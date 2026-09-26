@@ -232,11 +232,9 @@ async function postRevenueEntry(
   net: bigint,
   tax: bigint,
 ): Promise<void> {
-  const accounts = await accountIdsByCode(client, businessId, [
-    WELL_KNOWN_CODES.bankClearing,
-    WELL_KNOWN_CODES.deliveryRevenue,
-    WELL_KNOWN_CODES.vatPayable,
-  ]);
+  const accountCodes = [WELL_KNOWN_CODES.bankClearing, WELL_KNOWN_CODES.deliveryRevenue];
+  if (tax > 0n) accountCodes.push(WELL_KNOWN_CODES.vatPayable);
+  const accounts = await accountIdsByCode(client, businessId, accountCodes);
   await postExactJournalEntry(client, {
     businessId,
     locationId,
