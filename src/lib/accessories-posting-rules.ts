@@ -21,6 +21,7 @@ import { rialBigInt, type RialText } from "./inventory-exact";
 import { accountIdsByCode } from "./ledger-service";
 import { registerPostingRule, type PostingResult } from "./posting-engine";
 import type { SettlementMethod } from "./ledger";
+import { groupTendersByCode, type RetailTender } from "./retail-tenders";
 
 const PAYMENT_ACCOUNT_CODE: Record<SettlementMethod, string> = {
   cash: WELL_KNOWN_CODES.cash,
@@ -36,22 +37,22 @@ interface AccessorySaleRevenuePayload {
   net: RialText;
   vat: RialText;
   total: RialText;
-  paymentMethod: SettlementMethod;
+  tenders: RetailTender[];
 }
 
 registerPostingRule("accessory.sale_revenue", async (event, client): Promise<PostingResult | null> => {
   const payload = event.payload as unknown as AccessorySaleRevenuePayload;
-  const paymentCode = PAYMENT_ACCOUNT_CODE[payload.paymentMethod];
+  const debits = groupTendersByCode(payload.tenders, (m) => PAYMENT_ACCOUNT_CODE[m]);
 
   const accounts = await accountIdsByCode(client, event.businessId, [
-    paymentCode,
+    ...debits.map((d) => d.code),
     WELL_KNOWN_CODES.accessorySalesRevenue,
     WELL_KNOWN_CODES.vatPayable,
   ]);
 
   return {
     lines: [
-      { accountId: accounts.get(paymentCode)!, debit: payload.total, credit: ZERO },
+      ...debits.map((d) => ({ accountId: accounts.get(d.code)!, debit: d.amount, credit: ZERO })),
       { accountId: accounts.get(WELL_KNOWN_CODES.accessorySalesRevenue)!, debit: ZERO, credit: payload.net },
       { accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!, debit: ZERO, credit: payload.vat },
     ],

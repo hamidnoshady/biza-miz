@@ -14,7 +14,9 @@
  * `INDUSTRY_LABELS` from src/lib/industries.ts, so neither copy can drift on
  * which industries exist or what they are called.
  */
+import { useRef } from "react";
 import { ENABLED_INDUSTRIES, INDUSTRIES, INDUSTRY_LABELS, type Industry } from "@/lib/industries";
+import { radioMoveForKey, radioTargetIndex } from "@/lib/radio-keys";
 
 export function IndustryPicker({
   value,
@@ -25,19 +27,47 @@ export function IndustryPicker({
   onChange: (industry: Industry) => void;
   disabled?: boolean;
 }) {
+  // Roving focus for the `role="radiogroup"` below — see radio-keys.ts (the
+  // same helper business-settings.tsx's currency choice and
+  // branches-manager.tsx's colour picker use). Skips options that are
+  // disabled or not yet available, since a "به‌زودی" tile can't take focus.
+  const buttonsRef = useRef<Array<HTMLButtonElement | null>>([]);
+
   return (
     <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="نوع کسب‌وکار">
-      {INDUSTRIES.map((option) => {
+      {INDUSTRIES.map((option, index) => {
         const available = ENABLED_INDUSTRIES.includes(option);
         const selected = value === option;
+        const canFocus = !disabled && available;
         return (
           <button
             key={option}
+            ref={(node) => {
+              buttonsRef.current[index] = node;
+            }}
             type="button"
             role="radio"
             aria-checked={selected}
             disabled={disabled || !available}
+            tabIndex={selected && canFocus ? 0 : -1}
             onClick={() => available && onChange(option)}
+            onKeyDown={(event) => {
+              if (disabled) return;
+              const move = radioMoveForKey(event.key, true);
+              if (!move) return;
+              // Step from the current option until an enabled one is found,
+              // bounded by the group's length so an all-disabled group (never
+              // happens today, but costs nothing to guard) can't loop forever.
+              let target = radioTargetIndex(move, index, INDUSTRIES.length);
+              for (let steps = 0; target !== null && steps < INDUSTRIES.length; steps += 1) {
+                if (ENABLED_INDUSTRIES.includes(INDUSTRIES[target])) break;
+                target = radioTargetIndex(move === "first" || move === "last" ? "next" : move, target, INDUSTRIES.length);
+              }
+              if (target === null) return;
+              event.preventDefault();
+              onChange(INDUSTRIES[target]);
+              buttonsRef.current[target]?.focus();
+            }}
             className={`relative rounded-lg border px-3 py-2 text-sm transition-colors ${
               selected
                 ? "border-sky-400/60 bg-sky-400/10 font-medium text-sky-800 dark:text-sky-200"

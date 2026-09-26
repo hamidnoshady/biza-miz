@@ -10,15 +10,32 @@ import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import {
   createRetailInvoice,
   RetailInvoiceError,
+  type CreateRetailInvoiceTenderInput,
   type RetailInvoiceLineInput,
 } from "@/lib/retail-invoice-service";
+import { listRetailInvoices } from "@/lib/retail-invoice/list-service";
 import type { SettlementMethod } from "@/lib/ledger";
+import { rialText } from "@/lib/inventory-exact";
 import { enqueueHolooSaleForOrder } from "@/lib/integrations/holoo/outbox-producer";
 import { ledgerSettlementFor, type PaymentSettlement } from "@/lib/payment-methods";
-import { toLatinDigits } from "@/lib/digits";
+import { MAX_RETAIL_TENDERS } from "@/lib/retail-tenders";
+import { toLatinDigits, toPersianDigits } from "@/lib/digits";
+import { formatJalali } from "@/lib/jalali";
+import { rowsToCsv, type ReportTable } from "@/lib/report-export";
 
 const PAYMENT_METHODS: SettlementMethod[] = ["cash", "bank", "credit"];
 const INVOICE_METHODS = new Set<string>(PAYMENT_METHODS);
+/** A CSV export ignores pagination — this is the hard cap on how many rows one request will ever build, so a very wide filter can't exhaust memory or time out the request. */
+const EXPORT_ROW_CAP = 5_000;
+
+/** One slice of the invoice's payment, as the checkout screen sends it. */
+interface RawTenderBody {
+  method?: string;
+  /** Rial, whole — required at the HTTP layer (the screen always knows the invoice's due amount before it posts). */
+  amount?: number;
+  paymentMethodId?: string | null;
+  reference?: string | null;
+}
 
 function normalizedInvoiceSearch(value: string): string {
   // Cashiers commonly paste the Persian invoice number from the screen. The
@@ -48,7 +65,12 @@ async function requireRetailIndustry(businessId: string) {
 }
 
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.ordersCreate);
+  // Issuing a retail invoice settles it immediately (it IS the till taking
+  // payment) — the same gate the /accounting/pos page itself checks before
+  // it will even render `RetailInvoiceScreen`. `ordersCreate` alone used to
+  // guard this, which let e.g. a waiter's role name the permission without
+  // ever being able to reach the screen that calls it.
+  const { session, error } = await requirePermission(PERMISSIONS.paymentsTake);
   if (error) return error;
   const { industry, error: industryError } = await requireRetailIndustry(session.businessId);
   if (industryError) return industryError;
@@ -59,10 +81,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   let body: {
     lines?: unknown;
-    paymentMethod?: string;
-    /** Named payment way selected by the cashier; optional for old clients. */
-    paymentMethodId?: string | null;
-    paymentReference?: string | null;
+    /** ۱ تا ۱۰ سهم؛ ببینید RawTenderBody — یک روش تنها هم یک آرایهٔ یک‌عضوی است. */
+    tenders?: RawTenderBody[];
     customerId?: string | null;
     note?: string | null;
   };
@@ -75,10 +95,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!Array.isArray(body.lines) || body.lines.length === 0) {
     return NextResponse.json({ error: "empty_invoice" }, { status: 400 });
   }
-  const paymentMethod = body.paymentMethod as SettlementMethod;
-  if (!PAYMENT_METHODS.includes(paymentMethod)) {
-    return NextResponse.json({ error: "invalid_payment_method" }, { status: 400 });
-  }
   const customerId = typeof body.customerId === "string" && body.customerId.trim() ? body.customerId.trim() : null;
   if (customerId) {
     const { rows } = await query<{ id: string }>(
@@ -89,39 +105,79 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     if (!rows[0]) return NextResponse.json({ error: "customer_not_found" }, { status: 404 });
   }
 
-  const paymentMethodId = typeof body.paymentMethodId === "string" && body.paymentMethodId.trim()
-    ? body.paymentMethodId.trim()
-    : null;
-  const paymentReference = typeof body.paymentReference === "string"
-    ? body.paymentReference.trim()
-    : "";
-  if (paymentReference.length > 120) {
-    return NextResponse.json({ error: "payment_reference_too_long" }, { status: 400 });
+  // ۱ تا ۱۰ سهم. هر سهم می‌تواند مبلغ صریح خودش را بفرستد، و **حداکثر یکی** از
+  // آن‌ها (هر جای آرایه) می‌تواند مبلغ را کنار بگذارد — یعنی «هرچه فاکتور شد».
+  // این همان سهم «باز»ی است که createRetailInvoice/buildTenderQueue در سطح
+  // سرویس می‌پذیرد، و اینجا هم لازم است: تخفیف پروموشن (retailPromotionDiscounts)
+  // روی خطوط تجمیع‌پذیر فقط داخل تراکنش محاسبه می‌شود و صفحهٔ صدور فاکتور از
+  // پیش نمی‌داندش، پس فروش تک‌روشی (اکثریت قریب‌به‌اتفاق فاکتورها) باید بتواند
+  // بدون دانستن جمع نهایی، «همه‌چیز را با همین روش بگیر» بفرستد. یک فروش
+  // چندروشی هر سهمش را صریح می‌فرستد و فقط آخرین (یا هر یک) سهم را باز می‌گذارد.
+  if (!Array.isArray(body.tenders) || body.tenders.length === 0) {
+    return NextResponse.json({ error: "no_payment" }, { status: 400 });
   }
-
-  // A named way is tenant-owned and its settlement class must agree with the
-  // compact settlement sent to the retail posting services. Without this check
-  // a caller could display one way, post another, and lose the audit trail.
-  let paymentWayRequiresReference = false;
-  if (paymentMethodId) {
-    const { rows: paymentWays } = await query<{
-      settlement: string;
-      requires_reference: boolean;
-      is_active: boolean;
-    }>(
-      `SELECT settlement::text, requires_reference, is_active
-         FROM payment_methods
-        WHERE id = $1 AND business_id = $2`,
-      [paymentMethodId, session.businessId],
-    );
-    const paymentWay = paymentWays[0];
-    if (!paymentWay || !paymentWay.is_active || ledgerSettlementFor(paymentWay.settlement as PaymentSettlement) !== paymentMethod) {
+  if (body.tenders.length > MAX_RETAIL_TENDERS) {
+    return NextResponse.json({ error: "too_many_tenders" }, { status: 400 });
+  }
+  let openTenderCount = 0;
+  const tenders: CreateRetailInvoiceTenderInput[] = [];
+  for (const raw of body.tenders) {
+    if (!raw || typeof raw !== "object") {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    const method = raw.method as SettlementMethod;
+    if (!PAYMENT_METHODS.includes(method)) {
       return NextResponse.json({ error: "invalid_payment_method" }, { status: 400 });
     }
-    paymentWayRequiresReference = paymentWay.requires_reference;
-  }
-  if (paymentWayRequiresReference && !paymentReference) {
-    return NextResponse.json({ error: "payment_reference_required" }, { status: 400 });
+    const amountOmitted = raw.amount === undefined || raw.amount === null;
+    if (amountOmitted) {
+      openTenderCount += 1;
+      if (openTenderCount > 1) {
+        return NextResponse.json({ error: "too_many_open_tenders" }, { status: 400 });
+      }
+    } else if (!isSafePositiveInteger(raw.amount as number)) {
+      return NextResponse.json({ error: "invalid_amount" }, { status: 400 });
+    }
+    const paymentMethodId = typeof raw.paymentMethodId === "string" && raw.paymentMethodId.trim()
+      ? raw.paymentMethodId.trim()
+      : null;
+    const reference = typeof raw.reference === "string" ? raw.reference.trim() : "";
+    if (reference.length > 120) {
+      return NextResponse.json({ error: "payment_reference_too_long" }, { status: 400 });
+    }
+
+    // A named way is tenant-owned and its settlement class must agree with
+    // the compact settlement sent to the retail posting services. Without
+    // this check a caller could display one way, post another, and lose the
+    // audit trail — checked per slice, since each can name its own way.
+    let requiresReference = false;
+    if (paymentMethodId) {
+      const { rows: paymentWays } = await query<{
+        settlement: string;
+        requires_reference: boolean;
+        is_active: boolean;
+      }>(
+        `SELECT settlement::text, requires_reference, is_active
+           FROM payment_methods
+          WHERE id = $1 AND business_id = $2`,
+        [paymentMethodId, session.businessId],
+      );
+      const paymentWay = paymentWays[0];
+      if (!paymentWay || !paymentWay.is_active || ledgerSettlementFor(paymentWay.settlement as PaymentSettlement) !== method) {
+        return NextResponse.json({ error: "invalid_payment_method" }, { status: 400 });
+      }
+      requiresReference = paymentWay.requires_reference;
+    }
+    if (requiresReference && !reference) {
+      return NextResponse.json({ error: "payment_reference_required" }, { status: 400 });
+    }
+
+    tenders.push({
+      method,
+      amount: amountOmitted ? undefined : rialText(String(raw.amount)),
+      paymentMethodId,
+      reference: reference || null,
+    });
   }
 
   if (body.customerId) {
@@ -151,9 +207,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       locationId: location.id,
       industry,
       lines,
-      paymentMethod,
-      paymentMethodId,
-      paymentReference: paymentReference || null,
+      tenders,
       customerId,
       note: typeof body.note === "string" ? body.note : null,
       businessDate: businessDay?.businessDate,
@@ -188,7 +242,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
  * must not download every historical invoice just to show page one.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.ordersCreate);
+  // Listing/searching past invoices is a read of sales history — every role
+  // that can see the orders list should see this one too, not only the
+  // subset that may also create a new order.
+  const { session, error } = await requirePermission(PERMISSIONS.ordersView);
   if (error) return error;
   const { error: industryError } = await requireRetailIndustry(session.businessId);
   if (industryError) return industryError;
@@ -204,6 +261,26 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (method && !INVOICE_METHODS.has(method)) {
     return NextResponse.json({ error: "invalid_payment_method" }, { status: 400 });
   }
+  const rawStatus = params.get("status") ?? ""; // completed | voided | "" = all
+  if (rawStatus && rawStatus !== "completed" && rawStatus !== "voided") {
+    return NextResponse.json({ error: "invalid_invoice_status" }, { status: 400 });
+  }
+  // A Jalali date range on the screen, stored and compared as plain ISO
+  // calendar dates against the branch's own business day (`app_business_date`
+  // — migration 0076), the same function the dashboard and reports use, so a
+  // sale rung up after midnight but before the branch's day-start still lands
+  // on the day the cashier rang it up, not the calendar day the clock read.
+  const isoDate = (value: string | null) => (value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null);
+  const rawDateFrom = params.get("dateFrom");
+  const rawDateTo = params.get("dateTo");
+  const dateFrom = isoDate(rawDateFrom);
+  const dateTo = isoDate(rawDateTo);
+  if ((rawDateFrom && !dateFrom) || (rawDateTo && !dateTo)) {
+    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    return NextResponse.json({ error: "invalid_date_range" }, { status: 400 });
+  }
 
   const requestedPage = Number(params.get("page") ?? 1);
   const requestedPageSize = Number(params.get("pageSize") ?? 20);
@@ -215,88 +292,65 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   // Keep the public API vocabulary stable (`bank`) for the POS and installments
   // screens, while still allowing the named payment-way join to render its name.
   const dbMethod = method === "bank" ? "card" : method;
-  const offset = (page - 1) * pageSize;
 
-  const { rows } = await query<{
-    id: string;
-    order_number: string;
-    status: string;
-    total: string;
-    closed_at: string;
-    customer_name: string | null;
-    line_count: string;
-    pay_method: string | null;
-    payment_method_name: string | null;
-    credit_total: string;
-    has_installment_plan: boolean;
-    result_count: string;
-  }>(
-    `WITH invoice_rows AS (
-       SELECT o.id, o.order_number, o.status, o.total, o.closed_at,
-              c.name AS customer_name,
-              (SELECT count(*) FROM order_items oi WHERE oi.order_id = o.id) AS line_count,
-              tender.method::text AS pay_method,
-              pm.name AS payment_method_name,
-              COALESCE((SELECT sum(p.amount) FROM payments p
-                          WHERE p.order_id = o.id AND p.method = 'credit'), 0)::text AS credit_total,
-              EXISTS (SELECT 1 FROM installments ip
-                        WHERE ip.business_id = $2 AND ip.invoice_order_id = o.id) AS has_installment_plan
-         FROM orders o
-         LEFT JOIN parties c ON c.id = o.customer_id
-         LEFT JOIN LATERAL (
-           SELECT p.method, p.payment_method_id
-             FROM payments p
-            WHERE p.order_id = o.id
-            ORDER BY p.received_at, p.id
-            LIMIT 1
-         ) tender ON true
-         LEFT JOIN payment_methods pm ON pm.id = tender.payment_method_id
-        WHERE o.location_id = $1
-          AND o.type = 'retail'
-          AND o.status IN ('completed', 'voided')
-          AND ($3 = '' OR c.name ILIKE '%' || $3 || '%' OR o.order_number::text LIKE '%' || $3 || '%')
-          AND ($4 = '' OR tender.method::text = $4)
-     )
-     SELECT invoice_rows.*, count(*) OVER ()::text AS result_count
-       FROM invoice_rows
-      WHERE ($5 = false OR (status = 'completed' AND credit_total::bigint > 0 AND NOT has_installment_plan))
-      ORDER BY order_number DESC
-      LIMIT $6 OFFSET $7`,
-    [location.id, session.businessId, q, dbMethod, installmentEligible, pageSize, offset],
-  );
+  const format = params.get("format") ?? "";
+  if (format && format !== "csv") {
+    return NextResponse.json({ error: "invalid_format" }, { status: 400 });
+  }
+  // `all=true` is CSV-only: the on-screen table always paginates, but an
+  // export exists precisely so a filtered search isn't limited to one page —
+  // it re-runs the same query the screen just ran, with the same filters,
+  // ignoring `page`/`pageSize` up to EXPORT_ROW_CAP.
+  const exportAll = format === "csv" && params.get("all") === "true";
 
-  const invoices = rows.map((r) => ({
-    id: r.id,
-    orderNumber: Number(r.order_number),
-    status: r.status,
-    total: Number(r.total),
-    closedAt: r.closed_at,
-    customerName: r.customer_name,
-    lineCount: Number(r.line_count),
-    // The API deliberately exposes settlement vocabulary, not the underlying
-    // payment enum (`card` is what a retail bank payment stores).
-    paymentMethod:
-      r.pay_method === "card"
-        ? "bank"
-        : r.pay_method === "cash" || r.pay_method === "credit"
-          ? r.pay_method
-          : r.pay_method,
-    paymentMethodName:
-      r.payment_method_name ??
-      (r.pay_method === "cash"
-        ? "نقدی"
-        : r.pay_method === "card"
-          ? "کارت‌خوان"
-          : r.pay_method === "credit"
-            ? "نسیه"
-            : r.pay_method),
-    creditTotal: Number(r.credit_total),
-    hasInstallmentPlan: r.has_installment_plan,
-  }));
+  const { invoices, count } = await listRetailInvoices({
+    businessId: session.businessId,
+    locationId: location.id,
+    q,
+    method: dbMethod,
+    status: rawStatus,
+    dateFrom: dateFrom ?? "",
+    dateTo: dateTo ?? "",
+    installmentEligible,
+    page: exportAll ? 1 : page,
+    pageSize: exportAll ? EXPORT_ROW_CAP : pageSize,
+  });
+
+  if (format === "csv") {
+    const table: ReportTable = {
+      columns: [
+        { key: "orderNumber", label: "شماره فاکتور" },
+        { key: "customerName", label: "مشتری" },
+        { key: "lineCount", label: "اقلام" },
+        { key: "paymentMethods", label: "روش پرداخت" },
+        { key: "status", label: "وضعیت" },
+        { key: "total", label: "مبلغ (ریال)" },
+        { key: "closedAt", label: "تاریخ ثبت" },
+      ],
+      rows: invoices.map((invoice) => ({
+        orderNumber: invoice.orderNumber,
+        customerName: invoice.customerName ?? "",
+        lineCount: invoice.lineCount,
+        paymentMethods: invoice.paymentMethods.map((m) => m.name).join("، "),
+        status: invoice.status === "voided" ? "باطل‌شده" : "تکمیل‌شده",
+        total: invoice.total,
+        closedAt: invoice.closedAt
+          ? toPersianDigits(formatJalali(invoice.closedAt, { timeZone: location.timezone, withTime: true }))
+          : "",
+      })),
+    };
+    const csv = rowsToCsv(table);
+    return new NextResponse(csv, {
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": 'attachment; filename="invoices.csv"',
+      },
+    });
+  }
 
   return NextResponse.json({
     invoices,
-    count: rows[0] ? Number(rows[0].result_count) : 0,
+    count,
     page,
     pageSize,
     timeZone: location.timezone,

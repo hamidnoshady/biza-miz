@@ -102,8 +102,16 @@ export interface AmendmentResult {
   reversedEntryIds: string[];
 }
 
-/** The order, its lines and their modifiers as they stand right now — the amendment's before/after record. */
-async function snapshotOrder(client: PoolClient, orderId: string): Promise<unknown> {
+/**
+ * The order, its lines and their modifiers as they stand right now — the
+ * amendment's before/after record. Exported for
+ * `retail-invoice-void-service.ts`, which writes its own `order_amendments`
+ * row for the identical `before_snapshot` purpose (retail voids never touch
+ * this file's own `amendClosedOrder`, which is F&B-only) — this query has no
+ * F&B-only assumption in it (a retail line simply has an empty modifiers
+ * array), so it is shared rather than duplicated.
+ */
+export async function snapshotOrder(client: PoolClient, orderId: string): Promise<unknown> {
   const { rows } = await client.query<{ snapshot: unknown }>(
     `SELECT jsonb_build_object(
               'order', to_jsonb(o) - 'id',

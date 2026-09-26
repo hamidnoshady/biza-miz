@@ -177,6 +177,52 @@ describe("gift cards", () => {
     expect(Number(revenueTouches.rows[0].n)).toBe(2); // the two liability legs only
   });
 
+  it("redeems the same card twice, in two separate transactions, without a duplicate-key crash", async () => {
+    // Regression test: redeemGiftCard used to post its debit-the-liability
+    // entry with a fixed `sourceId: card.id`. journal_entries has a unique
+    // index on (business_id, source_type, source_id, posting_kind), so only
+    // the *first* redemption of any gift card could ever post — every later
+    // partial redemption of the same card (the whole point of a gift card)
+    // threw a raw duplicate-key unique-constraint violation.
+    const code = "GC-3001";
+    await withClient((client) =>
+      promotionsService.issueGiftCard(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        code,
+        initialValue: 900_000,
+      }),
+    );
+
+    const first = await withClient((client) =>
+      promotionsService.redeemGiftCard(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        code,
+        amount: 300_000,
+      }),
+    );
+    expect(first.balance).toBe(600_000);
+
+    const second = await withClient((client) =>
+      promotionsService.redeemGiftCard(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        code,
+        amount: 250_000,
+      }),
+    );
+    expect(second.balance).toBe(350_000);
+    expect(await promotionsService.giftCardBalance(biz.id, code)).toBe(350_000);
+
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT count(*)::text FROM journal_entries WHERE business_id = $1 AND source_type = 'gift_card'`,
+      [biz.id],
+    );
+    // 1 issue + 2 redemptions.
+    expect(rows[0].count).toBe("3");
+  });
+
   it("refuses to redeem more than the card's remaining value", async () => {
     await withClient((client) =>
       promotionsService.issueGiftCard(client, {

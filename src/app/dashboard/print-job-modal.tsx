@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { printerErrorMessage } from "@/lib/printing/errors";
 import { subscribePrintProgress, type PrintProgress } from "@/lib/printing/client";
 
@@ -41,28 +41,34 @@ export function PrintJobModal() {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent className="max-w-sm text-center" dir="rtl">
         <DialogTitle className="text-base">{state?.title ?? "چاپ"}</DialogTitle>
-        {success ? (
-          <div className="space-y-1 py-4">
-            <p className="text-lg font-semibold text-foreground">به چاپگر ارسال شد</p>
-            {state?.printerName ? <p className="text-sm text-muted-foreground" dir="auto">{state.printerName}</p> : null}
-          </div>
-        ) : (
-          <ol className="space-y-2 py-3 text-start text-sm">
-            {STEPS.map((step) => {
-              const mark = stepState(phase, step.phase);
-              return (
-                <li key={step.phase} className="flex items-center gap-2">
-                  <span aria-hidden="true">{mark === "done" ? "✓" : mark === "active" ? "◉" : "○"}</span>
-                  <span>{step.label}</span>
-                </li>
-              );
-            })}
-            {state?.printerName ? <li className="text-muted-foreground" dir="auto">چاپگر: {state.printerName}</li> : null}
-            {phase === "failed" && state?.error ? (
-              <li className="text-red-700 dark:text-red-300">{printerErrorMessage(state.error)}</li>
-            ) : null}
-          </ol>
-        )}
+        <DialogDescription className="sr-only">وضعیت پیشرفت ارسال سند به چاپگر</DialogDescription>
+        <div role="status" aria-live="polite">
+          {success ? (
+            <div className="space-y-1 py-4">
+              <p className="text-lg font-semibold text-foreground">به چاپگر ارسال شد</p>
+              {state?.printerName ? <p className="text-sm text-muted-foreground" dir="auto">{state.printerName}</p> : null}
+            </div>
+          ) : (
+            <ol className="space-y-2 py-3 text-start text-sm">
+              {STEPS.map((step) => {
+                const mark = stepState(phase, step.phase);
+                return (
+                  <li key={step.phase} className="flex items-center gap-2">
+                    <span aria-hidden="true">{mark === "done" ? "✓" : mark === "active" ? "◉" : "○"}</span>
+                    <span>{step.label}</span>
+                    <span className="sr-only">
+                      {mark === "done" ? "انجام شد" : mark === "active" ? "در حال انجام" : "در انتظار"}
+                    </span>
+                  </li>
+                );
+              })}
+              {state?.printerName ? <li className="text-muted-foreground" dir="auto">چاپگر: {state.printerName}</li> : null}
+              {phase === "failed" && state?.error ? (
+                <li role="alert" className="text-red-700 dark:text-red-300">{printerErrorMessage(state.error)}</li>
+              ) : null}
+            </ol>
+          )}
+        </div>
       </DialogContent>
     </Dialog>
   );

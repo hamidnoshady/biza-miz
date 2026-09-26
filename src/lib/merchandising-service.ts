@@ -10,6 +10,7 @@
  *   - sell-through by season/collection off the same sale events the sales
  *     report reads.
  */
+import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { getPool, query } from "./db";
@@ -231,6 +232,15 @@ export async function applyMarkdown(
     [input.itemId, input.newPrice],
   );
 
+  // Same defect class as the retail sell-services: `postingKind` for this
+  // rule is the fixed string "markdown_write_down", and slow-moving stock is
+  // routinely marked down more than once over its shelf life. Keying the
+  // posting identity on `input.itemId`, as this used to, meant only the
+  // *first* markdown of any item could ever post; a second markdown of the
+  // same item threw a raw unique-constraint violation. `itemAuditTrail`
+  // matches on `payload->>'itemId'` (kept, unchanged) as well as
+  // `domain_events.source_id`, so it is unaffected; `postingSourceId` is the
+  // separate identity only the ledger posting itself uses, fresh per call.
   const { entryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -238,6 +248,7 @@ export async function applyMarkdown(
     payload: { itemId: input.itemId, inventoryAccountCode: input.inventoryAccountCode, amount: rialText(String(writeDown)) },
     sourceType: "item",
     sourceId: input.itemId,
+    postingSourceId: randomUUID(),
     createdBy: input.createdBy ?? null,
   });
 

@@ -186,7 +186,7 @@ describe.each(TRADE_GOODS_INDUSTRIES)(
               vatPercent: 9,
             },
           ],
-          paymentMethod: "cash",
+          tenders: [{ method: "cash" }],
         }),
       );
 
@@ -219,6 +219,69 @@ describe.each(TRADE_GOODS_INDUSTRIES)(
         [biz.id],
       );
       expect(events.rows.map((r) => r.event_type).sort()).toEqual([`${industry}.sale_cogs`, `${industry}.sale_revenue`].sort());
+    });
+
+    it("sells the same item across two separate invoices without a duplicate-key crash", async () => {
+      // Regression test: sellTradeGoodsUnits used to post its revenue/COGS
+      // journal entries with `sourceId: input.itemId`. journal_entries has a
+      // unique index on (business_id, source_type, source_id, posting_kind),
+      // so only the *first* invoice that ever sold a given item could post;
+      // a second invoice selling the same item — ordinary for stock a shop
+      // expects to sell many times — threw a raw duplicate-key error.
+      const parent = await itemsService.createItem({
+        locationId: biz.locationId,
+        name: "کالای شمارشی",
+        kind: "variant_parent",
+      });
+      const child = await itemsService.createVariantChild(
+        parent.id,
+        biz.locationId,
+        "تنوع یک",
+        null,
+        [{ name: "واحد", value: "عدد" }],
+      );
+
+      await tradeGoods.receiveTradeGoodsStock(child.id, { quantity: "10", unitCost: 50_000 });
+      await tradeGoods.setTradeGoodsUnitPrice(child.id, 100_000);
+
+      const line = {
+        kind: "stocked" as const,
+        itemId: child.id,
+        quantity: "1",
+        unitPrice: 100_000,
+        discount: 0,
+        vatPercent: 9,
+      };
+
+      const first = await withTransaction((client) =>
+        retailInvoice.createRetailInvoice(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          industry,
+          lines: [line],
+          tenders: [{ method: "cash" }],
+        }),
+      );
+
+      const second = await withTransaction((client) =>
+        retailInvoice.createRetailInvoice(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          industry,
+          lines: [line],
+          tenders: [{ method: "cash" }],
+        }),
+      );
+
+      expect(second.total).toBe(first.total);
+      const stock = await tradeGoods.getStock(child.id);
+      expect(Number(stock?.quantity)).toBe(8);
+
+      const { rows } = await db.query<{ count: string }>(
+        `SELECT count(*)::text FROM journal_entries WHERE business_id = $1 AND source_type = $2`,
+        [biz.id, `${industry}_sale`],
+      );
+      expect(rows[0].count).toBe("4");
     });
   },
 );

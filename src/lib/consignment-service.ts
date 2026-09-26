@@ -14,6 +14,7 @@
  * DB-touching, so per repo convention it has no direct unit test; covered
  * instead by integration/consignment.integration.test.ts.
  */
+import { randomUUID } from "node:crypto";
 import { query, type PoolClient } from "./db";
 import { getItem } from "./items-service";
 import { consignorBalance } from "./industry-reports";
@@ -278,6 +279,16 @@ export async function payConsignor(
     throw new Error("مبلغ تسویه از مانده بدهی به امانت‌گذار بیشتر است.");
   }
 
+  // Same defect class as the retail sell-services: `postingKind` for this
+  // rule is the fixed string "consignment_payout", and — per this function's
+  // own doc comment — a consignor is meant to be paid "part or all" of their
+  // balance, i.e. across many separate payouts over time. Keying the posting
+  // identity on `input.consignorId`, as this used to, meant only the *first*
+  // payout to any consignor could ever post; every later partial payout to
+  // the same consignor threw a raw unique-constraint violation.
+  // `getConsignorStatement` reads `payload->>'consignorId'`, not
+  // `source_id`, so it is unaffected; `postingSourceId` is the separate
+  // identity only the ledger posting itself uses, fresh per payout.
   const { entryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -289,6 +300,7 @@ export async function payConsignor(
     },
     sourceType: "consignment_payout",
     sourceId: input.consignorId,
+    postingSourceId: randomUUID(),
     createdBy: input.createdBy ?? null,
   });
 

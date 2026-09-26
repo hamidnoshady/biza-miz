@@ -9,7 +9,7 @@
  * weekday row (شنبه → جمعه) and the day grid all flow right-to-left.
  */
 import { CalendarIcon, ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import {
   isoDateToJalali,
@@ -80,7 +80,50 @@ export function JalaliDatePicker({
     jm: selected?.jm ?? today.jm,
   });
   const rootRef = useRef<HTMLDivElement>(null);
+  // `role="dialog"` promises the ARIA Authoring Practices' date-picker-dialog
+  // contract: opening it moves focus in (onto the current day, per the
+  // pattern's own example), Tab is trapped inside while it is open, and
+  // closing it (Escape, «امروز», «پاک کردن», or picking a day) returns focus
+  // to the field that opened it. Before this, the panel only ever gained
+  // focus if a person kept tabbing forward into it by chance, and a screen
+  // reader had no way to know a dialog had appeared at all.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const gridId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const preferred = panel.querySelector<HTMLButtonElement>(
+      '[aria-pressed="true"], [aria-current="date"]',
+    );
+    (preferred ?? panel.querySelector<HTMLButtonElement>("button"))?.focus();
+  }, [open]);
+
+  const close = useCallback(() => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  }, []);
+
+  function focusableInPanel(): HTMLButtonElement[] {
+    return Array.from(panelRef.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])") ?? []);
+  }
+
+  function trapTab(event: React.KeyboardEvent) {
+    if (event.key !== "Tab") return;
+    const focusable = focusableInPanel();
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 
   // When the value changes from outside, follow it into view.
   useEffect(() => {
@@ -104,7 +147,7 @@ export function JalaliDatePicker({
       // document-level handler). One press of Escape, one layer.
       e.preventDefault();
       e.stopPropagation();
-      setOpen(false);
+      close();
     }
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -112,7 +155,7 @@ export function JalaliDatePicker({
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [open, close]);
 
   function shiftMonth(delta: number) {
     setView((v) => {
@@ -123,13 +166,13 @@ export function JalaliDatePicker({
 
   function pick(jd: number) {
     onChange(jalaliToIsoDate(view.jy, view.jm, jd));
-    setOpen(false);
+    close();
   }
 
   function goToday() {
     setView({ jy: today.jy, jm: today.jm });
     onChange(jalaliToIsoDate(today.jy, today.jm, today.jd));
-    setOpen(false);
+    close();
   }
 
   const monthLen = jalaliMonthLength(view.jy, view.jm);
@@ -141,6 +184,7 @@ export function JalaliDatePicker({
   return (
     <div ref={rootRef} className="relative inline-block w-full" dir="rtl">
       <button
+        ref={triggerRef}
         id={id}
         type="button"
         disabled={disabled}
@@ -161,8 +205,14 @@ export function JalaliDatePicker({
           className="absolute end-8 top-1/2 -translate-y-1/2 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring focus-visible:ring-ring/50 disabled:pointer-events-none"
           aria-label="پاک کردن تاریخ"
           onClick={() => {
+            // This button removes itself from the DOM the instant `value`
+            // becomes "" (it only renders `clearable && value`). Left
+            // focused, that strands keyboard focus at <body> — move it to
+            // the trigger it sits beside before the unmount, same as
+            // closing the calendar already does.
             onChange("");
             setOpen(false);
+            triggerRef.current?.focus();
           }}
         >
           <XIcon className="size-4" />
@@ -171,8 +221,11 @@ export function JalaliDatePicker({
 
       {open ? (
         <div
+          ref={panelRef}
           role="dialog"
           aria-label="انتخاب تاریخ شمسی"
+          aria-modal="true"
+          onKeyDown={trapTab}
           className={
             popoverClass ??
             `absolute z-50 mt-1 w-64 ${popoverPanelClass} p-3`
@@ -246,7 +299,7 @@ export function JalaliDatePicker({
                 type="button"
                 onClick={() => {
                   onChange("");
-                  setOpen(false);
+                  close();
                 }}
                 className="text-muted-foreground hover:text-foreground"
               >

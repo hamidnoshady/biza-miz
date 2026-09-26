@@ -70,6 +70,8 @@ export function SearchableSelect({
   const deferredQuery = React.useDeferredValue(query);
   const [activeIndex, setActiveIndex] = React.useState(0);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const listboxId = React.useId();
+  const optionId = (index: number) => `${listboxId}-option-${index}`;
 
   const selected = options.find((o) => o.value === value);
 
@@ -177,11 +179,16 @@ export function SearchableSelect({
                 }}
                 placeholder={searchPlaceholder}
                 className="h-8 ps-8"
+                role="combobox"
                 aria-autocomplete="list"
+                aria-expanded={open}
+                aria-controls={listboxId}
+                aria-activedescendant={filtered[activeIndex] ? optionId(activeIndex) : undefined}
               />
             </div>
           </div>
           <ul
+            id={listboxId}
             role="listbox"
             aria-busy={loading}
             aria-label={loading ? "در حال بارگذاری گزینه‌ها" : undefined}
@@ -206,6 +213,7 @@ export function SearchableSelect({
                 return (
                   <li key={option.value}>
                     <button
+                      id={optionId(i)}
                       type="button"
                       role="option"
                       aria-selected={isSelected}

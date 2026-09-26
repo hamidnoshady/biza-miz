@@ -14,6 +14,7 @@
  * rules this leans on) it has no direct unit test; covered instead by
  * integration/accessories.integration.test.ts.
  */
+import { randomUUID } from "node:crypto";
 import { query, type PoolClient } from "./db";
 import {
   accessoryCogs,
@@ -26,6 +27,7 @@ import { getItem } from "./items-service";
 import { emitDomainEvent } from "./posting-engine";
 import type { RialText } from "./inventory-exact";
 import type { SettlementMethod } from "./ledger";
+import { resolveLineTenders, type RetailTenderQueueEntry } from "./retail-tenders";
 // Side-effect import: registers the accessory.* posting rules with the engine.
 import "./accessories-posting-rules";
 
@@ -175,7 +177,10 @@ export interface SellAccessoryInput {
   unitPrice?: number;
   discount?: number;
   vatPercent: number;
-  paymentMethod: SettlementMethod;
+  /** The whole line paid one way — every pre-split caller (the accessories quick-sell panel). */
+  paymentMethod?: SettlementMethod;
+  /** A retail invoice's shared tender queue (retail-tenders.ts) — mutually exclusive with `paymentMethod`. */
+  tenders?: RetailTenderQueueEntry[];
   createdBy?: string | null;
 }
 
@@ -231,6 +236,20 @@ export async function sellAccessoryUnits(
 
   const cost = accessoryCogs(input.quantity, stock.unitCost);
 
+  // `journal_entries` enforces at most one posting per
+  // (business_id, source_type, source_id, posting_kind) via
+  // `uq_journal_business_source_posting` — the ledger's own idempotency key.
+  // Keying that off `input.itemId`, as this used to, meant only the *first*
+  // sale of any accessory could ever post: every later sale of the same
+  // item — the ordinary case for stock a shop expects to sell many times —
+  // threw a raw `duplicate key value violates unique constraint
+  // "uq_journal_business_source_posting"`. `domain_events.source_id` still
+  // carries `input.itemId` below (variantSalesAnalysis/itemAuditTrail group
+  // and join on it); `postingSourceId` is a separate, fresh identity that
+  // only the ledger posting itself uses, so each sale posts independently.
+  const postingSourceId = randomUUID();
+  const lineTenders = resolveLineTenders(input, breakdown.total);
+
   const { entryId: revenueEntryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -244,10 +263,11 @@ export async function sellAccessoryUnits(
       net: breakdown.net,
       vat: breakdown.vat,
       total: breakdown.total,
-      paymentMethod: input.paymentMethod,
+      tenders: lineTenders,
     },
     sourceType: "accessory_sale",
     sourceId: input.itemId,
+    postingSourceId,
     createdBy: input.createdBy ?? null,
   });
 
@@ -258,6 +278,7 @@ export async function sellAccessoryUnits(
     payload: { itemId: input.itemId, quantity: input.quantity, cost },
     sourceType: "accessory_sale",
     sourceId: input.itemId,
+    postingSourceId,
     createdBy: input.createdBy ?? null,
   });
 

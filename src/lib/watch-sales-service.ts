@@ -20,6 +20,7 @@ import { getItem } from "./items-service";
 import { emitDomainEvent } from "./posting-engine";
 import { rialText, type RialText } from "./inventory-exact";
 import type { SettlementMethod } from "./ledger";
+import { resolveLineTenders, type RetailTenderQueueEntry } from "./retail-tenders";
 // Side-effect import: registers the watch.* posting rules with the engine.
 import "./watch-posting-rules";
 
@@ -31,7 +32,10 @@ export interface SellSerializedUnitInput {
   price: number;
   discount?: number;
   vatPercent: number;
-  paymentMethod: SettlementMethod;
+  /** The whole unit paid one way — every pre-split caller (the watch quick-sell panel). */
+  paymentMethod?: SettlementMethod;
+  /** A retail invoice's shared tender queue (retail-tenders.ts) — mutually exclusive with `paymentMethod`. */
+  tenders?: RetailTenderQueueEntry[];
   /** Overrides the unit's standard term recorded at intake; omit to use that. */
   warrantyMonths?: number;
   /** ISO date (YYYY-MM-DD); defaults to today. The warranty window starts here. */
@@ -99,6 +103,7 @@ export async function sellSerializedUnit(
   });
 
   const saleDate = input.saleDate ?? todayIso();
+  const lineTenders = resolveLineTenders(input, breakdown.total);
 
   const { entryId: revenueEntryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
@@ -112,7 +117,7 @@ export async function sellSerializedUnit(
       net: breakdown.net,
       vat: breakdown.vat,
       total: breakdown.total,
-      paymentMethod: input.paymentMethod,
+      tenders: lineTenders,
     },
     sourceType: "watch_sale",
     sourceId: serial.id,

@@ -130,7 +130,7 @@ async function importSale(
         locationId,
         industry,
         lines: [line],
-        paymentMethod: "cash",
+        tenders: [{ method: "cash" }],
         customerId,
         note: `Holoo ${tx.remoteId}`,
         createdBy,

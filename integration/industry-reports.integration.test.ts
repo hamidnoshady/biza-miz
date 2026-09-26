@@ -315,6 +315,43 @@ describe("consignor statement and payout", () => {
     expect(statement?.balance).toBe(3_375_000);
   });
 
+  it("pays out the same consignor twice, in two separate transactions, without a duplicate-key crash", async () => {
+    // Regression test: payConsignor used to post its entry with a fixed
+    // `sourceId: input.consignorId`. journal_entries has a unique index on
+    // (business_id, source_type, source_id, posting_kind), so only the
+    // *first* payout to any consignor could ever post — every later partial
+    // payout to the same consignor (this function's own doc comment says
+    // "part or all" of the balance) threw a raw duplicate-key violation.
+    const { consignor } = await consignedSale();
+
+    const first = await withTransaction((client) =>
+      consignment.payConsignor(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        consignorId: consignor.id,
+        amount: 5_000_000,
+        paymentMethod: "cash",
+      }),
+    );
+    expect(first.entryId).not.toBeNull();
+
+    const second = await withTransaction((client) =>
+      consignment.payConsignor(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        consignorId: consignor.id,
+        amount: 3_000_000,
+        paymentMethod: "cash",
+      }),
+    );
+    expect(second.entryId).not.toBeNull();
+    expect(second.entryId).not.toBe(first.entryId);
+
+    const statement = await consignment.getConsignorStatement(biz.id, consignor.id);
+    expect(statement?.totalPaid).toBe(8_000_000);
+    expect(statement?.balance).toBe(5_375_000);
+  });
+
   it("refuses to pay out more than the outstanding balance", async () => {
     const { consignor } = await consignedSale();
     await expect(
