@@ -14,6 +14,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RetailInvoiceScreen } from "./retail-invoice-screen";
 import type { ReceiptData } from "@/lib/receipt-template";
+import type { PrintResult } from "@/lib/printing/client";
 
 const toastWarning = vi.fn();
 const toastInfo = vi.fn();
@@ -27,8 +28,8 @@ vi.mock("sonner", () => ({
 }));
 
 const printReceipt = vi.fn(
-  async (_printerId: string | null, _receipt: ReceiptData, _opts?: unknown) =>
-    ({ ok: true, supportsDrawer: false, printerId: null }) as const,
+  async (_printerId: string | null, _receipt: ReceiptData, _opts?: unknown): Promise<PrintResult> =>
+    ({ ok: true, supportsDrawer: false, printerId: undefined }) as PrintResult,
 );
 const kickDrawer = vi.fn(async (_printerId: string) => undefined);
 vi.mock("@/lib/printing/client", () => ({
@@ -164,6 +165,20 @@ async function scanAndFlush(code: string) {
   });
   act(() => {
     fireEvent.keyDown(input, { key: "Enter" });
+  });
+  await flush();
+}
+
+/** Opens a `SearchableSelect` by its trigger's accessible name and picks one option by its visible label. */
+async function selectFromCombobox(triggerName: string, optionName: string) {
+  const trigger = screen.getByRole("button", { name: triggerName });
+  act(() => {
+    fireEvent.click(trigger);
+  });
+  await flushUntil(() => screen.getByRole("option", { name: optionName }));
+  const option = screen.getByRole("option", { name: optionName });
+  act(() => {
+    fireEvent.click(option);
   });
   await flush();
 }
@@ -461,5 +476,286 @@ describe("RetailInvoiceScreen — submitting a sale", () => {
       ),
     ).toBe(false);
     expect(screen.getAllByText("برای فروش نسیه، انتخاب مشتری الزامی است.").length).toBeGreaterThan(0);
+  });
+});
+
+// Round-4 scenario sweep — one industry-specific line form per named scenario
+// (watch, jewelry, cosmetics), plus the printer-missing/printer-retry and
+// loading-state defects the sweep actually found.
+
+const WEIGHT_ITEM = {
+  id: "gold-1",
+  name: "گردنبند طلا",
+  sku: "GLD-1",
+  purity: "18",
+  netWeight: "5",
+  status: "in_stock",
+  stoneCost: 0,
+};
+const GOLD_PRICE = { purity: "18", priceDate: "2024-01-01", pricePerGram: 1_000_000 };
+
+const SERIAL_UNIT = {
+  id: "watch-1",
+  itemId: "watch-item-1",
+  itemName: "ساعت رولکس",
+  serialNumber: "SN-001",
+  status: "in_stock",
+  warrantyMonths: 12,
+};
+
+const COSMETIC_VARIANT = {
+  id: "cos-1",
+  parentName: null,
+  name: "کرم مرطوب‌کننده",
+  sku: "COS-1",
+  kind: "simple",
+  quantity: "20",
+  sellableQuantity: "20",
+  unitPrice: 250_000,
+};
+
+/** A fetch mock that layers a few extra routes on top of the shared fixture's `routeFor`. */
+function fetchMockWith(extra: { pattern: RegExp; body: unknown }[]) {
+  return vi.fn(async (url: string, init?: RequestInit) => {
+    const extraMatch = extra.find((r) => r.pattern.test(url));
+    if (extraMatch) return new Response(JSON.stringify(extraMatch.body), { status: 200 });
+    if (url.includes("/api/sales/invoices") && init?.method === "POST") {
+      return new Response(
+        JSON.stringify({ invoice: { orderId: "order-9", orderNumber: 42, total: "104000" } }),
+        { status: 200 },
+      );
+    }
+    const [match] = routeFor(url);
+    if (match) return new Response(JSON.stringify(match.body), { status: 200 });
+    return new Response(JSON.stringify({}), { status: 404 });
+  });
+}
+
+describe("RetailInvoiceScreen — industry-specific line forms", () => {
+  it("watch sale: adds a serialised unit at an agreed price and posts it", async () => {
+    const fetchMock = fetchMockWith([
+      { pattern: /\/api\/watch\/units$/, body: { units: [SERIAL_UNIT] } },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RetailInvoiceScreen industry="watch" />);
+    await flush();
+
+    await selectFromCombobox("انتخاب دستگاه", "ساعت رولکس — SN-001");
+    const priceInput = screen.getByLabelText(/قیمت \(/) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(priceInput, { target: { value: "5000000" } });
+    });
+    await flush();
+
+    const addButton = screen.getByRole("button", { name: /افزودن به فاکتور/ });
+    expect((addButton as HTMLButtonElement).disabled).toBe(false);
+    act(() => {
+      fireEvent.click(addButton);
+    });
+    await flush();
+
+    press(submitButton());
+    advance(2000);
+    release(submitButton());
+    await flush();
+    await flush();
+
+    const postCall = fetchMock.mock.calls.find(
+      (call: unknown[]) => call[0] === "/api/sales/invoices" && (call[1] as RequestInit | undefined)?.method === "POST",
+    ) as [string, RequestInit];
+    expect(postCall).toBeTruthy();
+    const body = JSON.parse(postCall[1].body as string);
+    expect(body.lines).toEqual([
+      expect.objectContaining({ kind: "watch", serialId: "watch-1", price: 50_000_000 }),
+    ]);
+  });
+
+  it("jewelry sale: adds a weighed gold piece priced from the day's rate and posts it", async () => {
+    const fetchMock = fetchMockWith([
+      { pattern: /\/api\/jewelry\/items$/, body: { items: [WEIGHT_ITEM] } },
+      { pattern: /\/api\/jewelry\/prices$/, body: { prices: [GOLD_PRICE] } },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RetailInvoiceScreen industry="jewelry" />);
+    await flush();
+
+    await selectFromCombobox("انتخاب کالای طلا", "گردنبند طلا — ۵ گرم — ۱۸ عیار");
+
+    const addButton = await flushUntil(() => {
+      const button = screen.getByRole("button", { name: /افزودن به فاکتور/ }) as HTMLButtonElement;
+      expect(button.disabled).toBe(false);
+    }).then(() => screen.getByRole("button", { name: /افزودن به فاکتور/ }));
+    act(() => {
+      fireEvent.click(addButton);
+    });
+    await flush();
+
+    press(submitButton());
+    advance(2000);
+    release(submitButton());
+    await flush();
+    await flush();
+
+    const postCall = fetchMock.mock.calls.find(
+      (call: unknown[]) => call[0] === "/api/sales/invoices" && (call[1] as RequestInit | undefined)?.method === "POST",
+    ) as [string, RequestInit];
+    expect(postCall).toBeTruthy();
+    const body = JSON.parse(postCall[1].body as string);
+    expect(body.lines).toEqual([expect.objectContaining({ kind: "gold", itemId: "gold-1" })]);
+  });
+
+  it("cosmetics batch sale: adds a quantity of one variant at its catalogue price and posts it", async () => {
+    const fetchMock = fetchMockWith([
+      { pattern: /\/api\/cosmetics\/items$/, body: { items: [COSMETIC_VARIANT] } },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RetailInvoiceScreen industry="cosmetics" />);
+    await flush();
+
+    await selectFromCombobox("انتخاب کالا", "کرم مرطوب‌کننده (موجودی ۲۰)");
+
+    const addButton = await flushUntil(() => {
+      const button = screen.getByRole("button", { name: /افزودن به فاکتور/ }) as HTMLButtonElement;
+      expect(button.disabled).toBe(false);
+    }).then(() => screen.getByRole("button", { name: /افزودن به فاکتور/ }));
+    act(() => {
+      fireEvent.click(addButton);
+    });
+    await flush();
+
+    press(submitButton());
+    advance(2000);
+    release(submitButton());
+    await flush();
+    await flush();
+
+    const postCall = fetchMock.mock.calls.find(
+      (call: unknown[]) => call[0] === "/api/sales/invoices" && (call[1] as RequestInit | undefined)?.method === "POST",
+    ) as [string, RequestInit];
+    expect(postCall).toBeTruthy();
+    const body = JSON.parse(postCall[1].body as string);
+    expect(body.lines).toEqual([expect.objectContaining({ kind: "cosmetic", itemId: "cos-1" })]);
+  });
+
+  it("a barcode-identified watch is reported as a status notice, not an alert — a successful scan is not a failure", async () => {
+    const fetchMock = fetchMockWith([
+      { pattern: /\/api\/watch\/units$/, body: { units: [SERIAL_UNIT] } },
+      {
+        pattern: /\/api\/barcodes\/lookup/,
+        body: { matches: [{ itemId: "watch-item-1", itemName: "ساعت رولکس", kind: "watch", tracking: "serial" }] },
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RetailInvoiceScreen industry="watch" />);
+    await flush();
+    await scanAndFlush("SN-001");
+
+    const notice = await flushUntil(() =>
+      screen.getByText(/دستگاه «ساعت رولکس — SN-001» شناسایی شد/),
+    ).then(() => screen.getByText(/دستگاه «ساعت رولکس — SN-001» شناسایی شد/));
+    expect(notice.getAttribute("role")).toBe("status");
+    expect(notice.className).not.toContain("rose");
+    expect(screen.queryByRole("alert")).toBe(null);
+  });
+
+  it("the item picker shows its own loading state while the catalogue is still in flight, instead of a false “no results”", async () => {
+    let resolveItems: (value: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      resolveItems = resolve;
+    });
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("/api/jewelry/items")) return pending;
+      if (url.includes("/api/jewelry/prices")) return new Response(JSON.stringify({ prices: [] }), { status: 200 });
+      const [match] = routeFor(url);
+      if (match) return new Response(JSON.stringify(match.body), { status: 200 });
+      return new Response(JSON.stringify({}), { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RetailInvoiceScreen industry="jewelry" />);
+    await flush();
+
+    const trigger = screen.getByRole("button", { name: "انتخاب کالای طلا" });
+    act(() => {
+      fireEvent.click(trigger);
+    });
+    await flush();
+
+    // The catalogue fetch has not resolved yet: the picker must say so, not
+    // claim the (still-unknown) list is empty.
+    expect(screen.queryByText("نتیجه‌ای یافت نشد.")).toBe(null);
+    expect(screen.getByRole("listbox").getAttribute("aria-busy")).toBe("true");
+
+    resolveItems(new Response(JSON.stringify({ items: [WEIGHT_ITEM] }), { status: 200 }));
+    await flush();
+    await flushUntil(() => expect(screen.getByRole("listbox").getAttribute("aria-busy")).toBe("false"));
+  });
+});
+
+describe("RetailInvoiceScreen — printer missing and printer retry", () => {
+  it("printer missing: the explicit «چاپ رسید» reprint tells the cashier why nothing printed, with a link to printer settings", async () => {
+    printReceipt.mockImplementationOnce(async () => ({ ok: true, supportsDrawer: false, printerId: undefined }) as const);
+    printReceipt.mockImplementationOnce(
+      async () => ({ ok: false, error: "printer_not_configured", supportsDrawer: false, printerId: undefined }) as const,
+    );
+
+    render(<RetailInvoiceScreen industry="accessories" />);
+    await flush();
+    await scanAndFlush("KEY-1");
+
+    press(submitButton());
+    advance(2000);
+    release(submitButton());
+    await flush();
+    await flush();
+    await flushUntil(() => expect(printReceipt).toHaveBeenCalledTimes(1));
+
+    const reprintButton = screen.getByRole("button", { name: /چاپ رسید/ });
+    act(() => {
+      fireEvent.click(reprintButton);
+    });
+    await flushUntil(() => expect(toastWarning).toHaveBeenCalled());
+
+    expect(toastWarning).toHaveBeenCalledWith(
+      "چاپگری برای این شعبه تنظیم نشده است.",
+      expect.objectContaining({ action: expect.objectContaining({ label: "تنظیمات چاپگر" }) }),
+    );
+  });
+
+  it("printer retry: a generic print failure on reprint offers «چاپ دوباره», which sends the same receipt again", async () => {
+    printReceipt.mockImplementationOnce(async () => ({ ok: true, supportsDrawer: false, printerId: undefined }) as const);
+    printReceipt.mockImplementationOnce(
+      async () => ({ ok: false, error: "printer_offline", supportsDrawer: false, printerId: undefined }) as const,
+    );
+
+    render(<RetailInvoiceScreen industry="accessories" />);
+    await flush();
+    await scanAndFlush("KEY-1");
+
+    press(submitButton());
+    advance(2000);
+    release(submitButton());
+    await flush();
+    await flush();
+    await flushUntil(() => expect(printReceipt).toHaveBeenCalledTimes(1));
+
+    const reprintButton = screen.getByRole("button", { name: /چاپ رسید/ });
+    act(() => {
+      fireEvent.click(reprintButton);
+    });
+    await flushUntil(() => expect(toastWarning).toHaveBeenCalled());
+
+    expect(toastWarning).toHaveBeenCalledWith("چاپ رسید انجام نشد.", expect.objectContaining({ action: expect.any(Object) }));
+    const [, options] = toastWarning.mock.calls[toastWarning.mock.calls.length - 1] as [string, { action: { onClick: () => void } }];
+    printReceipt.mockClear();
+    act(() => {
+      options.action.onClick();
+    });
+    await flush();
+    expect(printReceipt).toHaveBeenCalledTimes(1);
   });
 });

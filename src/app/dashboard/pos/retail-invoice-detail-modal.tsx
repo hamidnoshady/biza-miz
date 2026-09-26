@@ -255,11 +255,29 @@ export function RetailInvoiceDetailModal({
             <ErrorBox>{error}</ErrorBox>
           ) : invoice ? (
             <Tabs defaultValue="invoice">
-              <TabsList className="grid w-full grid-cols-4">
-                <TabsTrigger value="invoice">فاکتور</TabsTrigger>
-                <TabsTrigger value="payment">پرداخت</TabsTrigger>
-                <TabsTrigger value="accounting">حسابداری</TabsTrigger>
-                <TabsTrigger value="info">اطلاعات</TabsTrigger>
+              {/*
+                The shared TabsList defaults to a 32px-tall single-line strip
+                (`h-8`), well under this app's own ~40px touch-target floor —
+                fine for the mouse-driven screens it was built for, but this
+                is the one place it is used as a hand-held four-way switch at
+                390px wide. `h-auto min-h-10` lets it grow instead of clipping,
+                and each trigger allows a wrap (`whitespace-normal`) so the
+                longest label, «حسابداری», never overlaps its neighbour on a
+                narrow screen instead of silently overflowing sideways.
+              */}
+              <TabsList className="grid h-auto min-h-10 w-full grid-cols-4">
+                <TabsTrigger value="invoice" className="min-h-10 whitespace-normal py-1.5 text-center leading-tight">
+                  فاکتور
+                </TabsTrigger>
+                <TabsTrigger value="payment" className="min-h-10 whitespace-normal py-1.5 text-center leading-tight">
+                  پرداخت
+                </TabsTrigger>
+                <TabsTrigger value="accounting" className="min-h-10 whitespace-normal py-1.5 text-center leading-tight">
+                  حسابداری
+                </TabsTrigger>
+                <TabsTrigger value="info" className="min-h-10 whitespace-normal py-1.5 text-center leading-tight">
+                  اطلاعات
+                </TabsTrigger>
               </TabsList>
 
               <TabsContent value="invoice" className="mt-4 space-y-3">

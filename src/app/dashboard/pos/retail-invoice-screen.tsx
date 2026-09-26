@@ -472,8 +472,19 @@ export function RetailInvoiceScreen({
     if (!lastReceipt) return;
     const requestId = `reprint:${crypto.randomUUID()}`;
     void printReceipt(null, lastReceipt, { requestId }).then((result) => {
-      if (result.ok) toast.success("رسید برای چاپ ارسال شد");
-      else if (result.error !== "printer_not_configured") {
+      if (result.ok) {
+        toast.success("رسید برای چاپ ارسال شد");
+      } else if (result.error === "printer_not_configured") {
+        // The auto-print right after submit stays silent on a missing
+        // printer (see submit() above — a background attempt must never
+        // look like the sale failed). This button is different: the cashier
+        // pressed it on purpose expecting a receipt, so silence here just
+        // looks broken. Same message and settings link the invoice detail
+        // modal's own reprint gives for the same error.
+        toast.warning("چاپگری برای این شعبه تنظیم نشده است.", {
+          action: { label: "تنظیمات چاپگر", onClick: () => window.open("/dashboard/settings/printers", "_blank") },
+        });
+      } else {
         toast.warning("چاپ رسید انجام نشد.", {
           action: { label: "چاپ دوباره", onClick: () => void printReceipt(null, lastReceipt, { requestId: `${requestId}:retry` }) },
         });
@@ -541,15 +552,19 @@ export function RetailInvoiceScreen({
             />
           ) : null}
           {industry === "jewelry" ? (
-            <GoldLineForm industry={industry} items={weightItems} prices={prices} onAdd={addLine} />
+            <GoldLineForm industry={industry} items={weightItems} prices={prices} onAdd={addLine} loading={loading} />
           ) : null}
-          {industry === "watch" ? <WatchLineForm industry={industry} units={units} onAdd={addLine} /> : null}
+          {industry === "watch" ? (
+            <WatchLineForm industry={industry} units={units} onAdd={addLine} loading={loading} />
+          ) : null}
           {industry === "accessories" ? (
-            <AccessoryLineForm industry={industry} variants={variants} onAdd={addLine} kind="accessory" />
+            <AccessoryLineForm industry={industry} variants={variants} onAdd={addLine} kind="accessory" loading={loading} />
           ) : null}
-          {industry === "cosmetics" ? <CosmeticsLineForm industry={industry} variants={variants} onAdd={addLine} /> : null}
+          {industry === "cosmetics" ? (
+            <CosmeticsLineForm industry={industry} variants={variants} onAdd={addLine} loading={loading} />
+          ) : null}
           {isTradeGoodsIndustry(industry) ? (
-            <AccessoryLineForm industry={industry} variants={variants} onAdd={addLine} kind="stocked" />
+            <AccessoryLineForm industry={industry} variants={variants} onAdd={addLine} kind="stocked" loading={loading} />
           ) : null}
 
         </div>
@@ -859,12 +874,18 @@ function BarcodeScanField({
   const [code, setCode] = useState("");
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState("");
+  // A neutral, non-error follow-up ("device identified; enter its price") —
+  // a successful scan that still needs one more step must never look like a
+  // failed one: same red/alert styling on a scan that actually worked reads
+  // as "something went wrong" to the cashier and to a screen reader.
+  const [scanNotice, setScanNotice] = useState("");
 
   async function resolve(rawCode: string) {
     const needle = rawCode.trim();
     if (!needle) return;
     setScanBusy(true);
     setScanError("");
+    setScanNotice("");
     const { ok, data } = await api<{
       matches?: { itemId: string; serialId?: string | null; itemName: string; kind: string; tracking: string }[];
       message?: string;
@@ -978,7 +999,9 @@ function BarcodeScanField({
       }
       // A watch has no catalogue price — it is agreed per sale — so the scan
       // names the unit and the cashier enters the one figure the scan cannot.
-      setScanError(`دستگاه «${serial.itemName} — ${serial.serialNumber}» شناسایی شد؛ قیمت را در فرم دستگاه وارد کنید.`);
+      // This identified the device; it is not a failure, so it is reported
+      // through `scanNotice`, not `scanError`.
+      setScanNotice(`دستگاه «${serial.itemName} — ${serial.serialNumber}» شناسایی شد؛ قیمت را در فرم دستگاه وارد کنید.`);
       return;
     }
   }
@@ -1011,6 +1034,9 @@ function BarcodeScanField({
         <LoadingSkeleton rows={1} compact className="mt-2" label="در حال جست‌وجوی کالا" />
       ) : null}
       {scanError ? <p role="alert" className="mt-2 text-xs leading-5 text-rose-700 dark:text-rose-300">{scanError}</p> : null}
+      {scanNotice ? (
+        <p role="status" className="mt-2 text-xs leading-5 text-amber-800 dark:text-amber-300">{scanNotice}</p>
+      ) : null}
     </Panel>
   );
 }
@@ -1026,11 +1052,14 @@ function GoldLineForm({
   items,
   prices,
   onAdd,
+  loading = false,
 }: {
   industry: Industry;
   items: WeightItem[];
   prices: GoldPrice[];
   onAdd: (line: CartLine) => void;
+  /** The catalogue fetch is still in flight — an empty picker at this point means "not loaded yet", not "nothing in stock". */
+  loading?: boolean;
 }) {
   const money = useMoney();
   const [itemId, setItemId] = useState("");
@@ -1115,6 +1144,7 @@ function GoldLineForm({
           value={itemId}
           onChange={setItemId}
           ariaLabel="انتخاب کالای طلا"
+          loading={loading}
           options={[
             { value: "", label: "انتخاب کنید" },
             ...filtered.map((i) => ({
@@ -1216,10 +1246,13 @@ function WatchLineForm({
   industry,
   units,
   onAdd,
+  loading = false,
 }: {
   industry: Industry;
   units: SerialUnit[];
   onAdd: (line: CartLine) => void;
+  /** The catalogue fetch is still in flight — an empty picker at this point means "not loaded yet", not "nothing in stock". */
+  loading?: boolean;
 }) {
   const money = useMoney();
   const [serialId, setSerialId] = useState("");
@@ -1261,6 +1294,7 @@ function WatchLineForm({
           value={serialId}
           onChange={setSerialId}
           ariaLabel="انتخاب دستگاه"
+          loading={loading}
           options={[
             { value: "", label: "انتخاب کنید" },
             ...inStock.map((u) => ({ value: u.id, label: `${u.itemName} — ${u.serialNumber}` })),
@@ -1328,11 +1362,14 @@ function AccessoryLineForm({
   variants,
   onAdd,
   kind = "accessory",
+  loading = false,
 }: {
   industry: Industry;
   variants: Variant[];
   onAdd: (line: CartLine) => void;
   kind?: "accessory" | "stocked";
+  /** The catalogue fetch is still in flight — an empty picker at this point means "not loaded yet", not "nothing in stock". */
+  loading?: boolean;
 }) {
   const money = useMoney();
   const [itemId, setItemId] = useState("");
@@ -1379,6 +1416,7 @@ function AccessoryLineForm({
           value={itemId}
           onChange={setItemId}
           ariaLabel="انتخاب کالا"
+          loading={loading}
           options={[
             { value: "", label: "انتخاب کنید" },
             ...sellable.map((v) => ({
@@ -1457,10 +1495,13 @@ function CosmeticsLineForm({
   industry,
   variants,
   onAdd,
+  loading = false,
 }: {
   industry: Industry;
   variants: Variant[];
   onAdd: (line: CartLine) => void;
+  /** The catalogue fetch is still in flight — an empty picker at this point means "not loaded yet", not "nothing in stock". */
+  loading?: boolean;
 }) {
   const money = useMoney();
   const [itemId, setItemId] = useState("");
@@ -1510,6 +1551,7 @@ function CosmeticsLineForm({
           value={itemId}
           onChange={setItemId}
           ariaLabel="انتخاب کالا"
+          loading={loading}
           options={[
             { value: "", label: "انتخاب کنید" },
             ...sellable.map((v) => ({

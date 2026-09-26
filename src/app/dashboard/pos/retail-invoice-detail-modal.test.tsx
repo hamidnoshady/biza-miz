@@ -141,6 +141,22 @@ describe("RetailInvoiceDetailModal", () => {
     expect(link.getAttribute("href")).toContain("entries");
   });
 
+  it("keeps every tab at the app's own touch-target floor and lets a long label wrap instead of overlapping its neighbour", async () => {
+    // The shared <TabsList> defaults to a 32px-tall single-line strip — fine
+    // for a mouse, but this is the one screen that turns it into a hand-held
+    // four-way switch at 390px wide. Below the app's own ~40px floor, and
+    // with `whitespace-nowrap` and four equal columns, «حسابداری» — the
+    // longest of the four labels — has nowhere to go but over its neighbour.
+    render(<RetailInvoiceDetailModal invoiceId="order-1" open onOpenChange={() => {}} />);
+    await flush();
+
+    for (const name of ["فاکتور", "پرداخت", "حسابداری", "اطلاعات"]) {
+      const tab = screen.getByRole("tab", { name });
+      expect(tab.className).toContain("min-h-10");
+      expect(tab.className).toContain("whitespace-normal");
+    }
+  });
+
   it("shows the customer and cashier on the اطلاعات tab", async () => {
     render(<RetailInvoiceDetailModal invoiceId="order-1" open onOpenChange={() => {}} />);
     await flush();

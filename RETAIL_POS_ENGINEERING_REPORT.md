@@ -1257,17 +1257,24 @@ rows" gap and this display/filter bug are both closed by this section.
 ## 17. Remaining backlog against the original 91-point brief
 
 Everything in §9 not superseded by §14 (void/reversal), §15 (split payment),
-§16 (invoice-management export/filter fix), or §18 (RTL/accessibility audit)
-remains open and was explicitly **not** attempted this bucket, per direction:
+§16 (invoice-management export/filter fix), §18/§19 (RTL/accessibility
+audit), or §20 (responsive-breakpoint sweep and the ten manual/browser
+scenarios) remains open and was explicitly **not** attempted, per direction:
 the `retail-pos/` module reorganisation, the full desktop/mobile UI redesign,
 modal line editors for in-place cart-line edits, a dedicated payment modal,
-permission-ID normalisation to `sales.invoice.*`, the supervisor-PIN override
-system, a responsive-breakpoint sweep, and the ten manual/browser test
-scenarios the original brief lists. A gold/watch return/reinstatement
-workflow (manager approval, physical inspection, explicit disposition
-outcomes) — distinct from void, which §14 blocks entirely for gold/watch by
-design — is also not built. None of these are silent regressions; they are
-listed here, as in §9, so they are not mistaken for done.
+permission-ID normalisation to `sales.invoice.*`, and the supervisor-PIN
+override system. A gold/watch return/reinstatement workflow (manager
+approval, physical inspection, explicit disposition outcomes) — distinct from
+void, which §14 blocks entirely for gold/watch by design — is also not built.
+None of these are silent regressions; they are listed here, as in §9, so they
+are not mistaken for done.
+
+The responsive-breakpoint sweep and the ten manual/browser scenarios *were*
+attempted this engagement (§20) but, for a reason outside this session's
+control (no real browser is launchable in this sandbox — see §20.1), the
+verification method was component-level rendering plus a static/structural
+CSS audit, not an actual rendered browser at each width. §20.6 is explicit
+about which of this round's claims rest on which method.
 
 Permission-ID normalisation and the supervisor-PIN system were considered as
 the next item after §16 and deliberately **not** started: the former is not
@@ -1622,3 +1629,295 @@ narrowed further, not closed: `filters.tsx` and `payment-ways.tsx`'s
 `PaymentWays` UI are confirmed out of scope (café-only), and the café order
 screen itself remains entirely unaudited, as does everything outside the
 retail-invoice flow.
+
+## 20. Follow-up session — round 4: responsive-breakpoint sweep and the ten manual/browser scenarios
+
+This session's explicit brief was the two items §9/§17 always listed as never
+attempted: a responsive-breakpoint sweep, and ten named manual/browser
+scenarios (normal sale, barcode, watch, jewelry, cosmetics batch, split
+payment, credit, printer missing, printer retry, mobile @390px). Scope stayed
+the retail-invoice flow established in §18/§19; no accounting, void,
+payment-calculation or permission-semantics change, and none of the four
+things explicitly excluded (supervisor PIN, permission-ID renaming, gold/watch
+return workflows, broad rewrites).
+
+### 20.1 The environment could not launch a real browser — read this before §20.2
+
+Before any scenario work, this session tried to get an actual rendered
+browser running in the sandbox, the way §-labelled visual-regression work
+elsewhere in this repo does:
+
+- `npx playwright install chromium` fails: `cdn.playwright.dev` and
+  `playwright.download.prss.microsoft.com` both reset the TLS connection. A
+  connectivity probe against nine hosts found only `registry.npmjs.org`,
+  `github.com` (root only), `codeload.github.com`, `api.github.com` and
+  `pypi.org` reachable; every browser-binary CDN, `objects.githubusercontent.com`,
+  `raw.githubusercontent.com` and the Debian package mirrors were not.
+- No system Chromium/Chrome/Edge binary exists anywhere on the filesystem,
+  and `apt-get update` cannot reach a mirror either, so there is no OS
+  package-install path.
+- `@sparticuz/chromium` (a serverless Chromium build that ships its actual
+  binary inside the npm tarball, so it needs no secondary download) installs
+  fine from `registry.npmjs.org` and its `executablePath()` produces a real
+  209 MB Chromium binary — but it fails to run:
+  ```
+  $ /tmp/chromium --version
+  /tmp/chromium: error while loading shared libraries: libnspr4.so: cannot open shared object file
+  $ ldd /tmp/chromium | grep "not found"
+  	libnspr4.so => not found
+  	libnss3.so => not found
+  	libnssutil3.so => not found
+  ```
+  Those three NSS/NSPR shared libraries are not present anywhere on this
+  machine (`ldconfig -p` finds none, `find / -iname 'libnss3*'` finds
+  nothing), and there is no reachable package registry or GitHub release
+  asset to fetch them from (`pip download python-nss` fails for the same
+  reason: it needs the *headers*, which need the *library*, which is the
+  thing we are missing). This is a property of this sandbox, not of the
+  repository — the same install works on a normal Amazon-Linux Lambda
+  runtime, which is what `@sparticuz/chromium` targets.
+
+Given that, this round could not produce actual rendered screenshots or a
+real layout engine's box measurements at any viewport width. What follows
+substitutes the most rigorous alternative available: full React component
+mounts (`@testing-library/react` + jsdom) driving the *real* production
+component tree, business logic, and event handlers end-to-end for each named
+scenario, plus a static audit of every responsive Tailwind class in the
+in-scope files against the app's actual breakpoints. §20.6 states plainly
+which of this section's findings came from which method — this is not framed
+as equivalent to a rendered-browser pass, and the report should not be read
+as such.
+
+### 20.2 Responsive-breakpoint sweep (static/structural audit)
+
+The in-scope files' breakpoints were read against the app's own scale
+(`sm`≈640px, `md`≈768px, `lg`≈1024px, `xl`≈1280px) and against 390px, the
+brief's named mobile width, plus the tweener band between `sm` and `lg` that
+a sweep focused on one width alone would skip:
+
+- No physical-direction Tailwind class (`text-left`/`right`, `ml-`/`mr-`/
+  `pl-`/`pr-`, `float-`, bare `left-`/`right-`) exists in any of the eight
+  in-scope files — re-confirmed this round across all eight, not just the
+  three §18 originally swept.
+- `retail-invoice-screen.tsx`'s cart/form grid (`lg:grid-cols-[minmax(0,1fr)_22rem]
+  xl:grid-cols-[minmax(0,1fr)_26rem]`) is single-column below `lg` (1024px)
+  — including the whole 640–1023px tweener band a sweep of only 390px and
+  1280px would never exercise — with no fixed-width child forcing an early
+  wrap; each `LineForm`'s own `sm:grid-cols-2`/`sm:grid-cols-3` fields already
+  stack correctly below 640px, and `Field`'s own `mb-4` gives every stacked
+  row vertical spacing independent of the parent grid's (horizontal-only)
+  `gap-x-4`.
+- `invoice-management-view.tsx` already had the correct pattern for a data
+  table at 390px: a `hidden lg:block` table and a separate `lg:hidden` card
+  list, both populated from the same `rows` array (now assertion-tested, see
+  §20.4) — not a single table squeezed narrower.
+- `SearchableSelect`'s popover already caps at `max-h-[min(18rem,50dvh)]`
+  with `overscroll-contain`/`touch-pan-y` and stops wheel/touch propagation,
+  so a long jewelry/cosmetics catalogue cannot scroll the page behind it on a
+  short mobile viewport.
+- `Dialog`'s shared primitive caps every modal at `max-h-[calc(100dvh-2rem)]`
+  with `overflow-y-auto`, so `RetailInvoiceDetailModal` and `PrintJobModal`
+  cannot overflow a short viewport regardless of content length.
+- One real defect: `RetailInvoiceDetailModal`'s `<TabsList>` (§20.3, third
+  item) — the shared `Tabs` primitive's default 32px height and
+  `whitespace-nowrap` triggers are fine for the desktop/mouse screens they
+  were built for, but this is the one place a four-way tab switch is
+  rendered as a hand-held control at 390px wide.
+
+### 20.3 The ten named scenarios, and what each one actually found
+
+Each scenario below states what was exercised and, where a defect was found,
+what changed. "Exercised" means a mounted `RetailInvoiceScreen` (or
+`InvoiceManagementView`/`RetailInvoiceDetailModal`) with a mocked network
+layer but the real component tree, the real pricing functions
+(`computeGoldSalePrice`/`computeWatchSalePrice`/`computeAccessorySalePrice`/
+`computeCosmeticSalePrice`), and real DOM events (`fireEvent`, pointer
+down/up for the hold-to-confirm submit) — see §20.1 for why this is a
+component-level pass, not a rendered-browser one.
+
+1. **Normal sale (accessories)** — already covered by an existing test
+   (§6/§18); re-verified unaffected by this round's changes.
+2. **Barcode** — already covered by an existing test for the unmatched-code
+   path; this round added the watch-specific scan outcome (see the finding
+   below) and re-verified the matched-accessory path unaffected.
+3. **Watch** — new: selects a serialised unit in `WatchLineForm`, types an
+   agreed price, adds it, and submits — asserts the exact `kind: "watch"`
+   payload (`serialId`, `price`, `vatPercent`) `POST`ed to
+   `/api/sales/invoices`.
+4. **Jewelry** — new: selects a weighed gold piece in `GoldLineForm` (its
+   purity's rate already loaded), lets the اجرت/سود/مالیات defaults compute
+   a preview, adds it, and submits — asserts the `kind: "gold"` payload.
+5. **Cosmetics batch** — new: selects a variant in `CosmeticsLineForm` at its
+   catalogue price, adds it, and submits — asserts the `kind: "cosmetic"`
+   payload.
+6. **Split payment** — already covered (§18); re-verified unaffected.
+7. **Credit** — already covered (refuses with no customer, §18); re-verified
+   unaffected. The success path (with a customer selected) is exercised
+   implicitly by every other scenario's submit, which all go through the
+   same `requiresCustomer`/tenders-building code.
+8. **Printer missing** — a real defect, found and fixed: see §20.3.1.
+9. **Printer retry** — covered by an existing test for the *auto*-print
+   path (§18: print-data fetch failing after a successful sale); this round
+   added the *explicit* reprint path's retry (§20.3.1) and confirmed the
+   retry action re-sends the identical receipt.
+10. **Mobile @390px** — the app has no viewport-conditional JavaScript in
+    this flow (every responsive behaviour is a Tailwind breakpoint, not a
+    `useMediaQuery`/`matchMedia` branch), so there is no separate mobile code
+    path to execute a component test against; §20.2's static class audit is
+    the applicable check, plus §20.4's dual-layout data-parity test for
+    `invoice-management-view.tsx`, which *is* a real conditional-render path
+    (`hidden lg:block` vs `lg:hidden`, both mounted in the DOM at once, CSS
+    deciding which one is visible).
+
+#### 20.3.1 Defects found and fixed
+
+**A watch identified by barcode was reported as a failure.**
+`BarcodeScanField`'s `resolve()` funnelled every non-add outcome — genuine
+errors *and* "device identified, price still needed" — into the same
+`scanError` state, rendered with `role="alert"` and rose/red text. A watch
+has no catalogue price (it is agreed per sale), so a *successful* scan of a
+watch's barcode always ends here, and it looked exactly like a failed one —
+to the cashier's eye and to a screen reader, which announces `role="alert"`
+regardless of the (actually positive) content. Fixed by splitting the state:
+a new `scanNotice` (`role="status"`, amber, non-alert) carries this one
+outcome; `scanError` (`role="alert"`, unchanged) is reserved for actual
+failures. New test: *"a barcode-identified watch is reported as a status
+notice, not an alert."*
+
+**The explicit reprint button did nothing when no printer was configured.**
+`RetailInvoiceScreen`'s `reprintLast()` (the "چاپ رسید" button on the
+success banner) matched `RetailInvoiceDetailModal`'s own `reprint()` for
+every printing outcome *except* `printer_not_configured`, where it did
+nothing at all — no toast, no message. The *automatic* print attempt right
+after a sale is deliberately silent on this error (a background attempt must
+never look like the sale itself failed — see the comment above `submit()`),
+but this button is a cashier's deliberate, expectant click; silence there
+just looks broken, and the sibling detail modal already had the right
+answer. Fixed by giving `reprintLast()` the same actionable message
+`RetailInvoiceDetailModal.reprint()` uses: "چاپگری برای این شعبه تنظیم نشده
+است." with a "تنظیمات چاپگر" action linking to `/dashboard/settings/printers`.
+New tests: *"printer missing: the explicit «چاپ رسید» reprint tells the
+cashier why nothing printed, with a link to printer settings"* and
+*"printer retry: a generic print failure on reprint offers «چاپ دوباره»,
+which sends the same receipt again"* (this second one also confirms the
+already-correct generic-failure/retry path keeps working).
+
+**Every industry-specific item picker showed a false "no results" while its
+catalogue was still loading.** `RetailInvoiceScreen`'s four `LineForm`s
+(gold/watch/accessory/cosmetics) each pass their catalogue array straight
+into a `SearchableSelect` without ever passing that component's own
+`loading` prop — a prop `SearchableSelect` has always supported (its content
+placeholder skeleton exists specifically for this) but that, it turns out,
+no call site anywhere in the app actually wires up. Concretely: a cashier
+who opens the "کالا"/"دستگاه"/"کالای طلا" picker in the roughly one-second
+window between the screen mounting and `/api/jewelry/items` (or
+`/api/watch/units`, `/api/cosmetics/items`, …) resolving sees "نتیجه‌ای یافت
+نشد." — *no results found* — a definite, wrong statement, when the truth is
+just "not loaded yet." This is exactly the failure mode the ten-scenario
+brief is built to catch: it only shows up mid-scan/mid-select on a cold
+screen, not on a fully-loaded one. Fixed by threading the screen's existing
+`loading` state down into all four forms and each one's item-picker
+`SearchableSelect`. New test: *"the item picker shows its own loading state
+while the catalogue is still in flight, instead of a false 'no results'."*
+(The same gap likely exists at every other `SearchableSelect` call site in
+the app — out of scope here, noted for a future pass.)
+
+**`RetailInvoiceDetailModal`'s four tabs were a 32px-tall, non-wrapping strip
+on a 390px screen.** The shared `<TabsList>`/`<TabsTrigger>` primitives
+default to `h-8` (32px) and `whitespace-nowrap` — reasonable for the
+mouse-driven screens the primitive was built for (only two consumers exist
+in the whole app: this modal and an unrelated accounting screen, left
+untouched). 32px is below this app's own established touch-target floor
+(`min-h-10`/`min-h-11`, used everywhere else in this flow), and at 390px
+wide with four equal columns and `whitespace-nowrap`, the longest label —
+«حسابداری» — has no room to wrap if it ever runs tight, only room to
+overflow into its neighbour. Fixed locally to this one usage (the shared
+`tabs.tsx` primitive and the other consumer are untouched): the list is now
+`h-auto min-h-10`, and each trigger is `min-h-10 whitespace-normal` so a
+tight label wraps instead of colliding. New test: *"keeps every tab at the
+app's own touch-target floor and lets a long label wrap instead of
+overlapping its neighbour."*
+
+### 20.4 A gap noticed while writing scenario 10's test: no coverage of opening the detail modal at all
+
+While building the mobile-parity check for `invoice-management-view.tsx`,
+this round found there was no test anywhere that clicked a row's «جزئیات و
+چاپ» button and confirmed it actually opened `RetailInvoiceDetailModal` — a
+gap, not a defect (the wiring itself is correct). Added: a test that renders
+one invoice row, asserts the invoice-identifying text and the open button
+each appear exactly twice (once in the `hidden lg:block` table, once in the
+`lg:hidden` card list — proving neither layout silently drops data the other
+has), clicks the card layout's button, and confirms the modal starts
+fetching that exact invoice.
+
+### 20.5 Tests added this round
+
+- `retail-invoice-screen.test.tsx` — six new tests: watch sale, jewelry
+  sale, cosmetics batch sale, the barcode-scanned-watch status-notice fix,
+  the loading-state fix, and the printer-missing/printer-retry reprint fix
+  (two tests, one per outcome).
+- `retail-invoice-detail-modal.test.tsx` — one new test: the `TabsList`
+  touch-target/wrap fix.
+- `invoice-management-view.test.tsx` — one new test: the dual-layout
+  data-parity + open-the-modal check (§20.4).
+
+### 20.6 What this round did and did not verify, plainly stated
+
+Verified by real component rendering + jsdom + actual production business
+logic (pricing functions, submit/print/reprint code paths, DOM events): all
+ten scenarios' *functional* behaviour — the right payload reaches
+`/api/sales/invoices`, the right toast/message appears for each printer
+outcome, the right ARIA role is used for each barcode-scan outcome, the
+loading state suppresses the false "no results."
+
+Verified by static analysis only, not by a rendered layout engine: every
+responsive-breakpoint claim in §20.2 — jsdom has no box model, so no test in
+this repository (this round's or any prior round's) can assert an actual
+pixel measurement, only that the intended Tailwind classes are present and
+internally consistent. This is the same limitation §20.1 describes at length
+and is not new to this round; it is being stated here explicitly because
+this round's brief was specifically about viewport behaviour.
+
+Not verified at all, and not claimed to be: real hardware printing (every
+printer outcome in every round of this report, including this one, is a
+mocked `printReceipt()`/network response, never an actual USB/network
+receipt printer); real touch input (pointer *events* are dispatched and
+asserted, but no physical touch latency, multi-touch, or on-screen-keyboard
+occlusion is exercised); any pixel-level visual regression (blocked per
+§20.1 — the existing `scripts/visual-regression.mjs`/`test:visual` job,
+which needs the same browser this sandbox cannot launch, was not run this
+round for the same reason, and was already not run in §18/§19 either).
+
+### 20.7 Tool run results
+
+```
+$ npx tsc --noEmit                                                  → 0 errors
+$ npx eslint . --max-warnings=0                                     → 0 problems
+$ npx vitest run                                                    → 435 files / 6056 tests pass
+$ DATABASE_URL=postgres://pos:pos@127.0.0.1:5432/pos \
+  npx vitest run --config vitest.db.config.ts                       → 136 files / 1560 tests pass, 1 skipped
+$ NODE_OPTIONS="--max-old-space-size=3200" npm run build             → succeeds, /accounting/pos 37.8 kB
+```
+
+(The local integration run used this session's own `npm run db:dev:start`
+embedded Postgres, migrated with `npm run db:migrate` — the same mechanism
+`vitest.db.config.ts`/CI's `integration-tests` job uses, just pointed at a
+locally-launched database instead of a CI service container. The build
+needed the same larger V8 heap prior rounds already noted as this sandbox's
+own constraint, unrelated to this round's changes — freeing the ~850 MB the
+session's own `npm run dev` background process was holding was what let the
+default sandbox memory budget succeed this time, where §19.9 needed a larger
+`--max-old-space-size` instead.)
+
+**Net diff this section:** `retail-invoice-screen.tsx` (loading prop threaded
+into all four `LineForm`s and `BarcodeScanField`'s `SearchableSelect`
+pickers; `scanNotice` state split out of `scanError`; `reprintLast()`'s
+`printer_not_configured` branch); `retail-invoice-detail-modal.tsx`
+(`TabsList`/`TabsTrigger` touch-target and wrap fix, that screen only); eight
+new tests across three files (§20.5). No accounting, void/reversal,
+payment-calculation, or permission-semantics change; no supervisor PIN,
+permission-ID rename, gold/watch return workflow, or architecture rewrite;
+nothing in §18/§19's prior findings touched or regressed (their tests are
+unchanged and still pass). §17's responsive-breakpoint-sweep and
+ten-scenario items are closed by this section, with the caveats in §20.1 and
+§20.6 carried forward rather than glossed over.

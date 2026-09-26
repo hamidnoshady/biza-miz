@@ -232,6 +232,34 @@ describe("InvoiceManagementView split-payment display", () => {
     const badges = screen.getAllByText("نقدی، نسیه");
     expect(badges.length).toBeGreaterThan(0);
   });
+
+  it("renders every row in both the desktop table and the mobile card list (`hidden lg:block` / `lg:hidden`), each with a working «جزئیات و چاپ» button", async () => {
+    fetchMock.mockImplementation(async () => pageWithSplitInvoice());
+    render(<InvoiceManagementView />);
+    await flush();
+
+    // Both layouts exist in the DOM at once (CSS, not React, decides which
+    // is visible per breakpoint) — the invoice number and the open button
+    // must appear in each, or one of the two layouts silently lost the row.
+    const customerNames = screen.getAllByText("مشتری تست");
+    expect(customerNames.length).toBe(2);
+    const openButtons = screen.getAllByRole("button", { name: /جزئیات و چاپ/ });
+    expect(openButtons.length).toBe(2);
+
+    fetchMock.mockImplementation(async (url: string) => {
+      if (String(url).includes("/api/sales/invoices/inv-1")) {
+        return new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
+      }
+      return pageWithSplitInvoice();
+    });
+    act(() => {
+      fireEvent.click(openButtons[0]);
+    });
+    await flush();
+
+    // The detail modal mounts and starts loading the invoice it was opened for.
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/api/sales/invoices/inv-1"))).toBe(true);
+  });
 });
 
 describe("InvoiceManagementView export", () => {
