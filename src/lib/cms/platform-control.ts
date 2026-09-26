@@ -111,6 +111,7 @@ export interface CmsControlConfig {
   baseUrl: string;
   eventsCursor: null | string;
   eventsShipped: number;
+  storeOrderIngestCursor: null | string;
   label: string;
   lastEventsAt: null | string;
   lastEventsError: null | string;

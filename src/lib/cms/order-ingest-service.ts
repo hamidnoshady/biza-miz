@@ -7,15 +7,81 @@ import { NextResponse } from "next/server";
 import type { PoolClient } from "pg";
 import { getPool, query, withoutTenantScope, withTenant } from "../db";
 import { WELL_KNOWN_CODES } from "../coa-template";
-import { accountIdsByCode, postExactJournalEntry } from "../ledger-service";
+import { accountIdsByCode, postExactCogsEntry, postExactJournalEntry } from "../ledger-service";
+import { deductForOrder } from "../inventory-service";
 import { getPrimaryLocation } from "../setup-state";
 import { reconcileExternalIdentity } from "../crm-external-identity";
+import { getBusinessIndustry } from "../industry-guard";
+import type { Industry } from "../industries";
 import type { RialText } from "../inventory-exact";
 import type { WebsiteConnectionRow } from "../website/connection-service";
 import { cmsMinorToRial } from "./order-money";
 import type { CmsOrder } from "./types";
 
 const zero = "0" as RialText;
+
+const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, { revenue: string; cogs: string; inventory: string }> = {
+  jewelry: {
+    revenue: WELL_KNOWN_CODES.goldSalesRevenue,
+    cogs: WELL_KNOWN_CODES.goldCogs,
+    inventory: WELL_KNOWN_CODES.goldInventory,
+  },
+  watch: {
+    revenue: WELL_KNOWN_CODES.watchSalesRevenue,
+    cogs: WELL_KNOWN_CODES.watchCogs,
+    inventory: WELL_KNOWN_CODES.watchInventory,
+  },
+  accessories: {
+    revenue: WELL_KNOWN_CODES.accessorySalesRevenue,
+    cogs: WELL_KNOWN_CODES.accessoryCogs,
+    inventory: WELL_KNOWN_CODES.accessoryInventory,
+  },
+  cosmetics: {
+    revenue: WELL_KNOWN_CODES.cosmeticSalesRevenue,
+    cogs: WELL_KNOWN_CODES.cosmeticCogs,
+    inventory: WELL_KNOWN_CODES.cosmeticInventory,
+  },
+  wholesale: {
+    revenue: WELL_KNOWN_CODES.wholesaleSalesRevenue,
+    cogs: WELL_KNOWN_CODES.wholesaleCogs,
+    inventory: WELL_KNOWN_CODES.wholesaleInventory,
+  },
+  tools_fittings: {
+    revenue: WELL_KNOWN_CODES.toolsSalesRevenue,
+    cogs: WELL_KNOWN_CODES.toolsCogs,
+    inventory: WELL_KNOWN_CODES.toolsInventory,
+  },
+  haberdashery: {
+    revenue: WELL_KNOWN_CODES.haberdasherySalesRevenue,
+    cogs: WELL_KNOWN_CODES.haberdasheryCogs,
+    inventory: WELL_KNOWN_CODES.haberdasheryInventory,
+  },
+};
+
+function cmsProductId(order: CmsOrder): string | null {
+  if (typeof order.product === "string") return order.product;
+  if (order.product && typeof order.product === "object" && "id" in order.product) {
+    return String(order.product.id);
+  }
+  return null;
+}
+
+async function resolveWebsiteProductMap(
+  client: PoolClient,
+  businessId: string,
+  remoteProductId: string | null,
+): Promise<{ localKind: "item" | "menu_item"; localId: string } | null> {
+  if (!remoteProductId) return null;
+  const { rows } = await client.query<{ local_kind: "item" | "menu_item"; local_id: string }>(
+    `SELECT local_kind, local_id FROM website_product_map
+      WHERE business_id = $1 AND remote_id = $2 AND sync_enabled = true
+      LIMIT 1`,
+    [businessId, remoteProductId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return { localKind: row.local_kind, localId: row.local_id };
+}
 
 export interface CmsOrderEventNotice {
   siteId: string;
@@ -189,12 +255,32 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
       typeof order.product === "object" && order.product && "title" in order.product
         ? String(order.product.title)
         : order.productTitle ?? "محصول فروشگاه";
+    const quantity = Math.max(1, order.quantity);
+    const mapped = await resolveWebsiteProductMap(client, businessId, cmsProductId(order));
+    const industry = await getBusinessIndustry(businessId);
 
-    await client.query(
-      `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, status)
-       VALUES ($1, $2, NULL, $3, $4, $5, 'served')`,
-      [locationId, orderId, title, unit.toString(), Math.max(1, order.quantity)],
-    );
+    let inventoryEventId: string | null = null;
+    let cogsRial = "0";
+
+    if (mapped?.localKind === "menu_item") {
+      await client.query(
+        `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'served')`,
+        [locationId, orderId, mapped.localId, title, unit.toString(), quantity],
+      );
+    } else if (mapped?.localKind === "item") {
+      await client.query(
+        `INSERT INTO order_items (location_id, order_id, item_id, name_snapshot, unit_price, quantity, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'served')`,
+        [locationId, orderId, mapped.localId, title, unit.toString(), quantity],
+      );
+    } else {
+      await client.query(
+        `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, status)
+         VALUES ($1, $2, NULL, $3, $4, $5, 'served')`,
+        [locationId, orderId, title, unit.toString(), quantity],
+      );
+    }
 
     if (total > 0n) {
       await client.query(
@@ -210,7 +296,72 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
     );
     if (closed !== 1) throw new Error("order_close_failed");
 
-    await postRevenueEntry(client, businessId, locationId, orderId, order.reference, total, net, tax);
+    if (mapped?.localKind === "menu_item") {
+      const { rows: eventRows } = await client.query<{ id: string }>(
+        `INSERT INTO inventory_events
+           (business_id, location_id, event_type, source_type, source_id, created_by, idempotency_key, costing_version)
+         VALUES ($1, $2, 'sale_consumption', 'order', $3, NULL, $4, 2)
+         RETURNING id`,
+        [businessId, locationId, orderId, `cms-order:${orderId}`],
+      );
+      inventoryEventId = eventRows[0].id;
+      const { totalCost } = await deductForOrder(client, businessId, locationId, orderId, null, inventoryEventId);
+      cogsRial = totalCost;
+      await postExactCogsEntry(client, {
+        businessId,
+        locationId,
+        orderId,
+        createdBy: null,
+        totalCost,
+        inventoryEventId,
+      });
+    } else if (mapped?.localKind === "item" && industry && industry !== "food_service") {
+      const codes = RETAIL_ACCOUNT_CODES[industry];
+      const { rows: stockRows } = await client.query<{ unit_cost: string | null }>(
+        `SELECT unit_cost::text FROM item_stock WHERE item_id = $1 AND unit_cost IS NOT NULL`,
+        [mapped.localId],
+      );
+      const unitCost = stockRows[0]?.unit_cost ? BigInt(stockRows[0].unit_cost) : 0n;
+      if (unitCost > 0n) {
+        cogsRial = (unitCost * BigInt(quantity)).toString();
+        await client.query(
+          `UPDATE item_stock SET quantity = GREATEST(0, quantity - $2), last_sold_at = now(), updated_at = now()
+            WHERE item_id = $1`,
+          [mapped.localId, quantity],
+        );
+        const cogsAccounts = await accountIdsByCode(client, businessId, [codes.cogs, codes.inventory]);
+        await postExactJournalEntry(client, {
+          businessId,
+          locationId,
+          memo: "بهای تمام‌شده فروش فروشگاه سایت",
+          sourceType: "cms_store_order",
+          sourceId: orderId,
+          createdBy: null,
+          postingKind: "cogs",
+          lines: [
+            { accountId: cogsAccounts.get(codes.cogs)!, debit: cogsRial as RialText, credit: zero },
+            { accountId: cogsAccounts.get(codes.inventory)!, debit: zero, credit: cogsRial as RialText },
+          ],
+        });
+      }
+    }
+
+    await postRevenueEntry(
+      client,
+      businessId,
+      locationId,
+      orderId,
+      order.reference,
+      total,
+      net,
+      tax,
+      industry,
+      inventoryEventId,
+    );
+
+    if (inventoryEventId) {
+      await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1", [inventoryEventId]);
+    }
 
     await client.query("COMMIT");
     return orderId;
@@ -231,10 +382,14 @@ async function postRevenueEntry(
   total: bigint,
   net: bigint,
   tax: bigint,
+  industry: Industry | null,
+  inventoryEventId: string | null,
 ): Promise<void> {
+  const retailRevenue =
+    industry && industry !== "food_service" ? RETAIL_ACCOUNT_CODES[industry].revenue : WELL_KNOWN_CODES.deliveryRevenue;
   const accounts = await accountIdsByCode(client, businessId, [
     WELL_KNOWN_CODES.bankClearing,
-    WELL_KNOWN_CODES.deliveryRevenue,
+    retailRevenue,
     ...(tax > 0n ? [WELL_KNOWN_CODES.vatPayable] : []),
   ]);
   await postExactJournalEntry(client, {
@@ -245,10 +400,10 @@ async function postRevenueEntry(
     sourceId: orderId,
     createdBy: null,
     postingKind: "revenue",
-    inventoryEventId: null,
+    inventoryEventId,
     lines: [
       { accountId: accounts.get(WELL_KNOWN_CODES.bankClearing)!, debit: total.toString() as RialText, credit: zero },
-      { accountId: accounts.get(WELL_KNOWN_CODES.deliveryRevenue)!, debit: zero, credit: net.toString() as RialText },
+      { accountId: accounts.get(retailRevenue)!, debit: zero, credit: net.toString() as RialText },
       ...(tax > 0n
         ? [{ accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!, debit: zero, credit: tax.toString() as RialText }]
         : []),

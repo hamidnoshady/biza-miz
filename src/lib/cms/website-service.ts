@@ -61,6 +61,7 @@ import {
 // and is no longer called directly, so a rotated key is a form submission rather
 // than a redeploy.
 import { resolvePlatformCmsConfig } from "./platform-control-service";
+import { inboxStatusForCmsOrders } from "./order-inbox-service";
 import { dnsHint, ipsOverlap, type DnsCheck } from "./dns";
 import {
   CmsConnectionError,
@@ -204,6 +205,10 @@ export interface WebsiteOverview {
   posts: CmsPost[];
   products: CmsProduct[];
   orders: CmsOrder[];
+  orderInbox: Record<
+    string,
+    { status: "pending" | "processed" | "failed" | "duplicate"; error: string | null; importedOrderId: string | null }
+  >;
 }
 
 /** The connected site, in one call. Every read is cached by the CMS itself. */
@@ -223,9 +228,21 @@ export async function cmsWebsiteOverview(businessId: string): Promise<WebsiteRes
       fetchProducts(config, { limit: 50 }),
       fetchOrders(config, { limit: 50 }),
     ]);
+    const connections = await listCmsConnections(businessId);
+    const orderInbox = connections[0]
+      ? await inboxStatusForCmsOrders(connections[0].id, orders.docs.map((o) => o.id))
+      : {};
+
     return {
       ok: true,
-      data: { site, pages: pages.docs, posts: posts.docs, products: products.docs, orders: orders.docs },
+      data: {
+        site,
+        pages: pages.docs,
+        posts: posts.docs,
+        products: products.docs,
+        orders: orders.docs,
+        orderInbox,
+      },
     };
   } catch (error) {
     if (error instanceof CmsNetworkError) return { ok: false, error: "cms_unreachable" };

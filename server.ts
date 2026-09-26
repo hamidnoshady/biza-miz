@@ -411,6 +411,11 @@ app.prepare().then(async () => {
     const cmsEntitlementTick = () =>
       runCmsEntitlementOutboxTick().catch((err) => console.error("cms entitlement tick failed:", err));
     scheduleCentralTick(cmsEntitlementTick, 60_000, 42_000);
+
+    const { runCmsStoreOrderPollTick } = await import("./src/lib/cms/order-poll-service");
+    const cmsStoreOrderPollTick = () =>
+      runCmsStoreOrderPollTick().catch((err) => console.error("cms store order poll failed:", err));
+    scheduleCentralTick(cmsStoreOrderPollTick, 60_000, 45_000);
   }
 
   // «ورود و خروج داده» — the platform data transfer engine (migration 0169).
