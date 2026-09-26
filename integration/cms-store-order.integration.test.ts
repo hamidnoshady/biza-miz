@@ -95,7 +95,7 @@ beforeAll(async () => {
     [biz.id],
   );
 
-  const cipher = encryptSecret("eshobe_live_test_key", KEY);
+  const cipher = encryptSecret("eshobe_live_test_key", Buffer.from(KEY, "hex"));
   const conn = await db.query<{ id: string }>(
     `INSERT INTO eshobe_cms_connections (business_id, site_id, site_domain, base_url, api_key_ciphertext)
      VALUES ($1, $2, 'shop.test', 'https://cms.test', $3) RETURNING id`,
