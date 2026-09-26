@@ -150,6 +150,7 @@ const PUBLIC_ROUTES: Record<string, string> = {
   // a tenant session — the CMS has no session here, and the route only purges
   // cache tags, no tenant data.
   "cms/revalidate": "server-to-server webhook from the Eshobe CMS — authenticated by the x-eshobe-signature HMAC, not a session",
+  "cms/order-events": "server-to-server CMS store order webhook — authenticated by the x-eshobe-signature HMAC, not a session",
   // Phase 34 — the MCP connector's OAuth 2.1 flow. Every one of these is
   // reached BEFORE any credential exists (that is what the flow is for), and
   // the only step that makes a decision — the owner pressing "allow" — is
