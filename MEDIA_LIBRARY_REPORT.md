@@ -154,6 +154,18 @@ What actually changed, in the order it was built:
     This closes the "no version-history UI" gap Section L (background
     removal/upscale/variations) and Section L's deterministic-transforms subsection had
     both explicitly disclosed as not built. See Sections L, T, U.
+17. **Real CI checked for the first time this session — found red, partially fixed**
+    (Section U item 23, Section V): every prior session's "full suite green" claim was
+    true of this sandbox's own Linux run, never of the real Windows CI `gh run list`
+    shows this branch's pushes actually gate on. It had been failing since commit
+    `6778b46`, 12 pushes back, for two unrelated reasons: a `execFile("npx", ...)` call
+    in `media-reconcile-orphans.integration.test.ts` that cannot launch on Windows
+    (`npx.cmd`, not `npx.exe`) — fixed this session with the same `shell: isBatch`
+    pattern `src/lib/pg-tools.ts` already used; and a genuinely stale, but honestly
+    describable, `accounting-expenses` visual baseline predating item 11's receipt-upload
+    control — left open because re-recording it needs a headless Chromium and a
+    `workflow_dispatch` trigger this sandbox/session has neither the network access nor
+    the GitHub permission to produce, not because it was deprioritized.
 
 It did **not** touch: the canonical-asset-schema redesign beyond the additive columns in
 `0174`–`0181`, a full naming-system rebuild, CRM business-card scanning or Workspace
@@ -1567,6 +1579,68 @@ report described earlier is closed, not merely tested-and-left-as-is.
     Section V once carried) — **succeeded**, only the same two pre-existing
     Edge-Runtime-API warnings from `jose` (unrelated to Media, present before this
     program started) and no errors.
+23. **Real GitHub Actions CI checked for the first time this session — found genuinely
+    red, for a reason none of this program's many local-sandbox green runs could have
+    caught, and partially fixed**: every verification item above (1–22) was run against
+    this Linux sandbox's own Postgres and Node — this session was the first time this
+    program actually looked at `gh run list` for this branch's real CI. Result: the
+    `test` workflow's `test` job had been failing on **every single push since commit
+    `6778b46`** (\"deterministic crop/rotate/resize transforms ... storage orphan
+    reconciliation ...\", 12 commits/pushes, roughly a day of this program's own elapsed
+    time), for two separate, unrelated reasons — both real, neither previously caught,
+    because `.github/workflows/test.yml` runs every job on `windows-latest` (documented
+    in its own header comment) while every local check this whole program ever ran was
+    on this Linux sandbox:
+    - **`integration/media-reconcile-orphans.integration.test.ts`, 6/6 tests failing**:
+      `runScript()` invoked the CLI under test via
+      `execFile("npx", ["tsx", "scripts/media-reconcile-orphans.ts", ...])`. On Windows
+      there is no `npx.exe` on PATH, only `npx.cmd`, and Node's `execFile` refuses to
+      launch a `.cmd` without a shell — the spawn itself fails with `error.code ===
+      "ENOENT"` (a string), which the test's own catch block then reported as the
+      script's *exit code*, so every assertion of the form `expect(code).toBe(0)` saw
+      the string `"ENOENT"` instead of a number and failed. Fixed by resolving `npx.cmd`
+      on `win32` and setting `shell: true` in that case — the exact `shell: isBatch`
+      convention `src/lib/pg-tools.ts` already established for the same Windows/`.cmd`
+      reason, not a new pattern invented for this fix. Verified on this sandbox's own
+      Linux, where the fix is a no-op (`npxBin` stays `"npx"`, `shell` stays `false`):
+      6/6 passed, unchanged from before the fix. **Not yet verified on the real Windows
+      CI runner** — the next push to this branch will be the first real confirmation;
+      see the honesty note below.
+    - **`visual-regression` job: a real, described, but never-re-recorded UI diff**:
+      `accounting-expenses` (the exact screen this program's own item 11, receipt-photo
+      OCR wired into Accounting's expense form, added a file-upload control to) now
+      renders 0.83% of its pixels differently from the committed baseline PNG. Read
+      against `docs/design/visual-regression.md`'s own rule (\"a diff is either a bug you
+      introduced or a design change you can describe\"): this is squarely the second
+      case, not the first — item 11 is a real, intentional, already-documented UI change,
+      not a regression. **Left open, honestly, rather than fabricated shut**: re-recording
+      a baseline needs a real headless Chromium rendering the actual page pixel-for-pixel,
+      and this sandbox has neither a cached Chromium binary nor network access to
+      `cdn.playwright.dev`/`deb.debian.org` to fetch one (confirmed this session by
+      actually attempting `npx playwright install chromium` and `--with-deps`, both
+      failing on network, not skipped speculatively) — and the workflow's own
+      `record_baselines` manual-dispatch input exists specifically so a re-recording is a
+      deliberate human action (\"a baseline is an approval, and approving it is a human's
+      job\", the workflow file's own words), which this session's GitHub App token cannot
+      trigger either (`gh workflow run` returned `403: Resource not accessible by
+      integration`). Fabricating a replacement PNG by hand, without ever actually
+      rendering the real page, would be worse than leaving this red: a hand-edited
+      \"baseline\" that was never really photographed is exactly the kind of fake-passing
+      check the standing instructions forbid. **What a maintainer with the right CI
+      permissions needs to do**: trigger `test.yml` via `workflow_dispatch` with
+      `record_baselines: true` on this branch, download the `visual-baselines` artifact,
+      open `accounting-expenses.png` to confirm it shows the new upload control and
+      nothing else changed, and commit it — a five-minute, low-risk, purely-visual review,
+      not a re-investigation.
+    - **Honesty note this finding requires**: every earlier item in this Section U that
+      said a "full suite" or "full regression" was green was true of this sandbox's own
+      Linux/Postgres environment, run repeatedly and genuinely — but none of those runs
+      were ever the real CI this branch's PR actually gates on, and this session is the
+      first time anyone (human or agent) actually checked `gh run list` for it. That gap
+      in verification method, not a gap in effort, is why a real bug (the Windows
+      `execFile` spawn) sat undetected through 12 pushes. It is fixed now; the visual
+      diff is real, described, and blocked on a permission/tooling limit this session
+      does not have — not hidden, not invented as a false "resolved".
 
 Net effect on the test suite across this whole program: **+35 unit tests from earlier
 sessions (`media.test.ts` 19→34, `media-transform.test.ts` 0→6, `media-manager.test.tsx`
@@ -1715,6 +1789,26 @@ full-suite re-run this session, after every change, was green.
   way `api-guard-tests`/`design-checks`/`data-transfer-tests` each get one for
   legibility — a reporting/legibility choice this session did not make, not a coverage
   gap in what actually runs.
+- **The real GitHub Actions CI for this branch was actually checked for the first time
+  this session, and was red** (Section U item 23) — every prior "full suite green"
+  claim in this report was true of this sandbox's own Linux/Postgres run, never of the
+  real Windows CI this repo's `test.yml` actually runs on. Two real, unrelated causes,
+  found by reading `gh run list`/`gh run view` for this branch rather than assumed:
+  (a) `integration/media-reconcile-orphans.integration.test.ts` spawned `npx` via
+  `execFile` without a shell, which fails to launch on Windows (`npx.cmd`, not
+  `npx.exe`) — **fixed this session**, same `shell: isBatch` convention
+  `src/lib/pg-tools.ts` already used, verified 6/6 passing on this sandbox's Linux where
+  the fix is a no-op, **not yet confirmed on the actual Windows runner** (the next push
+  is the first real test of it); (b) the `visual-regression` job's `accounting-expenses`
+  baseline is genuinely, describably stale — it predates item 11's receipt-upload
+  control, a real and already-documented UI addition, not a bug — and **remains open**:
+  re-recording it needs a real headless Chromium this sandbox cannot obtain (`npx
+  playwright install chromium` fails on network to `cdn.playwright.dev`, confirmed by
+  attempting it, not assumed) and a `workflow_dispatch` trigger this session's GitHub
+  token cannot fire (`403: Resource not accessible by integration`, confirmed by
+  attempting it). A maintainer needs to run `test.yml` with `record_baselines: true`,
+  eyeball the one changed PNG, and commit it — genuinely blocked on tooling/permissions
+  this session does not have, not deprioritized.
 - ~~**`npm run build` could not be completed in this sandbox**~~ — **resolved this
   session**, not by a code change but by raising the heap ceiling for the one command
   that needed it: it had been attempted 4+ times across earlier sessions and OOM-killed

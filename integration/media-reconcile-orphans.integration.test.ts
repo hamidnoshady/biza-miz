@@ -131,10 +131,18 @@ beforeEach(async () => {
 });
 
 async function runScript(...args: string[]): Promise<{ stdout: string; code: number }> {
+  // `npx` resolves to `npx.cmd` on Windows, not `npx.exe` — `execFile` refuses
+  // to launch a `.cmd` directly (spawn fails with `code: "ENOENT"`, not a
+  // process exit code) unless a shell is asked to resolve it, exactly the
+  // `shell: isBatch` convention `src/lib/pg-tools.ts` already uses for the
+  // same reason. CI's `test.yml` runs every job on `windows-latest` — see
+  // that file's own header comment — so this is not a hypothetical platform.
+  const npxBin = process.platform === "win32" ? "npx.cmd" : "npx";
   try {
-    const { stdout } = await execFileAsync("npx", ["tsx", "scripts/media-reconcile-orphans.ts", ...args], {
+    const { stdout } = await execFileAsync(npxBin, ["tsx", "scripts/media-reconcile-orphans.ts", ...args], {
       cwd: process.cwd(),
       env: { ...process.env, DATABASE_URL: databaseUrl },
+      shell: process.platform === "win32",
     });
     return { stdout, code: 0 };
   } catch (error) {
