@@ -48,6 +48,7 @@ interface ConfigRow extends Record<string, unknown> {
   base_url: string;
   events_cursor: null | string;
   events_shipped: string;
+  store_order_ingest_cursor: null | string;
   label: string;
   last_events_at: null | string;
   last_events_error: null | string;
@@ -65,6 +66,7 @@ const CONFIG_COLUMNS = `base_url, label, allow_insecure, api_key_ciphertext, api
        billing_entitlement_key_id, billing_entitlement_secret_hint,
        verified_at, verify_error, mirror_enabled, mirror_interval_minutes,
        last_mirror_at, last_mirror_error, log_shipping_enabled, events_cursor,
+       store_order_ingest_cursor,
        last_events_at, last_events_error, events_shipped, updated_at`;
 
 function toConfig(row: ConfigRow | undefined): CmsControlConfig {
@@ -72,6 +74,7 @@ function toConfig(row: ConfigRow | undefined): CmsControlConfig {
     allowInsecure: row?.allow_insecure ?? false,
     baseUrl: row?.base_url ?? "",
     eventsCursor: row?.events_cursor ?? null,
+    storeOrderIngestCursor: row?.store_order_ingest_cursor ?? null,
     // `bigint` comes back as a string from node-postgres; a console figure that
     // silently became "12" + 1 = "121" is the classic version of this bug.
     eventsShipped: Number(row?.events_shipped ?? 0),
@@ -399,6 +402,19 @@ export async function recordEventsFailure(error: string): Promise<void> {
   await query(`UPDATE platform_cms_config SET last_events_error = $1 WHERE id = true`, [
     error.slice(0, 500),
   ]);
+}
+
+export async function advanceStoreOrderIngestCursor(cursor: null | string): Promise<void> {
+  await query(
+    `UPDATE platform_cms_config
+        SET store_order_ingest_cursor = CASE
+              WHEN $1::timestamptz IS NULL THEN store_order_ingest_cursor
+              WHEN store_order_ingest_cursor IS NULL THEN $1::timestamptz
+              ELSE GREATEST(store_order_ingest_cursor, $1::timestamptz)
+            END
+      WHERE id = true`,
+    [cursor],
+  );
 }
 
 // ---------------------------------------------------------------------------

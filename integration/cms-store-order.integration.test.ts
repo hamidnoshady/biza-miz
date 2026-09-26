@@ -91,7 +91,9 @@ beforeAll(async () => {
     `INSERT INTO accounts (business_id, code, name, type) VALUES
        ($1, '1100', 'Cash', 'asset'),
        ($1, '1120', 'Card clearing', 'asset'),
-       ($1, '4330', 'Delivery', 'revenue')`,
+       ($1, '1300', 'Inventory', 'asset'),
+       ($1, '4330', 'Delivery', 'revenue'),
+       ($1, '5100', 'COGS', 'expense')`,
     [biz.id],
   );
 
@@ -149,5 +151,39 @@ describe("CMS store order ingest", () => {
       [biz.connectionId, order.id],
     );
     expect(inbox.rows[0]?.status).toBe("processed");
+  });
+
+  it("maps a synced CMS product to a menu item line", async () => {
+    const menu = await db.query<{ id: string }>(
+      `INSERT INTO menu_items (location_id, name, price) VALUES ($1, 'قهوه', 500000) RETURNING id`,
+      [biz.locationId],
+    );
+    const productRemote = `prod-${randomUUID()}`;
+    await db.query(
+      `INSERT INTO website_product_map (business_id, local_kind, local_id, remote_id, sync_enabled)
+       VALUES ($1, 'menu_item', $2, $3, true)`,
+      [biz.id, menu.rows[0].id, productRemote],
+    );
+
+    const order = paidOrder(`ord-${randomUUID()}`);
+    order.product = productRemote;
+    const notice = {
+      siteId: biz.siteId,
+      deliveryId: `del-${randomUUID()}`,
+      event: "order.paid",
+      order,
+    };
+
+    const res = await ingest.handleCmsStoreOrderWebhook(notice);
+    expect(res.status).toBe(200);
+
+    const lines = await db.query<{ menu_item_id: string | null }>(
+      `SELECT oi.menu_item_id FROM order_items oi
+         JOIN orders o ON o.id = oi.order_id
+         JOIN locations l ON l.id = o.location_id
+        WHERE l.business_id = $1`,
+      [biz.id],
+    );
+    expect(lines.rows.some((r) => r.menu_item_id === menu.rows[0].id)).toBe(true);
   });
 });

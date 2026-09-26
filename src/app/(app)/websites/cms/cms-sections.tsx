@@ -705,6 +705,7 @@ export function CmsOrdersSection() {
       {site.overview ? (
         <OrdersCard
           orders={site.overview.orders}
+          orderInbox={site.overview.orderInbox ?? {}}
           currency={currency}
           updatingOrder={updatingOrder}
           onStatusChange={(order, status) => {
@@ -1116,13 +1117,29 @@ export function SiteSummary({ site }: { site: SiteDescriptor }) {
   );
 }
 
+const INBOX_STATUS_LABELS: Record<string, string> = {
+  processed: "وارد حسابداری شد",
+  failed: "خطای ورود",
+  pending: "در صف ورود",
+  duplicate: "تکراری",
+};
+
+const INBOX_STATUS_TONE: Record<string, "positive" | "danger" | "active" | "neutral"> = {
+  processed: "positive",
+  failed: "danger",
+  pending: "active",
+  duplicate: "neutral",
+};
+
 function OrdersCard({
   orders,
+  orderInbox,
   currency,
   updatingOrder,
   onStatusChange,
 }: {
   orders: CmsOrder[];
+  orderInbox: Record<string, { status: string; error: string | null }>;
   currency: string;
   updatingOrder: string;
   onStatusChange: (order: CmsOrder, status: CmsOrder["status"]) => void;
@@ -1147,6 +1164,11 @@ function OrdersCard({
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                {order.status === "paid" && orderInbox[order.id] ? (
+                  <StatusBadge tone={INBOX_STATUS_TONE[orderInbox[order.id].status] ?? "neutral"}>
+                    {INBOX_STATUS_LABELS[orderInbox[order.id].status] ?? orderInbox[order.id].status}
+                  </StatusBadge>
+                ) : null}
                 <StatusBadge tone={ORDER_STATUS_TONE[order.status] ?? "neutral"}>
                   {ORDER_STATUS_LABELS[order.status] ?? order.status}
                 </StatusBadge>

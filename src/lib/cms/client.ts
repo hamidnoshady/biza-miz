@@ -293,6 +293,18 @@ export function fetchOrders(
   });
 }
 
+export function fetchOrderById(
+  config: CmsConfig,
+  id: string,
+  opts?: { fetchImpl?: FetchLike },
+): Promise<CmsOrder> {
+  return cmsRequest<CmsOrder>(config, {
+    path: `/api/orders/${encodeURIComponent(id)}`,
+    query: { depth: 1 },
+    fetchImpl: opts?.fetchImpl,
+  });
+}
+
 /* ------------------------------------------------------------------ */
 /* Site-level writes — requires the site's API key                      */
 /* ------------------------------------------------------------------ */
