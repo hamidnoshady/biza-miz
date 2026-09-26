@@ -165,7 +165,17 @@ What actually changed, in the order it was built:
     describable, `accounting-expenses` visual baseline predating item 11's receipt-upload
     control — left open because re-recording it needs a headless Chromium and a
     `workflow_dispatch` trigger this sandbox/session has neither the network access nor
-    the GitHub permission to produce, not because it was deprioritized.
+    the GitHub permission to produce, not because it was deprioritized. The `execFile`
+    fix was watched through a real Windows CI run to completion afterward and confirmed:
+    the `integration tests` job went from failing every push to passing.
+18. **Shared vision-extraction call, closing the concrete half of the "no shared
+    document-intelligence abstraction" gap** (Section M, Section U item 24, Section V, no
+    schema change): `runReceiptOcr` and `runInvoiceOcr` had hand-duplicated the exact same
+    provider-call/timeout/error-mapping shell; extracted into `runAiVisionExtraction`
+    (`src/lib/ai-vision-extraction.ts`) with both existing services' own test files
+    passing unmodified (proof of no behaviour change) plus 9 new direct tests. Each
+    reply's *parsing* (receipt fields vs. invoice lines/inventory matching) deliberately
+    stayed apart — genuinely different shapes, not cosmetically different.
 
 It did **not** touch: the canonical-asset-schema redesign beyond the additive columns in
 `0174`–`0181`, a full naming-system rebuild, CRM business-card scanning or Workspace
@@ -623,7 +633,10 @@ flow (`media-manager.test.tsx`, 4 new tests). 30 new tests total, all passing.
 invoice-OCR-for-Inventory/purchases slice of this section's mandate were both built
 end-to-end onto canonical Media storage; business-card/CRM scanning and Workspace
 contract extraction were not (neither feature exists yet at all, so there is nothing to
-migrate onto a shared pipeline — new scope, not a gap in what already exists).
+migrate onto a shared pipeline — new scope, not a gap in what already exists). The two
+existing services' provider-call shell was also de-duplicated this session (see the
+`runAiVisionExtraction` entry near the end of this section) — the one piece of "shared
+document-intelligence abstraction" that was real and concrete rather than speculative.
 
 - `src/lib/ai-receipt-service.ts` **(new)**: a standalone, metered receipt-OCR service
   (`runReceiptOcr`) — deliberately *not* a further branch inside `ai-service.ts`'s
@@ -708,13 +721,18 @@ migrate onto a shared pipeline — new scope, not a gap in what already exists).
   pipeline yet — this is new scope, not a migration). No Workspace contract-extraction
   feature exists either, for the same reason. "Centralized OCR consumed by
   Accounting/CRM/Workspace" is now true for both Accounting (receipts) and Inventory
-  (invoices); CRM and Workspace do not yet have any OCR feature to point at it. No shared
-  "document-intelligence" abstraction layer exists above the two now-parallel
-  `runReceiptOcr`/`runInvoiceOcr` services — a future business-card/contract extractor
-  would still be written as its own service, not a plugin into a common one, because the
-  two existing examples were built independently rather than factored together (each
-  reuses its own pure prompt/parser module, but the metered-call/persist/settle shell
-  around each is duplicated by hand, not shared).
+  (invoices); CRM and Workspace do not yet have any OCR feature to point at it.
+- **`runReceiptOcr`/`runInvoiceOcr`'s duplicated provider-call shell — de-duplicated in a
+  later step of this same session**: both had hand-copied the identical
+  request/timeout/`ai_auth`/`ai_timeout`/`ai_network`/`ai_provider`-mapping shape;
+  extracted into `runAiVisionExtraction` (`src/lib/ai-vision-extraction.ts`), each caller
+  still throwing its own `ReceiptOcrError`/`InvoiceOcrError` via a `createError` factory
+  so no observable behaviour changed (both services' pre-existing test files pass
+  unmodified). Each reply's *parsing* (receipt fields vs. invoice lines matched against
+  inventory/suppliers) deliberately stayed in its own module — a future business-card or
+  contract extractor would reuse the shared call for its own provider request and still
+  write its own parser, exactly as these two do today; that per-feature difference is
+  real, not an unfactored duplicate.
 
 ## N. Per-app migration status
 
@@ -1585,8 +1603,8 @@ report described earlier is closed, not merely tested-and-left-as-is.
     this Linux sandbox's own Postgres and Node — this session was the first time this
     program actually looked at `gh run list` for this branch's real CI. Result: the
     `test` workflow's `test` job had been failing on **every single push since commit
-    `6778b46`** (\"deterministic crop/rotate/resize transforms ... storage orphan
-    reconciliation ...\", 12 commits/pushes, roughly a day of this program's own elapsed
+    `6778b46`** ("deterministic crop/rotate/resize transforms ... storage orphan
+    reconciliation ...", 12 commits/pushes, roughly a day of this program's own elapsed
     time), for two separate, unrelated reasons — both real, neither previously caught,
     because `.github/workflows/test.yml` runs every job on `windows-latest` (documented
     in its own header comment) while every local check this whole program ever ran was
@@ -1603,15 +1621,20 @@ report described earlier is closed, not merely tested-and-left-as-is.
       convention `src/lib/pg-tools.ts` already established for the same Windows/`.cmd`
       reason, not a new pattern invented for this fix. Verified on this sandbox's own
       Linux, where the fix is a no-op (`npxBin` stays `"npx"`, `shell` stays `false`):
-      6/6 passed, unchanged from before the fix. **Not yet verified on the real Windows
-      CI runner** — the next push to this branch will be the first real confirmation;
-      see the honesty note below.
+      6/6 passed, unchanged from before the fix. **Confirmed on the real Windows CI
+      runner this session**, not left as a next-push assumption: the following push
+      (`fdf978b`) was watched through to completion via `gh run view` — the `integration
+      tests (real database)` job on `windows-latest` went from failing on every prior push
+      to passing in 13m34s, with every other previously-green job (unit tests, ESLint,
+      type check, production build, API-guard tests, data-transfer-engine tests, design
+      checks) still green and only the still-open `visual-regression` job (next bullet)
+      still red — i.e. this fix, and only this fix, changed, and it changed the right job.
     - **`visual-regression` job: a real, described, but never-re-recorded UI diff**:
       `accounting-expenses` (the exact screen this program's own item 11, receipt-photo
       OCR wired into Accounting's expense form, added a file-upload control to) now
       renders 0.83% of its pixels differently from the committed baseline PNG. Read
-      against `docs/design/visual-regression.md`'s own rule (\"a diff is either a bug you
-      introduced or a design change you can describe\"): this is squarely the second
+      against `docs/design/visual-regression.md`'s own rule ("a diff is either a bug you
+      introduced or a design change you can describe"): this is squarely the second
       case, not the first — item 11 is a real, intentional, already-documented UI change,
       not a regression. **Left open, honestly, rather than fabricated shut**: re-recording
       a baseline needs a real headless Chromium rendering the actual page pixel-for-pixel,
@@ -1620,12 +1643,12 @@ report described earlier is closed, not merely tested-and-left-as-is.
       actually attempting `npx playwright install chromium` and `--with-deps`, both
       failing on network, not skipped speculatively) — and the workflow's own
       `record_baselines` manual-dispatch input exists specifically so a re-recording is a
-      deliberate human action (\"a baseline is an approval, and approving it is a human's
-      job\", the workflow file's own words), which this session's GitHub App token cannot
+      deliberate human action ("a baseline is an approval, and approving it is a human's
+      job", the workflow file's own words), which this session's GitHub App token cannot
       trigger either (`gh workflow run` returned `403: Resource not accessible by
       integration`). Fabricating a replacement PNG by hand, without ever actually
       rendering the real page, would be worse than leaving this red: a hand-edited
-      \"baseline\" that was never really photographed is exactly the kind of fake-passing
+      "baseline" that was never really photographed is exactly the kind of fake-passing
       check the standing instructions forbid. **What a maintainer with the right CI
       permissions needs to do**: trigger `test.yml` via `workflow_dispatch` with
       `record_baselines: true` on this branch, download the `visual-baselines` artifact,
@@ -1641,6 +1664,28 @@ report described earlier is closed, not merely tested-and-left-as-is.
       `execFile` spawn) sat undetected through 12 pushes. It is fixed now; the visual
       diff is real, described, and blocked on a permission/tooling limit this session
       does not have — not hidden, not invented as a false "resolved".
+24. **Shared vision-extraction call extracted from the two OCR services** (Section M,
+    Section V's "no shared document-intelligence abstraction" bullet, no schema/migration
+    change): `runReceiptOcr` and `runInvoiceOcr` had hand-duplicated the exact same
+    provider request shape, `AbortController`/timeout handling, and
+    `ai_auth`/`ai_timeout`/`ai_network`/`ai_provider` error mapping — only the prompt
+    pair, timeout, and token ceiling ever differed. Extracted into
+    `runAiVisionExtraction` (`src/lib/ai-vision-extraction.ts`), parameterized by prompt
+    pair/timeout/token-floor and a `createError` factory so each caller still throws its
+    own `ReceiptOcrError`/`InvoiceOcrError` — no caller-facing behaviour changed. `npx tsc
+    --noEmit` and `npx eslint` clean; both pre-existing service test files
+    (`ai-receipt-service.test.ts` 6/6, `ai-invoice-ocr-service.test.ts` 9/9) pass
+    **unmodified** — proof the refactor changed no observable behaviour, not just that it
+    compiles; a new `src/lib/ai-vision-extraction.test.ts` (9 tests) covers the shared
+    call directly (request shape, `max_tokens` floor-vs-config precedence, gateway vs.
+    platform auth header, all four error codes, usage parsing with and without a
+    provider-reported count, cost-header parsing with and without the header). Full
+    regression re-run after this change: whole-repo `tsc`/`eslint` clean; unit suite
+    **443/443 files, 6151/6151 tests** (up from 442/6142, the +1 file/+9 tests above, 0
+    regressions); DB integration suite **134/134 files, 1580/1581 tests, 1 pre-existing
+    unrelated skip** (unchanged from item 23 — this refactor touches no route, no schema,
+    no DB-facing behaviour, so an unchanged integration count is the expected result, not
+    a gap in coverage).
 
 Net effect on the test suite across this whole program: **+35 unit tests from earlier
 sessions (`media.test.ts` 19→34, `media-transform.test.ts` 0→6, `media-manager.test.tsx`
@@ -1663,9 +1708,12 @@ integration tests from this session's invoice-OCR storage migration (item 19), p
 net unit tests and +9 integration tests from this session's CRM party avatar storage
 migration (item 20), plus +6 unit tests from this session's Workspace document-register
 audit and UI fix (item 21), plus +7 unit tests (4 route + 3 manager UI) and +4
-integration tests from this session's version-history/lineage UI (item 22 above) —
+integration tests from this session's version-history/lineage UI (item 22 above), plus +9
+unit tests from this session's shared vision-extraction-call refactor (item 24 above,
+0 net behaviour change proven by both pre-existing OCR-service test files passing
+unmodified) —
 0 net regressions** at every checkpoint where the full suite was re-run (final state:
-**442 unit-suite files / 6142 tests, 134 DB integration files / 1580 tests (1 pre-existing
+**443 unit-suite files / 6151 tests, 134 DB integration files / 1580 tests (1 pre-existing
 unrelated skip), both fully
 green**).
 
@@ -1747,14 +1795,27 @@ full-suite re-run this session, after every change, was green.
   Accounting/CRM/Workspace" is true for Accounting and Inventory only, because those are
   the only two OCR consumers that exist in the product today; there is nothing in CRM or
   Workspace to migrate, only a hypothetical future feature to design storage for in
-  advance, which this program did not do; (b) no shared "document-intelligence"
+  advance, which this program did not do; (b) ~~no shared "document-intelligence"
   abstraction layer exists above `runReceiptOcr`/`runInvoiceOcr` — each was built and
   then migrated onto canonical storage independently, with its own hand-written
   metered-call/persist/settle shell duplicated between the two routes rather than
-  factored into one, because refactoring two similar-but-not-identical routes into a
-  shared abstraction was judged lower-value than closing the storage gap in both, and
-  was not attempted; a genuine third consumer (business-card or contract extraction)
-  would still be written as its own service today, not a plugin into a common one.
+  factored into one~~ — **the one piece of that duplication that was real and concrete —
+  the provider request/timeout/`ai_auth`/`ai_timeout`/`ai_network`/`ai_provider`
+  error-mapping shell both services had hand-copied byte-for-byte — was extracted this
+  session** into `runAiVisionExtraction` (`src/lib/ai-vision-extraction.ts`, Section U
+  item 24): each caller supplies its own prompt pair, timeout, token ceiling, and a
+  `createError` factory returning its *own* error class, so `runReceiptOcr` still throws
+  `ReceiptOcrError` and `runInvoiceOcr` still throws `InvoiceOcrError` — no caller-facing
+  behaviour changed, `instanceof` checks in both routes and both existing test files kept
+  passing unmodified, and 9 new tests cover the shared call directly. **Deliberately not
+  shared**: parsing the model's reply into receipt fields vs. invoice lines+inventory
+  matches (`ai-receipt.ts` vs. `ai-invoice-ocr.ts`), and each route's own
+  storage/settle/wallet-preflight sequence — those differ in real, non-cosmetic ways (an
+  invoice reply is matched against inventory candidates and a supplier table; a receipt
+  reply is not) and forcing them through one abstraction would have been the "shared
+  abstraction for its own sake" this report has avoided elsewhere. A genuine third
+  consumer (business-card or contract extraction) would reuse `runAiVisionExtraction` for
+  its provider call and still write its own parser/route, same as these two do today.
 - ~~**CRM party avatars** are still independent of the canonical Media Library's
   S3-backed storage~~ — **resolved this session (migration 0181, Sections D, N, O.1,
   O.2, T, U item 20)**: a new upload now goes through `MediaImageField`/

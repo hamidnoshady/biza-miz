@@ -11,11 +11,11 @@
  *     the exact same prompt and parser — there is exactly one definition of
  *     "what a receipt-extraction JSON reply looks like" in this codebase, not
  *     two independently-drifting ones.
- *   - `ai-invoice-ocr-service.ts` — the sibling supplier-invoice OCR service,
- *     whose `callVision`/error-mapping shape this module deliberately mirrors
- *     (same timeout, same header/auth handling, same ai_auth/ai_timeout/
- *     ai_network/ai_provider error codes) so every standalone AI-vision route
- *     in this app fails the same way rather than each inventing its own.
+ *   - `ai-invoice-ocr-service.ts` — the sibling supplier-invoice OCR service.
+ *     Both now call the same `runAiVisionExtraction` (`ai-vision-extraction.ts`)
+ *     for the actual provider request/timeout/error-mapping shell, extracted
+ *     this session because the two services had hand-duplicated it byte-for-
+ *     byte; only the prompt pair, timeout, and token ceiling ever differed.
  *
  * What's actually new here: unlike both `ai-service.ts`'s chat-turn call and
  * the standalone invoice-ocr route ("the image is a one-shot data URL — never
@@ -27,17 +27,18 @@
  * only returns bytes and lets its route call `storeMediaAsset`.
  */
 
-import { chatCompletionsUrl, type AiConfig } from "./ai";
-import { estimateTokens, type AiTokenUsage } from "./ai-billing";
-import { parseResponseCostHeader } from "./ai-gateway";
+import type { AiConfig } from "./ai";
+import type { AiTokenUsage } from "./ai-billing";
 import {
   RECEIPT_EXTRACTION_SYSTEM_PROMPT,
   RECEIPT_EXTRACTION_USER_PROMPT,
   parseReceiptExtractionReply,
   type ReceiptDraftFields,
 } from "./ai-receipt";
+import { runAiVisionExtraction } from "./ai-vision-extraction";
 
 const REQUEST_TIMEOUT_MS = 60_000;
+const MIN_OUTPUT_TOKENS = 1024;
 
 export class ReceiptOcrError extends Error {
   constructor(
@@ -48,34 +49,6 @@ export class ReceiptOcrError extends Error {
     super(message);
     this.name = "ReceiptOcrError";
   }
-}
-
-type ProviderContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
-
-interface ProviderMessage {
-  role: "system" | "user" | "assistant";
-  content: string | ProviderContentPart[];
-}
-
-function providerHeaders(config: AiConfig): Record<string, string> {
-  return {
-    "Content-Type": "application/json",
-    // Phase 37 & 39 — a gateway deployment authenticates with the calling
-    // business's virtual key when one has been provisioned; every other
-    // deployment sends the platform key. Same rule as ai-invoice-ocr-service.
-    Authorization: `Bearer ${config.gateway?.authKey || config.apiKey}`,
-  };
-}
-
-function textOf(content: ProviderMessage["content"]): string {
-  return typeof content === "string" ? content : "";
-}
-
-function fallbackUsage(messages: ProviderMessage[], content: string): AiTokenUsage {
-  return {
-    inputTokens: estimateTokens(JSON.stringify(messages)),
-    outputTokens: estimateTokens(content),
-  };
 }
 
 export interface ReceiptOcrResult {
@@ -90,58 +63,16 @@ export interface ReceiptOcrResult {
  * settles the wallet only when this resolves, never on a throw.
  */
 export async function runReceiptOcr(input: { config: AiConfig; dataUrl: string }): Promise<ReceiptOcrResult> {
-  const messages: ProviderMessage[] = [
-    { role: "system", content: RECEIPT_EXTRACTION_SYSTEM_PROMPT },
-    {
-      role: "user",
-      content: [
-        { type: "text", text: RECEIPT_EXTRACTION_USER_PROMPT },
-        { type: "image_url", image_url: { url: input.dataUrl } },
-      ],
-    },
-  ];
+  const { text, usage, costUsd } = await runAiVisionExtraction({
+    config: input.config,
+    systemPrompt: RECEIPT_EXTRACTION_SYSTEM_PROMPT,
+    userPrompt: RECEIPT_EXTRACTION_USER_PROMPT,
+    dataUrl: input.dataUrl,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    minOutputTokens: MIN_OUTPUT_TOKENS,
+    createError: (code, message, detail) => new ReceiptOcrError(code, message, detail),
+  });
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  let res: Response;
-  try {
-    res = await fetch(chatCompletionsUrl(input.config.baseUrl), {
-      method: "POST",
-      headers: providerHeaders(input.config),
-      body: JSON.stringify({
-        model: input.config.model,
-        messages,
-        temperature: Math.min(input.config.temperature, 0.2),
-        max_tokens: Math.max(input.config.maxOutputTokens ?? 1000, 1024),
-        ...(input.config.gateway?.body ?? {}),
-      }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    clearTimeout(timer);
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new ReceiptOcrError("ai_timeout", "پاسخ سرویس هوش مصنوعی به‌موقع نرسید.");
-    }
-    throw new ReceiptOcrError("ai_network", "اتصال به سرویس هوش مصنوعی برقرار نشد.");
-  }
-  clearTimeout(timer);
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    if (res.status === 401 || res.status === 403) {
-      throw new ReceiptOcrError("ai_auth", "کلید سرویس هوش مصنوعی نامعتبر است.", body);
-    }
-    throw new ReceiptOcrError("ai_provider", `سرویس هوش مصنوعی خطا داد (${res.status}).`, body);
-  }
-
-  const json = (await res.json()) as {
-    choices?: { message?: ProviderMessage }[];
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
-  };
-  const message = json.choices?.[0]?.message;
-  if (!message) throw new ReceiptOcrError("ai_provider", "پاسخ سرویس هوش مصنوعی نامفهوم بود.");
-
-  const text = textOf(message.content);
   const fields = parseReceiptExtractionReply(text);
   if (!fields) {
     throw new ReceiptOcrError(
@@ -150,16 +81,5 @@ export async function runReceiptOcr(input: { config: AiConfig; dataUrl: string }
     );
   }
 
-  const promptTokens = Number(json.usage?.prompt_tokens);
-  const completionTokens = Number(json.usage?.completion_tokens);
-  const usage =
-    Number.isFinite(promptTokens) && Number.isFinite(completionTokens)
-      ? { inputTokens: Math.max(0, Math.floor(promptTokens)), outputTokens: Math.max(0, Math.floor(completionTokens)) }
-      : fallbackUsage(messages, text);
-
-  return {
-    fields,
-    usage,
-    costUsd: parseResponseCostHeader(res.headers.get("x-litellm-response-cost")),
-  };
+  return { fields, usage, costUsd };
 }
