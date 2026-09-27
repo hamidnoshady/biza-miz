@@ -19,9 +19,18 @@ import {
   PAIRING_CODE_TTL_HOURS,
   type PairingCodeState,
 } from "./pairing-codes";
-import { PAIRING_SNAPSHOT_VERSION, type PairingSnapshot } from "./pairing-snapshot";
+import {
+  PAIRING_SNAPSHOT_VERSION,
+  type PairingSnapshot,
+} from "./pairing-snapshot";
 import { SETTING_KEYS } from "./settings";
 import { generateSyncToken } from "./sync-token";
+import {
+  decryptSecret,
+  encryptSecret,
+  resolveEncryptionKey,
+} from "./integrations/secrets";
+import { REPLICATION_DOMAIN_CONTRACT } from "./data-ownership";
 
 export interface PairingCodeSummary {
   id: string;
@@ -57,7 +66,11 @@ function toSummary(row: CodeRow, now: Date): PairingCodeSummary {
     revokedAt: row.revoked_at?.toISOString() ?? null,
     createdAt: row.created_at.toISOString(),
     state: pairingCodeState(
-      { expiresAt: row.expires_at, redeemedAt: row.redeemed_at, revokedAt: row.revoked_at },
+      {
+        expiresAt: row.expires_at,
+        redeemedAt: row.redeemed_at,
+        revokedAt: row.revoked_at,
+      },
       now,
     ),
   };
@@ -79,7 +92,9 @@ function toSummary(row: CodeRow, now: Date): PairingCodeSummary {
  * borrowed identity. (Only Owners reach this, and Owners are password logins,
  * so in practice it is set.)
  */
-export async function listPairingLocations(businessId: string): Promise<Array<{ id: string; name: string }>> {
+export async function listPairingLocations(
+  businessId: string,
+): Promise<Array<{ id: string; name: string }>> {
   const { rows } = await query<{ id: string; name: string }>(
     `SELECT id, name FROM locations WHERE business_id = $1 AND is_active ORDER BY name, created_at`,
     [businessId],
@@ -91,7 +106,10 @@ export async function issuePairingCode(
   businessId: string,
   issuedBy: string | null,
   locationId: string,
-): Promise<{ code: string; summary: PairingCodeSummary } | { error: "no_location" | "invalid_location" }> {
+): Promise<
+  | { code: string; summary: PairingCodeSummary }
+  | { error: "no_location" | "invalid_location" }
+> {
   if (!locationId) return { error: "no_location" };
   const { rows: locationRows } = await query<{ id: string }>(
     `SELECT id FROM locations WHERE id = $1 AND business_id = $2 AND is_active`,
@@ -114,7 +132,13 @@ export async function issuePairingCode(
          (business_id, location_id, code_hash, expires_at, issued_by)
        VALUES ($1, $2, $3, now() + ($4 || ' hours')::interval, $5)
        RETURNING id, business_id, location_id, expires_at, redeemed_at, revoked_at, created_at`,
-      [businessId, locationId, hashPairingCode(code), String(PAIRING_CODE_TTL_HOURS), issuedBy],
+      [
+        businessId,
+        locationId,
+        hashPairingCode(code),
+        String(PAIRING_CODE_TTL_HOURS),
+        issuedBy,
+      ],
     );
     await client.query("COMMIT");
     return { code, summary: toSummary(rows[0], new Date()) };
@@ -126,7 +150,9 @@ export async function issuePairingCode(
   }
 }
 
-export async function listPairingCodes(businessId: string): Promise<PairingCodeSummary[]> {
+export async function listPairingCodes(
+  businessId: string,
+): Promise<PairingCodeSummary[]> {
   const { rows } = await query<CodeRow>(
     `SELECT id, business_id, location_id, expires_at, redeemed_at, revoked_at, created_at
        FROM install_pairing_codes
@@ -140,7 +166,10 @@ export async function listPairingCodes(businessId: string): Promise<PairingCodeS
 }
 
 /** Revoke a still-live code. Returns false if there was nothing live to revoke. */
-export async function revokePairingCode(businessId: string, codeId: string): Promise<boolean> {
+export async function revokePairingCode(
+  businessId: string,
+  codeId: string,
+): Promise<boolean> {
   const { rowCount } = await query(
     `UPDATE install_pairing_codes SET revoked_at = now()
       WHERE id = $1 AND business_id = $2 AND redeemed_at IS NULL AND revoked_at IS NULL`,
@@ -149,92 +178,406 @@ export async function revokePairingCode(businessId: string, codeId: string): Pro
   return (rowCount ?? 0) > 0;
 }
 
+export type PairingSessionState =
+  | "issued"
+  | "redeeming"
+  | "snapshot_ready"
+  | "downloaded"
+  | "local_commit_pending"
+  | "completed"
+  | "expired"
+  | "abandoned"
+  | "revoked";
+
+type PairingSessionRow = {
+  id: string;
+  install_pairing_code_id: string;
+  business_id: string;
+  location_id: string;
+  site_device_id: string;
+  installation_id: string;
+  device_name: string;
+  state: PairingSessionState;
+  sync_token_ciphertext: string;
+  snapshot_ciphertext: string | null;
+  expires_at: Date;
+};
+
 export type RedeemResult =
-  | { ok: true; snapshot: PairingSnapshot }
+  | {
+      ok: true;
+      snapshot: PairingSnapshot;
+      pairingSessionId: string;
+      resumed: boolean;
+    }
   | {
       ok: false;
-      error: "code_not_found" | "code_expired" | "code_already_redeemed" | "code_revoked";
+      error:
+        | "code_not_found"
+        | "code_expired"
+        | "code_already_redeemed"
+        | "code_revoked"
+        | "pairing_session_unavailable";
     };
 
+export type AcknowledgePairingResult =
+  | { ok: true; state: "completed" }
+  | {
+      ok: false;
+      error:
+        | "pairing_session_not_found"
+        | "pairing_session_expired"
+        | "pairing_session_mismatch"
+        | "pairing_session_unavailable";
+    };
+
+function canonicalInstallationId(
+  raw: string | null | undefined,
+  clientIp: string | null,
+  deviceName: string,
+): string {
+  const supplied = raw?.trim();
+  if (supplied && supplied.length >= 8 && supplied.length <= 200)
+    return supplied;
+  // Old desktop builds did not send an instance id. Keep their one-code flow
+  // working, but bind the compatibility session deterministically so retries
+  // from the same caller resume instead of minting another device.
+  return `legacy:${createHash("sha256")
+    .update(`${clientIp ?? "unknown"}:${deviceName}`)
+    .digest("hex")}`;
+}
+
+async function expireStalePairingSessionsInTransaction(
+  client: import("pg").PoolClient,
+): Promise<void> {
+  const expired = await client.query<{ site_device_id: string }>(
+    `UPDATE pairing_sessions
+        SET state='expired', updated_at=now(), last_error_code='pairing_session_expired'
+      WHERE state IN ('redeeming','snapshot_ready','downloaded','local_commit_pending')
+        AND expires_at <= now()
+      RETURNING site_device_id`,
+  );
+  if (expired.rowCount) {
+    await client.query(
+      `UPDATE site_devices
+          SET status='revoked', revoked_at=COALESCE(revoked_at, now())
+        WHERE id = ANY($1::uuid[]) AND status='pending'`,
+      [expired.rows.map((row) => row.site_device_id)],
+    );
+    await client.query(
+      `DELETE FROM site_sync_credentials WHERE site_device_id = ANY($1::uuid[])`,
+      [expired.rows.map((row) => row.site_device_id)],
+    );
+  }
+}
+
 /**
- * Trade a pairing code for a snapshot of its business.
- *
- * Bypassed (`pairing-redeem`): the code is a bearer-style credential and
- * resolving it to a business is exactly the "identify the tenant first"
- * problem login and server-sync-auth already have. The bypass covers the
- * lookup, the mark-as-redeemed, and the reads that build the snapshot — all
- * for the one business the code names.
- *
- * The code is marked redeemed in the same transaction as the lookup, under a
- * row lock, so two desktops racing the same code can never both get a
- * snapshot.
+ * Expire orphaned pairing sessions and revoke their pending credentials. This
+ * runs from the server-sync tick as well as the redemption path, so an
+ * abandoned install is cleaned up even when nobody opens the pairing UI.
+ */
+export async function expireStalePairingSessions(): Promise<void> {
+  await withoutTenantScope("platform", async () => {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      await expireStalePairingSessionsInTransaction(client);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+}
+
+async function saveBuiltSnapshot(
+  sessionId: string,
+  snapshot: PairingSnapshot,
+): Promise<boolean> {
+  const ciphertext = encryptSecret(
+    JSON.stringify(snapshot),
+    resolveEncryptionKey(process.env),
+  );
+  const { rowCount } = await query(
+    `UPDATE pairing_sessions
+        SET snapshot_ciphertext=$2, state='snapshot_ready', updated_at=now(), last_error_code=NULL
+      WHERE id=$1 AND state='redeeming' AND expires_at > now()`,
+    [sessionId, ciphertext],
+  );
+  return (rowCount ?? 0) === 1;
+}
+
+/**
+ * Trade a pairing code for a resumable snapshot. A newly-created session owns
+ * a pending device and credential; it becomes active only after the local
+ * install acknowledges its committed transaction.
  */
 export async function redeemPairingCode(
   rawCode: string,
   clientIp: string | null,
   deviceName = "Windows Business Suite",
+  installationId?: string | null,
 ): Promise<RedeemResult> {
   return withoutTenantScope("pairing-redeem", async () => {
+    const cleanDeviceName =
+      deviceName.trim().slice(0, 120) || "Windows Business Suite";
+    const stableInstallationId = canonicalInstallationId(
+      installationId,
+      clientIp,
+      cleanDeviceName,
+    );
+    const key = resolveEncryptionKey(process.env);
     const client = await getPool().connect();
-    let businessId: string;
-    let locationId: string;
-    let siteDevice!: PairingSnapshot["siteDevice"];
-    let syncToken!: string;
+    let session: PairingSessionRow | null = null;
+    let shouldBuildSnapshot = false;
+    let resumed = false;
     try {
       await client.query("BEGIN");
+      await expireStalePairingSessionsInTransaction(client);
       const { rows } = await client.query<CodeRow>(
         `SELECT id, business_id, location_id, expires_at, redeemed_at, revoked_at, created_at
            FROM install_pairing_codes WHERE code_hash = $1 FOR UPDATE`,
         [hashPairingCode(rawCode)],
       );
-      const row = rows[0];
-      if (!row) {
+      const code = rows[0];
+      if (!code) {
         await client.query("ROLLBACK");
         return { ok: false, error: "code_not_found" };
       }
 
-      const state = pairingCodeState(
-        { expiresAt: row.expires_at, redeemedAt: row.redeemed_at, revokedAt: row.revoked_at },
-        new Date(),
+      const existing = await client.query<PairingSessionRow>(
+        `SELECT id,install_pairing_code_id,business_id,location_id,site_device_id,installation_id,
+                device_name,state,sync_token_ciphertext,snapshot_ciphertext,expires_at
+           FROM pairing_sessions WHERE install_pairing_code_id=$1 FOR UPDATE`,
+        [code.id],
       );
-      if (state !== "valid") {
-        await client.query("ROLLBACK");
-        return { ok: false, error: state };
-      }
+      session = existing.rows[0] ?? null;
+      if (session) {
+        if (session.installation_id !== stableInstallationId) {
+          await client.query("ROLLBACK");
+          return { ok: false, error: "code_already_redeemed" };
+        }
+        if (
+          session.state === "expired" ||
+          session.expires_at.getTime() <= Date.now()
+        ) {
+          await client.query("ROLLBACK");
+          return { ok: false, error: "code_expired" };
+        }
+        if (session.state === "completed") {
+          // Recovery ends at the atomic local-commit acknowledgement. Returning
+          // the snapshot/token after that would turn an old one-time code into
+          // a reusable credential download.
+          await client.query("ROLLBACK");
+          return { ok: false, error: "code_already_redeemed" };
+        }
+        if (session.state === "revoked" || session.state === "abandoned") {
+          await client.query("ROLLBACK");
+          return { ok: false, error: "pairing_session_unavailable" };
+        }
+        resumed = true;
+        shouldBuildSnapshot = !session.snapshot_ciphertext;
+        await client.query("COMMIT");
+      } else {
+        const state = pairingCodeState(
+          {
+            expiresAt: code.expires_at,
+            redeemedAt: code.redeemed_at,
+            revokedAt: code.revoked_at,
+          },
+          new Date(),
+        );
+        if (state !== "valid") {
+          await client.query("ROLLBACK");
+          return { ok: false, error: state };
+        }
 
-      businessId = row.business_id;
-      locationId = row.location_id;
-      syncToken = generateSyncToken();
-      const cleanDeviceName = deviceName.trim().slice(0, 120) || "Windows Business Suite";
-      const deviceRows = await client.query<{ id: string; public_id: string; display_name: string }>(
-        `INSERT INTO site_devices (business_id, location_id, display_name)
-         VALUES ($1, $2, $3)
-         RETURNING id, public_id, display_name`,
-        [businessId, locationId, cleanDeviceName],
-      );
-      const device = deviceRows.rows[0];
-      await client.query(
-        `INSERT INTO site_sync_credentials (site_device_id, business_id, token_hash)
-         VALUES ($1, $2, $3)`,
-        [device.id, businessId, createHash("sha256").update(syncToken).digest("hex")],
-      );
-      await client.query(
-        `UPDATE install_pairing_codes SET redeemed_at = now(), redeemed_ip = $2 WHERE id = $1`,
-        [row.id, clientIp],
-      );
-      await client.query("COMMIT");
-      siteDevice = { id: device.id, publicId: device.public_id, displayName: device.display_name };
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
+        const syncToken = generateSyncToken();
+        const deviceRows = await client.query<{
+          id: string;
+          public_id: string;
+          display_name: string;
+        }>(
+          `INSERT INTO site_devices (business_id, location_id, display_name, status)
+           VALUES ($1, $2, $3, 'pending')
+           RETURNING id, public_id, display_name`,
+          [code.business_id, code.location_id, cleanDeviceName],
+        );
+        const device = deviceRows.rows[0];
+        await client.query(
+          `INSERT INTO site_sync_credentials (site_device_id, business_id, token_hash)
+           VALUES ($1, $2, $3)`,
+          [
+            device.id,
+            code.business_id,
+            createHash("sha256").update(syncToken).digest("hex"),
+          ],
+        );
+        const sessionRows = await client.query<PairingSessionRow>(
+          `INSERT INTO pairing_sessions
+             (install_pairing_code_id,business_id,location_id,site_device_id,installation_id,device_name,
+              state,sync_token_ciphertext,expires_at)
+           VALUES ($1,$2,$3,$4,$5,$6,'redeeming',$7,$8)
+           RETURNING id,install_pairing_code_id,business_id,location_id,site_device_id,installation_id,
+                     device_name,state,sync_token_ciphertext,snapshot_ciphertext,expires_at`,
+          [
+            code.id,
+            code.business_id,
+            code.location_id,
+            device.id,
+            stableInstallationId,
+            cleanDeviceName,
+            encryptSecret(syncToken, key),
+            code.expires_at,
+          ],
+        );
+        session = sessionRows.rows[0];
+        await client.query(
+          `UPDATE install_pairing_codes SET redeemed_at=now(), redeemed_ip=$2 WHERE id=$1`,
+          [code.id, clientIp],
+        );
+        await client.query("COMMIT");
+        shouldBuildSnapshot = true;
+      }
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
     } finally {
       client.release();
     }
 
-    return {
-      ok: true,
-      snapshot: await buildPairingSnapshot(businessId, locationId, siteDevice, syncToken),
-    };
+    if (!session) return { ok: false, error: "pairing_session_unavailable" };
+    let snapshot: PairingSnapshot;
+    if (shouldBuildSnapshot) {
+      try {
+        const syncToken = decryptSecret(session.sync_token_ciphertext, key);
+        const device = await query<{
+          id: string;
+          public_id: string;
+          display_name: string;
+        }>(
+          `SELECT id,public_id,display_name FROM site_devices
+            WHERE id=$1 AND business_id=$2 AND status='pending'`,
+          [session.site_device_id, session.business_id],
+        );
+        if (!device.rows[0])
+          return { ok: false, error: "pairing_session_unavailable" };
+        snapshot = await buildPairingSnapshot(
+          session.business_id,
+          session.location_id,
+          {
+            id: device.rows[0].id,
+            publicId: device.rows[0].public_id,
+            displayName: device.rows[0].display_name,
+          },
+          syncToken,
+        );
+        if (!(await saveBuiltSnapshot(session.id, snapshot)))
+          return { ok: false, error: "pairing_session_unavailable" };
+      } catch (error) {
+        await query(
+          `UPDATE pairing_sessions SET last_error_code='snapshot_build_failed',updated_at=now()
+            WHERE id=$1 AND state='redeeming'`,
+          [session.id],
+        ).catch(() => {});
+        console.error("pairing snapshot build failed", error);
+        return { ok: false, error: "pairing_session_unavailable" };
+      }
+    } else {
+      try {
+        snapshot = JSON.parse(
+          decryptSecret(session.snapshot_ciphertext!, key),
+        ) as PairingSnapshot;
+      } catch {
+        return { ok: false, error: "pairing_session_unavailable" };
+      }
+    }
+
+    await query(
+      `UPDATE pairing_sessions
+          SET state=CASE WHEN state IN ('snapshot_ready','redeeming') THEN 'downloaded' ELSE state END,
+              downloaded_at=COALESCE(downloaded_at,now()),updated_at=now()
+        WHERE id=$1`,
+      [session.id],
+    );
+    return { ok: true, snapshot, pairingSessionId: session.id, resumed };
+  });
+}
+
+/** Activate a pending credential only after the local pairing transaction committed. */
+export async function acknowledgePairingSession(
+  pairingSessionId: string,
+  installationId: string,
+  token: string,
+): Promise<AcknowledgePairingResult> {
+  return withoutTenantScope("pairing-redeem", async () => {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      await expireStalePairingSessionsInTransaction(client);
+      const { rows } = await client.query<
+        PairingSessionRow & { token_hash: string }
+      >(
+        `SELECT s.id,s.install_pairing_code_id,s.business_id,s.location_id,s.site_device_id,s.installation_id,
+                s.device_name,s.state,s.sync_token_ciphertext,s.snapshot_ciphertext,s.expires_at,c.token_hash
+           FROM pairing_sessions s
+           JOIN site_sync_credentials c ON c.site_device_id=s.site_device_id AND c.business_id=s.business_id
+          WHERE s.id=$1 FOR UPDATE`,
+        [pairingSessionId],
+      );
+      const session = rows[0];
+      if (!session) {
+        await client.query("ROLLBACK");
+        return { ok: false, error: "pairing_session_not_found" };
+      }
+      if (
+        session.installation_id !== installationId ||
+        session.token_hash !== createHash("sha256").update(token).digest("hex")
+      ) {
+        await client.query("ROLLBACK");
+        return { ok: false, error: "pairing_session_mismatch" };
+      }
+      if (session.state === "completed") {
+        await client.query("COMMIT");
+        return { ok: true, state: "completed" };
+      }
+      if (
+        session.expires_at.getTime() <= Date.now() ||
+        session.state === "expired"
+      ) {
+        await client.query("ROLLBACK");
+        return { ok: false, error: "pairing_session_expired" };
+      }
+      if (
+        !["snapshot_ready", "downloaded", "local_commit_pending"].includes(
+          session.state,
+        )
+      ) {
+        await client.query("ROLLBACK");
+        return { ok: false, error: "pairing_session_unavailable" };
+      }
+      await client.query(
+        `UPDATE pairing_sessions SET state='local_commit_pending',updated_at=now() WHERE id=$1`,
+        [session.id],
+      );
+      await client.query(
+        `UPDATE site_devices SET status='active' WHERE id=$1 AND business_id=$2 AND status='pending'`,
+        [session.site_device_id, session.business_id],
+      );
+      await client.query(
+        `UPDATE pairing_sessions SET state='completed',completed_at=now(),updated_at=now(),last_error_code=NULL WHERE id=$1`,
+        [session.id],
+      );
+      await client.query("COMMIT");
+      return { ok: true, state: "completed" };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 }
 
@@ -275,201 +618,224 @@ export async function buildPairingSnapshot(
     settingRes,
     features,
   ] = await Promise.all([
-      query<{ id: string; name: string; slug: string; timezone: string; industry: Industry }>(
-        `SELECT id, name, slug::text AS slug, subdomain::text AS subdomain, timezone, industry
+    query<{
+      id: string;
+      name: string;
+      slug: string;
+      timezone: string;
+      industry: Industry;
+    }>(
+      `SELECT id, name, slug::text AS slug, subdomain::text AS subdomain, timezone, industry
            FROM businesses WHERE id = $1`,
-        [businessId],
-      ),
-      query<{
-        id: string;
-        name: string;
-        address: string | null;
-        phone: string | null;
-        timezone: string;
-      }>(`SELECT id, name, address, phone, timezone FROM locations WHERE id = $1`, [locationId]),
-      query<{
-        id: string;
-        role: string;
-        full_name: string;
-        email: string | null;
-        permissions: Record<string, unknown>;
-        pin_hash: string | null;
-        password_hash: string | null;
-        pu_email: string | null;
-        pu_full_name: string | null;
-        pu_password_hash: string | null;
-      }>(
-        `SELECT u.id, u.role::text AS role, u.full_name, u.email::text AS email, u.permissions,
+      [businessId],
+    ),
+    query<{
+      id: string;
+      name: string;
+      address: string | null;
+      phone: string | null;
+      timezone: string;
+    }>(
+      `SELECT id, name, address, phone, timezone FROM locations WHERE id = $1`,
+      [locationId],
+    ),
+    query<{
+      id: string;
+      role: string;
+      full_name: string;
+      email: string | null;
+      permissions: Record<string, unknown>;
+      pin_hash: string | null;
+      password_hash: string | null;
+      pu_email: string | null;
+      pu_full_name: string | null;
+      pu_password_hash: string | null;
+    }>(
+      `SELECT u.id, u.role::text AS role, u.full_name, u.email::text AS email, u.permissions,
                 u.pin_hash, u.password_hash,
                 pu.email::text AS pu_email, pu.full_name AS pu_full_name,
                 pu.password_hash AS pu_password_hash
            FROM users u
            LEFT JOIN platform_users pu ON pu.id = u.platform_user_id
           WHERE u.business_id = $1 AND u.is_active`,
-        [businessId],
-      ),
-      query<{ user_id: string; location_id: string }>(
-        `SELECT ul.user_id, ul.location_id
+      [businessId],
+    ),
+    query<{ user_id: string; location_id: string }>(
+      `SELECT ul.user_id, ul.location_id
            FROM user_locations ul
            JOIN users u ON u.id = ul.user_id
           WHERE u.business_id = $1`,
-        [businessId],
-      ),
-      query<{ id: string; parent_code: string | null; code: string; name: string; type: string }>(
-        `SELECT a.id, p.code AS parent_code, a.code, a.name, a.type::text AS type
+      [businessId],
+    ),
+    query<{
+      id: string;
+      parent_code: string | null;
+      code: string;
+      name: string;
+      type: string;
+    }>(
+      `SELECT a.id, p.code AS parent_code, a.code, a.name, a.type::text AS type
            FROM accounts a
            LEFT JOIN accounts p ON p.id = a.parent_id
           WHERE a.business_id = $1 AND a.is_active
           ORDER BY a.code`,
-        [businessId],
-      ),
-      query<{ id: string; name: string; sort_order: number; is_active: boolean }>(
-        `SELECT id, name, sort_order, is_active FROM menu_categories
+      [businessId],
+    ),
+    query<{ id: string; name: string; sort_order: number; is_active: boolean }>(
+      `SELECT id, name, sort_order, is_active FROM menu_categories
           WHERE location_id = $1 ORDER BY sort_order, name`,
-        [locationId],
-      ),
-      query<{
-        id: string;
-        category_id: string | null;
-        name: string;
-        description: string | null;
-        sku: string | null;
-        price: string;
-        image_url: string | null;
-        image_media_id: string | null;
-        is_active: boolean;
-        sort_order: number;
-      }>(
-        `SELECT id, category_id, name, description, sku, price, image_url, image_media_id,
+      [locationId],
+    ),
+    query<{
+      id: string;
+      category_id: string | null;
+      name: string;
+      description: string | null;
+      sku: string | null;
+      price: string;
+      image_url: string | null;
+      image_media_id: string | null;
+      is_active: boolean;
+      sort_order: number;
+    }>(
+      `SELECT id, category_id, name, description, sku, price, image_url, image_media_id,
                 is_active, sort_order
            FROM menu_items WHERE location_id = $1 ORDER BY sort_order, name`,
-        [locationId],
-      ),
-      // v4: the media rows this branch's menu actually points at. Minimal
-      // replication — metadata only; the bytes are fetched from this server
-      // on demand, so pairing never stalls on image payloads.
-      query<{
-        id: string;
-        kind: string;
-        file_name: string;
-        mime_type: string;
-        byte_size: string;
-        storage_key: string;
-        sha256: string;
-      }>(
-        `SELECT DISTINCT ma.id, ma.kind, ma.file_name, ma.mime_type,
+      [locationId],
+    ),
+    // v4: the media rows this branch's menu actually points at. Minimal
+    // replication — metadata only; the bytes are fetched from this server
+    // on demand, so pairing never stalls on image payloads.
+    query<{
+      id: string;
+      kind: string;
+      file_name: string;
+      mime_type: string;
+      byte_size: string;
+      storage_key: string;
+      sha256: string;
+    }>(
+      `SELECT DISTINCT ma.id, ma.kind, ma.file_name, ma.mime_type,
                 ma.byte_size::text AS byte_size, ma.storage_key, ma.sha256
            FROM media_assets ma
            JOIN menu_items mi ON mi.image_media_id = ma.id
           WHERE mi.location_id = $1`,
-        [locationId],
-      ),
-      query<{
-        id: string;
-        name: string;
-        min_select: number;
-        max_select: number;
-        is_active: boolean;
-        sort_order: number;
-      }>(
-        `SELECT id, name, min_select, max_select, is_active, sort_order
+      [locationId],
+    ),
+    query<{
+      id: string;
+      name: string;
+      min_select: number;
+      max_select: number;
+      is_active: boolean;
+      sort_order: number;
+    }>(
+      `SELECT id, name, min_select, max_select, is_active, sort_order
            FROM modifier_groups WHERE location_id = $1 ORDER BY sort_order, name, id`,
-        [locationId],
-      ),
-      query<{
-        id: string;
-        group_id: string;
-        name: string;
-        price_delta: string;
-        is_active: boolean;
-        sort_order: number;
-      }>(
-        `SELECT id, group_id, name, price_delta, is_active, sort_order
+      [locationId],
+    ),
+    query<{
+      id: string;
+      group_id: string;
+      name: string;
+      price_delta: string;
+      is_active: boolean;
+      sort_order: number;
+    }>(
+      `SELECT id, group_id, name, price_delta, is_active, sort_order
            FROM modifiers WHERE location_id = $1 ORDER BY group_id, sort_order, name`,
-        [locationId],
-      ),
-      query<{
-        menu_item_id: string;
-        modifier_group_id: string;
-        min_select_override: number | null;
-        max_select_override: number | null;
-        sort_order: number;
-        is_active: boolean;
-      }>(
-        `SELECT mm.menu_item_id, mm.modifier_group_id, mm.min_select_override,
+      [locationId],
+    ),
+    query<{
+      menu_item_id: string;
+      modifier_group_id: string;
+      min_select_override: number | null;
+      max_select_override: number | null;
+      sort_order: number;
+      is_active: boolean;
+    }>(
+      `SELECT mm.menu_item_id, mm.modifier_group_id, mm.min_select_override,
                 mm.max_select_override, mm.sort_order, mm.is_active
            FROM menu_item_modifier_groups mm
            JOIN menu_items mi ON mi.id = mm.menu_item_id
           WHERE mi.location_id = $1`,
-        [locationId],
-      ),
-      query<{
-        id: string;
-        name: string;
-        zone: string | null;
-        capacity: number;
-        sort_order: number;
-        is_active: boolean;
-      }>(
-        `SELECT id, name, zone, capacity, sort_order, is_active
+      [locationId],
+    ),
+    query<{
+      id: string;
+      name: string;
+      zone: string | null;
+      capacity: number;
+      sort_order: number;
+      is_active: boolean;
+    }>(
+      `SELECT id, name, zone, capacity, sort_order, is_active
            FROM dining_tables WHERE location_id = $1 ORDER BY sort_order, name`,
-        [locationId],
-      ),
-      query<{
-        id: string;
-        name: string;
-        sku: string | null;
-        unit: string;
-        reorder_level: string | null;
-        avg_cost: string;
-        purchase_unit: string | null;
-        purchase_unit_factor: string;
-        carrying_value_rial: string | null;
-        is_produced: boolean;
-        is_active: boolean;
-      }>(
-        `SELECT id, name, sku, unit, reorder_level, avg_cost, purchase_unit,
+      [locationId],
+    ),
+    query<{
+      id: string;
+      name: string;
+      sku: string | null;
+      unit: string;
+      reorder_level: string | null;
+      avg_cost: string;
+      purchase_unit: string | null;
+      purchase_unit_factor: string;
+      carrying_value_rial: string | null;
+      is_produced: boolean;
+      is_active: boolean;
+    }>(
+      `SELECT id, name, sku, unit, reorder_level, avg_cost, purchase_unit,
                 purchase_unit_factor, carrying_value_rial, is_produced, is_active
            FROM inventory_items WHERE location_id = $1 ORDER BY name, id`,
-        [locationId],
-      ),
-      query<{ menu_item_id: string; inventory_item_id: string; quantity: string }>(
-        `SELECT m.menu_item_id, m.inventory_item_id, m.quantity
+      [locationId],
+    ),
+    query<{
+      menu_item_id: string;
+      inventory_item_id: string;
+      quantity: string;
+    }>(
+      `SELECT m.menu_item_id, m.inventory_item_id, m.quantity
            FROM menu_item_ingredients m
            JOIN menu_items mi ON mi.id = m.menu_item_id
           WHERE mi.location_id = $1`,
-        [locationId],
-      ),
-      query<{ modifier_id: string; inventory_item_id: string; quantity_delta: string }>(
-        `SELECT m.modifier_id, m.inventory_item_id, m.quantity_delta
+      [locationId],
+    ),
+    query<{
+      modifier_id: string;
+      inventory_item_id: string;
+      quantity_delta: string;
+    }>(
+      `SELECT m.modifier_id, m.inventory_item_id, m.quantity_delta
            FROM modifier_ingredients m
            JOIN modifiers md ON md.id = m.modifier_id
           WHERE md.location_id = $1`,
-        [locationId],
-      ),
-      query<{
-        id: string;
-        code: string;
-        name: string;
-        settlement: string;
-        sort_order: number;
-        is_active: boolean;
-        is_builtin: boolean;
-        opens_drawer: boolean;
-        requires_reference: boolean;
-      }>(
-        `SELECT id, code, name, settlement::text AS settlement, sort_order,
+      [locationId],
+    ),
+    query<{
+      id: string;
+      code: string;
+      name: string;
+      settlement: string;
+      sort_order: number;
+      is_active: boolean;
+      is_builtin: boolean;
+      opens_drawer: boolean;
+      requires_reference: boolean;
+    }>(
+      `SELECT id, code, name, settlement::text AS settlement, sort_order,
                 is_active, is_builtin, opens_drawer, requires_reference
            FROM payment_methods WHERE business_id = $1 ORDER BY sort_order, name`,
-        [businessId],
-      ),
-      query<{ key: string; value: unknown }>(
-        `SELECT key, value FROM settings
+      [businessId],
+    ),
+    query<{ key: string; value: unknown }>(
+      `SELECT key, value FROM settings
           WHERE business_id = $1 AND location_id IS NULL AND key = ANY($2::text[])`,
-        [businessId, SNAPSHOT_SETTING_KEYS],
-      ),
-      effectiveFeatures(businessId),
-    ]);
+      [businessId, SNAPSHOT_SETTING_KEYS],
+    ),
+    effectiveFeatures(businessId),
+  ]);
 
   const locationsByUser = new Map<string, string[]>();
   for (const row of assignRes.rows) {
@@ -621,11 +987,20 @@ const PAIRING_DATA_CLASSIFICATION = {
     "named payment methods",
     "site-device identity and one-time sync credential",
   ],
-  ongoingDomainEvents: [
-    "order.created",
-    "order.item_added",
-    "order.item_status_changed",
-  ],
+  // Derived from the machine-readable replication contract. Bootstrap-only
+  // master data is intentionally absent: pairing must not imply that later
+  // catalogue/customer/staff edits already propagate continuously.
+  ongoingDomainEvents: Array.from(
+    new Set(
+      REPLICATION_DOMAIN_CONTRACT.domains
+        .filter((domain) => domain.continuousSync === "active")
+        .flatMap((domain) =>
+          domain.events
+            .filter((event) => event.disposition === "outbox_and_inbox")
+            .map((event) => `${event.type}@${event.schemaVersion}`),
+        ),
+    ),
+  ),
   siteLocalOperationalData: [
     "embedded PostgreSQL files and local backup destinations",
     "desktop identity, secrets, certificates, LAN gateway, logs, and firewall preference",
@@ -644,7 +1019,7 @@ const PAIRING_DATA_CLASSIFICATION = {
     "customers, CRM activity, loyalty, campaigns, coupons, and Growth/Marketing history",
     "website content, WooCommerce mappings/outbox, WordPress, Holoo, API/MCP, and other integration state",
     "media binaries and media-library history",
-    "changes to bootstrap master data after pairing unless represented by an event listed above",
+    "continuous changes to bootstrap master data (users, catalogue, settings, customers and CRM) after pairing",
   ],
 } satisfies PairingSnapshot["dataClassification"];
 

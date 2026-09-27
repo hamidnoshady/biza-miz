@@ -136,6 +136,9 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "the host-neutral twin of platform/pairing/redeem, session-less for the identical reason — " +
     "it exists because middleware moves everything under /api/platform to the console's host, " +
     "and an owner now issues a desktop code from their own business origin (src/lib/pairing-redeem.ts)",
+  "pairing/acknowledge":
+    "post-snapshot desktop handshake — a pending, device-bound sync bearer credential plus the durable " +
+    "pairing session and installation identity authenticate it; no tenant session exists on a new install",
   "integrations/wordpress/ping":
     "the WordPress plugin channel — authenticated by a bearer link token plus an HMAC envelope " +
     "over timestamp, nonce and body (src/lib/integrations/plugin-link.ts), never a tenant session; " +

@@ -4,8 +4,14 @@ import { deploymentRole } from "@/lib/deployment-role";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { getServerSyncConfig, getServerSyncState } from "@/lib/server-sync";
 import { query } from "@/lib/db";
-import type { ConnectionStatus, PlatformConnectionState } from "@/lib/connection-state";
-import { deliverCloudExceptions, pullCloudExceptionResponses } from "@/lib/cloud-exception-relay";
+import type {
+  ConnectionStatus,
+  PlatformConnectionState,
+} from "@/lib/connection-state";
+import {
+  deliverCloudExceptions,
+  pullCloudExceptionResponses,
+} from "@/lib/cloud-exception-relay";
 
 /**
  * Authenticated, credential-free connection model shared by the global status
@@ -20,12 +26,17 @@ export const GET = withTenantScope(async () => {
 
   const role = deploymentRole();
   const deployment = await readDeploymentProfile(session.businessId, role);
-  const exceptionRelay = role === "site"
-    ? await Promise.all([
-        deliverCloudExceptions(session.businessId).catch(() => ({ delivered: 0, pending: 0, configured: false })),
-        pullCloudExceptionResponses().catch(() => 0),
-      ]).then(([outbound, received]) => ({ ...outbound, received }))
-    : { delivered: 0, pending: 0, configured: false, received: 0 };
+  const exceptionRelay =
+    role === "site"
+      ? await Promise.all([
+          deliverCloudExceptions(session.businessId).catch(() => ({
+            delivered: 0,
+            pending: 0,
+            configured: false,
+          })),
+          pullCloudExceptionResponses().catch(() => 0),
+        ]).then(([outbound, received]) => ({ ...outbound, received }))
+      : { delivered: 0, pending: 0, configured: false, received: 0 };
   if (role !== "site" || deployment.profile === "cloud") {
     const state: PlatformConnectionState = {
       localServer: "not_applicable",
@@ -36,11 +47,21 @@ export const GET = withTenantScope(async () => {
       externalServices: "unknown",
       outboundPending: 0,
       inboundPending: 0,
+      deferred: 0,
       conflicts: 0,
       deadLetters: 0,
+      lastSuccessfulPushAt: null,
+      lastSuccessfulPullAt: null,
+      lastConvergedAt: null,
       lastSuccessfulSyncAt: null,
     };
-    return NextResponse.json({ profile: deployment.profile, ...state, cloudSync: "not_applicable", error: null, supportRelay: exceptionRelay });
+    return NextResponse.json({
+      profile: deployment.profile,
+      ...state,
+      cloudSync: "not_applicable",
+      error: null,
+      supportRelay: exceptionRelay,
+    });
   }
 
   if (deployment.profile === "local") {
@@ -53,21 +74,39 @@ export const GET = withTenantScope(async () => {
       externalServices: "not_configured",
       outboundPending: 0,
       inboundPending: 0,
+      deferred: 0,
       conflicts: 0,
       deadLetters: 0,
+      lastSuccessfulPushAt: null,
+      lastSuccessfulPullAt: null,
+      lastConvergedAt: null,
       lastSuccessfulSyncAt: null,
     };
-    return NextResponse.json({ profile: "local", ...state, cloudSync: "not_configured", error: null, supportRelay: exceptionRelay });
+    return NextResponse.json({
+      profile: "local",
+      ...state,
+      cloudSync: "not_configured",
+      error: null,
+      supportRelay: exceptionRelay,
+    });
   }
 
   const syncState = await getServerSyncState(session.businessId);
   const [config, counters] = await Promise.all([
     getServerSyncConfig(session.businessId),
-    query<{ outbound: string; inbound: string; conflicts: string; dead_letters: string }>(
+    query<{
+      outbound: string;
+      inbound: string;
+      deferred: string;
+      conflicts: string;
+      dead_letters: string;
+    }>(
       `SELECT
          count(*) FILTER (WHERE se.origin='local')::text AS outbound,
          count(*) FILTER (WHERE se.origin='remote' AND se.applied_at IS NULL)::text AS inbound,
-         (SELECT count(*) FROM sync_domain_effects WHERE business_id=$1 AND status='deferred')::text AS conflicts,
+         (SELECT count(*) FROM sync_domain_effects WHERE business_id=$1 AND status='deferred')::text AS deferred,
+         (SELECT count(*) FROM sync_events se2 JOIN locations l2 ON l2.id=se2.location_id
+            WHERE l2.business_id=$1 AND se2.error='conflict')::text AS conflicts,
          (SELECT count(*) FROM sync_event_dead_letters WHERE business_id=$1 AND status='open')::text AS dead_letters
        FROM sync_events se
        JOIN locations l ON l.id=se.location_id
@@ -79,10 +118,19 @@ export const GET = withTenantScope(async () => {
     ),
   ]);
   const row = counters.rows[0];
-  const lastSuccessfulSyncAt = [syncState.lastPushSuccessAt, syncState.lastPullSuccessAt]
-    .filter((value): value is string => Boolean(value))
-    .sort()
-    .at(-1) ?? null;
+  const lastSuccessfulPushAt = syncState.lastPushSuccessAt;
+  const lastSuccessfulPullAt = syncState.lastPullSuccessAt;
+  const lastSuccessfulSyncAt =
+    [lastSuccessfulPushAt, lastSuccessfulPullAt]
+      .filter((value): value is string => Boolean(value))
+      .sort()
+      .at(-1) ?? null;
+  // A converged point needs a successful push and pull; it is bounded by the
+  // older direction, not the most recent one-way contact.
+  const lastConvergedAt =
+    lastSuccessfulPushAt && lastSuccessfulPullAt
+      ? [lastSuccessfulPushAt, lastSuccessfulPullAt].sort()[0]
+      : null;
   const errorText = syncState.lastPushError || syncState.lastPullError;
   const configured = Boolean(config?.enabled);
   const sync: ConnectionStatus = !configured
@@ -92,30 +140,55 @@ export const GET = withTenantScope(async () => {
       : lastSuccessfulSyncAt
         ? "connected"
         : "connecting";
-  const cloud: ConnectionStatus = !configured ? "not_configured" : errorText ? "unreachable" : lastSuccessfulSyncAt ? "connected" : "connecting";
+  const cloud: ConnectionStatus = !configured
+    ? "not_configured"
+    : errorText
+      ? "unreachable"
+      : lastSuccessfulSyncAt
+        ? "connected"
+        : "connecting";
   const state: PlatformConnectionState = {
     localServer: "connected",
     lanGateway: "unknown",
-    internet: errorText ? "unknown" : cloud === "connected" ? "connected" : "unknown",
+    internet: errorText
+      ? "unknown"
+      : cloud === "connected"
+        ? "connected"
+        : "unknown",
     cloud,
     sync,
     externalServices: cloud,
     outboundPending: Number(row?.outbound ?? 0),
     inboundPending: Number(row?.inbound ?? 0),
+    deferred: Number(row?.deferred ?? 0),
     conflicts: Number(row?.conflicts ?? 0),
     deadLetters: Number(row?.dead_letters ?? 0),
+    lastSuccessfulPushAt,
+    lastSuccessfulPullAt,
+    lastConvergedAt,
     lastSuccessfulSyncAt,
   };
   return NextResponse.json({
     profile: deployment.profile,
     ...state,
     // Compatibility field for the bounded IndexedDB queue hook.
-    cloudSync: sync === "connected" ? "connected" : sync === "connecting" ? "connecting" : sync === "paused" ? "paused" : "not_configured",
+    cloudSync:
+      sync === "connected"
+        ? "connected"
+        : sync === "connecting"
+          ? "connecting"
+          : sync === "paused"
+            ? "paused"
+            : "not_configured",
     error: errorText ? "remote_unreachable" : null,
     supportRelay: exceptionRelay,
   });
 });
 
-function syncStateLastPushed(state: { lastPushedEventId?: number | null }): number {
-  return Number.isSafeInteger(state.lastPushedEventId) ? Number(state.lastPushedEventId) : 0;
+function syncStateLastPushed(state: {
+  lastPushedEventId?: number | null;
+}): number {
+  return Number.isSafeInteger(state.lastPushedEventId)
+    ? Number(state.lastPushedEventId)
+    : 0;
 }

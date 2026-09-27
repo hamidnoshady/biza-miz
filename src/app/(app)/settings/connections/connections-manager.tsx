@@ -60,15 +60,26 @@ export function ConnectionsManager({
       onOpenChange={setOpen}
     >
       <div className="min-w-0">
-        <p className="mb-4 text-sm leading-6 text-muted-foreground">{activeKind.description}</p>
+        <p className="mb-4 text-sm leading-6 text-muted-foreground">
+          {activeKind.description}
+        </p>
 
         <FeatureLock locked={locked} title={activeKind.label}>
-          {active === "desktop" ? <DesktopPanel /> : null}
+          {active === "desktop" ? (
+            <div className="space-y-6">
+              <DesktopPanel />
+              <FeatureLock
+                locked={!features.site_cloud_sync}
+                title="همگام‌سازی ابری"
+              >
+                <ServerSyncPanel />
+              </FeatureLock>
+            </div>
+          ) : null}
           {active === "local_devices" ? <LocalDevicesPanel /> : null}
           {active === "woocommerce" ? <WpConnectionPanel /> : null}
           {active === "website" ? <CmsConnectionPanel /> : null}
           {active === "holoo" ? <HolooPanel /> : null}
-          {active === "server_sync" ? <ServerSyncPanel /> : null}
           {active === "mcp" ? <McpPanel /> : null}
           {active === "api" ? <ApiTokensPanel /> : null}
         </FeatureLock>

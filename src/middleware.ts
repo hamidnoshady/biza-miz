@@ -65,11 +65,17 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/cms/revalidate",
   "/api/cms/order-events",
   "/api/pairing/redeem",
+  "/api/pairing/acknowledge",
   "/mcp",
 ] as const;
 
 export function isCentralExecutionPath(pathname: string): boolean {
-  return CENTRAL_EXECUTION_PATHS.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`) || (prefix.endsWith("-") && pathname.startsWith(prefix)));
+  return CENTRAL_EXECUTION_PATHS.some(
+    (prefix) =>
+      pathname === prefix ||
+      pathname.startsWith(`${prefix}/`) ||
+      (prefix.endsWith("-") && pathname.startsWith(prefix)),
+  );
 }
 
 const PUBLIC_PATHS = [
@@ -115,6 +121,7 @@ const PUBLIC_PATHS = [
   // code from their *own* dashboard, the address they hand the desktop app is
   // their business origin. See src/lib/pairing-redeem.ts.
   "/api/pairing/redeem",
+  "/api/pairing/acknowledge",
   // Phase 12: self-service business registration creates the tenant a session
   // would otherwise be scoped to, so it cannot require one. Refuses with 403
   // unless ALLOW_PUBLIC_SIGNUP is set.
@@ -318,7 +325,8 @@ export function isStrayServerActionCall(
   pathname: string,
   nextAction: null | string,
 ): boolean {
-  if (method !== "POST" || nextAction === null || pathname.startsWith("/api/")) return false;
+  if (method !== "POST" || nextAction === null || pathname.startsWith("/api/"))
+    return false;
   return !SERVER_ACTION_ID.test(nextAction);
 }
 
@@ -443,10 +451,11 @@ const AUTH_RATE_LIMITED_PATHS = [
   // the per-IP bucket rather than going unlimited.
   "/api/auth/impersonate-handoff",
   // A pairing code is a 12-character credential submitted without a session,
-  // and /api/setup/pair forwards one; all three belong in the same per-IP
+  // and /api/setup/pair forwards one; the acknowledgement is the same credential exchange and belongs in the same per-IP
   // bucket as every other credential exchange rather than going unlimited.
   "/api/platform/pairing/redeem",
   "/api/pairing/redeem",
+  "/api/pairing/acknowledge",
   "/api/setup/pair",
   // Self-service business registration accepts an *existing* platform user's
   // email with a guessed password (adding a business to an already-registered
@@ -516,7 +525,10 @@ const SYNC_TOKEN_RATE_LIMITED_PATHS = [
  * contain.
  */
 function isPluginChannelPath(pathname: string): boolean {
-  return pathname === "/api/integrations/wordpress" || pathname.startsWith("/api/integrations/wordpress/");
+  return (
+    pathname === "/api/integrations/wordpress" ||
+    pathname.startsWith("/api/integrations/wordpress/")
+  );
 }
 
 /**
@@ -546,7 +558,9 @@ function isMcpPath(pathname: string): boolean {
  * path that merely resembles it.
  */
 export function isPeerBackupPath(pathname: string): boolean {
-  return pathname === "/api/peer/backup" || pathname.startsWith("/api/peer/backup/");
+  return (
+    pathname === "/api/peer/backup" || pathname.startsWith("/api/peer/backup/")
+  );
 }
 
 /** All public API routes share one per-key bucket; this must stay prefix-based, not an exact route list. */
@@ -562,7 +576,10 @@ function isPublicApiPath(pathname: string): boolean {
  * nothing.
  */
 function isInternalRoutePath(pathname: string): boolean {
-  return pathname === "/api/internal/rate-limit" || pathname.startsWith("/api/internal/");
+  return (
+    pathname === "/api/internal/rate-limit" ||
+    pathname.startsWith("/api/internal/")
+  );
 }
 
 async function handleRateLimits(
@@ -603,7 +620,9 @@ async function handleRateLimits(
   }
 
   if (
-    SYNC_TOKEN_RATE_LIMITED_PATHS.includes(pathname) || isPluginChannelPath(pathname) || isPeerBackupPath(pathname)
+    SYNC_TOKEN_RATE_LIMITED_PATHS.includes(pathname) ||
+    isPluginChannelPath(pathname) ||
+    isPeerBackupPath(pathname)
   ) {
     const authHeader = request.headers.get("authorization");
     const key = authHeader
@@ -621,8 +640,16 @@ async function handleRateLimits(
 
   if (isMcpPath(pathname)) {
     const authHeader = request.headers.get("authorization");
-    const key = authHeader ? `mcp:${hashKey(authHeader)}` : `ip:${clientIp(request)}`;
-    const result = await checkRateLimit(mcpLimits, key, MCP_LIMIT, MCP_WINDOW_MS, now);
+    const key = authHeader
+      ? `mcp:${hashKey(authHeader)}`
+      : `ip:${clientIp(request)}`;
+    const result = await checkRateLimit(
+      mcpLimits,
+      key,
+      MCP_LIMIT,
+      MCP_WINDOW_MS,
+      now,
+    );
     if (!result.allowed) return rateLimited(result.retryAfterMs);
   }
 
@@ -661,7 +688,10 @@ async function handlePlatformAdmin(
     // even when somebody knows the route or has copied a platform cookie.
     if (deploymentRole() !== "central") {
       return pathname.startsWith("/api/")
-        ? NextResponse.json({ error: "deployment_unsupported" }, { status: 404 })
+        ? NextResponse.json(
+            { error: "deployment_unsupported" },
+            { status: 404 },
+          )
         : new NextResponse("Not Found", { status: 404 });
     }
 
@@ -712,8 +742,12 @@ function redirectToLabel(
   pathAndQuery: string,
   status?: number,
 ): NextResponse {
-  const hostHeader = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
-  const proto = preferredProto(request.headers.get("x-forwarded-proto"), request.nextUrl.protocol);
+  const hostHeader =
+    request.headers.get("x-forwarded-host") ?? request.headers.get("host");
+  const proto = preferredProto(
+    request.headers.get("x-forwarded-proto"),
+    request.nextUrl.protocol,
+  );
   const target = swapHostLabel(hostHeader, label, rootDomain);
   return NextResponse.redirect(`${proto}://${target}${pathAndQuery}`, status);
 }
@@ -726,14 +760,22 @@ function redirectToLabel(
  * telling them apart needs the database. /api/host/redirect can, and either
  * forwards to the canonical host or sends the visitor to this host's login.
  */
-function toHostResolver(request: NextRequest, next: string, slug?: string): NextResponse {
+function toHostResolver(
+  request: NextRequest,
+  next: string,
+  slug?: string,
+): NextResponse {
   const url = new URL("/api/host/redirect", request.url);
   url.searchParams.set("next", next);
   if (slug) url.searchParams.set("slug", slug);
   return NextResponse.redirect(url);
 }
 
-async function handleTenantAuth(request: NextRequest, pathname: string, host: ParsedHost | null) {
+async function handleTenantAuth(
+  request: NextRequest,
+  pathname: string,
+  host: ParsedHost | null,
+) {
   const token = request.cookies.get(SESSION_COOKIE)?.value;
   const session = token ? await verifySession(token) : null;
 
@@ -752,7 +794,10 @@ async function handleTenantAuth(request: NextRequest, pathname: string, host: Pa
     // itself, so a signed-out visit costs one extra hop and terminates.
     if (host?.kind === "business") {
       return {
-        response: toHostResolver(request, `${request.nextUrl.pathname}${request.nextUrl.search}`),
+        response: toHostResolver(
+          request,
+          `${request.nextUrl.pathname}${request.nextUrl.search}`,
+        ),
       };
     }
     const loginUrl = new URL("/login", request.url);
@@ -761,7 +806,10 @@ async function handleTenantAuth(request: NextRequest, pathname: string, host: Pa
     // on /mcp/consent, and losing that URL at the login page abandons an OAuth
     // flow they cannot restart from inside the app.
     if (!pathname.startsWith("/api/")) {
-      loginUrl.searchParams.set("next", `${request.nextUrl.pathname}${request.nextUrl.search}`);
+      loginUrl.searchParams.set(
+        "next",
+        `${request.nextUrl.pathname}${request.nextUrl.search}`,
+      );
     }
     return { response: NextResponse.redirect(loginUrl) };
   }
@@ -814,7 +862,10 @@ function handleHostIsolation(
   // Clearing the cookie matters as much as the redirect: leaving it in place
   // would send the browser back into the same mismatch on every navigation,
   // and the value is useless on this origin by definition.
-  const response = toHostResolver(request, `${request.nextUrl.pathname}${request.nextUrl.search}`);
+  const response = toHostResolver(
+    request,
+    `${request.nextUrl.pathname}${request.nextUrl.search}`,
+  );
   response.cookies.delete(SESSION_COOKIE);
   return response;
 }
@@ -877,7 +928,10 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
   // `/crm/segments`, never `/crm/segments/overview`), and so is the query
   // string. `src/lib/app-routes.ts` owns the table; `app-routes.test.ts` holds
   // the `/crm/overview/overview` regression.
-  const legacyTarget = legacyRedirectTarget(request.nextUrl.pathname, request.nextUrl.search);
+  const legacyTarget = legacyRedirectTarget(
+    request.nextUrl.pathname,
+    request.nextUrl.search,
+  );
   if (legacyTarget) {
     return NextResponse.redirect(new URL(legacyTarget, request.url), 308);
   }
@@ -891,7 +945,13 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
   // Ahead of the rate limits on purpose: a probe of a surface this app does not
   // have should cost nothing and should not spend the bucket of the IP it came
   // from, which may well be shared with a real customer behind the same NAT.
-  if (isStrayServerActionCall(request.method, pathname, request.headers.get("next-action"))) {
+  if (
+    isStrayServerActionCall(
+      request.method,
+      pathname,
+      request.headers.get("next-action"),
+    )
+  ) {
     return NextResponse.json({ error: "invalid_action_id" }, { status: 400 });
   }
 
@@ -912,7 +972,9 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
   // `TRUST_FORWARDED_HOST=on` inverts that, for a managed platform whose edge
   // routes by hostname and hands the container an internal name instead — see
   // `trustForwardedHost` for what that costs and when it is the only option.
-  const host = hostRouting ? parseHost(requestHost(request.headers), rootDomain) : null;
+  const host = hostRouting
+    ? parseHost(requestHost(request.headers), rootDomain)
+    : null;
 
   // ---- A hostname nobody vouches for ----------------------------------------
   //
@@ -948,7 +1010,13 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
   }
 
   // ---- Super-admin realm ---------------------------------------------------
-  const platformResponse = await handlePlatformAdmin(request, pathname, host, rootDomain, requestHeaders);
+  const platformResponse = await handlePlatformAdmin(
+    request,
+    pathname,
+    host,
+    rootDomain,
+    requestHeaders,
+  );
   if (platformResponse) return platformResponse;
 
   // ---- Tenant realm --------------------------------------------------------
@@ -958,7 +1026,8 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
     // it. Each is sent to the sign-in its own host does have: the apex's
     // "which business?" directory, and the console's own login page.
     if (pathname === "/login") {
-      if (host?.kind === "apex") return NextResponse.redirect(new URL("/", request.url));
+      if (host?.kind === "apex")
+        return NextResponse.redirect(new URL("/", request.url));
       if (host?.kind === "admin") {
         return NextResponse.redirect(new URL("/platform/login", request.url));
       }
@@ -969,7 +1038,8 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
     // host's only credential exchange), and on the console host the realm's
     // own login is the one that mints a usable cookie.
     if (pathname === "/admin") {
-      if (host?.kind === "apex") return NextResponse.redirect(new URL("/", request.url));
+      if (host?.kind === "apex")
+        return NextResponse.redirect(new URL("/", request.url));
       if (host?.kind === "admin") {
         return NextResponse.redirect(new URL("/platform/login", request.url));
       }
@@ -1028,7 +1098,10 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
     return NextResponse.next({ request: { headers: requestHeaders } });
   }
 
-  if (isInternalRoutePath(pathname) && (await isInternalCall(request.headers))) {
+  if (
+    isInternalRoutePath(pathname) &&
+    (await isInternalCall(request.headers))
+  ) {
     return NextResponse.next({ request: { headers: requestHeaders } });
   }
 
@@ -1044,7 +1117,12 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
     // (see handleLegacyPathRedirect for what became of its URLs), so an install
     // with no ROOT_DOMAIN — the desktop app, a single-café laptop — simply
     // serves `/dashboard` with no host check to make.
-    const isolationResponse = handleHostIsolation(request, pathname, host, session.businessSubdomain);
+    const isolationResponse = handleHostIsolation(
+      request,
+      pathname,
+      host,
+      session.businessSubdomain,
+    );
     if (isolationResponse) return isolationResponse;
   }
 
@@ -1061,7 +1139,8 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
   }
 
   // Phase 24 — Origin check on cookie-authenticated mutations
-  const originCheckEnabled = process.env.ORIGIN_CHECK !== "0" && process.env.ORIGIN_CHECK !== "off";
+  const originCheckEnabled =
+    process.env.ORIGIN_CHECK !== "0" && process.env.ORIGIN_CHECK !== "off";
   if (
     originCheckEnabled &&
     MUTATING_METHODS.has(request.method) &&
@@ -1092,7 +1171,12 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
     !supportMutationAllowed(session, request.method, pathname)
   ) {
     return NextResponse.json(
-      { error: session.imp.mode === "read_only" ? "impersonation_read_only" : "support_capability_denied" },
+      {
+        error:
+          session.imp.mode === "read_only"
+            ? "impersonation_read_only"
+            : "support_capability_denied",
+      },
       { status: 403 },
     );
   }
@@ -1103,22 +1187,27 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
 export async function middleware(request: NextRequest) {
   const nonce = generateNonce();
   const isHttps =
-    preferredProto(request.headers.get("x-forwarded-proto"), request.nextUrl.protocol) === "https";
+    preferredProto(
+      request.headers.get("x-forwarded-proto"),
+      request.nextUrl.protocol,
+    ) === "https";
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
-  
+
   const mode = cspMode();
   const cspStr = contentSecurityPolicy(nonce, {
     https: isHttps,
     reportOnly: mode === "report-only",
   });
-  
+
   // Set CSP on the incoming request so Next.js reads it for script nonces
   // (Next 15 reads it from the incoming request)
   requestHeaders.set("content-security-policy", cspStr);
-  
-  const response = await handle(request, requestHeaders) ?? NextResponse.next({ request: { headers: requestHeaders } });
+
+  const response =
+    (await handle(request, requestHeaders)) ??
+    NextResponse.next({ request: { headers: requestHeaders } });
 
   const headersObj = staticSecurityHeaders({ https: isHttps });
   for (const [key, val] of Object.entries(headersObj)) {
