@@ -39,7 +39,7 @@ interface SiteDeviceView {
   locationId: string;
   locationName: string;
   displayName: string;
-  status: "active" | "disabled" | "revoked";
+  status: "pending" | "active" | "disabled" | "revoked";
   createdAt: string;
   lastSeenAt: string | null;
   revokedAt: string | null;
@@ -321,7 +321,7 @@ export function DesktopPanel() {
                           : "bg-muted text-muted-foreground"
                       }`}
                     >
-                      {active ? "فعال" : device.status === "revoked" ? "لغوشده" : "غیرفعال"}
+                      {active ? "فعال" : device.status === "pending" ? "در انتظار تأیید نصب" : device.status === "revoked" ? "لغوشده" : "غیرفعال"}
                     </span>
                   </div>
                   {rotatedCredential?.deviceId === device.id ? (

@@ -1,12 +1,26 @@
+import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
-import { classifyConnectionCode, normalizeServerAddress } from "@/lib/connection-code";
+import {
+  classifyConnectionCode,
+  normalizeServerAddress,
+} from "@/lib/connection-code";
 import { applyPairingSnapshot } from "@/lib/pairing-apply";
 import { validateSnapshot } from "@/lib/pairing-snapshot";
 import { hasAnyUser } from "@/lib/setup-state";
 
 /** How long to wait on the online server before calling it unreachable. */
 const REDEEM_TIMEOUT_MS = 30_000;
+
+/** Electron supplies this durable identity; the deterministic fallback keeps non-Electron development resumable. */
+function localInstallationId(): string {
+  const desktopId = process.env.DESKTOP_INSTANCE_ID?.trim();
+  if (desktopId && desktopId.length >= 8 && desktopId.length <= 200)
+    return desktopId;
+  return `server:${createHash("sha256")
+    .update(process.env.HOSTNAME || "local-development")
+    .digest("hex")}`;
+}
 
 /**
  * Where to redeem, in order.
@@ -23,6 +37,7 @@ const PASSTHROUGH_ERRORS = new Set([
   "code_expired",
   "code_already_redeemed",
   "code_revoked",
+  "pairing_session_unavailable",
 ]);
 
 /**
@@ -57,12 +72,18 @@ export async function POST(request: NextRequest) {
   const address = normalizeServerAddress(body.remoteUrl ?? "");
   if (!address.ok) {
     return NextResponse.json(
-      { error: address.error === "missing_address" ? "missing_fields" : "invalid_url" },
+      {
+        error:
+          address.error === "missing_address"
+            ? "missing_fields"
+            : "invalid_url",
+      },
       { status: 400 },
     );
   }
   const remoteUrl = address.url;
-  if (!code) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+  if (!code)
+    return NextResponse.json({ error: "missing_fields" }, { status: 400 });
 
   // Name the credential mix-up before spending a round trip on it: the owner
   // who pastes a `POS1-…` server-sync token here has been told, until now,
@@ -76,8 +97,13 @@ export async function POST(request: NextRequest) {
   // server* does not serve that path (an older cloud build), which is the only
   // condition worth falling back on — a real redemption failure comes back as
   // one of the PASSTHROUGH_ERRORS and is reported as itself.
+  const installationId = localInstallationId();
   let remoteResponse: Response | null = null;
-  let payload: { snapshot?: unknown; error?: string } = {};
+  let payload: {
+    snapshot?: unknown;
+    pairingSessionId?: unknown;
+    error?: string;
+  } = {};
   for (const path of REDEEM_PATHS) {
     try {
       remoteResponse = await fetch(`${remoteUrl}${path}`, {
@@ -85,25 +111,38 @@ export async function POST(request: NextRequest) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           code,
-          deviceName: process.env.DESKTOP_DEVICE_NAME || "Windows Business Suite",
+          deviceName:
+            process.env.DESKTOP_DEVICE_NAME || "Windows Business Suite",
+          installationId,
         }),
         signal: AbortSignal.timeout(REDEEM_TIMEOUT_MS),
       });
     } catch {
-      return NextResponse.json({ error: "remote_unreachable" }, { status: 502 });
+      return NextResponse.json(
+        { error: "remote_unreachable" },
+        { status: 502 },
+      );
     }
-    payload = (await remoteResponse.json().catch(() => ({}))) as { snapshot?: unknown; error?: string };
+    payload = (await remoteResponse.json().catch(() => ({}))) as {
+      snapshot?: unknown;
+      pairingSessionId?: unknown;
+      error?: string;
+    };
     if (remoteResponse.status !== 404 && remoteResponse.status !== 405) break;
     // A 404 carrying a redemption error is the *code* not being found, not the
     // route — stop and report it rather than retrying against the legacy path.
     if (payload.error && PASSTHROUGH_ERRORS.has(payload.error)) break;
   }
 
-  if (!remoteResponse) return NextResponse.json({ error: "remote_unreachable" }, { status: 502 });
+  if (!remoteResponse)
+    return NextResponse.json({ error: "remote_unreachable" }, { status: 502 });
 
   if (!remoteResponse.ok) {
     if (payload.error && PASSTHROUGH_ERRORS.has(payload.error)) {
-      return NextResponse.json({ error: payload.error }, { status: remoteResponse.status });
+      return NextResponse.json(
+        { error: payload.error },
+        { status: remoteResponse.status },
+      );
     }
     return NextResponse.json({ error: "remote_unreachable" }, { status: 502 });
   }
@@ -121,7 +160,38 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "already_initialized" }, { status: 409 });
   }
 
-  const applied = await applyPairingSnapshot(validation.snapshot, remoteUrl);
+  const pairingSessionId =
+    typeof payload.pairingSessionId === "string"
+      ? payload.pairingSessionId
+      : undefined;
+  const applied = await applyPairingSnapshot(validation.snapshot, remoteUrl, {
+    pairingSessionId,
+    installationId,
+  });
+
+  // The cloud credential intentionally remains pending until this point. A
+  // failed acknowledgement does not roll back a committed local business; the
+  // durable session id in server_sync.config is retried by the sync tick.
+  let activationPending = false;
+  if (pairingSessionId) {
+    try {
+      const acknowledgement = await fetch(
+        `${remoteUrl}/api/pairing/acknowledge`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${validation.snapshot.syncToken}`,
+          },
+          body: JSON.stringify({ pairingSessionId, installationId }),
+          signal: AbortSignal.timeout(REDEEM_TIMEOUT_MS),
+        },
+      );
+      activationPending = !acknowledgement.ok;
+    } catch {
+      activationPending = true;
+    }
+  }
 
   const token = await signSession({
     sub: applied.ownerUserId,
@@ -133,7 +203,11 @@ export async function POST(request: NextRequest) {
     fullName: applied.ownerName,
     platformUserId: applied.ownerPlatformUserId,
   });
-  const response = NextResponse.json({ ok: true, slug: applied.businessSlug });
+  const response = NextResponse.json({
+    ok: true,
+    slug: applied.businessSlug,
+    activationPending,
+  });
   response.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
   return response;
 }

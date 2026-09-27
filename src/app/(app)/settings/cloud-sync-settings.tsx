@@ -33,7 +33,7 @@ export function CloudSyncSettings() {
             <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
               {local
                 ? "پایگاه داده و پشتیبان‌گیری محلی فعال‌اند. اتصال ابری فقط پس از بررسی سازگاری، تطبیق داده‌ها، راه‌اندازی اولیه و تأیید نهایی همگام‌سازی فعال می‌شود."
-                : `آخرین همگام‌سازی موفق: ${state.lastSuccessfulSyncAt ? new Date(state.lastSuccessfulSyncAt).toLocaleString("fa-IR") : "هنوز انجام نشده"}`}
+                : `آخرین همگرایی دوطرفه: ${state.lastConvergedAt ? new Date(state.lastConvergedAt).toLocaleString("fa-IR") : "هنوز انجام نشده"}`}
             </p>
           </div>
           {local ? (
@@ -43,9 +43,10 @@ export function CloudSyncSettings() {
           )}
         </div>
         {!local ? (
-          <dl className="mt-5 grid gap-3 text-sm sm:grid-cols-4">
+          <dl className="mt-5 grid gap-3 text-sm sm:grid-cols-5">
             <Metric label="خروجی در انتظار" value={state.outboundPending} />
             <Metric label="ورودی در انتظار" value={state.inboundPending} />
+            <Metric label="در انتظار پیش‌نیاز" value={state.deferred} />
             <Metric label="تعارض" value={state.conflicts} />
             <Metric label="نیازمند بررسی" value={state.deadLetters} />
           </dl>

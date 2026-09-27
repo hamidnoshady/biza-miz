@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { getPool, query } from "./db";
 import { generateSyncToken } from "./sync-token";
 
-export type SiteDeviceStatus = "active" | "disabled" | "revoked";
+export type SiteDeviceStatus = "pending" | "active" | "disabled" | "revoked";
 
 export interface SiteDeviceView {
   id: string;

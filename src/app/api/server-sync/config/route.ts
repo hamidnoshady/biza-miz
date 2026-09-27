@@ -5,7 +5,6 @@ import {
   getServerSyncConfig,
   getServerSyncState,
   getSyncDomainDiagnostics,
-  listServerSyncDeadLetters,
   setServerSyncConfig,
 } from "@/lib/server-sync";
 import {
@@ -32,31 +31,38 @@ import { publicSyncEventRegistry } from "@/lib/sync-event-registry";
  * that pairing already knows. `resolvedRemoteUrl` is that derived address.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
+  const { session, error } = await requirePermission(
+    PERMISSIONS.integrationsView,
+  );
   if (error) return error;
 
   const role = deploymentRole();
-  const [config, syncState, deadLetters, domainDiagnostics, appUpdateStatus, pairedSite] = await Promise.all([
-    getServerSyncConfig(session.businessId),
-    getServerSyncState(session.businessId),
-    listServerSyncDeadLetters(session.businessId),
-    getSyncDomainDiagnostics(session.businessId),
-    getAppUpdateStatus(session.businessId),
-    role === "central" ? getPairedSite(session.businessId) : Promise.resolve(null),
-  ]);
+  const [config, syncState, domainDiagnostics, appUpdateStatus, pairedSite] =
+    await Promise.all([
+      getServerSyncConfig(session.businessId),
+      getServerSyncState(session.businessId),
+      getSyncDomainDiagnostics(session.businessId),
+      getAppUpdateStatus(session.businessId),
+      role === "central"
+        ? getPairedSite(session.businessId)
+        : Promise.resolve(null),
+    ]);
 
   // Sources in order. Pairing writes the URL the laptop was paired with
   // straight into the config (pairing-apply.ts's insertSettings), so the
   // "paired platform URL" and "current config value" are one lookup here —
   // and config-first is what preserves a deliberate override.
-  const resolvedRemoteUrl = config?.remoteUrl?.trim() || platformBaseUrl() || "";
+  const resolvedRemoteUrl =
+    config?.remoteUrl?.trim() || platformBaseUrl() || "";
   // Never leak the token back to the client in full — mask it. `tokenFormat`
   // carries the one fact the UI needs about the real value: whether it is a
   // pre-format hex secret the owner should rotate when convenient.
   const masked = config
     ? {
         ...config,
-        token: config.token ? `${config.token.slice(0, 4)}…${config.token.slice(-4)}` : "",
+        token: config.token
+          ? `${config.token.slice(0, 4)}…${config.token.slice(-4)}`
+          : "",
         tokenFormat: syncTokenFormat(config.token),
       }
     : null;
@@ -66,7 +72,6 @@ export const GET = withTenantScope(async () => {
     resolvedRemoteUrl,
     pairedSite,
     syncState,
-    deadLetters,
     domainDiagnostics,
     eventRegistry: publicSyncEventRegistry(),
     appUpdateStatus,
@@ -74,7 +79,9 @@ export const GET = withTenantScope(async () => {
 });
 
 export const PUT = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(
+    PERMISSIONS.integrationsManage,
+  );
   if (error) return error;
 
   // A central server is what sites sync *to*; it has no peer of its own, and

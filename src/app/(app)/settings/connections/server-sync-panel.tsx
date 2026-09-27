@@ -59,18 +59,13 @@ interface StateView {
   legacyTokenLastUsedAt: string | null;
 }
 
-interface DeadLetter {
-  id: number;
-  remoteEventId: number;
-  locationId: string;
-  clientEventId: string;
-  eventType: string;
-  error: string;
-  createdAt: string;
-}
-
 interface DomainDiagnostics {
-  counts: { deferred: number; applied: number; deadLettered: number; openDeadLetters: number };
+  counts: {
+    deferred: number;
+    applied: number;
+    deadLettered: number;
+    openDeadLetters: number;
+  };
   recent: Array<{
     clientEventId: string;
     eventType: string;
@@ -84,6 +79,8 @@ interface DomainDiagnostics {
   }>;
   deadLetters: Array<{
     id: number;
+    source: "domain" | "server_pull";
+    remoteEventId: number | null;
     clientEventId: string;
     eventType: string;
     schemaVersion: number | null;
@@ -120,11 +117,25 @@ const SYNC_STATUS_LABELS: Record<string, string> = {
   skipped: "رد شده",
 };
 
-function StatusRow({ label, value, tone }: { label: string; value: string; tone?: "error" }) {
+function StatusRow({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: "error";
+}) {
   return (
     <div className="flex items-center justify-between border-b border-border/60 py-2 text-sm last:border-b-0">
       <span className="text-muted-foreground">{label}</span>
-      <span className={tone === "error" ? "font-medium text-destructive" : "font-medium"}>{value}</span>
+      <span
+        className={
+          tone === "error" ? "font-medium text-destructive" : "font-medium"
+        }
+      >
+        {value}
+      </span>
     </div>
   );
 }
@@ -135,9 +146,10 @@ export function ServerSyncPanel() {
   const [resolvedRemoteUrl, setResolvedRemoteUrl] = useState("");
   const [pairedSite, setPairedSite] = useState<PairedSiteView | null>(null);
   const [syncState, setSyncState] = useState<StateView | null>(null);
-  const [deadLetters, setDeadLetters] = useState<DeadLetter[]>([]);
-  const [domainDiagnostics, setDomainDiagnostics] = useState<DomainDiagnostics | null>(null);
-  const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatusView | null>(null);
+  const [domainDiagnostics, setDomainDiagnostics] =
+    useState<DomainDiagnostics | null>(null);
+  const [appUpdateStatus, setAppUpdateStatus] =
+    useState<AppUpdateStatusView | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -169,7 +181,6 @@ export function ServerSyncPanel() {
       resolvedRemoteUrl: string;
       pairedSite: PairedSiteView | null;
       syncState: StateView;
-      deadLetters: DeadLetter[];
       domainDiagnostics: DomainDiagnostics;
       appUpdateStatus: AppUpdateStatusView | null;
       error?: string;
@@ -180,7 +191,6 @@ export function ServerSyncPanel() {
       setResolvedRemoteUrl(data.resolvedRemoteUrl ?? "");
       setPairedSite(data.pairedSite ?? null);
       setSyncState(data.syncState);
-      setDeadLetters(data.deadLetters ?? []);
       setDomainDiagnostics(data.domainDiagnostics ?? null);
       setAppUpdateStatus(data.appUpdateStatus ?? null);
       setRemoteUrl(data.config?.remoteUrl ?? "");
@@ -205,7 +215,8 @@ export function ServerSyncPanel() {
    * at the input is the entire reason the format has a checksum. Legacy hex
    * secrets bypass it exactly as they do server-side.
    */
-  const tokenParse = token && !isLegacySyncToken(token) ? parseSyncToken(token) : null;
+  const tokenParse =
+    token && !isLegacySyncToken(token) ? parseSyncToken(token) : null;
   const tokenInvalid = tokenParse !== null && !tokenParse.ok;
 
   async function generateToken() {
@@ -258,10 +269,13 @@ export function ServerSyncPanel() {
     // keeps the existing token otherwise (see resolveConfigUpdate).
     if (token) body.token = token;
 
-    const { ok, data } = await api<{ error?: string }>("/api/server-sync/config", {
-      method: "PUT",
-      body: JSON.stringify(body),
-    });
+    const { ok, data } = await api<{ error?: string }>(
+      "/api/server-sync/config",
+      {
+        method: "PUT",
+        body: JSON.stringify(body),
+      },
+    );
     setBusy(false);
     if (!ok) {
       setError(errorMessage(data.error) || data.error || "خطای غیرمنتظره.");
@@ -271,13 +285,19 @@ export function ServerSyncPanel() {
     await load();
   }
 
-  async function reconcile(action: "retry-deferred" | "retry-dead-letter" | "discard-dead-letter", id?: number) {
+  async function reconcile(
+    action: "retry-deferred" | "retry-dead-letter" | "discard-dead-letter",
+    id?: number,
+  ) {
     setBusy(true);
     setError("");
-    const { ok, data } = await api<{ error?: string }>("/api/server-sync/reconcile", {
-      method: "POST",
-      body: JSON.stringify({ action, id }),
-    });
+    const { ok, data } = await api<{ error?: string }>(
+      "/api/server-sync/reconcile",
+      {
+        method: "POST",
+        body: JSON.stringify({ action, id }),
+      },
+    );
     setBusy(false);
     if (!ok) {
       setError(errorMessage(data.error));
@@ -299,20 +319,37 @@ export function ServerSyncPanel() {
       <div className="space-y-6">
         <SectionCard title="این سرور، سرور مرکزی است">
           <p className="mb-4 text-sm text-muted-foreground">
-            نصب‌های محلی (مثلاً لپ‌تاپ شعبه) به این سرور همگام می‌شوند؛ خودِ این سرور به جایی همگام نمی‌شود، بنابراین
-            آدرس و توکن اتصال اینجا تنظیم نمی‌شود. توکن هر نصب هنگام «جفت‌سازی» در کنسول مدیریت ساخته می‌شود.
+            نصب‌های محلی (مثلاً لپ‌تاپ شعبه) به این سرور همگام می‌شوند؛ خودِ این
+            سرور به جایی همگام نمی‌شود، بنابراین آدرس و توکن اتصال اینجا تنظیم
+            نمی‌شود. توکن هر نصب هنگام «جفت‌سازی» در کنسول مدیریت ساخته می‌شود.
           </p>
           <ErrorBox>{error}</ErrorBox>
           {pairedSite ? (
             <>
-              <StatusRow label="دستگاه‌های فعال" value={toPersianDigits(String(pairedSite.deviceCount))} />
-              <StatusRow label="شعبه‌های متصل" value={toPersianDigits(String(pairedSite.locationCount))} />
-              <StatusRow label="آخرین چرخش اعتبارنامه" value={formatTime(pairedSite.tokenSetAt)} />
-              <StatusRow label="آخرین ارتباط از نصب محلی" value={formatTime(pairedSite.lastSeenAt)} />
+              <StatusRow
+                label="دستگاه‌های فعال"
+                value={toPersianDigits(String(pairedSite.deviceCount))}
+              />
+              <StatusRow
+                label="شعبه‌های متصل"
+                value={toPersianDigits(String(pairedSite.locationCount))}
+              />
+              <StatusRow
+                label="آخرین چرخش اعتبارنامه"
+                value={formatTime(pairedSite.tokenSetAt)}
+              />
+              <StatusRow
+                label="آخرین ارتباط از نصب محلی"
+                value={formatTime(pairedSite.lastSeenAt)}
+              />
               <StatusRow
                 label="وضعیت آخرین ارتباط"
-                value={SYNC_STATUS_LABELS[pairedSite.lastSeenStatus ?? ""] ?? "—"}
-                tone={pairedSite.lastSeenStatus === "error" ? "error" : undefined}
+                value={
+                  SYNC_STATUS_LABELS[pairedSite.lastSeenStatus ?? ""] ?? "—"
+                }
+                tone={
+                  pairedSite.lastSeenStatus === "error" ? "error" : undefined
+                }
               />
             </>
           ) : (
@@ -325,7 +362,6 @@ export function ServerSyncPanel() {
         <SyncStatusPanels
           syncState={syncState}
           appUpdateStatus={appUpdateStatus}
-          deadLetters={deadLetters}
           domainDiagnostics={domainDiagnostics}
           busy={busy}
           onReconcile={reconcile}
@@ -338,8 +374,8 @@ export function ServerSyncPanel() {
     <div className="space-y-6">
       <SectionCard title="اتصال به سرور مرکزی">
         <p className="mb-4 text-sm text-muted-foreground">
-          این نصب (مثلاً لپ‌تاپ شعبه) با سرور مرکزی به‌صورت دوطرفه همگام می‌شود. توکن مشترک باید در هر دو سمت یکسان
-          باشد.
+          این نصب (مثلاً لپ‌تاپ شعبه) با سرور مرکزی به‌صورت دوطرفه همگام می‌شود.
+          توکن مشترک باید در هر دو سمت یکسان باشد.
         </p>
         <ErrorBox>{error}</ErrorBox>
         {notice ? <InfoBox>{notice}</InfoBox> : null}
@@ -358,7 +394,10 @@ export function ServerSyncPanel() {
               />
             </Field>
           ) : (
-            <Field label="آدرس سرور مرکزی" hint="این آدرس هنگام جفت‌سازی ثبت شده و نیازی به وارد کردن ندارد.">
+            <Field
+              label="آدرس سرور مرکزی"
+              hint="این آدرس هنگام جفت‌سازی ثبت شده و نیازی به وارد کردن ندارد."
+            >
               <div className="flex items-center gap-2">
                 <code
                   className="flex h-10 flex-1 items-center rounded-lg border border-input bg-muted/40 px-3 text-sm"
@@ -379,21 +418,27 @@ export function ServerSyncPanel() {
           )}
           {config?.tokenFormat === "legacy" ? (
             <InfoBox>
-              توکن فعلی با قالب قدیمی ساخته شده و همچنان کار می‌کند، اما قابل بازخوانی و تایپ نیست. در فرصت مناسب یک
-              توکن جدید بسازید و همان را در سمت دیگر هم ثبت کنید.
+              توکن فعلی با قالب قدیمی ساخته شده و همچنان کار می‌کند، اما قابل
+              بازخوانی و تایپ نیست. در فرصت مناسب یک توکن جدید بسازید و همان را
+              در سمت دیگر هم ثبت کنید.
             </InfoBox>
           ) : null}
           {generated ? (
             <InfoBox>
               <div className="space-y-2">
                 <p>
-                  این توکن فقط همین یک بار نمایش داده می‌شود. آن را کپی کنید، در سمت دیگر ثبت کنید، سپس این فرم را
-                  ذخیره کنید.
+                  این توکن فقط همین یک بار نمایش داده می‌شود. آن را کپی کنید، در
+                  سمت دیگر ثبت کنید، سپس این فرم را ذخیره کنید.
                 </p>
-                <code className="block rounded-lg bg-background/70 px-3 py-2 font-mono text-sm" dir="ltr">
+                <code
+                  className="block rounded-lg bg-background/70 px-3 py-2 font-mono text-sm"
+                  dir="ltr"
+                >
                   {generated}
                 </code>
-                <SecondaryButton onClick={copyGenerated}>{copied ? "کپی شد" : "کپی توکن"}</SecondaryButton>
+                <SecondaryButton onClick={copyGenerated}>
+                  {copied ? "کپی شد" : "کپی توکن"}
+                </SecondaryButton>
               </div>
             </InfoBox>
           ) : null}
@@ -412,7 +457,9 @@ export function ServerSyncPanel() {
                 className={inputClass}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
-                placeholder={config?.token ? "برای حفظ توکن فعلی خالی بگذارید" : "POS1-…"}
+                placeholder={
+                  config?.token ? "برای حفظ توکن فعلی خالی بگذارید" : "POS1-…"
+                }
                 dir="ltr"
                 type="text"
                 autoComplete="off"
@@ -423,7 +470,9 @@ export function ServerSyncPanel() {
               </SecondaryButton>
             </div>
             {tokenInvalid && tokenParse && !tokenParse.ok ? (
-              <span className="mt-1 block text-xs text-destructive">{errorMessage(tokenParse.error)}</span>
+              <span className="mt-1 block text-xs text-destructive">
+                {errorMessage(tokenParse.error)}
+              </span>
             ) : null}
           </Field>
           <Field label="تعداد رویداد در هر دسته">
@@ -435,17 +484,22 @@ export function ServerSyncPanel() {
             />
           </Field>
           <label className="mb-4 flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(e) => setEnabled(e.target.checked)}
+            />
             همگام‌سازی فعال باشد
           </label>
-          <PrimaryButton disabled={busy || tokenInvalid}>{busy ? "در حال ذخیره…" : "ذخیره تنظیمات"}</PrimaryButton>
+          <PrimaryButton disabled={busy || tokenInvalid}>
+            {busy ? "در حال ذخیره…" : "ذخیره تنظیمات"}
+          </PrimaryButton>
         </form>
       </SectionCard>
 
       <SyncStatusPanels
         syncState={syncState}
         appUpdateStatus={appUpdateStatus}
-        deadLetters={deadLetters}
         domainDiagnostics={domainDiagnostics}
         busy={busy}
         onReconcile={reconcile}
@@ -462,17 +516,18 @@ export function ServerSyncPanel() {
 function SyncStatusPanels({
   syncState,
   appUpdateStatus,
-  deadLetters,
   domainDiagnostics,
   busy,
   onReconcile,
 }: {
   syncState: StateView | null;
   appUpdateStatus: AppUpdateStatusView | null;
-  deadLetters: DeadLetter[];
   domainDiagnostics: DomainDiagnostics | null;
   busy: boolean;
-  onReconcile: (action: "retry-deferred" | "retry-dead-letter" | "discard-dead-letter", id?: number) => Promise<void>;
+  onReconcile: (
+    action: "retry-deferred" | "retry-dead-letter" | "discard-dead-letter",
+    id?: number,
+  ) => Promise<void>;
 }) {
   return (
     <>
@@ -480,16 +535,26 @@ function SyncStatusPanels({
         <SectionCard title="وضعیت همگام‌سازی">
           {syncState.legacyTokenLastUsedAt ? (
             <InfoBox>
-              درخواست‌های ورودی هنوز با توکن مشترک قدیمی (REMOTE_SYNC_TOKEN) تأیید می‌شوند، نه توکن اختصاصی این
-              کسب‌وکار — آخرین بار: {formatTime(syncState.legacyTokenLastUsedAt)}. برای امنیت بیشتر، توکن اختصاصی
-              را تنظیم و به‌جای متغیر محیطی مشترک از آن استفاده کنید.
+              درخواست‌های ورودی هنوز با توکن مشترک قدیمی (REMOTE_SYNC_TOKEN)
+              تأیید می‌شوند، نه توکن اختصاصی این کسب‌وکار — آخرین بار:{" "}
+              {formatTime(syncState.legacyTokenLastUsedAt)}. برای امنیت بیشتر،
+              توکن اختصاصی را تنظیم و به‌جای متغیر محیطی مشترک از آن استفاده
+              کنید.
             </InfoBox>
           ) : null}
           <div className="grid gap-x-8 sm:grid-cols-2">
             <div>
-              <h3 className="mb-1 text-sm font-medium text-muted-foreground">ارسال (Push)</h3>
-              <StatusRow label="آخرین تلاش" value={formatTime(syncState.lastPushAttemptAt)} />
-              <StatusRow label="آخرین موفقیت" value={formatTime(syncState.lastPushSuccessAt)} />
+              <h3 className="mb-1 text-sm font-medium text-muted-foreground">
+                ارسال (Push)
+              </h3>
+              <StatusRow
+                label="آخرین تلاش"
+                value={formatTime(syncState.lastPushAttemptAt)}
+              />
+              <StatusRow
+                label="آخرین موفقیت"
+                value={formatTime(syncState.lastPushSuccessAt)}
+              />
               <StatusRow
                 label="آخرین خطا"
                 value={syncState.lastPushError ?? "—"}
@@ -497,9 +562,17 @@ function SyncStatusPanels({
               />
             </div>
             <div>
-              <h3 className="mb-1 text-sm font-medium text-muted-foreground">دریافت (Pull)</h3>
-              <StatusRow label="آخرین تلاش" value={formatTime(syncState.lastPullAttemptAt)} />
-              <StatusRow label="آخرین موفقیت" value={formatTime(syncState.lastPullSuccessAt)} />
+              <h3 className="mb-1 text-sm font-medium text-muted-foreground">
+                دریافت (Pull)
+              </h3>
+              <StatusRow
+                label="آخرین تلاش"
+                value={formatTime(syncState.lastPullAttemptAt)}
+              />
+              <StatusRow
+                label="آخرین موفقیت"
+                value={formatTime(syncState.lastPullSuccessAt)}
+              />
               <StatusRow
                 label="آخرین خطا"
                 value={syncState.lastPullError ?? "—"}
@@ -513,56 +586,116 @@ function SyncStatusPanels({
       {appUpdateStatus && appUpdateStatus.error !== "sync_not_configured" ? (
         <SectionCard title="به‌روزرسانی نرم‌افزار">
           <p className="mb-4 text-sm text-muted-foreground">
-            نسخهٔ نصب‌شده روی این دستگاه در برابر نسخهٔ در حال اجرا روی سرور مرکزی. این فقط یک اعلان است — نصب نسخهٔ
-            جدید خودکار نیست و باید توسط مدیر انجام شود.
+            نسخهٔ نصب‌شده روی این دستگاه در برابر نسخهٔ در حال اجرا روی سرور
+            مرکزی. این فقط یک اعلان است — نصب نسخهٔ جدید خودکار نیست و باید توسط
+            مدیر انجام شود.
           </p>
           {appUpdateStatus.updateAvailable ? (
             <InfoBox>
-              نسخهٔ جدیدی در دسترس است ({appUpdateStatus.latestVersion}). قبل از نصب حتماً یک پشتیبان تهیه کنید،
-              سپس نصب‌کنندهٔ جدید را از مدیر سیستم دریافت و اجرا نمایید. پس از نصب، از سالم بودن داده‌ها اطمینان
-              حاصل کنید.
+              نسخهٔ جدیدی در دسترس است ({appUpdateStatus.latestVersion}). قبل از
+              نصب حتماً یک پشتیبان تهیه کنید، سپس نصب‌کنندهٔ جدید را از مدیر
+              سیستم دریافت و اجرا نمایید. پس از نصب، از سالم بودن داده‌ها
+              اطمینان حاصل کنید.
             </InfoBox>
           ) : null}
-          <StatusRow label="نسخهٔ فعلی" value={appUpdateStatus.currentVersion || "—"} />
-          <StatusRow label="آخرین نسخهٔ منتشرشده" value={appUpdateStatus.latestVersion ?? "—"} />
-          <StatusRow label="آخرین بررسی" value={formatTime(appUpdateStatus.checkedAt)} />
-          {appUpdateStatus.error ? <StatusRow label="خطا" value={appUpdateStatus.error} tone="error" /> : null}
+          <StatusRow
+            label="نسخهٔ فعلی"
+            value={appUpdateStatus.currentVersion || "—"}
+          />
+          <StatusRow
+            label="آخرین نسخهٔ منتشرشده"
+            value={appUpdateStatus.latestVersion ?? "—"}
+          />
+          <StatusRow
+            label="آخرین بررسی"
+            value={formatTime(appUpdateStatus.checkedAt)}
+          />
+          {appUpdateStatus.error ? (
+            <StatusRow label="خطا" value={appUpdateStatus.error} tone="error" />
+          ) : null}
         </SectionCard>
       ) : null}
 
       {domainDiagnostics ? (
         <SectionCard title="آشتی‌سازی اثرهای مالی و موجودی">
           <p className="mb-3 text-sm text-muted-foreground">
-            فقط شناسه، نوع، نسخه، کد خطا و هش محتوای رویداد نمایش داده می‌شود؛ payload و اعتبارنامه‌ها هرگز در این
-            صفحه برگردانده نمی‌شوند.
+            فقط شناسه، نوع، نسخه، کد خطا و هش محتوای رویداد نمایش داده می‌شود؛
+            payload و اعتبارنامه‌ها هرگز در این صفحه برگردانده نمی‌شوند.
           </p>
           <div className="grid gap-x-8 sm:grid-cols-2">
             <div>
-              <StatusRow label="اعمال‌شده" value={toPersianDigits(String(domainDiagnostics.counts.applied))} />
-              <StatusRow label="در انتظار پیش‌نیاز" value={toPersianDigits(String(domainDiagnostics.counts.deferred))} />
+              <StatusRow
+                label="اعمال‌شده"
+                value={toPersianDigits(
+                  String(domainDiagnostics.counts.applied),
+                )}
+              />
+              <StatusRow
+                label="در انتظار پیش‌نیاز"
+                value={toPersianDigits(
+                  String(domainDiagnostics.counts.deferred),
+                )}
+              />
             </div>
             <div>
-              <StatusRow label="نامهٔ مرده" value={toPersianDigits(String(domainDiagnostics.counts.deadLettered))} />
-              <StatusRow label="باز و نیازمند بررسی" value={toPersianDigits(String(domainDiagnostics.counts.openDeadLetters))} />
+              <StatusRow
+                label="نامهٔ مرده"
+                value={toPersianDigits(
+                  String(domainDiagnostics.counts.deadLettered),
+                )}
+              />
+              <StatusRow
+                label="باز و نیازمند بررسی"
+                value={toPersianDigits(
+                  String(domainDiagnostics.counts.openDeadLetters),
+                )}
+              />
             </div>
           </div>
           <div className="mt-3">
-            <SecondaryButton onClick={() => void onReconcile("retry-deferred")} disabled={busy || domainDiagnostics.counts.deferred === 0}>
+            <SecondaryButton
+              onClick={() => void onReconcile("retry-deferred")}
+              disabled={busy || domainDiagnostics.counts.deferred === 0}
+            >
               تلاش دوباره برای رویدادهای معوق
             </SecondaryButton>
           </div>
           {domainDiagnostics.recent.length > 0 ? (
             <div className="mt-4 overflow-hidden rounded-lg border">
-              <div className="border-b bg-muted/30 px-3 py-2 text-xs font-semibold">آخرین اثرهای دامنه</div>
+              <div className="border-b bg-muted/30 px-3 py-2 text-xs font-semibold">
+                آخرین اثرهای دامنه
+              </div>
               {domainDiagnostics.recent.slice(0, 10).map((effect) => (
-                <div key={effect.clientEventId} className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2 text-xs last:border-b-0">
+                <div
+                  key={effect.clientEventId}
+                  className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2 text-xs last:border-b-0"
+                >
                   <div className="min-w-0">
-                    <span className="font-medium" dir="ltr">{effect.eventType}@{effect.schemaVersion}</span>
-                    <span className="mr-2 text-muted-foreground" dir="ltr">{effect.effectType ? `${effect.effectType}:${effect.effectId ?? "—"}` : effect.errorCode ?? "—"}</span>
+                    <span className="font-medium" dir="ltr">
+                      {effect.eventType}@{effect.schemaVersion}
+                    </span>
+                    <span className="mr-2 text-muted-foreground" dir="ltr">
+                      {effect.effectType
+                        ? `${effect.effectType}:${effect.effectId ?? "—"}`
+                        : (effect.errorCode ?? "—")}
+                    </span>
                   </div>
-                  <span className={effect.status === "applied" ? "text-emerald-700 dark:text-emerald-300" : effect.status === "deferred" ? "text-amber-700 dark:text-amber-300" : "text-destructive"}>
-                    {effect.status === "applied" ? "اعمال شد" : effect.status === "deferred" ? `معوق — تلاش ${toPersianDigits(String(effect.attempts))}` : "نامهٔ مرده"}
-                    {" — "}{formatTime(effect.updatedAt)}
+                  <span
+                    className={
+                      effect.status === "applied"
+                        ? "text-emerald-700 dark:text-emerald-300"
+                        : effect.status === "deferred"
+                          ? "text-amber-700 dark:text-amber-300"
+                          : "text-destructive"
+                    }
+                  >
+                    {effect.status === "applied"
+                      ? "اعمال شد"
+                      : effect.status === "deferred"
+                        ? `معوق — تلاش ${toPersianDigits(String(effect.attempts))}`
+                        : "نامهٔ مرده"}
+                    {" — "}
+                    {formatTime(effect.updatedAt)}
                   </span>
                 </div>
               ))}
@@ -570,51 +703,60 @@ function SyncStatusPanels({
           ) : null}
           {domainDiagnostics.deadLetters.length > 0 ? (
             <div className="mt-4 space-y-2">
-              {domainDiagnostics.deadLetters.filter((letter) => letter.status === "open").map((letter) => (
-                <div key={letter.id} className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-medium" dir="ltr">{letter.eventType}@{letter.schemaVersion ?? "?"}</span>
-                    <span className="text-xs text-muted-foreground">{formatTime(letter.lastSeenAt)}</span>
+              {domainDiagnostics.deadLetters
+                .filter((letter) => letter.status === "open")
+                .map((letter) => (
+                  <div
+                    key={letter.id}
+                    className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium" dir="ltr">
+                        {letter.eventType}@{letter.schemaVersion ?? "?"}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {formatTime(letter.lastSeenAt)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-destructive" dir="ltr">
+                      {letter.errorCode}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {letter.source === "server_pull"
+                        ? `دریافت‌شده از سرور${letter.remoteEventId ? ` • رویداد ${toPersianDigits(String(letter.remoteEventId))}` : ""}`
+                        : "اثر دامنه"}
+                      {` • تلاش دوباره: ${toPersianDigits(String(letter.retryCount))}`}
+                    </p>
+                    <p
+                      className="mt-1 break-all font-mono text-[11px] text-muted-foreground"
+                      dir="ltr"
+                    >
+                      sha256:{letter.payloadSha256}
+                    </p>
+                    <div className="mt-2 flex gap-2">
+                      <SecondaryButton
+                        onClick={() =>
+                          void onReconcile("retry-dead-letter", letter.id)
+                        }
+                        disabled={busy}
+                      >
+                        تلاش دوباره
+                      </SecondaryButton>
+                      <SecondaryButton
+                        onClick={() =>
+                          void onReconcile("discard-dead-letter", letter.id)
+                        }
+                        disabled={busy}
+                      >
+                        بایگانی
+                      </SecondaryButton>
+                    </div>
                   </div>
-                  <p className="mt-1 text-xs text-destructive" dir="ltr">{letter.errorCode}</p>
-                  <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground" dir="ltr">
-                    sha256:{letter.payloadSha256}
-                  </p>
-                  <div className="mt-2 flex gap-2">
-                    <SecondaryButton onClick={() => void onReconcile("retry-dead-letter", letter.id)} disabled={busy}>
-                      تلاش دوباره
-                    </SecondaryButton>
-                    <SecondaryButton onClick={() => void onReconcile("discard-dead-letter", letter.id)} disabled={busy}>
-                      بایگانی
-                    </SecondaryButton>
-                  </div>
-                </div>
-              ))}
+                ))}
             </div>
           ) : null}
         </SectionCard>
       ) : null}
-
-      <SectionCard title="رویدادهای ناموفق قدیمی">
-        <p className="mb-4 text-sm text-muted-foreground">
-          رویدادهایی که هنگام دریافت از سرور مرکزی اعمال نشدند و برای بررسی نگه داشته شده‌اند.
-        </p>
-        {deadLetters.length === 0 ? (
-          <p className="text-sm text-muted-foreground">رویداد ناموفقی ثبت نشده است.</p>
-        ) : (
-          <div className="space-y-2">
-            {deadLetters.map((dl) => (
-              <div key={dl.id} className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium">{dl.eventType}</span>
-                  <span className="text-xs text-muted-foreground">{formatTime(dl.createdAt)}</span>
-                </div>
-                <p className="mt-1 text-xs text-destructive">{dl.error}</p>
-              </div>
-            ))}
-          </div>
-        )}
-      </SectionCard>
     </>
   );
 }

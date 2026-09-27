@@ -32,6 +32,7 @@ const STATUS_BY_ERROR: Record<string, number> = {
   code_expired: 410,
   code_already_redeemed: 409,
   code_revoked: 410,
+  pairing_session_unavailable: 409,
 };
 
 /**
@@ -44,8 +45,10 @@ const STATUS_BY_ERROR: Record<string, number> = {
  * The response carries the business's whole configuration including credential
  * hashes, so it must never be cached or logged.
  */
-export async function handlePairingRedeem(request: NextRequest): Promise<NextResponse> {
-  let body: { code?: string; deviceName?: string };
+export async function handlePairingRedeem(
+  request: NextRequest,
+): Promise<NextResponse> {
+  let body: { code?: string; deviceName?: string; installationId?: string };
   try {
     body = await request.json();
   } catch {
@@ -53,15 +56,33 @@ export async function handlePairingRedeem(request: NextRequest): Promise<NextRes
   }
 
   const code = body.code?.trim();
-  if (!code) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+  if (!code)
+    return NextResponse.json({ error: "missing_fields" }, { status: 400 });
 
-  const deviceName = typeof body.deviceName === "string" ? body.deviceName : "Windows Business Suite";
-  const result = await redeemPairingCode(code, clientIp(request), deviceName);
+  const deviceName =
+    typeof body.deviceName === "string"
+      ? body.deviceName
+      : "Windows Business Suite";
+  const installationId =
+    typeof body.installationId === "string" ? body.installationId : null;
+  const result = await redeemPairingCode(
+    code,
+    clientIp(request),
+    deviceName,
+    installationId,
+  );
   if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: STATUS_BY_ERROR[result.error] ?? 400 });
+    return NextResponse.json(
+      { error: result.error },
+      { status: STATUS_BY_ERROR[result.error] ?? 400 },
+    );
   }
 
-  const response = NextResponse.json({ snapshot: result.snapshot });
+  const response = NextResponse.json({
+    snapshot: result.snapshot,
+    pairingSessionId: result.pairingSessionId,
+    resumed: result.resumed,
+  });
   response.headers.set("Cache-Control", "no-store");
   return response;
 }

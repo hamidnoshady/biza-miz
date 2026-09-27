@@ -25,9 +25,16 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { getPool, query, withTenant, withoutTenantScope } from "./db";
 import { getSetting, setSetting, SETTING_KEYS } from "./settings";
-import { applySyncEvent, reconcileDeferredSyncEvents, type SyncEventInput, type SyncEventType } from "./sync-events";
+import {
+  applySyncEvent,
+  reconcileDeferredSyncEvents,
+  type SyncEventInput,
+  type SyncEventResult,
+  type SyncEventType,
+} from "./sync-events";
 import type { ServerSyncConfig } from "./server-sync-config";
 import { refreshAppUpdateStatus } from "./app-update";
+import { expireStalePairingSessions } from "./pairing-service";
 
 export type { ServerSyncConfig } from "./server-sync-config";
 
@@ -82,12 +89,22 @@ export function legacyTokenWarning(): string | null {
   return null;
 }
 
-export async function getServerSyncConfig(businessId: string): Promise<ServerSyncConfig | null> {
-  return getSetting<ServerSyncConfig>(businessId, SETTING_KEYS.serverSyncConfig);
+export async function getServerSyncConfig(
+  businessId: string,
+): Promise<ServerSyncConfig | null> {
+  return getSetting<ServerSyncConfig>(
+    businessId,
+    SETTING_KEYS.serverSyncConfig,
+  );
 }
 
 function hashSyncToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+/** Payloads stay private; diagnostics and canonical dead letters use this digest only. */
+function payloadDigest(payload: Record<string, unknown>): string {
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
 
 /**
@@ -99,7 +116,10 @@ function hashSyncToken(token: string): string {
  * own config PUT), so this insert needs no bypass — RLS's own WITH CHECK
  * already confines it to the caller's business.
  */
-export async function setServerSyncConfig(businessId: string, config: ServerSyncConfig): Promise<void> {
+export async function setServerSyncConfig(
+  businessId: string,
+  config: ServerSyncConfig,
+): Promise<void> {
   await setSetting(businessId, SETTING_KEYS.serverSyncConfig, config);
   if (config.siteDeviceId) {
     if (config.token) {
@@ -111,10 +131,10 @@ export async function setServerSyncConfig(businessId: string, config: ServerSync
         [config.siteDeviceId, businessId, hashSyncToken(config.token)],
       );
     } else {
-      await query(`DELETE FROM site_sync_credentials WHERE site_device_id = $1 AND business_id = $2`, [
-        config.siteDeviceId,
-        businessId,
-      ]);
+      await query(
+        `DELETE FROM site_sync_credentials WHERE site_device_id = $1 AND business_id = $2`,
+        [config.siteDeviceId, businessId],
+      );
     }
     return;
   }
@@ -128,7 +148,9 @@ export async function setServerSyncConfig(businessId: string, config: ServerSync
       [businessId, hashSyncToken(config.token)],
     );
   } else {
-    await query(`DELETE FROM server_sync_tokens WHERE business_id = $1`, [businessId]);
+    await query(`DELETE FROM server_sync_tokens WHERE business_id = $1`, [
+      businessId,
+    ]);
   }
 }
 
@@ -144,9 +166,15 @@ export interface SyncCredentialIdentity {
   locationId: string | null;
 }
 
-export async function resolveSyncCredential(token: string): Promise<SyncCredentialIdentity | null> {
+export async function resolveSyncCredential(
+  token: string,
+): Promise<SyncCredentialIdentity | null> {
   return withoutTenantScope("server-sync-auth", async () => {
-    const site = await query<{ business_id: string; site_device_id: string; location_id: string }>(
+    const site = await query<{
+      business_id: string;
+      site_device_id: string;
+      location_id: string;
+    }>(
       `SELECT c.business_id, c.site_device_id, d.location_id
          FROM site_sync_credentials c
          JOIN site_devices d ON d.id = c.site_device_id AND d.business_id = c.business_id
@@ -154,7 +182,10 @@ export async function resolveSyncCredential(token: string): Promise<SyncCredenti
       [hashSyncToken(token)],
     );
     if (site.rows[0]) {
-      await query(`UPDATE site_devices SET last_seen_at = now() WHERE id = $1`, [site.rows[0].site_device_id]);
+      await query(
+        `UPDATE site_devices SET last_seen_at = now() WHERE id = $1`,
+        [site.rows[0].site_device_id],
+      );
       return {
         businessId: site.rows[0].business_id,
         siteDeviceId: site.rows[0].site_device_id,
@@ -166,12 +197,18 @@ export async function resolveSyncCredential(token: string): Promise<SyncCredenti
       [hashSyncToken(token)],
     );
     return legacy.rows[0]
-      ? { businessId: legacy.rows[0].business_id, siteDeviceId: null, locationId: null }
+      ? {
+          businessId: legacy.rows[0].business_id,
+          siteDeviceId: null,
+          locationId: null,
+        }
       : null;
   });
 }
 
-export async function resolveBusinessBySyncToken(token: string): Promise<string | null> {
+export async function resolveBusinessBySyncToken(
+  token: string,
+): Promise<string | null> {
   return (await resolveSyncCredential(token))?.businessId ?? null;
 }
 
@@ -183,11 +220,19 @@ export async function resolveBusinessBySyncToken(token: string): Promise<string 
  * mismatch can't itself leak anything and `timingSafeEqual` never throws.
  */
 export function tokensMatch(a: string, b: string): boolean {
-  return timingSafeEqual(Buffer.from(hashSyncToken(a)), Buffer.from(hashSyncToken(b)));
+  return timingSafeEqual(
+    Buffer.from(hashSyncToken(a)),
+    Buffer.from(hashSyncToken(b)),
+  );
 }
 
-export async function getServerSyncState(businessId: string): Promise<ServerSyncState> {
-  const s = await getSetting<ServerSyncState>(businessId, SETTING_KEYS.serverSyncState);
+export async function getServerSyncState(
+  businessId: string,
+): Promise<ServerSyncState> {
+  const s = await getSetting<ServerSyncState>(
+    businessId,
+    SETTING_KEYS.serverSyncState,
+  );
   return s ? { ...EMPTY_STATE, ...s } : { ...EMPTY_STATE };
 }
 
@@ -199,61 +244,18 @@ export async function getServerSyncState(businessId: string): Promise<ServerSync
  * for the owner to notice, since the fallback works identically from the
  * caller's point of view. Runs within the caller's own withTenant() scope.
  */
-export async function recordLegacyTokenUsage(businessId: string): Promise<void> {
-  console.warn(`server-sync: business ${businessId} authenticated via the legacy REMOTE_SYNC_TOKEN fallback`);
+export async function recordLegacyTokenUsage(
+  businessId: string,
+): Promise<void> {
+  console.warn(
+    `server-sync: business ${businessId} authenticated via the legacy REMOTE_SYNC_TOKEN fallback`,
+  );
   const state = await getServerSyncState(businessId);
   await setSetting(businessId, SETTING_KEYS.serverSyncState, {
     ...state,
     legacyTokenLastUsedAt: new Date().toISOString(),
   } satisfies ServerSyncState);
 }
-
-export interface ServerSyncDeadLetter {
-  id: number;
-  remoteEventId: number;
-  locationId: string;
-  clientEventId: string;
-  eventType: string;
-  /** SHA-256 only; diagnostics never expose the business payload. */
-  payloadSha256: string;
-  error: string;
-  createdAt: string;
-}
-
-/** Pulled events that failed to apply and were dropped from the pull's forward progress; see runServerPull. */
-export async function listServerSyncDeadLetters(businessId: string, limit = 50): Promise<ServerSyncDeadLetter[]> {
-  const { rows } = await query<{
-    id: number;
-    remote_event_id: number;
-    location_id: string;
-    client_event_id: string;
-    event_type: string;
-    payload: Record<string, unknown>;
-    error: string;
-    created_at: string;
-  }>(
-    `SELECT id, remote_event_id, location_id, client_event_id, event_type, payload, error, created_at
-       FROM server_sync_dead_letters
-      WHERE business_id = $1
-      ORDER BY created_at DESC
-      LIMIT $2`,
-    [businessId, limit],
-  );
-  return rows.map((r) => ({
-    // bigint columns come back from pg as strings; safe to convert here since
-    // these are small monotonic counters, never anywhere near MAX_SAFE_INTEGER.
-    id: Number(r.id),
-    remoteEventId: Number(r.remote_event_id),
-    locationId: r.location_id,
-    clientEventId: r.client_event_id,
-    eventType: r.event_type,
-    payloadSha256: createHash("sha256").update(JSON.stringify(r.payload)).digest("hex"),
-    error: r.error,
-    createdAt: r.created_at,
-  }));
-}
-
-
 
 export interface SyncDomainDiagnostic {
   clientEventId: string;
@@ -269,6 +271,9 @@ export interface SyncDomainDiagnostic {
 
 export interface SyncDomainDeadLetterDiagnostic {
   id: number;
+  /** `server_pull` means a transport envelope was preserved for replay. */
+  source: "domain" | "server_pull";
+  remoteEventId: number | null;
   clientEventId: string;
   eventType: string;
   schemaVersion: number | null;
@@ -284,13 +289,23 @@ export async function getSyncDomainDiagnostics(
   businessId: string,
   limit = 50,
 ): Promise<{
-  counts: { deferred: number; applied: number; deadLettered: number; openDeadLetters: number };
+  counts: {
+    deferred: number;
+    applied: number;
+    deadLettered: number;
+    openDeadLetters: number;
+  };
   recent: SyncDomainDiagnostic[];
   deadLetters: SyncDomainDeadLetterDiagnostic[];
 }> {
   const safeLimit = Math.min(Math.max(1, limit), 200);
   const [counts, effects, dead] = await Promise.all([
-    query<{ deferred: string; applied: string; dead_lettered: string; open_dead_letters: string }>(
+    query<{
+      deferred: string;
+      applied: string;
+      dead_lettered: string;
+      open_dead_letters: string;
+    }>(
       `SELECT
          (SELECT count(*) FROM sync_domain_effects WHERE business_id=$1 AND status='deferred')::text deferred,
          (SELECT count(*) FROM sync_domain_effects WHERE business_id=$1 AND status='applied')::text applied,
@@ -299,18 +314,34 @@ export async function getSyncDomainDiagnostics(
       [businessId],
     ),
     query<{
-      client_event_id: string; event_type: string; schema_version: number; status: SyncDomainDiagnostic["status"];
-      effect_type: string | null; effect_id: string | null; error_code: string | null; attempts: number; updated_at: string;
+      client_event_id: string;
+      event_type: string;
+      schema_version: number;
+      status: SyncDomainDiagnostic["status"];
+      effect_type: string | null;
+      effect_id: string | null;
+      error_code: string | null;
+      attempts: number;
+      updated_at: string;
     }>(
       `SELECT client_event_id::text,event_type,schema_version,status,effect_type,effect_id,error_code,attempts,updated_at::text
          FROM sync_domain_effects WHERE business_id=$1 ORDER BY updated_at DESC LIMIT $2`,
       [businessId, safeLimit],
     ),
     query<{
-      id: number; client_event_id: string; event_type: string; schema_version: number | null; payload_sha256: string;
-      error_code: string; status: SyncDomainDeadLetterDiagnostic["status"]; retry_count: number; last_seen_at: string;
+      id: number;
+      source: SyncDomainDeadLetterDiagnostic["source"];
+      remote_event_id: number | null;
+      client_event_id: string;
+      event_type: string;
+      schema_version: number | null;
+      payload_sha256: string;
+      error_code: string;
+      status: SyncDomainDeadLetterDiagnostic["status"];
+      retry_count: number;
+      last_seen_at: string;
     }>(
-      `SELECT id,client_event_id,event_type,schema_version,payload_sha256,error_code,status,retry_count,last_seen_at::text
+      `SELECT id,source,remote_event_id,client_event_id,event_type,schema_version,payload_sha256,error_code,status,retry_count,last_seen_at::text
          FROM sync_event_dead_letters WHERE business_id=$1 ORDER BY last_seen_at DESC LIMIT $2`,
       [businessId, safeLimit],
     ),
@@ -336,6 +367,9 @@ export async function getSyncDomainDiagnostics(
     })),
     deadLetters: dead.rows.map((row) => ({
       id: Number(row.id),
+      source: row.source,
+      remoteEventId:
+        row.remote_event_id === null ? null : Number(row.remote_event_id),
       clientEventId: row.client_event_id,
       eventType: row.event_type,
       schemaVersion: row.schema_version,
@@ -348,8 +382,112 @@ export async function getSyncDomainDiagnostics(
   };
 }
 
+interface StoredPullDeadLetter {
+  id: number;
+  source: "domain" | "server_pull";
+  remote_event_id: number | null;
+  location_id: string | null;
+  client_event_id: string;
+  event_type: string;
+  schema_version: number | null;
+  payload: Record<string, unknown> | null;
+  occurred_at: string | null;
+  actor_user_id: string | null;
+  actor_role: string | null;
+}
 
+/**
+ * Record a pull failure in the canonical reconciliation model. It stores the
+ * envelope privately for replay; GET diagnostics intentionally return only a
+ * hash and other safe metadata.
+ */
+async function recordServerPullDeadLetter(
+  businessId: string,
+  remote: RemoteEvent,
+  error: string,
+): Promise<void> {
+  const remoteEventId =
+    Number.isSafeInteger(remote.id) && remote.id > 0 ? remote.id : null;
+  const payload =
+    remote.payload &&
+    typeof remote.payload === "object" &&
+    !Array.isArray(remote.payload)
+      ? remote.payload
+      : {};
+  const clientEventId =
+    typeof remote.clientEventId === "string" && remote.clientEventId.trim()
+      ? remote.clientEventId.trim()
+      : `invalid-pull:${remoteEventId ?? "unknown"}:${createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 24)}`;
+  const eventType =
+    typeof remote.type === "string" && remote.type.trim()
+      ? remote.type.trim().slice(0, 120)
+      : "invalid_event_type";
+  const schemaVersion =
+    Number.isSafeInteger(remote.schemaVersion) &&
+    Number(remote.schemaVersion) > 0
+      ? Number(remote.schemaVersion)
+      : 1;
+  const locationId =
+    typeof remote.locationId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      remote.locationId,
+    )
+      ? remote.locationId
+      : null;
+  const occurredAt =
+    typeof remote.occurredAt === "string" &&
+    Number.isFinite(Date.parse(remote.occurredAt))
+      ? remote.occurredAt
+      : null;
+  await query(
+    `INSERT INTO sync_event_dead_letters
+       (business_id,location_id,client_event_id,event_type,schema_version,payload_sha256,error_code,
+        source,remote_event_id,payload,occurred_at,actor_user_id,actor_role)
+     VALUES($1,$2,$3,$4,$5,$6,$7,'server_pull',$8,$9,$10,$11,$12)
+     ON CONFLICT (business_id,client_event_id,event_type,schema_version,source) DO UPDATE
+       SET location_id=EXCLUDED.location_id,remote_event_id=EXCLUDED.remote_event_id,payload=EXCLUDED.payload,
+           occurred_at=EXCLUDED.occurred_at,actor_user_id=EXCLUDED.actor_user_id,actor_role=EXCLUDED.actor_role,
+           payload_sha256=EXCLUDED.payload_sha256,error_code=EXCLUDED.error_code,status='open',
+           retry_count=sync_event_dead_letters.retry_count+1,last_seen_at=now(),
+           resolved_at=NULL,resolved_by=NULL,resolution_note=NULL`,
+    [
+      businessId,
+      locationId,
+      clientEventId,
+      eventType,
+      schemaVersion,
+      payloadDigest(payload),
+      error.slice(0, 240),
+      remoteEventId,
+      JSON.stringify(payload),
+      occurredAt,
+      typeof remote.actorUserId === "string" ? remote.actorUserId : null,
+      typeof remote.actorRole === "string" ? remote.actorRole : null,
+    ],
+  );
+}
 
+async function updateDeadLetterResolution(
+  businessId: string,
+  deadLetterId: number,
+  status: "resolved" | "discarded",
+  actorId: string,
+  note: string | null,
+): Promise<boolean> {
+  const { rowCount } = await query(
+    `UPDATE sync_event_dead_letters
+        SET status=$3,resolved_at=now(),resolved_by=$4,resolution_note=$5,last_seen_at=now()
+      WHERE id=$1 AND business_id=$2 AND status='open'`,
+    [deadLetterId, businessId, status, actorId, note?.slice(0, 500) || null],
+  );
+  return (rowCount ?? 0) === 1;
+}
+
+/**
+ * Retry or explicitly discard one canonical dead letter. `server_pull` rows
+ * hold their original transport envelope, so a moved cursor cannot make them
+ * unrecoverable; domain rows re-enter the existing deferred reconciler.
+ */
 export async function updateSyncDeadLetter(
   businessId: string,
   deadLetterId: number,
@@ -358,45 +496,117 @@ export async function updateSyncDeadLetter(
   note: string | null,
 ): Promise<boolean> {
   const client = await getPool().connect();
+  let row: StoredPullDeadLetter | null = null;
   try {
     await client.query("BEGIN");
-    const row = await client.query<{ client_event_id: string; location_id: string | null }>(
-      `SELECT client_event_id,location_id FROM sync_event_dead_letters
+    const selected = await client.query<StoredPullDeadLetter>(
+      `SELECT id,source,remote_event_id,location_id::text,client_event_id,event_type,schema_version,
+              payload,occurred_at::text,actor_user_id,actor_role
+         FROM sync_event_dead_letters
         WHERE id=$1 AND business_id=$2 AND status='open' FOR UPDATE`,
       [deadLetterId, businessId],
     );
-    if (!row.rows[0]) {
+    row = selected.rows[0] ?? null;
+    if (!row) {
       await client.query("ROLLBACK");
       return false;
     }
-    if (action === "retry") {
+    if (action === "discard") {
+      await client.query(
+        `UPDATE sync_event_dead_letters
+            SET status='discarded',resolved_at=now(),resolved_by=$3,resolution_note=$4,last_seen_at=now()
+          WHERE id=$1 AND business_id=$2`,
+        [deadLetterId, businessId, actorId, note?.slice(0, 500) || null],
+      );
+      await client.query("COMMIT");
+      return true;
+    }
+
+    if (row.source === "server_pull") {
+      await client.query(
+        `UPDATE sync_event_dead_letters SET retry_count=retry_count+1,last_seen_at=now()
+          WHERE id=$1 AND business_id=$2`,
+        [deadLetterId, businessId],
+      );
+    }
+    if (row.source === "domain") {
       await client.query(
         `UPDATE sync_domain_effects SET status='deferred',error_code=NULL,updated_at=now()
           WHERE business_id=$1 AND client_event_id=$2::uuid`,
-        [businessId, row.rows[0].client_event_id],
+        [businessId, row.client_event_id],
       );
-      if (row.rows[0].location_id) {
+      if (row.location_id) {
         await client.query(
           `UPDATE sync_events SET error=NULL,dead_lettered_at=NULL,deferred_until=now()
             WHERE location_id=$1 AND client_event_id=$2::uuid`,
-          [row.rows[0].location_id, row.rows[0].client_event_id],
+          [row.location_id, row.client_event_id],
         );
       }
+      await client.query(
+        `UPDATE sync_event_dead_letters
+            SET status='resolved',resolved_at=now(),resolved_by=$3,resolution_note=$4
+          WHERE id=$1 AND business_id=$2`,
+        [deadLetterId, businessId, actorId, note?.slice(0, 500) || null],
+      );
     }
-    await client.query(
-      `UPDATE sync_event_dead_letters
-          SET status=$3,resolved_at=now(),resolved_by=$4,resolution_note=$5
-        WHERE id=$1 AND business_id=$2`,
-      [deadLetterId, businessId, action === "retry" ? "resolved" : "discarded", actorId, note?.slice(0, 500) || null],
-    );
     await client.query("COMMIT");
-    return true;
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
     throw error;
   } finally {
     client.release();
   }
+
+  if (!row || action !== "retry" || row.source !== "server_pull") return true;
+  let result: SyncEventResult;
+  try {
+    result = await applySyncEvent(
+      row.location_id ?? "",
+      {
+        userId: row.actor_user_id ?? "",
+        role: (row.actor_role ?? "cashier") as import("./auth").Role,
+      },
+      {
+        clientEventId: row.client_event_id,
+        type: row.event_type,
+        occurredAt: row.occurred_at ?? new Date().toISOString(),
+        payload: row.payload ?? {},
+      },
+      "remote",
+      {
+        schemaVersion: row.schema_version ?? 1,
+        deadLetterSource: "server_pull",
+      },
+    );
+  } catch (error) {
+    result = {
+      clientEventId: row.client_event_id,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  if (result.ok || result.deferred) {
+    await updateDeadLetterResolution(
+      businessId,
+      deadLetterId,
+      "resolved",
+      actorId,
+      note,
+    );
+  } else if (!result.deadLettered) {
+    await query(
+      `UPDATE sync_event_dead_letters
+          SET error_code=$3,status='open',last_seen_at=now(),resolved_at=NULL,resolved_by=NULL,resolution_note=NULL
+        WHERE id=$1 AND business_id=$2`,
+      [
+        deadLetterId,
+        businessId,
+        (result.error ?? "apply_failed").slice(0, 240),
+      ],
+    );
+  }
+  return true;
 }
 
 export interface PairedSite {
@@ -410,7 +620,9 @@ export interface PairedSite {
 }
 
 /** Aggregate status for a central server's independently managed site devices. */
-export async function getPairedSite(businessId: string): Promise<PairedSite | null> {
+export async function getPairedSite(
+  businessId: string,
+): Promise<PairedSite | null> {
   const [siteRes, logRes] = await Promise.all([
     query<{
       token_set_at: string;
@@ -529,7 +741,9 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
     );
     rows = r;
   } catch (err) {
-    return fail(`query_failed: ${err instanceof Error ? err.message : String(err)}`);
+    return fail(
+      `query_failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 
   if (rows.length === 0) {
@@ -544,7 +758,10 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
   const events = rows.map((r) => ({
     clientEventId: r.client_event_id,
     type: r.event_type,
-    occurredAt: typeof r.occurred_at === "string" ? r.occurred_at : new Date(r.occurred_at).toISOString(),
+    occurredAt:
+      typeof r.occurred_at === "string"
+        ? r.occurred_at
+        : new Date(r.occurred_at).toISOString(),
     payload: r.payload,
     locationId: r.location_id,
     actorUserId: r.actor_user_id,
@@ -600,7 +817,9 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
       }
     }
   } catch (err) {
-    return fail(`unreachable: ${err instanceof Error ? err.message : String(err)}`);
+    return fail(
+      `unreachable: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 
   // PostgreSQL bigint values arrive from node-postgres as strings even though
@@ -690,7 +909,9 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
     const body = (await res.json()) as { events: RemoteEvent[] };
     remoteEvents = body.events ?? [];
   } catch (err) {
-    return fail(`unreachable: ${err instanceof Error ? err.message : String(err)}`);
+    return fail(
+      `unreachable: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 
   if (remoteEvents.length === 0) {
@@ -702,41 +923,61 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
     return { status: "ok", pulled: 0 };
   }
 
-  // Replay each event locally in order
+  // Replay each event locally in order. A failed event may advance the
+  // transport cursor only after its complete replay envelope is durable in the
+  // canonical dead-letter table. If we cannot persist that envelope we stop:
+  // replays are idempotent, silent loss is not.
   let lastAppliedRemoteId = afterId;
   for (const e of remoteEvents) {
-    const input: SyncEventInput = {
-      clientEventId: e.clientEventId,
-      type: e.type,
-      occurredAt: e.occurredAt,
-      payload: e.payload,
-    };
+    if (!Number.isSafeInteger(e.id) || e.id <= lastAppliedRemoteId) {
+      try {
+        await recordServerPullDeadLetter(
+          businessId,
+          e,
+          "remote_protocol_invalid_event_id",
+        );
+      } catch (recordError) {
+        return fail(
+          `dead_letter_persist_failed: ${recordError instanceof Error ? recordError.message : String(recordError)}`,
+        );
+      }
+      return fail("remote_protocol_invalid_event_id");
+    }
     try {
+      const input: SyncEventInput = {
+        clientEventId: e.clientEventId,
+        type: e.type,
+        occurredAt: e.occurredAt,
+        payload: e.payload,
+      };
       const applied = await applySyncEvent(
         e.locationId,
         { userId: e.actorUserId, role: e.actorRole as import("./auth").Role },
         input,
         "remote",
-        { siteDeviceId: e.siteDeviceId ?? null, schemaVersion: e.schemaVersion ?? 1 },
+        {
+          siteDeviceId: e.siteDeviceId ?? null,
+          schemaVersion: e.schemaVersion ?? 1,
+        },
       );
-      if (!applied.ok && !applied.deferred && !applied.deadLettered && !applied.conflict) {
+      // Deferred and already-canonical terminal events are recoverable through
+      // their own effect/dead-letter rows. Every other failure, including a
+      // legacy order conflict, gets a replayable server_pull dead letter.
+      if (!applied.ok && !applied.deferred && !applied.deadLettered) {
         throw new Error(applied.error ?? "apply_failed");
       }
-    } catch (err) {
-      // Don't abort the batch — a single bad event shouldn't block the rest —
-      // but the high-water mark below still advances past it, so record it
-      // as a dead letter rather than only logging: otherwise it's dropped
-      // forever with nothing to show it happened.
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`server-sync pull: failed to apply event ${e.clientEventId}: ${message}`);
-      await query(
-        `INSERT INTO server_sync_dead_letters
-           (business_id, remote_event_id, location_id, client_event_id, event_type, payload, error)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [businessId, e.id, e.locationId, e.clientEventId, e.type, JSON.stringify(e.payload), message],
-      ).catch((logErr) => {
-        console.error(`server-sync pull: failed to record dead letter for event ${e.clientEventId}:`, logErr);
-      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(
+        `server-sync pull: failed to apply event ${String(e.clientEventId)}: ${message}`,
+      );
+      try {
+        await recordServerPullDeadLetter(businessId, e, message);
+      } catch (recordError) {
+        return fail(
+          `dead_letter_persist_failed: ${recordError instanceof Error ? recordError.message : String(recordError)}`,
+        );
+      }
     }
     lastAppliedRemoteId = e.id;
   }
@@ -756,11 +997,71 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
   return { status: "ok", pulled: remoteEvents.length };
 }
 
+/**
+ * A pairing snapshot can commit locally while the acknowledgement response is
+ * lost. The durable session fields in the site config let the normal sync tick
+ * finish activation later without reusing the one-time code or minting a new
+ * credential.
+ */
+export async function acknowledgePendingPairing(
+  businessId: string,
+): Promise<
+  { status: "skipped" } | { status: "ok" } | { status: "error"; error: string }
+> {
+  const config = await getServerSyncConfig(businessId);
+  if (
+    !config?.pairingSessionId ||
+    !config.installationId ||
+    !config.remoteUrl?.trim() ||
+    !config.token?.trim()
+  ) {
+    return { status: "skipped" };
+  }
+  try {
+    const response = await fetch(
+      `${config.remoteUrl.trim().replace(/\/+$/, "")}/api/pairing/acknowledge`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${config.token.trim()}`,
+        },
+        body: JSON.stringify({
+          pairingSessionId: config.pairingSessionId,
+          installationId: config.installationId,
+        }),
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+    if (!response.ok)
+      return {
+        status: "error",
+        error: `pairing_acknowledgement_failed: HTTP ${response.status}`,
+      };
+    const activated = { ...config };
+    delete activated.pairingSessionId;
+    delete activated.installationId;
+    await setServerSyncConfig(businessId, activated);
+    return { status: "ok" };
+  } catch (error) {
+    return {
+      status: "error",
+      error: `pairing_acknowledgement_unreachable: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Combined tick (push then pull)
 // ---------------------------------------------------------------------------
 
 export async function runServerSyncTick(): Promise<void> {
+  // Pairing sessions are cloud-side state, so expire them before per-tenant
+  // sync work. Pending credentials are never accepted by normal sync routes.
+  await expireStalePairingSessions().catch((error) => {
+    console.error("pairing-session cleanup failed:", error);
+  });
+
   // Discovery spans tenants; each business's sync then runs scoped to it.
   const rows = await withoutTenantScope("platform", async () => {
     const result = await query<{ business_id: string }>(
@@ -775,9 +1076,22 @@ export async function runServerSyncTick(): Promise<void> {
 
   for (const row of rows) {
     try {
+      await withTenant(row.business_id, () =>
+        acknowledgePendingPairing(row.business_id),
+      );
+    } catch (err) {
+      console.error(
+        `pairing acknowledgement failed for business ${row.business_id}:`,
+        err,
+      );
+    }
+    try {
       await withTenant(row.business_id, () => runServerPush(row.business_id));
     } catch (err) {
-      console.error(`server-sync push failed for business ${row.business_id}:`, err);
+      console.error(
+        `server-sync push failed for business ${row.business_id}:`,
+        err,
+      );
     }
     try {
       await withTenant(row.business_id, async () => {
@@ -785,7 +1099,10 @@ export async function runServerSyncTick(): Promise<void> {
         await reconcileDeferredSyncEvents(row.business_id);
       });
     } catch (err) {
-      console.error(`server-sync pull/reconciliation failed for business ${row.business_id}:`, err);
+      console.error(
+        `server-sync pull/reconciliation failed for business ${row.business_id}:`,
+        err,
+      );
     }
     try {
       // Dashboard visibility only — no credential involved. See app-update.ts.
@@ -794,7 +1111,10 @@ export async function runServerSyncTick(): Promise<void> {
         await refreshAppUpdateStatus(row.business_id, config);
       });
     } catch (err) {
-      console.error(`app-update check failed for business ${row.business_id}:`, err);
+      console.error(
+        `app-update check failed for business ${row.business_id}:`,
+        err,
+      );
     }
   }
 }
