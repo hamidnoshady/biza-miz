@@ -222,8 +222,10 @@ async function main() {
     }
     log("auth", "owner session established");
 
+    // Dialogs on this page are already handled by the ownerContext-level
+    // "page" listener registered above — a second handler here would race
+    // it and throw "Cannot accept dialog which is already handled!".
     const page = await ownerContext.newPage();
-    page.on("dialog", (dialog) => dialog.accept());
 
     // ======================================================================
     // 1. Upload, tag, and search by tag
