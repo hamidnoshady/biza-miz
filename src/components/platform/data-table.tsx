@@ -104,6 +104,12 @@ export function PlatformDataTable<T>({
   className,
   minWidthClass = "min-w-[720px]",
 }: DataTableProps<T>) {
+  const mobileColumns = React.useMemo(() => {
+    return columns.filter((c) =>
+      mobileTitle ? true : c.key !== columns[0].key ? true : false,
+    );
+  }, [columns, mobileTitle]);
+
   const showInitialLoading = loading && (rows === null || rows.length === 0);
 
   if (error && (rows === null || rows.length === 0)) {
@@ -268,41 +274,33 @@ export function PlatformDataTable<T>({
                     {mobileTitle(row)}
                   </div>
                 ) : null}
-                {columns
-                  .filter((c) =>
-                    mobileTitle
-                      ? true
-                      : c.key !== columns[0].key
-                        ? true
-                        : false,
-                  )
-                  .map((col) => {
-                    // When there's an explicit mobileTitle, show every column as a labelled row.
-                    // Otherwise the first column IS the title (rendered above via cell fallback).
-                    if (!mobileTitle && col.key === columns[0].key) {
-                      return (
-                        <div
-                          key={col.key}
-                          className="font-medium text-foreground"
-                        >
-                          {(col.mobileCell ?? col.cell)(row)}
-                        </div>
-                      );
-                    }
+                {mobileColumns.map((col) => {
+                  // When there's an explicit mobileTitle, show every column as a labelled row.
+                  // Otherwise the first column IS the title (rendered above via cell fallback).
+                  if (!mobileTitle && col.key === columns[0].key) {
                     return (
                       <div
                         key={col.key}
-                        className="flex items-center justify-between gap-2 text-xs"
+                        className="font-medium text-foreground"
                       >
-                        <span className="shrink-0 text-muted-foreground">
-                          {col.header}
-                        </span>
-                        <span className="min-w-0 text-end text-foreground">
-                          {(col.mobileCell ?? col.cell)(row)}
-                        </span>
+                        {(col.mobileCell ?? col.cell)(row)}
                       </div>
                     );
-                  })}
+                  }
+                  return (
+                    <div
+                      key={col.key}
+                      className="flex items-center justify-between gap-2 text-xs"
+                    >
+                      <span className="shrink-0 text-muted-foreground">
+                        {col.header}
+                      </span>
+                      <span className="min-w-0 text-end text-foreground">
+                        {(col.mobileCell ?? col.cell)(row)}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
               {rowActions ? (
                 <div onClick={(e) => e.stopPropagation()} className="shrink-0">
