@@ -5,6 +5,7 @@ import { signBillingBody, BILLING_KEY_HEADER, BILLING_SIGNATURE_HEADER, BILLING_
 import { parseEntitlementPush, type EntitlementPayloadV1 } from "../contract/v1";
 import { buildCmsEntitlementPayload } from "./cms-payload";
 import { billingLog } from "../observability";
+import { assertPublicHttpsUrl } from "../../ssrf";
 
 const MAX_ATTEMPTS = 8;
 const LEASE_MS = 10 * 60 * 1000;
@@ -87,6 +88,12 @@ async function pushPayload(
   const timestamp = String(Math.floor(Date.now() / 1000));
   const signature = signBillingBody(cred.secret, timestamp, body);
   const url = `${cred.baseUrl}/api/platform/billing/entitlements/v1`;
+
+  const target = await assertPublicHttpsUrl(url);
+  if (!target.ok) {
+    return { ok: false, permanent: true, error: `ssrf_blocked: ${target.reason}` };
+  }
+
   try {
     const response = await fetch(url, {
       method: "POST",
