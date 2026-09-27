@@ -5,7 +5,7 @@ describe("public and bearer cloud API execution targets", () => {
   it("marks every cloud transport and OAuth surface central-only", () => {
     for (const path of [
       "/api/rollup/ingest", "/api/server-sync/push", "/api/server-sync/pull",
-      "/api/server-sync/update-check", "/api/server-sync/media/abc", "/api/server-sync/config/generate-token",
+      "/api/server-sync/update-check", "/api/server-sync/media/abc", "/api/server-sync/config/generate-token", "/api/server-sync/credential-rotation/ack",
       "/api/peer/backup/manifest",
       "/api/v1/orders", "/api/ai/chat", "/api/workspace/projects", "/api/billing/plans",
       "/api/messaging/campaigns", "/api/notifications/devices", "/api/notifications/public-key",
@@ -13,7 +13,7 @@ describe("public and bearer cloud API execution targets", () => {
       "/api/connections/website", "/api/integrations/wordpress/events",
       "/api/integrations/woocommerce/webhook/id", "/api/mcp", "/api/mcp/oauth/token",
       "/api/connections/mcp/consent", "/api/well-known/oauth-authorization-server/x",
-      "/.well-known/oauth-protected-resource", "/api/cms/revalidate", "/api/cms/order-events", "/api/pairing/redeem",
+      "/.well-known/oauth-protected-resource", "/api/cms/revalidate", "/api/cms/order-events", "/api/pairing/redeem", "/api/pairing/activate",
       "/mcp/consent",
     ]) expect(isCentralExecutionPath(path), path).toBe(true);
   });

@@ -91,6 +91,15 @@ describe("pairingCodeState", () => {
     );
   });
 
+  it("shows a reserved snapshot as pending rather than pretending it is activated", () => {
+    expect(pairingCodeState({
+      expiresAt: future,
+      redeemedAt: null,
+      revokedAt: null,
+      enrollmentState: "snapshot_prepared",
+    }, now)).toBe("code_pending_activation");
+  });
+
   it("rejects a revoked code", () => {
     expect(pairingCodeState({ expiresAt: future, redeemedAt: null, revokedAt: past }, now)).toBe(
       "code_revoked",

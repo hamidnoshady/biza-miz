@@ -66,6 +66,8 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/cms/order-events",
   "/api/pairing/redeem",
   "/api/pairing/acknowledge",
+  "/api/pairing/activate",
+  "/api/server-sync/credential-rotation",
   "/mcp",
 ] as const;
 
@@ -122,6 +124,8 @@ const PUBLIC_PATHS = [
   // their business origin. See src/lib/pairing-redeem.ts.
   "/api/pairing/redeem",
   "/api/pairing/acknowledge",
+  "/api/pairing/activate",
+  "/api/server-sync/credential-rotation",
   // Phase 12: self-service business registration creates the tenant a session
   // would otherwise be scoped to, so it cannot require one. Refuses with 403
   // unless ALLOW_PUBLIC_SIGNUP is set.

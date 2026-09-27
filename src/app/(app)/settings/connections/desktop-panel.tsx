@@ -23,6 +23,7 @@ import { useCallback, useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import { ErrorBox, InfoBox, PrimaryButton, SecondaryButton, api, errorMessage } from "@/app/dashboard/ui";
 import { SectionCard } from "@/app/dashboard/page-chrome";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 interface PairingCodeSummary {
   id: string;
@@ -30,7 +31,7 @@ interface PairingCodeSummary {
   redeemedAt: string | null;
   revokedAt: string | null;
   createdAt: string;
-  state: "valid" | "code_expired" | "code_already_redeemed" | "code_revoked";
+  state: "valid" | "code_pending_activation" | "code_expired" | "code_already_redeemed" | "code_revoked";
 }
 
 interface SiteDeviceView {
@@ -44,6 +45,10 @@ interface SiteDeviceView {
   lastSeenAt: string | null;
   revokedAt: string | null;
   credentialRotatedAt: string | null;
+  credentialRotationPending: boolean;
+  lastSuccessfulPushAt: string | null;
+  lastSuccessfulPullAt: string | null;
+  lastSyncError: string | null;
 }
 
 interface DesktopView {
@@ -58,6 +63,7 @@ interface DesktopView {
 const STATE_LABELS: Record<PairingCodeSummary["state"], { label: string; className: string }> = {
   valid: { label: "آماده استفاده", className: "bg-emerald-100 dark:bg-emerald-500/20 text-emerald-800 dark:text-emerald-200" },
   code_already_redeemed: { label: "استفاده‌شده", className: "bg-sky-100 dark:bg-sky-500/20 text-sky-800 dark:text-sky-200" },
+  code_pending_activation: { label: "در انتظار فعال‌سازی", className: "bg-amber-100 dark:bg-amber-500/20 text-amber-800 dark:text-amber-200" },
   code_expired: { label: "منقضی", className: "bg-muted text-muted-foreground" },
   code_revoked: { label: "لغوشده", className: "bg-muted text-muted-foreground" },
 };
@@ -114,8 +120,12 @@ export function DesktopPanel() {
   const [notice, setNotice] = useState("");
   /** The plaintext code, held only until this component unmounts — it is never retrievable again. */
   const [issued, setIssued] = useState("");
-  const [rotatedCredential, setRotatedCredential] = useState<{ deviceId: string; token: string } | null>(null);
+  const [rotationPendingFor, setRotationPendingFor] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{ device: SiteDeviceView; action: "rotate" | "revoke" } | null>(null);
   const [locationId, setLocationId] = useState("");
+  const [repairOpen, setRepairOpen] = useState(false);
+  const [repairAddress, setRepairAddress] = useState("");
+  const [repairCode, setRepairCode] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -176,17 +186,32 @@ export function DesktopPanel() {
     await load();
   }
 
-  async function manageDevice(device: SiteDeviceView, action: "rotate" | "revoke") {
-    const warning =
-      action === "rotate"
-        ? `اعتبارنامهٔ فعلی «${device.displayName}» فوراً از کار می‌افتد. پس از چرخش باید مقدار تازه را روی همان نصب محلی ذخیره کنید. ادامه می‌دهید؟`
-        : `دستگاه «${device.displayName}» به‌طور غیرقابل‌بازگشت لغو می‌شود و دیگر همگام نخواهد شد. ادامه می‌دهید؟`;
-    if (!window.confirm(warning)) return;
-
+  async function repairConnection() {
     setBusy(true);
     setError("");
     setNotice("");
-    setRotatedCredential(null);
+    const { ok, data } = await api<{ activationPending?: boolean; error?: string }>("/api/setup/reconnect", {
+      method: "POST",
+      body: JSON.stringify({ remoteUrl: repairAddress, code: repairCode }),
+    });
+    setBusy(false);
+    if (!ok) {
+      setError(errorMessage(data.error) || "ترمیم اتصال ممکن نشد.");
+      return;
+    }
+    setRepairCode("");
+    setRepairOpen(false);
+    setNotice(data.activationPending
+      ? "داده‌های محلی حفظ شد؛ فعال‌سازی ابری در صف تلاش دوباره است."
+      : "دستگاه بدون حذف داده‌های محلی دوباره متصل شد و همگام‌سازی فعال است.");
+    await load();
+  }
+
+  async function manageDevice(device: SiteDeviceView, action: "rotate" | "revoke") {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    setRotationPendingFor(null);
     const { ok, data } = await api<{ token?: string; error?: string }>("/api/connections/desktop", {
       method: "PATCH",
       body: JSON.stringify({ deviceId: device.id, action }),
@@ -200,11 +225,11 @@ export function DesktopPanel() {
       );
       return;
     }
-    if (action === "rotate" && data.token) {
-      setRotatedCredential({ deviceId: device.id, token: data.token });
-      setNotice("اعتبارنامه چرخید. مقدار تازه فقط همین یک بار نمایش داده می‌شود؛ آن را فوراً روی نصب محلی ذخیره کنید.");
+    if (action === "rotate") {
+      setRotationPendingFor(device.id);
+      setNotice("چرخش با دورهٔ هم‌پوشانی امن آغاز شد. نصب محلی اعتبارنامهٔ تازه را خودکار دریافت و تأیید می‌کند؛ اعتبارنامهٔ فعلی تا پایان انتقال معتبر می‌ماند.");
     } else {
-      setNotice("دستگاه و اعتبارنامهٔ آن لغو شد.");
+      setNotice("دستگاه و تمام اعتبارنامه‌های آن لغو شد.");
     }
     await load();
   }
@@ -218,10 +243,24 @@ export function DesktopPanel() {
     return (
       <SectionCard title="این نصب، نسخهٔ محلی است">
         <p className="text-sm leading-6 text-muted-foreground">
-          کد اتصال دسکتاپ در حساب ابری ساخته می‌شود، نه روی نصب محلی. وارد حساب ابری خود شوید و از همین بخش
-          «اتصال‌ها → برنامه دسکتاپ» کد بگیرید.
+          کد اتصال دسکتاپ در حساب ابری ساخته می‌شود، نه روی نصب محلی. برای اتصال معمول، کد را از حساب ابری بگیرید.
+          اگر دستگاه لغو شده یا اعتبارنامه‌اش از بین رفته است، از ترمیم استفاده کنید؛ داده و رویدادهای صف‌شدهٔ محلی پاک نمی‌شوند.
         </p>
         <ErrorBox>{error}</ErrorBox>
+        {notice ? <InfoBox>{notice}</InfoBox> : null}
+        {!repairOpen ? (
+          <PrimaryButton onClick={() => setRepairOpen(true)}>ترمیم / اتصال دوبارهٔ دسکتاپ</PrimaryButton>
+        ) : (
+          <div className="mt-4 space-y-3 rounded-xl border border-border p-4">
+            <p className="text-sm text-muted-foreground">یک کد تازه برای همین شعبه از حساب ابری بسازید، سپس آدرس و کد را وارد کنید.</p>
+            <input className="h-11 w-full rounded-lg border border-input bg-background px-3 text-sm" dir="ltr" value={repairAddress} onChange={(event) => setRepairAddress(event.target.value)} placeholder="https://cloud.example.com" />
+            <input className="h-11 w-full rounded-lg border border-input bg-background px-3 text-sm" dir="ltr" value={repairCode} onChange={(event) => setRepairCode(event.target.value)} placeholder="XXXX-XXXX-XXXX" />
+            <div className="flex flex-wrap gap-2">
+              <PrimaryButton onClick={() => void repairConnection()} disabled={busy || !repairAddress || !repairCode}>{busy ? "در حال ترمیم…" : "اتصال دوباره"}</PrimaryButton>
+              <SecondaryButton onClick={() => setRepairOpen(false)} disabled={busy}>انصراف</SecondaryButton>
+            </div>
+          </div>
+        )}
       </SectionCard>
     );
   }
@@ -230,7 +269,8 @@ export function DesktopPanel() {
 
   return (
     <div className="space-y-6">
-      <SectionCard title="اتصال یک دستگاه جدید">
+      <SectionCard title="دسکتاپ و همگام‌سازی ابری">
+        <p className="mb-4 text-sm leading-6 text-muted-foreground">چرخهٔ اتصال: کد → دادهٔ اولیه → فعال‌سازی امن → همگام‌سازی زنده. دستگاه تا تأیید دادهٔ اولیه، فعال یا «متصل» نمایش داده نمی‌شود.</p>
         <p className="mb-4 text-sm leading-6 text-muted-foreground">
           در برنامهٔ دسکتاپ، «اتصال به پلتفرم آنلاین» را انتخاب کنید و این دو مقدار را وارد کنید.
         </p>
@@ -292,8 +332,7 @@ export function DesktopPanel() {
 
       <SectionCard title="سرورهای ویندوز متصل">
         <p className="mb-4 text-sm leading-6 text-muted-foreground">
-          هر ردیف یک هویت مستقل و محدود به همان شعبه است. چرخش، اعتبارنامهٔ قبلی را فوراً باطل می‌کند؛ لغو نیز
-          دائمی است و سابقهٔ دستگاه را برای حسابرسی نگه می‌دارد.
+          هر ردیف یک هویت مستقل و محدود به همان شعبه است. چرخش با یک دورهٔ هم‌پوشانی کوتاه انجام می‌شود تا همگام‌سازی قطع نشود؛ لغو دائمی است و سابقهٔ دستگاه را برای حسابرسی نگه می‌دارد.
         </p>
         {!view || view.devices.length === 0 ? (
           <p className="text-sm text-muted-foreground">هنوز دستگاهی با موفقیت متصل نشده است.</p>
@@ -310,8 +349,12 @@ export function DesktopPanel() {
                         شعبه: {device.locationName} • شناسه: <code dir="ltr">{device.publicId}</code>
                       </p>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        اتصال: {device.lastSeenAt ? formatDateTime(device.lastSeenAt) : "هنوز ارتباطی ثبت نشده"}
+                        احراز هویت: {device.lastSeenAt ? formatDateTime(device.lastSeenAt) : "هنوز ارتباطی ثبت نشده"}
                         {device.credentialRotatedAt ? ` • چرخش اعتبارنامه: ${formatDateTime(device.credentialRotatedAt)}` : ""}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        آخرین ارسال موفق: {device.lastSuccessfulPushAt ? formatDateTime(device.lastSuccessfulPushAt) : "هنوز ثبت نشده"} • دریافت موفق: {device.lastSuccessfulPullAt ? formatDateTime(device.lastSuccessfulPullAt) : "هنوز ثبت نشده"}
+                        {device.lastSyncError ? ` • خطا: ${device.lastSyncError}` : ""}
                       </p>
                     </div>
                     <span
@@ -321,24 +364,18 @@ export function DesktopPanel() {
                           : "bg-muted text-muted-foreground"
                       }`}
                     >
-                      {active ? "فعال" : device.status === "pending" ? "در انتظار تأیید نصب" : device.status === "revoked" ? "لغوشده" : "غیرفعال"}
+                      {active ? "فعال" : device.status === "pending" ? "در انتظار فعال‌سازی" : device.status === "revoked" ? "لغوشده" : "غیرفعال"}
                     </span>
                   </div>
-                  {rotatedCredential?.deviceId === device.id ? (
-                    <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 dark:border-amber-500/40 dark:bg-amber-500/10">
-                      <CopyRow
-                        label="اعتبارنامهٔ تازه — فقط همین یک بار"
-                        value={rotatedCredential.token}
-                        hint="در تنظیمات سرور راه دورِ نصب محلی ذخیره کنید"
-                      />
-                    </div>
+                  {rotationPendingFor === device.id || device.credentialRotationPending ? (
+                    <InfoBox>اعتبارنامهٔ تازه در حال تحویل امن به نصب محلی است. تا زمان تأیید، اعتبارنامهٔ قبلی معتبر می‌ماند.</InfoBox>
                   ) : null}
                   {active ? (
                     <div className="mt-3 flex flex-wrap gap-2">
-                      <SecondaryButton onClick={() => manageDevice(device, "rotate")} disabled={busy}>
+                      <SecondaryButton onClick={() => setConfirmAction({ device, action: "rotate" })} disabled={busy}>
                         چرخش اعتبارنامه
                       </SecondaryButton>
-                      <SecondaryButton onClick={() => manageDevice(device, "revoke")} disabled={busy}>
+                      <SecondaryButton onClick={() => setConfirmAction({ device, action: "revoke" })} disabled={busy}>
                         لغو دستگاه
                       </SecondaryButton>
                     </div>
@@ -381,6 +418,26 @@ export function DesktopPanel() {
           </ul>
         )}
       </SectionCard>
+      {confirmAction ? (
+        <Dialog open onOpenChange={(open) => (open ? undefined : setConfirmAction(null))}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>{confirmAction.action === "rotate" ? "چرخش امن اعتبارنامه" : "لغو دستگاه"}</DialogTitle>
+              <DialogDescription>
+                {confirmAction.action === "rotate"
+                  ? `اعتبارنامهٔ تازه برای «${confirmAction.device.displayName}» به‌صورت خودکار و با دورهٔ هم‌پوشانی تحویل می‌شود. ادامه می‌دهید؟`
+                  : `دستگاه «${confirmAction.device.displayName}» دیگر اجازهٔ همگام‌سازی نخواهد داشت. این کار قابل بازگشت نیست.`}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <SecondaryButton onClick={() => setConfirmAction(null)} disabled={busy}>انصراف</SecondaryButton>
+              <PrimaryButton onClick={() => { const action = confirmAction; setConfirmAction(null); void manageDevice(action.device, action.action); }} disabled={busy}>
+                {confirmAction.action === "rotate" ? "شروع چرخش" : "لغو دستگاه"}
+              </PrimaryButton>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
     </div>
   );
 }

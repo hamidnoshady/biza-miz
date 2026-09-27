@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
-import { PERMISSIONS } from "@/lib/permissions";
+import { withTenantScope, requireRole } from "@/lib/auth";
 import {
   getServerSyncConfig,
   getServerSyncState,
@@ -32,9 +31,7 @@ import { REPLICATION_DOMAIN_CONTRACT } from "@/lib/data-ownership";
  * that pairing already knows. `resolvedRemoteUrl` is that derived address.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(
-    PERMISSIONS.integrationsView,
-  );
+  const { session, error } = await requireRole("owner");
   if (error) return error;
 
   const role = deploymentRole();
@@ -90,9 +87,7 @@ export const GET = withTenantScope(async () => {
 });
 
 export const PUT = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(
-    PERMISSIONS.integrationsManage,
-  );
+  const { session, error } = await requireRole("owner");
   if (error) return error;
 
   // A central server is what sites sync *to*; it has no peer of its own, and

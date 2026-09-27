@@ -167,10 +167,11 @@ describe("site-scoped sync credentials", () => {
       [device.rows[0].id, bizA.id, createHash("sha256").update(token).digest("hex")],
     );
 
-    expect(await serverSync.resolveSyncCredential(token)).toEqual({
+    expect(await serverSync.resolveSyncCredential(token)).toMatchObject({
       businessId: bizA.id,
       siteDeviceId: device.rows[0].id,
       locationId: bizA.locationId,
+      credentialState: "active",
     });
     expect((await serverSync.resolveSyncCredential(token))?.locationId).not.toBe(bizB.locationId);
 
@@ -205,19 +206,29 @@ describe("site-scoped sync credentials", () => {
     );
     expect(rotated.ok).toBe(true);
     if (!rotated.ok) throw new Error(rotated.error);
-    expect(rotated.token).not.toBe(oldToken);
+    expect(await serverSync.resolveSyncCredential(oldToken)).toMatchObject({ locationId: bizA.locationId, credentialState: "active" });
+    const handoff = await dbLib.withTenant(bizA.id, () =>
+      siteDevices.stagedCredentialForDevice(bizA.id, deviceA.rows[0].id, "active"),
+    );
+    expect(handoff?.token).toBeTruthy();
+    expect(handoff?.token).not.toBe(oldToken);
+    const stagedIdentity = await serverSync.resolveSyncCredential(handoff!.token);
+    expect(stagedIdentity).toMatchObject({ locationId: bizA.locationId, credentialState: "staged" });
+    expect(await dbLib.withTenant(bizA.id, () =>
+      siteDevices.acknowledgeStagedCredential(bizA.id, deviceA.rows[0].id, stagedIdentity?.credentialId),
+    )).toBe(true);
     expect(await serverSync.resolveSyncCredential(oldToken)).toBeNull();
-    expect((await serverSync.resolveSyncCredential(rotated.token))?.locationId).toBe(bizA.locationId);
+    expect((await serverSync.resolveSyncCredential(handoff!.token))?.locationId).toBe(bizA.locationId);
 
     const revoked = await dbLib.withTenant(bizA.id, () =>
       siteDevices.revokeSiteDevice(bizA.id, deviceA.rows[0].id, null),
     );
     expect(revoked).toEqual({ ok: true, alreadyRevoked: false });
-    expect(await serverSync.resolveSyncCredential(rotated.token)).toBeNull();
+    expect(await serverSync.resolveSyncCredential(handoff!.token)).toBeNull();
     expect(
       await dbLib.withTenant(bizA.id, () => siteDevices.rotateSiteCredential(bizA.id, deviceA.rows[0].id, null)),
     ).toEqual({ ok: false, error: "device_not_active" });
-    expect(await db.query("SELECT 1 FROM site_sync_credentials WHERE site_device_id = $1", [deviceA.rows[0].id]))
+    expect(await db.query("SELECT 1 FROM site_sync_credentials WHERE site_device_id = $1 AND revoked_at IS NULL", [deviceA.rows[0].id]))
       .toHaveProperty("rowCount", 0);
   });
 });

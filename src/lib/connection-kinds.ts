@@ -24,7 +24,6 @@ export const CONNECTION_KIND_KEYS = [
   "woocommerce",
   "website",
   "holoo",
-  "server_sync",
   "mcp",
   "api",
 ] as const;
@@ -47,9 +46,9 @@ export interface ConnectionKind {
 export const CONNECTION_KINDS: ConnectionKind[] = [
   {
     key: "desktop",
-    label: "دسکتاپ و ابر",
+    label: "دسکتاپ و همگام‌سازی ابری",
     description:
-      "نصب محلی، دستگاه‌های جفت‌شده و چرخهٔ کامل همگام‌سازی با ابر: راه‌اندازی، فعال‌سازی، وضعیت، آشتی‌سازی و بازیابی.",
+      "چرخهٔ کامل اتصال دسکتاپ به ابر: صدور کد، آماده‌سازی دادهٔ اولیه، فعال‌سازی امن، سلامت همگام‌سازی، تعمیر و لغو دستگاه.",
     // Redeeming a code hands over a snapshot of the whole business, including
     // credential hashes. That is an owner's decision, like inviting a member.
     allowedRoles: ["owner"],
@@ -88,9 +87,6 @@ export const CONNECTION_KINDS: ConnectionKind[] = [
     allowedRoles: ["owner", "manager"],
     feature: "integrations",
   },
-  // `?tab=server_sync` remains an input-only compatibility link. It resolves
-  // to the unified `desktop` surface below instead of exposing a second,
-  // competing sync lifecycle screen.
   {
     key: "mcp",
     label: "دستیارهای هوش مصنوعی",
@@ -136,23 +132,13 @@ export interface ConnectionKindVisibilityOptions {
  * `integrations` module belongs to the WordPress *management* half of
  * «مدیریت وب‌سایت», not to any connection.
  */
-export function visibleConnectionKinds(
-  options: ConnectionKindVisibilityOptions,
-): ConnectionKind[] {
-  if (options.industry && !hasModule(options.industry, "connections"))
-    return [];
-  return CONNECTION_KINDS.filter((kind) =>
-    kind.allowedRoles.includes(options.role),
-  );
+export function visibleConnectionKinds(options: ConnectionKindVisibilityOptions): ConnectionKind[] {
+  if (options.industry && !hasModule(options.industry, "connections")) return [];
+  return CONNECTION_KINDS.filter((kind) => kind.allowedRoles.includes(options.role));
 }
 
-export function isConnectionKindKey(
-  value: string | null | undefined,
-): value is ConnectionKindKey {
-  return (
-    typeof value === "string" &&
-    (CONNECTION_KIND_KEYS as readonly string[]).includes(value)
-  );
+export function isConnectionKindKey(value: string | null | undefined): value is ConnectionKindKey {
+  return typeof value === "string" && (CONNECTION_KIND_KEYS as readonly string[]).includes(value);
 }
 
 /**
@@ -167,17 +153,6 @@ export function resolveConnectionKind(
   visible: ConnectionKind[],
 ): ConnectionKindKey | null {
   if (visible.length === 0) return null;
-  // Links issued before the Desktop & Cloud consolidation stay useful without
-  // retaining a duplicate UI or separate lifecycle state.
-  if (
-    requested === "server_sync" &&
-    visible.some((kind) => kind.key === "desktop")
-  )
-    return "desktop";
-  if (
-    isConnectionKindKey(requested) &&
-    visible.some((kind) => kind.key === requested)
-  )
-    return requested;
+  if (isConnectionKindKey(requested) && visible.some((kind) => kind.key === requested)) return requested;
   return visible[0].key;
 }

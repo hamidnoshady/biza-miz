@@ -18,7 +18,7 @@
 
 import { isIndustry, type Industry } from "./industries";
 
-export const PAIRING_SNAPSHOT_VERSION = 4;
+export const PAIRING_SNAPSHOT_VERSION = 5;
 
 /**
  * Explicit contract for what pairing seeds and what continuing sync does (or
@@ -193,6 +193,12 @@ export interface PairingSnapshot {
     phone: string | null;
     timezone: string;
   };
+  /**
+   * Option A for cross-branch references: every desktop holds lightweight
+   * identities for the business's locations, while operational data remains
+   * limited to `location` above.
+   */
+  locationIdentities: Array<{ id: string; name: string; timezone: string }>;
   /** Independent, revocable identity of this Windows site. */
   siteDevice: {
     id: string;
@@ -304,6 +310,14 @@ export function validateSnapshot(raw: unknown): SnapshotValidation {
   if (!isNullableString(location.address)) return fail;
   if (!isNullableString(location.phone)) return fail;
   if (typeof location.timezone !== "string" || !location.timezone) return fail;
+  if (!Array.isArray(raw.locationIdentities) || raw.locationIdentities.length === 0) return fail;
+  const locationIdentityIds = new Set<string>();
+  for (const identity of raw.locationIdentities) {
+    if (!isObject(identity) || !isUuid(identity.id) || typeof identity.name !== "string" || !identity.name) return fail;
+    if (typeof identity.timezone !== "string" || !identity.timezone || locationIdentityIds.has(identity.id)) return fail;
+    locationIdentityIds.add(identity.id);
+  }
+  if (!locationIdentityIds.has(location.id)) return fail;
 
   const siteDevice = raw.siteDevice;
   if (!isObject(siteDevice)) return fail;

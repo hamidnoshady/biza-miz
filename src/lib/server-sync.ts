@@ -123,11 +123,14 @@ export async function setServerSyncConfig(
   await setSetting(businessId, SETTING_KEYS.serverSyncConfig, config);
   if (config.siteDeviceId) {
     if (config.token) {
-      await query(
-        `INSERT INTO site_sync_credentials (site_device_id, business_id, token_hash, rotated_at)
-         VALUES ($1, $2, $3, now())
-         ON CONFLICT (site_device_id) DO UPDATE
-           SET token_hash = EXCLUDED.token_hash, rotated_at = now()`,
+      const updated = await query(
+        `UPDATE site_sync_credentials SET token_hash=$3, rotated_at=now()
+          WHERE site_device_id=$1 AND business_id=$2 AND state='active' AND revoked_at IS NULL`,
+        [config.siteDeviceId, businessId, hashSyncToken(config.token)],
+      );
+      if ((updated.rowCount ?? 0) === 0) await query(
+        `INSERT INTO site_sync_credentials (site_device_id,business_id,token_hash,state)
+         VALUES ($1,$2,$3,'active')`,
         [config.siteDeviceId, businessId, hashSyncToken(config.token)],
       );
     } else {
@@ -164,6 +167,8 @@ export interface SyncCredentialIdentity {
   businessId: string;
   siteDeviceId: string | null;
   locationId: string | null;
+  credentialId?: string | null;
+  credentialState?: "active" | "staged" | null;
 }
 
 export async function resolveSyncCredential(
@@ -173,12 +178,14 @@ export async function resolveSyncCredential(
     const site = await query<{
       business_id: string;
       site_device_id: string;
-      location_id: string;
+      location_id: string; credential_id: string; credential_state: "active" | "staged";
     }>(
-      `SELECT c.business_id, c.site_device_id, d.location_id
+      `SELECT c.business_id,c.site_device_id,d.location_id,c.id AS credential_id,c.state AS credential_state
          FROM site_sync_credentials c
          JOIN site_devices d ON d.id = c.site_device_id AND d.business_id = c.business_id
-        WHERE c.token_hash = $1 AND d.status = 'active' AND d.revoked_at IS NULL`,
+        WHERE c.token_hash = $1 AND d.status='active' AND d.revoked_at IS NULL
+          AND c.state IN ('active','staged') AND c.revoked_at IS NULL
+          AND (c.valid_until IS NULL OR c.valid_until > now())`,
       [hashSyncToken(token)],
     );
     if (site.rows[0]) {
@@ -190,6 +197,8 @@ export async function resolveSyncCredential(
         businessId: site.rows[0].business_id,
         siteDeviceId: site.rows[0].site_device_id,
         locationId: site.rows[0].location_id,
+        credentialId: site.rows[0].credential_id,
+        credentialState: site.rows[0].credential_state,
       };
     }
     const legacy = await query<{ business_id: string }>(
@@ -234,6 +243,25 @@ export async function getServerSyncState(
     SETTING_KEYS.serverSyncState,
   );
   return s ? { ...EMPTY_STATE, ...s } : { ...EMPTY_STATE };
+}
+
+export interface SyncRunRecord {
+  businessId: string; siteDeviceId?: string | null; locationId?: string | null;
+  direction: "push" | "pull" | "activation"; status: "ok" | "error" | "skipped";
+  startCursor?: number | null; endCursor?: number | null; eventsAttempted?: number;
+  eventsApplied?: number; eventsDeferred?: number; eventsConflicted?: number;
+  eventsDeadLettered?: number; httpStatus?: number | null; errorCode?: string | null;
+  errorDetail?: string | null;
+}
+export async function recordSyncRun(run: SyncRunRecord): Promise<void> {
+  await query(`INSERT INTO sync_runs (business_id,site_device_id,location_id,direction,status,start_cursor,end_cursor,events_attempted,events_applied,events_deferred,events_conflicted,events_dead_lettered,http_status,error_code,error_detail,completed_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())`,
+    [run.businessId,run.siteDeviceId??null,run.locationId??null,run.direction,run.status,run.startCursor??null,run.endCursor??null,run.eventsAttempted??0,run.eventsApplied??0,run.eventsDeferred??0,run.eventsConflicted??0,run.eventsDeadLettered??0,run.httpStatus??null,run.errorCode??null,run.errorDetail?.slice(0,500)??null]);
+}
+export interface SyncRunView { id:string; siteDeviceId:string|null; locationId:string|null; direction:"push"|"pull"|"activation"; status:"running"|"ok"|"error"|"skipped"; startedAt:string; completedAt:string|null; eventsAttempted:number; eventsApplied:number; eventsDeferred:number; eventsConflicted:number; eventsDeadLettered:number; errorCode:string|null; }
+export async function listSyncRuns(businessId:string, limit=50): Promise<SyncRunView[]> {
+  const {rows}=await query<{id:string;site_device_id:string|null;location_id:string|null;direction:SyncRunView["direction"];status:SyncRunView["status"];started_at:Date;completed_at:Date|null;events_attempted:number;events_applied:number;events_deferred:number;events_conflicted:number;events_dead_lettered:number;error_code:string|null}>(`SELECT id,site_device_id,location_id,direction,status,started_at,completed_at,events_attempted,events_applied,events_deferred,events_conflicted,events_dead_lettered,error_code FROM sync_runs WHERE business_id=$1 ORDER BY started_at DESC LIMIT $2`,[businessId,Math.min(Math.max(limit,1),200)]);
+  return rows.map(r=>({id:r.id,siteDeviceId:r.site_device_id,locationId:r.location_id,direction:r.direction,status:r.status,startedAt:r.started_at.toISOString(),completedAt:r.completed_at?.toISOString()??null,eventsAttempted:r.events_attempted,eventsApplied:r.events_applied,eventsDeferred:r.events_deferred,eventsConflicted:r.events_conflicted,eventsDeadLettered:r.events_dead_lettered,errorCode:r.error_code}));
 }
 
 /**
@@ -997,6 +1025,22 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
   return { status: "ok", pulled: remoteEvents.length };
 }
 
+/** Receive and promote a staged replacement without exposing it to an owner browser. */
+export async function refreshStagedSiteCredential(businessId: string): Promise<boolean> {
+  const config=await getServerSyncConfig(businessId);
+  if (!config?.remoteUrl || !config.token || !config.siteDeviceId) return true;
+  const base=config.remoteUrl.trim().replace(/\/+$/, "");
+  try {
+    const response=await fetch(`${base}/api/server-sync/credential-rotation`,{headers:{Authorization:`Bearer ${config.token}`},signal:AbortSignal.timeout(30_000)});
+    if (!response.ok) return false;
+    const handoff=await response.json() as {pending?:boolean;token?:string};
+    let token=config.token;
+    if (handoff.token) { token=handoff.token; await setServerSyncConfig(businessId,{...config,token}); }
+    if (!handoff.pending) return true;
+    return (await fetch(`${base}/api/server-sync/credential-rotation/ack`,{method:"POST",headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(30_000)})).ok;
+  } catch { return false; }
+}
+
 /**
  * A pairing snapshot can commit locally while the acknowledgement response is
  * lost. The durable session fields in the site config let the normal sync tick
@@ -1080,9 +1124,9 @@ export async function runServerSyncTick(): Promise<void> {
 
   for (const row of rows) {
     try {
-      await withTenant(row.business_id, () =>
-        acknowledgePendingPairing(row.business_id),
-      );
+      await withTenant(row.business_id, () => acknowledgePendingPairing(row.business_id));
+      const credentialReady = await withTenant(row.business_id, () => refreshStagedSiteCredential(row.business_id));
+      if (!credentialReady) continue;
     } catch (err) {
       console.error(
         `pairing acknowledgement failed for business ${row.business_id}:`,

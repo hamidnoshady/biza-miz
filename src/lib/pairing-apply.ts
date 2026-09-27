@@ -73,6 +73,21 @@ export async function applyPairingSnapshot(
         ],
       );
 
+      const additionalLocations = snapshot.locationIdentities.filter((location) => location.id !== snapshot.location.id);
+      if (additionalLocations.length > 0) {
+        await client.query(
+          `INSERT INTO locations (id, business_id, name, timezone)
+           SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::text[], $4::text[])
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            additionalLocations.map((location) => location.id),
+            additionalLocations.map(() => snapshot.business.id),
+            additionalLocations.map((location) => location.name),
+            additionalLocations.map((location) => location.timezone),
+          ],
+        );
+      }
+
       await client.query(
         `INSERT INTO site_devices (id, business_id, location_id, public_id, display_name)
          VALUES ($1, $2, $3, $4, $5)`,
@@ -510,7 +525,11 @@ async function insertSettings(
       {
         remoteUrl,
         token: snapshot.syncToken,
-        enabled: false,
+        // The identity is still pending on the cloud until setup acknowledges
+        // this committed local transaction.  The sync worker retries that
+        // acknowledgement, then starts live sync automatically.
+        enabled: true,
+        pairingPending: true,
         batchSize: 100,
         siteDeviceId: snapshot.siteDevice.id,
         siteDevicePublicId: snapshot.siteDevice.publicId,
@@ -571,4 +590,72 @@ async function insertFeatures(
      ON CONFLICT (business_id, flag_key) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now()`,
     [snapshot.business.id, keys, vals],
   );
+}
+
+/**
+ * Non-destructive re-enrollment for a desktop that still has its business
+ * database but whose cloud identity was revoked or lost.  It intentionally
+ * does not replay bootstrap data: local orders/outbox rows stay untouched and
+ * only the machine identity + sync configuration are rebound.
+ */
+export async function repairPairingSnapshot(
+  snapshot: PairingSnapshot,
+  remoteUrl: string,
+): Promise<{ businessId: string; locationId: string }> {
+  return withoutTenantScope("platform", async () => {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query<{ id: string }>(
+        `SELECT b.id FROM businesses b JOIN locations l ON l.business_id=b.id
+          WHERE b.id=$1 AND l.id=$2 FOR UPDATE`,
+        [snapshot.business.id, snapshot.location.id],
+      );
+      if (!existing.rows[0]) throw new Error("repair_business_or_location_mismatch");
+      await client.query(
+        `INSERT INTO site_devices (id, business_id, location_id, public_id, display_name)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (id) DO UPDATE SET display_name=EXCLUDED.display_name, status='active', revoked_at=NULL`,
+        [
+          snapshot.siteDevice.id,
+          snapshot.business.id,
+          snapshot.location.id,
+          snapshot.siteDevice.publicId,
+          snapshot.siteDevice.displayName,
+        ],
+      );
+      await client.query(
+        `INSERT INTO site_sync_credentials (site_device_id,business_id,token_hash,state)
+         VALUES ($1,$2,$3,'active')
+         ON CONFLICT (token_hash) DO UPDATE SET revoked_at=NULL, state='active', rotated_at=now()`,
+        [snapshot.siteDevice.id, snapshot.business.id, createHash("sha256").update(snapshot.syncToken).digest("hex")],
+      );
+      await client.query(
+        `INSERT INTO settings (business_id, location_id, key, value)
+         VALUES ($1,NULL,$2,$3::jsonb)
+         ON CONFLICT (business_id, location_id, key) DO UPDATE SET value=EXCLUDED.value`,
+        [
+          snapshot.business.id,
+          SETTING_KEYS.serverSyncConfig,
+          JSON.stringify({
+            remoteUrl,
+            token: snapshot.syncToken,
+            enabled: true,
+            pairingPending: true,
+            batchSize: 100,
+            siteDeviceId: snapshot.siteDevice.id,
+            siteDevicePublicId: snapshot.siteDevice.publicId,
+            locationId: snapshot.location.id,
+          }),
+        ],
+      );
+      await client.query("COMMIT");
+      return { businessId: snapshot.business.id, locationId: snapshot.location.id };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
 }

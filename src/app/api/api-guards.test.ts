@@ -97,6 +97,10 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "server-to-server — authenticated by a site/location credential and constrained to its location (legacy tokens remain migration-only); not a session",
   "server-sync/update-check":
     "server-to-server — authenticated by a site or legacy business credential only; no global-token fallback and no session",
+  "server-sync/credential-rotation":
+    "server-to-server staged credential hand-off — authenticated by the current site credential, never a browser session",
+  "server-sync/credential-rotation/ack":
+    "server-to-server staged credential acknowledgement — authenticated by the newly staged site credential, never a browser session",
   "server-sync/media/[id]":
     "cloud-to-site media mirroring — authenticated by the site's scoped sync credential and constrained to that credential's business; no browser session",
   "cloud-exceptions/relay":
@@ -136,9 +140,8 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "the host-neutral twin of platform/pairing/redeem, session-less for the identical reason — " +
     "it exists because middleware moves everything under /api/platform to the console's host, " +
     "and an owner now issues a desktop code from their own business origin (src/lib/pairing-redeem.ts)",
-  "pairing/acknowledge":
-    "post-snapshot desktop handshake — a pending, device-bound sync bearer credential plus the durable " +
-    "pairing session and installation identity authenticate it; no tenant session exists on a new install",
+  "pairing/activate": "legacy machine-authenticated pairing acknowledgement alias",
+  "pairing/acknowledge": "machine-authenticated resumable pairing acknowledgement bound to the desktop installation identity",
   "integrations/wordpress/ping":
     "the WordPress plugin channel — authenticated by a bearer link token plus an HMAC envelope " +
     "over timestamp, nonce and body (src/lib/integrations/plugin-link.ts), never a tenant session; " +

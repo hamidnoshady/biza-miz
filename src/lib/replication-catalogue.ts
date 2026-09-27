@@ -1,0 +1,115 @@
+/**
+ * The single ownership contract for Desktop/Hybrid replication.
+ *
+ * This deliberately describes product ownership rather than pretending every
+ * table is a bidirectional replica.  Runtime event names are derived from the
+ * authoritative sync registry below; no second handwritten list of event
+ * strings is allowed in pairing copy or diagnostics.
+ */
+import { SYNC_EVENT_REGISTRY, type SyncEventDefinition } from "./sync-event-registry";
+
+export type ReplicationAuthority =
+  | "cloud_authoritative"
+  | "site_authoritative"
+  | "bidirectional"
+  | "site_local"
+  | "cloud_only";
+export type BootstrapPolicy = "snapshot" | "identity_only" | "none";
+export type LocationScope = "business" | "site" | "cross_location" | "machine";
+export type RetryPolicy = "idempotent_replay" | "manual_reconciliation" | "not_applicable";
+export type DependencyPolicy = "strict" | "defer" | "none";
+
+export interface ReplicationDomainDefinition {
+  key: string;
+  label: string;
+  authority: ReplicationAuthority;
+  bootstrap: BootstrapPolicy;
+  /** Registry effect classes whose event names belong to this domain. */
+  eventEffectClasses: readonly SyncEventDefinition["effectClass"][];
+  conflictPolicy: string;
+  locationScope: LocationScope;
+  retryPolicy: RetryPolicy;
+  dependencyPolicy: DependencyPolicy;
+  mediaTransfer: "none" | "metadata" | "on_demand" | "full";
+  deploymentProfiles: readonly ("cloud" | "hybrid" | "site")[];
+  notes: string;
+}
+
+export interface ReplicationDomain extends Omit<ReplicationDomainDefinition, "eventEffectClasses"> {
+  eventTypes: string[];
+}
+
+/**
+ * Every mutable desktop-relevant domain is declared here.  A domain with no
+ * events is intentionally explicit: it is either a bootstrap-only contract or
+ * cloud/site-local data, never an accidental sync omission.
+ */
+export const REPLICATION_DOMAIN_DEFINITIONS: readonly ReplicationDomainDefinition[] = [
+  { key: "business_settings", label: "Business profile and operational settings", authority: "cloud_authoritative", bootstrap: "snapshot", eventEffectClasses: [], conflictPolicy: "cloud replaces on repair", locationScope: "business", retryPolicy: "manual_reconciliation", dependencyPolicy: "none", mediaTransfer: "none", deploymentProfiles: ["cloud", "hybrid", "site"], notes: "Bootstrap settings are explicit; ongoing settings changes are not yet replicated." },
+  { key: "users_permissions", label: "Users, staff and permissions", authority: "cloud_authoritative", bootstrap: "snapshot", eventEffectClasses: [], conflictPolicy: "cloud replaces on repair", locationScope: "business", retryPolicy: "manual_reconciliation", dependencyPolicy: "strict", mediaTransfer: "none", deploymentProfiles: ["cloud", "hybrid", "site"], notes: "Active credential hashes and branch assignments seed the site; ongoing team edits are cloud-managed." },
+  { key: "locations", label: "Business location identities", authority: "cloud_authoritative", bootstrap: "identity_only", eventEffectClasses: [], conflictPolicy: "cloud replaces on repair", locationScope: "cross_location", retryPolicy: "manual_reconciliation", dependencyPolicy: "strict", mediaTransfer: "none", deploymentProfiles: ["cloud", "hybrid", "site"], notes: "All branch identities travel so cross-location references can be resolved; only the paired branch has operational data." },
+  { key: "catalogue", label: "Menus, products, modifiers and prices", authority: "cloud_authoritative", bootstrap: "snapshot", eventEffectClasses: [], conflictPolicy: "cloud replaces on repair", locationScope: "site", retryPolicy: "manual_reconciliation", dependencyPolicy: "strict", mediaTransfer: "on_demand", deploymentProfiles: ["cloud", "hybrid", "site"], notes: "Menu, recipe and price master data are seeded. Ongoing catalogue mutation needs an explicit future event before it is advertised as live." },
+  { key: "inventory_catalogue", label: "Inventory items", authority: "cloud_authoritative", bootstrap: "snapshot", eventEffectClasses: [], conflictPolicy: "cloud replaces on repair", locationScope: "site", retryPolicy: "manual_reconciliation", dependencyPolicy: "strict", mediaTransfer: "none", deploymentProfiles: ["cloud", "hybrid", "site"], notes: "Item metadata seeds a site; balances and lots do not." },
+  { key: "stock_and_lots", label: "Stock balances and lots", authority: "site_authoritative", bootstrap: "none", eventEffectClasses: ["inventory", "transfer"], conflictPolicy: "idempotent domain effect", locationScope: "site", retryPolicy: "idempotent_replay", dependencyPolicy: "defer", mediaTransfer: "none", deploymentProfiles: ["hybrid", "site"], notes: "Operational mutations synchronize as explicit domain events, never as direct balance replication." },
+  { key: "orders", label: "Orders", authority: "bidirectional", bootstrap: "none", eventEffectClasses: ["order"], conflictPolicy: "idempotency key and order-state conflict", locationScope: "site", retryPolicy: "idempotent_replay", dependencyPolicy: "defer", mediaTransfer: "none", deploymentProfiles: ["hybrid", "site"], notes: "New operational events sync; historical orders are not a bootstrap copy." },
+  { key: "payments", label: "Payments and tenders", authority: "bidirectional", bootstrap: "none", eventEffectClasses: ["payment"], conflictPolicy: "idempotency key and settlement validation", locationScope: "site", retryPolicy: "idempotent_replay", dependencyPolicy: "defer", mediaTransfer: "none", deploymentProfiles: ["hybrid", "site"], notes: "Payment effects wait for their order dependency." },
+  { key: "refunds", label: "Returns and refunds", authority: "bidirectional", bootstrap: "none", eventEffectClasses: ["refund"], conflictPolicy: "idempotency key and completed-order validation", locationScope: "site", retryPolicy: "idempotent_replay", dependencyPolicy: "defer", mediaTransfer: "none", deploymentProfiles: ["hybrid", "site"], notes: "Historical refund data is not seeded." },
+  { key: "journals", label: "Journal effects and fiscal controls", authority: "cloud_authoritative", bootstrap: "snapshot", eventEffectClasses: ["journal_reversal"], conflictPolicy: "ledger approval is authoritative", locationScope: "site", retryPolicy: "idempotent_replay", dependencyPolicy: "strict", mediaTransfer: "none", deploymentProfiles: ["cloud", "hybrid", "site"], notes: "The chart seeds locally; accounting documents, fiscal periods and reports remain cloud-authoritative." },
+  { key: "customers_crm", label: "Customers and CRM", authority: "cloud_only", bootstrap: "none", eventEffectClasses: [], conflictPolicy: "not applicable", locationScope: "business", retryPolicy: "not_applicable", dependencyPolicy: "none", mediaTransfer: "none", deploymentProfiles: ["cloud"], notes: "Customer/CRM history is not presented as synchronized desktop data." },
+  { key: "loyalty_credit", label: "Loyalty and store credit", authority: "cloud_only", bootstrap: "none", eventEffectClasses: [], conflictPolicy: "not applicable", locationScope: "business", retryPolicy: "not_applicable", dependencyPolicy: "none", mediaTransfer: "none", deploymentProfiles: ["cloud"], notes: "Cloud-only until an explicit value-safe protocol is introduced." },
+  { key: "suppliers_purchases", label: "Suppliers and purchases", authority: "bidirectional", bootstrap: "none", eventEffectClasses: ["inventory"], conflictPolicy: "idempotent domain effect", locationScope: "site", retryPolicy: "idempotent_replay", dependencyPolicy: "defer", mediaTransfer: "none", deploymentProfiles: ["hybrid", "site"], notes: "Purchase-related events are supported; supplier master data must exist before replay." },
+  { key: "stock_counts_waste_production", label: "Stock counts, waste and production", authority: "site_authoritative", bootstrap: "none", eventEffectClasses: ["inventory"], conflictPolicy: "idempotent domain effect", locationScope: "site", retryPolicy: "idempotent_replay", dependencyPolicy: "defer", mediaTransfer: "none", deploymentProfiles: ["hybrid", "site"], notes: "These operational effects are replayed through inventory domain handlers." },
+  { key: "transfers", label: "Cross-branch transfers", authority: "cloud_authoritative", bootstrap: "identity_only", eventEffectClasses: ["transfer"], conflictPolicy: "cloud orchestrates cross-location lifecycle", locationScope: "cross_location", retryPolicy: "manual_reconciliation", dependencyPolicy: "strict", mediaTransfer: "none", deploymentProfiles: ["cloud", "hybrid", "site"], notes: "Branch location identities are seeded. Cross-location transfer orchestration is cloud-authoritative; sites must not treat a single branch snapshot as a complete transfer ledger." },
+  { key: "payment_methods", label: "Payment methods", authority: "cloud_authoritative", bootstrap: "snapshot", eventEffectClasses: [], conflictPolicy: "cloud replaces on repair", locationScope: "business", retryPolicy: "manual_reconciliation", dependencyPolicy: "strict", mediaTransfer: "none", deploymentProfiles: ["cloud", "hybrid", "site"], notes: "Named methods seed locally; live configuration changes are cloud-managed." },
+  { key: "tables_reservations", label: "Tables and reservations", authority: "site_local", bootstrap: "snapshot", eventEffectClasses: [], conflictPolicy: "site owns current floor state", locationScope: "site", retryPolicy: "not_applicable", dependencyPolicy: "none", mediaTransfer: "none", deploymentProfiles: ["hybrid", "site"], notes: "Table definitions seed; availability and reservations are intentionally local." },
+  { key: "media", label: "Media metadata and files", authority: "cloud_authoritative", bootstrap: "snapshot", eventEffectClasses: [], conflictPolicy: "cloud object store is authoritative", locationScope: "business", retryPolicy: "manual_reconciliation", dependencyPolicy: "none", mediaTransfer: "on_demand", deploymentProfiles: ["cloud", "hybrid", "site"], notes: "Referenced metadata seeds; menu bytes are fetched on demand; media history is cloud-only." },
+  { key: "features_plans", label: "Feature and plan configuration", authority: "cloud_authoritative", bootstrap: "snapshot", eventEffectClasses: [], conflictPolicy: "cloud replaces on repair", locationScope: "business", retryPolicy: "manual_reconciliation", dependencyPolicy: "none", mediaTransfer: "none", deploymentProfiles: ["cloud", "hybrid", "site"], notes: "Feature entitlement snapshot prevents a site from inventing cloud plan state." },
+  { key: "integrations", label: "Website, Woo, WordPress, Holoo, API and MCP state", authority: "cloud_only", bootstrap: "none", eventEffectClasses: [], conflictPolicy: "not applicable", locationScope: "business", retryPolicy: "not_applicable", dependencyPolicy: "none", mediaTransfer: "none", deploymentProfiles: ["cloud"], notes: "Connection secrets and integration work queues do not travel to desktops." },
+  { key: "machine_state", label: "Desktop machine state", authority: "site_local", bootstrap: "none", eventEffectClasses: [], conflictPolicy: "not applicable", locationScope: "machine", retryPolicy: "not_applicable", dependencyPolicy: "none", mediaTransfer: "none", deploymentProfiles: ["site"], notes: "Certificates, printers, LAN gateway, local backups and offline browser queues stay on the machine." },
+] as const;
+
+export function replicationCatalogue(): ReplicationDomain[] {
+  return REPLICATION_DOMAIN_DEFINITIONS.map(({ eventEffectClasses, ...domain }) => ({
+    ...domain,
+    eventTypes: [...new Set(
+      SYNC_EVENT_REGISTRY
+        .filter((event) => eventEffectClasses.includes(event.effectClass))
+        .map((event) => event.type),
+    )],
+  }));
+}
+
+/** Pairing's user-facing coverage copy is a projection of the same catalogue. */
+export function pairingDataClassification(): {
+  bootstrapMasterData: string[];
+  ongoingDomainEvents: string[];
+  siteLocalOperationalData: string[];
+  centralOnlyData: string[];
+  notYetReplicated: string[];
+} {
+  const catalogue = replicationCatalogue();
+  const bootstrap = catalogue.filter((domain) => domain.bootstrap !== "none").map((domain) => domain.label);
+  const siteLocal = catalogue.filter((domain) => domain.authority === "site_local").map((domain) => domain.label);
+  const cloudOnly = catalogue.filter((domain) => domain.authority === "cloud_only").map((domain) => domain.label);
+  const notLive = catalogue
+    .filter((domain) => domain.bootstrap !== "none" && domain.eventTypes.length === 0 && domain.authority !== "site_local")
+    .map((domain) => domain.label);
+  return {
+    bootstrapMasterData: bootstrap,
+    ongoingDomainEvents: [...new Set(catalogue.flatMap((domain) => domain.eventTypes))].sort(),
+    siteLocalOperationalData: siteLocal,
+    centralOnlyData: cloudOnly,
+    notYetReplicated: [
+      ...notLive,
+      "journal entries, fiscal periods, bank reconciliation, payroll, tax filings, and accounting documents",
+    ],
+  };
+}
+
+/** A CI-friendly invariant: every registered ongoing event has explicit ownership. */
+export function replicationCatalogueProblems(): string[] {
+  const catalogued = new Set(replicationCatalogue().flatMap((domain) => domain.eventTypes));
+  return SYNC_EVENT_REGISTRY
+    .filter((event) => !catalogued.has(event.type))
+    .map((event) => `${event.type}@${event.schemaVersion}`);
+}

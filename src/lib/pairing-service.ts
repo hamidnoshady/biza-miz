@@ -391,7 +391,7 @@ export async function redeemPairingCode(
         );
         if (state !== "valid") {
           await client.query("ROLLBACK");
-          return { ok: false, error: state };
+          return { ok: false, error: state === "code_pending_activation" ? "pairing_session_unavailable" : state };
         }
 
         const syncToken = generateSyncToken();
@@ -601,6 +601,7 @@ export async function buildPairingSnapshot(
   const [
     bizRes,
     locRes,
+    locationIdentityRes,
     userRes,
     assignRes,
     accountRes,
@@ -638,6 +639,10 @@ export async function buildPairingSnapshot(
     }>(
       `SELECT id, name, address, phone, timezone FROM locations WHERE id = $1`,
       [locationId],
+    ),
+    query<{ id: string; name: string; timezone: string }>(
+      `SELECT id,name,timezone FROM locations WHERE business_id=$1 AND is_active ORDER BY created_at`,
+      [businessId],
     ),
     query<{
       id: string;
@@ -848,6 +853,7 @@ export async function buildPairingSnapshot(
     version: PAIRING_SNAPSHOT_VERSION,
     business: bizRes.rows[0],
     location: locRes.rows[0],
+    locationIdentities: locationIdentityRes.rows.map((location) => ({ id: location.id, name: location.name, timezone: location.timezone })),
     siteDevice,
     users: userRes.rows.map((u) => ({
       id: u.id,
