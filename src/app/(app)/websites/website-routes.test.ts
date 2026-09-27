@@ -62,8 +62,8 @@ describe("routing", () => {
   it("marks a section active on its own route and its nested pages only", () => {
     expect(isCmsSectionPathname(`${WEBSITE_HOME}/cms`, "overview")).toBe(true);
     // The manager's root must not light up every section under it.
-    expect(isCmsSectionPathname(`${WEBSITE_HOME}/cms/store`, "overview")).toBe(false);
-    expect(isCmsSectionPathname(`${WEBSITE_HOME}/cms/store`, "store")).toBe(true);
+    expect(isCmsSectionPathname(`${WEBSITE_HOME}/cms/products`, "overview")).toBe(false);
+    expect(isCmsSectionPathname(`${WEBSITE_HOME}/cms/products`, "products")).toBe(true);
     expect(isWpSectionPathname(`${WEBSITE_HOME}/wp/orders/12`, "orders")).toBe(true);
     expect(isWpSectionPathname(`${WEBSITE_HOME}/wp`, "orders")).toBe(false);
   });
@@ -93,15 +93,24 @@ describe("what a business sees, given its connections", () => {
 
   it("opens the whole manager once its connection exists", () => {
     const connected = state({
-      cms: { connected: true, domain: "acme.ir", setupStep: "built" },
+      cms: { connected: true, domain: "acme.ir", setupStep: "built", siteType: "store" },
       wp: { connected: true, storeCount: 1 },
     });
     expect(visibleCmsSections(connected)).toEqual([...CMS_SECTION_KEYS]);
     expect(visibleWpSections(connected)).toEqual([...WP_SECTION_KEYS]);
   });
 
+  it("hides store sections for portfolio sites", () => {
+    const portfolio = state({
+      cms: { connected: true, domain: "acme.ir", setupStep: "built", siteType: "portfolio" },
+    });
+    expect(visibleCmsSections(portfolio)).not.toContain("products");
+    expect(visibleCmsSections(portfolio)).not.toContain("orders");
+    expect(visibleCmsSections(portfolio)).toContain("pages");
+  });
+
   it("keeps the two answers independent — one connection never opens the other manager", () => {
-    const cmsOnly = state({ cms: { connected: true, domain: "acme.ir", setupStep: "built" } });
+    const cmsOnly = state({ cms: { connected: true, domain: "acme.ir", setupStep: "built", siteType: "business" } });
     expect(visibleCmsSections(cmsOnly)).toEqual([...CMS_SECTION_KEYS]);
     expect(visibleWpSections(cmsOnly)).toEqual(["overview"]);
     expect(hasAnyWebsite(cmsOnly)).toBe(true);

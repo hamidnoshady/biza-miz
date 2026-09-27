@@ -197,10 +197,14 @@ describe("the route tree resolves every promised URL", () => {
     }
     for (const pathname of [
       "/platform/login",
+      "/platform/cms/billing-sync",
       "/platform/cms/connection",
+      "/platform/cms/infrastructure",
       "/platform/cms/logs",
       "/platform/cms/sites",
+      "/platform/cms/sites/site-1",
       "/platform/cms/sync",
+      "/platform/cms/themes",
       "/platform/system/logs",
       "/platform/businesses/business-1",
       "/platform/businesses/business-1/settings",

@@ -227,10 +227,14 @@ const ERROR_MESSAGES: Record<string, string> = {
     no_tables: "حداقل یک میز لازم است.",
     // Phase 5 — offline queue, payments, hardware
     invalid_payment_method: "روش پرداخت نامعتبر است.",
+    // Retail invoice history filters (مدیریت فاکتورها).
+    invalid_invoice_status: "وضعیت فاکتور نامعتبر است.",
+    invalid_date_range: "بازهٔ تاریخ نامعتبر است؛ تاریخ شروع باید قبل از تاریخ پایان باشد.",
     // Splitting a bill across payment ways (migration 0091).
     no_payment: "روش دریافت وجه انتخاب نشده است.",
     payment_total_mismatch: "مجموع مبالغ روش‌های پرداخت باید دقیقاً برابر مبلغ فاکتور باشد.",
     too_many_tenders: "تعداد روش‌های پرداخت یک فاکتور بیش از حد مجاز است.",
+    too_many_open_tenders: "فقط یکی از روش‌های پرداخت می‌تواند بدون مبلغ (باقی‌مانده) باشد.",
     payment_reference_required: "برای این روش پرداخت، شمارهٔ پیگیری الزامی است.",
     payment_reference_too_long: "شمارهٔ پیگیری بیش از حد طولانی است.",
     invalid_settlement: "نحوهٔ تسویه نامعتبر است.",

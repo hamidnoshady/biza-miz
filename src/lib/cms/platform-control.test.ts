@@ -25,6 +25,7 @@ const config = (over: Partial<CmsControlConfig> = {}): CmsControlConfig => ({
   baseUrl: "https://cms.eshobe.com",
   eventsCursor: null,
   eventsShipped: 0,
+  storeOrderIngestCursor: null,
   label: "",
   lastEventsAt: null,
   lastEventsError: null,

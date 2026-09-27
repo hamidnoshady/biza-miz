@@ -14,12 +14,24 @@
  * edit, and a new page cannot drift by accident. See docs/ui-conventions.md.
  *
  * Deliberately not a client component: a page shell is markup, and every server
- * page can import it directly. Nothing here takes a callback except`TabBar`,
- * which is only ever rendered from a client manager.
+ * page can import it directly. `TabBar`/`TabPanel` are the one piece that
+ * needs interactivity (a roving-focus tab strip), so they live in their own
+ * `"use client"` module, `tab-bar.tsx` — re-exported below so this file stays
+ * the single import path every caller already uses.
  */
 import type { ComponentType, ReactNode } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { cardClass, overlayPanelClass, popoverPanelClass } from "./page-chrome-styles";
+import { TabBar, TabPanel } from "./tab-bar";
+import type { Tab } from "./tab-bar";
+
+// Re-exported so existing imports (`import { cardClass } from "../page-chrome"`,
+// `import { TabBar, TabPanel } from "../page-chrome"`) keep working — see
+// `page-chrome-styles.ts` and `tab-bar.tsx` for why these moved out.
+export { cardClass, overlayPanelClass, popoverPanelClass, TabBar, TabPanel };
+export type { Tab };
+
 
 /**
  * The one-column page canvas. Wraps every dashboard page so a wide monitor
@@ -56,34 +68,6 @@ export function PageHeader({
     </header>
  );
 }
-
-/**
- * The card skin — border, radius and the one-pixel warm shadow.`SectionCard` is
- * built from it; a surface whose *layout* is bespoke (a chat panel that fills a
- * fixed height, a canvas that scrolls) composes this instead of restating the
- * classes, so there is still exactly one definition of what a card looks like.
- */
-export const cardClass = "rounded-2xl border border-border/80 bg-card shadow-[0_1px_2px_rgb(41_37_36/0.035)]";
-
-/**
- * The floating-panel skin — modals, statement panels, date-picker popovers: the
- * one surface allowed to sit *above* the page rather than on it, so it is the
- * one surface with more than a one-pixel shadow. Same warm ink as`cardClass`,
- * just deeper and softer, still on a 1px hairline. Compose it (`className={
- *`${overlayPanelClass} p-5` }`) instead of hand-rolling`shadow-lg` — a modal
- * that restates its elevation drifts from every other dialog the moment one of
- * them is tuned.
- */
-export const overlayPanelClass =
- "rounded-2xl border border-border/80 bg-card shadow-[0_12px_32px_-6px_rgb(41_37_36/0.18)]";
-
-/**
- * The dropdown-popover skin — the shadcn popover spelling (`rounded-lg`,
- *`border-border`,`bg-popover`, the one sanctioned`shadow-md`) stated once so
- * app-level popovers (the Jalali date picker, inline menus) match the ones the
- * shadcn layer renders. Compose it rather than restating it.
- */
-export const popoverPanelClass = "rounded-lg border border-border bg-popover text-popover-foreground shadow-md";
 
 /**
  * A titled surface. Two shapes, one component: pass`flush` for a card whose
@@ -168,90 +152,6 @@ export function SectionCard({
         </div>
       ) : null}
     </section>
-  );
-}
-
-export interface Tab<K extends string> {
-  key: K;
- label: string;
-}
-
-/**
- * The dashboard's tab strip: a card of pills, two per row on a phone and a
- * single wrapping row from`sm` up. 52px tall because these are pressed on
- * tablets at a counter, and`aria-pressed` rather than`role="tab"` because the
- * panel below is a plain region, not a tabpanel widget.
- */
-export function TabBar<K extends string>({
-  idPrefix,
-  label,
-  tabs,
-  active,
-  onChange,
-  className,
-}: {
-  /** Prefixes the button and panel ids, so two strips can coexist on a page. */
-  idPrefix: string;
-  label: string;
-  tabs: readonly Tab<K>[];
-  active: K;
-  onChange: (key: K) => void;
-  className?: string;
-}) {
-  return (
-    <nav
-      aria-label={label}
-      className={cn(cardClass, "p-2", className)}
-    >
-      <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
-        {tabs.map((tab) => {
-          const isActive = active === tab.key;
-          return (
-            <button
-              key={tab.key}
-             id={`${idPrefix}-tab-${tab.key}`}
-              type="button"
-              aria-pressed={isActive}
-             aria-controls={`${idPrefix}-tabpanel`}
-              onClick={() => onChange(tab.key)}
-              className={cn(
-                "min-h-[52px] rounded-xl border px-3 text-center text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring focus-visible:ring-amber-400/40 dark:focus-visible:ring-amber-400/40 sm:px-4",
-                isActive
-                  ? "border-amber-200 dark:border-amber-500/30 bg-amber-100 dark:bg-amber-500/20 text-amber-950 dark:text-amber-200 shadow-[0_1px_2px_rgb(120_53_15/0.08)]"
-                  : "border-transparent bg-transparent text-muted-foreground hover:border-border hover:bg-muted hover:text-foreground",
-              )}
-            >
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
-    </nav>
- );
-}
-
-/**
- * The region a`TabBar` controls. Separate from`TabBar` so a manager can put
- * an error box or a warning banner between the strip and the panel.
- */
-export function TabPanel<K extends string>({
-  idPrefix,
-  active,
-  children,
-}: {
-  idPrefix: string;
-  active: K;
-  children: ReactNode;
-}) {
-  return (
-    <div
-     id={`${idPrefix}-tabpanel`}
-      role="region"
-     aria-labelledby={`${idPrefix}-tab-${active}`}
-      className="min-w-0"
-    >
-      {children}
-    </div>
   );
 }
 

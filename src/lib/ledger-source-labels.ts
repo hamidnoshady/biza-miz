@@ -38,6 +38,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   customer_return: "مرجوعی مشتری",
   woocommerce_order: "سفارش ووکامرس",
   woocommerce_refund: "بازپرداخت ووکامرس",
+  cms_store_order: "سفارش فروشگاه سایت",
 
   // Purchasing and stock
   purchase: "خرید",

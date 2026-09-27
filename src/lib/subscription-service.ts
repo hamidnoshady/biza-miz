@@ -313,8 +313,10 @@ export async function changeBusinessPlan(input: {
   const subscription = await getBusinessSubscription(input.businessId);
   if (!subscription) throw new SubscriptionError("subscription_not_found");
 
-  const { refreshEntitlementsForBusiness } = await import("./billing/entitlement/outbox-service");
-  void refreshEntitlementsForBusiness(input.businessId).catch(() => {});
+  if (process.env.DEPLOYMENT_ROLE !== "site") {
+    const { refreshEntitlementsForBusiness } = await import("./billing/entitlement/outbox-service");
+    void refreshEntitlementsForBusiness(input.businessId).catch(() => {});
+  }
 
   return { subscription, plan, outcome: existing ? "changed" : "created" };
 }

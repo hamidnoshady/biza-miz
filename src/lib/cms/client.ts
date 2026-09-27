@@ -293,6 +293,18 @@ export function fetchOrders(
   });
 }
 
+export function fetchOrderById(
+  config: CmsConfig,
+  id: string,
+  opts?: { fetchImpl?: FetchLike },
+): Promise<CmsOrder> {
+  return cmsRequest<CmsOrder>(config, {
+    path: `/api/orders/${encodeURIComponent(id)}`,
+    query: { depth: 1 },
+    fetchImpl: opts?.fetchImpl,
+  });
+}
+
 /* ------------------------------------------------------------------ */
 /* Site-level writes — requires the site's API key                      */
 /* ------------------------------------------------------------------ */
@@ -375,6 +387,37 @@ export function updatePost(
 
 export function deletePost(config: CmsConfig, id: string, opts?: { fetchImpl?: FetchLike }): Promise<null> {
   return cmsRequest<null>(config, { method: "DELETE", path: `/api/posts/${id}`, fetchImpl: opts?.fetchImpl });
+}
+
+export function createPage(
+  config: CmsConfig,
+  input: { title: string; slug?: string; layout?: unknown[] },
+  opts?: { fetchImpl?: FetchLike },
+): Promise<CmsPage> {
+  return cmsRequest<CmsPage>(config, {
+    method: "POST",
+    path: "/api/pages",
+    body: { title: input.title, ...(input.slug ? { slug: input.slug } : {}), layout: input.layout ?? [] },
+    fetchImpl: opts?.fetchImpl,
+  });
+}
+
+export function updatePage(
+  config: CmsConfig,
+  id: string,
+  patch: Partial<{ title: string; slug: string; layout: unknown[] }>,
+  opts?: { fetchImpl?: FetchLike },
+): Promise<CmsPage> {
+  return cmsRequest<CmsPage>(config, {
+    method: "PATCH",
+    path: `/api/pages/${id}`,
+    body: patch,
+    fetchImpl: opts?.fetchImpl,
+  });
+}
+
+export function deletePage(config: CmsConfig, id: string, opts?: { fetchImpl?: FetchLike }): Promise<null> {
+  return cmsRequest<null>(config, { method: "DELETE", path: `/api/pages/${id}`, fetchImpl: opts?.fetchImpl });
 }
 
 /**
@@ -618,6 +661,35 @@ export function revokeSiteApiKey(config: CmsConfig, id: string, opts?: { fetchIm
  * must resolve against the site's own origin, never the caller's. Do the
  * join here, in one place, so a move to R2 (absolute URLs) becomes a no-op.
  */
+export function fetchMedia(
+  config: CmsConfig,
+  opts?: { limit?: number; page?: number; fetchImpl?: FetchLike },
+): Promise<PayloadList<CmsMedia>> {
+  return cmsRequest<PayloadList<CmsMedia>>(config, {
+    path: "/api/media",
+    query: { limit: opts?.limit ?? 24, page: opts?.page, depth: 0, sort: "-createdAt" },
+    fetchImpl: opts?.fetchImpl,
+  });
+}
+
+export function updateMedia(
+  config: CmsConfig,
+  id: string,
+  patch: Partial<{ alt: string }>,
+  opts?: { fetchImpl?: FetchLike },
+): Promise<CmsMedia> {
+  return cmsRequest<CmsMedia>(config, {
+    method: "PATCH",
+    path: `/api/media/${id}`,
+    body: patch,
+    fetchImpl: opts?.fetchImpl,
+  });
+}
+
+export function deleteMedia(config: CmsConfig, id: string, opts?: { fetchImpl?: FetchLike }): Promise<null> {
+  return cmsRequest<null>(config, { method: "DELETE", path: `/api/media/${id}`, fetchImpl: opts?.fetchImpl });
+}
+
 export function absoluteCmsMediaUrl(media: Pick<CmsMedia, "url"> | string | null | undefined, mediaOrigin: string): string | null {
   if (media === null || media === undefined) return null;
   const url = typeof media === "string" ? media : media.url;

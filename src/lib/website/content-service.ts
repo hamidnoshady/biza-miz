@@ -136,8 +136,14 @@ export async function updateWebsitePost(
 export async function publishWebsitePost(businessId: string, postId: string): Promise<WebsiteResult<Post>> {
   if (!postId) return { ok: false, error: "bad_request" };
   try {
+    const { publishCmsPost } = await import("@/lib/cms/website-service");
+    const published = await publishCmsPost(businessId, postId);
+    if (!published.ok) return published;
     const { adapter } = await adapterForBusiness(businessId);
-    return { ok: true, data: await adapter.publishPost(postId) };
+    const page = await adapter.listPosts({ limit: 50 });
+    const post = page.items.find((row) => row.id === postId);
+    if (!post) return { ok: false, error: "not_found" };
+    return { ok: true, data: { ...post, status: "published" } };
   } catch (err) {
     return mapError(err);
   }

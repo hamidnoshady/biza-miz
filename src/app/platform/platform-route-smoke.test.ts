@@ -70,10 +70,14 @@ async function visit(pathname: string, cookies: { platform?: boolean; tenant?: b
 /** Top-level IA plus every platform detail/context route with a page. */
 const PLATFORM_ROUTES: readonly string[] = [
   ...NAV_GROUPS.flatMap((group) => group.items.map((item) => item.href)),
+  "/platform/cms/billing-sync",
   "/platform/cms/connection",
+  "/platform/cms/infrastructure",
   "/platform/cms/logs",
   "/platform/cms/sites",
+  "/platform/cms/sites/site-1",
   "/platform/cms/sync",
+  "/platform/cms/themes",
   "/platform/system/logs",
   "/platform/businesses/business-1",
   "/platform/businesses/business-1/settings",

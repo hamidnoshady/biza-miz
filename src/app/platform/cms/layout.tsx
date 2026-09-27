@@ -22,8 +22,11 @@ export default function CmsSectionLayout({ children }: { children: React.ReactNo
         items={[
           { exact: true, href: "/platform/cms", label: "میز فرمان" },
           { href: "/platform/cms/sites", label: "سایت‌ها" },
-          { href: "/platform/cms/sync", label: "همگام‌سازی" },
-          { href: "/platform/cms/logs", label: "پایش" },
+          { href: "/platform/cms/themes", label: "پوسته‌ها" },
+          { href: "/platform/cms/infrastructure", label: "زیرساخت" },
+          { href: "/platform/cms/billing-sync", label: "همگام‌سازی صورتحساب" },
+          { href: "/platform/cms/sync", label: "همگام‌سازی محتوا" },
+          { href: "/platform/cms/logs", label: "فعالیت" },
           { href: "/platform/cms/connection", label: "اتصال" },
         ]}
       />

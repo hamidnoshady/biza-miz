@@ -45,10 +45,15 @@ export const WEBSITE_NAV_GROUPS: readonly WebsiteNavGroup[] = [
 ];
 
 export const CMS_NAV_ITEMS: readonly WebsiteNavItem<CmsSectionKey>[] = [
-  { key: "overview", label: "میز کار سایت", description: "وضعیت سایت، دامنه و پیش‌نمایش زنده." },
+  { key: "overview", label: "میز کار سایت", description: "وضعیت سایت و پیش‌نمایش زنده." },
   { key: "setup", label: "ساخت سایت", description: "دامنه، CDN آروان، نوع سایت و ساخت." },
-  { key: "content", label: "محتوا", description: "صفحه‌ها و نوشته‌های سایت." },
-  { key: "store", label: "فروشگاه", description: "محصولات و سفارش‌های فروشگاه اینترنتی." },
+  { key: "pages", label: "صفحه‌ها", description: "برگه‌های ثابت سایت." },
+  { key: "posts", label: "نوشته‌ها", description: "مطالب وبلاگ و اخبار." },
+  { key: "media", label: "رسانه‌های سایت", description: "تصاویر و فایل‌های سایت." },
+  { key: "products", label: "محصولات سایت", description: "کالاهای فروشگاه اینترنتی." },
+  { key: "orders", label: "سفارش‌های سایت", description: "سفارش‌های آنلاین و وضعیت آن‌ها." },
+  { key: "design", label: "طراحی و پوسته", description: "پوسته، استقرار و تنظیمات ظاهر." },
+  { key: "domain", label: "دامنه و DNS", description: "دامنه، رکوردها و CDN." },
   { key: "settings", label: "تنظیمات همگام‌سازی", description: "اینکه قیمت و موجودی کدام کالا به سایت برود." },
   { key: "billing", label: "اشتراک و صورت‌حساب", description: "هزینهٔ سایت، دامنه و تمدید." },
 ];

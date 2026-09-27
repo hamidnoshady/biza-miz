@@ -292,6 +292,54 @@ describe("sellAccessoryUnits", () => {
       ),
     ).rejects.toThrow(/قیمت فروش/);
   });
+
+  it("sells the same item twice in separate transactions without a duplicate-key crash", async () => {
+    // Regression test: sellAccessoryUnits used to post its revenue/COGS
+    // journal entries with `sourceId: input.itemId`, a fixed value for a
+    // given item. journal_entries has a unique index on (business_id,
+    // source_type, source_id, posting_kind), so the *first* sale of an
+    // accessory posted fine but every subsequent sale of that same item —
+    // the ordinary case for stock a shop expects to sell many times — threw
+    // a raw `duplicate key value violates unique constraint
+    // "uq_journal_business_source_posting"`. Each sale must get its own
+    // posting identity.
+    const { child } = await makeFamilyWithVariant();
+    await accessories.setUnitPrice(child.id, 250_000);
+    await accessories.receiveStock(child.id, { quantity: "10", unitCost: 60_000 });
+
+    const first = await withTransaction((client) =>
+      accessories.sellAccessoryUnits(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        itemId: child.id,
+        quantity: "3",
+        vatPercent: 9,
+        paymentMethod: "cash",
+      }),
+    );
+
+    const second = await withTransaction((client) =>
+      accessories.sellAccessoryUnits(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        itemId: child.id,
+        quantity: "2",
+        vatPercent: 9,
+        paymentMethod: "cash",
+      }),
+    );
+
+    expect(second.revenueEntryId).not.toBe(first.revenueEntryId);
+    expect(second.cogsEntryId).not.toBe(first.cogsEntryId);
+    expect(await linesOf(first.revenueEntryId)).not.toHaveLength(0);
+    expect(await linesOf(second.revenueEntryId)).not.toHaveLength(0);
+    expect((await accessories.getStock(child.id))?.quantity).toBe("5.000000000");
+
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT count(*)::text FROM journal_entries WHERE source_type = 'accessory_sale'`,
+    );
+    expect(rows[0].count).toBe("4");
+  });
 });
 
 describe("listVariantBoard", () => {

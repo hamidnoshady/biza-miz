@@ -388,3 +388,5 @@ export async function verifyCmsConnection(
     return { error: (error as Error)?.message ?? "unknown", ok: false, reason: "server_error" };
   }
 }
+
+export * from "./platform-client-execution";

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { INDUSTRIES, type Industry } from "./industries";
 import {
+  defaultGoldMakingChargePercent,
+  defaultGoldProfitPercent,
+  defaultRetailVatPercent,
   hasModule,
   industryProfile,
   labelFor,
@@ -308,6 +311,32 @@ describe("moduleForPagePath", () => {
   it("names only modules that exist", () => {
     for (const [, module] of PAGE_MODULE_PREFIXES) {
       expect(MODULE_KEYS).toContain(module);
+    }
+  });
+});
+
+describe("retail POS pricing defaults — one place, not hardcoded in the screen", () => {
+  it("gives jewelry its configured اجرت/سود/مالیات defaults, not a literal in the POS component", () => {
+    expect(defaultGoldMakingChargePercent("jewelry")).toBe(
+      INDUSTRY_PROFILES.jewelry.retailDefaults?.goldMakingChargePercent,
+    );
+    expect(defaultGoldProfitPercent("jewelry")).toBe(INDUSTRY_PROFILES.jewelry.retailDefaults?.goldProfitPercent);
+    expect(defaultRetailVatPercent("jewelry")).toBe(INDUSTRY_PROFILES.jewelry.retailDefaults?.vatPercent);
+  });
+
+  it("falls back to 9% VAT and 7%/7% gold defaults for an industry with no retailDefaults opinion", () => {
+    const noOpinion = Object.entries(INDUSTRY_PROFILES).find(([, p]) => !p.retailDefaults)?.[0] as
+      | Industry
+      | undefined;
+    if (!noOpinion) return; // every industry has opted in — nothing to assert
+    expect(defaultRetailVatPercent(noOpinion)).toBe(9);
+    expect(defaultGoldMakingChargePercent(noOpinion)).toBe(7);
+    expect(defaultGoldProfitPercent(noOpinion)).toBe(7);
+  });
+
+  it("reads a per-industry VAT default for every retail industry without throwing", () => {
+    for (const industry of INDUSTRIES) {
+      expect(defaultRetailVatPercent(industry)).toBeGreaterThanOrEqual(0);
     }
   });
 });

@@ -74,6 +74,11 @@ const RULES: readonly Rule[] = [
       // Defines overlayPanelClass/popoverPanelClass and names the banned
       // spellings in its doc comments.
       "page-chrome.tsx",
+      // The actual definitions, split out of page-chrome.tsx (which
+      // re-exports them) so tab-bar.tsx's "use client" module and
+      // page-chrome.tsx's server-safe module can both import cardClass
+      // without an import cycle.
+      "page-chrome-styles.ts",
     ],
   },
   {
@@ -92,6 +97,9 @@ const RULES: readonly Rule[] = [
     allowed: [
       // Defines cardClass.
       "page-chrome.tsx",
+      // The actual definition — see the "heavy shadows" rule above for why
+      // it moved out of page-chrome.tsx.
+      "page-chrome-styles.ts",
     ],
   },
   {

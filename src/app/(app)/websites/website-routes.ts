@@ -56,12 +56,21 @@ export type WebsiteManagerKey = (typeof WEBSITE_MANAGER_KEYS)[number];
 export const CMS_SECTION_KEYS = [
   "overview",
   "setup",
-  "content",
-  "store",
+  "pages",
+  "posts",
+  "media",
+  "products",
+  "orders",
+  "design",
+  "domain",
   "settings",
   "billing",
 ] as const;
 export type CmsSectionKey = (typeof CMS_SECTION_KEYS)[number];
+
+export type CmsSiteType = "business" | "portfolio" | "store";
+
+const PORTFOLIO_HIDDEN_SECTIONS = new Set<CmsSectionKey>(["products", "orders"]);
 
 /** The route for a CMS section. The overview is the manager's root. */
 export function cmsSectionHref(key: CmsSectionKey): string {
@@ -114,6 +123,8 @@ export interface WebsiteManagersState {
     domain: string | null;
     /** How far the build wizard has got — `built` once the site exists. */
     setupStep: "domain" | "cdn" | "type" | "build" | "built" | null;
+    /** From setup while disconnected; from the live descriptor when connected. */
+    siteType: CmsSiteType | null;
   };
   wp: {
     connected: boolean;
@@ -123,7 +134,7 @@ export interface WebsiteManagersState {
 }
 
 export const EMPTY_WEBSITE_MANAGERS_STATE: WebsiteManagersState = {
-  cms: { connected: false, domain: null, setupStep: null },
+  cms: { connected: false, domain: null, setupStep: null, siteType: null },
   wp: { connected: false, storeCount: 0 },
 };
 
@@ -136,6 +147,9 @@ export const EMPTY_WEBSITE_MANAGERS_STATE: WebsiteManagersState = {
  */
 export function visibleCmsSections(state: WebsiteManagersState): CmsSectionKey[] {
   if (!state.cms.connected) return ["overview", "setup"];
+  if (state.cms.siteType === "portfolio") {
+    return CMS_SECTION_KEYS.filter((key) => !PORTFOLIO_HIDDEN_SECTIONS.has(key));
+  }
   return [...CMS_SECTION_KEYS];
 }
 

@@ -121,6 +121,24 @@ must be **HTTPS and on the same host as the manifest**; anything else is rejecte
 (`unexpected_download_url`), so a manifest can never point the plugin at an
 arbitrary URL on the internet.
 
+### «هیچ افزونهٔ معتبری یافت نشد» on install
+
+WordPress shows this when the uploaded or downloaded zip does not unpack to a
+folder that contains `pos-accounting-connector.php` with a `Plugin Name:` header.
+Common causes:
+
+1. **Wrong file** — the repository «Source code» zip, `update.json`, or a
+   re-zipped artifact that still wraps `pos-accounting-connector.zip` inside
+   another zip. Use the clean **`pos-accounting-connector.zip`** from the
+   workflow artifact or `https://updates.eshobe.app/wordpress/pos-accounting-connector/pos-accounting-connector.zip`.
+2. **Windows backslash paths** — zips built with `Compress-Archive` instead of
+   the workflow's ZipArchive step install as one flat file. Rebuild with
+   **build-plugin-zip** and re-upload.
+3. **GitHub tag zipball** — the whole monorepo; since 1.6.6 the plugin's
+   `upgrader_source_selection` handler walks wrapper folders before WordPress
+   validates the package. Update through «به‌روزرسانی‌های موجود» or upload the
+   clean zip for first install.
+
 ### Transitioning stores from GitHub mode to self-hosted
 
 Stores running 1.4.x don't know your URL yet — they still check GitHub. The

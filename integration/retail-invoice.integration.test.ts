@@ -27,6 +27,8 @@ let itemsService: typeof import("../src/lib/items-service");
 let goldPricesService: typeof import("../src/lib/gold-prices-service");
 let accessoriesService: typeof import("../src/lib/accessories-service");
 let invoiceService: typeof import("../src/lib/retail-invoice-service");
+let readService: typeof import("../src/lib/retail-invoice/read-service");
+let printDataService: typeof import("../src/lib/retail-invoice/print-data");
 
 const biz = { id: "", locationId: "" };
 const acct: Record<string, string> = {};
@@ -62,6 +64,8 @@ beforeAll(async () => {
   goldPricesService = await import("../src/lib/gold-prices-service");
   accessoriesService = await import("../src/lib/accessories-service");
   invoiceService = await import("../src/lib/retail-invoice-service");
+  readService = await import("../src/lib/retail-invoice/read-service");
+  printDataService = await import("../src/lib/retail-invoice/print-data");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -185,7 +189,7 @@ describe("a jewellery invoice", () => {
       businessId: biz.id,
       locationId: biz.locationId,
       industry: "jewelry",
-      paymentMethod: "cash",
+      tenders: [{ method: "cash" }],
       lines: [
         {
           kind: "gold",
@@ -236,7 +240,7 @@ describe("a jewellery invoice", () => {
       businessId: biz.id,
       locationId: biz.locationId,
       industry: "jewelry",
-      paymentMethod: "cash",
+      tenders: [{ method: "cash" }],
       lines: [
         {
           kind: "gold",
@@ -301,7 +305,7 @@ describe("a jewellery invoice", () => {
       businessId: biz.id,
       locationId: biz.locationId,
       industry: "jewelry",
-      paymentMethod: "cash",
+      tenders: [{ method: "cash" }],
       lines: [
         { ...line, itemId: a.id },
         { ...line, itemId: b.id },
@@ -342,7 +346,7 @@ describe("a jewellery invoice", () => {
         businessId: biz.id,
         locationId: biz.locationId,
         industry: "jewelry",
-        paymentMethod: "cash",
+        tenders: [{ method: "cash" }],
         lines: [
           { ...line, itemId: sellable.id },
           { ...line, itemId: broken.id },
@@ -370,7 +374,7 @@ describe("a jewellery invoice", () => {
         businessId: biz.id,
         locationId: biz.locationId,
         industry: "jewelry",
-        paymentMethod: "cash",
+        tenders: [{ method: "cash" }],
         lines: [{ kind: "accessory", itemId: randomUUID(), quantity: "1", vatPercent: 9 }],
       }),
     ).rejects.toThrow(invoiceService.RetailInvoiceError);
@@ -382,10 +386,35 @@ describe("a jewellery invoice", () => {
         businessId: biz.id,
         locationId: biz.locationId,
         industry: "jewelry",
-        paymentMethod: "cash",
+        tenders: [{ method: "cash" }],
         lines: [],
       }),
     ).rejects.toThrow(invoiceService.RetailInvoiceError);
+  });
+
+  it("refuses a credit sale with no customer — a receivable needs someone to owe it", async () => {
+    const bracelet = await makeBracelet("2.5", "4000000");
+    await expect(
+      invoice({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "jewelry",
+        tenders: [{ method: "credit" }],
+        customerId: null,
+        lines: [
+          {
+            kind: "gold",
+            itemId: bracelet.id,
+            makingChargeType: "percent",
+            makingChargeValue: 7,
+            profitPercent: 10,
+            vatPercent: 9,
+          },
+        ],
+      }),
+    ).rejects.toThrow(invoiceService.RetailInvoiceError);
+    const { rows: orders } = await db.query("SELECT id FROM orders WHERE location_id = $1", [biz.locationId]);
+    expect(orders).toHaveLength(0);
   });
 });
 
@@ -411,7 +440,7 @@ describe("an accessories invoice", () => {
       businessId: biz.id,
       locationId: biz.locationId,
       industry: "accessories",
-      paymentMethod: "cash",
+      tenders: [{ method: "cash" }],
       lines: [{ kind: "accessory", itemId: variant.id, quantity: "3", vatPercent: 9 }],
     });
 
@@ -448,7 +477,7 @@ describe("an accessories invoice", () => {
         businessId: biz.id,
         locationId: biz.locationId,
         industry: "accessories",
-        paymentMethod: "cash",
+        tenders: [{ method: "cash" }],
         lines: [{ kind: "accessory", itemId: variant.id, quantity: "5", vatPercent: 9 }],
       }),
     ).rejects.toThrow();
@@ -467,16 +496,155 @@ describe("invoice numbering", () => {
       businessId: biz.id,
       locationId: biz.locationId,
       industry: "jewelry",
-      paymentMethod: "cash",
+      tenders: [{ method: "cash" }],
       lines: [{ ...line, itemId: (await makeBracelet("1", "4000000")).id }],
     });
     const second = await invoice({
       businessId: biz.id,
       locationId: biz.locationId,
       industry: "jewelry",
-      paymentMethod: "cash",
+      tenders: [{ method: "cash" }],
       lines: [{ ...line, itemId: (await makeBracelet("1", "4000000")).id }],
     });
     expect(second.orderNumber).toBe(first.orderNumber + 1);
+  });
+});
+
+describe("read-service / print-data — historical fidelity", () => {
+  beforeEach(async () => {
+    await seedBusiness("accessories");
+  });
+
+  async function makeCustomer(name: string, phone: string) {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, roles, phone) VALUES ($1, $2, ARRAY['customer'], $3) RETURNING id`,
+      [biz.id, name, phone],
+    );
+    return rows[0].id;
+  }
+
+  it("reconstructs quantity, discount, customer and payment exactly as sold — none of it re-derived or hardcoded", async () => {
+    const family = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "دستبند بدلیجات",
+      kind: "variant_parent",
+    });
+    const variant = await itemsService.createVariantChild(family.id, biz.locationId, "قرمز", null, [
+      { name: "رنگ", value: "قرمز" },
+    ]);
+    await accessoriesService.receiveStock(variant.id, { quantity: "10", unitCost: 20_000 });
+    await accessoriesService.setUnitPrice(variant.id, 50_000);
+    const customerId = await makeCustomer("مریم کریمی", "09120000000");
+
+    const result = await invoice({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      industry: "accessories",
+      tenders: [{ method: "cash" }],
+      customerId,
+      lines: [{ kind: "accessory", itemId: variant.id, quantity: "3", discount: 15_000, vatPercent: 9 }],
+    });
+
+    const detail = await readService.getRetailInvoiceDetail(biz.id, biz.locationId, result.orderId);
+    expect(detail).not.toBeNull();
+    // 3 × 50,000 = 150,000 gross, minus the 15,000 manual discount = 135,000
+    // net; VAT 9% of that = 12,150; total 147,150. If the invoice header ever
+    // went back to a hardcoded zero discount, this is where it would show.
+    expect(detail!.subtotal).toBe(150_000);
+    expect(detail!.discount).toBe(15_000);
+    expect(detail!.total).toBe(147_150);
+    expect(detail!.customer).toEqual({ id: customerId, name: "مریم کریمی", phone: "09120000000" });
+    expect(detail!.status).toBe("completed");
+    expect(detail!.lines).toHaveLength(1);
+
+    const line = detail!.lines[0];
+    expect(line.kind).toBe("accessory");
+    // The real quantity sold — never coerced to the order_items.quantity=1
+    // that a gold line is stuck with.
+    expect(line.quantity).toBe("3");
+    if (line.kind === "accessory") {
+      expect(line.manualDiscount).toBe("15000");
+      expect(line.total).toBe("147150");
+    }
+
+    expect(detail!.payments).toHaveLength(1);
+    expect(detail!.payments[0].method).toBe("cash");
+    expect(detail!.payments[0].methodLabel).toBe("نقدی");
+    expect(detail!.payments[0].amount).toBe(147_150);
+    expect(detail!.paidTotal).toBe(147_150);
+    expect(detail!.balanceDue).toBe(0);
+    expect(detail!.overpaid).toBe(0);
+
+    // The print pipeline reads the exact same detail — first print and any
+    // later reprint share this one builder.
+    const printData = await printDataService.getRetailInvoicePrintData(biz.id, biz.locationId, result.orderId);
+    expect(printData).not.toBeNull();
+    expect(printData!.meta.legacy).toBe(false);
+    expect(printData!.receipt.customerName).toBe("مریم کریمی");
+    expect(printData!.receipt.discount).toBe(15_000);
+    expect(printData!.receipt.total).toBe(147_150);
+    expect(printData!.receipt.lines[0].quantity).toBe(3);
+    expect(printData!.receipt.lines[0].lineTotal).toBe(147_150);
+    // The invoice's real issue moment, not the moment this test happened to run.
+    expect(new Date(printData!.receipt.issuedAt as string).getTime()).not.toBeNaN();
+  });
+
+  it("reads a pre-migration row (no retail_snapshot) as an honest legacy line, never a fabricated one", async () => {
+    const family = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "گردنبند",
+      kind: "variant_parent",
+    });
+    const variant = await itemsService.createVariantChild(family.id, biz.locationId, "آبی", null, [
+      { name: "رنگ", value: "آبی" },
+    ]);
+    await accessoriesService.receiveStock(variant.id, { quantity: "5", unitCost: 20_000 });
+    await accessoriesService.setUnitPrice(variant.id, 50_000);
+
+    const result = await invoice({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      industry: "accessories",
+      tenders: [{ method: "cash" }],
+      lines: [{ kind: "accessory", itemId: variant.id, quantity: "2", vatPercent: 9 }],
+    });
+
+    // Simulate a row written before migration 0174 ever existed.
+    await db.query("UPDATE order_items SET retail_snapshot = NULL WHERE order_id = $1", [result.orderId]);
+
+    const detail = await readService.getRetailInvoiceDetail(biz.id, biz.locationId, result.orderId);
+    expect(detail!.lines).toHaveLength(1);
+    expect(detail!.lines[0].kind).toBe("legacy");
+    expect(detail!.lines[0].quantity).toBe("1");
+
+    const printData = await printDataService.getRetailInvoicePrintData(biz.id, biz.locationId, result.orderId);
+    expect(printData!.meta.legacy).toBe(true);
+  });
+
+  it("scopes strictly to the requesting branch — another location's invoice does not resolve", async () => {
+    const family = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "دستبند",
+      kind: "variant_parent",
+    });
+    const variant = await itemsService.createVariantChild(family.id, biz.locationId, "سبز", null, [
+      { name: "رنگ", value: "سبز" },
+    ]);
+    await accessoriesService.receiveStock(variant.id, { quantity: "5", unitCost: 20_000 });
+    await accessoriesService.setUnitPrice(variant.id, 50_000);
+    const result = await invoice({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      industry: "accessories",
+      tenders: [{ method: "cash" }],
+      lines: [{ kind: "accessory", itemId: variant.id, quantity: "1", vatPercent: 9 }],
+    });
+
+    const { rows: otherLocation } = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Other Branch') RETURNING id",
+      [biz.id],
+    );
+    const detail = await readService.getRetailInvoiceDetail(biz.id, otherLocation[0].id, result.orderId);
+    expect(detail).toBeNull();
   });
 });

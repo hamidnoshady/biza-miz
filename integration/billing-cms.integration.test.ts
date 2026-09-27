@@ -96,21 +96,16 @@ describe("entitlement outbox", () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
+    const { encryptSecret, resolveEncryptionKey } = await import("../src/lib/integrations/secrets");
+    const encKey = resolveEncryptionKey(process.env);
+    await db.query(`INSERT INTO platform_cms_config (id) VALUES (true) ON CONFLICT (id) DO NOTHING`);
     await db.query(
       `UPDATE platform_cms_config
           SET base_url = 'https://cms.example',
+              api_key_ciphertext = $1,
               billing_entitlement_key_id = 'billing_key_1',
-              billing_entitlement_secret_ciphertext = $1`,
-      [
-        (
-          await import("../src/lib/integrations/secrets")
-        ).encryptSecret(
-          "entitlement-secret",
-          (
-            await import("../src/lib/integrations/secrets")
-          ).resolveEncryptionKey(process.env),
-        ),
-      ],
+              billing_entitlement_secret_ciphertext = $2`,
+      [encryptSecret("cms-platform-api-key", encKey), encryptSecret("entitlement-secret", encKey)],
     );
 
     const { enqueueCmsEntitlementDelivery, runCmsEntitlementOutboxTick } = await import(

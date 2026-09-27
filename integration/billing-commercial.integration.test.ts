@@ -189,7 +189,7 @@ describe("usage ledger", () => {
       contractVersion: 1,
       events: [
         {
-          eventId: "cms-1",
+          eventId: "cms:test:01",
           siteId: "00000000-0000-4000-8000-000000000099",
           meterKey: "not.a.meter",
           quantity: 1,
@@ -199,7 +199,7 @@ describe("usage ledger", () => {
           occurredAt: "2026-09-26T13:00:00.000Z",
         },
         {
-          eventId: "cms-2",
+          eventId: "cms:test:02",
           siteId: "00000000-0000-4000-8000-000000000099",
           meterKey: "ai.credit",
           quantity: 1,
@@ -235,7 +235,7 @@ describe("usage ledger", () => {
       contractVersion: 1,
       events: [
         {
-          eventId: "bw-1",
+          eventId: "cms:bw:0001",
           siteId: "site-owned",
           meterKey: "cms.bandwidth_bytes",
           quantity: 100,
@@ -243,7 +243,7 @@ describe("usage ledger", () => {
           periodStart: "2026-09-26T13:00:00.000Z",
           periodEnd: "2026-09-26T14:00:00.000Z",
           occurredAt: "2026-09-26T13:00:00.000Z",
-          dimensions: { businessId: String(other) },
+          dimensions: { forged: String(other) },
         },
       ],
     };
@@ -253,7 +253,7 @@ describe("usage ledger", () => {
     expect(first.accepted).toBe(1);
     expect(second.duplicates).toBe(1);
     const { rows } = await db.query<{ business_id: string; quantity: string }>(
-      `SELECT business_id, quantity::text FROM billing_usage_events WHERE source = 'eshobe-cms' AND event_id = 'bw-1'`,
+      `SELECT business_id, quantity::text FROM billing_usage_events WHERE source = 'eshobe-cms' AND event_id = 'cms:bw:0001'`,
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]?.business_id).toBe(BID);
@@ -263,7 +263,7 @@ describe("usage ledger", () => {
       contractVersion: 1,
       events: [
         {
-          eventId: "bw-missing",
+          eventId: "cms:bw:miss",
           siteId: "site-nobody",
           meterKey: "cms.bandwidth_bytes",
           quantity: 5,
@@ -275,7 +275,7 @@ describe("usage ledger", () => {
       ],
     });
     if ("error" in missing) throw new Error(missing.error);
-    expect(missing.results).toEqual([{ eventId: "bw-missing", status: "rejected", reason: "unknown_site" }]);
+    expect(missing.results).toEqual([{ eventId: "cms:bw:miss", status: "rejected", reason: "unknown_site" }]);
   });
 
   it("refuses an older entitlement projection", async () => {

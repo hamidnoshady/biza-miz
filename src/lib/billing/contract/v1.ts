@@ -144,7 +144,10 @@ export function parseUsageEvent(input: unknown): { event: UsageEventV1 } | { err
   };
 }
 
-export function parseUsageBatch(input: unknown): { batch: UsageBatchV1 } | { error: ContractError } {
+/** Validates batch envelope only; events are parsed per-item at ingest time. */
+export function parseUsageBatchEnvelope(
+  input: unknown,
+): { envelope: { events: unknown[] } } | { error: ContractError } {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return { error: { code: "contract_mismatch", path: "" } };
   }
@@ -158,8 +161,14 @@ export function parseUsageBatch(input: unknown): { batch: UsageBatchV1 } | { err
   if (!Array.isArray(raw.events) || raw.events.length === 0 || raw.events.length > 100) {
     return { error: { code: "contract_mismatch", path: "events" } };
   }
+  return { envelope: { events: raw.events } };
+}
+
+export function parseUsageBatch(input: unknown): { batch: UsageBatchV1 } | { error: ContractError } {
+  const envelope = parseUsageBatchEnvelope(input);
+  if ("error" in envelope) return envelope;
   const events: UsageEventV1[] = [];
-  for (const [index, item] of raw.events.entries()) {
+  for (const [index, item] of envelope.envelope.events.entries()) {
     const parsed = parseUsageEvent(item);
     if ("error" in parsed) {
       return { error: { ...parsed.error, path: `events[${index}].${parsed.error.path}` } };

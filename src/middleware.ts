@@ -63,6 +63,7 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/well-known/oauth-",
   "/.well-known/oauth-",
   "/api/cms/revalidate",
+  "/api/cms/order-events",
   "/api/pairing/redeem",
   "/mcp",
 ] as const;

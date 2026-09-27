@@ -15,6 +15,7 @@
  * pure rules this leans on) it has no direct unit test; covered instead by
  * the integration suite.
  */
+import { randomUUID } from "node:crypto";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
@@ -26,6 +27,7 @@ import { getItem, type Item } from "./items-service";
 import { buildVariantMatrix, type MatrixAxis } from "./variant-matrix";
 import { emitDomainEvent } from "./posting-engine";
 import type { SettlementMethod } from "./ledger";
+import { resolveLineTenders, type RetailTenderQueueEntry } from "./retail-tenders";
 // Side-effect import: registers the cosmetic.* posting rules with the engine.
 import "./cosmetics-posting-rules";
 
@@ -215,7 +217,10 @@ export interface SellCosmeticInput {
   unitPrice?: number;
   discount?: number;
   vatPercent: number;
-  paymentMethod: SettlementMethod;
+  /** The whole line paid one way — every pre-split caller. */
+  paymentMethod?: SettlementMethod;
+  /** A retail invoice's shared tender queue (retail-tenders.ts) — mutually exclusive with `paymentMethod`. */
+  tenders?: RetailTenderQueueEntry[];
   createdBy?: string | null;
 }
 
@@ -320,6 +325,17 @@ export async function sellCosmeticUnits(
     cost = cosmeticCogs(input.quantity, stock.unitCost);
   }
 
+  // See the identical comment in accessories-service.ts's sellAccessoryUnits:
+  // `uq_journal_business_source_posting` is unique on (business_id,
+  // source_type, source_id, posting_kind), so keying the posting identity on
+  // `input.itemId` — as this used to — only let a cosmetic item ever be sold
+  // once, ever; every later sale of the same item threw a raw unique
+  // violation. `domain_events.source_id` keeps carrying `input.itemId`
+  // (reports group/join on it); `postingSourceId` is the separate identity
+  // the ledger posting itself uses, fresh per sale.
+  const postingSourceId = randomUUID();
+  const lineTenders = resolveLineTenders(input, breakdown.total);
+
   const { entryId: revenueEntryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -333,11 +349,12 @@ export async function sellCosmeticUnits(
       net: breakdown.net,
       vat: breakdown.vat,
       total: breakdown.total,
-      paymentMethod: input.paymentMethod,
+      tenders: lineTenders,
       batchNumbers: batchNumbers ?? [],
     },
     sourceType: "cosmetic_sale",
     sourceId: input.itemId,
+    postingSourceId,
     createdBy: input.createdBy ?? null,
   });
 
@@ -348,6 +365,7 @@ export async function sellCosmeticUnits(
     payload: { itemId: input.itemId, quantity: input.quantity, cost },
     sourceType: "cosmetic_sale",
     sourceId: input.itemId,
+    postingSourceId,
     createdBy: input.createdBy ?? null,
   });
 
@@ -391,6 +409,13 @@ export async function writeOffExpiredBatches(
     .reduce((sum, b) => sum.plus(new Decimal(b.quantity)), new Decimal(0))
     .toFixed();
 
+  // Same defect, same fix as sellCosmeticUnits above: `cosmetic_write_off`'s
+  // posting_kind is fixed (`cosmetic_expiry_write_off`), so keying the
+  // posting identity on `input.itemId` let a given item's expired stock be
+  // written off only once, ever — a second write-off batch for the same item
+  // on a later day would throw `uq_journal_business_source_posting`.
+  // `domain_events.source_id` keeps carrying `input.itemId`; `postingSourceId`
+  // is the separate identity the ledger posting itself uses, fresh per call.
   const { entryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -403,8 +428,10 @@ export async function writeOffExpiredBatches(
     },
     sourceType: "cosmetic_write_off",
     sourceId: input.itemId,
+    postingSourceId: randomUUID(),
     createdBy: input.createdBy ?? null,
   });
+
 
   for (const b of expired) {
     await client.query(`DELETE FROM item_batches WHERE id = $1`, [b.id]);
@@ -650,6 +677,13 @@ export async function openTester(
     cost = rialText(String(stock.unitCost));
   }
 
+  // Same defect, same fix as sellCosmeticUnits above: `cosmetic_tester`'s
+  // posting_kind is fixed, so keying the posting identity on `input.itemId`
+  // let a given item have its tester opened only once, ever — the second
+  // tester bottle of the same item would throw
+  // `uq_journal_business_source_posting`. `domain_events.source_id` keeps
+  // carrying `input.itemId`; `postingSourceId` is the separate identity the
+  // ledger posting itself uses, fresh per call.
   const { entryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -657,6 +691,7 @@ export async function openTester(
     payload: { itemId: input.itemId, quantity: "1", cost },
     sourceType: "cosmetic_tester",
     sourceId: input.itemId,
+    postingSourceId: randomUUID(),
     createdBy: input.createdBy ?? null,
   });
 

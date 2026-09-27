@@ -12,7 +12,7 @@ import { billingLog } from "./observability";
 import { selectPriceVersion, type PriceVersionPoint } from "./rating/engine";
 import { verifyBillingServiceRequest as verifyBillingServiceRequestV1 } from "./auth/verify-service-request";
 import type { BillingServiceScope } from "./auth/sign";
-import { parseUsageBatch, type UsageEventV1 } from "./contract/v1";
+import { parseUsageBatchEnvelope, parseUsageEvent, type UsageEventV1 } from "./contract/v1";
 import { validateUsageEvent } from "./usage/validate";
 
 export { verifyBillingServiceRequestV1 as verifyBillingServiceRequest };
@@ -356,12 +356,59 @@ export async function ingestCmsUsageBatchFromContract(batch: { events: UsageEven
   return { contractVersion: 1, results, accepted, duplicates };
 }
 
-export async function ingestCmsUsageBatchBody(body: unknown): Promise<IngestBatchResult | { error: string }> {
-  const parsed = parseUsageBatch(body);
-  if ("error" in parsed) {
-    return { error: parsed.error.code };
+function ingestEventIdFromRaw(raw: unknown): string {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const eventId = (raw as Record<string, unknown>).eventId;
+    if (typeof eventId === "string" && eventId.length > 0) return eventId;
   }
-  return ingestCmsUsageBatchFromContract(parsed.batch);
+  return "unknown";
+}
+
+export async function ingestCmsUsageBatchBody(body: unknown): Promise<IngestBatchResult | { error: string }> {
+  const envelope = parseUsageBatchEnvelope(body);
+  if ("error" in envelope) {
+    return { error: envelope.error.code };
+  }
+
+  const slots: (IngestEventResult | null)[] = [];
+  const toIngest: UsageEventV1[] = [];
+
+  for (const raw of envelope.envelope.events) {
+    const parsed = parseUsageEvent(raw);
+    if ("error" in parsed) {
+      slots.push({
+        eventId: ingestEventIdFromRaw(raw),
+        status: "rejected",
+        reason: parsed.error.code,
+      });
+      continue;
+    }
+    slots.push(null);
+    toIngest.push(parsed.event);
+  }
+
+  if (toIngest.length === 0) {
+    return {
+      contractVersion: 1,
+      results: slots.filter((slot): slot is IngestEventResult => slot !== null),
+      accepted: 0,
+      duplicates: 0,
+    };
+  }
+
+  const batchResult = await ingestCmsUsageBatchFromContract({ events: toIngest });
+  let batchIdx = 0;
+  const results = slots.map((slot) => {
+    if (slot) return slot;
+    return batchResult.results[batchIdx++]!;
+  });
+
+  return {
+    contractVersion: 1,
+    results,
+    accepted: batchResult.accepted,
+    duplicates: batchResult.duplicates,
+  };
 }
 
 async function resolveCmsSiteBusiness(siteId: string): Promise<string | null> {

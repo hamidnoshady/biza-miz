@@ -42,6 +42,12 @@ async function availablePortPair(): Promise<number> {
   throw new Error("could not reserve adjacent gateway ports");
 }
 
+function isRetryableListenError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) return false;
+  const code = (error as { code?: string }).code;
+  return code === "EADDRINUSE" || code === "EACCES" || code === "EADDRNOTAVAIL";
+}
+
 function secureGet(url: string, ca?: Buffer): Promise<{ status: number; body: Buffer }> {
   return new Promise((resolve, reject) => {
     const request = https.get(url, { ca, rejectUnauthorized: true }, (response) => {
@@ -68,13 +74,16 @@ describe("desktop mobile gateway boundary", () => {
       response.end(JSON.stringify({ path: request.url, forwardedProto: request.headers["x-forwarded-proto"] }));
     });
     const appPort = await listen(upstream);
-    const gatewayPort = await availablePortPair();
     const certificates = createCertificateManager(userData, logger);
-    const backend = {
-      config: { appPort, gatewayPort, gateway: { enabled: true, selectedAddress: "127.0.0.1" } },
-      app: { isPackaged: false },
-    };
-    const gateway = new GatewayManager({ backend, certificateManager: certificates, logger });
+    let gatewayPort = 0;
+    const gateway = new GatewayManager({
+      backend: {
+        config: { appPort, gatewayPort: 0, gateway: { enabled: true, selectedAddress: "127.0.0.1" } },
+        app: { isPackaged: false },
+      },
+      certificateManager: certificates,
+      logger,
+    });
     gateway.availableInterfaces = () => [{ name: "test", address: "127.0.0.1", netmask: "255.0.0.0", mac: "00:00:00:00:00:00" }];
     cleanups.push(async () => {
       await gateway.stop();
@@ -82,7 +91,16 @@ describe("desktop mobile gateway boundary", () => {
       await fs.rm(userData, { recursive: true, force: true });
     });
 
-    await gateway.start("127.0.0.1", gatewayPort);
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      gatewayPort = await availablePortPair();
+      gateway.backend.config.gatewayPort = gatewayPort;
+      try {
+        await gateway.start("127.0.0.1", gatewayPort);
+        break;
+      } catch (error) {
+        if (!isRetryableListenError(error) || attempt === 29) throw error;
+      }
+    }
     const status = gateway.status();
     expect(status.url).toBe(`https://127.0.0.1:${gatewayPort}`);
     expect(status.caDownloadUrl).toMatch(new RegExp(`^http://127\\.0\\.0\\.1:${gatewayPort + 1}/__business-suite/onboarding/[A-Za-z0-9_-]+/business-suite-local-ca\\.crt$`));

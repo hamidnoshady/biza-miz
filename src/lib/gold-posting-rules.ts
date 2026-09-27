@@ -42,6 +42,7 @@ import { rialBigInt, rialText, roundRial, type RialText } from "./inventory-exac
 import { accountIdsByCode } from "./ledger-service";
 import { registerPostingRule, type PostingResult } from "./posting-engine";
 import type { SettlementMethod } from "./ledger";
+import { groupTendersByCode, type RetailTender } from "./retail-tenders";
 
 interface GoldSaleRevenuePayload {
   itemId: string;
@@ -49,7 +50,7 @@ interface GoldSaleRevenuePayload {
   makingChargePlusProfit: RialText;
   vat: RialText;
   total: RialText;
-  paymentMethod: SettlementMethod;
+  tenders: RetailTender[];
 }
 
 const PAYMENT_ACCOUNT_CODE: Record<SettlementMethod, string> = {
@@ -60,10 +61,10 @@ const PAYMENT_ACCOUNT_CODE: Record<SettlementMethod, string> = {
 
 registerPostingRule("gold.sale_revenue", async (event, client): Promise<PostingResult | null> => {
   const payload = event.payload as unknown as GoldSaleRevenuePayload;
-  const paymentCode = PAYMENT_ACCOUNT_CODE[payload.paymentMethod];
+  const debits = groupTendersByCode(payload.tenders, (m) => PAYMENT_ACCOUNT_CODE[m]);
 
   const accounts = await accountIdsByCode(client, event.businessId, [
-    paymentCode,
+    ...debits.map((d) => d.code),
     WELL_KNOWN_CODES.goldSalesRevenue,
     WELL_KNOWN_CODES.makingChargeRevenue,
     WELL_KNOWN_CODES.vatPayable,
@@ -71,7 +72,7 @@ registerPostingRule("gold.sale_revenue", async (event, client): Promise<PostingR
   const zero = "0" as RialText;
 
   const lines = [
-    { accountId: accounts.get(paymentCode)!, debit: payload.total, credit: zero },
+    ...debits.map((d) => ({ accountId: accounts.get(d.code)!, debit: d.amount, credit: zero })),
     { accountId: accounts.get(WELL_KNOWN_CODES.goldSalesRevenue)!, debit: zero, credit: payload.metalValue },
     {
       accountId: accounts.get(WELL_KNOWN_CODES.makingChargeRevenue)!,
@@ -95,17 +96,17 @@ interface GoldConsignmentSaleRevenuePayload {
   profit: RialText;
   vat: RialText;
   total: RialText;
-  paymentMethod: SettlementMethod;
+  tenders: RetailTender[];
 }
 
 registerPostingRule(
   "gold.consignment_sale_revenue",
   async (event, client): Promise<PostingResult | null> => {
     const payload = event.payload as unknown as GoldConsignmentSaleRevenuePayload;
-    const paymentCode = PAYMENT_ACCOUNT_CODE[payload.paymentMethod];
+    const debits = groupTendersByCode(payload.tenders, (m) => PAYMENT_ACCOUNT_CODE[m]);
 
     const accounts = await accountIdsByCode(client, event.businessId, [
-      paymentCode,
+      ...debits.map((d) => d.code),
       WELL_KNOWN_CODES.consignmentPayable,
       WELL_KNOWN_CODES.consignmentCommissionRevenue,
       WELL_KNOWN_CODES.vatPayable,
@@ -116,7 +117,7 @@ registerPostingRule(
     );
 
     const lines = [
-      { accountId: accounts.get(paymentCode)!, debit: payload.total, credit: zero },
+      ...debits.map((d) => ({ accountId: accounts.get(d.code)!, debit: d.amount, credit: zero })),
       {
         accountId: accounts.get(WELL_KNOWN_CODES.consignmentPayable)!,
         debit: zero,

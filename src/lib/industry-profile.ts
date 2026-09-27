@@ -144,6 +144,26 @@ export interface IndustryProfile {
    * rather than from an `if (industry === …)` in the app. See CAPABILITY_KEYS.
    */
   capabilities: readonly CapabilityKey[];
+  /**
+   * The commercial rates a fresh retail invoice line starts from, before a
+   * cashier — permission allowing (`sales.invoice.discount` /
+   * `sales.invoice.override_price`, see permissions.ts) — overrides them.
+   *
+   * This is the one place these numbers live. Before this field existed, the
+   * gold form and the barcode-scan add-path each carried their own literal
+   * `7`/`7`/`9`, and a business that wanted a different اجرت default had to
+   * be told to type it in every time. A future per-category/per-business
+   * override layer (item/category/industry/business, per the product brief)
+   * still resolves down to this industry default at the bottom — it is not
+   * built yet, so this is honestly the *only* tier today.
+   */
+  retailDefaults?: {
+    vatPercent: number;
+    /** Jewelry only — the گروه اجرت percent a fresh gold line proposes. */
+    goldMakingChargePercent?: number;
+    /** Jewelry only — the سود percent a fresh gold line proposes. */
+    goldProfitPercent?: number;
+  };
 }
 
 /** F&B's wording is the base: every other industry overrides only what it must. */
@@ -253,6 +273,7 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     // `repairs` (Wave 10): repair_tickets is already generic (item_description,
     // nullable serial_id), so a jeweller uses the same workflow a watch shop does.
     capabilities: ["barcode", "repairs"],
+    retailDefaults: { vatPercent: 9, goldMakingChargePercent: 7, goldProfitPercent: 7 },
   },
   watch: {
     brandTitle: "ساعت",
@@ -262,6 +283,7 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["barcode", "repairs"],
+    retailDefaults: { vatPercent: 9 },
   },
   accessories: {
     brandTitle: "بدلیجات",
@@ -271,6 +293,7 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["barcode"],
+    retailDefaults: { vatPercent: 9 },
   },
   cosmetics: {
     brandTitle: "آرایشی و بهداشتی",
@@ -280,6 +303,7 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["batch_expiry", "barcode"],
+    retailDefaults: { vatPercent: 9 },
   },
   wholesale: {
     brandTitle: "عمده‌فروشی",
@@ -291,6 +315,7 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     // business also has no tables, kitchen, reservations or delivery flow.
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["barcode"],
+    retailDefaults: { vatPercent: 9 },
   },
   tools_fittings: {
     brandTitle: "ابزار و یراق‌آلات",
@@ -300,6 +325,7 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["barcode"],
+    retailDefaults: { vatPercent: 9 },
   },
   haberdashery: {
     brandTitle: "خرازی",
@@ -309,6 +335,7 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["barcode"],
+    retailDefaults: { vatPercent: 9 },
   },
 };
 
@@ -324,6 +351,21 @@ export function hasModule(industry: Industry, module: ModuleKey): boolean {
 /** Whether this trade has a Phase 27 capability switched on (batch expiry, barcode, repairs, …). */
 export function hasCapability(industry: Industry, capability: CapabilityKey): boolean {
   return INDUSTRY_PROFILES[industry].capabilities.includes(capability);
+}
+
+/** The VAT percent a fresh retail line proposes for this industry (9 if the profile has no opinion). */
+export function defaultRetailVatPercent(industry: Industry): number {
+  return INDUSTRY_PROFILES[industry].retailDefaults?.vatPercent ?? 9;
+}
+
+/** Jewelry's default اجرت percent — the one place this number is defined. */
+export function defaultGoldMakingChargePercent(industry: Industry): number {
+  return INDUSTRY_PROFILES[industry].retailDefaults?.goldMakingChargePercent ?? 7;
+}
+
+/** Jewelry's default سود percent — the one place this number is defined. */
+export function defaultGoldProfitPercent(industry: Industry): number {
+  return INDUSTRY_PROFILES[industry].retailDefaults?.goldProfitPercent ?? 7;
 }
 
 /** This industry's word for something, falling back to F&B's when it has no opinion. */

@@ -324,12 +324,18 @@ describe("legacyRedirectTarget", () => {
     expect(legacyRedirectTarget("/dashboard/crm/segments")).toBe("/crm/segments");
     expect(legacyRedirectTarget("/dashboard/crm/segments", "")).toBe("/crm/segments");
   });
+
+  it("forwards retired CMS grouped sections to their split routes", () => {
+    expect(legacyRedirectTarget("/websites/cms/content")).toBe("/websites/cms/pages");
+    expect(legacyRedirectTarget("/websites/cms/store")).toBe("/websites/cms/products");
+  });
 });
 
 describe("isCanonicalAppPathname", () => {
   it("knows the app prefixes, platform settings and the workspace module", () => {
     expect(isCanonicalAppPathname("/accounting/expenses")).toBe(true);
-    expect(isCanonicalAppPathname("/websites/cms/content")).toBe(true);
+    expect(isCanonicalAppPathname("/websites/cms/pages")).toBe(true);
+    expect(isCanonicalAppPathname("/websites/cms/content")).toBe(false);
     expect(isCanonicalAppPathname("/settings")).toBe(true);
     expect(isCanonicalAppPathname("/settings/billing")).toBe(true);
     expect(isCanonicalAppPathname("/workspace")).toBe(true);

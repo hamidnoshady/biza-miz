@@ -71,4 +71,10 @@ describe("WordPress plugin updater", () => {
     expect(workflow).toContain("Add checksum to self-hosted update manifest");
     expect(workflow).toContain("Get-FileHash -Algorithm SHA256");
   });
+
+  it("walks wrapper folders and nested zips before WordPress validates the package", () => {
+    expect(updater).toContain("find_plugin_root");
+    expect(updater).toContain("maybe_unpack_inner_zip");
+    expect(updater).toMatch(/find_plugin_root\([\s\S]*wordpress-plugin\/pos-accounting-connector/);
+  });
 });

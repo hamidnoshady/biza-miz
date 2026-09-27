@@ -412,6 +412,10 @@ export async function withTenantTransaction<T>(
  *     tenant is selected. The same identify-the-tenant-first shape as
  *     woocommerce-webhook-auth. The CMS never supplies `business_id`.
  *
+ *   - **cms-order-webhook-site-map** — resolving `site_id` on a signed
+ *     `POST /api/cms/order-events` delivery to its `eshobe_cms_connections`
+ *     row before ingest runs under `withTenant`.
+ *
  *   - **single-tenant-check** — `restoreAvailable()`: whether this install
  *     holds exactly one business. The same shape as `first-run` — a `count(*)`
  *     about the *install*, which no tenant scope can express, since the whole

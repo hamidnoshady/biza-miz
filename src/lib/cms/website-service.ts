@@ -16,7 +16,12 @@ import { promises as dns } from "node:dns";
 import {
   CmsApiError,
   CmsNetworkError,
+  createPage,
   createPost,
+  deletePage,
+  fetchMedia,
+  deleteMedia,
+  updateMedia,
   fetchRegistrarQuote,
   fetchSiteCdnStatus,
   orderRegistrarDomain,
@@ -34,12 +39,21 @@ import {
   issueSiteApiKey,
   provisionSite,
   updateOrderStatus,
+  updatePage,
   updatePost,
   updateProduct,
   updateSiteDomain as updateSiteDomainOnCms,
   type CmsConfig,
 } from "./client";
-import { simpleLexicalRoot, type CmsOrder, type CmsPage, type CmsPost, type CmsProduct, type SiteDescriptor } from "./types";
+import {
+  simpleLexicalRoot,
+  type CmsMedia,
+  type CmsOrder,
+  type CmsPage,
+  type CmsPost,
+  type CmsProduct,
+  type SiteDescriptor,
+} from "./types";
 // Migration 0139: the platform credential now lives in `platform_cms_config`
 // (encrypted, editable in the super-admin console) with the ESHOBE_CMS_* env pair
 // as the fallback for deployments configured before it. `resolvePlatformCmsConfig`
@@ -47,6 +61,7 @@ import { simpleLexicalRoot, type CmsOrder, type CmsPage, type CmsPost, type CmsP
 // and is no longer called directly, so a rotated key is a form submission rather
 // than a redeploy.
 import { resolvePlatformCmsConfig } from "./platform-control-service";
+import { inboxStatusForCmsOrders } from "./order-inbox-service";
 import { dnsHint, ipsOverlap, type DnsCheck } from "./dns";
 import {
   CmsConnectionError,
@@ -57,6 +72,7 @@ import {
   updateCmsConnectionDomain,
   type CmsConnectionSummary,
 } from "./connections";
+import { publishOwnerContent } from "./owner-bridge";
 
 const DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 const SITE_TYPES = ["business", "portfolio", "store"] as const;
@@ -189,6 +205,15 @@ export interface WebsiteOverview {
   posts: CmsPost[];
   products: CmsProduct[];
   orders: CmsOrder[];
+  orderInbox: Record<
+    string,
+    {
+      status: "pending" | "processed" | "failed" | "duplicate";
+      error: string | null;
+      importedOrderId: string | null;
+      reversed: boolean;
+    }
+  >;
 }
 
 /** The connected site, in one call. Every read is cached by the CMS itself. */
@@ -208,9 +233,21 @@ export async function cmsWebsiteOverview(businessId: string): Promise<WebsiteRes
       fetchProducts(config, { limit: 50 }),
       fetchOrders(config, { limit: 50 }),
     ]);
+    const connections = await listCmsConnections(businessId);
+    const orderInbox = connections[0]
+      ? await inboxStatusForCmsOrders(connections[0].id, orders.docs.map((o) => o.id))
+      : {};
+
     return {
       ok: true,
-      data: { site, pages: pages.docs, posts: posts.docs, products: products.docs, orders: orders.docs },
+      data: {
+        site,
+        pages: pages.docs,
+        posts: posts.docs,
+        products: products.docs,
+        orders: orders.docs,
+        orderInbox,
+      },
     };
   } catch (error) {
     if (error instanceof CmsNetworkError) return { ok: false, error: "cms_unreachable" };
@@ -313,6 +350,156 @@ export async function deleteCmsPost(businessId: string, id: string): Promise<Web
 
   try {
     await deletePost(config, id);
+    return { ok: true, data: null };
+  } catch (error) {
+    return mapCmsWriteError(error);
+  }
+}
+
+export async function publishCmsPost(businessId: string, id: string): Promise<WebsiteResult<{ id: string }>> {
+  const result = await publishOwnerContent(businessId, "posts", id);
+  if (!result.ok) return result;
+  return { ok: true, data: { id } };
+}
+
+export async function publishCmsPage(businessId: string, id: string): Promise<WebsiteResult<{ id: string }>> {
+  const result = await publishOwnerContent(businessId, "pages", id);
+  if (!result.ok) return result;
+  return { ok: true, data: { id } };
+}
+
+export async function publishCmsProduct(businessId: string, id: string): Promise<WebsiteResult<{ id: string }>> {
+  const result = await publishOwnerContent(businessId, "products", id);
+  if (!result.ok) return result;
+  return { ok: true, data: { id } };
+}
+
+export interface CmsPageInput {
+  title: string;
+  slug?: string;
+}
+
+export async function listCmsPages(
+  businessId: string,
+  opts?: { limit?: number; page?: number },
+): Promise<WebsiteResult<{ pages: CmsPage[]; totalDocs: number }>> {
+  let config: CmsConfig;
+  try {
+    config = await getCmsConfigForBusiness(businessId);
+  } catch {
+    return { ok: false, error: "not_connected" };
+  }
+  try {
+    const list = await fetchPages(config, { limit: opts?.limit ?? 50, page: opts?.page });
+    return { ok: true, data: { pages: list.docs, totalDocs: list.totalDocs ?? list.docs.length } };
+  } catch (error) {
+    if (error instanceof CmsNetworkError) return { ok: false, error: "cms_unreachable" };
+    return { ok: false, error: "cms_error" };
+  }
+}
+
+export async function createCmsPage(businessId: string, input: CmsPageInput): Promise<WebsiteResult<CmsPage>> {
+  if (!input.title?.trim()) return { ok: false, error: "title_required" };
+  if (input.title.trim().length > 200) return { ok: false, error: "field_too_long" };
+  let config: CmsConfig;
+  try {
+    config = await getCmsConfigForBusiness(businessId);
+  } catch {
+    return { ok: false, error: "not_connected" };
+  }
+  try {
+    const page = await createPage(config, { title: input.title.trim(), slug: input.slug?.trim() });
+    return { ok: true, data: page };
+  } catch (error) {
+    return mapCmsWriteError(error);
+  }
+}
+
+export async function updateCmsPage(
+  businessId: string,
+  id: string,
+  input: Partial<CmsPageInput>,
+): Promise<WebsiteResult<CmsPage>> {
+  if (input.title !== undefined && !input.title.trim()) return { ok: false, error: "title_required" };
+  let config: CmsConfig;
+  try {
+    config = await getCmsConfigForBusiness(businessId);
+  } catch {
+    return { ok: false, error: "not_connected" };
+  }
+  try {
+    const page = await updatePage(config, id, {
+      ...(input.title !== undefined ? { title: input.title.trim() } : {}),
+      ...(input.slug !== undefined ? { slug: input.slug.trim() } : {}),
+    });
+    return { ok: true, data: page };
+  } catch (error) {
+    return mapCmsWriteError(error);
+  }
+}
+
+export async function deleteCmsPage(businessId: string, id: string): Promise<WebsiteResult<null>> {
+  let config: CmsConfig;
+  try {
+    config = await getCmsConfigForBusiness(businessId);
+  } catch {
+    return { ok: false, error: "not_connected" };
+  }
+  try {
+    await deletePage(config, id);
+    return { ok: true, data: null };
+  } catch (error) {
+    return mapCmsWriteError(error);
+  }
+}
+
+export async function listCmsMedia(
+  businessId: string,
+  opts?: { limit?: number; page?: number },
+): Promise<WebsiteResult<{ media: CmsMedia[]; totalDocs: number }>> {
+  let config: CmsConfig;
+  try {
+    config = await getCmsConfigForBusiness(businessId);
+  } catch {
+    return { ok: false, error: "not_connected" };
+  }
+  try {
+    const list = await fetchMedia(config, { limit: opts?.limit ?? 24, page: opts?.page });
+    return { ok: true, data: { media: list.docs, totalDocs: list.totalDocs ?? list.docs.length } };
+  } catch (error) {
+    if (error instanceof CmsNetworkError) return { ok: false, error: "cms_unreachable" };
+    return { ok: false, error: "cms_error" };
+  }
+}
+
+export async function updateCmsMediaAlt(
+  businessId: string,
+  id: string,
+  alt: string,
+): Promise<WebsiteResult<CmsMedia>> {
+  let config: CmsConfig;
+  try {
+    config = await getCmsConfigForBusiness(businessId);
+  } catch {
+    return { ok: false, error: "not_connected" };
+  }
+  try {
+    const media = await updateMedia(config, id, { alt: alt.trim() });
+    return { ok: true, data: media };
+  } catch (error) {
+    return mapCmsWriteError(error);
+  }
+}
+
+export async function deleteCmsMedia(businessId: string, id: string): Promise<WebsiteResult<null>> {
+  let config: CmsConfig;
+  try {
+    config = await getCmsConfigForBusiness(businessId);
+  } catch {
+    return { ok: false, error: "not_connected" };
+  }
+  try {
+    await deleteMedia(config, id);
     return { ok: true, data: null };
   } catch (error) {
     return mapCmsWriteError(error);

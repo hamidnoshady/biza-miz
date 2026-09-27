@@ -176,6 +176,25 @@ export function usePlatformMutation<TArgs = void, TData = unknown>(
   const [error, setError] = useState<string | null>(null);
   const [fields, setFields] = useState<Record<string, string> | null>(null);
   const busyRef = useRef(false);
+  // `mutate` is stable on `[baseUrl, method]` so callers don't re-render on every
+  // keystroke; read the latest request/toast/callback options from a ref instead
+  // of closing over a stale `request` (which broke provisioning with missing_fields).
+  const optionsRef = useRef({
+    request,
+    errorMessages,
+    successToast,
+    errorToast,
+    onSuccess,
+    onError,
+  });
+  optionsRef.current = {
+    request,
+    errorMessages,
+    successToast,
+    errorToast,
+    onSuccess,
+    onError,
+  };
 
   const reset = useCallback(() => {
     setError(null);
@@ -192,7 +211,16 @@ export function usePlatformMutation<TArgs = void, TData = unknown>(
       setError(null);
       setFields(null);
 
-      const built = request?.(args) ?? {};
+      const {
+        request: buildRequest,
+        errorMessages: errorMap,
+        successToast: success,
+        errorToast: showErrorToast,
+        onSuccess: onOk,
+        onError: onFail,
+      } = optionsRef.current;
+
+      const built = buildRequest?.(args) ?? {};
       const url = built.url ?? baseUrl;
       const result = await platformFetch<TData>(url, {
         method,
@@ -200,24 +228,22 @@ export function usePlatformMutation<TArgs = void, TData = unknown>(
       });
 
       if (result.ok) {
-        if (successToast) {
-          const text =
-            typeof successToast === "function" ? successToast(result.data, args) : successToast;
+        if (success) {
+          const text = typeof success === "function" ? success(result.data, args) : success;
           toast.success(text);
         }
-        onSuccess?.(result.data, args);
+        onOk?.(result.data, args);
       } else if (!result.cancelled) {
         setError(result.code);
         setFields(result.fields ?? null);
-        if (errorToast) toast.error(platformErrorText(result.code, errorMessages));
-        onError?.(result.code, args);
+        if (showErrorToast) toast.error(platformErrorText(result.code, errorMap));
+        onFail?.(result.code, args);
       }
 
       busyRef.current = false;
       setBusy(false);
       return result;
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, method],
   );
 

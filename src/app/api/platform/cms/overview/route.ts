@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requirePlatformAdmin, withPlatformScope } from "@/lib/platform-auth";
-import { fetchCmsOverview } from "@/lib/cms/platform-client";
+import { fetchCmsBillingHealth, fetchCmsOverview, fetchCmsSaasOverview } from "@/lib/cms/platform-client";
 import { cmsFleetFindings, mirrorIsStale } from "@/lib/cms/platform-control";
 import {
   getCmsControlConfig,
@@ -44,6 +44,10 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
 
   let overview = null;
   let overviewError: null | string = null;
+  let saasOverview = null;
+  let saasOverviewError: null | string = null;
+  let billingHealth = null;
+  let billingHealthError: null | string = null;
   if (client) {
     try {
       overview = await fetchCmsOverview(
@@ -54,8 +58,24 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     } catch (err) {
       overviewError = cmsErrorCode(err);
     }
+    try {
+      saasOverview = await fetchCmsSaasOverview(
+        client,
+        { days: Number.isFinite(days) ? days : undefined },
+        { actor: session.padmin },
+      );
+    } catch (err) {
+      saasOverviewError = cmsErrorCode(err);
+    }
+    try {
+      billingHealth = await fetchCmsBillingHealth(client, { actor: session.padmin });
+    } catch (err) {
+      billingHealthError = cmsErrorCode(err);
+    }
   } else {
     overviewError = "cms_not_configured";
+    saasOverviewError = "cms_not_configured";
+    billingHealthError = "cms_not_configured";
   }
 
   return NextResponse.json({
@@ -63,9 +83,13 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     findings: cmsFleetFindings(sites),
     mirrorStale: mirrorIsStale(config.lastMirrorAt, config.mirrorIntervalMinutes),
     mirroredAt: config.lastMirrorAt,
+    billingHealth,
+    billingHealthError,
     overview,
     overviewError,
     runs,
+    saasOverview,
+    saasOverviewError,
     sites,
   });
 });

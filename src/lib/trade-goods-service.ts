@@ -12,6 +12,7 @@
  * DB-touching, so per repo convention it has no direct unit test; covered by
  * integration/trade-goods.integration.test.ts.
  */
+import { randomUUID } from "node:crypto";
 import { query, type PoolClient } from "./db";
 import { getItem } from "./items-service";
 import {
@@ -25,6 +26,7 @@ import {
 import { emitDomainEvent } from "./posting-engine";
 import type { RialText } from "./inventory-exact";
 import type { SettlementMethod } from "./ledger";
+import { resolveLineTenders, type RetailTenderQueueEntry } from "./retail-tenders";
 import {
   computeTradeGoodsSalePrice,
   nextTradeGoodsAverageUnitCost,
@@ -52,7 +54,10 @@ export interface SellTradeGoodsInput {
   unitPrice?: number;
   discount?: number;
   vatPercent: number;
-  paymentMethod: SettlementMethod;
+  /** The whole line paid one way — every pre-split caller. */
+  paymentMethod?: SettlementMethod;
+  /** A retail invoice's shared tender queue (retail-tenders.ts) — mutually exclusive with `paymentMethod`. */
+  tenders?: RetailTenderQueueEntry[];
   createdBy?: string | null;
 }
 
@@ -127,6 +132,17 @@ export async function sellTradeGoodsUnits(
 
   const cost = tradeGoodsCogs(input.quantity, stock.unitCost);
 
+  // See the identical comment in accessories-service.ts's sellAccessoryUnits:
+  // `uq_journal_business_source_posting` is unique on (business_id,
+  // source_type, source_id, posting_kind), so keying the posting identity on
+  // `input.itemId` — as this used to — only let a trade-goods item ever be
+  // sold once, ever; every later sale of the same item threw a raw unique
+  // violation. `domain_events.source_id` keeps carrying `input.itemId`
+  // (reports group/join on it); `postingSourceId` is the separate identity
+  // the ledger posting itself uses, fresh per sale.
+  const postingSourceId = randomUUID();
+  const lineTenders = resolveLineTenders(input, breakdown.total);
+
   const { entryId: revenueEntryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -140,10 +156,11 @@ export async function sellTradeGoodsUnits(
       net: breakdown.net,
       vat: breakdown.vat,
       total: breakdown.total,
-      paymentMethod: input.paymentMethod,
+      tenders: lineTenders,
     },
     sourceType: `${input.trade}_sale`,
     sourceId: input.itemId,
+    postingSourceId,
     createdBy: input.createdBy ?? null,
   });
 
@@ -154,6 +171,7 @@ export async function sellTradeGoodsUnits(
     payload: { itemId: input.itemId, quantity: input.quantity, cost },
     sourceType: `${input.trade}_sale`,
     sourceId: input.itemId,
+    postingSourceId,
     createdBy: input.createdBy ?? null,
   });
 

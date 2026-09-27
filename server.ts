@@ -406,10 +406,17 @@ app.prepare().then(async () => {
     runMessagingTick().catch((err) => console.error("messaging tick failed:", err));
   scheduleCentralTick(messagingTick, MESSAGE_TICK_INTERVAL_MS, 35_000);
 
-  const { runCmsEntitlementOutboxTick } = await import("./src/lib/billing/entitlement/outbox-service");
-  const cmsEntitlementTick = () =>
-    runCmsEntitlementOutboxTick().catch((err) => console.error("cms entitlement tick failed:", err));
-  scheduleCentralTick(cmsEntitlementTick, 60_000, 42_000);
+  if (process.env.DEPLOYMENT_ROLE !== "site") {
+    const { runCmsEntitlementOutboxTick } = await import("./src/lib/billing/entitlement/outbox-service");
+    const cmsEntitlementTick = () =>
+      runCmsEntitlementOutboxTick().catch((err) => console.error("cms entitlement tick failed:", err));
+    scheduleCentralTick(cmsEntitlementTick, 60_000, 42_000);
+
+    const { runCmsStoreOrderPollTick } = await import("./src/lib/cms/order-poll-service");
+    const cmsStoreOrderPollTick = () =>
+      runCmsStoreOrderPollTick().catch((err) => console.error("cms store order poll failed:", err));
+    scheduleCentralTick(cmsStoreOrderPollTick, 60_000, 45_000);
+  }
 
   // «ورود و خروج داده» — the platform data transfer engine (migration 0169).
   // Two ticks, for two genuinely different jobs.

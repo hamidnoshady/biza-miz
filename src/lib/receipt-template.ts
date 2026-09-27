@@ -36,6 +36,10 @@ export interface ReceiptLine {
     metalValue: Rial;
     makingCharge: Rial;
     profit: Rial;
+    /** Net weight sold, grams — decimal string (a fraction of a gram is common in jewelry). Optional so old callers keep compiling. */
+    netWeight?: string | null;
+    /** "18" | "21" | "24" — see src/lib/gold.ts's Purity. Free-form here to avoid a template↔domain dependency. */
+    purity?: string | null;
   } | null;
   /**
    * Phase 27 Wave 2 — a batch-tracked line's lot number and expiry date,
@@ -57,6 +61,16 @@ export interface ReceiptLine {
     conditionGrade?: string | null;
     boxAndPapers: boolean;
   } | null;
+  /**
+   * A serialized unit's identity and warranty (watches today) — printed so the
+   * customer's copy is the warranty document, not just a sales slip. Absent
+   * on every non-serial line.
+   */
+  serial?: {
+    serialNumber: string;
+    warrantyMonths?: number | null;
+    warrantyEndDate?: string | null;
+  } | null;
 }
 
 /**
@@ -74,7 +88,8 @@ export const PAYMENT_METHOD_LABELS: Record<string, string> = {
   snappfood: "اسنپ‌فود",
 };
 
-const CONDITION_GRADE_LABELS: Record<string, string> = {
+/** Exported so the retail invoice detail modal reads the same labels the printed receipt does. */
+export const CONDITION_GRADE_LABELS: Record<string, string> = {
   new: "نو",
   like_new: "در حد نو",
   good: "خوب",
@@ -131,7 +146,11 @@ export function renderReceiptHtml(data: ReceiptData, opts: { paperWidthMm?: Pape
         ? `<div class="mods">${escapeHtml(l.modifiersLabel)}</div>`
         : "";
       const goldRow = l.goldBreakdown
-        ? `<div class="mods">طلا ${fmt(l.goldBreakdown.metalValue, { withUnit: false })}` +
+        ? `<div class="mods">` +
+          (l.goldBreakdown.netWeight
+            ? `عیار ${toPersianDigits(l.goldBreakdown.purity ?? "")} · ${toPersianDigits(l.goldBreakdown.netWeight)} گرم · `
+            : "") +
+          `طلا ${fmt(l.goldBreakdown.metalValue, { withUnit: false })}` +
           ` · اجرت ${fmt(l.goldBreakdown.makingCharge, { withUnit: false })}` +
           ` · سود ${fmt(l.goldBreakdown.profit, { withUnit: false })}</div>`
         : "";
@@ -145,6 +164,14 @@ export function renderReceiptHtml(data: ReceiptData, opts: { paperWidthMm?: Pape
           (l.serialProvenance.boxAndPapers ? " · همراه جعبه و مدارک" : " · بدون جعبه و مدارک") +
           `</div>`
         : "";
+      const serialRow = l.serial
+        ? `<div class="mods">سریال ${escapeHtml(l.serial.serialNumber)}` +
+          (l.serial.warrantyMonths
+            ? ` · گارانتی ${toPersianDigits(l.serial.warrantyMonths)} ماهه` +
+              (l.serial.warrantyEndDate ? ` تا ${toPersianDigits(formatJalali(l.serial.warrantyEndDate))}` : "")
+            : "") +
+          `</div>`
+        : "";
       return `
         <div class="line">
           <div class="line-main">
@@ -156,6 +183,7 @@ export function renderReceiptHtml(data: ReceiptData, opts: { paperWidthMm?: Pape
           ${goldRow}
           ${batchRow}
           ${provenanceRow}
+          ${serialRow}
         </div>`;
     })
     .join("");

@@ -16,6 +16,7 @@ import {
   CreditCardIcon,
   FileTextIcon,
   FolderTreeIcon,
+  GlobeIcon,
   ImageIcon,
   LayoutDashboardIcon,
   ReceiptTextIcon,
@@ -52,8 +53,13 @@ import type { WpSectionKey } from "./wp/wp-routes";
 const CMS_ICONS: Record<CmsSectionKey, LucideIcon> = {
   overview: LayoutDashboardIcon,
   setup: WandSparklesIcon,
-  content: FileTextIcon,
-  store: ShoppingBagIcon,
+  pages: FileTextIcon,
+  posts: FileTextIcon,
+  media: ImageIcon,
+  products: ShoppingBagIcon,
+  orders: ReceiptTextIcon,
+  design: WandSparklesIcon,
+  domain: GlobeIcon,
   settings: SettingsIcon,
   billing: CreditCardIcon,
 };

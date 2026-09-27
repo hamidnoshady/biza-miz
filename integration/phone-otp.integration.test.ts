@@ -83,9 +83,10 @@ beforeAll(async () => {
   rmSync(preDir, { recursive: true, force: true });
   mkdirSync(preDir);
   for (const file of readdirSync(migrationsDir)) {
-    if (file.endsWith(".sql") && !file.startsWith("0139")) {
-      symlinkSync(join(migrationsDir, file), join(preDir, file));
-    }
+    if (!file.endsWith(".sql")) continue;
+    const migrationNumber = Number.parseInt(file.slice(0, 4), 10);
+    if (!Number.isFinite(migrationNumber) || migrationNumber >= 139) continue;
+    symlinkSync(join(migrationsDir, file), join(preDir, file));
   }
   await runMigrations({ databaseUrl: urlFor(databaseName), migrationsDir: preDir, quiet: true });
 

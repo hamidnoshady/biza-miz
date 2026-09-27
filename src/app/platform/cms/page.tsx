@@ -46,6 +46,8 @@ import {
 import { cmsErrorText, syncStatusTone } from "./text";
 
 interface OverviewResponse {
+  billingHealth?: Record<string, unknown> | null;
+  billingHealthError?: null | string;
   config?: MaskedCmsControlConfig;
   error?: string;
   findings?: CmsFleetFinding[];
@@ -54,6 +56,8 @@ interface OverviewResponse {
   overview?: CmsOverview | null;
   overviewError?: null | string;
   runs?: SyncRunRow[];
+  saasOverview?: Record<string, unknown> | null;
+  saasOverviewError?: null | string;
   sites?: MirroredCmsSite[];
 }
 
@@ -190,6 +194,34 @@ export default function CmsOverviewPage() {
           }
           value={formatPersianNumber(overview?.infrastructure.jobs.queued ?? 0)}
         />
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        <Card title="اجرای تجاری (سایت‌ساز)">
+          {data?.saasOverviewError ? (
+            <p className="text-sm text-muted-foreground">{cmsErrorText(data.saasOverviewError)}</p>
+          ) : data?.saasOverview ? (
+            <pre className="max-h-48 overflow-auto rounded-lg bg-muted p-2 text-xs" dir="ltr">
+              {JSON.stringify(data.saasOverview, null, 2)}
+            </pre>
+          ) : (
+            <p className="text-sm text-muted-foreground">گزارش در دسترس نیست.</p>
+          )}
+        </Card>
+        <Card title="سلامت یکپارچگی صورتحساب">
+          {data?.billingHealthError ? (
+            <p className="text-sm text-muted-foreground">{cmsErrorText(data.billingHealthError)}</p>
+          ) : data?.billingHealth ? (
+            <pre className="max-h-48 overflow-auto rounded-lg bg-muted p-2 text-xs" dir="ltr">
+              {JSON.stringify(data.billingHealth, null, 2)}
+            </pre>
+          ) : (
+            <p className="text-sm text-muted-foreground">—</p>
+          )}
+          <Link className="mt-2 inline-block text-sm text-teal-700 dark:text-teal-300" href="/platform/cms/billing-sync">
+            جزئیات همگام‌سازی
+          </Link>
+        </Card>
       </div>
 
       {findings.length ? (

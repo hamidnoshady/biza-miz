@@ -27,7 +27,11 @@ export default async function PosPage({
 
   const industry = (await getBusinessIndustry(session.businessId)) ?? "food_service";
   if (industryProfile(industry).salesModel === "retail_invoice") {
-    return <RetailInvoiceScreen industry={industry} />;
+    // Voiding a completed invoice is the retail shape of the café's own
+    // closed-order amendment — same permission, see retail-invoice-void-
+    // service.ts and its API route's own doc comment.
+    const canVoidInvoice = permissions.has(PERMISSIONS.ordersAmendClosed);
+    return <RetailInvoiceScreen industry={industry} canVoidInvoice={canVoidInvoice} />;
   }
   const { table } = await searchParams;
   return <PosScreen initialTableId={table ?? null} />;

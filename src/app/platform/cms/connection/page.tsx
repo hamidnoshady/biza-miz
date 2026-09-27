@@ -56,6 +56,8 @@ export default function CmsConnectionPage() {
   const [mirrorEnabled, setMirrorEnabled] = useState(false);
   const [interval, setIntervalMinutes] = useState(30);
   const [logShippingEnabled, setLogShippingEnabled] = useState(false);
+  const [billingKeyId, setBillingKeyId] = useState("");
+  const [billingSecret, setBillingSecret] = useState("");
 
   const hydrate = useCallback((next: MaskedCmsControlConfig) => {
     setConfig(next);
@@ -65,6 +67,7 @@ export default function CmsConnectionPage() {
     setMirrorEnabled(next.mirrorEnabled);
     setIntervalMinutes(next.mirrorIntervalMinutes);
     setLogShippingEnabled(next.logShippingEnabled);
+    setBillingKeyId(next.billingEntitlementKeyId ?? "");
     // Never re-populated from the server: there is nothing to re-populate it with.
     setApiKey("");
   }, []);
@@ -94,6 +97,8 @@ export default function CmsConnectionPage() {
         mirrorIntervalMinutes: interval,
         // Sent only when the operator typed one; an empty field is not a change.
         ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+        ...(billingKeyId.trim() ? { billingEntitlementKeyId: billingKeyId.trim() } : {}),
+        ...(billingSecret.trim() ? { billingEntitlementSecret: billingSecret.trim() } : {}),
         ...extra,
       }),
       method: "PUT",
@@ -271,6 +276,80 @@ export default function CmsConnectionPage() {
             </dd>
           </div>
         </dl>
+      </Card>
+
+      <Card title="اعتبارنامهٔ entitlement (صورتحساب)">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="شناسهٔ کلید امضا">
+            <input
+              className={inputClass}
+              dir="ltr"
+              disabled={!manage}
+              onChange={(event) => setBillingKeyId(event.target.value)}
+              placeholder={config?.billingEntitlementKeyId || "billing-key-id"}
+              value={billingKeyId}
+            />
+          </Field>
+          <Field
+            hint={
+              config?.billingEntitlementSecretHint
+                ? `راز ذخیره شده (${config.billingEntitlementSecretHint}). خالی = بدون تغییر.`
+                : "راز HMAC برای push entitlement"
+            }
+            label="راز امضا"
+          >
+            <input
+              autoComplete="off"
+              className={inputClass}
+              dir="ltr"
+              disabled={!manage}
+              onChange={(event) => setBillingSecret(event.target.value)}
+              type="password"
+              value={billingSecret}
+            />
+          </Field>
+        </div>
+        {manage ? (
+          <Button className="mt-3" disabled={busy} onClick={() => void save()} variant="ghost">
+            ذخیرهٔ entitlement
+          </Button>
+        ) : null}
+      </Card>
+
+      <Card title="آزمون‌های زیرساخت سایت‌ساز">
+        <p className="text-xs text-muted-foreground">
+          درگاه پرداخت و ذخیرهٔ اشیا — همان endpointهایی که اپراتور سایت‌ساز استفاده می‌کند.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button
+            disabled={busy || !config?.usable}
+            onClick={() =>
+              void api<{ error?: string; result?: unknown }>("/api/platform/cms/self-tests", {
+                body: JSON.stringify({ kind: "payments", payload: {} }),
+                method: "POST",
+              }).then((res) =>
+                res.ok ? setNotice("آزمون درگاه اجرا شد.") : setError(cmsErrorText(res.data.error)),
+              )
+            }
+            variant="ghost"
+          >
+            آزمون درگاه‌ها
+          </Button>
+          <Button
+            disabled={busy || !config?.usable}
+            onClick={() =>
+              void api<{ error?: string }>("/api/platform/cms/self-tests", {
+                body: JSON.stringify({ kind: "storage", payload: {} }),
+                method: "POST",
+              }).then((res) =>
+                res.ok ? setNotice("آزمون ذخیره اجرا شد.") : setError(cmsErrorText(res.data.error)),
+              )
+            }
+            variant="ghost"
+          >
+            آزمون ذخیرهٔ اشیا
+          </Button>
+        </div>
       </Card>
 
       <Card title="کارهای پس‌زمینه">

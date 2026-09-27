@@ -78,7 +78,7 @@ describe("isPublicPath", () => {
       "/accounting/settings",
       "/crm/persons/42",
       "/growth/campaigns",
-      "/websites/cms/content",
+      "/websites/cms/pages",
       "/websites/wp/orders",
       "/workspace",
       "/workspace/projects",

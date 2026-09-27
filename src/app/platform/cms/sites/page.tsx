@@ -14,6 +14,7 @@
  * that column would be a second place for the invariant to be forgotten. Moving a
  * connected site's domain stays the business's own «تنظیمات و همگام‌سازی» flow.
  */
+import Link from "next/link";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { Check, Copy, Globe, Plus, RefreshCw, X } from "lucide-react";
 
@@ -209,12 +210,17 @@ export default function CmsSitesPage() {
                         </span>
                       </td>
                       <td className="py-2 text-end">
-                        <Button
-                          onClick={() => setOpenId(openId === site.id ? null : site.id)}
-                          variant="ghost"
-                        >
-                          {openId === site.id ? "بستن" : "مدیریت"}
-                        </Button>
+                        <div className="flex flex-wrap justify-end gap-1">
+                          <Link href={`/platform/cms/sites/${encodeURIComponent(site.id)}`}>
+                            <Button variant="ghost">جزئیات</Button>
+                          </Link>
+                          <Button
+                            onClick={() => setOpenId(openId === site.id ? null : site.id)}
+                            variant="ghost"
+                          >
+                            {openId === site.id ? "بستن" : "سریع"}
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                     {openId === site.id ? (

@@ -13,7 +13,7 @@ describe("public and bearer cloud API execution targets", () => {
       "/api/connections/website", "/api/integrations/wordpress/events",
       "/api/integrations/woocommerce/webhook/id", "/api/mcp", "/api/mcp/oauth/token",
       "/api/connections/mcp/consent", "/api/well-known/oauth-authorization-server/x",
-      "/.well-known/oauth-protected-resource", "/api/cms/revalidate", "/api/pairing/redeem",
+      "/.well-known/oauth-protected-resource", "/api/cms/revalidate", "/api/cms/order-events", "/api/pairing/redeem",
       "/mcp/consent",
     ]) expect(isCentralExecutionPath(path), path).toBe(true);
   });

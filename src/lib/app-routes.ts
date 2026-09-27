@@ -280,6 +280,9 @@ const LEGACY_PREFIX_MAP: readonly (readonly [string, string])[] = [
   ["/dashboard/projects", "/workspace/projects"],
   ["/projects", "/workspace/projects"],
   ["/dashboard/settings", "/settings"],
+  // Phase F — CMS manager sections split; old grouped URLs forward only.
+  ["/websites/cms/content", "/websites/cms/pages"],
+  ["/websites/cms/store", "/websites/cms/products"],
 ];
 
 /**
@@ -433,6 +436,9 @@ export function legacyRedirectTarget(pathname: string, search = ""): string | nu
  * absent. Exported because it is exactly what the route tests assert.
  */
 export function isCanonicalAppPathname(pathname: string): boolean {
+  // A path that still exists only to redirect (Phase F CMS splits, retired
+  // dashboard prefixes, …) must not be treated as canonical app surface.
+  if (canonicalPathForLegacy(pathname) !== null) return false;
   return (
     appPrefixForPathname(pathname) !== null ||
     isPlatformSettingsPathname(pathname) ||

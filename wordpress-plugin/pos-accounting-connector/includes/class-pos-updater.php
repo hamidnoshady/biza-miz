@@ -673,41 +673,162 @@ class POS_Connector_Updater {
 			return $source;
 		}
 
-		$source = untrailingslashit( $source );
-
-		// The zipball case: the plugin is buried one level deep.
-		$nested = $source . '/wordpress-plugin/pos-accounting-connector';
-		if ( $fs->exists( $nested . '/pos-accounting-connector.php' ) ) {
-			return $nested;
-		}
-
-		// The plugin sits at the root of the zip, whatever the folder is called.
-		if ( $fs->exists( $source . '/pos-accounting-connector.php' ) ) {
-			// An update installs over the existing
-			// wp-content/plugins/pos-accounting-connector whatever the source
-			// folder is called, so renaming buys nothing there and would only
-			// orphan a copy of the tree in wp-content/upgrade/. A fresh
-			// install, though, *does* copy the source folder's name — and
-			// `pos-accounting-connector` is the folder name the rest of this
-			// codebase (and `wp plugin update pos-accounting-connector`)
-			// expects to stay true.
-			if ( empty( $hook_extra['plugin'] ) && 'pos-accounting-connector' !== basename( $source ) ) {
-				$target = dirname( $source ) . '/pos-accounting-connector';
-				if ( ! $fs->exists( $target ) && $fs->move( $source, $target ) ) {
-					return $target;
-				}
+		$resolved = self::find_plugin_root( $source, $fs );
+		if ( '' === $resolved ) {
+			$unpacked = self::maybe_unpack_inner_zip( $source, $fs );
+			if ( '' !== $unpacked ) {
+				$resolved = self::find_plugin_root( $unpacked, $fs );
 			}
+		}
+		if ( '' === $resolved ) {
 			return $source;
 		}
 
-		return $source;
+		// An update installs over the existing wp-content/plugins/pos-accounting-connector
+		// whatever the source folder is called. A fresh upload-install copies the folder
+		// name — keep it pos-accounting-connector for wp plugin update and docs.
+		if ( empty( $hook_extra['plugin'] ) && 'pos-accounting-connector' !== basename( $resolved ) ) {
+			$target = dirname( $resolved ) . '/pos-accounting-connector';
+			if ( ! $fs->exists( $target ) && $fs->move( $resolved, $target ) ) {
+				return $target;
+			}
+		}
+
+		return $resolved;
+	}
+
+	/**
+	 * Locate the directory that contains pos-accounting-connector.php inside an
+	 * extracted package.
+	 *
+	 * WordPress calls upgrader_source_selection before it steps into a lone
+	 * wrapper folder, so GitHub tag zipballs (repo-root/wordpress-plugin/…)
+	 * and “zip inside a folder” uploads must be walked explicitly.
+	 */
+	private static function find_plugin_root( $source, $fs, $depth = 0 ) {
+		$source = untrailingslashit( (string) $source );
+		if ( '' === $source || $depth > 4 ) {
+			return '';
+		}
+
+		$candidates = array(
+			$source,
+			$source . '/pos-accounting-connector',
+			$source . '/wordpress-plugin/pos-accounting-connector',
+		);
+		foreach ( $candidates as $dir ) {
+			if ( $fs->exists( $dir . '/pos-accounting-connector.php' ) ) {
+				return $dir;
+			}
+		}
+
+		$list = $fs->dirlist( $source, false, false );
+		if ( ! is_array( $list ) || empty( $list ) ) {
+			return '';
+		}
+
+		$dirs  = array();
+		$files = array();
+		foreach ( $list as $name => $meta ) {
+			if ( ! is_array( $meta ) || empty( $meta['type'] ) ) {
+				continue;
+			}
+			if ( 'd' === $meta['type'] ) {
+				$dirs[] = $name;
+			} elseif ( 'f' === $meta['type'] ) {
+				$files[] = $name;
+			}
+		}
+
+		// Typical GitHub zipball: one top-level directory, no loose files.
+		if ( 1 === count( $dirs ) && empty( $files ) ) {
+			return self::find_plugin_root( $source . '/' . $dirs[0], $fs, $depth + 1 );
+		}
+
+		return '';
+	}
+
+	/**
+	 * Some hosts upload the workflow artifact without unpacking — a zip whose only
+	 * entry is pos-accounting-connector.zip. Unpack it once so the upgrader sees
+	 * the real plugin tree.
+	 */
+	private static function maybe_unpack_inner_zip( $source, $fs ) {
+		$source = untrailingslashit( (string) $source );
+		$list   = $fs->dirlist( $source, false, false );
+		if ( ! is_array( $list ) ) {
+			return '';
+		}
+
+		$files = array();
+		foreach ( $list as $name => $meta ) {
+			if ( is_array( $meta ) && 'f' === $meta['type'] ) {
+				$files[] = $name;
+			}
+		}
+		if ( 1 !== count( $files ) ) {
+			return '';
+		}
+
+		$inner_name = $files[0];
+		if ( self::ASSET_NAME !== $inner_name && '.zip' !== strtolower( substr( $inner_name, -4 ) ) ) {
+			return '';
+		}
+
+		$inner_path = $source . '/' . $inner_name;
+		if ( ! $fs->exists( $inner_path ) ) {
+			return '';
+		}
+
+		if ( ! function_exists( 'unzip_file' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/file.php';
+		}
+
+		$dest = $source . '/pos-connector-package';
+		if ( $fs->exists( $dest ) ) {
+			$fs->delete( $dest, true );
+		}
+
+		$local = $inner_path;
+		if ( 'direct' !== $fs->method ) {
+			$local_copy = get_temp_dir() . wp_unique_filename( get_temp_dir(), $inner_name );
+			if ( ! $fs->copy( $inner_path, $local_copy, true ) ) {
+				return '';
+			}
+			$local = $local_copy;
+		}
+
+		$result = unzip_file( $local, $dest );
+		if ( $local !== $inner_path && file_exists( $local ) ) {
+			@unlink( $local ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		}
+		if ( is_wp_error( $result ) || ! $fs->exists( $dest ) ) {
+			return '';
+		}
+
+		return $dest;
 	}
 
 	/** Does this extracted zip contain this plugin, at either known layout? Used only for unnamed upload-installs. */
 	private static function source_looks_like_this_plugin( $source, $fs ) {
+		if ( '' !== self::find_plugin_root( $source, $fs ) ) {
+			return true;
+		}
+
 		$source = untrailingslashit( (string) $source );
-		return $fs->exists( $source . '/pos-accounting-connector.php' )
-			|| $fs->exists( $source . '/wordpress-plugin/pos-accounting-connector/pos-accounting-connector.php' );
+		$list   = $fs->dirlist( $source, false, false );
+		if ( ! is_array( $list ) ) {
+			return false;
+		}
+		$files = array();
+		foreach ( $list as $name => $meta ) {
+			if ( is_array( $meta ) && 'f' === $meta['type'] ) {
+				$files[] = $name;
+			}
+		}
+
+		return 1 === count( $files )
+			&& ( self::ASSET_NAME === $files[0] || '.zip' === strtolower( substr( $files[0], -4 ) ) );
 	}
 
 	/**

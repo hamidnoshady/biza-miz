@@ -7,6 +7,7 @@
  * events that posted it (issue credits 2420, redeem debits it) — the same
  * never-a-column discipline store credit and consignment use.
  */
+import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { rialText } from "./inventory-exact";
@@ -374,6 +375,20 @@ export async function redeemGiftCard(
   const balance = await giftCardBalance(input.businessId, input.code, client);
   if (input.amount > balance) throw new Error("اعتبار کارت هدیه کافی نیست.");
 
+  // `journal_entries` enforces at most one posting per (business_id,
+  // source_type, source_id, posting_kind) via
+  // `uq_journal_business_source_posting`. `postingKind` for this rule is the
+  // fixed string "gift_card_redeemed" (promotions-posting-rules.ts), and a
+  // gift card is explicitly meant to be *partially* redeemed across many
+  // separate transactions — `giftCardBalance` above sums every past
+  // `gift_card_redeemed` event for this card, by design. Keying the posting
+  // identity on `card.id`, as this used to, meant only the *first*
+  // redemption of any gift card could ever post; every later partial
+  // redemption of the same card threw a raw unique-constraint violation.
+  // `domain_events.source_id`/`payload.giftCardId` still carry `card.id`
+  // (giftCardBalance reads `payload.giftCardId`, not `source_id`, so neither
+  // is affected); `postingSourceId` is the separate identity only the ledger
+  // posting itself uses, fresh per redemption.
   const { entryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -381,6 +396,7 @@ export async function redeemGiftCard(
     payload: { giftCardId: card.id, amount: rialText(String(input.amount)) },
     sourceType: "gift_card",
     sourceId: card.id,
+    postingSourceId: randomUUID(),
     createdBy: input.createdBy ?? null,
   });
 

@@ -671,7 +671,17 @@ export function WpConnectionPanel() {
 
       <SectionCard title="نصب افزونهٔ وردپرس">
         <ol className="list-inside list-decimal space-y-1 text-xs leading-6 text-muted-foreground">
-          <li>افزونهٔ «POS Accounting Connector» را در وردپرس نصب و فعال کنید.</li>
+          <li>
+            فایل{" "}
+            <a
+              href="https://updates.eshobe.app/wordpress/pos-accounting-connector/pos-accounting-connector.zip"
+              className="font-medium text-primary hover:underline"
+              dir="ltr"
+            >
+              pos-accounting-connector.zip
+            </a>{" "}
+            را دانلود کنید (نه کل مخزن گیت‌هاب و نه فایل update.json) و در وردپرس از «افزونه‌ها ← افزودن ← بارگذاری افزونه» نصب کنید.
+          </li>
           <li>
             در پیشخوان وردپرس، منوی «اشوبه» را باز کنید؛ در بخش «اتصال» (در نصب تازه، راهنمای راه‌اندازی
             خودش نمایش داده می‌شود) آدرس <span dir="ltr" className="font-mono">{origin}</span> و توکنی که

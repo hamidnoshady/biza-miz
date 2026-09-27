@@ -190,7 +190,7 @@ describe("the signed-in journey", () => {
       "/crm/segments",
       "/growth/campaigns",
       "/growth/loyalty",
-      "/websites/cms/content",
+      "/websites/cms/pages",
       "/websites/wp/orders",
     ]) {
       expect(await isServed(pathname), `${pathname} should be served`).toBe(

@@ -52,6 +52,23 @@ export interface RecordDomainEventInput {
   sourceType?: string | null;
   sourceId?: string | null;
   createdBy?: string | null;
+  /**
+   * Overrides the id posted onto `journal_entries.source_id` (and thus the
+   * identity checked by `uq_journal_business_source_posting`) without
+   * touching what gets recorded on `domain_events.source_id` above.
+   *
+   * Most callers key `sourceId` by the business object the event is *about*
+   * (an order, a stock count, ...) and that same id is exactly right as the
+   * ledger's idempotency key too, because that object is only ever posted
+   * once. Fungible retail stock breaks that assumption: an accessory or
+   * cosmetic item's id is the right thing for `domain_events.source_id` to
+   * carry (reports like `variantSalesAnalysis`/`itemAuditTrail` group and
+   * join on it), but the same item is *meant* to be sold many times, each a
+   * distinct posting — so the ledger needs a fresh identity per sale while
+   * the event log keeps reporting against the item. Pass a freshly generated
+   * id here for exactly that case; leave it unset everywhere else.
+   */
+  postingSourceId?: string | null;
 }
 
 /** What a posting rule hands back for the engine to post; `null` means "record the event, post nothing" (not every domain event has a ledger effect). */
@@ -153,6 +170,8 @@ export async function recordDomainEvent(
 export async function dispatchDomainEvent(
   client: PoolClient,
   event: DomainEvent,
+  /** See `RecordDomainEventInput.postingSourceId`; defaults to `event.sourceId`. */
+  postingSourceId?: string | null,
 ): Promise<string | null> {
   const rule = rules.get(event.eventType);
   if (!rule) return null;
@@ -166,7 +185,7 @@ export async function dispatchDomainEvent(
     entryDate: result.entryDate ?? null,
     memo: result.memo ?? null,
     sourceType: event.sourceType ?? event.eventType,
-    sourceId: event.sourceId,
+    sourceId: postingSourceId !== undefined ? postingSourceId : event.sourceId,
     lines: result.lines,
     createdBy: event.createdBy,
     postingKind: result.postingKind ?? null,
@@ -186,6 +205,6 @@ export async function emitDomainEvent(
   input: RecordDomainEventInput,
 ): Promise<{ event: DomainEvent; entryId: string | null }> {
   const event = await recordDomainEvent(client, input);
-  const entryId = await dispatchDomainEvent(client, event);
+  const entryId = await dispatchDomainEvent(client, event, input.postingSourceId);
   return { event: entryId ? { ...event, entryId } : event, entryId };
 }
