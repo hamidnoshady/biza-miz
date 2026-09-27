@@ -381,8 +381,26 @@ async function main() {
     await categoriesSection.getByLabel("نام دسته", { exact: true }).fill(CATEGORY_NAME);
     await categoriesSection.getByRole("button", { name: "افزودن", exact: true }).click();
     await waitDebounce(page);
+    await categoriesSection.getByText(CATEGORY_NAME).first().waitFor({ timeout: 10_000 });
+    log("permission-setup", `category «${CATEGORY_NAME}» created`);
 
-    await itemsSection.getByRole("button", { name: "دسته را انتخاب کنید…", exact: true }).click();
+    try {
+      await itemsSection
+        .getByRole("button", { name: "دسته را انتخاب کنید…", exact: true })
+        .click({ timeout: 15_000 });
+    } catch (err) {
+      // Diagnostic-only: this exact step has failed opaquely in CI before
+      // (a 30s blind timeout with zero clues) — on any failure here, dump
+      // what was actually on the page so the next iteration doesn't have to
+      // guess blind again.
+      const itemsSectionCount = await itemsSection.count();
+      const bodyText = await page.locator("body").innerText().catch(() => "<unreadable>");
+      console.error(
+        `[e2e-media] DIAGNOSTIC: itemsSection matched ${itemsSectionCount} element(s). ` +
+          `Page text (first 2000 chars): ${bodyText.slice(0, 2000)}`,
+      );
+      throw err;
+    }
     await page.getByRole("option", { name: CATEGORY_NAME, exact: true }).click();
     await itemsSection.getByLabel("نام آیتم", { exact: true }).fill(ITEM_NAME);
     await itemsSection.getByLabel(/قیمت/).fill("100000");
