@@ -333,6 +333,11 @@ async function main() {
     // ======================================================================
     await goto(page, "/crm/directory");
     await page.getByRole("button", { name: /^افزودن/ }).click();
+    // «نام نمایشی» is its own required field (party-form.tsx), not derived
+    // from «نام»/«نام خانوادگی» — it must be filled directly, and it is what
+    // both the directory list and this script's own search-by-name below
+    // actually show/match against.
+    await page.getByLabel("نام نمایشی (الزامی)", { exact: true }).fill(PARTY_NAME);
     await page.getByLabel("نام", { exact: true }).first().fill(PARTY_NAME);
     await page.getByLabel("نام خانوادگی", { exact: true }).first().fill("E2E");
 
@@ -353,6 +358,13 @@ async function main() {
     log("picker", "CRM party form picked the EXISTING Library asset — no second upload happened");
 
     await page.getByRole("button", { name: "ذخیره", exact: true }).click();
+    await page.locator('[role="dialog"]').waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {});
+    // The directory may already hold plenty of seeded parties, and a fresh
+    // row is not guaranteed to land on the first page/sort position — search
+    // for it by name, the same way the tag step proved search rather than
+    // hoping the new row happens to be visible unfiltered.
+    await page.getByLabel("جستجوی اشخاص با نام یا تلفن").fill(PARTY_NAME);
+    await waitDebounce(page);
     await page.getByText(PARTY_NAME).first().waitFor({ timeout: 10_000 });
     log("picker", `party «${PARTY_NAME}» saved with the reused Media Library asset as its avatar`);
 
