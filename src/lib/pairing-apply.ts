@@ -34,6 +34,7 @@ export interface AppliedSnapshot {
 export async function applyPairingSnapshot(
   snapshot: PairingSnapshot,
   remoteUrl: string,
+  pairing: { pairingSessionId?: string; installationId?: string } = {},
 ): Promise<AppliedSnapshot> {
   return withoutTenantScope("platform", async () => {
     const client = await getPool().connect();
@@ -114,14 +115,15 @@ export async function applyPairingSnapshot(
       await insertDiningTables(client, snapshot);
       await insertInventory(client, snapshot);
       await insertPaymentMethods(client, snapshot);
-      await insertSettings(client, snapshot, remoteUrl);
+      await insertSettings(client, snapshot, remoteUrl, pairing);
       await insertFeatures(client, snapshot);
 
       await client.query("COMMIT");
       return {
         businessId: snapshot.business.id,
         businessSlug: snapshot.business.slug,
-        businessSubdomain: snapshot.business.subdomain ?? snapshot.business.slug,
+        businessSubdomain:
+          snapshot.business.subdomain ?? snapshot.business.slug,
         locationId: snapshot.location.id,
         ...ownerIds,
       };
@@ -232,7 +234,9 @@ async function insertAccounts(
       const args: unknown[] = [];
       let offset = 1;
       for (const account of chunk) {
-        values.push(`($${offset}, $${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::account_type)`);
+        values.push(
+          `($${offset}, $${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::account_type)`,
+        );
         args.push(
           account.id,
           snapshot.business.id,
@@ -259,7 +263,10 @@ async function insertAccounts(
   }
 }
 
-async function insertMenu(client: PoolClient, snapshot: PairingSnapshot): Promise<void> {
+async function insertMenu(
+  client: PoolClient,
+  snapshot: PairingSnapshot,
+): Promise<void> {
   // v4: media rows first — menu_items.image_media_id points at them, and the
   // bytes stay on the central server. The local /api/media/[id]/file fetches
   // on demand and the tile falls back to its placeholder when it cannot.
@@ -291,7 +298,7 @@ async function insertMenu(client: PoolClient, snapshot: PairingSnapshot): Promis
         snapshot.menu.categories.map((c) => c.name),
         snapshot.menu.categories.map((c) => c.sortOrder),
         snapshot.menu.categories.map((c) => c.isActive),
-      ]
+      ],
     );
   }
 
@@ -366,7 +373,10 @@ async function insertMenu(client: PoolClient, snapshot: PairingSnapshot): Promis
   }
 }
 
-async function insertDiningTables(client: PoolClient, snapshot: PairingSnapshot): Promise<void> {
+async function insertDiningTables(
+  client: PoolClient,
+  snapshot: PairingSnapshot,
+): Promise<void> {
   if (snapshot.diningTables.length === 0) return;
   await client.query(
     `INSERT INTO dining_tables (id, location_id, name, zone, capacity, sort_order, is_active)
@@ -383,7 +393,10 @@ async function insertDiningTables(client: PoolClient, snapshot: PairingSnapshot)
   );
 }
 
-async function insertInventory(client: PoolClient, snapshot: PairingSnapshot): Promise<void> {
+async function insertInventory(
+  client: PoolClient,
+  snapshot: PairingSnapshot,
+): Promise<void> {
   if (snapshot.inventory.items.length > 0) {
     await client.query(
       `INSERT INTO inventory_items
@@ -414,9 +427,15 @@ async function insertInventory(client: PoolClient, snapshot: PairingSnapshot): P
       `INSERT INTO menu_item_ingredients (menu_item_id, inventory_item_id, quantity)
        SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::numeric[])`,
       [
-        snapshot.inventory.menuIngredients.map((ingredient) => ingredient.menuItemId),
-        snapshot.inventory.menuIngredients.map((ingredient) => ingredient.inventoryItemId),
-        snapshot.inventory.menuIngredients.map((ingredient) => ingredient.quantity),
+        snapshot.inventory.menuIngredients.map(
+          (ingredient) => ingredient.menuItemId,
+        ),
+        snapshot.inventory.menuIngredients.map(
+          (ingredient) => ingredient.inventoryItemId,
+        ),
+        snapshot.inventory.menuIngredients.map(
+          (ingredient) => ingredient.quantity,
+        ),
       ],
     );
   }
@@ -426,15 +445,24 @@ async function insertInventory(client: PoolClient, snapshot: PairingSnapshot): P
       `INSERT INTO modifier_ingredients (modifier_id, inventory_item_id, quantity_delta)
        SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::numeric[])`,
       [
-        snapshot.inventory.modifierIngredients.map((ingredient) => ingredient.modifierId),
-        snapshot.inventory.modifierIngredients.map((ingredient) => ingredient.inventoryItemId),
-        snapshot.inventory.modifierIngredients.map((ingredient) => ingredient.quantityDelta),
+        snapshot.inventory.modifierIngredients.map(
+          (ingredient) => ingredient.modifierId,
+        ),
+        snapshot.inventory.modifierIngredients.map(
+          (ingredient) => ingredient.inventoryItemId,
+        ),
+        snapshot.inventory.modifierIngredients.map(
+          (ingredient) => ingredient.quantityDelta,
+        ),
       ],
     );
   }
 }
 
-async function insertPaymentMethods(client: PoolClient, snapshot: PairingSnapshot): Promise<void> {
+async function insertPaymentMethods(
+  client: PoolClient,
+  snapshot: PairingSnapshot,
+): Promise<void> {
   if (snapshot.paymentMethods.length === 0) return;
   await client.query(
     `INSERT INTO payment_methods
@@ -473,6 +501,7 @@ async function insertSettings(
   client: PoolClient,
   snapshot: PairingSnapshot,
   remoteUrl: string,
+  pairing: { pairingSessionId?: string; installationId?: string },
 ): Promise<void> {
   const pairedAt = new Date().toISOString();
 
@@ -505,6 +534,12 @@ async function insertSettings(
         siteDeviceId: snapshot.siteDevice.id,
         siteDevicePublicId: snapshot.siteDevice.publicId,
         locationId: snapshot.location.id,
+        ...(pairing.pairingSessionId
+          ? { pairingSessionId: pairing.pairingSessionId }
+          : {}),
+        ...(pairing.installationId
+          ? { installationId: pairing.installationId }
+          : {}),
       },
     ],
     [

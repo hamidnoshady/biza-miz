@@ -24,7 +24,6 @@ export const CONNECTION_KIND_KEYS = [
   "woocommerce",
   "website",
   "holoo",
-  "server_sync",
   "mcp",
   "api",
 ] as const;
@@ -87,17 +86,6 @@ export const CONNECTION_KINDS: ConnectionKind[] = [
       "اتصال به دیتابیس هلو برای مهاجرت یا کار در حالت همراه: اپ روی داده‌های خود هلو کار می‌کند در حالی که دفتر رسمی هلو می‌ماند.",
     allowedRoles: ["owner", "manager"],
     feature: "integrations",
-  },
-  {
-    key: "server_sync",
-    label: "جزئیات فنی همگام‌سازی",
-    description:
-      "عیب‌یابی پیشرفتهٔ اتصال ابری: وضعیت push/pull، رویدادهای معوق و نامه‌های مرده. نصب‌های تازه به ورود دستی توکن نیاز ندارند.",
-    // Owner-only, like the settings tab this replaces: the token reaches the
-    // whole central dataset. Gated by `site_cloud_sync` — without it there is no
-    // remote peer to sync with.
-    allowedRoles: ["owner"],
-    feature: "site_cloud_sync",
   },
   {
     key: "mcp",

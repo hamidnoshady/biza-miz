@@ -1,4 +1,4 @@
--- 0185_desktop_cloud_sync_hardening.sql
+-- 0186_desktop_cloud_sync_runs_and_rotation.sql
 --
 -- Desktop ↔ cloud pairing is an enrollment, not a single destructive exchange.
 -- A code now reserves a pending site identity, prepares a snapshot, and is only
@@ -6,25 +6,8 @@
 -- same migration upgrades site credentials to support a short staged rotation
 -- window and adds an auditable, per-device sync-run journal.
 
-ALTER TABLE install_pairing_codes
-  ADD COLUMN IF NOT EXISTS enrollment_state text NOT NULL DEFAULT 'issued'
-    CHECK (enrollment_state IN ('issued', 'reserved', 'snapshot_prepared', 'active', 'failed')),
-  ADD COLUMN IF NOT EXISTS reservation_expires_at timestamptz,
-  ADD COLUMN IF NOT EXISTS site_device_id uuid REFERENCES site_devices(id) ON DELETE SET NULL;
-
-UPDATE install_pairing_codes
-   SET enrollment_state = CASE WHEN redeemed_at IS NULL THEN 'issued' ELSE 'active' END
- WHERE enrollment_state = 'issued';
-
-CREATE INDEX IF NOT EXISTS idx_pairing_codes_pending_enrollment
-  ON install_pairing_codes (reservation_expires_at)
-  WHERE enrollment_state IN ('reserved', 'snapshot_prepared');
-
-ALTER TABLE site_devices
-  DROP CONSTRAINT IF EXISTS site_devices_status_check;
-ALTER TABLE site_devices
-  ADD CONSTRAINT site_devices_status_check
-  CHECK (status IN ('pending', 'active', 'disabled', 'revoked'));
+-- Pairing-session durability is provided by migration 0185. This migration
+-- extends only the device credential lifecycle and owner-safe run trace.
 
 -- The original table used site_device_id as its primary key, which made an
 -- overlap period technically impossible.  Credentials remain hash-only; the

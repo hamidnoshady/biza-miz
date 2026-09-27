@@ -4,8 +4,6 @@ import {
   getServerSyncConfig,
   getServerSyncState,
   getSyncDomainDiagnostics,
-  listServerSyncDeadLetters,
-  listSyncRuns,
   setServerSyncConfig,
 } from "@/lib/server-sync";
 import {
@@ -17,7 +15,7 @@ import { getAppUpdateStatus } from "@/lib/app-update";
 import { deploymentRole, platformBaseUrl } from "@/lib/deployment-role";
 import { getPairedSite } from "@/lib/server-sync";
 import { publicSyncEventRegistry } from "@/lib/sync-event-registry";
-import { replicationCatalogue } from "@/lib/replication-catalogue";
+import { REPLICATION_DOMAIN_CONTRACT } from "@/lib/data-ownership";
 
 /**
  * Owner-only: configure the bidirectional server-to-server sync target
@@ -37,28 +35,32 @@ export const GET = withTenantScope(async () => {
   if (error) return error;
 
   const role = deploymentRole();
-  const [config, syncState, deadLetters, domainDiagnostics, appUpdateStatus, pairedSite, syncRuns] = await Promise.all([
-    getServerSyncConfig(session.businessId),
-    getServerSyncState(session.businessId),
-    listServerSyncDeadLetters(session.businessId),
-    getSyncDomainDiagnostics(session.businessId),
-    getAppUpdateStatus(session.businessId),
-    role === "central" ? getPairedSite(session.businessId) : Promise.resolve(null),
-    listSyncRuns(session.businessId),
-  ]);
+  const [config, syncState, domainDiagnostics, appUpdateStatus, pairedSite] =
+    await Promise.all([
+      getServerSyncConfig(session.businessId),
+      getServerSyncState(session.businessId),
+      getSyncDomainDiagnostics(session.businessId),
+      getAppUpdateStatus(session.businessId),
+      role === "central"
+        ? getPairedSite(session.businessId)
+        : Promise.resolve(null),
+    ]);
 
   // Sources in order. Pairing writes the URL the laptop was paired with
   // straight into the config (pairing-apply.ts's insertSettings), so the
   // "paired platform URL" and "current config value" are one lookup here —
   // and config-first is what preserves a deliberate override.
-  const resolvedRemoteUrl = config?.remoteUrl?.trim() || platformBaseUrl() || "";
+  const resolvedRemoteUrl =
+    config?.remoteUrl?.trim() || platformBaseUrl() || "";
   // Never leak the token back to the client in full — mask it. `tokenFormat`
   // carries the one fact the UI needs about the real value: whether it is a
   // pre-format hex secret the owner should rotate when convenient.
   const masked = config
     ? {
         ...config,
-        token: config.token ? `${config.token.slice(0, 4)}…${config.token.slice(-4)}` : "",
+        token: config.token
+          ? `${config.token.slice(0, 4)}…${config.token.slice(-4)}`
+          : "",
         tokenFormat: syncTokenFormat(config.token),
       }
     : null;
@@ -68,11 +70,18 @@ export const GET = withTenantScope(async () => {
     resolvedRemoteUrl,
     pairedSite,
     syncState,
-    deadLetters,
     domainDiagnostics,
     eventRegistry: publicSyncEventRegistry(),
-    replicationCatalogue: replicationCatalogue(),
-    syncRuns,
+    replicationContract: {
+      version: REPLICATION_DOMAIN_CONTRACT.version,
+      domains: REPLICATION_DOMAIN_CONTRACT.domains.map((domain) => ({
+        domain: domain.domain,
+        authority: domain.authority,
+        direction: domain.direction,
+        continuousSync: domain.continuousSync,
+        eventCount: domain.events.length,
+      })),
+    },
     appUpdateStatus,
   });
 });

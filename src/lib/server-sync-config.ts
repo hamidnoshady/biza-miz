@@ -23,8 +23,10 @@ export interface ServerSyncConfig {
   siteDeviceId?: string;
   siteDevicePublicId?: string;
   locationId?: string;
-  /** True until the cloud accepts the freshly applied pairing snapshot. */
-  pairingPending?: boolean;
+  /** Pending cloud acknowledgement after the local snapshot transaction committed. */
+  pairingSessionId?: string;
+  /** Stable Electron backend instance identity, bound to the pairing session. */
+  installationId?: string;
 }
 
 export interface ServerSyncConfigUpdateInput {
@@ -39,7 +41,13 @@ export type ResolveConfigUpdateResult =
   | { ok: true; config: ServerSyncConfig }
   | {
       ok: false;
-      error: "missing_fields" | "invalid_url" | "bad_prefix" | "bad_length" | "bad_charset" | "bad_checksum";
+      error:
+        | "missing_fields"
+        | "invalid_url"
+        | "bad_prefix"
+        | "bad_length"
+        | "bad_charset"
+        | "bad_checksum";
     };
 
 /** Which of the two accepted token shapes a stored token is, for the UI to flag. */
@@ -73,18 +81,22 @@ export function resolveConfigUpdate(
 ): ResolveConfigUpdateResult {
   const remoteUrl = body.remoteUrl?.trim() ?? "";
   const enabled = Boolean(body.enabled);
-  const batchSize = Number.isFinite(body.batchSize) ? Math.min(Math.max(Number(body.batchSize), 1), 200) : 100;
+  const batchSize = Number.isFinite(body.batchSize)
+    ? Math.min(Math.max(Number(body.batchSize), 1), 200)
+    : 100;
 
   const tokenProvided = typeof body.token === "string";
   let token = tokenProvided ? body.token!.trim() : (existing?.token ?? "");
 
-  if (remoteUrl && !/^https?:\/\//.test(remoteUrl)) return { ok: false, error: "invalid_url" };
+  if (remoteUrl && !/^https?:\/\//.test(remoteUrl))
+    return { ok: false, error: "invalid_url" };
   if (tokenProvided && token && !isLegacySyncToken(token)) {
     const parsed = parseSyncToken(token);
     if (!parsed.ok) return { ok: false, error: parsed.error };
     token = parsed.canonical;
   }
-  if (enabled && (!remoteUrl || !token)) return { ok: false, error: "missing_fields" };
+  if (enabled && (!remoteUrl || !token))
+    return { ok: false, error: "missing_fields" };
 
   return {
     ok: true,
@@ -93,10 +105,19 @@ export function resolveConfigUpdate(
       token,
       enabled,
       batchSize,
-      ...(existing?.siteDeviceId ? { siteDeviceId: existing.siteDeviceId } : {}),
-      ...(existing?.siteDevicePublicId ? { siteDevicePublicId: existing.siteDevicePublicId } : {}),
+      ...(existing?.siteDeviceId
+        ? { siteDeviceId: existing.siteDeviceId }
+        : {}),
+      ...(existing?.siteDevicePublicId
+        ? { siteDevicePublicId: existing.siteDevicePublicId }
+        : {}),
       ...(existing?.locationId ? { locationId: existing.locationId } : {}),
-      ...(existing?.pairingPending ? { pairingPending: true } : {}),
+      ...(existing?.pairingSessionId
+        ? { pairingSessionId: existing.pairingSessionId }
+        : {}),
+      ...(existing?.installationId
+        ? { installationId: existing.installationId }
+        : {}),
     },
   };
 }

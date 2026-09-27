@@ -14,14 +14,15 @@ import { runMigrations } from "../scripts/migrate";
 import { getPool, query, withTenant, withoutTenantScope } from "../src/lib/db";
 import { provisionBusiness } from "../src/lib/business-provisioning";
 import {
+  acknowledgePairingSession,
   issuePairingCode,
   listPairingCodes,
   redeemPairingCode,
-  activatePairingEnrollment,
   revokePairingCode,
 } from "../src/lib/pairing-service";
 import { applyPairingSnapshot } from "../src/lib/pairing-apply";
 import { validateSnapshot } from "../src/lib/pairing-snapshot";
+import { acknowledgePendingPairing } from "../src/lib/server-sync";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -174,45 +175,68 @@ describe("pairing round trip", () => {
     if (!("code" in issued)) return;
     expect(issued.code).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
 
-    const redeemed = await redeemPairingCode(issued.code, "127.0.0.1");
+    const installationId = `desktop-installation-${randomUUID()}`;
+    const redeemed = await redeemPairingCode(
+      issued.code,
+      "127.0.0.1",
+      "Windows Business Suite",
+      installationId,
+    );
     expect(redeemed.ok).toBe(true);
     if (!redeemed.ok) return;
 
     // Round-tripped through JSON, which is how it actually reaches the laptop.
-    const validation = validateSnapshot(JSON.parse(JSON.stringify(redeemed.snapshot)));
+    const validation = validateSnapshot(
+      JSON.parse(JSON.stringify(redeemed.snapshot)),
+    );
     expect(validation).toMatchObject({ ok: true });
 
-    // The same code cannot be redeemed twice.
-    const second = await redeemPairingCode(issued.code, "127.0.0.1");
-    expect(second).toEqual({ ok: false, error: "code_pending_activation" });
+    // A lost response is resumable from the same installation: the cloud
+    // returns the same session/device/token rather than minting another one.
+    const second = await redeemPairingCode(
+      issued.code,
+      "127.0.0.1",
+      "Windows Business Suite",
+      installationId,
+    );
+    expect(second).toMatchObject({
+      ok: true,
+      resumed: true,
+      pairingSessionId: redeemed.pairingSessionId,
+    });
+    if (!second.ok) return;
+    expect(second.snapshot.siteDevice).toEqual(redeemed.snapshot.siteDevice);
+    expect(second.snapshot.syncToken).toBe(redeemed.snapshot.syncToken);
+    const anotherInstall = await redeemPairingCode(
+      issued.code,
+      "127.0.0.1",
+      "Windows Business Suite",
+      `desktop-installation-${randomUUID()}`,
+    );
+    expect(anotherInstall).toEqual({
+      ok: false,
+      error: "code_already_redeemed",
+    });
 
     const summaries = await withoutTenantScope("platform", () =>
       listPairingCodes(created.businessId),
     );
-    expect(summaries[0].state).toBe("code_pending_activation");
+    expect(summaries[0].state).toBe("code_already_redeemed");
 
     const snapshot = redeemed.snapshot;
 
     // ---- local side --------------------------------------------------------
     await useDatabase(localDb);
 
-    const applied = await applyPairingSnapshot(snapshot, "https://pos.example.com");
+    const applied = await applyPairingSnapshot(
+      snapshot,
+      "https://pos.example.com",
+      { pairingSessionId: redeemed.pairingSessionId, installationId },
+    );
     expect(applied.businessId).toBe(created.businessId);
     expect(applied.locationId).toBe(created.locationId);
     expect(applied.ownerUserId).toBe(created.userId);
 
-    // The cloud identity becomes active only after the local transaction has
-    // committed. A replayed acknowledgement is safe and does not consume a
-    // second device or credential.
-    await useDatabase(serverDb);
-    expect(await activatePairingEnrollment(snapshot.siteDevice.id, snapshot.syncToken)).toMatchObject({ ok: true, alreadyActive: false });
-    expect(await activatePairingEnrollment(snapshot.siteDevice.id, snapshot.syncToken)).toMatchObject({ ok: true, alreadyActive: true });
-    const cloudSite = await withoutTenantScope("platform", () => query<{ status: string }>(
-      "SELECT status FROM site_devices WHERE id=$1", [snapshot.siteDevice.id],
-    ));
-    expect(cloudSite.rows[0].status).toBe("active");
-
-    await useDatabase(localDb);
     await withTenant(applied.businessId, async () => {
       const items = await query<{ name: string; price: string }>(
         `SELECT name, price FROM menu_items`,
@@ -221,7 +245,12 @@ describe("pairing round trip", () => {
       expect(items.rows[0].name).toBe("اسپرسو");
       expect(Number(items.rows[0].price)).toBe(850_000);
 
-      const masterData = await query<{ modifiers: string; inventory: string; tables: string; methods: string }>(
+      const masterData = await query<{
+        modifiers: string;
+        inventory: string;
+        tables: string;
+        methods: string;
+      }>(
         `SELECT
            (SELECT count(*) FROM modifiers)::text AS modifiers,
            (SELECT count(*) FROM inventory_items)::text AS inventory,
@@ -243,7 +272,9 @@ describe("pairing round trip", () => {
       );
       expect(Number(accounts.rows[0].n)).toBeGreaterThan(0);
 
-      const mode = await query<{ value: { profile: string; pairedAt: string } }>(
+      const mode = await query<{
+        value: { profile: string; pairedAt: string };
+      }>(
         `SELECT value FROM settings WHERE business_id = $1 AND key = 'deployment.profile'`,
         [applied.businessId],
       );
@@ -265,8 +296,67 @@ describe("pairing round trip", () => {
         `SELECT location_id, status FROM site_devices WHERE business_id = $1`,
         [applied.businessId],
       );
-      expect(sites.rows).toEqual([{ location_id: applied.locationId, status: "active" }]);
+      expect(sites.rows).toEqual([
+        { location_id: applied.locationId, status: "active" },
+      ]);
     });
+
+    // Local application committed before activation. Acknowledge from that
+    // install to make the cloud-side pending credential usable for sync.
+    await useDatabase(serverDb);
+    const activated = await acknowledgePairingSession(
+      redeemed.pairingSessionId,
+      installationId,
+      redeemed.snapshot.syncToken,
+    );
+    expect(activated).toEqual({ ok: true, state: "completed" });
+    const cloudDevice = await withoutTenantScope("pairing-redeem", () =>
+      query<{ status: string }>("SELECT status FROM site_devices WHERE id=$1", [
+        redeemed.snapshot.siteDevice.id,
+      ]),
+    );
+    expect(cloudDevice.rows[0].status).toBe("active");
+
+    // A lost acknowledgement response is recovered from the durable local
+    // config and enables normal sync only after its next successful proof.
+    await useDatabase(localDb);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200 });
+    try {
+      await expect(
+        acknowledgePendingPairing(applied.businessId),
+      ).resolves.toEqual({ status: "ok" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    const activatedConfig = await withTenant(applied.businessId, () =>
+      query<{
+        value: {
+          enabled: boolean;
+          pairingSessionId?: string;
+          installationId?: string;
+        };
+      }>(
+        `SELECT value FROM settings WHERE business_id=$1 AND key='server_sync.config'`,
+        [applied.businessId],
+      ),
+    );
+    expect(activatedConfig.rows[0].value).toMatchObject({ enabled: true });
+    expect(activatedConfig.rows[0].value.pairingSessionId).toBeUndefined();
+    expect(activatedConfig.rows[0].value.installationId).toBeUndefined();
+
+    // Once acknowledged, recovery material is no longer downloadable with the
+    // old one-time code; acknowledgement itself remains idempotent instead.
+    await useDatabase(serverDb);
+    await expect(
+      redeemPairingCode(
+        issued.code,
+        "127.0.0.1",
+        "Windows Business Suite",
+        installationId,
+      ),
+    ).resolves.toEqual({ ok: false, error: "code_already_redeemed" });
   }, 120_000);
 });
 
@@ -297,7 +387,10 @@ describe("pairing code lifecycle", () => {
       revokePairingCode(created.businessId, issued.summary.id),
     );
     expect(revoked).toBe(true);
-    expect(await redeemPairingCode(issued.code, null)).toEqual({ ok: false, error: "code_revoked" });
+    expect(await redeemPairingCode(issued.code, null)).toEqual({
+      ok: false,
+      error: "code_revoked",
+    });
 
     // Re-issuing replaces rather than accumulates: the partial unique index
     // allows only one live code, so this must succeed.

@@ -13,16 +13,17 @@ describe("visibleConnectionKinds", () => {
     // the two website ones, which the managers that use them link to. Order
     // is the hub's tab order: the connections a business meets first come
     // first.
-    expect(visibleConnectionKinds({ role: "owner" }).map((k) => k.key)).toEqual([
-      "desktop",
-      "local_devices",
-      "woocommerce",
-      "website",
-      "holoo",
-      "server_sync",
-      "mcp",
-      "api",
-    ]);
+    expect(visibleConnectionKinds({ role: "owner" }).map((k) => k.key)).toEqual(
+      [
+        "desktop",
+        "local_devices",
+        "woocommerce",
+        "website",
+        "holoo",
+        "mcp",
+        "api",
+      ],
+    );
   });
 
   it("gives a Manager the connections their role can use, in hub order", () => {
@@ -32,22 +33,27 @@ describe("visibleConnectionKinds", () => {
     // orders, menu, inventory and reports, an MCP connection can be granted
     // the right to change them, and the server-sync token reaches the whole
     // central dataset.
-    expect(visibleConnectionKinds({ role: "manager" }).map((k) => k.key)).toEqual([
-      "woocommerce",
-      "website",
-      "holoo",
-    ]);
+    expect(
+      visibleConnectionKinds({ role: "manager" }).map((k) => k.key),
+    ).toEqual(["woocommerce", "website", "holoo"]);
   });
 
   it("gives a floor role nothing, so the page redirects rather than rendering empty", () => {
-    for (const role of ["cashier", "waiter", "kitchen", "accountant"] as const) {
+    for (const role of [
+      "cashier",
+      "waiter",
+      "kitchen",
+      "accountant",
+    ] as const) {
       expect(visibleConnectionKinds({ role })).toEqual([]);
     }
   });
 
   it("keeps every technical tab for every industry — `connections` is a core module", () => {
     for (const industry of INDUSTRIES) {
-      expect(visibleConnectionKinds({ role: "owner", industry })).toHaveLength(CONNECTION_KINDS.length);
+      expect(visibleConnectionKinds({ role: "owner", industry })).toHaveLength(
+        CONNECTION_KINDS.length,
+      );
     }
   });
 
@@ -56,7 +62,8 @@ describe("visibleConnectionKinds", () => {
     // business cannot ask for something it is never shown.
     const owner = visibleConnectionKinds({ role: "owner" });
     expect(owner.some((k) => k.feature === "integrations")).toBe(true);
-    expect(owner.some((k) => k.feature === "site_cloud_sync")).toBe(true);
+    // Cloud sync is now a feature-locked section inside the unified Desktop &
+    // Cloud surface, rather than a second top-level tab.
     expect(owner.some((k) => k.feature === "api_platform")).toBe(true);
     // …and the desktop tab has no flag at all: connecting the desktop app is
     // not something a business buys.
@@ -71,6 +78,7 @@ describe("resolveConnectionKind", () => {
   it("honours a valid, visible request", () => {
     expect(resolveConnectionKind("holoo", owner)).toBe("holoo");
     expect(resolveConnectionKind("api", owner)).toBe("api");
+    expect(resolveConnectionKind("server_sync", owner)).toBe("desktop");
     expect(resolveConnectionKind("woocommerce", manager)).toBe("woocommerce");
   });
 
@@ -94,7 +102,9 @@ describe("resolveConnectionKind", () => {
 
 describe("isConnectionKindKey", () => {
   it("recognises exactly the declared keys", () => {
-    expect(CONNECTION_KINDS.every((kind) => isConnectionKindKey(kind.key))).toBe(true);
+    expect(
+      CONNECTION_KINDS.every((kind) => isConnectionKindKey(kind.key)),
+    ).toBe(true);
     expect(isConnectionKindKey("integrations")).toBe(false);
     expect(isConnectionKindKey(null)).toBe(false);
     expect(isConnectionKindKey(undefined)).toBe(false);

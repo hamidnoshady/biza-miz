@@ -62,15 +62,17 @@ New installations must use site credentials.
 2. Pulls later location-scoped events from
    `GET /api/server-sync/pull?after=<id>`.
 3. Applies supported events through `applySyncEvent()`.
-4. Records transport attempts in `server_sync_log` and apply failures in
-   `server_sync_dead_letters` without blocking later events.
+4. Records transport attempts in `server_sync_log`. A pull failure may advance
+   the cursor only after its original replay envelope is durably stored as a
+   canonical `sync_event_dead_letters` row with `source='server_pull'`.
 
 The schema records event origin, source site device, schema version and
 idempotency metadata. Duplicate `client_event_id` values are rejected by a
-location-scoped unique constraint. This transport-level protection must not be
-mistaken for complete financial or inventory idempotency; additional
-operation-specific keys are required before broader money/stock effects are
-added.
+location-scoped unique constraint. Deferred domain events, conflicts and
+canonical dead letters are intentionally distinct operator outcomes. A
+canonical pull row can replay its stored envelope; an operator may retry it or
+explicitly discard it with resolver/note audit data. The old
+`server_sync_dead_letters` table is retired by migration 0185.
 
 Internet failures do not stop local use. The desktop continues to serve the
 LAN, queued local mutations remain in IndexedDB or `sync_events` as
@@ -79,37 +81,26 @@ The UI distinguishes local-server reachability from Internet/cloud status.
 
 ## Supported event scope
 
-The current bidirectional apply engine supports only:
+`src/lib/data-ownership.ts` is the versioned, machine-readable replication
+contract. It is the authority for domain ownership, stable identity,
+conflict/tombstone policy, bootstrap boundary, retry semantics, deployment
+availability, and exact `type@schemaVersion` event pairs. Pairing capability
+disclosure and its tests consume this same contract.
 
-| Event | Scope |
-|---|---|
-| `order.created` | Create an order for the paired location |
-| `order.item_added` | Add an item to an existing location order |
-| `order.item_status_changed` | Apply legal kitchen/item status transitions |
+The active Hybrid outbox/inbox set currently covers order creation/item
+changes, payment v2 and customer returns, manual-journal reversals, purchases,
+supplier returns, transfers, waste, retail/standard stock counts, and
+production/reversal events. Each is written in the local mutation transaction,
+uses stable IDs and `client_event_id` idempotency, and is applied through the
+versioned registry.
 
-This is intentionally narrow. Menu, floor plan, staff, CRM, accounting,
-inventory, Growth/Marketing and Website Management records are not yet all
-replicated by the event engine. Pairing snapshot v2 bootstraps selected
-master data, but it is not continuing full sync. Do not present this feature as
-full database replication.
-
-**Audit note (desktop offline-first review):** `src/lib/sync-event-registry.ts`
-actually registers 17 event types, not 3 — 14 more
-(`order.payment.completed`, `inventory.purchase.created/received`,
-`inventory.transfer.*`, `inventory.waste.recorded`,
-`inventory.stock_count.*`, `inventory.production.*`,
-`accounting.manual_journal.reversed`, etc.) have complete, atomic domain
-handlers in `sync-domain-handlers.ts` and are fully validated/dispatchable by
-`applySyncEvent()`. This is not a second, hidden replication path: nothing in
-the product ever constructs a `SyncEventInput` of one of those 14 types —
-`sync_events` rows only ever come from `applyLegacySyncEvent`'s own INSERT
-(the 3 legacy client-queue types above) or from a remote peer's `push`
-request. In other words, those 14 definitions are complete server-side
-machinery for financial/inventory site↔cloud sync **with no producer wired up
-yet** — forward-compatible scaffolding, not a partially-working feature. Do
-not assume payments, purchases, transfers, waste, stock counts or production
-runs replicate to a paired cloud site; they do not, today. Wiring a producer
-for any of them is a deliberate follow-up, not a bug fix.
+This is **not** full-database replication. The contract deliberately marks
+customers, catalogue/menu, and staff access as `bootstrap_only`: pairing
+copies the selected master data atomically, but subsequent master-data edits
+do not yet continuously synchronize. Printer settings, paths, LAN/certificate
+configuration, and the cloud-exception relay are device-local and never enter
+operational sync. Local-only profiles likewise never initiate continuous cloud
+synchronization.
 
 ## Configuration and operations
 
@@ -145,9 +136,9 @@ verification, pre-migration backup and rollback.
   and Business Suite use should continue.
 - **401 from sync endpoint:** pair again only after checking that the site
   device is active; a revoked credential is intentionally unusable.
-- **Events stay queued:** inspect `server_sync_log` and
-  `server_sync_dead_letters`, then verify the event type is in the supported
-  catalog above.
+- **Events stay queued:** inspect `server_sync_log` and canonical
+  `sync_event_dead_letters`, then verify the event type is in the supported
+  contract above.
 - **Phone cannot connect:** use the HTTPS URL/QR from Local Devices, trust the
   generated root certificate, confirm the chosen adapter is Private, and
   verify the gateway—not the internal server—is listening on the LAN.

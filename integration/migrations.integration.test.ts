@@ -45,7 +45,11 @@ async function createDatabase(): Promise<{ name: string; url: string }> {
 async function tempMigrations(files: Record<string, string>): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "pos-migrations-"));
   tempDirs.push(dir);
-  await Promise.all(Object.entries(files).map(([name, sql]) => writeFile(join(dir, name), sql, "utf8")));
+  await Promise.all(
+    Object.entries(files).map(([name, sql]) =>
+      writeFile(join(dir, name), sql, "utf8"),
+    ),
+  );
   return dir;
 }
 
@@ -59,7 +63,9 @@ afterEach(async () => {
       await client.end();
     }
   }
-  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(
+    tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+  );
 });
 
 describe("migration runner", () => {
@@ -74,13 +80,16 @@ describe("migration runner", () => {
       .sort()
       .map((filename) => ({
         filename,
-        checksum: createHash("sha256").update(readFileSync(join(migrationsDirectory, filename))).digest("hex"),
+        checksum: createHash("sha256")
+          .update(readFileSync(join(migrationsDirectory, filename)))
+          .digest("hex"),
       }));
     const client = new Client({ connectionString: database.url });
     await client.connect();
-    const actualMigrations = await client.query<{ filename: string; checksum: string }>(
-      "SELECT filename, checksum FROM schema_migrations ORDER BY filename",
-    );
+    const actualMigrations = await client.query<{
+      filename: string;
+      checksum: string;
+    }>("SELECT filename, checksum FROM schema_migrations ORDER BY filename");
     await client.end();
 
     expect(first).toEqual({
@@ -89,17 +98,24 @@ describe("migration runner", () => {
       repairedChecksums: [],
     });
     expect(actualMigrations.rows).toEqual(expectedMigrations);
-    expect(second).toEqual({ applied: 0, adoptedChecksums: 0, repairedChecksums: [] });
+    expect(second).toEqual({
+      applied: 0,
+      adoptedChecksums: 0,
+      repairedChecksums: [],
+    });
   }, 60_000);
 
   it("serializes concurrent runners with the advisory lock", async () => {
     const database = await createDatabase();
     const migrationsDir = await tempMigrations({
-      "0001_guard.sql": "CREATE TABLE concurrency_guard(id integer PRIMARY KEY);",
+      "0001_guard.sql":
+        "CREATE TABLE concurrency_guard(id integer PRIMARY KEY);",
     });
     const blocker = new Client({ connectionString: database.url });
     await blocker.connect();
-    await blocker.query("SELECT pg_advisory_lock($1::bigint)", [MIGRATION_ADVISORY_LOCK_ID]);
+    await blocker.query("SELECT pg_advisory_lock($1::bigint)", [
+      MIGRATION_ADVISORY_LOCK_ID,
+    ]);
 
     const runners = [
       runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true }),
@@ -122,7 +138,9 @@ describe("migration runner", () => {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     expect(waitingRunners).toBe(2);
-    await blocker.query("SELECT pg_advisory_unlock($1::bigint)", [MIGRATION_ADVISORY_LOCK_ID]);
+    await blocker.query("SELECT pg_advisory_unlock($1::bigint)", [
+      MIGRATION_ADVISORY_LOCK_ID,
+    ]);
     await blocker.end();
 
     const [first, second] = await Promise.all(runners);
@@ -134,40 +152,149 @@ describe("migration runner", () => {
     const database = await createDatabase();
     const dir = await mkdtemp(join(tmpdir(), "pos-upgrade-"));
     tempDirs.push(dir);
-    const files = readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
+    const files = readdirSync(migrationsDirectory)
+      .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+      .sort();
     for (const file of files.filter((name) => name <= "0011_delivery.sql")) {
       await copyFile(join(migrationsDirectory, file), join(dir, file));
     }
-    await runMigrations({ databaseUrl: database.url, migrationsDir: dir, quiet: true });
+    await runMigrations({
+      databaseUrl: database.url,
+      migrationsDir: dir,
+      quiet: true,
+    });
     for (const file of files.filter((name) => name > "0011_delivery.sql")) {
       await copyFile(join(migrationsDirectory, file), join(dir, file));
     }
-    const upgraded = await runMigrations({ databaseUrl: database.url, migrationsDir: dir, quiet: true });
-    const rerun = await runMigrations({ databaseUrl: database.url, migrationsDir: dir, quiet: true });
+    const upgraded = await runMigrations({
+      databaseUrl: database.url,
+      migrationsDir: dir,
+      quiet: true,
+    });
+    const rerun = await runMigrations({
+      databaseUrl: database.url,
+      migrationsDir: dir,
+      quiet: true,
+    });
     expect(upgraded.applied).toBe(files.length - 11);
-    expect(rerun).toEqual({ applied: 0, adoptedChecksums: 0, repairedChecksums: [] });
+    expect(rerun).toEqual({
+      applied: 0,
+      adoptedChecksums: 0,
+      repairedChecksums: [],
+    });
+  }, 60_000);
+
+  it("backfills legacy pull dead letters into the canonical replay store before dropping the old table", async () => {
+    const database = await createDatabase();
+    const dir = await mkdtemp(join(tmpdir(), "pos-0185-upgrade-"));
+    tempDirs.push(dir);
+    const files = readdirSync(migrationsDirectory)
+      .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+      .sort();
+    for (const file of files.filter(
+      (name) => name < "0185_durable_pairing_and_sync_recovery.sql",
+    )) {
+      await copyFile(join(migrationsDirectory, file), join(dir, file));
+    }
+    await runMigrations({
+      databaseUrl: database.url,
+      migrationsDir: dir,
+      quiet: true,
+    });
+
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    const seeded = await client.query<{ business_id: string }>(`
+      WITH business AS (
+        INSERT INTO businesses(name,slug) VALUES ('Legacy recovery cafe','legacy-recovery-cafe')
+        RETURNING id
+      ), location AS (
+        INSERT INTO locations(business_id,name) SELECT id,'Main' FROM business RETURNING id,business_id
+      )
+      SELECT business_id FROM location
+    `);
+    const businessId = seeded.rows[0].business_id;
+    await client.query(
+      `INSERT INTO server_sync_dead_letters
+         (business_id,remote_event_id,location_id,client_event_id,event_type,payload,error)
+       VALUES($1,42,'not-a-uuid','legacy-client-event','order_item.status',$2::jsonb,'invalid location')`,
+      [
+        businessId,
+        JSON.stringify({ itemId: "private-item", status: "preparing" }),
+      ],
+    );
+    await client.end();
+
+    await copyFile(
+      join(migrationsDirectory, "0185_durable_pairing_and_sync_recovery.sql"),
+      join(dir, "0185_durable_pairing_and_sync_recovery.sql"),
+    );
+    await runMigrations({
+      databaseUrl: database.url,
+      migrationsDir: dir,
+      quiet: true,
+    });
+
+    const verify = new Client({ connectionString: database.url });
+    await verify.connect();
+    const rows = await verify.query<{
+      source: string;
+      remote_event_id: string;
+      location_id: string | null;
+      payload: { itemId: string };
+      payload_sha256: string;
+      status: string;
+    }>(
+      `SELECT source,remote_event_id::text,location_id::text,payload,payload_sha256,status
+         FROM sync_event_dead_letters WHERE business_id=$1`,
+      [businessId],
+    );
+    const oldTable = await verify.query<{ present: string | null }>(
+      "SELECT to_regclass('server_sync_dead_letters')::text AS present",
+    );
+    await verify.end();
+
+    expect(rows.rows).toEqual([
+      {
+        source: "server_pull",
+        remote_event_id: "42",
+        location_id: null,
+        payload: { itemId: "private-item", status: "preparing" },
+        payload_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        status: "open",
+      },
+    ]);
+    expect(oldTable.rows[0].present).toBeNull();
   }, 60_000);
 
   it("adopts a checksum for legacy migration rows once", async () => {
     const database = await createDatabase();
-    const migrationsDir = await tempMigrations({ "0001_legacy.sql": "SELECT 1;" });
+    const migrationsDir = await tempMigrations({
+      "0001_legacy.sql": "SELECT 1;",
+    });
     const client = new Client({ connectionString: database.url });
     await client.connect();
     try {
       await client.query(
         "CREATE TABLE schema_migrations(filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())",
       );
-      await client.query("INSERT INTO schema_migrations(filename) VALUES('0001_legacy.sql')");
+      await client.query(
+        "INSERT INTO schema_migrations(filename) VALUES('0001_legacy.sql')",
+      );
     } finally {
       await client.end();
     }
 
-    await expect(runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true })).resolves.toEqual({
+    await expect(
+      runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true }),
+    ).resolves.toEqual({
       applied: 0,
       adoptedChecksums: 1,
       repairedChecksums: [],
     });
-    await expect(runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true })).resolves.toEqual({
+    await expect(
+      runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true }),
+    ).resolves.toEqual({
       applied: 0,
       adoptedChecksums: 0,
       repairedChecksums: [],
@@ -182,7 +309,9 @@ describe("migration runner", () => {
       "0103_holoo_integration.sql": "CREATE TABLE repair_probe(id integer);",
     });
     const repairedPath = join(migrationsDir, "0103_holoo_integration.sql");
-    const repairedChecksum = createHash("sha256").update(readFileSync(repairedPath)).digest("hex");
+    const repairedChecksum = createHash("sha256")
+      .update(readFileSync(repairedPath))
+      .digest("hex");
 
     // Record it as applied under the checksum of the original broken revision
     // (the sha-256 pinned in CHECKSUM_REPAIRS).
@@ -193,13 +322,20 @@ describe("migration runner", () => {
          filename text PRIMARY KEY, checksum text,
          applied_at timestamptz NOT NULL DEFAULT now())`,
     );
-    await client.query("INSERT INTO schema_migrations(filename, checksum) VALUES($1, $2)", [
-      "0103_holoo_integration.sql",
-      "889ff7579bd57c57882cde73de2a2bb5cdc7b5f76ffb377532fca3ef6bd614e8",
-    ]);
+    await client.query(
+      "INSERT INTO schema_migrations(filename, checksum) VALUES($1, $2)",
+      [
+        "0103_holoo_integration.sql",
+        "889ff7579bd57c57882cde73de2a2bb5cdc7b5f76ffb377532fca3ef6bd614e8",
+      ],
+    );
     await client.end();
 
-    const first = await runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true });
+    const first = await runMigrations({
+      databaseUrl: database.url,
+      migrationsDir,
+      quiet: true,
+    });
     expect(first).toEqual({
       applied: 0,
       adoptedChecksums: 0,
@@ -222,8 +358,16 @@ describe("migration runner", () => {
     expect(probe[0].present).toBeNull();
 
     // Second run is a plain no-op: the repair fires exactly once.
-    const second = await runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true });
-    expect(second).toEqual({ applied: 0, adoptedChecksums: 0, repairedChecksums: [] });
+    const second = await runMigrations({
+      databaseUrl: database.url,
+      migrationsDir,
+      quiet: true,
+    });
+    expect(second).toEqual({
+      applied: 0,
+      adoptedChecksums: 0,
+      repairedChecksums: [],
+    });
   });
 
   it("repairs the checksum of 0140_installments.sql and 0127_bug_reports.sql across revisions", async () => {
@@ -246,15 +390,22 @@ describe("migration runner", () => {
          filename text PRIMARY KEY, checksum text,
          applied_at timestamptz NOT NULL DEFAULT now())`,
     );
-    await client.query("INSERT INTO schema_migrations(filename, checksum) VALUES($1, $2), ($3, $4)", [
-      "0127_bug_reports.sql",
-      "f780470a9aeebc4400ea14c3fee5ade194d4aa598c5bd79840802b2aa372b5ff",
-      "0140_installments.sql",
-      "6ce624cd31cda355f2ca902bfa4482996d1ab67ca67ff6c3d80ef4c2ae170c9d",
-    ]);
+    await client.query(
+      "INSERT INTO schema_migrations(filename, checksum) VALUES($1, $2), ($3, $4)",
+      [
+        "0127_bug_reports.sql",
+        "f780470a9aeebc4400ea14c3fee5ade194d4aa598c5bd79840802b2aa372b5ff",
+        "0140_installments.sql",
+        "6ce624cd31cda355f2ca902bfa4482996d1ab67ca67ff6c3d80ef4c2ae170c9d",
+      ],
+    );
     await client.end();
 
-    const first = await runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true });
+    const first = await runMigrations({
+      databaseUrl: database.url,
+      migrationsDir,
+      quiet: true,
+    });
     expect(first).toEqual({
       applied: 0,
       adoptedChecksums: 0,
@@ -272,18 +423,36 @@ describe("migration runner", () => {
       { filename: "0140_installments.sql", checksum: repairedChecksum140 },
     ]);
 
-    const second = await runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true });
-    expect(second).toEqual({ applied: 0, adoptedChecksums: 0, repairedChecksums: [] });
+    const second = await runMigrations({
+      databaseUrl: database.url,
+      migrationsDir,
+      quiet: true,
+    });
+    expect(second).toEqual({
+      applied: 0,
+      adoptedChecksums: 0,
+      repairedChecksums: [],
+    });
   });
 
   it("rejects drift in an already-applied migration", async () => {
     const database = await createDatabase();
-    const migrationsDir = await tempMigrations({ "0001_value.sql": "CREATE TABLE value_one(id integer);" });
-    await runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true });
-    await writeFile(join(migrationsDir, "0001_value.sql"), "CREATE TABLE value_two(id integer);", "utf8");
-
-    await expect(runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true })).rejects.toThrow(
-      "migration_checksum_mismatch: 0001_value.sql",
+    const migrationsDir = await tempMigrations({
+      "0001_value.sql": "CREATE TABLE value_one(id integer);",
+    });
+    await runMigrations({
+      databaseUrl: database.url,
+      migrationsDir,
+      quiet: true,
+    });
+    await writeFile(
+      join(migrationsDir, "0001_value.sql"),
+      "CREATE TABLE value_two(id integer);",
+      "utf8",
     );
+
+    await expect(
+      runMigrations({ databaseUrl: database.url, migrationsDir, quiet: true }),
+    ).rejects.toThrow("migration_checksum_mismatch: 0001_value.sql");
   });
 });

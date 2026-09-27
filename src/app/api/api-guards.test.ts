@@ -140,8 +140,8 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "the host-neutral twin of platform/pairing/redeem, session-less for the identical reason — " +
     "it exists because middleware moves everything under /api/platform to the console's host, " +
     "and an owner now issues a desktop code from their own business origin (src/lib/pairing-redeem.ts)",
-  "pairing/activate":
-    "the second, machine-authenticated phase of desktop pairing — the pending site credential proves that a local snapshot was applied before its cloud identity becomes active",
+  "pairing/activate": "legacy machine-authenticated pairing acknowledgement alias",
+  "pairing/acknowledge": "machine-authenticated resumable pairing acknowledgement bound to the desktop installation identity",
   "integrations/wordpress/ping":
     "the WordPress plugin channel — authenticated by a bearer link token plus an HMAC envelope " +
     "over timestamp, nonce and body (src/lib/integrations/plugin-link.ts), never a tenant session; " +
