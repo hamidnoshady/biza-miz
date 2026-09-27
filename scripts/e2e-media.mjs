@@ -333,12 +333,19 @@ async function main() {
     // ======================================================================
     await goto(page, "/crm/directory");
     await page.getByRole("button", { name: /^افزودن/ }).click();
-    const partyDialog = page.locator('[role="dialog"], form').filter({ hasText: "نام" }).first();
     await page.getByLabel("نام", { exact: true }).first().fill(PARTY_NAME);
     await page.getByLabel("نام خانوادگی", { exact: true }).first().fill("E2E");
 
     await page.getByRole("button", { name: "انتخاب از کتابخانه", exact: true }).click();
-    const picker = page.locator('[role="dialog"]').filter({ hasText: "جست‌وجو در تصاویر کتابخانه" });
+    // The picker's own <h2> title is whatever caller label was passed in
+    // (e.g. "تصویر پروفایل"), not a fixed string — so it can't be matched by
+    // a hardcoded title. Its search placeholder IS fixed, but `hasText`
+    // filters on rendered text content and never sees placeholder attribute
+    // text, so identify the dialog via `has:` (a real descendant-locator
+    // match) instead of `hasText:` (a text-content string match).
+    const picker = page
+      .locator('[role="dialog"]')
+      .filter({ has: page.getByPlaceholder("جست‌وجو در تصاویر کتابخانه…") });
     await picker.getByPlaceholder("جست‌وجو در تصاویر کتابخانه…").fill(FILE_NAME);
     await waitDebounce(page);
     await picker.locator(`button[title="${FILE_NAME}"]`).click();
@@ -348,7 +355,6 @@ async function main() {
     await page.getByRole("button", { name: "ذخیره", exact: true }).click();
     await page.getByText(PARTY_NAME).first().waitFor({ timeout: 10_000 });
     log("picker", `party «${PARTY_NAME}» saved with the reused Media Library asset as its avatar`);
-    void partyDialog; // kept for readability of intent above; not asserted further
 
     // ======================================================================
     // 5. The named permission bug: a menu photo, rendered as a real Cashier
@@ -363,7 +369,9 @@ async function main() {
     await page.getByLabel("نام آیتم", { exact: true }).fill(ITEM_NAME);
     await page.getByLabel(/قیمت/).fill("100000");
     await page.getByRole("button", { name: "انتخاب از کتابخانه", exact: true }).click();
-    const itemPicker = page.locator('[role="dialog"]').filter({ hasText: "جست‌وجو در تصاویر کتابخانه" });
+    const itemPicker = page
+      .locator('[role="dialog"]')
+      .filter({ has: page.getByPlaceholder("جست‌وجو در تصاویر کتابخانه…") });
     await itemPicker.getByPlaceholder("جست‌وجو در تصاویر کتابخانه…").fill(FILE_NAME);
     await waitDebounce(page);
     await itemPicker.locator(`button[title="${FILE_NAME}"]`).click();
