@@ -104,6 +104,12 @@ export function PlatformDataTable<T>({
   className,
   minWidthClass = "min-w-[720px]",
 }: DataTableProps<T>) {
+  const mobileColumns = React.useMemo(() => {
+    return columns.filter((c) =>
+      mobileTitle ? true : c.key !== columns[0].key ? true : false,
+    );
+  }, [columns, mobileTitle]);
+
   const showInitialLoading = loading && (rows === null || rows.length === 0);
 
   if (error && (rows === null || rows.length === 0)) {
@@ -151,12 +157,6 @@ export function PlatformDataTable<T>({
       sortKey === col.key && sortDir === "desc" ? "asc" : "desc";
     onSort(col.key, nextDir);
   }
-
-  const mobileColumns = React.useMemo(() => {
-    return columns.filter((c) =>
-      mobileTitle ? true : c.key !== columns[0].key ? true : false,
-    );
-  }, [columns, mobileTitle]);
 
   return (
     <div className={className} aria-busy={loading ? "true" : undefined}>
