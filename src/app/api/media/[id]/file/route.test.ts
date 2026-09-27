@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { NextRequest } from "next/server";
 import * as auth from "@/lib/auth";
 import * as mediaService from "@/lib/media-service";
+import * as mediaMirror from "@/lib/media-mirror";
 import { PERMISSIONS } from "@/lib/permissions";
 import { GET } from "./route";
 
@@ -31,6 +32,14 @@ vi.mock("@/lib/media-service", () => ({
   getMediaAssetUsage: vi.fn(),
 }));
 
+// A paired site's offline fallback: when the cloud bucket has no copy (or no
+// bucket is configured at all), the route consults a checksum-verified local
+// mirror before giving up. Mocked to "no mirrored copy" by default so every
+// existing expectation still exercises the bucket path.
+vi.mock("@/lib/media-mirror", () => ({
+  readMirroredMediaObject: vi.fn(),
+}));
+
 const SESSION = { businessId: "biz-1", sub: "user-1", role: "member" };
 const IMAGE_ASSET = { id: "asset-1", kind: "image" as const, mimeType: "image/png", fileName: "photo.png" };
 const DOC_ASSET = { id: "asset-2", kind: "document" as const, mimeType: "application/pdf", fileName: "doc.pdf" };
@@ -54,6 +63,7 @@ beforeEach(() => {
   vi.mocked(mediaService.isMediaStorageReady).mockReturnValue(true);
   vi.mocked(mediaService.readMediaObject).mockResolvedValue({ asset: IMAGE_ASSET, bytes: Buffer.from("x") } as never);
   vi.mocked(mediaService.getMediaAssetUsage).mockResolvedValue(EMPTY_USAGE as never);
+  vi.mocked(mediaMirror.readMirroredMediaObject).mockResolvedValue(null);
 });
 
 describe("GET /api/media/[id]/file — usage-based permission model", () => {
@@ -206,7 +216,7 @@ describe("GET /api/media/[id]/file — usage-based permission model", () => {
     expect(res.status).toBe(403);
   });
 
-  it("404s when the asset does not exist and 503s when storage is not configured", async () => {
+  it("404s when the asset exists nowhere — neither the bucket nor the local mirror", async () => {
     vi.mocked(auth.requireMember).mockResolvedValue({
       session: SESSION,
       membership: membershipWith(PERMISSIONS.mediaView),
@@ -217,8 +227,29 @@ describe("GET /api/media/[id]/file — usage-based permission model", () => {
     const missing = await GET(req(), ctx());
     expect(missing.status).toBe(404);
 
+    // Storage not configured is not an error here: a paired site never holds
+    // bucket credentials, so the route consults the local mirror instead —
+    // and with no mirrored copy either, the answer is still "no such asset".
     vi.mocked(mediaService.isMediaStorageReady).mockReturnValue(false);
     const notReady = await GET(req(), ctx());
-    expect(notReady.status).toBe(503);
+    expect(notReady.status).toBe(404);
+    expect(mediaService.readMediaObject).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves the checksum-verified local mirror copy when the bucket has none", async () => {
+    vi.mocked(auth.requireMember).mockResolvedValue({
+      session: SESSION,
+      membership: membershipWith(PERMISSIONS.mediaView),
+      error: null,
+    } as never);
+
+    vi.mocked(mediaService.readMediaObject).mockResolvedValue(null);
+    vi.mocked(mediaMirror.readMirroredMediaObject).mockResolvedValue({
+      asset: IMAGE_ASSET,
+      bytes: Buffer.from("mirrored"),
+    } as never);
+    const res = await GET(req(), ctx());
+    expect(res.status).toBe(200);
+    expect(mediaMirror.readMirroredMediaObject).toHaveBeenCalledWith("biz-1", "asset-1");
   });
 });

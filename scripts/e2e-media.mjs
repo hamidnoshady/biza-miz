@@ -46,6 +46,7 @@ import { createServer } from "node:http";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { crc32 as zlibCrc32 } from "node:zlib";
 import { chromium } from "playwright";
 import { Client } from "pg";
 
@@ -72,6 +73,32 @@ const ITEM_NAME = `آیتم E2E ${RUN_ID}`;
 // real upload would.
 const PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+/**
+ * The upload route deduplicates by the bytes' own sha256 within a tenant
+ * (`findMediaAssetByHash`): a byte-identical re-upload returns the EXISTING
+ * asset — old id, old file name — instead of creating a new one. A fixed
+ * PNG constant would therefore break this script's idempotence promise: on
+ * any database that already holds a previous run's upload, the grid would
+ * never show this run's unique FILE_NAME and the very first step would
+ * time out (CI wipes its database every run, so only local/re-run
+ * environments ever hit it). Splice a spec-valid `tEXt` chunk carrying
+ * RUN_ID in front of IEND — ancillary, correct CRC, ignored by every
+ * decoder including sharp — so each run's bytes hash differently while the
+ * file stays a genuine PNG.
+ */
+function uniquePngBytes() {
+  const base = Buffer.from(PNG_BASE64, "base64");
+  const keyword = Buffer.from(`Comment\0e2e-run-${RUN_ID}`, "latin1");
+  const type = Buffer.from("tEXt", "latin1");
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(keyword.length);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(zlibCrc32(Buffer.concat([type, keyword])) >>> 0);
+  const chunk = Buffer.concat([length, type, keyword, crc]);
+  const iendOffset = base.length - 12; // IEND is always the trailing 12 bytes
+  return Buffer.concat([base.subarray(0, iendOffset), chunk, base.subarray(iendOffset)]);
+}
 
 const contextOptions = {
   viewport: { width: 1360, height: 900 },
@@ -203,7 +230,7 @@ async function main() {
 
   const tmpDir = mkdtempSync(join(tmpdir(), "e2e-media-"));
   const uploadPath = join(tmpDir, FILE_NAME);
-  writeFileSync(uploadPath, Buffer.from(PNG_BASE64, "base64"));
+  writeFileSync(uploadPath, uniquePngBytes());
 
   const ownerContext = await browser.newContext(contextOptions);
   // Every confirm() in the Media manager (trash, permanent delete) must be
@@ -385,8 +412,15 @@ async function main() {
     log("permission-setup", `category «${CATEGORY_NAME}» created`);
 
     try {
+      // The category SearchableSelect's trigger is a <button> whose
+      // *accessible name* is the Field label «دسته» (label association wins
+      // over content in the accname computation) — the visible
+      // «دسته را انتخاب کنید…» placeholder is only its text content, so a
+      // role+name locator on the placeholder text never matches. Target the
+      // labelled name and keep it scoped to the items section, where «دسته»
+      // names exactly this one trigger.
       await itemsSection
-        .getByRole("button", { name: "دسته را انتخاب کنید…", exact: true })
+        .getByRole("button", { name: "دسته", exact: true })
         .click({ timeout: 15_000 });
     } catch (err) {
       // Diagnostic-only: this exact step has failed opaquely in CI before
@@ -455,8 +489,18 @@ async function main() {
     });
     await cashierPage.goto(`${BASE_URL}/accounting/pos`, { waitUntil: "domcontentloaded" });
     await waitSettled(cashierPage);
-    // Images are `loading="lazy"`; give any still-off-screen ones a moment to
-    // fire before deciding none arrived.
+    // The product grid renders the seeded catalogue first, and this run's
+    // photographed item — freshly appended to a freshly appended category —
+    // is not guaranteed to be among the initially visible tiles (the grid
+    // is long and images are `loading="lazy"`, so an off-screen tile never
+    // even issues its request). Search for the item by name, exactly like a
+    // real cashier ringing it up would, so ITS tile — the one whose photo
+    // exercises the usage-based authorization path — is on screen.
+    await cashierPage.getByLabel("جستجوی محصول یا کد کالا", { exact: true }).fill(ITEM_NAME);
+    await waitDebounce(cashierPage);
+    await cashierPage.getByText(ITEM_NAME).first().waitFor({ timeout: 10_000 });
+    // Images are `loading="lazy"`; give the now-on-screen tile's photo a
+    // moment to fire before deciding nothing arrived.
     await cashierPage.waitForTimeout(1_500);
 
     if (mediaFileResponses.length === 0) {
