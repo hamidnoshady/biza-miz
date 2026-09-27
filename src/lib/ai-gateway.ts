@@ -468,6 +468,12 @@ export const GATEWAY_ERROR_TEXT: Record<string, string> = {
   // Validation of the technical gateway settings form.
   ai_gateway_bad_base_url: "نشانی دروازه باید یک نشانی http یا https معتبر باشد.",
   ai_gateway_missing_chat_model: "نام مستعار مدل گفت‌وگو الزامی است.",
+  // Business ↔ branch integrity (issue #748).
+  ai_gateway_location_business_mismatch:
+    "شعبهٔ انتخاب‌شده متعلق به این کسب‌وکار نیست؛ عملیات انجام نشد.",
+  // Revoke/rotate lifecycle safety (issue #748).
+  ai_gateway_revoke_failed:
+    "ابطال کلید مجازی در LiteLLM ناموفق بود؛ کلید فعلی برای حفظ ایمنی دست‌نخورده باقی ماند. دوباره تلاش کنید.",
 };
 
 /** The console translation of one `ai_gateway_*` code, when it has one. */

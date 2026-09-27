@@ -123,18 +123,22 @@ export const ENCRYPTED_TABLES: Record<string, EncryptedTable> = {
  * should not have to re-derive the list from the prose.
  *
  * Not yet materialised, and the integration test therefore does not assert
- * them. Two of the three original entries no longer exist as written:
+ * them. Three of the original entries no longer exist as written:
  * `platform_ai_config` was dropped by `0124_ai_litellm_only.sql` (its key
- * lives on as `platform_ai_gateway.master_key`), and the Kavenegar key
- * arrived already encrypted — `platform_sms_config.api_key_enc`, Wave 2 — so
- * it is done rather than pending.
+ * lived on as `platform_ai_gateway.master_key`), the Kavenegar key arrived
+ * already encrypted — `platform_sms_config.api_key_enc`, Wave 2 — and the
+ * LiteLLM master key and per-business/branch virtual keys are now done too:
+ * migration 0183 (issue #748) added `platform_ai_gateway.master_key_ciphertext`
+ * and `ai_business_gateway.virtual_key_ciphertext`, AES-256-GCM under
+ * `src/lib/integrations/secrets.ts` — the same scheme as
+ * `platform_cms_config.api_key_ciphertext` (0139) — rather than a business DEK,
+ * since both are platform/tenant-administrative credentials, not customer PII.
+ * `ai-gateway-service.ts` writes only the ciphertext column; the legacy
+ * plaintext columns stay as a read fallback until `npm run
+ * db:encrypt-ai-secrets` has backfilled every deployment and a follow-up
+ * migration drops them.
  */
 export const TIER_A_PENDING: { table: string; column: string; note: string }[] = [
-  {
-    table: "platform_ai_gateway",
-    column: "master_key",
-    note: "A live LiteLLM key. Platform scope, so it wraps under the KEK directly, not a business DEK.",
-  },
   {
     table: "platform_update_config",
     column: "s3_secret_access_key",

@@ -9,10 +9,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAiRuntimeReadiness, getPlatformAiConfig } from "@/lib/ai-config";
 import { resolveAiConfigFor } from "@/lib/ai-runtime";
 import {
+  BusinessLocationMismatchError,
   GatewayProvisioningError,
   getAiGatewayConfig,
   getBusinessGateway,
   listBusinessGateways,
+  locationBelongsToBusiness,
   mergeGatewayConfig,
   probeGateway,
   provisionVirtualKey,
@@ -28,6 +30,7 @@ import {
   validateGatewayInput,
   type AiGatewayInput,
 } from "@/lib/ai-gateway";
+import { platformCan } from "@/lib/platform-admin";
 import { platformAudit, requirePlatformCapability, withPlatformScope } from "@/lib/platform-auth";
 import { query, withoutTenantScope } from "@/lib/db";
 
@@ -73,7 +76,13 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     }),
   );
 
-  const canManage = session.role === "owner";
+  // The public gateway shape (base URL, aliases, virtual-key toggle,
+  // hasMasterKey) is already secret-safe — see toPublicGatewayConfig — so
+  // every `ai.read` holder gets it, not only owners. Mutations stay gated
+  // server-side by `ai.config.manage` on PUT/POST; the console itself hides
+  // the edit controls from a read-only viewer, but that is a UI convenience,
+  // not the security boundary.
+  const canManage = platformCan(session.role, "ai.config.manage");
   const wantsProbe = request.nextUrl.searchParams.get("probe") === "1";
   const firstVirtualKey = gateways.find((row) => Boolean(row.virtualKey))?.virtualKey ?? null;
   const status = canManage && wantsProbe
@@ -81,7 +90,8 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     : null;
 
   return NextResponse.json({
-    gateway: canManage ? toPublicAiGatewayConfig(gateway) : null,
+    gateway: toPublicAiGatewayConfig(gateway),
+    canManage,
     provider: platform.provider,
     platformModel: platform.model,
     platformBaseUrl: gateway.baseUrl,
@@ -175,6 +185,15 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   const locationId = typeof body.locationId === "string" && body.locationId ? body.locationId : null;
   if (!businessId) return NextResponse.json({ error: "bad_request" }, { status: 400 });
 
+  // Every branch-level lifecycle action (provision/verify/rotate/revoke) must
+  // refuse a location that does not actually belong to this business — see
+  // issue #748 P0-3. Checked once here for a clean 400 before any gateway
+  // call; ai-gateway-service.ts repeats the same check as defense in depth
+  // for any other caller.
+  if (locationId && !(await locationBelongsToBusiness(businessId, locationId))) {
+    return NextResponse.json({ error: "ai_gateway_location_business_mismatch" }, { status: 400 });
+  }
+
   const platform = await getPlatformAiConfig();
   const gateway = await getAiGatewayConfig();
 
@@ -205,6 +224,9 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       });
       return NextResponse.json({ gateway: toPublicBusinessGateway(row, gateway, platform.model) });
     } catch (err) {
+      if (err instanceof BusinessLocationMismatchError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
       if (err instanceof GatewayProvisioningError) {
         return NextResponse.json({ error: err.code, detail: err.detail }, { status: 502 });
       }
@@ -216,25 +238,54 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   }
 
   if (body.action === "revoke_key") {
-    await revokeVirtualKey(gateway, businessId, locationId);
-    await platformAudit({
-      adminId: session.padmin,
-      businessId,
-      action: "ai.gateway.key.revoke",
-      entity: "ai_business_gateway",
-      entityId: locationId ? `${businessId}:${locationId}` : businessId,
-      payload: { locationId },
-    });
-    return NextResponse.json({ ok: true });
+    try {
+      const result = await revokeVirtualKey(gateway, businessId, locationId);
+      if (!result.ok) {
+        // The remote revoke failed — the local key row is guaranteed to be
+        // untouched (revokeVirtualKey's own contract). Report a non-2xx
+        // response so the console shows this as a failure to retry, not a
+        // silent success, and audit the failed attempt explicitly.
+        await platformAudit({
+          adminId: session.padmin,
+          businessId,
+          action: "ai.gateway.key.revoke_failed",
+          entity: "ai_business_gateway",
+          entityId: locationId ? `${businessId}:${locationId}` : businessId,
+          payload: { locationId, error: result.code, detail: result.detail },
+        });
+        return NextResponse.json({ error: result.code ?? "ai_gateway_revoke_failed", detail: result.detail }, { status: 502 });
+      }
+      await platformAudit({
+        adminId: session.padmin,
+        businessId,
+        action: "ai.gateway.key.revoke",
+        entity: "ai_business_gateway",
+        entityId: locationId ? `${businessId}:${locationId}` : businessId,
+        payload: { locationId, alreadyGone: result.alreadyGone },
+      });
+      return NextResponse.json({ ok: true });
+    } catch (err) {
+      if (err instanceof BusinessLocationMismatchError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      throw err;
+    }
   }
 
   if (body.action === "verify_key") {
-    const result = await verifyVirtualKey(gateway, businessId, locationId, platform.model);
-    if (!result.gateway) return NextResponse.json({ error: "not_found", status: result.probe }, { status: 404 });
-    return NextResponse.json({
-      gateway: toPublicBusinessGateway(result.gateway, gateway, platform.model),
-      status: result.probe,
-    });
+    try {
+      const result = await verifyVirtualKey(gateway, businessId, locationId, platform.model);
+      if (!result.gateway) return NextResponse.json({ error: "not_found", status: result.probe }, { status: 404 });
+      return NextResponse.json({
+        gateway: toPublicBusinessGateway(result.gateway, gateway, platform.model),
+        status: result.probe,
+      });
+    } catch (err) {
+      if (err instanceof BusinessLocationMismatchError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      throw err;
+    }
   }
 
   if (body.action === "rotate_key") {
@@ -250,7 +301,22 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       });
       return NextResponse.json({ gateway: toPublicBusinessGateway(row, gateway, platform.model) });
     } catch (err) {
+      if (err instanceof BusinessLocationMismatchError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
       if (err instanceof GatewayProvisioningError) {
+        // Rotation may fail either at the revoke step (old key + row both
+        // preserved) or the provision step after a confirmed revoke (row now
+        // visibly shows "no valid key"). Either way the attempt is audited so
+        // an operator can see it happened, not just that it eventually worked.
+        await platformAudit({
+          adminId: session.padmin,
+          businessId,
+          action: "ai.gateway.key.rotate_failed",
+          entity: "ai_business_gateway",
+          entityId: locationId ? `${businessId}:${locationId}` : businessId,
+          payload: { locationId, error: err.code, detail: err.detail },
+        });
         return NextResponse.json({ error: err.code, detail: err.detail }, { status: 502 });
       }
       throw err;

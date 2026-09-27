@@ -7,6 +7,27 @@
  */
 import { defaultConfig, type AiConfig } from "./ai";
 import { query } from "./db";
+import { decryptSecret, resolveEncryptionKey } from "./integrations/secrets";
+
+/**
+ * Decrypt the master key, preferring the ciphertext column written by
+ * migration 0183's cutover (`ai-gateway-service.ts`'s `saveAiGatewayConfig`)
+ * and falling back to the legacy plaintext column for a row nobody has
+ * re-saved since. See that file's header comment for the full story; this is
+ * the *other* reader of `platform_ai_gateway` (the hot request path), so it
+ * needs the same fallback, not just the platform console's.
+ */
+function decryptMasterKey(ciphertext: string | null | undefined, plaintext: string | null | undefined): string {
+  if (ciphertext) {
+    try {
+      return decryptSecret(ciphertext, resolveEncryptionKey(process.env));
+    } catch (err) {
+      console.error("platform AI master key ciphertext could not be decrypted; treating as absent", err);
+      return "";
+    }
+  }
+  return plaintext?.trim() || "";
+}
 
 export type AiRuntimeUnavailableReason =
   | "platform_disabled"
@@ -26,8 +47,6 @@ export interface AiRuntimeReadiness {
   authenticationReady: boolean;
   virtualKeyRequired: boolean;
   virtualKeyReady: boolean;
-  costingReady: boolean;
-  ceilingReady: boolean;
   modelReady: boolean;
 }
 
@@ -60,6 +79,7 @@ type GatewayConfigRow = {
   chat_model: string;
   base_url: string;
   master_key: string | null;
+  master_key_ciphertext: string | null;
   temperature: string | number;
   input_cost_rial_per_million: string | number | null;
   output_cost_rial_per_million: string | number | null;
@@ -139,7 +159,7 @@ function rowToConfig(row: GatewayConfigRow): PlatformAiConfig {
     provider: "litellm",
     model: row.chat_model?.trim() || fallback.model || base.model,
     baseUrl: row.base_url?.trim() || fallback.baseUrl || base.baseUrl,
-    apiKey: row.master_key?.trim() || fallback.apiKey || "",
+    apiKey: decryptMasterKey(row.master_key_ciphertext, row.master_key) || fallback.apiKey || "",
     temperature: numberValue(row.temperature),
     inputCostRialPerMillion: numberValue(row.input_cost_rial_per_million),
     outputCostRialPerMillion: numberValue(row.output_cost_rial_per_million),
@@ -163,7 +183,7 @@ function rowToConfig(row: GatewayConfigRow): PlatformAiConfig {
 export async function getPlatformAiConfig(): Promise<PlatformAiConfig> {
   try {
     const { rows } = await query<GatewayConfigRow>(
-      `SELECT enabled, chat_model, base_url, master_key, temperature,
+      `SELECT enabled, chat_model, base_url, master_key, master_key_ciphertext, temperature,
               input_cost_rial_per_million, output_cost_rial_per_million,
               revenue_margin_percent, max_turn_rial, max_output_tokens,
               gateway_costing_enabled, usd_rial_rate
@@ -214,8 +234,6 @@ export function getAiRuntimeReadiness(config: PlatformAiConfig): AiRuntimeReadin
     authenticationReady,
     virtualKeyRequired,
     virtualKeyReady,
-    costingReady: true,
-    ceilingReady: true,
     modelReady,
   };
 }

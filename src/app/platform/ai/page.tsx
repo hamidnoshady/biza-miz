@@ -66,8 +66,6 @@ interface RuntimeReadiness {
   authenticationReady: boolean;
   virtualKeyRequired: boolean;
   virtualKeyReady: boolean;
-  costingReady: boolean;
-  ceilingReady: boolean;
   modelReady: boolean;
 }
 
@@ -112,9 +110,6 @@ const READINESS_REASON_FA: Record<string, string> = {
   tenant_virtual_key_missing: "کلید مجازی این کسب‌وکار صادر نشده است",
   missing_model: "مدل گفت‌وگو تنظیم نشده است",
   invalid_max_output_tokens: "سقف توکن خروجی معتبر نیست",
-  max_turn_credit_missing: "گارد اعتباری درخواست در بخش Billing تنظیم نشده است",
-  gateway_costing_rate_missing: "تنظیمات هزینه در Billing کامل نیست",
-  costing_not_configured: "روش هزینه‌گذاری در Billing کامل نیست",
   configuration_load_failed: "خواندن تنظیمات/ساختار پایگاه داده ناموفق بود؛ مهاجرت‌ها و لاگ سرور را بررسی کنید",
 };
 

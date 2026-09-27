@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { GET, PUT, POST } from "./route";
+import { requirePlatformCapability } from "@/lib/platform-auth";
+import { locationBelongsToBusiness, revokeVirtualKey } from "@/lib/ai-gateway-service";
 
 vi.mock("@/lib/platform-auth", () => ({
   requirePlatformCapability: vi.fn(async (cap: string) => {
@@ -104,7 +106,13 @@ vi.mock("@/lib/ai-gateway-service", () => ({
     syncedAt: "2026-09-22T00:00:00Z",
     syncError: null,
   })),
-  revokeVirtualKey: vi.fn(async () => {}),
+  revokeVirtualKey: vi.fn(async () => ({ ok: true, alreadyGone: false })),
+  locationBelongsToBusiness: vi.fn(async () => true),
+  BusinessLocationMismatchError: class extends Error {
+    constructor() {
+      super("ai_gateway_location_business_mismatch");
+    }
+  },
   refreshKeySpend: vi.fn(async () => ({
     id: "g-1",
     businessId: "biz-1",
@@ -196,6 +204,24 @@ describe("GET /api/platform/ai/gateway", () => {
   });
 });
 
+describe("GET /api/platform/ai/gateway — read-only visibility (issue #748 P1-4)", () => {
+  it("gives a read-only ai.read admin the same secret-safe technical state as an owner", async () => {
+    vi.mocked(requirePlatformCapability).mockResolvedValueOnce({
+      session: { padmin: "admin-2", role: "support" } as never,
+      error: null,
+    } as never);
+    const req = new NextRequest("http://localhost:3000/api/platform/ai/gateway");
+    const res = await GET(req);
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    // The public shape is already secret-safe — a read-only viewer must see
+    // it too, not a null gateway that reads as "master key not registered".
+    expect(json.gateway).toMatchObject({ hasMasterKey: true, baseUrl: "http://litellm:4000/v1" });
+    expect(json.canManage).toBe(false);
+    expect(JSON.stringify(json)).not.toContain("sk-master");
+  });
+});
+
 describe("PUT /api/platform/ai/gateway", () => {
   it("runs the multi-stage probe when action is probe", async () => {
     const req = new NextRequest("http://localhost:3000/api/platform/ai/gateway", {
@@ -260,5 +286,34 @@ describe("POST /api/platform/ai/gateway", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.ok).toBe(true);
+  });
+
+  it("reports a non-2xx failure and never claims success when the remote revoke fails (issue #748 P0-1)", async () => {
+    vi.mocked(revokeVirtualKey).mockResolvedValueOnce({
+      ok: false,
+      alreadyGone: false,
+      code: "ai_gateway_unreachable",
+      detail: null,
+    });
+    const req = new NextRequest("http://localhost:3000/api/platform/ai/gateway", {
+      method: "POST",
+      body: JSON.stringify({ action: "revoke_key", businessId: "biz-1" }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(502);
+    const json = await res.json();
+    expect(json.error).toBe("ai_gateway_unreachable");
+  });
+
+  it("rejects a location that does not belong to the business before any lifecycle action (issue #748 P0-3)", async () => {
+    vi.mocked(locationBelongsToBusiness).mockResolvedValueOnce(false);
+    const req = new NextRequest("http://localhost:3000/api/platform/ai/gateway", {
+      method: "POST",
+      body: JSON.stringify({ action: "sync_key", businessId: "biz-1", locationId: "loc-from-another-business" }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toBe("ai_gateway_location_business_mismatch");
   });
 });

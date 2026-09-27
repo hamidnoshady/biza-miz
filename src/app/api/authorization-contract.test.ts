@@ -50,8 +50,6 @@ const JUSTIFIED_ROLE_CHECKS: Record<string, string> = {
   "ai/chat/route.ts":
     "selects the narrow read-only floor assistant for till roles; the role IS the product " +
     "decision about which assistant a person is given, not a permission they hold",
-  "platform/ai/gateway/route.ts":
-    "tenant-owner authority over the shared AI gateway credential, matching api.manage's owner-only rule",
 };
 
 /**
