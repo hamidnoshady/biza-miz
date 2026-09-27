@@ -372,22 +372,28 @@ async function main() {
     // 5. The named permission bug: a menu photo, rendered as a real Cashier
     // ======================================================================
     await goto(page, "/settings/menu");
-    await page.getByLabel("نام دسته", { exact: true }).fill(CATEGORY_NAME);
-    await page.getByRole("button", { name: "افزودن", exact: true }).click();
+    // /settings/menu renders «دسته‌ها», «آیتم‌ها» and «گروه‌های افزودنی» all at
+    // once (not behind tabs/navigation), and each SectionCard carries its
+    // title as its own aria-label — so an unscoped "افزودن" collides with
+    // the add-on-groups section's identical button. Scope to each section.
+    const categoriesSection = page.getByLabel("دسته‌ها", { exact: true });
+    const itemsSection = page.getByLabel("آیتم‌ها", { exact: true });
+    await categoriesSection.getByLabel("نام دسته", { exact: true }).fill(CATEGORY_NAME);
+    await categoriesSection.getByRole("button", { name: "افزودن", exact: true }).click();
     await waitDebounce(page);
 
-    await page.getByRole("button", { name: "دسته را انتخاب کنید…", exact: true }).click();
+    await itemsSection.getByRole("button", { name: "دسته را انتخاب کنید…", exact: true }).click();
     await page.getByRole("option", { name: CATEGORY_NAME, exact: true }).click();
-    await page.getByLabel("نام آیتم", { exact: true }).fill(ITEM_NAME);
-    await page.getByLabel(/قیمت/).fill("100000");
-    await page.getByRole("button", { name: "انتخاب از کتابخانه", exact: true }).click();
+    await itemsSection.getByLabel("نام آیتم", { exact: true }).fill(ITEM_NAME);
+    await itemsSection.getByLabel(/قیمت/).fill("100000");
+    await itemsSection.getByRole("button", { name: "انتخاب از کتابخانه", exact: true }).click();
     const itemPicker = page
       .locator('[role="dialog"]')
       .filter({ has: page.getByPlaceholder("جست‌وجو در تصاویر کتابخانه…") });
     await itemPicker.getByPlaceholder("جست‌وجو در تصاویر کتابخانه…").fill(FILE_NAME);
     await waitDebounce(page);
     await itemPicker.locator(`button[title="${FILE_NAME}"]`).click();
-    await page.getByRole("button", { name: "افزودن آیتم", exact: true }).click();
+    await itemsSection.getByRole("button", { name: "افزودن آیتم", exact: true }).click();
     await page.getByText(ITEM_NAME).first().waitFor({ timeout: 10_000 });
     log("permission-setup", `menu item «${ITEM_NAME}» created with the Library asset as its photo`);
 
