@@ -41,6 +41,7 @@ import {
 } from "./plugin-link";
 import { pluginAdvertisedJobTypes, pluginSupportsJobType } from "./plugin-capabilities";
 import { ingestPluginEvent, type PluginEventInput } from "./webhook-ingest-service";
+import { failWordPressMediaSync } from "../media-service";
 
 /** How many jobs one pull may lease. Bounded so a WP-Cron run finishes inside PHP's time limit. */
 const JOB_PULL_LIMIT = 25;
@@ -501,7 +502,7 @@ export async function pluginAckJobs(
       }
 
       const message = (result.error ?? "plugin_failed").slice(0, 500);
-      const { rows } = await query<{ attempts: number; status: string }>(
+      const { rows } = await query<{ attempts: number; status: string; entity_type: string; payload: Record<string, unknown> }>(
         `UPDATE integration_outbox_events
             SET attempts = attempts + 1,
                 last_error = $3,
@@ -510,7 +511,7 @@ export async function pluginAckJobs(
                 next_attempt_at = now() + (LEAST(POWER(2, attempts) * $5, 3600000) || ' milliseconds')::interval,
                 updated_at = now()
           WHERE id = $1 AND connection_id = $2
-        RETURNING attempts, status`,
+        RETURNING attempts, status, entity_type, payload`,
         [result.id, connection.id, message, JOB_MAX_ATTEMPTS, JOB_BASE_BACKOFF_MS],
       );
       failed += rows.length;
@@ -521,6 +522,16 @@ export async function pluginAckJobs(
           action: "outbox.dead_lettered",
           error: message,
         });
+        // A media_create job that ran out of retries is never coming back
+        // as a content.updated event (nothing sideloaded, so nothing was
+        // ever tagged with the operation id) — the mapping row must not sit
+        // "pending" forever with no event left that could ever resolve it.
+        if (rows[0].entity_type === "media_create") {
+          const operationId = rows[0].payload?.__operationId;
+          if (typeof operationId === "string" && operationId) {
+            await failWordPressMediaSync(operationId, message);
+          }
+        }
       }
     }
     // Outbound sync happened: the plugin applied at least one leased job, so

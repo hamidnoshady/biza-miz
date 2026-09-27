@@ -271,12 +271,29 @@ describe("the form's own lifecycle", () => {
     expect(FORM_SOURCE).not.toMatch(/\? "با ذخیره ساخته می‌شود"\s*: state\.accountingCode/);
   });
 
-  it("checks the picked avatar's real type and size, and clears a rejected pick", () => {
-    // `accept` is a hint; and a rejected file stays as the input's value, so
-    // re-picking the same file fires no change event at all.
-    expect(FORM_SOURCE).toMatch(/PROFILE_IMAGE_TYPES\.includes\(file\.type\)/);
-    expect(FORM_SOURCE).toMatch(/file\.size > MAX_PROFILE_IMAGE_BYTES/);
-    expect(FORM_SOURCE).toMatch(/input\.value = ""/);
+  it("uploads a new avatar through the canonical Media Library, not a second client-side base64 encoder (migration 0181)", () => {
+    // The form used to read a picked file into a `data:` URL by hand
+    // (its own FileReader, its own type/size checks) and store the base64
+    // text directly on the party row — a second, unmanaged image store
+    // living inside `parties`, duplicating validation the Media Library
+    // already does once, centrally, for every other upload in the app.
+    // A *new* avatar now always goes through the same `MediaImageField` /
+    // `MediaPickerDialog` every catalogue item's photo uses, so this file
+    // must not reintroduce its own FileReader-based pick path.
+    expect(FORM_SOURCE).toMatch(/MediaImageField/);
+    expect(FORM_SOURCE).toMatch(/MediaPickerDialog/);
+    expect(FORM_SOURCE).not.toMatch(/new FileReader\(\)/);
+    expect(FORM_SOURCE).not.toMatch(/readAsDataURL/);
+  });
+
+  it("still renders a legacy inline/linked avatar saved before migration 0181, with a path to move it onto the library", () => {
+    // Old rows are never force-migrated (no data loss for an existing
+    // `data:`/`https://` value) — the form must keep an `<img>` fallback for
+    // `state.profileImage` when no canonical asset id is set yet, alongside
+    // an explicit way to replace it with one.
+    expect(FORM_SOURCE).toMatch(/state\.profileImage \? \(/);
+    expect(FORM_SOURCE).toMatch(/src=\{state\.profileImage\}/);
+    expect(FORM_SOURCE).toMatch(/setPickingAvatar\(true\)/);
   });
 });
 

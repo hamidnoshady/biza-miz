@@ -107,6 +107,7 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 = 1.6.4 =
 * Fix queue table install on activation; fix product attribute payload fatal; self-heal missing queue table; harden hook enqueue; fix WP-CLI cron hints when DISABLE_WP_CRON; reduce update manifest log noise.
 * رفع ساخت جدول صف (dbDelta بدون comment)، payload ویژگی‌های رشته‌ای، self-heal جدول صف، ایمن‌سازی enqueue در هوک‌ها، اصلاح راهنمای crontab در WP-CLI، و کاهش spam لاگ به‌روزرسانی.
+* رویداد به‌روزرسانی پیوست‌ها اکنون شناسهٔ عملیات مربوط به ارسال از کتابخانهٔ رسانهٔ مرکزی را همراه دارد؛ فایلی که سامانهٔ حسابداری به فروشگاه ارسال می‌کند، پس از اتمام بارگذاری در همان کتابخانه هم به‌عنوان «همگام‌شده» ثبت می‌شود.
 
 == Deploy notes (operators) ==
 

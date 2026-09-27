@@ -61,6 +61,16 @@ describe("WordPress plugin protocol", () => {
     expect(sync).toContain("operation_id_missing_for_non_idempotent_post_create");
     expect(sync).toContain("operation_id_missing_for_non_idempotent_media_create");
   });
+
+  it("echoes the push operation id back on the attachment it created, not on any other attachment event", () => {
+    // apply_media_create() stamps the meta right after the sideload...
+    expect(sync).toContain("update_post_meta( (int) $attachment_id, '_pos_operation_id', $operation_id );");
+    // ...and content_payload() reads it back, only inside the attachment
+    // branch, only when the meta is actually set.
+    const attachmentBranch = sync.slice(sync.indexOf("if ( 'attachment' === $post->post_type ) {"), sync.indexOf("} else {"));
+    expect(attachmentBranch).toContain("get_post_meta( $post->ID, '_pos_operation_id', true )");
+    expect(attachmentBranch).toContain("$payload['operation_id']");
+  });
 });
 
 describe("WordPress plugin updater", () => {

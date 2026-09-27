@@ -29,7 +29,6 @@ import {
   MAX_PARTY_DISPLAY_NAME,
   MAX_PARTY_NAME_PART,
   MAX_PARTY_NOTES,
-  MAX_PROFILE_IMAGE_CHARS,
   PARTY_PERSON_TYPES,
   PARTY_PERSON_TYPE_LABELS,
   PARTY_ROLES,
@@ -76,6 +75,7 @@ import {
 } from "@/components/ui/dialog";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { Switch } from "@/components/ui/switch";
+import { MediaImageField, MediaPickerDialog } from "../media/media-picker";
 import { LoadingSkeleton, TabBar, TabPanel } from "../page-chrome";
 import { api, errorMessage, ErrorBox, Field, InfoBox, inputClass } from "../ui";
 
@@ -99,22 +99,6 @@ function tabForField(path: string): TabKey {
 
 /** The draft autosave interval. Long enough that typing is not a write per keystroke. */
 const DRAFT_AUTOSAVE_MS = 4_000;
-
-/**
- * The avatar formats the form accepts, matching the `accept` attribute.
- *
- * Kept as a real check because `accept` only filters the picker's default view.
- */
-const PROFILE_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
-
-/**
- * The size ceiling applied to the *file*, before it is read.
- *
- * `MAX_PROFILE_IMAGE_CHARS` caps the base64 text, which runs about 4/3 the size
- * of the bytes it encodes; this is that limit expressed back in bytes so an
- * oversize pick is refused without reading it into memory first.
- */
-const MAX_PROFILE_IMAGE_BYTES = Math.floor((MAX_PROFILE_IMAGE_CHARS * 3) / 4);
 
 export interface PartyFormDialogProps {
   scope: PartyScopeDef;
@@ -180,6 +164,8 @@ export function PartyFormDialog({
   const [draftId, setDraftId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<PartyDraft[]>([]);
   const [showDrafts, setShowDrafts] = useState(false);
+  /** Replacing a legacy inline/linked avatar with one from the Media Library. */
+  const [pickingAvatar, setPickingAvatar] = useState(false);
   /**
    * The tax field's own text, while it is being typed.
    *
@@ -487,48 +473,6 @@ export function PartyFormDialog({
     refreshDrafts();
   }
 
-  /**
-   * Read the picked avatar into the form as a data URL.
-   *
-   * Rejections clear the file input: the browser keeps a rejected file as the
-   * control's value, and «همان فایل را دوباره انتخاب کنید» then fires no
-   * `change` event at all — so after one oversize pick the picker looked dead.
-   */
-  function onProfileImagePicked(input: HTMLInputElement) {
-    const file = input.files?.[0];
-    if (!file) return;
-    const reject = (message: string) => {
-      setFormError(message);
-      input.value = "";
-    };
-    // The `accept` attribute is a hint, not a gate: every file picker offers an
-    // «All files» escape, and a drag-and-drop never consults it.
-    if (!PROFILE_IMAGE_TYPES.includes(file.type)) {
-      reject("فقط تصویر PNG، JPEG یا WebP پذیرفته می‌شود.");
-      return;
-    }
-    // Checked before reading, not after: a 40 MB photo would otherwise be
-    // base64-encoded into memory in full just to be thrown away.
-    if (file.size > MAX_PROFILE_IMAGE_BYTES) {
-      reject("حجم تصویر بیش از حد مجاز است (۳۰۰ کیلوبایت).");
-      return;
-    }
-    const reader = new FileReader();
-    reader.onerror = () => reject("خواندن فایل ممکن نشد.");
-    reader.onload = () => {
-      const value = String(reader.result ?? "");
-      if (value.length > MAX_PROFILE_IMAGE_CHARS) {
-        reject("حجم تصویر بیش از حد مجاز است (۳۰۰ کیلوبایت).");
-        return;
-      }
-      patch({ profileImage: value });
-      clearError("profileImage");
-      setFormError("");
-      input.value = "";
-    };
-    reader.readAsDataURL(file);
-  }
-
   const has = (path: string) => errors[path];
 
   if (loadingRecord) {
@@ -755,29 +699,53 @@ export function PartyFormDialog({
           </Field>
 
           <div className="sm:col-span-2">
-            <p className="mb-1 text-sm font-medium text-foreground">تصویر پروفایل</p>
-            <div className="flex flex-wrap items-center gap-3">
-              {state.profileImage ? (
-
-                <img
-                  src={state.profileImage}
-                  alt=""
-                  className="size-12 rounded-full border border-border object-cover"
-                />
-              ) : null}
-              <input
-                type="file"
-                accept="image/png,image/jpeg,image/webp"
-                aria-label="انتخاب تصویر پروفایل"
-                onChange={(event) => onProfileImagePicked(event.currentTarget)}
-                className="block w-full max-w-xs text-sm text-muted-foreground file:me-3 file:rounded-lg file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-foreground"
+            {state.profileImageAssetId ? (
+              // Migration 0181: an uploaded avatar is a canonical Media
+              // Library asset, picked/replaced/removed through the same
+              // dialog every catalogue item's photo uses.
+              <MediaImageField
+                label="تصویر پروفایل"
+                value={state.profileImageAssetId}
+                onChange={(id) => patch({ profileImageAssetId: id ?? "" })}
               />
-              {state.profileImage ? (
-                <Button type="button" variant="ghost" size="xs" onClick={() => patch({ profileImage: "" })}>
-                  برداشتن تصویر
-                </Button>
-              ) : null}
-            </div>
+            ) : state.profileImage ? (
+              // A legacy `data:`/`https://` value already on this record
+              // (saved before migration 0181, or an external link) — kept
+              // exactly as it renders today, with an offer to move it onto
+              // the Media Library instead of a client-side FileReader pick.
+              <>
+                <p className="mb-1 text-sm font-medium text-foreground">تصویر پروفایل</p>
+                <div className="flex flex-wrap items-center gap-3">
+                  <img
+                    src={state.profileImage}
+                    alt=""
+                    className="size-12 rounded-full border border-border object-cover"
+                  />
+                  <Button type="button" variant="ghost" size="xs" onClick={() => patch({ profileImage: "" })}>
+                    برداشتن تصویر
+                  </Button>
+                  <Button type="button" variant="outline" size="xs" onClick={() => setPickingAvatar(true)}>
+                    جایگزینی با تصویر از کتابخانه
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <MediaImageField
+                label="تصویر پروفایل"
+                value={null}
+                onChange={(id) => patch({ profileImageAssetId: id ?? "" })}
+              />
+            )}
+            {pickingAvatar ? (
+              <MediaPickerDialog
+                title="تصویر پروفایل"
+                onClose={() => setPickingAvatar(false)}
+                onPick={(asset) => {
+                  patch({ profileImageAssetId: asset.id, profileImage: "" });
+                  setPickingAvatar(false);
+                }}
+              />
+            ) : null}
             {has("profileImage") ? (
               <span className="mt-1 block text-xs text-destructive">{partyFieldErrorMessage(has("profileImage"))}</span>
             ) : null}

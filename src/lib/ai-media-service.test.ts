@@ -14,7 +14,14 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AiConfig } from "./ai";
-import { MediaAiError, runMediaEnhance, runMediaLabelDetection } from "./ai-media-service";
+import {
+  MediaAiError,
+  runMediaBackgroundRemoval,
+  runMediaEnhance,
+  runMediaLabelDetection,
+  runMediaUpscale,
+  runMediaVariations,
+} from "./ai-media-service";
 
 const config: AiConfig = {
   enabled: true,
@@ -213,5 +220,108 @@ describe("runMediaEnhance", () => {
     await expect(
       runMediaEnhance({ config, model: "gpt-image-1", imageBytes: pngBytes, mimeType: "image/png", fileName: "p.png" }),
     ).rejects.toMatchObject({ code: "ai_reply_invalid" });
+  });
+});
+
+describe("runMediaBackgroundRemoval and runMediaUpscale", () => {
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+
+  it("background removal posts the transparent-background prompt to the same /images/edits endpoint", async () => {
+    const outBytes = Buffer.from("no-bg-bytes");
+    const fetchMock = vi.fn(async () => jsonResponse({ data: [{ b64_json: outBytes.toString("base64") }] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runMediaBackgroundRemoval({
+      config,
+      model: "gpt-image-1",
+      imageBytes: pngBytes,
+      mimeType: "image/png",
+      fileName: "product.png",
+    });
+
+    expect(result.bytes.equals(outBytes)).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://gw.example.com/v1/images/edits");
+    const form = init.body as FormData;
+    expect(String(form.get("prompt"))).toMatch(/transparent/i);
+  });
+
+  it("upscale posts the sharpen/increase-resolution prompt, not the enhance or bg-removal one", async () => {
+    const outBytes = Buffer.from("upscaled-bytes");
+    const fetchMock = vi.fn(async () => jsonResponse({ data: [{ b64_json: outBytes.toString("base64") }] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runMediaUpscale({
+      config,
+      model: "gpt-image-1",
+      imageBytes: pngBytes,
+      mimeType: "image/png",
+      fileName: "product.png",
+    });
+
+    expect(result.bytes.equals(outBytes)).toBe(true);
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const form = init.body as FormData;
+    const prompt = String(form.get("prompt"));
+    expect(prompt).toMatch(/resolution/i);
+    expect(prompt).not.toMatch(/white background/i);
+    expect(prompt).not.toMatch(/transparent/i);
+  });
+
+  it("both map 404/400 to enhance_unsupported like runMediaEnhance already does", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("no such model", { status: 400 })));
+    await expect(
+      runMediaBackgroundRemoval({ config, model: "m", imageBytes: pngBytes, mimeType: "image/png", fileName: "p.png" }),
+    ).rejects.toMatchObject({ code: "enhance_unsupported" });
+  });
+});
+
+describe("runMediaVariations", () => {
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+
+  it("posts to /images/variations (not /images/edits) with no prompt, and returns every image the provider sent back", async () => {
+    const outA = Buffer.from("variation-a");
+    const outB = Buffer.from("variation-b");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        { data: [{ b64_json: outA.toString("base64") }, { b64_json: outB.toString("base64") }] },
+        { headers: { "content-type": "application/json", "x-litellm-response-cost": "0.06" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runMediaVariations({
+      config,
+      model: "gpt-image-1",
+      imageBytes: pngBytes,
+      mimeType: "image/png",
+      fileName: "product.png",
+      count: 3,
+    });
+
+    expect(result.images).toHaveLength(2);
+    expect(result.images[0].equals(outA)).toBe(true);
+    expect(result.images[1].equals(outB)).toBe(true);
+    expect(result.costUsd).toBeCloseTo(0.06);
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://gw.example.com/v1/images/variations");
+    const form = init.body as FormData;
+    expect(form.get("n")).toBe("3");
+    expect(form.get("prompt")).toBeNull();
+  });
+
+  it("refuses a reply with no images rather than returning an empty success", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ data: [] })));
+    await expect(
+      runMediaVariations({ config, model: "m", imageBytes: pngBytes, mimeType: "image/png", fileName: "p.png", count: 3 }),
+    ).rejects.toMatchObject({ code: "ai_reply_invalid" });
+  });
+
+  it("maps a network failure to ai_network like every other media AI call", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("ECONNRESET"))));
+    await expect(
+      runMediaVariations({ config, model: "m", imageBytes: pngBytes, mimeType: "image/png", fileName: "p.png", count: 3 }),
+    ).rejects.toMatchObject({ code: "ai_network" });
   });
 });

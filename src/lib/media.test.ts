@@ -3,12 +3,19 @@ import {
   buildMediaKey,
   dailyStorageCharge,
   DEFAULT_MEDIA_CONFIG,
+  folderDepthOf,
+  folderMoveCreatesCycle,
   hasMatchingMediaSignature,
+  isMediaSort,
   keyBelongsToBusiness,
   maskMediaConfig,
   mediaKindForMime,
+  mediaSearchExpression,
+  mediaSortOrderBy,
   normalizeKeyPrefix,
+  normalizeSearchTerm,
   parseCategory,
+  parseMediaTransformInput,
   parseTags,
   safeFileName,
   validateMediaConfigInput,
@@ -212,5 +219,131 @@ describe("tag/category parsing", () => {
     expect(parseCategory("  غذا ")).toBe("غذا");
     expect(parseCategory("x".repeat(81))).toBeUndefined();
     expect(parseCategory(5)).toBeUndefined();
+  });
+});
+
+describe("mediaSortOrderBy / isMediaSort", () => {
+  it("maps every declared sort to a concrete, safe ORDER BY clause", () => {
+    expect(mediaSortOrderBy("newest")).toBe("created_at DESC");
+    expect(mediaSortOrderBy(undefined)).toBe("created_at DESC");
+    expect(mediaSortOrderBy("oldest")).toBe("created_at ASC");
+    expect(mediaSortOrderBy("name_asc")).toBe("file_name ASC");
+    expect(mediaSortOrderBy("name_desc")).toBe("file_name DESC");
+    expect(mediaSortOrderBy("largest")).toBe("byte_size DESC");
+    expect(mediaSortOrderBy("smallest")).toBe("byte_size ASC");
+    expect(mediaSortOrderBy("updated")).toBe("updated_at DESC");
+  });
+
+  it("recognizes only the declared sort keys", () => {
+    expect(isMediaSort("newest")).toBe(true);
+    expect(isMediaSort("largest")).toBe(true);
+    expect(isMediaSort("random; DROP TABLE media_assets;")).toBe(false);
+    expect(isMediaSort(undefined)).toBe(false);
+    expect(isMediaSort(42)).toBe(false);
+  });
+});
+
+describe("search normalization", () => {
+  it("trims, collapses whitespace and caps length without mutating meaning", () => {
+    expect(normalizeSearchTerm("  اسپرسو   دوبل  ")).toBe("اسپرسو دوبل");
+    expect(normalizeSearchTerm("a".repeat(200)).length).toBe(120);
+  });
+
+  it("folds Arabic letter variants onto their Persian equivalents", () => {
+    // ي (Arabic yeh) and ك (Arabic kaf) are what many keyboards produce when
+    // typing Persian ی/ک — a search for one must find the other.
+    expect(normalizeSearchTerm("كتاب")).toBe("کتاب");
+    expect(normalizeSearchTerm("چاي")).toBe("چای");
+    expect(normalizeSearchTerm("قهوه")).toBe("قهوه");
+  });
+
+  it("builds a symmetric SQL expression so a stored value need never be rewritten", () => {
+    expect(mediaSearchExpression("file_name")).toContain("translate(file_name");
+  });
+});
+
+describe("folder tree safety", () => {
+  // root -> a -> b -> c
+  const tree = [
+    { id: "root", parentId: null },
+    { id: "a", parentId: "root" },
+    { id: "b", parentId: "a" },
+    { id: "c", parentId: "b" },
+  ];
+
+  it("computes 1-based depth from the root", () => {
+    expect(folderDepthOf(tree, "root")).toBe(1);
+    expect(folderDepthOf(tree, "a")).toBe(2);
+    expect(folderDepthOf(tree, "c")).toBe(4);
+    expect(folderDepthOf(tree, null)).toBe(0);
+  });
+
+  it("refuses moving a folder into itself", () => {
+    expect(folderMoveCreatesCycle(tree, "a", "a")).toBe(true);
+  });
+
+  it("refuses moving a folder into its own descendant", () => {
+    expect(folderMoveCreatesCycle(tree, "a", "c")).toBe(true);
+    expect(folderMoveCreatesCycle(tree, "root", "c")).toBe(true);
+  });
+
+  it("allows moving a folder under an unrelated folder, or to the root", () => {
+    const withSibling = [...tree, { id: "d", parentId: null }];
+    expect(folderMoveCreatesCycle(withSibling, "a", "d")).toBe(false);
+    expect(folderMoveCreatesCycle(withSibling, "c", null)).toBe(false);
+  });
+
+  it("never loops forever even if the input already contains a corrupt cycle", () => {
+    const corrupt = [
+      { id: "x", parentId: "y" },
+      { id: "y", parentId: "x" },
+    ];
+    expect(() => folderMoveCreatesCycle(corrupt, "x", "y")).not.toThrow();
+    expect(() => folderDepthOf(corrupt, "x")).not.toThrow();
+  });
+});
+
+describe("parseMediaTransformInput — the lightweight crop/rotate/resize contract", () => {
+  it("accepts a well-formed crop and normalizes it to integers", () => {
+    const result = parseMediaTransformInput({ operation: "crop", params: { x: 10, y: 20, width: 100, height: 200 } });
+    expect(result).toEqual({ ok: true, value: { operation: "crop", params: { x: 10, y: 20, width: 100, height: 200 } } });
+  });
+
+  it("refuses a crop with negative offsets, non-integers, or a zero/oversized dimension", () => {
+    expect(parseMediaTransformInput({ operation: "crop", params: { x: -1, y: 0, width: 10, height: 10 } }).ok).toBe(false);
+    expect(parseMediaTransformInput({ operation: "crop", params: { x: 0, y: 0, width: 10.5, height: 10 } }).ok).toBe(false);
+    expect(parseMediaTransformInput({ operation: "crop", params: { x: 0, y: 0, width: 0, height: 10 } }).ok).toBe(false);
+    expect(parseMediaTransformInput({ operation: "crop", params: { x: 0, y: 0, width: 5000, height: 10 } }).ok).toBe(false);
+    expect(parseMediaTransformInput({ operation: "crop", params: { x: 0, y: 0 } }).ok).toBe(false);
+  });
+
+  it("accepts a rotate within ±360° and refuses a no-op or out-of-range one", () => {
+    expect(parseMediaTransformInput({ operation: "rotate", params: { degrees: 90 } })).toEqual({
+      ok: true,
+      value: { operation: "rotate", params: { degrees: 90 } },
+    });
+    expect(parseMediaTransformInput({ operation: "rotate", params: { degrees: -45 } }).ok).toBe(true);
+    expect(parseMediaTransformInput({ operation: "rotate", params: { degrees: 0 } }).ok).toBe(false);
+    expect(parseMediaTransformInput({ operation: "rotate", params: { degrees: 720 } }).ok).toBe(false);
+    expect(parseMediaTransformInput({ operation: "rotate", params: {} }).ok).toBe(false);
+  });
+
+  it("accepts a resize with at least one dimension and defaults fit to 'inside'", () => {
+    const result = parseMediaTransformInput({ operation: "resize", params: { width: 400 } });
+    expect(result).toEqual({ ok: true, value: { operation: "resize", params: { width: 400, height: undefined, fit: "inside" } } });
+    expect(parseMediaTransformInput({ operation: "resize", params: { height: 300, fit: "cover" } }).ok).toBe(true);
+    expect(parseMediaTransformInput({ operation: "resize", params: {} }).ok).toBe(false);
+    expect(parseMediaTransformInput({ operation: "resize", params: { width: 0 } }).ok).toBe(false);
+    expect(parseMediaTransformInput({ operation: "resize", params: { width: 100, fit: "not-a-fit" } })).toMatchObject({
+      ok: true,
+      value: { params: { fit: "inside" } },
+    });
+  });
+
+  it("refuses an unknown operation or a non-object body", () => {
+    expect(parseMediaTransformInput({ operation: "sepia", params: {} }).ok).toBe(false);
+    expect(parseMediaTransformInput(null).ok).toBe(false);
+    expect(parseMediaTransformInput("crop").ok).toBe(false);
+    expect(parseMediaTransformInput(42).ok).toBe(false);
   });
 });

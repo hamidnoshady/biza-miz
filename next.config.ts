@@ -40,7 +40,12 @@ const nextConfig: NextConfig = {
    * Keep both packages external so Node resolves them natively at runtime —
    * the import is lazy and only the chat route ever loads them.
    */
-  serverExternalPackages: ["unpdf", "pdfjs-dist"],
+  /**
+   * `sharp` (migration 0175 — deterministic crop/rotate/resize transforms)
+   * ships prebuilt native bindings; webpack should never try to trace/bundle
+   * those, same reasoning as unpdf/pdfjs-dist above.
+   */
+  serverExternalPackages: ["unpdf", "pdfjs-dist", "sharp"],
   /**
    * The AI console was slimmed down to the LiteLLM gateway settings only: the
    * platform's AI section is one page, and every user-level AI settings

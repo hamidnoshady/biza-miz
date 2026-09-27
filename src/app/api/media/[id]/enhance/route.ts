@@ -12,7 +12,7 @@ import {
   readMediaObject,
   storeMediaAsset,
 } from "@/lib/media-service";
-import { chargeFeatureUse, WalletInsufficientFundsError } from "@/lib/wallet-service";
+import { chargeFeatureUse, getWalletBalanceRial, WalletInsufficientFundsError } from "@/lib/wallet-service";
 
 /**
  * The optional AI product-image refine (migration 0149): photo in, the
@@ -22,9 +22,14 @@ import { chargeFeatureUse, WalletInsufficientFundsError } from "@/lib/wallet-ser
  * and the operator chooses which one an item or the website uses.
  *
  * Priced by the console (`platform_media_config.enhance_price_rial`) and
- * debited from the business wallet BEFORE the provider call; a failed call
- * refunds by simply not having charged — the debit happens only after the
- * enhanced bytes are in hand, so the business never pays for a failure.
+ * debited from the business wallet only after the enhanced bytes are in
+ * hand — a failed provider call is never charged. But the provider call
+ * itself is real infrastructure cost, so a wallet that plainly cannot cover
+ * the price is refused BEFORE that call, not discovered after paying for it:
+ * a cheap balance preflight (`getWalletBalanceRial`), then the provider call,
+ * then the actual debit — which still re-checks atomically, because a
+ * concurrent spend between the preflight and the debit is exactly what
+ * `chargeFeatureUse`'s own row lock is for.
  */
 export const POST = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requirePermission(PERMISSIONS.mediaManage);
@@ -54,7 +59,20 @@ export const POST = withTenantScope(async (_request: NextRequest, context: { par
     );
   }
 
-  // The provider call first: the wallet is debited only for a result in hand.
+  // Preflight: refuse before spending any provider cost when the wallet
+  // plainly cannot cover today's price. The debit itself still happens only
+  // after a result is in hand (below) — this only blocks the doomed call.
+  if (mediaConfig.enhancePriceRial > 0) {
+    const balanceRial = await getWalletBalanceRial(session.businessId);
+    if (balanceRial < mediaConfig.enhancePriceRial) {
+      return NextResponse.json(
+        { error: "insufficient_funds", message: "موجودی کیف پول برای بهینه‌سازی تصویر کافی نیست." },
+        { status: 402 },
+      );
+    }
+  }
+
+  // The provider call: the wallet is actually debited only for a result in hand.
   let enhanced: Awaited<ReturnType<typeof runMediaEnhance>>;
   try {
     enhanced = await runMediaEnhance({

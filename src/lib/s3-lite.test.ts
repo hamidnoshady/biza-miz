@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseListObjectsXml, sha256Hex, signS3Request, type S3Config } from "./s3-lite";
+import { parseListObjectsXml, presignS3Get, sha256Hex, signS3Request, type S3Config } from "./s3-lite";
 
 // The pinned signatures below were cross-checked against botocore's
 // S3SigV4Auth (the reference implementation) with the same fixed clock,
@@ -68,6 +68,45 @@ describe("signS3Request", () => {
       { method: "GET", key: "x", payloadHash: sha256Hex(""), now },
     );
     expect(a.headers.Authorization).not.toBe(b.headers.Authorization);
+  });
+});
+
+describe("presignS3Get", () => {
+  // Cross-checked against boto3's `generate_presigned_url("get_object", ...)`
+  // with the same fixed clock, credentials and key — same query params in
+  // the same order, byte-for-byte identical X-Amz-Signature.
+  it("matches boto3's presigned GET URL exactly", () => {
+    const url = presignS3Get(config, "media/business-1/photo.png", 600, now);
+    expect(url).toBe(
+      "https://s3.example.com/cafe-backups/media/business-1/photo.png?" +
+        "X-Amz-Algorithm=AWS4-HMAC-SHA256&" +
+        "X-Amz-Credential=AKIDEXAMPLE%2F20260721%2Fus-east-1%2Fs3%2Faws4_request&" +
+        "X-Amz-Date=20260721T033005Z&" +
+        "X-Amz-Expires=600&" +
+        "X-Amz-SignedHeaders=host&" +
+        "X-Amz-Signature=606c421ddbca37ebfd4a86e1b12922b2d4e462e28241f906e00f8940e7fe0ca1",
+    );
+  });
+
+  it("clamps a non-positive expiry to 1 second rather than signing a negative one", () => {
+    const url = presignS3Get(config, "k.png", 0, now);
+    expect(url).toContain("X-Amz-Expires=1");
+  });
+
+  it("floors a fractional expiry", () => {
+    const url = presignS3Get(config, "k.png", 599.9, now);
+    expect(url).toContain("X-Amz-Expires=599");
+  });
+
+  it("percent-encodes the key but keeps its slash", () => {
+    const url = presignS3Get(config, "a b/c(d)'e*.png", 60, now);
+    expect(url).toContain("/cafe-backups/a%20b/c%28d%29%27e%2A.png?");
+  });
+
+  it("changes the signature when the clock moves", () => {
+    const later = new Date(now.getTime() + 1000);
+    const url = presignS3Get(config, "media/business-1/photo.png", 600, later);
+    expect(url).not.toContain("X-Amz-Signature=606c421ddbca37ebfd4a86e1b12922b2d4e462e28241f906e00f8940e7fe0ca1");
   });
 });
 

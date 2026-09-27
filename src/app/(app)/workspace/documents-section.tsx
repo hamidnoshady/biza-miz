@@ -11,7 +11,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FilesIcon, PlusIcon, XIcon } from "lucide-react";
+import { ExternalLinkIcon, FilesIcon, PlusIcon, XIcon } from "lucide-react";
+import { mediaFileUrl } from "@/app/dashboard/media/media-picker";
 import {
   EmptyState,
   KpiCard,
@@ -197,7 +198,23 @@ export function DocumentsSection({
                     <div className="flex flex-col gap-1">
                       <span className="font-medium">{document.title}</span>
                       {document.fileName ? (
-                        <span className="text-xs text-muted-foreground">{document.fileName}</span>
+                        document.mediaAssetId ? (
+                          // The row's own onClick opens the metadata dialog; this link
+                          // must stop that propagation or the file could never be
+                          // opened directly — the whole point of listing it here.
+                          <a
+                            href={mediaFileUrl(document.mediaAssetId)}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(event) => event.stopPropagation()}
+                            className="inline-flex w-fit items-center gap-1 text-xs text-amber-700 underline-offset-2 hover:underline dark:text-amber-400"
+                          >
+                            <ExternalLinkIcon className="size-3" aria-hidden />
+                            {document.fileName}
+                          </a>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">{document.fileName}</span>
+                        )
                       ) : null}
                       <TagList tags={document.tags} />
                     </div>
@@ -372,14 +389,27 @@ function DocumentDialog({
               />
             </Field>
           </div>
-          <PickerField
-            label="فایل از کتابخانهٔ رسانه"
-            value={mediaAssetId}
-            onChange={setMediaAssetId}
-            options={media.map((m) => ({ id: m.id, label: m.fileName }))}
-            placeholder="— بدون فایل —"
-            hint="بارگذاری فایل در بخش «رسانه» انجام می‌شود."
-          />
+          <div>
+            <PickerField
+              label="فایل از کتابخانهٔ رسانه"
+              value={mediaAssetId}
+              onChange={setMediaAssetId}
+              options={media.map((m) => ({ id: m.id, label: m.fileName }))}
+              placeholder="— بدون فایل —"
+              hint="بارگذاری فایل در بخش «رسانه» انجام می‌شود."
+            />
+            {mediaAssetId ? (
+              <a
+                href={mediaFileUrl(mediaAssetId)}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-1 inline-flex items-center gap-1 text-xs text-amber-700 underline-offset-2 hover:underline dark:text-amber-400"
+              >
+                <ExternalLinkIcon className="size-3" aria-hidden />
+                مشاهدهٔ فایل فعلی
+              </a>
+            ) : null}
+          </div>
           <SelectField
             label="وضعیت"
             value={status}

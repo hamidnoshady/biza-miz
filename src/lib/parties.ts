@@ -242,7 +242,21 @@ export interface PartyFormState {
   roles: PartyRole[];
   accountingCodeMode: AccountingCodeMode;
   accountingCode: string;
+  /**
+   * An `https://` link, or (only for a row saved before migration 0181)
+   * a legacy inline `data:` URL. A *new* avatar from this form always goes
+   * through `profileImageAssetId` instead — see that field's own comment.
+   */
   profileImage: string;
+  /**
+   * Migration 0181 — the canonical Media Library asset id for an uploaded
+   * avatar, picked through the same `MediaPickerDialog` every catalogue item
+   * photo uses. When set, it is authoritative and `profileImage` is cleared
+   * on write (`parties-service.ts`'s `normalizePartyWrite` enforces this):
+   * one party never carries both an asset-backed photo and an inline one at
+   * the same time.
+   */
+  profileImageAssetId: string;
   personType: PartyPersonType;
   displayName: string;
   firstName: string;
@@ -273,6 +287,7 @@ export const PARTY_FORM_DEFAULTS: PartyFormState = {
   accountingCodeMode: "Automatic",
   accountingCode: "",
   profileImage: "",
+  profileImageAssetId: "",
   personType: "Real",
   displayName: "",
   firstName: "",
@@ -731,6 +746,8 @@ export interface PartyPayload {
   /** Sent only in `Manual` mode. In `Automatic` mode the backend assigns it. */
   accountingCode: string | null;
   profileImage: string | null;
+  /** Migration 0181. Sent alongside `profileImage`; the server decides precedence. */
+  profileImageAssetId: string | null;
   notes: string | null;
   general_info: {
     nationalId: string | null;
@@ -782,6 +799,7 @@ export function buildPartyPayload(state: PartyFormState): PartyPayload {
     accountingCodeMode: manual ? "Manual" : "Automatic",
     accountingCode: manual ? trimmedOrNull(state.accountingCode) : null,
     profileImage: trimmedOrNull(state.profileImage),
+    profileImageAssetId: isUuid(state.profileImageAssetId) ? state.profileImageAssetId.trim() : null,
     notes: trimmedOrNull(state.notes)?.slice(0, MAX_PARTY_NOTES) ?? null,
     general_info: {
       nationalId: state.personType === "Real" ? trimmedOrNull(state.generalInfo.nationalId) : null,
@@ -890,6 +908,8 @@ export interface PartyApiRecord {
   accountingCodeMode?: string;
   accountingCode?: string | null;
   profileImage?: string | null;
+  /** Migration 0181. */
+  profileImageAssetId?: string | null;
   notes?: string | null;
   /**
    * The canonical contact columns. `parties-service` mirrors them from the contact
@@ -922,6 +942,7 @@ export function formStateFromParty(party: PartyApiRecord | null | undefined): Pa
     : "Automatic";
   state.accountingCode = party.accountingCode ?? "";
   state.profileImage = party.profileImage ?? "";
+  state.profileImageAssetId = party.profileImageAssetId ?? "";
   state.notes = party.notes ?? "";
   state.generalInfo = {
     nationalId: party.generalInfo?.nationalId ?? "",
@@ -997,6 +1018,8 @@ export interface PartyWriteInput {
   accountingCodeMode?: string | null;
   accountingCode?: string | null;
   profileImage?: string | null;
+  /** Migration 0181. */
+  profileImageAssetId?: string | null;
   notes?: string | null;
   generalInfo?: Record<string, unknown> | null;
   addressInfo?: Record<string, unknown> | null;
@@ -1131,6 +1154,11 @@ export function parsePartyRequestBody(
       : "Automatic";
   }
   if (has("employeeUserId")) input.employeeUserId = trimmedOrNull(raw.employeeUserId);
+  if (has("profileImageAssetId")) {
+    const value = trimmedOrNull(raw.profileImageAssetId);
+    input.profileImageAssetId = value;
+    state.profileImageAssetId = value ?? "";
+  }
 
   // --- the tabs -------------------------------------------------------------
   const tabs = [

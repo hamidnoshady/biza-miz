@@ -41,6 +41,11 @@ export interface InvoiceOcrApplyPayload {
   purchaseDate: string;
   note: string;
   lines: InvoiceOcrDraftLine[];
+  /** The invoice photo's own Media Library asset id, once the scan route
+   * stored it (migration 0179/0180) — carried through so the resulting
+   * purchase draft can keep a durable pointer back to the photo it was
+   * scanned from, the same way an expense keeps its receipt photo's id. */
+  invoiceAssetId: string | null;
 }
 
 interface OcrLine {
@@ -80,6 +85,7 @@ interface OcrResponse {
   supplierId?: string | null;
   supplierName?: string | null;
   costRial?: number;
+  asset?: { id: string } | null;
 }
 
 function fileToDataUrl(file: File): Promise<string> {
@@ -249,6 +255,7 @@ export function InvoiceOcrPanel({
       purchaseDate,
       note: note.trim(),
       lines: payloadLines,
+      invoiceAssetId: result?.asset?.id ?? null,
     });
   }
 

@@ -16,6 +16,7 @@
  * Pure validation here, no DB: the route does the I/O, and the rules are
  * testable as strings.
  */
+import { hasMatchingMediaSignature } from "./media";
 
 export const LOGO_MAX_BYTES = 256 * 1024;
 
@@ -37,25 +38,19 @@ export function isLogoMimeType(value: unknown): value is LogoMimeType {
 /**
  * Cheap byte-signature check — the multipart MIME type is attacker-controlled,
  * so a "logo" that is really a script must not become an <img src> the print
- * agent's browser then loads. Mirrors website/content-service.ts's check, plus
- * SVG (which has no binary signature and is matched on its root element).
+ * agent's browser then loads.
+ *
+ * Delegates entirely to the canonical media-library signature check
+ * (src/lib/media.ts's `hasMatchingMediaSignature`), which was written to be a
+ * strict superset of this module's four MIME types (png/jpeg/webp/svg) —
+ * one signature ruleset for the whole platform, so a future hardening change
+ * (e.g. a new disallowed SVG element) only needs to happen once. This module
+ * keeps its own name/export for its callers and because its storage model
+ * (an inline `data:` URL in `settings`, not an S3-backed media asset) is
+ * deliberately not the Media Library — see the file header for why.
  */
 export function hasMatchingLogoSignature(mimeType: string, bytes: Uint8Array): boolean {
-  const starts = (...signature: number[]) => signature.every((value, index) => bytes[index] === value);
-  if (mimeType === "image/png") return starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
-  if (mimeType === "image/jpeg") return starts(0xff, 0xd8, 0xff);
-  if (mimeType === "image/webp") {
-    return starts(0x52, 0x49, 0x46, 0x46) && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50;
-  }
-  if (mimeType === "image/svg+xml") {
-    const head = new TextDecoder().decode(bytes.slice(0, 1024)).toLowerCase();
-    // An SVG is text, so the only real check is that it *is* an SVG document
-    // and carries no script or external fetch. A thermal logo needs neither.
-    if (!head.includes("<svg")) return false;
-    const whole = new TextDecoder().decode(bytes).toLowerCase();
-    return !whole.includes("<script") && !whole.includes("onload=") && !whole.includes("<foreignobject");
-  }
-  return false;
+  return hasMatchingMediaSignature(mimeType, bytes);
 }
 
 export function isValidLogo(input: { mimeType: string; byteLength: number }): boolean {

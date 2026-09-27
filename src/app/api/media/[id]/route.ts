@@ -3,7 +3,14 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { parseCategory, parseTags } from "@/lib/media";
-import { deleteMediaAsset, getMediaAsset, getMediaConfig } from "@/lib/media-service";
+import {
+  deleteMediaAsset,
+  getMediaAsset,
+  getMediaAssetUsage,
+  getMediaConfig,
+  mediaAssetUsageIsEmpty,
+  softDeleteMediaAsset,
+} from "@/lib/media-service";
 
 /**
  * One media asset: organize (PATCH) and delete (DELETE).
@@ -107,15 +114,61 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   return NextResponse.json({ asset: updated });
 });
 
-export const DELETE = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+/**
+ * Delete — a two-step trash, not an instant disappearance. The safety this
+ * route adds is at the UX layer twice over:
+ *
+ *   1. An operator asking to delete a photo that a menu/inventory item is
+ *      actively showing gets the list of what would go blank FIRST
+ *      (409 + usage), and must repeat the request with `?force=1` to
+ *      continue — "cancel or confirm", never a silent surprise on the
+ *      selling screen a moment later.
+ *   2. The request itself only moves the asset to the trash
+ *      (`softDeleteMediaAsset`) — the row and its stored object are
+ *      untouched, recoverable through `POST /api/media/[id]/restore` until
+ *      the retention sweep purges it (`MEDIA_TRASH_RETENTION_DAYS`,
+ *      src/lib/media.ts). `?purge=1` skips the trash and removes the row AND
+ *      the stored object for good — the catalogue FK (`image_media_id`) is
+ *      `ON DELETE SET NULL`, so the database itself never ends up with a
+ *      dangling reference — but only once the asset is already in the trash,
+ *      so a permanent delete is always two deliberate requests, never one.
+ */
+export const DELETE = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const { session, error } = await requirePermission(PERMISSIONS.mediaManage);
   if (error) return error;
   const { id } = await context.params;
 
-  // An asset a catalogue item points at loses the pointer (FK SET NULL), so
-  // deletion is safe; the item simply shows no photo afterwards.
-  const config = await getMediaConfig();
-  const deleted = await deleteMediaAsset(session.businessId, id, config);
-  if (!deleted) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
-  return NextResponse.json({ ok: true });
+  const force = request.nextUrl.searchParams.get("force") === "1";
+  const purge = request.nextUrl.searchParams.get("purge") === "1";
+  if (!force) {
+    const usage = await getMediaAssetUsage(id);
+    if (!mediaAssetUsageIsEmpty(usage)) {
+      return NextResponse.json({ error: "asset_in_use", usage }, { status: 409 });
+    }
+  }
+
+  if (purge) {
+    const asset = await getMediaAsset(session.businessId, id);
+    if (!asset) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
+    if (!asset.deletedAt) {
+      return NextResponse.json(
+        { error: "not_in_trash", message: "برای حذف همیشگی، ابتدا باید مورد در سطل زباله باشد." },
+        { status: 409 },
+      );
+    }
+    const config = await getMediaConfig();
+    const deleted = await deleteMediaAsset(session.businessId, id, config);
+    if (!deleted) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
+    return NextResponse.json({ ok: true, purged: true });
+  }
+
+  const trashed = await softDeleteMediaAsset(session.businessId, id);
+  if (!trashed) {
+    // Already trashed (idempotent) or never existed — either way there is
+    // nothing left this request needs to do to the row; distinguish only for
+    // a clearer client message.
+    const asset = await getMediaAsset(session.businessId, id);
+    if (!asset) return NextResponse.json({ error: "asset_not_found" }, { status: 404 });
+  }
+  return NextResponse.json({ ok: true, trashed: true });
 });

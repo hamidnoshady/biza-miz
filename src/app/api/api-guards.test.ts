@@ -489,6 +489,15 @@ describe("every API route is guarded", () => {
       // right answer for every member of every business, so there is no
       // per-user row to scope to.
       if (key === "knowledge" || key.startsWith("knowledge/")) continue;
+      // media/[id]/file: `requireMember` here is not "acts only on its own
+      // rows" — it is "every role must reach this gate; the actual decision
+      // is a permission-SET introspection the handler makes afterwards"
+      // (media.view for library browsing, OR menu.view/inventory.view when
+      // the specific asset is a catalogue item's own referenced photo — see
+      // getMediaAssetUsage). No single permission or role list can express
+      // an "authorized by usage reference" rule, which is exactly the class
+      // of exception the two entries above already are.
+      if (key === "media/[id]/file") continue;
       expect(src, `src/app/api/${key}/route.ts uses requireMember but never scopes to session.sub`).toMatch(
         /session\.sub/,
       );

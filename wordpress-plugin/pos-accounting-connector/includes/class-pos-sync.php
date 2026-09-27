@@ -364,6 +364,16 @@ class POS_Connector_Sync {
 			$payload['mime_type']  = $post->post_mime_type;
 			$payload['media_type'] = strtok( (string) $post->post_mime_type, '/' ) ?: 'file';
 			$payload['alt_text']   = get_post_meta( $post->ID, '_wp_attachment_image_alt', true );
+			// Only present on the file this store received from a
+			// `media_create` job (apply_media_create() stamps this meta
+			// right after the sideload): what lets the app's Media Library
+			// tell "the file I pushed just landed as attachment #123" apart
+			// from every other attachment this same event fires for — a
+			// site owner's own upload, or a later edit of either.
+			$operation_id = get_post_meta( $post->ID, '_pos_operation_id', true );
+			if ( $operation_id ) {
+				$payload['operation_id'] = (string) $operation_id;
+			}
 		} else {
 			// Excerpt/content are delivered raw so the manager's editor can
 			// round-trip them; rendered HTML lives on the public site.

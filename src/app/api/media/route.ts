@@ -4,11 +4,13 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import {
   hasMatchingMediaSignature,
+  isMediaSort,
   MEDIA_MAX_BYTES,
   mediaKindForMime,
   type MediaKind,
 } from "@/lib/media";
 import {
+  findMediaAssetByHash,
   getMediaConfig,
   isMediaStorageReady,
   listMediaAssets,
@@ -52,6 +54,22 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (search) filter.search = search.slice(0, 120);
   const aiStatus = params.get("aiStatus");
   if (aiStatus === "pending_review") filter.aiStatus = "pending_review";
+  const source = params.get("source");
+  if (
+    source === "upload" ||
+    source === "ai_attachment" ||
+    source === "ai_generated" ||
+    source === "ocr_receipt" ||
+    source === "ocr_invoice"
+  )
+    filter.source = source;
+  if (params.get("trashed") === "1") filter.trashed = true;
+  const collectionId = params.get("collectionId");
+  if (collectionId) filter.collectionId = collectionId;
+  const sort = params.get("sort");
+  if (isMediaSort(sort)) filter.sort = sort;
+  const limit = Number(params.get("limit"));
+  if (Number.isFinite(limit) && limit > 0) filter.limit = Math.floor(limit);
   const offset = Number(params.get("offset"));
   if (Number.isFinite(offset) && offset > 0) filter.offset = Math.floor(offset);
 
@@ -118,6 +136,28 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const folderIdRaw = form?.get("folderId");
   const folderId = typeof folderIdRaw === "string" && folderIdRaw ? folderIdRaw : null;
+  // "Upload another copy anyway" — the picker/library UI sets this once the
+  // operator has seen the duplicate notice and still wants a second object.
+  const allowDuplicate = form?.get("allowDuplicate") === "1" || form?.get("allowDuplicate") === "true";
+
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+
+  // Tenant-scoped duplicate detection: identical bytes already in THIS
+  // business's library are reused rather than written a second time, unless
+  // the caller explicitly asked for another copy.
+  if (!allowDuplicate) {
+    const existing = await findMediaAssetByHash(session.businessId, sha256).catch(() => null);
+    if (existing) {
+      return NextResponse.json(
+        {
+          duplicate: true,
+          asset: existing,
+          message: "این فایل قبلاً در کتابخانهٔ رسانه وجود دارد.",
+        },
+        { status: 200 },
+      );
+    }
+  }
 
   try {
     const asset = await storeMediaAsset({
@@ -128,10 +168,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       fileName: file.name || "file",
       mimeType: file.type,
       bytes,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
+      sha256,
       folderId,
     });
-    return NextResponse.json({ asset }, { status: 201 });
+    return NextResponse.json({ asset, duplicate: false }, { status: 201 });
   } catch (err) {
     console.error("media upload failed:", err);
     return NextResponse.json(

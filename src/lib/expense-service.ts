@@ -22,6 +22,7 @@ import {
   type ExpenseListFilters,
 } from "./expense-input";
 import { postJournalEntry } from "./ledger-service";
+import { getMediaAsset } from "./media-service";
 
 export class ExpenseError extends Error {
   status: number;
@@ -56,6 +57,10 @@ export interface Expense {
   memo: string;
   createdByName: string | null;
   createdAt: string;
+  /** Migration 0177 — the canonical Media Library asset for the receipt
+   * photo this expense was recorded from, when one was attached (e.g. via
+   * the receipt-OCR upload flow). Null for an expense entered by hand. */
+  receiptAssetId: string | null;
 }
 
 interface ExpenseRow extends Record<string, unknown> {
@@ -72,6 +77,7 @@ interface ExpenseRow extends Record<string, unknown> {
   memo: string;
   created_by_name: string | null;
   created_at: string;
+  receipt_asset_id: string | null;
 }
 
 function toExpense(r: ExpenseRow): Expense {
@@ -89,6 +95,7 @@ function toExpense(r: ExpenseRow): Expense {
     memo: r.memo,
     createdByName: r.created_by_name,
     createdAt: r.created_at,
+    receiptAssetId: r.receipt_asset_id,
   };
 }
 
@@ -96,6 +103,7 @@ const SELECT_EXPENSE = `
   SELECT e.id, e.expense_date::text AS expense_date, e.amount::text AS amount, e.vendor, e.memo, e.created_at::text AS created_at,
          e.account_id, a.code AS account_code, a.name AS account_name,
          e.payment_account_id, p.code AS payment_account_code, p.name AS payment_account_name,
+         e.receipt_asset_id,
          u.full_name AS created_by_name
     FROM expenses e
     JOIN accounts a ON a.id = e.account_id
@@ -181,6 +189,11 @@ export async function recordExpense(params: {
   vendor?: string | null;
   memo: string;
   createdBy: string | null;
+  /** Migration 0177 — a Media Library asset (the receipt photo) to attach,
+   * typically the one `/api/ai/receipt-ocr` just stored. Re-validated
+   * server-side against this business so a stale or cross-tenant id from the
+   * client can never be linked onto someone else's financial record. */
+  receiptAssetId?: string | null;
 }): Promise<Expense> {
   if (!Number.isSafeInteger(params.amount) || params.amount <= 0 || params.amount > MAX_EXPENSE_AMOUNT_RIAL) {
     throw new ExpenseError("invalid_amount");
@@ -198,6 +211,12 @@ export async function recordExpense(params: {
   const expenseDate = params.expenseDate?.trim() || null;
   if (expenseDate !== null && !isValidIsoDate(expenseDate)) throw new ExpenseError("invalid_expense_date");
 
+  const receiptAssetId = params.receiptAssetId?.trim() || null;
+  if (receiptAssetId) {
+    const asset = await getMediaAsset(params.businessId, receiptAssetId);
+    if (!asset) throw new ExpenseError("receipt_asset_not_found", 404);
+  }
+
   await assertAccount(params.businessId, params.accountId, "expense");
   await assertAccount(params.businessId, params.paymentAccountId, "asset");
 
@@ -207,8 +226,8 @@ export async function recordExpense(params: {
     await client.query("BEGIN");
 
     const { rows } = await client.query<{ id: string }>(
-      `INSERT INTO expenses (business_id, location_id, account_id, payment_account_id, amount, expense_date, vendor, memo, created_by)
-       VALUES ($1, $2, $3, $4, $5, COALESCE($6, CURRENT_DATE), $7, $8, $9) RETURNING id`,
+      `INSERT INTO expenses (business_id, location_id, account_id, payment_account_id, amount, expense_date, vendor, memo, created_by, receipt_asset_id)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6, CURRENT_DATE), $7, $8, $9, $10) RETURNING id`,
       [
         params.businessId,
         params.locationId,
@@ -219,6 +238,7 @@ export async function recordExpense(params: {
         params.vendor?.trim() || null,
         params.memo.trim(),
         params.createdBy,
+        receiptAssetId,
       ],
     );
     expenseId = rows[0].id;
