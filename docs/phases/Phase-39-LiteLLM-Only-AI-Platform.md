@@ -5,11 +5,16 @@ usage, prompt bindings and MCP), Phase 14 (multiple locations per business — t
 dimension this phase adds to the gateway), Phase 18 (the Rial credit ledger, which this
 phase does not touch).
 
-## Status: designed — implementation not started
+## Status: shipped
 
-This document is the specification, not a record of shipped work. It is written to the level
-of table shapes, function signatures and call sites so that picking it up later is execution,
-not re-derivation.
+This phase has been implemented: `AiProvider` has exactly one member (`"litellm"`),
+`platform_ai_config` was dropped and merged into `platform_ai_gateway` (migration
+`0124_ai_litellm_only.sql`), `ai_business_gateway` carries the branch dimension described
+below, and `/platform/ai` is the single technical console (there is no separate
+`/platform/ai/gateway` page — that path is only the API route backing this page). The rest of
+this document is kept as the design record; see issue #757 / PR #756 for the follow-up
+hardening pass (N+1 removal, scope-aware branch readiness, dead policy-mirror field cleanup)
+that landed after the initial phase.
 
 ## Context: what exists today
 
@@ -164,7 +169,7 @@ re-enters the gateway address and master key in the merged console page.** This 
 manual step for the platform operator (there is exactly one global row), not per-tenant work,
 and must be called out in the release notes the way any breaking migration is.
 
-## Exit criteria
+## Exit criteria (all met)
 
 - `AiProvider` has exactly one member; nothing in the codebase references `openrouter` or
   `arvan` outside historical migration files.
@@ -178,3 +183,24 @@ and must be called out in the release notes the way any breaking migration is.
 - `ai_business_gateway` (widened) and `ai_gateway_usage.location_id` both pass the Phase 17
   generated tenant-isolation test.
 - `npx tsc --noEmit`, `npm test`, `npm run test:db` and `npm run build` all pass.
+
+## Follow-up (issue #757, PR #756 and after)
+
+- Dead LiteLLM-policy-mirror fields (`fallbackModels`, `allowBusinessModels`,
+  `publishedModels`, `modelOverride`, `mcpEnabled`, `mcpServers`) were removed from
+  `src/lib/ai-gateway.ts` and their backing columns dropped from `platform_ai_gateway` /
+  `ai_business_gateway` — the console never actually read or wrote them; LiteLLM's own config
+  (`docker/litellm/config.yaml`) is the only place that policy lives.
+- The admin fleet-readiness GET route (`/api/platform/ai/gateway`) no longer resolves each
+  business's AI config one at a time (an N+1 query pattern); it now loads the gateway,
+  business-gateway rows, locations and businesses once and decorates them in memory, with
+  server-side search, status filtering (`ready` / `missing_key` / `key_sync_error` /
+  `entitlement_disabled` / `branch_override` / `gateway_unavailable`) and pagination.
+- Selecting a specific (business, branch) pair on `/platform/ai` now returns a distinct
+  `branchReadiness` view scoped to that exact pair — credential source (branch vs. inherited
+  business vs. none), whether the branch has its own key, the effective model alias, last
+  verification time and any technical sync error — instead of only ever showing the
+  business-default scope.
+- **Deliberately left open:** the legacy plaintext `master_key`/`virtual_key` columns
+  alongside their encrypted replacements were not dropped in this pass — that cutover needs a
+  confirmed production backfill first and is unsafe to do blind.

@@ -13,18 +13,12 @@ import {
   emptyBusinessGateway,
   gatewayErrorText,
   gatewayManagementUrl,
-  gatewayMcpToolsBody,
   gatewayTurnPricing,
-  gatewayRequestBody,
   gatewayStatusMessage,
   joinGatewayDetail,
   keyInfoUrl,
   livelinessUrl,
   modelInfoUrl,
-  mcpServersFromText,
-  mcpServersToText,
-  normaliseBusinessGatewayInput,
-  normalizeMcpServers,
   parseGatewayErrorDetail,
   parseGatewayModels,
   parseGeneratedKey,
@@ -34,10 +28,7 @@ import {
   rialFromGatewayUsd,
   resolveEmbeddingModel,
   resolveGatewayAuthKey,
-  toListText,
   toPublicGatewayConfig,
-  toStringList,
-  validateBusinessGatewayInput,
   validateGatewayInput,
   virtualKeyAlias,
   type AiGatewayConfig,
@@ -73,9 +64,11 @@ describe("an inactive gateway changes nothing", () => {
     ).toBeUndefined();
   });
 
-  it("sends no extra body fields to a direct vendor", () => {
-    expect(gatewayRequestBody(null)).toEqual({});
-    expect(gatewayRequestBody({ ...gateway(), enabled: false, fallbackModels: ["a"] })).toEqual({});
+  it("sends no extra body fields when a runtime is built for an inactive gateway", () => {
+    expect(buildGatewayRuntime({ config: platform, gateway: null, business: null })).toBeUndefined();
+    expect(
+      buildGatewayRuntime({ config: platform, gateway: { ...gateway(), enabled: false }, business: null }),
+    ).toBeUndefined();
   });
 
   it("substitutes no key when no gateway credential exists", () => {
@@ -96,18 +89,14 @@ describe("model resolution", () => {
     ).toBe("pos-chat");
   });
 
-  it("ignores historical business and branch model overrides", () => {
-    const allowed = gateway({
-      chatModel: "pos-chat",
-      allowBusinessModels: true,
-      publishedModels: ["pos-fast", "pos-smart", "pos-pro"],
-    });
+  it("ignores business and branch identity when resolving the model — LiteLLM owns model policy", () => {
+    const allowed = gateway({ chatModel: "pos-chat" });
     expect(
       resolveChatModel({
         platformModel: "gpt-4o-mini",
         gateway: allowed,
-        business: business({ modelOverride: "pos-smart" }),
-        branch: business({ modelOverride: "pos-pro" }),
+        business: business({ virtualKey: "sk-biz" }),
+        branch: business({ virtualKey: "sk-branch" }),
       }),
     ).toBe("pos-chat");
   });
@@ -182,18 +171,10 @@ describe("credential resolution", () => {
 });
 
 describe("request body", () => {
-  it("does not send request-level fallbacks", () => {
-    expect(gatewayRequestBody(gateway({ fallbackModels: ["pos-cheap", "pos-last"] }))).toEqual({});
-  });
-
-  it("omits the field entirely when the chain is empty", () => {
-    expect(gatewayRequestBody(gateway({ fallbackModels: [] }))).toEqual({});
-  });
-
-  it("includes the model and key in the built runtime", () => {
+  it("never sends request-level fallbacks or other routing policy", () => {
     const runtime = buildGatewayRuntime({
       config: platform,
-      gateway: gateway({ chatModel: "pos-chat", masterKey: "sk-master", fallbackModels: ["pos-cheap"] }),
+      gateway: gateway({ chatModel: "pos-chat", masterKey: "sk-master" }),
       business: null,
     });
     expect(runtime).toEqual({
@@ -327,18 +308,6 @@ describe("the operator-facing error vocabulary", () => {
   });
 });
 
-describe("list coercion", () => {
-  it("accepts arrays, newline text and comma text", () => {
-    expect(toStringList(["a", " b ", ""])).toEqual(["a", "b"]);
-    expect(toStringList("a\nb,, c")).toEqual(["a", "b", "c"]);
-    expect(toStringList(undefined)).toEqual([]);
-  });
-
-  it("round-trips through the console textarea", () => {
-    expect(toStringList(toListText(["a", "b"]))).toEqual(["a", "b"]);
-  });
-});
-
 describe("the single billing architecture (migration 0168)", () => {
   // The platform console stopped mirroring the proxy's own settings: routing,
   // per-model RPM/TPM and per-key budgets live in docker/litellm/config.yaml
@@ -358,19 +327,12 @@ describe("the single billing architecture (migration 0168)", () => {
     }
   });
 
-  it("keeps a business row identity-only — no model, budget, duration or rate limit columns", () => {
+  it("keeps a fresh business row identity-only — no model, budget, duration or rate limit columns", () => {
     const fresh = emptyBusinessGateway("b1");
-    const row = normaliseBusinessGatewayInput("b1", {
-      modelOverride: "  pos-fast  ",
-      // A legacy console patch still carrying retired fields must not resurrect
-      // them (they are ignored, not validated).
-      ...({ maxBudgetUsd: 5, tpmLimit: 100, rpmLimit: 100, budgetDuration: "30d" } as unknown as Record<string, never>),
-    });
-    const json = JSON.stringify({ fresh, row });
-    for (const retired of ["maxBudgetUsd", "tpmLimit", "rpmLimit", "budgetDuration"]) {
+    const json = JSON.stringify(fresh);
+    for (const retired of ["maxBudgetUsd", "tpmLimit", "rpmLimit", "budgetDuration", "modelOverride"]) {
       expect(json, retired).not.toContain(retired);
     }
-    expect(row.modelOverride).toBeNull();
   });
 
   it("validates a gateway patch without any routing/budget/limit codes", () => {
@@ -385,37 +347,15 @@ describe("validation", () => {
     expect(validateGatewayInput({ baseUrl: "litellm:4000" })).toContain("ai_gateway_bad_base_url");
     expect(validateGatewayInput({ baseUrl: "http://litellm:4000/v1" })).not.toContain("ai_gateway_bad_base_url");
   });
-
-  it("ignores legacy model override fields instead of validating app-owned model policy", () => {
-    expect(
-      validateBusinessGatewayInput({ modelOverride: "gpt-4o" }, { allowBusinessModels: true, allowedModels: ["pos-fast"] }),
-    ).toEqual([]);
-    expect(
-      validateBusinessGatewayInput(
-        { modelOverride: "pos-fast" },
-        { allowBusinessModels: false, allowedModels: ["pos-fast"] },
-      ),
-    ).toEqual([]);
-  });
 });
 
-describe("normalising a business patch", () => {
-  it("blanks an empty model override and keeps the row identity-only", () => {
-    const row = normaliseBusinessGatewayInput("b1", { modelOverride: "  " });
-    expect(row.modelOverride).toBeNull();
+describe("a fresh business/branch row", () => {
+  it("is identity-only — no model, budget, duration or rate limit fields", () => {
+    const row = emptyBusinessGateway("b1");
     expect(row.virtualKey).toBeNull();
     expect(row.spendUsd).toBe(0);
     expect(Object.keys(row).sort()).toEqual(
-      [
-        "businessId",
-        "keyAlias",
-        "locationId",
-        "modelOverride",
-        "spendUsd",
-        "syncedAt",
-        "syncError",
-        "virtualKey",
-      ].sort(),
+      ["businessId", "keyAlias", "locationId", "spendUsd", "syncedAt", "syncError", "virtualKey"].sort(),
     );
   });
 });
@@ -478,66 +418,15 @@ describe("gateway cost capture and conversion", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 38b — MCP through the gateway
+// Phase 38b / issue #748 P2-7 — MCP, fallback chains and model-access policy
+// are LiteLLM's, never mirrored into the app's request body or stored config.
 // ---------------------------------------------------------------------------
 
-describe("gateway MCP servers", () => {
-  it("keeps sane servers and drops broken or duplicate ones", () => {
-    const servers = normalizeMcpServers([
-      { name: "Pos-MCP", label: "اتصال‌دهنده", url: "http://app:3000/api/mcp" },
-      { name: "", url: "http://x" },
-      { name: "no-url" },
-      { name: "pos-mcp", url: "http://duplicate" },
-      "not-an-object",
-    ]);
-    expect(servers).toEqual([{ name: "pos-mcp", label: "اتصال‌دهنده", url: "http://app:3000/api/mcp" }]);
-  });
-
-  it("round-trips through the console's text shape", () => {
-    const servers = [{ name: "pos_mcp", label: "POS", url: "http://app:3000/api/mcp" }];
-    expect(mcpServersFromText(mcpServersToText(servers))).toEqual(servers);
-  });
-
-  it("does not inject MCP tools into ordinary chat", () => {
-    const body = gatewayMcpToolsBody(
-      gateway({
-        mcpEnabled: true,
-        mcpServers: [{ name: "pos_mcp", label: "POS", url: "http://app:3000/api/mcp" }],
-      }),
-    );
-    expect(body).toEqual({});
-  });
-
-  it("sends nothing when MCP is off, empty, or the gateway is not a gateway", () => {
-    expect(gatewayMcpToolsBody(gateway({ mcpEnabled: false, mcpServers: [{ name: "a", label: "a", url: "http://a" }] }))).toEqual({});
-    expect(gatewayMcpToolsBody(gateway({ mcpEnabled: true, mcpServers: [] }))).toEqual({});
-    expect(gatewayMcpToolsBody(null)).toEqual({});
-    expect(gatewayMcpToolsBody({ ...defaultGatewayConfig(), mcpEnabled: true })).toEqual({});
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Phase 38b — the runtime assembles the new body pieces
-// ---------------------------------------------------------------------------
-
-describe("the runtime carries MCP only through a gateway", () => {
+describe("the runtime never carries routing/MCP policy", () => {
   it("a gateway without extras sends an empty body", () => {
     const runtime = buildGatewayRuntime({
       config: platform,
       gateway: gateway(),
-      business: null,
-    });
-    expect(runtime?.body).toEqual({});
-  });
-
-  it("fallback and MCP settings do not become per-request body fields", () => {
-    const runtime = buildGatewayRuntime({
-      config: platform,
-      gateway: gateway({
-        fallbackModels: ["pos-cheap"],
-        mcpEnabled: true,
-        mcpServers: [{ name: "pos_mcp", label: "POS", url: "http://app:3000/api/mcp" }],
-      }),
       business: null,
     });
     expect(runtime?.body).toEqual({});
@@ -547,8 +436,7 @@ describe("the runtime carries MCP only through a gateway", () => {
 describe("validation after platform AI cleanup", () => {
   it("validates only technical LiteLLM connection fields on the AI page", () => {
     expect(validateGatewayInput({ baseUrl: "http://litellm:4000/v1", enabled: true, chatModel: "pos-chat" })).toEqual([]);
-    expect(validateGatewayInput({ baseUrl: "http://litellm:4000/v1", fallbackModels: "legacy" } as never)).toEqual([]);
-    expect(validateGatewayInput({ baseUrl: "http://litellm:4000/v1", mcpServers: "legacy" } as never)).toEqual([]);
+    expect(validateGatewayInput({ baseUrl: "http://litellm:4000/v1" })).toEqual([]);
   });
 
   it("still requires a chat model when enabling LiteLLM", () => {
@@ -565,9 +453,6 @@ describe("the public gateway config is technical-only", () => {
         usdRialRate: 60_000,
         revenueMarginPercent: 15,
         maxTurnRial: 40_000,
-        fallbackModels: ["pos-cheap"],
-        mcpEnabled: true,
-        mcpServers: [{ name: "pos_mcp", label: "POS", url: "http://app:3000/api/mcp" }],
       }),
     );
     expect(pub).toEqual({
@@ -580,6 +465,6 @@ describe("the public gateway config is technical-only", () => {
     });
     const json = JSON.stringify(pub);
     expect(json).not.toContain("sk-secret");
-    expect(json).not.toMatch(/usdRialRate|revenueMarginPercent|maxTurnRial|fallbackModels|publishedModels|allowBusinessModels|mcpServers/);
+    expect(json).not.toMatch(/usdRialRate|revenueMarginPercent|maxTurnRial|fallbackModels|publishedModels|allowBusinessModels|mcpServers|mcpEnabled|modelOverride/);
   });
 });

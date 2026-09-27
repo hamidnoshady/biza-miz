@@ -13,7 +13,35 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Loader2Icon } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { PlatformConfirmDialog } from "@/components/platform/dialogs";
 import { api, Button, Card, ErrorBox, Field, InfoBox, inputClass, errorMessage, useCan, PlatformPageSkeleton } from "../ui";
+
+const FLEET_STATUS_OPTIONS: { value: string; label: string }[] = [
+  { value: "all", label: "همه" },
+  { value: "ready", label: "آماده" },
+  { value: "missing_key", label: "فاقد کلید" },
+  { value: "key_sync_error", label: "خطای همگام‌سازی کلید" },
+  { value: "entitlement_disabled", label: "دسترسی غیرفعال" },
+  { value: "branch_override", label: "دارای پیکربندی شعبه" },
+  { value: "gateway_unavailable", label: "دروازه در دسترس نیست" },
+];
+
+const FLEET_STATUS_FA: Record<string, string> = {
+  ready: "آماده",
+  missing_key: "فاقد کلید",
+  key_sync_error: "خطای همگام‌سازی کلید",
+  entitlement_disabled: "دسترسی غیرفعال",
+  gateway_unavailable: "دروازه در دسترس نیست",
+};
+
+const PAGE_SIZE = 10;
+
+const CREDENTIAL_SOURCE_FA: Record<string, string> = {
+  branch: "اختصاصی شعبه",
+  business: "کسب‌وکار (به‌ارث‌رسیده)",
+  master: "کلید اصلی پلتفرم",
+  none: "بدون کلید",
+};
 
 interface GatewayConfig {
   enabled: boolean;
@@ -66,14 +94,34 @@ interface RuntimeReadiness {
   authenticationReady: boolean;
   virtualKeyRequired: boolean;
   virtualKeyReady: boolean;
-  costingReady: boolean;
-  ceilingReady: boolean;
   modelReady: boolean;
 }
 
 interface TenantReadiness extends RuntimeReadiness {
   businessId: string;
   entitled: boolean;
+  hasBranchOverride: boolean;
+  status: string;
+}
+
+interface BranchReadiness extends RuntimeReadiness {
+  businessId: string;
+  locationId: string | null;
+  entitled: boolean;
+  credentialSource: "branch" | "business" | "master" | "none";
+  businessHasKey: boolean;
+  branchHasKey: boolean | null;
+  inheritedFromBusiness: boolean;
+  effectiveModel: string;
+  lastVerifiedAt: string | null;
+  syncError: string | null;
+}
+
+interface Pagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
 }
 
 interface GatewayData {
@@ -85,6 +133,8 @@ interface GatewayData {
   active: boolean;
   runtimeReadiness: RuntimeReadiness;
   tenantReadiness: TenantReadiness[];
+  branchReadiness: BranchReadiness | null;
+  pagination: Pagination;
   status: GatewayStatus | null;
   gateways: BusinessGateway[];
   businesses: BusinessSummary[];
@@ -112,9 +162,6 @@ const READINESS_REASON_FA: Record<string, string> = {
   tenant_virtual_key_missing: "کلید مجازی این کسب‌وکار صادر نشده است",
   missing_model: "مدل گفت‌وگو تنظیم نشده است",
   invalid_max_output_tokens: "سقف توکن خروجی معتبر نیست",
-  max_turn_credit_missing: "گارد اعتباری درخواست در بخش Billing تنظیم نشده است",
-  gateway_costing_rate_missing: "تنظیمات هزینه در Billing کامل نیست",
-  costing_not_configured: "روش هزینه‌گذاری در Billing کامل نیست",
   configuration_load_failed: "خواندن تنظیمات/ساختار پایگاه داده ناموفق بود؛ مهاجرت‌ها و لاگ سرور را بررسی کنید",
 };
 
@@ -139,10 +186,31 @@ export default function PlatformAiPage() {
   const [masterKey, setMasterKey] = useState("");
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
   const [selectedLocationId, setSelectedLocationId] = useState("");
+  const [page, setPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+  const [revokeConfirmOpen, setRevokeConfirmOpen] = useState(false);
+  const [rotateConfirmOpen, setRotateConfirmOpen] = useState(false);
+
+  // Debounce free-text fleet search so every keystroke doesn't hit the server
+  // (issue #748 P1-6 — server-side search over a large fleet).
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      setSearch(searchInput.trim());
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [searchInput]);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const result = await api<GatewayData>("/api/platform/ai/gateway");
+    const params = new URLSearchParams({ page: String(page), pageSize: String(PAGE_SIZE) });
+    if (search) params.set("search", search);
+    if (statusFilter !== "all") params.set("status", statusFilter);
+    if (selectedBusinessId) params.set("businessId", selectedBusinessId);
+    if (selectedLocationId) params.set("locationId", selectedLocationId);
+    const result = await api<GatewayData>(`/api/platform/ai/gateway?${params.toString()}`);
     if (!result.ok) {
       setError(result.data.error === "ai_configuration_load_failed"
         ? "خواندن تنظیمات هوش مصنوعی ناموفق بود؛ اجرای مهاجرت‌های پایگاه داده و لاگ سرور را بررسی کنید."
@@ -152,15 +220,41 @@ export default function PlatformAiPage() {
     }
     setData(result.data);
     setDraft(result.data.gateway);
-    setSelectedBusinessId((current) =>
-      current && (result.data.businesses ?? []).some((b) => b.businessId === current) ? current : "",
-    );
     setLoading(false);
-  }, []);
+  }, [page, search, statusFilter, selectedBusinessId, selectedLocationId]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The "which business/branch to manage" picker is server-searched and
+  // decoupled from the fleet table's own pagination/filter (issue #748
+  // P1-6): a business far outside the fleet table's current page must still
+  // be reachable by typing its name.
+  const [pickerQueryInput, setPickerQueryInput] = useState("");
+  const [pickerQuery, setPickerQuery] = useState("");
+  const [pickerBusinesses, setPickerBusinesses] = useState<BusinessSummary[]>([]);
+  const [pickerLoading, setPickerLoading] = useState(false);
+
+  useEffect(() => {
+    const handle = setTimeout(() => setPickerQuery(pickerQueryInput.trim()), 250);
+    return () => clearTimeout(handle);
+  }, [pickerQueryInput]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPickerLoading(true);
+    const params = new URLSearchParams({ page: "1", pageSize: "50" });
+    if (pickerQuery) params.set("search", pickerQuery);
+    void api<GatewayData>(`/api/platform/ai/gateway?${params.toString()}`).then((result) => {
+      if (cancelled) return;
+      if (result.ok) setPickerBusinesses(result.data.businesses ?? []);
+      setPickerLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [pickerQuery]);
 
   const businessLocations = useMemo(
     () => (data?.locations ?? []).filter((loc) => loc.businessId === selectedBusinessId),
@@ -173,10 +267,9 @@ export default function PlatformAiPage() {
     return data.gateways.find((row) => row.businessId === selectedBusinessId && row.locationId === loc) ?? null;
   }, [data?.gateways, selectedBusinessId, selectedLocationId]);
 
-  const selectedReadiness = useMemo(
-    () => data?.tenantReadiness?.find((item) => item.businessId === selectedBusinessId),
-    [data?.tenantReadiness, selectedBusinessId],
-  );
+  const branchReadiness = data?.branchReadiness && data.branchReadiness.businessId === selectedBusinessId
+    ? data.branchReadiness
+    : null;
 
   const keyRows = useMemo(() => {
     const businesses = data?.businesses ?? [];
@@ -354,7 +447,10 @@ export default function PlatformAiPage() {
             <SearchableSelect
               value={selectedBusinessId}
               onChange={(value) => { setSelectedBusinessId(value); setSelectedLocationId(""); }}
-              options={(data?.businesses ?? []).map((business) => ({ value: business.businessId, label: business.businessName }))}
+              onQueryChange={setPickerQueryInput}
+              loading={pickerLoading}
+              options={pickerBusinesses.map((business) => ({ value: business.businessId, label: business.businessName }))}
+              searchPlaceholder="جستجوی کسب‌وکار…"
             />
           </Field>
           {businessLocations.length > 0 ? (
@@ -370,23 +466,30 @@ export default function PlatformAiPage() {
 
         {selectedBusinessId ? (
           <div className="space-y-4 border-t border-border pt-4">
-            <div className={`rounded-lg border p-3 text-sm ${selectedReadiness?.ready && selectedReadiness.entitled ? "border-emerald-300 bg-emerald-50 dark:bg-emerald-500/10" : "border-amber-300 bg-amber-50 dark:bg-amber-500/10"}`}>
+            <div className={`rounded-lg border p-3 text-sm ${branchReadiness?.ready && branchReadiness.entitled ? "border-emerald-300 bg-emerald-50 dark:bg-emerald-500/10" : "border-amber-300 bg-amber-50 dark:bg-amber-500/10"}`}>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                <p>AI entitlement: <strong>{selectedReadiness?.entitled ? "فعال" : "غیرفعال"}</strong></p>
-                <p>کلید مجازی: <strong>{selectedReadiness?.virtualKeyRequired ? (selectedReadiness.virtualKeyReady ? "آماده" : "نیازمند صدور/رفع خطا") : "الزامی نیست"}</strong></p>
-                <p>Runtime: <strong>{selectedReadiness?.ready && selectedReadiness.entitled ? "آماده" : "نیازمند تنظیم"}</strong></p>
+                <p>AI entitlement: <strong>{branchReadiness?.entitled ? "فعال" : "غیرفعال"}</strong></p>
+                <p>کلید مجازی: <strong>{branchReadiness?.virtualKeyRequired ? (branchReadiness.virtualKeyReady ? "آماده" : "نیازمند صدور/رفع خطا") : "الزامی نیست"}</strong></p>
+                <p>Runtime: <strong>{branchReadiness?.ready && branchReadiness.entitled ? "آماده" : "نیازمند تنظیم"}</strong></p>
+                <p>منبع اعتبارنامه: <strong>{branchReadiness ? CREDENTIAL_SOURCE_FA[branchReadiness.credentialSource] : "—"}</strong></p>
+                <p>کلید کسب‌وکار: <strong>{branchReadiness?.businessHasKey ? "صادر شده" : "صادر نشده"}</strong></p>
+                {selectedLocationId ? (
+                  <p>
+                    کلید شعبه: <strong>{branchReadiness?.branchHasKey ? "صادر شده (اختصاصی شعبه)" : branchReadiness?.inheritedFromBusiness ? "به‌ارث‌رسیده از کسب‌وکار" : "صادر نشده"}</strong>
+                  </p>
+                ) : null}
               </div>
-              {selectedReadiness && (!selectedReadiness.ready || !selectedReadiness.entitled) ? (
-                <p className="mt-2 text-xs text-muted-foreground">علت: {!selectedReadiness.entitled ? "دسترسی ai_assistant فعال نشده است" : readinessText(selectedReadiness)}</p>
+              {branchReadiness && (!branchReadiness.ready || !branchReadiness.entitled) ? (
+                <p className="mt-2 text-xs text-muted-foreground">علت: {!branchReadiness.entitled ? "دسترسی ai_assistant فعال نشده است" : readinessText(branchReadiness)}</p>
               ) : null}
             </div>
             <div className="grid gap-2 text-sm sm:grid-cols-3">
-              <p>مدل مؤثر: <strong dir="ltr" className="font-medium">{selectedRow?.effectiveModel ?? draft?.chatModel ?? "—"}</strong></p>
+              <p>مدل مؤثر: <strong dir="ltr" className="font-medium">{branchReadiness?.effectiveModel ?? selectedRow?.effectiveModel ?? draft?.chatModel ?? "—"}</strong></p>
               <p>وضعیت کلید: {selectedRow?.hasVirtualKey ? "صادر شده" : "صادر نشده"}</p>
               <p>Key alias: <span dir="ltr">{selectedRow?.keyAlias ?? "—"}</span></p>
-              <p>آخرین همگام‌سازی: {fmtDate(selectedRow?.syncedAt ?? null)}</p>
+              <p>آخرین بررسی/همگام‌سازی: {fmtDate(branchReadiness?.lastVerifiedAt ?? selectedRow?.syncedAt ?? null)}</p>
             </div>
-            {selectedRow?.syncError ? <ErrorBox>{selectedRow.syncError}</ErrorBox> : null}
+            {(branchReadiness?.syncError ?? selectedRow?.syncError) ? <ErrorBox>{branchReadiness?.syncError ?? selectedRow?.syncError}</ErrorBox> : null}
             {canManageAi ? (
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => void write({ action: "sync_key", businessId: selectedBusinessId, locationId: selectedLocationId || null }, "sync")} disabled={Boolean(busy)}>
@@ -395,10 +498,10 @@ export default function PlatformAiPage() {
                 <Button variant="ghost" onClick={() => void write({ action: "verify_key", businessId: selectedBusinessId, locationId: selectedLocationId || null }, "verify")} disabled={Boolean(busy) || !selectedRow?.hasVirtualKey}>
                   {busy === "verify" ? <Loader2Icon className="animate-spin" /> : "Verify"}
                 </Button>
-                <Button variant="ghost" onClick={() => void write({ action: "rotate_key", businessId: selectedBusinessId, locationId: selectedLocationId || null }, "rotate")} disabled={Boolean(busy)}>
+                <Button variant="ghost" onClick={() => setRotateConfirmOpen(true)} disabled={Boolean(busy)}>
                   {busy === "rotate" ? <Loader2Icon className="animate-spin" /> : "Rotate/recreate"}
                 </Button>
-                <Button variant="danger" onClick={() => void write({ action: "revoke_key", businessId: selectedBusinessId, locationId: selectedLocationId || null }, "revoke")} disabled={Boolean(busy) || !selectedRow?.hasVirtualKey}>
+                <Button variant="danger" onClick={() => setRevokeConfirmOpen(true)} disabled={Boolean(busy) || !selectedRow?.hasVirtualKey}>
                   {busy === "revoke" ? <Loader2Icon className="animate-spin" /> : "Revoke"}
                 </Button>
               </div>
@@ -406,7 +509,29 @@ export default function PlatformAiPage() {
           </div>
         ) : <p className="text-sm text-muted-foreground">یک کسب‌وکار را انتخاب کنید.</p>}
 
-        <div className="mt-5 overflow-x-auto">
+        <div className="mt-5 flex flex-wrap items-end gap-3 border-t border-border pt-4">
+          <Field label="جستجوی کسب‌وکار در فهرست">
+            <input
+              className={inputClass}
+              placeholder="نام کسب‌وکار…"
+              value={searchInput}
+              onChange={(event) => setSearchInput(event.target.value)}
+            />
+          </Field>
+          <Field label="وضعیت">
+            <select
+              className={inputClass}
+              value={statusFilter}
+              onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }}
+            >
+              {FLEET_STATUS_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </Field>
+        </div>
+
+        <div className="mt-3 overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="text-right text-xs text-muted-foreground">
               <tr className="border-b border-border">
@@ -422,22 +547,64 @@ export default function PlatformAiPage() {
             <tbody>
               {keyRows.map(({ business, key, readiness }) => (
                 <tr key={business.businessId} className="border-b border-border">
-                  <td className="py-2 pr-1 font-medium text-foreground">{business.businessName}</td>
+                  <td className="py-2 pr-1 font-medium text-foreground">
+                    {business.businessName}
+                    {readiness?.hasBranchOverride ? <span className="mr-1 text-xs text-muted-foreground">(شعبه‌ای)</span> : null}
+                  </td>
                   <td className="py-2">{business.aiEntitled ? "فعال" : "غیرفعال"}</td>
                   <td className="py-2">{key?.hasVirtualKey ? (key.syncError ? "خطای همگام‌سازی" : "صادر شده") : "صادر نشده"}</td>
                   <td className="py-2" dir="ltr">{key?.keyAlias ?? "—"}</td>
                   <td className="py-2">{fmtDate(key?.syncedAt ?? null)}</td>
-                  <td className="py-2">{readiness?.ready && business.aiEntitled ? "آماده" : readinessText(readiness ?? undefined)}</td>
+                  <td className="py-2">{readiness ? FLEET_STATUS_FA[readiness.status] ?? readinessText(readiness) : "—"}</td>
                   <td className="py-2 text-xs text-rose-700 dark:text-rose-300">{key?.syncError ?? "—"}</td>
                 </tr>
               ))}
               {keyRows.length === 0 ? (
-                <tr><td colSpan={7} className="py-6 text-center text-muted-foreground">هنوز کسب‌وکاری ثبت نشده است.</td></tr>
+                <tr><td colSpan={7} className="py-6 text-center text-muted-foreground">نتیجه‌ای یافت نشد.</td></tr>
               ) : null}
             </tbody>
           </table>
         </div>
+
+        {data?.pagination && data.pagination.totalPages > 1 ? (
+          <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
+            <span>
+              صفحهٔ {data.pagination.page} از {data.pagination.totalPages} ({data.pagination.total} کسب‌وکار)
+            </span>
+            <div className="flex gap-2">
+              <Button variant="ghost" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>قبلی</Button>
+              <Button variant="ghost" onClick={() => setPage((p) => Math.min(data.pagination.totalPages, p + 1))} disabled={page >= data.pagination.totalPages}>بعدی</Button>
+            </div>
+          </div>
+        ) : null}
       </Card>
+
+      <PlatformConfirmDialog
+        open={rotateConfirmOpen}
+        onOpenChange={setRotateConfirmOpen}
+        title="چرخش کلید مجازی؟"
+        description="کلید فعلی این کسب‌وکار/شعبه باطل می‌شود و کلید تازه‌ای صادر می‌گردد. تا صدور کلید جدید، درخواست‌های هوش مصنوعی این کسب‌وکار ممکن است موقتاً با خطا مواجه شوند. این عملیات را فقط در صورت لزوم (مثلاً افشای احتمالی کلید) انجام دهید."
+        confirmLabel="چرخش کلید"
+        onConfirm={() => {
+          setRotateConfirmOpen(false);
+          void write({ action: "rotate_key", businessId: selectedBusinessId, locationId: selectedLocationId || null }, "rotate");
+        }}
+        busy={busy === "rotate"}
+      />
+
+      <PlatformConfirmDialog
+        open={revokeConfirmOpen}
+        onOpenChange={setRevokeConfirmOpen}
+        title="ابطال کلید مجازی؟"
+        description="کلید مجازی فعلی این کسب‌وکار/شعبه در LiteLLM باطل می‌شود و دیگر قابل استفاده نخواهد بود. تا صدور دستی کلید تازه، این کسب‌وکار به هوش مصنوعی دسترسی نخواهد داشت. این عملیات بازگشت‌ناپذیر است."
+        confirmLabel="ابطال کلید"
+        variant="destructive"
+        onConfirm={() => {
+          setRevokeConfirmOpen(false);
+          void write({ action: "revoke_key", businessId: selectedBusinessId, locationId: selectedLocationId || null }, "revoke");
+        }}
+        busy={busy === "revoke"}
+      />
     </div>
   );
 }

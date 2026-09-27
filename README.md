@@ -177,41 +177,50 @@ the prompting user, proposed payload summary, and applied/failed/dismissed outco
 available to Owner/Manager at `/dashboard/ai`. No real WhatsApp, Telegram, voice,
 SMS, or automatic customer-message channel is introduced.
 
-**Platform-owned providers and billing.** One OpenAI-compatible provider is
-supported — **LiteLLM** — through one platform-owned connection configured only at
-`/platform/ai`. Businesses never enter or receive a provider key. Each assistant turn
-atomically reserves a configured maximum, settles its actual provider token usage, and
-refunds unused credit; a business with insufficient credit is blocked before a provider
-request. Credit, subscription and top-up management is not a console surface anymore:
-the ledger keeps working, and the platform console's AI section is just the LiteLLM
-gateway settings. Deployment-level env variables remain bootstrap fallbacks;
-see `.env.example`.
+**Platform-owned provider and billing.** **LiteLLM** is the only supported
+provider (Phase 39 collapsed the old direct-vendor/gateway split to one connection
+shape) — one platform-owned connection configured only at `/platform/ai`. Businesses
+never enter or receive a provider key. Each assistant turn atomically reserves a
+configured maximum, settles its actual provider token usage, and refunds unused
+credit; a business with insufficient credit is blocked before a provider request.
+Credit, subscription and top-up management is not a console surface anymore: the
+ledger keeps working, and the platform console's AI section is a purely technical
+LiteLLM console. Deployment-level env variables remain bootstrap fallbacks; see
+`.env.example`.
 
-**Optional model gateway (LiteLLM, Phase 37).** Selecting the LiteLLM provider puts
-one OpenAI-compatible gateway in front of every upstream vendor instead of tying the
-platform to a single one. That buys failover between providers, per-business
-**virtual keys** (so spend, budgets and rate limits are enforced per tenant inside
-the gateway), model **aliases** that can be repointed without redeploying, and real
-usage numbers instead of the `chars / 2` estimate used when a vendor omits a usage
-block. Because LiteLLM can route embeddings to a different vendor than chat, the
-assistant's knowledge search (Phase 36) also stops being all-or-nothing on providers
-that only serve chat models.
+**What the console does and does not own.** `/platform/ai` configures the gateway
+address, master key, chat/embedding model **aliases**, the virtual-keys toggle, and
+per-business **and per-branch** virtual-key lifecycle (provision, verify, rotate,
+revoke) plus fleet-wide readiness monitoring — searchable, filterable
+(ready / missing key / key sync error / entitlement disabled / branch override /
+gateway unavailable) and paginated so it stays usable with many tenants. It never
+becomes a billing, routing or model-policy surface: failover between upstream
+vendors, per-model rate limits/budgets, retries and MCP tool policy live entirely in
+LiteLLM's own config (`docker/litellm/config.yaml`), never in the app. Selecting a
+specific business/branch shows a scope-aware readiness view for that exact pair —
+entitlement, credential source (its own key vs. inherited from the business), model
+alias, last verification time and any technical sync error — not just the
+business-default status.
 
-Two things deliberately do not move. **Billing stays in Rial** — gateway budgets are
-USD and are only a backstop; the ledger in `ai_business_billing` is still the only
-thing a business is billed against, and the gateway's reported spend is a
-reconciliation diagnostic. And **a gateway failure degrades, never fails**: a
-deployment that worked before the gateway existed keeps working when its container is
-stopped, falling back to the platform connection.
+Two things deliberately do not move. **Billing stays in Rial** — LiteLLM's own USD
+budgets, if configured, are only a technical backstop; the ledger in
+`ai_business_billing` is still the only thing a business is billed against, and the
+gateway's reported spend is a reconciliation diagnostic. And **a gateway failure
+fails closed, never silently**: since Phase 39 there is no other provider to fall
+back to, so a gateway or database error while resolving config surfaces the
+assistant's existing "unavailable" state rather than throwing or pretending a working
+connection exists.
 
-The gateway is optional and off by default. Start it with
-`docker compose --profile ai up -d litellm` (config template at
-`docker/litellm/config.yaml`), then finish the setup in `/platform/ai` —
-connection, failover chain, model aliases, and per-business keys. It is bound to the
-compose network only, never published to the host, because it holds every upstream
-vendor key and its management API can mint keys and read spend. A business's model is
-chosen by the platform (from the published list) in `/platform/ai`; there is no
-user-level AI settings page. See [Phase 37](docs/phases/Phase-37-LiteLLM-Gateway.md).
+The `litellm` container in `docker-compose.yml` is optional and off by default — a
+deployment can instead point `LITELLM_BASE_URL` at an already-managed LiteLLM
+instance. Start the bundled one with `docker compose --profile ai up -d litellm`
+(config template at `docker/litellm/config.yaml`), then finish the technical setup on
+`/platform/ai`: connection, model aliases, and per-business/per-branch keys. It is
+bound to the compose network only, never published to the host, because it holds
+every upstream vendor key and its management API can mint keys and read spend. There
+is no user-level AI settings page — a business's model alias is set by the platform.
+See [Phase 37](docs/phases/Phase-37-LiteLLM-Gateway.md) and
+[Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md).
 
 ## On-site deployment (café laptop / mini PC)
 

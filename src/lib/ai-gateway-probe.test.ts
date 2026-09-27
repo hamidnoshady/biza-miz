@@ -20,7 +20,6 @@ const CONFIG: AiGatewayConfig = {
   masterKey: "sk-master",
   chatModel: "pos-chat",
   embeddingModel: "pos-embed",
-  fallbackModels: ["pos-cheap"],
 };
 
 type Stub = { status: number; body: unknown };

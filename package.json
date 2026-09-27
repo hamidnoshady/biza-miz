@@ -35,6 +35,7 @@
     "db:reconcile-opening": "tsx scripts/reconcile-opening-inventory.ts",
     "db:normalize-phones": "tsx scripts/normalize-customer-phones.ts",
     "db:encrypt-fields": "tsx scripts/encrypt-fields.ts",
+    "db:encrypt-ai-secrets": "tsx scripts/encrypt-ai-gateway-secrets.ts",
     "inventory:cutover": "tsx scripts/inventory-cutover.ts",
     "deployment:convert-hybrid": "tsx scripts/convert-local-to-hybrid.ts"
   },

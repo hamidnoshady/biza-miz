@@ -40,13 +40,11 @@ import {
   parseKeySpend,
   resolveChatModel,
   toPublicGatewayConfig,
-  validateBusinessGatewayInput,
   validateGatewayInput,
   virtualKeyAlias,
   type AiGatewayConfig,
   type AiGatewayInput,
   type BusinessGateway,
-  type BusinessGatewayInput,
   type GatewayProbe,
   type PublicAiGatewayConfig,
   type PublicBusinessGateway,
@@ -55,9 +53,52 @@ import {
 import { getPlatformAiConfig } from "./ai-config";
 import { chatCompletionsUrl } from "./ai";
 import { normalizeProviderError, providerErrorReason } from "./ai-provider-errors";
+import { decryptSecret, encryptSecret, resolveEncryptionKey } from "./integrations/secrets";
 
 /** Management calls are operator-facing: fail them fast rather than hang a page. */
 const MANAGEMENT_TIMEOUT_MS = 10_000;
+
+// ---------------------------------------------------------------------------
+// Secrets at rest (issue #748 / migration 0183)
+//
+// `platform_ai_gateway.master_key` and `ai_business_gateway.virtual_key` are
+// live bearer credentials. From here on they are only ever WRITTEN encrypted
+// (AES-256-GCM, `src/lib/integrations/secrets.ts` — the same scheme already
+// used for `platform_cms_config.api_key_ciphertext`). Reads prefer the
+// ciphertext column and fall back to the legacy plaintext column so an
+// un-migrated row (or a deployment mid-cutover) keeps working; `npm run
+// db:encrypt-ai-secrets` backfills the ciphertext column so the plaintext one
+// can eventually be dropped in a follow-up migration.
+// ---------------------------------------------------------------------------
+
+/** Encrypt a secret for storage, or `null` for "nothing to store". */
+function encryptForStorage(value: string | null | undefined): string | null {
+  const trimmedValue = value?.trim();
+  if (!trimmedValue) return null;
+  return encryptSecret(trimmedValue, resolveEncryptionKey(process.env));
+}
+
+/**
+ * Decrypt a stored secret, preferring the ciphertext column. Falls back to
+ * the legacy plaintext column when no ciphertext has been written yet (a row
+ * created before migration 0183, or before `db:encrypt-ai-secrets` ran).
+ *
+ * A ciphertext that fails to decrypt (rotated `INTEGRATIONS_ENCRYPTION_KEY` /
+ * `JWT_SECRET`) is treated as absent rather than thrown: the operator can see
+ * `hasMasterKey`/`hasVirtualKey` go false and re-enter the credential, which
+ * is a recoverable state, instead of every AI request throwing.
+ */
+function decryptFromStorage(ciphertext: string | null | undefined, plaintext: string | null | undefined): string {
+  if (ciphertext) {
+    try {
+      return decryptSecret(ciphertext, resolveEncryptionKey(process.env));
+    } catch (err) {
+      console.error("ai gateway secret ciphertext could not be decrypted; treating as absent", err);
+      return "";
+    }
+  }
+  return plaintext?.trim() || "";
+}
 
 function numberValue(value: string | number | null | undefined): number {
   const n = Number(value ?? 0);
@@ -82,20 +123,16 @@ type GatewayRow = {
   enabled: boolean;
   base_url: string;
   master_key: string | null;
+  master_key_ciphertext: string | null;
   chat_model: string;
   embedding_model: string;
-  fallback_models: unknown;
   virtual_keys_enabled: boolean;
-  allow_business_models: boolean;
-  published_models: unknown;
   usd_rial_rate: string | null;
   gateway_costing_enabled: boolean;
   input_cost_rial_per_million: string | number;
   output_cost_rial_per_million: string | number;
   revenue_margin_percent: string | number | null;
   max_turn_rial: string | number | null;
-  mcp_enabled: boolean;
-  mcp_servers: unknown;
 };
 
 function rowToGateway(row: GatewayRow): AiGatewayConfig {
@@ -103,35 +140,27 @@ function rowToGateway(row: GatewayRow): AiGatewayConfig {
   return {
     enabled: row.enabled,
     baseUrl: textOr(row.base_url, fallback.baseUrl),
-    masterKey: row.master_key ?? "",
+    masterKey: decryptFromStorage(row.master_key_ciphertext, row.master_key),
     chatModel: row.chat_model ?? "",
     embeddingModel: row.embedding_model ?? "",
-    // Retired local mirrors: route/fallback/MCP/model access policy belongs to LiteLLM.
-    fallbackModels: [],
     virtualKeysEnabled: row.virtual_keys_enabled,
-    allowBusinessModels: false,
-    publishedModels: [],
     usdRialRate: optionalNumber(row.usd_rial_rate),
     gatewayCostingEnabled: row.gateway_costing_enabled,
     inputCostRialPerMillion: numberValue(row.input_cost_rial_per_million),
     outputCostRialPerMillion: numberValue(row.output_cost_rial_per_million),
     revenueMarginPercent: Math.max(0, numberValue(row.revenue_margin_percent)),
     maxTurnRial: Math.max(0, numberValue(row.max_turn_rial)),
-    mcpEnabled: false,
-    mcpServers: [],
   };
 }
 
 /** The gateway settings, or a switched-off default when the row has never been written. */
 export async function getAiGatewayConfig(): Promise<AiGatewayConfig> {
   const { rows } = await query<GatewayRow>(
-    `SELECT enabled, base_url, master_key, chat_model, embedding_model,
-            fallback_models, virtual_keys_enabled,
-            allow_business_models, published_models,
+    `SELECT enabled, base_url, master_key, master_key_ciphertext, chat_model, embedding_model,
+            virtual_keys_enabled,
             usd_rial_rate, gateway_costing_enabled,
             input_cost_rial_per_million, output_cost_rial_per_million,
-            revenue_margin_percent, max_turn_rial,
-            mcp_enabled, mcp_servers
+            revenue_margin_percent, max_turn_rial
        FROM platform_ai_gateway
       WHERE id = true`,
   );
@@ -164,10 +193,7 @@ export function mergeGatewayConfig(draft: AiGatewayInput, current: AiGatewayConf
     masterKey: draft.masterKey?.trim() || current.masterKey,
     chatModel: draft.chatModel ?? current.chatModel,
     embeddingModel: draft.embeddingModel ?? current.embeddingModel,
-    fallbackModels: [],
     virtualKeysEnabled: draft.virtualKeysEnabled ?? current.virtualKeysEnabled,
-    allowBusinessModels: false,
-    publishedModels: [],
     // Billing-owned settings are preserved here for runtime compatibility but
     // are no longer accepted from `/platform/ai` patches.
     usdRialRate: current.usdRialRate,
@@ -176,8 +202,6 @@ export function mergeGatewayConfig(draft: AiGatewayInput, current: AiGatewayConf
     outputCostRialPerMillion: current.outputCostRialPerMillion,
     revenueMarginPercent: current.revenueMarginPercent,
     maxTurnRial: current.maxTurnRial,
-    mcpEnabled: false,
-    mcpServers: [],
   };
 }
 
@@ -191,55 +215,49 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
   // enabled configuration that runtime would immediately reject.
   const errors = validateGatewayInput(mergeGatewayConfig(input, current));
   if (errors.length > 0) throw new Error(errors[0]);
-  const masterKey = input.masterKey?.trim() || current.masterKey || null;
+  // An empty submission means "unchanged" (the console always renders the
+  // master key masked); a new value is encrypted before it ever reaches a
+  // parameter binding. The legacy plaintext column is written NULL from here
+  // on — see migration 0183's header for the read-fallback/backfill story.
+  const masterKey = input.masterKey?.trim() || current.masterKey || "";
+  const masterKeyCiphertext = encryptForStorage(masterKey);
   await query(
     `INSERT INTO platform_ai_gateway
-       (id, enabled, base_url, master_key, chat_model, embedding_model,
-        fallback_models, virtual_keys_enabled,
-        allow_business_models, published_models,
+       (id, enabled, base_url, master_key, master_key_ciphertext, chat_model, embedding_model,
+        virtual_keys_enabled,
         usd_rial_rate, gateway_costing_enabled, input_cost_rial_per_million, output_cost_rial_per_million,
-        revenue_margin_percent, max_turn_rial,
-        mcp_enabled, mcp_servers, updated_at)
+        revenue_margin_percent, max_turn_rial, updated_at)
      VALUES
-       (true, $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb,
-        $10, $11, $12, $13, $14, $15, $16, $17::jsonb, now())
+       (true, $1, $2, NULL, $3, $4, $5, $6,
+        $7, $8, $9, $10, $11, $12, now())
      ON CONFLICT (id)
      DO UPDATE SET enabled = EXCLUDED.enabled,
                    base_url = EXCLUDED.base_url,
-                   master_key = EXCLUDED.master_key,
+                   master_key = NULL,
+                   master_key_ciphertext = EXCLUDED.master_key_ciphertext,
                    chat_model = EXCLUDED.chat_model,
                    embedding_model = EXCLUDED.embedding_model,
-                   fallback_models = EXCLUDED.fallback_models,
                    virtual_keys_enabled = EXCLUDED.virtual_keys_enabled,
-                   allow_business_models = EXCLUDED.allow_business_models,
-                   published_models = EXCLUDED.published_models,
                    usd_rial_rate = EXCLUDED.usd_rial_rate,
                    gateway_costing_enabled = EXCLUDED.gateway_costing_enabled,
                    input_cost_rial_per_million = EXCLUDED.input_cost_rial_per_million,
                    output_cost_rial_per_million = EXCLUDED.output_cost_rial_per_million,
                    revenue_margin_percent = EXCLUDED.revenue_margin_percent,
                    max_turn_rial = EXCLUDED.max_turn_rial,
-                   mcp_enabled = EXCLUDED.mcp_enabled,
-                   mcp_servers = EXCLUDED.mcp_servers,
                    updated_at = now()`,
     [
       input.enabled ?? current.enabled,
       (input.baseUrl ?? current.baseUrl).trim(),
-      masterKey,
+      masterKeyCiphertext,
       (input.chatModel ?? current.chatModel).trim(),
       (input.embeddingModel ?? current.embeddingModel).trim(),
-      JSON.stringify([]),
       input.virtualKeysEnabled ?? current.virtualKeysEnabled,
-      false,
-      JSON.stringify([]),
       current.usdRialRate,
       current.gatewayCostingEnabled,
       current.inputCostRialPerMillion,
       current.outputCostRialPerMillion,
       current.revenueMarginPercent,
       Math.round(current.maxTurnRial),
-      false,
-      JSON.stringify([]),
     ],
   );
   return getAiGatewayConfig();
@@ -330,21 +348,24 @@ type BusinessGatewayRow = {
   business_id: string;
   location_id: string | null;
   virtual_key: string | null;
+  virtual_key_ciphertext: string | null;
   key_alias: string | null;
-  model_override: string | null;
   spend_usd: string | null;
   synced_at: string | null;
   sync_error: string | null;
 };
 
+const BUSINESS_GATEWAY_COLUMNS =
+  "id, business_id, location_id, virtual_key, virtual_key_ciphertext, key_alias, spend_usd, synced_at, sync_error";
+
 function rowToBusinessGateway(row: BusinessGatewayRow): BusinessGateway {
+  const virtualKey = decryptFromStorage(row.virtual_key_ciphertext, row.virtual_key);
   return {
     id: row.id,
     businessId: row.business_id,
     locationId: row.location_id ?? null,
-    virtualKey: row.virtual_key ?? null,
+    virtualKey: virtualKey || null,
     keyAlias: row.key_alias ?? null,
-    modelOverride: row.model_override ?? null,
     spendUsd: numberValue(row.spend_usd),
     syncedAt: row.synced_at,
     syncError: row.sync_error ?? null,
@@ -362,8 +383,7 @@ export async function getBusinessGateway(
 ): Promise<BusinessGateway | null> {
   const loc = locationId?.trim() || null;
   const { rows } = await query<BusinessGatewayRow>(
-    `SELECT id, business_id, location_id, virtual_key, key_alias, model_override,
-            spend_usd, synced_at, sync_error
+    `SELECT ${BUSINESS_GATEWAY_COLUMNS}
        FROM ai_business_gateway
       WHERE business_id = $1
         AND (
@@ -387,8 +407,7 @@ export async function getBranchGateway(
 /** List all branch gateways for a business. */
 export async function listBranchGateways(businessId: string): Promise<BusinessGateway[]> {
   const { rows } = await query<BusinessGatewayRow>(
-    `SELECT id, business_id, location_id, virtual_key, key_alias, model_override,
-            spend_usd, synced_at, sync_error
+    `SELECT ${BUSINESS_GATEWAY_COLUMNS}
        FROM ai_business_gateway
       WHERE business_id = $1
         AND location_id IS NOT NULL`,
@@ -403,9 +422,7 @@ export async function listBusinessGateways(
   locationId?: string | null,
 ): Promise<BusinessGateway[]> {
   return withoutTenantScope("platform", async () => {
-    let sql = `SELECT id, business_id, location_id, virtual_key, key_alias, model_override,
-                      spend_usd, synced_at, sync_error
-                 FROM ai_business_gateway`;
+    let sql = `SELECT ${BUSINESS_GATEWAY_COLUMNS} FROM ai_business_gateway`;
     const params: unknown[] = [];
     const conditions: string[] = [];
 
@@ -434,28 +451,21 @@ export async function listBusinessGateways(
 }
 
 /**
- * Legacy-safe upsert for a business or branch key row. Model override input is
- * ignored: LiteLLM owns tenant/model access policy.
+ * Ensure an identity-only row exists for a business or branch, without
+ * minting a virtual key. Used by callers that need a tracked row to attach
+ * a key to later; model/budget/rate-limit policy is never part of this row —
+ * LiteLLM owns model access policy entirely.
  */
 export async function saveBusinessGateway(
   businessId: string,
-  input: BusinessGatewayInput,
-  gateway: AiGatewayConfig,
   locationId?: string | null,
 ): Promise<BusinessGateway> {
   const loc = locationId?.trim() || null;
-  validateBusinessGatewayInput(input, {
-    allowBusinessModels: gateway.allowBusinessModels,
-    allowedModels: gateway.publishedModels,
-  });
-
   await query(
-    `INSERT INTO ai_business_gateway
-       (business_id, location_id, model_override, updated_at)
-     VALUES ($1, $2, NULL, now())
+    `INSERT INTO ai_business_gateway (business_id, location_id, updated_at)
+     VALUES ($1, $2, now())
      ON CONFLICT (business_id, location_id)
-     DO UPDATE SET model_override = NULL,
-                   updated_at = now()`,
+     DO UPDATE SET updated_at = now()`,
     [businessId, loc],
   );
   return (await getBusinessGateway(businessId, loc)) ?? emptyBusinessGateway(businessId, loc);
@@ -470,13 +480,15 @@ async function storeVirtualKey(input: {
   syncError?: string | null;
 }): Promise<BusinessGateway> {
   const loc = input.locationId?.trim() || null;
+  const virtualKeyCiphertext = encryptForStorage(input.virtualKey);
   return withoutTenantScope("platform", async () => {
     await query(
       `INSERT INTO ai_business_gateway
-         (business_id, location_id, virtual_key, key_alias, synced_at, sync_error, updated_at)
-       VALUES ($1, $2, $3, $4, CASE WHEN $5::text IS NULL THEN now() ELSE NULL END, $5, now())
+         (business_id, location_id, virtual_key, virtual_key_ciphertext, key_alias, synced_at, sync_error, updated_at)
+       VALUES ($1, $2, NULL, $3, $4, CASE WHEN $5::text IS NULL THEN now() ELSE NULL END, $5, now())
        ON CONFLICT (business_id, location_id)
-       DO UPDATE SET virtual_key = EXCLUDED.virtual_key,
+       DO UPDATE SET virtual_key = NULL,
+                     virtual_key_ciphertext = EXCLUDED.virtual_key_ciphertext,
                      key_alias = EXCLUDED.key_alias,
                      synced_at = CASE WHEN $5::text IS NULL THEN now() ELSE ai_business_gateway.synced_at END,
                      sync_error = EXCLUDED.sync_error,
@@ -484,13 +496,85 @@ async function storeVirtualKey(input: {
       [
         input.businessId,
         loc,
-        input.virtualKey,
+        virtualKeyCiphertext,
         input.keyAlias,
         input.syncError ?? null,
       ],
     );
     return (await getBusinessGateway(input.businessId, loc)) ?? emptyBusinessGateway(input.businessId, loc);
   });
+}
+
+/**
+ * Leave a visible, retryable "this business/branch currently has no valid
+ * virtual key" row — used when a revoke succeeds but the replacement
+ * provisioning that rotation attempted afterwards fails. Never silently
+ * drops the row (which would read as "never configured" rather than "needs
+ * attention") and never re-uses a key that is already confirmed revoked.
+ */
+async function recordNoValidKey(input: {
+  businessId: string;
+  locationId?: string | null;
+  keyAlias: string | null;
+  syncError: string;
+}): Promise<BusinessGateway> {
+  const loc = input.locationId?.trim() || null;
+  return withoutTenantScope("platform", async () => {
+    await query(
+      `INSERT INTO ai_business_gateway
+         (business_id, location_id, virtual_key, virtual_key_ciphertext, key_alias, synced_at, sync_error, updated_at)
+       VALUES ($1, $2, NULL, NULL, $3, NULL, $4, now())
+       ON CONFLICT (business_id, location_id)
+       DO UPDATE SET virtual_key = NULL,
+                     virtual_key_ciphertext = NULL,
+                     key_alias = COALESCE(EXCLUDED.key_alias, ai_business_gateway.key_alias),
+                     synced_at = NULL,
+                     sync_error = EXCLUDED.sync_error,
+                     updated_at = now()`,
+      [input.businessId, loc, input.keyAlias, input.syncError],
+    );
+    return (await getBusinessGateway(input.businessId, loc)) ?? emptyBusinessGateway(input.businessId, loc);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Business ↔ branch integrity (issue #748, P0-3)
+//
+// The admin API accepts both `businessId` and `locationId` from the console.
+// Every branch-level lifecycle action must refuse a location that does not
+// actually belong to the given business — a forged or stale pair must never
+// reach a provision/verify/rotate/revoke call.
+// ---------------------------------------------------------------------------
+
+export class BusinessLocationMismatchError extends Error {
+  constructor() {
+    super("ai_gateway_location_business_mismatch");
+    this.name = "BusinessLocationMismatchError";
+  }
+}
+
+/** True when `locationId` is null (business-level scope) or genuinely belongs to `businessId`. */
+export async function locationBelongsToBusiness(
+  businessId: string,
+  locationId: string | null,
+): Promise<boolean> {
+  if (!locationId) return true;
+  return withoutTenantScope("platform", async () => {
+    const { rows } = await query<{ ok: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM locations WHERE id = $1 AND business_id = $2
+       ) AS ok`,
+      [locationId, businessId],
+    );
+    return rows[0]?.ok ?? false;
+  });
+}
+
+/** Defense in depth: every branch-level lifecycle function calls this before touching a row. */
+async function assertLocationBelongsToBusiness(businessId: string, locationId: string | null): Promise<void> {
+  if (!(await locationBelongsToBusiness(businessId, locationId))) {
+    throw new BusinessLocationMismatchError();
+  }
 }
 
 /** Forget the virtual key and the row that held it. Platform scope. */
@@ -815,6 +899,7 @@ export async function provisionVirtualKey(
   input: VirtualKeyInput,
 ): Promise<BusinessGateway> {
   const loc = input.locationId?.trim() || null;
+  await assertLocationBelongsToBusiness(input.businessId, loc);
   const alias = virtualKeyAlias(input.businessId, loc);
   const existing = await getBusinessGatewayOrEmpty(input.businessId, loc);
 
@@ -958,30 +1043,131 @@ export async function ensureTenantVirtualKey(
   }
 }
 
-/** Revoke a business or branch's virtual key at the gateway and drop the row. */
+/**
+ * Whether LiteLLM's own `/key/delete` response means "this key is gone",
+ * either because it just deleted it or because it was already gone. A local
+ * key record must never be removed on anything less certain than this.
+ */
+function keyConfirmedAbsent(status: number, body: unknown): boolean {
+  // A clean 404 is unambiguous. Some proxy versions instead answer 200/400
+  // with a body naming zero deleted keys — that also means "there was
+  // nothing there to delete", i.e. the key is already gone.
+  if (status === 404) return true;
+  const row = body as { deleted_keys?: unknown } | null;
+  if (row && typeof row === "object" && Array.isArray(row.deleted_keys)) {
+    return row.deleted_keys.length === 0;
+  }
+  return false;
+}
+
+export interface RevokeKeyResult {
+  ok: boolean;
+  /** True when nothing needed to be revoked, or LiteLLM confirmed the key no longer exists. */
+  alreadyGone: boolean;
+  code?: string;
+  detail?: string | null;
+}
+
+/**
+ * Revoke a business or branch's virtual key.
+ *
+ * The local `ai_business_gateway` row is the platform's only memory of which
+ * credential is live; it must never be cleared on anything weaker than LiteLLM
+ * *confirming* the key is gone. `gatewayRequest()` turns network failures and
+ * HTTP errors into a response object rather than throwing (by design — a
+ * gateway outage must never become an assistant-facing exception), which is
+ * exactly why this function, and not the caller, has to inspect the status
+ * before touching the row: every non-2xx/non-404 outcome — unreachable,
+ * 401/403, 5xx, or a malformed body — preserves the row and reports failure.
+ */
 export async function revokeVirtualKey(
   config: AiGatewayConfig,
   businessId: string,
   locationId?: string | null,
-): Promise<void> {
+): Promise<RevokeKeyResult> {
   const loc = locationId?.trim() || null;
+  await assertLocationBelongsToBusiness(businessId, loc);
   const existing = await getBusinessGatewayOrEmpty(businessId, loc);
-  if (existing?.virtualKey) {
-    await gatewayRequest(config, keyDeleteUrl(config.baseUrl), {
-      method: "POST",
-      body: { keys: [existing.virtualKey] },
-    });
+
+  if (!existing?.virtualKey) {
+    // Nothing live to revoke at the gateway; any local row is at most a
+    // stale sync_error placeholder and is safe to clear.
+    await clearVirtualKey(businessId, loc);
+    return { ok: true, alreadyGone: true };
   }
-  await clearVirtualKey(businessId, loc);
+
+  const res = await gatewayRequest(config, keyDeleteUrl(config.baseUrl), {
+    method: "POST",
+    body: { keys: [existing.virtualKey] },
+  });
+
+  if (ok(res.status) || keyConfirmedAbsent(res.status, res.body)) {
+    await clearVirtualKey(businessId, loc);
+    return { ok: true, alreadyGone: !ok(res.status) };
+  }
+
+  // Failure — never delete the local row. Record an actionable sync_error so
+  // the console shows the credential still exists and needs a retry.
+  const error = asError(res.status, res.body);
+  await storeVirtualKey({
+    businessId,
+    locationId: loc,
+    virtualKey: existing.virtualKey,
+    keyAlias: existing.keyAlias ?? virtualKeyAlias(businessId, loc),
+    syncError: joinGatewayDetail("ابطال کلید مجازی در LiteLLM ناموفق بود؛ کلید محلی حفظ شد.", joinGatewayDetail(error.message, error.detail)),
+  });
+  return { ok: false, alreadyGone: false, code: error.code, detail: error.detail };
 }
 
+/**
+ * Rotate a business or branch's virtual key.
+ *
+ * Transactional at the lifecycle level: the old key is revoked and its
+ * removal CONFIRMED before a replacement is ever requested. If revoke fails,
+ * rotation stops immediately — the old key, and the local row that names it,
+ * are both left exactly as they were, so nothing is orphaned and nothing
+ * about the tenant's credential state is lost. If the replacement fails
+ * *after* a confirmed revoke, the tenant genuinely has no valid key any more;
+ * that state is recorded visibly (not silently dropped) and is retryable —
+ * the next call sees no virtual key and provisions a fresh one.
+ */
 export async function rotateVirtualKey(
   config: AiGatewayConfig,
   businessId: string,
   locationId?: string | null,
 ): Promise<BusinessGateway> {
-  await revokeVirtualKey(config, businessId, locationId);
-  return provisionVirtualKey(config, { businessId, locationId: locationId ?? null });
+  const loc = locationId?.trim() || null;
+  await assertLocationBelongsToBusiness(businessId, loc);
+  const existing = await getBusinessGatewayOrEmpty(businessId, loc);
+
+  if (!existing?.virtualKey) {
+    // No live key to protect — rotation degrades to plain provisioning.
+    return provisionVirtualKey(config, { businessId, locationId: loc });
+  }
+
+  const revoked = await revokeVirtualKey(config, businessId, loc);
+  if (!revoked.ok) {
+    // The old key is still live and its row is untouched (revokeVirtualKey's
+    // own guarantee). Refuse to mint a second, parallel credential.
+    throw new GatewayProvisioningError(revoked.code ?? "ai_gateway_revoke_failed", revoked.detail ?? null);
+  }
+
+  try {
+    return await provisionVirtualKey(config, { businessId, locationId: loc });
+  } catch (err) {
+    const code = err instanceof GatewayProvisioningError ? err.code : "ai_gateway_provision_failed";
+    const detail = err instanceof GatewayProvisioningError ? err.detail : err instanceof Error ? err.message : null;
+    await recordNoValidKey({
+      businessId,
+      locationId: loc,
+      keyAlias: existing.keyAlias ?? virtualKeyAlias(businessId, loc),
+      syncError: joinGatewayDetail(
+        "کلید قبلی ابطال شد اما صدور کلید جایگزین ناموفق بود؛ این کسب‌وکار/شعبه اکنون بدون کلید معتبر است.",
+        joinGatewayDetail(code, detail),
+      ),
+    });
+    throw err;
+  }
 }
 
 export async function verifyVirtualKey(
@@ -991,6 +1177,7 @@ export async function verifyVirtualKey(
   platformModel?: string,
 ): Promise<{ gateway: BusinessGateway | null; probe: GatewayProbe }> {
   const loc = locationId?.trim() || null;
+  await assertLocationBelongsToBusiness(businessId, loc);
   const existing = await getBusinessGatewayOrEmpty(businessId, loc);
   const model = resolveChatModel({
     platformModel: platformModel || config.chatModel || "",
@@ -1060,6 +1247,7 @@ export async function refreshKeySpend(
   locationId?: string | null,
 ): Promise<BusinessGateway | null> {
   const loc = locationId?.trim() || null;
+  await assertLocationBelongsToBusiness(businessId, loc);
   const existing = await getBusinessGatewayOrEmpty(businessId, loc);
   if (!existing?.virtualKey) return existing ?? null;
   const res = await gatewayRequest(config, keyInfoUrl(config.baseUrl, existing.virtualKey), { method: "GET" });

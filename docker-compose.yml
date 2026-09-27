@@ -25,8 +25,9 @@ services:
   #
   #   docker compose --profile ai up -d litellm
   #
-  # Then select provider "litellm" in /platform/ai and finish the setup in
-  # /platform/ai/gateway. Bound to the compose network only — never published
+  # Then finish the technical setup (base URL, master key, model aliases,
+  # virtual-key provisioning) on the /platform/ai console. Bound to the
+  # compose network only — never published
   # to the host — because this service holds every upstream vendor key and its
   # management API can mint keys and read spend.
   litellm:
