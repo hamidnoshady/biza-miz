@@ -16,6 +16,7 @@ import { getAppUpdateStatus } from "@/lib/app-update";
 import { deploymentRole, platformBaseUrl } from "@/lib/deployment-role";
 import { getPairedSite } from "@/lib/server-sync";
 import { publicSyncEventRegistry } from "@/lib/sync-event-registry";
+import { REPLICATION_DOMAIN_CONTRACT } from "@/lib/data-ownership";
 
 /**
  * Owner-only: configure the bidirectional server-to-server sync target
@@ -74,6 +75,16 @@ export const GET = withTenantScope(async () => {
     syncState,
     domainDiagnostics,
     eventRegistry: publicSyncEventRegistry(),
+    replicationContract: {
+      version: REPLICATION_DOMAIN_CONTRACT.version,
+      domains: REPLICATION_DOMAIN_CONTRACT.domains.map((domain) => ({
+        domain: domain.domain,
+        authority: domain.authority,
+        direction: domain.direction,
+        continuousSync: domain.continuousSync,
+        eventCount: domain.events.length,
+      })),
+    },
     appUpdateStatus,
   });
 });

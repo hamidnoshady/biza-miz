@@ -30,7 +30,7 @@ import {
   encryptSecret,
   resolveEncryptionKey,
 } from "./integrations/secrets";
-import { SYNC_EVENT_REGISTRY } from "./sync-event-registry";
+import { REPLICATION_DOMAIN_CONTRACT } from "./data-ownership";
 
 export interface PairingCodeSummary {
   id: string;
@@ -987,11 +987,19 @@ const PAIRING_DATA_CLASSIFICATION = {
     "named payment methods",
     "site-device identity and one-time sync credential",
   ],
-  // Derived from the server's authoritative replay catalogue. Updating a
-  // domain event therefore updates the pairing capability response rather than
-  // leaving an attractive but stale hand-written claim behind.
-  ongoingDomainEvents: SYNC_EVENT_REGISTRY.map(
-    (event) => `${event.type}@${event.schemaVersion}`,
+  // Derived from the machine-readable replication contract. Bootstrap-only
+  // master data is intentionally absent: pairing must not imply that later
+  // catalogue/customer/staff edits already propagate continuously.
+  ongoingDomainEvents: Array.from(
+    new Set(
+      REPLICATION_DOMAIN_CONTRACT.domains
+        .filter((domain) => domain.continuousSync === "active")
+        .flatMap((domain) =>
+          domain.events
+            .filter((event) => event.disposition === "outbox_and_inbox")
+            .map((event) => `${event.type}@${event.schemaVersion}`),
+        ),
+    ),
   ),
   siteLocalOperationalData: [
     "embedded PostgreSQL files and local backup destinations",

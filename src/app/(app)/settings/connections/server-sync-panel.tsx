@@ -92,6 +92,17 @@ interface DomainDiagnostics {
   }>;
 }
 
+interface ReplicationContractView {
+  version: number;
+  domains: Array<{
+    domain: string;
+    authority: string;
+    direction: string;
+    continuousSync: "active" | "bootstrap_only" | "not_replicated";
+    eventCount: number;
+  }>;
+}
+
 interface AppUpdateStatusView {
   checkedAt: string;
   currentVersion: string;
@@ -148,6 +159,8 @@ export function ServerSyncPanel() {
   const [syncState, setSyncState] = useState<StateView | null>(null);
   const [domainDiagnostics, setDomainDiagnostics] =
     useState<DomainDiagnostics | null>(null);
+  const [replicationContract, setReplicationContract] =
+    useState<ReplicationContractView | null>(null);
   const [appUpdateStatus, setAppUpdateStatus] =
     useState<AppUpdateStatusView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -182,6 +195,7 @@ export function ServerSyncPanel() {
       pairedSite: PairedSiteView | null;
       syncState: StateView;
       domainDiagnostics: DomainDiagnostics;
+      replicationContract: ReplicationContractView;
       appUpdateStatus: AppUpdateStatusView | null;
       error?: string;
     }>("/api/server-sync/config");
@@ -192,6 +206,7 @@ export function ServerSyncPanel() {
       setPairedSite(data.pairedSite ?? null);
       setSyncState(data.syncState);
       setDomainDiagnostics(data.domainDiagnostics ?? null);
+      setReplicationContract(data.replicationContract ?? null);
       setAppUpdateStatus(data.appUpdateStatus ?? null);
       setRemoteUrl(data.config?.remoteUrl ?? "");
       setOverriding(false);
@@ -363,6 +378,7 @@ export function ServerSyncPanel() {
           syncState={syncState}
           appUpdateStatus={appUpdateStatus}
           domainDiagnostics={domainDiagnostics}
+          replicationContract={replicationContract}
           busy={busy}
           onReconcile={reconcile}
         />
@@ -501,6 +517,7 @@ export function ServerSyncPanel() {
         syncState={syncState}
         appUpdateStatus={appUpdateStatus}
         domainDiagnostics={domainDiagnostics}
+        replicationContract={replicationContract}
         busy={busy}
         onReconcile={reconcile}
       />
@@ -517,12 +534,14 @@ function SyncStatusPanels({
   syncState,
   appUpdateStatus,
   domainDiagnostics,
+  replicationContract,
   busy,
   onReconcile,
 }: {
   syncState: StateView | null;
   appUpdateStatus: AppUpdateStatusView | null;
   domainDiagnostics: DomainDiagnostics | null;
+  replicationContract: ReplicationContractView | null;
   busy: boolean;
   onReconcile: (
     action: "retry-deferred" | "retry-dead-letter" | "discard-dead-letter",
@@ -622,6 +641,29 @@ function SyncStatusPanels({
             فقط شناسه، نوع، نسخه، کد خطا و هش محتوای رویداد نمایش داده می‌شود؛
             payload و اعتبارنامه‌ها هرگز در این صفحه برگردانده نمی‌شوند.
           </p>
+          {replicationContract ? (
+            <p className="mb-3 text-xs text-muted-foreground">
+              قرارداد تکثیر نسخهٔ{" "}
+              {toPersianDigits(String(replicationContract.version))}:{" "}
+              {toPersianDigits(
+                String(
+                  replicationContract.domains.filter(
+                    (domain) => domain.continuousSync === "active",
+                  ).length,
+                ),
+              )}{" "}
+              دامنه با همگام‌سازی پیوسته و{" "}
+              {toPersianDigits(
+                String(
+                  replicationContract.domains.filter(
+                    (domain) => domain.continuousSync === "bootstrap_only",
+                  ).length,
+                ),
+              )}{" "}
+              دامنه فقط با راه‌اندازی اولیه. جزئیات مالکیت، حذف و تلاش مجدد در
+              مستندات قرارداد ثبت شده است.
+            </p>
+          ) : null}
           <div className="grid gap-x-8 sm:grid-cols-2">
             <div>
               <StatusRow
