@@ -20,6 +20,7 @@
     "test:design": "vitest run src/app/dashboard/design-lint.test.ts src/app/design-lint.test.ts src/app/dashboard/primitive-lint.test.ts src/app/loading-coverage.test.ts src/app/reference-screenshots.test.ts",
     "test:visual": "node scripts/visual-regression.mjs",
     "test:visual:update": "node scripts/visual-regression.mjs --update",
+    "test:e2e:media": "node scripts/e2e-media.mjs",
     "db:dev": "node scripts/dev-postgres.mjs",
     "db:dev:start": "node scripts/dev-postgres.mjs --detach",
     "db:dev:stop": "node scripts/dev-postgres.mjs --stop",
