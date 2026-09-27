@@ -40,13 +40,11 @@ import {
   parseKeySpend,
   resolveChatModel,
   toPublicGatewayConfig,
-  validateBusinessGatewayInput,
   validateGatewayInput,
   virtualKeyAlias,
   type AiGatewayConfig,
   type AiGatewayInput,
   type BusinessGateway,
-  type BusinessGatewayInput,
   type GatewayProbe,
   type PublicAiGatewayConfig,
   type PublicBusinessGateway,
@@ -128,18 +126,13 @@ type GatewayRow = {
   master_key_ciphertext: string | null;
   chat_model: string;
   embedding_model: string;
-  fallback_models: unknown;
   virtual_keys_enabled: boolean;
-  allow_business_models: boolean;
-  published_models: unknown;
   usd_rial_rate: string | null;
   gateway_costing_enabled: boolean;
   input_cost_rial_per_million: string | number;
   output_cost_rial_per_million: string | number;
   revenue_margin_percent: string | number | null;
   max_turn_rial: string | number | null;
-  mcp_enabled: boolean;
-  mcp_servers: unknown;
 };
 
 function rowToGateway(row: GatewayRow): AiGatewayConfig {
@@ -150,19 +143,13 @@ function rowToGateway(row: GatewayRow): AiGatewayConfig {
     masterKey: decryptFromStorage(row.master_key_ciphertext, row.master_key),
     chatModel: row.chat_model ?? "",
     embeddingModel: row.embedding_model ?? "",
-    // Retired local mirrors: route/fallback/MCP/model access policy belongs to LiteLLM.
-    fallbackModels: [],
     virtualKeysEnabled: row.virtual_keys_enabled,
-    allowBusinessModels: false,
-    publishedModels: [],
     usdRialRate: optionalNumber(row.usd_rial_rate),
     gatewayCostingEnabled: row.gateway_costing_enabled,
     inputCostRialPerMillion: numberValue(row.input_cost_rial_per_million),
     outputCostRialPerMillion: numberValue(row.output_cost_rial_per_million),
     revenueMarginPercent: Math.max(0, numberValue(row.revenue_margin_percent)),
     maxTurnRial: Math.max(0, numberValue(row.max_turn_rial)),
-    mcpEnabled: false,
-    mcpServers: [],
   };
 }
 
@@ -170,12 +157,10 @@ function rowToGateway(row: GatewayRow): AiGatewayConfig {
 export async function getAiGatewayConfig(): Promise<AiGatewayConfig> {
   const { rows } = await query<GatewayRow>(
     `SELECT enabled, base_url, master_key, master_key_ciphertext, chat_model, embedding_model,
-            fallback_models, virtual_keys_enabled,
-            allow_business_models, published_models,
+            virtual_keys_enabled,
             usd_rial_rate, gateway_costing_enabled,
             input_cost_rial_per_million, output_cost_rial_per_million,
-            revenue_margin_percent, max_turn_rial,
-            mcp_enabled, mcp_servers
+            revenue_margin_percent, max_turn_rial
        FROM platform_ai_gateway
       WHERE id = true`,
   );
@@ -208,10 +193,7 @@ export function mergeGatewayConfig(draft: AiGatewayInput, current: AiGatewayConf
     masterKey: draft.masterKey?.trim() || current.masterKey,
     chatModel: draft.chatModel ?? current.chatModel,
     embeddingModel: draft.embeddingModel ?? current.embeddingModel,
-    fallbackModels: [],
     virtualKeysEnabled: draft.virtualKeysEnabled ?? current.virtualKeysEnabled,
-    allowBusinessModels: false,
-    publishedModels: [],
     // Billing-owned settings are preserved here for runtime compatibility but
     // are no longer accepted from `/platform/ai` patches.
     usdRialRate: current.usdRialRate,
@@ -220,8 +202,6 @@ export function mergeGatewayConfig(draft: AiGatewayInput, current: AiGatewayConf
     outputCostRialPerMillion: current.outputCostRialPerMillion,
     revenueMarginPercent: current.revenueMarginPercent,
     maxTurnRial: current.maxTurnRial,
-    mcpEnabled: false,
-    mcpServers: [],
   };
 }
 
@@ -244,14 +224,12 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
   await query(
     `INSERT INTO platform_ai_gateway
        (id, enabled, base_url, master_key, master_key_ciphertext, chat_model, embedding_model,
-        fallback_models, virtual_keys_enabled,
-        allow_business_models, published_models,
+        virtual_keys_enabled,
         usd_rial_rate, gateway_costing_enabled, input_cost_rial_per_million, output_cost_rial_per_million,
-        revenue_margin_percent, max_turn_rial,
-        mcp_enabled, mcp_servers, updated_at)
+        revenue_margin_percent, max_turn_rial, updated_at)
      VALUES
-       (true, $1, $2, NULL, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb,
-        $10, $11, $12, $13, $14, $15, $16, $17::jsonb, now())
+       (true, $1, $2, NULL, $3, $4, $5, $6,
+        $7, $8, $9, $10, $11, $12, now())
      ON CONFLICT (id)
      DO UPDATE SET enabled = EXCLUDED.enabled,
                    base_url = EXCLUDED.base_url,
@@ -259,18 +237,13 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
                    master_key_ciphertext = EXCLUDED.master_key_ciphertext,
                    chat_model = EXCLUDED.chat_model,
                    embedding_model = EXCLUDED.embedding_model,
-                   fallback_models = EXCLUDED.fallback_models,
                    virtual_keys_enabled = EXCLUDED.virtual_keys_enabled,
-                   allow_business_models = EXCLUDED.allow_business_models,
-                   published_models = EXCLUDED.published_models,
                    usd_rial_rate = EXCLUDED.usd_rial_rate,
                    gateway_costing_enabled = EXCLUDED.gateway_costing_enabled,
                    input_cost_rial_per_million = EXCLUDED.input_cost_rial_per_million,
                    output_cost_rial_per_million = EXCLUDED.output_cost_rial_per_million,
                    revenue_margin_percent = EXCLUDED.revenue_margin_percent,
                    max_turn_rial = EXCLUDED.max_turn_rial,
-                   mcp_enabled = EXCLUDED.mcp_enabled,
-                   mcp_servers = EXCLUDED.mcp_servers,
                    updated_at = now()`,
     [
       input.enabled ?? current.enabled,
@@ -278,18 +251,13 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
       masterKeyCiphertext,
       (input.chatModel ?? current.chatModel).trim(),
       (input.embeddingModel ?? current.embeddingModel).trim(),
-      JSON.stringify([]),
       input.virtualKeysEnabled ?? current.virtualKeysEnabled,
-      false,
-      JSON.stringify([]),
       current.usdRialRate,
       current.gatewayCostingEnabled,
       current.inputCostRialPerMillion,
       current.outputCostRialPerMillion,
       current.revenueMarginPercent,
       Math.round(current.maxTurnRial),
-      false,
-      JSON.stringify([]),
     ],
   );
   return getAiGatewayConfig();
@@ -382,11 +350,13 @@ type BusinessGatewayRow = {
   virtual_key: string | null;
   virtual_key_ciphertext: string | null;
   key_alias: string | null;
-  model_override: string | null;
   spend_usd: string | null;
   synced_at: string | null;
   sync_error: string | null;
 };
+
+const BUSINESS_GATEWAY_COLUMNS =
+  "id, business_id, location_id, virtual_key, virtual_key_ciphertext, key_alias, spend_usd, synced_at, sync_error";
 
 function rowToBusinessGateway(row: BusinessGatewayRow): BusinessGateway {
   const virtualKey = decryptFromStorage(row.virtual_key_ciphertext, row.virtual_key);
@@ -396,7 +366,6 @@ function rowToBusinessGateway(row: BusinessGatewayRow): BusinessGateway {
     locationId: row.location_id ?? null,
     virtualKey: virtualKey || null,
     keyAlias: row.key_alias ?? null,
-    modelOverride: row.model_override ?? null,
     spendUsd: numberValue(row.spend_usd),
     syncedAt: row.synced_at,
     syncError: row.sync_error ?? null,
@@ -414,8 +383,7 @@ export async function getBusinessGateway(
 ): Promise<BusinessGateway | null> {
   const loc = locationId?.trim() || null;
   const { rows } = await query<BusinessGatewayRow>(
-    `SELECT id, business_id, location_id, virtual_key, virtual_key_ciphertext, key_alias, model_override,
-            spend_usd, synced_at, sync_error
+    `SELECT ${BUSINESS_GATEWAY_COLUMNS}
        FROM ai_business_gateway
       WHERE business_id = $1
         AND (
@@ -439,8 +407,7 @@ export async function getBranchGateway(
 /** List all branch gateways for a business. */
 export async function listBranchGateways(businessId: string): Promise<BusinessGateway[]> {
   const { rows } = await query<BusinessGatewayRow>(
-    `SELECT id, business_id, location_id, virtual_key, virtual_key_ciphertext, key_alias, model_override,
-            spend_usd, synced_at, sync_error
+    `SELECT ${BUSINESS_GATEWAY_COLUMNS}
        FROM ai_business_gateway
       WHERE business_id = $1
         AND location_id IS NOT NULL`,
@@ -455,9 +422,7 @@ export async function listBusinessGateways(
   locationId?: string | null,
 ): Promise<BusinessGateway[]> {
   return withoutTenantScope("platform", async () => {
-    let sql = `SELECT id, business_id, location_id, virtual_key, virtual_key_ciphertext, key_alias, model_override,
-                      spend_usd, synced_at, sync_error
-                 FROM ai_business_gateway`;
+    let sql = `SELECT ${BUSINESS_GATEWAY_COLUMNS} FROM ai_business_gateway`;
     const params: unknown[] = [];
     const conditions: string[] = [];
 
@@ -486,28 +451,21 @@ export async function listBusinessGateways(
 }
 
 /**
- * Legacy-safe upsert for a business or branch key row. Model override input is
- * ignored: LiteLLM owns tenant/model access policy.
+ * Ensure an identity-only row exists for a business or branch, without
+ * minting a virtual key. Used by callers that need a tracked row to attach
+ * a key to later; model/budget/rate-limit policy is never part of this row —
+ * LiteLLM owns model access policy entirely.
  */
 export async function saveBusinessGateway(
   businessId: string,
-  input: BusinessGatewayInput,
-  gateway: AiGatewayConfig,
   locationId?: string | null,
 ): Promise<BusinessGateway> {
   const loc = locationId?.trim() || null;
-  validateBusinessGatewayInput(input, {
-    allowBusinessModels: gateway.allowBusinessModels,
-    allowedModels: gateway.publishedModels,
-  });
-
   await query(
-    `INSERT INTO ai_business_gateway
-       (business_id, location_id, model_override, updated_at)
-     VALUES ($1, $2, NULL, now())
+    `INSERT INTO ai_business_gateway (business_id, location_id, updated_at)
+     VALUES ($1, $2, now())
      ON CONFLICT (business_id, location_id)
-     DO UPDATE SET model_override = NULL,
-                   updated_at = now()`,
+     DO UPDATE SET updated_at = now()`,
     [businessId, loc],
   );
   return (await getBusinessGateway(businessId, loc)) ?? emptyBusinessGateway(businessId, loc);

@@ -18,7 +18,7 @@ import {
   getAiGatewayConfig,
   getBusinessGateway,
 } from "./ai-gateway-service";
-import { buildGatewayRuntime, isGatewayActive } from "./ai-gateway";
+import { buildGatewayRuntime, isGatewayActive, type AiGatewayConfig, type BusinessGateway } from "./ai-gateway";
 import type { AiConfig } from "./ai";
 
 /**
@@ -85,11 +85,43 @@ async function decorate(
     return { ...config, enabled: false, runtimeUnavailableReason: "configuration_load_failed" };
   }
 
-  const runtime = buildGatewayRuntime({ config, gateway, business, branch, tenantScoped: Boolean(businessId) });
+  return decorateAiConfigWithState(config, gateway, business, branch, businessId);
+}
+
+/**
+ * Pure decoration: apply already-loaded gateway/business/branch state to a
+ * config, with no DB access of its own.
+ *
+ * `decorate()` above calls this immediately after loading that state itself,
+ * for the ordinary per-request resolve path. The platform console's fleet
+ * readiness (`/platform/ai` GET, issue #748 P1-5/P1-6) loads the gateway
+ * singleton and every business/branch row ONCE up front and calls this
+ * directly per business/branch instead, to avoid an N+1 query pattern.
+ *
+ * `isGatewayActive`'s early exit is intentionally skipped here (the caller is
+ * expected to have already handled "gateway inactive" once for the whole
+ * fleet) — `buildGatewayRuntime` returns `undefined` for an inactive gateway
+ * regardless, so passing one through is still safe, just less specific about
+ * *why* it's not ready than `decorate()`'s own explicit check.
+ */
+export function decorateAiConfigWithState(
+  config: PlatformAiConfig,
+  gateway: AiGatewayConfig | null | undefined,
+  business: BusinessGateway | null,
+  branch: BusinessGateway | null,
+  businessId: string | null,
+): PlatformAiConfig {
+  const normalizedGateway = gateway ?? null;
+  if (!config.enabled) return { ...config, runtimeUnavailableReason: config.runtimeUnavailableReason ?? "platform_disabled" };
+  if (!isGatewayActive(normalizedGateway)) {
+    return { ...config, enabled: false, runtimeUnavailableReason: normalizedGateway?.enabled ? "missing_base_url" : "gateway_disabled" };
+  }
+
+  const runtime = buildGatewayRuntime({ config, gateway: normalizedGateway, business, branch, tenantScoped: Boolean(businessId) });
   if (!runtime) return config;
 
   const { model, embeddingModel, body, authKey } = runtime;
-  const tenantVirtualKeyRequired = Boolean(businessId && gateway.virtualKeysEnabled);
+  const tenantVirtualKeyRequired = Boolean(businessId && gateway?.virtualKeysEnabled);
   const tenantVirtualKeyResolved = Boolean(runtime.virtualKeyResolved);
   const decorated: AiConfig & Pick<PlatformAiConfig, "tenantVirtualKeyRequired" | "tenantVirtualKeyResolved" | "runtimeUnavailableReason"> = {
     ...config,

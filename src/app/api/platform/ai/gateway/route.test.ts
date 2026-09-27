@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { GET, PUT, POST } from "./route";
 import { requirePlatformCapability } from "@/lib/platform-auth";
-import { locationBelongsToBusiness, revokeVirtualKey } from "@/lib/ai-gateway-service";
+import { locationBelongsToBusiness, listBusinessGateways, revokeVirtualKey } from "@/lib/ai-gateway-service";
+import { query } from "@/lib/db";
 
 vi.mock("@/lib/platform-auth", () => ({
   requirePlatformCapability: vi.fn(async (cap: string) => {
@@ -37,17 +38,24 @@ vi.mock("@/lib/ai-config", () => ({
   })),
 }));
 
-vi.mock("@/lib/ai-runtime", () => ({
-  resolveAiConfigFor: vi.fn(async () => ({
-    enabled: true,
-    provider: "litellm",
-    model: "pos-chat",
-    baseUrl: "http://litellm:4000/v1",
-    apiKey: "sk-tenant",
-    maxOutputTokens: 1000,
-    temperature: 0.3,
-  })),
-}));
+vi.mock("@/lib/ai-runtime", async () => {
+  // `decorateAiConfigWithState` is a pure function of already-loaded state —
+  // the route calls it directly now (issue #748 P1-6), so it stays real here
+  // rather than mocked; only the legacy per-request resolver is a stub.
+  const actual = await vi.importActual<typeof import("@/lib/ai-runtime")>("@/lib/ai-runtime");
+  return {
+    ...actual,
+    resolveAiConfigFor: vi.fn(async () => ({
+      enabled: true,
+      provider: "litellm",
+      model: "pos-chat",
+      baseUrl: "http://litellm:4000/v1",
+      apiKey: "sk-tenant",
+      maxOutputTokens: 1000,
+      temperature: 0.3,
+    })),
+  };
+});
 
 vi.mock("@/lib/ai-gateway-service", () => ({
   getAiGatewayConfig: vi.fn(async () => ({
@@ -57,8 +65,6 @@ vi.mock("@/lib/ai-gateway-service", () => ({
     chatModel: "pos-chat",
     embeddingModel: "pos-embed",
     virtualKeysEnabled: true,
-    allowBusinessModels: true,
-    publishedModels: ["pos-chat", "pos-fast"],
   })),
   listBusinessGateways: vi.fn(async () => [
     {
@@ -67,7 +73,6 @@ vi.mock("@/lib/ai-gateway-service", () => ({
       locationId: null,
       virtualKey: "sk-v1",
       keyAlias: "pos-biz1",
-      modelOverride: null,
       spendUsd: 0,
       syncedAt: "2026-09-22T00:00:00Z",
       syncError: null,
@@ -81,8 +86,6 @@ vi.mock("@/lib/ai-gateway-service", () => ({
     chatModel: input.chatModel ?? "pos-chat",
     embeddingModel: input.embeddingModel ?? "pos-embed",
     virtualKeysEnabled: Boolean(input.virtualKeysEnabled),
-    allowBusinessModels: Boolean(input.allowBusinessModels),
-    publishedModels: input.publishedModels ?? [],
   })),
   saveBusinessGateway: vi.fn(async (businessId, input) => ({
     id: "g-1",
@@ -90,7 +93,6 @@ vi.mock("@/lib/ai-gateway-service", () => ({
     locationId: null,
     virtualKey: null,
     keyAlias: null,
-    modelOverride: input.modelOverride ?? null,
     spendUsd: 0,
     syncedAt: null,
     syncError: null,
@@ -101,7 +103,6 @@ vi.mock("@/lib/ai-gateway-service", () => ({
     locationId: null,
     virtualKey: "sk-new-key",
     keyAlias: `pos-${input.businessId}`,
-    modelOverride: null,
     spendUsd: 0,
     syncedAt: "2026-09-22T00:00:00Z",
     syncError: null,
@@ -119,7 +120,6 @@ vi.mock("@/lib/ai-gateway-service", () => ({
     locationId: null,
     virtualKey: "sk-v1",
     keyAlias: "pos-biz1",
-    modelOverride: null,
     spendUsd: 0.05,
     syncedAt: "2026-09-22T00:00:00Z",
     syncError: null,
@@ -144,14 +144,12 @@ vi.mock("@/lib/ai-gateway-service", () => ({
     chatModel: gw.chatModel,
     embeddingModel: gw.embeddingModel,
     virtualKeysEnabled: gw.virtualKeysEnabled,
-    allowBusinessModels: gw.allowBusinessModels,
-    publishedModels: gw.publishedModels,
     hasMasterKey: Boolean(gw.masterKey),
   })),
   toPublicBusinessGateway: vi.fn((row, _gw, model) => ({
     ...row,
     hasVirtualKey: Boolean(row.virtualKey),
-    effectiveModel: row.modelOverride || model,
+    effectiveModel: model,
   })),
   GatewayProvisioningError: class extends Error {
     code: string;
@@ -315,5 +313,136 @@ describe("POST /api/platform/ai/gateway", () => {
     expect(res.status).toBe(400);
     const json = await res.json();
     expect(json.error).toBe("ai_gateway_location_business_mismatch");
+  });
+});
+
+describe("GET /api/platform/ai/gateway — fleet pagination, search and status filter (issue #748 P1-6)", () => {
+  const businesses = [
+    { id: "biz-1", name: "کافه الفبا", ai_entitled: true },
+    { id: "biz-2", name: "کافه بتا", ai_entitled: false },
+    { id: "biz-3", name: "رستوران گاما", ai_entitled: true },
+  ];
+  const locations = [{ id: "loc-1", business_id: "biz-1", name: "شعبه مرکزی" }];
+
+  function mockFleetQueries() {
+    vi.mocked(query)
+      .mockResolvedValueOnce({ rows: locations } as never)
+      .mockResolvedValueOnce({ rows: businesses } as never);
+  }
+
+  it("paginates the fleet instead of returning every business at once", async () => {
+    mockFleetQueries();
+    vi.mocked(listBusinessGateways).mockResolvedValueOnce([
+      { id: "g-1", businessId: "biz-1", locationId: null, virtualKey: "sk-v1", keyAlias: "pos-biz1", spendUsd: 0, syncedAt: "2026-09-22T00:00:00Z", syncError: null },
+    ]);
+    const req = new NextRequest("http://localhost:3000/api/platform/ai/gateway?pageSize=1&page=2");
+    const res = await GET(req);
+    const json = await res.json();
+    expect(json.pagination).toEqual({ page: 2, pageSize: 1, total: 3, totalPages: 3 });
+    expect(json.businesses).toHaveLength(1);
+    expect(json.businesses[0].businessId).toBe("biz-2");
+  });
+
+  it("filters the fleet by a business-name search term", async () => {
+    mockFleetQueries();
+    vi.mocked(listBusinessGateways).mockResolvedValueOnce([]);
+    const req = new NextRequest(`http://localhost:3000/api/platform/ai/gateway?search=${encodeURIComponent("گاما")}`);
+    const res = await GET(req);
+    const json = await res.json();
+    expect(json.pagination.total).toBe(1);
+    expect(json.businesses).toEqual([{ businessId: "biz-3", businessName: "رستوران گاما", aiEntitled: true }]);
+  });
+
+  it("filters the fleet by entitlement status", async () => {
+    mockFleetQueries();
+    vi.mocked(listBusinessGateways).mockResolvedValueOnce([]);
+    const req = new NextRequest("http://localhost:3000/api/platform/ai/gateway?status=entitlement_disabled");
+    const res = await GET(req);
+    const json = await res.json();
+    expect(json.tenantReadiness).toHaveLength(1);
+    expect(json.tenantReadiness[0]).toMatchObject({ businessId: "biz-2", status: "entitlement_disabled", entitled: false });
+  });
+
+  it("flags a business/branch key sync error over any other status", async () => {
+    mockFleetQueries();
+    vi.mocked(listBusinessGateways).mockResolvedValueOnce([
+      { id: "g-1", businessId: "biz-1", locationId: null, virtualKey: "sk-v1", keyAlias: "pos-biz1", spendUsd: 0, syncedAt: null, syncError: "ai_gateway_unreachable" },
+    ]);
+    const req = new NextRequest("http://localhost:3000/api/platform/ai/gateway?status=key_sync_error");
+    const res = await GET(req);
+    const json = await res.json();
+    expect(json.tenantReadiness.map((t: { businessId: string }) => t.businessId)).toEqual(["biz-1"]);
+    expect(json.tenantReadiness[0].status).toBe("key_sync_error");
+  });
+
+  it("keeps the selected business visible even when it falls outside the current page or filter", async () => {
+    mockFleetQueries();
+    vi.mocked(listBusinessGateways).mockResolvedValueOnce([]);
+    const req = new NextRequest("http://localhost:3000/api/platform/ai/gateway?pageSize=1&page=1&businessId=biz-3");
+    const res = await GET(req);
+    const json = await res.json();
+    expect(json.businesses.map((b: { businessId: string }) => b.businessId)).toContain("biz-3");
+  });
+});
+
+describe("GET /api/platform/ai/gateway — branch-scoped readiness (issue #748 P1-5)", () => {
+  const businesses = [{ id: "biz-1", name: "کافه الفبا", ai_entitled: true }];
+  const locations = [
+    { id: "loc-1", business_id: "biz-1", name: "شعبه مرکزی" },
+    { id: "loc-2", business_id: "biz-1", name: "شعبه دوم" },
+  ];
+
+  function mockFleetQueries() {
+    vi.mocked(query)
+      .mockResolvedValueOnce({ rows: locations } as never)
+      .mockResolvedValueOnce({ rows: businesses } as never);
+  }
+
+  it("reports the branch's own key when it has been provisioned separately from the business", async () => {
+    mockFleetQueries();
+    vi.mocked(listBusinessGateways).mockResolvedValueOnce([
+      { id: "g-1", businessId: "biz-1", locationId: null, virtualKey: "sk-biz", keyAlias: "pos-biz1", spendUsd: 0, syncedAt: "2026-09-22T00:00:00Z", syncError: null },
+      { id: "g-2", businessId: "biz-1", locationId: "loc-1", virtualKey: "sk-branch", keyAlias: "pos-biz1-loc1", spendUsd: 0, syncedAt: "2026-09-22T00:00:00Z", syncError: null },
+    ]);
+    const req = new NextRequest("http://localhost:3000/api/platform/ai/gateway?businessId=biz-1&locationId=loc-1");
+    const res = await GET(req);
+    const json = await res.json();
+    expect(json.branchReadiness).toMatchObject({
+      businessId: "biz-1",
+      locationId: "loc-1",
+      entitled: true,
+      credentialSource: "branch",
+      businessHasKey: true,
+      branchHasKey: true,
+      inheritedFromBusiness: false,
+    });
+    expect(JSON.stringify(json.branchReadiness)).not.toContain("sk-branch");
+  });
+
+  it("reports inheritance from the business key when the branch has none of its own", async () => {
+    mockFleetQueries();
+    vi.mocked(listBusinessGateways).mockResolvedValueOnce([
+      { id: "g-1", businessId: "biz-1", locationId: null, virtualKey: "sk-biz", keyAlias: "pos-biz1", spendUsd: 0, syncedAt: "2026-09-22T00:00:00Z", syncError: null },
+    ]);
+    const req = new NextRequest("http://localhost:3000/api/platform/ai/gateway?businessId=biz-1&locationId=loc-2");
+    const res = await GET(req);
+    const json = await res.json();
+    expect(json.branchReadiness).toMatchObject({
+      businessId: "biz-1",
+      locationId: "loc-2",
+      credentialSource: "business",
+      businessHasKey: true,
+      branchHasKey: false,
+      inheritedFromBusiness: true,
+    });
+  });
+
+  it("returns no branchReadiness for a business that does not exist", async () => {
+    mockFleetQueries();
+    vi.mocked(listBusinessGateways).mockResolvedValueOnce([]);
+    const req = new NextRequest("http://localhost:3000/api/platform/ai/gateway?businessId=biz-missing");
+    const res = await GET(req);
+    const json = await res.json();
+    expect(json.branchReadiness).toBeNull();
   });
 });

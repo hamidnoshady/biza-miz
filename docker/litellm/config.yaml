@@ -22,13 +22,17 @@
 #   کلید مدیر                $LITELLM_MASTER_KEY   (same secret as below)
 #   مدل گفت‌وگو              pos-chat
 #   مدل بردارسازی            pos-embed
-#   زنجیرهٔ جایگزین          pos-cheap
-#   مدل‌های قابل انتخاب      pos-chat, pos-cheap   (only if the business model
-#                                                  picker is switched on)
 #
-# Routing, per-model RPM/TPM and per-key budgets are configured HERE and only
-# here — the platform console stopped mirroring them (migration 0168), so this
-# file is the single home of the proxy's own settings.
+# That is the entire console surface: base URL, master key and the two model
+# aliases, plus the per-business/per-branch virtual-key lifecycle. There is no
+# fallback-chain field and no selectable-model list in the app anymore — the
+# platform console never mirrored routing/model policy in the first place, and
+# the last vestigial fields for it (`fallbackModels`, `publishedModels`,
+# `allowBusinessModels`) were deleted from the schema, not just hidden
+# (migration 0168 stopped the console from writing them; issue #757 dropped
+# the columns). Routing, per-model RPM/TPM and per-key budgets are configured
+# HERE and only here — this file is the single home of the proxy's own
+# settings.
 #
 # A routing strategy only has something to do when an alias has more than one
 # deployment behind it. Each alias below has exactly one, so today the router's
@@ -108,13 +112,15 @@ general_settings:
 # ---------------------------------------------------------------------------
 # MCP servers (Phase 38b).
 #
-# The application's gateway settings list these same servers by name; a chat
-# turn may then arrive with `tools: [{type: "mcp", server_url:
+# This proxy config is the only place MCP servers are registered — the
+# platform console has no MCP roster field (the old `mcpEnabled`/`mcpServers`
+# mirror columns were dead stubs and were dropped, issue #757). A chat turn
+# may arrive with `tools: [{type: "mcp", server_url:
 # "litellm_proxy/<name>/mcp", server_label: "<name>", require_approval:
 # "never"}]`, and the proxy transforms that server's tools into OpenAI
-# function tools and executes the calls the model makes before answering.
-# Keep this list a superset of what the application declares — a name the
-# proxy does not know is a 404 mid-turn.
+# function tools and executes the calls the model makes before answering. Any
+# server name the application's assistant code references (`<name>` above)
+# must exist below — a name the proxy does not know is a 404 mid-turn.
 #
 # The POS's own MCP connector (Phase 34) can be listed like any server, which
 # makes the proxy the hub for both directions: external MCP clients dial the
@@ -145,10 +151,11 @@ litellm_settings:
 
 router_settings:
   # The router's own choice of deployment when an alias has several. This is a
-  # proxy-side setting: LiteLLM has no endpoint that changes it at runtime
-  # (`GET /router/settings` is read-only), so it is edited here and the
-  # application's /platform/ai field must say the same thing — the
-  # console's "بررسی ارتباط" reads the live value and reports a disagreement.
+  # proxy-side setting only: LiteLLM has no endpoint that changes it at
+  # runtime (`GET /router/settings` is read-only), and the platform console
+  # has no matching field for it — the console's "بررسی ارتباط" ("probe")
+  # checks that the configured base URL/master key/model aliases actually
+  # answer, not routing policy. Edit routing strategy here only.
   #
   # simple-shuffle is LiteLLM's documented production default: it is the only
   # strategy under which weighted in-group failover applies, and the

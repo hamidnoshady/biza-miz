@@ -6,8 +6,8 @@
  * allowances and tenant monetization belong strictly to Plan/Billing.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getAiRuntimeReadiness, getPlatformAiConfig } from "@/lib/ai-config";
-import { resolveAiConfigFor } from "@/lib/ai-runtime";
+import { getAiRuntimeReadiness, getPlatformAiConfig, type AiRuntimeReadiness } from "@/lib/ai-config";
+import { decorateAiConfigWithState } from "@/lib/ai-runtime";
 import {
   BusinessLocationMismatchError,
   GatewayProvisioningError,
@@ -27,9 +27,57 @@ import {
 } from "@/lib/ai-gateway-service";
 import {
   isGatewayActive,
+  resolveChatModel,
   validateGatewayInput,
+  type BusinessGateway,
   type AiGatewayInput,
 } from "@/lib/ai-gateway";
+
+/** The fleet-table status filter/vocabulary (issue #748 P1-6). */
+type FleetStatus =
+  | "ready"
+  | "missing_key"
+  | "key_sync_error"
+  | "entitlement_disabled"
+  | "gateway_unavailable";
+
+const FLEET_STATUS_FILTERS = new Set([
+  "all",
+  "ready",
+  "missing_key",
+  "key_sync_error",
+  "entitlement_disabled",
+  "gateway_unavailable",
+  "branch_override",
+]);
+
+const GATEWAY_LEVEL_REASONS = new Set([
+  "platform_disabled",
+  "gateway_disabled",
+  "missing_base_url",
+  "invalid_base_url",
+  "missing_runtime_credential",
+  "missing_model",
+  "invalid_max_output_tokens",
+  "configuration_load_failed",
+]);
+
+/**
+ * The worst-first status a fleet row shows in the console table. A row with
+ * a branch override is flagged as such only once nothing worse applies —
+ * "has a branch override" is informational, not itself a problem.
+ */
+function deriveFleetStatus(input: {
+  readiness: AiRuntimeReadiness;
+  entitled: boolean;
+  syncError: string | null;
+}): FleetStatus {
+  if (input.syncError) return "key_sync_error";
+  if (input.readiness.reason === "tenant_virtual_key_missing") return "missing_key";
+  if (!input.entitled) return "entitlement_disabled";
+  if (input.readiness.reason && GATEWAY_LEVEL_REASONS.has(input.readiness.reason)) return "gateway_unavailable";
+  return "ready";
+}
 import { platformCan } from "@/lib/platform-admin";
 import { platformAudit, requirePlatformCapability, withPlatformScope } from "@/lib/platform-auth";
 import { query, withoutTenantScope } from "@/lib/db";
@@ -48,6 +96,25 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     );
   }
 
+  const params = request.nextUrl.searchParams;
+  const search = (params.get("search") ?? "").trim().toLowerCase();
+  const statusParamRaw = params.get("status") ?? "all";
+  const statusFilter = FLEET_STATUS_FILTERS.has(statusParamRaw) ? statusParamRaw : "all";
+  const page = Math.max(1, Math.trunc(Number(params.get("page")) || 1));
+  const pageSize = Math.min(100, Math.max(1, Math.trunc(Number(params.get("pageSize")) || 20)));
+  // The exact (businessId, locationId) the console has selected for the
+  // "manage this business/branch" panel — resolved independently of the
+  // fleet table's pagination, so a business found via the picker's own
+  // search works even when it is not on the fleet table's current page
+  // (issue #748 P1-5).
+  const focusBusinessId = params.get("businessId")?.trim() || null;
+  const focusLocationId = params.get("locationId")?.trim() || null;
+
+  // Issue #748 P1-6: the platform gateway singleton and every business/branch
+  // key row are each loaded exactly ONCE here, then every business's
+  // readiness is derived from these two already-loaded results in memory
+  // (`decorateAiConfigWithState`) — no more one `resolveAiConfigFor` (and its
+  // own gateway + business-row queries) per business.
   const [gateway, gateways, locationsRes, businessesRes] = await Promise.all([
     getAiGatewayConfig(),
     listBusinessGateways(),
@@ -69,12 +136,94 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
   ]);
 
   const runtimeReadiness = getAiRuntimeReadiness(platform);
-  const tenantReadiness = await Promise.all(
-    businessesRes.rows.map(async (business) => {
-      const config = await resolveAiConfigFor(business.id, null);
-      return { businessId: business.id, entitled: business.ai_entitled, ...getAiRuntimeReadiness(config) };
-    }),
-  );
+
+  const businessRowByBusiness = new Map<string, BusinessGateway>();
+  const branchRowsByBusiness = new Map<string, BusinessGateway[]>();
+  const branchRowByKey = new Map<string, BusinessGateway>();
+  for (const row of gateways) {
+    if (!row.locationId) {
+      businessRowByBusiness.set(row.businessId, row);
+      continue;
+    }
+    branchRowByKey.set(`${row.businessId}:${row.locationId}`, row);
+    const list = branchRowsByBusiness.get(row.businessId) ?? [];
+    list.push(row);
+    branchRowsByBusiness.set(row.businessId, list);
+  }
+
+  const fleet = businessesRes.rows.map((business) => {
+    const businessRow = businessRowByBusiness.get(business.id) ?? null;
+    const decorated = decorateAiConfigWithState(platform, gateway, businessRow, null, business.id);
+    const readiness = getAiRuntimeReadiness(decorated);
+    const hasBranchOverride = (branchRowsByBusiness.get(business.id)?.length ?? 0) > 0;
+    const status = deriveFleetStatus({ readiness, entitled: business.ai_entitled, syncError: businessRow?.syncError ?? null });
+    return { business, readiness, hasBranchOverride, status };
+  });
+
+  let filtered = fleet;
+  if (search) filtered = filtered.filter(({ business }) => business.name.toLowerCase().includes(search));
+  if (statusFilter === "branch_override") filtered = filtered.filter((row) => row.hasBranchOverride);
+  else if (statusFilter !== "all") filtered = filtered.filter((row) => row.status === statusFilter);
+
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const pageStart = (Math.min(page, totalPages) - 1) * pageSize;
+  const pageItems = filtered.slice(pageStart, pageStart + pageSize);
+
+  // The selected business/branch's own row must be present in the response
+  // even when it fell outside the current page or the active filter — the
+  // console's detail panel and the fleet table share one payload.
+  const visibleBusinessIds = new Set(pageItems.map((row) => row.business.id));
+  if (focusBusinessId && !visibleBusinessIds.has(focusBusinessId)) {
+    const focusRow = fleet.find((row) => row.business.id === focusBusinessId);
+    if (focusRow) {
+      pageItems.push(focusRow);
+      visibleBusinessIds.add(focusBusinessId);
+    }
+  }
+
+  let branchReadiness: {
+    businessId: string;
+    locationId: string | null;
+    entitled: boolean;
+    credentialSource: "branch" | "business" | "master" | "none";
+    businessHasKey: boolean;
+    branchHasKey: boolean | null;
+    inheritedFromBusiness: boolean;
+    effectiveModel: string;
+    lastVerifiedAt: string | null;
+    syncError: string | null;
+  } & AiRuntimeReadiness | null = null;
+  if (focusBusinessId) {
+    const businessMeta = businessesRes.rows.find((r) => r.id === focusBusinessId);
+    if (businessMeta) {
+      const businessRow = businessRowByBusiness.get(focusBusinessId) ?? null;
+      const branchRow = focusLocationId ? (branchRowByKey.get(`${focusBusinessId}:${focusLocationId}`) ?? null) : null;
+      const decorated = decorateAiConfigWithState(platform, gateway, businessRow, branchRow, focusBusinessId);
+      const readiness = getAiRuntimeReadiness(decorated);
+      const credentialSource: "branch" | "business" | "master" | "none" = branchRow?.virtualKey
+        ? "branch"
+        : businessRow?.virtualKey
+          ? "business"
+          : gateway.masterKey
+            ? "master"
+            : "none";
+      const effective = branchRow ?? businessRow;
+      branchReadiness = {
+        businessId: focusBusinessId,
+        locationId: focusLocationId,
+        entitled: businessMeta.ai_entitled,
+        ...readiness,
+        credentialSource,
+        businessHasKey: Boolean(businessRow?.virtualKey),
+        branchHasKey: focusLocationId ? Boolean(branchRow?.virtualKey) : null,
+        inheritedFromBusiness: Boolean(focusLocationId) && !branchRow?.virtualKey && Boolean(businessRow?.virtualKey),
+        effectiveModel: resolveChatModel({ platformModel: platform.model, gateway, business: businessRow, branch: branchRow }),
+        lastVerifiedAt: effective?.syncedAt ?? null,
+        syncError: effective?.syncError ?? null,
+      };
+    }
+  }
 
   // The public gateway shape (base URL, aliases, virtual-key toggle,
   // hasMasterKey) is already secret-safe — see toPublicGatewayConfig — so
@@ -83,11 +232,16 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
   // the edit controls from a read-only viewer, but that is a UI convenience,
   // not the security boundary.
   const canManage = platformCan(session.role, "ai.config.manage");
-  const wantsProbe = request.nextUrl.searchParams.get("probe") === "1";
+  const wantsProbe = params.get("probe") === "1";
   const firstVirtualKey = gateways.find((row) => Boolean(row.virtualKey))?.virtualKey ?? null;
   const status = canManage && wantsProbe
     ? await probeGateway(gateway, { platformModel: platform.model, virtualKey: firstVirtualKey })
     : null;
+
+  const responseGateways = gateways.filter(
+    (row) => visibleBusinessIds.has(row.businessId) && (row.locationId === null || row.businessId === focusBusinessId),
+  );
+  const responseLocations = locationsRes.rows.filter((r) => visibleBusinessIds.has(r.business_id));
 
   return NextResponse.json({
     gateway: toPublicAiGatewayConfig(gateway),
@@ -98,18 +252,26 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     providerIsGateway: true,
     active: runtimeReadiness.ready,
     runtimeReadiness,
-    tenantReadiness,
+    tenantReadiness: pageItems.map(({ business, readiness, hasBranchOverride, status: fleetStatus }) => ({
+      businessId: business.id,
+      entitled: business.ai_entitled,
+      hasBranchOverride,
+      status: fleetStatus,
+      ...readiness,
+    })),
+    branchReadiness,
+    pagination: { page: Math.min(page, totalPages), pageSize, total, totalPages },
     status,
-    gateways: gateways.map((row) => toPublicBusinessGateway(row, gateway, platform.model)),
-    locations: locationsRes.rows.map((r) => ({
+    gateways: responseGateways.map((row) => toPublicBusinessGateway(row, gateway, platform.model)),
+    locations: responseLocations.map((r) => ({
       id: r.id,
       businessId: r.business_id,
       name: r.name,
     })),
-    businesses: businessesRes.rows.map((r) => ({
-      businessId: r.id,
-      businessName: r.name,
-      aiEntitled: r.ai_entitled,
+    businesses: pageItems.map(({ business }) => ({
+      businessId: business.id,
+      businessName: business.name,
+      aiEntitled: business.ai_entitled,
     })),
   });
 });

@@ -26,14 +26,8 @@ export interface AiGatewayConfig {
   chatModel: string;
   /** Gateway model alias for embeddings; empty means "use the chat model". */
   embeddingModel: string;
-  /** @deprecated Retired local copy. LiteLLM owns fallback chains. */
-  fallbackModels: string[];
   /** Mint and use one virtual key per business or branch. */
   virtualKeysEnabled: boolean;
-  /** @deprecated Retired local copy. LiteLLM owns tenant/model access policy. */
-  allowBusinessModels: boolean;
-  /** @deprecated Retired local copy. LiteLLM owns the published model catalogue. */
-  publishedModels: string[];
   /** Phase 38b — FX rate turning the gateway's USD cost figures into Rial. */
   usdRialRate: number | null;
   /** Phase 38b — settle turns on the gateway's own reported cost. */
@@ -54,10 +48,6 @@ export interface AiGatewayConfig {
    * released back down to LiteLLM's actual reported cost at settlement.
    */
   maxTurnRial: number;
-  /** @deprecated Retired local copy. MCP servers are configured in LiteLLM. */
-  mcpEnabled: boolean;
-  /** @deprecated Retired local copy. MCP servers are configured in LiteLLM. */
-  mcpServers: GatewayMcpServer[];
 }
 
 /**
@@ -99,26 +89,13 @@ export interface AiGatewayInput {
   virtualKeysEnabled?: boolean;
 }
 
-/**
- * Phase 38b — one MCP server the LiteLLM proxy fronts.
- */
-export interface GatewayMcpServer {
-  /** Stable identifier — becomes the proxy's `server_label` and its URL path. */
-  name: string;
-  /** Persian display name for the console. */
-  label: string;
-  /** The server's MCP endpoint (streamable HTTP). */
-  url: string;
-}
-
-/** One business or branch's slice of the gateway: its key and its model choice. */
+/** One business or branch's slice of the gateway: its key and its sync state. */
 export interface BusinessGateway {
   id?: string;
   businessId: string;
   locationId: string | null;
   virtualKey: string | null;
   keyAlias: string | null;
-  modelOverride: string | null;
   spendUsd: number;
   syncedAt: string | null;
   syncError: string | null;
@@ -179,18 +156,13 @@ export function defaultGatewayConfig(): AiGatewayConfig {
     masterKey: "",
     chatModel: "",
     embeddingModel: "",
-    fallbackModels: [],
     virtualKeysEnabled: false,
-    allowBusinessModels: false,
-    publishedModels: [],
     usdRialRate: null,
     gatewayCostingEnabled: false,
     inputCostRialPerMillion: 0,
     outputCostRialPerMillion: 0,
     revenueMarginPercent: 0,
     maxTurnRial: 0,
-    mcpEnabled: false,
-    mcpServers: [],
   };
 }
 
@@ -200,7 +172,6 @@ export function emptyBusinessGateway(businessId: string, locationId: string | nu
     locationId,
     virtualKey: null,
     keyAlias: null,
-    modelOverride: null,
     spendUsd: 0,
     syncedAt: null,
     syncError: null,
@@ -209,80 +180,6 @@ export function emptyBusinessGateway(businessId: string, locationId: string | nu
 
 function trimmed(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
-}
-
-/**
- * A `jsonb` column arrives as a parsed array; the UI also posts plain strings
- * and comma-separated text. Accept all three so the console never has to know
- * which column produced the value.
- */
-export function toStringList(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => trimmed(entry))
-      .filter((entry) => entry.length > 0);
-  }
-  if (typeof value === "string") {
-    return value
-      .split(/[\n,]/)
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0);
-  }
-  return [];
-}
-
-/** The inverse of `toStringList` for the console textarea. */
-export function toListText(values: string[]): string {
-  return values.join("\n");
-}
-
-// ---------------------------------------------------------------------------
-// MCP tools
-// ---------------------------------------------------------------------------
-
-/** `name | label | url`, one server per line — the console's MCP editor format. */
-export function mcpServersToText(servers: GatewayMcpServer[]): string {
-  return servers.map((server) => [server.name, server.label, server.url].join(" | ")).join("\n");
-}
-
-/**
- * Normalise the MCP server list.
- */
-export function normalizeMcpServers(value: unknown): GatewayMcpServer[] {
-  if (!Array.isArray(value)) return [];
-  const servers: GatewayMcpServer[] = [];
-  const seen = new Set<string>();
-  for (const entry of value) {
-    if (!entry || typeof entry !== "object") continue;
-    const row = entry as Record<string, unknown>;
-    const name = trimmed(row.name).toLowerCase().replace(/[^a-z0-9_-]/g, "");
-    const url = trimmed(row.url);
-    if (!name || !url || seen.has(name)) continue;
-    seen.add(name);
-    servers.push({ name, label: trimmed(row.label) || name, url });
-  }
-  return servers;
-}
-
-/** Parse the console's `name | label | url` textarea into server rows. */
-export function mcpServersFromText(text: string): GatewayMcpServer[] {
-  return normalizeMcpServers(
-    text
-      .split("\n")
-      .map((line) => {
-        const [name, label, url] = line.split("|");
-        return { name, label, url };
-      }),
-  );
-}
-
-/**
- * Deprecated: core tenant chat no longer injects LiteLLM MCP declarations into
- * the ordinary OpenAI tools array. MCP remains a separate integration surface;
- * optional MCP must not be able to break basic chat.
- */
-export function gatewayMcpToolsBody(_gateway: AiGatewayConfig | null): Record<string, unknown> {
-  return {};
 }
 
 /**
@@ -439,8 +336,8 @@ export function gatewayStatusMessage(status: number): string {
  * Persian text for every `ai_gateway_*` code the console can be shown: the
  * codes minted by the gateway calls (`unreachable`, `auth`, …), the ones the
  * service throws when a response cannot be parsed, the validation codes from
- * `validateGatewayInput`/`validateBusinessGatewayInput`, and the pre-flight
- * codes the console route answers before it will even try to mint a key.
+ * `validateGatewayInput`, and the pre-flight codes the console route answers
+ * before it will even try to mint a key.
  *
  * One table for server and client: the service composes the `sync_error` text
  * stored on a business's row from it, and the console's `errorMessage()`
@@ -569,15 +466,6 @@ export function resolveGatewayAuthKey(input: {
   return undefined;
 }
 
-/**
- * Deprecated: routing, retries and provider fallback are LiteLLM gateway policy.
- * The application must not send request-level `fallbacks` to `/chat/completions`
- * because proxy versions and upstream providers disagree on that extension.
- */
-export function gatewayRequestBody(_gateway: AiGatewayConfig | null): Record<string, unknown> {
-  return {};
-}
-
 /** LiteLLM `key_alias` for a business or branch — stable, short and traceable. */
 export function virtualKeyAlias(businessId: string, locationId?: string | null): string {
   const b = businessId.replace(/-/g, "").slice(0, 16);
@@ -603,26 +491,6 @@ export function validateGatewayInput(input: AiGatewayInput): string[] {
   return errors;
 }
 
-export interface BusinessGatewayInput {
-  /** @deprecated Ignored. Model access policy belongs to LiteLLM. */
-  modelOverride?: string | null;
-}
-
-export function validateBusinessGatewayInput(
-  _input: BusinessGatewayInput,
-  _options: { allowBusinessModels: boolean; allowedModels: string[] },
-): string[] {
-  return [];
-}
-
-export function normaliseBusinessGatewayInput(
-  businessId: string,
-  _input: BusinessGatewayInput,
-  locationId: string | null = null,
-): BusinessGateway {
-  return emptyBusinessGateway(businessId, locationId);
-}
-
 export function isGatewayActive(gateway: AiGatewayConfig | null | undefined): boolean {
   return Boolean(gateway?.enabled) && Boolean(trimmed(gateway?.baseUrl));
 }
@@ -642,11 +510,11 @@ export function buildGatewayRuntime(input: {
 } | undefined {
   if (!input.gateway || !isGatewayActive(input.gateway)) return undefined;
   const gateway = input.gateway;
-  const mcpBody = gatewayMcpToolsBody(gateway);
-  const body = {
-    ...gatewayRequestBody(gateway),
-    ...mcpBody,
-  };
+  // Reserved extension point for a future, explicitly-adopted request-body
+  // addition; core chat sends nothing extra. Routing, retries, provider
+  // fallback and MCP declarations are LiteLLM policy and must never be
+  // mirrored into the request body from here.
+  const body: Record<string, unknown> = {};
   return {
     model: resolveChatModel({
       platformModel: input.config.model,
