@@ -91,6 +91,15 @@ export function ExpenseSection({
   const [formError, setFormError] = useState("");
   const [notice, setNotice] = useState("");
 
+  // Receipt-photo OCR (migration 0177) — Accounting's own direct upload path,
+  // distinct from the AI Chat assistant's draft_expense_from_receipt tool:
+  // no chat turn needed, and the photo becomes a real Media Library asset
+  // (`receiptAssetId`) attached to the expense once it's recorded.
+  const [receiptBusy, setReceiptBusy] = useState(false);
+  const [receiptError, setReceiptError] = useState("");
+  const [receiptAsset, setReceiptAsset] = useState<{ id: string; fileName: string } | null>(null);
+  const receiptInputRef = useRef<HTMLInputElement>(null);
+
   const [expenses, setExpenses] = useState<ExpenseRow[] | null>(null);
   const [listTotal, setListTotal] = useState(0);
   const [listCount, setListCount] = useState(0);
@@ -164,6 +173,59 @@ export function ExpenseSection({
   }
 
   /**
+   * Reads the chosen photo as a data URL, sends it to the metered
+   * `/api/ai/receipt-ocr` extraction, and — on success — both prefills the
+   * form (vendor/date/amount/memo/category, never overwriting a field the
+   * person had already typed) and remembers the resulting Media asset so
+   * `submit` attaches it to the expense as its `receiptAssetId`. A failed or
+   * unavailable extraction never blocks manual entry — it just reports why
+   * and leaves the form exactly as it was.
+   */
+  async function handleReceiptFile(file: File) {
+    setReceiptError("");
+    setReceiptBusy(true);
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error("read_failed"));
+        reader.readAsDataURL(file);
+      });
+
+      const { ok, data } = await api<{
+        message?: string;
+        fields?: { vendor: string | null; expenseDate: string | null; amount: number | null; memo: string; suggestedAccountCode: string | null };
+        asset?: { id: string; fileName: string };
+      }>("/api/ai/receipt-ocr", {
+        method: "POST",
+        body: JSON.stringify({ image: dataUrl, fileName: file.name }),
+      });
+
+      if (!ok || !data.fields) {
+        setReceiptError(data.message ?? "استخراج اطلاعات از روی تصویر رسید ممکن نشد؛ مقادیر را دستی وارد کنید.");
+        return;
+      }
+
+      setReceiptAsset(data.asset ?? null);
+      const f = data.fields;
+      if (f.vendor && !vendor.trim()) setVendor(f.vendor);
+      if (f.memo && !memo.trim()) setMemo(f.memo);
+      if (f.expenseDate && !expenseDate) setExpenseDate(f.expenseDate);
+      if (f.amount && !amount.trim()) setAmount(String(money.toInput(f.amount)));
+      if (f.suggestedAccountCode && !accountId) {
+        const match = expenseAccounts.find((a) => a.code === f.suggestedAccountCode);
+        if (match) setAccountId(match.id);
+      }
+      setNotice("اطلاعات از روی تصویر رسید استخراج شد؛ پیش از ثبت آن‌ها را بررسی کنید.");
+    } catch {
+      setReceiptError("خواندن فایل تصویر ناموفق بود.");
+    } finally {
+      setReceiptBusy(false);
+      if (receiptInputRef.current) receiptInputRef.current.value = "";
+    }
+  }
+
+  /**
    * Everything that can be known before the round trip, in the order a person
    * fills the form in — so the message points at the first thing to fix rather
    * than at whatever the server happened to check first.
@@ -210,6 +272,7 @@ export function ExpenseSection({
           expenseDate: expenseDate || undefined,
           vendor: vendor.trim() || undefined,
           memo: memo.trim(),
+          receiptAssetId: receiptAsset?.id,
         }),
       }),
     );
@@ -220,6 +283,8 @@ export function ExpenseSection({
       setAmount("");
       setExpenseDate("");
       setVendor("");
+      setReceiptAsset(null);
+      setReceiptError("");
       setMemo("");
     }
   }
@@ -348,6 +413,40 @@ export function ExpenseSection({
                   maxLength={120}
                 />
               </label>
+
+              <div className="block md:col-span-2 xl:col-span-3">
+                <span className="mb-1.5 block text-sm font-medium text-foreground">
+                  عکس رسید <span className="font-normal text-muted-foreground">(اختیاری — استخراج خودکار)</span>
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    ref={receiptInputRef}
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) void handleReceiptFile(file);
+                    }}
+                  />
+                  <SecondaryButton disabled={receiptBusy} onClick={() => receiptInputRef.current?.click()}>
+                    {receiptBusy ? "در حال استخراج…" : "آپلود عکس رسید"}
+                  </SecondaryButton>
+                  {receiptAsset ? (
+                    <span className="text-xs text-emerald-700 dark:text-emerald-300">
+                      «{receiptAsset.fileName}» ضمیمه شد و همراه هزینه ذخیره می‌شود.
+                    </span>
+                  ) : null}
+                </div>
+                {receiptError ? (
+                  <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">{receiptError}</p>
+                ) : (
+                  <span className="mt-1.5 block text-xs text-muted-foreground">
+                    عکس رسید را انتخاب کنید تا مبلغ، طرف حساب و تاریخ به‌صورت خودکار پیشنهاد شود؛ عکس در کتابخانهٔ رسانه
+                    ذخیره و به این هزینه پیوند داده می‌شود.
+                  </span>
+                )}
+              </div>
 
               <label className="block md:col-span-2 xl:col-span-3">
                 <span className="mb-1.5 block text-sm font-medium text-foreground">شرح هزینه</span>

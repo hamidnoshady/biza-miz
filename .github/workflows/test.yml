@@ -398,12 +398,80 @@ jobs:
         continue-on-error: true
         run: npm run db:dev:stop
 
+  # A real Chromium driving the real rendered UI end-to-end for the Media
+  # Library — upload/tag/search/folder-move/trash-restore, the universal
+  # Media Picker reused from a second app (CRM), and the named
+  # media.view/menu.view permission bug exercised as an actual PIN-login
+  # Cashier session. A separate job (not a step tacked onto
+  # `visual-regression`) so this suite's own pass/fail is never masked by an
+  # unrelated, already-tracked baseline-image diff in that job.
+  media-e2e-tests:
+    name: media E2E tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      PGPORT: "55433"
+      DATABASE_URL: postgres://pos:pos@127.0.0.1:55433/pos
+      JWT_SECRET: ci-only-throwaway-secret-0123456789abcdef0123456789abcdef
+      TZ: Asia/Tehran
+      SEED_OWNER_PASSWORD: owner1234
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install Chromium (pinned by the playwright dependency)
+        run: npx playwright install --with-deps chromium
+      - name: Start PostgreSQL
+        run: npm run db:dev:start
+      - name: Apply migrations and seed
+        run: |
+          npm run db:migrate
+          npm run db:seed
+      - name: Provision the unprivileged application role
+        env:
+          APP_DB_PASSWORD: ci-only-app-role-password
+        run: npm run db:app-role
+      - name: Build
+        run: npm run build
+      - name: Start the production server
+        run: |
+          BIND_ADDR=127.0.0.1 PORT=3000 \
+          DATABASE_URL=postgres://pos_app:ci-only-app-role-password@127.0.0.1:55433/pos \
+          npm run start > server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:3000/api/health >/dev/null; then
+              echo "server up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not become healthy within 60s"
+          echo "--- server log ---"; cat server.log 2>/dev/null || true
+          exit 1
+      - name: Media E2E
+        # The script itself writes platform_media_config directly (an
+        # in-process mock S3, not the pos_app role) — it needs the
+        # superuser-ish seeding connection, not the unprivileged runtime role
+        # the server above uses.
+        run: npm run test:e2e:media
+      - name: Server log (on failure)
+        if: failure()
+        run: cat server.log || true
+      - name: Stop PostgreSQL
+        if: always()
+        continue-on-error: true
+        run: npm run db:dev:stop
+
   # Single status check that fails if any job failed, was cancelled, or
   # never ran.
   required:
     name: all checks passed
     runs-on: windows-latest
-    needs: [lint, typecheck, unit-tests, build, integration-tests, api-guard-tests, data-transfer-tests, design-checks, visual-regression]
+    needs: [lint, typecheck, unit-tests, build, integration-tests, api-guard-tests, data-transfer-tests, design-checks, visual-regression, media-e2e-tests]
     if: always()
     steps:
       - name: Check job results

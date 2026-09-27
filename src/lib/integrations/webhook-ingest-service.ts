@@ -33,7 +33,8 @@ import { writeIntegrationAudit } from "./audit";
 import { getBusinessIndustry } from "../industry-guard";
 import { connectionLocationId, resolveOrderCustomerId, upsertCustomerFromWoo, upsertProductFromWoo } from "./sync-service";
 import { wooLineCandidateIds, shouldImportWooOrder } from "./woo-catalogue";
-import { deleteWpContent, upsertWpContent } from "./wp-content-service";
+import { deleteWpContent, safeWpUrl, upsertWpContent, type WpContentPayload } from "./wp-content-service";
+import { confirmWordPressMediaSync } from "../media-service";
 import { replaceTerms, type WooTermSnapshot } from "./woo-taxonomy-service";
 import type { WooCustomer, WooOrder, WooOrderLineItem, WooProduct, WooRefund } from "./woocommerce-client";
 import type { Industry } from "../industries";
@@ -257,6 +258,21 @@ async function dispatchIngestEvent(
       // Manager app's own job, and a shop that only syncs orders still has
       // pages it would be harmless to see.
       await upsertWpContent(connection, event.payload as never);
+      // Phase — WordPress as a view over the central Media Library. The
+      // plugin stamps `_pos_operation_id` on an attachment it just created
+      // from a `media_create` job (class-pos-sync.php: apply_media_create)
+      // and echoes it back on exactly this event (content_payload()); no
+      // other attachment event ever carries one. That is the only signal
+      // that correlates a push back to the `wordpress_media_mapping` row
+      // waiting on it — the job ack (pluginAckJobs) only reports "the job
+      // ran without throwing", never the resulting attachment's identity.
+      const wpPayload = event.payload as unknown as WpContentPayload;
+      if (wpPayload.type === "attachment" && typeof wpPayload.operation_id === "string" && wpPayload.operation_id) {
+        const wpUrl = safeWpUrl(wpPayload.source_url) || safeWpUrl(wpPayload.url);
+        if (wpUrl && remoteId) {
+          await confirmWordPressMediaSync(wpPayload.operation_id, remoteId, wpUrl);
+        }
+      }
     } else if (event.topic.endsWith("content.deleted")) {
       // Trash is an ordinary update carrying status=trash; only a permanent
       // deletion removes the mirror row. Validate the plugin payload before

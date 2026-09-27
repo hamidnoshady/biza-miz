@@ -354,6 +354,40 @@ export function dailyStorageCharge(storedBytes: number, config: MediaStorageConf
 export const MEDIA_STORAGE_FEATURE_KEY = "media_storage";
 /** wallet_ledger/feature_usage key for one AI product-image refine. */
 export const MEDIA_ENHANCE_FEATURE_KEY = "media_enhance";
+/** wallet_ledger/feature_usage key for one AI background-removal edit. */
+export const MEDIA_BG_REMOVE_FEATURE_KEY = "media_bg_remove";
+/** wallet_ledger/feature_usage key for one AI upscale edit. */
+export const MEDIA_UPSCALE_FEATURE_KEY = "media_upscale";
+/** wallet_ledger/feature_usage key for one AI variations batch (charged per image produced). */
+export const MEDIA_VARIATIONS_FEATURE_KEY = "media_variations";
+/** How many alternates one "variations" request produces — fixed, not caller-supplied, so the cost is bounded. */
+export const MEDIA_VARIATIONS_COUNT = 3;
+
+/**
+ * Every distinct value `media_assets.variant` can hold (migrations 0149,
+ * 0175, 0176): the two AI-generated derived kinds this file's editing
+ * operations produce (`enhanced`, plus `bg_removed`/`upscaled`/`variation`
+ * from the lightweight edit operations below), the free local
+ * crop/rotate/resize tier (`transformed`), and `original` for everything
+ * else. All four AI/edit variants share the same shape — a new row with
+ * `source_asset_id` pointing back at what it was derived from; the source is
+ * never overwritten.
+ */
+export type MediaAssetVariant = "original" | "enhanced" | "transformed" | "bg_removed" | "upscaled" | "variation";
+
+/**
+ * How an asset entered the library (migrations 0161, 0178, 0180): a human
+ * upload, a photo dropped into an AI Chat turn, an image the assistant
+ * generated from scratch, a receipt photo submitted for metered OCR
+ * extraction (`POST /api/ai/receipt-ocr`, 0178), or — as of 0180 — a
+ * supplier-invoice photo submitted the same way (`POST /api/ai/invoice-ocr`).
+ * Both `ocr_*` values are deliberately distinct from `ai_attachment` (no chat
+ * turn is involved) and from each other (an accountant's receipt is not a
+ * purchaser's invoice), so reporting either as "از گفت‌وگو" (from a
+ * conversation) or conflating the two would be wrong.
+ */
+export type MediaAssetSource = "upload" | "ai_attachment" | "ai_generated" | "ocr_receipt" | "ocr_invoice";
+
 
 // ---------------------------------------------------------------------------
 // Folder / asset input rules shared by the routes and the client
@@ -363,6 +397,17 @@ export const MAX_FOLDER_DEPTH = 6;
 export const MAX_TAGS_PER_ASSET = 20;
 export const MAX_TAG_LENGTH = 60;
 export const MAX_CATEGORY_LENGTH = 80;
+
+/**
+ * How long a soft-deleted ("trashed") asset stays recoverable before the
+ * retention sweep (`runMediaTrashPurgeTick`, media-service.ts) removes it and
+ * its stored object for good. An operator can always purge sooner by hand.
+ */
+export const MEDIA_TRASH_RETENTION_DAYS = 30;
+
+/** A collection's name — same shape as a folder's (media_collections.name). */
+export const MAX_COLLECTION_NAME_LENGTH = 120;
+export const MAX_COLLECTION_DESCRIPTION_LENGTH = 500;
 
 /** A cleaned tag list: trimmed, deduplicated, capped — or null when invalid. */
 export function parseTags(value: unknown): string[] | null {
@@ -396,3 +441,233 @@ export const MEDIA_KIND_LABELS: Record<MediaKind, string> = {
   video: "ویدیو",
   document: "سند",
 };
+
+// ---------------------------------------------------------------------------
+// Sorting — the grid's "newest / oldest / name / size" order
+// ---------------------------------------------------------------------------
+
+export const MEDIA_SORTS = [
+  "newest",
+  "oldest",
+  "name_asc",
+  "name_desc",
+  "largest",
+  "smallest",
+  "updated",
+] as const;
+export type MediaSort = (typeof MEDIA_SORTS)[number];
+
+export function isMediaSort(value: unknown): value is MediaSort {
+  return typeof value === "string" && (MEDIA_SORTS as readonly string[]).includes(value);
+}
+
+/** The `ORDER BY` column + direction for a sort key — one place, so the SQL and the UI agree. */
+export function mediaSortOrderBy(sort: MediaSort | undefined): string {
+  switch (sort) {
+    case "oldest":
+      return "created_at ASC";
+    case "name_asc":
+      return "file_name ASC";
+    case "name_desc":
+      return "file_name DESC";
+    case "largest":
+      return "byte_size DESC";
+    case "smallest":
+      return "byte_size ASC";
+    case "updated":
+      return "updated_at DESC";
+    case "newest":
+    default:
+      return "created_at DESC";
+  }
+}
+
+export const MEDIA_SORT_LABELS: Record<MediaSort, string> = {
+  newest: "جدیدترین",
+  oldest: "قدیمی‌ترین",
+  name_asc: "نام (الف تا ی)",
+  name_desc: "نام (ی تا الف)",
+  largest: "بزرگ‌ترین حجم",
+  smallest: "کوچک‌ترین حجم",
+  updated: "به‌روزرسانی اخیر",
+};
+
+// ---------------------------------------------------------------------------
+// Search normalization — mixed Persian/Arabic input, never mutating storage
+// ---------------------------------------------------------------------------
+
+/**
+ * A search term, cleaned for matching: trimmed, internal whitespace
+ * collapsed, capped at a sane length, and the common Arabic/Persian
+ * character variants folded together (ي→ی, ك→ک, ۀ→ه, ة→ه) so a term typed on
+ * an Arabic keyboard still finds a tag written with Persian letters. The
+ * ORIGINAL value stored on the asset is never touched — this only shapes the
+ * pattern the query matches against (see `mediaSearchExpression`).
+ */
+export function normalizeSearchTerm(input: string): string {
+  return input
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 120)
+    .replace(/[يى]/g, "ی")
+    .replace(/ك/g, "ک")
+    .replace(/[ةۀ]/g, "ه");
+}
+
+/** Wraps a SQL column reference with the same character-variant folding, so
+ * both sides of an ILIKE compare on equal footing without rewriting the
+ * stored value. */
+export function mediaSearchExpression(column: string): string {
+  return `translate(${column}, 'يىكةۀ', 'ییکهه')`;
+}
+
+// ---------------------------------------------------------------------------
+// Folder tree safety — cycle and depth checks shared by create/move
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Deterministic transforms — the lightweight Cloudinary/Canva-style tier
+// (crop / rotate / resize), explicitly NOT a full image editor. Pure
+// validation only; the actual pixel work (sharp) lives in media-transform.ts
+// because it needs a native binding, which this dependency-free module never
+// takes on.
+// ---------------------------------------------------------------------------
+
+export const MEDIA_TRANSFORM_OPERATIONS = ["crop", "rotate", "resize"] as const;
+export type MediaTransformOperation = (typeof MEDIA_TRANSFORM_OPERATIONS)[number];
+
+/** A generous but real ceiling — this is a crop/resize tool, not a canvas. */
+export const MAX_TRANSFORM_DIMENSION = 4000;
+
+export interface CropTransformParams {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+export interface RotateTransformParams {
+  degrees: number;
+}
+export type ResizeFit = "cover" | "contain" | "inside" | "fill";
+export interface ResizeTransformParams {
+  width?: number;
+  height?: number;
+  fit: ResizeFit;
+}
+
+export type MediaTransformInput =
+  | { operation: "crop"; params: CropTransformParams }
+  | { operation: "rotate"; params: RotateTransformParams }
+  | { operation: "resize"; params: ResizeTransformParams };
+
+export type MediaTransformParseResult = { ok: true; value: MediaTransformInput } | { ok: false; error: string };
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/**
+ * Validate a transform request body with no I/O: every rule the route
+ * enforces about what a legal crop/rotate/resize even looks like lives here,
+ * so it is testable without an image, a database, or sharp.
+ */
+export function parseMediaTransformInput(input: unknown): MediaTransformParseResult {
+  if (typeof input !== "object" || input === null) return { ok: false, error: "bad_request" };
+  const body = input as { operation?: unknown; params?: unknown };
+  const params = typeof body.params === "object" && body.params !== null ? (body.params as Record<string, unknown>) : {};
+
+  if (body.operation === "crop") {
+    const { x, y, width, height } = params;
+    if (
+      !isFiniteNumber(x) || !isFiniteNumber(y) || !isFiniteNumber(width) || !isFiniteNumber(height) ||
+      !Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(width) || !Number.isInteger(height)
+    ) {
+      return { ok: false, error: "invalid_crop" };
+    }
+    if (x < 0 || y < 0 || width < 1 || height < 1) return { ok: false, error: "invalid_crop" };
+    if (width > MAX_TRANSFORM_DIMENSION || height > MAX_TRANSFORM_DIMENSION) return { ok: false, error: "invalid_crop" };
+    return { ok: true, value: { operation: "crop", params: { x, y, width, height } } };
+  }
+
+  if (body.operation === "rotate") {
+    const { degrees } = params;
+    if (!isFiniteNumber(degrees) || degrees === 0) return { ok: false, error: "invalid_rotate" };
+    if (degrees < -360 || degrees > 360) return { ok: false, error: "invalid_rotate" };
+    return { ok: true, value: { operation: "rotate", params: { degrees } } };
+  }
+
+  if (body.operation === "resize") {
+    const { width, height } = params;
+    const fitRaw = params.fit;
+    const fit: ResizeFit = fitRaw === "cover" || fitRaw === "contain" || fitRaw === "fill" ? fitRaw : "inside";
+    const hasWidth = width !== undefined;
+    const hasHeight = height !== undefined;
+    if (!hasWidth && !hasHeight) return { ok: false, error: "invalid_resize" };
+    if (hasWidth && (!isFiniteNumber(width) || !Number.isInteger(width) || width < 1 || width > MAX_TRANSFORM_DIMENSION)) {
+      return { ok: false, error: "invalid_resize" };
+    }
+    if (hasHeight && (!isFiniteNumber(height) || !Number.isInteger(height) || height < 1 || height > MAX_TRANSFORM_DIMENSION)) {
+      return { ok: false, error: "invalid_resize" };
+    }
+    return {
+      ok: true,
+      value: {
+        operation: "resize",
+        params: { width: hasWidth ? (width as number) : undefined, height: hasHeight ? (height as number) : undefined, fit },
+      },
+    };
+  }
+
+  return { ok: false, error: "unsupported_operation" };
+}
+
+export const MEDIA_TRANSFORM_LABELS: Record<MediaTransformOperation, string> = {
+  crop: "برش",
+  rotate: "چرخش",
+  resize: "تغییر اندازه",
+};
+
+export interface FolderNode {
+  id: string;
+  parentId: string | null;
+}
+
+/**
+ * True when re-parenting `folderId` under `newParentId` would create a cycle:
+ * moving a folder into itself, or into one of its own descendants. Pure and
+ * total over any folder set — callers pass the business's own folders (RLS
+ * already guarantees they belong to one tenant), so cross-tenant parents are
+ * never representable here in the first place.
+ */
+export function folderMoveCreatesCycle(
+  folders: readonly FolderNode[],
+  folderId: string,
+  newParentId: string | null,
+): boolean {
+  if (newParentId === null) return false;
+  if (newParentId === folderId) return true;
+  const byId = new Map(folders.map((f) => [f.id, f]));
+  let cursor: string | null = newParentId;
+  let hops = 0;
+  const ceiling = folders.length + 1;
+  while (cursor !== null && hops <= ceiling) {
+    if (cursor === folderId) return true;
+    cursor = byId.get(cursor)?.parentId ?? null;
+    hops += 1;
+  }
+  return false;
+}
+
+/** 1-based depth of `folderId` in the tree (a root folder is depth 1). Guards
+ * against a corrupt cycle instead of looping forever. */
+export function folderDepthOf(folders: readonly FolderNode[], folderId: string | null): number {
+  const byId = new Map(folders.map((f) => [f.id, f]));
+  let depth = 0;
+  let cursor = folderId;
+  const ceiling = folders.length + 2;
+  while (cursor !== null && depth <= ceiling) {
+    depth += 1;
+    cursor = byId.get(cursor)?.parentId ?? null;
+  }
+  return depth;
+}

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requireMember } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getMediaConfig, isMediaStorageReady, readMediaObject } from "@/lib/media-service";
+import { getMediaAssetUsage, getMediaConfig, isMediaStorageReady, readMediaObject } from "@/lib/media-service";
 import { readMirroredMediaObject } from "@/lib/media-mirror";
 
 /**
@@ -13,14 +13,33 @@ import { readMirroredMediaObject } from "@/lib/media-mirror";
  * item pickers); everything else downloads — a "document" that turned out to
  * be active content must never execute on this origin.
  *
- * Every signed-in staff role may fetch *inline* kinds: the POS and waiter
- * tiles show catalogue photos, so a cashier used to get a 403 on every image
- * on the selling screen while the media library itself stays owner/manager.
- * Documents keep the stricter gate — the role check runs a second time once
- * the asset's kind is known.
+ * Two different questions decide access to an INLINE asset, and they are not
+ * the same permission:
+ *
+ *   1. "Can this member browse the Media Library?" — `media.view`, held by
+ *      owner/manager/admin.
+ *   2. "Can this member render a photo an application record they may
+ *      already open is showing them?" — a cashier/waiter/kitchen member
+ *      cannot browse the library, but the POS tile, the waiter card and the
+ *      kitchen ticket all render a menu item's own photo
+ *      (`MenuItemImage` → this route), and an inventory screen renders an
+ *      item's own photo the same way; an accountant with `ledger.view` but
+ *      not `media.view` can likewise open a recorded expense's receipt photo
+ *      (migration 0177), a purchaser with `inventory.view` can open a
+ *      draft purchase's own scanned invoice photo (migration 0179), and a
+ *      CRM editor with `parties.view` can open a party's own uploaded avatar
+ *      (migration 0181). Those roles hold `menu.view` / `inventory.view` /
+ *      `ledger.view` / `parties.view`; whether THIS SPECIFIC asset is the
+ *      photo of a menu item, inventory item, expense receipt, purchase
+ *      invoice, or party avatar they are already authorized to see is what
+ *      `getMediaAssetUsage` answers.
+ *
+ * Neither path ever grants the DOCUMENT kinds this cheaply — a PDF/DOCX read
+ * always requires `media.view`, because "used by a catalogue item" is not a
+ * concept documents participate in.
  */
 export const GET = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.mediaView);
+  const { session, membership, error } = await requireMember();
   if (error) return error;
   const { id } = await context.params;
 
@@ -39,10 +58,24 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
 
   const { asset, bytes } = result;
   const inline = asset.kind === "image" || asset.kind === "video";
-  if (!inline) {
-    // Reading a document is a media-library action, not a selling-screen one.
-    const restricted = await requirePermission(PERMISSIONS.mediaView);
-    if (restricted.error) return restricted.error;
+  const canBrowseLibrary = membership.permissions.has(PERMISSIONS.mediaView);
+
+  if (!canBrowseLibrary) {
+    if (!inline) {
+      // Reading a document is a media-library action, never a selling-screen
+      // one — no usage exception exists for this kind.
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
+    const usage = await getMediaAssetUsage(id);
+    const authorizedByUsage =
+      (usage.menuItems.length > 0 && membership.permissions.has(PERMISSIONS.menuView)) ||
+      (usage.inventoryItems.length > 0 && membership.permissions.has(PERMISSIONS.inventoryView)) ||
+      (usage.expenses.length > 0 && membership.permissions.has(PERMISSIONS.ledgerView)) ||
+      (usage.purchases.length > 0 && membership.permissions.has(PERMISSIONS.inventoryView)) ||
+      (usage.parties.length > 0 && membership.permissions.has(PERMISSIONS.partiesView));
+    if (!authorizedByUsage) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
   }
   const fileName = encodeURIComponent(asset.fileName);
   return new NextResponse(new Uint8Array(bytes), {

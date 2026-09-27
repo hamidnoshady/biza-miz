@@ -129,6 +129,10 @@ export function PurchasesSection({
   const [purchaseDate, setPurchaseDate] = useState("");
   const [note, setNote] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([emptyLine()]);
+  // Set only by applying an OCR scan (invoice-ocr-panel.tsx); carried through
+  // to POST /api/inventory/purchases so the draft keeps a durable pointer
+  // back to the photo it was scanned from, mirroring an expense's receipt id.
+  const [invoiceAssetId, setInvoiceAssetId] = useState<string | null>(null);
   const [settlementByPurchase, setSettlementByPurchase] = useState<Record<string, string>>({});
   const [supplierByPurchase, setSupplierByPurchase] = useState<Record<string, string>>({});
 
@@ -353,6 +357,7 @@ export function PurchasesSection({
             purchaseDate: purchaseDate || null,
             note,
             items: payloadLines,
+            invoiceAssetId,
           }),
         }),
       setLocalError,
@@ -360,6 +365,7 @@ export function PurchasesSection({
     if (ok) {
       setNote("");
       setLines([emptyLine()]);
+      setInvoiceAssetId(null);
       loadPurchases();
     }
   }
@@ -583,6 +589,7 @@ export function PurchasesSection({
         })),
       );
     }
+    setInvoiceAssetId(payload.invoiceAssetId);
     setLocalError("");
     // Scroll the manual form into view so the operator sees the filled lines.
     if (typeof document !== "undefined") {

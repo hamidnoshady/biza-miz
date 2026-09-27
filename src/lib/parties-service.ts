@@ -30,6 +30,8 @@
  */
 import { getBusinessDek } from "./business-keys";
 import { query } from "./db";
+import { hasMatchingMediaSignature } from "./media";
+import { getMediaAsset } from "./media-service";
 import {
   blindIndex,
   decryptOptional,
@@ -51,6 +53,7 @@ import {
   PARTY_ROLE_STORAGE,
   asciiDigits,
   deriveDisplayName,
+  isProfileImageValue,
   isValidIranianNationalId,
   nextAccountingCode,
   partyPersonType,
@@ -94,6 +97,8 @@ export interface Party extends Record<string, unknown> {
   accountingCode: string | null;
   accountingCodeMode: AccountingCodeMode;
   profileImage: string | null;
+  /** Migration 0181 — the canonical Media Library asset for an uploaded avatar. */
+  profileImageAssetId: string | null;
   categoryId: string | null;
   categoryName: string | null;
   /** The canonical contact row. Mirrored from `contactInfo` so the POS, the picker and the invoice all read one place. */
@@ -134,7 +139,8 @@ export class PartyValidationError extends Error {
 const PARTY_COLUMNS = `p.id, p.name, p.first_name AS "firstName", p.last_name AS "lastName",
        p.role, p.roles, p.person_type AS "personType", p.is_active AS "isActive",
        p.accounting_code AS "accountingCode", p.accounting_code_mode AS "accountingCodeMode",
-       p.profile_image AS "profileImage", p.category_id AS "categoryId",
+       p.profile_image AS "profileImage", p.profile_image_asset_id AS "profileImageAssetId",
+       p.category_id AS "categoryId",
        p.general_info AS "generalInfo", p.address_info AS "addressInfo",
        p.contact_info AS "contactInfo", p.financial_info AS "financialInfo",
        p.national_id AS "nationalId", p.national_id_enc AS "nationalIdEnc",
@@ -213,6 +219,7 @@ function toParty(row: PartyRow, dek: Buffer | null): Party {
       ? (row.accountingCodeMode as AccountingCodeMode)
       : "Automatic",
     profileImage: (row.profileImage as string | null) ?? null,
+    profileImageAssetId: (row.profileImageAssetId as string | null) ?? null,
     categoryId: (row.categoryId as string | null) ?? null,
     categoryName: categoryName ?? null,
     phone: decryptOptional(phoneEnc, dek, (row.phone as string | null) ?? null),
@@ -275,6 +282,14 @@ export interface PartyInput {
   accountingCodeMode?: string | null;
   accountingCode?: string | null;
   profileImage?: string | null;
+  /**
+   * Migration 0181 — a Media Library asset id for an uploaded avatar. Not
+   * validated for tenant ownership here (`PartyInput` is a plain data
+   * bag) — `createParty`/`updateParty` do that against the caller's
+   * `businessId` before it is ever written, the same shape
+   * `purchase-service.ts`'s `invoiceAssetId` uses.
+   */
+  profileImageAssetId?: string | null;
   notes?: string | null;
   generalInfo?: (Partial<PartyGeneralInfo> & Record<string, unknown>) | null;
   addressInfo?: (Partial<PartyAddressInfo> & Record<string, unknown>) | null;
@@ -307,6 +322,7 @@ interface NormalizedWrite {
   status: boolean;
   categoryId: string | null;
   profileImage: string | null;
+  profileImageAssetId: string | null;
   notes: string | null;
   accountingCodeMode: AccountingCodeMode;
   /** Already validated as present-and-shaped when the mode is Manual. */
@@ -339,6 +355,35 @@ interface NormalizedWrite {
  * when the tab was sent, so a caller that knows nothing about tabs (a POS quick-add
  * posting `{displayName, phone}`) still gets exactly the row it asked for.
  */
+
+const PROFILE_IMAGE_DATA_URL_RE = /^data:(image\/(?:png|jpe?g|webp));base64,(.+)$/i;
+
+/**
+ * `isProfileImageValue` (src/lib/parties.ts) is the cheap, pure shape check
+ * shared with the client form's live field feedback — it never decodes the
+ * base64, so it cannot tell a real PNG from four kilobytes of `AAAA…`
+ * declared as one. This is the actual trust boundary: a party's profile
+ * image is later rendered as `<img src>` (party-form.tsx and every party
+ * list that shows an avatar), so a data-URL value gets the same
+ * byte-signature check the Media Library gives every upload
+ * (`hasMatchingMediaSignature`, src/lib/media.ts) before it is ever written.
+ * An `https://` value (a linked, not uploaded, avatar) has no bytes to check.
+ */
+function validatedProfileImage(value: string | null): string | null {
+  if (value === null) return null;
+  if (!isProfileImageValue(value)) throw new PartyValidationError("invalid_image", "profileImage");
+  const trimmed = value.trim();
+  const dataUrlMatch = PROFILE_IMAGE_DATA_URL_RE.exec(trimmed);
+  if (dataUrlMatch) {
+    const mimeType = dataUrlMatch[1].toLowerCase().replace("image/jpg", "image/jpeg");
+    const bytes = Buffer.from(dataUrlMatch[2].replace(/\s+/g, ""), "base64");
+    if (bytes.byteLength === 0 || !hasMatchingMediaSignature(mimeType, bytes)) {
+      throw new PartyValidationError("invalid_image", "profileImage");
+    }
+  }
+  return value;
+}
+
 function normalizePartyWrite(input: PartyInput, existing?: Party | null): NormalizedWrite {
   const general = tabOf<PartyGeneralInfo & Record<string, unknown>>(input, "generalInfo", "general_info");
   const contact = tabOf<PartyContactInfo & Record<string, unknown>>(input, "contactInfo", "contact_info");
@@ -474,6 +519,24 @@ function normalizePartyWrite(input: PartyInput, existing?: Party | null): Normal
   const notes = input.notes !== undefined ? textOf(input.notes) : (existing?.notes ?? null);
   if (notes && notes.length > MAX_PARTY_NOTES) throw new PartyValidationError("notes_too_long", "notes");
 
+  // Migration 0181. Shape-only here (a real string or null); `createParty`/
+  // `updateParty` still validate it against the caller's tenant and the
+  // asset's kind before it is ever written — this function has no database
+  // access and cannot do that part.
+  const profileImageAssetId =
+    input.profileImageAssetId !== undefined
+      ? textOf(input.profileImageAssetId)
+      : (existing?.profileImageAssetId ?? null);
+  // An asset-backed avatar and the legacy inline/linked one are mutually
+  // exclusive: once a party has a canonical Media Library photo, the old
+  // column is cleared rather than left holding a value nothing renders
+  // anymore (a party can otherwise never be un-migrated by re-uploading).
+  const profileImage = profileImageAssetId
+    ? null
+    : input.profileImage !== undefined
+      ? validatedProfileImage(textOf(input.profileImage))
+      : (existing?.profileImage ?? null);
+
   return {
     displayName: displayName.slice(0, MAX_PARTY_DISPLAY_NAME),
     firstName: input.firstName !== undefined ? textOf(input.firstName) : (existing?.firstName ?? null),
@@ -487,7 +550,8 @@ function normalizePartyWrite(input: PartyInput, existing?: Party | null): Normal
     // somebody had archived.
     status: input.status === undefined ? (existing?.status ?? true) : input.status !== false,
     categoryId: input.categoryId !== undefined ? textOf(input.categoryId) : (existing?.categoryId ?? null),
-    profileImage: input.profileImage !== undefined ? textOf(input.profileImage) : (existing?.profileImage ?? null),
+    profileImage,
+    profileImageAssetId,
     notes,
     accountingCodeMode,
     accountingCode: accountingCodeMode === "Manual" ? manualCode : null,
@@ -552,6 +616,24 @@ async function assertNationalIdFree(
     [businessId, dek && digits ? blindIndex(digits, dek) : null, digits, exceptId ?? null],
   );
   if (rows[0]) throw new PartyValidationError("national_id_taken", "generalInfo.nationalId");
+}
+
+/**
+ * Migration 0181 — the same tenant-scoped cross-reference check
+ * `purchase-service.ts` runs for `invoiceAssetId` and `expense-service.ts`
+ * for `receiptAssetId`, reusing `getMediaAsset` rather than a fourth
+ * hand-rolled `SELECT`. A stale id (deleted from another tab mid-edit) or
+ * one belonging to a different business is refused with the same
+ * `invalid_image` code the byte-signature check already uses for this
+ * field — one error a caller has to handle for "this avatar is not usable",
+ * whichever of the two ways it failed.
+ */
+async function assertProfileImageAssetOwned(businessId: string, assetId: string | null): Promise<void> {
+  if (!assetId) return;
+  const asset = await getMediaAsset(businessId, assetId);
+  if (!asset || asset.kind !== "image") {
+    throw new PartyValidationError("invalid_image", "profileImage");
+  }
 }
 
 /** The phone/identity derived columns, written as one set — see `phoneColumns` below. */
@@ -969,6 +1051,7 @@ export async function createParty(
   const dek = await getBusinessDek(businessId);
   const write = normalizePartyWrite(input);
   await assertNationalIdFree(businessId, write.nationalId, dek);
+  await assertProfileImageAssetOwned(businessId, write.profileImageAssetId);
 
   const phoneCols = phoneColumns(write.phone, dek);
   const identity = identityColumns(write.nationalId, write.economicCode, dek);
@@ -990,10 +1073,10 @@ export async function createParty(
             national_id, national_id_enc, national_id_bidx, economic_code, economic_code_enc,
             phone, phone_enc, phone_bidx, phone_e164, phone_last4, phone_kind,
             address, address_enc, notes, notes_enc, email, birthday, tags,
-            marketing_consent, sms_consent, employee_user_id
+            marketing_consent, sms_consent, employee_user_id, profile_image_asset_id
           )
          VALUES ($1,$2,$3,$4,$5,$6,$7::text[],$8,$9,$10,$11,$12,$13::uuid,$14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,
-                 $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34::date,$35,$36,$37,$38::uuid)
+                 $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34::date,$35,$36,$37,$38::uuid,$39::uuid)
          RETURNING id`,
         [
           businessId,
@@ -1034,6 +1117,7 @@ export async function createParty(
           write.marketingConsent ?? false,
           write.smsConsent ?? false,
           write.roles.includes("Employee") ? (write.employeeUserId ?? null) : null,
+          write.profileImageAssetId,
         ],
       );
       const created = rows[0] ? await getParty(businessId, String(rows[0].id)) : null;
@@ -1109,6 +1193,13 @@ export async function updateParty(
   const dek = await getBusinessDek(businessId);
   const write = normalizePartyWrite(input, existing);
   await assertNationalIdFree(businessId, write.nationalId, dek, id);
+  // Only re-checked when this write actually touches the field: an edit that
+  // never mentions the avatar carries the existing (already-owned) value
+  // straight through `normalizePartyWrite`, so re-querying it on every
+  // unrelated save (a phone-number fix, a note) would be a wasted lookup.
+  if (input.profileImageAssetId !== undefined) {
+    await assertProfileImageAssetOwned(businessId, write.profileImageAssetId);
+  }
 
   const sets: string[] = [];
   const params: unknown[] = [businessId, id];
@@ -1127,6 +1218,7 @@ export async function updateParty(
   add("accounting_code", write.accountingCode);
   add("accounting_code_mode", write.accountingCodeMode.toLowerCase());
   add("profile_image", write.profileImage);
+  add("profile_image_asset_id", write.profileImageAssetId);
   add("category_id", write.categoryId);
   add("general_info", JSON.stringify(write.generalInfo));
   if (write.addressInfo) add("address_info", JSON.stringify(write.addressInfo));

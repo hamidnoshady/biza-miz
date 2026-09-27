@@ -120,6 +120,56 @@ export function signS3Request(config: S3Config, input: S3RequestInput): SignedS3
   };
 }
 
+/**
+ * A time-limited GET URL an unrelated third party can fetch directly from
+ * the bucket — no Authorization header, no server round-trip. SigV4's
+ * "presigned URL" variant: the same signature, but the pieces that normally
+ * live in headers (`x-amz-date`, `x-amz-content-sha256`, the credential
+ * scope) move into the query string instead, because the caller issuing the
+ * eventual GET (a WordPress site's `media_sideload_image`, not this app)
+ * cannot be handed custom headers to send.
+ *
+ * The one difference from `signS3Request`'s canonical request: the payload
+ * hash is the literal string `UNSIGNED-PAYLOAD` (SigV4's documented value
+ * for a presigned request with no body to hash), and `host` is the only
+ * signed header.
+ */
+export function presignS3Get(config: S3Config, key: string, expiresSeconds: number, now: Date = new Date()): string {
+  const dateTime = amzDate(now);
+  const date = dateTime.slice(0, 8);
+  const scope = `${date}/${config.region}/s3/aws4_request`;
+
+  const url = new URL(config.endpoint);
+  const host = url.host;
+  const basePath = url.pathname.replace(/\/+$/, "");
+  const path = `${basePath}/${rfc3986(config.bucket)}/${encodeKeyPath(key)}`;
+
+  const query: Record<string, string> = {
+    "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+    "X-Amz-Credential": `${config.accessKeyId}/${scope}`,
+    "X-Amz-Date": dateTime,
+    "X-Amz-Expires": String(Math.max(1, Math.floor(expiresSeconds))),
+    "X-Amz-SignedHeaders": "host",
+  };
+  const canonicalQuery = Object.entries(query)
+    .map(([k, v]) => [rfc3986(k), rfc3986(v)] as const)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${k}=${v}`)
+    .join("&");
+
+  const canonicalRequest = ["GET", path, canonicalQuery, `host:${host}\n`, "host", "UNSIGNED-PAYLOAD"].join("\n");
+
+  const stringToSign = ["AWS4-HMAC-SHA256", dateTime, scope, sha256Hex(canonicalRequest)].join("\n");
+
+  const kDate = hmac(`AWS4${config.secretAccessKey}`, date);
+  const kRegion = hmac(kDate, config.region);
+  const kService = hmac(kRegion, "s3");
+  const kSigning = hmac(kService, "aws4_request");
+  const signature = createHmac("sha256", kSigning).update(stringToSign).digest("hex");
+
+  return `${url.protocol}//${host}${path}?${canonicalQuery}&X-Amz-Signature=${signature}`;
+}
+
 export interface S3Object {
   key: string;
   size: number;

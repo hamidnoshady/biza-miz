@@ -77,6 +77,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await db.query("DELETE FROM expenses");
+  await db.query("DELETE FROM media_assets");
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM businesses");
@@ -303,5 +304,109 @@ describe("recordExpense", () => {
         createdBy: user.id,
       }),
     ).rejects.toThrow("fiscal_period_locked");
+  });
+});
+
+/**
+ * Migration 0177 closes the "attachments... are deferred" gap this test file
+ * opens with: a receipt photo is a real Media Library asset, and an expense
+ * can point at the one it was recorded from. `receiptAssetId` must be
+ * tenant-scoped like every other cross-reference here (`unknown_account`'s
+ * sibling), and the FK's `ON DELETE SET NULL` must survive the asset it
+ * points at actually being deleted — the expense outlives its receipt photo.
+ */
+describe("recordExpense — receipt asset (migration 0177)", () => {
+  async function insertAsset(businessId: string, fileName = "receipt.jpg"): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO media_assets (business_id, kind, file_name, mime_type, byte_size, storage_key, sha256)
+       VALUES ($1, 'image', $2, 'image/jpeg', 1024, $3, repeat('b', 64)) RETURNING id`,
+      [businessId, fileName, `media/${businessId}/${randomUUID()}/${fileName}`],
+    );
+    return rows[0].id;
+  }
+
+  it("links the expense to the receipt asset and getMediaAssetUsage finds it back", async () => {
+    const assetId = await insertAsset(biz.id);
+    const expense = await expenseService.recordExpense({
+      businessId: biz.id,
+      locationId: null,
+      accountId: acct.rent,
+      paymentAccountId: acct.cash,
+      amount: 250_000,
+      memo: "خرید از روی رسید",
+      createdBy: user.id,
+      receiptAssetId: assetId,
+    });
+    expect(expense.receiptAssetId).toBe(assetId);
+
+    const { rows } = await db.query<{ receipt_asset_id: string }>(
+      "SELECT receipt_asset_id FROM expenses WHERE id = $1",
+      [expense.id],
+    );
+    expect(rows[0].receipt_asset_id).toBe(assetId);
+
+    const mediaService = await import("../src/lib/media-service");
+    const usage = await mediaService.getMediaAssetUsage(assetId);
+    expect(usage.expenses).toEqual([{ id: expense.id, name: "خرید از روی رسید" }]);
+    expect(mediaService.mediaAssetUsageIsEmpty(usage)).toBe(false);
+  });
+
+  it("rejects a receipt asset belonging to a different business", async () => {
+    const other = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Other Receipt Co', $1) RETURNING id",
+      [`other-receipt-${randomUUID().slice(0, 8)}`],
+    );
+    const foreignAssetId = await insertAsset(other.rows[0].id);
+
+    await expect(
+      expenseService.recordExpense({
+        businessId: biz.id,
+        locationId: null,
+        accountId: acct.rent,
+        paymentAccountId: acct.cash,
+        amount: 10_000,
+        memo: "X",
+        createdBy: user.id,
+        receiptAssetId: foreignAssetId,
+      }),
+    ).rejects.toThrow("receipt_asset_not_found");
+  });
+
+  it("rejects a receiptAssetId that does not exist at all", async () => {
+    await expect(
+      expenseService.recordExpense({
+        businessId: biz.id,
+        locationId: null,
+        accountId: acct.rent,
+        paymentAccountId: acct.cash,
+        amount: 10_000,
+        memo: "X",
+        createdBy: user.id,
+        receiptAssetId: randomUUID(),
+      }),
+    ).rejects.toThrow("receipt_asset_not_found");
+  });
+
+  it("survives the receipt asset later being deleted — the expense keeps its amount, just loses the link", async () => {
+    const assetId = await insertAsset(biz.id);
+    const expense = await expenseService.recordExpense({
+      businessId: biz.id,
+      locationId: null,
+      accountId: acct.rent,
+      paymentAccountId: acct.cash,
+      amount: 90_000,
+      memo: "قابل حذف",
+      createdBy: user.id,
+      receiptAssetId: assetId,
+    });
+
+    await db.query("DELETE FROM media_assets WHERE id = $1", [assetId]);
+
+    const { rows } = await db.query<{ amount: string; receipt_asset_id: string | null }>(
+      "SELECT amount, receipt_asset_id FROM expenses WHERE id = $1",
+      [expense.id],
+    );
+    expect(rows[0].receipt_asset_id).toBeNull();
+    expect(rows[0].amount).toBe("90000");
   });
 });

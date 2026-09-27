@@ -4,12 +4,8 @@
  * and run the pure validator. The image never leaves this request.
  */
 
-import {
-  chatCompletionsUrl,
-  type AiConfig,
-} from "./ai";
-import { estimateTokens, type AiTokenUsage } from "./ai-billing";
-import { parseResponseCostHeader } from "./ai-gateway";
+import type { AiConfig } from "./ai";
+import type { AiTokenUsage } from "./ai-billing";
 import {
   INVOICE_EXTRACTION_SYSTEM_PROMPT,
   INVOICE_EXTRACTION_USER_PROMPT,
@@ -21,9 +17,11 @@ import {
   type InvoiceMatchStatus,
   type InvoiceValidationResult,
 } from "./ai-invoice-ocr";
+import { runAiVisionExtraction } from "./ai-vision-extraction";
 import { query } from "./db";
 
 const REQUEST_TIMEOUT_MS = 90_000;
+const MIN_OUTPUT_TOKENS = 2048;
 
 export interface MatchedInvoiceLine {
   /** Stable key for the review UI (index-based). */
@@ -60,110 +58,25 @@ export interface InvoiceOcrResult {
   costUsd: number | null;
 }
 
-type ProviderContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } };
-
-interface ProviderMessage {
-  role: "system" | "user" | "assistant";
-  content: string | ProviderContentPart[];
-}
-
-function providerHeaders(config: AiConfig): Record<string, string> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    // Phase 37 & 39 — a gateway deployment authenticates the call with the calling
-    // branch or business's virtual key when one has been provisioned; every other
-    // deployment sends the platform key.
-    Authorization: `Bearer ${config.gateway?.authKey || config.apiKey}`,
-  };
-  return headers;
-}
-
-function textOf(content: ProviderMessage["content"]): string {
-  return typeof content === "string" ? content : "";
-}
-
-function fallbackUsage(messages: ProviderMessage[], content: string): AiTokenUsage {
-  return {
-    inputTokens: estimateTokens(JSON.stringify(messages)),
-    outputTokens: estimateTokens(content),
-  };
-}
-
+/**
+ * Thin wrapper over the shared `runAiVisionExtraction` (`ai-vision-extraction.ts`):
+ * this service's own prompt pair, timeout, and token ceiling, mapped onto its
+ * own `InvoiceOcrError` so every existing `instanceof InvoiceOcrError` check
+ * (route, tests) keeps working unchanged.
+ */
 async function callVision(
   config: AiConfig,
   dataUrl: string,
 ): Promise<{ text: string; usage: AiTokenUsage; costUsd: number | null }> {
-  const messages: ProviderMessage[] = [
-    { role: "system", content: INVOICE_EXTRACTION_SYSTEM_PROMPT },
-    {
-      role: "user",
-      content: [
-        { type: "text", text: INVOICE_EXTRACTION_USER_PROMPT },
-        { type: "image_url", image_url: { url: dataUrl } },
-      ],
-    },
-  ];
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  let res: Response;
-  try {
-    res = await fetch(chatCompletionsUrl(config.baseUrl), {
-      method: "POST",
-      headers: providerHeaders(config),
-      body: JSON.stringify({
-        model: config.model,
-        messages,
-        temperature: Math.min(config.temperature, 0.2),
-        max_tokens: Math.max(config.maxOutputTokens ?? 1000, 2048),
-        // Phase 37 — the gateway's failover chain, when one is configured.
-        // Empty for every deployment that talks to a vendor directly.
-        ...(config.gateway?.body ?? {}),
-      }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    clearTimeout(timer);
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new InvoiceOcrError("ai_timeout", "پاسخ سرویس هوش مصنوعی به‌موقع نرسید.");
-    }
-    throw new InvoiceOcrError("ai_network", "اتصال به سرویس هوش مصنوعی برقرار نشد.");
-  }
-  clearTimeout(timer);
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    if (res.status === 401 || res.status === 403) {
-      throw new InvoiceOcrError("ai_auth", "کلید سرویس هوش مصنوعی نامعتبر است.", body);
-    }
-    throw new InvoiceOcrError("ai_provider", `سرویس هوش مصنوعی خطا داد (${res.status}).`, body);
-  }
-
-  const json = (await res.json()) as {
-    choices?: { message?: ProviderMessage }[];
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
-  };
-  const message = json.choices?.[0]?.message;
-  if (!message) throw new InvoiceOcrError("ai_provider", "پاسخ سرویس هوش مصنوعی نامفهوم بود.");
-
-  const text = textOf(message.content);
-  const promptTokens = Number(json.usage?.prompt_tokens);
-  const completionTokens = Number(json.usage?.completion_tokens);
-  const usage =
-    Number.isFinite(promptTokens) && Number.isFinite(completionTokens)
-      ? {
-          inputTokens: Math.max(0, Math.floor(promptTokens)),
-          outputTokens: Math.max(0, Math.floor(completionTokens)),
-        }
-      : fallbackUsage(messages, text);
-
-  return {
-    text,
-    usage,
-    costUsd: parseResponseCostHeader(res.headers.get("x-litellm-response-cost")),
-  };
+  return runAiVisionExtraction({
+    config,
+    systemPrompt: INVOICE_EXTRACTION_SYSTEM_PROMPT,
+    userPrompt: INVOICE_EXTRACTION_USER_PROMPT,
+    dataUrl,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    minOutputTokens: MIN_OUTPUT_TOKENS,
+    createError: (code, message, detail) => new InvoiceOcrError(code, message, detail),
+  });
 }
 
 export class InvoiceOcrError extends Error {

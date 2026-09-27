@@ -48,6 +48,15 @@ export interface WpContentPayload {
   alt_text?: string;
   /** Media: the attachment URL in either of the shapes plugins send. */
   url?: string;
+  /**
+   * Media: the `_pos_operation_id` meta the plugin stamped on this
+   * attachment when it was created — present only when this attachment
+   * exists because the app pushed it (Media Library → WordPress), and only
+   * on the `add_attachment` event that fires immediately after. Absent on
+   * every attachment a site owner uploaded directly, and on every later
+   * content sync of the same file.
+   */
+  operation_id?: string;
 }
 
 export interface WpContentRow {

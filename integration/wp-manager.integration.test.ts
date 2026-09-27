@@ -40,6 +40,7 @@ let ingest: typeof import("../src/lib/integrations/webhook-ingest-service");
 let plugin: typeof import("../src/lib/integrations/plugin-service");
 let taxonomy: typeof import("../src/lib/integrations/woo-taxonomy-service");
 let connections: typeof import("../src/lib/integrations/connections-service");
+let media: typeof import("../src/lib/media-service");
 
 const biz = { id: "", locationId: "", userId: "", pluginConnId: "", restConnId: "" };
 
@@ -98,6 +99,7 @@ beforeAll(async () => {
   plugin = await import("../src/lib/integrations/plugin-service");
   taxonomy = await import("../src/lib/integrations/woo-taxonomy-service");
   connections = await import("../src/lib/integrations/connections-service");
+  media = await import("../src/lib/media-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -662,5 +664,118 @@ describe("the enhanced WP queue summary, filtering, and retries", () => {
     const restFlush = await manager.flushWpOutbox(biz.id, biz.restConnId);
     expect(restFlush.ok).toBe(true);
     expect(restFlush.mode).toBe("rest_api");
+  });
+});
+
+describe("WordPress as a view over the central Media Library — correlating a push back to its mapping", () => {
+  async function makeAsset(fileName: string): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO media_assets (business_id, kind, file_name, mime_type, byte_size, storage_key, sha256)
+       VALUES ($1, 'image', $2, 'image/png', 100, $3, $4) RETURNING id`,
+      [biz.id, fileName, `media/${biz.id}/${randomUUID()}.png`, randomUUID().replaceAll("-", "")],
+    );
+    return rows[0].id;
+  }
+
+  it("a content.updated event carrying the plugin's echoed operation id confirms the pending mapping", async () => {
+    const assetId = await makeAsset("pushed-banner.png");
+    const operationId = `wp-media:${biz.pluginConnId}:${randomUUID()}`;
+    await dbLib!.withTenant(biz.id, () =>
+      media.recordWordPressMediaPush({ businessId: biz.id, mediaAssetId: assetId, connectionId: biz.pluginConnId, operationId }),
+    );
+
+    const connection = await connections.getConnection(biz.id, biz.pluginConnId);
+    const outcome = await ingest.ingestPluginEvent(connection!, {
+      topic: "content.updated",
+      deliveryId: randomUUID(),
+      payload: {
+        id: 7331,
+        type: "attachment",
+        title: { rendered: "pushed-banner", raw: "pushed-banner" },
+        source_url: "https://shop.example.com/wp-content/uploads/pushed-banner.png",
+        mime_type: "image/png",
+        media_type: "image",
+        operation_id: operationId,
+      },
+    });
+    expect(outcome.status).toBe("processed");
+
+    const mapping = await dbLib!.withTenant(biz.id, () => media.getWordPressMediaMapping(biz.id, biz.pluginConnId, assetId));
+    expect(mapping?.status).toBe("synced");
+    expect(mapping?.wpMediaId).toBe("7331");
+    expect(mapping?.wpUrl).toBe("https://shop.example.com/wp-content/uploads/pushed-banner.png");
+  });
+
+  it("an ordinary attachment sync with no operation id never touches any mapping", async () => {
+    const assetId = await makeAsset("untouched.png");
+    const operationId = `wp-media:${biz.pluginConnId}:${randomUUID()}`;
+    await dbLib!.withTenant(biz.id, () =>
+      media.recordWordPressMediaPush({ businessId: biz.id, mediaAssetId: assetId, connectionId: biz.pluginConnId, operationId }),
+    );
+
+    const connection = await connections.getConnection(biz.id, biz.pluginConnId);
+    // A site owner's own upload — same event topic and shape, no operation id.
+    await ingest.ingestPluginEvent(connection!, {
+      topic: "content.updated",
+      deliveryId: randomUUID(),
+      payload: { id: 7332, type: "attachment", title: "owner-upload", source_url: "https://shop.example.com/owner-upload.png", mime_type: "image/png" },
+    });
+
+    const mapping = await dbLib!.withTenant(biz.id, () => media.getWordPressMediaMapping(biz.id, biz.pluginConnId, assetId));
+    expect(mapping?.status).toBe("pending"); // unaffected — this event was never this asset's push
+  });
+
+  it("a media_create job that exhausts its retries dead-letters and fails the mapping instead of leaving it pending forever", async () => {
+    const assetId = await makeAsset("will-never-land.png");
+    const operationId = `wp-media:${biz.pluginConnId}:${randomUUID()}`;
+    await dbLib!.withTenant(biz.id, () =>
+      media.recordWordPressMediaPush({ businessId: biz.id, mediaAssetId: assetId, connectionId: biz.pluginConnId, operationId }),
+    );
+
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id, attempts)
+       VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5, 5)
+       RETURNING id`,
+      [biz.id, biz.pluginConnId, `asset-${assetId}-${randomUUID()}`, JSON.stringify({ url: "https://bucket.example.com/x.png", __operationId: operationId }), operationId],
+    );
+    const jobId = rows[0].id;
+
+    const connection = await connections.getConnection(biz.id, biz.pluginConnId);
+    const response = await plugin.pluginAckJobs(connection! as never, [{ id: jobId, status: "failed", error: "سایت پاسخ نداد" }]);
+    const body = (await response.json()) as { ok: boolean; failed: number };
+    expect(body.ok).toBe(true);
+    expect(body.failed).toBe(1);
+
+    const outboxRow = await db.query<{ status: string }>(`SELECT status FROM integration_outbox_events WHERE id = $1`, [jobId]);
+    expect(outboxRow.rows[0].status).toBe("dead");
+
+    const mapping = await dbLib!.withTenant(biz.id, () => media.getWordPressMediaMapping(biz.id, biz.pluginConnId, assetId));
+    expect(mapping?.status).toBe("failed");
+    expect(mapping?.lastError).toContain("سایت");
+  });
+
+  it("a media_create job's ordinary (non-final) failure leaves the mapping pending — only the dead letter gives up", async () => {
+    const assetId = await makeAsset("retry-me.png");
+    const operationId = `wp-media:${biz.pluginConnId}:${randomUUID()}`;
+    await dbLib!.withTenant(biz.id, () =>
+      media.recordWordPressMediaPush({ businessId: biz.id, mediaAssetId: assetId, connectionId: biz.pluginConnId, operationId }),
+    );
+
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id, attempts)
+       VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5, 0)
+       RETURNING id`,
+      [biz.id, biz.pluginConnId, `asset-${assetId}-${randomUUID()}`, JSON.stringify({ url: "https://bucket.example.com/y.png", __operationId: operationId }), operationId],
+    );
+    const jobId = rows[0].id;
+
+    const connection = await connections.getConnection(biz.id, biz.pluginConnId);
+    await plugin.pluginAckJobs(connection! as never, [{ id: jobId, status: "failed", error: "timeout" }]);
+
+    const outboxRow = await db.query<{ status: string }>(`SELECT status FROM integration_outbox_events WHERE id = $1`, [jobId]);
+    expect(outboxRow.rows[0].status).toBe("failed"); // not dead yet — will be retried
+
+    const mapping = await dbLib!.withTenant(biz.id, () => media.getWordPressMediaMapping(biz.id, biz.pluginConnId, assetId));
+    expect(mapping?.status).toBe("pending");
   });
 });

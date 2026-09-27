@@ -11,7 +11,7 @@ import {
   settleAiTurn,
 } from "@/lib/ai-wallet-billing";
 import { MediaAiError, runMediaLabelDetection } from "@/lib/ai-media-service";
-import { getMediaConfig, isMediaStorageReady, readMediaObject } from "@/lib/media-service";
+import { getMediaAsset, getMediaConfig, isMediaStorageReady, readMediaObject } from "@/lib/media-service";
 
 /**
  * Metered AI auto-tagging for a stored image (migration 0149) — the same
@@ -92,9 +92,11 @@ export const POST = withTenantScope(async (_request: NextRequest, context: { par
       [id, session.businessId, JSON.stringify({ category: result.category, tags: result.tags, description: result.description })],
     );
 
+    const updated = await getMediaAsset(session.businessId, id);
     return NextResponse.json({
       ok: true,
       proposal: { category: result.category, tags: result.tags, description: result.description },
+      asset: updated,
     });
   } catch (err) {
     // Phase B — no reservation to refund; a failed turn settles nothing.

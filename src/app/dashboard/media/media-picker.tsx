@@ -8,11 +8,19 @@
  * is organized once and reused everywhere). Returns the chosen asset's id —
  * the caller stores it as `image_media_id` and renders the photo through
  * `/api/media/{id}/file`.
+ *
+ * Search follows the library screen's own debounce + AbortController +
+ * stale-response guard (one implementation, not a second copy of the same
+ * three rules), and paginates rather than ever fetching the whole library.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { toPersianDigits } from "@/lib/digits";
+import { uploadFiles } from "@/lib/media-uploader";
 import { cardClass, EmptyState, LoadingSkeleton } from "../page-chrome";
 import { api, ErrorBox, inputClass } from "../ui";
+
+const PAGE_SIZE = 40;
 
 export interface PickedMedia {
   id: string;
@@ -40,42 +48,79 @@ export function MediaPickerDialog({
   onClose: () => void;
 }) {
   const [assets, setAssets] = useState<PickerAsset[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [storageReady, setStorageReady] = useState(true);
   const fileInput = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const requestRef = useRef(0);
 
-  const load = useCallback(() => {
-    const params = new URLSearchParams({ kind: "image" });
-    if (search) params.set("search", search);
-    api<{ assets: PickerAsset[]; storage: { ready: boolean } }>(`/api/media?${params.toString()}`).then(
-      ({ ok, data }) => {
-        if (ok) {
-          setAssets(data.assets.filter((a) => a.mimeType !== "image/svg+xml"));
-          setStorageReady(data.storage.ready);
-        } else setError("خواندن کتابخانهٔ رسانه ناموفق بود.");
-      },
-    );
-  }, [search]);
-  useEffect(load, [load]);
+  useEffect(() => {
+    const handle = window.setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => window.clearTimeout(handle);
+  }, [searchInput]);
+
+  const load = useCallback(
+    (offset: number, append: boolean) => {
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const requestId = ++requestRef.current;
+      if (append) setLoadingMore(true);
+
+      const params = new URLSearchParams({ kind: "image", limit: String(PAGE_SIZE), offset: String(offset) });
+      if (search) params.set("search", search);
+      api<{ assets: PickerAsset[]; total: number; storage: { ready: boolean } }>(
+        `/api/media?${params.toString()}`,
+        { signal: controller.signal },
+      ).then(({ ok, data, aborted }) => {
+        if (aborted || requestId !== requestRef.current) return;
+        setLoadingMore(false);
+        if (!ok) {
+          setError("خواندن کتابخانهٔ رسانه ناموفق بود.");
+          return;
+        }
+        setError("");
+        const usable = data.assets.filter((a) => a.mimeType !== "image/svg+xml");
+        setAssets((current) => (append && current ? [...current, ...usable] : usable));
+        setTotal(data.total);
+        setStorageReady(data.storage.ready);
+      });
+    },
+    [search],
+  );
+
+  useEffect(() => {
+    load(0, false);
+    return () => abortRef.current?.abort();
+  }, [load]);
 
   async function upload(files: FileList | null) {
     const file = files?.[0];
     if (!file) return;
     setBusy(true);
     setError("");
-    const form = new FormData();
-    form.set("file", file);
-    const res = await fetch("/api/media", { method: "POST", body: form });
+    setNotice("");
+    // Same central uploader the library manager uses (src/lib/media-uploader.ts)
+    // — a picker upload is a one-file batch, but it still gets the retry on a
+    // transient failure that a bare fetch here never had.
+    const { done } = uploadFiles([file]);
+    const [result] = await done;
     setBusy(false);
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { message?: string };
-      setError(body.message ?? "بارگذاری ناموفق بود.");
+    if (result.status !== "success" || !result.asset) {
+      if (result.status === "error") setError(result.message ?? "بارگذاری ناموفق بود.");
       return;
     }
-    const body = (await res.json()) as { asset: PickerAsset };
-    onPick({ id: body.asset.id, fileName: body.asset.fileName });
+    // Inside a picker, an exact duplicate is reused rather than offered as a
+    // second copy — the caller only needs an id, and the library gains
+    // nothing from two identical objects.
+    if (result.asset.duplicate) setNotice("این تصویر از قبل در کتابخانه بود؛ همان انتخاب شد.");
+    onPick({ id: result.asset.id, fileName: result.asset.fileName });
   }
 
   return (
@@ -93,12 +138,13 @@ export function MediaPickerDialog({
         </div>
 
         {error ? <ErrorBox>{error}</ErrorBox> : null}
+        {notice ? <p className="mb-3 text-xs text-muted-foreground">{notice}</p> : null}
 
         <div className="mb-4 flex gap-2">
           <input
             className={inputClass}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             placeholder="جست‌وجو در تصاویر کتابخانه…"
           />
           <Button
@@ -125,25 +171,38 @@ export function MediaPickerDialog({
         ) : assets === null ? (
           <LoadingSkeleton rows={4} />
         ) : assets.length === 0 ? (
-          <EmptyState>تصویری در کتابخانه نیست؛ با «بارگذاری تصویر» اولین تصویر را اضافه کنید.</EmptyState>
+          search ? (
+            <EmptyState>تصویری با این جست‌وجو پیدا نشد.</EmptyState>
+          ) : (
+            <EmptyState>تصویری در کتابخانه نیست؛ با «بارگذاری تصویر» اولین تصویر را اضافه کنید.</EmptyState>
+          )
         ) : (
-          <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
-            {assets.map((asset) => (
-              <button
-                key={asset.id}
-                type="button"
-                onClick={() => onPick({ id: asset.id, fileName: asset.fileName })}
-                className="group overflow-hidden rounded-xl border border-border transition-colors hover:border-ring"
-                title={asset.fileName}
-              >
-                <span className="block aspect-square overflow-hidden bg-muted">
-                  { }
-                  <img src={mediaFileUrl(asset.id)} alt={asset.fileName} loading="lazy" className="size-full object-cover" />
-                </span>
-                <span className="block truncate px-1.5 py-1 text-[11px] text-muted-foreground">{asset.fileName}</span>
-              </button>
-            ))}
-          </div>
+          <>
+            <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+              {assets.map((asset) => (
+                <button
+                  key={asset.id}
+                  type="button"
+                  onClick={() => onPick({ id: asset.id, fileName: asset.fileName })}
+                  className="group overflow-hidden rounded-xl border border-border transition-colors hover:border-ring"
+                  title={asset.fileName}
+                >
+                  <span className="block aspect-square overflow-hidden bg-muted">
+                    { }
+                    <img src={mediaFileUrl(asset.id)} alt={asset.fileName} loading="lazy" className="size-full object-cover" />
+                  </span>
+                  <span className="block truncate px-1.5 py-1 text-[11px] text-muted-foreground">{asset.fileName}</span>
+                </button>
+              ))}
+            </div>
+            {assets.length < total ? (
+              <div className="mt-3 flex justify-center">
+                <Button variant="outline" size="sm" disabled={loadingMore} onClick={() => load(assets.length, true)}>
+                  {loadingMore ? "در حال بارگذاری…" : `نمایش بیشتر (${toPersianDigits(total - assets.length)} مورد دیگر)`}
+                </Button>
+              </div>
+            ) : null}
+          </>
         )}
       </div>
     </div>

@@ -34,6 +34,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     expenseDate?: string;
     vendor?: string;
     memo?: string;
+    receiptAssetId?: string;
   };
   try {
     body = await request.json();
@@ -54,6 +55,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       vendor: body.vendor,
       memo: String(body.memo ?? ""),
       createdBy: session.sub,
+      receiptAssetId: typeof body.receiptAssetId === "string" ? body.receiptAssetId : null,
     });
     return NextResponse.json({ expense }, { status: 201 });
   } catch (err) {

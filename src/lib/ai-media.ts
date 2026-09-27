@@ -99,9 +99,38 @@ export const MEDIA_ENHANCE_PROMPT =
   "consistent margins of about 8% on every side, upright and straightened alignment, soft natural shadow " +
   "directly under the product, color-accurate, no props, no text, no watermark, square 1:1 canvas.";
 
+/**
+ * The instruction for background removal — a distinct operation from the
+ * enhance prompt above: no recomposition, no white product-shot styling,
+ * only the background gone (transparent) and the subject untouched.
+ */
+export const MEDIA_BG_REMOVE_PROMPT =
+  "Remove the background from this image completely, leaving only the main subject with a fully " +
+  "transparent background (alpha channel). Do not alter, recolor, crop, or reposition the subject itself " +
+  "in any way — same pose, same framing, same colors, same lighting on the subject. Output PNG with " +
+  "transparency, no added shadow, no added border, no watermark.";
+
+/**
+ * The instruction for the "upscale" edit. This is a prompted edit-model
+ * operation over the same `/images/edits` endpoint as enhance/bg-removal —
+ * not a dedicated super-resolution model — so it is described honestly as
+ * "sharpen and increase resolution" rather than promising a guaranteed
+ * pixel multiplier no generic image-edit endpoint can reliably deliver.
+ */
+export const MEDIA_UPSCALE_PROMPT =
+  "Increase the resolution and sharpness of this image as much as possible while preserving the exact " +
+  "content, composition, framing, colors and proportions — do not crop, recompose, add, remove, or alter " +
+  "any element. Reduce noise and compression artifacts, sharpen fine detail and edges, keep it photorealistic " +
+  "and faithful to the original, no watermark, no added text.";
+
 /** `{baseUrl}/images/edits` — the OpenAI-compatible image-edit endpoint. */
 export function imageEditsUrl(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/images/edits`;
+}
+
+/** `{baseUrl}/images/variations` — the OpenAI-compatible image-variations endpoint. */
+export function imageVariationsUrl(baseUrl: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}/images/variations`;
 }
 
 /**
@@ -111,11 +140,25 @@ export function imageEditsUrl(baseUrl: string): string {
  * mystery payload.
  */
 export function parseImageEditReply(payload: unknown): { b64: string } | { url: string } | null {
-  if (!payload || typeof payload !== "object") return null;
+  return parseImageEditReplies(payload)[0] ?? null;
+}
+
+/**
+ * Same shape as `parseImageEditReply`, but keeps every element of `data` —
+ * "variations" is the one operation that can legitimately return more than
+ * one image from a single call. Returns `[]` (not null) for an unparseable
+ * or empty payload so the caller can treat "no images" uniformly.
+ */
+export function parseImageEditReplies(payload: unknown): ({ b64: string } | { url: string })[] {
+  if (!payload || typeof payload !== "object") return [];
   const data = (payload as { data?: unknown }).data;
-  if (!Array.isArray(data) || data.length === 0) return null;
-  const first = data[0] as Record<string, unknown>;
-  if (typeof first.b64_json === "string" && first.b64_json) return { b64: first.b64_json };
-  if (typeof first.url === "string" && /^https?:\/\//.test(first.url)) return { url: first.url };
-  return null;
+  if (!Array.isArray(data)) return [];
+  const out: ({ b64: string } | { url: string })[] = [];
+  for (const entry of data) {
+    if (!entry || typeof entry !== "object") continue;
+    const item = entry as Record<string, unknown>;
+    if (typeof item.b64_json === "string" && item.b64_json) out.push({ b64: item.b64_json });
+    else if (typeof item.url === "string" && /^https?:\/\//.test(item.url)) out.push({ url: item.url });
+  }
+  return out;
 }

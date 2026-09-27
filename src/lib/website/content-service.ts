@@ -14,6 +14,7 @@
 import { WebsiteAdapterError, type Post, type RemoteProduct, type WebsiteMedia } from "./adapter";
 import { adapterForBusiness, getWebsiteConnection, WebsiteNotConnectedError } from "./connection-service";
 import { summarizeWebsiteQueue } from "./catalog-service";
+import { hasMatchingMediaSignature } from "../media";
 
 export type WebsiteResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -68,13 +69,20 @@ export function isValidWebsiteImage(input: { filename: string; mimeType: string;
   return Boolean(input.filename.trim()) && IMAGE_TYPES.has(input.mimeType) && input.byteLength > 0 && input.byteLength <= WEBSITE_MEDIA_MAX_BYTES;
 }
 
-/** Cheap signature check: MIME comes from an untrusted multipart client. */
+/**
+ * Cheap signature check: MIME comes from an untrusted multipart client.
+ *
+ * jpeg/png/webp delegate to the canonical media-library check (src/lib/media.ts)
+ * so the byte rules for those three formats live in exactly one place; gif is
+ * this module's own extension (the Media Library does not accept gif at all),
+ * so it stays here.
+ */
 export function hasMatchingImageSignature(mimeType: string, bytes: Uint8Array): boolean {
-  const starts = (...signature: number[]) => signature.every((value, index) => bytes[index] === value);
-  if (mimeType === "image/jpeg") return starts(0xff, 0xd8, 0xff);
-  if (mimeType === "image/png") return starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
-  if (mimeType === "image/gif") return starts(0x47, 0x49, 0x46, 0x38) && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61;
-  return mimeType === "image/webp" && starts(0x52, 0x49, 0x46, 0x46) && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50;
+  if (mimeType === "image/gif") {
+    const starts = (...signature: number[]) => signature.every((value, index) => bytes[index] === value);
+    return starts(0x47, 0x49, 0x46, 0x38) && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61;
+  }
+  return hasMatchingMediaSignature(mimeType, bytes);
 }
 
 export async function uploadWebsiteMedia(input: {
