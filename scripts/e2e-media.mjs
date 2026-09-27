@@ -231,7 +231,7 @@ async function main() {
     await goto(page, "/media");
     if (!page.url().includes("/media")) fail("upload", `expected to land on /media, got ${page.url()}`);
 
-    await page.getByRole("button", { name: "بارگذاری فایل" }).click();
+    await page.getByRole("button", { name: "بارگذاری فایل", exact: true }).click();
     await page.locator('input[type="file"]').first().setInputFiles(uploadPath);
     await page.locator(`button:has-text("${FILE_NAME}")`).first().waitFor({ timeout: 20_000 });
     log("upload", `«${FILE_NAME}» appeared in the library grid after a real multipart upload`);
@@ -240,9 +240,9 @@ async function main() {
     await page.locator(`button:has-text("${FILE_NAME}")`).first().click();
     const drawer = page.locator('[role="dialog"]');
     await drawer.getByLabel("برچسب‌ها").fill(TAG_TEXT);
-    await drawer.getByRole("button", { name: "ذخیره" }).click();
+    await drawer.getByRole("button", { name: "ذخیره", exact: true }).click();
     await drawer.getByText("تغییرات ذخیره شد.").waitFor({ timeout: 10_000 });
-    await drawer.getByRole("button", { name: "بستن" }).click();
+    await drawer.getByRole("button", { name: "بستن", exact: true }).click();
     log("tag", `tag «${TAG_TEXT}» saved on the asset`);
 
     // Search must actually find it by the tag text — not just by file name —
@@ -257,8 +257,8 @@ async function main() {
     // ======================================================================
     // 2. Folder move, via the real folder tree — not a mocked API call
     // ======================================================================
-    await page.getByRole("button", { name: "پوشهٔ جدید" }).click();
-    await page.getByLabel(/پوشهٔ جدید/).fill(FOLDER_NAME);
+    await page.getByRole("button", { name: "پوشهٔ جدید", exact: true }).click();
+    await page.getByLabel("پوشهٔ جدید در ریشه", { exact: true }).fill(FOLDER_NAME);
     await page.getByRole("button", { name: "ساخت", exact: true }).click();
     const tree = page.getByRole("list", { name: "درخت پوشه‌ها" });
     await tree.getByText(FOLDER_NAME).waitFor({ timeout: 10_000 });
@@ -266,9 +266,9 @@ async function main() {
 
     await page.locator(`button:has-text("${FILE_NAME}")`).first().click();
     await drawer.getByLabel("پوشه").selectOption({ label: FOLDER_NAME });
-    await drawer.getByRole("button", { name: "ذخیره" }).click();
+    await drawer.getByRole("button", { name: "ذخیره", exact: true }).click();
     await drawer.getByText("تغییرات ذخیره شد.").waitFor({ timeout: 10_000 });
-    await drawer.getByRole("button", { name: "بستن" }).click();
+    await drawer.getByRole("button", { name: "بستن", exact: true }).click();
 
     // Selecting "همهٔ فایل‌ها" then the new folder proves the move is real:
     // the asset must disappear from "root only" and appear under the folder.
@@ -291,7 +291,7 @@ async function main() {
     // 3. Soft-delete → trash → restore
     // ======================================================================
     await page.locator(`button:has-text("${FILE_NAME}")`).first().click();
-    await drawer.getByRole("button", { name: "انتقال به سطل زباله" }).click();
+    await drawer.getByRole("button", { name: "انتقال به سطل زباله", exact: true }).click();
     await page.locator('[role="dialog"]').waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {});
     await waitDebounce(page);
     const inLibraryAfterTrash = await page
@@ -301,14 +301,14 @@ async function main() {
       .catch(() => false);
     if (inLibraryAfterTrash) fail("trash", "asset still visible in the library after being sent to trash");
 
-    await page.getByRole("button", { name: "سطل زباله" }).click();
+    await page.getByRole("button", { name: "سطل زباله", exact: true }).click();
     await waitDebounce(page);
     await page.locator(`button:has-text("${FILE_NAME}")`).first().waitFor({ timeout: 10_000 });
     log("trash", "asset confirmed in the trash view after soft-delete");
 
     await page
       .locator(`div:has(> button:has-text("${FILE_NAME}"))`)
-      .getByRole("button", { name: "بازیابی" })
+      .getByRole("button", { name: "بازیابی", exact: true })
       .click();
     await waitDebounce(page);
     const stillInTrash = await page
@@ -329,14 +329,14 @@ async function main() {
     await page.getByRole("button", { name: /^افزودن/ }).click();
     const partyDialog = page.locator('[role="dialog"], form').filter({ hasText: "نام" }).first();
     await page.getByLabel("نام", { exact: true }).first().fill(PARTY_NAME);
-    await page.getByLabel("نام خانوادگی").first().fill("E2E");
+    await page.getByLabel("نام خانوادگی", { exact: true }).first().fill("E2E");
 
-    await page.getByRole("button", { name: "انتخاب از کتابخانه" }).click();
+    await page.getByRole("button", { name: "انتخاب از کتابخانه", exact: true }).click();
     const picker = page.locator('[role="dialog"]').filter({ hasText: "جست‌وجو در تصاویر کتابخانه" });
     await picker.getByPlaceholder("جست‌وجو در تصاویر کتابخانه…").fill(FILE_NAME);
     await waitDebounce(page);
     await picker.locator(`button[title="${FILE_NAME}"]`).click();
-    await page.getByRole("button", { name: "تغییر تصویر" }).waitFor({ timeout: 10_000 });
+    await page.getByRole("button", { name: "تغییر تصویر", exact: true }).waitFor({ timeout: 10_000 });
     log("picker", "CRM party form picked the EXISTING Library asset — no second upload happened");
 
     await page.getByRole("button", { name: "ذخیره", exact: true }).click();
@@ -348,20 +348,20 @@ async function main() {
     // 5. The named permission bug: a menu photo, rendered as a real Cashier
     // ======================================================================
     await goto(page, "/settings/menu");
-    await page.getByLabel("نام دسته").fill(CATEGORY_NAME);
+    await page.getByLabel("نام دسته", { exact: true }).fill(CATEGORY_NAME);
     await page.getByRole("button", { name: "افزودن", exact: true }).click();
     await waitDebounce(page);
 
-    await page.getByRole("button", { name: "دسته را انتخاب کنید…" }).click();
-    await page.getByRole("option", { name: CATEGORY_NAME }).click();
-    await page.getByLabel("نام آیتم").fill(ITEM_NAME);
+    await page.getByRole("button", { name: "دسته را انتخاب کنید…", exact: true }).click();
+    await page.getByRole("option", { name: CATEGORY_NAME, exact: true }).click();
+    await page.getByLabel("نام آیتم", { exact: true }).fill(ITEM_NAME);
     await page.getByLabel(/قیمت/).fill("100000");
-    await page.getByRole("button", { name: "انتخاب از کتابخانه" }).click();
+    await page.getByRole("button", { name: "انتخاب از کتابخانه", exact: true }).click();
     const itemPicker = page.locator('[role="dialog"]').filter({ hasText: "جست‌وجو در تصاویر کتابخانه" });
     await itemPicker.getByPlaceholder("جست‌وجو در تصاویر کتابخانه…").fill(FILE_NAME);
     await waitDebounce(page);
     await itemPicker.locator(`button[title="${FILE_NAME}"]`).click();
-    await page.getByRole("button", { name: "افزودن آیتم" }).click();
+    await page.getByRole("button", { name: "افزودن آیتم", exact: true }).click();
     await page.getByText(ITEM_NAME).first().waitFor({ timeout: 10_000 });
     log("permission-setup", `menu item «${ITEM_NAME}» created with the Library asset as its photo`);
 
