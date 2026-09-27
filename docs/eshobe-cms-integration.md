@@ -467,7 +467,30 @@ CMS row written while the poll was in flight must still be reachable next time.
 Both halves are opt-in and default off, so a deployment with no CMS makes no
 network call because a migration ran.
 
-## 8. Failure handling
+## 8. Store orders → accounting (Phase G)
+
+Paid CMS store checkouts import into platform accounting (one `orders` row per CMS
+order id). Wire contract: `cms-store-order-contract/v1/`. Production deployer
+checklist: `cms-store-orders-production-ops.md` in the platform project store.
+
+| Piece | Where |
+|---|---|
+| Inbox + idempotency | `cms_store_order_inbox` — unique `(cms_connection_id, delivery_id)` and `(cms_connection_id, cms_order_id)` |
+| HTTP ingest | `POST /api/cms/order-events` — HMAC like revalidate (`ESHOBE_CMS_WEBHOOK_SECRET`); body `siteId`, `deliveryId`, `event: "order.paid"`, full `order` |
+| Poll fallback | `runCmsStoreOrderPollTick` (60s) — `GET /api/platform/events`, cursor `platform_cms_config.store_order_ingest_cursor`, then `fetchOrderById` with the site key |
+| Site map | `eshobe_cms_connections.site_id` |
+| Product lines / COGS | `website_product_map` (`remote_id` = CMS product id, `sync_enabled`) |
+| UI status | CMS manager **فروشگاه** — `inboxStatusForCmsOrders` |
+
+CMS emits `order.paid` on the platform event feed and audit log when checkout
+status becomes `paid` (`emitOrderPaid`). Standard CMS **webhooks** use
+`<timestamp>.<body>` signatures and the platform event JSON shape — they do
+**not** substitute for `order-events` without a translator. Production default:
+platform poll + site key fetch.
+
+Refund/cancel-after-import is not part of Phase G; no `order.refunded` ingest yet.
+
+## 9. Failure handling
 
 - The client throws `CmsApiError` (HTTP 4xx/5xx with the Payload error body)
   or `CmsNetworkError` (timeout/DNS — default 8s timeout).
