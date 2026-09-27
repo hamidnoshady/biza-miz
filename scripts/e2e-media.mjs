@@ -258,7 +258,11 @@ async function main() {
     // 2. Folder move, via the real folder tree — not a mocked API call
     // ======================================================================
     await page.getByRole("button", { name: "پوشهٔ جدید", exact: true }).click();
-    await page.getByLabel("پوشهٔ جدید در ریشه", { exact: true }).fill(FOLDER_NAME);
+    // Not getByLabel: the folder tree's own "+" new-subfolder button carries
+    // the identical aria-label ("پوشهٔ جدید در ریشه"), and getByLabel matches
+    // any aria-labelled element, not only form controls — scoping by role
+    // excludes that button, which does not have role=textbox.
+    await page.getByRole("textbox", { name: "پوشهٔ جدید در ریشه", exact: true }).fill(FOLDER_NAME);
     await page.getByRole("button", { name: "ساخت", exact: true }).click();
     const tree = page.getByRole("list", { name: "درخت پوشه‌ها" });
     await tree.getByText(FOLDER_NAME).waitFor({ timeout: 10_000 });
