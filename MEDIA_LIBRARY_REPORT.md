@@ -1857,10 +1857,14 @@ full-suite re-run this session, after every change, was green.
   found by reading `gh run list`/`gh run view` for this branch rather than assumed:
   (a) `integration/media-reconcile-orphans.integration.test.ts` spawned `npx` via
   `execFile` without a shell, which fails to launch on Windows (`npx.cmd`, not
-  `npx.exe`) — **fixed this session**, same `shell: isBatch` convention
-  `src/lib/pg-tools.ts` already used, verified 6/6 passing on this sandbox's Linux where
-  the fix is a no-op, **not yet confirmed on the actual Windows runner** (the next push
-  is the first real test of it); (b) the `visual-regression` job's `accounting-expenses`
+  `npx.exe`) — **fixed**, same `shell: isBatch` convention `src/lib/pg-tools.ts` already
+  used, verified 6/6 passing on this sandbox's Linux where the fix is a no-op, and
+  **confirmed on the real Windows CI runner** across two subsequent real pushes (`fdf978b`
+  and this session's own `50e27d6`, the vision-extraction refactor commit): the
+  `integration tests (real database)` job on `windows-latest` passed both times (13m34s,
+  then 12m30s), with every other previously-green job still green — this is not a
+  next-push assumption, it has now actually run and passed twice on the real runner; (b)
+  the `visual-regression` job's `accounting-expenses`
   baseline is genuinely, describably stale — it predates item 11's receipt-upload
   control, a real and already-documented UI addition, not a bug — and **remains open**:
   re-recording it needs a real headless Chromium this sandbox cannot obtain (`npx
