@@ -25,3 +25,6 @@
 ## 2025-02-27 - Pre-Grouping Relations for O(1) Component Render
 **Learning:** React component lists (like ItemRow in MenuManager) frequently filter secondary arrays inside their render scope (`links.filter(l => l.menuItemId === item.id)`). This turns an O(N) render into an O(N^2) operation, causing severe bottlenecks on menus with hundreds of items.
 **Action:** Always extract relational array filtering into a parent `useMemo` that builds a `Map<id, RelatedItem[]>`. Pass down `map.get(id) ?? []` to child components to reduce relation lookup time from O(N) to O(1).
+## 2024-05-24 - Extract derived static operations like column configurations out of render loops
+**Learning:** In highly configurable data grids (like the Data Table component), computing visual representation derived from props (such as filtering which columns should be shown on mobile views) inside the row rendering loop creates O(N * C) operations and allocates N new arrays on each render.
+**Action:** Always pre-calculate and cache derived structure data (like the column layout) into a `React.useMemo` at the root of the component whenever the input schema is stable relative to the data rows.
