@@ -8,6 +8,7 @@ import {
 import { applyPairingSnapshot } from "@/lib/pairing-apply";
 import { validateSnapshot } from "@/lib/pairing-snapshot";
 import { hasAnyUser } from "@/lib/setup-state";
+import { acknowledgePendingPairing } from "@/lib/server-sync";
 
 /** How long to wait on the online server before calling it unreachable. */
 const REDEEM_TIMEOUT_MS = 30_000;
@@ -169,29 +170,16 @@ export async function POST(request: NextRequest) {
     installationId,
   });
 
-  // The cloud credential intentionally remains pending until this point. A
-  // failed acknowledgement does not roll back a committed local business; the
-  // durable session id in server_sync.config is retried by the sync tick.
-  let activationPending = false;
-  if (pairingSessionId) {
-    try {
-      const acknowledgement = await fetch(
-        `${remoteUrl}/api/pairing/acknowledge`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${validation.snapshot.syncToken}`,
-          },
-          body: JSON.stringify({ pairingSessionId, installationId }),
-          signal: AbortSignal.timeout(REDEEM_TIMEOUT_MS),
-        },
-      );
-      activationPending = !acknowledgement.ok;
-    } catch {
-      activationPending = true;
-    }
-  }
+  // The cloud credential intentionally remains pending until this point.
+  // `acknowledgePendingPairing` also promotes the stored local config to
+  // enabled only after the cloud confirms the committed snapshot. If the
+  // response is lost it leaves the durable recovery metadata intact for the
+  // normal sync tick to retry; it never strands this newly-created business.
+  const acknowledgement = pairingSessionId
+    ? await acknowledgePendingPairing(applied.businessId)
+    : { status: "skipped" as const };
+  const activationPending =
+    pairingSessionId !== undefined && acknowledgement.status !== "ok";
 
   const token = await signSession({
     sub: applied.ownerUserId,

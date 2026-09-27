@@ -47,9 +47,9 @@ export interface ConnectionKind {
 export const CONNECTION_KINDS: ConnectionKind[] = [
   {
     key: "desktop",
-    label: "برنامه دسکتاپ",
+    label: "دسکتاپ و ابر",
     description:
-      "نصب برنامه روی رایانهٔ فروشگاه و اتصال آن به همین حساب ابری: آدرس این حساب و یک کد اتصال یک‌بارمصرف.",
+      "نصب محلی، دستگاه‌های جفت‌شده و چرخهٔ کامل همگام‌سازی با ابر: راه‌اندازی، فعال‌سازی، وضعیت، آشتی‌سازی و بازیابی.",
     // Redeeming a code hands over a snapshot of the whole business, including
     // credential hashes. That is an owner's decision, like inviting a member.
     allowedRoles: ["owner"],
@@ -88,17 +88,9 @@ export const CONNECTION_KINDS: ConnectionKind[] = [
     allowedRoles: ["owner", "manager"],
     feature: "integrations",
   },
-  {
-    key: "server_sync",
-    label: "سرور راه دور",
-    description:
-      "همگام‌سازی دوطرفهٔ این سرور با سرور مرکزی (VPS): آدرس و توکن اتصال، وضعیت همگام‌سازی و رویدادهای ناموفق.",
-    // Owner-only, like the settings tab this replaces: the token reaches the
-    // whole central dataset. Gated by `site_cloud_sync` — without it there is no
-    // remote peer to sync with.
-    allowedRoles: ["owner"],
-    feature: "site_cloud_sync",
-  },
+  // `?tab=server_sync` remains an input-only compatibility link. It resolves
+  // to the unified `desktop` surface below instead of exposing a second,
+  // competing sync lifecycle screen.
   {
     key: "mcp",
     label: "دستیارهای هوش مصنوعی",
@@ -144,13 +136,23 @@ export interface ConnectionKindVisibilityOptions {
  * `integrations` module belongs to the WordPress *management* half of
  * «مدیریت وب‌سایت», not to any connection.
  */
-export function visibleConnectionKinds(options: ConnectionKindVisibilityOptions): ConnectionKind[] {
-  if (options.industry && !hasModule(options.industry, "connections")) return [];
-  return CONNECTION_KINDS.filter((kind) => kind.allowedRoles.includes(options.role));
+export function visibleConnectionKinds(
+  options: ConnectionKindVisibilityOptions,
+): ConnectionKind[] {
+  if (options.industry && !hasModule(options.industry, "connections"))
+    return [];
+  return CONNECTION_KINDS.filter((kind) =>
+    kind.allowedRoles.includes(options.role),
+  );
 }
 
-export function isConnectionKindKey(value: string | null | undefined): value is ConnectionKindKey {
-  return typeof value === "string" && (CONNECTION_KIND_KEYS as readonly string[]).includes(value);
+export function isConnectionKindKey(
+  value: string | null | undefined,
+): value is ConnectionKindKey {
+  return (
+    typeof value === "string" &&
+    (CONNECTION_KIND_KEYS as readonly string[]).includes(value)
+  );
 }
 
 /**
@@ -165,6 +167,17 @@ export function resolveConnectionKind(
   visible: ConnectionKind[],
 ): ConnectionKindKey | null {
   if (visible.length === 0) return null;
-  if (isConnectionKindKey(requested) && visible.some((kind) => kind.key === requested)) return requested;
+  // Links issued before the Desktop & Cloud consolidation stay useful without
+  // retaining a duplicate UI or separate lifecycle state.
+  if (
+    requested === "server_sync" &&
+    visible.some((kind) => kind.key === "desktop")
+  )
+    return "desktop";
+  if (
+    isConnectionKindKey(requested) &&
+    visible.some((kind) => kind.key === requested)
+  )
+    return requested;
   return visible[0].key;
 }

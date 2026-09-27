@@ -1038,7 +1038,11 @@ export async function acknowledgePendingPairing(
         status: "error",
         error: `pairing_acknowledgement_failed: HTTP ${response.status}`,
       };
-    const activated = { ...config };
+    // Pairing is the owner's explicit consent to connect this install. Keep
+    // traffic disabled until the cloud confirms the committed local snapshot,
+    // then atomically promote this recovered configuration to an active Hybrid
+    // sync target; a lost acknowledgement response retries this same step.
+    const activated = { ...config, enabled: true };
     delete activated.pairingSessionId;
     delete activated.installationId;
     await setServerSyncConfig(businessId, activated);

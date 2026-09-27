@@ -22,6 +22,7 @@ import {
 } from "../src/lib/pairing-service";
 import { applyPairingSnapshot } from "../src/lib/pairing-apply";
 import { validateSnapshot } from "../src/lib/pairing-snapshot";
+import { acknowledgePendingPairing } from "../src/lib/server-sync";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -212,7 +213,10 @@ describe("pairing round trip", () => {
       "Windows Business Suite",
       `desktop-installation-${randomUUID()}`,
     );
-    expect(anotherInstall).toEqual({ ok: false, error: "code_already_redeemed" });
+    expect(anotherInstall).toEqual({
+      ok: false,
+      error: "code_already_redeemed",
+    });
 
     const summaries = await withoutTenantScope("platform", () =>
       listPairingCodes(created.businessId),
@@ -227,6 +231,7 @@ describe("pairing round trip", () => {
     const applied = await applyPairingSnapshot(
       snapshot,
       "https://pos.example.com",
+      { pairingSessionId: redeemed.pairingSessionId, installationId },
     );
     expect(applied.businessId).toBe(created.businessId);
     expect(applied.locationId).toBe(created.locationId);
@@ -311,8 +316,39 @@ describe("pairing round trip", () => {
       ]),
     );
     expect(cloudDevice.rows[0].status).toBe("active");
+
+    // A lost acknowledgement response is recovered from the durable local
+    // config and enables normal sync only after its next successful proof.
+    await useDatabase(localDb);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200 });
+    try {
+      await expect(
+        acknowledgePendingPairing(applied.businessId),
+      ).resolves.toEqual({ status: "ok" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    const activatedConfig = await withTenant(applied.businessId, () =>
+      query<{
+        value: {
+          enabled: boolean;
+          pairingSessionId?: string;
+          installationId?: string;
+        };
+      }>(
+        `SELECT value FROM settings WHERE business_id=$1 AND key='server_sync.config'`,
+        [applied.businessId],
+      ),
+    );
+    expect(activatedConfig.rows[0].value).toMatchObject({ enabled: true });
+    expect(activatedConfig.rows[0].value.pairingSessionId).toBeUndefined();
+    expect(activatedConfig.rows[0].value.installationId).toBeUndefined();
+
     // Once acknowledged, recovery material is no longer downloadable with the
     // old one-time code; acknowledgement itself remains idempotent instead.
+    await useDatabase(serverDb);
     await expect(
       redeemPairingCode(
         issued.code,
