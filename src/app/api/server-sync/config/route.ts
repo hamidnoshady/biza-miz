@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
-import { PERMISSIONS } from "@/lib/permissions";
+import { withTenantScope, requireRole } from "@/lib/auth";
 import {
   getServerSyncConfig,
   getServerSyncState,
   getSyncDomainDiagnostics,
   listServerSyncDeadLetters,
+  listSyncRuns,
   setServerSyncConfig,
 } from "@/lib/server-sync";
 import {
@@ -17,6 +17,7 @@ import { getAppUpdateStatus } from "@/lib/app-update";
 import { deploymentRole, platformBaseUrl } from "@/lib/deployment-role";
 import { getPairedSite } from "@/lib/server-sync";
 import { publicSyncEventRegistry } from "@/lib/sync-event-registry";
+import { replicationCatalogue } from "@/lib/replication-catalogue";
 
 /**
  * Owner-only: configure the bidirectional server-to-server sync target
@@ -32,17 +33,18 @@ import { publicSyncEventRegistry } from "@/lib/sync-event-registry";
  * that pairing already knows. `resolvedRemoteUrl` is that derived address.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsView);
+  const { session, error } = await requireRole("owner");
   if (error) return error;
 
   const role = deploymentRole();
-  const [config, syncState, deadLetters, domainDiagnostics, appUpdateStatus, pairedSite] = await Promise.all([
+  const [config, syncState, deadLetters, domainDiagnostics, appUpdateStatus, pairedSite, syncRuns] = await Promise.all([
     getServerSyncConfig(session.businessId),
     getServerSyncState(session.businessId),
     listServerSyncDeadLetters(session.businessId),
     getSyncDomainDiagnostics(session.businessId),
     getAppUpdateStatus(session.businessId),
     role === "central" ? getPairedSite(session.businessId) : Promise.resolve(null),
+    listSyncRuns(session.businessId),
   ]);
 
   // Sources in order. Pairing writes the URL the laptop was paired with
@@ -69,12 +71,14 @@ export const GET = withTenantScope(async () => {
     deadLetters,
     domainDiagnostics,
     eventRegistry: publicSyncEventRegistry(),
+    replicationCatalogue: replicationCatalogue(),
+    syncRuns,
     appUpdateStatus,
   });
 });
 
 export const PUT = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requireRole("owner");
   if (error) return error;
 
   // A central server is what sites sync *to*; it has no peer of its own, and

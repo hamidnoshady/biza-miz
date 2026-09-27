@@ -65,6 +65,8 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/cms/revalidate",
   "/api/cms/order-events",
   "/api/pairing/redeem",
+  "/api/pairing/activate",
+  "/api/server-sync/credential-rotation",
   "/mcp",
 ] as const;
 
@@ -115,6 +117,7 @@ const PUBLIC_PATHS = [
   // code from their *own* dashboard, the address they hand the desktop app is
   // their business origin. See src/lib/pairing-redeem.ts.
   "/api/pairing/redeem",
+  "/api/pairing/activate",
   // Phase 12: self-service business registration creates the tenant a session
   // would otherwise be scoped to, so it cannot require one. Refuses with 403
   // unless ALLOW_PUBLIC_SIGNUP is set.
@@ -136,6 +139,7 @@ const PUBLIC_PATHS = [
   "/api/server-sync/push",
   "/api/server-sync/pull",
   "/api/server-sync/media",
+  "/api/server-sync/credential-rotation",
   // Migration 0132: the same shape again — the caller is another *server*
   // migrating onto this one, authenticated with a bearer token issued in the
   // super-admin console (`platform_backup_tokens`, hashed), never with a
@@ -447,6 +451,7 @@ const AUTH_RATE_LIMITED_PATHS = [
   // bucket as every other credential exchange rather than going unlimited.
   "/api/platform/pairing/redeem",
   "/api/pairing/redeem",
+  "/api/pairing/activate",
   "/api/setup/pair",
   // Self-service business registration accepts an *existing* platform user's
   // email with a guessed password (adding a business to an already-registered

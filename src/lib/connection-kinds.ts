@@ -47,9 +47,9 @@ export interface ConnectionKind {
 export const CONNECTION_KINDS: ConnectionKind[] = [
   {
     key: "desktop",
-    label: "برنامه دسکتاپ",
+    label: "دسکتاپ و همگام‌سازی ابری",
     description:
-      "نصب برنامه روی رایانهٔ فروشگاه و اتصال آن به همین حساب ابری: آدرس این حساب و یک کد اتصال یک‌بارمصرف.",
+      "چرخهٔ کامل اتصال دسکتاپ به ابر: صدور کد، آماده‌سازی دادهٔ اولیه، فعال‌سازی امن، سلامت همگام‌سازی، تعمیر و لغو دستگاه.",
     // Redeeming a code hands over a snapshot of the whole business, including
     // credential hashes. That is an owner's decision, like inviting a member.
     allowedRoles: ["owner"],
@@ -90,9 +90,9 @@ export const CONNECTION_KINDS: ConnectionKind[] = [
   },
   {
     key: "server_sync",
-    label: "سرور راه دور",
+    label: "جزئیات فنی همگام‌سازی",
     description:
-      "همگام‌سازی دوطرفهٔ این سرور با سرور مرکزی (VPS): آدرس و توکن اتصال، وضعیت همگام‌سازی و رویدادهای ناموفق.",
+      "عیب‌یابی پیشرفتهٔ اتصال ابری: وضعیت push/pull، رویدادهای معوق و نامه‌های مرده. نصب‌های تازه به ورود دستی توکن نیاز ندارند.",
     // Owner-only, like the settings tab this replaces: the token reaches the
     // whole central dataset. Gated by `site_cloud_sync` — without it there is no
     // remote peer to sync with.

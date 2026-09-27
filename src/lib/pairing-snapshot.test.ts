@@ -17,6 +17,10 @@ function validSnapshot(): PairingSnapshot {
       phone: null,
       timezone: "Asia/Tehran",
     },
+    locationIdentities: [
+      { id: "22222222-2222-2222-2222-222222222222", name: "شعبه مرکزی", timezone: "Asia/Tehran" },
+      { id: "aaaaaaaa-1111-1111-1111-111111111111", name: "شعبه دوم", timezone: "Asia/Tehran" },
+    ],
     siteDevice: {
       id: "77777777-7777-7777-7777-777777777777",
       publicId: "88888888-8888-8888-8888-888888888888",

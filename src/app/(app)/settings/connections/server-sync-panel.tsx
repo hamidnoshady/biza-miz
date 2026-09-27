@@ -35,6 +35,8 @@ interface ConfigView {
   tokenFormat: "current" | "legacy" | null;
   enabled: boolean;
   batchSize?: number;
+  siteDeviceId?: string;
+  pairingPending?: boolean;
 }
 
 type DeploymentRole = "central" | "site";
@@ -69,6 +71,21 @@ interface DeadLetter {
   createdAt: string;
 }
 
+interface SyncRunView {
+  id: string;
+  siteDeviceId: string | null;
+  locationId: string | null;
+  direction: "push" | "pull" | "activation";
+  status: "running" | "ok" | "error" | "skipped";
+  startedAt: string;
+  eventsAttempted: number;
+  eventsApplied: number;
+  eventsDeferred: number;
+  eventsConflicted: number;
+  eventsDeadLettered: number;
+  errorCode: string | null;
+}
+
 interface DomainDiagnostics {
   counts: { deferred: number; applied: number; deadLettered: number; openDeadLetters: number };
   recent: Array<{
@@ -95,6 +112,15 @@ interface DomainDiagnostics {
   }>;
 }
 
+interface ReplicationDomainView {
+  key: string;
+  label: string;
+  authority: "cloud_authoritative" | "site_authoritative" | "bidirectional" | "site_local" | "cloud_only";
+  bootstrap: "snapshot" | "identity_only" | "none";
+  eventTypes: string[];
+  notes: string;
+}
+
 interface AppUpdateStatusView {
   checkedAt: string;
   currentVersion: string;
@@ -105,13 +131,15 @@ interface AppUpdateStatusView {
 
 function formatTime(iso: string | null): string {
   if (!iso) return "هرگز";
-  const time = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Tehran",
+  // Jalali presentation is centralised in the platform formatter. Do not pin
+  // an arbitrary Tehran timezone in a sync screen: installations may use the
+  // business timezone configured at pairing time.
+  const time = new Intl.DateTimeFormat("fa-IR", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
   }).format(new Date(iso));
-  return `${toPersianDigits(formatJalali(iso))} ${toPersianDigits(time)}`;
+  return `${toPersianDigits(formatJalali(iso))} ${time}`;
 }
 
 const SYNC_STATUS_LABELS: Record<string, string> = {
@@ -137,7 +165,9 @@ export function ServerSyncPanel() {
   const [syncState, setSyncState] = useState<StateView | null>(null);
   const [deadLetters, setDeadLetters] = useState<DeadLetter[]>([]);
   const [domainDiagnostics, setDomainDiagnostics] = useState<DomainDiagnostics | null>(null);
+  const [syncRuns, setSyncRuns] = useState<SyncRunView[]>([]);
   const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatusView | null>(null);
+  const [replicationCatalogue, setReplicationCatalogue] = useState<ReplicationDomainView[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -171,7 +201,9 @@ export function ServerSyncPanel() {
       syncState: StateView;
       deadLetters: DeadLetter[];
       domainDiagnostics: DomainDiagnostics;
+      syncRuns: SyncRunView[];
       appUpdateStatus: AppUpdateStatusView | null;
+      replicationCatalogue: ReplicationDomainView[];
       error?: string;
     }>("/api/server-sync/config");
     if (ok) {
@@ -182,7 +214,9 @@ export function ServerSyncPanel() {
       setSyncState(data.syncState);
       setDeadLetters(data.deadLetters ?? []);
       setDomainDiagnostics(data.domainDiagnostics ?? null);
+      setSyncRuns(data.syncRuns ?? []);
       setAppUpdateStatus(data.appUpdateStatus ?? null);
+      setReplicationCatalogue(data.replicationCatalogue ?? []);
       setRemoteUrl(data.config?.remoteUrl ?? "");
       setOverriding(false);
       setEnabled(data.config?.enabled ?? false);
@@ -325,8 +359,10 @@ export function ServerSyncPanel() {
         <SyncStatusPanels
           syncState={syncState}
           appUpdateStatus={appUpdateStatus}
+          replicationCatalogue={replicationCatalogue}
           deadLetters={deadLetters}
           domainDiagnostics={domainDiagnostics}
+          syncRuns={syncRuns}
           busy={busy}
           onReconcile={reconcile}
         />
@@ -343,6 +379,12 @@ export function ServerSyncPanel() {
         </p>
         <ErrorBox>{error}</ErrorBox>
         {notice ? <InfoBox>{notice}</InfoBox> : null}
+        {config?.pairingPending ? (
+          <InfoBox>دادهٔ اولیه روی این دستگاه ثبت شده است و فعال‌سازی امن در حال تلاش دوباره است. تا تأیید ابری، همگام‌سازی زنده شروع نمی‌شود.</InfoBox>
+        ) : null}
+        {config?.siteDeviceId ? (
+          <InfoBox>این نصب با کد اتصال جفت شده است؛ آدرس و اعتبارنامهٔ اختصاصی آن خودکار مدیریت می‌شود. فقط در بازیابی پیشرفته، تنظیم دستی لازم است.</InfoBox>
+        ) : null}
         <form onSubmit={save}>
           {overriding ? (
             <Field
@@ -377,6 +419,8 @@ export function ServerSyncPanel() {
               </div>
             </Field>
           )}
+          {!config?.siteDeviceId ? (
+            <>
           {config?.tokenFormat === "legacy" ? (
             <InfoBox>
               توکن فعلی با قالب قدیمی ساخته شده و همچنان کار می‌کند، اما قابل بازخوانی و تایپ نیست. در فرصت مناسب یک
@@ -426,6 +470,8 @@ export function ServerSyncPanel() {
               <span className="mt-1 block text-xs text-destructive">{errorMessage(tokenParse.error)}</span>
             ) : null}
           </Field>
+            </>
+          ) : null}
           <Field label="تعداد رویداد در هر دسته">
             <PersianNumberInput
               className={inputClass}
@@ -445,8 +491,10 @@ export function ServerSyncPanel() {
       <SyncStatusPanels
         syncState={syncState}
         appUpdateStatus={appUpdateStatus}
+        replicationCatalogue={replicationCatalogue}
         deadLetters={deadLetters}
         domainDiagnostics={domainDiagnostics}
+        syncRuns={syncRuns}
         busy={busy}
         onReconcile={reconcile}
       />
@@ -462,15 +510,19 @@ export function ServerSyncPanel() {
 function SyncStatusPanels({
   syncState,
   appUpdateStatus,
+  replicationCatalogue,
   deadLetters,
   domainDiagnostics,
+  syncRuns,
   busy,
   onReconcile,
 }: {
   syncState: StateView | null;
   appUpdateStatus: AppUpdateStatusView | null;
+  replicationCatalogue: ReplicationDomainView[];
   deadLetters: DeadLetter[];
   domainDiagnostics: DomainDiagnostics | null;
+  syncRuns: SyncRunView[];
   busy: boolean;
   onReconcile: (action: "retry-deferred" | "retry-dead-letter" | "discard-dead-letter", id?: number) => Promise<void>;
 }) {
@@ -592,6 +644,42 @@ function SyncStatusPanels({
               ))}
             </div>
           ) : null}
+        </SectionCard>
+      ) : null}
+
+      {syncRuns.length > 0 ? (
+        <SectionCard title="آخرین اجراهای همگام‌سازی">
+          <p className="mb-3 text-sm text-muted-foreground">هر ردیف یک اجرای مستقل برای همان دستگاه/شعبه است؛ شناسه و payload رویداد در این نمای پشتیبانی نمایش داده نمی‌شود.</p>
+          <div className="space-y-2">
+            {syncRuns.slice(0, 12).map((run) => (
+              <div key={run.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3 text-xs">
+                <span dir="ltr" className="font-mono">{run.direction} · {run.status}</span>
+                <span>تلاش: {toPersianDigits(String(run.eventsAttempted))} • اعمال: {toPersianDigits(String(run.eventsApplied))}</span>
+                {run.errorCode ? <span dir="ltr" className="text-destructive">{run.errorCode}</span> : null}
+                <span className="text-muted-foreground">{formatTime(run.startedAt)}</span>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+      ) : null}
+
+      {replicationCatalogue.length > 0 ? (
+        <SectionCard title="پوشش همگام‌سازی">
+          <p className="mb-3 text-sm text-muted-foreground">این فهرست از کاتالوگ مالکیت دادهٔ سرویس ساخته می‌شود؛ هر موردی که رویداد زنده ندارد، عمداً به‌عنوان دادهٔ اولیه، محلی یا ابری نمایش داده شده است.</p>
+          <div className="space-y-2">
+            {replicationCatalogue.map((domain) => (
+              <div key={domain.key} className="rounded-lg border border-border p-3 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium">{domain.label}</span>
+                  <code dir="ltr" className="text-xs text-muted-foreground">{domain.authority}</code>
+                </div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">{domain.notes}</p>
+                <p className="mt-1 break-words font-mono text-[11px] text-muted-foreground" dir="ltr">
+                  {domain.eventTypes.length ? domain.eventTypes.join(", ") : `bootstrap:${domain.bootstrap}`}
+                </p>
+              </div>
+            ))}
+          </div>
         </SectionCard>
       ) : null}
 

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { applySyncEvent, type SyncEventInput } from "@/lib/sync-events";
 import { query, withTenant, withoutTenantScope } from "@/lib/db";
-import { recordLegacyTokenUsage, resolveSyncCredential, tokensMatch, legacySyncToken } from "@/lib/server-sync";
+import { recordLegacyTokenUsage, resolveSyncCredential, tokensMatch, legacySyncToken, recordSyncRun } from "@/lib/server-sync";
 import type { Role } from "@/lib/auth";
 
 /**
@@ -154,5 +154,20 @@ export async function POST(request: NextRequest) {
     return out;
   });
 
+  if (credential?.siteDeviceId) {
+    await withTenant(businessId, () => recordSyncRun({
+      businessId,
+      siteDeviceId: credential.siteDeviceId,
+      locationId: credential.locationId,
+      direction: "push",
+      status: results.some((result) => !result.ok && !result.conflict && !result.deadLettered) ? "error" : "ok",
+      eventsAttempted: results.length,
+      eventsApplied: results.filter((result) => result.ok).length,
+      eventsDeferred: results.filter((result) => result.deferred).length,
+      eventsConflicted: results.filter((result) => result.conflict).length,
+      eventsDeadLettered: results.filter((result) => result.deadLettered).length,
+      errorCode: results.find((result) => !result.ok)?.error ?? null,
+    }));
+  }
   return NextResponse.json({ results });
 }

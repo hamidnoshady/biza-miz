@@ -23,6 +23,8 @@ export interface ServerSyncConfig {
   siteDeviceId?: string;
   siteDevicePublicId?: string;
   locationId?: string;
+  /** True until the cloud accepts the freshly applied pairing snapshot. */
+  pairingPending?: boolean;
 }
 
 export interface ServerSyncConfigUpdateInput {
@@ -94,6 +96,7 @@ export function resolveConfigUpdate(
       ...(existing?.siteDeviceId ? { siteDeviceId: existing.siteDeviceId } : {}),
       ...(existing?.siteDevicePublicId ? { siteDevicePublicId: existing.siteDevicePublicId } : {}),
       ...(existing?.locationId ? { locationId: existing.locationId } : {}),
+      ...(existing?.pairingPending ? { pairingPending: true } : {}),
     },
   };
 }

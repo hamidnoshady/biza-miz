@@ -17,6 +17,7 @@ import {
   issuePairingCode,
   listPairingCodes,
   redeemPairingCode,
+  activatePairingEnrollment,
   revokePairingCode,
 } from "../src/lib/pairing-service";
 import { applyPairingSnapshot } from "../src/lib/pairing-apply";
@@ -183,12 +184,12 @@ describe("pairing round trip", () => {
 
     // The same code cannot be redeemed twice.
     const second = await redeemPairingCode(issued.code, "127.0.0.1");
-    expect(second).toEqual({ ok: false, error: "code_already_redeemed" });
+    expect(second).toEqual({ ok: false, error: "code_pending_activation" });
 
     const summaries = await withoutTenantScope("platform", () =>
       listPairingCodes(created.businessId),
     );
-    expect(summaries[0].state).toBe("code_already_redeemed");
+    expect(summaries[0].state).toBe("code_pending_activation");
 
     const snapshot = redeemed.snapshot;
 
@@ -200,6 +201,18 @@ describe("pairing round trip", () => {
     expect(applied.locationId).toBe(created.locationId);
     expect(applied.ownerUserId).toBe(created.userId);
 
+    // The cloud identity becomes active only after the local transaction has
+    // committed. A replayed acknowledgement is safe and does not consume a
+    // second device or credential.
+    await useDatabase(serverDb);
+    expect(await activatePairingEnrollment(snapshot.siteDevice.id, snapshot.syncToken)).toMatchObject({ ok: true, alreadyActive: false });
+    expect(await activatePairingEnrollment(snapshot.siteDevice.id, snapshot.syncToken)).toMatchObject({ ok: true, alreadyActive: true });
+    const cloudSite = await withoutTenantScope("platform", () => query<{ status: string }>(
+      "SELECT status FROM site_devices WHERE id=$1", [snapshot.siteDevice.id],
+    ));
+    expect(cloudSite.rows[0].status).toBe("active");
+
+    await useDatabase(localDb);
     await withTenant(applied.businessId, async () => {
       const items = await query<{ name: string; price: string }>(
         `SELECT name, price FROM menu_items`,

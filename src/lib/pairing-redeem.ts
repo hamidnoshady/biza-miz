@@ -32,6 +32,7 @@ const STATUS_BY_ERROR: Record<string, number> = {
   code_expired: 410,
   code_already_redeemed: 409,
   code_revoked: 410,
+  code_pending_activation: 409,
 };
 
 /**
@@ -42,7 +43,8 @@ const STATUS_BY_ERROR: Record<string, number> = {
  * as /api/auth/accept-invite and the server-sync bearer routes.
  *
  * The response carries the business's whole configuration including credential
- * hashes, so it must never be cached or logged.
+ * hashes, so it must never be cached or logged. The cloud device remains
+ * pending until the local install acknowledges /api/pairing/activate.
  */
 export async function handlePairingRedeem(request: NextRequest): Promise<NextResponse> {
   let body: { code?: string; deviceName?: string };

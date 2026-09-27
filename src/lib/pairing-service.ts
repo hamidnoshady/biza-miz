@@ -17,11 +17,14 @@ import {
   hashPairingCode,
   pairingCodeState,
   PAIRING_CODE_TTL_HOURS,
+  PAIRING_RESERVATION_TTL_MINUTES,
   type PairingCodeState,
+  type PairingEnrollmentState,
 } from "./pairing-codes";
 import { PAIRING_SNAPSHOT_VERSION, type PairingSnapshot } from "./pairing-snapshot";
 import { SETTING_KEYS } from "./settings";
 import { generateSyncToken } from "./sync-token";
+import { pairingDataClassification } from "./replication-catalogue";
 
 export interface PairingCodeSummary {
   id: string;
@@ -45,6 +48,9 @@ type CodeRow = {
   redeemed_at: Date | null;
   revoked_at: Date | null;
   created_at: Date;
+  enrollment_state: PairingEnrollmentState;
+  reservation_expires_at: Date | null;
+  site_device_id: string | null;
 };
 
 function toSummary(row: CodeRow, now: Date): PairingCodeSummary {
@@ -57,7 +63,12 @@ function toSummary(row: CodeRow, now: Date): PairingCodeSummary {
     revokedAt: row.revoked_at?.toISOString() ?? null,
     createdAt: row.created_at.toISOString(),
     state: pairingCodeState(
-      { expiresAt: row.expires_at, redeemedAt: row.redeemed_at, revokedAt: row.revoked_at },
+      {
+        expiresAt: row.expires_at,
+        redeemedAt: row.redeemed_at,
+        revokedAt: row.revoked_at,
+        enrollmentState: row.enrollment_state,
+      },
       now,
     ),
   };
@@ -113,7 +124,8 @@ export async function issuePairingCode(
       `INSERT INTO install_pairing_codes
          (business_id, location_id, code_hash, expires_at, issued_by)
        VALUES ($1, $2, $3, now() + ($4 || ' hours')::interval, $5)
-       RETURNING id, business_id, location_id, expires_at, redeemed_at, revoked_at, created_at`,
+       RETURNING id, business_id, location_id, expires_at, redeemed_at, revoked_at, created_at,
+                 enrollment_state, reservation_expires_at, site_device_id`,
       [businessId, locationId, hashPairingCode(code), String(PAIRING_CODE_TTL_HOURS), issuedBy],
     );
     await client.query("COMMIT");
@@ -128,7 +140,8 @@ export async function issuePairingCode(
 
 export async function listPairingCodes(businessId: string): Promise<PairingCodeSummary[]> {
   const { rows } = await query<CodeRow>(
-    `SELECT id, business_id, location_id, expires_at, redeemed_at, revoked_at, created_at
+    `SELECT id, business_id, location_id, expires_at, redeemed_at, revoked_at, created_at,
+            enrollment_state, reservation_expires_at, site_device_id
        FROM install_pairing_codes
       WHERE business_id = $1
       ORDER BY created_at DESC
@@ -153,21 +166,43 @@ export type RedeemResult =
   | { ok: true; snapshot: PairingSnapshot }
   | {
       ok: false;
-      error: "code_not_found" | "code_expired" | "code_already_redeemed" | "code_revoked";
+      error:
+        | "code_not_found"
+        | "code_expired"
+        | "code_already_redeemed"
+        | "code_revoked"
+        | "code_pending_activation";
     };
 
 /**
- * Trade a pairing code for a snapshot of its business.
- *
- * Bypassed (`pairing-redeem`): the code is a bearer-style credential and
- * resolving it to a business is exactly the "identify the tenant first"
- * problem login and server-sync-auth already have. The bypass covers the
- * lookup, the mark-as-redeemed, and the reads that build the snapshot — all
- * for the one business the code names.
- *
- * The code is marked redeemed in the same transaction as the lookup, under a
- * row lock, so two desktops racing the same code can never both get a
- * snapshot.
+ * Releases stale reservations before another enrollment is allowed to claim a
+ * code.  A failed local write can therefore never become an active cloud
+ * device: its pending credential is removed and the still-unspent code becomes
+ * retryable after the reservation window.
+ */
+async function reclaimStalePairingReservations(client: import("pg").PoolClient): Promise<void> {
+  const expired = await client.query<{ site_device_id: string | null }>(
+    `UPDATE install_pairing_codes
+        SET enrollment_state = 'issued', reservation_expires_at = NULL, site_device_id = NULL
+      WHERE enrollment_state IN ('reserved', 'snapshot_prepared')
+        AND reservation_expires_at IS NOT NULL AND reservation_expires_at <= now()
+      RETURNING site_device_id`,
+  );
+  const ids = expired.rows.flatMap((row) => row.site_device_id ? [row.site_device_id] : []);
+  if (ids.length === 0) return;
+  await client.query(`DELETE FROM site_sync_credentials WHERE site_device_id = ANY($1::uuid[])`, [ids]);
+  await client.query(
+    `UPDATE site_devices SET status = 'disabled', revoked_at = COALESCE(revoked_at, now())
+      WHERE id = ANY($1::uuid[]) AND status = 'pending'`,
+    [ids],
+  );
+}
+
+/**
+ * Reserve a code, create a pending machine identity, then prepare the
+ * snapshot.  The code is deliberately *not* redeemed here.  It is consumed
+ * only by activatePairingEnrollment after the desktop has committed the
+ * snapshot to its own database.
  */
 export async function redeemPairingCode(
   rawCode: string,
@@ -176,14 +211,17 @@ export async function redeemPairingCode(
 ): Promise<RedeemResult> {
   return withoutTenantScope("pairing-redeem", async () => {
     const client = await getPool().connect();
-    let businessId: string;
-    let locationId: string;
+    let businessId = "";
+    let locationId = "";
+    let codeId = "";
     let siteDevice!: PairingSnapshot["siteDevice"];
-    let syncToken!: string;
+    let syncToken = "";
     try {
       await client.query("BEGIN");
+      await reclaimStalePairingReservations(client);
       const { rows } = await client.query<CodeRow>(
-        `SELECT id, business_id, location_id, expires_at, redeemed_at, revoked_at, created_at
+        `SELECT id, business_id, location_id, expires_at, redeemed_at, revoked_at, created_at,
+                enrollment_state, reservation_expires_at, site_device_id
            FROM install_pairing_codes WHERE code_hash = $1 FOR UPDATE`,
         [hashPairingCode(rawCode)],
       );
@@ -192,11 +230,12 @@ export async function redeemPairingCode(
         await client.query("ROLLBACK");
         return { ok: false, error: "code_not_found" };
       }
-
-      const state = pairingCodeState(
-        { expiresAt: row.expires_at, redeemedAt: row.redeemed_at, revokedAt: row.revoked_at },
-        new Date(),
-      );
+      const state = pairingCodeState({
+        expiresAt: row.expires_at,
+        redeemedAt: row.redeemed_at,
+        revokedAt: row.revoked_at,
+        enrollmentState: row.enrollment_state,
+      }, new Date());
       if (state !== "valid") {
         await client.query("ROLLBACK");
         return { ok: false, error: state };
@@ -204,37 +243,132 @@ export async function redeemPairingCode(
 
       businessId = row.business_id;
       locationId = row.location_id;
+      codeId = row.id;
       syncToken = generateSyncToken();
       const cleanDeviceName = deviceName.trim().slice(0, 120) || "Windows Business Suite";
       const deviceRows = await client.query<{ id: string; public_id: string; display_name: string }>(
-        `INSERT INTO site_devices (business_id, location_id, display_name)
-         VALUES ($1, $2, $3)
+        `INSERT INTO site_devices (business_id, location_id, display_name, status)
+         VALUES ($1, $2, $3, 'pending')
          RETURNING id, public_id, display_name`,
         [businessId, locationId, cleanDeviceName],
       );
       const device = deviceRows.rows[0];
       await client.query(
-        `INSERT INTO site_sync_credentials (site_device_id, business_id, token_hash)
-         VALUES ($1, $2, $3)`,
+        `INSERT INTO site_sync_credentials (site_device_id, business_id, token_hash, state)
+         VALUES ($1, $2, $3, 'active')`,
         [device.id, businessId, createHash("sha256").update(syncToken).digest("hex")],
       );
       await client.query(
-        `UPDATE install_pairing_codes SET redeemed_at = now(), redeemed_ip = $2 WHERE id = $1`,
-        [row.id, clientIp],
+        `UPDATE install_pairing_codes
+            SET enrollment_state = 'reserved', reservation_expires_at = now() + ($2 || ' minutes')::interval,
+                site_device_id = $3, redeemed_ip = $4
+          WHERE id = $1`,
+        [row.id, String(PAIRING_RESERVATION_TTL_MINUTES), device.id, clientIp],
       );
       await client.query("COMMIT");
       siteDevice = { id: device.id, publicId: device.public_id, displayName: device.display_name };
     } catch (err) {
-      await client.query("ROLLBACK");
+      await client.query("ROLLBACK").catch(() => {});
       throw err;
     } finally {
       client.release();
     }
 
-    return {
-      ok: true,
-      snapshot: await buildPairingSnapshot(businessId, locationId, siteDevice, syncToken),
-    };
+    try {
+      const snapshot = await buildPairingSnapshot(businessId, locationId, siteDevice, syncToken);
+      await query(
+        `UPDATE install_pairing_codes SET enrollment_state = 'snapshot_prepared'
+          WHERE id = $1 AND enrollment_state = 'reserved'`,
+        [codeId],
+      );
+      return { ok: true, snapshot };
+    } catch (error) {
+      // Snapshot construction itself is part of enrollment.  Put the code back
+      // into its issued state and remove the pending credential so a transient
+      // central-side failure is safe to retry immediately.
+      await query(
+        `UPDATE install_pairing_codes
+            SET enrollment_state = 'issued', reservation_expires_at = NULL, site_device_id = NULL
+          WHERE id = $1 AND redeemed_at IS NULL`,
+        [codeId],
+      ).catch(() => {});
+      await query(`DELETE FROM site_sync_credentials WHERE site_device_id = $1`, [siteDevice?.id]).catch(() => {});
+      await query(
+        `UPDATE site_devices SET status = 'disabled', revoked_at = now()
+          WHERE id = $1 AND status = 'pending'`,
+        [siteDevice?.id],
+      ).catch(() => {});
+      throw error;
+    }
+  });
+}
+
+export type PairingActivationResult =
+  | { ok: true; alreadyActive: boolean; businessId: string; siteDeviceId: string }
+  | { ok: false; error: "pairing_not_found" | "pairing_expired" | "pairing_not_prepared" };
+
+/**
+ * Final acknowledgement from the freshly bootstrapped desktop.  The bearer is
+ * the pending site's own credential, never a code or a user session.  This is
+ * idempotent so a timeout after the cloud commit can be retried safely.
+ */
+export async function activatePairingEnrollment(
+  siteDeviceId: string,
+  syncToken: string,
+): Promise<PairingActivationResult> {
+  return withoutTenantScope("pairing-redeem", async () => {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      await reclaimStalePairingReservations(client);
+      const locked = await client.query<{
+        id: string; business_id: string; enrollment_state: PairingEnrollmentState; reservation_expires_at: Date | null;
+        redeemed_at: Date | null; site_device_id: string | null;
+      }>(
+        `SELECT pc.id, pc.business_id, pc.enrollment_state, pc.reservation_expires_at, pc.redeemed_at, pc.site_device_id
+           FROM install_pairing_codes pc
+           JOIN site_sync_credentials c ON c.site_device_id = pc.site_device_id AND c.business_id = pc.business_id
+          WHERE pc.site_device_id = $1 AND c.token_hash = $2
+          FOR UPDATE OF pc`,
+        [siteDeviceId, createHash("sha256").update(syncToken).digest("hex")],
+      );
+      const row = locked.rows[0];
+      if (!row) {
+        await client.query("ROLLBACK");
+        return { ok: false, error: "pairing_not_found" };
+      }
+      if (row.enrollment_state === "active" && row.redeemed_at) {
+        await client.query("ROLLBACK");
+        return { ok: true, alreadyActive: true, businessId: row.business_id, siteDeviceId };
+      }
+      if (!row.reservation_expires_at || row.reservation_expires_at <= new Date()) {
+        await client.query("ROLLBACK");
+        return { ok: false, error: "pairing_expired" };
+      }
+      if (row.enrollment_state !== "snapshot_prepared") {
+        await client.query("ROLLBACK");
+        return { ok: false, error: "pairing_not_prepared" };
+      }
+      await client.query(`UPDATE site_devices SET status = 'active' WHERE id = $1 AND status = 'pending'`, [siteDeviceId]);
+      await client.query(
+        `UPDATE install_pairing_codes
+            SET enrollment_state = 'active', redeemed_at = now(), reservation_expires_at = NULL
+          WHERE id = $1`,
+        [row.id],
+      );
+      await client.query(
+        `INSERT INTO audit_log (business_id, action, entity, entity_id, payload)
+         VALUES ($1, 'site_device.pairing_activated', 'site_device', $2, $3)`,
+        [row.business_id, siteDeviceId, JSON.stringify({ credentialStored: false })],
+      );
+      await client.query("COMMIT");
+      return { ok: true, alreadyActive: false, businessId: row.business_id, siteDeviceId };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 }
 
@@ -258,6 +392,7 @@ export async function buildPairingSnapshot(
   const [
     bizRes,
     locRes,
+    locationIdentityRes,
     userRes,
     assignRes,
     accountRes,
@@ -286,7 +421,11 @@ export async function buildPairingSnapshot(
         address: string | null;
         phone: string | null;
         timezone: string;
-      }>(`SELECT id, name, address, phone, timezone FROM locations WHERE id = $1`, [locationId]),
+      }>(`SELECT id, name, address, phone, timezone FROM locations WHERE id = $1 AND business_id = $2`, [locationId, businessId]),
+      query<{ id: string; name: string; timezone: string }>(
+        `SELECT id, name, timezone FROM locations WHERE business_id = $1 AND is_active ORDER BY created_at`,
+        [businessId],
+      ),
       query<{
         id: string;
         role: string;
@@ -482,6 +621,11 @@ export async function buildPairingSnapshot(
     version: PAIRING_SNAPSHOT_VERSION,
     business: bizRes.rows[0],
     location: locRes.rows[0],
+    locationIdentities: locationIdentityRes.rows.map((location) => ({
+      id: location.id,
+      name: location.name,
+      timezone: location.timezone,
+    })),
     siteDevice,
     users: userRes.rows.map((u) => ({
       id: u.id,
@@ -603,50 +747,11 @@ export async function buildPairingSnapshot(
       requiresReference: method.requires_reference,
     })),
     settings: settingRes.rows.map((s) => ({ key: s.key, value: s.value })),
-    dataClassification: PAIRING_DATA_CLASSIFICATION,
+    dataClassification: pairingDataClassification(),
     features,
     syncToken,
   };
 }
-
-const PAIRING_DATA_CLASSIFICATION = {
-  bootstrapMasterData: [
-    "business identity and selected location",
-    "active users, location assignments, and credential hashes",
-    "chart of accounts",
-    "feature entitlements and selected operational settings",
-    "menu categories, items, modifier groups, modifiers, and recipes",
-    "dining tables (availability state resets locally)",
-    "inventory item catalogue (not stock balances or lots)",
-    "named payment methods",
-    "site-device identity and one-time sync credential",
-  ],
-  ongoingDomainEvents: [
-    "order.created",
-    "order.item_added",
-    "order.item_status_changed",
-  ],
-  siteLocalOperationalData: [
-    "embedded PostgreSQL files and local backup destinations",
-    "desktop identity, secrets, certificates, LAN gateway, logs, and firewall preference",
-    "IndexedDB offline mutation queue",
-    "printer and print-connector machine configuration",
-  ],
-  centralOnlyData: [
-    "platform administrators, impersonation grants, plans, wallet billing, and global feature catalogue",
-    "cloud media/update/backup distribution credentials",
-    "cross-business support and platform audit data",
-  ],
-  notYetReplicated: [
-    "historical/full orders, tenders, payments, refunds, reservations, and shifts",
-    "journal entries, fiscal periods, bank reconciliation, payroll, tax filings, and accounting documents",
-    "stock balances, lots, movements, counts, purchases, suppliers, production, and transfers",
-    "customers, CRM activity, loyalty, campaigns, coupons, and Growth/Marketing history",
-    "website content, WooCommerce mappings/outbox, WordPress, Holoo, API/MCP, and other integration state",
-    "media binaries and media-library history",
-    "changes to bootstrap master data after pairing unless represented by an event listed above",
-  ],
-} satisfies PairingSnapshot["dataClassification"];
 
 /**
  * The settings a till needs to operate, and nothing else. Backup destinations

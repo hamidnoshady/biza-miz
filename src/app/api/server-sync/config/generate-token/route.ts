@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
-import { PERMISSIONS } from "@/lib/permissions";
+import { withTenantScope, requireRole } from "@/lib/auth";
 import { generateSyncToken } from "@/lib/sync-token";
 
 /**
@@ -14,7 +13,7 @@ import { generateSyncToken } from "@/lib/sync-token";
  * sync between the two calls.
  */
 export const POST = withTenantScope(async () => {
-  const { error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { error } = await requireRole("owner");
   if (error) return error;
 
   return NextResponse.json({ token: generateSyncToken() });

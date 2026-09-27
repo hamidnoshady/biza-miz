@@ -23,6 +23,7 @@ const PASSTHROUGH_ERRORS = new Set([
   "code_expired",
   "code_already_redeemed",
   "code_revoked",
+  "code_pending_activation",
 ]);
 
 /**
@@ -123,6 +124,25 @@ export async function POST(request: NextRequest) {
 
   const applied = await applyPairingSnapshot(validation.snapshot, remoteUrl);
 
+  // Local data is committed before the cloud device becomes active.  If this
+  // acknowledgement times out, the persisted pairingPending flag lets the sync
+  // worker retry without reinstalling or consuming another code.
+  let activationPending = false;
+  try {
+    const activation = await fetch(`${remoteUrl}/api/pairing/activate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${validation.snapshot.syncToken}`,
+      },
+      body: JSON.stringify({ siteDeviceId: validation.snapshot.siteDevice.id }),
+      signal: AbortSignal.timeout(REDEEM_TIMEOUT_MS),
+    });
+    activationPending = !activation.ok;
+  } catch {
+    activationPending = true;
+  }
+
   const token = await signSession({
     sub: applied.ownerUserId,
     role: "owner",
@@ -133,7 +153,7 @@ export async function POST(request: NextRequest) {
     fullName: applied.ownerName,
     platformUserId: applied.ownerPlatformUserId,
   });
-  const response = NextResponse.json({ ok: true, slug: applied.businessSlug });
+  const response = NextResponse.json({ ok: true, slug: applied.businessSlug, activationPending });
   response.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
   return response;
 }

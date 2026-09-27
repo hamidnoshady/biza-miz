@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query, withTenant, withoutTenantScope } from "@/lib/db";
-import { recordLegacyTokenUsage, resolveSyncCredential, tokensMatch, legacySyncToken } from "@/lib/server-sync";
+import { recordLegacyTokenUsage, resolveSyncCredential, tokensMatch, legacySyncToken, recordSyncRun } from "@/lib/server-sync";
 
 /**
  * Server-to-server pull endpoint (Phase 11).
@@ -106,5 +106,18 @@ export async function GET(request: NextRequest) {
     origin: "cloud",
   }));
 
+  if (credential?.siteDeviceId) {
+    await withTenant(businessId, () => recordSyncRun({
+      businessId,
+      siteDeviceId: credential.siteDeviceId,
+      locationId: credential.locationId,
+      direction: "pull",
+      status: "ok",
+      startCursor: after,
+      endCursor: events.at(-1)?.id ?? after,
+      eventsAttempted: events.length,
+      eventsApplied: events.length,
+    }));
+  }
   return NextResponse.json({ events });
 }

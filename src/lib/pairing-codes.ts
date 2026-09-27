@@ -18,6 +18,8 @@ export { PAIRING_CODE_ALPHABET };
 
 /** How long an issued code stays redeemable. Long enough to post it, short enough to matter. */
 export const PAIRING_CODE_TTL_HOURS = 72;
+/** A desktop has this long to apply the prepared snapshot and acknowledge it. */
+export const PAIRING_RESERVATION_TTL_MINUTES = 30;
 
 const GROUPS = 3;
 const GROUP_LENGTH = 4;
@@ -48,8 +50,10 @@ export function hashPairingCode(code: string): string {
   return createHash("sha256").update(normalizePairingCode(code)).digest("hex");
 }
 
+export type PairingEnrollmentState = "issued" | "reserved" | "snapshot_prepared" | "active" | "failed";
 export type PairingCodeState =
   | "valid"
+  | "code_pending_activation"
   | "code_expired"
   | "code_already_redeemed"
   | "code_revoked";
@@ -58,18 +62,22 @@ export interface PairingCodeRow {
   expiresAt: Date;
   redeemedAt: Date | null;
   revokedAt: Date | null;
+  enrollmentState?: PairingEnrollmentState;
 }
 
 /**
  * Why a code can't be used, or "valid".
  *
- * Redemption is reported ahead of revocation and both ahead of expiry: when
- * more than one applies, the most specific fact is the most useful thing to
- * put in front of a café owner who is stuck at the pairing screen.
+ * A snapshot reservation is intentionally not reported as a redeem. It is a
+ * recoverable pending enrollment: it becomes usable again when the reservation
+ * expires and is cleaned up, whereas an activated code is irreversibly spent.
  */
 export function pairingCodeState(row: PairingCodeRow, now: Date): PairingCodeState {
-  if (row.redeemedAt) return "code_already_redeemed";
+  if (row.redeemedAt || row.enrollmentState === "active") return "code_already_redeemed";
   if (row.revokedAt) return "code_revoked";
   if (row.expiresAt.getTime() <= now.getTime()) return "code_expired";
+  if (row.enrollmentState === "reserved" || row.enrollmentState === "snapshot_prepared") {
+    return "code_pending_activation";
+  }
   return "valid";
 }
