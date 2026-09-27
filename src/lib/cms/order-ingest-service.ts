@@ -16,6 +16,11 @@ import type { Industry } from "../industries";
 import type { RialText } from "../inventory-exact";
 import type { WebsiteConnectionRow } from "../website/connection-service";
 import { cmsMinorToRial } from "./order-money";
+import {
+  cmsReversalStatusMatches,
+  isCmsReversalEvent,
+  reverseImportedCmsStoreOrder,
+} from "./order-reversal-service";
 import type { CmsOrder } from "./types";
 
 const zero = "0" as RialText;
@@ -120,13 +125,32 @@ export async function handleCmsStoreOrderWebhook(notice: CmsOrderEventNotice): P
     }
 
     try {
-      if (notice.event !== "order.paid" || notice.order.status !== "paid") {
-        await markInboxFailed(claimed.inboxId, "not_paid");
-        return NextResponse.json({ error: "not_paid" }, { status: 422 });
+      if (notice.event === "order.paid") {
+        if (notice.order.status !== "paid") {
+          await markInboxFailed(claimed.inboxId, "not_paid");
+          return NextResponse.json({ error: "not_paid" }, { status: 422 });
+        }
+        const orderId = await importPaidCmsOrder(connection, notice.order);
+        await markInboxProcessed(claimed.inboxId, orderId);
+        return NextResponse.json({ status: "processed", orderId });
       }
-      const orderId = await importPaidCmsOrder(connection, notice.order);
-      await markInboxProcessed(claimed.inboxId, orderId);
-      return NextResponse.json({ status: "processed", orderId });
+
+      if (isCmsReversalEvent(notice.event)) {
+        if (!cmsReversalStatusMatches(notice.event, notice.order)) {
+          await markInboxFailed(claimed.inboxId, "status_mismatch");
+          return NextResponse.json({ error: "status_mismatch" }, { status: 422 });
+        }
+        const reversal = await reverseImportedCmsStoreOrder(connection, notice, claimed.inboxId);
+        return NextResponse.json({
+          status: "processed",
+          orderId: reversal.orderId,
+          amendmentId: reversal.amendmentId,
+          alreadyReversed: reversal.alreadyReversed,
+        });
+      }
+
+      await markInboxFailed(claimed.inboxId, "unsupported_event");
+      return NextResponse.json({ error: "unsupported_event" }, { status: 422 });
     } catch (err) {
       const message = err instanceof Error ? err.message : "import_failed";
       await markInboxFailed(claimed.inboxId, message);
@@ -141,13 +165,15 @@ type ClaimResult =
   | { kind: "replay" };
 
 async function claimInboxRow(connection: WebsiteConnectionRow, notice: CmsOrderEventNotice): Promise<ClaimResult> {
-  const { rows: imported } = await query<{ id: string }>(
-    `SELECT id FROM cms_store_order_inbox
-      WHERE cms_connection_id = $1 AND cms_order_id = $2 AND status = 'processed'
-      LIMIT 1`,
-    [connection.id, notice.order.id],
-  );
-  if (imported[0]) return { kind: "replay" };
+  if (notice.event === "order.paid") {
+    const { rows: imported } = await query<{ id: string }>(
+      `SELECT id FROM cms_store_order_inbox
+        WHERE cms_connection_id = $1 AND cms_order_id = $2 AND event_topic = 'order.paid' AND status = 'processed'
+        LIMIT 1`,
+      [connection.id, notice.order.id],
+    );
+    if (imported[0]) return { kind: "replay" };
+  }
 
   const { rows } = await query<{ id: string }>(
     `INSERT INTO cms_store_order_inbox
@@ -225,7 +251,8 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
 
     const { rows: prior } = await client.query<{ imported_order_id: string | null }>(
       `SELECT imported_order_id FROM cms_store_order_inbox
-        WHERE cms_connection_id = $1 AND cms_order_id = $2 AND status = 'processed' AND imported_order_id IS NOT NULL
+        WHERE cms_connection_id = $1 AND cms_order_id = $2 AND event_topic = 'order.paid'
+          AND status = 'processed' AND imported_order_id IS NOT NULL
         LIMIT 1`,
       [connection.id, remoteId],
     );

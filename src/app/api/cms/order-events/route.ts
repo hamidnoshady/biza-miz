@@ -2,7 +2,8 @@
  * `POST /api/cms/order-events` — CMS store order notifications (Phase G).
  *
  * Signed like `POST /api/cms/revalidate` (`x-eshobe-signature` over the raw body).
- * Body: `{ siteId, deliveryId, event, order }` where `event` is `order.paid`.
+ * Body: `{ siteId, deliveryId, event, order }` where `event` is `order.paid`,
+ * `order.refunded`, or `order.cancelled`.
  */
 import { NextResponse } from "next/server";
 

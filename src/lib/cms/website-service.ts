@@ -207,7 +207,12 @@ export interface WebsiteOverview {
   orders: CmsOrder[];
   orderInbox: Record<
     string,
-    { status: "pending" | "processed" | "failed" | "duplicate"; error: string | null; importedOrderId: string | null }
+    {
+      status: "pending" | "processed" | "failed" | "duplicate";
+      error: string | null;
+      importedOrderId: string | null;
+      reversed: boolean;
+    }
   >;
 }
 

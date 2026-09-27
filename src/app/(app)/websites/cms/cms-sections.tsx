@@ -1139,7 +1139,7 @@ function OrdersCard({
   onStatusChange,
 }: {
   orders: CmsOrder[];
-  orderInbox: Record<string, { status: string; error: string | null }>;
+  orderInbox: Record<string, { status: string; error: string | null; reversed?: boolean }>;
   currency: string;
   updatingOrder: string;
   onStatusChange: (order: CmsOrder, status: CmsOrder["status"]) => void;
@@ -1164,9 +1164,17 @@ function OrdersCard({
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {order.status === "paid" && orderInbox[order.id] ? (
-                  <StatusBadge tone={INBOX_STATUS_TONE[orderInbox[order.id].status] ?? "neutral"}>
-                    {INBOX_STATUS_LABELS[orderInbox[order.id].status] ?? orderInbox[order.id].status}
+                {orderInbox[order.id] ? (
+                  <StatusBadge
+                    tone={
+                      orderInbox[order.id].reversed
+                        ? "neutral"
+                        : (INBOX_STATUS_TONE[orderInbox[order.id].status] ?? "neutral")
+                    }
+                  >
+                    {orderInbox[order.id].reversed
+                      ? "برگشت در حسابداری"
+                      : (INBOX_STATUS_LABELS[orderInbox[order.id].status] ?? orderInbox[order.id].status)}
                   </StatusBadge>
                 ) : null}
                 <StatusBadge tone={ORDER_STATUS_TONE[order.status] ?? "neutral"}>

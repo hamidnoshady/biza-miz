@@ -93,6 +93,7 @@ beforeAll(async () => {
        ($1, '1120', 'Card clearing', 'asset'),
        ($1, '1300', 'Inventory', 'asset'),
        ($1, '4330', 'Delivery', 'revenue'),
+       ($1, '4400', 'Sales returns', 'revenue'),
        ($1, '5100', 'COGS', 'expense')`,
     [biz.id],
   );
@@ -185,5 +186,50 @@ describe("CMS store order ingest", () => {
       [biz.id],
     );
     expect(lines.rows.some((r) => r.menu_item_id === menu.rows[0].id)).toBe(true);
+  });
+
+  it("voids an imported order on order.refunded and dedupes the delivery", async () => {
+    const order = paidOrder(`ord-${randomUUID()}`);
+    const paidNotice = {
+      siteId: biz.siteId,
+      deliveryId: `del-${randomUUID()}`,
+      event: "order.paid",
+      order,
+    };
+    const paidRes = await ingest.handleCmsStoreOrderWebhook(paidNotice);
+    expect(paidRes.status).toBe(200);
+    const paidJson = (await paidRes.json()) as { orderId?: string };
+    expect(paidJson.orderId).toBeTruthy();
+    const importedOrderId = paidJson.orderId!;
+
+    order.status = "refunded";
+    const refundNotice = {
+      siteId: biz.siteId,
+      deliveryId: `del-${randomUUID()}`,
+      event: "order.refunded",
+      order,
+    };
+    const refundRes = await ingest.handleCmsStoreOrderWebhook(refundNotice);
+    expect(refundRes.status).toBe(200);
+    const refundJson = (await refundRes.json()) as { status?: string; amendmentId?: string };
+    expect(refundJson.status).toBe("processed");
+    expect(refundJson.amendmentId).toBeTruthy();
+
+    const replay = await ingest.handleCmsStoreOrderWebhook(refundNotice);
+    expect(replay.status).toBe(200);
+    const replayJson = (await replay.json()) as { status?: string };
+    expect(replayJson.status).toMatch(/duplicate|processed/);
+
+    const orderRow = await db.query<{ status: string }>(`SELECT status FROM orders WHERE id = $1`, [
+      importedOrderId,
+    ]);
+    expect(orderRow.rows[0]?.status).toBe("voided");
+
+    const paidInbox = await db.query<{ reversal_amendment_id: string | null }>(
+      `SELECT reversal_amendment_id FROM cms_store_order_inbox
+        WHERE cms_connection_id = $1 AND cms_order_id = $2 AND event_topic = 'order.paid'`,
+      [biz.connectionId, order.id],
+    );
+    expect(paidInbox.rows[0]?.reversal_amendment_id).toBe(refundJson.amendmentId);
   });
 });

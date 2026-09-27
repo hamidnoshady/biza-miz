@@ -21,12 +21,22 @@ export interface CmsStoreOrderPollResult {
   polled: number;
 }
 
-export function orderIdFromEvent(event: { data?: Record<string, unknown>; id: string }): string | null {
+export function orderIdFromEvent(event: { data?: Record<string, unknown>; id: string; kind?: string }): string | null {
   if (typeof event.data?.orderId === "string") return event.data.orderId;
   if (typeof event.data?.id === "string") return event.data.id;
   const parts = event.id.split(":");
-  if (parts[0] === "order" && parts[1] === "paid" && parts[2]) return parts[2];
+  if (parts[0] === "order" && parts[2]) {
+    if (parts[1] === "paid") return parts[2];
+    if (parts[1] === "refunded" || parts[1] === "cancelled") return parts[2];
+  }
   return null;
+}
+
+const STORE_ORDER_EVENT_KINDS = ["order.paid", "order.refunded", "order.cancelled"] as const;
+type StoreOrderEventKind = (typeof STORE_ORDER_EVENT_KINDS)[number];
+
+function isStoreOrderEventKind(kind: string): kind is StoreOrderEventKind {
+  return (STORE_ORDER_EVENT_KINDS as readonly string[]).includes(kind);
 }
 
 export async function runCmsStoreOrderPollTick(): Promise<CmsStoreOrderPollResult> {
@@ -42,21 +52,24 @@ export async function runCmsStoreOrderPollTick(): Promise<CmsStoreOrderPollResul
     return { ok: false, ingested: 0, polled: 0, error: message };
   }
 
-  const paidEvents = page.events.filter((e) => e.kind === "order.paid" && e.siteId);
+  const storeEvents = page.events.filter((e) => e.siteId && isStoreOrderEventKind(e.kind));
   let ingested = 0;
 
-  for (const event of paidEvents) {
+  for (const event of storeEvents) {
     const siteId = event.siteId!;
     const orderId = orderIdFromEvent(event);
     if (!orderId) continue;
 
     const order = await loadOrderForSite(siteId, orderId);
-    if (!order || order.status !== "paid") continue;
+    if (!order) continue;
+    if (event.kind === "order.paid" && order.status !== "paid") continue;
+    if (event.kind === "order.refunded" && order.status !== "refunded") continue;
+    if (event.kind === "order.cancelled" && order.status !== "cancelled") continue;
 
     const notice: CmsOrderEventNotice = {
       siteId,
       deliveryId: `poll:${event.id}`,
-      event: "order.paid",
+      event: event.kind,
       order,
     };
     const res = await handleCmsStoreOrderWebhook(notice);
@@ -67,7 +80,7 @@ export async function runCmsStoreOrderPollTick(): Promise<CmsStoreOrderPollResul
   }
 
   await advanceStoreOrderIngestCursor(page.cursor);
-  return { ok: true, ingested, polled: paidEvents.length };
+  return { ok: true, ingested, polled: storeEvents.length };
 }
 
 async function loadOrderForSite(siteId: string, orderId: string): Promise<CmsOrder | null> {
