@@ -115,21 +115,21 @@ describe("visibleSettingsTabs", () => {
       }).map((tab) => tab.key),
       // No `server-sync`: remote-server sync is a technical connection and
       // lives in the «اتصال‌های فنی» hub now, not among the settings tabs.
-    ).toEqual(["branch-management", "notifications", "backup"]);
+    ).toEqual(["branch-management", "desktop", "notifications", "backup"]);
 
     expect(
       visibleSettingsTabs([PERMISSIONS.locationsManage], {
         role: "owner",
         features: { backup: false, site_cloud_sync: false },
       }).map((tab) => tab.key),
-    ).toEqual(["notifications"]);
+    ).toEqual(["desktop", "notifications"]);
 
     expect(
       visibleSettingsTabs([PERMISSIONS.locationsManage], {
         role: "owner",
         features: { backup: false, site_cloud_sync: false, multi_location: true },
       }).map((tab) => tab.key),
-    ).toEqual(["branch-management", "notifications"]);
+    ).toEqual(["branch-management", "desktop", "notifications"]);
   });
 
   it("gates branch management on locations.manage, the permission its API checks", () => {

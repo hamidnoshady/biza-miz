@@ -377,9 +377,10 @@ in that repo for the endpoint contract and its own rules.
 
 ### 7.2 The credential, and what it now reaches
 
-The address and key live in `platform_cms_config` (a singleton, the same shape as
-`platform_update_config` / `platform_message_config`), the key AES-256-GCM at rest
-through `src/lib/integrations/secrets.ts`. Three rules:
+The address and key live in `platform_cms_config` (a singleton alongside
+`platform_message_config`); the key is AES-256-GCM encrypted at rest through
+`src/lib/integrations/secrets.ts`. The inactive `platform_update_config` singleton
+was removed by migration 0187 and is not part of this integration. Three rules:
 
 * **The key is never returned by anything.** The console reads a masked view whose
   only trace of it is the last four characters. There is no route that returns it.

@@ -138,13 +138,9 @@ export const ENCRYPTED_TABLES: Record<string, EncryptedTable> = {
  * db:encrypt-ai-secrets` has backfilled every deployment and a follow-up
  * migration drops them.
  */
-export const TIER_A_PENDING: { table: string; column: string; note: string }[] = [
-  {
-    table: "platform_update_config",
-    column: "s3_secret_access_key",
-    note: "A dump of this table today yields live S3 credentials.",
-  },
-];
+// Migration 0187 removed the inactive platform_update_config singleton and
+// its plaintext S3 secret rather than carrying an unused credential forward.
+export const TIER_A_PENDING: { table: string; column: string; note: string }[] = [];
 
 /**
  * Back-compatible shape: `table → column → tier`. Kept because it reads well

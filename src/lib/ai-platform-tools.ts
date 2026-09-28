@@ -7,7 +7,7 @@
  */
 import { query, withoutTenantScope } from "./db";
 import type { ToolResult } from "./ai-tools";
-import { clientVersionCompliance } from "./platform-service";
+import { desktopFleetCompliance } from "./desktop-release-service";
 
 export const PLATFORM_READ_TOOL_NAMES = new Set([
   "get_client_update_status",
@@ -25,27 +25,38 @@ function lookbackHours(value: unknown): number {
 }
 
 async function clientUpdateStatus() {
-  const clients = await clientVersionCompliance();
-  const outOfDate = clients.filter((client) => client.updateAvailable);
-  const reportingProblems = clients.filter((client) => Boolean(client.error));
+  const fleet = await desktopFleetCompliance();
+  const outOfDate = fleet.devices.filter((device) => device.compliance === "update_available");
+  const reportingProblems = fleet.devices.filter((device) =>
+    ["error", "unsupported", "incompatible", "version_mismatch", "stale", "offline"].includes(device.compliance),
+  );
   return {
     scope: "platform_health_only",
-    connectedClientCount: clients.length,
+    connectedClientCount: fleet.devices.length,
+    summary: fleet.summary,
     outOfDate: cap(
-      outOfDate.map((client) => ({
-        businessId: client.businessId,
-        businessName: client.businessName,
-        currentVersion: client.currentVersion,
-        latestVersion: client.latestVersion,
-        checkedAt: client.checkedAt,
+      outOfDate.map((device) => ({
+        siteDeviceId: device.siteDeviceId,
+        businessId: device.businessId,
+        businessName: device.businessName,
+        locationName: device.locationName,
+        deviceName: device.deviceName,
+        installedVersion: device.installedVersion,
+        targetVersion: device.targetRelease?.version ?? null,
+        lastReportAt: device.lastReportAt,
       })),
     ),
     reportingProblems: cap(
-      reportingProblems.map((client) => ({
-        businessId: client.businessId,
-        businessName: client.businessName,
-        checkedAt: client.checkedAt,
-        hasError: true,
+      reportingProblems.map((device) => ({
+        siteDeviceId: device.siteDeviceId,
+        businessId: device.businessId,
+        businessName: device.businessName,
+        locationName: device.locationName,
+        deviceName: device.deviceName,
+        compliance: device.compliance,
+        connectivity: device.connectivity,
+        lastReportAt: device.lastReportAt,
+        errorCode: device.error?.code ?? null,
       })),
     ),
   };

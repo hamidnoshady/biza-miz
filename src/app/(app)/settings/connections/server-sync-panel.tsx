@@ -105,6 +105,11 @@ interface ReplicationContractView {
 
 interface AppUpdateStatusView {
   checkedAt: string;
+  installed?: { version: string; buildCommit: string; buildId: string; channel: "stable" | "beta" | "internal" };
+  centralRuntime?: { releaseVersion: string | null; commitSha: string | null; buildId: string | null } | null;
+  targetRelease?: { version: string; releaseNotes: string[] } | null;
+  compliance?: string;
+  // Present while an older packaged web runtime is completing an in-place update.
   currentVersion: string;
   latestVersion: string | null;
   updateAvailable: boolean;
@@ -603,34 +608,40 @@ function SyncStatusPanels({
       ) : null}
 
       {appUpdateStatus && appUpdateStatus.error !== "sync_not_configured" ? (
-        <SectionCard title="به‌روزرسانی نرم‌افزار">
+        <SectionCard title="وضعیت انتشار دسکتاپ">
           <p className="mb-4 text-sm text-muted-foreground">
-            نسخهٔ نصب‌شده روی این دستگاه در برابر نسخهٔ در حال اجرا روی سرور
-            مرکزی. این فقط یک اعلان است — نصب نسخهٔ جدید خودکار نیست و باید توسط
-            مدیر انجام شود.
+            نسخهٔ نصب‌شده، هدف انتشار دسکتاپ و ساختِ در حال اجرای سرور مرکزی سه
+            هویت جدا هستند. برای دانلود و نصب امن به «تنظیمات ← دسکتاپ» بروید.
           </p>
           {appUpdateStatus.updateAvailable ? (
             <InfoBox>
-              نسخهٔ جدیدی در دسترس است ({appUpdateStatus.latestVersion}). قبل از
-              نصب حتماً یک پشتیبان تهیه کنید، سپس نصب‌کنندهٔ جدید را از مدیر
-              سیستم دریافت و اجرا نمایید. پس از نصب، از سالم بودن داده‌ها
-              اطمینان حاصل کنید.
+              نسخهٔ دسکتاپ {appUpdateStatus.targetRelease?.version ?? appUpdateStatus.latestVersion} برای
+              کانال این نصب در دسترس است. موتور به‌روزرسانی پیش از نصب، هش و امضای
+              ویندوز را بررسی می‌کند و بدون پشتیبان تأییدشده ادامه نمی‌دهد.
             </InfoBox>
           ) : null}
           <StatusRow
-            label="نسخهٔ فعلی"
-            value={appUpdateStatus.currentVersion || "—"}
+            label="نسخهٔ دسکتاپ نصب‌شده"
+            value={appUpdateStatus.installed?.version ?? appUpdateStatus.currentVersion ?? "—"}
           />
           <StatusRow
-            label="آخرین نسخهٔ منتشرشده"
-            value={appUpdateStatus.latestVersion ?? "—"}
+            label="هدف انتشار دسکتاپ"
+            value={appUpdateStatus.targetRelease?.version ?? appUpdateStatus.latestVersion ?? "—"}
+          />
+          <StatusRow
+            label="نسخهٔ انتشار سرور مرکزی"
+            value={appUpdateStatus.centralRuntime?.releaseVersion ?? "—"}
+          />
+          <StatusRow
+            label="ساخت سرور مرکزی"
+            value={appUpdateStatus.centralRuntime?.commitSha ?? "—"}
           />
           <StatusRow
             label="آخرین بررسی"
             value={formatTime(appUpdateStatus.checkedAt)}
           />
           {appUpdateStatus.error ? (
-            <StatusRow label="خطا" value={appUpdateStatus.error} tone="error" />
+            <StatusRow label="وضعیت گزارش" value="ارتباط با مرکز ناموفق بود" tone="error" />
           ) : null}
         </SectionCard>
       ) : null}

@@ -19,13 +19,31 @@ on:
         description: 'Successful release-acceptance-aggregate run id for this exact candidate'
         type: string
         required: true
+      channel:
+        description: 'Channel embedded by the signed-candidate run'
+        type: choice
+        options: [stable, beta, internal]
+        default: stable
+        required: true
+      minimum_supported_version:
+        description: 'Oldest Desktop SemVer eligible for an in-place update'
+        type: string
+        required: true
+      migration_version:
+        description: 'Highest database migration number in this package'
+        type: string
+        required: true
+      release_notes:
+        description: 'Short release note (additional notes can be added in the registry)'
+        type: string
+        required: true
 
 concurrency:
   group: windows-production-release
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 defaults:
@@ -37,7 +55,11 @@ env:
   CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
   CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
   ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
+  RELEASE_CHANNEL: ${{ inputs.channel }}
+  MINIMUM_SUPPORTED_VERSION: ${{ inputs.minimum_supported_version }}
+  MIGRATION_VERSION: ${{ inputs.migration_version }}
   WINDOWS_EXPECTED_SIGNER: ${{ vars.WINDOWS_EXPECTED_SIGNER }}
+  DESKTOP_RELEASE_PUBLIC_KEY_PEM: ${{ vars.DESKTOP_RELEASE_PUBLIC_KEY_PEM }}
 
 jobs:
   promote:
@@ -62,7 +84,11 @@ jobs:
           if ($env:CANDIDATE_COMMIT -notmatch '^[0-9a-f]{40}$') { throw 'candidate_commit must be a full Git SHA' }
           if ($env:CANDIDATE_RUN_ID -notmatch '^\d+$') { throw 'candidate_run_id must be a workflow run id' }
           if ($env:ACCEPTANCE_RUN_ID -notmatch '^\d+$') { throw 'acceptance_run_id must be a workflow run id' }
+          if ($env:RELEASE_CHANNEL -notin @('stable','beta','internal')) { throw 'Unsupported release channel' }
+          if ($env:MINIMUM_SUPPORTED_VERSION -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') { throw 'minimum_supported_version must be SemVer' }
+          if ($env:MIGRATION_VERSION -notmatch '^\d+$' -or [int]$env:MIGRATION_VERSION -lt 1) { throw 'migration_version must be a positive integer' }
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_EXPECTED_SIGNER)) { throw 'NOT CONFIGURED: WINDOWS_EXPECTED_SIGNER' }
+          if ([string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_PUBLIC_KEY_PEM)) { throw 'NOT CONFIGURED: DESKTOP_RELEASE_PUBLIC_KEY_PEM' }
           if ($env:WORKFLOW_COMMIT -cne $env:CANDIDATE_COMMIT) { throw "Workflow definition commit $env:WORKFLOW_COMMIT does not match candidate $env:CANDIDATE_COMMIT" }
           $checkedOutCommit = (git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $checkedOutCommit -cne $env:CANDIDATE_COMMIT) { throw "Checked-out commit $checkedOutCommit does not match candidate $env:CANDIDATE_COMMIT" }
@@ -125,7 +151,12 @@ jobs:
           $candidateEvidence = Get-Content $candidateEvidenceFile.FullName -Raw | ConvertFrom-Json
           $candidateReadiness = Get-Content $candidateReadinessFile.FullName -Raw | ConvertFrom-Json
 
-          if ($provenance.version -cne $env:RELEASE_VERSION -or $provenance.commit -cne $env:CANDIDATE_COMMIT) { throw 'Release provenance is not for the requested version and candidate' }
+          if ($provenance.version -cne $env:RELEASE_VERSION -or $provenance.commit -cne $env:CANDIDATE_COMMIT -or $provenance.channel -cne $env:RELEASE_CHANNEL) { throw 'Release provenance is not for the requested version, channel and candidate' }
+          $currentKey = $env:DESKTOP_RELEASE_PUBLIC_KEY_PEM.Replace('\\n', "`n").Trim()
+          $currentKeyFile = Join-Path $env:RUNNER_TEMP 'desktop-release-public-key.pem'
+          [IO.File]::WriteAllText($currentKeyFile, "$currentKey`n", [Text.UTF8Encoding]::new($false))
+          $currentKeyHash = (Get-FileHash $currentKeyFile -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($provenance.releaseManifestPublicKeySha256 -cne $currentKeyHash) { throw 'Accepted installer embeds a different release-manifest public key' }
           $expectedName = "Business Suite Setup $env:RELEASE_VERSION.exe"
           if ($installer.Name -cne $expectedName) { throw "Installer $($installer.Name) does not match $expectedName" }
           $artifactRows = @($provenance.artifacts | Where-Object { $_.name -ceq $installer.Name })
@@ -202,6 +233,57 @@ jobs:
             promotedAt = [DateTime]::UtcNow.ToString('o')
           } | ConvertTo-Json -Depth 6 | Set-Content release-promotion.json -Encoding UTF8
 
+      - name: Generate the consumable Desktop release manifest
+        env:
+          CANDIDATE_ROOT: ${{ runner.temp }}\signed-candidate
+          RELEASE_NOTE: ${{ inputs.release_notes }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = @(Get-ChildItem $env:CANDIDATE_ROOT -Recurse -File -Filter "Business Suite Setup $env:RELEASE_VERSION.exe")
+          if ($installer.Count -ne 1) { throw "Expected exactly one promoted installer" }
+          $tag = if ($env:RELEASE_CHANNEL -eq 'stable') { "desktop-v$env:RELEASE_VERSION" } else { "desktop-$env:RELEASE_CHANNEL-v$env:RELEASE_VERSION" }
+          $assetName = [uri]::EscapeDataString($installer[0].Name)
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$assetName"
+          $manifest = [ordered]@{
+            schemaVersion = 1
+            channel = $env:RELEASE_CHANNEL
+            version = $env:RELEASE_VERSION
+            buildCommit = $env:CANDIDATE_COMMIT
+            buildId = "signed-candidate-$env:CANDIDATE_RUN_ID"
+            releasedAt = [DateTime]::UtcNow.ToString('o')
+            minimumSupportedVersion = $env:MINIMUM_SUPPORTED_VERSION
+            mandatory = $false
+            installer = [ordered]@{
+              url = $url
+              sha256 = $env:PROMOTION_INSTALLER_SHA256
+              size = $installer[0].Length
+              signatureRequired = $true
+              expectedPublisher = $env:WINDOWS_EXPECTED_SIGNER
+            }
+            database = [ordered]@{
+              migrationVersion = [int]$env:MIGRATION_VERSION
+              minimumSchemaVersion = 1
+              maximumSchemaVersion = [int]$env:MIGRATION_VERSION
+              backupRequired = $true
+            }
+            releaseNotes = @($env:RELEASE_NOTE)
+            recovery = [ordered]@{ knownGoodVersion = $null; notes = 'Use the preserved pre-update backup; binary and database recovery are separate operator decisions.' }
+          }
+          $manifest | ConvertTo-Json -Depth 8 | Set-Content release-manifest.json -Encoding UTF8
+          "DESKTOP_RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DESKTOP_INSTALLER_PATH=$($installer[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DESKTOP_INSTALLER_SIZE=$($installer[0].Length)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Sign the release manifest and verify its embedded-package key
+        env:
+          DESKTOP_RELEASE_PRIVATE_KEY_PEM: ${{ secrets.DESKTOP_RELEASE_PRIVATE_KEY_PEM }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_PRIVATE_KEY_PEM)) { throw 'NOT CONFIGURED: DESKTOP_RELEASE_PRIVATE_KEY_PEM' }
+          node scripts/sign-desktop-release-manifest.mjs release-manifest.json
+          if ($LASTEXITCODE -ne 0) { throw 'Release manifest signing failed' }
+          $manifestHash = (Get-FileHash release-manifest.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$manifestHash  release-manifest.json" | Set-Content release-manifest.sha256 -Encoding ascii
+
       - name: Stage the immutable accepted candidate for upload
         env:
           CANDIDATE_ROOT: ${{ runner.temp }}\signed-candidate
@@ -211,7 +293,7 @@ jobs:
           New-Item -ItemType Directory -Path final-release | Out-Null
           Copy-Item "$env:CANDIDATE_ROOT\*" final-release -Recurse -Force
           Copy-Item -LiteralPath $env:ACCEPTANCE_FILE -Destination final-release\release-acceptance-evidence.json
-          Copy-Item release-evidence.json, release-readiness.json, release-readiness.md, release-promotion.json, promotion-installer-signatures.json -Destination final-release -Force
+          Copy-Item release-evidence.json, release-readiness.json, release-readiness.md, release-promotion.json, promotion-installer-signatures.json, release-manifest.json, release-manifest.sha256 -Destination final-release -Force
 
       - name: Upload production release without changing accepted bytes
         uses: actions/upload-artifact@v7
@@ -219,3 +301,59 @@ jobs:
           name: business-suite-windows-${{ inputs.version }}-signed
           if-no-files-found: error
           path: final-release/**
+
+      - name: Publish installer and manifest to the production Desktop feed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ env.DESKTOP_RELEASE_TAG }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (gh release view $env:TAG 2>$null) { throw "Release tag $env:TAG already exists; production promotion is immutable" }
+          $args = @(
+            'release','create',$env:TAG,
+            $env:DESKTOP_INSTALLER_PATH,
+            'release-manifest.json',
+            'release-manifest.sha256',
+            'release-readiness.json',
+            $env:CANDIDATE_PROVENANCE_FILE,
+            '--target',$env:CANDIDATE_COMMIT,
+            '--title',"Business Suite Desktop $env:RELEASE_VERSION ($env:RELEASE_CHANNEL)",
+            '--notes',"Accepted signed Desktop release. Installer SHA-256: $env:PROMOTION_INSTALLER_SHA256"
+          )
+          if ($env:RELEASE_CHANNEL -ne 'stable') { $args += '--prerelease' }
+          gh @args
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed' }
+
+      - name: Register the promoted release in Central
+        env:
+          REGISTRY_URL: ${{ vars.DESKTOP_RELEASE_REGISTRY_URL }}
+          REGISTRY_TOKEN: ${{ secrets.DESKTOP_RELEASE_PUBLISH_TOKEN }}
+          RELEASE_NOTE: ${{ inputs.release_notes }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:REGISTRY_URL)) { throw 'NOT CONFIGURED: DESKTOP_RELEASE_REGISTRY_URL' }
+          if ([string]::IsNullOrWhiteSpace($env:REGISTRY_TOKEN)) { throw 'NOT CONFIGURED: DESKTOP_RELEASE_PUBLISH_TOKEN' }
+          $manifest = Get-Content release-manifest.json -Raw | ConvertFrom-Json
+          $payload = [ordered]@{
+            version = $manifest.version
+            buildCommit = $manifest.buildCommit
+            buildId = $manifest.buildId
+            channel = $manifest.channel
+            status = 'published'
+            rolloutState = 'internal'
+            rolloutPercentage = 0
+            minimumSupportedVersion = $manifest.minimumSupportedVersion
+            mandatory = $manifest.mandatory
+            installerUrl = $manifest.installer.url
+            installerSha256 = $manifest.installer.sha256
+            installerSize = $manifest.installer.size
+            manifestSignature = $manifest.manifestSignature
+            expectedPublisher = $manifest.installer.expectedPublisher
+            migrationVersion = $manifest.database.migrationVersion
+            minimumSchemaVersion = $manifest.database.minimumSchemaVersion
+            maximumSchemaVersion = $manifest.database.maximumSchemaVersion
+            releaseNotes = @($env:RELEASE_NOTE)
+            recoveryNotes = $manifest.recovery.notes
+            knownGoodReleaseId = $null
+          } | ConvertTo-Json -Depth 8
+          Invoke-RestMethod -Method Post -Uri $env:REGISTRY_URL -Headers @{ Authorization = "Bearer $env:REGISTRY_TOKEN" } -ContentType 'application/json' -Body $payload | Out-Null

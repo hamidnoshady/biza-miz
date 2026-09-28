@@ -25,7 +25,7 @@ const DEVICE_LOCAL_TABLES = new Set([
 ]);
 const DEVICE_LOCAL_SETTING_KEYS = new Set([
   "backup.config", "rollup.config", "rollup.sync_state", "server_sync.config",
-  "server_sync.state", "app_update.status", "deployment.profile", "deployment.mode",
+  "server_sync.state", "app_update.status", "desktop_update.policy", "deployment.profile", "deployment.mode",
 ]);
 
 export function conversionExport(tables: TenantExportTable[]): TenantExportTable[] {

@@ -715,7 +715,7 @@ range, an `ORDER BY`, a `GROUP BY`, or an aggregate. Equality-only lookup is per
 blind index. Everything else stays plaintext.**
 
 **Tier A — pure secrets, zero query impact. Start here.** `platform_ai_config.api_key`
-(`migrations/0039:16`), `platform_update_config.s3_secret_access_key` (`0038:16`), and the
+(`migrations/0039:16`). The former `platform_update_config.s3_secret_access_key` (`0038:16`) was removed by migration 0187 together with the inactive updater config. The
 secrets inside the `settings` JSONB: `backup.config.cloud.secretAccessKey`,
 `backup.config.cloud.passphrase`, `server_sync.config.token`, `rollup.config.token`. These are
 read once and used, never filtered, sorted or summed. This is the highest value-to-cost ratio

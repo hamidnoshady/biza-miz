@@ -26,7 +26,7 @@ const backendManager = require("../../electron/backend-manager.js") as {
     runtimeUrl: string,
     superuserUrl: string,
     appVersion?: string,
-    options?: { pgToolsDir?: string; emergencyBackupDir?: string },
+    options?: { pgToolsDir?: string; emergencyBackupDir?: string; updateStatePath?: string; updateTargetPath?: string },
   ) => Record<string, string>;
 };
 
@@ -39,10 +39,17 @@ describe("desktopServerEnvironment", () => {
       "postgres://runtime",
       "postgres://superuser",
       "1.2.3",
-      { pgToolsDir: "/resources/postgresql-tools", emergencyBackupDir: "/userData/emergency-backups" },
+      {
+        pgToolsDir: "/resources/postgresql-tools",
+        emergencyBackupDir: "/userData/emergency-backups",
+        updateStatePath: "/userData/Configuration/update-state.json",
+        updateTargetPath: "/userData/Configuration/update-target.json",
+      },
     );
     expect(env.PG_TOOLS_DIR).toBe("/resources/postgresql-tools");
     expect(env.RESTORE_EMERGENCY_DIR).toBe("/userData/emergency-backups");
+    expect(env.DESKTOP_UPDATE_STATE_PATH).toBe("/userData/Configuration/update-state.json");
+    expect(env.DESKTOP_UPDATE_TARGET_PATH).toBe("/userData/Configuration/update-target.json");
   });
 
   it("still sets the core env (unchanged by the fix) and forces production/loopback posture", () => {
@@ -57,13 +64,20 @@ describe("desktopServerEnvironment", () => {
     expect(env.DEPLOYMENT_ROLE).toBe("site");
     expect(env.DESKTOP_INSTANCE_ID).toBe(CONFIG.instanceId);
     expect(env.APP_RELEASE_VERSION).toBe("1.2.3");
-    expect(env.APP_IMAGE_SHA).toBe("1.2.3");
+    // SemVer and provenance are deliberately separate; a package whose build
+    // metadata is still unknown must not put SemVer into the SHA field.
+    expect(env.APP_IMAGE_SHA).toBe("unknown");
+    expect(env.APP_BUILD_COMMIT).toBe("unknown");
+    expect(env.APP_BUILD_ID).toBe("development");
+    expect(env.DESKTOP_RELEASE_CHANNEL).toBe("stable");
   });
 
   it("omits PG_TOOLS_DIR/RESTORE_EMERGENCY_DIR rather than fabricating a value when the caller has none (dev/unpackaged run)", () => {
     const env = backendManager.desktopServerEnvironment(CONFIG, "postgres://runtime", "postgres://superuser");
     expect(env.PG_TOOLS_DIR).toBeUndefined();
     expect(env.RESTORE_EMERGENCY_DIR).toBeUndefined();
+    expect(env.DESKTOP_UPDATE_STATE_PATH).toBeUndefined();
+    expect(env.DESKTOP_UPDATE_TARGET_PATH).toBeUndefined();
     expect(env.APP_RELEASE_VERSION).toBe("unknown");
   });
 

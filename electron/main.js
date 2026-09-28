@@ -13,6 +13,7 @@ const { createLogger } = require("./logger");
 const nativePrinting = require("./native-printing");
 const localStorageChecks = require("./local-storage");
 const { computePaths, migrateLegacyLayout } = require("./app-paths");
+const { DesktopUpdateEngine } = require("./update-engine");
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -23,6 +24,7 @@ if (!gotSingleInstanceLock) {
   let gateway = null;
   let firewall = null;
   let logger = null;
+  let updater = null;
   let quitting = false;
   let cleanupStarted = null;
   let ipcRegistered = false;
@@ -136,6 +138,40 @@ if (!gotSingleInstanceLock) {
     ipcMain.handle("desktop:open-logs", async () => {
       shell.showItemInFolder(logger.path);
       return logger.path;
+    });
+
+    // Desktop updates: manual and background downloads share this one engine.
+    // Renderer input is still treated as hostile: the engine validates SemVer,
+    // HTTPS origin, exact size/hash, Authenticode publisher and backup evidence.
+    ipcMain.handle("desktop:update-status", async () => updater.publicState());
+    ipcMain.handle("desktop:update-policy", async (_event, payload) => updater.setPolicy(payload));
+    ipcMain.handle("desktop:update-check", async (_event, payload) => updater.check(payload?.manifest ?? null));
+    ipcMain.handle("desktop:update-download", async () => {
+      try { return await updater.download(); } catch (error) { return updater.fail(error); }
+    });
+    ipcMain.handle("desktop:update-pause", async () => updater.pause());
+    ipcMain.handle("desktop:update-cancel", async () => updater.cancel());
+    ipcMain.handle("desktop:update-offline", async () => {
+      const manifestChoice = await dialog.showOpenDialog({
+        title: "فایل release-manifest.json را انتخاب کنید",
+        properties: ["openFile"],
+        filters: [{ name: "Release manifest", extensions: ["json"] }],
+      });
+      if (manifestChoice.canceled || !manifestChoice.filePaths[0]) return updater.publicState();
+      const installerChoice = await dialog.showOpenDialog({
+        title: "نصب‌کنندهٔ امضاشده را انتخاب کنید",
+        properties: ["openFile"],
+        defaultPath: path.dirname(manifestChoice.filePaths[0]),
+        filters: [{ name: "Windows installer", extensions: ["exe"] }],
+      });
+      if (installerChoice.canceled || !installerChoice.filePaths[0]) return updater.publicState();
+      return updater.prepareOffline(manifestChoice.filePaths[0], installerChoice.filePaths[0]);
+    });
+    ipcMain.handle("desktop:update-install-next-restart", async () => updater.scheduleNextRestart());
+    ipcMain.handle("desktop:update-install-now", async () => performUpdateInstall());
+    ipcMain.handle("desktop:update-show-backup", async () => {
+      if (updater.state.backupPath) shell.showItemInFolder(updater.state.backupPath);
+      return updater.state.backupPath ?? null;
     });
 
     // Native printing (Section 7 of the desktop audit): the desktop app talks
@@ -367,6 +403,30 @@ if (!gotSingleInstanceLock) {
     return cleanupStarted;
   }
 
+  async function performUpdateInstall() {
+    try {
+      // Backup while PostgreSQL is healthy, then shut every local writer down
+      // before NSIS replaces binaries. A backup verification failure throws
+      // before cleanup and leaves the running application untouched.
+      await updater.createVerifiedBackup(backend);
+      await cleanup();
+      updater.launchInstaller();
+      quitting = true;
+      app.exit(0);
+      return updater.publicState();
+    } catch (error) {
+      const state = updater.fail(error);
+      // If shutdown had already started, restart this same binary so the user
+      // is not stranded with a closed local service after a UAC/launch error.
+      if (cleanupStarted) {
+        app.relaunch();
+        quitting = true;
+        app.exit(1);
+      }
+      return state;
+    }
+  }
+
   function writeSmokeFailure(error) {
     const marker = process.env.DESKTOP_SMOKE_MARKER;
     if (!marker) return;
@@ -412,6 +472,10 @@ if (!gotSingleInstanceLock) {
       try {
         cleanupStarted = null;
         const state = await initialiseBackend();
+        // Reaching here proves both PostgreSQL and the packaged web backend
+        // passed their health checks. Only now may a pending update be marked
+        // successful (and only when app.getVersion() is the expected target).
+        updater?.completeStartupHealth();
         if (process.env.DESKTOP_SMOKE_MARKER) {
           await runSmokeProbe(state.appUrl);
           await cleanup();
@@ -466,6 +530,16 @@ if (!gotSingleInstanceLock) {
       console.error("Folder-layout migration failed; continuing with the existing layout.", error);
     }
     logger = createLogger(app.getPath("userData"));
+    updater = new DesktopUpdateEngine({ app, logger });
+    updater.on("state", (state) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("desktop:update-state", state);
+    });
+    // The packaged backend refreshes the credential-bound Central target during
+    // its normal sync tick. Electron consumes that narrow local handoff even
+    // when no renderer or settings page is open.
+    updater.checkPersistedTarget();
+    const updateCheckTimer = setInterval(() => updater.checkPersistedTarget(), 15 * 60 * 1000);
+    updateCheckTimer.unref();
     logger.info("Desktop process starting", { version: app.getVersion(), packaged: app.isPackaged });
     process.on("uncaughtException", (error) => logger.error("Uncaught desktop exception", error));
     process.on("unhandledRejection", (error) => logger.error("Unhandled desktop rejection", error));
@@ -487,6 +561,10 @@ if (!gotSingleInstanceLock) {
   app.on("before-quit", (event) => {
     if (quitting) return;
     event.preventDefault();
+    if (updater?.state.installOnNextRestart && updater.state.state === "ready_to_install") {
+      void performUpdateInstall();
+      return;
+    }
     quitting = true;
     void cleanup().finally(() => app.exit(0));
   });

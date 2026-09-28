@@ -30,6 +30,24 @@ contextBridge.exposeInMainWorld("businessSuiteDesktop", Object.freeze({
     showCaCertificate: () => ipcRenderer.invoke("desktop:show-ca-certificate"),
     openLogs: () => ipcRenderer.invoke("desktop:open-logs"),
   }),
+  update: Object.freeze({
+    status: () => ipcRenderer.invoke("desktop:update-status"),
+    configure: (policy) => ipcRenderer.invoke("desktop:update-policy", policy),
+    check: (manifest) => ipcRenderer.invoke("desktop:update-check", { manifest }),
+    download: () => ipcRenderer.invoke("desktop:update-download"),
+    pause: () => ipcRenderer.invoke("desktop:update-pause"),
+    cancel: () => ipcRenderer.invoke("desktop:update-cancel"),
+    selectOfflinePackage: () => ipcRenderer.invoke("desktop:update-offline"),
+    installNow: () => ipcRenderer.invoke("desktop:update-install-now"),
+    installOnNextRestart: () => ipcRenderer.invoke("desktop:update-install-next-restart"),
+    showBackup: () => ipcRenderer.invoke("desktop:update-show-backup"),
+    onState: (callback) => {
+      if (typeof callback !== "function") return () => {};
+      const listener = (_event, state) => callback(state);
+      ipcRenderer.on("desktop:update-state", listener);
+      return () => ipcRenderer.removeListener("desktop:update-state", listener);
+    },
+  }),
   /**
    * Native printing (Section 7 of the desktop audit): the same
    * `{type:"windows", systemName}` / `{type:"network", ip, port}` target

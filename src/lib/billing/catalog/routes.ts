@@ -18,6 +18,8 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   internal: keys("platform.internal"),
   platform: keys("platform.console"),
   "cloud-exceptions": keys("platform.exceptions"),
+  "desktop-releases": keys("platform.internal"),
+  "desktop-update": keys("operations.shared"),
   billing: keys("platform.billing_self_service"),
 
   orders: keys("accounting.orders"),
