@@ -27,6 +27,23 @@ async function main() {
   const client = new Client({ connectionString: databaseUrl });
   await client.connect();
 
+  const isDefault = password === "owner1234" || email === "owner@example.com";
+  if (isDefault) {
+    if (process.env.NODE_ENV === "production") {
+      console.error("Refusing to seed with default credentials in production.");
+      process.exit(1);
+    }
+    const anyRealBusiness = await client.query(
+      "SELECT id FROM businesses WHERE slug != 'cafe-nemoone' LIMIT 1",
+    );
+    if (anyRealBusiness.rowCount && anyRealBusiness.rowCount > 0) {
+      console.error(
+        "Refusing to seed with default credentials into an already-initialized database.",
+      );
+      process.exit(1);
+    }
+  }
+
   try {
     await client.query("BEGIN");
 
@@ -36,7 +53,9 @@ async function main() {
     await client.query("SELECT set_config('app.rls_bypass', 'on', true)");
 
     let businessId: string;
-    const existingBusiness = await client.query("SELECT id FROM businesses LIMIT 1");
+    const existingBusiness = await client.query(
+      "SELECT id FROM businesses LIMIT 1",
+    );
     if (existingBusiness.rowCount) {
       businessId = existingBusiness.rows[0].id;
       console.log("Business already exists, reusing.");
@@ -88,7 +107,9 @@ async function main() {
          VALUES ($1, $2, 'owner', $3, $4, $5)`,
         [businessId, identity.rows[0].id, name, email, passwordHash],
       );
-      console.log(`Created owner ${email} (password from SEED_OWNER_PASSWORD).`);
+      console.log(
+        `Created owner ${email} (password from SEED_OWNER_PASSWORD).`,
+      );
     }
 
     const existingCashier = await client.query(
@@ -101,7 +122,12 @@ async function main() {
       await client.query(
         `INSERT INTO users (business_id, location_id, role, full_name, pin_hash)
          VALUES ($1, $2, 'cashier', $3, $4)`,
-        [businessId, locationId, "صندوق‌دار نمونه", await bcrypt.hash("1234", BCRYPT_COST)],
+        [
+          businessId,
+          locationId,
+          "صندوق‌دار نمونه",
+          await bcrypt.hash("1234", BCRYPT_COST),
+        ],
       );
       console.log("Created sample cashier with PIN 1234.");
     }
@@ -170,7 +196,9 @@ async function main() {
         `INSERT INTO menu_item_modifier_groups (menu_item_id, modifier_group_id) VALUES ($1, $2)`,
         [espresso.rows[0].id, milkGroup.rows[0].id],
       );
-      console.log("Created sample menu (2 categories, 3 items, 1 modifier group).");
+      console.log(
+        "Created sample menu (2 categories, 3 items, 1 modifier group).",
+      );
     }
 
     await client.query("COMMIT");
