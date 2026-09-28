@@ -12,3 +12,7 @@
 **Vulnerability:** Manually extracting IP addresses via `request.headers.get("x-forwarded-for")?.split(",")[0]` assumes the leftmost IP is trustworthy. In multi-proxy configurations without explicitly defined trusted proxies parsing right-to-left, attackers can forge the leftmost IP, bypassing security logging and rate limits by spoofing `x-forwarded-for`.
 **Learning:** This specific vulnerability was found in the Impersonation (`src/app/api/platform/businesses/[id]/impersonate/route.ts`) and Support Session management (`src/lib/support-session.ts`), which incorrectly relied on manual string splitting rather than the centralized parser.
 **Prevention:** Always use the centralized `clientIpFrom(headers, trustedHops)` utility from `@/lib/rate-limit`. This utility implements the correct right-to-left fallback matching scheme designed to identify the first public IP reliably, guarding against trivial header forgery.
+## 2025-02-27 - [Environment guard for weak seed credentials]
+**Vulnerability:** Weak default seed credentials with no environment guard in `scripts/seed.ts`
+**Learning:** `scripts/seed.ts` lacked a mechanism to prevent seeding the database with weak default credentials (e.g. `owner1234`) in a production environment or an already-initialized database.
+**Prevention:** Database seed scripts should enforce a safeguard to prevent execution with default weak credentials in a production setting (`NODE_ENV === 'production'`) or when the database already holds non-default real data.
