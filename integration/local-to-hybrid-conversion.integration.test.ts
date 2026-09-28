@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client, type Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
@@ -65,7 +67,7 @@ describe("safe Local to Hybrid conversion", () => {
       [`cloud-${randomUUID()}@example.com`],
     );
     await cloudSetup.end();
-    const identityMapPath = `/tmp/local-to-hybrid-${randomUUID()}.json`;
+    const identityMapPath = join(tmpdir(), `local-to-hybrid-${randomUUID()}.json`);
     await writeFile(identityMapPath, JSON.stringify({ [membership.rows[0].id]: cloudIdentity.rows[0].id }));
     const args = {
       businessId: created.businessId, centralUrl: urlFor(centralDb), remoteUrl: "https://cloud.example.test",
