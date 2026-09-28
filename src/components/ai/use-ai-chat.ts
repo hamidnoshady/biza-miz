@@ -7,7 +7,7 @@
  * page and its management panel can never drift.
  */
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { ACTION_CATALOG, type ProposedAction } from "@/lib/ai";
 import type { InputRequestSpec, InputResponse } from "@/lib/ai-input-protocol";
@@ -18,10 +18,12 @@ import {
 } from "@/lib/ai-attachment-limits";
 import type { AiTaskId } from "@/lib/ai-tasks";
 import { agentIdForTurn } from "@/lib/ai-custom-agents";
+import { AI_REASONING_MODES, type AiReasoningMode } from "@/lib/ai-reasoning";
 import { applyProposalRequest } from "./apply-proposal";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 
 export type AssistantMode = "wizard" | "dashboard" | "floor";
+export type AiAppFocus = "all" | "accounting" | "growth" | "crm" | "website" | "workspace";
 
 /** Phase E — a typed input request attached to an assistant turn. */
 interface AiInputRequestState {
@@ -42,6 +44,7 @@ export interface AiChatMessage {
   /** Phase E — a structured input request the assistant raised this turn. */
   inputRequest?: AiInputRequestState | null;
   auditId?: string | null;
+  proposalStatus?: "proposed" | "processing" | "applied" | "failed" | "dismissed" | "reverted" | null;
   applied?: boolean;
   /** Actual Rial charged for this turn, shown quietly once it finishes. */
   costRial?: number | null;
@@ -58,8 +61,9 @@ export interface AiChatMessage {
 }
 
 /**
- * Wave 5 (issue #145, extended) — files attached to the next turn only, held
- * client-side as data URLs; never uploaded to storage, never persisted.
+ * Wave 5 / Issue #759 — files attached to the next turn only in the browser.
+ * Images are copied to the tenant Media Library by the server with provenance;
+ * PDFs are extracted for this turn and are not persisted.
  */
 export interface ChatAttachment {
   id: string;
@@ -110,6 +114,8 @@ interface ConversationMessagePayload {
   content: string;
   proposal: ProposedAction | null;
   inputRequest?: { id: string; spec: InputRequestSpec; status: string } | null;
+  auditId?: string | null;
+  proposalStatus?: "proposed" | "processing" | "applied" | "failed" | "dismissed" | "reverted" | null;
 }
 
 /** Reads the `inputRequest` block off a done event or a loaded message. */
@@ -138,6 +144,8 @@ export interface UseAiChatOptions {
    * project the conversation already carries).
    */
   projectId?: string | null;
+  appFocus?: AiAppFocus;
+  reasoningMode?: AiReasoningMode;
 }
 
 export function useAiChat({
@@ -145,6 +153,8 @@ export function useAiChat({
   currentStep,
   onConversationIdChange,
   projectId = null,
+  appFocus = "all",
+  reasoningMode: initialReasoningMode = AI_REASONING_MODES[0],
 }: UseAiChatOptions) {
   const router = useRouter();
   const canPropose = mode === "wizard" || mode === "dashboard";
@@ -158,12 +168,16 @@ export function useAiChat({
   const [actionsAllowed, setActionsAllowed] = useState(true);
   const [task, setTask] = useState<AiTaskId>("general");
   const [customTask, setCustomTask] = useState("");
+  const [reasoningMode, setReasoningMode] = useState<AiReasoningMode>(initialReasoningMode);
   // Phase I — the business-defined custom agent this dashboard turn runs as.
   // null = the full dashboard assistant (or, inside a project, its pinned
   // default). The backend resolves a request-level agentId every turn and it
   // always wins, so the picker can change the lens mid-conversation. Only
   // dashboard mode runs as an agent; the value is ignored otherwise.
   const [agentId, setAgentId] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const generationRef = useRef(0);
+  const cancelledRef = useRef(false);
 
   /**
    * Patch one message in the thread by id — the single way this hook edits a
@@ -193,9 +207,10 @@ export function useAiChat({
   }
 
   /**
-   * Reads image/PDF files client-side into data URLs; nothing is ever
-   * uploaded to storage. Dashboard mode only, at most MAX_ATTACHMENTS per
-   * message — each invalid file is explained, never silently dropped.
+   * Reads image/PDF files client-side into data URLs. Images are persisted
+   * best-effort in the tenant Media Library after a successful turn; PDFs are
+   * extracted for that turn only. Dashboard mode only, at most MAX_ATTACHMENTS
+   * per message — each invalid file is explained, never silently dropped.
    */
   async function attachFiles(files: File[]) {
     if (mode !== "dashboard") return;
@@ -262,6 +277,10 @@ export function useAiChat({
   }
 
   function startNewConversation() {
+    if (abortControllerRef.current) {
+      cancelGeneration();
+      generationRef.current += 1;
+    }
     setConversation(null);
     setInput("");
     clearAttachment();
@@ -269,10 +288,14 @@ export function useAiChat({
   }
 
   async function loadConversation(id: string) {
+    if (abortControllerRef.current) {
+      cancelGeneration();
+      generationRef.current += 1;
+    }
     setLoadingConversation(true);
     clearAttachment();
     try {
-      const response = await fetch(`/api/ai/conversations/${id}`);
+      const response = await fetch(`/api/ai/conversations/${id}?mode=${encodeURIComponent(mode)}`);
       const data = (await response.json().catch(() => ({}))) as {
         messages?: ConversationMessagePayload[];
         error?: string;
@@ -285,6 +308,9 @@ export function useAiChat({
           role: message.role,
           content: message.content,
           proposal: canPropose ? message.proposal : null,
+          auditId: message.auditId ?? null,
+          proposalStatus: message.proposalStatus ?? (message.proposal ? "proposed" : null),
+          applied: message.proposalStatus === "applied",
           inputRequest: parseInputRequestPayload(message.inputRequest),
         })),
       );
@@ -344,8 +370,13 @@ export function useAiChat({
       { id: replyId, role: "assistant", content: "", createdAt: Date.now() },
     ]);
     setBusy(true);
+    const generation = ++generationRef.current;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    cancelledRef.current = false;
 
     function setReply(update: (current: AiChatMessage) => AiChatMessage) {
+      if (generationRef.current !== generation) return;
       editMessage(replyId, update);
     }
 
@@ -388,6 +419,7 @@ export function useAiChat({
             : null,
           inputRequest: parseInputRequestPayload(payload.inputRequest),
           auditId: typeof payload.auditId === "string" ? payload.auditId : null,
+          proposalStatus: payload.proposedAction ? "proposed" : null,
           costRial: typeof payload.costRial === "number" ? payload.costRial : null,
           cacheNotice:
             typeof payload.cacheNotice === "string" ? payload.cacheNotice : null,
@@ -413,6 +445,7 @@ export function useAiChat({
           "Content-Type": "application/json",
           Accept: "text/event-stream",
         },
+        signal: controller.signal,
         body: JSON.stringify({
           mode,
           currentStep: currentStep ?? null,
@@ -430,6 +463,8 @@ export function useAiChat({
           })),
           task,
           customTask: customTask.trim() || undefined,
+          appFocus,
+          reasoningMode,
           // Only dashboard mode runs as a custom agent; the backend refuses a
           // disabled/unknown id rather than silently widening the turn.
           agentId: agentIdForTurn(mode, agentId),
@@ -477,19 +512,30 @@ export function useAiChat({
         }));
       }
     } catch (error) {
-      setReply(() => ({
-        id: replyId,
-        role: "assistant",
-        content:
-          "⚠️ " +
-          (error instanceof Error
-            ? error.message
-            : "اتصال برقرار نشد. دوباره تلاش کنید."),
-      }));
+      if (cancelledRef.current || (error instanceof DOMException && error.name === "AbortError")) {
+        setReply((current) => ({ ...current, content: current.content || "پاسخ‌گویی متوقف شد." }));
+      } else {
+        setReply(() => ({
+          id: replyId,
+          role: "assistant",
+          content:
+            "⚠️ " +
+            (error instanceof Error
+              ? error.message
+              : "اتصال برقرار نشد. دوباره تلاش کنید."),
+        }));
+      }
     } finally {
+      if (abortControllerRef.current === controller) abortControllerRef.current = null;
       setBusy(false);
       clearAttachment();
     }
+  }
+
+  function cancelGeneration() {
+    if (!abortControllerRef.current) return;
+    cancelledRef.current = true;
+    abortControllerRef.current.abort();
   }
 
   async function finishAudit(
@@ -513,36 +559,27 @@ export function useAiChat({
     if (!meta) return;
     setApplyingId(message.id);
     try {
-      const outcome = await applyProposalRequest(proposal);
+      const outcome = await applyProposalRequest(proposal, message.auditId);
       if (!outcome.ok) {
         if (outcome.error === "missing_param") {
           toast.error(outcome.detail);
           return;
         }
-        if (message.auditId) {
-          void finishAudit(message.auditId, "failed", {
-            endpoint: outcome.endpoint,
-            method: outcome.method,
-            detail: outcome.detail,
-          });
-        }
+        // Current proposals are transitioned by the server-owned apply route.
+        // A legacy card without a link has no safe mutation path and is only
+        // shown for backwards compatibility.
         toast.error(`ثبت انجام نشد. ${outcome.detail}`.trim());
         return;
       }
 
-      let auditUpdated = true;
-      if (message.auditId) {
-        try {
-          await finishAudit(message.auditId, "applied", {
-            endpoint: outcome.endpoint,
-            method: outcome.method,
-            status: outcome.status,
-          });
-        } catch {
-          auditUpdated = false;
-        }
-      }
-      editMessage(message.id, (item) => ({ ...item, applied: true }));
+      // The proposal route has already atomically claimed and finalized the
+      // audit row. Do not issue a second status mutation from the browser.
+      const auditUpdated = Boolean(message.auditId);
+      editMessage(message.id, (item) => ({
+        ...item,
+        applied: true,
+        proposalStatus: "applied",
+      }));
       toast.success(
         auditUpdated
           ? `${meta.label} انجام شد.`
@@ -559,13 +596,19 @@ export function useAiChat({
     }
   }
 
-  function dismissProposal(message: AiChatMessage) {
-    if (message.auditId) {
-      void finishAudit(message.auditId, "dismissed").catch(() => {
-        toast.error("پیشنهاد رد شد، اما ثبت آن در گزارش ممیزی ممکن نشد.");
-      });
+  async function dismissProposal(message: AiChatMessage) {
+    if (message.proposalStatus && message.proposalStatus !== "proposed") return;
+    try {
+      if (message.auditId) await finishAudit(message.auditId, "dismissed");
+      editMessage(message.id, (item) => ({
+        ...item,
+        proposalStatus: "dismissed",
+      }));
+    } catch {
+      // Keep the card executable-looking until the server confirms dismissal;
+      // otherwise a transient network error would create a false local state.
+      toast.error("رد پیشنهاد ثبت نشد. دوباره تلاش کنید.");
     }
-    editMessage(message.id, (item) => ({ ...item, proposal: null }));
   }
 
   /**
@@ -648,12 +691,15 @@ export function useAiChat({
     setTask,
     customTask,
     setCustomTask,
+    reasoningMode,
+    setReasoningMode,
     agentId,
     setAgentId,
     ensureGreeting,
     startNewConversation,
     loadConversation,
     sendMessage,
+    cancelGeneration,
     askAgain,
     applyProposal,
     dismissProposal,

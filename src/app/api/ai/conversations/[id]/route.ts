@@ -12,6 +12,7 @@ export const GET = withTenantScope(
     const session = await getSession();
     if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     const { id } = await context.params;
+    const requestedMode = _request.nextUrl.searchParams.get("mode");
 
     const result = await getConversationMessages({
       businessId: session.businessId,
@@ -19,6 +20,9 @@ export const GET = withTenantScope(
       conversationId: id,
     });
     if (!result) return NextResponse.json({ error: "not_found" }, { status: 404 });
+    if (requestedMode && requestedMode !== result.conversation.mode) {
+      return NextResponse.json({ error: "conversation_mode_mismatch" }, { status: 409 });
+    }
     return NextResponse.json(result);
   },
 );

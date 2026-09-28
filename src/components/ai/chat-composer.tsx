@@ -16,6 +16,7 @@ import {
   FileTextIcon,
   ImageIcon,
   PlusIcon,
+  SquareIcon,
   XIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -54,6 +55,8 @@ interface ChatComposerProps {
   setActionsAllowed: (allowed: boolean) => void;
   loadConversation: (id: string) => void;
   sendMessage: (prompt?: string) => void;
+  onCancelGeneration?: () => void;
+  cancellable?: boolean;
   /** The small print under the composer (mode-dependent). */
   footer?: ReactNode;
 }
@@ -77,6 +80,8 @@ export function ChatComposer({
   setActionsAllowed,
   loadConversation,
   sendMessage,
+  onCancelGeneration,
+  cancellable = false,
   footer,
 }: ChatComposerProps) {
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -262,7 +267,7 @@ export function ChatComposer({
                         تصویر فاکتور / رسید
                       </span>
                       <span className="block text-[10px] text-muted-foreground">
-                        JPG، PNG یا WebP — حداکثر ۵ مگابایت
+                        JPG، PNG یا WebP — حداکثر ۵ مگابایت؛ در Media Library ذخیره می‌شود
                       </span>
                     </span>
                   </DropdownMenuItem>
@@ -278,7 +283,7 @@ export function ChatComposer({
                         سند PDF
                       </span>
                       <span className="block text-[10px] text-muted-foreground">
-                        متن سند خوانده می‌شود — حداکثر ۱۰ مگابایت
+                        متن سند خوانده می‌شود — حداکثر ۱۰ مگابایت؛ فقط برای همین نوبت
                       </span>
                     </span>
                   </DropdownMenuItem>
@@ -326,20 +331,33 @@ export function ChatComposer({
               : "پیوست با آیکون + یا کشیدن فایل"}
           </span>
 
-          <Button
-            ref={sendRef}
-            size="icon-sm"
-            onClick={() => sendMessage()}
-            disabled={busy || !input.trim()}
-            aria-label="ارسال پیام"
-            title="ارسال پیام (Enter)"
-            className={cn(
-              "size-8 rounded-full transition-all",
-              !busy && input.trim() && "opacity-100",
-            )}
-          >
-            <ArrowUpIcon className="size-4" />
-          </Button>
+          {busy && cancellable ? (
+            <Button
+              type="button"
+              size="icon-sm"
+              onClick={onCancelGeneration}
+              aria-label="توقف پاسخ‌گویی"
+              title="توقف پاسخ‌گویی"
+              className="size-8 rounded-full bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              <SquareIcon className="size-3.5 fill-current" />
+            </Button>
+          ) : (
+            <Button
+              ref={sendRef}
+              size="icon-sm"
+              onClick={() => sendMessage()}
+              disabled={busy || !input.trim()}
+              aria-label="ارسال پیام"
+              title="ارسال پیام (Enter)"
+              className={cn(
+                "size-8 rounded-full transition-all",
+                !busy && input.trim() && "opacity-100",
+              )}
+            >
+              <ArrowUpIcon className="size-4" />
+            </Button>
+          )}
         </div>
       </div>
 

@@ -23,6 +23,8 @@
  * have AI".
  */
 
+import { PERMISSIONS, type Permission } from "./permissions";
+
 /** The query parameter that opens the assistant's management panel on `/dashboard`. */
 export const AI_PANEL_PARAM = "aiPanel";
 
@@ -127,6 +129,19 @@ export function aiPanelHref(key: AiPanelSectionKey): string {
  * only) — so a cashier or accountant never sees it. Kept as a function, not a
  * constant, so a future per-section rule has one place to live.
  */
-export function canManageAi(role: string, _key?: AiPanelSectionKey): boolean {
-  return role === "owner" || role === "manager";
+/**
+ * Capability-based management check. The role overload is retained only for
+ * older non-request callers; request/page code must pass the membership's
+ * effective permission set so custom roles and revocations cannot drift from
+ * the API.
+ */
+export function canManageAi(
+  effective: ReadonlySet<Permission> | readonly Permission[] | string,
+  _key?: AiPanelSectionKey,
+): boolean {
+  if (typeof effective !== "string") {
+    const permissions = effective instanceof Set ? effective : new Set(effective);
+    return permissions.has(PERMISSIONS.aiManage);
+  }
+  return effective === "owner" || effective === "manager";
 }

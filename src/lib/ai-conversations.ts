@@ -48,6 +48,9 @@ export interface AiConversationMessage {
   createdAt: string;
   /** Phase E — the input request attached to this turn, when there was one. */
   inputRequest?: { id: string; spec: unknown; status: string | null } | null;
+  /** Durable proposal/audit link. The UI must render terminal status from here. */
+  auditId?: string | null;
+  proposalStatus?: "proposed" | "processing" | "applied" | "failed" | "dismissed" | "reverted" | null;
 }
 
 interface Owner {
@@ -94,10 +97,11 @@ export async function appendMessage(input: {
   content: string;
   toolCalls?: unknown;
   proposal?: ProposedAction | null;
+  auditId?: string | null;
 }): Promise<string> {
   const { rows } = await query<{ id: string }>(
-    `INSERT INTO ai_messages (conversation_id, role, content, tool_calls, proposal)
-     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+    `INSERT INTO ai_messages (conversation_id, role, content, tool_calls, proposal, proposal_audit_id)
+     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)
      RETURNING id`,
     [
       input.conversationId,
@@ -105,6 +109,7 @@ export async function appendMessage(input: {
       input.content,
       input.toolCalls === undefined ? null : JSON.stringify(input.toolCalls),
       input.proposal ? JSON.stringify(input.proposal) : null,
+      input.auditId ?? null,
     ],
   );
   await query(`UPDATE ai_conversations SET last_message_at = now() WHERE id = $1`, [input.conversationId]);
@@ -113,7 +118,7 @@ export async function appendMessage(input: {
 
 export async function listConversations(
   owner: Owner,
-  options: { limit?: number; before?: string | null } = {},
+  options: { limit?: number; before?: string | null; mode?: AgentMode } = {},
 ): Promise<AiConversationSummary[]> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 30)));
   const { rows } = await query<{
@@ -127,10 +132,11 @@ export async function listConversations(
     `SELECT id, mode, title, last_message_at, created_at, project_id
        FROM ai_conversations
       WHERE business_id = $1 AND actor_user_id = $2
-        AND ($3::timestamptz IS NULL OR last_message_at < $3::timestamptz)
+        AND ($3::text IS NULL OR mode = $3::text)
+        AND ($4::timestamptz IS NULL OR last_message_at < $4::timestamptz)
       ORDER BY last_message_at DESC
-      LIMIT $4`,
-    [owner.businessId, owner.actorUserId, options.before ?? null, limit],
+      LIMIT $5`,
+    [owner.businessId, owner.actorUserId, options.mode ?? null, options.before ?? null, limit],
   );
   return rows.map((row) => ({
     id: row.id,
@@ -184,6 +190,8 @@ export async function getConversationMessages(
     content: string;
     tool_calls: unknown;
     proposal: ProposedAction | null;
+    proposal_audit_id: string | null;
+    proposal_status: "proposed" | "processing" | "applied" | "failed" | "dismissed" | "reverted" | null;
     created_at: string;
     input_request_id: string | null;
     input_request_spec: unknown;
@@ -192,9 +200,11 @@ export async function getConversationMessages(
     // Phase E — left-join the input request attached to each assistant turn, so
     // a reloaded transcript can re-render a still-open card (and lock an
     // already-answered one). At most one request per message by construction.
-    `SELECT m.id, m.role, m.content, m.tool_calls, m.proposal, m.created_at,
+    `SELECT m.id, m.role, m.content, m.tool_calls, m.proposal,
+            m.proposal_audit_id, a.status AS proposal_status, m.created_at,
             r.id AS input_request_id, r.spec AS input_request_spec, r.status AS input_request_status
        FROM ai_messages m
+       LEFT JOIN ai_action_audit a ON a.id = m.proposal_audit_id
        LEFT JOIN ai_input_requests r ON r.message_id = m.id
       WHERE m.conversation_id = $1
       ORDER BY m.created_at ASC`,
@@ -217,6 +227,8 @@ export async function getConversationMessages(
       toolCalls: row.tool_calls,
       proposal: row.proposal,
       createdAt: row.created_at,
+      auditId: row.proposal_audit_id,
+      proposalStatus: row.proposal_status,
       inputRequest: row.input_request_id
         ? {
             id: row.input_request_id,
@@ -245,6 +257,7 @@ export async function searchConversations(
   owner: Owner,
   queryText: string,
   limit = 8,
+  options: { mode?: AgentMode } = {},
 ): Promise<AiConversationSearchResult[]> {
   const trimmed = queryText.trim();
   if (!trimmed) return [];
@@ -253,13 +266,20 @@ export async function searchConversations(
     `SELECT c.id, c.title, c.last_message_at
        FROM ai_conversations c
       WHERE c.business_id = $1 AND c.actor_user_id = $2
+        AND ($5::text IS NULL OR c.mode = $5::text)
         AND (
           c.title ILIKE $3 ESCAPE '\\'
           OR EXISTS (SELECT 1 FROM ai_messages m WHERE m.conversation_id = c.id AND m.content ILIKE $3 ESCAPE '\\')
         )
       ORDER BY c.last_message_at DESC
       LIMIT $4`,
-    [owner.businessId, owner.actorUserId, needle, Math.max(1, Math.min(50, Math.floor(limit)))],
+    [
+      owner.businessId,
+      owner.actorUserId,
+      needle,
+      Math.max(1, Math.min(50, Math.floor(limit))),
+      options.mode ?? null,
+    ],
   );
   return rows.map((row) => ({ id: row.id, title: row.title, lastMessageAt: row.last_message_at }));
 }
@@ -316,7 +336,7 @@ export async function renameConversation(
  */
 export async function listConversationsByProject(
   owner: Owner & { projectId: string },
-  options: { limit?: number; before?: string | null } = {},
+  options: { limit?: number; before?: string | null; mode?: AgentMode } = {},
 ): Promise<AiConversationSummary[]> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 30)));
   const { rows } = await query<{
@@ -330,10 +350,11 @@ export async function listConversationsByProject(
     `SELECT id, mode, title, last_message_at, created_at, project_id
        FROM ai_conversations
       WHERE business_id = $1 AND actor_user_id = $2 AND project_id = $3
-        AND ($4::timestamptz IS NULL OR last_message_at < $4::timestamptz)
+        AND ($4::text IS NULL OR mode = $4::text)
+        AND ($5::timestamptz IS NULL OR last_message_at < $5::timestamptz)
       ORDER BY last_message_at DESC
-      LIMIT $5`,
-    [owner.businessId, owner.actorUserId, owner.projectId, options.before ?? null, limit],
+      LIMIT $6`,
+    [owner.businessId, owner.actorUserId, owner.projectId, options.mode ?? null, options.before ?? null, limit],
   );
   return rows.map((row) => ({
     id: row.id,

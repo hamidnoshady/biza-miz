@@ -13,7 +13,7 @@
  * re-checks the *scope*, because that is the boundary RLS says nothing about.
  */
 import { query } from "../db";
-import { runReadTool } from "../ai-tools";
+import { runSystemReadTool } from "../ai-system-read";
 import { getBusinessIndustry } from "../industry-guard";
 import { INDUSTRY_LABELS } from "../industries";
 import { industryProfile, labelFor } from "../industry-profile";
@@ -123,7 +123,7 @@ async function callTool(
     // tool ignores the argument. A connection with no authorizing user (a
     // machine token) gets a decline from the tool itself, which is the right
     // answer: there is no "my tasks" without a "my".
-    const outcome = await runReadTool(
+    const outcome = await runSystemReadTool(
       tool.binding.readToolName,
       args,
       auth.businessId,

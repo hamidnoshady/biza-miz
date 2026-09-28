@@ -15,7 +15,7 @@ import {
   getConversationProjectId,
   getOrCreateConversation,
 } from "@/lib/ai-conversations";
-import { buildProjectPromptContext, getProjectPromptContext } from "@/lib/ai-projects";
+import { buildProjectPromptContext, getProject, getProjectPromptContext } from "@/lib/ai-projects";
 import { persistChatImageAttachments } from "@/lib/ai-media-persist";
 import { createInputRequest } from "@/lib/ai-input-requests-service";
 import {
@@ -46,6 +46,13 @@ import { businessToday } from "@/lib/business-day-service";
 import { requireManager, resolveActiveLocation } from "@/lib/setup-state";
 import { requireFloorAssistant, withTenantScope } from "@/lib/auth";
 import { providerErrorReason } from "@/lib/ai-provider-errors";
+import { PERMISSIONS } from "@/lib/permissions";
+import {
+  AI_MODE_DIRECTIVES,
+  isAiReasoningMode,
+  isAiReasoningModeAvailable,
+  type AiReasoningMode,
+} from "@/lib/ai-reasoning";
 
 const MAX_MESSAGES = 24;
 const MAX_CONTENT = 8_000;
@@ -93,6 +100,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     customTask?: unknown;
     /** Phase 36 Wave 7 — «دوباره بپرس»: build a fresh turn, skip the cache. */
     bypassCache?: unknown;
+    /** Product-facing routing mode; provider aliases never reach the tenant. */
+    reasoningMode?: unknown;
+    /** Optional app focus, which only narrows prompt/tool context. */
+    appFocus?: unknown;
   };
   try {
     body = await request.json();
@@ -102,9 +113,27 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const mode: AgentMode =
     body.mode === "wizard" ? "wizard" : body.mode === "floor" ? "floor" : "dashboard";
-  const guard = mode === "floor" ? await requireFloorAssistant() : await requireManager();
+  // Dashboard access is a capability, not a manager role. This makes the
+  // universal home usable by cashiers/accountants while the effective tool
+  // intersection below keeps their data surface narrow.
+  const guard =
+    mode === "floor"
+      ? await requireFloorAssistant()
+      : mode === "wizard"
+        ? await requireManager()
+        : await requireManager(PERMISSIONS.aiUse);
   if (guard.error) return guard.error;
   const session = guard.session;
+  const effectivePermissions = guard.membership?.permissions ?? new Set();
+  const reasoningMode: AiReasoningMode = isAiReasoningMode(body.reasoningMode)
+    ? body.reasoningMode
+    : "auto";
+  if (!isAiReasoningModeAvailable(reasoningMode)) {
+    return NextResponse.json(
+      { error: "mode_unavailable", mode: reasoningMode, message: "حالت پژوهش عمیق هنوز برای دستیار کسب‌وکار فعال نشده است." },
+      { status: 409 },
+    );
+  }
 
   const floorLocation = mode === "floor" ? await resolveActiveLocation(session) : null;
   if (mode === "floor" && !floorLocation) {
@@ -139,7 +168,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   // Wave 5 (issue #145, extended) — only dashboard mode (owner/manager) may
   // attach files (receipt/invoice images and PDF documents), matching
-  // expense.categorize's existing scope. Nothing is persisted; on an invalid
+  // expense.categorize's existing scope. Validated images are persisted
+  // best-effort in Media Library; PDFs stay one-turn ephemeral. On an invalid
   // data URL the whole request is refused rather than silently dropping the
   // attachment. The legacy single-object shape is still accepted.
   const { attachments, error: attachmentError } = parseChatAttachments(
@@ -158,11 +188,28 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // PDF text layers are extracted once, before the turn starts.
   const preparedAttachments = await prepareAttachments(attachments);
   const allowActions = body.allowActions !== false;
-  const taskDirective = taskDirectiveFor({
-    task: body.task,
-    customTask: body.customTask,
-    mode,
-  });
+  const appFocusValues = new Set([
+    "all",
+    "accounting",
+    "growth",
+    "crm",
+    "website",
+    "workspace",
+  ]);
+  const appFocus = typeof body.appFocus === "string" && appFocusValues.has(body.appFocus)
+    ? body.appFocus
+    : "all";
+  const appFocusDirective =
+    appFocus === "all"
+      ? ""
+      : `تمرکز این نوبت روی بخش «${appFocus}» است؛ فقط ابزارهای مجاز همین عضو را استفاده کن و این انتخاب هرگز مجوز تازه‌ای ایجاد نمی‌کند.`;
+  const taskDirective = [
+    AI_MODE_DIRECTIVES[reasoningMode],
+    taskDirectiveFor({ task: body.task, customTask: body.customTask, mode }),
+    appFocusDirective,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
   const activeLocation = await resolveActiveLocation(session);
   const locationId = floorLocation?.id ?? activeLocation?.id ?? null;
@@ -223,6 +270,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     typeof body.projectId === "string" && body.projectId.trim()
       ? body.projectId.trim()
       : null;
+  if (requestedProjectId && (mode === "dashboard" || mode === "wizard")) {
+    const project = await getProject({
+      businessId: session.businessId,
+      actorUserId: session.sub,
+      projectId: requestedProjectId,
+    });
+    if (!project) {
+      return NextResponse.json({ error: "project_forbidden", message: "به این پروژه دسترسی ندارید." }, { status: 403 });
+    }
+  }
   let conversationId: string | null = null;
   try {
     const conversation = await getOrCreateConversation({
@@ -259,6 +316,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
           actorUserId: session.sub,
           projectId,
         });
+        if (!ctx) {
+          return NextResponse.json({ error: "project_forbidden", message: "به این پروژه دسترسی ندارید." }, { status: 403 });
+        }
         if (ctx) {
           activeProjectId = projectId;
           projectContext = buildProjectPromptContext(ctx);
@@ -420,6 +480,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             // Phase G — «مالِ من» in the workspace tools is this member and
             // only this member; the model never names a user id.
             actorUserId: session.sub,
+            permissions: effectivePermissions,
             systemPrompt,
             floorScope:
               mode === "floor" && floorLocation && (session.role === "cashier" || session.role === "waiter")
@@ -447,6 +508,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
               onToolCalls: () => emit("reset", {}),
             },
             requestId,
+            signal: request.signal,
           });
 
           // Phase F pt.2 — a project-scoped proposal is addressed by the AMBIENT
@@ -497,6 +559,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
                 actorName: session.fullName,
                 prompt: latestPrompt,
                 proposal: reply.proposedAction,
+                conversationId,
               })
             : null;
 
@@ -511,6 +574,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
               role: "assistant",
               content: reply.content,
               proposal: reply.proposedAction,
+              auditId,
             }).catch((err) => {
               console.error("ai conversation persistence failed", err);
               return null;

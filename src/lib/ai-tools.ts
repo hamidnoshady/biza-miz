@@ -66,6 +66,8 @@ import {
 import { isFeatureEnabled } from "./features";
 import { INDUSTRY_LABELS, type Industry } from "./industries";
 import { industryProfile, labelFor as industryLabelFor } from "./industry-profile";
+import { canUseAiTool, SYSTEM_AI_READ_PERMISSIONS } from "./ai-capabilities";
+import type { Permission } from "./permissions";
 
 export interface ToolResult {
   ok: boolean;
@@ -1260,7 +1262,16 @@ export async function runReadTool(
    * than falling back to "everyone".
    */
   actorUserId?: string,
+  permissions?: ReadonlySet<Permission>,
 ): Promise<ToolResult> {
+  // The provider-facing catalogue and production executor paths pass an
+  // effective permission set. Keep the low-level executor compatible with
+  // trusted legacy/internal callers that predate capability enforcement; the
+  // explicit system-read wrapper supplies a full trusted set for background
+  // jobs, while user-facing calls must never omit this argument.
+  if (permissions && !canUseAiTool(name, permissions)) {
+    return { ok: false, data: { error: "دسترسی لازم برای این ابزار را ندارید." } };
+  }
   // Phase G — «میز کار من». Kept out of the switch below because the four
   // tools share one executor and one extra gate (a caller identity).
   if (isWorkspaceToolName(name)) {

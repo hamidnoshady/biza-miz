@@ -20,6 +20,18 @@ import type { Role } from "./auth";
  * business.
  */
 export const PERMISSIONS = {
+  // AI workspace — capability keys are intentionally separate from module
+  // permissions. `ai.use` opens the canonical workspace; the management keys
+  // only control the corresponding panel/API surfaces. A member may use AI
+  // without receiving any of the data tools below.
+  aiUse: "ai.use",
+  aiManage: "ai.manage",
+  aiAgentsManage: "ai.agents.manage",
+  aiAutomationsManage: "ai.automations.manage",
+  aiKnowledgeManage: "ai.knowledge.manage",
+  aiUsageView: "ai.usage.view",
+  aiWidgetsManage: "ai.widgets.manage",
+
   // Point of sale
   ordersView: "orders.view",
   ordersCreate: "orders.create",
@@ -334,6 +346,7 @@ export function isOwnerOnlyPermission(permission: Permission): boolean {
 }
 
 const {
+  aiUse, aiManage, aiAgentsManage, aiAutomationsManage, aiKnowledgeManage, aiUsageView, aiWidgetsManage,
   ordersView, ordersCreate, ordersVoid, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
   tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
   menuView, menuEdit,
@@ -367,6 +380,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
   // ownership, destructive recovery, master API or cross-location trust keys.
   admin: ALL_PERMISSIONS.filter((permission) => !isOwnerOnlyPermission(permission)),
   manager: [
+    aiUse, aiManage, aiAgentsManage, aiAutomationsManage, aiKnowledgeManage, aiUsageView, aiWidgetsManage,
     ordersView, ordersCreate, ordersVoid, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
     tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
     menuView, menuEdit,
@@ -410,6 +424,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
   // closed to this role, so the 360° file, segments and notes are not a back
   // door into customer PII without an accounting reason.
   accountant: [
+    aiUse, aiUsageView,
     menuView,
     inventoryView,
     partiesView, partiesManage,
@@ -434,6 +449,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     growthView,
   ],
   cashier: [
+    aiUse,
     ordersView, ordersCreate, ordersDiscount, paymentsTake,
     tablesManage, reservationsView, reservationsManage,
     menuView, deliveryManage,
@@ -451,6 +467,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     workspaceView, workspaceManage,
   ],
   waiter: [
+    aiUse,
     ordersView, ordersCreate,
     tablesManage, reservationsView, reservationsManage,
     menuView,
@@ -459,6 +476,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     workspaceView, printingExecute,
   ],
   kitchen: [
+    aiUse,
     kitchenView, printingExecute,
     menuView,
   ],

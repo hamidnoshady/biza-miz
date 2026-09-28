@@ -391,9 +391,7 @@ export async function requireAnyPermission(...permissions: Permission[]): Promis
  * requireManager: only current cashier/waiter memberships with menu-view
  * access may use the narrow, read-only assistant.
  */
-export async function requireFloorAssistant(): Promise<
-  { session: SessionPayload; error: null } | { session: null; error: NextResponse }
-> {
+export async function requireFloorAssistant(): Promise<GuardResult> {
   const guard = await requirePermission(PERMISSIONS.menuView);
   if (guard.error) return guard;
   if (guard.session.role !== "cashier" && guard.session.role !== "waiter") {

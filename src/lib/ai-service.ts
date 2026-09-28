@@ -15,6 +15,8 @@ import {
   type AiConfig,
   type ProposedAction,
   type PromptContext,
+  BASE_ACTION_TYPES,
+  PROJECT_ACTION_TYPES,
 } from "./ai";
 import { runReadTool, type FloorReadScope, type ToolResult } from "./ai-tools";
 import { validateInputRequest, type InputRequestSpec } from "./ai-input-protocol";
@@ -23,6 +25,11 @@ import { parseResponseCostHeader } from "./ai-gateway";
 import { normalizeProviderError, tenantProviderErrorMessage, type NormalizedProviderError } from "./ai-provider-errors";
 import { clampRetrievalLimit, formatRetrievalForPrompt, isRetrievalAvailable, retrieveKnowledge } from "./ai-rag";
 import { embedOne, isEmbeddingAvailable } from "./ai-embeddings";
+import {
+  allowedAiActions,
+  filterAiToolsByPermissions,
+} from "./ai-capabilities";
+import type { Permission } from "./permissions";
 import {
   parseReceiptExtractionReply,
   RECEIPT_EXTRACTION_SYSTEM_PROMPT,
@@ -372,9 +379,11 @@ async function callProvider(
   tools: ReturnType<typeof toolDefinitions>,
   stream?: ProviderStreamCallbacks,
   requestId?: string,
+  parentSignal?: AbortSignal,
 ): Promise<ProviderResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const signal = parentSignal ? AbortSignal.any([controller.signal, parentSignal]) : controller.signal;
   const url = chatCompletionsUrl(config.baseUrl);
   const toolErrors = validateOpenAiTools(tools);
   const requestDiagnostics: AiProviderRequestDiagnostics = {
@@ -430,7 +439,7 @@ async function callProvider(
       method: "POST",
       headers: providerHeaders(config),
       body: JSON.stringify(body),
-      signal: controller.signal,
+      signal,
     });
     // Some OpenAI-compatible gateways accept streaming but not the optional
     // usage trailer. Retry the same non-mutating provider request once without
@@ -443,7 +452,7 @@ async function callProvider(
         method: "POST",
         headers: providerHeaders(config),
         body: JSON.stringify(fallbackBody),
-        signal: controller.signal,
+        signal,
       });
     }
   } catch (err) {
@@ -580,7 +589,7 @@ interface ReceiptExtractionResult {
  * request rather than folding the image into the main conversation loop —
  * that would resend the image bytes on every later tool round.
  */
-async function extractReceiptDraft(config: AiConfig, dataUrl: string): Promise<ReceiptExtractionResult> {
+async function extractReceiptDraft(config: AiConfig, dataUrl: string, signal?: AbortSignal): Promise<ReceiptExtractionResult> {
   const convo: ProviderMessage[] = [
     { role: "system", content: RECEIPT_EXTRACTION_SYSTEM_PROMPT },
     {
@@ -592,7 +601,7 @@ async function extractReceiptDraft(config: AiConfig, dataUrl: string): Promise<R
     },
   ];
   try {
-    const result = await callProvider(config, convo, []);
+    const result = await callProvider(config, convo, [], undefined, undefined, signal);
     return {
       fields: parseReceiptExtractionReply(textOf(result.message.content)),
       usage: result.usage,
@@ -687,6 +696,9 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
    * accepted. Absent, those tools decline instead of widening their scope.
    */
   actorUserId?: string;
+  /** Effective permissions resolved for this request. When present, the
+   * catalogue and executor both enforce the same fail-closed intersection. */
+  permissions?: ReadonlySet<Permission>;
   /**
    * A separate read-tool realm can supply its own executor. It is deliberately
    * invoked only after the tool name is checked against toolDefinitions(mode).
@@ -696,6 +708,8 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   stream?: ProviderStreamCallbacks;
   /** Server-generated id used only for sanitized diagnostics/log correlation. */
   requestId?: string;
+  /** Disconnect/cancel signal from a browser request; aborts provider work too. */
+  signal?: AbortSignal;
   promptContext: PromptContext;
   /**
    * An explicit system prompt for this turn; when absent the code-built one
@@ -746,14 +760,26 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   // is exactly the pre-wave behaviour. Desktop installs keep the assistant.
   const retrievalReady = await retrievalReadyForMode(config, mode, businessId);
 
-  const tools = toolDefinitions(mode, {
+  const permissionActionTypes = opts.permissions
+    ? allowedAiActions(
+        opts.actionTypes ?? (opts.projectScoped ? PROJECT_ACTION_TYPES : BASE_ACTION_TYPES),
+        opts.permissions,
+      )
+    : opts.actionTypes;
+  const catalogue = toolDefinitions(mode, {
     hasAttachment,
-    actionTypes: opts.actionTypes,
+    actionTypes: permissionActionTypes,
     retrieval: retrievalReady,
     toolAllowlist: opts.toolAllowlist,
     projectScoped: opts.projectScoped,
   }).filter((tool) => allowActions || tool.function.name !== "propose_action");
-  const allowedActionTypes = opts.actionTypes ? new Set<string>(opts.actionTypes) : null;
+  // Filtering happens before provider serialization and again in the executor.
+  // A newly-added tool without a registry entry therefore cannot accidentally
+  // become available to a tenant member.
+  const tools = opts.permissions
+    ? filterAiToolsByPermissions(catalogue, opts.permissions)
+    : catalogue;
+  const allowedActionTypes = permissionActionTypes ? new Set<string>(permissionActionTypes) : null;
   const canPropose = tools.some((tool) => tool.function.name === "propose_action");
   const canRequestInput = tools.some((tool) => tool.function.name === "request_input");
   const allowedReadToolNames = new Set(
@@ -764,7 +790,8 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   const toolRunner: ReadToolRunner | null =
     opts.executeReadTool ??
     (businessId
-      ? (name, args) => runReadTool(name, args, businessId, floorScope, opts.actorUserId)
+      ? (name, args) =>
+          runReadTool(name, args, businessId, floorScope, opts.actorUserId, opts.permissions)
       : null);
   const usage: AiTokenUsage = { inputTokens: 0, outputTokens: 0 };
   let costUsd: number | null = null;
@@ -780,7 +807,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   ];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const result = await callProvider(config, convo, tools, opts.stream, opts.requestId);
+    const result = await callProvider(config, convo, tools, opts.stream, opts.requestId, opts.signal);
     usage.inputTokens += result.usage.inputTokens;
     usage.outputTokens += result.usage.outputTokens;
     if (result.costUsd !== null) costUsd = (costUsd ?? 0) + result.costUsd;
@@ -861,7 +888,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
           (item) => item.kind === "pdf" && typeof item.extractedText === "string" && item.extractedText,
         );
         if (image) {
-          const extraction = await extractReceiptDraft(config, image.dataUrl!);
+          const extraction = await extractReceiptDraft(config, image.dataUrl!, opts.signal);
           usage.inputTokens += extraction.usage.inputTokens;
           usage.outputTokens += extraction.usage.outputTokens;
           if (extraction.costUsd !== null) costUsd = (costUsd ?? 0) + extraction.costUsd;

@@ -1,18 +1,16 @@
 /**
  * Phase G, Part 2 — persist AI chat media into the Media Library.
  *
- * Until now a file a user pasted into the assistant (a receipt photo, an
- * invoice image) lived only for the length of one turn: ai-attachment.ts states
- * plainly that "nothing here touches a table or object storage". That was the
- * right call while the library had no vocabulary for AI-originated files; Part 1
- * added it (media_assets.source / created_by_ai / conversation_id / project_id).
- * This module is the write path that uses it.
+ * The dashboard policy persists validated images best-effort in the canonical
+ * Media Library, tagged with AI provenance (media_assets.source / created_by_ai /
+ * conversation_id / project_id); PDFs remain ephemeral after text extraction.
+ * This module is the image write path.
  *
  * The split mirrors the rest of the AI subsystem: the PURE half here
  * (`decodeImageDataUrl`) validates and decodes a base64 image data URL with no
  * I/O and is unit-tested; the DB/S3 half (`persistChatImageAttachments`) is a
- * thin, BEST-EFFORT orchestration that the chat route calls after the turn is
- * already answered. Persisting a file must never fail or slow a turn, so every
+ * thin, BEST-EFFORT orchestration that the chat route calls alongside the
+ * turn. Persisting a file must never fail or slow a turn, so every
  * failure here is swallowed and logged — the library gains a file or it does
  * not, but the conversation is unaffected.
  */

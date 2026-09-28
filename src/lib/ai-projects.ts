@@ -190,9 +190,12 @@ export async function listProjects(
             (SELECT count(*) FROM ai_conversations c WHERE c.project_id = p.id) AS conversation_count
        FROM ai_projects p
        LEFT JOIN users u ON u.id = p.owner_user_id AND u.business_id = p.business_id
-      WHERE p.business_id = $1 ${archivedClause}
+      WHERE p.business_id = $1
+        AND (p.owner_user_id::text = $2 OR p.created_by = $2
+             OR EXISTS (SELECT 1 FROM workspace_members m WHERE m.project_id = p.id AND m.user_id::text = $2))
+        ${archivedClause}
       ORDER BY p.created_at DESC`,
-    [owner.businessId],
+    [owner.businessId, owner.actorUserId],
   );
   return rows.map((row) => ({
     ...toProject(row), noteCount: Number(row.note_count), conversationCount: Number(row.conversation_count),
@@ -206,8 +209,10 @@ export async function getProject(
     `SELECT ${PROJECT_COLUMNS}
        FROM ai_projects p
        LEFT JOIN users u ON u.id = p.owner_user_id AND u.business_id = p.business_id
-      WHERE p.id = $1 AND p.business_id = $2`,
-    [owner.projectId, owner.businessId],
+      WHERE p.id = $1 AND p.business_id = $2
+        AND (p.owner_user_id::text = $3 OR p.created_by = $3
+             OR EXISTS (SELECT 1 FROM workspace_members m WHERE m.project_id = p.id AND m.user_id::text = $3))`,
+    [owner.projectId, owner.businessId, owner.actorUserId],
   );
   return rows[0] ? toProject(rows[0]) : null;
 }

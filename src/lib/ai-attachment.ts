@@ -3,10 +3,10 @@
  * "upload image and PDF").
  *
  * The original receipt flow accepted exactly one validated image data URL
- * that was used for exactly one isolated vision call and never persisted
- * (see ai-receipt.ts). This module extends that contract to a small list of
- * attachments — receipt photos *and* PDF documents — without changing the
- * persistence rule: nothing here touches a table or object storage.
+ * that was used for exactly one isolated vision call. This module extends the
+ * contract to a small list of attachments — receipt photos *and* PDF documents.
+ * Images are persisted best-effort in the tenant Media Library with conversation
+ * provenance; PDFs remain one-turn ephemeral after their text is extracted.
  *
  * PDFs are handled differently from images by necessity: the OpenAI-compatible
  * providers in use do not read PDF bytes, so the text layer is extracted
