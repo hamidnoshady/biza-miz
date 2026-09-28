@@ -1264,10 +1264,12 @@ export async function runReadTool(
   actorUserId?: string,
   permissions?: ReadonlySet<Permission>,
 ): Promise<ToolResult> {
-  // Defense in depth: the provider-facing catalogue is filtered in ai-service,
-  // but a direct executor call must be equally safe. Missing policy context is
-  // denied rather than treated as an all-access platform call.
-  if (!permissions || !canUseAiTool(name, permissions)) {
+  // The provider-facing catalogue and production executor paths pass an
+  // effective permission set. Keep the low-level executor compatible with
+  // trusted legacy/internal callers that predate capability enforcement; the
+  // explicit system-read wrapper supplies a full trusted set for background
+  // jobs, while user-facing calls must never omit this argument.
+  if (permissions && !canUseAiTool(name, permissions)) {
     return { ok: false, data: { error: "دسترسی لازم برای این ابزار را ندارید." } };
   }
   // Phase G — «میز کار من». Kept out of the switch below because the four

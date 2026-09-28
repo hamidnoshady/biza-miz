@@ -25,6 +25,7 @@ CREATE INDEX IF NOT EXISTS idx_ai_action_audit_conversation
 -- permission-aware AgentTurn and wallet/audit flow.
 CREATE TABLE IF NOT EXISTS ai_widget_templates (
     id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id         uuid NULL REFERENCES businesses(id) ON DELETE CASCADE,
     name                text NOT NULL CHECK (btrim(name) <> ''),
     description         text NOT NULL DEFAULT '',
     industry            text NOT NULL DEFAULT 'all',
@@ -70,7 +71,16 @@ ALTER TABLE ai_widget_templates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai_widget_templates FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation ON ai_widget_templates;
 CREATE POLICY tenant_isolation ON ai_widget_templates FOR ALL
-  USING (app_rls_bypass() OR enabled) WITH CHECK (app_rls_bypass());
+  USING (
+    app_rls_bypass()
+    OR business_id IS NULL
+    OR business_id = app_current_business()
+  )
+  WITH CHECK (
+    app_rls_bypass()
+    OR business_id IS NULL
+    OR business_id = app_current_business()
+  );
 
 INSERT INTO ai_widget_templates
   (name, description, industry, source_app, required_permissions, prompt, output_format, default_width, default_height, created_by)
