@@ -34,6 +34,12 @@ export interface AppDef {
   executionTarget: ExecutionTarget;
   requiredAnyPermission: readonly Permission[];
   /**
+   * Preferred destinations within the app. The launcher/root resolver picks
+   * the first one that survived the member's canonical navigation filtering;
+   * this is route preference only, never an authorization rule.
+   */
+  landingRoutes: readonly string[];
+  /**
    * The modules that make up this app. An app is shown only when the
    * business's industry has at least one of them — so a future trade that
    * drops an entire app's worth of modules drops the app with them.
@@ -50,7 +56,23 @@ export const APPS: AppDef[] = [
     capability: "app.accounting",
     supportedProfiles: ["cloud", "hybrid", "local"],
     executionTarget: "either",
-    requiredAnyPermission: ["ledger.view", "orders.view", "orders.create"],
+    requiredAnyPermission: [
+      "ledger.view", "orders.view", "orders.create", "payments.take",
+      "tables.manage", "reservations.view", "reservations.manage", "kitchen.view",
+      "delivery.manage", "inventory.view", "reports.view",
+    ],
+    landingRoutes: [
+      "/accounting/overview",
+      "/accounting/pos",
+      "/accounting/orders",
+      "/accounting/floor",
+      "/accounting/reservations",
+      "/accounting/delivery",
+      "/accounting/waiter",
+      "/accounting/kitchen",
+      "/accounting/inventory",
+      "/accounting/reports",
+    ],
     // Sales/POS and operations are work areas inside Accounting's workspace.
     // The operational dashboard follows Accounting; shared settings do not.
     modules: [
@@ -70,6 +92,7 @@ export const APPS: AppDef[] = [
     supportedProfiles: ["cloud", "hybrid", "local"],
     executionTarget: "either",
     requiredAnyPermission: ["crm.view", "crm.manage"],
+    landingRoutes: ["/crm/overview", "/crm/directory"],
     // Phase 36 — the CRM is its own app, not a section of Growth.
     //
     // Phase 35 seated `crm` under Growth as a forward reference, on the
@@ -101,6 +124,7 @@ export const APPS: AppDef[] = [
     supportedProfiles: ["cloud", "hybrid"],
     executionTarget: "cloud",
     requiredAnyPermission: ["growth.view"],
+    landingRoutes: ["/growth/overview", "/growth/loyalty", "/growth/campaigns", "/growth/commission"],
     // Since Phase 36b this app has a home of its own (/growth) with
     // a management dashboard and one section per engine — the same shape the
     // accounting suite has — over the same services and posting rules the
@@ -121,6 +145,7 @@ export const APPS: AppDef[] = [
     supportedProfiles: ["cloud", "hybrid"],
     executionTarget: "cloud",
     requiredAnyPermission: ["website.view", "cms.view", "woocommerce.view"],
+    landingRoutes: ["/websites/overview"],
     // One app, two managers — and it is *one* app on purpose.
     //
     // Until now these were two peers in the rail: «وب‌سایت» (the eshobe-cms
@@ -206,6 +231,46 @@ export function appForKey(key: AppKey): AppDef {
   // `key` is `AppKey`, so this is exhaustive; the guard is for the impossible path.
   if (!found) throw new Error(`Unknown app key: ${String(key)}`);
   return found;
+}
+
+/** Minimal route shape accepted from the already-filtered server navigation. */
+export interface AccessibleAppRoute {
+  module: ModuleKey;
+  href?: string;
+  children?: readonly AccessibleAppRoute[];
+}
+
+/**
+ * Resolve an app door from routes the member can actually reach.
+ *
+ * Authorization has already happened while building this navigation. This
+ * helper only groups routes by the owning app and applies the app registry's
+ * destination preference. Keeping that preference in the registry prevents
+ * the workspace rail and `/accounting` from inventing separate RBAC models.
+ */
+export function resolveAccessibleAppLanding(
+  key: AppKey,
+  routes: readonly AccessibleAppRoute[],
+): string | null {
+  const owned = new Set<string>();
+  const visit = (items: readonly AccessibleAppRoute[]) => {
+    for (const item of items) {
+      if (item.href && appForModule(item.module) === key) owned.add(item.href);
+      if (item.children) visit(item.children);
+    }
+  };
+  visit(routes);
+  if (owned.size === 0) return null;
+
+  for (const preferred of appForKey(key).landingRoutes) {
+    if (owned.has(preferred)) return preferred;
+  }
+  return owned.values().next().value ?? null;
+}
+
+/** Whether effective permissions admit the member to at least one app capability. */
+export function canOpenApp(key: AppKey, permissions: ReadonlySet<string>): boolean {
+  return appForKey(key).requiredAnyPermission.some((permission) => permissions.has(permission));
 }
 
 /** Type guard for `AppKey`. */

@@ -47,7 +47,7 @@ vi.mock("../src/lib/auth", async (importOriginal) => {
         locationId: sessionState.locationId,
         activeLocationId: sessionState.locationId,
         sub: sessionState.sub,
-        role: "owner",
+        role: "cashier",
       },
       error: null,
     })),
@@ -57,7 +57,7 @@ vi.mock("../src/lib/auth", async (importOriginal) => {
         locationId: sessionState.locationId,
         activeLocationId: sessionState.locationId,
         sub: sessionState.sub,
-        role: "owner",
+        role: "cashier",
       },
       error: null,
     })),
@@ -182,7 +182,7 @@ beforeEach(async () => {
   // events and journal entries, all of which reference users(id).
   const user = await db.query<{ id: string }>(
     `INSERT INTO users (business_id, role, full_name, pin_hash)
-     VALUES ($1, 'owner', 'صندوقدار آزمون', 'x') RETURNING id`,
+     VALUES ($1, 'cashier', 'صندوقدار آزمون', 'x') RETURNING id`,
     [biz.id],
   );
   sessionState.sub = user.rows[0].id;
@@ -355,13 +355,42 @@ describe("postExactOrderPaymentEntry — settling with a difference", () => {
 });
 
 describe("POST /api/orders/[id]/pay — settle with a difference", () => {
-  it("completes an exact payment unchanged", async () => {
+  it("lets a cashier complete an exact offline/site payment atomically", async () => {
+    const previousRole = process.env.DEPLOYMENT_ROLE;
+    process.env.DEPLOYMENT_ROLE = "site";
     const orderId = await openOrder(500_000);
-    const { status, body } = await pay(orderId, { payments: [{ method: "cash", amount: 500_000 }] });
+    const { status, body } = await (async () => {
+      try {
+        return await pay(orderId, { payments: [{ method: "cash", amount: 500_000 }] });
+      } finally {
+        if (previousRole === undefined) delete process.env.DEPLOYMENT_ROLE;
+        else process.env.DEPLOYMENT_ROLE = previousRole;
+      }
+    })();
     expect(status).toBe(200);
     expect(body).toMatchObject({ balanceDue: 0, customerCredit: 0 });
-    const { rows } = await db.query<{ status: string }>("SELECT status FROM orders WHERE id = $1", [orderId]);
-    expect(rows[0].status).toBe("completed");
+
+    const { rows } = await db.query<{ status: string; closed_by: string; closed_at: Date | null }>(
+      "SELECT status, closed_by::text, closed_at FROM orders WHERE id = $1",
+      [orderId],
+    );
+    expect(rows[0]).toMatchObject({ status: "completed", closed_by: sessionState.sub });
+    expect(rows[0].closed_at).toBeInstanceOf(Date);
+
+    const payment = await db.query<{ received_by: string }>(
+      "SELECT received_by::text FROM payments WHERE order_id = $1",
+      [orderId],
+    );
+    expect(payment.rows).toEqual([{ received_by: sessionState.sub }]);
+    expect((await linesOfEntry("revenue", orderId)).length).toBeGreaterThan(0);
+
+    // A site/local checkout commits its durable outbox event with the primary
+    // transaction, so reconnecting cannot manufacture a second payment.
+    const sync = await db.query<{ event_type: string; actor_role: string }>(
+      "SELECT event_type, actor_role::text FROM sync_events WHERE location_id = $1 AND payload->>'orderId' = $2",
+      [biz.locationId, orderId],
+    );
+    expect(sync.rows).toContainEqual({ event_type: "order.payment.completed", actor_role: "cashier" });
   });
 
   it("refuses an underpayment without a customer — a balance is a person's", async () => {

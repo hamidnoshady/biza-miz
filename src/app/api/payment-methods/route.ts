@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requireAnyPermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { listPaymentMethods } from "@/lib/payment-methods-service";
 
@@ -13,7 +13,11 @@ import { listPaymentMethods } from "@/lib/payment-methods-service";
  * retired way stays on the payments that used it, and is never offered again.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.settingsManage);
+  const { session, error } = await requireAnyPermission(
+    PERMISSIONS.paymentsTake,
+    PERMISSIONS.ordersAmendClosed,
+    PERMISSIONS.paymentsRefund,
+  );
   if (error) return error;
 
   return NextResponse.json({ paymentMethods: await listPaymentMethods(session.businessId) });

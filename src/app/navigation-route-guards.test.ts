@@ -65,9 +65,17 @@ describe("tenant contextual-nav route guards", () => {
     }
   });
 
+  it("uses a server-side accessible-route resolver for the Accounting root", () => {
+    const root = source("./(app)/accounting/page.tsx");
+    expect(root).toContain("memberAccessFor(session)");
+    expect(root).toContain("accessibleNavItemsFor(");
+    expect(root).toContain('resolveAccessibleAppLanding("accounting", navigation)');
+    expect(root).not.toContain("redirect(ACCOUNTING_HOME)");
+  });
+
   it("uses the shared Accounting body and Workspace body to enforce their app/feature/permission gates", () => {
     const accounting = source("./(app)/accounting/accounting-page-body.tsx");
-    expect(accounting).toContain("canOpenAccounting(permissions)");
+    expect(accounting).toContain("canOpenLedger(permissions)");
     expect(accounting).toContain("canViewAccountingSection(permissions, section)");
     expect(accounting).toContain('requireFeatureForPage(session.businessId, "ledger")');
 

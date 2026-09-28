@@ -261,6 +261,16 @@ export const PERMISSIONS = {
   billingManage: "billing.manage",
 } as const;
 
+/** The till/POS surface edits an order and takes money; neither key alone is enough. */
+export const POS_REQUIRED_PERMISSIONS = [
+  PERMISSIONS.ordersCreate,
+  PERMISSIONS.paymentsTake,
+] as const;
+
+export function canUsePos(permissions: ReadonlySet<string>): boolean {
+  return POS_REQUIRED_PERMISSIONS.every((permission) => permissions.has(permission));
+}
+
 export type Permission = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
 
 export const ALL_PERMISSIONS: Permission[] = Object.values(PERMISSIONS);

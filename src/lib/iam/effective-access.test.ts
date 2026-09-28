@@ -13,6 +13,27 @@ describe("Hybrid IAM effective access", () => {
     expect(access.permissions.has(PERMISSIONS.paymentsRefund)).toBe(false);
   });
 
+  it("preserves cashier checkout authority locally, then enforces a synchronized deny", () => {
+    const synced = resolveEffectiveAccess({ profile: "hybrid", role: "cashier", canonicalLocationIds: ["a"],
+      sitePolicy: policy() });
+    expect(synced.permissions.has(PERMISSIONS.ordersCreate)).toBe(true);
+    expect(synced.permissions.has(PERMISSIONS.paymentsTake)).toBe(true);
+    expect(synced.permissions.has(PERMISSIONS.ledgerView)).toBe(false);
+
+    const revoked = resolveEffectiveAccess({ profile: "hybrid", role: "cashier",
+      overrides: { revoked: [PERMISSIONS.paymentsTake] }, canonicalLocationIds: ["a"], sitePolicy: policy() });
+    expect(revoked.permissions.has(PERMISSIONS.paymentsTake)).toBe(false);
+    expect(revoked.permissions.has(PERMISSIONS.ordersView)).toBe(true);
+  });
+
+  it("gives a local-only cashier the same canonical preset without cloud authority", () => {
+    const access = resolveEffectiveAccess({ profile: "local", role: "cashier", canonicalLocationIds: ["a"] });
+    expect(access.permissions.has(PERMISSIONS.ordersCreate)).toBe(true);
+    expect(access.permissions.has(PERMISSIONS.paymentsTake)).toBe(true);
+    expect(access.permissions.has(PERMISSIONS.settingsManage)).toBe(false);
+    expect(access.permissions.has(PERMISSIONS.ledgerView)).toBe(false);
+  });
+
   it("cannot turn a Cloud denial into a grant", () => {
     const access = resolveEffectiveAccess({ profile: "hybrid", role: "cashier", canonicalLocationIds: ["a"],
       sitePolicy: policy() });

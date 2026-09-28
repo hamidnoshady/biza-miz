@@ -43,6 +43,9 @@ export async function lockOpenOrder(
   );
   const order = rows[0];
   if (!order) return { ok: false, error: "order_not_found", status: 404 };
+  // `held` is an intentionally paused order, not a payable state. It remains
+  // active for table/session occupancy, but must be resumed to `open` before
+  // checkout so line edits, kitchen state and settlement cannot race.
   if (order.status !== "open") return { ok: false, error: "order_not_open", status: 409 };
   return { ok: true, order: order as LockedOpenOrder };
 }

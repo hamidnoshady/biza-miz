@@ -112,7 +112,12 @@ export function ClosedOrderAmendment({
       : "",
   );
   const [method, setMethod] = useState("");
-  const { methods: paymentMethods, loaded: paymentMethodsLoaded } = usePaymentMethods();
+  const {
+    methods: paymentMethods,
+    loaded: paymentMethodsLoaded,
+    error: paymentMethodsError,
+    reload: reloadPaymentMethods,
+  } = usePaymentMethods();
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -416,6 +421,13 @@ export function ClosedOrderAmendment({
             <div className="min-w-0 flex-1">
               {!paymentMethodsLoaded ? (
                 <LoadingSkeleton rows={1} compact label="در حال بارگذاری روش‌های تسویه" />
+              ) : paymentMethodsError ? (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-2 text-xs" role="alert">
+                  <p className="text-destructive">{paymentMethodsError.message}</p>
+                  <button type="button" onClick={reloadPaymentMethods} className="mt-1 min-h-9 rounded-lg border px-3 font-bold">
+                    تلاش دوباره
+                  </button>
+                </div>
               ) : (
                 <SearchableSelect
                   value={method}

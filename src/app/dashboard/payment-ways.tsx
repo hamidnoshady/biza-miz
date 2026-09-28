@@ -58,25 +58,58 @@ export function paymentWayIcon(method: PaymentMethodView) {
  * its checkout button on it: paying with no way chosen is exactly the request
  * the server refuses, so the screen shouldn't offer it either.
  */
-export function usePaymentMethods(): {
+export type PaymentMethodsLoadError = {
+  kind: "authorization" | "offline" | "server";
+  message: string;
+};
+
+export function usePaymentMethods(enabled = true): {
   methods: PaymentMethodView[];
   loaded: boolean;
+  loading: boolean;
+  error: PaymentMethodsLoadError | null;
   reload: () => void;
 } {
   const [methods, setMethods] = useState<PaymentMethodView[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const [loaded, setLoaded] = useState(!enabled);
+  const [loading, setLoading] = useState(enabled);
+  const [error, setError] = useState<PaymentMethodsLoadError | null>(null);
 
   const reload = useCallback(() => {
-    void api<{ paymentMethods: PaymentMethodView[] }>("/api/payment-methods")
-      .then(({ ok, data }) => {
-        if (ok) setMethods(data.paymentMethods ?? []);
+    if (!enabled) return;
+    setLoading(true);
+    setError(null);
+    void api<{ paymentMethods?: PaymentMethodView[]; error?: string }>("/api/payment-methods")
+      .then(({ ok, status, data }) => {
+        if (ok) {
+          setMethods(data.paymentMethods ?? []);
+          return;
+        }
+        if (status === 401 || status === 403) {
+          setError({
+            kind: "authorization",
+            message: "مجوز مشاهدهٔ روش‌های دریافت وجه برای این حساب فعال نیست.",
+          });
+        } else if (status === 0 || data.error === "network_error") {
+          setError({
+            kind: "offline",
+            message: "ارتباط با سرویس محلی برقرار نشد. در نسخهٔ دسکتاپ، برنامهٔ محلی را بررسی کنید.",
+          });
+        } else {
+          setError({
+            kind: "server",
+            message: "بارگذاری روش‌های دریافت وجه انجام نشد.",
+          });
+        }
       })
-      .catch(() => undefined)
-      .finally(() => setLoaded(true));
-  }, []);
+      .finally(() => {
+        setLoaded(true);
+        setLoading(false);
+      });
+  }, [enabled]);
 
   useEffect(reload, [reload]);
-  return { methods, loaded, reload };
+  return { methods, loaded, loading, error, reload };
 }
 
 const CHIP_ON = "border-amber-200 dark:border-amber-500/30 bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300";
@@ -94,6 +127,8 @@ export interface PaymentWaysProps {
   disabled?: boolean;
   /** False only during the hook's first request; prevents a false "no methods" state. */
   loaded?: boolean;
+  loadError?: PaymentMethodsLoadError | null;
+  onReload?: () => void;
   /** Distinguishes the ids of two panels rendered at once (the POS has a desktop and a sheet copy). */
   idPrefix?: string;
   /**
@@ -112,6 +147,8 @@ export function PaymentWays({
   due,
   disabled,
   loaded = true,
+  loadError = null,
+  onReload,
   idPrefix = "pay",
   customer = null,
   onChooseCustomer,
@@ -257,6 +294,19 @@ export function PaymentWays({
             <Skeleton key={item} aria-hidden="true" className="h-14 rounded-xl" />
           ))}
         </div>
+      ) : loadError ? (
+        <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-xs" role="alert">
+          <p className="text-destructive">{loadError.message}</p>
+          {onReload ? (
+            <button
+              type="button"
+              onClick={onReload}
+              className="mt-2 min-h-9 rounded-lg border border-destructive/30 px-3 font-bold text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/40"
+            >
+              تلاش دوباره
+            </button>
+          ) : null}
+        </div>
       ) : (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
           {methods.map((method) => {
@@ -280,8 +330,8 @@ export function PaymentWays({
           })}
         </div>
       )}
-      {loaded && methods.length === 0 ? (
-        <p className="mt-2 text-xs text-muted-foreground">روشی برای دریافت وجه تعریف نشده است.</p>
+      {loaded && !loadError && methods.length === 0 ? (
+        <p className="mt-2 text-xs text-muted-foreground">هیچ روش فعالی برای دریافت وجه پیکربندی نشده است. با مدیر کسب‌وکار تماس بگیرید.</p>
       ) : null}
 
       {/*

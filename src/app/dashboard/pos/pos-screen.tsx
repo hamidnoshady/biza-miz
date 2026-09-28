@@ -227,8 +227,12 @@ export function PosScreen({
   // The ways this business takes money, in its own order — no longer three
   // hard-coded buttons. `paymentDraft` is what the cashier has chosen,
   // including a split across several of them (src/lib/payment-draft.ts).
-  const { methods: paymentMethods, loaded: paymentMethodsLoaded } =
-    usePaymentMethods();
+  const {
+    methods: paymentMethods,
+    loaded: paymentMethodsLoaded,
+    error: paymentMethodsError,
+    reload: reloadPaymentMethods,
+  } = usePaymentMethods();
   const [paymentDraft, setPaymentDraft] = useState<PaymentDraft>(() =>
     emptyPaymentDraft([]),
   );
@@ -2108,6 +2112,8 @@ export function PosScreen({
                   <PaymentWays
                     methods={paymentMethods}
                     loaded={paymentMethodsLoaded}
+                    loadError={paymentMethodsError}
+                    onReload={reloadPaymentMethods}
                     draft={paymentDraft}
                     onChange={setPaymentDraft}
                     due={totals.total}
@@ -2156,7 +2162,13 @@ export function PosScreen({
                     label="ثبت پرداخت"
                     holdingLabel="نگه دارید…"
                     busy={busy}
-                    disabled={cart.length === 0 || paymentNeedsCustomer}
+                    disabled={
+                      cart.length === 0 ||
+                      paymentNeedsCustomer ||
+                      !paymentMethodsLoaded ||
+                      Boolean(paymentMethodsError) ||
+                      paymentMethods.length === 0
+                    }
                     onComplete={() => {
                       void submit("payment");
                     }}

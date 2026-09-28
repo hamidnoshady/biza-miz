@@ -193,7 +193,12 @@ export function RetailInvoiceScreen({
   // the domain-event engine per line, which knows one destination per sale,
   // so `ledgerSettlementFor` narrows the chosen way to what that engine
   // understands. Splitting a bill is the order path's (see PaymentWays).
-  const { methods: paymentWays, loaded: paymentWaysLoaded } = usePaymentMethods();
+  const {
+    methods: paymentWays,
+    loaded: paymentWaysLoaded,
+    error: paymentWaysError,
+    reload: reloadPaymentWays,
+  } = usePaymentMethods();
   const settlementWays = paymentWays.filter((way) => ledgerSettlementFor(way.settlement) !== null);
   const [paymentWayId, setPaymentWayId] = useState("");
   const selectedWay = settlementWays.find((way) => way.id === paymentWayId) ?? settlementWays[0];
@@ -668,9 +673,16 @@ export function RetailInvoiceScreen({
                       The group names itself via `role="radiogroup"` below. */}
                   {!paymentWaysLoaded ? (
                     <LoadingSkeleton rows={3} compact label="در حال بارگذاری روش‌های پرداخت" />
+                  ) : paymentWaysError ? (
+                    <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs" role="alert">
+                      <p className="text-destructive">{paymentWaysError.message}</p>
+                      <button type="button" onClick={reloadPaymentWays} className="mt-2 min-h-9 rounded-lg border px-3 font-bold">
+                        تلاش دوباره
+                      </button>
+                    </div>
                   ) : settlementWays.length === 0 ? (
                     <p className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                      روشی برای دریافت وجه تعریف نشده است؛ از تنظیمات یک روش پرداخت اضافه کنید.
+                      هیچ روش فعالی برای دریافت وجه پیکربندی نشده است. با مدیر کسب‌وکار تماس بگیرید.
                     </p>
                   ) : (
                     <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="روش پرداخت">
