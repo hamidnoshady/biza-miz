@@ -15,7 +15,7 @@
  * catalogue, and a short guide to the conventions. A resource list is read in
  * full by most clients, so length here is a cost paid on every conversation.
  */
-import { runReadTool } from "../ai-tools";
+import { runSystemReadTool } from "../ai-system-read";
 import { getBusinessIndustry } from "../industry-guard";
 import { standardReportsFor } from "../reports";
 
@@ -137,7 +137,7 @@ export async function readMcpResource(
 ): Promise<McpResourceContent | null> {
   switch (uri) {
     case "pos://app/overview": {
-      const result = await runReadTool("describe_app", {}, businessId);
+      const result = await runSystemReadTool("describe_app", {}, businessId);
       return {
         uri,
         mimeType: "application/json",

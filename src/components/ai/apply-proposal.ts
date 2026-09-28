@@ -11,9 +11,37 @@ export type ApplyProposalOutcome =
   | { ok: true; endpoint: string; method: string; status: number }
   | { ok: false; endpoint?: string; method?: string; error: "unknown_action" | "missing_param" | "request_failed"; detail: string };
 
-export async function applyProposalRequest(proposal: ProposedAction): Promise<ApplyProposalOutcome> {
+export async function applyProposalRequest(
+  proposal: ProposedAction,
+  auditId?: string | null,
+): Promise<ApplyProposalOutcome> {
   const meta = ACTION_CATALOG[proposal.type];
   if (!meta) return { ok: false, error: "unknown_action", detail: "نوع این پیشنهاد شناخته‌شده نیست." };
+
+  // New proposals use the server-owned audit row as the idempotency key. The
+  // server claims it before calling the business endpoint, so reloads and
+  // double clicks cannot execute a non-idempotent action twice.
+  if (auditId) {
+    const response = await fetch("/api/ai/proposals/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auditId }),
+    });
+    const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: "request_failed",
+        detail: typeof data.message === "string" ? data.message : "این پیشنهاد قبلاً اجرا شده یا دیگر قابل اجرا نیست.",
+      };
+    }
+    return {
+      ok: true,
+      endpoint: typeof data.endpoint === "string" ? data.endpoint : meta.endpoint,
+      method: meta.method,
+      status: response.status,
+    };
+  }
 
   const endpoint = resolveActionEndpoint(meta, proposal.payload);
   if (!endpoint) {

@@ -39,6 +39,7 @@ export type PermissionRisk = "low" | "medium" | "high" | "critical";
 
 /** Role-editor grouping. One group per screenful of related capability. */
 export type PermissionGroup =
+  | "ai"
   | "orders"
   | "payments"
   | "floor"
@@ -85,6 +86,7 @@ export interface PermissionMetadata {
 const P = PERMISSIONS;
 
 const GROUP_LABELS: Record<PermissionGroup, string> = {
+  ai: "دستیار هوشمند",
   orders: "فروش و سفارش‌ها",
   payments: "پرداخت‌ها",
   floor: "سالن و تحویل",
@@ -110,7 +112,7 @@ export function permissionGroupLabel(group: PermissionGroup): string {
 }
 
 export const PERMISSION_GROUP_ORDER: readonly PermissionGroup[] = [
-  "orders", "payments", "floor", "menu", "inventory", "parties", "crm",
+  "ai", "orders", "payments", "floor", "menu", "inventory", "parties", "crm",
   "workspace", "accounting", "finance", "payroll", "reports", "growth", "website", "data",
   "team", "settings", "security",
 ];
@@ -119,6 +121,15 @@ type Draft = Omit<PermissionMetadata, "ownerOnly" | "delegatable"> &
   Partial<Pick<PermissionMetadata, "delegatable">>;
 
 const DRAFTS: Draft[] = [
+  // --- AI workspace --------------------------------------------------------
+  { key: P.aiUse, group: "ai", label: "استفاده از دستیار هوشمند", description: "باز کردن فضای کار هوش مصنوعی و پرسیدن سؤال با داده‌های مجاز.", risk: "low", audit: false },
+  { key: P.aiManage, group: "ai", label: "مدیریت دستیار هوشمند", description: "مدیریت ایجنت‌ها، همکارها و تنظیمات اصلی دستیار.", risk: "high", audit: true, implies: [P.aiUse] },
+  { key: P.aiAgentsManage, group: "ai", label: "مدیریت ایجنت‌ها", description: "ساخت و تنظیم ایجنت‌های سفارشی دستیار.", risk: "medium", audit: true, implies: [P.aiUse] },
+  { key: P.aiAutomationsManage, group: "ai", label: "مدیریت اتوماسیون‌های هوشمند", description: "ساخت، بررسی و اجرای گردش‌کارهای هوشمند.", risk: "high", audit: true, implies: [P.aiUse] },
+  { key: P.aiKnowledgeManage, group: "ai", label: "مدیریت دانش دستیار", description: "افزودن و بازسازی اسناد دانشی که دستیار از آن‌ها استفاده می‌کند.", risk: "medium", audit: true, implies: [P.aiUse] },
+  { key: P.aiUsageView, group: "ai", label: "مشاهده مصرف هوش مصنوعی", description: "دیدن مصرف، هزینه و سابقهٔ استفاده از دستیار.", risk: "low", audit: false, implies: [P.aiUse] },
+  { key: P.aiWidgetsManage, group: "ai", label: "مدیریت ویجت‌های هوشمند", description: "ساخت، ویرایش و حذف خلاصه‌های ویجتی فضای کار.", risk: "medium", audit: true, implies: [P.aiUse] },
+
   // --- Sales & orders ------------------------------------------------------
   { key: P.ordersView, group: "orders", label: "مشاهده سفارش‌ها", description: "دیدن سفارش‌های باز و بسته‌شده بدون تغییر آن‌ها.", risk: "low", audit: false },
   { key: P.ordersCreate, group: "orders", label: "ثبت سفارش", description: "ایجاد سفارش جدید و افزودن اقلام به آن.", risk: "low", audit: false, implies: [P.menuView, P.ordersView] },

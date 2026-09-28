@@ -3,7 +3,7 @@
  * /api/setup/* routes and the aggregated wizard state used by the UI.
  */
 import { requirePermission, type Role, type SessionPayload } from "./auth";
-import { PERMISSIONS } from "./permissions";
+import { PERMISSIONS, type Permission } from "./permissions";
 import { query, withTenant, withoutTenantScope } from "./db";
 import {
   accessibleLocationIds,
@@ -55,8 +55,8 @@ export interface TaxSetting {
 }
 
 /** Compatibility name for setup callers; authorization is capability-based. */
-export async function requireManager() {
-  return requirePermission(PERMISSIONS.settingsManage);
+export async function requireManager(permission: Permission = PERMISSIONS.settingsManage) {
+  return requirePermission(permission);
 }
 
 async function count(sql: string, params: unknown[]): Promise<number> {

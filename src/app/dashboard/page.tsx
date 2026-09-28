@@ -1,9 +1,12 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
+import { authorize } from "@/lib/authorize";
+import { PERMISSIONS } from "@/lib/permissions";
 import { featureLockedForPage } from "@/lib/features";
 import { canManageAi } from "@/lib/ai-panel";
 import { FeatureLock } from "@/components/feature-lock";
 import { AiChatHub } from "./ai/ai-chat-hub";
+import { cardClass } from "./page-chrome";
 
 /**
  * `/dashboard` — the tenant's home, and the assistant's one canonical address.
@@ -30,11 +33,28 @@ export default async function DashboardPage() {
   const session = await getSession();
   if (!session) redirect("/login");
   const locked = await featureLockedForPage(session.businessId, "ai_assistant");
+  const access = await authorize(session, { permission: PERMISSIONS.aiUse });
+
+  // A universal dashboard must not invite a member to type into a surface that
+  // the chat endpoint will reject. Keep the entitlement preview above, but use
+  // the same effective-permission decision as the API for member visibility.
+  if (!access.ok) {
+    return (
+      <div className="flex min-h-full items-center justify-center p-6" dir="rtl">
+        <div className={`${cardClass} w-full max-w-lg p-6 text-center`}>
+          <h1 className="text-lg font-semibold text-foreground">دستیار هوشمند در دسترس شما نیست</h1>
+          <p className="mt-2 text-sm leading-6 text-muted-foreground">
+            دسترسی «استفاده از دستیار» برای این نقش فعال نشده است. از مدیر کسب‌وکار بخواهید مجوز مناسب را به نقش شما اضافه کند.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <FeatureLock locked={locked} title="دستیار هوشمند">
       <AiChatHub
-        canManageAi={canManageAi(session.role)}
+        canManageAi={canManageAi(access.membership.permissions)}
         canAutoApply={session.role === "owner"}
       />
     </FeatureLock>

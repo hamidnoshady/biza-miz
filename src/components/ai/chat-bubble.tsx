@@ -255,6 +255,7 @@ export function ChatBubble({
           <AiProposalCard
             proposal={message.proposal}
             applied={message.applied}
+            status={message.proposalStatus}
             applying={applyingId === message.id}
             onApply={() => void applyProposal(message)}
             onDismiss={() => dismissProposal(message)}

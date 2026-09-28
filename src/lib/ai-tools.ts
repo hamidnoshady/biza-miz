@@ -66,6 +66,8 @@ import {
 import { isFeatureEnabled } from "./features";
 import { INDUSTRY_LABELS, type Industry } from "./industries";
 import { industryProfile, labelFor as industryLabelFor } from "./industry-profile";
+import { canUseAiTool, SYSTEM_AI_READ_PERMISSIONS } from "./ai-capabilities";
+import type { Permission } from "./permissions";
 
 export interface ToolResult {
   ok: boolean;
@@ -1260,7 +1262,14 @@ export async function runReadTool(
    * than falling back to "everyone".
    */
   actorUserId?: string,
+  permissions?: ReadonlySet<Permission>,
 ): Promise<ToolResult> {
+  // Defense in depth: the provider-facing catalogue is filtered in ai-service,
+  // but a direct executor call must be equally safe. Missing policy context is
+  // denied rather than treated as an all-access platform call.
+  if (!permissions || !canUseAiTool(name, permissions)) {
+    return { ok: false, data: { error: "دسترسی لازم برای این ابزار را ندارید." } };
+  }
   // Phase G — «میز کار من». Kept out of the switch below because the four
   // tools share one executor and one extra gate (a caller identity).
   if (isWorkspaceToolName(name)) {

@@ -36,9 +36,12 @@ import {
   isAiPanelSectionKey,
   type AiPanelSectionKey,
 } from "@/lib/ai-panel";
-import { useAiChat } from "@/components/ai/use-ai-chat";
+import { useAiChat, type AiAppFocus } from "@/components/ai/use-ai-chat";
+import { AI_REASONING_MODES, AI_MODE_LABELS, isAiReasoningMode, type AiReasoningMode } from "@/lib/ai-reasoning";
 import { AiManagementSheet } from "./ai-management-sheet";
 import { AiConversationsSidebar } from "./ai-conversations-sidebar";
+import { AiWorkspaceWidgets } from "./ai-workspace-widgets";
+import { AiWorkspaceContext } from "./ai-workspace-context";
 import { cardClass, overlayPanelClass } from "../page-chrome";
 
 export function AiChatHub({
@@ -53,12 +56,28 @@ export function AiChatHub({
   const locked = useFeatureLocked();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const focusFromUrl = searchParams.get("focus");
+  const reasoningFromUrl = searchParams.get("reasoning");
+  const [appFocus, setAppFocus] = useState<AiAppFocus>(() =>
+    ["all", "accounting", "growth", "crm", "website", "workspace"].includes(focusFromUrl ?? "")
+      ? (focusFromUrl as AiAppFocus)
+      : "all",
+  );
   // Phase F — `?project=<id>` starts new conversations inside that project's
   // workspace, so their turns are shaped by the project's instruction, notes
   // and memory.
   const chat = useAiChat({
     mode: "dashboard",
     projectId: searchParams.get("project"),
+    appFocus,
+    reasoningMode: isAiReasoningMode(reasoningFromUrl) && reasoningFromUrl !== "deep_research" ? reasoningFromUrl : "auto",
+    onConversationIdChange: (id) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (id) params.set("conversation", id);
+      else params.delete("conversation");
+      const query = params.toString();
+      router.replace(query ? `/dashboard?${query}` : "/dashboard", { scroll: false });
+    },
   });
 
   // The management panel is addressed by the URL (`/dashboard?aiPanel=
@@ -87,7 +106,13 @@ export function AiChatHub({
     () => replaceParams((params) => params.delete(AI_PANEL_PARAM)),
     [replaceParams],
   );
-
+  const updateAppFocus = useCallback((value: AiAppFocus) => {
+    setAppFocus(value);
+    replaceParams((params) => {
+      if (value === "all") params.delete("focus");
+      else params.set("focus", value);
+    });
+  }, [replaceParams]);
   const money = useMoney();
   const scrollRef = useRef<HTMLDivElement>(null);
   const heroRef = useRef<HTMLDivElement>(null);
@@ -121,18 +146,48 @@ export function AiChatHub({
     setTask,
     customTask,
     setCustomTask,
+    reasoningMode,
+    setReasoningMode,
     agentId,
     setAgentId,
     ensureGreeting,
     startNewConversation,
     loadConversation,
     sendMessage,
+    cancelGeneration,
     askAgain,
     applyProposal,
     dismissProposal,
     submitInputRequest,
     dismissInputRequest,
   } = chat;
+
+  const updateReasoningMode = useCallback((value: AiReasoningMode) => {
+    setReasoningMode(value);
+    replaceParams((params) => {
+      if (value === "auto") params.delete("reasoning");
+      else params.set("reasoning", value);
+    });
+  }, [replaceParams, setReasoningMode]);
+
+  useEffect(() => {
+    if (["all", "accounting", "growth", "crm", "website", "workspace"].includes(focusFromUrl ?? "")) {
+      setAppFocus(focusFromUrl as AiAppFocus);
+    }
+    if (isAiReasoningMode(reasoningFromUrl) && reasoningFromUrl !== "deep_research") {
+      setReasoningMode(reasoningFromUrl);
+    }
+  }, [focusFromUrl, reasoningFromUrl, setReasoningMode]);
+
+  const changeProject = useCallback((nextProjectId: string | null) => {
+    if (nextProjectId === searchParams.get("project")) return;
+    startNewConversation();
+    replaceParams((params) => {
+      if (nextProjectId) params.set("project", nextProjectId);
+      else params.delete("project");
+      params.delete("conversation");
+    });
+  }, [replaceParams, searchParams, startNewConversation]);
 
   useEffect(() => {
     if (initialized.current) return;
@@ -208,7 +263,7 @@ export function AiChatHub({
   );
 
   return (
-    <section className="flex h-full min-h-0 w-full flex-col lg:flex-row">
+    <section className="grid h-full min-h-0 w-full grid-cols-1 grid-rows-[minmax(0,1fr)_auto] lg:grid-cols-[minmax(0,1fr)_18rem] lg:grid-rows-[minmax(0,1fr)_auto]">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="flex min-h-12 items-center gap-2 border-b border-border/80 bg-card/80 px-2 py-1.5 backdrop-blur sm:px-3">
         <div className="min-w-0 flex-1">
@@ -265,6 +320,14 @@ export function AiChatHub({
           <span className="hidden sm:inline">گفت‌وگوی جدید</span>
         </Button>
       </header>
+      <AiWorkspaceContext
+        appFocus={appFocus}
+        onAppFocusChange={updateAppFocus}
+        reasoningMode={reasoningMode}
+        onReasoningModeChange={updateReasoningMode}
+        projectId={searchParams.get("project")}
+        onProjectChange={changeProject}
+      />
 
       <AiManagementSheet
         section={panelSection}
@@ -384,6 +447,8 @@ export function AiChatHub({
             setActionsAllowed={setActionsAllowed}
             loadConversation={loadConversation}
             sendMessage={sendMessage}
+            onCancelGeneration={cancelGeneration}
+            cancellable={busy}
             footer={
               <p className="mt-2 text-center text-[11px] text-muted-foreground">
                 پاسخ‌ها بر اساس داده‌های ثبت‌شده کسب‌وکار شما ارائه می‌شوند.
@@ -403,6 +468,8 @@ export function AiChatHub({
           {historyPanel()}
         </aside>
       )}
+
+      <AiWorkspaceWidgets />
 
       {/* Phone — the same list as a modal sheet over the chat. */}
       {historySheetOpen ? (

@@ -19,7 +19,7 @@ interface Entry {
   actionTitle: string;
   actionSummary: string;
   category: AutopilotCategory | null;
-  status: "proposed" | "applied" | "failed" | "dismissed" | "reverted";
+  status: "proposed" | "processing" | "applied" | "failed" | "dismissed" | "reverted";
   deferredReason: string | null;
   payload: Record<string, unknown>;
   createdAt: string;
@@ -28,6 +28,7 @@ interface Entry {
 
 const STATUS_LABEL: Record<Entry["status"], string> = {
   proposed: "در انتظار تأیید شما",
+  processing: "در حال اجرا…",
   applied: "انجام شد",
   failed: "ناموفق",
   dismissed: "رد شد",
@@ -36,6 +37,7 @@ const STATUS_LABEL: Record<Entry["status"], string> = {
 
 const STATUS_TONE: Record<Entry["status"], "active" | "positive" | "neutral" | "danger"> = {
   proposed: "active",
+  processing: "active",
   applied: "positive",
   failed: "danger",
   dismissed: "neutral",
@@ -119,16 +121,11 @@ export function AiAutopilotActivity() {
         title: entry.actionTitle,
         summary: entry.actionSummary,
         payload: entry.payload,
-      });
+      }, entry.id);
       if (!outcome.ok) {
         toast.error(`ثبت انجام نشد. ${outcome.detail}`.trim());
         return;
       }
-      await fetch("/api/ai/action-audit", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: entry.id, status: "applied", result: { endpoint: outcome.endpoint } }),
-      }).catch(() => {});
       toast.success(`${ACTION_CATALOG[entry.actionType as ActionType]?.label ?? "اقدام"} انجام شد.`);
       await load();
     } catch {

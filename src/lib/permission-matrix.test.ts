@@ -57,6 +57,7 @@ describe("built-in role presets", () => {
 
   it("holds the manager preset exactly", () => {
     expect(effective("manager")).toEqual([
+      "ai.agents.manage", "ai.automations.manage", "ai.knowledge.manage", "ai.manage", "ai.usage.view", "ai.use", "ai.widgets.manage",
       "backup.manage",
       "billing.manage", "billing.view",
       "campaigns.manage", "campaigns.view",
@@ -94,6 +95,7 @@ describe("built-in role presets", () => {
   it("holds the accountant preset exactly — the books, and no till or floor", () => {
     expect(effective("accountant")).toEqual([
       "accounts.edit",
+      "ai.usage.view", "ai.use",
       "data.export", "data.import",
       "finance.assets_manage", "finance.cheques_manage", "finance.expenses_manage",
       "finance.installments_manage", "finance.payables_manage",
@@ -111,6 +113,7 @@ describe("built-in role presets", () => {
 
   it("holds the cashier preset exactly", () => {
     expect(effective("cashier")).toEqual([
+      "ai.use",
       "campaigns.view",
       "crm.manage", "crm.view",
       "delivery.manage",
@@ -130,6 +133,7 @@ describe("built-in role presets", () => {
 
   it("holds the waiter preset exactly", () => {
     expect(effective("waiter")).toEqual([
+      "ai.use",
       "menu.view",
       "orders.create", "orders.view",
       "printing.execute",
@@ -140,7 +144,7 @@ describe("built-in role presets", () => {
   });
 
   it("holds the kitchen preset exactly", () => {
-    expect(effective("kitchen")).toEqual(["kitchen.view", "menu.view", "printing.execute"]);
+    expect(effective("kitchen")).toEqual(["ai.use", "kitchen.view", "menu.view", "printing.execute"]);
   });
 
 });

@@ -26,15 +26,18 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : DEFAULT_LIMIT;
   const before = parseBefore(url.searchParams.get("before"));
   const projectId = url.searchParams.get("project");
+  // Dashboard history is intentionally mode-scoped; old wizard/floor threads
+  // must not appear as if they were compatible with this workspace.
+  const mode = url.searchParams.get("mode") === "floor" ? "floor" : "dashboard";
 
   const conversations = projectId
     ? await listConversationsByProject(
         { businessId: session.businessId, actorUserId: session.sub, projectId },
-        { limit, before },
+        { limit, before, mode },
       )
     : await listConversations(
         { businessId: session.businessId, actorUserId: session.sub },
-        { limit, before },
+        { limit, before, mode },
       );
   return NextResponse.json({ conversations });
 });

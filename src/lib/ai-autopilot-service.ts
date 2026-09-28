@@ -26,7 +26,7 @@ import { AUTOPILOT_EXECUTORS, AUTOPILOT_REVERTERS } from "./ai-autopilot-executo
 import { autopilotAmountContext } from "./ai-amount-context";
 import { createAiActionAudit } from "./ai-action-audit";
 import { runAgentTurn } from "./ai-service";
-import { runReadTool } from "./ai-tools";
+import { runSystemReadTool } from "./ai-system-read";
 import { compactProactiveFacts, type LocalBusinessClock } from "./ai-proactive";
 import {
   AiWalletInsufficientError,
@@ -290,7 +290,7 @@ async function collectCategoryFacts(
              FROM stock WHERE stock_qty <= reorder_level ORDER BY name LIMIT 20`,
           [businessId],
         ),
-        runReadTool("get_stock_valuation", {}, businessId),
+        runSystemReadTool("get_stock_valuation", {}, businessId),
       ]);
       return {
         facts: { lowStock: lowStock.rows, valuation: valuation.data },
@@ -300,7 +300,7 @@ async function collectCategoryFacts(
 
     case "pricing": {
       const [performance, drift] = await Promise.all([
-        runReadTool("get_menu_performance", { dateTo: clock.dateKey }, businessId),
+        runSystemReadTool("get_menu_performance", { dateTo: clock.dateKey }, businessId),
         // Only ever proposes a price move where recorded ingredient cost moved.
         query<{ menu_item_id: string; name: string; price: string; recipe_cost: string }>(
           `SELECT m.id AS menu_item_id, m.name, m.price::text AS price,
@@ -324,8 +324,8 @@ async function collectCategoryFacts(
 
     case "money": {
       const [bankLines, aging] = await Promise.all([
-        runReadTool("get_unreconciled_bank_lines", {}, businessId),
-        runReadTool("get_ar_aging", {}, businessId),
+        runSystemReadTool("get_unreconciled_bank_lines", {}, businessId),
+        runSystemReadTool("get_ar_aging", {}, businessId),
       ]);
       const lines = Array.isArray((bankLines.data as { rows?: unknown[] })?.rows)
         ? ((bankLines.data as { rows: unknown[] }).rows as unknown[])
@@ -337,7 +337,7 @@ async function collectCategoryFacts(
     }
 
     case "customer": {
-      const atRisk = await runReadTool("get_at_risk_customers", {}, businessId);
+      const atRisk = await runSystemReadTool("get_at_risk_customers", {}, businessId);
       const rows = Array.isArray((atRisk.data as { rows?: unknown[] })?.rows)
         ? ((atRisk.data as { rows: unknown[] }).rows as unknown[])
         : [];

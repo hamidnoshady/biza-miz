@@ -1537,8 +1537,14 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
 
     // Phase F pt.2 — inside a project the propose enum also carries the
     // project-scoped actions (the model still never names the project id).
-    const propose = opts.projectScoped ? projectProposeTool : proposeTool;
-    return [...base, propose, requestInputTool];
+    const propose = opts.actionTypes
+      ? proposeToolFor(opts.actionTypes)
+      : opts.projectScoped
+        ? projectProposeTool
+        : proposeTool;
+    return opts.actionTypes?.length === 0
+      ? [...base, requestInputTool]
+      : [...base, propose, requestInputTool];
   }
   if (mode === "floor") return floorReadTools;
   if (mode === "proactive") return [];

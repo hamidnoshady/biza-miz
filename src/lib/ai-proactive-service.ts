@@ -32,7 +32,7 @@ import {
   settleAiTurn,
 } from "./ai-wallet-billing";
 import { runAgentTurn } from "./ai-service";
-import { runReadTool } from "./ai-tools";
+import { runSystemReadTool } from "./ai-system-read";
 import { listCustomerBalances, UNKNOWN_CUSTOMER_KEY } from "./ar-service";
 import { query, withTenant, withoutTenantScope } from "./db";
 import { isFeatureEnabled } from "./features";
@@ -363,26 +363,26 @@ async function collectDigestFacts(
     noShowRows,
   ] = await Promise.all([
     inclusion.financial
-      ? runReadTool("run_report", { key: "daily_sales_summary", dateFrom, dateTo: clock.dateKey }, businessId)
+      ? runSystemReadTool("run_report", { key: "daily_sales_summary", dateFrom, dateTo: clock.dateKey }, businessId)
       : NO_TOOL_RESULT,
     inclusion.reconciliation
-      ? runReadTool("run_report", { key: "shift_reconciliation", dateFrom, dateTo: clock.dateKey }, businessId)
+      ? runSystemReadTool("run_report", { key: "shift_reconciliation", dateFrom, dateTo: clock.dateKey }, businessId)
       : NO_TOOL_RESULT,
     inclusion.sales
-      ? runReadTool("get_menu_performance", { dateFrom, dateTo: clock.dateKey }, businessId)
+      ? runSystemReadTool("get_menu_performance", { dateFrom, dateTo: clock.dateKey }, businessId)
       : NO_TOOL_RESULT,
-    inclusion.sales ? runReadTool("get_void_pattern", { dateFrom, dateTo: clock.dateKey }, businessId) : NO_TOOL_RESULT,
-    inclusion.financial ? runReadTool("get_stock_valuation", {}, businessId) : NO_TOOL_RESULT,
-    inclusion.reconciliation ? runReadTool("get_unreconciled_bank_lines", {}, businessId) : NO_TOOL_RESULT,
+    inclusion.sales ? runSystemReadTool("get_void_pattern", { dateFrom, dateTo: clock.dateKey }, businessId) : NO_TOOL_RESULT,
+    inclusion.financial ? runSystemReadTool("get_stock_valuation", {}, businessId) : NO_TOOL_RESULT,
+    inclusion.reconciliation ? runSystemReadTool("get_unreconciled_bank_lines", {}, businessId) : NO_TOOL_RESULT,
     inclusion.financial
-      ? runReadTool("get_vat_liability", { dateFrom, dateTo: clock.dateKey }, businessId)
+      ? runSystemReadTool("get_vat_liability", { dateFrom, dateTo: clock.dateKey }, businessId)
       : NO_TOOL_RESULT,
-    inclusion.financial ? runReadTool("get_payroll_summary", {}, businessId) : NO_TOOL_RESULT,
+    inclusion.financial ? runSystemReadTool("get_payroll_summary", {}, businessId) : NO_TOOL_RESULT,
     inclusion.financial
-      ? runReadTool("get_branch_comparison", { dateFrom, dateTo: clock.dateKey }, businessId)
+      ? runSystemReadTool("get_branch_comparison", { dateFrom, dateTo: clock.dateKey }, businessId)
       : NO_TOOL_RESULT,
     inclusion.financial
-      ? runReadTool("get_courier_performance", { dateFrom, dateTo: clock.dateKey }, businessId)
+      ? runSystemReadTool("get_courier_performance", { dateFrom, dateTo: clock.dateKey }, businessId)
       : NO_TOOL_RESULT,
     !inclusion.sales
       ? NO_ROWS

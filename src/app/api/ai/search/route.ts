@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { searchConversations } from "@/lib/ai-conversations";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 import { standardReportsFor } from "@/lib/reports";
-import { requireManager } from "@/lib/setup-state";
-import { withTenantScope } from "@/lib/auth";
+import { requirePermission, withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 
 const MAX_RESULTS = 8;
 
@@ -15,7 +15,7 @@ const MAX_RESULTS = 8;
  * (ownership-scoped exactly like GET /api/ai/conversations).
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const guard = await requireManager();
+  const guard = await requirePermission(PERMISSIONS.aiUse);
   if (guard.error) return guard.error;
   const session = guard.session;
 
@@ -34,6 +34,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     { businessId: session.businessId, actorUserId: session.sub },
     q,
     MAX_RESULTS,
+    { mode: "dashboard" },
   );
 
   return NextResponse.json({ conversations, reports });

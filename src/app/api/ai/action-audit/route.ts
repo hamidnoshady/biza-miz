@@ -1,23 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope } from "@/lib/auth";
+import {
+  requireAnyPermission,
+  requirePermission,
+  withTenantScope,
+} from "@/lib/auth";
 import {
   finishAiActionAudit,
   listAiActionAudit,
-  type AiActionAuditStatus,
+  type AiActionAuditTerminalStatus,
 } from "@/lib/ai-action-audit";
-import { requireManager } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
 
-const TERMINAL_STATUSES: Exclude<AiActionAuditStatus, "proposed">[] = [
+const TERMINAL_STATUSES: AiActionAuditTerminalStatus[] = [
   "applied",
   "failed",
   "dismissed",
+  "reverted",
 ];
 
-/** Owners/managers can review the latest proposals and their human outcomes. */
+/** Members with AI usage/audit capability can review only their own proposals;
+ * AI managers can review the tenant-wide activity. */
 export const GET = withTenantScope(async () => {
-  const guard = await requireManager();
+  const guard = await requireAnyPermission(PERMISSIONS.aiUsageView, PERMISSIONS.aiManage);
   if (guard.error) return guard.error;
-  const entries = await listAiActionAudit(guard.session.businessId);
+  const entries = await listAiActionAudit(
+    guard.session.businessId,
+    30,
+    guard.membership.permissions.has(PERMISSIONS.aiManage) ? undefined : guard.session.sub,
+  );
   return NextResponse.json({ entries });
 });
 
@@ -27,7 +37,7 @@ export const GET = withTenantScope(async () => {
  * originate in the server-side chat route and remain protected by RLS.
  */
 export const PATCH = withTenantScope(async (request: NextRequest) => {
-  const guard = await requireManager();
+  const guard = await requirePermission(PERMISSIONS.aiUse);
   if (guard.error) return guard.error;
 
   let body: { id?: unknown; status?: unknown; result?: unknown };
@@ -40,8 +50,8 @@ export const PATCH = withTenantScope(async (request: NextRequest) => {
   const id = typeof body.id === "string" ? body.id.trim() : "";
   const status =
     typeof body.status === "string" &&
-    TERMINAL_STATUSES.includes(body.status as Exclude<AiActionAuditStatus, "proposed">)
-      ? (body.status as Exclude<AiActionAuditStatus, "proposed">)
+    TERMINAL_STATUSES.includes(body.status as AiActionAuditTerminalStatus)
+      ? (body.status as AiActionAuditTerminalStatus)
       : null;
   if (!id || id.length > 100 || !status) {
     return NextResponse.json({ error: "invalid_audit_update" }, { status: 400 });
@@ -56,6 +66,7 @@ export const PATCH = withTenantScope(async (request: NextRequest) => {
     id,
     status,
     result,
+    actorUserId: guard.membership.permissions.has(PERMISSIONS.aiManage) ? undefined : guard.session.sub,
   });
   if (!updated) return NextResponse.json({ error: "not_found" }, { status: 404 });
   return NextResponse.json({ ok: true });
