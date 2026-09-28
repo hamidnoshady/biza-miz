@@ -55,16 +55,34 @@ New installations must use site credentials.
 
 ## Event transport
 
-`server-sync-service.ts` periodically:
+On the site, `runServerSyncTick()` (`src/lib/server-sync.ts`, every 30 s):
 
-1. Pushes eligible local rows from `sync_events` to
-   `POST /api/server-sync/push`.
+1. Pushes local rows from `sync_events` that are applied and not yet
+   delivered (`pushed_at IS NULL`, migration 0189) to
+   `POST /api/server-sync/push`. Delivery is tracked **per row**, not by a
+   high-water mark. A mark skipped any row whose transaction committed after
+   a higher id, and any locally deferred row applied later. A row counts as
+   delivered once the central durably holds it: applied, conflict, dead
+   letter or **deferred**. One failed row does not hold back the rows after
+   it; only that row is re-sent.
 2. Pulls later location-scoped events from
-   `GET /api/server-sync/pull?after=<id>`.
+   `GET /api/server-sync/pull?after=<id>`. The `id` cursor is a JSON number;
+   the site also accepts the numeric string an older central sends.
 3. Applies supported events through `applySyncEvent()`.
-4. Records transport attempts in `server_sync_log`. A pull failure may advance
-   the cursor only after its original replay envelope is durably stored as a
-   canonical `sync_event_dead_letters` row with `source='server_pull'`.
+4. Records transport attempts that moved data or failed in `server_sync_log`
+   (idle ticks are not logged). A pull failure may advance the cursor only
+   after its original replay envelope is durably stored as a canonical
+   `sync_event_dead_letters` row with `source='server_pull'`.
+
+On the central, `runCentralSyncMaintenanceTick()` (every 60 s) retries each
+business's dependency-deferred inbox rows and expires abandoned pairing
+sessions. Before this existed, the central only retried a deferred event when
+the site re-sent it, which stalled that site's whole push queue behind it.
+
+The desktop's runtime report (`POST /api/server-sync/runtime-status`) and the
+older `GET /api/server-sync/update-check` authenticate with the site bearer
+credential, so middleware lets them through without a session, like push and
+pull. The route checks the credential itself.
 
 The schema records event origin, source site device, schema version and
 idempotency metadata. Duplicate `client_event_id` values are rejected by a
@@ -136,9 +154,16 @@ verification, pre-migration backup and rollback.
   and Business Suite use should continue.
 - **401 from sync endpoint:** pair again only after checking that the site
   device is active; a revoked credential is intentionally unusable.
-- **Events stay queued:** inspect `server_sync_log` and canonical
-  `sync_event_dead_letters`, then verify the event type is in the supported
-  contract above.
+- **Events stay queued:** undelivered rows are
+  `sync_events WHERE origin='local' AND applied_at IS NOT NULL AND error IS NULL AND pushed_at IS NULL`.
+  Inspect `server_sync_log` for the push error, and canonical
+  `sync_event_dead_letters` / `sync_domain_effects` (status `deferred`) on
+  the central. Then verify the event type is in the supported contract above.
+- **Only some data syncs:** operational events sync, but master data
+  (customers, catalogue/menu, staff access) is `bootstrap_only`. Edits made
+  after pairing are not replicated in either direction. Mutations made
+  directly on the central are not written to its outbox either (only a
+  `site` deployment role writes one), so they do not reach the site.
 - **Phone cannot connect:** use the HTTPS URL/QR from Local Devices, trust the
   generated root certificate, confirm the chosen adapter is Private, and
   verify the gateway—not the internal server—is listening on the LAN.

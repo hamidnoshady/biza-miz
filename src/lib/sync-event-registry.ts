@@ -87,10 +87,6 @@ export function syncEventDefinition(type: unknown, schemaVersion: unknown): Sync
   return byKey.get(`${type}@${schemaVersion}`) ?? null;
 }
 
-export function isSyncEventType(type: unknown): type is SyncEventType {
-  return typeof type === "string" && SYNC_EVENT_REGISTRY.some((entry) => entry.type === type);
-}
-
 /**
  * Whether the client offline queue (POST /api/sync/events, src/lib/offline-db.ts)
  * may flush this (type, schemaVersion) pair. True for the three legacy order

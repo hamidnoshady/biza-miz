@@ -41,6 +41,7 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/server-sync/pull",
   "/api/server-sync/media",
   "/api/server-sync/update-check",
+  "/api/server-sync/runtime-status",
   "/api/server-sync/config/generate-token",
   "/api/peer/backup",
   "/api/v1",
@@ -147,6 +148,13 @@ const PUBLIC_PATHS = [
   "/api/server-sync/push",
   "/api/server-sync/pull",
   "/api/server-sync/media",
+  // The desktop's per-tick runtime report (and the pre-runtime-status
+  // update-check older installs still call) authenticate with that same site
+  // bearer credential. Missing from this list, every call was answered 401
+  // here, so a paired desktop never saw its target release and re-sent a
+  // doomed request on every 30-second sync tick.
+  "/api/server-sync/runtime-status",
+  "/api/server-sync/update-check",
   // Migration 0132: the same shape again — the caller is another *server*
   // migrating onto this one, authenticated with a bearer token issued in the
   // super-admin console (`platform_backup_tokens`, hashed), never with a
@@ -519,6 +527,8 @@ const SYNC_TOKEN_RATE_LIMITED_PATHS = [
   "/api/rollup/ingest",
   "/api/server-sync/push",
   "/api/server-sync/pull",
+  "/api/server-sync/runtime-status",
+  "/api/server-sync/update-check",
 ];
 
 /**

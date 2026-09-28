@@ -18,7 +18,8 @@ import { recordLegacyTokenUsage, resolveSyncCredential, tokensMatch, legacySyncT
  * connection happens to be.
  */
 type SyncEventRow = {
-  id: number;
+  /** bigint identity — node-postgres hands it over as a string. */
+  id: string | number;
   location_id: string;
   client_event_id: string;
   event_type: string;
@@ -91,8 +92,12 @@ export async function GET(request: NextRequest) {
     return result.rows;
   });
 
+  // `id` is the site's pull cursor and it validates it with
+  // Number.isSafeInteger. node-postgres returns bigint as a string, and sending
+  // that string through made the site reject every event it was offered as
+  // `remote_protocol_invalid_event_id` — cloud → site sync never advanced.
   const events = rows.map((r) => ({
-    id: r.id,
+    id: Number(r.id),
     locationId: r.location_id,
     clientEventId: r.client_event_id,
     type: r.event_type,

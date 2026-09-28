@@ -160,7 +160,7 @@ export async function POST(request: NextRequest) {
       siteDeviceId: credential.siteDeviceId,
       locationId: credential.locationId,
       direction: "push",
-      status: results.some((result) => !result.ok && !result.conflict && !result.deadLettered) ? "error" : "ok",
+      status: results.some((result) => !result.ok && !result.conflict && !result.deadLettered && !result.deferred) ? "error" : "ok",
       eventsAttempted: results.length,
       eventsApplied: results.filter((result) => result.ok).length,
       eventsDeferred: results.filter((result) => result.deferred).length,

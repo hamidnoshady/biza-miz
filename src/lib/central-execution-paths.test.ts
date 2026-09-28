@@ -5,7 +5,7 @@ describe("public and bearer cloud API execution targets", () => {
   it("marks every cloud transport and OAuth surface central-only", () => {
     for (const path of [
       "/api/rollup/ingest", "/api/server-sync/push", "/api/server-sync/pull",
-      "/api/server-sync/update-check", "/api/server-sync/media/abc", "/api/server-sync/config/generate-token", "/api/server-sync/credential-rotation/ack",
+      "/api/server-sync/update-check", "/api/server-sync/runtime-status", "/api/server-sync/media/abc", "/api/server-sync/config/generate-token", "/api/server-sync/credential-rotation/ack",
       "/api/peer/backup/manifest",
       "/api/v1/orders", "/api/ai/chat", "/api/workspace/projects", "/api/billing/plans",
       "/api/messaging/campaigns", "/api/notifications/devices", "/api/notifications/public-key",

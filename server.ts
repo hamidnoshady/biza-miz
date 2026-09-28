@@ -110,7 +110,12 @@ app.prepare().then(async () => {
   const { ROLLUP_SYNC_INTERVAL_MS } = await import("./src/lib/rollup");
   const { runBackupTick } = await import("./src/lib/backup-service");
   const { BACKUP_TICK_INTERVAL_MS } = await import("./src/lib/backup");
-  const { runServerSyncTick, SERVER_SYNC_INTERVAL_MS } = await import("./src/lib/server-sync");
+  const {
+    runServerSyncTick,
+    SERVER_SYNC_INTERVAL_MS,
+    runCentralSyncMaintenanceTick,
+    CENTRAL_SYNC_MAINTENANCE_INTERVAL_MS,
+  } = await import("./src/lib/server-sync");
   const { runCloudExceptionRelayTick, CLOUD_EXCEPTION_RELAY_INTERVAL_MS } = await import("./src/lib/cloud-exception-relay");
   const { assertRlsEffective, closeDatabasePool } = await import("./src/lib/db");
   const { deploymentRole, describeDeploymentRole } = await import("./src/lib/deployment-role");
@@ -254,6 +259,16 @@ app.prepare().then(async () => {
   const serverSyncTick = () =>
     runServerSyncTick().catch((err) => console.error("server-sync tick failed:", err));
   scheduleSiteTick(serverSyncTick, SERVER_SYNC_INTERVAL_MS, 20_000);
+
+  // The receiving half of that link: retry site events the central deferred
+  // for a missing prerequisite, and expire abandoned pairing sessions. Without
+  // it a deferred event was only retried when the site re-sent it, which
+  // stalled that site's whole push queue behind it.
+  const centralSyncTick = () =>
+    runCentralSyncMaintenanceTick().catch((err) =>
+      console.error("central sync maintenance tick failed:", err),
+    );
+  scheduleCentralTick(centralSyncTick, CENTRAL_SYNC_MAINTENANCE_INTERVAL_MS, 25_000);
 
   // Local/Hybrid Support and Bug Report are durable even when nobody leaves a
   // dashboard open: this site-process worker leases and retries the exception

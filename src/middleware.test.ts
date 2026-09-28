@@ -29,6 +29,13 @@ describe("isPublicPath", () => {
     expect(isPublicPath("/api/server-sync/credential-rotation/ack")).toBe(true);
   });
 
+  it("lets a paired desktop's runtime report reach the route's own bearer check", () => {
+    expect(isPublicPath("/api/server-sync/runtime-status")).toBe(true);
+    expect(isPublicPath("/api/server-sync/update-check")).toBe(true);
+    // The owner's config screen stays session-gated.
+    expect(isPublicPath("/api/server-sync/config")).toBe(false);
+  });
+
   it("keeps the tenant admin door (/admin) session-less like /login", () => {
     // The login split moved the owner/manager password form to this
     // subdirectory of the business's own origin. It mints no session before

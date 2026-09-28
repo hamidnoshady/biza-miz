@@ -103,12 +103,12 @@ beforeEach(async () => {
   // the business it's configuring.
 });
 
-describe("setServerSyncConfig / resolveBusinessBySyncToken", () => {
+describe("setServerSyncConfig / resolveSyncCredential", () => {
   it("resolves a configured token to the right business", async () => {
     await dbLib.withTenant(bizA.id, () =>
       serverSync.setServerSyncConfig(bizA.id, { remoteUrl: "https://vps.example.com", token: "token-for-a-1234", enabled: true }),
     );
-    expect(await serverSync.resolveBusinessBySyncToken("token-for-a-1234")).toBe(bizA.id);
+    expect((await serverSync.resolveSyncCredential("token-for-a-1234"))?.businessId ?? null).toBe(bizA.id);
   });
 
   it("two businesses' tokens never cross-resolve", async () => {
@@ -119,27 +119,27 @@ describe("setServerSyncConfig / resolveBusinessBySyncToken", () => {
       serverSync.setServerSyncConfig(bizB.id, { remoteUrl: "https://vps.example.com", token: "token-for-b-5678", enabled: true }),
     );
 
-    expect(await serverSync.resolveBusinessBySyncToken("token-for-a-1234")).toBe(bizA.id);
-    expect(await serverSync.resolveBusinessBySyncToken("token-for-b-5678")).toBe(bizB.id);
+    expect((await serverSync.resolveSyncCredential("token-for-a-1234"))?.businessId ?? null).toBe(bizA.id);
+    expect((await serverSync.resolveSyncCredential("token-for-b-5678"))?.businessId ?? null).toBe(bizB.id);
     // Presenting business A's token never resolves to business B, or vice versa.
-    expect(await serverSync.resolveBusinessBySyncToken("token-for-a-1234")).not.toBe(bizB.id);
+    expect((await serverSync.resolveSyncCredential("token-for-a-1234"))?.businessId ?? null).not.toBe(bizB.id);
   });
 
   it("an unconfigured or unknown token resolves to nothing", async () => {
-    expect(await serverSync.resolveBusinessBySyncToken("never-configured")).toBeNull();
+    expect((await serverSync.resolveSyncCredential("never-configured"))?.businessId ?? null).toBeNull();
   });
 
   it("rotating a business's token invalidates the old one immediately", async () => {
     await dbLib.withTenant(bizA.id, () =>
       serverSync.setServerSyncConfig(bizA.id, { remoteUrl: "https://vps.example.com", token: "old-token-1234", enabled: true }),
     );
-    expect(await serverSync.resolveBusinessBySyncToken("old-token-1234")).toBe(bizA.id);
+    expect((await serverSync.resolveSyncCredential("old-token-1234"))?.businessId ?? null).toBe(bizA.id);
 
     await dbLib.withTenant(bizA.id, () =>
       serverSync.setServerSyncConfig(bizA.id, { remoteUrl: "https://vps.example.com", token: "new-token-5678", enabled: true }),
     );
-    expect(await serverSync.resolveBusinessBySyncToken("old-token-1234")).toBeNull();
-    expect(await serverSync.resolveBusinessBySyncToken("new-token-5678")).toBe(bizA.id);
+    expect((await serverSync.resolveSyncCredential("old-token-1234"))?.businessId ?? null).toBeNull();
+    expect((await serverSync.resolveSyncCredential("new-token-5678"))?.businessId ?? null).toBe(bizA.id);
   });
 
   it("clearing the token (disabling sync) removes resolvability", async () => {
@@ -149,7 +149,7 @@ describe("setServerSyncConfig / resolveBusinessBySyncToken", () => {
     await dbLib.withTenant(bizA.id, () =>
       serverSync.setServerSyncConfig(bizA.id, { remoteUrl: "", token: "", enabled: false }),
     );
-    expect(await serverSync.resolveBusinessBySyncToken("token-1234")).toBeNull();
+    expect((await serverSync.resolveSyncCredential("token-1234"))?.businessId ?? null).toBeNull();
   });
 });
 
