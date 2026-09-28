@@ -1,6 +1,9 @@
 {
   "name": "business-suite-desktop",
   "version": "1.0.5",
+  "buildCommit": "unknown",
+  "buildId": "development",
+  "releaseChannel": "stable",
   "private": true,
   "author": "Business Suite",
   "description": "Standalone Windows installer for the multi-app Business Suite platform — accounting, CRM, growth, websites, and POS without manual infrastructure setup.",
@@ -43,6 +46,8 @@
       "native-printing.js",
       "local-storage.js",
       "logger.js",
+      "update-engine.js",
+      "desktop-release-public-key.pem",
       "package.json"
     ],
     "win": {

@@ -1,8 +1,15 @@
-/** Pure decision logic for manual desktop release-version visibility. */
+/** Pure Desktop SemVer decision logic kept separate from runtime I/O. */
+import { classifyDesktopVersion, type DeviceComplianceStatus } from "./desktop-release";
 
-/** "unknown" means this image was built with no --build-arg GIT_SHA (e.g. a
- * plain local `docker build`) — nothing meaningful to compare, so never
- * offer an update from it. */
-export function computeUpdateAvailable(currentVersion: string, latestVersion: string): boolean {
-  return latestVersion !== "unknown" && latestVersion !== currentVersion;
+export function computeUpdateStatus(
+  currentVersion: string,
+  targetVersion: string | null,
+  minimumSupportedVersion?: string | null,
+): DeviceComplianceStatus {
+  return classifyDesktopVersion(currentVersion, targetVersion, minimumSupportedVersion);
+}
+
+/** Back-compatible helper for callers that only need the one CTA decision. */
+export function computeUpdateAvailable(currentVersion: string, targetVersion: string): boolean {
+  return computeUpdateStatus(currentVersion, targetVersion) === "update_available";
 }

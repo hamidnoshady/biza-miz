@@ -12,6 +12,7 @@ import {
   CloudCogIcon,
   CreditCardIcon,
   DatabaseIcon,
+  DownloadIcon,
   FileTextIcon,
   MonitorCogIcon,
   PanelTopIcon,
@@ -49,6 +50,7 @@ import { DataTransferSettings } from "./transfer/data-transfer-settings";
 import { ShiftHistorySettings } from "./shift-history-settings";
 import { TaxSettings } from "./tax-settings";
 import { CloudSyncSettings } from "./cloud-sync-settings";
+import { DesktopUpdateSettings } from "./desktop-update-settings";
 import { cardClass } from "@/app/dashboard/page-chrome";
 
 interface SettingsManagerProps {
@@ -86,6 +88,7 @@ const TAB_ICONS: Record<SettingsTabKey, LucideIcon> = {
   "cloud-sync": CloudCogIcon,
   "branch-management": StoreIcon,
   devices: MonitorCogIcon,
+  desktop: DownloadIcon,
   notifications: BellIcon,
   shifts: CalendarClockIcon,
   "audit-log": ClipboardCheckIcon,
@@ -99,7 +102,7 @@ const TAB_ICONS: Record<SettingsTabKey, LucideIcon> = {
 // so a tab missing here is dropped from the sidebar without any type error.
 const SETTINGS_GROUPS: Array<{ label: string; keys: SettingsTabKey[] }> = [
   { label: "کسب‌وکار", keys: ["business", "branch-management"] },
-  { label: "ابر و اتصال", keys: ["cloud-sync"] },
+  { label: "ابر و اتصال", keys: ["cloud-sync", "desktop"] },
   { label: "مالی و فروش", keys: ["tax", "pricing", "payment-methods", "accounts"] },
   // Keep the platform contract beside payment settings instead of making
   // owners scan past management and security sections to find it.
@@ -231,6 +234,7 @@ export function SettingsManager({
       {activeTab === "cloud-sync" ? <CloudSyncSettings /> : null}
       {activeTab === "branch-management" ? <BranchManagementSettings features={features} /> : null}
       {activeTab === "devices" ? <DeviceSettings /> : null}
+      {activeTab === "desktop" ? <DesktopUpdateSettings /> : null}
       {activeTab === "notifications" ? <NotificationSettings /> : null}
       {activeTab === "shifts" ? (
         <div className="space-y-6">

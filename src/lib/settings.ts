@@ -35,8 +35,10 @@ export const SETTING_KEYS = {
   backupConfig: "backup.config",
   /** PricingConfig — menu cost-plus margin, overhead policy and cost-drift threshold */
   pricing: "pricing.config",
-  /** AppUpdateStatus — last manual release-version comparison; no download metadata or credentials */
+  /** AppUpdateStatus — local cache of the authenticated Desktop release target and separated Central provenance */
   appUpdateStatus: "app_update.status",
+  /** Desktop update check/download policy; executable installation is always explicit. */
+  desktopUpdatePolicy: "desktop_update.policy",
   /** DeploymentProfileRecord — { profile: 'cloud'|'hybrid'|'local', pairedAt }. */
   deploymentProfile: "deployment.profile",
   /** @deprecated Pre-0172 compatibility key. Read only; new code writes deployment.profile. */

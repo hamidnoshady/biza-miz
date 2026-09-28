@@ -11,6 +11,12 @@ on:
         description: 'Full release-candidate Git commit SHA'
         type: string
         required: true
+      channel:
+        description: 'Desktop release channel embedded in the signed package'
+        type: choice
+        options: [stable, beta, internal]
+        default: stable
+        required: true
 
 concurrency:
   group: windows-signed-candidate
@@ -33,9 +39,11 @@ env:
   PRODUCTION_RELEASE: "1"
   RELEASE_VERSION: ${{ inputs.version }}
   CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+  RELEASE_CHANNEL: ${{ inputs.channel }}
   WINDOWS_SIGNING_PROVIDER: ${{ vars.WINDOWS_SIGNING_PROVIDER }}
   WINDOWS_SIGNING_RUNNER_JSON: ${{ vars.WINDOWS_SIGNING_RUNNER_JSON }}
   WINDOWS_EXPECTED_SIGNER: ${{ vars.WINDOWS_EXPECTED_SIGNER }}
+  DESKTOP_RELEASE_PUBLIC_KEY_PEM: ${{ vars.DESKTOP_RELEASE_PUBLIC_KEY_PEM }}
   WINDOWS_RFC3161_URL: ${{ vars.WINDOWS_RFC3161_URL }}
   PG_SOURCE_VERSION: '16.15'
   PG_SOURCE_URL: https://ftp.postgresql.org/pub/source/v16.15/postgresql-16.15.tar.gz
@@ -79,12 +87,16 @@ jobs:
           $ErrorActionPreference = "Stop"
           if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw "Version must be X.Y.Z" }
           if ($env:CANDIDATE_COMMIT -notmatch '^[0-9a-f]{40}$') { throw "candidate_commit must be a full Git SHA" }
+          if ($env:RELEASE_CHANNEL -notin @('stable','beta','internal')) { throw "Unsupported release channel" }
           if ($env:WORKFLOW_COMMIT -cne $env:CANDIDATE_COMMIT) { throw "Workflow definition commit $env:WORKFLOW_COMMIT does not match candidate $env:CANDIDATE_COMMIT" }
           $checkedOutCommit = (git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $checkedOutCommit -cne $env:CANDIDATE_COMMIT) { throw "Checked-out commit $checkedOutCommit does not match candidate $env:CANDIDATE_COMMIT" }
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_PROVIDER)) { throw "NOT CONFIGURED: WINDOWS_SIGNING_PROVIDER" }
           if ($env:WINDOWS_SIGNING_PROVIDER -notin @('pfx','certificate-store','azure-trusted-signing')) { throw "Unsupported production WINDOWS_SIGNING_PROVIDER: $env:WINDOWS_SIGNING_PROVIDER" }
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_EXPECTED_SIGNER)) { throw "NOT CONFIGURED: WINDOWS_EXPECTED_SIGNER" }
+          if ([string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_PUBLIC_KEY_PEM)) { throw "NOT CONFIGURED: DESKTOP_RELEASE_PUBLIC_KEY_PEM" }
+          node -e "const k=require('node:crypto').createPublicKey(process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM.replaceAll('\\n','\n'));if(!String(k.asymmetricKeyType).startsWith('rsa'))process.exit(2)"
+          if ($LASTEXITCODE -ne 0) { throw "DESKTOP_RELEASE_PUBLIC_KEY_PEM is not a valid public key" }
           if ($env:WINDOWS_SIGNING_PROVIDER -eq 'pfx' -and ([string]::IsNullOrWhiteSpace($env:CSC_LINK) -or [string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD))) { throw 'NOT CONFIGURED: protected PFX signing credentials' }
           if ($env:WINDOWS_SIGNING_PROVIDER -eq 'certificate-store') {
             if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_SUBJECT) -and [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_SHA1)) { throw 'NOT CONFIGURED: certificate-store selector' }
@@ -139,6 +151,11 @@ jobs:
           npm run build
           npm run desktop:runtime
 
+      - name: Embed protected release-manifest verification key
+        run: |
+          $key = $env:DESKTOP_RELEASE_PUBLIC_KEY_PEM.Replace('\\n', "`n").Trim()
+          [IO.File]::WriteAllText("${{ github.workspace }}\electron\desktop-release-public-key.pem", "$key`n", [Text.UTF8Encoding]::new($false))
+
       - name: Install and audit Electron dependencies
         working-directory: electron
         run: |
@@ -173,7 +190,7 @@ jobs:
           AZURE_CLIENT_ID: ${{ vars.WINDOWS_SIGNING_PROVIDER == 'azure-trusted-signing' && secrets.AZURE_CLIENT_ID || '' }}
           AZURE_CLIENT_SECRET: ${{ vars.WINDOWS_SIGNING_PROVIDER == 'azure-trusted-signing' && vars.AZURE_USE_OIDC != 'true' && secrets.AZURE_CLIENT_SECRET || '' }}
         run: |
-          npm pkg set "version=$env:VERSION" --prefix electron
+          npm pkg set "version=$env:VERSION" "buildCommit=$env:CANDIDATE_COMMIT" "buildId=signed-candidate-$env:GITHUB_RUN_ID" "releaseChannel=$env:RELEASE_CHANNEL" --prefix electron
           npm run dist --prefix electron
 
       - name: Clear transient Azure CLI signing session
@@ -283,8 +300,11 @@ jobs:
             schemaVersion = 1
             version = $env:RELEASE_VERSION
             commit = $env:CANDIDATE_COMMIT
+            channel = $env:RELEASE_CHANNEL
+            buildId = "signed-candidate-$env:GITHUB_RUN_ID"
             signingProvider = $env:WINDOWS_SIGNING_PROVIDER
             expectedSigner = $env:WINDOWS_EXPECTED_SIGNER
+            releaseManifestPublicKeySha256 = (Get-FileHash electron\desktop-release-public-key.pem -Algorithm SHA256).Hash.ToLowerInvariant()
             signingStatusSha256 = (Get-FileHash electron\dist\windows-signing-status.json -Algorithm SHA256).Hash.ToLowerInvariant()
             signatureVerificationSha256 = (Get-FileHash windows-signature-verification.json -Algorithm SHA256).Hash.ToLowerInvariant()
             postgresqlToolsSource = "postgresql-$env:PG_SOURCE_VERSION.tar.gz"

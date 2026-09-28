@@ -30,8 +30,6 @@ import {
 } from "./impersonation-handoff";
 import { validSupportReason } from "./support-session";
 import { isUuid } from "./uuid";
-import { SETTING_KEYS } from "./settings";
-import type { AppUpdateStatus } from "./app-update";
 
 // ---------------------------------------------------------------------------
 // Business lifecycle
@@ -2431,99 +2429,6 @@ export async function systemStatus(pendingMigrations: number): Promise<SystemSta
       platformAdmins: Number(counts.rows[0]?.platform_admins ?? 0),
     },
   };
-}
-
-// ---------------------------------------------------------------------------
-// Desktop installer update distribution (owner-only to configure)
-// ---------------------------------------------------------------------------
-
-export interface UpdateDistributionConfig {
-  s3Endpoint: string;
-  s3Bucket: string;
-  s3AccessKeyId: string;
-  s3SecretAccessKey: string;
-  publicBaseUrl: string;
-}
-
-/** Null until an owner has configured it once — the console treats that as "not set up yet", not an error. */
-export async function getUpdateDistributionConfig(): Promise<UpdateDistributionConfig | null> {
-  const { rows } = await withoutTenantScope("platform", () =>
-    query<{
-      s3_endpoint: string | null;
-      s3_bucket: string | null;
-      s3_access_key_id: string | null;
-      s3_secret_access_key: string | null;
-      public_base_url: string | null;
-    }>(
-      `SELECT s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, public_base_url
-         FROM platform_update_config WHERE id = true`,
-    ),
-  );
-  const row = rows[0];
-  if (!row) return null;
-  return {
-    s3Endpoint: row.s3_endpoint ?? "",
-    s3Bucket: row.s3_bucket ?? "",
-    s3AccessKeyId: row.s3_access_key_id ?? "",
-    s3SecretAccessKey: row.s3_secret_access_key ?? "",
-    publicBaseUrl: row.public_base_url ?? "",
-  };
-}
-
-export async function setUpdateDistributionConfig(config: UpdateDistributionConfig): Promise<void> {
-  await withoutTenantScope("platform", () =>
-    query(
-      `INSERT INTO platform_update_config
-         (id, s3_endpoint, s3_bucket, s3_access_key_id, s3_secret_access_key, public_base_url, updated_at)
-       VALUES (true, $1, $2, $3, $4, $5, now())
-       ON CONFLICT (id) DO UPDATE SET
-         s3_endpoint = EXCLUDED.s3_endpoint,
-         s3_bucket = EXCLUDED.s3_bucket,
-         s3_access_key_id = EXCLUDED.s3_access_key_id,
-         s3_secret_access_key = EXCLUDED.s3_secret_access_key,
-         public_base_url = EXCLUDED.public_base_url,
-         updated_at = now()`,
-      [config.s3Endpoint, config.s3Bucket, config.s3AccessKeyId, config.s3SecretAccessKey, config.publicBaseUrl],
-    ),
-  );
-}
-
-export interface ClientVersionStatus {
-  businessId: string;
-  businessName: string;
-  currentVersion: string;
-  latestVersion: string | null;
-  updateAvailable: boolean;
-  checkedAt: string | null;
-  error: string | null;
-}
-
-/**
- * Per-business manual release-version status (AppUpdateStatus,
- * src/lib/app-update.ts) across connected sites. This is visibility only: no
- * update is downloaded or executed. A fully offline desktop has no reporting
- * channel and therefore does not appear here.
- */
-export async function clientVersionCompliance(): Promise<ClientVersionStatus[]> {
-  const { rows } = await withoutTenantScope("platform", () =>
-    query<{ business_id: string; business_name: string; value: AppUpdateStatus }>(
-      `SELECT s.business_id, b.name AS business_name, s.value
-         FROM settings s
-         JOIN businesses b ON b.id = s.business_id
-        WHERE s.key = $1 AND s.location_id IS NULL
-        ORDER BY b.name`,
-      [SETTING_KEYS.appUpdateStatus],
-    ),
-  );
-  return rows.map((r) => ({
-    businessId: r.business_id,
-    businessName: r.business_name,
-    currentVersion: r.value.currentVersion,
-    latestVersion: r.value.latestVersion,
-    updateAvailable: r.value.updateAvailable,
-    checkedAt: r.value.checkedAt,
-    error: r.value.error,
-  }));
 }
 
 // ---------------------------------------------------------------------------

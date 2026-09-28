@@ -20,6 +20,7 @@ export const SETTINGS_TAB_KEYS = [
   // «تنظیمات» keeps no copy; the old `?tab=server-sync` deep link redirects
   // to the hub in `settings-manager.tsx`.
   "devices",
+  "desktop",
   "notifications",
   "shifts",
   "audit-log",
@@ -171,6 +172,12 @@ export const SETTINGS_TABS: SettingsTab[] = [
     label: "دستگاه‌های ثبت‌شده",
     description: "پایانه‌های متصل و ورود بیومتریک اختصاصی هر دستگاه",
     requiredAnyPermission: [PERMISSIONS.settingsManage],
+  },
+  {
+    key: "desktop",
+    label: "دسکتاپ و به‌روزرسانی",
+    description: "نسخهٔ نصب‌شده، کانال انتشار، دانلود امن، بستهٔ آفلاین و نصب پس از پشتیبان",
+    allowedRoles: ["owner"],
   },
   {
     key: "notifications",

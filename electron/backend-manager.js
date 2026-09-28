@@ -8,6 +8,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const { computePaths } = require("./app-paths");
+const desktopPackage = require("./package.json");
 
 class StartupError extends Error {
   constructor(stage, message, cause) {
@@ -139,7 +140,7 @@ function runLoggedCommand(executable, args, logger, name) {
 }
 
 function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion = "unknown", options = {}) {
-  const { pgToolsDir, emergencyBackupDir } = options;
+  const { pgToolsDir, emergencyBackupDir, updateStatePath, updateTargetPath } = options;
   return {
     DATABASE_URL: runtimeUrl,
     BACKUP_DATABASE_URL: superuserUrl,
@@ -155,9 +156,14 @@ function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion =
     DESKTOP_INSTANCE_ID: config.instanceId,
     DESKTOP_DEVICE_NAME: require("node:os").hostname(),
     APP_RELEASE_VERSION: appVersion,
-    // Existing health/deployment diagnostics expose APP_IMAGE_SHA. Keep that
-    // established field populated with the signed desktop package version.
-    APP_IMAGE_SHA: appVersion,
+    // SemVer is the update identity. Commit/build remain separate provenance;
+    // never put appVersion into APP_IMAGE_SHA or Central will compare unlike
+    // identifiers again.
+    APP_BUILD_COMMIT: typeof desktopPackage.buildCommit === "string" ? desktopPackage.buildCommit : "unknown",
+    APP_BUILD_ID: typeof desktopPackage.buildId === "string" ? desktopPackage.buildId : "unknown",
+    DESKTOP_RELEASE_CHANNEL: typeof desktopPackage.releaseChannel === "string" ? desktopPackage.releaseChannel : "stable",
+    ELECTRON_VERSION: process.versions.electron || "unknown",
+    APP_IMAGE_SHA: typeof desktopPackage.buildCommit === "string" ? desktopPackage.buildCommit : "unknown",
     // Bug fix (this cycle): `start()` below has always passed a 5th
     // options argument here (`{ pgToolsDir, emergencyBackupDir }`), but
     // this function's signature silently dropped it — neither value ever
@@ -175,6 +181,8 @@ function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion =
     // `userData`.
     ...(pgToolsDir ? { PG_TOOLS_DIR: pgToolsDir } : {}),
     ...(emergencyBackupDir ? { RESTORE_EMERGENCY_DIR: emergencyBackupDir } : {}),
+    ...(updateStatePath ? { DESKTOP_UPDATE_STATE_PATH: updateStatePath } : {}),
+    ...(updateTargetPath ? { DESKTOP_UPDATE_TARGET_PATH: updateTargetPath } : {}),
   };
 }
 
@@ -389,10 +397,13 @@ class BackendManager {
     const pgToolsDir = this.app.isPackaged
       ? path.join(process.resourcesPath, "postgresql-tools")
       : path.join(__dirname, "..", ".desktop-assets", "postgresql-tools");
-    const emergencyBackupDir = computePaths(userDataDir).emergencyBackupDir;
+    const desktopPaths = computePaths(userDataDir);
+    const emergencyBackupDir = desktopPaths.emergencyBackupDir;
     const serverEnv = desktopServerEnvironment(config, runtimeUrl, superuserUrl, this.app.getVersion(), {
       pgToolsDir,
       emergencyBackupDir,
+      updateStatePath: path.join(desktopPaths.configDir, "update-state.json"),
+      updateTargetPath: path.join(desktopPaths.configDir, "update-target.json"),
     });
     this.server = spawn(process.execPath, [path.join(runtimeDir, "bin", "server.cjs")], {
       cwd: runtimeDir,
@@ -423,6 +434,22 @@ class BackendManager {
   updateConfig(mutator) {
     mutator(this.config);
     saveConfig(this.configPath, this.config);
+  }
+
+  async preUpdateSafety() {
+    if (!this.pg) throw new Error("PostgreSQL is not running.");
+    const client = this.pg.getPgClient("pos", "127.0.0.1");
+    await client.connect();
+    try {
+      const { rows } = await client.query(
+        `SELECT
+           (SELECT count(*)::int FROM employee_shifts WHERE ended_at IS NULL) AS open_shifts,
+           (SELECT count(*)::int FROM orders WHERE status IN ('open','held')) AS open_orders`,
+      );
+      return { openShifts: Number(rows[0]?.open_shifts ?? 0), openOrders: Number(rows[0]?.open_orders ?? 0) };
+    } finally {
+      await client.end().catch(() => {});
+    }
   }
 
   async stopPostgresGracefully() {

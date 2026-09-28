@@ -96,7 +96,11 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "server-sync/push":
     "server-to-server — authenticated by a site/location credential and constrained to its location (legacy tokens remain migration-only); not a session",
   "server-sync/update-check":
-    "server-to-server — authenticated by a site or legacy business credential only; no global-token fallback and no session",
+    "server-to-server — authenticated by a site credential only; no global-token fallback and no session",
+  "server-sync/runtime-status":
+    "server-to-server runtime telemetry — authenticated by the exact site-device credential; the body cannot choose a device/business/location",
+  "desktop-releases/promote":
+    "release-pipeline ingress — authenticated by the timing-safe DESKTOP_RELEASE_PUBLISH_TOKEN, never by a tenant browser session",
   "server-sync/credential-rotation":
     "server-to-server staged credential hand-off — authenticated by the current site credential, never a browser session",
   "server-sync/credential-rotation/ack":

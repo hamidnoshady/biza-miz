@@ -111,6 +111,54 @@ export interface DesktopStorageBridge {
   checkFolder(path: string): Promise<DesktopFolderCheckResult>;
 }
 
+export type DesktopUpdateStateName =
+  | "checking" | "no_update" | "update_available" | "downloading" | "paused"
+  | "verifying" | "ready_to_install" | "backup_in_progress" | "installing"
+  | "restarting" | "verifying_health" | "success" | "failed" | "recovery_required";
+
+export interface DesktopUpdateState {
+  state: DesktopUpdateStateName;
+  installedVersion: string;
+  target: {
+    id?: string;
+    version: string;
+    buildCommit: string;
+    buildId: string;
+    channel: "stable" | "beta" | "internal";
+    releasedAt: string;
+    minimumSupportedVersion: string | null;
+    mandatory: boolean;
+    installer: { url: string; sha256: string; size: number; signatureRequired: true; expectedPublisher: string | null };
+    database: { migrationVersion: number | null; minimumSchemaVersion: number | null; maximumSchemaVersion: number | null; backupRequired: true };
+    releaseNotes: string[];
+    recovery: { knownGoodVersion: string | null; notes: string | null };
+  } | null;
+  progress: { received: number; total: number; percent: number } | null;
+  installerPath: string | null;
+  backupPath: string | null;
+  errorCode: string | null;
+  errorDetail: string | null;
+  checkedAt: string | null;
+  updatedAt: string;
+  policy: { automaticChecks: boolean; backgroundDownload: boolean; automaticInstall: false; channel: "stable" | "beta" | "internal" };
+  installOnNextRestart: boolean;
+  previousVersion: string | null;
+}
+
+export interface DesktopUpdateBridge {
+  status(): Promise<DesktopUpdateState>;
+  configure(policy: Partial<DesktopUpdateState["policy"]>): Promise<DesktopUpdateState>;
+  check(manifest: DesktopUpdateState["target"]): Promise<DesktopUpdateState>;
+  download(): Promise<DesktopUpdateState>;
+  pause(): Promise<DesktopUpdateState>;
+  cancel(): Promise<DesktopUpdateState>;
+  selectOfflinePackage(): Promise<DesktopUpdateState>;
+  installNow(): Promise<DesktopUpdateState>;
+  installOnNextRestart(): Promise<DesktopUpdateState>;
+  showBackup(): Promise<string | null>;
+  onState(callback: (state: DesktopUpdateState) => void): () => void;
+}
+
 export interface DesktopBridge {
   isDesktop: true;
   /** Opens a native "choose a folder" dialog; `title` customizes the dialog heading. */
@@ -127,6 +175,8 @@ export interface DesktopBridge {
     showCaCertificate(): Promise<string>;
     openLogs(): Promise<string>;
   };
+  /** Desktop Update Engine; optional while an older shell serves a newer web runtime. */
+  update?: DesktopUpdateBridge;
   /** Present since the native-printing bridge shipped; optional so older builds still type-check. */
   printing?: DesktopPrintingBridge;
 }

@@ -41,10 +41,10 @@ export const EXEMPT_TABLES = new Set([
   // `billing_plans` (one plan domain: limits + pricing + lifecycle). The
   // exempt entry for `plans` is gone with the table; `billing_plans` (below)
   // remains the one exempt plan catalogue.
-  // Platform-wide singleton config for the desktop installer's update
-  // distribution (migration 0038) — carries no business_id/location_id,
-  // nothing to scope by, same shape as feature_flags/plans.
-  "platform_update_config",
+  // Migration 0187 — deployment-wide Desktop release catalogue. Installer
+  // storage credentials are deliberately absent; per-device runtime/update
+  // telemetry lives in RLS-protected site_device_* tables.
+  "platform_releases",
   // Phase J dropped the legacy AI credit catalogues (ai_credit_packages,
   // ai_subscription_plans) with the rest of the Phase 18 billing schema
   // (migration 0164); the singleton provider config platform_ai_gateway is
