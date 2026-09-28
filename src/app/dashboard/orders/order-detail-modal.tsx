@@ -251,6 +251,7 @@ export function OrderDetailModal({
   open,
   onOpenChange,
   canEdit,
+  canTakePayment,
   canAmendClosed = false,
   onChanged,
 }: {
@@ -258,6 +259,8 @@ export function OrderDetailModal({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   canEdit: boolean;
+  /** May take money and complete an order; deliberately independent of editing. */
+  canTakePayment: boolean;
   /** may edit/remove an order that has already been paid for — a separate, back-office permission */
   canAmendClosed?: boolean;
   /** Lets the queue behind the dialog re-read itself after a paid/voided/edited order. */
@@ -287,7 +290,12 @@ export function OrderDetailModal({
   // The business's own payment ways, and what the cashier has chosen — a
   // single way or a split across several (src/lib/payment-draft.ts). Shared
   // with the POS through <PaymentWays>, so the two checkouts stay identical.
-  const { methods: paymentMethods, loaded: paymentMethodsLoaded } = usePaymentMethods();
+  const {
+    methods: paymentMethods,
+    loaded: paymentMethodsLoaded,
+    error: paymentMethodsError,
+    reload: reloadPaymentMethods,
+  } = usePaymentMethods(canTakePayment);
   const [paymentDraft, setPaymentDraft] = useState<PaymentDraft>(() => emptyPaymentDraft([]));
   // The ways land a render or two after the dialog opens, so the draft starts
   // pointing at nothing; this settles it on the first way once they arrive.
@@ -1315,7 +1323,7 @@ export function OrderDetailModal({
                         </dl>
                       </section>
 
-                    {editable ? (
+                    {canTakePayment && order.status === "open" ? (
                       <section
                         className={`${CARD} mt-3 p-4`}
                         aria-label="دریافت وجه و تکمیل سفارش"
@@ -1346,6 +1354,8 @@ export function OrderDetailModal({
                           <PaymentWays
                             methods={paymentMethods}
                             loaded={paymentMethodsLoaded}
+                            loadError={paymentMethodsError}
+                            onReload={reloadPaymentMethods}
                             draft={paymentDraft}
                             onChange={setPaymentDraft}
                             due={Number(order.total)}
@@ -1383,6 +1393,8 @@ export function OrderDetailModal({
                           holdingLabel="نگه دارید…"
                           busy={paying}
                           disabled={
+                            !paymentMethodsLoaded ||
+                            Boolean(paymentMethodsError) ||
                             paymentMethods.length === 0 ||
                             (draftRequiresCustomer(paymentDraft, paymentMethods, Number(order.total)) &&
                               !selectedCustomer)

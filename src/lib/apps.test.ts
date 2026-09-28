@@ -6,9 +6,12 @@ import {
   appForKey,
   isAppKey,
   modulesForApp,
+  resolveAccessibleAppLanding,
+  canOpenApp,
   unassignedModules,
 } from "./apps";
 import { MODULE_KEYS } from "./industry-profile";
+import { effectivePermissions, PERMISSIONS, roleBasePermissions } from "./permissions";
 
 describe("appForModule", () => {
   it("groups loyalty, promotions and commission under Growth & Marketing", () => {
@@ -119,6 +122,46 @@ describe("appForKey / modulesForApp", () => {
     expect(modulesForApp("accounting")).toEqual(expect.arrayContaining([
       "dashboard", "orders", "pos", "inventory", "kitchen", "ledger", "reports",
     ]));
+  });
+});
+
+describe("permission-driven app landing", () => {
+  const route = (module: Parameters<typeof appForModule>[0], href: string) => ({ module, href });
+
+  it("lands a food-service cashier on POS without granting ledger access", () => {
+    const permissions = new Set(roleBasePermissions("cashier"));
+    const nav = [
+      route("orders", "/accounting/orders"),
+      route("pos", "/accounting/pos"),
+      route("tables", "/accounting/floor"),
+    ];
+    expect(canOpenApp("accounting", permissions)).toBe(true);
+    expect(permissions.has(PERMISSIONS.ledgerView)).toBe(false);
+    expect(resolveAccessibleAppLanding("accounting", nav)).toBe("/accounting/pos");
+  });
+
+  it("prefers the ledger overview for an accountant/manager when it is accessible", () => {
+    const nav = [
+      route("orders", "/accounting/orders"),
+      route("ledger", "/accounting/overview"),
+    ];
+    expect(resolveAccessibleAppLanding("accounting", nav)).toBe("/accounting/overview");
+  });
+
+  it("is capability-driven for custom roles and honours revocations", () => {
+    const custom = new Set<string>([PERMISSIONS.ordersView, PERMISSIONS.ordersCreate, PERMISSIONS.paymentsTake]);
+    expect(canOpenApp("accounting", custom)).toBe(true);
+    expect(custom.has(PERMISSIONS.ledgerView)).toBe(false);
+    expect(resolveAccessibleAppLanding("accounting", [route("pos", "/accounting/pos")])).toBe("/accounting/pos");
+
+    const revoked = effectivePermissions("cashier", { revoked: [PERMISSIONS.paymentsTake] });
+    expect(revoked.has(PERMISSIONS.paymentsTake)).toBe(false);
+    expect(resolveAccessibleAppLanding("accounting", [route("orders", "/accounting/orders")])).toBe("/accounting/orders");
+  });
+
+  it("does not invent an Accounting door for kitchen or unrelated routes", () => {
+    expect(resolveAccessibleAppLanding("accounting", [])).toBeNull();
+    expect(resolveAccessibleAppLanding("accounting", [route("customers", "/crm/overview")])).toBeNull();
   });
 });
 

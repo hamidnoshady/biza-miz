@@ -16,7 +16,7 @@ describe("lockOpenOrder", () => {
     expect(client.query).toHaveBeenCalledWith(expect.stringContaining("FOR UPDATE"), ["order-1", "location-1"]);
   });
 
-  it("distinguishes missing from no-longer-open orders", async () => {
+  it("distinguishes missing from no-longer-open orders and requires held orders to resume", async () => {
     await expect(lockOpenOrder(clientWith([]) as never, "location-1", "missing")).resolves.toEqual({
       ok: false,
       error: "order_not_found",
@@ -24,6 +24,9 @@ describe("lockOpenOrder", () => {
     });
     await expect(
       lockOpenOrder(clientWith([{ id: "order-1", status: "completed" }]) as never, "location-1", "order-1"),
+    ).resolves.toEqual({ ok: false, error: "order_not_open", status: 409 });
+    await expect(
+      lockOpenOrder(clientWith([{ id: "order-2", status: "held" }]) as never, "location-1", "order-2"),
     ).resolves.toEqual({ ok: false, error: "order_not_open", status: 409 });
   });
 });

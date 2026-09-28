@@ -3,6 +3,8 @@ import {
   ACCOUNTING_DOOR_PERMISSION,
   ACCOUNTING_SECTIONS,
   accountingSectionsFor,
+  canOpenAccountingApp,
+  canOpenLedger,
   canViewAccountingSection,
 } from "./accounting-nav";
 import { roleBasePermissions } from "@/lib/permissions";
@@ -80,7 +82,7 @@ describe("accountingSectionsFor", () => {
     expect(keys).toContain("dashboard");
   });
 
-  it("shows nothing to someone the app already refuses", () => {
+  it("keeps operational staff out of ledger sections", () => {
     for (const role of ["cashier", "waiter", "kitchen", "none"] as const) {
       expect(accountingSectionsFor(of(role))).toEqual([]);
       for (const key of ACCOUNTING_SECTION_KEYS) {
@@ -89,7 +91,15 @@ describe("accountingSectionsFor", () => {
     }
   });
 
-  it("opens the app to everyone holding its door capability", () => {
+  it("separates opening the operational app from opening the ledger", () => {
+    for (const role of ["cashier", "waiter", "kitchen"] as const) {
+      expect(canOpenAccountingApp(of(role)), role).toBe(true);
+      expect(canOpenLedger(of(role)), role).toBe(false);
+    }
+    expect(canOpenAccountingApp(of("none"))).toBe(false);
+  });
+
+  it("opens the ledger to everyone holding its door capability", () => {
     // Including `viewer`, the read-only auditor role: being able to read the
     // books is the entire point of that role, and `ledger.view` is in its
     // preset deliberately.

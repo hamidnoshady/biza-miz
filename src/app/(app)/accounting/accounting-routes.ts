@@ -156,9 +156,10 @@ export function isAccountingSectionKey(value: string | null | undefined): value 
 }
 
 // The app's door used to be a second role list here. It is
-// `canOpenAccounting` in `accounting-nav.ts` now — one definition, expressed as
-// the `ledger.view` capability the routes enforce, so the door and the section
-// list cannot answer differently.
+// Bookkeeping-section access is `canOpenLedger` in `accounting-nav.ts`; the
+// broader application door is resolved from accessible owned routes. Keeping
+// those concepts separate prevents operational staff from inheriting ledger
+// access merely because POS and Orders live under this prefix.
 
 /**
  * Where to send someone who lands on a section they may not open: back to the

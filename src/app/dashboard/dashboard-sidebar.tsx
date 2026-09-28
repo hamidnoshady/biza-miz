@@ -39,7 +39,7 @@ import {
   workspaceSectionHref,
 } from "@/lib/app-routes";
 import { bestNavMatch, flattenNav } from "@/lib/nav-tree";
-import { appForModule, type AppKey } from "@/lib/apps";
+import { appForModule, resolveAccessibleAppLanding, type AppKey } from "@/lib/apps";
 import type { AppAvailabilityState } from "@/lib/app-availability";
 import { appShellForPathname, type AppShellDef } from "@/lib/app-shells";
 import {
@@ -113,13 +113,9 @@ const SIDEBAR_KEYBOARD_STEP = 16;
  * every app in the platform, so adding one (the CRM, and whatever follows it)
  * should be an entry here, not another copy of a `SidebarMenuItem`.
  *
- * `hrefs` is a preference list, not an alias list. The first entry is the app's
- * own home; the rest are pages the app absorbed, kept so that a member whose
- * saved bottom-nav or bookmark still points at an old flat route is launched
- * into the app instead of hitting a redirect chain. Only routes the member can
- * actually reach (their trade's modules, their role, their feature flags — the
- * nav list is already filtered for all three) are considered, which is what
- * makes an app disappear from the rail for a business that does not have it.
+ * Route ownership and landing preference live in the canonical app registry.
+ * Only routes the server already admitted to the member are considered, which
+ * makes an app disappear when the member cannot reach any of its sections.
  *
  * Neither the assistant nor the technical-connections hub is a launcher: the
  * assistant IS the rail's home («دستیار هوشمند» above opens it), and
@@ -129,49 +125,26 @@ const WORKSPACE_APP_LAUNCHERS: readonly {
   key: AppKey;
   label: string;
   icon: LucideIcon;
-  hrefs: readonly string[];
 }[] = [
   {
     key: "accounting",
     label: "حسابداری",
     icon: CalculatorIcon,
-    // The app's own pages first: opening «حسابداری» lands on the app's home
-    // (`/accounting`), not on the sales overview. The overview is
-    // only the fallback for a member whose role cannot open the accounting
-    // pages or the reports at all; the old `/dashboard/ledger` address stays
-    // as a preference-list entry for any surface still holding it.
-    hrefs: ["/accounting/overview", "/accounting/financial-reports", "/accounting/reports"],
   },
   {
     key: "crm",
     label: "ارتباط با مشتری",
     icon: ContactIcon,
-    // `/crm/directory` redirects into the app's directory, so a business
-    // that has customers but has never opened the CRM still gets the launcher.
-    hrefs: ["/crm/overview", "/crm/directory"],
   },
   {
     key: "growth",
     label: "رشد و بازاریابی",
     icon: TrendingUpIcon,
-    hrefs: [
-      "/growth/overview",
-      "/growth/loyalty",
-      "/growth/campaigns",
-      "/growth/commission",
-    ],
   },
   {
     key: "website",
     label: "مدیریت وب‌سایت",
     icon: GlobeIcon,
-    // One launcher for both managers, opening the app home. (The old
-    // `/dashboard/wp` prefix still forwards into the app for bookmarks and
-    // saved bottom-nav slots, but it is not a nav entry anymore, so it is not
-    // a launcher fallback either.) Do not fall back to the technical
-    // connection hub: that would put the site managers back behind the
-    // Accounting/Connections door.
-    hrefs: ["/websites/overview"],
   },
 ];
 
@@ -207,6 +180,8 @@ export interface NavItem {
   appState?: { state: AppAvailabilityState; label: string; usable: boolean };
   /** Server-filtered against the member's effective permission set before reaching the client. */
   requiredAnyPermission?: Permission[];
+  /** Every capability listed is required (for compound surfaces such as POS). */
+  requiredAllPermissions?: Permission[];
 }
 
 interface SidebarProps {
@@ -264,13 +239,10 @@ function isActive(pathname: string, href: string, search?: ReadonlyURLSearchPara
  * left sidebar (search/rename/delete/continue) — see ai-chat-hub.tsx.
  */
 function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: string }) {
-  const hrefs = navItems.flatMap((item) => (item.href ? [item.href] : []));
   // The four apps this rail launches, as data rather than four copies of the same
-  // markup. Each entry lists its candidate routes in preference order: a
-  // launcher always opens the app's own home, and falls back to a page the
-  // app absorbed so a member whose saved bottom-nav still holds an old flat
-  // route lands in the app rather than on a 404. An app with no reachable
-  // route (its modules are not this trade's) is simply not listed.
+  // markup. The app registry resolves the best route from this server-filtered
+  // tree, so the rail cannot accidentally turn "open Accounting" into
+  // "may read the ledger".
   // An app's state («به‌زودی», «در حال تعمیر», …) travels on the nav entries the
   // layout already resolved — grouped here by *owning app*, so each launcher
   // wears its own app's badge, exactly what the flat sidebar shows for the
@@ -284,7 +256,7 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
     if (owner && !stateByApp.has(owner)) stateByApp.set(owner, item.appState);
   }
   const launchers = WORKSPACE_APP_LAUNCHERS.flatMap((launcher) => {
-    const href = launcher.hrefs.find((candidate) => hrefs.includes(candidate));
+    const href = resolveAccessibleAppLanding(launcher.key, navItems);
     if (!href) return [];
     return [
       {

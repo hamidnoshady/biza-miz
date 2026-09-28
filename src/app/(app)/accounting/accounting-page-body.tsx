@@ -8,7 +8,7 @@ import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { AskAssistant } from "@/components/ai/ask-assistant";
 import { AccountingManager } from "./accounting-manager";
-import { canOpenAccounting, canViewAccountingSection } from "./accounting-nav";
+import { canOpenLedger, canViewAccountingSection } from "./accounting-nav";
 import {
   accountingFallbackHref,
   type AccountingSectionKey,
@@ -66,7 +66,7 @@ export async function AccountingPageBody({ section }: { section: AccountingSecti
   // effective permissions — the same set the Accounting routes enforce.
   const member = await memberAccessFor(session);
   const permissions: ReadonlySet<string> = member?.permissions ?? new Set<string>();
-  if (!canOpenAccounting(permissions)) redirect("/dashboard");
+  if (!canOpenLedger(permissions)) redirect("/accounting");
   if (!canViewAccountingSection(permissions, section)) redirect(accountingFallbackHref());
   await requireFeatureForPage(session.businessId, "ledger");
   const holooCompanion = await withTenant(session.businessId, () => hasActiveHolooCompanion(session.businessId));

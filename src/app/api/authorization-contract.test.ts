@@ -98,6 +98,21 @@ describe("no route re-implements authorization inline", () => {
   });
 });
 
+describe("payment-method authorization split", () => {
+  it("keeps checkout reads operational and every configuration mutation administrative", () => {
+    const runtime = read("payment-methods/route.ts");
+    expect(runtime).toContain("requireAnyPermission(");
+    expect(runtime).toContain("PERMISSIONS.paymentsTake");
+    expect(runtime).not.toContain("requirePermission(PERMISSIONS.settingsManage)");
+
+    for (const route of ["settings/payment-methods/route.ts", "settings/payment-methods/[id]/route.ts"]) {
+      const source = read(route);
+      expect(source, route).toContain("requirePermission(PERMISSIONS.settingsManage)");
+      expect(source, route).not.toContain("PERMISSIONS.paymentsTake");
+    }
+  });
+});
+
 describe("families migrated off role-only gating stay migrated", () => {
   const family = (prefix: string) => ROUTES.filter((r) => r.startsWith(prefix));
 

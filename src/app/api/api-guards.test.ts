@@ -479,9 +479,9 @@ describe("every API route is guarded", () => {
       expect(
         /requireRole\(/.test(src) ||
           /requireManager\(/.test(src) ||
-          /requirePermission\(/.test(src) ||
+          /require(Permission|Permissions|AnyPermission)\(/.test(src) ||
           /requireMember\(/.test(src),
-        `src/app/api/${key}/route.ts has no requireRole/requireManager/requirePermission/requireMember guard and is not in the documented public list`,
+        `src/app/api/${key}/route.ts has no canonical tenant guard and is not in the documented public list`,
       ).toBe(true);
     });
 

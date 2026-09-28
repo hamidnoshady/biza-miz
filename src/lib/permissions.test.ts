@@ -8,6 +8,7 @@ import {
   isOwnerOnlyPermission,
   parseOverrides,
   roleBasePermissions,
+  canUsePos,
 } from "./permissions";
 
 describe("role presets", () => {
@@ -29,6 +30,24 @@ describe("role presets", () => {
     expect(cashier.has(PERMISSIONS.paymentsTake)).toBe(true);
     expect(cashier.has(PERMISSIONS.ledgerPost)).toBe(false);
     expect(cashier.has(PERMISSIONS.accountsEdit)).toBe(false);
+  });
+
+  it("pins the cashier till preset without granting bookkeeping or settings authority", () => {
+    const cashier = new Set(roleBasePermissions("cashier"));
+    for (const permission of [PERMISSIONS.ordersView, PERMISSIONS.ordersCreate, PERMISSIONS.paymentsTake]) {
+      expect(cashier.has(permission), permission).toBe(true);
+    }
+    expect(cashier.has(PERMISSIONS.ledgerView)).toBe(false);
+    expect(cashier.has(PERMISSIONS.settingsManage)).toBe(false);
+    expect(canUsePos(cashier)).toBe(true);
+  });
+
+  it("requires both order creation and payment authority for the full POS surface", () => {
+    expect(canUsePos(new Set([PERMISSIONS.ordersCreate]))).toBe(false);
+    expect(canUsePos(new Set([PERMISSIONS.paymentsTake]))).toBe(false);
+    expect(canUsePos(new Set([PERMISSIONS.ordersCreate, PERMISSIONS.paymentsTake]))).toBe(true);
+    expect(canUsePos(effectivePermissions("cashier", { revoked: [PERMISSIONS.paymentsTake] }))).toBe(false);
+    expect(canUsePos(effectivePermissions("cashier", { revoked: [PERMISSIONS.ordersCreate] }))).toBe(false);
   });
 
   it("lets managers, cashiers and accountants manage the persons file, each from their own app", () => {

@@ -13,6 +13,7 @@
  */
 
 import { PERMISSIONS, type Permission } from "@/lib/permissions";
+import { canOpenApp } from "@/lib/apps";
 import type { AccountingSectionKey } from "./accounting-routes";
 
 /**
@@ -139,7 +140,16 @@ export function canViewAccountingSection(
   return accountingSectionsFor(permissions).some((section) => section.key === key);
 }
 
-/** Whether a member has any Accounting surface at all — the app door. */
-export function canOpenAccounting(permissions: ReadonlySet<string>): boolean {
+/** Whether the member may read the bookkeeping workspace and ledger sections. */
+export function canOpenLedger(permissions: ReadonlySet<string>): boolean {
   return permissions.has(ACCOUNTING_DOOR_PERMISSION);
+}
+
+/**
+ * Whether the member has any surface owned by the Accounting application.
+ * This is intentionally broader than ledger access: selling and floor
+ * operations share the app shell without exposing bookkeeping data.
+ */
+export function canOpenAccountingApp(permissions: ReadonlySet<string>): boolean {
+  return canOpenApp("accounting", permissions);
 }

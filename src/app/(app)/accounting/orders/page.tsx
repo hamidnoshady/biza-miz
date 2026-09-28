@@ -16,20 +16,19 @@ export default async function OrdersPage({
   await requireModuleForPage(session.businessId, "orders");
   const access = await memberAccessFor(session);
   const permissions = access?.permissions ?? new Set<string>();
-  if (!permissions.has(PERMISSIONS.ordersCreate)) redirect("/dashboard");
+  if (!permissions.has(PERMISSIONS.ordersView)) redirect("/accounting");
 
   // Amending a *closed* order is its own permission, not part of the till's
-  // edit rights — see permissions.ts. The member's effective set comes from
-  // the one shared read (member-access.ts): explicit withTenant scope inside,
-  // so it cannot come back empty non-deterministically.
-  const member = await memberAccessFor(session);
-  const canAmendClosed = member?.permissions.has(PERMISSIONS.ordersAmendClosed) ?? false;
+  // edit rights — see permissions.ts. Reuse the same effective set that gated
+  // the page so navigation, controls and server APIs cannot drift.
+  const canAmendClosed = permissions.has(PERMISSIONS.ordersAmendClosed);
 
   const { order } = await searchParams;
 
   return (
     <OrdersList
-      canEdit={permissions.has(PERMISSIONS.paymentsTake)}
+      canEdit={permissions.has(PERMISSIONS.ordersCreate)}
+      canTakePayment={permissions.has(PERMISSIONS.paymentsTake)}
       canAmendClosed={canAmendClosed}
       initialOrderId={order ?? null}
     />

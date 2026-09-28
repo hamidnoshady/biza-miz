@@ -16,7 +16,7 @@ import { query, withTenant } from "@/lib/db";
 import { effectiveFeatures, isLockableFeature } from "@/lib/features";
 import { INDUSTRY_LABELS, type Industry } from "@/lib/industries";
 import { hasModule, industryProfile, labelFor } from "@/lib/industry-profile";
-import { type Permission } from "@/lib/permissions";
+import { POS_REQUIRED_PERMISSIONS, type Permission } from "@/lib/permissions";
 import { memberAccessFor } from "@/lib/member-access";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import { visibleSettingsTabs, type ResolvedSettingsTab } from "@/lib/settings-tabs";
@@ -54,19 +54,22 @@ interface NavContext {
   settingsTabs: ResolvedSettingsTab[];
 }
 
-function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
+export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
   return [
     {
       label: labelFor(industry, "saleDocumentPlural"),
       module: "orders",
       href: "/accounting/orders",
-      roles: ["owner", "manager", "cashier", "waiter"],
+      requiredAnyPermission: ["orders.view"],
     },
     {
       label: labelFor(industry, "sellScreen"),
       module: "pos",
       href: ACCOUNTING_WORKSPACE_HREFS.pos,
-      roles: ["owner", "manager", "cashier"],
+      // The till is both an order editor and a money-taking surface. Requiring
+      // both keeps a waiter with orders.create out and honours either explicit
+      // revocation for custom/system roles.
+      requiredAllPermissions: [...POS_REQUIRED_PERMISSIONS],
     },
     // The CRM app's door (Phase 36 — it is its own app, not a section of any
     // other). It is anchored on the `customers` module — core for every trade,
@@ -283,12 +286,36 @@ function canSee(
   // assigned-table board, not a general business capability. Every ordinary
   // application door is permission-derived, regardless of the preset's name.
   if (item.module === "waiter" && item.roles && !item.roles.includes(role)) return false;
+  if (item.requiredAllPermissions?.some((permission) => !permissions.has(permission))) return false;
   const required = item.requiredAnyPermission ?? modulePermissions(item.module);
   if (required.length > 0) return required.some((permission) => permissions.has(permission));
   // Industry-specific catalogue modules historically carried owner/manager
   // role lists; their canonical capability is inventory viewing.
   if (item.roles) return permissions.has("inventory.view");
   return true;
+}
+
+/**
+ * Build the member-accessible navigation once. Consumers such as the shell and
+ * permission-aware app-root redirects use this same result; neither repeats
+ * role or permission decisions.
+ */
+export function accessibleNavItemsFor(
+  industry: Industry,
+  ctx: NavContext,
+  role: Role,
+  permissions: Set<Permission>,
+  features: Record<string, boolean>,
+): NavItem[] {
+  return navItemsFor(industry, ctx)
+    .map((item) =>
+      item.children
+        ? { ...item, children: item.children.filter((child) => canSee(child, role, permissions, features, industry)) }
+        : item,
+    )
+    .filter((item) => !item.children || item.children.length > 0)
+    .filter((item) => canSee(item, role, permissions, features, industry))
+    .filter((item) => item.href !== "/settings" || ctx.settingsTabs.length > 0);
 }
 
 /**
@@ -362,19 +389,13 @@ export async function WorkspaceShell({
     description,
   }));
   const profile = industryProfile(industry);
-  const navItems = navItemsFor(industry, { settingsTabs })
-    // Phase 42 — group children go through the same role/module/permission
-    // gate as their parent; a group whose children all filtered out is gone
-    // rather than an empty disclosure.
-    .map((item) =>
-      item.children
-        ? { ...item, children: item.children.filter((child) => canSee(child, member.role, permissions, features, industry)) }
-        : item,
-    )
-    .filter((item) => !item.children || item.children.length > 0)
-    .filter((item) => canSee(item, member.role, permissions, features, industry))
-    .filter((item) => item.href !== "/settings" || settingsTabs.length > 0)
-    .map((item) => {
+  const navItems = accessibleNavItemsFor(
+    industry,
+    { settingsTabs },
+    member.role,
+    permissions,
+    features,
+  ).map((item) => {
       // An app that is off is *announced*, not hidden: the entry stays and
       // carries its state's badge («به‌زودی», «در حال تعمیر», «نسخهٔ آزمایشی»),
       // and its page renders the explanation screen instead of the app. That

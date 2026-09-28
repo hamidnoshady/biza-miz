@@ -188,11 +188,14 @@ function OrderRowsSkeleton() {
 
 export function OrdersList({
   canEdit,
+  canTakePayment,
   canAmendClosed = false,
   initialOrderId = null,
 }: {
-  /** May work an open order — add lines, discount it, take payment. */
+  /** May edit an open order (lines/details); independent of taking money. */
   canEdit: boolean;
+  /** May settle an open order. */
+  canTakePayment: boolean;
   /** May edit or remove an order that has already been paid for. */
   canAmendClosed?: boolean;
   /** `?order=<id>` from the URL: the dialog opens on it once, on first render. */
@@ -927,6 +930,7 @@ export function OrdersList({
         open={detailOpen}
         onOpenChange={(next) => (next ? setDetailOpen(true) : closeDetail())}
         canEdit={canEdit}
+        canTakePayment={canTakePayment}
         canAmendClosed={canAmendClosed}
         onChanged={() => void load()}
       />
