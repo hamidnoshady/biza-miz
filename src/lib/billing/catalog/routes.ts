@@ -13,6 +13,7 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   pairing: keys("platform.sync"),
   peer: keys("platform.sync"),
   "server-sync": keys("platform.sync"),
+  iam: keys("platform.sync"),
   rollup: keys("platform.sync"),
   sync: keys("platform.sync"),
   internal: keys("platform.internal"),

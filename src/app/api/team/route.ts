@@ -16,6 +16,7 @@ import { listBranches } from "@/lib/branch-service";
 import { canonicalMemberPhone } from "@/lib/phone-otp";
 import { ASSIGNABLE_ROLES } from "@/lib/roles";
 import type { Role } from "@/lib/auth";
+import { readDeploymentProfile } from "@/lib/deployment-mode";
 
 /**
  * The business's members, with their effective permissions resolved, and the
@@ -36,11 +37,13 @@ export const GET = withTenantScope(async () => {
   );
   if (error) return error;
 
-  const [members, branches] = await Promise.all([
+  const [members, branches, deployment] = await Promise.all([
     listMembers(session.businessId),
     listBranches(session.businessId),
+    readDeploymentProfile(session.businessId),
   ]);
   return NextResponse.json({
+    deploymentProfile: deployment.profile,
     members,
     locations: branches.map((branch) => ({
       id: branch.id,

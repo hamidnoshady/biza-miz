@@ -71,6 +71,9 @@ export function PairForm({ onBack }: { onBack: () => void }) {
   const [busy, setBusy] = useState(false);
   const [probing, setProbing] = useState(false);
   const [probe, setProbe] = useState<ProbeState>({ kind: "idle" });
+  const [pairedOwnerId, setPairedOwnerId] = useState("");
+  const [offlinePin, setOfflinePin] = useState("");
+  const [confirmPin, setConfirmPin] = useState("");
 
   const codeKind = classifyConnectionCode(code);
   const codeHint = CODE_HINTS[codeKind];
@@ -119,16 +122,15 @@ export function PairForm({ onBack }: { onBack: () => void }) {
       body: JSON.stringify({ remoteUrl, code }),
     });
 
+    const data = (await res.json().catch(() => ({}))) as { error?: string; ownerUserId?: string; requiresOfflineCredential?: boolean };
     if (res.ok) {
-      // The snapshot already carries a completed wizard, so this goes straight
-      // to the dashboard rather than /setup/business. Unprefixed: a paired
-      // laptop serves one business from its own address, and the dashboard has
-      // had no slug in its URL since the path-prefix scheme was retired.
-      router.replace("/dashboard");
+      if (data.requiresOfflineCredential && data.ownerUserId) {
+        setPairedOwnerId(data.ownerUserId);
+        setBusy(false);
+      } else router.replace("/dashboard");
       return;
     }
 
-    const data = (await res.json().catch(() => ({}))) as { error?: string };
     setBusy(false);
     if (data.error === "already_initialized") {
       router.replace("/login");
@@ -138,6 +140,19 @@ export function PairForm({ onBack }: { onBack: () => void }) {
       ERROR_MESSAGES[data.error ?? ""] ?? "اتصال انجام نشد. دوباره تلاش کنید.",
     );
   }
+
+  if (pairedOwnerId) return (
+    <div className={`w-full max-w-md ${cardClass} p-8`}>
+      <h1 className="text-2xl font-bold">رمز ورود آفلاین این دستگاه</h1>
+      <p className="mt-2 text-sm text-muted-foreground">رمز حساب ابری شما روی این رایانه کپی نشده است. یک رمز عددی مخصوص همین سایت بسازید تا هنگام قطع اینترنت نیز بتوانید وارد شوید.</p>
+      {error ? <div className="mt-4 rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{error}</div> : null}
+      <form className="mt-5 space-y-4" onSubmit={async(e)=>{e.preventDefault();if(!/^\d{4,12}$/.test(offlinePin)){setError("رمز عددی باید ۴ تا ۱۲ رقم باشد.");return;}if(offlinePin!==confirmPin){setError("تکرار رمز با رمز اصلی یکسان نیست.");return;}setBusy(true);const response=await fetch(`/api/team/${pairedOwnerId}/credentials`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({pin:offlinePin})});if(response.ok){router.replace("/dashboard");return;}const result=await response.json().catch(()=>({}));setError(ERROR_MESSAGES[result.error]??"ثبت رمز آفلاین ناموفق بود.");setBusy(false);}}>
+        <label className="block"><span className="mb-1 block text-sm font-medium">رمز عددی جدید</span><input autoFocus required dir="ltr" inputMode="numeric" maxLength={12} className="w-full rounded-lg border border-input px-3 py-2 text-center text-xl tracking-[.3em]" value={offlinePin} onChange={e=>setOfflinePin(e.target.value.replace(/\D/g,""))}/></label>
+        <label className="block"><span className="mb-1 block text-sm font-medium">تکرار رمز</span><input required dir="ltr" inputMode="numeric" maxLength={12} className="w-full rounded-lg border border-input px-3 py-2 text-center text-xl tracking-[.3em]" value={confirmPin} onChange={e=>setConfirmPin(e.target.value.replace(/\D/g,""))}/></label>
+        <button disabled={busy} className="min-h-11 w-full rounded-lg bg-primary px-4 font-medium text-primary-foreground disabled:opacity-50">{busy?"در حال ثبت…":"ثبت رمز و ورود"}</button>
+      </form>
+    </div>
+  );
 
   return (
     <div className={`w-full max-w-md ${cardClass} p-8`}>

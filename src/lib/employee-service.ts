@@ -22,6 +22,7 @@ import { hostRoutingEnabled, leadingHostLabel, parseHost, rootDomain } from "./h
 import { postgresDateToIso } from "./jalali";
 import { resolveBusinessByLabel } from "./host-resolution";
 import { isValidPin } from "./team";
+import { readDeploymentProfile } from "./deployment-mode";
 import {
   generateSessionToken,
   isIssuableCredentialType,
@@ -1079,11 +1080,13 @@ export async function loginRoster(
   locationId?: string | null,
   deviceId?: string | null,
 ): Promise<LoginRosterEntry[]> {
-  const params: unknown[] = [deviceId ?? null];
+  const profile = (await readDeploymentProfile(businessId)).profile;
+  const allowPrivilegedSitePin = profile === "hybrid" || profile === "local";
+  const params: unknown[] = [deviceId ?? null, allowPrivilegedSitePin];
   let locationFilter = "";
   if (locationId) {
     params.push(locationId);
-    locationFilter = "AND u.location_id = $2";
+    locationFilter = "AND u.location_id = $3";
   }
   const { rows } = await query<RosterRow>(
     `SELECT u.id, u.full_name, u.role::text AS role, e.photo_url,
@@ -1096,8 +1099,12 @@ export async function loginRoster(
        FROM users u
        LEFT JOIN employees e ON e.id = u.id
       WHERE u.is_active
-        AND u.role IN ('cashier', 'waiter', 'kitchen')
-        AND u.pin_hash IS NOT NULL
+        AND (u.role IN ('cashier', 'waiter', 'kitchen') OR ($2::boolean AND u.role IN ('owner','admin','manager','accountant')))
+        AND (u.pin_hash IS NOT NULL OR EXISTS (
+          SELECT 1 FROM employee_credentials pin
+           WHERE pin.employee_id = u.id AND pin.business_id = u.business_id
+             AND pin.credential_type = 'pin' AND pin.status = 'active'
+        ))
         ${locationFilter}
       ORDER BY u.full_name`,
     params,

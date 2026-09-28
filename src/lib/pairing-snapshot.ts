@@ -18,7 +18,7 @@
 
 import { isIndustry, type Industry } from "./industries";
 
-export const PAIRING_SNAPSHOT_VERSION = 5;
+export const PAIRING_SNAPSHOT_VERSION = 6;
 
 /**
  * Explicit contract for what pairing seeds and what continuing sync does (or
@@ -36,20 +36,29 @@ export interface PairingDataClassification {
 export interface SnapshotUser {
   id: string;
   role: string;
+  customRoleId: string | null;
   fullName: string;
   email: string | null;
   permissions: Record<string, unknown>;
-  pinHash: string | null;
-  passwordHash: string | null;
-  /**
-   * The global identity behind this membership, recreated on the local side so
-   * an owner can sign in with the same email and password they use online.
-   * Null for a PIN-only member, who has no platform identity.
-   */
-  platformUserEmail: string | null;
-  platformUserFullName: string | null;
-  platformUserPasswordHash: string | null;
+  isActive: boolean;
+  membershipStatus: "invited" | "active" | "suspended" | "locked" | "inactive" | "offboarded";
+  locationScope: "all" | "selected" | "home" | "none";
+  defaultLocationId: string | null;
   locationIds: string[];
+  membershipRevision: number;
+  /** Opaque identity link only. Cloud credential material never crosses. */
+  cloudIdentityRef: string | null;
+  credentialMetadata: Array<{ type: string; status: string }>;
+}
+
+export interface SnapshotTenantRole {
+  id: string;
+  name: string;
+  description: string;
+  permissions: string[];
+  defaultLocationScope: "all" | "selected" | "home" | "none";
+  isActive: boolean;
+  roleRevision: number;
 }
 
 export interface SnapshotAccount {
@@ -206,6 +215,8 @@ export interface PairingSnapshot {
     displayName: string;
   };
   users: SnapshotUser[];
+  tenantRoles: SnapshotTenantRole[];
+  iam: { schemaVersion: number; lastSequence: number; stateHash: string };
   accounts: SnapshotAccount[];
   menu: {
     categories: SnapshotMenuCategory[];
@@ -332,13 +343,24 @@ export function validateSnapshot(raw: unknown): SnapshotValidation {
     if (typeof user.fullName !== "string" || !user.fullName) return fail;
     if (!isNullableString(user.email)) return fail;
     if (!isObject(user.permissions)) return fail;
-    if (!isNullableString(user.pinHash)) return fail;
-    if (!isNullableString(user.passwordHash)) return fail;
-    if (!isNullableString(user.platformUserEmail)) return fail;
-    if (!isNullableString(user.platformUserFullName)) return fail;
-    if (!isNullableString(user.platformUserPasswordHash)) return fail;
+    // Fail closed if a producer accidentally reintroduces legacy secret fields.
+    if (["passwordHash", "pinHash", "platformUserPasswordHash", "totpSecret", "recoveryCodes"].some((key) => key in user)) return fail;
+    if (!isNullableString(user.customRoleId) || !isNullableString(user.defaultLocationId) || !isNullableString(user.cloudIdentityRef)) return fail;
+    if (typeof user.isActive !== "boolean" || typeof user.membershipStatus !== "string") return fail;
+    if (!["all", "selected", "home", "none"].includes(String(user.locationScope))) return fail;
+    if (!Number.isSafeInteger(user.membershipRevision) || Number(user.membershipRevision) < 1) return fail;
     if (!Array.isArray(user.locationIds) || !user.locationIds.every(isUuid)) return fail;
+    if (!Array.isArray(user.credentialMetadata) || !user.credentialMetadata.every((c) => isObject(c) && typeof c.type === "string" && typeof c.status === "string")) return fail;
   }
+  if (!Array.isArray(raw.tenantRoles)) return fail;
+  for (const role of raw.tenantRoles) {
+    if (!isObject(role) || !isUuid(role.id) || typeof role.name !== "string" || !role.name) return fail;
+    if (typeof role.description !== "string" || !isStringArray(role.permissions) || typeof role.isActive !== "boolean") return fail;
+    if (!["all", "selected", "home", "none"].includes(String(role.defaultLocationScope))) return fail;
+    if (!Number.isSafeInteger(role.roleRevision) || Number(role.roleRevision) < 1) return fail;
+  }
+  if (!isObject(raw.iam) || raw.iam.schemaVersion !== 1 || !Number.isSafeInteger(raw.iam.lastSequence) || typeof raw.iam.stateHash !== "string") return fail;
+
   // Without an owner the local install would have nobody to sign in as, which
   // is a dead end the wizard cannot recover from.
   if (!raw.users.some((u) => isObject(u) && u.role === "owner")) return fail;

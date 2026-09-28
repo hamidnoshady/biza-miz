@@ -14,6 +14,9 @@ import { BCRYPT_COST } from "@/lib/password-hashing";
 import type { PoolClient } from "pg";
 import { getPool, query, withoutTenantScope } from "./db";
 import type { Role } from "./auth-edge";
+import { appendIamEvent } from "./iam/service";
+import { readDeploymentProfile } from "./deployment-mode";
+import { restrictSiteMember } from "./iam/site-policy";
 import {
   effectivePermissions,
   parseOverrides,
@@ -49,6 +52,8 @@ export class TeamError extends Error {
 export interface TeamMember {
   id: string;
   role: Role;
+  customRoleId: string | null;
+  customRoleName: string | null;
   fullName: string;
   email: string | null;
   isActive: boolean;
@@ -75,6 +80,9 @@ export interface TeamMember {
 interface MemberRow extends Record<string, unknown> {
   id: string;
   role: Role;
+  custom_role_id: string | null;
+  custom_role_name: string | null;
+  custom_role_permissions: string[] | null;
   full_name: string;
   email: string | null;
   is_active: boolean;
@@ -95,6 +103,8 @@ function toMember(row: MemberRow): TeamMember {
   return {
     id: row.id,
     role: row.role,
+    customRoleId: row.custom_role_id,
+    customRoleName: row.custom_role_name,
     fullName: row.full_name,
     email: row.email,
     isActive: row.is_active,
@@ -107,7 +117,7 @@ function toMember(row: MemberRow): TeamMember {
     locationIds: row.location_ids ?? [],
     defaultLocationId: row.default_location_id,
     overrides,
-    effectivePermissions: [...effectivePermissions(row.role, overrides)].sort(),
+    effectivePermissions: [...effectivePermissions(row.role, overrides, row.custom_role_permissions)].sort(),
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -115,9 +125,15 @@ function toMember(row: MemberRow): TeamMember {
 /** Every membership of the current business. RLS confines this to one tenant. */
 export async function listMembers(businessId: string): Promise<TeamMember[]> {
   const { rows } = await query<MemberRow>(
-    `SELECT u.id, u.role, u.full_name, u.email, u.is_active,
+    `SELECT u.id, u.role, u.custom_role_id, tr.name custom_role_name,
+            CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) END custom_role_permissions,
+            u.full_name, u.email, u.is_active,
             u.membership_status, u.location_scope,
-            (u.pin_hash IS NOT NULL) AS has_pin,
+            (u.pin_hash IS NOT NULL OR EXISTS (
+              SELECT 1 FROM employee_credentials ec
+               WHERE ec.employee_id = u.id AND ec.business_id = u.business_id
+                 AND ec.credential_type = 'pin' AND ec.status = 'active'
+            )) AS has_pin,
             (u.platform_user_id IS NOT NULL) AS has_login,
             u.phone_e164, u.phone_verified_at,
             u.location_id AS default_location_id,
@@ -127,6 +143,7 @@ export async function listMembers(businessId: string): Promise<TeamMember[]> {
               '{}'
             ) AS location_ids
        FROM users u
+       LEFT JOIN tenant_roles tr ON tr.id=u.custom_role_id AND tr.business_id=u.business_id
       WHERE u.business_id = $1
       ORDER BY u.created_at`,
     [businessId],
@@ -225,6 +242,9 @@ export interface CreateMembershipInput {
 export async function createMembership(
   input: CreateMembershipInput,
 ): Promise<{ userId: string }> {
+  const profile = (await readDeploymentProfile(input.businessId)).profile;
+  if (profile === "hybrid") throw new TeamError("cloud_confirmation_required", 409);
+  const eventOrigin = profile === "local" ? "local" : "cloud";
   const fullName = input.fullName.trim();
   const email = input.email?.trim().toLowerCase() || null;
 
@@ -303,7 +323,7 @@ export async function createMembership(
       `INSERT INTO users
          (business_id, platform_user_id, role, full_name, email, pin_hash,
           phone_e164, location_id, permissions, location_scope)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+       VALUES ($1, $2, $3, $4, $5, NULLIF($6::text, $6::text), $7, $8, $9,
                CASE WHEN $3::user_role = 'owner'::user_role THEN 'all'::location_scope
                     WHEN $11::text IS NOT NULL THEN $11::location_scope
                     WHEN cardinality($10::uuid[]) > 0 THEN 'selected'::location_scope
@@ -325,12 +345,36 @@ export async function createMembership(
     );
     const userId = created[0].id;
 
+    // Site-local secrets belong to the revocable credential store. Keep the
+    // legacy users.pin_hash column read-only so pre-migration rows can still
+    // sign in without creating a second source of truth.
+    if (pinHash) {
+      await client.query(
+        `INSERT INTO employees (id, business_id) VALUES ($1, $2)
+         ON CONFLICT (id) DO NOTHING`,
+        [userId, input.businessId],
+      );
+      await client.query(
+        `INSERT INTO employee_credentials
+           (employee_id, business_id, credential_type, secret_hash)
+         VALUES ($1, $2, 'pin', $3)`,
+        [userId, input.businessId, pinHash],
+      );
+    }
+
     if (locations.locationIds.length > 0) {
       await client.query(
         "INSERT INTO user_locations (user_id, location_id) SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING",
         [userId, locations.locationIds],
       );
     }
+
+    await appendIamEvent(client, { businessId: input.businessId, type: "membership.created", entityId: userId,
+      payload: { membership: { id: userId, businessId: input.businessId, cloudIdentityRef: platformUserId,
+        role: input.role, customRoleId: null, fullName, email, isActive: true, status: "active",
+        overrides: input.overrides ?? {}, locationScope: input.role === "owner" ? "all" : (input.locationScope ?? (locations.locationIds.length ? "selected" : locations.defaultLocationId ? "home" : "all")),
+        defaultLocationId: locations.defaultLocationId, locationIds: locations.locationIds, revision: 1 }, revision: 1 },
+      actorUserId: input.actorId, origin: eventOrigin });
 
     await auditMembership(client, {
       businessId: input.businessId,
@@ -363,8 +407,16 @@ export async function isPinTaken(
   exceptUserId?: string,
 ): Promise<boolean> {
   const { rows } = await query<{ id: string; pin_hash: string }>(
-    `SELECT id, pin_hash FROM users
-      WHERE business_id = $1 AND is_active AND pin_hash IS NOT NULL`,
+    `SELECT u.id, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash
+       FROM users u
+       LEFT JOIN LATERAL (
+         SELECT secret_hash FROM employee_credentials
+          WHERE employee_id = u.id AND business_id = u.business_id
+            AND credential_type = 'pin' AND status = 'active'
+          ORDER BY created_at DESC LIMIT 1
+       ) ec ON true
+      WHERE u.business_id = $1 AND u.is_active
+        AND coalesce(ec.secret_hash, u.pin_hash) IS NOT NULL`,
     [businessId],
   );
   for (const row of rows) {
@@ -403,6 +455,7 @@ export interface UpdateMembershipInput {
   userId: string;
   actorId: string | null;
   role?: Role;
+  customRoleId?: string | null;
   fullName?: string;
   isActive?: boolean;
   overrides?: PermissionOverrides;
@@ -453,6 +506,17 @@ async function resolveMemberLocations(
 export async function updateMembership(
   input: UpdateMembershipInput,
 ): Promise<void> {
+  const profile = (await readDeploymentProfile(input.businessId)).profile;
+  if (profile === "hybrid") {
+    const attemptsExpansion = input.role !== undefined || input.customRoleId !== undefined || input.fullName !== undefined || input.isActive === true ||
+      (input.overrides?.granted?.length ?? 0) > 0 || input.locationScope === "all";
+    if (attemptsExpansion) throw new TeamError("cloud_confirmation_required", 409);
+    await restrictSiteMember({ businessId: input.businessId, userId: input.userId, actorId: input.actorId ?? input.userId,
+      permissionDenies: input.overrides?.revoked, allowedLocationIds: input.locationIds,
+      isLocallySuspended: input.isActive === false, reason: "team_screen_site_restriction" });
+    return;
+  }
+  const eventOrigin = profile === "local" ? "local" : "cloud";
   const members = await memberSummaries(input.businessId);
   const target = members.find((m) => m.id === input.userId);
   if (!target) throw new TeamError("not_found", 404);
@@ -466,6 +530,10 @@ export async function updateMembership(
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    if (input.customRoleId) {
+      const role = await client.query(`SELECT 1 FROM tenant_roles WHERE business_id=$1 AND id=$2 AND is_active`, [input.businessId,input.customRoleId]);
+      if (!role.rowCount) throw new TeamError("custom_role_not_found",404);
+    }
 
     const { rows: beforeRows } = await client.query(
       `SELECT role, full_name, email, is_active, permissions, location_id
@@ -513,6 +581,7 @@ export async function updateMembership(
                                        WHEN $5::boolean IS FALSE THEN 'suspended'::membership_status
                                        ELSE membership_status END,
               permissions = coalesce($6, permissions),
+              custom_role_id = CASE WHEN $12::boolean THEN $13::uuid ELSE custom_role_id END,
               location_id = CASE WHEN $7::boolean THEN $8::uuid ELSE location_id END,
               location_scope = CASE
                 WHEN coalesce($3::user_role, role) = 'owner'::user_role THEN 'all'::location_scope
@@ -523,6 +592,7 @@ export async function updateMembership(
                                            THEN 'home'::location_scope
                                            ELSE 'all'::location_scope END
                 ELSE location_scope END,
+              membership_revision = membership_revision + 1,
               updated_at  = now()
         WHERE id = $1 AND business_id = $2`,
       [
@@ -537,6 +607,8 @@ export async function updateMembership(
         locationIds !== null,
         locationIds ?? [],
         input.locationScope ?? null,
+        input.customRoleId !== undefined,
+        input.customRoleId ?? null,
       ],
     );
 
@@ -553,10 +625,21 @@ export async function updateMembership(
     }
 
     const { rows: afterRows } = await client.query(
-      `SELECT role, full_name, email, is_active, permissions, location_id
+      `SELECT role, full_name, email, is_active, permissions, location_id, membership_revision
          FROM users WHERE id = $1`,
       [input.userId],
     );
+
+    const eventType = input.role !== undefined ? "membership.system_role_changed"
+      : input.customRoleId !== undefined ? "membership.custom_role_changed"
+      : input.overrides !== undefined ? "membership.permissions_changed"
+      : input.locationIds !== undefined ? "membership.locations_changed"
+      : input.locationScope !== undefined || input.defaultLocationId !== undefined ? "membership.location_policy_changed"
+      : input.isActive === false ? "membership.suspended"
+      : input.isActive === true ? "membership.reactivated" : "membership.profile_updated";
+    await appendIamEvent(client, { businessId: input.businessId, type: eventType, entityId: input.userId,
+      payload: { revision: Number((afterRows[0] as { membership_revision?: string })?.membership_revision ?? 1), changes: input },
+      actorUserId: input.actorId, origin: eventOrigin });
 
     await auditMembership(client, {
       businessId: input.businessId,
@@ -599,6 +682,13 @@ export async function removeMembership(
   userId: string,
   actorId: string | null,
 ): Promise<void> {
+  const profile = (await readDeploymentProfile(businessId)).profile;
+  if (profile === "hybrid") {
+    await restrictSiteMember({ businessId, userId, actorId: actorId ?? userId, isLocallySuspended: true,
+      localLoginLocked: true, reason: "local_offboarding_request" });
+    return;
+  }
+  const eventOrigin = profile === "local" ? "local" : "cloud";
   const members = await memberSummaries(businessId);
   if (!members.some((m) => m.id === userId))
     throw new TeamError("not_found", 404);
@@ -618,12 +708,12 @@ export async function removeMembership(
       throw new TeamError("not_found", 404);
     }
 
-    await client.query(
+    const { rows: removedRows } = await client.query<{ membership_revision: string }>(
       `UPDATE users
           SET is_active = false, membership_status = 'offboarded',
               location_scope = 'none', pin_hash = NULL, password_hash = NULL,
-              platform_user_id = NULL, updated_at = now()
-        WHERE id = $1 AND business_id = $2`,
+              platform_user_id = NULL, membership_revision = membership_revision + 1, updated_at = now()
+        WHERE id = $1 AND business_id = $2 RETURNING membership_revision`,
       [userId, businessId],
     );
     await client.query("DELETE FROM user_locations WHERE user_id = $1", [
@@ -650,6 +740,9 @@ export async function removeMembership(
         WHERE employee_id = $1 AND business_id = $2 AND ended_at IS NULL`,
       [userId, businessId, actorId],
     );
+
+    await appendIamEvent(client, { businessId, type: "membership.offboarded", entityId: userId,
+      payload: { status: "offboarded", revision: Number(removedRows[0].membership_revision) }, actorUserId: actorId, origin: eventOrigin });
 
     await auditMembership(client, {
       businessId,
@@ -680,19 +773,46 @@ export async function setPin(
   pin: string,
   actorId: string | null,
 ): Promise<void> {
+  const profile = (await readDeploymentProfile(businessId)).profile;
+  const eventOrigin = profile === "cloud" ? "cloud" : "local";
   if (await isPinTaken(businessId, pin, userId))
     throw new TeamError("pin_taken", 409);
 
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
-    const { rowCount } = await client.query(
-      "UPDATE users SET pin_hash = $3, updated_at = now() WHERE id = $1 AND business_id = $2",
-      [userId, businessId, await bcrypt.hash(pin, BCRYPT_COST)],
+    const member = await client.query(
+      "SELECT 1 FROM users WHERE id = $1 AND business_id = $2 FOR UPDATE",
+      [userId, businessId],
     );
-    if (!rowCount) {
-      await client.query("ROLLBACK");
-      throw new TeamError("not_found", 404);
+    if (!member.rowCount) throw new TeamError("not_found", 404);
+    const pinHash = await bcrypt.hash(pin, BCRYPT_COST);
+    await client.query(
+      `INSERT INTO employees (id, business_id) VALUES ($1, $2)
+       ON CONFLICT (id) DO NOTHING`,
+      [userId, businessId],
+    );
+    await client.query(
+      `UPDATE employee_credentials
+          SET status = 'revoked', revoked_at = now()
+        WHERE employee_id = $1 AND business_id = $2
+          AND credential_type = 'pin' AND status = 'active'`,
+      [userId, businessId],
+    );
+    await client.query(
+      `INSERT INTO employee_credentials
+         (employee_id, business_id, credential_type, secret_hash)
+       VALUES ($1, $2, 'pin', $3)`,
+      [userId, businessId, pinHash],
+    );
+    // Once a canonical PIN exists, erase any compatibility copy.
+    await client.query(
+      "UPDATE users SET pin_hash = NULL, updated_at = now() WHERE id = $1 AND business_id = $2",
+      [userId, businessId],
+    );
+    if (profile !== "hybrid") {
+      await appendIamEvent(client, { businessId, type: "credential.rotated", entityId: userId,
+        payload: { credentialType: "pin" }, actorUserId: actorId, origin: eventOrigin });
     }
     await auditMembership(client, {
       businessId,

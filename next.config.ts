@@ -1,6 +1,17 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // This repository has hundreds of App Router entries. Keep compilation
+  // single-process and enable webpack's reduced-memory graph representation so
+  // release builds also work on Local/Desktop builders with modest RAM.
+  experimental: {
+    cpus: 1,
+    webpackBuildWorker: false,
+    webpackMemoryOptimizations: true,
+    parallelServerCompiles: false,
+    parallelServerBuildTraces: false,
+    staticGenerationMaxConcurrency: 1,
+  },
   // Electron packages this traced production tree, never the repository's
   // development node_modules. The custom WebSocket/background server is
   // bundled separately by scripts/build-desktop-runtime.mjs.

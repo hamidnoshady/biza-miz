@@ -224,6 +224,9 @@ describe("pairing round trip", () => {
     expect(summaries[0].state).toBe("code_already_redeemed");
 
     const snapshot = redeemed.snapshot;
+    expect(JSON.stringify(snapshot)).not.toContain("platformUserPasswordHash");
+    expect(JSON.stringify(snapshot)).not.toContain("passwordHash");
+    expect(snapshot.users.every((user) => !("pinHash" in user))).toBe(true);
 
     // ---- local side --------------------------------------------------------
     await useDatabase(localDb);

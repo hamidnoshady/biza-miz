@@ -162,10 +162,15 @@ describe("membership creation always produces a usable login", () => {
       }),
     );
 
-    const { rows } = await db.query<{ platform_user_id: string | null; pin_hash: string }>(
-      "SELECT platform_user_id, pin_hash FROM users WHERE full_name = 'Cashier'",
+    const { rows } = await db.query<{ platform_user_id: string | null; legacy_pin_hash: string | null; pin_hash: string }>(
+      `SELECT u.platform_user_id, u.pin_hash AS legacy_pin_hash, ec.secret_hash AS pin_hash
+         FROM users u
+         JOIN employee_credentials ec ON ec.employee_id=u.id AND ec.business_id=u.business_id
+          AND ec.credential_type='pin' AND ec.status='active'
+        WHERE u.full_name = 'Cashier'`,
     );
     expect(rows[0].platform_user_id).toBeNull();
+    expect(rows[0].legacy_pin_hash).toBeNull();
     expect(await bcrypt.compare("4816", rows[0].pin_hash)).toBe(true);
   });
 
@@ -585,6 +590,29 @@ describe("team reads stay inside the business", () => {
       team.listMembers(alpha.businessId),
     );
     expect(alphaMembers.map((m) => m.fullName)).not.toContain("Beta Cashier");
+  });
+});
+
+describe("custom role assignment revisioning", () => {
+  it("increments membership revision exactly once when assigning a custom role", async () => {
+    const { rows: roles } = await db.query<{ id: string }>(
+      `INSERT INTO tenant_roles(business_id,name,permissions,created_by,updated_by)
+       VALUES($1,$2,'[]'::jsonb,$3,$3) RETURNING id`,
+      [alpha.businessId, `Revision role ${randomUUID()}`, alpha.ownerId],
+    );
+    const { userId } = await asBusiness(alpha.businessId, () => team.createMembership({
+      businessId: alpha.businessId, role: "cashier", fullName: "Revision Cashier",
+      pin: "7531", actorId: alpha.ownerId,
+    }));
+    const before = await db.query<{ membership_revision: string }>("SELECT membership_revision FROM users WHERE id=$1", [userId]);
+
+    await asBusiness(alpha.businessId, () => team.updateMembership({
+      businessId: alpha.businessId, userId, actorId: alpha.ownerId, customRoleId: roles[0].id,
+    }));
+
+    const after = await db.query<{ custom_role_id: string; membership_revision: string }>("SELECT custom_role_id,membership_revision FROM users WHERE id=$1", [userId]);
+    expect(after.rows[0].custom_role_id).toBe(roles[0].id);
+    expect(Number(after.rows[0].membership_revision)).toBe(Number(before.rows[0].membership_revision) + 1);
   });
 });
 

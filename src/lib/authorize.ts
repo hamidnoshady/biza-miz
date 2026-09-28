@@ -199,6 +199,11 @@ interface MembershipRow extends Record<string, unknown> {
   location_scope: unknown;
   business_status: string;
   custom_role_permissions: string[] | null;
+  deployment_profile: string | null;
+  site_permission_denies: string[] | null;
+  site_allowed_location_ids: string[] | null;
+  is_locally_suspended: boolean | null;
+  local_login_locked: boolean | null;
 }
 
 /**
@@ -225,10 +230,18 @@ export async function loadMembership(
                 u.location_id,
                 u.location_scope::text AS location_scope,
                 b.status::text          AS business_status,
-                CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE NULL END AS custom_role_permissions
+                CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) ELSE NULL END AS custom_role_permissions,
+                dp.value->>'profile' AS deployment_profile,
+                CASE WHEN sma.id IS NOT NULL THEN ARRAY(SELECT jsonb_array_elements_text(sma.permission_denies)) ELSE NULL END AS site_permission_denies,
+                sma.allowed_location_ids AS site_allowed_location_ids,
+                sma.is_locally_suspended, sma.local_login_locked
            FROM users u
            JOIN businesses b ON b.id = u.business_id
            LEFT JOIN tenant_roles tr ON tr.id = u.custom_role_id AND tr.business_id = u.business_id
+           LEFT JOIN settings dp ON dp.business_id=u.business_id AND dp.location_id IS NULL AND dp.key='deployment.profile'
+           LEFT JOIN settings sc ON sc.business_id=u.business_id AND sc.location_id IS NULL AND sc.key='server_sync.config'
+           LEFT JOIN site_member_access sma ON sma.business_id=u.business_id AND sma.user_id=u.id
+             AND sma.site_device_id=(sc.value->>'siteDeviceId')::uuid
           WHERE u.id = $1 AND u.business_id = $2`,
         [session.sub, session.businessId],
       ),
@@ -238,7 +251,13 @@ export async function loadMembership(
     if (!row) return null;
 
     const overrides = parseOverrides(row.permissions);
-    const active = row.is_active && (row.membership_status == null || row.membership_status === "active");
+    const isHybrid = row.deployment_profile === "hybrid";
+    const permissions = effectivePermissions(row.role, overrides, row.custom_role_permissions);
+    if (isHybrid) for (const denied of row.site_permission_denies ?? []) permissions.delete(denied as Permission);
+    const active = row.is_active && (row.membership_status == null || row.membership_status === "active")
+      && !(isHybrid && (row.is_locally_suspended || row.local_login_locked));
+    const canonicalScope = isLocationScope(row.location_scope) ? row.location_scope : "home";
+    const hasSiteLocationRestriction = isHybrid && row.site_allowed_location_ids !== null;
     return {
       userId: session.sub,
       businessId: session.businessId,
@@ -246,16 +265,16 @@ export async function loadMembership(
       isActive: active,
       businessStatus: row.business_status,
       overrides,
-      permissions: effectivePermissions(row.role, overrides, row.custom_role_permissions),
-      locationScope: isLocationScope(row.location_scope) ? row.location_scope : "home",
+      permissions,
+      locationScope: hasSiteLocationRestriction ? "selected" : canonicalScope,
       homeLocationId: row.location_id,
-      assignedLocationIds: () => loadAssignedLocations(session.sub, session.businessId),
+      assignedLocationIds: () => loadAssignedLocations(session.sub, session.businessId, canonicalScope, row.location_id, hasSiteLocationRestriction ? row.site_allowed_location_ids : null),
     } satisfies MembershipContext;
   });
 }
 
-async function loadAssignedLocations(userId: string, businessId: string): Promise<string[]> {
-  return requestMemo(`locations:${userId}`, async () => {
+async function loadAssignedLocations(userId: string, businessId: string, canonicalScope: LocationScope = "selected", homeLocationId: string | null = null, siteAllowed: string[] | null = null): Promise<string[]> {
+  return requestMemo(`locations:${userId}:${canonicalScope}:${siteAllowed?.join(",") ?? "all"}`, async () => {
     const { rows } = await withoutTenantScope("authorization-membership", () =>
       query<{ location_id: string }>(
         // Joined to `locations` on business_id so a `user_locations` row that
@@ -268,7 +287,15 @@ async function loadAssignedLocations(userId: string, businessId: string): Promis
         [userId, businessId],
       ),
     );
-    return rows.map((r) => r.location_id);
+    let canonical = rows.map((r) => r.location_id);
+    if (canonicalScope === "all") {
+      const all = await withoutTenantScope("authorization-membership", () => query<{ id: string }>(
+        "SELECT id FROM locations WHERE business_id=$1 AND is_active", [businessId]));
+      canonical = all.rows.map((r) => r.id);
+    } else if (canonicalScope === "home") canonical = homeLocationId ? [homeLocationId] : [];
+    else if (canonicalScope === "none") canonical = [];
+    if (siteAllowed !== null) { const allowed = new Set(siteAllowed); canonical = canonical.filter((id) => allowed.has(id)); }
+    return canonical;
   });
 }
 
