@@ -191,8 +191,8 @@ export async function listProjects(
        FROM ai_projects p
        LEFT JOIN users u ON u.id = p.owner_user_id AND u.business_id = p.business_id
       WHERE p.business_id = $1
-        AND (p.owner_user_id = $2 OR p.created_by = $2
-             OR EXISTS (SELECT 1 FROM workspace_members m WHERE m.project_id = p.id AND m.user_id = $2))
+        AND (p.owner_user_id::text = $2 OR p.created_by = $2
+             OR EXISTS (SELECT 1 FROM workspace_members m WHERE m.project_id = p.id AND m.user_id::text = $2))
         ${archivedClause}
       ORDER BY p.created_at DESC`,
     [owner.businessId, owner.actorUserId],
@@ -210,8 +210,8 @@ export async function getProject(
        FROM ai_projects p
        LEFT JOIN users u ON u.id = p.owner_user_id AND u.business_id = p.business_id
       WHERE p.id = $1 AND p.business_id = $2
-        AND (p.owner_user_id = $3 OR p.created_by = $3
-             OR EXISTS (SELECT 1 FROM workspace_members m WHERE m.project_id = p.id AND m.user_id = $3))`,
+        AND (p.owner_user_id::text = $3 OR p.created_by = $3
+             OR EXISTS (SELECT 1 FROM workspace_members m WHERE m.project_id = p.id AND m.user_id::text = $3))`,
     [owner.projectId, owner.businessId, owner.actorUserId],
   );
   return rows[0] ? toProject(rows[0]) : null;
