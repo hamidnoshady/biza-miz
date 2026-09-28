@@ -25,10 +25,13 @@ import {
 } from "@/lib/permissions";
 import { PIN_MAX_LENGTH, PIN_MIN_LENGTH, isValidPin } from "@/lib/pin-policy";
 import { roleLabel } from "@/lib/role-labels";
-import { INVITABLE_ROLES, PIN_ROLES } from "@/lib/roles";
+import { ASSIGNABLE_ROLES, INVITABLE_ROLES, PIN_ROLES } from "@/lib/roles";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { formatPhoneDisplay } from "@/lib/phone";
+import { RolesManager } from "@/components/team/roles-manager";
+import { IamSyncCard } from "@/components/team/iam-sync-card";
+import { LocalToHybridGuide } from "@/components/team/local-to-hybrid-guide";
 import { partyScopeFor } from "@/lib/parties-scopes";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -39,6 +42,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { LoadingSkeleton, SectionCard } from "../page-chrome";
 import { PartiesSection } from "../parties/parties-section";
 import {
@@ -98,6 +102,8 @@ const PERMISSION_LABELS: Record<string, string> = {
 interface Member {
   id: string;
   role: string;
+  customRoleId: string | null;
+  customRoleName: string | null;
   fullName: string;
   email: string | null;
   isActive: boolean;
@@ -140,9 +146,7 @@ const INVITATION_STATUS_LABELS: Record<Invitation["status"], string> = {
 };
 
 /** Which role options the editor offers — every assignable role, labelled once. */
-const ROLE_OPTIONS = (["owner", "manager", "accountant", "cashier", "waiter", "kitchen"] as const).map(
-  (value) => ({ value, label: roleLabel(value) }),
-);
+const ROLE_OPTIONS = ASSIGNABLE_ROLES.map((value) => ({ value, label: roleLabel(value) }));
 
 export function TeamManager({
   currentUserId,
@@ -159,6 +163,7 @@ export function TeamManager({
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [deploymentProfile, setDeploymentProfile] = useState<"cloud" | "hybrid" | "local">("cloud");
   /** The member whose full editor dialog is open (name, role, branches, permissions). */
   const [editing, setEditing] = useState<Member | null>(null);
   /** Phase 42 — which member's login-phone editor is open. */
@@ -168,11 +173,12 @@ export function TeamManager({
 
   const load = useCallback(async () => {
     const [membersRes, invitesRes] = await Promise.all([
-      api<{ members: Member[]; locations?: TeamLocation[] }>("/api/team"),
+      api<{ members: Member[]; locations?: TeamLocation[]; deploymentProfile?: "cloud" | "hybrid" | "local" }>("/api/team"),
       api<{ invitations: Invitation[] }>("/api/team/invitations"),
     ]);
     if (membersRes.ok) {
       setMembers(membersRes.data.members);
+      if (membersRes.data.deploymentProfile) setDeploymentProfile(membersRes.data.deploymentProfile);
       // Branches travel with the members: assigning a person to a place needs
       // the place's name, and a second permission-gated call for a list this
       // screen already owns would only be a way to make it fail separately.
@@ -214,6 +220,18 @@ export function TeamManager({
   return (
     <div className="space-y-6">
       <ErrorBox>{error}</ErrorBox>
+      <div role="status" className="rounded-xl border border-border bg-muted/40 px-4 py-3 text-sm">
+        <p className="font-semibold text-foreground">
+          {deploymentProfile === "cloud" ? "مدیریت ابری" : deploymentProfile === "hybrid" ? "دسترسی ابری و محدودیت‌های این سایت" : "مدیریت محلی"}
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {deploymentProfile === "hybrid"
+            ? "این سایت در حالت قطع اتصال فقط می‌تواند دسترسی را محدود کند. افزایش سطح دسترسی به تأیید فضای ابری نیاز دارد."
+            : deploymentProfile === "local"
+              ? "این کسب‌وکار به فضای ابری Eshobe وابسته نیست و مدیریت کاربران به‌صورت محلی انجام می‌شود."
+              : "هویت، نقش‌ها، نشست‌ها و دسترسی‌ها از فضای ابری مدیریت می‌شوند."}
+        </p>
+      </div>
 
       <SectionCard
         title={
@@ -244,7 +262,7 @@ export function TeamManager({
                     )}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {roleLabel(member.role)}
+                    {roleLabel(member.role)}{member.customRoleName ? ` / ${member.customRoleName}` : ""}
                     {member.email ? ` · ${member.email}` : ""}
                     {member.hasPin ? " · ورود با رمز عددی" : ""}
                     {member.locationScope === "all"
@@ -308,6 +326,10 @@ export function TeamManager({
           ))}
         </div>
       </SectionCard>
+
+      <RolesManager deploymentProfile={deploymentProfile} />
+      {deploymentProfile === "local" ? <LocalToHybridGuide members={members} /> : null}
+      {deploymentProfile === "hybrid" ? <IamSyncCard /> : null}
 
       {editing ? (
         <MemberEditorDialog
@@ -386,6 +408,8 @@ function MemberEditorDialog({
 }) {
   const [fullName, setFullName] = useState(member.fullName);
   const [role, setRole] = useState(member.role);
+  const [customRoleId, setCustomRoleId] = useState(member.customRoleId ?? "");
+  const [customRoles, setCustomRoles] = useState<Array<{id:string;name:string;permissions:string[];isActive:boolean}>>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set(member.effectivePermissions));
   const [locationScope, setLocationScope] = useState(member.locationScope);
   const [branchIds, setBranchIds] = useState<string[]>(member.locationIds);
@@ -393,11 +417,13 @@ function MemberEditorDialog({
   const [permissionSearch, setPermissionSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  useEffect(() => { void api<{roles:Array<{id:string;name:string;permissions:string[];isActive:boolean}>}>("/api/team/roles").then((res) => { if (res.ok) setCustomRoles(res.data.roles.filter((item) => item.isActive)); }); }, []);
 
   // Re-base the ticks whenever the role changes, so the boxes always show what
   // that role would actually grant.
   function changeRole(next: string) {
     setRole(next);
+    setCustomRoleId("");
     setSelected(new Set(roleBasePermissions(next as never)));
   }
 
@@ -418,7 +444,8 @@ function MemberEditorDialog({
     if (id) setBranchIds((current) => (current.includes(id) ? current : [...current, id]));
   }
 
-  const preset = new Set<string>(roleBasePermissions(role as never));
+  const customPreset = customRoles.find((item) => item.id === customRoleId)?.permissions;
+  const preset = new Set<string>(customPreset ?? roleBasePermissions(role as never));
   const isOwnerRole = role === "owner";
 
   async function save() {
@@ -436,6 +463,7 @@ function MemberEditorDialog({
       body: JSON.stringify({
         fullName: name,
         role,
+        customRoleId: customRoleId || null,
         // An owner's set is not reducible (permissions.ts), so none is sent.
         ...(isOwnerRole ? {} : { permissions: { granted, revoked } }),
         locationScope: isOwnerRole ? "all" : locationScope,
@@ -452,11 +480,18 @@ function MemberEditorDialog({
   }
 
   return (
-    <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>ویرایش «{member.fullName}»</DialogTitle>
-        </DialogHeader>
+    <Sheet open onOpenChange={(next) => (next ? undefined : onClose())}>
+      <SheetContent side="left" className="w-full max-w-none overflow-y-auto p-0 sm:max-w-2xl">
+        <SheetHeader className="sticky top-0 z-10 border-b bg-background px-5 py-4 text-start">
+          <SheetTitle>ویرایش «{member.fullName}»</SheetTitle>
+          <nav aria-label="بخش‌های عضو" className="mt-3 flex gap-2 overflow-x-auto pb-1 text-xs">
+            <a className="rounded-full bg-muted px-3 py-1.5 focus-visible:ring" href="#member-profile">پروفایل و نقش</a>
+            <a className="rounded-full bg-muted px-3 py-1.5 focus-visible:ring" href="#member-branches">شعبه‌ها</a>
+            <a className="rounded-full bg-muted px-3 py-1.5 focus-visible:ring" href="#member-access">دسترسی‌ها</a>
+          </nav>
+        </SheetHeader>
+        <div className="space-y-5 px-5 py-4">
+        <div id="member-profile" className="scroll-mt-28">
         <ErrorBox>{error}</ErrorBox>
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -474,9 +509,16 @@ function MemberEditorDialog({
               options={canManageOwners ? ROLE_OPTIONS : ROLE_OPTIONS.filter((option) => option.value !== "owner")}
             />
           </Field>
-        </div>
+          <Field label="نقش سفارشی" hint="در صورت انتخاب، الگوی دسترسی نقش سیستمی را جایگزین می‌کند.">
+            <SearchableSelect value={customRoleId} disabled={isOwnerRole} onChange={(value) => {
+              setCustomRoleId(value);
+              const custom = customRoles.find((item) => item.id === value);
+              setSelected(new Set(custom?.permissions ?? roleBasePermissions(role as never)));
+            }} options={[{value:"",label:"بدون نقش سفارشی"},...customRoles.map((item)=>({value:item.id,label:item.name}))]} />
+          </Field>
+        </div></div>
 
-        <Field label="دامنهٔ شعبه">
+        <div id="member-branches" className="scroll-mt-28 space-y-4"><Field label="دامنهٔ شعبه">
           <SearchableSelect
             value={isOwnerRole ? "all" : locationScope}
             onChange={(value) => setLocationScope(value as Member["locationScope"])}
@@ -524,7 +566,8 @@ function MemberEditorDialog({
           />
         </Field> : null}
 
-        {isOwnerRole ? (
+        </div>
+        <div id="member-access" className="scroll-mt-28">{isOwnerRole ? (
           <InfoBox>مالک به همهٔ بخش‌ها دسترسی دارد و دسترسی‌هایش قابل محدود کردن نیست.</InfoBox>
         ) : (
           <Field label="دسترسی‌ها" hint="تیک‌ها نسبت به نقش پایه خوانده می‌شوند: برداشتن تیکِ پیش‌فرض یعنی گرفتن آن دسترسی، و تیکِ اضافه یعنی اعطای آن.">
@@ -565,14 +608,13 @@ function MemberEditorDialog({
           </Field>
         )}
 
-        <DialogFooter>
+        </div></div>
+        <SheetFooter className="sticky bottom-0 border-t bg-background px-5 py-4">
           <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
-          <PrimaryButton onClick={save} disabled={busy}>
-            ذخیره
-          </PrimaryButton>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          <PrimaryButton onClick={save} disabled={busy}>ذخیره</PrimaryButton>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
 }
 

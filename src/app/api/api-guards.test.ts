@@ -91,6 +91,11 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "token is the credential; the caller has no session on the business's origin yet by " +
     "definition, since the token exists precisely to mint the first one there",
   "rollup/ingest": "server-to-server — authenticated by a per-location bearer token, not a session",
+  "iam/events": "security control-plane pull — authenticated by the scoped site credential, not a browser session",
+  "iam/snapshot": "security snapshot repair — authenticated by the scoped site credential, not a browser session",
+  "iam/status": "security sync diagnostics — authenticated by the scoped site credential, not a browser session",
+  "iam/commands": "Cloud-authoritative security command — authenticated by the scoped site credential and re-authorizes the actor from current membership state",
+  "iam/detach": "site detachment — authenticated by the scoped site credential and requires a current Cloud owner",
   "server-sync/pull":
     "server-to-server — authenticated by a site/location credential (legacy business/global tokens remain migration-only); not a session",
   "server-sync/push":

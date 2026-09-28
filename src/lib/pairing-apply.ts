@@ -109,6 +109,7 @@ export async function applyPairingSnapshot(
         ],
       );
 
+      await insertTenantRoles(client, snapshot);
       const ownerIds = await insertUsers(client, snapshot);
       await insertAccounts(client, snapshot);
       await insertMenu(client, snapshot);
@@ -136,78 +137,60 @@ export async function applyPairingSnapshot(
   });
 }
 
+/** Insert canonical custom-role identities before memberships reference them. */
+async function insertTenantRoles(client: PoolClient, snapshot: PairingSnapshot): Promise<void> {
+  for (const role of snapshot.tenantRoles) {
+    await client.query(
+      `INSERT INTO tenant_roles (id,business_id,name,description,permissions,default_location_scope,is_active,role_revision)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [role.id,snapshot.business.id,role.name,role.description,JSON.stringify(role.permissions),role.defaultLocationScope,role.isActive,role.roleRevision],
+    );
+  }
+}
+
 /**
- * Recreate memberships and, where one existed online, the global identity
- * behind them — so the owner signs in on the laptop with the same email and
- * password they use on the platform. Credential hashes are inserted as-is;
- * no plaintext ever crossed the wire.
+ * Recreate the canonical membership replica without Cloud credentials. Cloud
+ * password hashes, MFA secrets and sessions never cross the pairing boundary.
+ * The temporary post-pairing owner session is used to establish an explicit
+ * site credential before the next login.
  */
-async function insertUsers(
-  client: PoolClient,
-  snapshot: PairingSnapshot,
-): Promise<{
-  ownerUserId: string;
-  ownerName: string;
-  ownerPlatformUserId: string | null;
+async function insertUsers(client: PoolClient, snapshot: PairingSnapshot): Promise<{
+  ownerUserId: string; ownerName: string; ownerPlatformUserId: null;
 }> {
   let ownerUserId = "";
   let ownerName = "";
-  let ownerPlatformUserId: string | null = null;
-
   for (const user of snapshot.users) {
-    let platformUserId: string | null = null;
-    if (user.platformUserEmail && user.platformUserPasswordHash) {
-      const { rows } = await client.query<{ id: string }>(
-        `INSERT INTO platform_users (email, password_hash, full_name)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (email) DO UPDATE SET full_name = EXCLUDED.full_name
-         RETURNING id`,
-        [
-          user.platformUserEmail,
-          user.platformUserPasswordHash,
-          user.platformUserFullName ?? user.fullName,
-        ],
-      );
-      platformUserId = rows[0].id;
-    }
-
     await client.query(
       `INSERT INTO users
-         (id, business_id, platform_user_id, location_id, role, full_name, email,
-          password_hash, pin_hash, permissions)
-       VALUES ($1, $2, $3, NULL, $4::user_role, $5, $6, $7, $8, $9)`,
-      [
-        user.id,
-        snapshot.business.id,
-        platformUserId,
-        user.role,
-        user.fullName,
-        user.email,
-        user.passwordHash,
-        user.pinHash,
-        JSON.stringify(user.permissions ?? {}),
-      ],
+         (id,business_id,platform_user_id,location_id,role,custom_role_id,full_name,email,
+          permissions,is_active,membership_status,location_scope,membership_revision)
+       VALUES ($1,$2,NULL,$3,$4::user_role,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [user.id,snapshot.business.id,user.defaultLocationId,user.role,user.customRoleId,user.fullName,user.email,
+       JSON.stringify(user.permissions ?? {}),user.isActive,user.membershipStatus,user.locationScope,user.membershipRevision],
     );
-
-    // Only assignments naming the branch this install actually holds; a
-    // multi-branch business pairs one laptop per branch.
     for (const locationId of user.locationIds) {
-      if (locationId !== snapshot.location.id) continue;
-      await client.query(
-        `INSERT INTO user_locations (user_id, location_id) VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
-        [user.id, locationId],
-      );
+      await client.query(`INSERT INTO user_locations (user_id,location_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [user.id,locationId]);
     }
-
-    if (user.role === "owner" && !ownerUserId) {
-      ownerUserId = user.id;
-      ownerName = user.fullName;
-      ownerPlatformUserId = platformUserId;
-    }
+    // Site policy is a separate deny-only overlay. It narrows this machine to
+    // its paired branch without erasing the membership's Cloud branch policy.
+    await client.query(
+      `INSERT INTO site_member_access (business_id,site_device_id,user_id,allowed_location_ids)
+       VALUES ($1,$2,$3,$4::uuid[]) ON CONFLICT DO NOTHING`,
+      [snapshot.business.id,snapshot.siteDevice.id,user.id,[snapshot.location.id]],
+    );
+    if (user.role === "owner" && !ownerUserId) { ownerUserId=user.id; ownerName=user.fullName; }
   }
-
-  return { ownerUserId, ownerName, ownerPlatformUserId };
+  await client.query(`INSERT INTO iam_business_sequences(business_id,last_sequence) VALUES($1,$2)
+    ON CONFLICT(business_id) DO UPDATE SET last_sequence=GREATEST(iam_business_sequences.last_sequence,EXCLUDED.last_sequence)`,
+    [snapshot.business.id,snapshot.iam.lastSequence]);
+  await client.query(
+    `INSERT INTO iam_sync_state (business_id,site_device_id,last_sequence,last_snapshot_version,last_snapshot_hash,status,last_success_at)
+     VALUES ($1,$2,$3,$3,$4,'healthy',now())
+     ON CONFLICT (business_id,site_device_id) DO UPDATE SET last_sequence=EXCLUDED.last_sequence,
+       last_snapshot_version=EXCLUDED.last_snapshot_version,last_snapshot_hash=EXCLUDED.last_snapshot_hash,status='healthy',last_success_at=now(),last_error=NULL`,
+    [snapshot.business.id,snapshot.siteDevice.id,snapshot.iam.lastSequence,snapshot.iam.stateHash],
+  );
+  return { ownerUserId, ownerName, ownerPlatformUserId: null };
 }
 
 /** Parents before children, resolving parent_id from a code→id map built as we go. */

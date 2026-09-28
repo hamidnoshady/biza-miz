@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { writeFile } from "node:fs/promises";
 import { Client, type Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
@@ -52,9 +53,23 @@ describe("safe Local to Hybrid conversion", () => {
       `INSERT INTO orders(location_id,order_number,status,subtotal,total) VALUES($1,7001,'open',2500,2500)`,
       [created.locationId],
     ));
+    const membership = await withTenant(created.businessId, () => query<{ id: string }>(
+      "SELECT id FROM users WHERE business_id=$1 AND role='owner'",
+      [created.businessId],
+    ));
+    const cloudSetup = new Client({ connectionString: urlFor(centralDb) });
+    await cloudSetup.connect();
+    const cloudIdentity = await cloudSetup.query<{ id: string }>(
+      `INSERT INTO platform_users(email,password_hash,full_name)
+       VALUES($1,'cloud-owned-test-hash','Cloud Owner') RETURNING id`,
+      [`cloud-${randomUUID()}@example.com`],
+    );
+    await cloudSetup.end();
+    const identityMapPath = `/tmp/local-to-hybrid-${randomUUID()}.json`;
+    await writeFile(identityMapPath, JSON.stringify({ [membership.rows[0].id]: cloudIdentity.rows[0].id }));
     const args = {
       businessId: created.businessId, centralUrl: urlFor(centralDb), remoteUrl: "https://cloud.example.test",
-      activate: false, yes: true,
+      activate: false, yes: true, identityMapPath,
     };
     await runLocalToHybridConversion(args);
 

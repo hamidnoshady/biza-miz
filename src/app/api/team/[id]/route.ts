@@ -32,6 +32,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
 
   let body: {
     role?: Role;
+    customRoleId?: string | null;
     fullName?: string;
     isActive?: boolean;
     locationIds?: string[];
@@ -57,7 +58,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     return NextResponse.json({ error: "selected_locations_required" }, { status: 400 });
   }
 
-  const changesAccess = body.role !== undefined || body.permissions !== undefined;
+  const changesAccess = body.role !== undefined || body.permissions !== undefined || body.customRoleId !== undefined;
   if (changesAccess) {
     const escalation = await requirePermission(PERMISSIONS.teamPermissionsManage);
     if (escalation.error) return escalation.error;
@@ -70,13 +71,22 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     actor_permissions: unknown;
     target_role: Role;
     target_permissions: unknown;
+    actor_custom_permissions: string[] | null;
+    target_custom_permissions: string[] | null;
+    selected_custom_permissions: string[] | null;
   }>(
     `SELECT actor.role AS actor_role, actor.permissions AS actor_permissions,
-            target.role AS target_role, target.permissions AS target_permissions
+            target.role AS target_role, target.permissions AS target_permissions,
+            CASE WHEN ar.is_active THEN ARRAY(SELECT jsonb_array_elements_text(ar.permissions)) END actor_custom_permissions,
+            CASE WHEN tr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) END target_custom_permissions,
+            CASE WHEN sr.is_active THEN ARRAY(SELECT jsonb_array_elements_text(sr.permissions)) END selected_custom_permissions
        FROM users actor
        JOIN users target ON target.id = $3 AND target.business_id = actor.business_id
+       LEFT JOIN tenant_roles ar ON ar.id=actor.custom_role_id AND ar.business_id=actor.business_id
+       LEFT JOIN tenant_roles tr ON tr.id=target.custom_role_id AND tr.business_id=target.business_id
+       LEFT JOIN tenant_roles sr ON sr.id=$4::uuid AND sr.business_id=actor.business_id
       WHERE actor.id = $1 AND actor.business_id = $2 AND actor.is_active = true`,
-    [session.sub, session.businessId, id],
+    [session.sub, session.businessId, id, body.customRoleId ?? null],
   );
   const roles = roleRows[0];
   if (!roles) return NextResponse.json({ error: "not_found" }, { status: 404 });
@@ -102,13 +112,16 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
       actorPermissions: effectivePermissions(
         roles.actor_role,
         parseOverrides(roles.actor_permissions),
+        roles.actor_custom_permissions,
       ),
       isSelf: id === session.sub,
       currentPermissions: effectivePermissions(
         roles.target_role,
         parseOverrides(roles.target_permissions),
+        roles.target_custom_permissions,
       ),
-      nextPermissions: effectivePermissions(body.role ?? roles.target_role, nextOverrides),
+      nextPermissions: effectivePermissions(body.role ?? roles.target_role, nextOverrides,
+        body.customRoleId === undefined ? roles.target_custom_permissions : roles.selected_custom_permissions),
       roleChanges: body.role !== undefined && body.role !== roles.target_role,
     });
     if (refusal) {
@@ -139,6 +152,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
       userId: id,
       actorId: session.sub,
       role: body.role,
+      customRoleId: body.customRoleId,
       fullName: body.fullName,
       isActive: body.isActive,
       locationIds: body.locationIds,

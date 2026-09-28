@@ -194,7 +194,11 @@ export async function POST(request: NextRequest) {
   const response = NextResponse.json({
     ok: true,
     slug: applied.businessSlug,
+    ownerUserId: applied.ownerUserId,
     activationPending,
+    // Cloud credentials are never copied. The wizard must establish a PIN,
+    // local password or passkey for this site before ending this session.
+    requiresOfflineCredential: true,
   });
   response.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
   return response;

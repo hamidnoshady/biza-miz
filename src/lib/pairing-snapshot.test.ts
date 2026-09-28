@@ -32,15 +32,20 @@ function validSnapshot(): PairingSnapshot {
         role: "owner",
         fullName: "حمید",
         email: "owner@example.com",
+        customRoleId: null,
         permissions: {},
-        pinHash: null,
-        passwordHash: "$2a$10$abcdefghijklmnopqrstuv",
-        platformUserEmail: "owner@example.com",
-        platformUserFullName: "حمید",
-        platformUserPasswordHash: "$2a$10$abcdefghijklmnopqrstuv",
+        isActive: true,
+        membershipStatus: "active",
+        locationScope: "all",
+        defaultLocationId: "22222222-2222-2222-2222-222222222222",
         locationIds: ["22222222-2222-2222-2222-222222222222"],
+        membershipRevision: 1,
+        cloudIdentityRef: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        credentialMetadata: [{ type: "password", status: "active" }],
       },
     ],
+    tenantRoles: [],
+    iam: { schemaVersion: 1, lastSequence: 0, stateHash: "a".repeat(64) },
     accounts: [
       { id: "44444444-4444-4444-4444-444444444444", parentCode: null, code: "1000", name: "دارایی", type: "asset" },
     ],
@@ -109,6 +114,12 @@ describe("validateSnapshot", () => {
     const result = validateSnapshot(validSnapshot());
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.snapshot.business.slug).toBe("cafe-bahar");
+  });
+
+  it("rejects Cloud credential material even when the rest of the snapshot is valid", () => {
+    const snapshot = validSnapshot() as PairingSnapshot & { users: Array<PairingSnapshot["users"][number] & { platformUserPasswordHash?: string }> };
+    snapshot.users[0].platformUserPasswordHash = "$2b$12$must-never-travel";
+    expect(validateSnapshot(snapshot)).toEqual({ ok: false, error: "snapshot_invalid" });
   });
 
   it("rejects a non-object", () => {

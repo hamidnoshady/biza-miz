@@ -42,49 +42,38 @@ export function registerConnection(ws: WebSocket, session: SessionPayload): void
   ws.on("close", () => connections.delete(conn));
   ws.on("error", () => connections.delete(conn));
 
-  // Phase 24: Periodic re-authorization for long-lived sockets
-  const REAUTH_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+  // Long-lived channels re-authorize against current membership and branch
+  // state; JWT role claims are never trusted for the lifetime of a socket.
+  const REAUTH_INTERVAL_MS = 30_000;
   const interval = setInterval(async () => {
-    // Dynamic import to avoid circular dependencies
-    const { resolveSessionFromToken } = await import("./auth");
-    
-    // We can't access the raw token anymore, but we can just use the DB to check if the session is still active
-    // Alternatively, we can check the db directly. Wait, resolveSessionFromToken requires the token.
-    // Let's just check the DB to ensure they still have the role/permission, or if their employee session is revoked.
     try {
-      const { query } = await import("./db");
-      
-      if (session.employeeSessionId) {
-        const { rows } = await query<{ revoked_at: Date | null }>(
-          `SELECT revoked_at FROM employee_sessions WHERE id = $1`,
-          [session.employeeSessionId]
-        );
-        if (rows.length === 0 || rows[0].revoked_at !== null) {
-          ws.close(1008, "Session Revoked");
-          return;
-        }
+      const { authorize } = await import("./authorize");
+      const decision = await authorize(session, { locationId: session.locationId });
+      if (!decision.ok) {
+        ws.close(1008, "Authorization Revoked");
+        return;
       }
-
-      if (session.platformUserId && session.tokenVersion) {
-        const { rows } = await query<{ token_version: number }>(
-          `SELECT token_version FROM platform_users WHERE id = $1`,
-          [session.platformUserId]
-        );
-        if (rows.length === 0 || rows[0].token_version !== session.tokenVersion) {
-          ws.close(1008, "Session Revoked");
-          return;
-        }
-      }
-
-    } catch (e) {
-      console.error("Re-auth failed:", e);
-      ws.close(1011, "Internal Error");
+      conn.session = decision.session;
+    } catch (error) {
+      console.error("WebSocket re-authorization failed", error);
+      ws.close(1011, "Authorization Check Failed");
     }
   }, REAUTH_INTERVAL_MS);
-  
   interval.unref();
 
   ws.on("close", () => clearInterval(interval));
+}
+
+/** Close a member's sockets immediately after IAM revocation commits. */
+export function disconnectMember(businessId: string, userId: string, reason = "Access Revoked"): number {
+  let closed = 0;
+  for (const connection of connections) {
+    if (connection.session.businessId !== businessId || connection.session.sub !== userId) continue;
+    connection.ws.close(1008, reason);
+    connections.delete(connection);
+    closed += 1;
+  }
+  return closed;
 }
 
 /** Sends `event` to every connected client scoped to `locationId` (or all-location owners/managers). */

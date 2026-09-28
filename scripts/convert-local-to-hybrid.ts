@@ -11,6 +11,7 @@
  */
 import "dotenv/config";
 import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { Client } from "pg";
 import { exportTenantData, tenantDataToSql, type TenantExportTable } from "../src/lib/tenant-export";
 import { getPool } from "../src/lib/db";
@@ -19,6 +20,9 @@ import { restoreTenantExport } from "./restore-tenant";
 
 const DEVICE_LOCAL_TABLES = new Set([
   "printers", "backup_runs", "cloud_exception_outbox", "cloud_exception_response_receipts",
+  // Authentication material remains on the site where it was enrolled. Cloud
+  // receives membership metadata only and never Local secrets or sessions.
+  "employee_credentials", "employee_sessions", "login_attempts",
   // Wrapped under the Local install's KEK and unusable on Cloud. Plaintext
   // export columns are restored, then Cloud mints/backfills its own DEK.
   "business_encryption_keys",
@@ -31,26 +35,55 @@ const DEVICE_LOCAL_SETTING_KEYS = new Set([
 export function conversionExport(tables: TenantExportTable[]): TenantExportTable[] {
   return tables.flatMap((table) => {
     if (DEVICE_LOCAL_TABLES.has(table.name)) return [];
+    if (table.name === "users") return [{
+      ...table,
+      rows: table.rows.map((row) => ({ ...row, pin_hash: null, password_hash: null })),
+    }];
     if (table.name !== "settings") return [table];
     return [{ ...table, rows: table.rows.filter((row) => !DEVICE_LOCAL_SETTING_KEYS.has(String(row.key))) }];
   });
 }
 
-export interface LocalToHybridConversionArgs { businessId: string; centralUrl: string; remoteUrl: string; activate: boolean; yes: boolean }
+export type IdentityMap = Record<string, string>;
+
+/** Apply an operator-confirmed Local membership -> existing Cloud identity map. */
+export function applyIdentityMap(tables: TenantExportTable[], identityMap: IdentityMap): TenantExportTable[] {
+  return tables.map((table) => table.name !== "users" ? table : ({
+    ...table,
+    rows: table.rows.map((row) => {
+      const mappedIdentity = identityMap[String(row.id)] ?? null;
+      return {
+        ...row,
+        platform_user_id: mappedIdentity,
+        // Unmapped Local identities are retained for audit/history but cannot
+        // authenticate after Cloud becomes authoritative.
+        is_active: mappedIdentity ? row.is_active : false,
+        membership_status: mappedIdentity ? (row.membership_status ?? "active") : "offboarded",
+        pin_hash: null,
+        password_hash: null,
+      };
+    }),
+  }));
+}
+
+export interface LocalToHybridConversionArgs { businessId: string; centralUrl: string; remoteUrl: string; activate: boolean; yes: boolean; preview?: boolean; identityMapPath?: string }
 type Args = LocalToHybridConversionArgs;
 function argsOf(argv: string[]): Args {
-  const args: Args = { businessId: "", centralUrl: "", remoteUrl: "", activate: false, yes: false };
+  const args: Args = { businessId: "", centralUrl: "", remoteUrl: "", activate: false, yes: false, preview: false, identityMapPath: "" };
   for (let i = 0; i < argv.length; i++) {
     const value = argv[i];
     if (value === "--business-id") args.businessId = argv[++i] ?? "";
     else if (value === "--central-database-url") args.centralUrl = argv[++i] ?? "";
     else if (value === "--remote-url") args.remoteUrl = (argv[++i] ?? "").replace(/\/+$/, "");
+    else if (value === "--identity-map") args.identityMapPath = argv[++i] ?? "";
+    else if (value === "--preview") args.preview = true;
     else if (value === "--activate") args.activate = true;
     else if (value === "--yes") args.yes = true;
     else throw new Error(`unknown argument: ${value}`);
   }
   if (!args.businessId || !args.centralUrl || !args.remoteUrl) throw new Error("--business-id, --central-database-url and --remote-url are required");
-  if (!args.yes) throw new Error("conversion changes Cloud data; inspect a backup first, then pass --yes");
+  if (!args.activate && !args.identityMapPath) throw new Error("--identity-map is required for conversion preview and bootstrap");
+  if (!args.preview && !args.yes) throw new Error("conversion changes Cloud data; run --preview first, then pass --yes");
   return args;
 }
 
@@ -124,24 +157,41 @@ export async function runLocalToHybridConversion(args: LocalToHybridConversionAr
       "SELECT 1 FROM business_encryption_keys WHERE business_id=$1 AND retired_at IS NULL AND octet_length(wrapped_dek)>0",
       [args.businessId],
     );
-    const exported = conversionExport(await exportTenantData(args.businessId))
-      .filter((table) => table.name !== "platform_users");
-    // Global identities have no business_id and are therefore intentionally
-    // outside the generic tenant walker, but users.platform_user_id references
-    // them. Copy only identities actually referenced by this business, before
-    // tenant rows; an email/id collision on Cloud makes the mandatory dry run
-    // fail rather than silently merging accounts.
-    const identities = await local.query(
-      `SELECT DISTINCT p.* FROM platform_users p JOIN users u ON u.platform_user_id=p.id
-        WHERE u.business_id=$1 ORDER BY p.id`, [args.businessId],
+    const rawMap = JSON.parse(await readFile(args.identityMapPath!, "utf8")) as unknown;
+    if (!rawMap || typeof rawMap !== "object" || Array.isArray(rawMap)) throw new Error("identity_map_must_be_an_object");
+    const identityMap = rawMap as IdentityMap;
+    const mappedIdentityIds = [...new Set(Object.values(identityMap))];
+    if (mappedIdentityIds.some((id) => !/^[0-9a-f-]{36}$/i.test(id))) throw new Error("identity_map_contains_invalid_cloud_id");
+    const cloudIdentities = mappedIdentityIds.length ? await central.query<{ id: string }>(
+      "SELECT id FROM platform_users WHERE id=ANY($1::uuid[]) AND is_active",
+      [mappedIdentityIds],
+    ) : { rows: [] as Array<{ id: string }> };
+    const validCloudIds = new Set(cloudIdentities.rows.map((row) => row.id));
+    if (mappedIdentityIds.some((id) => !validCloudIds.has(id))) throw new Error("identity_map_references_missing_or_inactive_cloud_identity");
+
+    const localMembers = await local.query<{ id: string; role: string; is_active: boolean }>(
+      "SELECT id,role,is_active FROM users WHERE business_id=$1 ORDER BY id",
+      [args.businessId],
     );
-    const identityTable: TenantExportTable[] = identities.rows.length ? [{
-      name: "platform_users",
-      columns: identities.fields.map((field) => field.name),
-      rows: identities.rows,
-    }] : [];
-    const sql = tenantDataToSql([...identityTable, ...exported]);
+    const memberIds = new Set(localMembers.rows.map((row) => row.id));
+    if (Object.keys(identityMap).some((id) => !memberIds.has(id))) throw new Error("identity_map_contains_unknown_local_membership");
+    if (!localMembers.rows.some((member) => member.role === "owner" && member.is_active && identityMap[member.id])) {
+      throw new Error("mapped_active_owner_required");
+    }
+
+    const exported = applyIdentityMap(
+      conversionExport(await exportTenantData(args.businessId))
+        .filter((table) => table.name !== "platform_users"),
+      identityMap,
+    );
+    const sql = tenantDataToSql(exported);
     await restoreTenantExport(central, sql, { apply: false }); // mandatory full dry run
+    const mappedCount = localMembers.rows.filter((member) => identityMap[member.id]).length;
+    console.log(JSON.stringify({ businessId: args.businessId, members: localMembers.rows.length, mapped: mappedCount, disabled: localMembers.rows.length - mappedCount, credentialSecretsCopied: false }, null, 2));
+    if (args.preview) {
+      console.log("Preview complete. No Cloud or Local data was changed.");
+      return;
+    }
     await restoreTenantExport(central, sql, { apply: true });
 
     const location = await local.query<{ id: string }>("SELECT id FROM locations WHERE business_id=$1 ORDER BY created_at,id LIMIT 1", [args.businessId]);

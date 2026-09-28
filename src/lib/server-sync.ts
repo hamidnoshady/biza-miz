@@ -33,6 +33,7 @@ import {
   type SyncEventType,
 } from "./sync-events";
 import type { ServerSyncConfig } from "./server-sync-config";
+import { runIamSync } from "./iam/sync";
 import { refreshAppUpdateStatus } from "./app-update";
 import { expireStalePairingSessions } from "./pairing-service";
 
@@ -1132,6 +1133,13 @@ export async function runServerSyncTick(): Promise<void> {
         `pairing acknowledgement failed for business ${row.business_id}:`,
         err,
       );
+    }
+    // Security control-plane reconciliation always gates operational traffic.
+    // A suspension or permission revocation must land before queued orders.
+    const iamReady = await withTenant(row.business_id, () => runIamSync(row.business_id));
+    if (!iamReady) {
+      console.error(`IAM sync blocked operational sync for business ${row.business_id}`);
+      continue;
     }
     try {
       await withTenant(row.business_id, () => runServerPush(row.business_id));

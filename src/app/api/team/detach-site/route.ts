@@ -1,0 +1,13 @@
+import { NextRequest,NextResponse } from "next/server";
+import { requireRole,withTenantScope } from "@/lib/auth";
+import { readDeploymentProfile } from "@/lib/deployment-mode";
+import { getSetting,setSetting,SETTING_KEYS } from "@/lib/settings";
+import type { ServerSyncConfig } from "@/lib/server-sync-config";
+import { runIamSync } from "@/lib/iam/sync";
+import { runLocalBackup } from "@/lib/backup-service";
+import { query } from "@/lib/db";
+export const POST=withTenantScope(async(_request:NextRequest)=>{const guard=await requireRole("owner");if(guard.error)return guard.error;if((await readDeploymentProfile(guard.session.businessId)).profile!=="hybrid")return NextResponse.json({error:"hybrid_only"},{status:409});const config=await getSetting<ServerSyncConfig>(guard.session.businessId,SETTING_KEYS.serverSyncConfig);if(!config?.siteDeviceId||!config.remoteUrl||!config.token)return NextResponse.json({error:"site_not_configured"},{status:409});
+ const credential=await query(`SELECT 1 FROM users u WHERE u.business_id=$1 AND u.id=$2 AND (u.pin_hash IS NOT NULL OR EXISTS(SELECT 1 FROM employee_credentials c WHERE c.business_id=u.business_id AND c.employee_id=u.id AND c.credential_type='pin' AND c.status='active'))`,[guard.session.businessId,guard.session.sub]);if(!credential.rowCount)return NextResponse.json({error:"local_owner_credential_required"},{status:409});
+ if(!await runIamSync(guard.session.businessId))return NextResponse.json({error:"final_iam_sync_failed"},{status:503});const backup=await runLocalBackup(guard.session.businessId,"manual");if(backup.status!=="ok")return NextResponse.json({error:"backup_failed"},{status:503});
+ const response=await fetch(`${config.remoteUrl.replace(/\/+$/,"")}/api/iam/detach`,{method:"POST",headers:{Authorization:`Bearer ${config.token}`,"Content-Type":"application/json"},body:JSON.stringify({actorUserId:guard.session.sub}),signal:AbortSignal.timeout(30_000)}).catch(()=>null);if(!response?.ok)return NextResponse.json({error:"cloud_detach_failed"},{status:503});
+ await setSetting(guard.session.businessId,SETTING_KEYS.serverSyncConfig,{...config,enabled:false,token:"",detachedAt:new Date().toISOString()});await setSetting(guard.session.businessId,SETTING_KEYS.deploymentProfile,{profile:"local",pairedAt:null});await query(`INSERT INTO audit_log(business_id,user_id,action,entity,entity_id,payload) VALUES($1,$2,'iam.detached_to_local','business',$1,$3)`,[guard.session.businessId,guard.session.sub,JSON.stringify({backupRunId:backup.runId,siteDeviceId:config.siteDeviceId})]);return NextResponse.json({ok:true,backup:backup.artifact});});

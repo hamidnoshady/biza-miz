@@ -19,6 +19,7 @@ import {
   signPhonePendingToken,
 } from "@/lib/phone-otp";
 import { memberPhoneState, pinWindowActive } from "@/lib/phone-otp-policy";
+import { readDeploymentProfile } from "@/lib/deployment-mode";
 
 interface UserRow extends Record<string, unknown> {
   id: string;
@@ -95,6 +96,8 @@ export async function POST(request: NextRequest) {
   }
 
   return withTenant(businessId, async () => {
+    const deployment = await readDeploymentProfile(businessId);
+    const privilegedPinRoles = deployment.profile === "cloud" ? "" : ", 'owner', 'admin', 'manager', 'accountant'";
     // Phase 20 Wave 8 — a picker-narrowed request already names the employee,
     // so a lockout is checked before touching the PIN at all; a bare legacy
     // scan doesn't know who it is yet and gets the same check further below,
@@ -124,13 +127,19 @@ export async function POST(request: NextRequest) {
     const { rows } = await query<UserRow>(
       `SELECT u.id, u.business_id, b.slug::text AS business_slug,
               b.subdomain::text AS business_subdomain, u.location_id,
-              u.role, u.full_name, u.pin_hash,
+              u.role, u.full_name, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash,
               u.phone_e164, u.phone_verified_at, u.otp_login_at
          FROM users u
          JOIN businesses b ON b.id = u.business_id
+         LEFT JOIN LATERAL (
+           SELECT secret_hash FROM employee_credentials
+            WHERE employee_id = u.id AND business_id = u.business_id
+              AND credential_type = 'pin' AND status = 'active'
+            ORDER BY created_at DESC LIMIT 1
+         ) ec ON true
         WHERE u.is_active
-          AND u.role IN ('cashier', 'waiter', 'kitchen')
-          AND u.pin_hash IS NOT NULL
+          AND u.role IN ('cashier', 'waiter', 'kitchen' ${privilegedPinRoles})
+          AND coalesce(ec.secret_hash, u.pin_hash) IS NOT NULL
           ${filter}`,
       params,
     );

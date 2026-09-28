@@ -50,7 +50,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   const { rows } = await query<{ pin_hash: string | null }>(
-    `SELECT pin_hash FROM users WHERE id = $1 AND business_id = $2`,
+    `SELECT coalesce(ec.secret_hash, u.pin_hash) AS pin_hash
+       FROM users u
+       LEFT JOIN LATERAL (
+         SELECT secret_hash FROM employee_credentials
+          WHERE employee_id = u.id AND business_id = u.business_id
+            AND credential_type = 'pin' AND status = 'active'
+          ORDER BY created_at DESC LIMIT 1
+       ) ec ON true
+      WHERE u.id = $1 AND u.business_id = $2`,
     [session.sub, session.businessId],
   );
   const hash = rows[0]?.pin_hash;

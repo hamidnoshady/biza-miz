@@ -17,7 +17,11 @@ export const GET = withTenantScope(async () => {
 
   const { rows: users } = await query(
     `SELECT id, role, full_name, email, is_active,
-            (pin_hash IS NOT NULL) AS has_pin
+            (pin_hash IS NOT NULL OR EXISTS (
+              SELECT 1 FROM employee_credentials ec
+               WHERE ec.employee_id = users.id AND ec.business_id = users.business_id
+                 AND ec.credential_type = 'pin' AND ec.status = 'active'
+            )) AS has_pin
        FROM users WHERE business_id = $1
       ORDER BY created_at`,
     [session.businessId],

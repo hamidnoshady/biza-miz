@@ -31,6 +31,7 @@ import {
   resolveEncryptionKey,
 } from "./integrations/secrets";
 import { REPLICATION_DOMAIN_CONTRACT } from "./data-ownership";
+import { buildIamSnapshot } from "./iam/service";
 
 export interface PairingCodeSummary {
   id: string;
@@ -598,12 +599,11 @@ export async function buildPairingSnapshot(
   siteDevice: PairingSnapshot["siteDevice"],
   syncToken: string,
 ): Promise<PairingSnapshot> {
+  const iamSnapshot = await buildIamSnapshot(businessId, siteDevice.id);
   const [
     bizRes,
     locRes,
     locationIdentityRes,
-    userRes,
-    assignRes,
     accountRes,
     catRes,
     itemRes,
@@ -642,34 +642,6 @@ export async function buildPairingSnapshot(
     ),
     query<{ id: string; name: string; timezone: string }>(
       `SELECT id,name,timezone FROM locations WHERE business_id=$1 AND is_active ORDER BY created_at`,
-      [businessId],
-    ),
-    query<{
-      id: string;
-      role: string;
-      full_name: string;
-      email: string | null;
-      permissions: Record<string, unknown>;
-      pin_hash: string | null;
-      password_hash: string | null;
-      pu_email: string | null;
-      pu_full_name: string | null;
-      pu_password_hash: string | null;
-    }>(
-      `SELECT u.id, u.role::text AS role, u.full_name, u.email::text AS email, u.permissions,
-                u.pin_hash, u.password_hash,
-                pu.email::text AS pu_email, pu.full_name AS pu_full_name,
-                pu.password_hash AS pu_password_hash
-           FROM users u
-           LEFT JOIN platform_users pu ON pu.id = u.platform_user_id
-          WHERE u.business_id = $1 AND u.is_active`,
-      [businessId],
-    ),
-    query<{ user_id: string; location_id: string }>(
-      `SELECT ul.user_id, ul.location_id
-           FROM user_locations ul
-           JOIN users u ON u.id = ul.user_id
-          WHERE u.business_id = $1`,
       [businessId],
     ),
     query<{
@@ -842,12 +814,7 @@ export async function buildPairingSnapshot(
     effectiveFeatures(businessId),
   ]);
 
-  const locationsByUser = new Map<string, string[]>();
-  for (const row of assignRes.rows) {
-    const list = locationsByUser.get(row.user_id) ?? [];
-    list.push(row.location_id);
-    locationsByUser.set(row.user_id, list);
-  }
+
 
   return {
     version: PAIRING_SNAPSHOT_VERSION,
@@ -855,19 +822,25 @@ export async function buildPairingSnapshot(
     location: locRes.rows[0],
     locationIdentities: locationIdentityRes.rows.map((location) => ({ id: location.id, name: location.name, timezone: location.timezone })),
     siteDevice,
-    users: userRes.rows.map((u) => ({
-      id: u.id,
-      role: u.role,
-      fullName: u.full_name,
-      email: u.email,
-      permissions: u.permissions ?? {},
-      pinHash: u.pin_hash,
-      passwordHash: u.password_hash,
-      platformUserEmail: u.pu_email,
-      platformUserFullName: u.pu_full_name,
-      platformUserPasswordHash: u.pu_password_hash,
-      locationIds: locationsByUser.get(u.id) ?? [],
+    users: iamSnapshot.memberships.map((member) => ({
+      id: member.id,
+      role: member.role,
+      customRoleId: member.customRoleId,
+      fullName: member.fullName,
+      email: member.email,
+      permissions: member.overrides as Record<string, unknown>,
+      isActive: member.isActive,
+      membershipStatus: member.status,
+      locationScope: member.locationScope,
+      defaultLocationId: member.defaultLocationId,
+      locationIds: member.locationIds,
+      membershipRevision: member.revision,
+      cloudIdentityRef: member.cloudIdentityRef,
+      credentialMetadata: iamSnapshot.credentials.filter((credential) => credential.userId === member.id).map((credential) => ({ type: credential.type, status: credential.status })),
     })),
+    tenantRoles: iamSnapshot.tenantRoles.map((role) => ({ id: role.id, name: role.name, description: role.description,
+      permissions: role.permissions, defaultLocationScope: role.defaultLocationScope, isActive: role.isActive, roleRevision: role.revision })),
+    iam: { schemaVersion: iamSnapshot.schemaVersion, lastSequence: iamSnapshot.lastSequence, stateHash: iamSnapshot.stateHash },
     accounts: accountRes.rows.map((a) => ({
       id: a.id,
       parentCode: a.parent_code,
