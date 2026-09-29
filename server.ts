@@ -256,9 +256,31 @@ app.prepare().then(async () => {
   // reach the remote just records the error; the next tick resumes from the
   // stored high-water mark. Disabled unless a business has configured a
   // server-sync target (settings key server_sync.config).
-  const serverSyncTick = () =>
-    runServerSyncTick().catch((err) => console.error("server-sync tick failed:", err));
+  //
+  // Migration 0190: one single-flight runner (a slow tick and the next timer
+  // can no longer overlap), which a committed local change (Postgres NOTIFY)
+  // or a central-side change (long-poll) wakes early — see sync-wake-service.
+  const { createSyncRunner } = await import("./src/lib/sync-wake");
+  const syncRunner = createSyncRunner(
+    async () => {
+      // Tracked like every scheduled job, so shutdown drains a woken run too.
+      const task = runServerSyncTick();
+      backgroundTasks.add(task);
+      try {
+        await task;
+      } finally {
+        backgroundTasks.delete(task);
+      }
+    },
+    (err) => console.error("server-sync tick failed:", err),
+  );
+  const serverSyncTick = () => syncRunner.run();
   scheduleSiteTick(serverSyncTick, SERVER_SYNC_INTERVAL_MS, 20_000);
+  const syncWakeAbort = new AbortController();
+  if (runtimeRole === "site") {
+    const { startSyncWakeListeners } = await import("./src/lib/sync-wake-service");
+    startSyncWakeListeners({ onWake: (delayMs) => syncRunner.kick(delayMs), signal: syncWakeAbort.signal });
+  }
 
   // The receiving half of that link: retry site events the central deferred
   // for a missing prerequisite, and expire abandoned pairing sessions. Without
@@ -605,6 +627,8 @@ app.prepare().then(async () => {
       clearInterval(timer);
     }
     backgroundTimers.clear();
+    syncWakeAbort.abort();
+    syncRunner.cancel();
 
     // WebSockets are long-lived, so server.close() cannot make progress by
     // itself. 1012 tells browsers this is a service restart and invites the

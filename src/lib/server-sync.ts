@@ -36,6 +36,9 @@ import type { ServerSyncConfig } from "./server-sync-config";
 import { runIamSync } from "./iam/sync";
 import { refreshAppUpdateStatus } from "./app-update";
 import { expireStalePairingSessions } from "./pairing-service";
+import { runMasterSync } from "./master-sync-transport";
+import { runDriftCheck } from "./sync-health-service";
+import { attemptDue, nextAttemptAt } from "./sync-backoff";
 
 export type { ServerSyncConfig } from "./server-sync-config";
 
@@ -60,6 +63,17 @@ export interface ServerSyncState {
    * see recordLegacyTokenUsage(). Null if it has never happened.
    */
   legacyTokenLastUsedAt: string | null;
+  /**
+   * The pull cursor's transaction half (migration 0190). The central server
+   * orders its feed by (txid, id) so a row committed late is never passed
+   * over; null until the first pull from a central server that reports it.
+   */
+  lastPulledTxid: string | null;
+  /** Consecutive transport failures and when the next attempt is allowed (sync-backoff.ts). */
+  pushFailures: number;
+  pushNextAttemptAt: string | null;
+  pullFailures: number;
+  pullNextAttemptAt: string | null;
 }
 
 const EMPTY_STATE: ServerSyncState = {
@@ -72,6 +86,11 @@ const EMPTY_STATE: ServerSyncState = {
   lastPushError: null,
   lastPullError: null,
   legacyTokenLastUsedAt: null,
+  lastPulledTxid: null,
+  pushFailures: 0,
+  pushNextAttemptAt: null,
+  pullFailures: 0,
+  pullNextAttemptAt: null,
 };
 
 export function legacySyncTokenAllowed(): boolean {
@@ -698,6 +717,7 @@ type SyncEventRow = {
 
 export type PushResult =
   | { status: "disabled" }
+  | { status: "backoff"; until: string }
   | { status: "ok"; pushed: number }
   | { status: "error"; error: string };
 
@@ -726,17 +746,31 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
   const state = await getServerSyncState(businessId);
   const batchSize = config.batchSize ?? 100;
   const afterId = state.lastPushedEventId ?? 0;
+  const now = new Date();
+  // The central server was unreachable or refusing us: wait out the backoff
+  // rather than hammering it every tick (sync-backoff.ts).
+  if (!attemptDue(state.pushNextAttemptAt, now)) {
+    return { status: "backoff", until: state.pushNextAttemptAt! };
+  }
 
   await setSetting(businessId, SETTING_KEYS.serverSyncState, {
     ...state,
-    lastPushAttemptAt: new Date().toISOString(),
+    lastPushAttemptAt: now.toISOString(),
   } satisfies ServerSyncState);
 
-  const fail = async (error: string): Promise<PushResult> => {
+  /**
+   * `transport` failures (unreachable, HTTP error, malformed answer) back the
+   * whole push off. A single refused row does not: it waits on its own
+   * per-row backoff while the rest of the queue keeps moving.
+   */
+  const fail = async (error: string, transport = true): Promise<PushResult> => {
     const s = await getServerSyncState(businessId);
+    const failures = transport ? s.pushFailures + 1 : s.pushFailures;
     await setSetting(businessId, SETTING_KEYS.serverSyncState, {
       ...s,
       lastPushError: error,
+      pushFailures: failures,
+      pushNextAttemptAt: transport ? nextAttemptAt(failures, now) : s.pushNextAttemptAt,
     } satisfies ServerSyncState);
     await query(
       `INSERT INTO server_sync_log (business_id, direction, status, events_count, error, last_event_id)
@@ -760,6 +794,7 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
           AND se.applied_at IS NOT NULL
           AND se.error IS NULL
           AND se.origin = 'local'
+          AND (se.next_push_at IS NULL OR se.next_push_at <= now())
           AND ($3::uuid IS NULL OR se.location_id = $3::uuid)
         ORDER BY se.id
         LIMIT $2`,
@@ -796,6 +831,7 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
 
   const url = `${config.remoteUrl.trim().replace(/\/+$/, "")}/api/server-sync/push`;
   const delivered: string[] = [];
+  const refused: string[] = [];
   let firstFailure: string | null = null;
   try {
     const res = await fetch(url, {
@@ -835,8 +871,9 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
         result.deferred
       ) {
         delivered.push(String(rows[index].id));
-      } else if (!firstFailure) {
-        firstFailure = `remote_apply_failed: ${result.error || "unknown"}`;
+      } else {
+        refused.push(String(rows[index].id));
+        firstFailure ??= `remote_apply_failed: ${result.error || "unknown"}`;
       }
     }
   } catch (err) {
@@ -847,8 +884,19 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
 
   if (delivered.length > 0) {
     await query(
-      `UPDATE sync_events SET pushed_at = now() WHERE id = ANY($1::bigint[])`,
+      `UPDATE sync_events SET pushed_at = now(), next_push_at = NULL WHERE id = ANY($1::bigint[])`,
       [delivered],
+    );
+  }
+  // Each refused row waits longer before it is offered again (30 s doubling
+  // to a 15-minute ceiling), so one poison event is not re-sent every tick.
+  if (refused.length > 0) {
+    await query(
+      `UPDATE sync_events
+          SET push_attempts = push_attempts + 1,
+              next_push_at = now() + make_interval(secs => least(900, 30 * power(2, least(push_attempts, 10))))
+        WHERE id = ANY($1::bigint[])`,
+      [refused],
     );
   }
   // PostgreSQL bigint values arrive from node-postgres as strings even though
@@ -860,9 +908,11 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
       await setSetting(businessId, SETTING_KEYS.serverSyncState, {
         ...(await getServerSyncState(businessId)),
         lastPushedEventId: lastId,
+        pushFailures: 0,
+        pushNextAttemptAt: null,
       } satisfies ServerSyncState);
     }
-    return fail(firstFailure);
+    return fail(firstFailure, false);
   }
   const s = await getServerSyncState(businessId);
   await setSetting(businessId, SETTING_KEYS.serverSyncState, {
@@ -870,6 +920,8 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
     lastPushedEventId: lastId,
     lastPushSuccessAt: new Date().toISOString(),
     lastPushError: null,
+    pushFailures: 0,
+    pushNextAttemptAt: null,
   } satisfies ServerSyncState);
   await query(
     `INSERT INTO server_sync_log (business_id, direction, status, events_count, last_event_id)
@@ -885,11 +937,14 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
 
 export type PullResult =
   | { status: "disabled" }
+  | { status: "backoff"; until: string }
   | { status: "ok"; pulled: number }
   | { status: "error"; error: string };
 
 interface RemoteEvent {
   id: number;
+  /** The central row's writing transaction (migration 0190); absent from an older central server. */
+  txid?: string;
   clientEventId: string;
   type: string;
   occurredAt: string;
@@ -901,6 +956,27 @@ interface RemoteEvent {
   siteDeviceId?: string | null;
   schemaVersion?: number;
   origin?: string;
+}
+
+/**
+ * Whether a pulled event lies strictly after the cursor. With transaction ids
+ * (a central server on migration 0190) the order is (txid, id); without them
+ * it is the id alone, as before. A position that does not advance is a
+ * protocol error, never silently skipped.
+ */
+export function pullPositionAdvances(
+  cursorTxid: string | null,
+  cursorId: number,
+  txid: string | null,
+  id: number,
+): boolean {
+  if (txid !== null) {
+    const a = BigInt(txid);
+    const b = BigInt(cursorTxid ?? "0");
+    return a > b || (a === b && id > cursorId);
+  }
+  // An older central server reports no txid and orders by id alone.
+  return id > cursorId;
 }
 
 /**
@@ -916,17 +992,25 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
   const state = await getServerSyncState(businessId);
   const batchSize = config.batchSize ?? 100;
   const afterId = state.lastPulledEventId ?? 0;
+  const afterTxid = state.lastPulledTxid;
+  const now = new Date();
+  if (!attemptDue(state.pullNextAttemptAt, now)) {
+    return { status: "backoff", until: state.pullNextAttemptAt! };
+  }
 
   await setSetting(businessId, SETTING_KEYS.serverSyncState, {
     ...state,
-    lastPullAttemptAt: new Date().toISOString(),
+    lastPullAttemptAt: now.toISOString(),
   } satisfies ServerSyncState);
 
   const fail = async (error: string): Promise<PullResult> => {
     const s = await getServerSyncState(businessId);
+    const failures = s.pullFailures + 1;
     await setSetting(businessId, SETTING_KEYS.serverSyncState, {
       ...s,
       lastPullError: error,
+      pullFailures: failures,
+      pullNextAttemptAt: nextAttemptAt(failures, now),
     } satisfies ServerSyncState);
     await query(
       `INSERT INTO server_sync_log (business_id, direction, status, events_count, error, last_event_id)
@@ -936,8 +1020,14 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
     return { status: "error", error };
   };
 
-  // Fetch from remote
-  const url = `${config.remoteUrl.trim().replace(/\/+$/, "")}/api/server-sync/pull?after=${afterId}&limit=${batchSize}`;
+  // Fetch from remote. `afterTx` asks for the commit-safe (txid, id) order. A
+  // site switching over from the id-only cursor sends 0 and re-reads from the
+  // start once — every replay is idempotent, and an id cursor cannot be
+  // translated into a transaction position without risking a gap. An older
+  // central server ignores afterTx and answers by id, as before.
+  const url =
+    `${config.remoteUrl.trim().replace(/\/+$/, "")}/api/server-sync/pull?after=${afterId}&limit=${batchSize}` +
+    `&afterTx=${encodeURIComponent(afterTxid ?? "0")}`;
   let remoteEvents: RemoteEvent[];
   try {
     const res = await fetch(url, {
@@ -954,13 +1044,24 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
   }
 
   // Idle is not logged — see the same note in runServerPush.
-  if (remoteEvents.length === 0) return { status: "ok", pulled: 0 };
+  if (remoteEvents.length === 0) {
+    if (state.pullFailures > 0) {
+      await setSetting(businessId, SETTING_KEYS.serverSyncState, {
+        ...(await getServerSyncState(businessId)),
+        pullFailures: 0,
+        pullNextAttemptAt: null,
+        lastPullError: null,
+      } satisfies ServerSyncState);
+    }
+    return { status: "ok", pulled: 0 };
+  }
 
   // Replay each event locally in order. A failed event may advance the
   // transport cursor only after its complete replay envelope is durable in the
   // canonical dead-letter table. If we cannot persist that envelope we stop:
   // replays are idempotent, silent loss is not.
   let lastAppliedRemoteId = afterId;
+  let lastAppliedTxid = afterTxid;
   for (const e of remoteEvents) {
     // A central running an older build sends the bigint id as a numeric
     // string; accept that exact shape rather than dead-lettering every event.
@@ -968,7 +1069,8 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
     if (typeof rawId === "string" && /^[1-9][0-9]{0,15}$/.test(rawId)) {
       e.id = Number(rawId);
     }
-    if (!Number.isSafeInteger(e.id) || e.id <= lastAppliedRemoteId) {
+    const txid = typeof e.txid === "string" && /^[0-9]{1,20}$/.test(e.txid) ? e.txid : null;
+    if (!Number.isSafeInteger(e.id) || !pullPositionAdvances(lastAppliedTxid, lastAppliedRemoteId, txid, e.id)) {
       try {
         await recordServerPullDeadLetter(
           businessId,
@@ -1019,14 +1121,18 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
       }
     }
     lastAppliedRemoteId = e.id;
+    if (txid) lastAppliedTxid = txid;
   }
 
   const s = await getServerSyncState(businessId);
   await setSetting(businessId, SETTING_KEYS.serverSyncState, {
     ...s,
     lastPulledEventId: lastAppliedRemoteId,
+    lastPulledTxid: lastAppliedTxid,
     lastPullSuccessAt: new Date().toISOString(),
     lastPullError: null,
+    pullFailures: 0,
+    pullNextAttemptAt: null,
   } satisfies ServerSyncState);
   await query(
     `INSERT INTO server_sync_log (business_id, direction, status, events_count, last_event_id)
@@ -1145,6 +1251,14 @@ export async function runServerSyncTick(): Promise<void> {
       console.error(`IAM sync blocked operational sync for business ${row.business_id}`);
       continue;
     }
+    // Master data before operational events, in both directions: an order the
+    // desktop pushes names menu items and customers the central server must
+    // already hold, and an order it pulls names ones this desktop must hold.
+    try {
+      await withTenant(row.business_id, () => runMasterSync(row.business_id));
+    } catch (err) {
+      console.error(`master-data sync failed for business ${row.business_id}:`, err);
+    }
     try {
       await withTenant(row.business_id, () => runServerPush(row.business_id));
     } catch (err) {
@@ -1157,6 +1271,9 @@ export async function runServerSyncTick(): Promise<void> {
       await withTenant(row.business_id, async () => {
         await runServerPull(row.business_id);
         await reconcileDeferredSyncEvents(row.business_id);
+        // Hourly: do this desktop and the central server agree on each day's
+        // settled sales? (sync-health-service.ts; skipped while work is queued.)
+        await runDriftCheck(row.business_id);
       });
     } catch (err) {
       console.error(

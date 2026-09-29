@@ -34,7 +34,7 @@ import type { PoolClient } from "pg";
 import { randomUUID } from "node:crypto";
 import type { Role } from "./auth";
 import { appendSyncOutboxEvent } from "./sync-outbox";
-import { deploymentRole } from "./deployment-role";
+import { recordOrderState, type OrderStateActor } from "./order-state-sync";
 
 /**
  * Writes one line's add-on snapshots, quantities included. One INSERT per
@@ -165,6 +165,17 @@ export interface CreateOrderInput {
   clientRequestId?: string | null;
   /** Stable entity id used by site and cloud. Generated before the transaction when omitted. */
   orderId?: string;
+  /**
+   * Ids for the lines, in `items` order — set when replaying a peer's
+   * order.create so both sides hold the same line ids. Generated when omitted.
+   */
+  itemIds?: readonly (string | null)[];
+  /**
+   * When the order was actually opened, set when replaying a peer's
+   * order.create: a bill belongs to the shift and day it was opened in, not
+   * to the moment the peer happened to receive it.
+   */
+  openedAt?: string | null;
   /** Actor role is persisted with the outbox event for permission-safe replay. */
   actorRole?: Role;
   /** False only while applying an event already present in the sync inbox. */
@@ -369,8 +380,10 @@ export async function createOrder(
     const discountType = input.discount.type;
     const { rows: orderRows } = await client.query<{ id: string }>(
       `INSERT INTO orders (id, location_id, order_number, type, status, table_id, table_session_id, customer_id, guest_count,
-              subtotal, discount, discount_type, discount_value, service_charge, tax, total, note, opened_by, client_request_id)
-       VALUES ($1, $2, $3, $4, 'open', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+              subtotal, discount, discount_type, discount_value, service_charge, tax, total, note, opened_by, client_request_id,
+              opened_at)
+       VALUES ($1, $2, $3, $4, 'open', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+               coalesce($19::timestamptz, now()))
        RETURNING id`,
       [
         requestedOrderId,
@@ -391,6 +404,7 @@ export async function createOrder(
         input.note?.trim() || null,
         input.openedBy,
         clientRequestId,
+        input.openedAt ?? null,
       ],
     );
     const orderId = orderRows[0].id;
@@ -407,12 +421,13 @@ export async function createOrder(
       });
     }
 
-    for (const item of preparedItems) {
+    const lineIds: string[] = [];
+    for (const [index, item] of preparedItems.entries()) {
       // Submitting the order *is* "send to kitchen": items land as 'sent'
       // straight away so they appear on the KDS within ~1s (Phase 4).
       const { rows: itemRows } = await client.query<{ id: string }>(
-        `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'sent', now()) RETURNING id`,
+        `INSERT INTO order_items (id, location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at)
+         VALUES (coalesce($8::uuid, gen_random_uuid()), $1, $2, $3, $4, $5, $6, $7, 'sent', now()) RETURNING id`,
         [
           input.locationId,
           orderId,
@@ -421,9 +436,11 @@ export async function createOrder(
           item.unitPrice,
           item.quantity,
           item.note,
+          input.itemIds?.[index] ?? null,
         ],
       );
       const orderItemId = itemRows[0].id;
+      lineIds.push(orderItemId);
       await insertOrderItemModifiers(client, orderItemId, item.modifiers);
       await captureInventorySnapshot(
         client,
@@ -433,7 +450,9 @@ export async function createOrder(
       );
     }
 
-    if (input.recordSyncEvent !== false && deploymentRole() === "site") {
+    // appendSyncOutboxEvent decides who records (a site always; the central
+    // server for a branch with a paired desktop); replays pass false.
+    if (input.recordSyncEvent !== false) {
       await appendSyncOutboxEvent(client, {
         locationId: input.locationId,
         clientEventId: orderId,
@@ -449,6 +468,9 @@ export async function createOrder(
           note: input.note ?? null,
           discount: input.discount,
           items: input.items,
+          // The lines' own ids, so the peer creates the very same lines and a
+          // later order.state.synced finds them (migration 0190).
+          itemIds: lineIds,
           delivery: input.delivery ?? null,
         },
       });
@@ -497,6 +519,12 @@ export interface AddItemsInput {
   locationId: string;
   orderId: string;
   items: CartItemInput[];
+  /**
+   * Who is adding the lines. When present the order's new state is queued
+   * for the paired peer (order-state-sync.ts) in this same transaction; the
+   * offline-queue replay passes none, since the peer made the change itself.
+   */
+  actor?: OrderStateActor;
 }
 
 /** Same validation + transaction as POST /api/orders/[id]/items. */
@@ -555,6 +583,9 @@ export async function addItemsToOrder(
       );
     }
     const totals = await recomputeOrderTotals(client, input.orderId, discount);
+    if (input.actor) {
+      await recordOrderState(client, { locationId: input.locationId, orderId: input.orderId, actor: input.actor });
+    }
     await client.query("COMMIT");
     return { ok: true, data: { totals } };
   } catch (err) {
@@ -590,6 +621,8 @@ export interface UpdateOrderItemInput {
   modifierIds?: string[];
   /** Voiding wins over every other field, since a voided line has nothing left to edit. */
   void?: { reason?: string | null };
+  /** As on AddItemsInput: present means the new order state is queued for the paired peer. */
+  actor?: OrderStateActor;
 }
 
 /**
@@ -755,6 +788,9 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
     }
 
     const totals = await recomputeOrderTotals(client, input.orderId, discount);
+    if (input.actor) {
+      await recordOrderState(client, { locationId: input.locationId, orderId: input.orderId, actor: input.actor });
+    }
     await client.query("COMMIT");
     return {
       ok: true,

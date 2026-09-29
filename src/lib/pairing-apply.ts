@@ -40,6 +40,11 @@ export async function applyPairingSnapshot(
     const client = await getPool().connect();
     try {
       await client.query("BEGIN");
+      // The snapshot *is* the central server's data: record no master-data
+      // clocks for it (migration 0190), or the whole catalogue would be pushed
+      // straight back. The master feed then fills in what the snapshot lacks,
+      // customers included, and both sides compare equal on the rest.
+      await client.query("SET LOCAL app.sync_replay = 'on'");
 
       await client.query(
         `INSERT INTO businesses (id, name, slug, subdomain, timezone, industry) VALUES ($1, $2, $3, $4, $5, $6)`,

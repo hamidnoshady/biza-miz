@@ -9,6 +9,7 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 import { broadcast } from "@/lib/realtime";
 import { lockOpenOrder } from "@/lib/order-lock";
 import { ensureSessionForTable } from "@/lib/table-session-service";
+import { recordOrderState } from "@/lib/order-state-sync";
 import { recordNotification } from "@/lib/notification-events";
 import { notificationDedupeKey } from "@/lib/notifications";
 import { tomanText } from "@/lib/ai-labels";
@@ -126,11 +127,15 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
       }
       if (discountInput !== undefined) {
         const totals = await recomputeOrderTotals(client, id, discountInput);
+        await recordOrderState(client, { locationId: location.id, orderId: id, actor: { userId: session.sub, role: session.role } });
         await client.query("COMMIT");
         broadcast(location.id, { type: "order.updated", orderId: id });
         return NextResponse.json({ ok: true, totals });
       }
     }
+    // The void, customer, table or note change travels to the paired peer
+    // with the rest of the bill (order-state-sync.ts), atomically with it.
+    await recordOrderState(client, { locationId: location.id, orderId: id, actor: { userId: session.sub, role: session.role } });
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");

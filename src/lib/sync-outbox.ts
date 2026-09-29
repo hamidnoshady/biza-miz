@@ -11,6 +11,9 @@ import type { Role } from "./auth";
 import type { SyncEventType } from "./sync-event-registry";
 import { deploymentRole } from "./deployment-role";
 
+/** Postgres NOTIFY channel a site raises when it queues an event for the central server. */
+export const SYNC_OUTBOX_CHANNEL = "sync_outbox";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** sync_events uses uuid keys; derive a stable UUID when the domain identity is textual. */
@@ -35,17 +38,33 @@ export async function appendSyncOutboxEvent(
     schemaVersion?: number;
   },
 ): Promise<void> {
-  // A replay handler runs on the central process and calls the same domain
-  // services as normal requests. Enforcing origin here makes bounce events
-  // impossible even if a caller forgets to pass a replay flag.
-  if (deploymentRole() !== "site") return;
-
+  // Who records, decided in the INSERT itself so it costs no extra round trip:
+  //
+  //  - never while applying a peer's event. applySyncEvent sets
+  //    app.sync_replay on its transaction, and a handler calls the same domain
+  //    services as a normal request; recording there would bounce the event
+  //    straight back to where it came from, even if a caller forgot a flag.
+  //  - always on a site (the desktop's own sales go up to the cloud).
+  //  - on the central server only for a branch a desktop is paired to
+  //    (migration 0190): a sale, purchase or journal the owner records in the
+  //    cloud for that branch travels down to it. A cloud-only branch has no
+  //    one to deliver to, so nothing is queued for it.
+  // On a site the same statement also raises a NOTIFY, delivered when this
+  // transaction commits: the desktop's sync runner (server.ts) wakes and
+  // pushes within seconds instead of on its next 30-second tick.
   await client.query(
-    `INSERT INTO sync_events
-       (location_id,client_event_id,event_type,payload,occurred_at,applied_at,
-        actor_user_id,actor_role,origin,schema_version)
-     VALUES ($1,$2,$3,$4,$5,now(),$6,$7,'local',$8)
-     ON CONFLICT (location_id,client_event_id) DO NOTHING`,
+    `WITH queued AS (
+       INSERT INTO sync_events
+         (location_id,client_event_id,event_type,payload,occurred_at,applied_at,
+          actor_user_id,actor_role,origin,schema_version)
+       SELECT $1::uuid,$2::uuid,$3::text,$4::jsonb,$5::timestamptz,now(),$6::text,$7::text,'local',$8::integer
+        WHERE coalesce(current_setting('app.sync_replay', true), '') <> 'on'
+          AND ($9::boolean OR EXISTS (
+                SELECT 1 FROM site_devices d
+                 WHERE d.location_id = $1::uuid AND d.status = 'active' AND d.revoked_at IS NULL))
+       ON CONFLICT (location_id,client_event_id) DO NOTHING
+       RETURNING 1)
+     SELECT pg_notify('${SYNC_OUTBOX_CHANNEL}', '') FROM queued WHERE $9::boolean`,
     [
       input.locationId,
       syncClientEventId(input.clientEventId),
@@ -55,6 +74,7 @@ export async function appendSyncOutboxEvent(
       input.actorUserId,
       input.actorRole,
       input.schemaVersion ?? 1,
+      deploymentRole() === "site",
     ],
   );
 }

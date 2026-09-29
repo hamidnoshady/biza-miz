@@ -31,6 +31,10 @@ export const SETTING_KEYS = {
   serverSyncConfig: "server_sync.config",
   /** ServerSyncState (src/lib/server-sync.ts) — push/pull high-water marks + status (Phase 11) */
   serverSyncState: "server_sync.state",
+  /** MasterSyncState (src/lib/master-sync-transport.ts) — master-data feed cursors, desktop side (migration 0190) */
+  masterSyncState: "server_sync.master_state",
+  /** DriftState (src/lib/sync-health-service.ts) — last comparison of settled figures with the central server */
+  syncDriftState: "server_sync.drift_state",
   /** BackupConfig (src/lib/backup.ts) — schedule/retention/cloud settings (Phase 10) */
   backupConfig: "backup.config",
   /** PricingConfig — menu cost-plus margin, overhead policy and cost-drift threshold */

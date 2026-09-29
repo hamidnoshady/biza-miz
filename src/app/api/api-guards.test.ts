@@ -104,6 +104,10 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "server-to-server — authenticated by a site credential only; no global-token fallback and no session",
   "server-sync/runtime-status":
     "server-to-server runtime telemetry — authenticated by the exact site-device credential; the body cannot choose a device/business/location",
+  "server-sync/master":
+    "server-to-server master-data feed (migration 0190) — authenticated by the exact site-device credential (requireSiteCredential); the credential, never the request, names the business and branch, and writes are confined to that branch's rows",
+  "server-sync/digest":
+    "server-to-server drift check (migration 0190) — authenticated by the exact site-device credential; compares figures for that credential's branch only and writes nothing",
   "desktop-releases/promote":
     "release-pipeline ingress — authenticated by the timing-safe DESKTOP_RELEASE_PUBLISH_TOKEN, never by a tenant browser session",
   "server-sync/credential-rotation":

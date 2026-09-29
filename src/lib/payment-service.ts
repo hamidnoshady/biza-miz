@@ -226,11 +226,22 @@ export interface CompleteSplitOrderPaymentInput {
   businessDate?: string;
   receivedBy: string | null;
   idempotencyKey: string;
+  /**
+   * When the bill was actually paid, and the journal date the paying side
+   * posted it on (migration 0190). A replay that stamped its own `now()` put a
+   * sale synced after midnight on the next day's reports and books — the same
+   * rule the Holoo importer already follows: the row carries the instant the
+   * sale happened.
+   */
+  settledAt?: string | null;
+  entryDate?: string | null;
 }
 
 /** Exact split-tender settlement used by server-sync replay. */
 export async function completeSplitOrderPayment(input: CompleteSplitOrderPaymentInput): Promise<CompleteOrderPaymentResult> {
   const { client, businessId, locationId, orderId, tenders, customerId, tipAmount, businessDate, receivedBy, idempotencyKey } = input;
+  const settledAt = input.settledAt ?? null;
+  const entryDate = input.entryDate ?? null;
   const effectKey = `order-payment:${idempotencyKey}`;
   const prior = await client.query<{ total: string; tip_amount: number }>(
     `SELECT o.total::text total,o.tip_amount FROM inventory_events ie JOIN orders o ON o.id=ie.source_id AND o.location_id=ie.location_id
@@ -262,9 +273,9 @@ export async function completeSplitOrderPayment(input: CompleteSplitOrderPayment
   const inventoryEventId = event.rows[0].id;
   for (const [index, tender] of tenders.entries()) {
     await client.query(
-      `INSERT INTO payments(location_id,order_id,method,amount,reference,received_by,payment_method_id,settlement_seq)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [locationId, orderId, tender.settlement, String(tender.amount), tender.reference, receivedBy, tender.methodId && knownMethods.has(tender.methodId) ? tender.methodId : null, index + 1],
+      `INSERT INTO payments(location_id,order_id,method,amount,reference,received_by,payment_method_id,settlement_seq,received_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,coalesce($9::timestamptz,now()))`,
+      [locationId, orderId, tender.settlement, String(tender.amount), tender.reference, receivedBy, tender.methodId && knownMethods.has(tender.methodId) ? tender.methodId : null, index + 1, settledAt],
     );
   }
   if (difference.balanceDue > 0) {
@@ -272,9 +283,9 @@ export async function completeSplitOrderPayment(input: CompleteSplitOrderPayment
       "SELECT id FROM payment_methods WHERE business_id=$1 AND settlement='credit' AND is_active ORDER BY sort_order LIMIT 1", [businessId],
     );
     await client.query(
-      `INSERT INTO payments(location_id,order_id,method,amount,reference,received_by,payment_method_id,settlement_seq)
-       VALUES($1,$2,'credit',$3,NULL,$4,$5,$6)`,
-      [locationId, orderId, String(difference.balanceDue), receivedBy, credit.rows[0]?.id ?? null, tenders.length + 1],
+      `INSERT INTO payments(location_id,order_id,method,amount,reference,received_by,payment_method_id,settlement_seq,received_at)
+       VALUES($1,$2,'credit',$3,NULL,$4,$5,$6,coalesce($7::timestamptz,now()))`,
+      [locationId, orderId, String(difference.balanceDue), receivedBy, credit.rows[0]?.id ?? null, tenders.length + 1, settledAt],
     );
   }
   if (difference.customerCredit > 0 && customerId) {
@@ -285,8 +296,8 @@ export async function completeSplitOrderPayment(input: CompleteSplitOrderPayment
     });
   }
   const completed = await client.query(
-    "UPDATE orders SET status='completed',closed_by=$2,closed_at=now(),tip_amount=$3 WHERE id=$1 AND status='open' RETURNING id",
-    [orderId, receivedBy, tipAmount],
+    "UPDATE orders SET status='completed',closed_by=$2,closed_at=coalesce($4::timestamptz,now()),tip_amount=$3 WHERE id=$1 AND status='open' RETURNING id",
+    [orderId, receivedBy, tipAmount, settledAt],
   );
   if (completed.rowCount !== 1) throw Object.assign(new Error("order_not_open"), { code: "order_not_open", status: 409 });
   const { totalCost } = await deductForOrder(client, businessId, locationId, orderId, receivedBy, inventoryEventId);
@@ -302,8 +313,9 @@ export async function completeSplitOrderPayment(input: CompleteSplitOrderPayment
     amount, tax: rialText(locked.order.tax), inventoryEventId, orderChannel: locked.order.type,
     tip: rialText(String(tipAmount)), platformCommission,
     balanceDue: rialText(String(difference.balanceDue)), customerCredit: rialText(String(difference.customerCredit)),
+    entryDate,
   });
-  await postExactCogsEntry(client, { businessId, locationId, orderId, createdBy: receivedBy, totalCost, inventoryEventId });
+  await postExactCogsEntry(client, { businessId, locationId, orderId, createdBy: receivedBy, totalCost, inventoryEventId, entryDate });
   const loyaltyCustomerId = customerId || locked.order.customer_id;
   if (loyaltyCustomerId) {
     const owned = await client.query(`SELECT 1 FROM parties WHERE id=$1 AND business_id=$2 AND roles && ARRAY['customer']::text[]`, [loyaltyCustomerId, businessId]);

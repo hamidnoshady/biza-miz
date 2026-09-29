@@ -22,7 +22,12 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
-  const result = await addItemsToOrder({ locationId: location.id, orderId: id, items: body.items ?? [] });
+  const result = await addItemsToOrder({
+    locationId: location.id,
+    orderId: id,
+    items: body.items ?? [],
+    actor: { userId: session.sub, role: session.role },
+  });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
 
   broadcast(location.id, { type: "order.updated", orderId: id });

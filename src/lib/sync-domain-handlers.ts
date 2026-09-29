@@ -20,6 +20,9 @@ import {
 } from "./transfer-service";
 import { isWasteReason, recordWasteInTransaction } from "./waste-service";
 import type { SyncEventDefinition } from "./sync-event-registry";
+import { applyOrderState, OrderStateTerminal } from "./order-state-sync";
+import { amendClosedOrder, OrderAmendmentError } from "./order-amendment-service";
+import { validateAmendment, type AmendmentInput } from "./order-amendments";
 
 export interface SyncDomainContext {
   client: PoolClient;
@@ -29,6 +32,8 @@ export interface SyncDomainContext {
   clientEventId: string;
   payload: Record<string, unknown>;
   definition: SyncEventDefinition;
+  /** When the action happened on the side that made it (ISO). */
+  occurredAt?: string;
 }
 
 export interface SyncDomainEffect {
@@ -64,6 +69,16 @@ function array(payload: Record<string, unknown>, field: string, allowEmpty = fal
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new SyncPayloadError(`invalid_${field}`);
     return entry as Record<string, unknown>;
   });
+}
+
+function validInstant(value: unknown): string | null {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function isoDate(value: string | null): string | null {
+  if (value === null) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new SyncPayloadError("invalid_entryDate");
+  return value;
 }
 
 function enumValue<T extends string>(value: unknown, values: readonly T[], code: string): T {
@@ -125,8 +140,47 @@ export async function applySyncDomainHandler(context: SyncDomainContext): Promis
         tipAmount: payload.tipAmount === undefined ? 0 : exactInteger(payload.tipAmount, "invalid_tipAmount"),
         businessDate: optionalString(payload, "businessDate") ?? undefined,
         receivedBy: actor.userId, idempotencyKey: clientEventId,
+        // The paying side's own instant and journal date, so a sale synced
+        // after midnight is still on the day it was made (migration 0190).
+        settledAt: validInstant(context.occurredAt),
+        entryDate: isoDate(optionalString(payload, "entryDate")),
       });
       return { effectType: "order_payment", effectId: requiredString(payload, "orderId"), result: { amount: result.amount, duplicate: Boolean(result.duplicate) } };
+    }
+    case "order.state.synced": {
+      try {
+        const result = await applyOrderState(client, { locationId, actor, payload });
+        return { effectType: "order_state", effectId: result.orderId, result: { outcome: result.outcome } };
+      } catch (error) {
+        if (error instanceof OrderStateTerminal) throw new SyncPayloadError(error.message);
+        throw error;
+      }
+    }
+    case "order.amendment.posted": {
+      const orderId = requiredString(payload, "orderId");
+      const validated = validateAmendment((payload.input ?? {}) as AmendmentInput);
+      if (!validated.ok) throw new SyncPayloadError("invalid_input");
+      const newItemIds = payload.newItemIds === undefined ? [] : payload.newItemIds;
+      if (!Array.isArray(newItemIds) || newItemIds.some((id) => typeof id !== "string")) {
+        throw new SyncPayloadError("invalid_newItemIds");
+      }
+      try {
+        const result = await amendClosedOrder(client, {
+          businessId,
+          locationId,
+          orderId,
+          actorId: actor.userId,
+          input: validated.value,
+          newItemIds: newItemIds as string[],
+        });
+        return { effectType: "order_amendment", effectId: result.id, result: { newTotal: result.newTotal } };
+      } catch (error) {
+        // Not here yet (or not paid yet) waits; any other refusal is final.
+        if (error instanceof OrderAmendmentError && !context.definition.dependencyErrors.includes(error.message)) {
+          throw new SyncPayloadError(error.message);
+        }
+        throw error;
+      }
     }
     case "order.customer_return.created": {
       const refundMethod = enumValue(payload.refundMethod, ["cash", "card", "card_to_card", "online", "credit"] as const, "invalid_refundMethod");

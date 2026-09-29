@@ -11,6 +11,7 @@ import { validateAmendment, type AmendmentInput } from "@/lib/order-amendments";
 import { PERMISSIONS } from "@/lib/permissions";
 import { broadcast } from "@/lib/realtime";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { appendSyncOutboxEvent } from "@/lib/sync-outbox";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -107,6 +108,18 @@ export const POST = withTenantScope(async (request: NextRequest, context: Contex
       orderId: id,
       actorId: session.sub,
       input: validated.value,
+    });
+    // The paired peer replays the same correction through the same service,
+    // with these line ids, so its books and its bill match this side's
+    // (migration 0190). Same transaction: the correction and its delivery
+    // commit together.
+    await appendSyncOutboxEvent(client, {
+      locationId: location.id,
+      clientEventId: `order-amendment:${result.id}`,
+      eventType: "order.amendment.posted",
+      payload: { orderId: id, input: body as unknown as Record<string, unknown>, newItemIds: result.addedItemIds },
+      actorUserId: session.sub,
+      actorRole: session.role,
     });
     await client.query("COMMIT");
     broadcast(location.id, { type: "order.updated", orderId: id });

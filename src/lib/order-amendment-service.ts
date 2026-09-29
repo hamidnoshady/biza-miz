@@ -100,6 +100,8 @@ export interface AmendmentResult {
   /** whole-Rial COGS the replayed consumption posted ('0' for a removal) */
   replayedCost: string;
   reversedEntryIds: string[];
+  /** Ids of the lines this amendment added, in the order they were given. */
+  addedItemIds: string[];
 }
 
 /**
@@ -222,6 +224,12 @@ export async function amendClosedOrder(
     orderId: string;
     actorId: string | null;
     input: ValidatedAmendment;
+    /**
+     * Ids for the added lines, when this amendment is being replayed from the
+     * peer that made it (order.amendment.posted, migration 0190): both sides
+     * then hold the same line ids, so a later amendment can name them.
+     */
+    newItemIds?: readonly string[];
   },
 ): Promise<AmendmentResult> {
   const { rows: orderRows } = await client.query<OrderRow>(
@@ -241,6 +249,7 @@ export async function amendClosedOrder(
   if (returns.length > 0) throw new OrderAmendmentError("order_has_returns", 409);
 
   const beforeSnapshot = await snapshotOrder(client, params.orderId);
+  const addedItemIds: string[] = [];
   const previousTotal = Number(order.total);
   const previousTip = Number(order.tip_amount ?? 0);
   const paid = await paymentsOnOrder(client, params.orderId);
@@ -407,10 +416,10 @@ export async function amendClosedOrder(
         client,
       );
       if (!resolved.ok) throw new OrderAmendmentError(resolved.error, resolved.status);
-      for (const item of resolved.preparedItems) {
+      for (const [index, item] of resolved.preparedItems.entries()) {
         const { rows: itemRows } = await client.query<{ id: string }>(
-          `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'served',now()) RETURNING id`,
+          `INSERT INTO order_items (id, location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at)
+           VALUES (coalesce($8::uuid, gen_random_uuid()),$1,$2,$3,$4,$5,$6,$7,'served',now()) RETURNING id`,
           [
             params.locationId,
             params.orderId,
@@ -419,9 +428,11 @@ export async function amendClosedOrder(
             item.unitPrice,
             item.quantity,
             item.note,
+            params.newItemIds?.[index] ?? null,
           ],
         );
         const orderItemId = itemRows[0].id;
+        addedItemIds.push(orderItemId);
         await insertOrderItemModifiers(client, orderItemId, item.modifiers);
         try {
           await captureInventorySnapshot(
@@ -581,6 +592,7 @@ export async function amendClosedOrder(
     restoredCost: restoredCost.toString(),
     replayedCost,
     reversedEntryIds: postings.map((posting) => posting.id),
+    addedItemIds,
   };
 }
 

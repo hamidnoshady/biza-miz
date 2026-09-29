@@ -63,8 +63,11 @@ export interface SyncEventResult {
   data?: unknown;
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 interface OrderCreatePayload {
   orderId?: string;
+  itemIds?: unknown[];
   type?: "dine_in" | "takeaway" | "delivery";
   tableId?: string;
   customerId?: string;
@@ -101,6 +104,7 @@ async function dispatch(
   locationId: string,
   actor: { userId: string; role: Role },
   event: SyncEventInput,
+  origin: "local" | "remote" = "local",
 ): Promise<DispatchResult> {
   if (event.type === "order.create" || event.type === "order.add_items") {
     if (!ORDER_MUTATION_ROLES.includes(actor.role))
@@ -144,6 +148,16 @@ async function dispatch(
         typeof payload.orderId === "string"
           ? payload.orderId
           : event.clientEventId,
+      // The sender's line ids (migration 0190); absent from an offline-queued
+      // phone payload, which the order-state reconciliation then covers.
+      itemIds: Array.isArray(payload.itemIds)
+        ? payload.itemIds.map((id) => (typeof id === "string" && UUID_PATTERN.test(id) ? id : null))
+        : undefined,
+      // Only a peer *server's* replay carries the instant the order was
+      // really opened. A phone's offline flush does not: there is no
+      // "record a past sale" path, and a device clock must not be able to
+      // place a new order into a day that has already been closed.
+      openedAt: origin === "remote" && Number.isFinite(Date.parse(event.occurredAt)) ? event.occurredAt : null,
       actorRole: actor.role,
       recordSyncEvent: false,
       delivery:
@@ -317,7 +331,7 @@ async function applyLegacySyncEvent(
   }
 
   try {
-    const result = await dispatch(locationId, actor, event);
+    const result = await dispatch(locationId, actor, event, origin);
     if (result.error) {
       await query("UPDATE sync_events SET error = $2 WHERE id = $1", [
         inserted[0].id,
@@ -543,6 +557,10 @@ async function applyTransactionalSyncEvent(
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    // Everything this transaction does is a peer's (or a queued device's)
+    // action being applied here, not a new one: the outbox and the
+    // master-data capture trigger both stand down, so nothing echoes back.
+    await client.query("SET LOCAL app.sync_replay = 'on'");
     const scope = await eventScope(
       client,
       locationId,
@@ -708,6 +726,9 @@ async function applyTransactionalSyncEvent(
         clientEventId: event.clientEventId,
         payload: event.payload,
         definition,
+        // A peer server's instant is trusted for dating; a device's is not
+        // (see the legacy order.create note above).
+        occurredAt: origin === "remote" ? event.occurredAt : undefined,
       });
       if (metadata.failureInjection === "after_domain_effect")
         throw new Error("injected_sync_failure_after_domain_effect");

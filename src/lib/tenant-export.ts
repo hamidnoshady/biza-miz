@@ -27,6 +27,12 @@ export interface TenantExportTable {
   rows: Record<string, unknown>[];
 }
 
+/** Columns that only mean something inside the database that wrote them (sync feed positions). */
+const TRANSPORT_LOCAL_COLUMNS: Record<string, readonly string[]> = {
+  sync_events: ["txid"],
+  sync_row_clocks: ["txid"],
+};
+
 /** Postgres identifiers can't be parameterised; table/column names here come only from information_schema, but validate anyway rather than trust that blindly. */
 function assertSafeIdentifier(name: string): string {
   if (!/^[a-z_][a-z0-9_]*$/.test(name)) throw new Error(`unsafe_identifier: ${name}`);
@@ -88,6 +94,11 @@ export async function exportTenantData(businessId: string): Promise<TenantExport
       // state the dual-write window must never be left in. A restored install
       // re-encrypts with `npm run db:encrypt-fields`.
       const derived = new Set(encrypted.flatMap((c) => [c.encColumn, c.bidxColumn].filter(Boolean) as string[]));
+      // Migration 0190: a transaction id is a position in *this* database's
+      // commit order and means nothing in another. Restored rows take a fresh
+      // one from the column default instead of scrambling the target's sync
+      // feed order.
+      for (const column of TRANSPORT_LOCAL_COLUMNS[name] ?? []) derived.add(column);
       const columns = fields.map((f) => f.name).filter((c) => !generated?.has(c) && !derived.has(c));
       out.push({ name, columns, rows: orderedRows });
     }

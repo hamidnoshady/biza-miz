@@ -74,6 +74,16 @@ On the site, `runServerSyncTick()` (`src/lib/server-sync.ts`, every 30 s):
    after its original replay envelope is durably stored as a canonical
    `sync_event_dead_letters` row with `source='server_pull'`.
 
+Transport details (migration 0190): the pull cursor is `(txid, id)` and only
+rows whose writing transaction has finished are handed out, so a late commit
+can never be skipped; each direction backs off exponentially (30 s → 15 min)
+after failures, and a refused row backs off on its own; a committed local
+change (`pg_notify`) or a central-side change (long-poll) wakes the tick
+within seconds. The desktop's sync panel shows **health** (backlog and its
+age, refused rows, dead letters, master conflicts) and the hourly **drift
+check**: settled bills, sales and payments per business day compared with the
+central server's for the last seven days.
+
 On the central, `runCentralSyncMaintenanceTick()` (every 60 s) retries each
 business's dependency-deferred inbox rows and expires abandoned pairing
 sessions. Before this existed, the central only retried a deferred event when
@@ -105,19 +115,40 @@ conflict/tombstone policy, bootstrap boundary, retry semantics, deployment
 availability, and exact `type@schemaVersion` event pairs. Pairing capability
 disclosure and its tests consume this same contract.
 
-The active Hybrid outbox/inbox set currently covers order creation/item
-changes, payment v2 and customer returns, manual-journal reversals, purchases,
+The active Hybrid outbox/inbox set covers order creation, **the whole open
+bill after every change** (`order.state.synced`: added lines, voids,
+quantities, discount, customer, table, kitchen status — and once more inside
+the payment transaction), payment v2 and customer returns, **closed-order
+amendments** (`order.amendment.posted`), manual-journal reversals, purchases,
 supplier returns, transfers, waste, retail/standard stock counts, and
 production/reversal events. Each is written in the local mutation transaction,
 uses stable IDs and `client_event_id` idempotency, and is applied through the
-versioned registry.
+versioned registry. Since contract v2 the **central server records the same
+events for a branch that has an active paired desktop**, so a bill, purchase
+or journal the owner records in the cloud for that branch reaches it; the
+desktop stays the operational authority and a cloud event it cannot apply
+becomes a dead letter the owner sees. Replays keep the sale's own instant
+(`opened_at`, `closed_at`, `received_at`) and the paying side's journal date.
 
-This is **not** full-database replication. The contract deliberately marks
-customers, catalogue/menu, and staff access as `bootstrap_only`: pairing
-copies the selected master data atomically, but subsequent master-data edits
-do not yet continuously synchronize. Printer settings, paths, LAN/certificate
-configuration, and the cloud-exception relay are device-local and never enter
-operational sync. Local-only profiles likewise never initiate continuous cloud
+**Master data** — customers (`parties`, `party_categories`), payment ways, and
+the branch's menu, modifiers, recipes, stock items and tables — synchronises
+continuously in both directions through the master-data feed
+(`/api/server-sync/master`, `master-sync-service.ts`, migration 0190). A
+trigger records a hybrid-logical clock per edited field on every write path;
+the receiver merges field by field (the later edit of each field wins; edits to
+different fields both survive). Values each side derives for itself never
+merge: stock average cost and carrying value, table occupancy, CRM scores and
+ciphertext (the plaintext crosses and is re-encrypted under the receiver's
+key). A change that cannot merge — two rows created independently with the
+same unique name, a delete the other side's history blocks — is recorded as a
+master conflict and listed on the sync panel.
+
+This is still **not** full-database replication. Staff access follows its own
+IAM control plane; retail invoices and the retail catalogue are not part of
+hybrid sync (pairing never copies them); website and imported sales are
+settled on the central server and stay there. Printer settings, paths,
+LAN/certificate configuration, and the cloud-exception relay are device-local
+and never enter operational sync. Local-only profiles likewise never initiate continuous cloud
 synchronization.
 
 ## Configuration and operations
@@ -159,11 +190,14 @@ verification, pre-migration backup and rollback.
   Inspect `server_sync_log` for the push error, and canonical
   `sync_event_dead_letters` / `sync_domain_effects` (status `deferred`) on
   the central. Then verify the event type is in the supported contract above.
-- **Only some data syncs:** operational events sync, but master data
-  (customers, catalogue/menu, staff access) is `bootstrap_only`. Edits made
-  after pairing are not replicated in either direction. Mutations made
-  directly on the central are not written to its outbox either (only a
-  `site` deployment role writes one), so they do not reach the site.
+- **A customer or menu edit did not arrive:** check the panel's master
+  conflicts (a unique-name clash is recorded, not retried) and
+  `server_sync.master_state` for the feed cursors and last error. A row
+  waiting on a parent that has not arrived is retried ten times, then
+  recorded as a conflict.
+- **The drift check reports a day:** the two sides settled different bills
+  or totals for that business day. Compare that day's bills on both sides;
+  a bill missing on one side usually has a dead letter explaining why.
 - **Phone cannot connect:** use the HTTPS URL/QR from Local Devices, trust the
   generated root certificate, confirm the chosen adapter is Private, and
   verify the gateway—not the internal server—is listening on the LAN.

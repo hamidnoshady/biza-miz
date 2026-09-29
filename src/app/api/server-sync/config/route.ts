@@ -16,6 +16,8 @@ import { deploymentRole, platformBaseUrl } from "@/lib/deployment-role";
 import { getPairedSite } from "@/lib/server-sync";
 import { publicSyncEventRegistry } from "@/lib/sync-event-registry";
 import { REPLICATION_DOMAIN_CONTRACT } from "@/lib/data-ownership";
+import { getSyncHealth } from "@/lib/sync-health-service";
+import { listMasterConflicts } from "@/lib/master-sync-service";
 
 /**
  * Owner-only: configure the bidirectional server-to-server sync target
@@ -35,7 +37,7 @@ export const GET = withTenantScope(async () => {
   if (error) return error;
 
   const role = deploymentRole();
-  const [config, syncState, domainDiagnostics, appUpdateStatus, pairedSite] =
+  const [config, syncState, domainDiagnostics, appUpdateStatus, pairedSite, health, masterConflicts] =
     await Promise.all([
       getServerSyncConfig(session.businessId),
       getServerSyncState(session.businessId),
@@ -44,6 +46,10 @@ export const GET = withTenantScope(async () => {
       role === "central"
         ? getPairedSite(session.businessId)
         : Promise.resolve(null),
+      // Migration 0190: is it moving, and do the two sides agree? Only a
+      // desktop has an outbox and a drift check of its own.
+      role === "site" ? getSyncHealth(session.businessId) : Promise.resolve(null),
+      listMasterConflicts(session.businessId, 20),
     ]);
 
   // Sources in order. Pairing writes the URL the laptop was paired with
@@ -70,6 +76,8 @@ export const GET = withTenantScope(async () => {
     resolvedRemoteUrl,
     pairedSite,
     syncState,
+    health,
+    masterConflicts,
     domainDiagnostics,
     eventRegistry: publicSyncEventRegistry(),
     replicationContract: {
