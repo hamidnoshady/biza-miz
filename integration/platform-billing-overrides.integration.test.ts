@@ -373,10 +373,38 @@ describe("GET business billing — the include contract and list pagination", ()
     expect(invoices).not.toHaveProperty("payments");
   }, 30_000);
 
+  it("accepts the always-present `business` key alongside a section", async () => {
+    // This is the exact request every tab of the billing page makes. The page
+    // prepends `business` for its own title, and the first version of this
+    // contract refused it — so every tab load was a 400 the route's tests could
+    // not see, because they never sent the key the page sends.
+    await seedLedger(2);
+    const res = await getBilling("?include=business,ledger");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.business.name).toBe("کافه استثنا");
+    expect(json.ledger).toHaveLength(2);
+  }, 30_000);
+
   it("refuses an unknown include key rather than quietly ignoring it", async () => {
     const res = await getBilling("?include=ledger,secrets");
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ error: "invalid_include", invalid: "secrets" });
+    // The refusal names what *is* acceptable, so a caller can fix itself.
+    expect((await (await getBilling("?include=secrets")).json()).valid).toContain("business");
+  }, 30_000);
+
+  it("keeps paging by offset even when the page size is clamped", async () => {
+    // "Load more" appends by offset now, but the clamp is still what bounds a
+    // single request — and the old cumulative-limit approach died on it: past
+    // the cap every click re-fetched the same rows.
+    await seedLedger(3);
+    const json = await (
+      await getBilling("?include=ledger&ledgerLimit=9999&ledgerOffset=2")
+    ).json();
+    expect(json.meta.ledger.limit).toBe(200);
+    expect(json.ledger).toHaveLength(1);
+    expect(json.meta.ledger.total).toBe(3);
   }, 30_000);
 
   it("keeps the whole-payload contract when `include` is omitted", async () => {

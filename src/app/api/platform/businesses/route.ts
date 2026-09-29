@@ -11,6 +11,7 @@ import {
   provisionBusiness,
   validateProvisionBody,
   ExistingOwnerConfirmationRequiredError,
+  OwnerPhoneRequiredError,
   SubdomainTakenError,
   type ProvisionRequestBody,
 } from "@/lib/business-provisioning";
@@ -174,6 +175,12 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       // theirs that still redirects. The admin picks another rather than
       // being silently given `acme-2`.
       return NextResponse.json({ error: "subdomain_taken" }, { status: 409 });
+    }
+    if (err instanceof OwnerPhoneRequiredError) {
+      // An activation link without a mobile cannot be honoured: redemption
+      // requires a code texted to the owner (issue #755 §14). Say so instead of
+      // creating a business nobody can log into.
+      return NextResponse.json({ error: "owner_phone_required" }, { status: 400 });
     }
     if (err instanceof ExistingOwnerConfirmationRequiredError) {
       // The address already belongs to a platform user. Usually that is the

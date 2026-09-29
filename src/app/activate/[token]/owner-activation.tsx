@@ -6,9 +6,14 @@
  * Everything here belongs to the owner and to nobody else: the password is
  * theirs to choose, the second factor is enrolled against *their* record in
  * their own browser, and the recovery codes are displayed here — once — and
- * never returned to the platform operator who created the business. That is the
- * whole point of the flow: a super-admin can hand over the link, but the link
- * is single-use and the material behind it never passes through them.
+ * never returned to the platform operator who created the business.
+ *
+ * The link alone is deliberately not enough. It travels through the operator
+ * (there is no mail transport), so finishing activation also requires a
+ * six-digit code texted to the owner's own mobile — a channel the operator can
+ * trigger and cannot read. Without that second field the operator could simply
+ * redeem their own link and hold a permanent credential to the tenant, which is
+ * the exact risk this flow replaced.
  */
 import { useEffect, useState } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -37,10 +42,13 @@ interface Preview {
 interface MfaHandover {
   method: "sms_otp" | "totp";
   phoneE164: string | null;
-  totpSecret: string | null;
-  totpQr: string | null;
+  /** The identity already had a second factor, which this activation left alone. */
+  existing: boolean;
   recoveryCodes: string[];
 }
+
+/** How long a texted code is good for, in the service's own terms. */
+const CODE_LENGTH = 6;
 
 interface Activated {
   businessName: string;
@@ -57,6 +65,9 @@ export function OwnerActivation({ token }: { token: string }) {
   const [error, setError] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [code, setCode] = useState("");
+  const [codeHint, setCodeHint] = useState("");
+  const [sending, setSending] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -72,14 +83,45 @@ export function OwnerActivation({ token }: { token: string }) {
   }, [token]);
 
   const mismatch = confirm.length > 0 && confirm !== password;
-  const ready = password.length >= MIN_PASSWORD_LENGTH && password === confirm;
+  const ready =
+    password.length >= MIN_PASSWORD_LENGTH && password === confirm && code.length === CODE_LENGTH;
+
+  /**
+   * Texts the code to the owner's own mobile.
+   *
+   * This is the half the operator cannot take over: the link itself travels
+   * through them, so the right to set this password rests on a message only the
+   * owner receives. The button is here rather than automatic so the owner is not
+   * made to wait on a text they did not ask for.
+   */
+  async function sendCode() {
+    setSending(true);
+    setError("");
+    const res = await api<{ phoneHint: string; expiresAt: string; error?: string }>(
+      "/api/auth/owner-activation",
+      { method: "POST", body: JSON.stringify({ token, action: "send_code" }) },
+    );
+    setSending(false);
+    if (!res.ok) {
+      setError(errorMessage(res.data.error));
+      return;
+    }
+    // A clock time, not a date: the window is ten minutes, so naming the day
+    // would tell the reader nothing (and a Persian-locale format keeps it out of
+    // any Gregorian display by construction).
+    setCodeHint(
+      `کد به شمارهٔ ${res.data.phoneHint} پیامک شد. تا ${new Date(
+        res.data.expiresAt,
+      ).toLocaleTimeString("fa-IR", { hour: "2-digit", minute: "2-digit" })} اعتبار دارد.`,
+    );
+  }
 
   async function activate() {
     setBusy(true);
     setError("");
     const res = await api<Activated & { error?: string }>("/api/auth/owner-activation", {
       method: "POST",
-      body: JSON.stringify({ token, password }),
+      body: JSON.stringify({ token, password, code }),
     });
     setBusy(false);
     if (!res.ok) {
@@ -106,7 +148,8 @@ export function OwnerActivation({ token }: { token: string }) {
         <>
           <InfoBox>
             «{preview.businessName}» آماده است. برای ورود، رمز عبور خودتان را تعیین کنید. هیچ‌کس جز شما این
-            رمز را نمی‌داند — حتی اپراتور پلتفرم که این کسب‌وکار را ساخته است.
+            رمز را نمی‌داند — حتی اپراتور پلتفرم که این کسب‌وکار را ساخته است. برای همین، تکمیل
+            فعال‌سازی به کد پیامک‌شده به موبایل خودتان هم نیاز دارد؛ آن کد تنها به دست شما می‌رسد.
           </InfoBox>
 
           <Field label="نام مالک">
@@ -122,7 +165,8 @@ export function OwnerActivation({ token }: { token: string }) {
 
           {preview.phoneHint ? (
             <p className="text-xs text-muted-foreground">
-              کد ورود دومرحله‌ای به این شماره پیامک می‌شود: <span dir="ltr">{preview.phoneHint}</span>
+              کد فعال‌سازی و کد ورود دومرحله‌ای به این شماره پیامک می‌شود:{" "}
+              <span dir="ltr">{preview.phoneHint}</span>
             </p>
           ) : null}
 
@@ -151,6 +195,26 @@ export function OwnerActivation({ token }: { token: string }) {
             />
           </Field>
 
+          {/* The owner-controlled half of the exchange. The operator can hand
+              over the link but cannot read the code, so only the owner can
+              finish this — which is the whole point of the second field. */}
+          <Field label="کد پیامک‌شده" hint={codeHint || "برای دریافت کد، دکمهٔ زیر را بزنید."}>
+            <div className="flex items-center gap-2">
+              <input
+                className={inputClass}
+                dir="ltr"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={CODE_LENGTH}
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+              />
+              <SecondaryButton onClick={sendCode} disabled={sending}>
+                {sending ? "در حال ارسال…" : "ارسال کد"}
+              </SecondaryButton>
+            </div>
+          </Field>
+
           <PrimaryButton onClick={activate} disabled={busy || !ready}>
             {busy ? "در حال فعال‌سازی…" : "تعیین رمز و فعال‌سازی"}
           </PrimaryButton>
@@ -165,9 +229,9 @@ export function OwnerActivation({ token }: { token: string }) {
 }
 
 /**
- * The one and only showing of the owner's own second-factor material. Held
- * until they confirm they have saved it: the TOTP secret is stored encrypted
- * and the recovery codes only as hashes, so none of this can be recovered.
+ * The one and only showing of the owner's own recovery codes. Held until they
+ * confirm they have saved them: the codes are stored only as hashes, so none of
+ * this can be recovered.
  */
 function HandoverPanel({ data }: { data: Activated }) {
   const [confirmed, setConfirmed] = useState(false);
@@ -181,33 +245,22 @@ function HandoverPanel({ data }: { data: Activated }) {
         نمی‌شوند و هیچ‌کس — از جمله پشتیبانی — به آن‌ها دسترسی ندارد.
       </InfoBox>
 
-      {data.mfa.method === "sms_otp" ? (
+      {data.mfa.existing ? (
+        // Nothing was enrolled and nothing replaced: a person who already had a
+        // second factor keeps it, and keeps the recovery codes they saved when
+        // they set it up. Saying so matters — otherwise the absence of codes
+        // below reads as something having gone wrong.
         <p className="text-sm text-foreground">
-          ورود دومرحله‌ای شما با پیامک یک‌بارمصرف به شمارهٔ{" "}
-          <span dir="ltr">{data.mfa.phoneE164}</span> انجام می‌شود. در نخستین ورود، کد پیامک‌شده را وارد
-          کنید تا شماره تأیید شود.
+          ورود دومرحله‌ای شما از قبل تنظیم شده بود و دست‌نخورده باقی می‌ماند؛ فقط رمز عبور تازه ثبت شد.
+          کدهای بازیابی قبلی شما همچنان معتبرند.
         </p>
       ) : (
         <p className="text-sm text-foreground">
-          این نصب به اینترنت وصل نیست، پس ورود دومرحله‌ای با برنامهٔ رمزساز انجام می‌شود. کد QR را با
-          برنامهٔ رمزساز اسکن کنید.
+          رمز عبور شما تعیین شد. ورود دومرحله‌ای شما با پیامک یک‌بارمصرف به شمارهٔ{" "}
+          <span dir="ltr">{data.mfa.phoneE164}</span> انجام می‌شود. در نخستین ورود، کد پیامک‌شده را وارد
+          کنید تا شماره تأیید شود.
         </p>
       )}
-
-      {data.mfa.totpQr ? (
-        <div className="flex justify-center">
-          <img src={data.mfa.totpQr} alt="کد QR ورود دومرحله‌ای" className="size-44 rounded-lg bg-card p-2" />
-        </div>
-      ) : null}
-
-      {data.mfa.totpSecret ? (
-        <div>
-          <p className="mb-1 text-sm text-muted-foreground">کد دستی برنامهٔ رمزساز:</p>
-          <p dir="ltr" className="rounded-lg border border-border bg-muted px-3 py-2 font-mono text-sm tracking-wider">
-            {data.mfa.totpSecret}
-          </p>
-        </div>
-      ) : null}
 
       {data.mfa.recoveryCodes.length > 0 ? (
         <div>

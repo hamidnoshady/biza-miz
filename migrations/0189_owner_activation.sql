@@ -13,13 +13,26 @@
 -- the second factor and recovery codes are minted, in the owner's own browser,
 -- shown only to them. The operator never sees or chooses any of it.
 --
+-- **The link alone is deliberately not enough.** There is no mail transport in
+-- this system (see the note at the top of 0022), so the operator is the one who
+-- carries the token — which would make the whole exercise theatre if the token
+-- were sufficient on its own: the operator could redeem their own link, choose a
+-- password, collect the recovery codes and keep permanent access to the tenant.
+-- Redemption therefore also requires a one-time code texted to the *owner's*
+-- mobile (the number the operator typed, which is a channel only the owner
+-- reads). The operator can request that code; they cannot see it. So the two
+-- halves have to be held by two different people, and the handover is real.
+--
+-- That is what `code_hash` and friends are for: an HMAC of the code with the
+-- platform realm secret, its expiry and an attempt counter, on the activation
+-- row itself rather than in `mfa_challenges` (which belongs to the login path
+-- and is read by the login interstitial — an activation code must never be
+-- presentable as a login OTP).
+--
 -- Only the token's sha-256 is stored — the same rule as invitations (0022) and
 -- pairing codes (0048): the plaintext is shown once at creation, so a database
--- read can never yield a usable link.
---
--- No email is sent (there is still no mail transport in this system; see the
--- note at the top of 0022), so the operator copies the link. It is single-use
--- and expires, which is what makes handing it over safe.
+-- read can never yield a usable link. The code is never stored in the clear
+-- either.
 -- ============================================================================
 
 CREATE TABLE owner_activations (
@@ -33,6 +46,13 @@ CREATE TABLE owner_activations (
     email            citext NOT NULL,
     token_hash       text NOT NULL UNIQUE,
     expires_at       timestamptz NOT NULL,
+    -- The proof that the person redeeming this holds the owner's phone: an HMAC
+    -- of a six-digit code, its expiry and how many tries it has had. Null until
+    -- an operator (or the owner) asks for a code to be sent.
+    code_hash        text,
+    code_expires_at  timestamptz,
+    code_attempts    integer NOT NULL DEFAULT 0,
+    code_sent_at     timestamptz,
     accepted_at      timestamptz,
     revoked_at       timestamptz,
     -- Which platform admin issued it. Kept after the fact: "who invited this
@@ -61,4 +81,4 @@ CREATE POLICY tenant_isolation ON owner_activations FOR ALL
     WITH CHECK (app_rls_bypass() OR business_id = app_current_business());
 
 COMMENT ON TABLE owner_activations IS
-    'Single-use owner activation links. The plaintext token is never stored; redemption is where the owner sets their own password and receives their own MFA material, so no platform operator ever holds a permanent credential to a tenant.';
+    'Single-use owner activation links. The plaintext token is never stored, and the link is inert without a one-time code sent to the owner''s own mobile — redemption is where the owner sets their own password and receives their own MFA material, so no platform operator can obtain a permanent credential to a tenant.';

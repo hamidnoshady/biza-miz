@@ -26,6 +26,7 @@
  * identity to show and edit. PIN-only staff are people, but not this profile.
  */
 import { getPool, withoutTenantScope } from "./db";
+import { formatPersianNumber } from "./digits";
 import { normalizePhone } from "./phone";
 
 /** The login-holding roles whose profile this surface owns. */
@@ -287,14 +288,28 @@ export async function updateBusinessOwnerProfile(
   }
 
   const emailChanges = email !== undefined && email !== before.email;
-  if (emailChanges && before.membershipCount > 1 && update.confirmCrossBusiness !== true) {
+  const phoneChanges =
+    phone !== undefined && (phoneE164 ?? null) !== (before.mfa.phoneE164 ?? null);
+
+  // Both the email and the SMS second factor live on the *platform user*, not on
+  // the membership: one identity has one login and one factor, shared by every
+  // business it belongs to. An operator editing this business can therefore
+  // redirect or clear the number that protects the same person's *other*
+  // businesses, and unprove a factor they had already confirmed. Same guard as
+  // the email, for the same reason — and the phone was the gap, because it reads
+  // like a per-business contact detail and is not one.
+  if (
+    (emailChanges || phoneChanges) &&
+    before.membershipCount > 1 &&
+    update.confirmCrossBusiness !== true
+  ) {
     return { ok: false, error: "cross_business_confirmation_required" };
   }
 
   const changesNothing =
     (fullName === undefined || fullName === before.fullName) &&
     !emailChanges &&
-    (phone === undefined || (phoneE164 ?? null) === (before.mfa.phoneE164 ?? null)) &&
+    !phoneChanges &&
     (update.isActive === undefined || update.isActive === before.membershipActive);
   if (changesNothing) return { ok: false, error: "no_changes" };
 
@@ -388,6 +403,13 @@ export async function updateBusinessOwnerProfile(
         );
       }
       notices.push("شمارهٔ پیامکی تغییر کرد و باید دوباره تأیید شود؛ تا آن زمان ورود دومرحله‌ای کامل نیست.");
+      if (before.membershipCount > 1) {
+        // Said out loud rather than left for the operator to infer: this number
+        // is the second factor for every business this person belongs to.
+        notices.push(
+          `این شماره ورود دومرحله‌ای همهٔ ${formatPersianNumber(before.membershipCount)} کسب‌وکار این شخص بود و اکنون در همهٔ آن‌ها تغییر کرده است.`,
+        );
+      }
     }
 
     await client.query("COMMIT");

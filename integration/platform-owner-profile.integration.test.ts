@@ -186,15 +186,19 @@ async function get(): Promise<Response> {
   ) as Promise<Response>;
 }
 
-async function patch(body: Record<string, unknown>): Promise<Response> {
+async function patchAt(businessId: string, body: Record<string, unknown>): Promise<Response> {
   const { PATCH } = await import("../src/app/api/platform/businesses/[id]/owner/route");
   return PATCH(
-    new Request(`http://localhost:3000/api/platform/businesses/${businessA.id}/owner`, {
+    new Request(`http://localhost:3000/api/platform/businesses/${businessId}/owner`, {
       method: "PATCH",
       body: JSON.stringify(body),
     }) as never,
-    { params: Promise.resolve({ id: businessA.id }) },
+    { params: Promise.resolve({ id: businessId }) },
   ) as Promise<Response>;
+}
+
+async function patch(body: Record<string, unknown>): Promise<Response> {
+  return patchAt(businessA.id, body);
 }
 
 async function auditRows(): Promise<{ action: string; payload: Record<string, unknown> }[]> {
@@ -317,21 +321,6 @@ describe("PATCH owner profile — business-scoped edits", () => {
     expect(globalIdentity[0].is_active).toBe(true);
   });
 
-  it("stores a changed MFA phone unconfirmed, so the factor must be re-proven", async () => {
-    const res = await patch({ membershipId: membershipA.id, phone: "09121234568" });
-    expect(res.status).toBe(200);
-    const json = await res.json();
-    expect(json.notices.join(" ")).toContain("تأیید");
-
-    const { rows } = await db.query<{ phone_e164: string | null; confirmed_at: Date | null }>(
-      `SELECT phone_e164, confirmed_at FROM mfa_enrolments
-        WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
-      [identity.id],
-    );
-    expect(rows[0].phone_e164).toBe("+989121234568");
-    expect(rows[0].confirmed_at).toBeNull();
-  });
-
   it("rejects a malformed phone without writing anything", async () => {
     const res = await patch({ membershipId: membershipA.id, phone: "123" });
     expect(res.status).toBe(400);
@@ -341,6 +330,88 @@ describe("PATCH owner profile — business-scoped edits", () => {
       [identity.id],
     );
     expect(rows[0].phone_e164).toBe("+989121234567");
+  });
+
+  it("refuses a phone edit that would move the factor for this person's other businesses", async () => {
+    // The Codex review finding: the SMS enrolment belongs to the *identity*, so
+    // editing it from one business redirects (or clears) the factor protecting
+    // every other business this person belongs to — and unproves a number they
+    // had already confirmed. It needs the same explicit yes the email needs.
+    const res = await patch({ membershipId: membershipA.id, phone: "09121234568" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "cross_business_confirmation_required" });
+
+    const { rows } = await db.query<{ phone_e164: string | null }>(
+      `SELECT phone_e164 FROM mfa_enrolments
+        WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
+      [identity.id],
+    );
+    expect(rows[0].phone_e164).toBe("+989121234567");
+    expect(await auditRows()).toHaveLength(0);
+  });
+
+  it("stores a confirmed phone change unconfirmed, and says whose other businesses it touches", async () => {
+    const res = await patch({
+      membershipId: membershipA.id,
+      phone: "09121234568",
+      confirmCrossBusiness: true,
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    // Both facts are said out loud: the factor must be re-proven, and the change
+    // was not local to this business.
+    expect(json.notices.join(" ")).toContain("تأیید");
+    expect(json.notices.join(" ")).toContain("۲ کسب‌وکار");
+
+    const { rows } = await db.query<{ phone_e164: string | null; confirmed_at: Date | null }>(
+      `SELECT phone_e164, confirmed_at FROM mfa_enrolments
+        WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
+      [identity.id],
+    );
+    expect(rows[0].phone_e164).toBe("+989121234568");
+    expect(rows[0].confirmed_at).toBeNull();
+
+  });
+
+  it("asks nothing extra when the person belongs to one business only", async () => {
+    // The guard above is conditional on purpose: a blanket refusal would break
+    // the ordinary single-business owner, whose phone change touches nobody
+    // else's login. Fixtures created here so this identity has exactly one
+    // membership.
+    const suffix = randomUUID().slice(0, 8);
+    const biz = (
+      await db.query<{ id: string }>(
+        `INSERT INTO businesses (name, slug) VALUES ('کافه تنها', $1) RETURNING id`,
+        [`solo-${suffix}`],
+      )
+    ).rows[0].id;
+    const personId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO platform_users (email, password_hash, full_name)
+         VALUES ($1, 'x', 'تنها') RETURNING id`,
+        [`solo-${suffix}@example.com`],
+      )
+    ).rows[0].id;
+    const memberId = (
+      await db.query<{ id: string }>(
+        `INSERT INTO users (business_id, role, full_name, platform_user_id)
+         VALUES ($1, 'owner', 'تنها', $2) RETURNING id`,
+        [biz, personId],
+      )
+    ).rows[0].id;
+
+    const res = await patchAt(biz, { membershipId: memberId, phone: "09129998877" });
+    expect(res.status).toBe(200);
+
+    const { rows } = await db.query<{ phone_e164: string | null; confirmed_at: Date | null }>(
+      `SELECT phone_e164, confirmed_at FROM mfa_enrolments
+        WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
+      [personId],
+    );
+    expect(rows[0].phone_e164).toBe("+989129998877");
+    // Still unconfirmed: a number an operator typed is never a proven channel,
+    // no matter how many businesses the person belongs to.
+    expect(rows[0].confirmed_at).toBeNull();
   });
 
   it("refuses an edit that changes nothing", async () => {

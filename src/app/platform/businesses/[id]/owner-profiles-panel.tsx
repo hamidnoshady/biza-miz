@@ -9,11 +9,13 @@
  * else (the platform user id, the identity's active flag, the membership's
  * creation date, the recovery-code count) is reported as state.
  *
- * Editing the email is the one consequential field: it is the *login*, it
- * belongs to a global identity shared with the person's other businesses, and
- * it invalidates their sessions everywhere. That is why it asks for an explicit
- * confirmation when the identity reaches beyond this business, and why the
- * server refuses the change without it.
+ * Two fields are consequential, for the same reason: the email *is* the login,
+ * and the mobile *is* the second factor, and both belong to a global identity
+ * shared with the person's other businesses. Editing either from one business
+ * changes it for all of them — the email invalidates their sessions everywhere,
+ * the phone redirects the channel that protects them everywhere. So both ask
+ * for an explicit confirmation when the identity reaches beyond this business,
+ * and the server refuses either change without it.
  */
 import { useCallback, useEffect, useState } from "react";
 import { formatJalali } from "@/lib/jalali";
@@ -258,7 +260,12 @@ function EditForm({
   const [busy, setBusy] = useState(false);
 
   const emailChanged = email.trim().toLowerCase() !== (profile.email ?? "");
-  const needsCrossBusiness = emailChanged && profile.membershipCount > 1;
+  // The SMS factor lives on the identity, exactly like the email: one person,
+  // one number, every business they belong to. So a phone edit that reaches
+  // beyond this business needs the same explicit yes — see
+  // platform-owner-profile.ts.
+  const phoneChanged = phone.trim() !== (profile.mfa.phoneE164 ?? "");
+  const needsCrossBusiness = (emailChanged || phoneChanged) && profile.membershipCount > 1;
 
   async function save() {
     setBusy(true);
@@ -285,7 +292,7 @@ function EditForm({
     }
     setError(
       data.error === "cross_business_confirmation_required"
-        ? "این هویت در چند کسب‌وکار عضو است؛ برای تغییر نشانی ورود باید تأیید کنید."
+        ? "این هویت در چند کسب‌وکار عضو است؛ برای تغییر نشانی ورود یا شمارهٔ موبایل باید تأیید کنید."
         : data.error === "email_taken"
           ? "این نشانی ورود قبلاً برای شخص دیگری ثبت شده است."
           : data.error === "invalid_email"
@@ -308,7 +315,10 @@ function EditForm({
         <Field label="نشانی ورود (ایمیل)" hint="هویت سراسری — روی همهٔ کسب‌وکارهای این فرد اثر می‌گذارد.">
           <input className={inputClass} dir="ltr" value={email} onChange={(e) => setEmail(e.target.value)} />
         </Field>
-        <Field label="شمارهٔ موبایل (ورود دومرحله‌ای)" hint="خالی‌گذاشتن، شماره را برمی‌دارد؛ شمارهٔ تازه باید دوباره تأیید شود.">
+        <Field
+          label="شمارهٔ موبایل (ورود دومرحله‌ای)"
+          hint="هویت سراسری — این شماره برای همهٔ کسب‌وکارهای این فرد استفاده می‌شود. خالی‌گذاشتن، شماره را برمی‌دارد؛ شمارهٔ تازه باید دوباره تأیید شود."
+        >
           <input className={inputClass} dir="ltr" value={phone} onChange={(e) => setPhone(e.target.value)} />
         </Field>
         <Field label="دلیل تغییر (اختیاری، در تاریخچه ثبت می‌شود)">
@@ -335,8 +345,9 @@ function EditForm({
             onChange={(e) => setConfirmCrossBusiness(e.target.checked)}
           />
           <span>
-            تأیید می‌کنم نشانی ورود این فرد تغییر کند. او در {formatPersianNumber(profile.membershipCount)}{" "}
-            کسب‌وکار عضو است، نشست‌هایش باطل می‌شوند و ورود بعدی با نشانی تازه انجام می‌شود.
+            تأیید می‌کنم هویت سراسری این فرد تغییر کند. او در {formatPersianNumber(profile.membershipCount)}{" "}
+            کسب‌وکار عضو است؛ این تغییر روی همهٔ آن‌ها اثر می‌گذارد
+            {emailChanged ? "، نشست‌هایش باطل می‌شوند و ورود بعدی با نشانی تازه انجام می‌شود" : " و ورود دومرحله‌ای‌اش تا تأیید شمارهٔ تازه کامل نیست"}.
           </span>
         </label>
       ) : null}

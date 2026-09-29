@@ -28,36 +28,42 @@ import {
 import { rialFromGatewayUsd } from "@/lib/ai-gateway";
 import { getPlanAllowance } from "@/lib/ai-plan-allowance";
 import { query } from "@/lib/db";
+import {
+  BILLING_ALWAYS_INCLUDED,
+  BILLING_INCLUDE_KEYS,
+  isBillingIncludeKey,
+} from "@/lib/platform-billing-includes";
 
 /**
- * The section keys `include=` accepts. One key per tab of the business Billing
+ * The section keys `include=` accepts — one per tab of the business Billing
  * page, so the page fetches the tab it is actually showing (issue #755 §17)
  * rather than every collection for every business on every open.
+ *
+ * The keys live in `@/lib/platform-billing-includes` because the page names them
+ * too, and the two lists have to agree: the first version of this contract had
+ * the page sending a key this function refused, which turned every tab load into
+ * a 400 that no test could see.
  */
-const INCLUDE_KEYS = [
-  "subscription",
-  "wallet",
-  "ledger",
-  "payments",
-  "invoices",
-  "usage",
-  "ai",
-  "overrides",
-] as const;
-type IncludeKey = (typeof INCLUDE_KEYS)[number];
+type IncludeKey = (typeof BILLING_INCLUDE_KEYS)[number];
 
 function parseInclude(raw: string | null): { keys: Set<IncludeKey> } | { invalid: string } {
   // No `include` means "everything" — the pre-§17 contract, kept so the global
   // Billing control center and existing callers keep working unchanged.
-  if (raw === null) return { keys: new Set<IncludeKey>(INCLUDE_KEYS) };
+  if (raw === null) return { keys: new Set<IncludeKey>(BILLING_INCLUDE_KEYS) };
   const keys = new Set<IncludeKey>();
   for (const part of raw.split(",")) {
     const key = part.trim().toLowerCase();
     if (!key) continue;
-    if (!(INCLUDE_KEYS as readonly string[]).includes(key)) return { invalid: key };
-    keys.add(key as IncludeKey);
+    // The business's own identity is always returned, so naming it is allowed
+    // rather than a refusal — see BILLING_ALWAYS_INCLUDED. `?include=business`
+    // is therefore a legitimate (if thin) request, and the version that refused
+    // it is what broke every tab of the Billing page.
+    if (key === BILLING_ALWAYS_INCLUDED) continue;
+    if (!isBillingIncludeKey(key)) return { invalid: key };
+    keys.add(key);
   }
-  if (keys.size === 0) return { invalid: "" };
+  // `?include=` with nothing after it is a malformed request, not a thin one.
+  if (keys.size === 0 && raw.trim() === "") return { invalid: "" };
   return { keys };
 }
 
@@ -98,7 +104,11 @@ export const GET = withPlatformScope(
     const parsed = parseInclude(sp.get("include"));
     if ("invalid" in parsed) {
       return NextResponse.json(
-        { error: "invalid_include", invalid: parsed.invalid, valid: INCLUDE_KEYS },
+        {
+          error: "invalid_include",
+          invalid: parsed.invalid,
+          valid: [...BILLING_INCLUDE_KEYS, BILLING_ALWAYS_INCLUDED],
+        },
         { status: 400 },
       );
     }

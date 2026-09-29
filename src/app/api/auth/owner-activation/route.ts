@@ -3,6 +3,7 @@ import {
   OwnerActivationError,
   acceptOwnerActivation,
   previewOwnerActivation,
+  requestActivationCode,
 } from "@/lib/owner-activation";
 
 function errorResponse(err: unknown): NextResponse {
@@ -38,25 +39,44 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * Redeems an activation link: the owner sets their own password, and their
- * second factor and recovery codes are minted here and returned once, to them.
+ * The two halves of the owner's side of activation, on one public endpoint.
  *
- * No platform operator is involved in this request, and none can be — the
- * console that created the business has no password field and receives none of
- * this material.
+ * `{action: "send_code", token}` texts a six-digit code to the owner's own
+ * mobile. `{token, password, code}` redeems the link.
+ *
+ * The code is not optional. The activation link travels through the platform
+ * operator — there is no mail transport in this system — so a link that sufficed
+ * on its own would let whoever provisioned the business set themselves a
+ * password, take the recovery codes and keep permanent access to a tenant they
+ * are supposed to be administering. The code goes to a channel the operator can
+ * make ring and cannot read, so redemption needs both halves, held by two
+ * different people (issue #755 §14, and the Codex review finding that closed
+ * this gap).
+ *
+ * Nothing here mints anything for the operator: the password is the owner's own
+ * choice, and the second factor and recovery codes are created on this request
+ * and returned only to this browser.
  */
 export async function POST(request: NextRequest) {
-  let body: { token?: string; password?: string };
+  let body: { token?: string; password?: string; code?: string; action?: string };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
   if (!body.token) return NextResponse.json({ error: "missing_token" }, { status: 400 });
-  if (!body.password) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
 
   try {
-    return NextResponse.json(await acceptOwnerActivation(body.token, body.password));
+    if (body.action === "send_code") {
+      return NextResponse.json(await requestActivationCode(body.token));
+    }
+
+    if (!body.password) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+    if (!body.code) return NextResponse.json({ error: "activation_code_required" }, { status: 400 });
+
+    return NextResponse.json(
+      await acceptOwnerActivation(body.token, body.password, body.code),
+    );
   } catch (err) {
     return errorResponse(err);
   }

@@ -13,7 +13,9 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  ACTIVATION_CODE_TTL_MINUTES,
   ACTIVATION_TTL_DAYS,
+  MAX_ACTIVATION_CODE_ATTEMPTS,
   MIN_OWNER_PASSWORD_LENGTH,
   activationExpiry,
   activationStatus,
@@ -87,6 +89,22 @@ describe("maskPhone", () => {
     expect(maskPhone("")).toBeNull();
     // Nothing to hide means nothing to show, rather than three "digits".
     expect(maskPhone("12")).toBeNull();
+  });
+});
+
+describe("the texted code that proves the owner holds the phone", () => {
+  it("gives a short window and a small number of guesses", () => {
+    // Both numbers are load-bearing against the operator, who can trigger a code
+    // and holds the link: a long window or a generous attempt count is time to
+    // guess six digits with the link in hand.
+    expect(ACTIVATION_CODE_TTL_MINUTES).toBeLessThanOrEqual(15);
+    expect(ACTIVATION_CODE_TTL_MINUTES).toBeGreaterThan(0);
+    expect(MAX_ACTIVATION_CODE_ATTEMPTS).toBeLessThanOrEqual(10);
+    expect(MAX_ACTIVATION_CODE_ATTEMPTS).toBeGreaterThan(1);
+    // The code must not outlive the link it belongs to.
+    expect(ACTIVATION_CODE_TTL_MINUTES * 60_000).toBeLessThan(
+      ACTIVATION_TTL_DAYS * 24 * 60 * 60 * 1000,
+    );
   });
 });
 

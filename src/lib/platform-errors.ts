@@ -45,6 +45,10 @@ const PLATFORM_ERROR_MESSAGES: Record<string, string> = {
   business_archived: "کسب‌وکار بایگانی‌شده قابل ورود نیست.",
   business_not_found: "کسب‌وکار پیدا نشد.",
   no_owner: "این کسب‌وکار مالک فعالی برای ورود ندارد.",
+  // Issue #755 §14 — the owner activates with a link *and* a code texted to
+  // their own mobile, so provisioning without a number would mint a link nobody
+  // could honour.
+  owner_phone_required: "برای فعال‌سازی مالک، شمارهٔ موبایل الزامی است.",
   impersonation_read_only: "این نشست فقط‌خواندنی است و امکان تغییر ندارد.",
   reason_too_short: "دلیل دسترسی باید دست‌کم ۱۰ نویسه باشد.",
   ticket_unavailable: "تیکت انتخاب‌شده به این کسب‌وکار تعلق ندارد یا در دسترس نیست.",

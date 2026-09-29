@@ -189,6 +189,22 @@ export class ExistingOwnerConfirmationRequiredError extends Error {
   }
 }
 
+/**
+ * `ownerActivation` was asked for without a mobile number to prove control of.
+ *
+ * Issue #755 §14 makes redemption require a one-time code texted to the owner,
+ * because the activation link itself travels by hand — through the operator. A
+ * link without a code would be redeemable by that operator, which is the exact
+ * credential handover the flow exists to remove. So a business that is
+ * provisioned for activation needs a number *before* it is created, rather than
+ * getting a link that can never be honoured.
+ */
+export class OwnerPhoneRequiredError extends Error {
+  constructor() {
+    super("owner_phone_required");
+  }
+}
+
 export const DEFAULT_LOCATION_NAME = "شعبه مرکزی";
 
 /**
@@ -274,9 +290,11 @@ export function validateProvisionBody(
   // "fill everything in", not single out the one field the visitor has never
   // been asked for on this deployment before.
   let ownerPhone: string | null = null;
-  if (options.deploymentMode !== "local") {
-    // Mobile only — this is who the SMS OTP goes to, and a landline can't
-    // receive one.
+  // Required on the activation path regardless of deployment mode: redemption
+  // needs a code sent to this number (see OwnerPhoneRequiredError), so there is
+  // no such thing as an activation link without one. Mobile only — this is who
+  // the SMS OTP goes to, and a landline can't receive one.
+  if (options.deploymentMode !== "local" || options.ownerActivation) {
     if (!isMobilePhone(body.ownerPhone)) return { input: null, error: "invalid_owner_phone" };
     ownerPhone = phoneE164(body.ownerPhone);
   }
@@ -346,6 +364,9 @@ export async function provisionBusiness(
   // caller that skipped `validateProvisionBody` would otherwise store a form
   // -shaped `0912…` in a column everything downstream treats as `+98912…`.
   const ownerPhone = input.ownerPhone ? phoneE164(input.ownerPhone) : null;
+  // Checked before the transaction opens: an activation that could never be
+  // redeemed must not create a business. See OwnerPhoneRequiredError.
+  if (input.ownerActivation && !ownerPhone) throw new OwnerPhoneRequiredError();
 
   return withoutTenantScope("platform", async () => {
     const client = await getPool().connect();

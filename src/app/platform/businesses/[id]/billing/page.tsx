@@ -15,13 +15,19 @@
  *
  * The retired `/plan` section redirects to `?tab=subscription`.
  */
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Loader2Icon, RefreshCwIcon, SparklesIcon, WalletIcon } from "lucide-react";
 import { formatJalali } from "@/lib/jalali";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
+import {
+  BILLING_ALWAYS_INCLUDED,
+  BILLING_TAB_INCLUDES,
+  BILLING_TAB_READY_KEYS,
+  type BillingIncludeKey,
+} from "@/lib/platform-billing-includes";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { PlatformStatusBadge } from "@/components/platform/status-badge";
 import { PlatformConfirmDialog } from "@/components/platform/dialogs";
@@ -141,7 +147,7 @@ interface BusinessBillingData {
   usage: { featureKey: string; usedCount: number; chargedCount: number; spentRial: number }[];
   /** Which sections rode along, and how much of each paged list there is. */
   meta?: {
-    includes: IncludeKey[];
+    includes: BillingIncludeKey[];
     ledger: ListPageInfo;
     payments: ListPageInfo;
     invoices: ListPageInfo;
@@ -154,47 +160,26 @@ interface ListPageInfo {
   offset: number;
 }
 
-type IncludeKey =
-  | "subscription"
-  | "wallet"
-  | "ledger"
-  | "payments"
-  | "invoices"
-  | "usage"
-  | "ai"
-  | "overrides";
-
-/**
- * Which sections each tab needs (issue #755 §17). The API answers an explicit
- * `include=` contract, so opening Invoices no longer loads the wallet, the
- * ledger, usage, media and the subscription total for every business.
- */
-const INCLUDE_BY_TAB: Record<string, IncludeKey[]> = {
-  subscription: ["subscription", "overrides"],
-  wallet: ["wallet", "ledger", "payments", "ai"],
-  invoices: ["invoices"],
-  usage: ["usage", "ai"],
-};
-
-/**
- * The response keys a tab renders. The tab waits for exactly these, so a
- * section that was not requested can never be silently shown as "empty" — the
- * difference between "no invoices" and "invoices not fetched" matters.
- */
-const READY_KEYS: Record<string, string[]> = {
-  subscription: ["subscription", "recurring", "entitlements", "overrides"],
-  wallet: ["wallet", "ledger", "payments", "ai"],
-  invoices: ["invoices"],
-  usage: ["usage", "media", "messaging", "ai"],
-};
-
-/** One page of a paged list. */
+/** One page of a paged list — the unit every "load more" fetches. */
 const PAGE_SIZE = 50;
+
+/**
+ * Concatenated pages, with repeated ids dropped.
+ *
+ * A row can move between pages when something is written while the operator is
+ * paging (the lists are newest-first), so page two can legitimately repeat a row
+ * page one already showed. Without this, React key collisions would show the
+ * ledger twice.
+ */
+function dedupeById<T extends { id: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  return rows.filter((row) => (seen.has(row.id) ? false : (seen.add(row.id), true)));
+}
 
 /**
  * The shape every tab renders against, with shape-complete empties. Sections
  * that were not requested stay at their empty value but are never *shown*: the
- * tab gates on `READY_KEYS` first.
+ * tab gates on BILLING_TAB_READY_KEYS first.
  */
 function emptyBilling(businessId: string): BusinessBillingData {
   return {
@@ -355,30 +340,52 @@ export default function BusinessBillingPage() {
 
   const setTab = (next: Tab) => router.replace(`?tab=${next}`, { scroll: false });
 
-  // How much of each paged list is on screen. `ref` so a reload reads the
-  // current sizes without the callback going stale and refetching page one.
-  const pageSizes = useRef({ ledger: PAGE_SIZE, payments: PAGE_SIZE, invoices: PAGE_SIZE });
-  const [sizes, setSizes] = useState(pageSizes.current);
-
+  /**
+   * `appendSection` is how "load more" works: fetch the *next* page of one list
+   * by offset and concatenate it, rather than re-requesting a longer list.
+   *
+   * The first version grew `limit` instead, which silently capped out: the route
+   * clamps a page size to 200, so past 200 rows every click re-fetched the same
+   * rows, the shown count never reached `total`, and rows 201+ were unreachable.
+   */
   const load = useCallback(
-    async (which: Tab) => {
-      const page = pageSizes.current;
+    async (
+      which: Tab,
+      append?: { section: "ledger" | "payments" | "invoices"; offset: number },
+    ) => {
       const sp = new URLSearchParams({
-        include: ["business", ...INCLUDE_BY_TAB[which]].join(","),
-        ledgerLimit: String(page.ledger),
-        paymentsLimit: String(page.payments),
-        invoicesLimit: String(page.invoices),
+        include: [BILLING_ALWAYS_INCLUDED, ...BILLING_TAB_INCLUDES[which]].join(","),
+        ledgerLimit: String(PAGE_SIZE),
+        paymentsLimit: String(PAGE_SIZE),
+        invoicesLimit: String(PAGE_SIZE),
       });
+      if (append) {
+        sp.set(`${append.section}Offset`, String(append.offset));
+      }
       const { ok, data: res } = await api<Partial<BusinessBillingData> & { error?: string }>(
         `/api/platform/billing/businesses/${businessId}?${sp.toString()}`,
       );
-      if (ok) {
-        // Merge rather than replace: the other tabs' already-loaded sections
-        // stay put, so switching tabs never flashes a half-empty page.
-        setData((prev) => ({ ...prev, ...res }));
-      } else {
+      if (!ok) {
         setError(res.error === "business_not_found" ? "کسب‌وکار یافت نشد." : res.error ?? "بارگذاری انجام نشد.");
+        return;
       }
+      // Merge rather than replace: the other tabs' already-loaded sections stay
+      // put, so switching tabs never flashes a half-empty page.
+      setData((prev) => {
+        const next = { ...prev, ...res };
+        if (!append) return next;
+        // Newest-first lists, so the next page goes on the end — with the ids
+        // de-duplicated, because a row can move between pages when something is
+        // written while the operator is paging.
+        if (append.section === "ledger") {
+          next.ledger = dedupeById([...(prev.ledger ?? []), ...(res.ledger ?? [])]);
+        } else if (append.section === "payments") {
+          next.payments = dedupeById([...(prev.payments ?? []), ...(res.payments ?? [])]);
+        } else {
+          next.invoices = dedupeById([...(prev.invoices ?? []), ...(res.invoices ?? [])]);
+        }
+        return next;
+      });
     },
     [businessId],
   );
@@ -391,12 +398,21 @@ export default function BusinessBillingPage() {
     void load(tab);
   }, [load, tab]);
 
-  /** Fetch one more page of a capped list instead of hiding the rest. */
+  /**
+   * Fetch one more page of a list instead of hiding the rest.
+   *
+   * Resets the section to its first page afterwards on the next tab load, which
+   * is what an operator expects from re-opening a tab — and means a wallet
+   * adjustment refreshes exactly what is on screen rather than a stale count.
+   */
   function loadMore(section: "ledger" | "payments" | "invoices") {
-    const next = { ...pageSizes.current, [section]: pageSizes.current[section] + PAGE_SIZE };
-    pageSizes.current = next;
-    setSizes(next);
-    void load(tab);
+    const shown =
+      section === "ledger"
+        ? (data.ledger?.length ?? 0)
+        : section === "payments"
+          ? (data.payments?.length ?? 0)
+          : (data.invoices?.length ?? 0);
+    void load(tab, { section, offset: shown });
   }
 
   useEffect(() => {
@@ -433,7 +449,7 @@ export default function BusinessBillingPage() {
   }
 
   const view: BusinessBillingData = { ...emptyBilling(businessId), ...data };
-  const ready = READY_KEYS[tab].every((key) => key in data);
+  const ready = BILLING_TAB_READY_KEYS[tab].every((key) => key in data);
 
   return (
     <div className="space-y-4 sm:space-y-6">
@@ -486,7 +502,6 @@ export default function BusinessBillingPage() {
               canAdjustWallet={canAdjustWallet}
               canRefreshSpend={canRefreshSpend}
               busy={busy}
-              pageSizes={sizes}
               onLoadMore={loadMore}
               onBusy={setBusy}
               onReload={reload}
@@ -870,7 +885,6 @@ function WalletTab({
   canAdjustWallet,
   canRefreshSpend,
   busy,
-  pageSizes,
   onLoadMore,
   onBusy,
   onReload,
@@ -882,7 +896,6 @@ function WalletTab({
   canAdjustWallet: boolean;
   canRefreshSpend: boolean;
   busy: string | null;
-  pageSizes: { ledger: number; payments: number; invoices: number };
   onLoadMore: (section: "ledger" | "payments" | "invoices") => void;
   onBusy: (key: string | null) => void;
   onReload: () => Promise<void>;
@@ -1010,7 +1023,7 @@ function WalletTab({
           />
         ) : null}
         <p className="mt-2 text-xs text-muted-foreground">
-          {toPersianDigits(pageSizes.ledger)} ردیف آخر از {toPersianDigits(data.meta?.ledger.total ?? data.ledger.length)} ردیف دفتر نمایش داده شده است.
+          {toPersianDigits(data.ledger.length)} ردیف آخر از {toPersianDigits(data.meta?.ledger.total ?? data.ledger.length)} ردیف دفتر نمایش داده شده است.
         </p>
       </Card>
 

@@ -283,8 +283,8 @@ export function ProvisionDialog({
                   error={phoneError ? platformErrorText(phoneError) : undefined}
                   description={
                     warningLabel
-                      ? `کد ورود دومرحله‌ای به این شماره پیامک می‌شود: ${warningLabel}`
-                      : "کد ورود دومرحله‌ای به این شماره پیامک می‌شود."
+                      ? `کد فعال‌سازی و کد ورود دومرحله‌ای به این شماره پیامک می‌شود: ${warningLabel}`
+                      : "کد فعال‌سازی و کد ورود دومرحله‌ای به این شماره پیامک می‌شود؛ شماره‌ای را وارد کنید که فقط مالک در دست دارد."
                   }
                 >
                   <Input
@@ -300,7 +300,9 @@ export function ProvisionDialog({
                 </PlatformField>
                 <p className="text-xs text-muted-foreground">
                   رمز عبور را شما تعیین نمی‌کنید. پس از ایجاد، یک لینک فعال‌سازی یک‌بارمصرف به مالک
-                  تحویل می‌دهید تا خودش رمز عبور، ورود دومرحله‌ای و کدهای بازیابی‌اش را بسازد.
+                  تحویل می‌دهید تا خودش رمز عبور، ورود دومرحله‌ای و کدهای بازیابی‌اش را بسازد. او برای
+                  تکمیل فعال‌سازی به کد پیامک‌شده به همین شماره هم نیاز دارد؛ آن کد را فقط مالک
+                  می‌بیند، نه شما.
                 </p>
               </PlatformFormSection>
             ) : null}
@@ -323,7 +325,8 @@ export function ProvisionDialog({
                 <ReviewRow label="موبایل مالک" value={ownerPhone.trim()} dir="ltr" />
                 <p className="pt-2 text-xs text-muted-foreground">
                   با ایجاد، سرفصل حساب‌ها ساخته می‌شود و یک لینک فعال‌سازی یک‌بارمصرف برای مالک صادر
-                  می‌شود. رمز عبور مالک را نه شما و نه هیچ اپراتور دیگری تعیین یا مشاهده نمی‌کند.
+                  می‌شود. رمز عبور مالک را نه شما و نه هیچ اپراتور دیگری تعیین یا مشاهده نمی‌کند، و
+                  تکمیل فعال‌سازی به کد پیامک‌شده به موبایل مالک نیاز دارد که تنها در اختیار اوست.
                 </p>
               </div>
             ) : null}
@@ -381,6 +384,11 @@ function ReviewRow({ label, value, dir }: { label: string; value: string; dir?: 
  * reason the token is shown here at all is that there is no mail transport in
  * this system, so somebody has to carry it — and a single-use, expiring link is
  * safe to carry, unlike a credential.
+ *
+ * Carrying it is not the same as holding the account: redemption also needs a
+ * six-digit code texted to the owner's own mobile, which this dialog never sees
+ * and never shows. The copy says so, because an operator who believes the link
+ * is sufficient will be surprised when the owner asks what code.
  */
 function OwnerHandover({
   owner,
@@ -427,8 +435,9 @@ function OwnerHandover({
           <p className="text-sm text-muted-foreground">
             این لینک <strong>یک‌بارمصرف</strong> است و تا{" "}
             {owner.activationExpiresAt ? formatJalali(owner.activationExpiresAt) : "یک هفته"} اعتبار
-            دارد. مالک با باز کردن آن، رمز عبور خودش را تعیین می‌کند و ورود دومرحله‌ای و کدهای
-            بازیابی‌اش را خودش دریافت می‌کند — نه شما.
+            دارد. مالک با باز کردن آن، با زدن دکمهٔ «ارسال کد» یک کد پیامکی به شمارهٔ خودش می‌گیرد، و
+            با آن کد رمز عبور خودش را تعیین می‌کند و ورود دومرحله‌ای و کدهای بازیابی‌اش را خودش
+            دریافت می‌کند — نه شما.
           </p>
 
           {url ? (

@@ -8,27 +8,35 @@
  * they create, and it routes one-time secrets through whatever channel two
  * colleagues happen to share.
  *
- * The replacement is a single-use activation link. The operator can hand it
- * over but cannot use it: redeeming it is where the owner sets their *own*
- * password, and where the second factor and the recovery codes are minted — in
- * the owner's browser, shown only to them, never in the operator's response.
+ * The replacement is a single-use activation link **plus a one-time code sent to
+ * the owner's own mobile**. That second half is not decoration. There is no mail
+ * transport in this system, so the operator is the one who carries the token —
+ * and a token that were sufficient on its own would make the whole thing
+ * theatre: the operator could redeem their own link, choose a password, collect
+ * the recovery codes and keep permanent access. So the code goes to the number
+ * the owner controls, which the operator can trigger but cannot read, and the
+ * two halves have to be held by two different people.
+ *
+ * Redeeming is then where the owner sets their *own* password, and where the
+ * second factor and the recovery codes are minted — in the owner's browser,
+ * shown only to them, never in the operator's response.
  *
  * The link follows the same one-way rule as invitations (0022) and pairing
  * codes (0048): only the sha-256 is stored, so a database read can never yield
- * a usable link.
+ * a usable link. The code is stored the same way (an HMAC), never in the clear.
  *
  * Nothing here imports `business-provisioning.ts`; the dependency runs one way,
  * because provisioning creates the activation inside its transaction and this
  * module must stay importable from the public acceptance route.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import bcrypt from "bcryptjs";
-import { generateSecret, generateURI } from "otplib";
 import { BCRYPT_COST } from "./password-hashing";
 import { getPool, withoutTenantScope } from "./db";
 import { issueRecoveryCodes } from "./mfa-recovery";
-import { provisionMfaEnrolment } from "./mfa-service";
-import { totpQrDataUrl } from "./totp-qr";
+import { getPublicSmsConfig, getSmsProvider } from "./sms-config";
+import { checkMfaChallengeRateLimit, recordMfaChallenge } from "./mfa-rate-limit";
+import { getRealmSecret } from "./jwt-secret";
 
 /** How long an activation link stays usable — the same week an invitation gets. */
 export const ACTIVATION_TTL_DAYS = 7;
@@ -56,6 +64,31 @@ export function hashActivationToken(token: string): string {
 
 export function activationExpiry(now: Date = new Date()): Date {
   return new Date(now.getTime() + ACTIVATION_TTL_DAYS * 24 * 60 * 60 * 1000);
+}
+
+/** How long a texted activation code stays usable. */
+export const ACTIVATION_CODE_TTL_MINUTES = 10;
+
+/** How many wrong guesses before the code is dead and a new one must be sent. */
+export const MAX_ACTIVATION_CODE_ATTEMPTS = 5;
+
+/**
+ * The code's stored form: an HMAC under the platform realm secret, exactly like
+ * `mfa_challenges` (`verifySmsOtp` in mfa-verify.ts computes the same thing).
+ * Reusing the construction keeps one rule for one-time codes in this codebase,
+ * while living on the activation row rather than in that table — an activation
+ * code must never be presentable as a login OTP.
+ */
+async function hashActivationCode(code: string): Promise<string> {
+  const secretKey = await getRealmSecret("platform");
+  return createHmac("sha256", secretKey).update(code).digest("hex");
+}
+
+/** Constant-time compare, so a wrong code cannot be narrowed down by timing. */
+async function codeMatches(stored: string, offered: string): Promise<boolean> {
+  const a = Buffer.from(stored, "hex");
+  const b = Buffer.from(await hashActivationCode(offered), "hex");
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 export interface ActivationState {
@@ -89,6 +122,88 @@ export class OwnerActivationError extends Error {
   ) {
     super(code);
   }
+}
+
+/**
+ * The six-digit code, texted to the owner's mobile.
+ *
+ * Sent through the same provider the login OTP uses, and refused outright when
+ * no provider is configured: `getSmsProvider()` falls back to a no-op that
+ * *logs* the code, which would leave the owner unable to activate and the code
+ * sitting in a server log. No channel, no handover.
+ *
+ * Rate-limited per identity with the login's own limiter, because the two are
+ * the same abuse — someone making a phone ring.
+ */
+export async function requestActivationCode(token: string): Promise<{
+  phoneHint: string;
+  expiresAt: string;
+}> {
+  return withoutTenantScope("login", async () => {
+    const client = await getPool().connect();
+    try {
+      const { rows } = (await client.query(
+        `SELECT a.id, a.email, a.expires_at, a.accepted_at, a.revoked_at,
+                u.phone_e164 AS owner_phone
+           FROM owner_activations a
+           JOIN users u ON u.id = a.user_id
+          WHERE a.token_hash = $1`,
+        [hashActivationToken(token)],
+      )) as {
+        rows: {
+          id: string;
+          email: string;
+          owner_phone: string | null;
+          expires_at: Date;
+          accepted_at: Date | null;
+          revoked_at: Date | null;
+        }[];
+      };
+
+      const row = rows[0];
+      if (!row) throw new OwnerActivationError("invalid_activation", 404);
+
+      // Sending a code to a link that is already used, revoked or expired would
+      // be a text message nobody can act on — and, for a link the operator is
+      // holding, a way to keep a channel warm after the fact.
+      const status = activationStatus({
+        expiresAt: row.expires_at,
+        acceptedAt: row.accepted_at,
+        revokedAt: row.revoked_at,
+      });
+      if (status !== "pending") throw new OwnerActivationError(`activation_${status}`, 409);
+
+      // The console requires a mobile when it provisions, so a missing one here
+      // means the record was changed underneath us — and without a channel there
+      // is no way to prove the owner controls anything.
+      if (!row.owner_phone) throw new OwnerActivationError("activation_phone_missing", 409);
+
+      const config = await getPublicSmsConfig();
+      if (!config.configured) throw new OwnerActivationError("sms_not_configured", 503);
+
+      const limit = await checkMfaChallengeRateLimit(row.email);
+      if (!limit.allowed) throw new OwnerActivationError("rate_limited", 429);
+
+      const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+      await client.query(
+        `UPDATE owner_activations
+            SET code_hash = $2, code_expires_at = now() + ($3 || ' minutes')::interval,
+                code_attempts = 0, code_sent_at = now()
+          WHERE id = $1`,
+        [row.id, await hashActivationCode(code), String(ACTIVATION_CODE_TTL_MINUTES)],
+      );
+
+      await recordMfaChallenge(row.email);
+
+      const provider = await getSmsProvider();
+      await provider.sendOtp(row.owner_phone, code);
+
+      const expiresAt = new Date(Date.now() + ACTIVATION_CODE_TTL_MINUTES * 60_000);
+      return { phoneHint: maskPhone(row.owner_phone) ?? "", expiresAt: expiresAt.toISOString() };
+    } finally {
+      client.release();
+    }
+  });
 }
 
 export interface OwnerActivationInput {
@@ -170,6 +285,9 @@ interface ActivationRow {
   expires_at: Date;
   accepted_at: Date | null;
   revoked_at: Date | null;
+  code_hash: string | null;
+  code_expires_at: Date | null;
+  code_attempts: number;
   business_name: string;
   business_slug: string;
   business_subdomain: string;
@@ -232,15 +350,19 @@ export interface OwnerActivationResult {
   businessSubdomain: string;
   email: string;
   mfa: {
+    /** Which factor protects this login from now on. */
     method: "sms_otp" | "totp";
     phoneE164: string | null;
-    /** Present only on the TOTP path, and only for a brand-new identity. */
-    totpSecret: string | null;
-    totpQr: string | null;
     /**
-     * Empty when the identity already had a second factor: its existing codes
-     * belong to the person and re-issuing them would silently invalidate the
-     * paper they already keep.
+     * True when the identity already had a factor and this activation left it
+     * alone. Nothing was enrolled and nothing re-issued: its existing codes and
+     * secret belong to the person, and replacing them would invalidate the paper
+     * they already keep.
+     */
+    existing: boolean;
+    /**
+     * Empty when the identity already had a second factor, for the same reason.
+     * Otherwise the ten codes, shown here — in the owner's own browser — once.
      */
     recoveryCodes: string[];
   };
@@ -249,6 +371,13 @@ export interface OwnerActivationResult {
 /**
  * Redeems an activation link: the owner sets their own password, and their
  * second factor and recovery codes are minted here and returned to them.
+ *
+ * **The `code` is required, and it is what makes this the owner's act rather
+ * than the operator's.** The token travels by hand — there is no mail transport —
+ * so a token that sufficed alone could be redeemed by whoever provisioned the
+ * business, handing them a password and a set of recovery codes for a tenant
+ * they are supposed to be administering, not holding. The code goes to the
+ * owner's mobile, which the operator can trigger and cannot read.
  *
  * One transaction against the row locked `FOR UPDATE`, so two browsers racing
  * the same link produce one activation and one refusal rather than two
@@ -261,10 +390,12 @@ export interface OwnerActivationResult {
 export async function acceptOwnerActivation(
   token: string,
   password: string,
+  code: string,
 ): Promise<OwnerActivationResult> {
   if (password.length < MIN_OWNER_PASSWORD_LENGTH) {
     throw new OwnerActivationError("weak_password", 400);
   }
+  if (!code.trim()) throw new OwnerActivationError("activation_code_required", 400);
 
   return withoutTenantScope("login", async () => {
     const client = await getPool().connect();
@@ -277,6 +408,7 @@ export async function acceptOwnerActivation(
       const { rows } = (await client.query(
         `SELECT a.id, a.business_id, a.platform_user_id, a.user_id, a.email,
                 a.expires_at, a.accepted_at, a.revoked_at,
+                a.code_hash, a.code_expires_at, a.code_attempts,
                 b.name AS business_name, b.slug::text AS business_slug,
                 b.subdomain::text AS business_subdomain,
                 u.full_name AS owner_name, u.phone_e164 AS owner_phone
@@ -292,6 +424,36 @@ export async function acceptOwnerActivation(
       if (!row) throw new OwnerActivationError("invalid_activation", 404);
       const status = activationStatus(stateOf(row));
       if (status !== "pending") throw new OwnerActivationError(`activation_${status}`, 409);
+
+      // **The proof of control, and the reason the operator cannot do this.**
+      // The token above proves only possession of a link, which the person who
+      // provisioned the business is holding. The code proves control of the
+      // mobile the owner was provisioned with — a channel the operator can make
+      // ring and cannot read. Without this check the whole flow would be theatre:
+      // the operator could redeem their own link, choose a password, collect the
+      // recovery codes and keep permanent access to a tenant they are meant to be
+      // administering rather than holding.
+      //
+      // A wrong code burns one of a handful of tries. That accounting has to
+      // survive the refusal, so it is committed *before* the throw: rolling it
+      // back inside the catch would let an attacker guess forever.
+      if (!row.code_hash || !row.code_expires_at) {
+        throw new OwnerActivationError("activation_code_required", 409);
+      }
+      if (row.code_attempts >= MAX_ACTIVATION_CODE_ATTEMPTS) {
+        throw new OwnerActivationError("activation_code_attempts_exceeded", 429);
+      }
+      if (new Date(row.code_expires_at).getTime() <= Date.now()) {
+        throw new OwnerActivationError("activation_code_expired", 409);
+      }
+      if (!(await codeMatches(row.code_hash, code.trim()))) {
+        await client.query(
+          `UPDATE owner_activations SET code_attempts = code_attempts + 1 WHERE id = $1`,
+          [row.id],
+        );
+        await client.query("COMMIT");
+        throw new OwnerActivationError("activation_code_invalid", 400);
+      }
 
       // The password is theirs from here on. `token_version` moves so any
       // session minted against the throwaway hash is invalidated.
@@ -312,8 +474,6 @@ export async function acceptOwnerActivation(
 
       let method: "sms_otp" | "totp";
       let phoneE164: string | null = null;
-      let totpSecret: string | null = null;
-      let totpQr: string | null = null;
       let recoveryCodes: string[] = [];
 
       const already = existing.rows[0] as { method: string; phone_e164: string | null } | undefined;
@@ -339,37 +499,28 @@ export async function acceptOwnerActivation(
           [row.platform_user_id, row.owner_phone],
         );
       } else {
-        // No mobile to send to — an offline install, or simply no number. TOTP
-        // is the only factor that works without a network, and the secret is
-        // shown to the owner here and nowhere else.
-        method = "totp";
-        const secret = generateSecret();
-        totpSecret = secret;
-        const url = generateURI({
-          label: row.email,
-          issuer: row.business_name,
-          secret,
-          strategy: "totp",
-        });
-        totpQr = await totpQrDataUrl(url);
-        await provisionMfaEnrolment(
-          client,
-          "platform_user",
-          row.platform_user_id,
-          "totp",
-          true,
-          null,
-          Buffer.from(secret),
-        );
+        // Reachable only if the number was removed between the code being sent
+        // and this redemption, which can't happen inside one activation — but a
+        // silent TOTP enrolment here used to paper over exactly this state, and a
+        // second factor nobody agreed to is worse than a refusal the operator can
+        // read. Without a channel there is no owner-controlled half, so there is
+        // no activation either.
+        throw new OwnerActivationError("activation_phone_missing", 409);
       }
 
       if (!already) {
         recoveryCodes = await issueRecoveryCodes("platform_user", row.platform_user_id, client);
       }
 
-      await client.query(`UPDATE owner_activations SET accepted_at = now() WHERE id = $1`, [
-        row.id,
-      ]);
+      // The code is spent with the link: keeping the hash would leave a texted
+      // six-digit code valid against an activation that is already accepted.
+      await client.query(
+        `UPDATE owner_activations
+            SET accepted_at = now(), code_hash = NULL, code_expires_at = NULL,
+                code_attempts = 0
+          WHERE id = $1`,
+        [row.id],
+      );
 
       await client.query(
         `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
@@ -389,7 +540,7 @@ export async function acceptOwnerActivation(
         businessSlug: row.business_slug,
         businessSubdomain: row.business_subdomain,
         email: row.email,
-        mfa: { method, phoneE164, totpSecret, totpQr, recoveryCodes },
+        mfa: { method, phoneE164, existing: Boolean(already), recoveryCodes },
       };
     } catch (err) {
       await client.query("ROLLBACK").catch(() => {});
