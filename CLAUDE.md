@@ -478,6 +478,33 @@ receivable, the store's purchase order and the payroll advance all point at the 
   the knowledge articles and every label say «طرف‌حساب‌ها» for the record and keep
   «مشتری»/«تأمین‌کننده»/«کارمند» for the role a row has.
 
+## Hybrid sync — read before touching an order, a master table or the outbox
+
+A paired desktop and the central server converge through two channels (Phase 44, migrations
+0189/0190; see [docs/server-sync.md](docs/server-sync.md) and
+[docs/phases/Phase-44-Hybrid-Sync-Completeness.md](docs/phases/Phase-44-Hybrid-Sync-Completeness.md)):
+versioned **events** (`sync_events` outbox/inbox) for operations, and the **master feed**
+(per-field clocks in `sync_row_clocks`) for customers, the menu, tables and payment ways.
+
+- **A new mutation of an open order emits its state.** Call `recordOrderState` inside the
+  mutation's own transaction (or `recordOrderStateStandalone` when there is none). A route that
+  changes a bill without it is how "the cloud refused the payment" comes back.
+- **A new money- or stock-moving action is a registered event.** Append it with
+  `appendSyncOutboxEvent` in the same transaction and give it a handler in
+  `sync-domain-handlers.ts`; `appendSyncOutboxEvent` decides who records (a site always, the
+  central server only for a branch with a paired desktop, nobody during a replay).
+- **Never write a master table around the trigger, and never merge a derived column.** A new
+  synchronised table goes into `MASTER_SYNC_TABLES` *and* the trigger list in the same
+  migration (a unit test compares them); stock cost, occupancy, scores and ciphertext stay in
+  `excluded`.
+- **Applying a peer's change sets `app.sync_replay`.** Keep it that way — it is the only thing
+  that stops an event or an edit bouncing back to where it came from.
+- **A replay keeps the peer's instant, a device's flush does not.** Only `origin = 'remote'`
+  may date `opened_at`/`closed_at`/the journal; a phone's clock must never place a sale in a
+  closed day.
+- **Cursors are `(txid, …)` under `pg_snapshot_xmin`, never a bare id.** An id is allocated at
+  INSERT, not COMMIT, and a cursor over it skips late commits.
+
 ## Counting stock — read before touching barcodes or a physical count
 
 Both item models can now be counted with a scanner, and they stay **two separate

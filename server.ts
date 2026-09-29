@@ -110,7 +110,12 @@ app.prepare().then(async () => {
   const { ROLLUP_SYNC_INTERVAL_MS } = await import("./src/lib/rollup");
   const { runBackupTick } = await import("./src/lib/backup-service");
   const { BACKUP_TICK_INTERVAL_MS } = await import("./src/lib/backup");
-  const { runServerSyncTick, SERVER_SYNC_INTERVAL_MS } = await import("./src/lib/server-sync");
+  const {
+    runServerSyncTick,
+    SERVER_SYNC_INTERVAL_MS,
+    runCentralSyncMaintenanceTick,
+    CENTRAL_SYNC_MAINTENANCE_INTERVAL_MS,
+  } = await import("./src/lib/server-sync");
   const { runCloudExceptionRelayTick, CLOUD_EXCEPTION_RELAY_INTERVAL_MS } = await import("./src/lib/cloud-exception-relay");
   const { assertRlsEffective, closeDatabasePool } = await import("./src/lib/db");
   const { deploymentRole, describeDeploymentRole } = await import("./src/lib/deployment-role");
@@ -251,9 +256,41 @@ app.prepare().then(async () => {
   // reach the remote just records the error; the next tick resumes from the
   // stored high-water mark. Disabled unless a business has configured a
   // server-sync target (settings key server_sync.config).
-  const serverSyncTick = () =>
-    runServerSyncTick().catch((err) => console.error("server-sync tick failed:", err));
+  //
+  // Migration 0190: one single-flight runner (a slow tick and the next timer
+  // can no longer overlap), which a committed local change (Postgres NOTIFY)
+  // or a central-side change (long-poll) wakes early — see sync-wake-service.
+  const { createSyncRunner } = await import("./src/lib/sync-wake");
+  const syncRunner = createSyncRunner(
+    async () => {
+      // Tracked like every scheduled job, so shutdown drains a woken run too.
+      const task = runServerSyncTick();
+      backgroundTasks.add(task);
+      try {
+        await task;
+      } finally {
+        backgroundTasks.delete(task);
+      }
+    },
+    (err) => console.error("server-sync tick failed:", err),
+  );
+  const serverSyncTick = () => syncRunner.run();
   scheduleSiteTick(serverSyncTick, SERVER_SYNC_INTERVAL_MS, 20_000);
+  const syncWakeAbort = new AbortController();
+  if (runtimeRole === "site") {
+    const { startSyncWakeListeners } = await import("./src/lib/sync-wake-service");
+    startSyncWakeListeners({ onWake: (delayMs) => syncRunner.kick(delayMs), signal: syncWakeAbort.signal });
+  }
+
+  // The receiving half of that link: retry site events the central deferred
+  // for a missing prerequisite, and expire abandoned pairing sessions. Without
+  // it a deferred event was only retried when the site re-sent it, which
+  // stalled that site's whole push queue behind it.
+  const centralSyncTick = () =>
+    runCentralSyncMaintenanceTick().catch((err) =>
+      console.error("central sync maintenance tick failed:", err),
+    );
+  scheduleCentralTick(centralSyncTick, CENTRAL_SYNC_MAINTENANCE_INTERVAL_MS, 25_000);
 
   // Local/Hybrid Support and Bug Report are durable even when nobody leaves a
   // dashboard open: this site-process worker leases and retries the exception
@@ -590,6 +627,8 @@ app.prepare().then(async () => {
       clearInterval(timer);
     }
     backgroundTimers.clear();
+    syncWakeAbort.abort();
+    syncRunner.cancel();
 
     // WebSockets are long-lived, so server.close() cannot make progress by
     // itself. 1012 tells browsers this is a service restart and invites the

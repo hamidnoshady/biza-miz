@@ -47,9 +47,15 @@ export const SYNC_EVENT_REGISTRY = [
   { type: "order.create", schemaVersion: 1, handler: "legacy.order.create", permission: ORDER_PERMISSION, effectClass: "order", locationRule: "event_location", dependencyErrors: [], payloadFields: ["orderId", "type", "tableId", "customerId", "guestCount", "note", "discount", "items", "delivery"], legacy: true },
   { type: "order.add_items", schemaVersion: 1, handler: "legacy.order.add_items", permission: ORDER_PERMISSION, effectClass: "order", locationRule: "event_location", dependencyErrors: ["order_not_found"], payloadFields: ["orderId", "items"], legacy: true },
   { type: "order_item.status", schemaVersion: 1, handler: "legacy.order_item.status", permission: ORDER_PERMISSION, effectClass: "order", locationRule: "event_location", dependencyErrors: ["item_not_found"], payloadFields: ["itemId", "status"], legacy: true },
+  // Migration 0190: the whole open order after every change (lines, add-ons,
+  // discount, table, customer, kitchen status, void). See order-state-sync.ts.
+  { type: "order.state.synced", schemaVersion: 1, handler: "order.state.synced", permission: ORDER_PERMISSION, effectClass: "order", locationRule: "event_location", dependencyErrors: ["customer_not_found", "menu_item_not_found"], payloadFields: ["orderId", "stateHlc", "order", "items"] },
+  // Migration 0190: a closed-order amendment, replayed through the same
+  // service with the new lines' ids so a later amendment finds them.
+  { type: "order.amendment.posted", schemaVersion: 1, handler: "order.amendment.posted", permission: "orders.amend_closed", effectClass: "order", locationRule: "event_location", dependencyErrors: ["order_not_found", "order_not_completed"], payloadFields: ["orderId", "input", "newItemIds"] },
 
   { type: "order.payment.completed", schemaVersion: 1, handler: "order.payment.completed", permission: PAYMENT_PERMISSION, effectClass: "payment", locationRule: "event_location", dependencyErrors: ["order_not_found", "order_not_open", "customer_not_found"], payloadFields: ["orderId", "method", "reference", "customerId", "tipAmount", "businessDate"] },
-  { type: "order.payment.completed", schemaVersion: 2, handler: "order.payment.completed.v2", permission: PAYMENT_PERMISSION, effectClass: "payment", locationRule: "event_location", dependencyErrors: ["order_not_found", "order_not_open", "customer_not_found", "customer_required"], payloadFields: ["orderId", "tenders", "customerId", "tipAmount", "businessDate"] },
+  { type: "order.payment.completed", schemaVersion: 2, handler: "order.payment.completed.v2", permission: PAYMENT_PERMISSION, effectClass: "payment", locationRule: "event_location", dependencyErrors: ["order_not_found", "order_not_open", "customer_not_found", "customer_required"], payloadFields: ["orderId", "tenders", "customerId", "tipAmount", "businessDate", "entryDate"] },
   { type: "order.customer_return.created", schemaVersion: 1, handler: "order.customer_return.created", permission: REFUND_PERMISSION, effectClass: "refund", locationRule: "event_location", dependencyErrors: ["completed_order_not_found", "order_item_not_found", "historical_cogs_unavailable"], payloadFields: ["orderId", "refundMethod", "refundAmount", "reason", "lines"] },
   { type: "accounting.manual_journal.reversed", schemaVersion: 1, handler: "accounting.manual_journal.reversed", permission: "ledger.approve", effectClass: "journal_reversal", locationRule: "event_location", dependencyErrors: ["entry_not_found"], payloadFields: ["entryId", "memo", "entryDate"] },
 
@@ -85,10 +91,6 @@ const byKey = new Map<string, SyncEventDefinition>(
 export function syncEventDefinition(type: unknown, schemaVersion: unknown): SyncEventDefinition | null {
   if (typeof type !== "string" || !Number.isSafeInteger(schemaVersion) || Number(schemaVersion) < 1) return null;
   return byKey.get(`${type}@${schemaVersion}`) ?? null;
-}
-
-export function isSyncEventType(type: unknown): type is SyncEventType {
-  return typeof type === "string" && SYNC_EVENT_REGISTRY.some((entry) => entry.type === type);
 }
 
 /**

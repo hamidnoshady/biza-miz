@@ -851,6 +851,164 @@ describe("runServerPush — remote outcomes", () => {
   });
 });
 
+describe("runServerPush — per-row delivery", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function insertLocalEvent(applied: boolean): Promise<string> {
+    const clientEventId = randomUUID();
+    await db.query(
+      `INSERT INTO sync_events
+         (location_id,client_event_id,event_type,payload,occurred_at,applied_at,actor_user_id,actor_role,origin)
+       VALUES($1,$2,'order_item.status','{}'::jsonb,now(),${applied ? "now()" : "NULL"},'u1','kitchen','local')`,
+      [bizA.locationId, clientEventId],
+    );
+    return clientEventId;
+  }
+
+  function stubRemote(
+    outcome: (clientEventId: string) => Record<string, unknown>,
+    seen: string[][] = [],
+  ) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as {
+          events: Array<{ clientEventId: string }>;
+        };
+        seen.push(body.events.map((event) => event.clientEventId));
+        return new Response(
+          JSON.stringify({
+            results: body.events.map((event) => ({
+              clientEventId: event.clientEventId,
+              ...outcome(event.clientEventId),
+            })),
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+    return seen;
+  }
+
+  async function pushedIds(): Promise<string[]> {
+    const { rows } = await db.query<{ client_event_id: string }>(
+      "SELECT client_event_id::text FROM sync_events WHERE pushed_at IS NOT NULL ORDER BY id",
+    );
+    return rows.map((row) => row.client_event_id);
+  }
+
+  it("keeps delivering past a deferred or failed row and re-sends only the failed one", async () => {
+    const deferred = await insertLocalEvent(true);
+    const failed = await insertLocalEvent(true);
+    const applied = await insertLocalEvent(true);
+    stubRemote((id) =>
+      id === deferred
+        ? { ok: false, deferred: true, error: "dependency_missing" }
+        : id === failed
+          ? { ok: false, error: "boom" }
+          : { ok: true },
+    );
+    const first = await dbLib.withTenant(bizA.id, () =>
+      serverSync.runServerPush(bizA.id),
+    );
+    expect(first).toEqual({ status: "error", error: "remote_apply_failed: boom" });
+    // The central holds a deferred event and retries it itself; only the
+    // failed row is still owed.
+    expect(await pushedIds()).toEqual([deferred, applied]);
+
+    // The refused row waits out its own backoff before it is offered again…
+    const backoff = await db.query<{ push_attempts: number; waiting: boolean }>(
+      "SELECT push_attempts, next_push_at > now() AS waiting FROM sync_events WHERE client_event_id = $1",
+      [failed],
+    );
+    expect(backoff.rows[0]).toEqual({ push_attempts: 1, waiting: true });
+    // …so move its clock on, as if the wait had passed.
+    await db.query("UPDATE sync_events SET next_push_at = now() - interval '1 second' WHERE client_event_id = $1", [failed]);
+
+    const seen = stubRemote(() => ({ ok: true }));
+    const second = await dbLib.withTenant(bizA.id, () =>
+      serverSync.runServerPush(bizA.id),
+    );
+    expect(second).toEqual({ status: "ok", pushed: 1 });
+    expect(seen).toEqual([[failed]]);
+    expect(await pushedIds()).toEqual([deferred, failed, applied]);
+  });
+
+  it("still delivers a lower-id row that is applied after a higher one went out", async () => {
+    const late = await insertLocalEvent(false);
+    const early = await insertLocalEvent(true);
+    const seen = stubRemote(() => ({ ok: true }));
+    await dbLib.withTenant(bizA.id, () => serverSync.runServerPush(bizA.id));
+    expect(seen).toEqual([[early]]);
+
+    await db.query(
+      "UPDATE sync_events SET applied_at=now() WHERE client_event_id=$1",
+      [late],
+    );
+    await dbLib.withTenant(bizA.id, () => serverSync.runServerPush(bizA.id));
+    expect(seen).toEqual([[early], [late]]);
+  });
+
+  it("sends nothing and logs nothing when there is nothing to send", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await dbLib.withTenant(bizA.id, () =>
+      serverSync.runServerPush(bizA.id),
+    );
+    expect(result).toEqual({ status: "ok", pushed: 0 });
+    expect(fetchMock).not.toHaveBeenCalled();
+    const { rowCount } = await db.query(
+      "SELECT 1 FROM server_sync_log WHERE business_id=$1 AND status='skipped'",
+      [bizA.id],
+    );
+    expect(rowCount).toBe(0);
+  });
+});
+
+describe("runServerPull — cursor shape", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("accepts a bigint id sent as a numeric string by an older central", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              events: [
+                {
+                  id: "12",
+                  clientEventId: randomUUID(),
+                  type: "order_item.status",
+                  occurredAt: new Date().toISOString(),
+                  payload: { itemId: bizA.itemId, status: "preparing" },
+                  locationId: bizA.locationId,
+                  actorUserId: "remote-user",
+                  actorRole: "kitchen",
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const result = await dbLib.withTenant(bizA.id, () =>
+      serverSync.runServerPull(bizA.id),
+    );
+    expect(result).toEqual({ status: "ok", pulled: 1 });
+    const state = await dbLib.withTenant(bizA.id, () =>
+      serverSync.getServerSyncState(bizA.id),
+    );
+    expect(state.lastPulledEventId).toBe(12);
+    const diagnostics = await dbLib.withTenant(bizA.id, () =>
+      serverSync.getSyncDomainDiagnostics(bizA.id),
+    );
+    expect(
+      diagnostics.deadLetters.filter((letter) => letter.source === "server_pull"),
+    ).toHaveLength(0);
+  });
+});
+
 describe("/api/server-sync/push and /pull — cross-business isolation", () => {
   it("applies a batch scoped entirely to the token's own business", async () => {
     const res = await pushRoute.POST(
@@ -931,6 +1089,9 @@ describe("/api/server-sync/push and /pull — cross-business isolation", () => {
 
     expect(pulledA.events).toHaveLength(1);
     expect(pulledA.events[0].locationId).toBe(bizA.locationId);
+    // The site validates the cursor with Number.isSafeInteger; a bigint sent
+    // through as a string made it dead-letter every pulled event.
+    expect(typeof pulledA.events[0].id).toBe("number");
     expect(pulledB.events).toHaveLength(1);
     expect(pulledB.events[0].locationId).toBe(bizB.locationId);
   });

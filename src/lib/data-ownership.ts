@@ -7,8 +7,10 @@
  * replicated before it has a stable identity, conflict and recovery policy.
  */
 import { SYNC_EVENT_REGISTRY } from "./sync-event-registry";
+import { MASTER_SYNC_TABLES } from "./master-sync-registry";
 
-export const REPLICATION_CONTRACT_VERSION = 1 as const;
+/** v2 (migration 0190): customers and the menu sync continuously; cloud writes reach the branch. */
+export const REPLICATION_CONTRACT_VERSION = 2 as const;
 
 export type DataOwnership =
   | "site_authoritative"
@@ -30,6 +32,12 @@ export type ContinuousSyncState =
   "active" | "bootstrap_only" | "not_replicated";
 export type EventDisposition =
   "outbox_and_inbox" | "compatibility_receive_only";
+/**
+ * How a domain travels. `events`: versioned domain events through the
+ * sync_events outbox/inbox. `master_feed`: row state with per-field clocks
+ * through the master-data feed (master-sync-service.ts, migration 0190).
+ */
+export type SyncTransport = "events" | "master_feed" | "none";
 
 /** A versioned event entry in the replication contract, never a wildcard. */
 export interface ReplicationEventDefinition {
@@ -68,7 +76,10 @@ export interface DomainOwnershipDefinition {
   identity: string;
   /** The durable retry/replay rule an operator can rely on. */
   retry: string;
+  transport: SyncTransport;
   events: readonly ReplicationEventDefinition[];
+  /** For `master_feed`: exactly the tables MASTER_SYNC_TABLES captures for this domain. */
+  masterTables?: readonly string[];
 }
 
 const SITE_OPERATIONAL_PROFILES = ["local", "hybrid"] as const;
@@ -148,34 +159,41 @@ function cloudOrBootstrapOnly(
  * version/tombstone event producer exists.
  */
 export const DATA_OWNERSHIP_REGISTRY = {
+  // Operational domains: the desktop is the authority for its branch, and
+  // (contract v2) a write the owner makes in the cloud for that branch is
+  // delivered to it as the same event, so both directions converge.
   orders: replicated({
     domain: "orders",
     authority: "site_authoritative",
-    direction: "site_to_cloud",
+    direction: "bidirectional",
     conflictPolicy: "immutable_idempotent",
     tombstonePolicy: "archive",
     bootstrap: "optional",
     continuousSync: "active",
-    identity: "location-scoped order UUID plus client_event_id",
+    identity: "location-scoped order and line UUIDs plus client_event_id",
     retry:
-      "transactional sync_events outbox; at-least-once delivery and idempotent application",
+      "transactional sync_events outbox; an open order converges by whole-state transfer ordered by hybrid logical clock; at-least-once delivery and idempotent application",
+    transport: "events",
     events: [
       event("order.create", 1),
       event("order.add_items", 1),
       event("order_item.status", 1),
+      event("order.state.synced", 1),
+      event("order.amendment.posted", 1),
     ],
   }),
   payments: replicated({
     domain: "payments",
     authority: "site_authoritative",
-    direction: "site_to_cloud",
+    direction: "bidirectional",
     conflictPolicy: "append_only",
     tombstonePolicy: "not_applicable",
     bootstrap: "optional",
     continuousSync: "active",
     identity: "location-scoped payment or return UUID plus client_event_id",
     retry:
-      "transactional sync_events outbox; payments append and returns compensate rather than overwrite",
+      "transactional sync_events outbox; payments append and returns compensate rather than overwrite; replays keep the paying side's instant and journal date",
+    transport: "events",
     events: [
       event("order.payment.completed", 1, "compatibility_receive_only"),
       event("order.payment.completed", 2),
@@ -185,7 +203,7 @@ export const DATA_OWNERSHIP_REGISTRY = {
   accounting_journals: replicated({
     domain: "accounting_journals",
     authority: "site_authoritative",
-    direction: "site_to_cloud",
+    direction: "bidirectional",
     conflictPolicy: "append_or_reverse",
     tombstonePolicy: "not_applicable",
     bootstrap: "optional",
@@ -193,12 +211,13 @@ export const DATA_OWNERSHIP_REGISTRY = {
     identity: "journal entry UUID plus deterministic reversal client_event_id",
     retry:
       "transactional sync_events outbox; reversals never overwrite posted facts",
+    transport: "events",
     events: [event("accounting.manual_journal.reversed", 1)],
   }),
   inventory_movements: replicated({
     domain: "inventory_movements",
     authority: "site_authoritative",
-    direction: "site_to_cloud",
+    direction: "bidirectional",
     conflictPolicy: "append_only",
     tombstonePolicy: "not_applicable",
     bootstrap: "optional",
@@ -206,6 +225,7 @@ export const DATA_OWNERSHIP_REGISTRY = {
     identity: "location-scoped operation UUID plus client_event_id",
     retry:
       "transactional sync_events outbox; dependent events defer, terminal failures dead-letter",
+    transport: "events",
     events: [
       event("inventory.purchase.created", 1),
       event("inventory.purchase.received", 1),
@@ -223,31 +243,48 @@ export const DATA_OWNERSHIP_REGISTRY = {
       event("inventory.production.reversed", 1),
     ],
   }),
-  customers: cloudOrBootstrapOnly({
+  // Master data (contract v2): row state merged field by field — the later
+  // edit of each field wins, edits to different fields both survive.
+  customers: replicated({
     domain: "customers",
     authority: "shared_synchronized",
     direction: "bidirectional",
     conflictPolicy: "field_merge_with_version",
     tombstonePolicy: "tombstone",
     bootstrap: "required",
-    continuousSync: "bootstrap_only",
-    identity: "stable customer UUID",
+    continuousSync: "active",
+    identity: "stable party UUID",
     retry:
-      "no continuous producer yet; snapshot application is atomic and a later pairing is required",
+      "per-field hybrid-logical-clock capture by trigger; commit-safe feed in both directions; a missing parent defers, an unmergeable change is recorded as a master conflict",
+    transport: "master_feed",
     events: [],
+    masterTables: ["party_categories", "parties"],
   }),
-  products_menu: cloudOrBootstrapOnly({
+  products_menu: replicated({
     domain: "products_menu",
     authority: "shared_synchronized",
     direction: "bidirectional",
-    conflictPolicy: "authoritative_scope",
+    conflictPolicy: "field_merge_with_version",
     tombstonePolicy: "tombstone",
     bootstrap: "required",
-    continuousSync: "bootstrap_only",
+    continuousSync: "active",
     identity: "stable catalogue UUIDs and location scope",
     retry:
-      "no continuous producer yet; snapshot application is atomic and a later pairing is required",
+      "per-field hybrid-logical-clock capture by trigger; commit-safe feed in both directions; derived costs and table occupancy never merge",
+    transport: "master_feed",
     events: [],
+    masterTables: [
+      "payment_methods",
+      "menu_categories",
+      "modifier_groups",
+      "modifiers",
+      "inventory_items",
+      "menu_items",
+      "dining_tables",
+      "menu_item_modifier_groups",
+      "menu_item_ingredients",
+      "modifier_ingredients",
+    ],
   }),
   staff_access: cloudOrBootstrapOnly({
     domain: "staff_access",
@@ -259,7 +296,8 @@ export const DATA_OWNERSHIP_REGISTRY = {
     continuousSync: "bootstrap_only",
     identity: "stable user/platform identity UUID",
     retry:
-      "no continuous producer yet; snapshot application is atomic and a later pairing is required",
+      "separate IAM control-plane stream (iam_events), applied before any operational event",
+    transport: "none",
     events: [],
   }),
   plans_billing: cloudOrBootstrapOnly({
@@ -272,6 +310,7 @@ export const DATA_OWNERSHIP_REGISTRY = {
     continuousSync: "bootstrap_only",
     identity: "central plan and entitlement identity",
     retry: "cloud capability checks are separate from operational sync",
+    transport: "none",
     events: [],
   }),
   printer_settings: cloudOrBootstrapOnly({
@@ -284,6 +323,7 @@ export const DATA_OWNERSHIP_REGISTRY = {
     continuousSync: "not_replicated",
     identity: "device-local printer identifier",
     retry: "never transported",
+    transport: "none",
     events: [],
   }),
   backup_paths: cloudOrBootstrapOnly({
@@ -296,6 +336,7 @@ export const DATA_OWNERSHIP_REGISTRY = {
     continuousSync: "not_replicated",
     identity: "device-local filesystem path",
     retry: "never transported",
+    transport: "none",
     events: [],
   }),
   lan_gateway: cloudOrBootstrapOnly({
@@ -308,6 +349,7 @@ export const DATA_OWNERSHIP_REGISTRY = {
     continuousSync: "not_replicated",
     identity: "device-local network adapter and certificate",
     retry: "never transported",
+    transport: "none",
     events: [],
   }),
   certificate_paths: cloudOrBootstrapOnly({
@@ -320,6 +362,7 @@ export const DATA_OWNERSHIP_REGISTRY = {
     continuousSync: "not_replicated",
     identity: "device-local certificate path",
     retry: "never transported",
+    transport: "none",
     events: [],
   }),
   database_paths: cloudOrBootstrapOnly({
@@ -332,6 +375,7 @@ export const DATA_OWNERSHIP_REGISTRY = {
     continuousSync: "not_replicated",
     identity: "device-local PostgreSQL data path",
     retry: "never transported",
+    transport: "none",
     events: [],
   }),
   cloud_exception_transport: cloudOrBootstrapOnly({
@@ -344,6 +388,7 @@ export const DATA_OWNERSHIP_REGISTRY = {
     continuousSync: "not_replicated",
     identity: "installation identity plus opaque relay event ID",
     retry: "separate bounded cloud-exception outbox, never operational sync",
+    transport: "none",
     events: [],
   }),
 } as const satisfies Record<string, DomainOwnershipDefinition>;
@@ -370,6 +415,8 @@ export function replicationContractProblems(): string[] {
     SYNC_EVENT_REGISTRY.map((entry) => `${entry.type}@${entry.schemaVersion}`),
   );
   const problems: string[] = [];
+  const capturedTables = new Set(MASTER_SYNC_TABLES.map((config) => config.table));
+  const claimedTables = new Set<string>();
   for (const domain of REPLICATION_DOMAIN_CONTRACT.domains) {
     for (const listed of domain.events) {
       if (!available.has(`${listed.type}@${listed.schemaVersion}`)) {
@@ -378,8 +425,20 @@ export function replicationContractProblems(): string[] {
         );
       }
     }
-    if (domain.continuousSync === "active" && domain.events.length === 0) {
+    if (domain.continuousSync === "active" && domain.transport === "events" && domain.events.length === 0) {
       problems.push(`${domain.domain}: active continuous sync has no events`);
+    }
+    if (domain.continuousSync === "active" && domain.transport === "none") {
+      problems.push(`${domain.domain}: active continuous sync has no transport`);
+    }
+    if (domain.transport === "master_feed") {
+      const tables = domain.masterTables ?? [];
+      if (tables.length === 0) problems.push(`${domain.domain}: master feed lists no tables`);
+      for (const table of tables) {
+        if (!capturedTables.has(table)) problems.push(`${domain.domain}: ${table} is not captured by the master feed`);
+        if (claimedTables.has(table)) problems.push(`${domain.domain}: ${table} is claimed by two domains`);
+        claimedTables.add(table);
+      }
     }
     if (
       domain.continuousSync !== "active" &&
@@ -391,4 +450,12 @@ export function replicationContractProblems(): string[] {
     }
   }
   return problems;
+}
+
+/** Every captured master table belongs to exactly one declared domain. */
+export function unclaimedMasterTables(): string[] {
+  const claimed = new Set(
+    REPLICATION_DOMAIN_CONTRACT.domains.flatMap((domain) => ("masterTables" in domain ? domain.masterTables ?? [] : [])),
+  );
+  return MASTER_SYNC_TABLES.map((config) => config.table).filter((table) => !claimed.has(table));
 }

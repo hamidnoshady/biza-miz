@@ -5,6 +5,7 @@ import {
   REPLICATION_DOMAIN_CONTRACT,
   ownershipFor,
   replicationContractProblems,
+  unclaimedMasterTables,
 } from "./data-ownership";
 
 describe("replication-domain contract", () => {
@@ -49,22 +50,35 @@ describe("replication-domain contract", () => {
       expect(
         domain.deploymentAvailability.continuousSyncProfiles,
       ).not.toContain("local");
-      if (domain.continuousSync === "active") {
+      if (domain.continuousSync === "active" && domain.transport === "events") {
         expect(domain.events.length).toBeGreaterThan(0);
       }
     }
   });
 
-  it("does not claim continuous master-data replication before its event producers exist", () => {
-    for (const domain of [
-      "customers",
-      "products_menu",
-      "staff_access",
-    ] as const) {
+  it("syncs customers and the menu continuously, merged field by field, through the master feed", () => {
+    for (const domain of ["customers", "products_menu"] as const) {
       expect(ownershipFor(domain)).toMatchObject({
-        continuousSync: "bootstrap_only",
-        events: [],
+        continuousSync: "active",
+        transport: "master_feed",
+        direction: "bidirectional",
+        conflictPolicy: "field_merge_with_version",
       });
     }
+    // Every table the capture trigger records belongs to one declared domain.
+    expect(unclaimedMasterTables()).toEqual([]);
+  });
+
+  it("keeps staff access on its own control plane, not the master feed", () => {
+    expect(ownershipFor("staff_access")).toMatchObject({
+      continuousSync: "bootstrap_only",
+      transport: "none",
+      events: [],
+    });
+  });
+
+  it("carries open-order state and closed-order amendments as order events", () => {
+    const events = ownershipFor("orders").events.map((entry) => `${entry.type}@${entry.schemaVersion}`);
+    expect(events).toEqual(expect.arrayContaining(["order.state.synced@1", "order.amendment.posted@1"]));
   });
 });

@@ -645,7 +645,7 @@ interface IdentityColumns {
   economicCodeEnc: Buffer | null;
 }
 
-function identityColumns(
+export function identityColumns(
   nationalId: string | null,
   economicCode: string | null,
   dek: Buffer | null,
@@ -683,7 +683,7 @@ interface PhoneColumns {
   kind: string | null;
 }
 
-function phoneColumns(phone: string | null, dek: Buffer | null): PhoneColumns {
+export function phoneColumns(phone: string | null, dek: Buffer | null): PhoneColumns {
   return {
     enc: dek ? encryptOptional(phone, dek) : null,
     bidx: dek && phone ? phoneBlindIndex(phone, dek) : null,

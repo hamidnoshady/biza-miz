@@ -14,6 +14,7 @@ import {
 import { getOnlinePlatformsConfig } from "@/lib/online-platforms-service";
 import { commissionAmountFor } from "@/lib/online-platforms-calculation";
 import { lockOpenOrder } from "@/lib/order-lock";
+import { recordOrderState } from "@/lib/order-state-sync";
 import { paymentFailureFor } from "@/lib/order-payment-errors";
 import { rialBigInt, rialText, type RialText } from "@/lib/inventory-exact";
 import {
@@ -165,6 +166,14 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       return NextResponse.json({ error: locked.error }, { status: locked.status });
     }
     const order = locked.order;
+    // The exact bill being paid, queued for the paired peer before the payment
+    // event and in the same transaction (order-state-sync.ts): even if every
+    // earlier state was lost, the peer settles precisely these lines and totals.
+    await recordOrderState(client, {
+      locationId: location.id,
+      orderId: id,
+      actor: { userId: session.sub, role: session.role },
+    });
     if (customerId) {
       const { rowCount: customerOwned } = await client.query(
         `SELECT 1 FROM parties
@@ -333,6 +342,10 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     // never leave a table that looks empty but still owes money.
     releasedSession = await releaseTableAfterOrderSettled(client, location.id, id, session.sub);
     await markScoringDirtyIn(client, session.businessId);
+    // The date the entries above were posted on (CURRENT_DATE in this same
+    // transaction), so the peer posts its copy on the same day however late
+    // it receives it — its own CURRENT_DATE, and its timezone, may differ.
+    const { rows: postedOn } = await client.query<{ day: string }>("SELECT CURRENT_DATE::text AS day");
     await appendSyncOutboxEvent(client, {
       locationId: location.id,
       clientEventId: `order-payment:${id}`,
@@ -349,6 +362,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
         customerId,
         tipAmount,
         businessDate: businessDay?.businessDate ?? null,
+        entryDate: postedOn[0]?.day ?? null,
       },
       actorUserId: session.sub,
       actorRole: session.role,

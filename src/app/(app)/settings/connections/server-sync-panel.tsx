@@ -59,6 +59,45 @@ interface StateView {
   legacyTokenLastUsedAt: string | null;
 }
 
+interface SyncHealthView {
+  level: "ok" | "warning" | "error";
+  issues: Array<{
+    code:
+      | "sync_disabled"
+      | "backlog_stale"
+      | "backlog_growing"
+      | "events_refused"
+      | "dead_letters"
+      | "master_conflicts"
+      | "drift"
+      | "no_recent_contact";
+    level: "warning" | "error";
+  }>;
+  unsent: number;
+  oldestUnsentAt: string | null;
+  refused: number;
+  lastMasterSyncAt: string | null;
+  nextAttemptAt: string | null;
+  drift: {
+    checkedAt: string | null;
+    status: "ok" | "drift" | "pending" | "error" | null;
+    days: Array<{
+      day: string;
+      site: { completedOrders: number } | null;
+      cloud: { completedOrders: number } | null;
+    }>;
+  };
+}
+
+interface MasterConflictView {
+  id: number;
+  table: string;
+  rowId: string;
+  errorCode: string;
+  attempts: number;
+  lastSeenAt: string;
+}
+
 interface DomainDiagnostics {
   counts: {
     deferred: number;
@@ -168,6 +207,8 @@ export function ServerSyncPanel() {
     useState<ReplicationContractView | null>(null);
   const [appUpdateStatus, setAppUpdateStatus] =
     useState<AppUpdateStatusView | null>(null);
+  const [health, setHealth] = useState<SyncHealthView | null>(null);
+  const [masterConflicts, setMasterConflicts] = useState<MasterConflictView[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -202,10 +243,14 @@ export function ServerSyncPanel() {
       domainDiagnostics: DomainDiagnostics;
       replicationContract: ReplicationContractView;
       appUpdateStatus: AppUpdateStatusView | null;
+      health: SyncHealthView | null;
+      masterConflicts: MasterConflictView[];
       error?: string;
     }>("/api/server-sync/config");
     if (ok) {
       setConfig(data.config);
+      setHealth(data.health ?? null);
+      setMasterConflicts(data.masterConflicts ?? []);
       setRole(data.role ?? "site");
       setResolvedRemoteUrl(data.resolvedRemoteUrl ?? "");
       setPairedSite(data.pairedSite ?? null);
@@ -518,6 +563,8 @@ export function ServerSyncPanel() {
         </form>
       </SectionCard>
 
+      {health ? <SyncHealthCard health={health} conflicts={masterConflicts} /> : null}
+
       <SyncStatusPanels
         syncState={syncState}
         appUpdateStatus={appUpdateStatus}
@@ -527,6 +574,118 @@ export function ServerSyncPanel() {
         onReconcile={reconcile}
       />
     </div>
+  );
+}
+
+const HEALTH_ISSUE_LABELS: Record<SyncHealthView["issues"][number]["code"], string> = {
+  sync_disabled: "همگام‌سازی خاموش است.",
+  backlog_growing: "چند تغییر بیش از ۵ دقیقه است منتظر ارسال به سرور مرکزی مانده‌اند.",
+  backlog_stale: "تغییراتی بیش از ۳۰ دقیقه است به سرور مرکزی نرسیده‌اند.",
+  events_refused: "سرور مرکزی برخی تغییرات را نپذیرفته است؛ با فاصله‌ی بیشتر دوباره فرستاده می‌شوند.",
+  dead_letters: "رویدادهایی کنار گذاشته شده‌اند و بررسی شما را لازم دارند (پایین همین صفحه).",
+  master_conflicts: "برخی تغییرات مشتری یا منو ادغام نشدند (فهرست زیر).",
+  drift: "جمع فروش یا دریافتی برخی روزها با سرور مرکزی یکی نیست.",
+  no_recent_contact: "تغییرات منتظرند و مدتی است با سرور مرکزی تماس موفقی نبوده است.",
+};
+
+const HEALTH_LEVEL_TITLES: Record<SyncHealthView["level"], string> = {
+  ok: "همگام‌سازی سالم است",
+  warning: "همگام‌سازی نیاز به توجه دارد",
+  error: "همگام‌سازی مشکل دارد",
+};
+
+const MASTER_TABLE_LABELS: Record<string, string> = {
+  parties: "طرف‌حساب",
+  party_categories: "دسته طرف‌حساب",
+  payment_methods: "روش پرداخت",
+  menu_categories: "دسته منو",
+  menu_items: "آیتم منو",
+  modifier_groups: "گروه افزودنی",
+  modifiers: "افزودنی",
+  inventory_items: "کالای انبار",
+  dining_tables: "میز",
+  menu_item_modifier_groups: "افزودنی آیتم منو",
+  menu_item_ingredients: "دستور تهیه",
+  modifier_ingredients: "مواد افزودنی",
+};
+
+const MASTER_CONFLICT_LABELS: Record<string, string> = {
+  unique_violation: "نام یا کد تکراری در دو طرف",
+  dependency_missing: "رکورد وابسته هنوز نرسیده است",
+  delete_blocked: "حذف ممکن نبود؛ سابقه دارد",
+};
+
+/**
+ * Migration 0190: the two questions an owner actually has — is it moving, and
+ * do the desktop and the central server agree on the money.
+ */
+function SyncHealthCard({ health, conflicts }: { health: SyncHealthView; conflicts: MasterConflictView[] }) {
+  const Box = health.level === "error" ? ErrorBox : InfoBox;
+  return (
+    <SectionCard title="سلامت همگام‌سازی">
+      <div className="space-y-3">
+        <Box>
+          <p className="font-medium">{HEALTH_LEVEL_TITLES[health.level]}</p>
+          {health.issues.length > 0 ? (
+            <ul className="mt-1 list-disc ps-5 text-sm">
+              {health.issues.map((issue) => (
+                <li key={issue.code}>{HEALTH_ISSUE_LABELS[issue.code]}</li>
+              ))}
+            </ul>
+          ) : null}
+        </Box>
+        <div>
+          <StatusRow label="تغییرات در انتظار ارسال" value={toPersianDigits(String(health.unsent))} />
+          <StatusRow label="قدیمی‌ترین تغییر ارسال‌نشده" value={health.oldestUnsentAt ? formatTime(health.oldestUnsentAt) : "—"} />
+          <StatusRow
+            label="تغییرات ردشده (در انتظار تلاش دوباره)"
+            value={toPersianDigits(String(health.refused))}
+            tone={health.refused > 0 ? "error" : undefined}
+          />
+          <StatusRow label="آخرین همگام‌سازی مشتری و منو" value={formatTime(health.lastMasterSyncAt)} />
+          <StatusRow label="تلاش بعدی پس از خطا" value={health.nextAttemptAt ? formatTime(health.nextAttemptAt) : "—"} />
+          <StatusRow
+            label="مقایسه‌ی فروش با سرور مرکزی"
+            value={
+              health.drift.status === "ok"
+                ? `یکسان (${formatTime(health.drift.checkedAt)})`
+                : health.drift.status === "drift"
+                  ? `${toPersianDigits(String(health.drift.days.length))} روز ناهمخوان`
+                  : health.drift.status === "pending"
+                    ? "پس از ارسال تغییرات در انتظار انجام می‌شود"
+                    : health.drift.status === "error"
+                      ? "انجام نشد — دوباره تلاش می‌شود"
+                      : "هنوز انجام نشده"
+            }
+            tone={health.drift.status === "drift" ? "error" : undefined}
+          />
+        </div>
+        {health.drift.status === "drift" && health.drift.days.length > 0 ? (
+          <ul className="space-y-1 text-sm">
+            {health.drift.days.map((day) => (
+              <li key={day.day} className="text-destructive">
+                {toPersianDigits(formatJalali(day.day))}: این دستگاه{" "}
+                {toPersianDigits(String(day.site?.completedOrders ?? 0))} صورت‌حساب، سرور مرکزی{" "}
+                {toPersianDigits(String(day.cloud?.completedOrders ?? 0))} صورت‌حساب
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {conflicts.length > 0 ? (
+          <div>
+            <p className="text-sm font-medium">ادغام‌نشده‌ها</p>
+            <ul className="mt-1 space-y-1 text-sm">
+              {conflicts.map((conflict) => (
+                <li key={conflict.id}>
+                  {MASTER_TABLE_LABELS[conflict.table] ?? conflict.table} —{" "}
+                  {MASTER_CONFLICT_LABELS[conflict.errorCode] ?? "ادغام ممکن نبود"} ({formatTime(conflict.lastSeenAt)})
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </div>
+    </SectionCard>
   );
 }
 

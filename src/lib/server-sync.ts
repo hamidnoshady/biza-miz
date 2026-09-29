@@ -36,6 +36,9 @@ import type { ServerSyncConfig } from "./server-sync-config";
 import { runIamSync } from "./iam/sync";
 import { refreshAppUpdateStatus } from "./app-update";
 import { expireStalePairingSessions } from "./pairing-service";
+import { runMasterSync } from "./master-sync-transport";
+import { runDriftCheck } from "./sync-health-service";
+import { attemptDue, nextAttemptAt } from "./sync-backoff";
 
 export type { ServerSyncConfig } from "./server-sync-config";
 
@@ -60,6 +63,17 @@ export interface ServerSyncState {
    * see recordLegacyTokenUsage(). Null if it has never happened.
    */
   legacyTokenLastUsedAt: string | null;
+  /**
+   * The pull cursor's transaction half (migration 0190). The central server
+   * orders its feed by (txid, id) so a row committed late is never passed
+   * over; null until the first pull from a central server that reports it.
+   */
+  lastPulledTxid: string | null;
+  /** Consecutive transport failures and when the next attempt is allowed (sync-backoff.ts). */
+  pushFailures: number;
+  pushNextAttemptAt: string | null;
+  pullFailures: number;
+  pullNextAttemptAt: string | null;
 }
 
 const EMPTY_STATE: ServerSyncState = {
@@ -72,6 +86,11 @@ const EMPTY_STATE: ServerSyncState = {
   lastPushError: null,
   lastPullError: null,
   legacyTokenLastUsedAt: null,
+  lastPulledTxid: null,
+  pushFailures: 0,
+  pushNextAttemptAt: null,
+  pullFailures: 0,
+  pullNextAttemptAt: null,
 };
 
 export function legacySyncTokenAllowed(): boolean {
@@ -81,13 +100,6 @@ export function legacySyncTokenAllowed(): boolean {
 export function legacySyncToken(): string | null {
   if (!legacySyncTokenAllowed()) return null;
   return process.env.REMOTE_SYNC_TOKEN?.trim() || null;
-}
-
-export function legacyTokenWarning(): string | null {
-  if (process.env.REMOTE_SYNC_TOKEN && !legacySyncTokenAllowed()) {
-    return "REMOTE_SYNC_TOKEN is set but ALLOW_LEGACY_SYNC_TOKEN is not. Legacy sync token is denied by default.";
-  }
-  return null;
 }
 
 export async function getServerSyncConfig(
@@ -216,12 +228,6 @@ export async function resolveSyncCredential(
   });
 }
 
-export async function resolveBusinessBySyncToken(
-  token: string,
-): Promise<string | null> {
-  return (await resolveSyncCredential(token))?.businessId ?? null;
-}
-
 /**
  * Constant-time comparison for the legacy single-secret REMOTE_SYNC_TOKEN
  * path (kept for deployments that haven't configured a per-business token
@@ -258,11 +264,6 @@ export async function recordSyncRun(run: SyncRunRecord): Promise<void> {
   await query(`INSERT INTO sync_runs (business_id,site_device_id,location_id,direction,status,start_cursor,end_cursor,events_attempted,events_applied,events_deferred,events_conflicted,events_dead_lettered,http_status,error_code,error_detail,completed_at)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())`,
     [run.businessId,run.siteDeviceId??null,run.locationId??null,run.direction,run.status,run.startCursor??null,run.endCursor??null,run.eventsAttempted??0,run.eventsApplied??0,run.eventsDeferred??0,run.eventsConflicted??0,run.eventsDeadLettered??0,run.httpStatus??null,run.errorCode??null,run.errorDetail?.slice(0,500)??null]);
-}
-export interface SyncRunView { id:string; siteDeviceId:string|null; locationId:string|null; direction:"push"|"pull"|"activation"; status:"running"|"ok"|"error"|"skipped"; startedAt:string; completedAt:string|null; eventsAttempted:number; eventsApplied:number; eventsDeferred:number; eventsConflicted:number; eventsDeadLettered:number; errorCode:string|null; }
-export async function listSyncRuns(businessId:string, limit=50): Promise<SyncRunView[]> {
-  const {rows}=await query<{id:string;site_device_id:string|null;location_id:string|null;direction:SyncRunView["direction"];status:SyncRunView["status"];started_at:Date;completed_at:Date|null;events_attempted:number;events_applied:number;events_deferred:number;events_conflicted:number;events_dead_lettered:number;error_code:string|null}>(`SELECT id,site_device_id,location_id,direction,status,started_at,completed_at,events_attempted,events_applied,events_deferred,events_conflicted,events_dead_lettered,error_code FROM sync_runs WHERE business_id=$1 ORDER BY started_at DESC LIMIT $2`,[businessId,Math.min(Math.max(limit,1),200)]);
-  return rows.map(r=>({id:r.id,siteDeviceId:r.site_device_id,locationId:r.location_id,direction:r.direction,status:r.status,startedAt:r.started_at.toISOString(),completedAt:r.completed_at?.toISOString()??null,eventsAttempted:r.events_attempted,eventsApplied:r.events_applied,eventsDeferred:r.events_deferred,eventsConflicted:r.events_conflicted,eventsDeadLettered:r.events_dead_lettered,errorCode:r.error_code}));
 }
 
 /**
@@ -670,10 +671,13 @@ export async function getPairedSite(
        HAVING count(*) > 0`,
       [businessId],
     ),
-    query<{ attempted_at: string; status: "ok" | "error" | "skipped" }>(
-      `SELECT attempted_at, status FROM server_sync_log
-        WHERE business_id = $1
-        ORDER BY attempted_at DESC
+    // sync_runs is what *this* (central) side records for each incoming push
+    // or pull. server_sync_log is only ever written by a site's own outgoing
+    // tick, so on the central it was always empty and the status read null.
+    query<{ status: "ok" | "error" | "skipped" }>(
+      `SELECT status FROM sync_runs
+        WHERE business_id = $1 AND status <> 'running'
+        ORDER BY started_at DESC
         LIMIT 1`,
       [businessId],
     ),
@@ -713,12 +717,25 @@ type SyncEventRow = {
 
 export type PushResult =
   | { status: "disabled" }
+  | { status: "backoff"; until: string }
   | { status: "ok"; pushed: number }
   | { status: "error"; error: string };
 
 /**
- * Fetch unsynced rows from local sync_events and POST them to the remote.
- * Idempotent: the remote deduplicates on (location_id, client_event_id).
+ * Fetch not-yet-delivered rows from local sync_events and POST them to the
+ * remote. Idempotent: the remote deduplicates on (location_id, client_event_id).
+ *
+ * Delivery is tracked per row (`sync_events.pushed_at`, migration 0189), not
+ * by one high-water mark. A mark skipped rows forever whenever a lower id
+ * committed after a higher one, or a locally deferred row was applied late.
+ *
+ * A row is marked delivered once the remote durably holds it: applied, a
+ * recorded conflict, a dead letter, or *deferred*. The remote keeps a deferred
+ * event in its own inbox and retries it (see runCentralSyncMaintenanceTick),
+ * so the site must not keep re-sending it. That retry loop used to block every
+ * later event behind one missing prerequisite. Any other failure leaves the
+ * row unmarked and it goes out again on the next tick, while the rows around
+ * it are still delivered.
  */
 export async function runServerPush(businessId: string): Promise<PushResult> {
   const config = await getServerSyncConfig(businessId);
@@ -729,17 +746,31 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
   const state = await getServerSyncState(businessId);
   const batchSize = config.batchSize ?? 100;
   const afterId = state.lastPushedEventId ?? 0;
+  const now = new Date();
+  // The central server was unreachable or refusing us: wait out the backoff
+  // rather than hammering it every tick (sync-backoff.ts).
+  if (!attemptDue(state.pushNextAttemptAt, now)) {
+    return { status: "backoff", until: state.pushNextAttemptAt! };
+  }
 
   await setSetting(businessId, SETTING_KEYS.serverSyncState, {
     ...state,
-    lastPushAttemptAt: new Date().toISOString(),
+    lastPushAttemptAt: now.toISOString(),
   } satisfies ServerSyncState);
 
-  const fail = async (error: string): Promise<PushResult> => {
+  /**
+   * `transport` failures (unreachable, HTTP error, malformed answer) back the
+   * whole push off. A single refused row does not: it waits on its own
+   * per-row backoff while the rest of the queue keeps moving.
+   */
+  const fail = async (error: string, transport = true): Promise<PushResult> => {
     const s = await getServerSyncState(businessId);
+    const failures = transport ? s.pushFailures + 1 : s.pushFailures;
     await setSetting(businessId, SETTING_KEYS.serverSyncState, {
       ...s,
       lastPushError: error,
+      pushFailures: failures,
+      pushNextAttemptAt: transport ? nextAttemptAt(failures, now) : s.pushNextAttemptAt,
     } satisfies ServerSyncState);
     await query(
       `INSERT INTO server_sync_log (business_id, direction, status, events_count, error, last_event_id)
@@ -749,7 +780,7 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
     return { status: "error", error };
   };
 
-  // Fetch the next batch of local sync_events rows
+  // Fetch the next batch of undelivered local sync_events rows
   let rows: SyncEventRow[];
   try {
     const { rows: r } = await query<SyncEventRow>(
@@ -759,14 +790,15 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
          FROM sync_events se
          JOIN locations l ON l.id = se.location_id
         WHERE l.business_id = $1
-          AND se.id > $2
+          AND se.pushed_at IS NULL
           AND se.applied_at IS NOT NULL
           AND se.error IS NULL
-          AND (se.origin IS NULL OR se.origin = 'local')
-          AND ($4::uuid IS NULL OR se.location_id = $4::uuid)
+          AND se.origin = 'local'
+          AND (se.next_push_at IS NULL OR se.next_push_at <= now())
+          AND ($3::uuid IS NULL OR se.location_id = $3::uuid)
         ORDER BY se.id
-        LIMIT $3`,
-      [businessId, afterId, batchSize, config.locationId ?? null],
+        LIMIT $2`,
+      [businessId, batchSize, config.locationId ?? null],
     );
     rows = r;
   } catch (err) {
@@ -775,14 +807,10 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
     );
   }
 
-  if (rows.length === 0) {
-    await query(
-      `INSERT INTO server_sync_log (business_id, direction, status, events_count, last_event_id)
-       VALUES ($1, 'push', 'skipped', 0, $2)`,
-      [businessId, afterId],
-    );
-    return { status: "ok", pushed: 0 };
-  }
+  // Nothing to send is the normal idle state. It is not logged: one row per
+  // 30-second tick filled server_sync_log with thousands of rows a day that
+  // said nothing, and nothing read them.
+  if (rows.length === 0) return { status: "ok", pushed: 0 };
 
   const events = rows.map((r) => ({
     clientEventId: r.client_event_id,
@@ -802,6 +830,9 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
   }));
 
   const url = `${config.remoteUrl.trim().replace(/\/+$/, "")}/api/server-sync/push`;
+  const delivered: string[] = [];
+  const refused: string[] = [];
+  let firstFailure: string | null = null;
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -833,16 +864,16 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
       if (result.clientEventId !== rows[index].client_event_id) {
         return fail("remote_rejected: mismatched result order");
       }
-      // A conflict is a terminal, explicitly recorded outcome. Any other
-      // apply failure (including an ambiguous in-progress outcome) must stop
-      // the high-water mark rather than silently dropping a domain mutation.
-      if (result.deferred) {
-        return fail(`remote_dependency_deferred: ${result.error || "unknown"}`);
-      }
-      // A dead letter is a terminal, durable remote outcome. Advancing is safe:
-      // the operator can inspect/reconcile it there and retries cannot apply it.
-      if (!result.ok && !result.conflict && !result.deadLettered) {
-        return fail(`remote_apply_failed: ${result.error || "unknown"}`);
+      if (
+        result.ok ||
+        result.conflict ||
+        result.deadLettered ||
+        result.deferred
+      ) {
+        delivered.push(String(rows[index].id));
+      } else {
+        refused.push(String(rows[index].id));
+        firstFailure ??= `remote_apply_failed: ${result.error || "unknown"}`;
       }
     }
   } catch (err) {
@@ -851,15 +882,46 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
     );
   }
 
+  if (delivered.length > 0) {
+    await query(
+      `UPDATE sync_events SET pushed_at = now(), next_push_at = NULL WHERE id = ANY($1::bigint[])`,
+      [delivered],
+    );
+  }
+  // Each refused row waits longer before it is offered again (30 s doubling
+  // to a 15-minute ceiling), so one poison event is not re-sent every tick.
+  if (refused.length > 0) {
+    await query(
+      `UPDATE sync_events
+          SET push_attempts = push_attempts + 1,
+              next_push_at = now() + make_interval(secs => least(900, 30 * power(2, least(push_attempts, 10))))
+        WHERE id = ANY($1::bigint[])`,
+      [refused],
+    );
+  }
   // PostgreSQL bigint values arrive from node-postgres as strings even though
-  // the persisted settings contract uses JSON numbers.
-  const lastId = Number(rows[rows.length - 1].id);
+  // the persisted settings contract uses JSON numbers. The mark is kept for
+  // the status screen only; it no longer decides what is sent.
+  const lastId = Math.max(afterId, ...delivered.map(Number));
+  if (firstFailure) {
+    if (delivered.length > 0) {
+      await setSetting(businessId, SETTING_KEYS.serverSyncState, {
+        ...(await getServerSyncState(businessId)),
+        lastPushedEventId: lastId,
+        pushFailures: 0,
+        pushNextAttemptAt: null,
+      } satisfies ServerSyncState);
+    }
+    return fail(firstFailure, false);
+  }
   const s = await getServerSyncState(businessId);
   await setSetting(businessId, SETTING_KEYS.serverSyncState, {
     ...s,
     lastPushedEventId: lastId,
     lastPushSuccessAt: new Date().toISOString(),
     lastPushError: null,
+    pushFailures: 0,
+    pushNextAttemptAt: null,
   } satisfies ServerSyncState);
   await query(
     `INSERT INTO server_sync_log (business_id, direction, status, events_count, last_event_id)
@@ -875,11 +937,14 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
 
 export type PullResult =
   | { status: "disabled" }
+  | { status: "backoff"; until: string }
   | { status: "ok"; pulled: number }
   | { status: "error"; error: string };
 
 interface RemoteEvent {
   id: number;
+  /** The central row's writing transaction (migration 0190); absent from an older central server. */
+  txid?: string;
   clientEventId: string;
   type: string;
   occurredAt: string;
@@ -891,6 +956,27 @@ interface RemoteEvent {
   siteDeviceId?: string | null;
   schemaVersion?: number;
   origin?: string;
+}
+
+/**
+ * Whether a pulled event lies strictly after the cursor. With transaction ids
+ * (a central server on migration 0190) the order is (txid, id); without them
+ * it is the id alone, as before. A position that does not advance is a
+ * protocol error, never silently skipped.
+ */
+export function pullPositionAdvances(
+  cursorTxid: string | null,
+  cursorId: number,
+  txid: string | null,
+  id: number,
+): boolean {
+  if (txid !== null) {
+    const a = BigInt(txid);
+    const b = BigInt(cursorTxid ?? "0");
+    return a > b || (a === b && id > cursorId);
+  }
+  // An older central server reports no txid and orders by id alone.
+  return id > cursorId;
 }
 
 /**
@@ -906,17 +992,25 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
   const state = await getServerSyncState(businessId);
   const batchSize = config.batchSize ?? 100;
   const afterId = state.lastPulledEventId ?? 0;
+  const afterTxid = state.lastPulledTxid;
+  const now = new Date();
+  if (!attemptDue(state.pullNextAttemptAt, now)) {
+    return { status: "backoff", until: state.pullNextAttemptAt! };
+  }
 
   await setSetting(businessId, SETTING_KEYS.serverSyncState, {
     ...state,
-    lastPullAttemptAt: new Date().toISOString(),
+    lastPullAttemptAt: now.toISOString(),
   } satisfies ServerSyncState);
 
   const fail = async (error: string): Promise<PullResult> => {
     const s = await getServerSyncState(businessId);
+    const failures = s.pullFailures + 1;
     await setSetting(businessId, SETTING_KEYS.serverSyncState, {
       ...s,
       lastPullError: error,
+      pullFailures: failures,
+      pullNextAttemptAt: nextAttemptAt(failures, now),
     } satisfies ServerSyncState);
     await query(
       `INSERT INTO server_sync_log (business_id, direction, status, events_count, error, last_event_id)
@@ -926,8 +1020,14 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
     return { status: "error", error };
   };
 
-  // Fetch from remote
-  const url = `${config.remoteUrl.trim().replace(/\/+$/, "")}/api/server-sync/pull?after=${afterId}&limit=${batchSize}`;
+  // Fetch from remote. `afterTx` asks for the commit-safe (txid, id) order. A
+  // site switching over from the id-only cursor sends 0 and re-reads from the
+  // start once — every replay is idempotent, and an id cursor cannot be
+  // translated into a transaction position without risking a gap. An older
+  // central server ignores afterTx and answers by id, as before.
+  const url =
+    `${config.remoteUrl.trim().replace(/\/+$/, "")}/api/server-sync/pull?after=${afterId}&limit=${batchSize}` +
+    `&afterTx=${encodeURIComponent(afterTxid ?? "0")}`;
   let remoteEvents: RemoteEvent[];
   try {
     const res = await fetch(url, {
@@ -943,12 +1043,16 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
     );
   }
 
+  // Idle is not logged — see the same note in runServerPush.
   if (remoteEvents.length === 0) {
-    await query(
-      `INSERT INTO server_sync_log (business_id, direction, status, events_count, last_event_id)
-       VALUES ($1, 'pull', 'skipped', 0, $2)`,
-      [businessId, afterId],
-    );
+    if (state.pullFailures > 0) {
+      await setSetting(businessId, SETTING_KEYS.serverSyncState, {
+        ...(await getServerSyncState(businessId)),
+        pullFailures: 0,
+        pullNextAttemptAt: null,
+        lastPullError: null,
+      } satisfies ServerSyncState);
+    }
     return { status: "ok", pulled: 0 };
   }
 
@@ -957,8 +1061,16 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
   // canonical dead-letter table. If we cannot persist that envelope we stop:
   // replays are idempotent, silent loss is not.
   let lastAppliedRemoteId = afterId;
+  let lastAppliedTxid = afterTxid;
   for (const e of remoteEvents) {
-    if (!Number.isSafeInteger(e.id) || e.id <= lastAppliedRemoteId) {
+    // A central running an older build sends the bigint id as a numeric
+    // string; accept that exact shape rather than dead-lettering every event.
+    const rawId: unknown = e.id;
+    if (typeof rawId === "string" && /^[1-9][0-9]{0,15}$/.test(rawId)) {
+      e.id = Number(rawId);
+    }
+    const txid = typeof e.txid === "string" && /^[0-9]{1,20}$/.test(e.txid) ? e.txid : null;
+    if (!Number.isSafeInteger(e.id) || !pullPositionAdvances(lastAppliedTxid, lastAppliedRemoteId, txid, e.id)) {
       try {
         await recordServerPullDeadLetter(
           businessId,
@@ -1009,14 +1121,18 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
       }
     }
     lastAppliedRemoteId = e.id;
+    if (txid) lastAppliedTxid = txid;
   }
 
   const s = await getServerSyncState(businessId);
   await setSetting(businessId, SETTING_KEYS.serverSyncState, {
     ...s,
     lastPulledEventId: lastAppliedRemoteId,
+    lastPulledTxid: lastAppliedTxid,
     lastPullSuccessAt: new Date().toISOString(),
     lastPullError: null,
+    pullFailures: 0,
+    pullNextAttemptAt: null,
   } satisfies ServerSyncState);
   await query(
     `INSERT INTO server_sync_log (business_id, direction, status, events_count, last_event_id)
@@ -1105,12 +1221,6 @@ export async function acknowledgePendingPairing(
 // ---------------------------------------------------------------------------
 
 export async function runServerSyncTick(): Promise<void> {
-  // Pairing sessions are cloud-side state, so expire them before per-tenant
-  // sync work. Pending credentials are never accepted by normal sync routes.
-  await expireStalePairingSessions().catch((error) => {
-    console.error("pairing-session cleanup failed:", error);
-  });
-
   // Discovery spans tenants; each business's sync then runs scoped to it.
   const rows = await withoutTenantScope("platform", async () => {
     const result = await query<{ business_id: string }>(
@@ -1141,6 +1251,14 @@ export async function runServerSyncTick(): Promise<void> {
       console.error(`IAM sync blocked operational sync for business ${row.business_id}`);
       continue;
     }
+    // Master data before operational events, in both directions: an order the
+    // desktop pushes names menu items and customers the central server must
+    // already hold, and an order it pulls names ones this desktop must hold.
+    try {
+      await withTenant(row.business_id, () => runMasterSync(row.business_id));
+    } catch (err) {
+      console.error(`master-data sync failed for business ${row.business_id}:`, err);
+    }
     try {
       await withTenant(row.business_id, () => runServerPush(row.business_id));
     } catch (err) {
@@ -1153,6 +1271,9 @@ export async function runServerSyncTick(): Promise<void> {
       await withTenant(row.business_id, async () => {
         await runServerPull(row.business_id);
         await reconcileDeferredSyncEvents(row.business_id);
+        // Hourly: do this desktop and the central server agree on each day's
+        // settled sales? (sync-health-service.ts; skipped while work is queued.)
+        await runDriftCheck(row.business_id);
       });
     } catch (err) {
       console.error(
@@ -1176,3 +1297,46 @@ export async function runServerSyncTick(): Promise<void> {
 }
 
 export const SERVER_SYNC_INTERVAL_MS = 30_000; // 30 s
+
+// ---------------------------------------------------------------------------
+// Central side: the half of the link nothing used to run
+// ---------------------------------------------------------------------------
+
+/**
+ * The receiving (central) half of Hybrid sync. runServerSyncTick only runs on
+ * a site, so before this existed the central never retried a deferred event
+ * on its own, and never expired a pairing session. A site event that arrived
+ * before its prerequisite waited for that same site to re-send it, and the
+ * site's push stalled behind it until then.
+ *
+ * Expires stale pairing sessions (cloud-side state), then retries each
+ * business's dependency-deferred inbox rows. Discovery spans tenants; each
+ * business's reconciliation runs scoped to it, and one failing business never
+ * stops the next.
+ */
+export async function runCentralSyncMaintenanceTick(): Promise<void> {
+  await expireStalePairingSessions().catch((error) => {
+    console.error("pairing-session cleanup failed:", error);
+  });
+
+  const rows = await withoutTenantScope("platform", async () => {
+    const result = await query<{ business_id: string }>(
+      `SELECT DISTINCT business_id FROM sync_domain_effects WHERE status = 'deferred'`,
+    );
+    return result.rows;
+  });
+  for (const row of rows) {
+    try {
+      await withTenant(row.business_id, () =>
+        reconcileDeferredSyncEvents(row.business_id),
+      );
+    } catch (err) {
+      console.error(
+        `central sync reconciliation failed for business ${row.business_id}:`,
+        err,
+      );
+    }
+  }
+}
+
+export const CENTRAL_SYNC_MAINTENANCE_INTERVAL_MS = 60_000; // 1 min

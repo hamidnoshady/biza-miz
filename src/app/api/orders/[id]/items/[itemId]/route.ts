@@ -87,6 +87,7 @@ export const PATCH = withTenantScope(
       modifiers,
       modifierIds: body.modifierIds,
       void: body.void,
+      actor: { userId: session.sub, role: session.role },
     });
     if (!result.ok)
       return NextResponse.json(

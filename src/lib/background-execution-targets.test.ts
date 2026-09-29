@@ -15,7 +15,7 @@ describe("background execution targets", () => {
       "platformBackupTick", "aiProactiveTick", "wooSyncTick", "websiteSyncTick",
       "websiteBillingTick", "mediaBillingTick", "cmsControlTick", "holooSyncTick",
       "holooPushTick", "holooReconciliationTick", "notificationTick", "messagingTick",
-      "scheduledExportTick",
+      "scheduledExportTick", "centralSyncTick",
     ]) {
       expect(server).toContain(`scheduleCentralTick(${tick},`);
       expect(server).not.toContain(`scheduleBackgroundTick(${tick},`);

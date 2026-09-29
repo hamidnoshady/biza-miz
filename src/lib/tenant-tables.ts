@@ -45,6 +45,10 @@ export const EXEMPT_TABLES = new Set([
   // storage credentials are deliberately absent; per-device runtime/update
   // telemetry lives in RLS-protected site_device_* tables.
   "platform_releases",
+  // Migration 0190 — this database's hybrid-logical-clock node id and floor.
+  // A singleton describing the install, not any business: every business on
+  // it stamps edits with the same node.
+  "sync_hlc_state",
   // Phase J dropped the legacy AI credit catalogues (ai_credit_packages,
   // ai_subscription_plans) with the rest of the Phase 18 billing schema
   // (migration 0164); the singleton provider config platform_ai_gateway is
