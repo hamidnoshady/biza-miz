@@ -11,7 +11,7 @@
  * would be worse than no picker.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { PlusIcon, Trash2Icon, UsersIcon } from "lucide-react";
 import {
   EmptyState,
@@ -128,8 +128,12 @@ export function TeamsSection({
     setAddUserId("");
   }
 
-  const memberIds = new Set((members ?? []).map((m) => m.userId));
-  const addable = lookups.members.filter((m) => !memberIds.has(m.id));
+  // ⚡ Bolt: Extract O(N) lookup set and filtering into useMemo to prevent
+  // recreating the array and Set on every component render.
+  const addable = useMemo(() => {
+    const memberIds = new Set((members ?? []).map((m) => m.userId));
+    return lookups.members.filter((m) => !memberIds.has(m.id));
+  }, [members, lookups.members]);
 
   return (
     <div className="flex flex-col gap-4">
