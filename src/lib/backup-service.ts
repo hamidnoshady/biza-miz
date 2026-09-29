@@ -34,6 +34,8 @@ import {
 } from "./restore-engine";
 import { runPgDump as runPgDumpTool } from "./pg-tools";
 import { secureUnlink } from "./secure-temp";
+import { deploymentRole } from "./deployment-role";
+import { discardRestoreUpload, readRestoreUpload, uploadSourceName } from "./restore-upload";
 import { getSetting, setSetting, SETTING_KEYS } from "./settings";
 import {
   BACKUP_RUNS_SHOWN,
@@ -732,6 +734,18 @@ export type RestoreOutcome =
 /** One restore in flight per business per process — the same shape as backups. */
 const restoreInFlight = new Set<string>();
 
+/** Where the bytes of a restore come from. */
+export type RestoreSource =
+  | { source: "local" | "cloud"; artifact: string }
+  /**
+   * A file the Owner uploaded in pieces (./restore-upload.ts). This is the
+   * only way to restore on an install whose `backup_runs` never saw the file —
+   * a reinstalled desktop, or a dump carried over on a USB stick. A typed
+   * passphrase wins over the stored one, because the stored one belongs to
+   * *this* install and the file may come from the previous one.
+   */
+  | { source: "upload"; uploadId: string; fileName?: string; passphrase?: string };
+
 /**
  * The dashboard's restore: `apply: false` verifies the artifact into a scratch
  * database and reports the validation summary; `apply: true` replaces the
@@ -744,7 +758,7 @@ const restoreInFlight = new Set<string>();
  */
 export async function restoreFromArtifact(
   businessId: string,
-  opts: { source: "local" | "cloud"; artifact: string; apply: boolean },
+  opts: RestoreSource & { apply: boolean },
 ): Promise<RestoreOutcome> {
   if (restoreInFlight.has(businessId)) return { status: "failed", error: "restore_busy" };
   if (!(await restoreAvailable())) return { status: "failed", error: "restore_not_available" };
@@ -752,9 +766,17 @@ export async function restoreFromArtifact(
   try {
     const config = await getBackupConfig(businessId);
 
-    // 1. The artifact bytes — a local file or a cloud download.
+    // 1. The artifact bytes — a local file, a cloud download, or an upload.
     let data: Buffer;
-    if (opts.source === "local") {
+    let sourceName: string;
+    let passphrase = backupPassphrase(config);
+    if (opts.source === "upload") {
+      const staged = await readRestoreUpload(businessId, opts.uploadId);
+      if (!staged) return { status: "failed", error: "upload_not_found" };
+      data = staged;
+      sourceName = uploadSourceName(opts.fileName);
+      if (opts.passphrase) passphrase = opts.passphrase;
+    } else if (opts.source === "local") {
       // The artifact name arrives in the request body — reject a path before it
       // reaches the filesystem. (The cloud branch takes an object key, where a
       // `/` is the configured prefix and legitimate.)
@@ -766,6 +788,7 @@ export async function restoreFromArtifact(
       } catch {
         return { status: "failed", error: "artifact_not_found" };
       }
+      sourceName = opts.artifact;
     } else {
       const s3 = s3ConfigOf(config);
       if (!s3.endpoint || !s3.bucket || !s3.accessKeyId || !s3.secretAccessKey) {
@@ -776,42 +799,122 @@ export async function restoreFromArtifact(
       } catch (err) {
         return { status: "failed", error: `download_failed:${errText(err)}` };
       }
+      sourceName = opts.artifact.split("/").at(-1) ?? opts.artifact;
     }
 
-    // 2. Decrypt if needed, stage as a plaintext dump. The same passphrase the
-    //    backup/upload paths encrypt with — top-level, then the legacy cloud
-    //    slot, then BACKUP_PASSPHRASE.
-    let staged: { workDir: string; dumpPath: string; sourceName: string };
-    try {
-      staged = await stageDumpFile(
-        data,
-        backupPassphrase(config),
-        opts.artifact.split("/").at(-1) ?? opts.artifact,
-      );
-    } catch (err) {
-      if (err instanceof RestoreRefusal) return { status: "failed", error: err.refusalCode };
-      return { status: "failed", error: errText(err) };
+    // 2 + 3. Decrypt/stage, verify into a scratch database, and only then apply.
+    const outcome = await stageAndRestore(data, {
+      passphrase,
+      sourceName,
+      apply: opts.apply,
+      emergencyDir: path.join(backupDir(config.directory), "emergency"),
+    });
+    // An applied upload has done its job; a verified one stays staged so the
+    // Owner can apply the very same bytes without uploading them twice.
+    if (opts.source === "upload" && outcome.status === "applied") {
+      await discardRestoreUpload(businessId, opts.uploadId).catch(() => {});
     }
-
-    // 3. Verify into a scratch database, and only then apply.
-    try {
-      const { verified, applied } = await restoreDumpFile({
-        databaseUrl: dumpDatabaseUrl(),
-        dumpPath: staged.dumpPath,
-        source: staged.sourceName,
-        apply: opts.apply,
-        emergencyDir: path.join(backupDir(config.directory), "emergency"),
-      });
-      return { status: applied ? "applied" : "verified", summary: applied ?? verified };
-    } catch (err) {
-      return { status: "failed", error: errText(err) };
-    } finally {
-      await cleanupStagedDump(staged.workDir).catch(() => {});
-    }
+    return outcome;
   } catch (err) {
     console.error(`restore failed for business ${businessId}:`, errText(err));
     return { status: "failed", error: errText(err) };
   } finally {
     restoreInFlight.delete(businessId);
+  }
+}
+
+/**
+ * Steps 2 and 3 of every tenant-side restore: decrypt when the bytes carry the
+ * POSBKP1 envelope, stage a plaintext dump, verify it into a scratch database,
+ * and — only when asked and only after that passes — apply it.
+ */
+async function stageAndRestore(
+  data: Buffer,
+  opts: { passphrase: string; sourceName: string; apply: boolean; emergencyDir: string },
+): Promise<RestoreOutcome> {
+  let staged: { workDir: string; dumpPath: string; sourceName: string };
+  try {
+    staged = await stageDumpFile(data, opts.passphrase, opts.sourceName);
+  } catch (err) {
+    if (err instanceof RestoreRefusal) return { status: "failed", error: err.refusalCode };
+    return { status: "failed", error: errText(err) };
+  }
+  try {
+    const { verified, applied } = await restoreDumpFile({
+      databaseUrl: dumpDatabaseUrl(),
+      dumpPath: staged.dumpPath,
+      source: staged.sourceName,
+      apply: opts.apply,
+      emergencyDir: opts.emergencyDir,
+    });
+    return { status: applied ? "applied" : "verified", summary: applied ?? verified };
+  } catch (err) {
+    return { status: "failed", error: errText(err) };
+  } finally {
+    await cleanupStagedDump(staged.workDir).catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// First-run restore — a reinstalled desktop bringing its old database back
+// ---------------------------------------------------------------------------
+
+/** The upload scope of the first-run screen, where no business exists yet. */
+export const SETUP_RESTORE_SCOPE = "setup";
+
+/**
+ * Whether the first-run screen may offer «بازگردانی از فایل پشتیبان».
+ *
+ * Only on a *site* install (the desktop, never the central server) whose
+ * database is still completely empty — no business and no user. That is the
+ * exact state in which /api/setup/bootstrap and /api/setup/pair also run
+ * without a session: whoever is at the machine is about to decide what this
+ * install is, and choosing "the database I backed up before reinstalling" is
+ * the same decision as "a new business" or "pair with my cloud account".
+ * The moment a user exists, this closes, and the Owner-gated dashboard
+ * restore is the only way in.
+ */
+export async function freshInstallRestoreAvailable(): Promise<boolean> {
+  if (deploymentRole() !== "site") return false;
+  const { rows } = await withoutTenantScope("first-run", () =>
+    query<{ businesses: string; users: string }>(
+      `SELECT (SELECT count(*) FROM businesses)::text AS businesses,
+              (SELECT count(*) FROM users)::text AS users`,
+      [],
+    ),
+  );
+  return Number(rows[0]?.businesses ?? 1) === 0 && Number(rows[0]?.users ?? 1) === 0;
+}
+
+let setupRestoreInFlight = false;
+
+/** Verify (and on request apply) an uploaded dump onto an empty install. */
+export async function restoreFreshInstall(opts: {
+  uploadId: string;
+  fileName?: string;
+  passphrase?: string;
+  apply: boolean;
+}): Promise<RestoreOutcome> {
+  if (setupRestoreInFlight) return { status: "failed", error: "restore_busy" };
+  if (!(await freshInstallRestoreAvailable())) return { status: "failed", error: "restore_not_available" };
+  setupRestoreInFlight = true;
+  try {
+    const data = await readRestoreUpload(SETUP_RESTORE_SCOPE, opts.uploadId);
+    if (!data) return { status: "failed", error: "upload_not_found" };
+    const outcome = await stageAndRestore(data, {
+      passphrase: opts.passphrase || process.env.BACKUP_PASSPHRASE || "",
+      sourceName: uploadSourceName(opts.fileName),
+      apply: opts.apply,
+      emergencyDir: path.join(backupDir(), "emergency"),
+    });
+    if (outcome.status === "applied") {
+      await discardRestoreUpload(SETUP_RESTORE_SCOPE, opts.uploadId).catch(() => {});
+    }
+    return outcome;
+  } catch (err) {
+    console.error("first-run restore failed:", errText(err));
+    return { status: "failed", error: errText(err) };
+  } finally {
+    setupRestoreInFlight = false;
   }
 }

@@ -71,6 +71,11 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/pairing/acknowledge",
   "/api/pairing/activate",
   "/api/server-sync/credential-rotation",
+  "/api/iam/snapshot",
+  "/api/iam/events",
+  "/api/iam/status",
+  "/api/iam/commands",
+  "/api/iam/detach",
   "/mcp",
 ] as const;
 
@@ -120,6 +125,10 @@ const PUBLIC_PATHS = [
   // database, so there is no session to require. The one-time code in the body
   // is the credential, and the route refuses once any user exists.
   "/api/setup/pair",
+  // Desktop first-run restore (a reinstall bringing its old database back):
+  // the third choice on the same empty-database screen, refused by the route
+  // itself once any business or user exists, and never on a central server.
+  "/api/setup/restore",
   // The cloud side of that same exchange, on whatever origin the owner copied.
   // The twin under /api/platform is unchanged, but everything with that prefix
   // is moved to the console's host — and since an owner now issues a desktop
@@ -170,6 +179,21 @@ const PUBLIC_PATHS = [
   // server-sync-auth.ts before anything is read or written.
   "/api/server-sync/master",
   "/api/server-sync/digest",
+  // The IAM control plane a paired desktop reconciles before every sync tick
+  // (src/lib/iam/sync.ts): snapshot, events and status are read with the site
+  // bearer credential, and commands/detach are posted with it — each route
+  // checks it itself (authenticateIamSite). Missing from this list, every
+  // call was answered 401 here; runIamSync() then failed on every tick and
+  // runServerSyncTick() skipped master data, push and pull entirely, so a
+  // paired desktop showed «در حال اتصال» forever and nothing moved either way.
+  // Deliberately not in SYNC_TOKEN_RATE_LIMITED_PATHS: three calls per tick on
+  // top of the operational ones would spend that shared budget and put sync
+  // back behind a 429 the owner cannot see.
+  "/api/iam/snapshot",
+  "/api/iam/events",
+  "/api/iam/status",
+  "/api/iam/commands",
+  "/api/iam/detach",
   // Migration 0132: the same shape again — the caller is another *server*
   // migrating onto this one, authenticated with a bearer token issued in the
   // super-admin console (`platform_backup_tokens`, hashed), never with a
@@ -484,6 +508,9 @@ const AUTH_RATE_LIMITED_PATHS = [
   "/api/pairing/redeem",
   "/api/pairing/acknowledge",
   "/api/setup/pair",
+  // The first-run restore's verify/apply (not its upload pieces, which a
+  // single file sends dozens of): no session exists yet, like pair.
+  "/api/setup/restore",
   // Self-service business registration accepts an *existing* platform user's
   // email with a guessed password (adding a business to an already-registered
   // account authenticates against that account's real password — see

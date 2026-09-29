@@ -6,6 +6,7 @@ import {
   CheckIcon,
   CloudIcon,
   HardDriveIcon,
+  HistoryIcon,
   ShieldCheckIcon,
   SparklesIcon,
   WifiOffIcon,
@@ -44,11 +45,35 @@ const options = [
   },
 ];
 
+/**
+ * Shown only when the server says this empty desktop install may restore
+ * (GET /api/setup/restore) — the way back after uninstalling and reinstalling.
+ */
+const restoreOption = {
+  mode: "restore" as const,
+  icon: HistoryIcon,
+  title: "بازگردانی از فایل پشتیبان",
+  eyebrow: "بعد از نصب دوباره",
+  description:
+    "فایل پشتیبانی را که قبل از حذف برنامه ساخته‌اید بارگذاری کنید تا همهٔ داده‌ها و حساب‌های قبلی برگردند.",
+  points: [
+    "فایل ‎.dump‎ یا ‎.dump.enc‎",
+    "ابتدا بررسی، سپس بازگردانی",
+    "اتصال ابری بعداً با «ترمیم اتصال»",
+  ],
+  badge: "برای نصب دوباره",
+};
+
+export type SetupMode = "local" | "connect" | "restore";
+
 export function ModeChoice({
   onChoose,
+  canRestore = false,
 }: {
-  onChoose: (mode: "local" | "connect") => void;
+  onChoose: (mode: SetupMode) => void;
+  canRestore?: boolean;
 }) {
+  const shown = canRestore ? [...options, restoreOption] : options;
   return (
     <div className="w-full max-w-5xl">
       <div className="mb-8 text-center sm:mb-10">
@@ -67,8 +92,8 @@ export function ModeChoice({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        {options.map((option) => {
+      <div className={`grid gap-4 sm:grid-cols-2 ${canRestore ? "lg:grid-cols-3" : ""}`}>
+        {shown.map((option) => {
           const Icon = option.icon;
           return (
             <article

@@ -6,6 +6,7 @@ import { FormLoadingSkeleton } from "@/components/form-loading-skeleton";
 import { cardClass } from "@/app/dashboard/page-chrome";
 import { ModeChoice } from "./mode-choice";
 import { PairForm } from "./pair-form";
+import { UploadRestorePanel } from "@/app/dashboard/backup/backup-manager";
 import {
   ENABLED_INDUSTRIES,
   INDUSTRIES,
@@ -13,7 +14,7 @@ import {
   type Industry,
 } from "@/lib/industries";
 
-type Stage = "choosing" | "local" | "connecting";
+type Stage = "choosing" | "local" | "connecting" | "restoring";
 
 /**
  * First-run page. On a completely empty database it asks how this install
@@ -25,6 +26,15 @@ export default function WelcomePage() {
   const router = useRouter();
   const [checking, setChecking] = useState(true);
   const [stage, setStage] = useState<Stage>("choosing");
+  const [canRestore, setCanRestore] = useState(false);
+
+  useEffect(() => {
+    // Only an empty *desktop* install may restore here; the server decides.
+    fetch("/api/setup/restore")
+      .then((r) => r.json())
+      .then((s: { available?: boolean }) => setCanRestore(Boolean(s.available)))
+      .catch(() => setCanRestore(false));
+  }, []);
 
   useEffect(() => {
     fetch("/api/setup/state")
@@ -61,13 +71,22 @@ export default function WelcomePage() {
             <span>انتخاب روش</span>
             <span className="h-px w-8 bg-border" />
             <span className="size-2 rounded-full bg-amber-500 dark:bg-amber-400" />
-            <span>{stage === "local" ? "ساخت فضای کار" : "اتصال دستگاه"}</span>
+            <span>
+              {stage === "local"
+                ? "ساخت فضای کار"
+                : stage === "restoring"
+                  ? "بازگردانی پشتیبان"
+                  : "اتصال دستگاه"}
+            </span>
           </div>
         ) : null}
         {stage === "choosing" ? (
           <ModeChoice
+            canRestore={canRestore}
             onChoose={(mode) =>
-              setStage(mode === "local" ? "local" : "connecting")
+              setStage(
+                mode === "local" ? "local" : mode === "restore" ? "restoring" : "connecting",
+              )
             }
           />
         ) : null}
@@ -77,8 +96,60 @@ export default function WelcomePage() {
         {stage === "connecting" ? (
           <PairForm onBack={() => setStage("choosing")} />
         ) : null}
+        {stage === "restoring" ? (
+          <RestoreFromFileForm onBack={() => setStage("choosing")} />
+        ) : null}
       </div>
     </main>
+  );
+}
+
+/**
+ * The reinstall path: upload the backup the previous install wrote, verify it,
+ * then replace this empty database with it. Afterwards the owner signs in with
+ * their old account; cloud sync is re-attached from the desktop panel's
+ * «ترمیم / اتصال دوباره», which keeps the restored data and queued events.
+ */
+function RestoreFromFileForm({ onBack }: { onBack: () => void }) {
+  const router = useRouter();
+  const [applied, setApplied] = useState(false);
+  return (
+    <div className={`mx-auto w-full max-w-2xl ${cardClass} p-8`}>
+      {!applied ? (
+        <button
+          type="button"
+          onClick={onBack}
+          className="mb-4 inline-flex min-h-10 items-center rounded-lg px-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
+        >
+          ← بازگشت
+        </button>
+      ) : null}
+      <h1 className="mb-1 text-2xl font-bold">بازگردانی از فایل پشتیبان</h1>
+      <p className="mb-6 text-sm text-muted-foreground">
+        فایل ابتدا در یک پایگاه‌دادهٔ موقت بررسی می‌شود و تا شما تأیید نکنید چیزی تغییر نمی‌کند.
+      </p>
+      <UploadRestorePanel
+        endpoint="/api/setup/restore/upload"
+        onApplied={() => setApplied(true)}
+        onRun={async ({ uploadId, fileName, passphrase, apply }) => {
+          const res = await fetch("/api/setup/restore", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ uploadId, fileName, passphrase, apply }),
+          });
+          return res.json().catch(() => ({ error: "" }));
+        }}
+      />
+      {applied ? (
+        <button
+          type="button"
+          onClick={() => router.replace("/login")}
+          className="mt-6 inline-flex min-h-10 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground"
+        >
+          رفتن به صفحهٔ ورود
+        </button>
+      ) : null}
+    </div>
   );
 }
 

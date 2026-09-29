@@ -18,6 +18,7 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useCallback, useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
+import { uploadRestoreFile } from "@/lib/restore-upload-client";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { ErrorBox, Field, InfoBox, PrimaryButton, api, inputClass } from "../ui";
 import { Button } from "@/components/ui/button";
@@ -130,6 +131,12 @@ const RESTORE_ERRORS: Record<string, string> = {
   missing_artifact: "نسخهٔ پشتیبان انتخاب نشده است.",
   download_failed: "دریافت نسخهٔ پشتیبان از فضای ابری ناموفق بود:",
   decrypt_failed: "رمزگشایی نسخهٔ پشتیبان ناموفق بود — عبارت عبور را بررسی کنید:",
+  upload_not_found: "فایل بارگذاری‌شده دیگر روی سرور نیست؛ دوباره بارگذاری کنید.",
+  upload_failed: "بارگذاری فایل پشتیبان ناموفق بود.",
+  upload_network: "ارتباط هنگام بارگذاری فایل قطع شد؛ دوباره تلاش کنید.",
+  upload_offset: "بارگذاری فایل پشتیبان ناهماهنگ شد؛ دوباره تلاش کنید.",
+  upload_too_large: "این فایل برای بازگردانی بیش از حد بزرگ است.",
+  empty_chunk: "فایل انتخاب‌شده خالی است.",
 };
 
 function restoreErrorMessage(code: string): string {
@@ -227,7 +234,7 @@ function SourcePill({
 
 function RestoreCard({ onChanged }: { onChanged: () => void }) {
   const [view, setView] = useState<RestoreView | null>(null);
-  const [source, setSource] = useState<"local" | "cloud">("local");
+  const [source, setSource] = useState<"local" | "cloud" | "file">("local");
   /** The artifact key a request is running for, and which of the two it is. */
   const [busy, setBusy] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<"verify" | "apply" | null>(null);
@@ -250,7 +257,7 @@ function RestoreCard({ onChanged }: { onChanged: () => void }) {
     load();
   }, [load]);
 
-  const artifacts = (source === "local" ? view?.local : view?.cloud) ?? [];
+  const artifacts = (source === "local" ? view?.local : source === "cloud" ? view?.cloud : null) ?? [];
 
   // A whole-database restore replaces every business on the install, so the
   // server only offers it when there is exactly one. Elsewhere the card is a
@@ -258,7 +265,7 @@ function RestoreCard({ onChanged }: { onChanged: () => void }) {
   // feature flag hides what a business hasn't bought.
   if (view && !view.allowed) return null;
 
-  function pickSource(next: "local" | "cloud") {
+  function pickSource(next: "local" | "cloud" | "file") {
     setSource(next);
     setConfirmKey(null);
     setConfirmed(false);
@@ -307,6 +314,9 @@ function RestoreCard({ onChanged }: { onChanged: () => void }) {
             <SourcePill active={source === "cloud"} onClick={() => pickSource("cloud")}>
               ابری
             </SourcePill>
+            <SourcePill active={source === "file"} onClick={() => pickSource("file")}>
+              از فایل
+            </SourcePill>
           </div>
         ) : null
       }
@@ -330,7 +340,22 @@ function RestoreCard({ onChanged }: { onChanged: () => void }) {
         </InfoBox>
       ) : null}
 
-      {!view ? (
+      {source === "file" ? (
+        <UploadRestorePanel
+          endpoint="/api/backup/restore/upload"
+          onRun={async ({ uploadId, fileName, passphrase, apply }) => {
+            const res = await api<{ status?: string; summary?: RestoreSummary; error?: string }>(
+              "/api/backup/restore",
+              {
+                method: "POST",
+                body: JSON.stringify({ source: "upload", uploadId, fileName, passphrase, apply }),
+              },
+            );
+            if (res.ok && res.data.status === "applied") onChanged();
+            return res.ok ? res.data : { error: res.data.error ?? "" };
+          }}
+        />
+      ) : !view ? (
         <LoadingSkeleton rows={3} />
       ) : artifacts.length === 0 ? (
         <EmptyState>نسخهٔ پشتیبان {source === "local" ? "محلی" : "ابری"} موفقی یافت نشد.</EmptyState>
@@ -441,6 +466,194 @@ function RestoreCard({ onChanged }: { onChanged: () => void }) {
         </ul>
       )}
     </SectionCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Restore from a file this install never recorded (reinstall, USB stick)
+// ---------------------------------------------------------------------------
+
+type RestoreRunResult = { status?: string; summary?: RestoreSummary; error?: string };
+
+function uploadErrorMessage(code: string): string {
+  if (code === "passphrase_required") {
+    return "این فایل رمزنگاری شده است؛ عبارت عبور رمزنگاری همان نصبی را که پشتیبان را ساخته وارد کنید.";
+  }
+  if (code === "restore_not_available") {
+    return "بازگردانی روی این نصب در دسترس نیست (فقط روی نصب تازه یا تک‌کسب‌وکاری ممکن است).";
+  }
+  return restoreErrorMessage(code);
+}
+
+/**
+ * Pick a `.dump`/`.dump.enc`, upload it in pieces, verify it into a scratch
+ * database, then — after the same explicit confirmation as a listed artifact —
+ * apply it. Shared with the first-run screen, which passes its own endpoints.
+ */
+export function UploadRestorePanel({
+  endpoint,
+  onRun,
+  onApplied,
+}: {
+  endpoint: string;
+  onRun: (input: {
+    uploadId: string;
+    fileName: string;
+    passphrase: string;
+    apply: boolean;
+  }) => Promise<RestoreRunResult>;
+  onApplied?: () => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [passphrase, setPassphrase] = useState("");
+  const [uploadId, setUploadId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [busy, setBusy] = useState<"upload" | "verify" | "apply" | null>(null);
+  const [summary, setSummary] = useState<RestoreSummary | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function pickFile(next: File | null) {
+    setFile(next);
+    setUploadId(null);
+    setSummary(null);
+    setConfirmed(false);
+    setDone(false);
+    setError(null);
+    setProgress(null);
+  }
+
+  async function verify() {
+    if (!file) return;
+    setError(null);
+    setSummary(null);
+    let id = uploadId;
+    if (!id) {
+      setBusy("upload");
+      const uploaded = await uploadRestoreFile(endpoint, file, setProgress);
+      if (!uploaded.ok) {
+        setBusy(null);
+        setError(uploadErrorMessage(uploaded.error));
+        return;
+      }
+      id = uploaded.uploadId;
+      setUploadId(id);
+    }
+    setBusy("verify");
+    const result = await onRun({ uploadId: id, fileName: file.name, passphrase, apply: false });
+    setBusy(null);
+    if (result.error || result.status !== "verified" || !result.summary) {
+      if (result.error === "upload_not_found") setUploadId(null);
+      setError(uploadErrorMessage(result.error ?? ""));
+      return;
+    }
+    setSummary(result.summary);
+  }
+
+  async function apply() {
+    if (!file || !uploadId) return;
+    setBusy("apply");
+    setError(null);
+    const result = await onRun({ uploadId, fileName: file.name, passphrase, apply: true });
+    setBusy(null);
+    if (result.error || result.status !== "applied") {
+      if (result.error === "upload_not_found") setUploadId(null);
+      setError(uploadErrorMessage(result.error ?? ""));
+      return;
+    }
+    setDone(true);
+    setSummary(null);
+    onApplied?.();
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-sm leading-6 text-muted-foreground">
+        فایل پشتیبانی را که پیش‌تر ساخته‌اید (مثلاً قبل از حذف و نصب دوبارهٔ برنامه) انتخاب کنید —
+        پسوند آن <code dir="ltr">.dump</code> یا <code dir="ltr">.dump.enc</code> است. فایل خروجی SQL
+        یا اکسل قابل بازگردانی نیست.
+      </p>
+      {error ? <ErrorBox>{error}</ErrorBox> : null}
+      {done ? (
+        <InfoBox>
+          بازگردانی انجام شد. برنامه را ببندید و دوباره باز کنید، سپس با همان حساب کاربری قبلی وارد
+          شوید. برای وصل‌کردن دوبارهٔ همگام‌سازی ابری به «تنظیمات ← اتصال‌ها ← برنامهٔ دسکتاپ ← ترمیم /
+          اتصال دوباره» بروید و یک کد اتصال تازه از پنل ابری وارد کنید.
+        </InfoBox>
+      ) : null}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="فایل پشتیبان">
+          <input
+            type="file"
+            accept=".dump,.enc,application/octet-stream"
+            className={inputClass}
+            disabled={busy !== null}
+            onChange={(e) => pickFile(e.target.files?.[0] ?? null)}
+          />
+        </Field>
+        <Field label="عبارت عبور رمزنگاری (اگر فایل رمزنگاری‌شده است)">
+          <input
+            type="password"
+            dir="ltr"
+            autoComplete="off"
+            className={inputClass}
+            value={passphrase}
+            disabled={busy !== null}
+            onChange={(e) => setPassphrase(e.target.value)}
+          />
+        </Field>
+      </div>
+      {busy === "upload" && progress !== null ? (
+        <p className="text-xs text-muted-foreground">
+          در حال بارگذاری… {toPersianDigits(String(Math.round(progress * 100)))}٪
+        </p>
+      ) : null}
+      {summary ? (
+        <InfoBox>
+          بررسی <code dir="ltr">{summary.source}</code> موفق بود —{" "}
+          {toPersianDigits(String(summary.migrations))} مهاجرت و جدول‌های اصلی:{" "}
+          {summary.tables.map((t) => `${t.name}: ${toPersianDigits(String(t.rows))}`).join(" · ")}.
+        </InfoBox>
+      ) : null}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!file || busy !== null}
+          onClick={() => void verify()}
+        >
+          {busy === "upload" ? "در حال بارگذاری…" : busy === "verify" ? "در حال بررسی…" : "بارگذاری و بررسی"}
+        </Button>
+      </div>
+      {summary ? (
+        <div className="space-y-3 rounded-xl border border-destructive/25 bg-destructive/[0.055] p-3">
+          <p className="text-xs leading-5 text-destructive">
+            بازگردانی، پایگاه‌دادهٔ فعلی این نصب را کامل با محتوای این فایل جایگزین می‌کند؛ هر داده‌ای
+            که اکنون در این نصب است و در فایل نیست از بین می‌رود.
+          </p>
+          <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-foreground">
+            <input
+              type="checkbox"
+              checked={confirmed}
+              onChange={(e) => setConfirmed(e.target.checked)}
+              className="size-4"
+            />
+            می‌فهمم که دادهٔ فعلی این نصب با این فایل جایگزین می‌شود.
+          </label>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            disabled={!confirmed || busy !== null}
+            onClick={() => void apply()}
+          >
+            {busy === "apply" ? "در حال بازگردانی…" : "بازگردانی نهایی"}
+          </Button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

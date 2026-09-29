@@ -154,6 +154,13 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "setup/pair":
     "first-run only — claims an existing online business on an empty install and refuses with " +
     "409 as soon as any user exists, exactly like setup/bootstrap",
+  "setup/restore":
+    "first-run only — restores a reinstalled desktop's own backup onto an empty install; refuses " +
+    "with 403 unless this is a site (never central) install with no business and no user, the " +
+    "same window setup/bootstrap and setup/pair run in",
+  "setup/restore/upload":
+    "first-run only — stages the pieces of the file setup/restore verifies, behind the identical " +
+    "empty-site-install check",
   "setup/pair/test":
     "first-run only — probes whether a typed address reaches a POS server at all, so a wrong " +
     "address is separable from a wrong code before the one-time code is spent; refuses with 409 " +
