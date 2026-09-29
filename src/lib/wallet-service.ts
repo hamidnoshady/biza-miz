@@ -257,7 +257,7 @@ export async function getWalletBalanceRial(businessId: string): Promise<number> 
   return wallet.balanceRial;
 }
 
-export async function listLedger(businessId: string, limit = 50): Promise<LedgerEntry[]> {
+export async function listLedger(businessId: string, limit = 50, offset = 0): Promise<LedgerEntry[]> {
   const { rows } = await query<{
     id: string;
     kind: LedgerKind;
@@ -270,8 +270,8 @@ export async function listLedger(businessId: string, limit = 50): Promise<Ledger
   }>(
     `SELECT id, kind, direction, amount_rial, balance_after_rial, feature_key, note, created_at
        FROM wallet_ledger WHERE business_id = $1
-      ORDER BY created_at DESC, id DESC LIMIT $2`,
-    [businessId, limit],
+      ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3`,
+    [businessId, limit, offset],
   );
   return rows.map((r) => ({
     id: r.id,
@@ -283,6 +283,21 @@ export async function listLedger(businessId: string, limit = 50): Promise<Ledger
     note: r.note,
     createdAt: r.created_at,
   }));
+}
+
+/**
+ * How many ledger rows this business has in total.
+ *
+ * The console pages the ledger (issue #755 §17) instead of silently showing
+ * the newest 50 and calling it the ledger, so it needs a denominator to say
+ * "50 of 312" and to know when "load more" has nothing left to fetch.
+ */
+export async function countLedger(businessId: string): Promise<number> {
+  const { rows } = await query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM wallet_ledger WHERE business_id = $1`,
+    [businessId],
+  );
+  return Number(rows[0]?.count ?? 0);
 }
 
 export async function listCreditPackages(activeOnly = false): Promise<CreditPackage[]> {
@@ -1185,15 +1200,22 @@ export async function getPaymentById(id: string): Promise<PaymentRecord | null> 
 }
 
 export async function listPayments(
-  options: { businessId?: string; status?: PaymentStatus; limit?: number } = {},
+  options: {
+    businessId?: string;
+    status?: PaymentStatus;
+    limit?: number;
+    /** Rows to skip — the console pages payments rather than capping at 50. */
+    offset?: number;
+  } = {},
 ): Promise<PaymentRecord[]> {
   const limit = Math.min(options.limit ?? 100, 500);
+  const offset = Math.max(options.offset ?? 0, 0);
   if (options.businessId) {
     const { rows } = await query<Record<string, unknown>>(
       `SELECT * FROM billing_payments WHERE business_id = $1
         AND ($2::text IS NULL OR status = $2)
-        ORDER BY created_at DESC, id DESC LIMIT $3`,
-      [options.businessId, options.status ?? null, limit],
+        ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
+      [options.businessId, options.status ?? null, limit, offset],
     );
     return rows.map(rowToPayment);
   }
@@ -1202,10 +1224,29 @@ export async function listPayments(
     `SELECT p.*, b.name AS business_name
        FROM billing_payments p JOIN businesses b ON b.id = p.business_id
       WHERE ($2::text IS NULL OR p.status = $2)
-      ORDER BY p.created_at DESC, p.id DESC LIMIT $1`,
-    [limit, options.status ?? null],
+      ORDER BY p.created_at DESC, p.id DESC LIMIT $1 OFFSET $3`,
+    [limit, options.status ?? null, offset],
   );
   return rows.map(rowToPayment);
+}
+
+/** Total payments matching the same filter `listPayments` pages through. */
+export async function countPayments(
+  options: { businessId?: string; status?: PaymentStatus } = {},
+): Promise<number> {
+  if (options.businessId) {
+    const { rows } = await query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM billing_payments
+        WHERE business_id = $1 AND ($2::text IS NULL OR status = $2)`,
+      [options.businessId, options.status ?? null],
+    );
+    return Number(rows[0]?.count ?? 0);
+  }
+  const { rows } = await query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM billing_payments WHERE ($1::text IS NULL OR status = $1)`,
+    [options.status ?? null],
+  );
+  return Number(rows[0]?.count ?? 0);
 }
 
 function rowToPayment(row: Record<string, unknown>): PaymentRecord {

@@ -468,6 +468,13 @@ jobs:
 
   # Single status check that fails if any job failed, was cancelled, or
   # never ran.
+  #
+  # `skipped` is in the list because that is what the three states it names
+  # actually look like from here: a job whose `if` evaluated false, or one
+  # Github never started, reports `skipped`, not `failure` — so checking only
+  # `failure`/`cancelled` would let a required job quietly not run and still
+  # report "all checks passed", which is the opposite of what this job is for
+  # (issue #755 §22).
   required:
     name: all checks passed
     runs-on: windows-latest
@@ -475,8 +482,14 @@ jobs:
     if: always()
     steps:
       - name: Check job results
+        env:
+          # Rendered as a space-separated list, so a skipped job reads as
+          # `skipped` in the log instead of only changing a boolean.
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          if ("${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" -eq "true") {
-            Write-Host "::error::One or more required checks failed."
+          Write-Host "job results: $env:RESULTS"
+          $bad = @($env:RESULTS -split '\s+' | Where-Object { $_ -in @('failure', 'cancelled', 'skipped') })
+          if ($bad.Count -gt 0) {
+            Write-Host "::error::One or more required checks failed, were cancelled, or did not run: $($bad -join ', ')"
             exit 1
           }

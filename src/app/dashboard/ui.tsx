@@ -321,6 +321,25 @@ const ERROR_MESSAGES: Record<string, string> = {
     invitation_revoked: "این دعوت لغو شده است.",
     invitation_expired: "این دعوت منقضی شده است.",
     invalid_current_password: "رمز عبور فعلی درست نیست.",
+    // Issue #755 §14 — owner activation. The link is the credential, so every
+    // refusal has to say which way it failed.
+    invalid_activation: "این لینک فعال‌سازی معتبر نیست.",
+    activation_accepted: "این لینک فعال‌سازی قبلاً استفاده شده است.",
+    activation_revoked: "این لینک فعال‌سازی لغو شده است.",
+    activation_expired: "این لینک فعال‌سازی منقضی شده است. از پشتیبانی بخواهید لینک تازه‌ای صادر کند.",
+    // The link travels through the operator, so the texted code is what proves
+    // control of the owner's own mobile — each refusal has to say which half
+    // failed, or the owner cannot tell "ask for a new code" from "ask for a new
+    // link".
+    activation_code_required: "کد پیامک‌شده را وارد کنید. برای دریافت کد، دکمهٔ «ارسال کد» را بزنید.",
+    activation_code_invalid: "کد پیامک‌شده درست نیست. دوباره بررسی کنید یا کد تازه بگیرید.",
+    activation_code_expired: "کد پیامک‌شده منقضی شده است؛ کد تازه بگیرید.",
+    activation_code_attempts_exceeded:
+      "تلاش‌های ناموفق زیاد بود و این کد دیگر پذیرفته نمی‌شود؛ کد تازه بگیرید.",
+    activation_phone_missing: "برای این فعال‌سازی شماره‌ای ثبت نشده است؛ با پشتیبانی تماس بگیرید.",
+    sms_not_configured: "سامانهٔ پیامک این نصب تنظیم نشده است، پس کد فعال‌سازی فرستاده نمی‌شود.",
+    email_already_registered:
+      "این ایمیل از قبل حساب کاربری پلتفرم دارد. با تأیید، این کسب‌وکار به همان حساب اضافه می‌شود و رمز عبور فعلی او تغییر نمی‌کند.",
     no_login: "این عضو حساب ورود با ایمیل ندارد.",
     nothing_to_change: "تغییری برای ذخیره وجود ندارد.",
     business_suspended: "دسترسی این کسب‌وکار موقتاً معلق شده است.",

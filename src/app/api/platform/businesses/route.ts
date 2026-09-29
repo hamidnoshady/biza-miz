@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformAdmin, requirePlatformCapability, platformAudit, withPlatformScope } from "@/lib/platform-auth";
-import { queryBusinesses, type BusinessQuery } from "@/lib/platform-service";
+import {
+  queryBusinesses,
+  listBusinessPlanKeys,
+  type BusinessQuery,
+} from "@/lib/platform-service";
 import { rootDomain } from "@/lib/host";
 import { isIndustry } from "@/lib/industries";
 import {
   provisionBusiness,
   validateProvisionBody,
-  EmailPasswordMismatchError,
+  ExistingOwnerConfirmationRequiredError,
+  OwnerPhoneRequiredError,
   SubdomainTakenError,
   type ProvisionRequestBody,
 } from "@/lib/business-provisioning";
@@ -23,7 +28,11 @@ const VALID_ACTIVITY = new Set(["active", "idle"]);
  * `rootDomain` rides along because the console is a client component and cannot
  * read the server's environment — it needs the root to render a business's real
  * URL and to preview one before provisioning. The response carries `meta` with
- * pagination info (task section 25).
+ * pagination info (task section 25) and `statusCounts`, whose three figures are
+ * server-side aggregates over the current filter context — not a count of the
+ * 20 rows on this page, which is what the summary cards used to show.
+ * `plans` is the distinct plan keys in use, so the plan filter has real options
+ * without a `plans.manage`-gated catalogue read.
  */
 export const GET = withPlatformScope(async (request: NextRequest) => {
   const { error } = await requirePlatformAdmin();
@@ -50,11 +59,17 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
     pageSize: Number.isFinite(pageSizeNum) && pageSizeNum > 0 ? pageSizeNum : undefined,
   };
 
-  const result = await queryBusinesses(q);
+  const [result, plans] = await Promise.all([queryBusinesses(q), listBusinessPlanKeys()]);
   return NextResponse.json({
     businesses: result.businesses,
     rootDomain: rootDomain(),
-    meta: { total: result.total, page: result.page, pageSize: result.pageSize },
+    plans,
+    meta: {
+      total: result.total,
+      page: result.page,
+      pageSize: result.pageSize,
+      statusCounts: result.statusCounts,
+    },
   });
 });
 
@@ -63,6 +78,20 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
  * branch, and — because this is the console, not the setup wizard — the default
  * chart of accounts, so the owner can log straight in and sell (exit criterion
  * 1). Owner-only (`business.provision`), and audited before we return.
+ *
+ * **No password is accepted here (issue #755 §14).** The console used to take
+ * an operator-chosen owner password and print the owner's second factor and
+ * recovery codes. Now the new owner's identity is created with 32 random bytes
+ * nobody knows, and the response carries a single-use activation link the
+ * operator hands over. The owner sets their own password and receives their own
+ * MFA material at that link, in their own browser — so no platform operator
+ * ever holds a permanent credential to a tenant.
+ *
+ * The one exception is an email that already has a platform login: that person
+ * keeps the password they already have (the operator never learns it), and the
+ * business is simply added to their account. Because that is still an action on
+ * somebody else's identity, it is refused the first time and only performed
+ * when the operator repeats the request with `confirmExistingOwner`.
  */
 export const POST = withPlatformScope(async (request: NextRequest) => {
   const { session, error } = await requirePlatformCapability("business.provision");
@@ -79,7 +108,10 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   // the one caller required to name the business's address: `{subdomain}.$ROOT_DOMAIN`
   // is what the owner will be given, and it is typed in English by hand rather
   // than transliterated from a Persian business name.
-  const validated = validateProvisionBody(body, { requireSubdomain: true });
+  const validated = validateProvisionBody(body, {
+    requireSubdomain: true,
+    ownerActivation: true,
+  });
   if (validated.input === null) {
     return NextResponse.json({ error: validated.error }, { status: 400 });
   }
@@ -89,6 +121,8 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     const provisioned = await provisionBusiness({
       ...input,
       seedChartOfAccounts: true,
+      createdBy: session.padmin,
+      confirmExistingOwner: body.confirmExistingOwner === true,
     });
 
     // A configured LiteLLM gateway now provisions the tenant key as part of
@@ -108,8 +142,9 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
         subdomain: provisioned.businessSubdomain,
         industry: input.industry,
         ownerEmail: input.email,
+        ownerIdentityCreated: provisioned.ownerIdentityCreated,
+        ownerActivationIssued: Boolean(provisioned.ownerActivation),
       },
-
     });
 
     return NextResponse.json(
@@ -120,21 +155,16 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
           subdomain: provisioned.businessSubdomain,
           locationId: provisioned.locationId,
         },
-        // Phase 24 Wave 2 — the Owner's second factor, returned exactly once.
-        //
-        // A console-provisioned business is `connected`, so the Owner is
-        // enrolled in SMS OTP to `ownerPhone` and there is no TOTP secret to
-        // print; what there *is* is ten recovery codes, and this response is
-        // the only place they will ever exist in plaintext. The operator hands
-        // them to the Owner. Deliberately not written to the audit payload
-        // below: an audit log that contains the credentials it is auditing is
-        // worse than no audit log.
-        mfa: {
-          method: provisioned.totpSecret ? ("totp" as const) : ("sms_otp" as const),
-          totpSecret: provisioned.totpSecret ?? null,
-          totpUrl: provisioned.totpUrl ?? null,
-          totpQr: provisioned.totpQr ?? null,
-          recoveryCodes: provisioned.recoveryCodes ?? [],
+        // The activation token is *not* secret from this operator — they have to
+        // carry it to the owner. What it deliberately is not is permanent, or
+        // usable by them: it is single-use, it expires, and redeeming it sets a
+        // password the operator never sees.
+        owner: {
+          email: input.email,
+          existingLogin: !provisioned.ownerIdentityCreated,
+          activationRequired: Boolean(provisioned.ownerActivation),
+          activationToken: provisioned.ownerActivation?.token ?? null,
+          activationExpiresAt: provisioned.ownerActivation?.expiresAt.toISOString() ?? null,
         },
       },
       { status: 201 },
@@ -146,11 +176,17 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       // being silently given `acme-2`.
       return NextResponse.json({ error: "subdomain_taken" }, { status: 409 });
     }
-    if (err instanceof EmailPasswordMismatchError) {
-      // The email already belongs to a person, and a different password was
-      // offered. Adding a business to their account must be authenticated as
-      // them (see business-provisioning.ts).
-      return NextResponse.json({ error: "email_password_mismatch" }, { status: 409 });
+    if (err instanceof OwnerPhoneRequiredError) {
+      // An activation link without a mobile cannot be honoured: redemption
+      // requires a code texted to the owner (issue #755 §14). Say so instead of
+      // creating a business nobody can log into.
+      return NextResponse.json({ error: "owner_phone_required" }, { status: 400 });
+    }
+    if (err instanceof ExistingOwnerConfirmationRequiredError) {
+      // The address already belongs to a platform user. Usually that is the
+      // group owner opening their second café, but it is still an action on
+      // someone else's account, so it needs an explicit yes.
+      return NextResponse.json({ error: "email_already_registered" }, { status: 409 });
     }
     throw err;
   }

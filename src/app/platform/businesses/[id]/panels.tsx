@@ -8,6 +8,7 @@
  * header and the sidebar without a remount.
  */
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatPersianNumber } from "@/lib/digits";
@@ -348,11 +349,42 @@ interface Feature {
   effective: boolean;
 }
 
+/**
+ * What the API answers after the `ai_assistant` flag changes — the runtime's
+ * real readiness, computed from the resolved gateway/model/key configuration.
+ * "AI is enabled" is an entitlement; "AI is operational" is this object.
+ */
+interface AiReadiness {
+  ready: boolean;
+  reason: string | null;
+  gatewayReady: boolean;
+  authenticationReady: boolean;
+  virtualKeyRequired: boolean;
+  virtualKeyReady: boolean;
+  modelReady: boolean;
+}
+
+const AI_READINESS_REASONS: Record<string, string> = {
+  platform_disabled: "دستیار در سطح سکو خاموش است",
+  gateway_disabled: "درگاه LiteLLM غیرفعال است",
+  missing_base_url: "نشانی درگاه تنظیم نشده است",
+  invalid_base_url: "نشانی درگاه معتبر نیست",
+  missing_runtime_credential: "کلید دسترسی درگاه تنظیم نشده است",
+  tenant_virtual_key_missing: "کلید مجازی این کسب‌وکار صادر نشده است",
+  missing_model: "مدل پیش‌فرض انتخاب نشده است",
+  invalid_max_output_tokens: "سقف توکن خروجی معتبر نیست",
+  configuration_load_failed: "تنظیمات بارگذاری نشد",
+};
+
 export function FeaturesPanel() {
   const { business, version } = useBusiness();
   const can = useCan();
   const editable = can("features.write");
   const [features, setFeatures] = useState<Feature[] | null>(null);
+  // Discarded before: the API computed readiness on every ai_assistant change
+  // and the UI threw it away, so an operator could switch AI on and reasonably
+  // believe the assistant now worked.
+  const [aiReadiness, setAiReadiness] = useState<AiReadiness | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
 
@@ -375,16 +407,27 @@ export function FeaturesPanel() {
   async function setOverride(flagKey: string, enabled: boolean | null) {
     setPending(flagKey);
     setError(null);
-    const { ok, data } = await api<{ features: Feature[]; error?: string }>(
-      `/api/platform/businesses/${bizId}/features`,
-      { method: "PATCH", body: JSON.stringify({ flagKey, enabled }) },
-    );
+    const { ok, data } = await api<{
+      features: Feature[];
+      aiReadiness?: AiReadiness;
+      error?: string;
+    }>(`/api/platform/businesses/${bizId}/features`, {
+      method: "PATCH",
+      body: JSON.stringify({ flagKey, enabled }),
+    });
     setPending(null);
-    if (ok) setFeatures(data.features);
-    else setError(errorMessage(data.error));
+    if (ok) {
+      setFeatures(data.features);
+      if (data.aiReadiness) setAiReadiness(data.aiReadiness);
+    } else {
+      setError(errorMessage(data.error));
+    }
   }
 
+  const aiFlag = features?.find((f) => f.key === "ai_assistant") ?? null;
+
   return (
+    <>
     <Card title="پرچم‌های ویژگی">
       <ErrorBox>{error}</ErrorBox>
       {features === null ? (
@@ -456,6 +499,76 @@ export function FeaturesPanel() {
         </div>
       )}
     </Card>
+
+    {/*
+      The flag says "entitled", this says "actually working". Rendered only
+      after an `ai_assistant` change, because that is when the API computes it.
+      A future grant may split AI enablement from runtime configuration; until
+      then the honest reading is: enabled ≠ operational.
+    */}
+    {aiReadiness && aiFlag ? (
+      <Card title="آمادگی اجرای هوش مصنوعی">
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={
+              aiFlag.effective
+                ? "rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-700 dark:text-emerald-300"
+                : "rounded-full border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+            }
+          >
+            ویژگی: {aiFlag.effective ? "فعال" : "غیرفعال"}
+          </span>
+          <span
+            className={
+              aiReadiness.ready
+                ? "rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-700 dark:text-emerald-300"
+                : "rounded-full border border-amber-500/30 bg-amber-500/15 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-300"
+            }
+          >
+            اجرا: {aiReadiness.ready ? "آماده" : "آماده نیست"}
+          </span>
+        </div>
+        <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+          <div className="flex items-center justify-between gap-2">
+            <dt className="text-muted-foreground">کلید مجازی کسب‌وکار</dt>
+            <dd>{aiReadiness.virtualKeyReady ? "موجود" : aiReadiness.virtualKeyRequired ? "صادر نشده" : "لازم نیست"}</dd>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <dt className="text-muted-foreground">مدل / مسیر</dt>
+            <dd>{aiReadiness.modelReady ? "آماده" : "تنظیم نشده"}</dd>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <dt className="text-muted-foreground">درگاه</dt>
+            <dd>{aiReadiness.gatewayReady ? "آماده" : "غیرفعال یا ناقص"}</dd>
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <dt className="text-muted-foreground">احراز هویت درگاه</dt>
+            <dd>{aiReadiness.authenticationReady ? "آماده" : "ناقص"}</dd>
+          </div>
+        </dl>
+        {!aiReadiness.ready ? (
+          <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-900 dark:text-amber-100">
+            <p>
+              {aiReadiness.reason
+                ? (AI_READINESS_REASONS[aiReadiness.reason] ?? aiReadiness.reason)
+                : "پیکربندی اجرا کامل نیست."}
+            </p>
+            {can("ai.config.manage") ? (
+              <p className="mt-1 text-xs">
+                پیکربندی فنی در{" "}
+                <Link href="/platform/ai" className="underline">
+                  تنظیمات هوش مصنوعی سکو
+                </Link>{" "}
+                انجام می‌شود؛ این بخش فقط وضعیت را گزارش می‌کند.
+              </p>
+            ) : (
+              <p className="mt-1 text-xs">برای تکمیل پیکربندی با تیم فنی سکو تماس بگیرید.</p>
+            )}
+          </div>
+        ) : null}
+      </Card>
+    ) : null}
+    </>
   );
 }
 
@@ -471,6 +584,8 @@ interface Grant {
   expiresAt: string;
   endedAt: string | null;
   revokedAt: string | null;
+  /** Computed by the API for the admin asking — the browser cannot know it. */
+  isMine: boolean;
 }
 
 interface TicketOption { id: string; subject: string; status: string }
@@ -519,7 +634,27 @@ export function ImpersonationPanel() {
   if (!business) return null;
 
   const isActive = (g: Grant) => !g.endedAt && !g.revokedAt && new Date(g.expiresAt).getTime() > Date.now();
-  const active = (grants ?? []).find(isActive) ?? null;
+  // Ownership, not "the first active row". A colleague's open session is shown
+  // as theirs — never offered the controls that only make sense for one's own.
+  const myActive = (grants ?? []).find((g) => isActive(g) && g.isMine) ?? null;
+  const otherActive = (grants ?? []).find((g) => isActive(g) && !g.isMine) ?? null;
+
+  /** Re-enter my own open session: a real handoff into the same grant. */
+  async function resume(grant: Grant) {
+    setBusy(true);
+    setError(null);
+    const { ok, data } = await api<{ handoffUrl?: string; error?: string }>(
+      `/api/platform/impersonation/${grant.id}/resume`,
+      { method: "POST", body: JSON.stringify({ businessId: business!.id }) },
+    );
+    setBusy(false);
+    if (ok) {
+      window.location.href = data.handoffUrl ?? "/dashboard";
+      return;
+    }
+    setError("ادامهٔ نشست ممکن نشد؛ ممکن است پایان یافته یا منقضی شده باشد.");
+    void load();
+  }
 
   async function enter() {
     if (reason.trim().length < 10) { setError("دلیل نشست باید دست‌کم ۱۰ نویسه و روشن باشد."); return; }
@@ -546,28 +681,52 @@ export function ImpersonationPanel() {
   return (
     <div className="space-y-4">
       <ErrorBox>{error}</ErrorBox>
-      {active ? (
-        <Card title="نشست پشتیبانی فعال">
-          <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
-            <p><span className="block text-xs text-muted-foreground">اپراتور</span>{active.operatorName ?? "اپراتور پلتفرم"} · {active.operatorRole ?? "—"}</p>
-            <p><span className="block text-xs text-muted-foreground">نوع دسترسی</span>{MODE_LABELS[active.mode]}</p>
-            <p><span className="block text-xs text-muted-foreground">دلیل</span>{active.reason}</p>
-            <p><span className="block text-xs text-muted-foreground">تیکت مرتبط</span>{active.ticketId ? `#${active.ticketId.slice(0, 8)}` : "بدون تیکت"}</p>
-            <p><span className="block text-xs text-muted-foreground">شروع</span>{new Date(active.createdAt).toLocaleString("fa-IR")}</p>
-            <p><span className="block text-xs text-muted-foreground">پایان خودکار</span>{new Date(active.expiresAt).toLocaleString("fa-IR")}</p>
-          </div>
+      {myActive ? (
+        <Card title="نشست پشتیبانی من">
+          <SessionSummary grant={myActive} />
           <div className="mt-4 flex flex-wrap gap-2">
-            <Button onClick={() => setOpen(true)} disabled={busy}>ادامه نشست فعلی</Button>
-            <Button variant="ghost" onClick={() => void closeGrant(active, false)} disabled={busy}>پایان نشست من</Button>
-            {can("impersonate.revoke") ? <Button variant="danger" onClick={() => void closeGrant(active, true)} disabled={busy}>لغو نشست</Button> : null}
+            <Button onClick={() => void resume(myActive)} disabled={busy}>ادامه نشست من</Button>
+            <Button variant="ghost" onClick={() => void closeGrant(myActive, false)} disabled={busy}>پایان نشست من</Button>
           </div>
         </Card>
-      ) : (
+      ) : null}
+
+      {otherActive ? (
+        <Card title="نشست فعال اپراتور دیگر">
+          <p className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-900 dark:text-amber-100">
+            این نشست به شما تعلق ندارد؛ فقط با دسترسی لغو می‌توانید آن را ببندید.
+          </p>
+          <SessionSummary grant={otherActive} />
+          <div className="mt-4 flex flex-wrap gap-2">
+            {can("impersonate.revoke") ? (
+              <Button variant="danger" onClick={() => void closeGrant(otherActive, true)} disabled={busy}>
+                لغو نشست این اپراتور
+              </Button>
+            ) : (
+              <span className="text-xs text-muted-foreground">
+                برای لغو نشست دیگری به دسترسی «لغو نشست پشتیبانی» نیاز است.
+              </span>
+            )}
+          </div>
+        </Card>
+      ) : null}
+
+      {!myActive && !otherActive ? (
         <Card title="شروع نشست پشتیبانی">
           <p className="mb-4 text-sm text-muted-foreground">دسترسی موقت، ثبت‌شده و قابل لغو است. حالت فقط‌خواندنی گزینهٔ پیش‌فرض است.</p>
           <Button onClick={() => setOpen(true)}>شروع نشست</Button>
         </Card>
-      )}
+      ) : null}
+
+      {myActive ? (
+        <p className="text-xs text-muted-foreground">
+          تا پایان نشست فعلی نمی‌توانید نشست تازه‌ای بسازید؛ ابتدا آن را ادامه دهید یا پایان دهید.
+        </p>
+      ) : otherActive ? (
+        <p className="text-xs text-muted-foreground">
+          کسب‌وکار اشغال است؛ تا بسته شدن نشست اپراتور دیگر امکان ساخت نشست تازه نیست.
+        </p>
+      ) : null}
 
       <Dialog open={open} onOpenChange={(next) => !busy && setOpen(next)}>
           <DialogContent className="sm:max-w-lg">
@@ -604,10 +763,24 @@ export function ImpersonationPanel() {
 
       <Card title="تاریخچه نشست‌ها">
         {grants === null ? <SkeletonRows rows={4} /> : grants.length === 0 ? <p className="text-sm text-muted-foreground">نشستی ثبت نشده است.</p> : (
-          <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-sm"><thead><tr className="border-b border-border text-right text-xs text-muted-foreground"><th className="p-2">وضعیت</th><th className="p-2">اپراتور</th><th className="p-2">دسترسی</th><th className="p-2">دلیل</th><th className="p-2">شروع</th><th className="p-2">پایان</th></tr></thead><tbody>{grants.map((g) => <tr key={g.id} className="border-b border-border/60"><td className="p-2">{isActive(g) ? "فعال" : g.revokedAt ? "لغوشده" : g.endedAt ? "پایان‌یافته" : "منقضی"}</td><td className="p-2">{g.operatorName ?? "—"}</td><td className="p-2">{MODE_LABELS[g.mode]}</td><td className="max-w-xs truncate p-2">{g.reason}</td><td className="p-2">{new Date(g.createdAt).toLocaleString("fa-IR")}</td><td className="p-2">{g.endedAt ? new Date(g.endedAt).toLocaleString("fa-IR") : "—"}</td></tr>)}</tbody></table></div>
+          <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-sm"><thead><tr className="border-b border-border text-right text-xs text-muted-foreground"><th className="p-2">وضعیت</th><th className="p-2">اپراتور</th><th className="p-2">دسترسی</th><th className="p-2">دلیل</th><th className="p-2">شروع</th><th className="p-2">پایان</th></tr></thead><tbody>{grants.map((g) => <tr key={g.id} className="border-b border-border/60"><td className="p-2">{isActive(g) ? (g.isMine ? "فعال (نشست من)" : "فعال (اپراتور دیگر)") : g.revokedAt ? "لغوشده" : g.endedAt ? "پایان‌یافته" : "منقضی"}</td><td className="p-2">{g.operatorName ?? "—"}</td><td className="p-2">{MODE_LABELS[g.mode]}</td><td className="max-w-xs truncate p-2">{g.reason}</td><td className="p-2">{new Date(g.createdAt).toLocaleString("fa-IR")}</td><td className="p-2">{g.endedAt ? new Date(g.endedAt).toLocaleString("fa-IR") : "—"}</td></tr>)}</tbody></table></div>
         )}
       </Card>
       <Card title="سیاست امنیتی پشتیبانی"><p className="text-sm leading-6 text-muted-foreground">هر نشست موقت است، شناسهٔ دقیق مجوز در هر درخواست دوباره بررسی می‌شود و تغییرات مجاز با هویت اپراتور ثبت می‌شوند. اطلاعات محرمانه و خروجی‌های حساس جزو دسترسی عادی پشتیبانی نیستند.</p></Card>
+    </div>
+  );
+}
+
+/** One session's facts, shared by the "mine" and "another operator's" cards. */
+function SessionSummary({ grant }: { grant: Grant }) {
+  return (
+    <div className="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+      <p><span className="block text-xs text-muted-foreground">اپراتور</span>{grant.operatorName ?? "اپراتور پلتفرم"} · {grant.operatorRole ?? "—"}</p>
+      <p><span className="block text-xs text-muted-foreground">نوع دسترسی</span>{MODE_LABELS[grant.mode]}</p>
+      <p><span className="block text-xs text-muted-foreground">دلیل</span>{grant.reason}</p>
+      <p><span className="block text-xs text-muted-foreground">تیکت مرتبط</span>{grant.ticketId ? `#${grant.ticketId.slice(0, 8)}` : "بدون تیکت"}</p>
+      <p><span className="block text-xs text-muted-foreground">شروع</span>{new Date(grant.createdAt).toLocaleString("fa-IR")}</p>
+      <p><span className="block text-xs text-muted-foreground">پایان خودکار</span>{new Date(grant.expiresAt).toLocaleString("fa-IR")}</p>
     </div>
   );
 }
@@ -712,7 +885,9 @@ export function RemovePanel() {
       body: JSON.stringify({ confirmation }),
     });
     if (ok) {
-      window.location.href = "/platform";
+      // The business list is `/platform/businesses`; `/platform` is the console
+      // home, and landing there after a delete reads as "nothing happened".
+      window.location.href = "/platform/businesses";
       return;
     }
     setBusy(false);

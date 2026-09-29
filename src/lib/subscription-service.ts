@@ -514,17 +514,25 @@ export interface InvoiceRecord {
 }
 
 export async function listInvoices(
-  filter: { businessId?: string; status?: string; limit?: number; withLines?: boolean } = {},
+  filter: {
+    businessId?: string;
+    status?: string;
+    limit?: number;
+    /** Rows to skip — the console pages invoices rather than capping at 50. */
+    offset?: number;
+    withLines?: boolean;
+  } = {},
 ): Promise<InvoiceRecord[]> {
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 500);
+  const offset = Math.max(filter.offset ?? 0, 0);
   const { rows } = await query<Record<string, unknown>>(
     `SELECT i.*, b.name AS business_name
        FROM billing_invoices i JOIN businesses b ON b.id = i.business_id
       WHERE ($1::uuid IS NULL OR i.business_id = $1)
         AND ($2::text IS NULL OR i.status = $2)
       ORDER BY i.created_at DESC, i.id DESC
-      LIMIT $3`,
-    [filter.businessId ?? null, filter.status ?? null, limit],
+      LIMIT $3 OFFSET $4`,
+    [filter.businessId ?? null, filter.status ?? null, limit, offset],
   );
   const invoices = rows.map(rowToInvoice);
   if (!filter.withLines || invoices.length === 0) return invoices;
@@ -557,6 +565,25 @@ export async function listInvoices(
     invoice.lines = linesByInvoice.get(invoice.id) ?? [];
   }
   return invoices;
+}
+
+/**
+ * How many invoices match the same filter `listInvoices` pages through.
+ *
+ * The business Billing page shows "N of M" and knows when "load more" is done
+ * (issue #755 §17) instead of silently showing the newest 50 as if that were
+ * the whole invoice ledger.
+ */
+export async function countInvoices(
+  filter: { businessId?: string; status?: string } = {},
+): Promise<number> {
+  const { rows } = await query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM billing_invoices
+      WHERE ($1::uuid IS NULL OR business_id = $1)
+        AND ($2::text IS NULL OR status = $2)`,
+    [filter.businessId ?? null, filter.status ?? null],
+  );
+  return Number(rows[0]?.count ?? 0);
 }
 
 export async function getInvoice(id: string, withLines = false): Promise<InvoiceRecord | null> {

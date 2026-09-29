@@ -45,6 +45,10 @@ const PLATFORM_ERROR_MESSAGES: Record<string, string> = {
   business_archived: "کسب‌وکار بایگانی‌شده قابل ورود نیست.",
   business_not_found: "کسب‌وکار پیدا نشد.",
   no_owner: "این کسب‌وکار مالک فعالی برای ورود ندارد.",
+  // Issue #755 §14 — the owner activates with a link *and* a code texted to
+  // their own mobile, so provisioning without a number would mint a link nobody
+  // could honour.
+  owner_phone_required: "برای فعال‌سازی مالک، شمارهٔ موبایل الزامی است.",
   impersonation_read_only: "این نشست فقط‌خواندنی است و امکان تغییر ندارد.",
   reason_too_short: "دلیل دسترسی باید دست‌کم ۱۰ نویسه باشد.",
   ticket_unavailable: "تیکت انتخاب‌شده به این کسب‌وکار تعلق ندارد یا در دسترس نیست.",
@@ -75,6 +79,12 @@ const PLATFORM_ERROR_MESSAGES: Record<string, string> = {
   reserved_subdomain: "این زیردامنه رزرو شده است و قابل استفاده نیست.",
   missing_subdomain: "زیردامنهٔ کسب‌وکار را به انگلیسی وارد کنید.",
   subdomain_taken: "این زیردامنه قبلاً به کسب‌وکار دیگری اختصاص یافته است.",
+  invalid_owner_phone: "شمارهٔ موبایل مالک معتبر نیست. نمونه: ۰۹۱۲۱۲۳۴۵۶۷",
+  // Issue #755 §14 — the address already belongs to a platform user. Adding a
+  // business to that person's account is fine (it is the group-owner case) but
+  // never silent, so the console asks and repeats with confirmation.
+  email_already_registered:
+    "این ایمیل از قبل حساب کاربری پلتفرم دارد. با تأیید، این کسب‌وکار به همان حساب اضافه می‌شود و رمز عبور فعلی او تغییر نمی‌کند.",
   invalid_industry: "نوع کسب‌وکار نامعتبر است.",
   industry_not_available: "این نوع کسب‌وکار هنوز در دسترس نیست.",
   unchanged: "زیردامنه تغییری نکرده است.",

@@ -140,6 +140,20 @@ export interface BusinessListResult {
   total: number;
   page: number;
   pageSize: number;
+  /**
+   * Server-side aggregates for the directory's summary cards, computed over the
+   * same filter context as the page (see `queryBusinesses`). The page used to
+   * count its own 20 rows and label that "فعال"/"معلق"/"بایگانی", which is a
+   * different number from the one an operator reads it as.
+   */
+  statusCounts: BusinessStatusCounts;
+}
+
+export interface BusinessStatusCounts {
+  total: number;
+  active: number;
+  suspended: number;
+  archived: number;
 }
 
 const BUSINESS_SORT_SQL: Record<NonNullable<BusinessQuery["sort"]>, string> = {
@@ -166,42 +180,79 @@ export async function queryBusinesses(q: BusinessQuery = {}): Promise<BusinessLi
   const sort = BUSINESS_SORT_SQL[q.sort ?? "newest"] ?? BUSINESS_SORT_SQL.newest;
 
   return withoutTenantScope("platform", async () => {
-    const where: string[] = [];
-    const params: unknown[] = [];
+    /** Bound values plus the WHERE clauses that reference them. */
+    interface FilterBuilder {
+      where: string[];
+      params: unknown[];
+    }
+    const builder = (): FilterBuilder => ({ where: [], params: [] });
     /** Push a bound value and return its `$n` placeholder. */
-    const bind = (value: unknown): string => {
-      params.push(value);
-      return `$${params.length}`;
+    const bind = (b: FilterBuilder, value: unknown): string => {
+      b.params.push(value);
+      return `$${b.params.length}`;
     };
 
-    if (q.search && q.search.trim()) {
-      const p = bind(`%${q.search.trim()}%`);
-      where.push(`(b.name ILIKE ${p} OR b.slug::text ILIKE ${p} OR b.subdomain::text ILIKE ${p})`);
-    }
-    if (q.status) where.push(`b.status = ${bind(q.status)}`);
-    if (q.plan) where.push(`b.plan = ${bind(q.plan)}`);
-    if (q.industry) where.push(`b.industry = ${bind(q.industry)}`);
-    if (q.createdFrom) where.push(`b.created_at >= ${bind(q.createdFrom)}`);
-    if (q.createdTo) where.push(`b.created_at <= ${bind(`${q.createdTo}T23:59:59.999Z`)}`);
+    /**
+     * Every filter except `status`, applied to a fresh builder. The status
+     * filter is deliberately *not* here: the summary counts must describe the
+     * current search/plan/industry/activity context across all statuses, or a
+     * single "معلق" filter would report «فعال: ۰» as if nothing were active.
+     */
+    const applyFilters = (b: FilterBuilder): void => {
+      if (q.search && q.search.trim()) {
+        const p = bind(b, `%${q.search.trim()}%`);
+        b.where.push(
+          `(b.name ILIKE ${p} OR b.slug::text ILIKE ${p} OR b.subdomain::text ILIKE ${p})`,
+        );
+      }
+      if (q.plan) b.where.push(`b.plan = ${bind(b, q.plan)}`);
+      if (q.industry) b.where.push(`b.industry = ${bind(b, q.industry)}`);
+      if (q.createdFrom) b.where.push(`b.created_at >= ${bind(b, q.createdFrom)}`);
+      if (q.createdTo) b.where.push(`b.created_at <= ${bind(b, `${q.createdTo}T23:59:59.999Z`)}`);
 
-    // Activity filter needs the correlated existence of an order.
-    if (q.activity === "active") {
-      where.push(
-        "EXISTS (SELECT 1 FROM orders o JOIN locations l ON l.id = o.location_id WHERE l.business_id = b.id)",
-      );
-    } else if (q.activity === "idle") {
-      where.push(
-        "NOT EXISTS (SELECT 1 FROM orders o JOIN locations l ON l.id = o.location_id WHERE l.business_id = b.id)",
-      );
-    }
+      // Activity filter needs the correlated existence of an order.
+      if (q.activity === "active") {
+        b.where.push(
+          "EXISTS (SELECT 1 FROM orders o JOIN locations l ON l.id = o.location_id WHERE l.business_id = b.id)",
+        );
+      } else if (q.activity === "idle") {
+        b.where.push(
+          "NOT EXISTS (SELECT 1 FROM orders o JOIN locations l ON l.id = o.location_id WHERE l.business_id = b.id)",
+        );
+      }
+    };
 
-    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const filtered = builder();
+    applyFilters(filtered);
+    const all = builder();
+    applyFilters(all);
+    if (q.status) all.where.push(`b.status = ${bind(all, q.status)}`);
+
+    const whereSql = all.where.length ? `WHERE ${all.where.join(" AND ")}` : "";
+    const filteredWhereSql = filtered.where.length
+      ? `WHERE ${filtered.where.join(" AND ")}`
+      : "";
 
     const { rows: countRows } = await query<{ total: string }>(
       `SELECT count(*)::text AS total FROM businesses b ${whereSql}`,
-      params,
+      all.params,
     );
     const total = Number(countRows[0]?.total ?? 0);
+
+    // One grouped round trip for all three statuses, over the filter context
+    // without the status clause — never a count of the current page.
+    const { rows: statusRows } = await query<{ status: BusinessStatus; count: string }>(
+      `SELECT b.status::text AS status, count(*)::text AS count
+         FROM businesses b ${filteredWhereSql}
+        GROUP BY b.status`,
+      filtered.params,
+    );
+    const statusCounts: BusinessStatusCounts = { total: 0, active: 0, suspended: 0, archived: 0 };
+    for (const row of statusRows) {
+      const value = Number(row.count);
+      statusCounts[row.status] = value;
+      statusCounts.total += value;
+    }
 
     const { rows } = await query<BusinessRow>(
       `SELECT b.id, b.name, b.slug::text AS slug, b.subdomain::text AS subdomain,
@@ -217,10 +268,61 @@ export async function queryBusinesses(q: BusinessQuery = {}): Promise<BusinessLi
         ${whereSql}
         ORDER BY ${sort}
         LIMIT ${pageSize} OFFSET ${offset}`,
-      params,
+      all.params,
     );
 
-    return { businesses: rows.map(toSummary), total, page, pageSize };
+    return { businesses: rows.map(toSummary), total, page, pageSize, statusCounts };
+  });
+}
+
+/**
+ * The distinct plan keys actually in use, for the directory's plan filter.
+ *
+ * Read from the businesses themselves rather than the plan catalogue: the
+ * useful question is "which plans exist on this deployment?", and a support
+ * operator without `plans.manage` must still be able to filter by one.
+ */
+export async function listBusinessPlanKeys(): Promise<string[]> {
+  return withoutTenantScope("platform", async () => {
+    const { rows } = await query<{ plan: string }>(
+      `SELECT DISTINCT b.plan FROM businesses b
+        WHERE b.plan IS NOT NULL AND b.plan <> ''
+        ORDER BY b.plan`,
+    );
+    return rows.map((row) => row.plan);
+  });
+}
+
+/**
+ * Just who a business is — the shell's sidebar title, its host and its status.
+ *
+ * Deliberately not `getBusiness`: that read costs four correlated sub-selects
+ * (locations, active members, orders, newest order), the alias list and the
+ * industry data counts. The console layout needs one string to draw the
+ * workspace's name, and it used to pay for all of it — on every navigation
+ * into the workspace, twice, because the workspace's own provider reads the
+ * full summary too (issue #755 §11).
+ */
+export interface BusinessIdentity {
+  id: string;
+  name: string;
+  slug: string;
+  subdomain: string;
+  status: BusinessStatus;
+}
+
+interface BusinessIdentityRow extends Record<string, unknown>, BusinessIdentity {}
+
+export async function getBusinessIdentity(businessId: string): Promise<BusinessIdentity | null> {
+  return withoutTenantScope("platform", async () => {
+    const { rows } = await query<BusinessIdentityRow>(
+      `SELECT id, name, slug::text AS slug, subdomain::text AS subdomain,
+              status::text AS status
+         FROM businesses
+        WHERE id = $1`,
+      [businessId],
+    );
+    return rows[0] ?? null;
   });
 }
 
@@ -257,6 +359,7 @@ export async function getBusiness(businessId: string): Promise<BusinessSummary |
 export async function setBusinessStatus(
   businessId: string,
   status: BusinessStatus,
+  options: { expectFrom?: BusinessStatus } = {},
 ): Promise<BusinessSummary | null> {
   const { rows } = await withoutTenantScope("platform", () =>
     query<{ id: string }>(
@@ -270,8 +373,9 @@ export async function setBusinessStatus(
                                   ELSE archived_at END,
               updated_at = now()
         WHERE id = $1
+          AND ($3::text IS NULL OR status::text = $3)
         RETURNING id`,
-      [businessId, status],
+      [businessId, status, options.expectFrom ?? null],
     ),
   );
   return rows[0] ? getBusiness(businessId) : null;
@@ -939,17 +1043,14 @@ export async function setBusinessFeature(
   });
 }
 
-/**
- * Assign a plan to a business. Kept as a thin compatibility seam for the few
- * internal callers that only need the column moved; the FULL transition path
- * — validation, subscription row, add-on preservation, entitlement restamp —
- * is `changeBusinessPlan` in subscription-service.ts, which every API route
- * uses. New code must call that instead.
- */
-export async function setBusinessPlan(businessId: string, plan: string): Promise<void> {
-  const { changeBusinessPlan } = await import("./subscription-service");
-  await changeBusinessPlan({ businessId, planKey: plan, source: "admin" });
-}
+// Issue #755 §3/§20: `setBusinessPlan` used to live here as a "thin
+// compatibility seam" onto `changeBusinessPlan`. Nothing called it — there were
+// no "internal callers that only need the column moved" — so it was a second,
+// undeclared plan-mutation entry point that existed only to be an alternative
+// path to the one authoritative one. Deleted rather than kept as a seam nobody
+// crosses: `changeBusinessPlan` in subscription-service.ts is the single path,
+// and the console reaches it through POST /api/platform/billing/subscriptions
+// (`billing.manage`).
 
 // ---------------------------------------------------------------------------
 // Cross-business usage
@@ -1034,6 +1135,13 @@ export interface ImpersonationGrant {
   expiresAt: string;
   endedAt: string | null;
   revokedAt: string | null;
+  /**
+   * Whether this grant belongs to the admin who is asking. The console's
+   * Support page used to pick "the first active grant" and label it «نشست من»
+   * whatever it was; ownership has to come from the server, because the browser
+   * has no idea which platform admin it is signed in as.
+   */
+  isMine: boolean;
 }
 
 interface GrantRow extends Record<string, unknown> {
@@ -1054,8 +1162,9 @@ interface GrantRow extends Record<string, unknown> {
   revoked_at: string | null;
 }
 
-function toGrant(row: GrantRow): ImpersonationGrant {
+function toGrant(row: GrantRow, viewerAdminId?: string | null): ImpersonationGrant {
   return {
+    isMine: Boolean(viewerAdminId) && row.platform_admin_id === viewerAdminId,
     id: row.id,
     platformAdminId: row.platform_admin_id,
     businessId: row.business_id,
@@ -1418,6 +1527,89 @@ export async function activeGrant(
   return platformCan(row.operator_role, capability) ? toGrant(row) : null;
 }
 
+export type ResumeImpersonationResult =
+  | {
+      ok: true;
+      grant: ImpersonationGrant;
+      userId: string;
+      fullName: string;
+      /** A fresh one-time handoff token; returned once, never stored plaintext. */
+      handoff: { token: string };
+    }
+  | { ok: false; error: "not_active" };
+
+/**
+ * Re-enter a support session that is already open — what «ادامه نشست فعلی»
+ * in the console must actually do. It used to open the *create* dialog instead,
+ * because no endpoint could re-enter an existing grant.
+ *
+ * It authorizes with `activeGrant` — the same live re-check every impersonated
+ * request already goes through — rather than a second, looser predicate. That
+ * one call covers the whole security story: the grant belongs to *this* admin,
+ * it was not ended or revoked, it has not expired, the admin is still active
+ * and their token version still matches, the business is not archived and has
+ * not disabled support access, and the operator's role still holds the
+ * capability for the grant's mode. A resumed session is therefore never
+ * stronger or longer-lived than the one it continues: the grant's own expiry
+ * is unchanged, and only a new short-lived handoff token is minted.
+ */
+export async function resumeImpersonation(params: {
+  grantId: string;
+  adminId: string;
+  businessId: string;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+}): Promise<ResumeImpersonationResult> {
+  const grant = await activeGrant(params.grantId, params.adminId, params.businessId);
+  if (!grant || !grant.userId) return { ok: false, error: "not_active" };
+
+  const { token, tokenHash } = generateImpersonationHandoffToken();
+
+  return withoutTenantScope("platform", async () => {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      // The handoff row and its audit entry are written together, so a token
+      // can never exist without a record of who re-entered.
+      await client.query(
+        `INSERT INTO impersonation_handoffs (grant_id, token_hash, expires_at)
+         VALUES ($1, $2, now() + ($3 || ' minutes')::interval)`,
+        [params.grantId, tokenHash, String(IMPERSONATION_HANDOFF_TTL_MINUTES)],
+      );
+      await client.query(
+        `INSERT INTO platform_audit_log
+           (platform_admin_id, business_id, action, entity, entity_id, payload, ip_address, user_agent)
+         VALUES ($1, $2, 'support_session.resumed', 'impersonation_grant', $3, $4::jsonb, $5, $6)`,
+        [
+          params.adminId,
+          params.businessId,
+          params.grantId,
+          JSON.stringify({ grantId: params.grantId, mode: grant.mode, expiresAt: grant.expiresAt }),
+          params.ipAddress ?? null,
+          params.userAgent ?? null,
+        ],
+      );
+      const { rows } = await client.query<{ full_name: string }>(
+        `SELECT full_name FROM users WHERE id = $1`,
+        [grant.userId],
+      );
+      await client.query("COMMIT");
+      return {
+        ok: true as const,
+        grant,
+        userId: grant.userId as string,
+        fullName: rows[0]?.full_name ?? "",
+        handoff: { token },
+      };
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  });
+}
+
 /**
  * Who is closing a support session, and therefore which grants they may touch:
  *
@@ -1532,7 +1724,11 @@ export async function closeSupportSession(
   };
 }
 
-export async function getGrant(grantId: string, businessId: string): Promise<ImpersonationGrant | null> {
+export async function getGrant(
+  grantId: string,
+  businessId: string,
+  viewerAdminId?: string | null,
+): Promise<ImpersonationGrant | null> {
   const { rows } = await withoutTenantScope("platform", () => query<GrantRow>(
     `SELECT g.id, g.platform_admin_id, g.business_id, g.user_id, g.mode, g.reason,
             g.ticket_id, g.allowed_capabilities, pa.full_name AS operator_name,
@@ -1544,11 +1740,20 @@ export async function getGrant(grantId: string, businessId: string): Promise<Imp
       WHERE g.id = $1 AND g.business_id = $2`,
     [grantId, businessId],
   ));
-  return rows[0] ? toGrant(rows[0]) : null;
+  return rows[0] ? toGrant(rows[0], viewerAdminId) : null;
 }
 
-/** Recent impersonation grants across the platform, or scoped to one business. */
-export async function listGrants(businessId?: string): Promise<ImpersonationGrant[]> {
+/**
+ * Recent impersonation grants across the platform, or scoped to one business.
+ *
+ * `viewerAdminId` is the admin reading the list; each grant comes back with
+ * `isMine` so the caller can tell their own session from a colleague's rather
+ * than assuming the newest active row is theirs.
+ */
+export async function listGrants(
+  businessId?: string,
+  viewerAdminId?: string | null,
+): Promise<ImpersonationGrant[]> {
   const { rows } = await withoutTenantScope("platform", () =>
     query<GrantRow>(
       `SELECT g.id, g.platform_admin_id, g.business_id, g.user_id, g.mode, g.reason,
@@ -1563,7 +1768,7 @@ export async function listGrants(businessId?: string): Promise<ImpersonationGran
       [businessId ?? null],
     ),
   );
-  return rows.map(toGrant);
+  return rows.map((row) => toGrant(row, viewerAdminId));
 }
 
 // ---------------------------------------------------------------------------

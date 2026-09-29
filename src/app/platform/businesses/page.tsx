@@ -45,8 +45,9 @@ import {
 import { usePlatformQuery } from "../_lib/use-platform-data";
 import { useUrlFilters, useDebouncedValue } from "../_lib/use-url-filters";
 import { fmtDate, fmtRelative, formatPersianNumber } from "@/lib/platform-format";
+import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { ProvisionDialog } from "./components/provision-dialog";
-import { PlanBadge } from "../ui";
+import { PlanBadge, inputClass } from "../ui";
 
 interface Business {
   id: string;
@@ -63,10 +64,24 @@ interface Business {
   createdAt: string;
 }
 
+/**
+ * `statusCounts` are server-side aggregates over the current filter context
+ * (search / plan / industry / activity / created range), so they answer "how
+ * many are suspended in what I am looking at?" rather than restating the page.
+ */
+interface StatusCounts {
+  total: number;
+  active: number;
+  suspended: number;
+  archived: number;
+}
+
 interface ListResponse {
   businesses: Business[];
   rootDomain?: string;
-  meta?: { total: number; page: number; pageSize: number };
+  /** Distinct plan keys in use — the plan filter's options. */
+  plans?: string[];
+  meta?: { total: number; page: number; pageSize: number; statusCounts?: StatusCounts };
 }
 
 const PAGE_SIZE = 20;
@@ -81,6 +96,10 @@ const DEFAULTS = {
   plan: "",
   industry: "",
   activity: "",
+  // ISO dates, but chosen through the Shamsi calendar (JalaliDatePicker) — a
+  // native date input would open a Gregorian one.
+  from: "",
+  to: "",
   sort: "newest",
   page: "1",
 };
@@ -99,15 +118,19 @@ function BusinessesInner() {
     if (values.plan) params.set("plan", values.plan);
     if (values.industry) params.set("industry", values.industry);
     if (values.activity) params.set("activity", values.activity);
+    if (values.from) params.set("from", values.from);
+    if (values.to) params.set("to", values.to);
     if (values.sort) params.set("sort", values.sort);
     params.set("page", values.page || "1");
     params.set("pageSize", String(PAGE_SIZE));
     return `/api/platform/businesses?${params.toString()}`;
-  }, [debouncedSearch, values.status, values.plan, values.industry, values.activity, values.sort, values.page]);
+  }, [debouncedSearch, values.status, values.plan, values.industry, values.activity, values.from, values.to, values.sort, values.page]);
 
   const query = usePlatformQuery<ListResponse>(url, [url]);
   const businesses = query.data?.businesses ?? null;
   const meta = query.data?.meta;
+  const statusCounts = meta?.statusCounts;
+  const planOptions = query.data?.plans ?? [];
   const rootDomain = query.data?.rootDomain ?? "";
   const page = Number(values.page) || 1;
 
@@ -217,26 +240,30 @@ function BusinessesInner() {
         }
       />
 
-      {meta ? (
+      {statusCounts ? (
         <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <PlatformStat label="کل نتایج" value={formatPersianNumber(meta.total)} />
+          <PlatformStat
+            label="کل نتایج"
+            value={formatPersianNumber(statusCounts.total)}
+            hint="با فیلترهای فعلی"
+          />
           <PlatformStat
             label="فعال"
-            value={formatPersianNumber(businesses?.filter((b) => b.status === "active").length ?? 0)}
+            value={formatPersianNumber(statusCounts.active)}
             tone="success"
-            hint="در این صفحه"
+            href="/platform/businesses?status=active"
           />
           <PlatformStat
             label="معلق"
-            value={formatPersianNumber(businesses?.filter((b) => b.status === "suspended").length ?? 0)}
+            value={formatPersianNumber(statusCounts.suspended)}
             tone="warning"
-            hint="در این صفحه"
+            href="/platform/businesses?status=suspended"
           />
           <PlatformStat
             label="بایگانی"
-            value={formatPersianNumber(businesses?.filter((b) => b.status === "archived").length ?? 0)}
+            value={formatPersianNumber(statusCounts.archived)}
             tone="muted"
-            hint="در این صفحه"
+            href="/platform/businesses?status=archived"
           />
         </div>
       ) : null}
@@ -268,6 +295,12 @@ function BusinessesInner() {
           options={INDUSTRIES.map((i) => ({ value: i, label: INDUSTRY_LABELS[i] }))}
         />
         <FilterSelect
+          value={values.plan}
+          onChange={(v) => set({ plan: v, page: "1" })}
+          placeholder="همه پلن‌ها"
+          options={planOptions.map((p) => ({ value: p, label: p }))}
+        />
+        <FilterSelect
           value={values.activity}
           onChange={(v) => set({ activity: v, page: "1" })}
           placeholder="همه"
@@ -276,6 +309,26 @@ function BusinessesInner() {
             { value: "idle", label: "بدون سفارش" },
           ]}
         />
+        <div className="flex items-center gap-2">
+          <span className="text-xs whitespace-nowrap text-muted-foreground">ایجاد از</span>
+          <div className="w-36">
+            <JalaliDatePicker
+              value={values.from}
+              onChange={(iso) => set({ from: iso, page: "1" })}
+              className={inputClass}
+              ariaLabel="تاریخ ایجاد از"
+            />
+          </div>
+          <span className="text-xs whitespace-nowrap text-muted-foreground">تا</span>
+          <div className="w-36">
+            <JalaliDatePicker
+              value={values.to}
+              onChange={(iso) => set({ to: iso, page: "1" })}
+              className={inputClass}
+              ariaLabel="تاریخ ایجاد تا"
+            />
+          </div>
+        </div>
       </PlatformFilterBar>
 
       <PlatformDataTable

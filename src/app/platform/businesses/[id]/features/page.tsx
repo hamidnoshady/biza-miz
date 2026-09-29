@@ -1,8 +1,14 @@
 "use client";
 
-/** Feature flags, per-business app states, and desktop pairing — everything "what can this tenant use?". */
+/**
+ * Feature flags and per-business app states — everything "what is this tenant
+ * entitled to?".
+ *
+ * Desktop pairing used to live here too, which made a credential's lifetime
+ * read as another capability switch; it is its own section now
+ * («دستگاه‌ها و نصب‌ها», issue #755 §15).
+ */
 import { FeaturesPanel } from "../panels";
-import { PairingPanel } from "../pairing-panel";
 import { BusinessAppAvailabilityPanel } from "../app-availability-panel";
 
 export default function BusinessFeaturesPage() {
@@ -11,9 +17,8 @@ export default function BusinessFeaturesPage() {
       <FeaturesPanel />
       {/* The second, orthogonal switch: a flag says whether this business is
           entitled to a capability, this says whether the app is released and
-          working for them — «به‌زودی», «در حال تعمیر», «نسخهٔ آزمایشی». */}
+          working for them — «به‌زودی»، «در حال تعمیر»، «نسخهٔ آزمایشی». */}
       <BusinessAppAvailabilityPanel />
-      <PairingPanel />
     </div>
   );
 }

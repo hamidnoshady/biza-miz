@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { requirePlatformAdmin, requirePlatformCapability, platformAudit, withPlatformScope } from "@/lib/platform-auth";
 import {
+  countLedger,
+  countPayments,
   deductCredits,
   getWallet,
   grantCredits,
@@ -9,12 +11,13 @@ import {
 } from "@/lib/wallet-service";
 import { listEntitlements } from "@/lib/billing-plans-service";
 import {
+  countInvoices,
   getBusinessSubscription,
   listInvoices,
   calculateSubscriptionTotal,
 } from "@/lib/subscription-service";
 import { getMessageBusinessBilling } from "@/lib/messaging-billing";
-import { mediaUsageFor } from "@/lib/media-service";
+import { emptyMediaUsage, mediaUsageFor } from "@/lib/media-service";
 import { getPlatformAiConfig } from "@/lib/ai-config";
 import {
   getAiGatewayConfig,
@@ -25,18 +28,91 @@ import {
 import { rialFromGatewayUsd } from "@/lib/ai-gateway";
 import { getPlanAllowance } from "@/lib/ai-plan-allowance";
 import { query } from "@/lib/db";
+import {
+  BILLING_ALWAYS_INCLUDED,
+  BILLING_INCLUDE_KEYS,
+  isBillingIncludeKey,
+} from "@/lib/platform-billing-includes";
 
 /**
- * One business's complete commercial view for the consolidated Billing page
- * (migration 0176): subscription, plan limits, wallet, ledger, entitlements,
- * usage across AI / messaging / media, invoices, payments, overrides and the
- * LiteLLM spend read-back.
+ * The section keys `include=` accepts — one per tab of the business Billing
+ * page, so the page fetches the tab it is actually showing (issue #755 §17)
+ * rather than every collection for every business on every open.
+ *
+ * The keys live in `@/lib/platform-billing-includes` because the page names them
+ * too, and the two lists have to agree: the first version of this contract had
+ * the page sending a key this function refused, which turned every tab load into
+ * a 400 that no test could see.
+ */
+type IncludeKey = (typeof BILLING_INCLUDE_KEYS)[number];
+
+function parseInclude(raw: string | null): { keys: Set<IncludeKey> } | { invalid: string } {
+  // No `include` means "everything" — the pre-§17 contract, kept so the global
+  // Billing control center and existing callers keep working unchanged.
+  if (raw === null) return { keys: new Set<IncludeKey>(BILLING_INCLUDE_KEYS) };
+  const keys = new Set<IncludeKey>();
+  for (const part of raw.split(",")) {
+    const key = part.trim().toLowerCase();
+    if (!key) continue;
+    // The business's own identity is always returned, so naming it is allowed
+    // rather than a refusal — see BILLING_ALWAYS_INCLUDED. `?include=business`
+    // is therefore a legitimate (if thin) request, and the version that refused
+    // it is what broke every tab of the Billing page.
+    if (key === BILLING_ALWAYS_INCLUDED) continue;
+    if (!isBillingIncludeKey(key)) return { invalid: key };
+    keys.add(key);
+  }
+  // `?include=` with nothing after it is a malformed request, not a thin one.
+  if (keys.size === 0 && raw.trim() === "") return { invalid: "" };
+  return { keys };
+}
+
+/** A bounded page size from the query string; `fallback` when absent/garbage. */
+function pageSize(sp: URLSearchParams, name: string, fallback: number): number {
+  const n = Number(sp.get(name));
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(Math.floor(n), 200);
+}
+
+function pageOffset(sp: URLSearchParams, name: string): number {
+  const n = Number(sp.get(name));
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n);
+}
+
+/**
+ * One business's commercial view for the consolidated Billing page (migration
+ * 0176) — subscription, plan limits, wallet, ledger, entitlements, usage across
+ * AI / messaging / media, invoices, payments, overrides and the LiteLLM spend
+ * read-back.
+ *
+ * **Scalability (issue #755 §17).** It used to load all fourteen of those at
+ * once and cap the ledger/payments/invoices lists at 50 rows with no way to see
+ * past them. Now the caller names the sections it needs with an explicit
+ * `include=` contract (one key per tab), and the three list collections page
+ * with `{section}Limit` / `{section}Offset`, reporting `total` in `meta` so the
+ * UI can say "50 of 312" and offer a real load-more. `include` omitted still
+ * returns everything, for the cross-business console and older callers.
  */
 export const GET = withPlatformScope(
-  async (_req: Request, ctx: { params: Promise<{ id: string }> }) => {
+  async (request: Request, ctx: { params: Promise<{ id: string }> }) => {
     const { error } = await requirePlatformAdmin();
     if (error) return error;
     const { id: businessId } = await ctx.params;
+
+    const sp = new URL(request.url).searchParams;
+    const parsed = parseInclude(sp.get("include"));
+    if ("invalid" in parsed) {
+      return NextResponse.json(
+        {
+          error: "invalid_include",
+          invalid: parsed.invalid,
+          valid: [...BILLING_INCLUDE_KEYS, BILLING_ALWAYS_INCLUDED],
+        },
+        { status: 400 },
+      );
+    }
+    const want = parsed.keys;
 
     const { rows: bizRows } = await query<{ name: string; plan: string }>(
       `SELECT name, plan FROM businesses WHERE id = $1`,
@@ -44,78 +120,171 @@ export const GET = withPlatformScope(
     );
     if (!bizRows[0]) return NextResponse.json({ error: "business_not_found" }, { status: 404 });
 
+    const ledgerLimit = pageSize(sp, "ledgerLimit", 50);
+    const ledgerOffset = pageOffset(sp, "ledgerOffset");
+    const paymentsLimit = pageSize(sp, "paymentsLimit", 50);
+    const paymentsOffset = pageOffset(sp, "paymentsOffset");
+    const invoicesLimit = pageSize(sp, "invoicesLimit", 50);
+    const invoicesOffset = pageOffset(sp, "invoicesOffset");
+
+    // Only the included sections are queried — that is the whole point of the
+    // contract: opening the Invoices tab must not also compute usage, media and
+    // the subscription total for a business with a million ledger rows.
     const [
       wallet,
       ledger,
+      ledgerTotal,
       entitlements,
       payments,
+      paymentsTotal,
       usage,
       gateway,
       platform,
       gatewayRows,
       subscription,
       invoices,
+      invoicesTotal,
       recurring,
       messageBilling,
       mediaUsage,
       planAllowance,
       overrides,
     ] = await Promise.all([
-      getWallet(businessId),
-      listLedger(businessId, 50),
-      listEntitlements(businessId),
-      listPayments({ businessId, limit: 50 }),
-      query<{
-        feature_key: string;
-        used_count: string;
-        charged_count: string;
-        spent_rial: string;
-      }>(
-        `SELECT feature_key, used_count, charged_count, spent_rial
-           FROM feature_usage WHERE business_id = $1
-          ORDER BY spent_rial DESC, feature_key`,
-        [businessId],
-      ),
-      getAiGatewayConfig(),
-      getPlatformAiConfig(),
-      listBusinessGateways(businessId),
-      getBusinessSubscription(businessId),
-      listInvoices({ businessId, limit: 50 }),
-      calculateSubscriptionTotal(businessId).catch(() => null),
-      getMessageBusinessBilling(businessId).catch(() => ({ balanceRial: 0 })),
-      mediaUsageFor(businessId).catch(() => ({ totalBytes: 0, assetCount: 0, byKind: {} })),
-      getPlanAllowance(businessId),
-      query<{
-        id: string;
-        kind: string;
-        target: string;
-        value_int: number | null;
-        value_bool: boolean | null;
-        reason: string;
-        expires_at: string | null;
-        created_at: string;
-        admin_name: string | null;
-      }>(
-        `SELECT o.id, o.kind, o.target, o.value_int, o.value_bool, o.reason,
-                o.expires_at, o.created_at, adm.full_name AS admin_name
-           FROM business_billing_overrides o
-           LEFT JOIN platform_admins adm ON adm.id = o.created_by
-          WHERE o.business_id = $1 AND o.active
-          ORDER BY o.created_at DESC`,
-        [businessId],
-      ),
+      want.has("wallet") ? getWallet(businessId) : null,
+      want.has("ledger") ? listLedger(businessId, ledgerLimit, ledgerOffset) : null,
+      want.has("ledger") ? countLedger(businessId) : null,
+      want.has("subscription") ? listEntitlements(businessId) : null,
+      want.has("payments")
+        ? listPayments({ businessId, limit: paymentsLimit, offset: paymentsOffset })
+        : null,
+      want.has("payments") ? countPayments({ businessId }) : null,
+      // The AI tab reports this business's AI spend from the same usage rows,
+      // so `ai` needs them too — one small aggregate query, not the whole tab.
+      want.has("usage") || want.has("ai")
+        ? query<{
+            feature_key: string;
+            used_count: string;
+            charged_count: string;
+            spent_rial: string;
+          }>(
+            `SELECT feature_key, used_count, charged_count, spent_rial
+               FROM feature_usage WHERE business_id = $1
+              ORDER BY spent_rial DESC, feature_key`,
+            [businessId],
+          )
+        : null,
+      want.has("ai") ? getAiGatewayConfig() : null,
+      want.has("ai") ? getPlatformAiConfig() : null,
+      want.has("ai") ? listBusinessGateways(businessId) : null,
+      want.has("subscription") ? getBusinessSubscription(businessId) : null,
+      want.has("invoices")
+        ? listInvoices({ businessId, limit: invoicesLimit, offset: invoicesOffset })
+        : null,
+      want.has("invoices") ? countInvoices({ businessId }) : null,
+      want.has("subscription") ? calculateSubscriptionTotal(businessId).catch(() => null) : null,
+      want.has("usage")
+        ? getMessageBusinessBilling(businessId).catch(() => ({ balanceRial: 0 }))
+        : null,
+      // The failure fallback must have the *same* shape as a success, or the
+      // recovery path crashes where the happy path worked. `emptyMediaUsage()`
+      // carries every kind, so `usage.byKind.image.count` is always defined.
+      want.has("usage") ? mediaUsageFor(businessId).catch(() => emptyMediaUsage()) : null,
+      want.has("ai") ? getPlanAllowance(businessId) : null,
+      // Every override row, classified. The entitlement engine already ignores
+      // an expired override, so returning expired rows as if they were live made
+      // the console disagree with the engine that actually decides access.
+      want.has("overrides")
+        ? query<{
+            id: string;
+            kind: string;
+            target: string;
+            value_int: number | null;
+            value_bool: boolean | null;
+            reason: string;
+            expires_at: string | null;
+            created_at: string;
+            admin_name: string | null;
+            state: "active" | "expired" | "removed";
+          }>(
+            `SELECT o.id, o.kind, o.target, o.value_int, o.value_bool, o.reason,
+                    o.expires_at, o.created_at, adm.full_name AS admin_name,
+                    CASE WHEN NOT o.active THEN 'removed'
+                         WHEN o.expires_at IS NOT NULL AND o.expires_at <= now() THEN 'expired'
+                         ELSE 'active' END AS state
+               FROM business_billing_overrides o
+               LEFT JOIN platform_admins adm ON adm.id = o.created_by
+              WHERE o.business_id = $1
+              ORDER BY o.created_at DESC`,
+            [businessId],
+          )
+        : null,
     ]);
 
-    // The LiteLLM side of this business: each virtual key's reported USD spend,
-    // converted to Rial at the platform's stored rate so the console can show
-    // the real cost the platform is paying LiteLLM for this business.
-    const rate = platform.usdRialRate ?? 0;
-    const litellm = {
-      costingEnabled: Boolean(platform.gatewayCostingEnabled && rate > 0),
-      usdRialRate: rate > 0 ? rate : null,
-      totalSpendUsd: 0,
-      totalSpendRial: 0,
-      keys: gatewayRows.map((row) => {
+    const overrideRows = overrides?.rows ?? [];
+    const toOverride = (o: (typeof overrideRows)[number]) => ({
+      id: o.id,
+      kind: o.kind,
+      target: o.target,
+      valueInt: o.value_int,
+      valueBool: o.value_bool,
+      reason: o.reason,
+      expiresAt: o.expires_at,
+      createdAt: o.created_at,
+      createdBy: o.admin_name,
+      state: o.state,
+    });
+
+    const response: Record<string, unknown> = {
+      business: { id: businessId, name: bizRows[0].name, plan: bizRows[0].plan },
+      meta: {
+        includes: [...want],
+        ledger: { total: ledgerTotal ?? 0, limit: ledgerLimit, offset: ledgerOffset },
+        payments: { total: paymentsTotal ?? 0, limit: paymentsLimit, offset: paymentsOffset },
+        invoices: { total: invoicesTotal ?? 0, limit: invoicesLimit, offset: invoicesOffset },
+      },
+    };
+
+    if (wallet) response.wallet = wallet;
+    if (ledger) response.ledger = ledger;
+    if (entitlements) response.entitlements = entitlements;
+    if (payments) response.payments = payments;
+    if (invoices) response.invoices = invoices;
+    if (subscription !== undefined && want.has("subscription")) {
+      response.subscription = subscription;
+      response.recurring = recurring;
+    }
+    if (want.has("usage")) {
+      response.messaging = { balanceRial: messageBilling?.balanceRial ?? 0 };
+      response.media = { usage: mediaUsage ?? emptyMediaUsage() };
+      response.usage = (usage?.rows ?? []).map((u) => ({
+        featureKey: u.feature_key,
+        usedCount: Number(u.used_count),
+        chargedCount: Number(u.charged_count),
+        spentRial: Number(u.spent_rial),
+      }));
+    }
+    if (want.has("ai")) {
+      response.ai = {
+        allowance: planAllowance,
+        walletSpentRial: (usage?.rows ?? [])
+          .filter((u) => u.feature_key === "ai")
+          .reduce((sum, u) => sum + Number(u.spent_rial), 0),
+      };
+    }
+    if (want.has("overrides")) {
+      // `overrides` is the *effective* set (what the entitlement engine will
+      // actually honour); `overrideHistory` is expired/removed rows kept for
+      // accountability rather than shown as active.
+      response.overrides = overrideRows.filter((o) => o.state === "active").map(toOverride);
+      response.overrideHistory = overrideRows.filter((o) => o.state !== "active").map(toOverride);
+    }
+    if (gateway && platform && gatewayRows) {
+      // The LiteLLM side of this business: each virtual key's reported USD
+      // spend, converted to Rial at the platform's stored rate so the console
+      // can show the real cost the platform is paying LiteLLM for this
+      // business.
+      const rate = platform.usdRialRate ?? 0;
+      const keys = gatewayRows.map((row) => {
         const pub = toPublicBusinessGateway(row, gateway, platform.model);
         return {
           locationId: pub.locationId,
@@ -127,47 +296,17 @@ export const GET = withPlatformScope(
           syncedAt: pub.syncedAt,
           syncError: pub.syncError,
         };
-      }),
-    };
-    litellm.totalSpendUsd = litellm.keys.reduce((sum, k) => sum + k.spendUsd, 0);
-    litellm.totalSpendRial = litellm.keys.reduce((sum, k) => sum + k.spendRial, 0);
+      });
+      response.litellm = {
+        costingEnabled: Boolean(platform.gatewayCostingEnabled && rate > 0),
+        usdRialRate: rate > 0 ? rate : null,
+        totalSpendUsd: keys.reduce((sum, k) => sum + k.spendUsd, 0),
+        totalSpendRial: keys.reduce((sum, k) => sum + k.spendRial, 0),
+        keys,
+      };
+    }
 
-    return NextResponse.json({
-      business: { id: businessId, name: bizRows[0].name, plan: bizRows[0].plan },
-      subscription,
-      recurring,
-      wallet,
-      ledger,
-      entitlements,
-      payments,
-      invoices,
-      litellm,
-      ai: {
-        allowance: planAllowance,
-        walletSpentRial: usage.rows
-          .filter((u) => u.feature_key === "ai")
-          .reduce((sum, u) => sum + Number(u.spent_rial), 0),
-      },
-      messaging: { balanceRial: messageBilling.balanceRial },
-      media: { usage: mediaUsage },
-      overrides: overrides.rows.map((o) => ({
-        id: o.id,
-        kind: o.kind,
-        target: o.target,
-        valueInt: o.value_int,
-        valueBool: o.value_bool,
-        reason: o.reason,
-        expiresAt: o.expires_at,
-        createdAt: o.created_at,
-        createdBy: o.admin_name,
-      })),
-      usage: usage.rows.map((u) => ({
-        featureKey: u.feature_key,
-        usedCount: Number(u.used_count),
-        chargedCount: Number(u.charged_count),
-        spentRial: Number(u.spent_rial),
-      })),
-    });
+    return NextResponse.json(response);
   },
 );
 

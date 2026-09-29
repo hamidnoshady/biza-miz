@@ -1077,17 +1077,31 @@ export interface MediaUsageSummary {
   byKind: Record<MediaKind, { count: number; bytes: number }>;
 }
 
+/**
+ * The zero usage, with every key present. Callers that need a fallback shape
+ * (a billing read that must not fail when the media tables are unreachable)
+ * use this rather than hand-writing `{ byKind: {} }` — a partial shape is what
+ * made `usage.byKind.image.count` throw in the UI's recovery path.
+ */
+export function emptyMediaUsage(): MediaUsageSummary {
+  return {
+    totalBytes: 0,
+    assetCount: 0,
+    byKind: {
+      image: { count: 0, bytes: 0 },
+      video: { count: 0, bytes: 0 },
+      document: { count: 0, bytes: 0 },
+    },
+  };
+}
+
 export async function mediaUsageFor(businessId: string): Promise<MediaUsageSummary> {
   const { rows } = await query<{ kind: MediaKind; count: string; bytes: string }>(
     `SELECT kind, COUNT(*) AS count, COALESCE(SUM(byte_size), 0) AS bytes
        FROM media_assets WHERE business_id = $1 GROUP BY kind`,
     [businessId],
   );
-  const byKind: MediaUsageSummary["byKind"] = {
-    image: { count: 0, bytes: 0 },
-    video: { count: 0, bytes: 0 },
-    document: { count: 0, bytes: 0 },
-  };
+  const { byKind } = emptyMediaUsage();
   let totalBytes = 0;
   let assetCount = 0;
   for (const row of rows) {

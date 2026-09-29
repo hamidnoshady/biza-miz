@@ -75,6 +75,11 @@ export default function PlatformLayout({ children }: { children: React.ReactNode
     };
   }, [isLogin, pathname, router]);
 
+  // The sidebar's workspace title reads the lightweight identity endpoint, not
+  // the full business summary: the summary computes counts, aliases and
+  // industry data, and the workspace's own provider already reads it for the
+  // page. Reading it here too meant two heavy reads per workspace navigation
+  // just to draw one string (issue #755 §11).
   useEffect(() => {
     if (!openBusinessId) {
       setOpenBusiness(null);
@@ -83,7 +88,7 @@ export default function PlatformLayout({ children }: { children: React.ReactNode
     let cancelled = false;
     (async () => {
       const { ok, data } = await api<{ business?: { name?: string } }>(
-        `/api/platform/businesses/${openBusinessId}`,
+        `/api/platform/businesses/${openBusinessId}/identity`,
       );
       if (cancelled) return;
       setOpenBusiness(

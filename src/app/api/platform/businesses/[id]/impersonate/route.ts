@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformCapability, withPlatformScope } from "@/lib/platform-auth";
+import { CONTROLLED_SESSION_CAPABILITIES } from "@/lib/platform-admin";
 import { clientIpFrom } from "@/lib/rate-limit";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
 import { businessHost, hostRoutingEnabled, preferredProto, rootDomain } from "@/lib/host";
@@ -75,7 +76,10 @@ export const POST = withPlatformScope(async (request: NextRequest, ctx: Ctx) => 
       reason: body.reason,
       minutes: body.minutes,
       ticketId: body.ticketId,
-      allowedCapabilities: mode === "controlled" ? ["printer.test", "connection.test", "sync.retry", "integration.test", "diagnostics.run"] : [],
+      // One list, in platform-admin.ts beside the rest of the capability
+      // policy — it used to be inline here while a dead near-copy sat unused in
+      // that file (issue #755 §20).
+      allowedCapabilities: mode === "controlled" ? [...CONTROLLED_SESSION_CAPABILITIES] : [],
       ipAddress: clientIpFrom(request.headers, 0),
       userAgent: request.headers.get("user-agent"),
     });
