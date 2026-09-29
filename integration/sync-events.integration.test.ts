@@ -916,6 +916,15 @@ describe("runServerPush — per-row delivery", () => {
     // failed row is still owed.
     expect(await pushedIds()).toEqual([deferred, applied]);
 
+    // The refused row waits out its own backoff before it is offered again…
+    const backoff = await db.query<{ push_attempts: number; waiting: boolean }>(
+      "SELECT push_attempts, next_push_at > now() AS waiting FROM sync_events WHERE client_event_id = $1",
+      [failed],
+    );
+    expect(backoff.rows[0]).toEqual({ push_attempts: 1, waiting: true });
+    // …so move its clock on, as if the wait had passed.
+    await db.query("UPDATE sync_events SET next_push_at = now() - interval '1 second' WHERE client_event_id = $1", [failed]);
+
     const seen = stubRemote(() => ({ ok: true }));
     const second = await dbLib.withTenant(bizA.id, () =>
       serverSync.runServerPush(bizA.id),

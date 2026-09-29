@@ -200,6 +200,12 @@ BEGIN
   IF biz IS NULL OR row_key IS NULL THEN
     RETURN NULL;
   END IF;
+  -- The business itself is being deleted and this row is going with it by
+  -- cascade: there is no peer left to tell, and a tombstone would reference a
+  -- business that no longer exists.
+  IF NOT EXISTS (SELECT 1 FROM businesses b WHERE b.id = biz) THEN
+    RETURN NULL;
+  END IF;
 
   stamp := app_sync_next_hlc();
   IF TG_OP = 'DELETE' THEN
