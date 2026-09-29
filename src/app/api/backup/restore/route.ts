@@ -6,6 +6,7 @@ import {
   restoreAvailable,
   restoreFromArtifact,
 } from "@/lib/backup-service";
+import { isRestoreUploadId } from "@/lib/restore-upload";
 
 /**
  * Restore (whole database) — Owner-only, and only on an install whose database
@@ -30,7 +31,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.backupRestore);
   if (error) return error;
 
-  let body: { source?: unknown; artifact?: unknown; apply?: unknown };
+  let body: {
+    source?: unknown;
+    artifact?: unknown;
+    uploadId?: unknown;
+    fileName?: unknown;
+    passphrase?: unknown;
+    apply?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -41,17 +49,29 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "restore_not_available" }, { status: 403 });
   }
 
-  const source = body.source === "cloud" ? "cloud" : "local";
-  const artifact = typeof body.artifact === "string" ? body.artifact.trim() : "";
-  if (!artifact) {
-    return NextResponse.json({ error: "missing_artifact" }, { status: 400 });
+  const apply = Boolean(body.apply);
+  let outcome;
+  if (body.source === "upload") {
+    // A file uploaded through ./upload — the only way to restore a backup this
+    // install never recorded (a reinstalled desktop, a dump on a USB stick).
+    if (!isRestoreUploadId(body.uploadId)) {
+      return NextResponse.json({ error: "missing_artifact" }, { status: 400 });
+    }
+    outcome = await restoreFromArtifact(session.businessId, {
+      source: "upload",
+      uploadId: body.uploadId,
+      fileName: typeof body.fileName === "string" ? body.fileName : undefined,
+      passphrase: typeof body.passphrase === "string" ? body.passphrase : undefined,
+      apply,
+    });
+  } else {
+    const source = body.source === "cloud" ? "cloud" : "local";
+    const artifact = typeof body.artifact === "string" ? body.artifact.trim() : "";
+    if (!artifact) {
+      return NextResponse.json({ error: "missing_artifact" }, { status: 400 });
+    }
+    outcome = await restoreFromArtifact(session.businessId, { source, artifact, apply });
   }
-
-  const outcome = await restoreFromArtifact(session.businessId, {
-    source,
-    artifact,
-    apply: Boolean(body.apply),
-  });
   if (outcome.status === "failed") {
     return NextResponse.json({ error: outcome.error }, { status: 400 });
   }

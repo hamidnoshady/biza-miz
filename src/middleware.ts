@@ -120,6 +120,10 @@ const PUBLIC_PATHS = [
   // database, so there is no session to require. The one-time code in the body
   // is the credential, and the route refuses once any user exists.
   "/api/setup/pair",
+  // Desktop first-run restore (a reinstall bringing its old database back):
+  // the third choice on the same empty-database screen, refused by the route
+  // itself once any business or user exists, and never on a central server.
+  "/api/setup/restore",
   // The cloud side of that same exchange, on whatever origin the owner copied.
   // The twin under /api/platform is unchanged, but everything with that prefix
   // is moved to the console's host — and since an owner now issues a desktop
@@ -484,6 +488,9 @@ const AUTH_RATE_LIMITED_PATHS = [
   "/api/pairing/redeem",
   "/api/pairing/acknowledge",
   "/api/setup/pair",
+  // The first-run restore's verify/apply (not its upload pieces, which a
+  // single file sends dozens of): no session exists yet, like pair.
+  "/api/setup/restore",
   // Self-service business registration accepts an *existing* platform user's
   // email with a guessed password (adding a business to an already-registered
   // account authenticates against that account's real password — see

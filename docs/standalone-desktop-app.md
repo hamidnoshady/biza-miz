@@ -231,3 +231,13 @@ Use Windows **Installed apps** to uninstall. App data remains by default. To
 perform an intentional destructive reset, first create and verify a compatible
 backup, uninstall, and remove the Business Suite `userData` directory manually.
 Never delete the data directory as part of a routine upgrade or reinstall.
+
+After such a reset there are two ways back, both on the first-run screen:
+
+- **«اتصال کسب‌وکار موجود»** — pair with a fresh code from the cloud panel. The
+  new install is seeded from the cloud; anything the old install never managed
+  to push is not in the cloud and is not brought back.
+- **«بازگردانی از فایل پشتیبان»** — upload the `.dump`/`.dump.enc` taken before
+  the reset (see [backup-restore.md](backup-restore.md) §A2). Then restart,
+  sign in with the old account, and use «ترمیم / اتصال دوباره» on the desktop
+  panel so the restored install pushes its pending events to the cloud.

@@ -116,6 +116,34 @@ You can also restore a manually-downloaded `.dump.enc` as a local file —
 `isEncryptedBackup` detection is automatic; only `BACKUP_PASSPHRASE` is
 needed.
 
+### A2. From a backup file, in the app (reinstall, USB stick)
+
+The dashboard's artifact list comes from this database's own `backup_runs`, so
+a freshly installed or reinstalled desktop lists nothing — even with the old
+`.dump`/`.dump.enc` sitting in the backup folder. Two in-app paths take the
+file itself:
+
+- **First-run screen** (`/welcome`, third choice «بازگردانی از فایل پشتیبان»):
+  offered only on a *site* install whose database has no business and no user
+  (`freshInstallRestoreAvailable()`), the same window bootstrap and pairing run
+  in. Never on a central server.
+- **`/dashboard/backup` → بازگردانی پشتیبان → «از فایل»**: Owner-only, on a
+  single-business install, like the listed artifacts.
+
+Either way the file is uploaded in ≤ 4 MB pieces (`src/lib/restore-upload.ts`
+— Next's middleware truncates any request body over 10 MB), verified into the
+scratch database, and applied only after an explicit confirmation. An
+encrypted file needs the passphrase of the install that wrote it, typed into
+the form. Only `.dump`/`.dump.enc` restore; the SQL/xlsx *export* is a
+per-business data export, not a restorable backup.
+
+After applying: restart the app (the desktop runs pending migrations at start,
+so an older backup is brought up to date), sign in with the accounts inside
+the backup, and re-attach cloud sync from «تنظیمات ← اتصال‌ها ← برنامهٔ دسکتاپ ←
+ترمیم / اتصال دوباره» with a fresh pairing code. Repair keeps the restored data
+and its queued sync events, so what never reached the cloud before the
+reinstall is sent after it.
+
 ### C. Bare-metal recovery (machine completely lost)
 
 1. New machine: install Docker + Node, clone this repo, `npm install`,
