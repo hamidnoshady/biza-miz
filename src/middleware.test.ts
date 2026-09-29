@@ -32,6 +32,12 @@ describe("isPublicPath", () => {
   it("lets a paired desktop's runtime report reach the route's own bearer check", () => {
     expect(isPublicPath("/api/server-sync/runtime-status")).toBe(true);
     expect(isPublicPath("/api/server-sync/update-check")).toBe(true);
+    // The desktop's IAM reconciliation gates every sync tick; a 401 here
+    // stopped all Hybrid sync (the card sat on «در حال اتصال»).
+    for (const path of ["snapshot", "events", "status", "commands", "detach"]) {
+      expect(isPublicPath(`/api/iam/${path}`)).toBe(true);
+    }
+    expect(isPublicPath("/api/iam")).toBe(false);
     // The owner's config screen stays session-gated.
     expect(isPublicPath("/api/server-sync/config")).toBe(false);
   });

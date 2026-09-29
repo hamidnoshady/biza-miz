@@ -131,7 +131,23 @@ export const GET = withTenantScope(async () => {
     lastSuccessfulPushAt && lastSuccessfulPullAt
       ? [lastSuccessfulPushAt, lastSuccessfulPullAt].sort()[0]
       : null;
-  const errorText = syncState.lastPushError || syncState.lastPullError;
+  // The IAM reconciliation gates every operational tick (runServerSyncTick
+  // skips master data, push and pull while it fails), and it records its
+  // failure only in iam_sync_state. Without reading it here, a blocked site
+  // had no push/pull error and no success either, and showed «در حال اتصال»
+  // indefinitely instead of saying sync was stopped.
+  let iamError: string | null = null;
+  if (config?.enabled && config.siteDeviceId) {
+    const iam = await query<{ status: string; last_error: string | null }>(
+      `SELECT status, last_error FROM iam_sync_state WHERE business_id=$1 AND site_device_id=$2`,
+      [session.businessId, config.siteDeviceId],
+    );
+    const row = iam.rows[0];
+    if (row && row.status !== "healthy" && row.status !== "syncing" && row.last_error) {
+      iamError = `iam_sync_blocked: ${row.last_error}`;
+    }
+  }
+  const errorText = syncState.lastPushError || syncState.lastPullError || iamError;
   const configured = Boolean(config?.enabled);
   const sync: ConnectionStatus = !configured
     ? "not_configured"
