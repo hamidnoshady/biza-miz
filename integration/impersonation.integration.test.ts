@@ -318,3 +318,119 @@ describe("redeemImpersonationHandoff — the business-origin half", () => {
     });
   });
 });
+
+/**
+ * Session ownership + the real resume (issue #755 §4).
+ *
+ * The console used to pick "the first active grant", label it its own, and its
+ * «ادامه نشست فعلی» opened the *create* dialog. Ownership is now decided by the
+ * server (`isMine`) and resume hands off into the same grant — never a new one,
+ * and never someone else's.
+ */
+describe("support-session ownership and resume", () => {
+  it("marks a grant as mine only for the admin who holds it", async () => {
+    const { grant } = await platformService.startImpersonation({
+      adminId: admin.id,
+      businessId: biz.id,
+      mode: "read_only",
+      reason: "بررسی مشکل فنی مشتری",
+    });
+    const mine = await platformService.listGrants(biz.id, admin.id);
+    expect(mine.find((g) => g.id === grant.id)?.isMine).toBe(true);
+
+    const theirs = await platformService.listGrants(biz.id, otherAdmin.id);
+    expect(theirs.find((g) => g.id === grant.id)?.isMine).toBe(false);
+  });
+
+  it("resumes my own live session into the same grant, with a redeemable handoff", async () => {
+    const { grant } = await platformService.startImpersonation({
+      adminId: admin.id,
+      businessId: biz.id,
+      mode: "read_only",
+      reason: "بررسی مشکل فنی مشتری",
+    });
+
+    const resumed = await platformService.resumeImpersonation({
+      grantId: grant.id,
+      adminId: admin.id,
+      businessId: biz.id,
+    });
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.grant.id).toBe(grant.id);
+
+    const redeemed = await platformService.redeemImpersonationHandoff(resumed.handoff.token);
+    expect(redeemed).toMatchObject({ ok: true, grantId: grant.id, adminId: admin.id });
+  });
+
+  it("cannot resume another operator's session", async () => {
+    const { grant } = await platformService.startImpersonation({
+      adminId: admin.id,
+      businessId: biz.id,
+      mode: "read_only",
+      reason: "بررسی مشکل فنی مشتری",
+    });
+    expect(
+      await platformService.resumeImpersonation({
+        grantId: grant.id,
+        adminId: otherAdmin.id,
+        businessId: biz.id,
+      }),
+    ).toEqual({ ok: false, error: "not_active" });
+  });
+
+  it("cannot resume a session that ended, or one that expired", async () => {
+    const ended = await platformService.startImpersonation({
+      adminId: admin.id,
+      businessId: biz.id,
+      mode: "read_only",
+      reason: "بررسی مشکل فنی مشتری",
+    });
+    await platformService.closeSupportSession(ended.grant.id, { type: "operator", adminId: admin.id }, channel);
+    expect(
+      await platformService.resumeImpersonation({
+        grantId: ended.grant.id,
+        adminId: admin.id,
+        businessId: biz.id,
+      }),
+    ).toEqual({ ok: false, error: "not_active" });
+
+    const expired = await platformService.startImpersonation({
+      adminId: admin.id,
+      businessId: biz.id,
+      mode: "read_only",
+      reason: "بررسی مشکل فنی مشتری",
+    });
+    await db.query("UPDATE impersonation_grants SET expires_at = now() - interval '1 minute' WHERE id = $1", [
+      expired.grant.id,
+    ]);
+    expect(
+      await platformService.resumeImpersonation({
+        grantId: expired.grant.id,
+        adminId: admin.id,
+        businessId: biz.id,
+      }),
+    ).toEqual({ ok: false, error: "not_active" });
+  });
+
+  it("records the re-entry in the audit trail", async () => {
+    const { grant } = await platformService.startImpersonation({
+      adminId: admin.id,
+      businessId: biz.id,
+      mode: "read_only",
+      reason: "بررسی مشکل فنی مشتری",
+    });
+    await platformService.resumeImpersonation({
+      grantId: grant.id,
+      adminId: admin.id,
+      businessId: biz.id,
+    });
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM platform_audit_log
+        WHERE action = 'support_session.resumed' AND entity_id = $1`,
+      [grant.id],
+    );
+    expect(Number(rows[0].count)).toBe(1);
+  });
+
+});

@@ -138,6 +138,32 @@ describe("queryBusinesses", () => {
     expect(result.page).toBe(1);
   });
 
+  /**
+   * The summary cards used to count the current page's rows. These are the
+   * server-side aggregates that replace them: over the *filter context*, and
+   * deliberately not narrowed by the status filter itself — otherwise choosing
+   * "معلق" would report «فعال: ۰» as if nothing on the deployment were active.
+   */
+  it("reports whole-context status counts, not a count of the page", async () => {
+    const all = await platformService.queryBusinesses({ pageSize: 2 });
+    expect(all.businesses).toHaveLength(2);
+    expect(all.statusCounts).toEqual({ total: 4, active: 2, suspended: 1, archived: 1 });
+
+    const suspended = await platformService.queryBusinesses({ status: "suspended" });
+    expect(suspended.total).toBe(1);
+    expect(suspended.statusCounts).toEqual({ total: 4, active: 2, suspended: 1, archived: 1 });
+
+    const pro = await platformService.queryBusinesses({ plan: "pro" });
+    expect(pro.statusCounts).toEqual({ total: 2, active: 1, suspended: 0, archived: 1 });
+
+    const idle = await platformService.queryBusinesses({ activity: "idle" });
+    expect(idle.statusCounts).toEqual({ total: 3, active: 1, suspended: 1, archived: 1 });
+  });
+
+  it("lists the distinct plan keys in use for the directory's plan filter", async () => {
+    expect(await platformService.listBusinessPlanKeys()).toEqual(["free", "pro"]);
+  });
+
   it("filters by status", async () => {
     const active = await platformService.queryBusinesses({ status: "active" });
     expect(active.total).toBe(2);

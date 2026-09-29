@@ -15,12 +15,13 @@
  *
  * The retired `/plan` section redirects to `?tab=subscription`.
  */
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Loader2Icon, RefreshCwIcon, SparklesIcon, WalletIcon } from "lucide-react";
 import { formatJalali } from "@/lib/jalali";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
+import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { PlatformStatusBadge } from "@/components/platform/status-badge";
 import { PlatformConfirmDialog } from "@/components/platform/dialogs";
@@ -122,8 +123,103 @@ interface BusinessBillingData {
     expiresAt: string | null;
     createdAt: string;
     createdBy: string | null;
+    state: "active" | "expired" | "removed";
+  }[];
+  /** Expired and removed overrides — accountability, not effective access. */
+  overrideHistory: {
+    id: string;
+    kind: string;
+    target: string;
+    valueInt: number | null;
+    valueBool: boolean | null;
+    reason: string;
+    expiresAt: string | null;
+    createdAt: string;
+    createdBy: string | null;
+    state: "active" | "expired" | "removed";
   }[];
   usage: { featureKey: string; usedCount: number; chargedCount: number; spentRial: number }[];
+  /** Which sections rode along, and how much of each paged list there is. */
+  meta?: {
+    includes: IncludeKey[];
+    ledger: ListPageInfo;
+    payments: ListPageInfo;
+    invoices: ListPageInfo;
+  };
+}
+
+interface ListPageInfo {
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+type IncludeKey =
+  | "subscription"
+  | "wallet"
+  | "ledger"
+  | "payments"
+  | "invoices"
+  | "usage"
+  | "ai"
+  | "overrides";
+
+/**
+ * Which sections each tab needs (issue #755 §17). The API answers an explicit
+ * `include=` contract, so opening Invoices no longer loads the wallet, the
+ * ledger, usage, media and the subscription total for every business.
+ */
+const INCLUDE_BY_TAB: Record<string, IncludeKey[]> = {
+  subscription: ["subscription", "overrides"],
+  wallet: ["wallet", "ledger", "payments", "ai"],
+  invoices: ["invoices"],
+  usage: ["usage", "ai"],
+};
+
+/**
+ * The response keys a tab renders. The tab waits for exactly these, so a
+ * section that was not requested can never be silently shown as "empty" — the
+ * difference between "no invoices" and "invoices not fetched" matters.
+ */
+const READY_KEYS: Record<string, string[]> = {
+  subscription: ["subscription", "recurring", "entitlements", "overrides"],
+  wallet: ["wallet", "ledger", "payments", "ai"],
+  invoices: ["invoices"],
+  usage: ["usage", "media", "messaging", "ai"],
+};
+
+/** One page of a paged list. */
+const PAGE_SIZE = 50;
+
+/**
+ * The shape every tab renders against, with shape-complete empties. Sections
+ * that were not requested stay at their empty value but are never *shown*: the
+ * tab gates on `READY_KEYS` first.
+ */
+function emptyBilling(businessId: string): BusinessBillingData {
+  return {
+    business: { id: businessId, name: "", plan: "" },
+    subscription: null,
+    recurring: null,
+    wallet: { balanceRial: 0, totalToppedUpRial: 0, totalSpentRial: 0 },
+    ledger: [],
+    entitlements: [],
+    payments: [],
+    invoices: [],
+    litellm: {
+      costingEnabled: false,
+      usdRialRate: null,
+      totalSpendUsd: 0,
+      totalSpendRial: 0,
+      keys: [],
+    },
+    ai: { allowance: { monthlyCreditRial: 0, usedRial: 0, remainingRial: 0 }, walletSpentRial: 0 },
+    messaging: { balanceRial: 0 },
+    media: { usage: { totalBytes: 0, assetCount: 0, byKind: {} } },
+    overrides: [],
+    overrideHistory: [],
+    usage: [],
+  };
 }
 
 const KIND_LABELS: Record<string, string> = {
@@ -187,9 +283,46 @@ const TABS = [
 type Tab = (typeof TABS)[number]["key"];
 
 function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "۰ بایت";
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} گیگابایت`;
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} مگابایت`;
-  return `${Math.max(1, Math.round(bytes / 1024))} کیلوبایت`;
+  if (bytes < 1024) return `${toPersianDigits(Math.round(bytes))} بایت`;
+  return `${(bytes / 1024).toFixed(1)} کیلوبایت`;
+}
+
+/**
+ * "N of M" plus a real load-more. The lists used to stop at 50 with nothing
+ * saying so — an operator reading a 300-row ledger drawer had no way to tell
+ * the difference between "that is the ledger" and "that is the newest 50".
+ */
+function LoadMoreButton({
+  shown,
+  total,
+  onClick,
+}: {
+  shown: number;
+  total: number;
+  onClick: () => void;
+}) {
+  return (
+    <div className="mt-3 flex justify-center">
+      <Button variant="ghost" onClick={onClick}>
+        نمایش {toPersianDigits(Math.min(PAGE_SIZE, total - shown))} ردیف بیشتر ({toPersianDigits(shown)} از {toPersianDigits(total)})
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * Media usage is read from a separate service that can fail on its own; the
+ * fallback is shape-complete now, but the UI stays null-safe so a partial or
+ * older payload can never crash the recovery path it exists to serve.
+ */
+function mediaKindCount(
+  usage: BusinessBillingData["media"]["usage"] | undefined,
+  kind: string,
+): number {
+  return usage?.byKind?.[kind]?.count ?? 0;
 }
 
 export default function BusinessBillingPage() {
@@ -200,9 +333,20 @@ export default function BusinessBillingPage() {
   const rawTab = searchParams.get("tab") ?? "subscription";
   const tab: Tab = TABS.some((t) => t.key === rawTab) ? (rawTab as Tab) : "subscription";
   const can = useCan();
-  const canAdjust = can("adjustments.manage") || can("billing.manage");
+  // Capabilities are read per action, not folded into one `canAdjust`. The API
+  // enforces exactly these, and each may be granted independently in the future
+  // — a wallet/override desk without price policy, or a payments reviewer
+  // without either.
+  //   subscription / plan / auto-renew / cancel  -> billing.manage
+  //   wallet adjustment                          -> adjustments.manage
+  //   business overrides                         -> adjustments.manage
+  //   LiteLLM spend refresh (the POST action)    -> adjustments.manage
+  const canManageSubscription = can("billing.manage");
+  const canAdjustWallet = can("adjustments.manage");
+  const canOverride = can("adjustments.manage");
+  const canRefreshSpend = can("adjustments.manage");
 
-  const [data, setData] = useState<BusinessBillingData | null>(null);
+  const [data, setData] = useState<Partial<BusinessBillingData>>({});
   const [activePlans, setActivePlans] = useState<{ key: string; name: string }[]>([]);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
@@ -211,17 +355,49 @@ export default function BusinessBillingPage() {
 
   const setTab = (next: Tab) => router.replace(`?tab=${next}`, { scroll: false });
 
-  const load = useCallback(async () => {
-    const { ok, data: res } = await api<BusinessBillingData & { error?: string }>(
-      `/api/platform/billing/businesses/${businessId}`,
-    );
-    if (ok) setData(res);
-    else setError(res.error === "business_not_found" ? "کسب‌وکار یافت نشد." : res.error ?? "بارگذاری انجام نشد.");
-  }, [businessId]);
+  // How much of each paged list is on screen. `ref` so a reload reads the
+  // current sizes without the callback going stale and refetching page one.
+  const pageSizes = useRef({ ledger: PAGE_SIZE, payments: PAGE_SIZE, invoices: PAGE_SIZE });
+  const [sizes, setSizes] = useState(pageSizes.current);
+
+  const load = useCallback(
+    async (which: Tab) => {
+      const page = pageSizes.current;
+      const sp = new URLSearchParams({
+        include: ["business", ...INCLUDE_BY_TAB[which]].join(","),
+        ledgerLimit: String(page.ledger),
+        paymentsLimit: String(page.payments),
+        invoicesLimit: String(page.invoices),
+      });
+      const { ok, data: res } = await api<Partial<BusinessBillingData> & { error?: string }>(
+        `/api/platform/billing/businesses/${businessId}?${sp.toString()}`,
+      );
+      if (ok) {
+        // Merge rather than replace: the other tabs' already-loaded sections
+        // stay put, so switching tabs never flashes a half-empty page.
+        setData((prev) => ({ ...prev, ...res }));
+      } else {
+        setError(res.error === "business_not_found" ? "کسب‌وکار یافت نشد." : res.error ?? "بارگذاری انجام نشد.");
+      }
+    },
+    [businessId],
+  );
+
+  const reload = useCallback(async () => {
+    await load(tab);
+  }, [load, tab]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    void load(tab);
+  }, [load, tab]);
+
+  /** Fetch one more page of a capped list instead of hiding the rest. */
+  function loadMore(section: "ledger" | "payments" | "invoices") {
+    const next = { ...pageSizes.current, [section]: pageSizes.current[section] + PAGE_SIZE };
+    pageSizes.current = next;
+    setSizes(next);
+    void load(tab);
+  }
 
   useEffect(() => {
     void api<{ plans: { key: string; name: string; status: string }[]; error?: string }>(
@@ -242,19 +418,22 @@ export default function BusinessBillingPage() {
     setBusy(null);
     if (ok) {
       setInfo(message);
-      await load();
+      await load(tab);
     } else {
       setError(res.error === "subscription_not_found" ? "اشتراکی ثبت نشده است." : `انجام نشد: ${res.error ?? ""}`);
     }
   }
 
-  if (!data) {
+  if (!data.business) {
     return (
       <div className="flex justify-center py-12 text-muted-foreground">
         <Loader2Icon className="size-6 animate-spin" />
       </div>
     );
   }
+
+  const view: BusinessBillingData = { ...emptyBilling(businessId), ...data };
+  const ready = READY_KEYS[tab].every((key) => key in data);
 
   return (
     <div className="space-y-4 sm:space-y-6">
@@ -279,25 +458,48 @@ export default function BusinessBillingPage() {
         ))}
       </nav>
 
-      {tab === "subscription" && (
-        <SubscriptionTab
-          data={data}
-          activePlans={activePlans}
-          canAdjust={canAdjust}
-          busy={busy}
-          onBusy={setBusy}
-          onSubscriptionAction={subscriptionAction}
-          onReload={load}
-          onError={setError}
-          confirmCancel={confirmCancel}
-          setConfirmCancel={setConfirmCancel}
-        />
+      {!ready ? (
+        <div className="flex justify-center py-12 text-muted-foreground">
+          <Loader2Icon className="size-6 animate-spin" />
+        </div>
+      ) : (
+        <>
+          {tab === "subscription" && (
+            <SubscriptionTab
+              data={view}
+              activePlans={activePlans}
+              canManageSubscription={canManageSubscription}
+              canOverride={canOverride}
+              busy={busy}
+              onBusy={setBusy}
+              onSubscriptionAction={subscriptionAction}
+              onReload={reload}
+              onError={setError}
+              confirmCancel={confirmCancel}
+              setConfirmCancel={setConfirmCancel}
+            />
+          )}
+          {tab === "wallet" && (
+            <WalletTab
+              data={view}
+              businessId={businessId}
+              canAdjustWallet={canAdjustWallet}
+              canRefreshSpend={canRefreshSpend}
+              busy={busy}
+              pageSizes={sizes}
+              onLoadMore={loadMore}
+              onBusy={setBusy}
+              onReload={reload}
+              onError={setError}
+              onInfo={setInfo}
+            />
+          )}
+          {tab === "invoices" && (
+            <InvoicesTab invoices={view.invoices} pageInfo={view.meta?.invoices} onLoadMore={loadMore} />
+          )}
+          {tab === "usage" && <UsageTab data={view} />}
+        </>
       )}
-      {tab === "wallet" && (
-        <WalletTab data={data} businessId={businessId} canAdjust={canAdjust} busy={busy} onBusy={setBusy} onReload={load} onError={setError} onInfo={setInfo} />
-      )}
-      {tab === "invoices" && <InvoicesTab invoices={data.invoices} />}
-      {tab === "usage" && <UsageTab data={data} />}
     </div>
   );
 }
@@ -309,7 +511,8 @@ export default function BusinessBillingPage() {
 function SubscriptionTab({
   data,
   activePlans,
-  canAdjust,
+  canManageSubscription,
+  canOverride,
   busy,
   onBusy,
   onSubscriptionAction,
@@ -320,7 +523,8 @@ function SubscriptionTab({
 }: {
   data: BusinessBillingData;
   activePlans: { key: string; name: string }[];
-  canAdjust: boolean;
+  canManageSubscription: boolean;
+  canOverride: boolean;
   busy: string | null;
   onBusy: (key: string | null) => void;
   onSubscriptionAction: (body: Record<string, unknown>, message: string) => Promise<void>;
@@ -337,6 +541,8 @@ function SubscriptionTab({
   const [ovUnlimited, setOvUnlimited] = useState(false);
   const [ovValue, setOvValue] = useState("");
   const [ovReason, setOvReason] = useState("");
+  // ISO date, chosen through the Shamsi calendar — the server stores and
+  // compares ISO, the operator only ever sees Jalali.
   const [ovExpiry, setOvExpiry] = useState("");
 
   async function saveOverride(ev: FormEvent) {
@@ -347,7 +553,9 @@ function SubscriptionTab({
       kind: "limit",
       target: ovTarget,
       reason: ovReason.trim(),
-      expiresAt: ovExpiry ? new Date(ovExpiry).toISOString() : null,
+      // End of the chosen day, so an override that expires "today" is still
+      // effective today instead of lapsing at midnight UTC.
+      expiresAt: ovExpiry ? new Date(`${ovExpiry}T23:59:59.999Z`).toISOString() : null,
     };
     if (ovUnlimited) body.unlimited = true;
     else {
@@ -374,11 +582,13 @@ function SubscriptionTab({
     }
   }
 
-  async function removeOverride(target: string) {
-    onBusy(`override-remove-${target}`);
+  async function removeOverride(override: BusinessBillingData["overrides"][number]) {
+    onBusy(`override-remove-${override.target}`);
+    // kind + id, matching the uniqueness key: target alone could delete a
+    // capability override that merely shares a name with the limit one.
     await api(`/api/platform/billing/businesses/${data.business.id}/overrides`, {
       method: "POST",
-      body: JSON.stringify({ action: "remove", target }),
+      body: JSON.stringify({ action: "remove", target: override.target, kind: override.kind, id: override.id }),
     });
     onBusy(null);
     await onReload();
@@ -421,7 +631,7 @@ function SubscriptionTab({
               <div className="flex justify-between gap-2">
                 <dt className="text-muted-foreground">تمدید خودکار</dt>
                 <dd>
-                  {canAdjust ? (
+                  {canManageSubscription ? (
                     <button
                       type="button"
                       className="rounded-lg border border-border px-2 py-0.5 text-xs hover:bg-muted"
@@ -441,7 +651,7 @@ function SubscriptionTab({
                 </dd>
               </div>
             </dl>
-            {canAdjust && sub.status !== "cancelled" && sub.status !== "expired" && (
+            {canManageSubscription && sub.status !== "cancelled" && sub.status !== "expired" && (
               <div className="flex flex-wrap gap-2 pt-1">
                 <Button variant="danger" onClick={() => setConfirmCancel(true)} disabled={busy === "subscription"}>
                   لغو اشتراک
@@ -466,7 +676,7 @@ function SubscriptionTab({
         )}
       </Card>
 
-      {canAdjust && (
+      {canManageSubscription && (
         <Card title="انتساب / تغییر پلن">
           <form
             className="flex flex-wrap items-end gap-3"
@@ -536,7 +746,7 @@ function SubscriptionTab({
           استثنا فقط برای همین کسب‌وکار است، پلن عمومی را تغییر نمی‌دهد؛ ثبت دلیل الزامی است و همهٔ تغییرات در
           تاریخچه ثبت می‌شود. پس از انقضا، استثنا خودبه‌خور غیرفعال است.
         </p>
-        {data.overrides.length > 0 && (
+        {data.overrides.length > 0 ? (
           <ul className="mb-4 divide-y divide-border text-sm">
             {data.overrides.map((ov) => (
               <li key={ov.id} className="flex items-start justify-between gap-2 py-2">
@@ -552,12 +762,12 @@ function SubscriptionTab({
                     {ov.expiresAt ? ` • تا ${formatJalali(ov.expiresAt, { withMonthName: true })}` : " • بدون انقضا"}
                   </p>
                 </div>
-                {canAdjust && (
+                {canOverride && (
                   <button
                     type="button"
                     className="shrink-0 rounded-lg border border-red-500/40 px-2 py-1 text-xs text-red-700 dark:text-red-300 hover:bg-red-500/10"
                     disabled={busy === `override-remove-${ov.target}`}
-                    onClick={() => void removeOverride(ov.target)}
+                    onClick={() => void removeOverride(ov)}
                   >
                     حذف
                   </button>
@@ -565,8 +775,34 @@ function SubscriptionTab({
               </li>
             ))}
           </ul>
+        ) : (
+          <p className="mb-3 text-sm text-muted-foreground">استثنای فعالی برای این کسب‌وکار ثبت نشده است.</p>
         )}
-        {canAdjust && (
+        {(data.overrideHistory ?? []).length > 0 ? (
+          <details className="mb-4 rounded-xl border border-border bg-muted/30 p-3">
+            <summary className="cursor-pointer text-xs text-muted-foreground">
+              تاریخچهٔ استثناهای منقضی/حذف‌شده ({toPersianDigits((data.overrideHistory ?? []).length)})
+            </summary>
+            <ul className="mt-2 divide-y divide-border text-sm">
+              {(data.overrideHistory ?? []).map((ov) => (
+                <li key={ov.id} className="flex items-start justify-between gap-2 py-2">
+                  <div className="min-w-0">
+                    <p className="text-muted-foreground">
+                      {OVERRIDE_TARGET_LABELS[ov.target] ?? ov.target}:{" "}
+                      <strong>{ov.valueInt == null ? "نامحدود" : toPersianDigits(ov.valueInt)}</strong>
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {ov.state === "expired" ? "منقضی" : "حذف‌شده"}
+                      {ov.expiresAt ? ` • انقضا ${formatJalali(ov.expiresAt, { withMonthName: true })}` : ""}
+                      {" "}• {ov.reason}
+                    </p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
+        {canOverride && (
           <form onSubmit={saveOverride} className="grid gap-3 rounded-xl border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-5 lg:items-end">
             <Field label="محدودیت">
               <select className={selectClass} value={ovTarget} onChange={(e) => setOvTarget(e.target.value)}>
@@ -589,8 +825,13 @@ function SubscriptionTab({
             <Field label="دلیل (الزامی)">
               <input className={inputClass} value={ovReason} onChange={(e) => setOvReason(e.target.value)} placeholder="مثلاً قرارداد سازمانی، جبران اختلال" />
             </Field>
-            <Field label="انقضا (اختیاری — میلادی)">
-              <input type="date" className={inputClass} value={ovExpiry} onChange={(e) => setOvExpiry(e.target.value)} />
+            <Field label="انقضا (اختیاری — شمسی)">
+              <JalaliDatePicker
+                value={ovExpiry}
+                onChange={setOvExpiry}
+                className={inputClass}
+                ariaLabel="تاریخ انقضای استثنا"
+              />
             </Field>
             <div className="lg:col-span-5">
               <Button type="submit" disabled={busy === "override"}>
@@ -626,8 +867,11 @@ function SubscriptionTab({
 function WalletTab({
   data,
   businessId,
-  canAdjust,
+  canAdjustWallet,
+  canRefreshSpend,
   busy,
+  pageSizes,
+  onLoadMore,
   onBusy,
   onReload,
   onError,
@@ -635,8 +879,11 @@ function WalletTab({
 }: {
   data: BusinessBillingData;
   businessId: string;
-  canAdjust: boolean;
+  canAdjustWallet: boolean;
+  canRefreshSpend: boolean;
   busy: string | null;
+  pageSizes: { ledger: number; payments: number; invoices: number };
+  onLoadMore: (section: "ledger" | "payments" | "invoices") => void;
   onBusy: (key: string | null) => void;
   onReload: () => Promise<void>;
   onError: (message: string) => void;
@@ -708,7 +955,7 @@ function WalletTab({
           </div>
         </div>
 
-        {canAdjust && (
+        {canAdjustWallet && (
           <form onSubmit={adjust} className="grid gap-3 rounded-xl border border-border bg-card p-4 sm:grid-cols-3 sm:items-end">
             <Field label="مبلغ (تومان — برای کسر منفی)">
               <PersianNumberInput
@@ -755,6 +1002,16 @@ function WalletTab({
           ))}
           {data.ledger.length === 0 && <li className="py-4 text-center text-muted-foreground">تراکنشی ثبت نشده است.</li>}
         </ul>
+        {data.meta && data.ledger.length < data.meta.ledger.total ? (
+          <LoadMoreButton
+            shown={data.ledger.length}
+            total={data.meta.ledger.total}
+            onClick={() => onLoadMore("ledger")}
+          />
+        ) : null}
+        <p className="mt-2 text-xs text-muted-foreground">
+          {toPersianDigits(pageSizes.ledger)} ردیف آخر از {toPersianDigits(data.meta?.ledger.total ?? data.ledger.length)} ردیف دفتر نمایش داده شده است.
+        </p>
       </Card>
 
       <Card title="پرداخت‌ها">
@@ -781,6 +1038,13 @@ function WalletTab({
           ))}
           {data.payments.length === 0 && <li className="py-4 text-center text-muted-foreground">پرداختی نیست.</li>}
         </ul>
+        {data.meta && data.payments.length < data.meta.payments.total ? (
+          <LoadMoreButton
+            shown={data.payments.length}
+            total={data.meta.payments.total}
+            onClick={() => onLoadMore("payments")}
+          />
+        ) : null}
       </Card>
 
       <Card title="هزینهٔ واقعی هوش مصنوعی (LiteLLM)">
@@ -802,10 +1066,17 @@ function WalletTab({
               </p>
             </div>
           </div>
-          <Button type="button" onClick={() => void syncLiteLlm()} disabled={syncing}>
-            {syncing ? <Loader2Icon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />}
-            به‌روزرسانی مصرف
-          </Button>
+          {/* The POST action needs `adjustments.manage`; a read-only admin who
+              holds only `billing.view` still sees the stored figures below but
+              is not offered a button guaranteed to return 403. */}
+          {canRefreshSpend ? (
+            <Button type="button" onClick={() => void syncLiteLlm()} disabled={syncing}>
+              {syncing ? <Loader2Icon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />}
+              به‌روزرسانی مصرف
+            </Button>
+          ) : (
+            <span className="text-xs text-muted-foreground">آخرین ارقام ذخیره‌شده — به‌روزرسانی نیازمند دسترسی تعدیل است.</span>
+          )}
         </div>
 
         {liteLlm.keys.length === 0 ? (
@@ -862,7 +1133,15 @@ function WalletTab({
 // Invoices tab
 // ---------------------------------------------------------------------------
 
-function InvoicesTab({ invoices }: { invoices: BusinessBillingData["invoices"] }) {
+function InvoicesTab({
+  invoices,
+  pageInfo,
+  onLoadMore,
+}: {
+  invoices: BusinessBillingData["invoices"];
+  pageInfo?: ListPageInfo;
+  onLoadMore: (section: "ledger" | "payments" | "invoices") => void;
+}) {
   return (
     <Card title="فاکتورها">
       {invoices.length === 0 ? (
@@ -897,6 +1176,13 @@ function InvoicesTab({ invoices }: { invoices: BusinessBillingData["invoices"] }
           </table>
         </div>
       )}
+      {pageInfo && invoices.length < pageInfo.total ? (
+        <LoadMoreButton
+          shown={invoices.length}
+          total={pageInfo.total}
+          onClick={() => onLoadMore("invoices")}
+        />
+      ) : null}
       <p className="mt-3 text-xs text-muted-foreground">
         ردیف‌های هر فاکتور در لحظهٔ صدور ثبت می‌شوند و با تغییر پلن یا تعرفه دوباره قیمت نمی‌خورند؛ فهرست کامل
         پلتفرم در <Link href="/platform/billing?tab=invoices" className="underline">مرکز صورت‌حساب</Link> است.
@@ -988,11 +1274,15 @@ function UsageTab({ data }: { data: BusinessBillingData }) {
         </Card>
 
         <Card title="نگهداری رسانه">
-          <p className="text-2xl font-extrabold tabular-nums text-foreground">{formatBytes(data.media.usage.totalBytes)}</p>
+          <p className="text-2xl font-extrabold tabular-nums text-foreground">
+            {formatBytes(data.media?.usage?.totalBytes ?? 0)}
+          </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            {toPersianDigits(data.media.usage.assetCount)} فایل
-            {data.media.usage.byKind.image.count > 0 && ` • تصویر: ${toPersianDigits(data.media.usage.byKind.image.count)}`}
-            {data.media.usage.byKind.video.count > 0 && ` • ویدیو: ${toPersianDigits(data.media.usage.byKind.video.count)}`}
+            {toPersianDigits(data.media?.usage?.assetCount ?? 0)} فایل
+            {mediaKindCount(data.media?.usage, "image") > 0 &&
+              ` • تصویر: ${toPersianDigits(mediaKindCount(data.media?.usage, "image"))}`}
+            {mediaKindCount(data.media?.usage, "video") > 0 &&
+              ` • ویدیو: ${toPersianDigits(mediaKindCount(data.media?.usage, "video"))}`}
           </p>
           <p className="mt-3 text-xs text-muted-foreground">
             هزینهٔ روزانهٔ نگهداری بر پایهٔ تعرفهٔ رسانه از کیف پول کسر می‌شود.

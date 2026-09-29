@@ -134,6 +134,14 @@ const PUBLIC_PATHS = [
   // business yet — the single-use token in the link is the credential.
   "/invite",
   "/api/auth/accept-invite",
+  // Issue #755 §14: an owner activating the business a platform operator
+  // provisioned for them has no session and no usable password (the identity
+  // was created with 32 random bytes nobody knows). The single-use token in the
+  // link is the credential, and redeeming it is where that person sets their
+  // own password and receives their own second factor — the same shape as
+  // accept-invite, and public for the same reason.
+  "/activate",
+  "/api/auth/owner-activation",
   // Phase 9: the caller is another location's server, not a browser — the
   // route authenticates it with a per-location bearer token, not a session.
   "/api/rollup/ingest",

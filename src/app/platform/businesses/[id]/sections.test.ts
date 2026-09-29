@@ -17,13 +17,32 @@ describe("business workspace navigation", () => {
     // consolidated commercial section (`billing?tab=subscription`).
     expect(hrefs).toEqual([
       "/platform/businesses/business-1",
+      "/platform/businesses/business-1/profile",
       "/platform/businesses/business-1/settings",
       "/platform/businesses/business-1/billing",
       "/platform/businesses/business-1/features",
+      "/platform/businesses/business-1/devices",
       "/platform/businesses/business-1/support",
       "/platform/businesses/business-1/danger",
     ]);
     expect(new Set(hrefs).size).toBe(hrefs.length);
+  });
+
+  it("separates devices & installations from the entitlement switches (issue #755 §15)", () => {
+    // Pairing is owner-only operational device management; an engineer who may
+    // toggle flags must not be offered a credential's controls.
+    expect(labelsFor("owner")).toContain("دستگاه‌ها و نصب‌ها");
+    expect(labelsFor("engineer")).not.toContain("دستگاه‌ها و نصب‌ها");
+    expect(labelsFor("support")).not.toContain("دستگاه‌ها و نصب‌ها");
+
+    const features = businessSections(BUSINESS_ID, CAPABILITIES_FOR("owner")).find(
+      (section) => section.href.endsWith("/features"),
+    );
+    expect(features?.hint).not.toContain("جفت‌سازی");
+    const devices = businessSections(BUSINESS_ID, CAPABILITIES_FOR("owner")).find(
+      (section) => section.href.endsWith("/devices"),
+    );
+    expect(devices?.hint).toContain("اتصال");
   });
 
   it("shows the consolidated billing section to every admin (billing.view) while hiding destructive entries", () => {
@@ -35,6 +54,9 @@ describe("business workspace navigation", () => {
     // actions inside the page are re-checked server-side per capability.
     expect(support).toContain("صورت‌حساب و اشتراک");
     expect(support).not.toContain("منطقهٔ خطر");
+    // Owner & managers is a read surface for every role — support needs the
+    // owner's contact to diagnose an account — while only an owner edits it.
+    expect(support).toContain("مالک و مدیران");
 
     const engineer = labelsFor("engineer");
     expect(engineer).toContain("صورت‌حساب و اشتراک");

@@ -11,6 +11,7 @@
  * mobile where the sidebar collapses.
  */
 import Link from "next/link";
+import { allowedLifecycleTransitions } from "@/lib/platform-business-lifecycle";
 import { BusinessDataProvider, useBusiness } from "./context";
 import { businessSections } from "./sections";
 import {
@@ -36,15 +37,20 @@ function Workspace({ children }: { children: React.ReactNode }) {
     exact: s.href === `/platform/businesses/${id}`,
   }));
 
+  // The moves this operator may actually make from the *current* status. The
+  // capability belongs to the transition (archived -> active needs
+  // `business.archive`), so the header cannot derive it from the target alone.
+  const lifecycle = business ? allowedLifecycleTransitions(business.status, caps) : [];
+
   return (
     <div className="mx-auto w-full max-w-5xl space-y-4">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <Link
-          href="/platform"
+          href="/platform/businesses"
           className="text-sm text-sky-700 dark:text-sky-300 hover:underline"
           aria-label="بازگشت به فهرست کسب‌وکارها"
         >
-          ← فهرست
+          ← فهرست کسب‌وکارها
         </Link>
         <span className="text-muted-foreground" aria-hidden>
           /
@@ -63,24 +69,16 @@ function Workspace({ children }: { children: React.ReactNode }) {
             {business.subdomain}.{rootDomain}
           </a>
         ) : null}
-        {business && caps.includes("business.suspend") && business.status === "active" ? (
+        {lifecycle.map((t, index) => (
           <Button
+            key={`${t.from}-${t.to}`}
             variant="ghost"
-            className="ms-auto"
-            onClick={() => void changeStatus("suspended", "معلق")}
+            className={index === 0 ? "ms-auto" : undefined}
+            onClick={() => void changeStatus(t.to, t.label)}
           >
-            تعلیق
+            {t.label}
           </Button>
-        ) : null}
-        {business && caps.includes("business.suspend") && business.status !== "active" ? (
-          <Button
-            variant="ghost"
-            className="ms-auto"
-            onClick={() => void changeStatus("active", "فعال")}
-          >
-            فعال‌سازی
-          </Button>
-        ) : null}
+        ))}
       </div>
 
       <SubNav items={tabs} />

@@ -215,15 +215,28 @@ export const PLATFORM_ROLE_LABELS: Record<PlatformAdminRole, string> = {
 export const MAX_IMPERSONATION_MINUTES = 60;
 export const DEFAULT_IMPERSONATION_MINUTES = 30;
 
-export const CONTROLLED_SUPPORT_CAPABILITIES = [
+/**
+ * What a `controlled` support session may actually do inside a tenant.
+ *
+ * Only diagnostic-and-retry verbs: a controlled session exists to look at a
+ * problem and shake it loose, not to change a customer's books, and this list is
+ * the whole of its authority.
+ *
+ * Issue #755 §20: this used to be `CONTROLLED_SUPPORT_CAPABILITIES`, a nine-
+ * entry list nothing read, while the impersonation route carried its own
+ * five-entry inline copy that was the one actually passed to
+ * `startImpersonation`. The two had already drifted — the dead copy named
+ * `connection.reconnect`, `media.reprocess` and `cache.refresh`, which no
+ * controlled session was ever granted. The live five are what this is now, so
+ * there is one list, it is enforced, and its name says what it governs. (The
+ * dead copy is not "restored": widening a support session's reach is a security
+ * decision, not a cleanup.)
+ */
+export const CONTROLLED_SESSION_CAPABILITIES = [
   "printer.test",
-  "printer.manage",
   "connection.test",
-  "connection.reconnect",
   "sync.retry",
   "integration.test",
-  "media.reprocess",
-  "cache.refresh",
   "diagnostics.run",
 ] as const;
 

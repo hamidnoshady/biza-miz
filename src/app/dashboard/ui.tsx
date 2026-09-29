@@ -321,6 +321,14 @@ const ERROR_MESSAGES: Record<string, string> = {
     invitation_revoked: "این دعوت لغو شده است.",
     invitation_expired: "این دعوت منقضی شده است.",
     invalid_current_password: "رمز عبور فعلی درست نیست.",
+    // Issue #755 §14 — owner activation. The link is the credential, so every
+    // refusal has to say which way it failed.
+    invalid_activation: "این لینک فعال‌سازی معتبر نیست.",
+    activation_accepted: "این لینک فعال‌سازی قبلاً استفاده شده است.",
+    activation_revoked: "این لینک فعال‌سازی لغو شده است.",
+    activation_expired: "این لینک فعال‌سازی منقضی شده است. از پشتیبانی بخواهید لینک تازه‌ای صادر کند.",
+    email_already_registered:
+      "این ایمیل از قبل حساب کاربری پلتفرم دارد. با تأیید، این کسب‌وکار به همان حساب اضافه می‌شود و رمز عبور فعلی او تغییر نمی‌کند.",
     no_login: "این عضو حساب ورود با ایمیل ندارد.",
     nothing_to_change: "تغییری برای ذخیره وجود ندارد.",
     business_suspended: "دسترسی این کسب‌وکار موقتاً معلق شده است.",

@@ -19,6 +19,10 @@ import {
   type BusinessStatus,
 } from "@/lib/platform-service";
 import { DESTRUCTIVE_CONFIRMATION_PHRASE } from "@/lib/platform-admin";
+import {
+  businessLifecycleTransition,
+  isBusinessLifecycleStatus,
+} from "@/lib/platform-business-lifecycle";
 import { ENABLED_INDUSTRIES, isIndustry, type Industry } from "@/lib/industries";
 import { validateSubdomain } from "@/lib/slug";
 import { rootDomain } from "@/lib/host";
@@ -62,21 +66,21 @@ export const GET = withPlatformScope(async (_request: NextRequest, ctx: Ctx) => 
   });
 });
 
-const STATUS_CAPABILITY: Record<BusinessStatus, "business.suspend" | "business.archive"> = {
-  active: "business.suspend",
-  suspended: "business.suspend",
-  archived: "business.archive",
-};
-
 /**
- * Move a business between lifecycle states, or reassign its plan.
+ * Edit one business: lifecycle status, industry, subdomain or metadata.
  *
- * `status` transitions are the phase's suspend/reactivate/archive controls;
- * reactivating to `active` and suspending both need `business.suspend`, while
- * archiving is owner-only (`business.archive`). `plan` is a separate,
- * flag-writer action. Everything here is audited with the admin, business, and
- * new value — suspension leaves data untouched (exit criterion 2); the block
- * happens at login and the API guard, not by deletion.
+ * A `status` move is authorized by the *transition*, not the destination
+ * (`src/lib/platform-business-lifecycle.ts`): an engineer may suspend and
+ * reactivate but may not touch the archive in either direction. The plan is
+ * deliberately **not** editable here — assigning a plan is a commercial
+ * lifecycle act with its own service and permission contract
+ * (`POST /api/platform/billing/subscriptions`, `billing.manage`), and a second
+ * write path through this generic PATCH is exactly what used to let a
+ * `features.write` holder change a plan.
+ *
+ * Everything here is audited with the admin, business, and new value —
+ * suspension leaves data untouched (exit criterion 2); the block happens at
+ * login and the API guard, not by deletion.
  */
 export const PATCH = withPlatformScope(async (request: NextRequest, ctx: Ctx) => {
   // A generic admin check first so we can 401 before parsing; the capability
@@ -95,7 +99,6 @@ export const PATCH = withPlatformScope(async (request: NextRequest, ctx: Ctx) =>
   }
 
   const hasStatus = body.status !== undefined;
-  const hasPlan = body.plan !== undefined;
   const hasMetadata = body.name !== undefined || body.timezone !== undefined;
   // Phase 23: renaming the public host is its own action, not another
   // metadata field — it writes an alias and invalidates live sessions, so it
@@ -105,8 +108,13 @@ export const PATCH = withPlatformScope(async (request: NextRequest, ctx: Ctx) =>
   // tops up its chart of accounts, so — like a subdomain rename — it is its own
   // action rather than a metadata field riding along with an unrelated edit.
   const hasIndustry = body.industry !== undefined;
+  // One action per request — except that naming `plan` at all is a retired
+  // caller, refused with a pointer rather than silently ignored.
+  if (body.plan !== undefined) {
+    return NextResponse.json({ error: "plan_change_moved_to_billing" }, { status: 400 });
+  }
   if (
-    Number(hasStatus) + Number(hasPlan) + Number(hasMetadata) + Number(hasSubdomain) + Number(hasIndustry) !==
+    Number(hasStatus) + Number(hasMetadata) + Number(hasSubdomain) + Number(hasIndustry) !==
     1
   ) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
@@ -183,66 +191,51 @@ export const PATCH = withPlatformScope(async (request: NextRequest, ctx: Ctx) =>
   }
 
   if (hasStatus) {
-    if (
-      typeof body.status !== "string" ||
-      !["active", "suspended", "archived"].includes(body.status)
-    ) {
+    if (typeof body.status !== "string" || !isBusinessLifecycleStatus(body.status)) {
       return NextResponse.json({ error: "invalid_status" }, { status: 400 });
     }
-    const status = body.status as BusinessStatus;
-    const cap = STATUS_CAPABILITY[status];
-    const guard = await requirePlatformCapability(cap);
-    if (guard.error) return guard.error;
+    const status: BusinessStatus = body.status;
 
-    const updated = await setBusinessStatus(id, status);
-    if (!updated) return NextResponse.json({ error: "not_found" }, { status: 404 });
-
-    await platformAudit({
-      adminId: guard.session.padmin,
-      businessId: id,
-      action: "business." + status,
-      entity: "business",
-      entityId: id,
-      payload: { status },
-    });
-    return NextResponse.json({ business: updated });
-  }
-
-  if (hasPlan) {
-    if (typeof body.plan !== "string") {
-      return NextResponse.json({ error: "bad_request" }, { status: 400 });
-    }
-    const plan = body.plan.trim();
-    if (!plan) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
-    const guard = await requirePlatformCapability("features.write");
-    if (guard.error) return guard.error;
-
+    // The current status decides *which* capability the move needs, so it has
+    // to be read before the guard rather than assumed from the request.
     const existing = await getBusiness(id);
     if (!existing) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
-    // The ONE plan-transition path: validation, the subscription row, add-on
-    // preservation and the entitlement restamp all live in
-    // changeBusinessPlan — never a bare `businesses.plan` UPDATE.
-    const { changeBusinessPlan, SubscriptionError } = await import("@/lib/subscription-service");
-    let outcome;
-    try {
-      outcome = await changeBusinessPlan({ businessId: id, planKey: plan, source: "admin" });
-    } catch (err) {
-      if (err instanceof SubscriptionError) {
-        const status = err.code === "plan_not_found" ? 404 : 400;
-        return NextResponse.json({ error: err.code }, { status });
-      }
-      throw err;
+    const decision = businessLifecycleTransition(existing.status, status);
+    if (!decision.ok) {
+      return NextResponse.json(
+        { error: decision.error, from: existing.status, to: status },
+        { status: 409 },
+      );
     }
+
+    const guard = await requirePlatformCapability(decision.transition.capability);
+    if (guard.error) return guard.error;
+
+    // `expectFrom` makes the move atomic: if another operator changed the
+    // status between the read above and here, nothing is written and the
+    // operator is told their screen was stale instead of silently winning.
+    const updated = await setBusinessStatus(id, status, { expectFrom: existing.status });
+    if (!updated) {
+      return NextResponse.json(
+        { error: "transition_conflict", from: existing.status, to: status },
+        { status: 409 },
+      );
+    }
+
     await platformAudit({
       adminId: guard.session.padmin,
       businessId: id,
-      action: outcome.outcome === "created" ? "subscription.created" : "business.plan.changed",
+      action: decision.transition.auditAction,
       entity: "business",
       entityId: id,
-      payload: { plan, from: existing.plan, source: "admin" },
+      payload: {
+        from: existing.status,
+        to: status,
+        capability: decision.transition.capability,
+      },
     });
-    return NextResponse.json({ business: await getBusiness(id) });
+    return NextResponse.json({ business: updated });
   }
 
   const name =
@@ -368,15 +361,21 @@ export const DELETE = withPlatformScope(async (request: NextRequest, ctx: Ctx) =
     return NextResponse.json({ error: "delete_confirmation_required" }, { status: 400 });
   }
 
-  // Audit first: the record must exist even if the delete then fails, and it
-  // must capture the business's identity before the row disappears.
+  // The identity of the business has to be captured before the row disappears,
+  // and the audit trail has to say what actually happened. A single
+  // "business.delete" written up front claimed success even when the delete
+  // then threw, so the trail is now three explicit lifecycle events:
+  //   requested -> completed | failed
+  // `completed` is written only after the delete committed, so its presence is
+  // evidence the business is really gone.
+  const identity = { name: business.name, slug: business.slug, plan: business.plan };
   await platformAudit({
     adminId: session.padmin,
     businessId: id,
-    action: "business.delete",
+    action: "business.delete.requested",
     entity: "business",
     entityId: id,
-    payload: { name: business.name, slug: business.slug },
+    payload: identity,
   });
 
   try {
@@ -388,7 +387,32 @@ export const DELETE = withPlatformScope(async (request: NextRequest, ctx: Ctx) =
     // hardDeleteBusiness is one transaction, so this response also guarantees
     // no partial delete was committed. Keep the database detail in server logs.
     console.error("platform business delete failed", { businessId: id, err });
+    await platformAudit({
+      adminId: session.padmin,
+      businessId: id,
+      action: "business.delete.failed",
+      entity: "business",
+      entityId: id,
+      payload: {
+        ...identity,
+        reason: err instanceof Error ? err.message : "unknown_error",
+      },
+    });
     return NextResponse.json({ error: "delete_failed" }, { status: 500 });
   }
+
+  // The business row is gone. `platform_audit_log.business_id` has an FK to
+  // `businesses`, so a completion written *after* the delete must leave it NULL
+  // (a value would violate the FK) — the identity in the payload plus
+  // `entity_id` is what still names what was deleted, which is why the same
+  // payload rides on both the request and the completion.
+  await platformAudit({
+    adminId: session.padmin,
+    businessId: null,
+    action: "business.delete.completed",
+    entity: "business",
+    entityId: id,
+    payload: identity,
+  });
   return NextResponse.json({ ok: true });
 });

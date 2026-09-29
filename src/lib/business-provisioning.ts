@@ -35,6 +35,8 @@ import { issueRecoveryCodes } from "./mfa-recovery";
 import { CURRENT_KEY_VERSION, generateDek, wrapDek } from "./business-keys";
 import { getMasterKey } from "./master-key";
 import { totpQrDataUrl } from "./totp-qr";
+import { createOwnerActivation } from "./owner-activation";
+import { randomBytes } from "node:crypto";
 
 export interface ProvisionBusinessInput {
   businessName: string;
@@ -44,7 +46,11 @@ export interface ProvisionBusinessInput {
   ownerName: string;
   ownerPhone?: string | null;
   email: string;
-  password: string;
+  /**
+   * Ignored when `ownerActivation` is set — that path deliberately has no
+   * password to pass, because nobody but the owner may choose it.
+   */
+  password?: string;
   timezone?: string;
   /** Defaults to 'food_service' when omitted — every business before Phase 21 is one. */
   industry?: Industry;
@@ -82,6 +88,28 @@ export interface ProvisionBusinessInput {
    * root domain — where it falls back to the name-derived form.
    */
   subdomain?: string;
+  /**
+   * Issue #755 §14 — create the owner with an *unusable* password and hand back
+   * a single-use activation link instead.
+   *
+   * The platform console turns this on: an operator should never know, choose
+   * or print a tenant owner's permanent credential. The owner sets their own
+   * password and receives their own second factor and recovery codes when they
+   * follow the link (see owner-activation.ts). The setup wizard and public
+   * signup leave it off, because there the person choosing the password *is*
+   * the owner, sitting in front of the form.
+   */
+  ownerActivation?: boolean;
+  /** The platform admin provisioning this business, recorded on the
+   * activation link so "who invited this owner in" survives it being used. */
+  createdBy?: string | null;
+  /**
+   * `ownerActivation` only: the email already has a platform login and the
+   * caller has acknowledged that it is the same person. Without it the
+   * provisioning is refused rather than silently attaching a business to
+   * somebody's account.
+   */
+  confirmExistingOwner?: boolean;
 }
 
 export interface ProvisionedBusiness {
@@ -93,6 +121,18 @@ export interface ProvisionedBusiness {
   /** users.id — the owner's membership in the new business. */
   userId: string;
   platformUserId: string;
+  /**
+   * True when the email had no platform login and one was created for it.
+   * `false` means the business was added to a person who already had one — the
+   * multi-business case — and therefore no activation link was issued, because
+   * they already have credentials nobody else needs to know.
+   */
+  ownerIdentityCreated: boolean;
+  /**
+   * The one-time link the operator hands to the owner. Present only on the
+   * activation path; the plaintext is never stored and cannot be re-read.
+   */
+  ownerActivation?: { token: string; expiresAt: Date };
   /**
    * Phase 24 Wave 2 — the Owner's first second factor, returned exactly once.
    *
@@ -133,6 +173,22 @@ export class SubdomainTakenError extends Error {
   }
 }
 
+/**
+ * `ownerActivation` was asked for on an email that already has a platform
+ * login, and the caller has not acknowledged it.
+ *
+ * Issue #755 §14: attaching a second (or third) business to an existing person
+ * is the normal group-owner case, but it is still an action on *their*
+ * account — so it is never silent. The console surfaces this as "this address
+ * already belongs to a platform user; continue?" and repeats the request with
+ * `confirmExistingOwner`.
+ */
+export class ExistingOwnerConfirmationRequiredError extends Error {
+  constructor() {
+    super("email_already_registered");
+  }
+}
+
 export const DEFAULT_LOCATION_NAME = "شعبه مرکزی";
 
 /**
@@ -161,6 +217,12 @@ export interface ProvisionRequestBody {
   industry?: string;
   /** The public host label, typed in English. Derived from the name when omitted. */
   subdomain?: string;
+  /**
+   * The email already has a platform login and the caller has acknowledged that
+   * it is the same person. Never sent by the interactive wizards; only the
+   * console's activation path uses it, after its first attempt was refused.
+   */
+  confirmExistingOwner?: boolean;
 }
 
 export const MIN_PASSWORD_LENGTH = 8;
@@ -183,21 +245,29 @@ export const MIN_PASSWORD_LENGTH = 8;
  */
 export function validateProvisionBody(
   body: ProvisionRequestBody,
-  options: { requireSubdomain?: boolean; deploymentMode?: DeploymentModeName } = {},
+  options: {
+    requireSubdomain?: boolean;
+    deploymentMode?: DeploymentModeName;
+    /** Issue #755 §14 — no password is supplied or accepted on this path. */
+    ownerActivation?: boolean;
+  } = {},
 ): { input: ProvisionBusinessInput; error: null } | { input: null; error: string } {
   const businessName = body.businessName?.trim();
   const ownerName = body.ownerName?.trim();
   const email = body.email?.trim().toLowerCase();
   const password = body.password ?? "";
 
-  if (!businessName || !ownerName || !email || !password) {
+  if (!businessName || !ownerName || !email) {
     return { input: null, error: "missing_fields" };
   }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return { input: null, error: "invalid_email" };
   }
-  if (password.length < MIN_PASSWORD_LENGTH) {
-    return { input: null, error: "weak_password" };
+  if (!options.ownerActivation) {
+    if (!password) return { input: null, error: "missing_fields" };
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      return { input: null, error: "weak_password" };
+    }
   }
 
   // Checked after the fields above, not before them: an empty form should say
@@ -242,9 +312,10 @@ export function validateProvisionBody(
       ownerName,
       ownerPhone,
       email,
-      password,
+      password: options.ownerActivation ? undefined : password,
       industry,
       subdomain: subdomain || undefined,
+      ownerActivation: options.ownerActivation,
     },
     error: null,
   };
@@ -269,6 +340,12 @@ export async function provisionBusiness(
   const locationName = input.locationName?.trim() || DEFAULT_LOCATION_NAME;
   const ownerName = input.ownerName.trim();
   const email = input.email.trim().toLowerCase();
+  // Normalised here rather than trusted from the caller. `users.phone_e164` is
+  // an E.164 column (it is the address an SMS one-time code is sent to), and
+  // the owner-activation flow reads it back to bind the second factor — so a
+  // caller that skipped `validateProvisionBody` would otherwise store a form
+  // -shaped `0912…` in a column everything downstream treats as `+98912…`.
+  const ownerPhone = input.ownerPhone ? phoneE164(input.ownerPhone) : null;
 
   return withoutTenantScope("platform", async () => {
     const client = await getPool().connect();
@@ -317,17 +394,36 @@ export async function provisionBusiness(
         is_active: boolean;
       }>("SELECT id, password_hash, is_active FROM platform_users WHERE email = $1", [email]);
 
+      const ownerIdentityCreated = existingIdentity.length === 0;
       let platformUserId: string;
       if (existingIdentity[0]) {
         const identity = existingIdentity[0];
-        const ok = identity.is_active && (await bcrypt.compare(input.password, identity.password_hash));
-        if (!ok) throw new EmailPasswordMismatchError();
-        platformUserId = identity.id;
+        if (!identity.is_active) throw new EmailPasswordMismatchError();
+        if (input.ownerActivation) {
+          // Nobody types their password for an inbound business, so this is not
+          // an authentication but a confirmation. It still refuses to attach a
+          // business to somebody's account silently.
+          if (!input.confirmExistingOwner) throw new ExistingOwnerConfirmationRequiredError();
+          platformUserId = identity.id;
+        } else {
+          // The password-choosing paths are a person adding a business to their
+          // own account, and still have to prove that is who they are.
+          if (!(await bcrypt.compare(input.password ?? "", identity.password_hash))) {
+            throw new EmailPasswordMismatchError();
+          }
+          platformUserId = identity.id;
+        }
       } else {
+        // On the activation path nobody ever knows this password — not the
+        // operator, not this code. It is 32 random bytes, replaced by the owner
+        // at the activation link, and any comparison against it fails closed.
+        const secret = input.ownerActivation
+          ? randomBytes(32).toString("hex")
+          : (input.password ?? "");
         const { rows } = await client.query<{ id: string }>(
           `INSERT INTO platform_users (email, password_hash, full_name)
            VALUES ($1, $2, $3) RETURNING id`,
-          [email, await bcrypt.hash(input.password, BCRYPT_COST), ownerName],
+          [email, await bcrypt.hash(secret, BCRYPT_COST), ownerName],
         );
         platformUserId = rows[0].id;
       }
@@ -364,7 +460,7 @@ export async function provisionBusiness(
       const { rows: userRows } = await client.query<{ id: string }>(
         `INSERT INTO users (business_id, platform_user_id, role, full_name, email, phone_e164, location_id)
          VALUES ($1, $2, 'owner', $3, $4, $5, NULL) RETURNING id`,
-        [businessId, platformUserId, ownerName, email, input.ownerPhone ?? null],
+        [businessId, platformUserId, ownerName, email, ownerPhone],
       );
       const userId = userRows[0].id;
 
@@ -415,36 +511,55 @@ export async function provisionBusiness(
         ],
       );
 
-      if (input.deploymentMode === "local") {
+      // Issue #755 §14 — on the activation path the second factor and the
+      // recovery codes are minted when the *owner* redeems their link
+      // (owner-activation.ts), in their own browser, and shown only to them.
+      // Creating them here is what used to force the operator to hold the
+      // owner's credentials.
+      let recoveryCodes: string[] | undefined;
+      let ownerActivation: { token: string; expiresAt: Date } | undefined;
+      if (!input.ownerActivation) {
+        if (input.deploymentMode === "local") {
+          await client.query(
+            `INSERT INTO settings (business_id, location_id, key, value)
+             VALUES ($1, NULL, $2, $3)`,
+            [businessId, SETTING_KEYS.deploymentProfile, JSON.stringify({ profile: "local", pairedAt: null })],
+          );
+          await disableFeatures(client, businessId, LOCAL_DISABLED_FEATURES);
+
+          totpSecret = generateSecret();
+          totpUrl = generateURI({
+            label: email,
+            // Phase 42 — the business's own name, so the entry in the
+            // authenticator app is tellable apart from every other business
+            // this person holds an entry for (see mfa-enrol.ts's TOTP_ISSUER).
+            issuer: businessName,
+            secret: totpSecret,
+            strategy: "totp"
+          });
+          totpQr = await totpQrDataUrl(totpUrl);
+          await provisionMfaEnrolment(client, "platform_user", platformUserId, "totp", true, null, Buffer.from(totpSecret || ""));
+        } else {
+          await provisionMfaEnrolment(client, "platform_user", platformUserId, "sms_otp", true, ownerPhone, null);
+        }
+
+        // Both paths get recovery codes, in the same transaction as the
+        // enrolment they back: a rolled-back provision must not leave live codes
+        // for a business that was never created. They are the only way back in
+        // for an Owner whose phone (or authenticator) is gone, so an enrolment
+        // without them is the lockout this wave exists to prevent.
+        recoveryCodes = await issueRecoveryCodes("platform_user", platformUserId, client);
+      } else if (input.deploymentMode === "local") {
+        // The local deployment profile is a property of the install, not of the
+        // credentials, so it is still stamped here; only the enrolment moves to
+        // the owner's activation.
         await client.query(
           `INSERT INTO settings (business_id, location_id, key, value)
            VALUES ($1, NULL, $2, $3)`,
           [businessId, SETTING_KEYS.deploymentProfile, JSON.stringify({ profile: "local", pairedAt: null })],
         );
         await disableFeatures(client, businessId, LOCAL_DISABLED_FEATURES);
-
-        totpSecret = generateSecret();
-        totpUrl = generateURI({
-          label: email,
-          // Phase 42 — the business's own name, so the entry in the
-          // authenticator app is tellable apart from every other business
-          // this person holds an entry for (see mfa-enrol.ts's TOTP_ISSUER).
-          issuer: businessName,
-          secret: totpSecret,
-          strategy: "totp"
-        });
-        totpQr = await totpQrDataUrl(totpUrl);
-        await provisionMfaEnrolment(client, "platform_user", platformUserId, "totp", true, null, Buffer.from(totpSecret || ""));
-      } else {
-        await provisionMfaEnrolment(client, "platform_user", platformUserId, "sms_otp", true, input.ownerPhone, null);
       }
-
-      // Both paths get recovery codes, in the same transaction as the
-      // enrolment they back: a rolled-back provision must not leave live codes
-      // for a business that was never created. They are the only way back in
-      // for an Owner whose phone (or authenticator) is gone, so an enrolment
-      // without them is the lockout this wave exists to prevent.
-      const recoveryCodes = await issueRecoveryCodes("platform_user", platformUserId, client);
 
       // Phase 24 Wave 3 — mint the business's data-encryption key inside the
       // same transaction as the business, so the very first customer written
@@ -460,6 +575,23 @@ export async function provisionBusiness(
         );
       }
 
+      // The owner's activation link, inside the same transaction as the
+      // business: a rolled-back provision must not leave a live link, and a
+      // committed one must never be missing the only way in.
+      //
+      // Not issued when the email already had a login: that person's credentials
+      // are theirs already, the operator learns nothing about them, and asking
+      // them to "activate" an account they have used for years would be a lie.
+      if (input.ownerActivation && ownerIdentityCreated) {
+        ownerActivation = await createOwnerActivation(client, {
+          businessId,
+          platformUserId,
+          userId,
+          email,
+          createdBy: input.createdBy ?? null,
+        });
+      }
+
       await client.query("COMMIT");
       return {
         businessId,
@@ -468,6 +600,8 @@ export async function provisionBusiness(
         locationId,
         userId,
         platformUserId,
+        ownerIdentityCreated,
+        ownerActivation,
         totpSecret,
         totpUrl,
         totpQr,
@@ -563,10 +697,8 @@ export async function seedChartOfAccounts(
   return inserted;
 }
 
-/** Whether this deployment has any business at all (drives the first-run flow). */
-export async function hasAnyBusiness(): Promise<boolean> {
-  return withoutTenantScope("platform", async () => {
-    const { rows } = await getPool().query("SELECT 1 FROM businesses LIMIT 1");
-    return rows.length > 0;
-  });
-}
+// Issue #755 §20: `hasAnyBusiness` used to live here, documented as driving the
+// first-run flow. It did not — the setup flow asks `hasAnyUser`
+// (src/lib/setup-state.ts) — and no caller existed anywhere in src, integration
+// or scripts. Deleted rather than kept "in case": a helper that answers a
+// question nothing asks is one more thing to keep correct.

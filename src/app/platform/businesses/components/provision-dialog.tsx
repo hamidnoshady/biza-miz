@@ -2,14 +2,29 @@
 
 /**
  * The business provisioning wizard, lifted out of the directory list body into
- * its own dialog with logical steps (task section 7): identity → owner → review.
- * Creating a business here seeds the chart of accounts, enrols the owner's
- * second factor and returns one-time recovery material the operator hands over.
+ * its own dialog with logical steps: identity → owner → review → handover.
+ *
+ * Two things changed for issue #755 and both are visible here:
+ *
+ * **§14 — activation, not handover.** The operator no longer types the owner's
+ * password. There is no field for one. Creating the business mints a single-use
+ * activation link, and this dialog's job ends at handing that link over: the
+ * owner sets their own password, and the second factor and recovery codes are
+ * shown to the owner at that link and never to this operator.
+ *
+ * **§16 — the smaller cleanups.** Review shows the industry's Persian label
+ * rather than the raw `food_service` key; a missing root domain is handled by
+ * falling back to this origin instead of rendering `undefined` in a URL; email
+ * and mobile are validated (and their errors surfaced) before Review, not after
+ * Create; and every field whose content is Latin-script data carries an explicit
+ * `dir="ltr"` so the browser stops reordering addresses inside the RTL page.
  */
 import { useState } from "react";
 import { toast } from "sonner";
-import { Industry } from "@/lib/industries";
+import { INDUSTRY_LABELS, Industry } from "@/lib/industries";
 import { validateSubdomain } from "@/lib/slug";
+import { isMobilePhone, normalizePhone } from "@/lib/phone";
+import { formatJalali } from "@/lib/jalali";
 import {
   Dialog,
   DialogContent,
@@ -27,15 +42,32 @@ import { usePlatformMutation } from "../../_lib/use-platform-data";
 import { platformErrorText } from "@/lib/platform-errors";
 import { IndustryPicker } from "../../industry-picker";
 
-interface ProvisionMfaHandover {
-  method: "totp" | "sms_otp";
-  totpSecret: string | null;
-  totpUrl: string | null;
-  totpQr: string | null;
-  recoveryCodes: string[];
+interface ProvisionedOwner {
+  email: string;
+  existingLogin: boolean;
+  activationRequired: boolean;
+  activationToken: string | null;
+  activationExpiresAt: string | null;
 }
 
 type Step = "identity" | "owner" | "review" | "handover";
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Where the owner opens their activation link.
+ *
+ * On a routed deployment that is the business's own origin — the address the
+ * operator just chose, which is also the address printed on the owner's
+ * receipts, so it is the one they will recognise. On a single-origin install
+ * there is no root domain to build a subdomain from, and the current origin is
+ * the honest answer rather than a literal `undefined`.
+ */
+function activationUrl(rootDomain: string, subdomain: string, token: string): string {
+  const origin =
+    rootDomain && subdomain ? `https://${subdomain}.${rootDomain}` : window.location.origin;
+  return `${origin}/activate/${token}`;
+}
 
 export function ProvisionDialog({
   open,
@@ -55,43 +87,59 @@ export function ProvisionDialog({
   const [locationName, setLocationName] = useState("");
   const [ownerName, setOwnerName] = useState("");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [ownerPhone, setOwnerPhone] = useState("");
-  const [handover, setHandover] = useState<ProvisionMfaHandover | null>(null);
+  const [owner, setOwner] = useState<ProvisionedOwner | null>(null);
+  /**
+   * Set when the address already belongs to a platform user. Creating the
+   * business attaches it to that person's account, which is the normal
+   * group-owner case but still an action on somebody else's identity — so the
+   * first attempt is refused and the operator has to mean it.
+   */
+  const [confirmExistingOwner, setConfirmExistingOwner] = useState(false);
 
   const subdomainError = subdomain ? validateSubdomain(subdomain) : null;
+  const emailError = email.trim() && !EMAIL_PATTERN.test(email.trim()) ? "invalid_email" : null;
+  const phoneError =
+    ownerPhone.trim() && !isMobilePhone(ownerPhone) ? "invalid_owner_phone" : null;
 
-  const create = usePlatformMutation<void, { mfa?: ProvisionMfaHandover }>(
-    "/api/platform/businesses",
-    {
-      method: "POST",
-      request: () => ({
-        options: {
-          body: {
-            businessName: businessName.trim(),
-            ownerName: ownerName.trim(),
-            email: email.trim().toLowerCase(),
-            password,
-            ownerPhone: ownerPhone.trim(),
-            locationName: locationName.trim() || undefined,
-            subdomain,
-            industry,
-          },
+  const create = usePlatformMutation<
+    void,
+    { business?: unknown; owner?: ProvisionedOwner; error?: string }
+  >("/api/platform/businesses", {
+    method: "POST",
+    request: () => ({
+      options: {
+        body: {
+          businessName: businessName.trim(),
+          ownerName: ownerName.trim(),
+          email: email.trim().toLowerCase(),
+          ownerPhone: ownerPhone.trim(),
+          locationName: locationName.trim() || undefined,
+          subdomain,
+          industry,
+          ...(confirmExistingOwner ? { confirmExistingOwner: true } : {}),
         },
-      }),
-      errorToast: false,
-      onSuccess: (data) => {
-        if (data.mfa && (data.mfa.recoveryCodes?.length || data.mfa.totpSecret)) {
-          setHandover(data.mfa);
-          setStep("handover");
-        } else {
-          toast.success("کسب‌وکار ایجاد شد.");
-          reset();
-          onCreated();
-        }
       },
+    }),
+    errorToast: false,
+    onSuccess: (data) => {
+      if (data.owner) {
+        setOwner(data.owner);
+        setStep("handover");
+        return;
+      }
+      // Defensive: a response without an owner block would otherwise leave the
+      // dialog open on Review with no explanation.
+      toast.success("کسب‌وکار ایجاد شد.");
+      reset();
+      onCreated();
     },
-  );
+  });
+
+  // The one refusal the wizard can resolve itself: the operator confirms the
+  // address and resubmits, rather than being sent back to retype everything.
+  const needsExistingOwnerConfirmation =
+    create.errorText === platformErrorText("email_already_registered");
 
   function reset() {
     setStep("identity");
@@ -101,9 +149,9 @@ export function ProvisionDialog({
     setLocationName("");
     setOwnerName("");
     setEmail("");
-    setPassword("");
     setOwnerPhone("");
-    setHandover(null);
+    setOwner(null);
+    setConfirmExistingOwner(false);
     create.reset();
   }
 
@@ -113,16 +161,22 @@ export function ProvisionDialog({
     onOpenChange(false);
   }
 
-  const identityValid = businessName.trim() && subdomain && !subdomainError;
-  const ownerValid = ownerName.trim() && email.trim() && password.length >= 8 && ownerPhone.trim();
+  const identityValid = Boolean(businessName.trim() && subdomain && !subdomainError);
+  const ownerValid = Boolean(
+    ownerName.trim() && email.trim() && !emailError && ownerPhone.trim() && !phoneError,
+  );
+
+  const warningLabel = ownerPhone.trim() ? normalizePhone(ownerPhone).e164 : null;
 
   return (
     <Dialog open={open} onOpenChange={(v) => (v ? onOpenChange(v) : close())}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
-        {step === "handover" && handover ? (
-          <HandoverPanel
-            handover={handover}
-            ownerEmail={email.trim().toLowerCase()}
+      <DialogContent className="max-h-[92vh] w-[calc(100vw-1.5rem)] overflow-y-auto p-4 sm:max-w-lg sm:p-6">
+        {step === "handover" && owner ? (
+          <OwnerHandover
+            owner={owner}
+            businessName={businessName}
+            subdomain={subdomain}
+            rootDomain={rootDomain}
             onDone={() => {
               reset();
               onCreated();
@@ -141,7 +195,26 @@ export function ProvisionDialog({
               </DialogDescription>
             </DialogHeader>
 
-            {create.errorText ? <PlatformInlineError>{create.errorText}</PlatformInlineError> : null}
+            {create.errorText ? (
+              needsExistingOwnerConfirmation ? (
+                <div className="space-y-3">
+                  <PlatformInlineError>{create.errorText}</PlatformInlineError>
+                  <label className="flex items-start gap-2 text-sm text-foreground">
+                    <Checkbox
+                      checked={confirmExistingOwner}
+                      onCheckedChange={(v) => setConfirmExistingOwner(v === true)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      تأیید می‌کنم که این ایمیل به همین شخص تعلق دارد و افزودن این کسب‌وکار به حساب او
+                      مورد نظر است. رمز عبور او تغییر نمی‌کند.
+                    </span>
+                  </label>
+                </div>
+              ) : (
+                <PlatformInlineError>{create.errorText}</PlatformInlineError>
+              )
+            ) : null}
 
             {step === "identity" ? (
               <PlatformFormSection>
@@ -158,7 +231,7 @@ export function ProvisionDialog({
                       ? `کسب‌وکار از این نشانی سرو می‌شود: https://${subdomain}.${rootDomain}`
                       : rootDomain
                         ? `نام انگلیسی کسب‌وکار؛ نشانی زیر ${rootDomain} ساخته می‌شود.`
-                        : "فقط حروف انگلیسی کوچک، رقم و خط تیره."
+                        : "این نصب روی دامنهٔ اختصاصی راه‌اندازی نشده است؛ کسب‌وکار با همین نشانی فعلی سرو می‌شود و بعداً می‌توان دامنه را تنظیم کرد."
                   }
                 >
                   <Input
@@ -186,59 +259,98 @@ export function ProvisionDialog({
                 <PlatformField label="نام مالک" htmlFor="pv-owner" required>
                   <Input id="pv-owner" value={ownerName} onChange={(e) => setOwnerName(e.target.value)} />
                 </PlatformField>
-                <PlatformField label="ایمیل مالک" htmlFor="pv-email" required>
-                  <Input id="pv-email" type="email" dir="ltr" value={email} onChange={(e) => setEmail(e.target.value)} />
-                </PlatformField>
-                <PlatformField label="رمز عبور مالک" htmlFor="pv-pass" required description="حداقل ۸ نویسه.">
-                  <Input id="pv-pass" type="password" dir="ltr" value={password} onChange={(e) => setPassword(e.target.value)} />
+                <PlatformField
+                  label="ایمیل مالک"
+                  htmlFor="pv-email"
+                  required
+                  error={emailError ? platformErrorText(emailError) : undefined}
+                  description="این ایمیل نام کاربری مالک است. اگر از قبل حساب داشته باشد، همان حساب به این کسب‌وکار وصل می‌شود."
+                >
+                  <Input
+                    id="pv-email"
+                    type="email"
+                    dir="ltr"
+                    inputMode="email"
+                    autoComplete="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                  />
                 </PlatformField>
                 <PlatformField
                   label="موبایل مالک"
                   htmlFor="pv-phone"
                   required
-                  description="کد ورود دومرحله‌ای به این شماره پیامک می‌شود."
+                  error={phoneError ? platformErrorText(phoneError) : undefined}
+                  description={
+                    warningLabel
+                      ? `کد ورود دومرحله‌ای به این شماره پیامک می‌شود: ${warningLabel}`
+                      : "کد ورود دومرحله‌ای به این شماره پیامک می‌شود."
+                  }
                 >
-                  <Input id="pv-phone" type="tel" dir="ltr" placeholder="09121234567" value={ownerPhone} onChange={(e) => setOwnerPhone(e.target.value)} />
+                  <Input
+                    id="pv-phone"
+                    type="tel"
+                    dir="ltr"
+                    inputMode="tel"
+                    autoComplete="tel"
+                    placeholder="09121234567"
+                    value={ownerPhone}
+                    onChange={(e) => setOwnerPhone(e.target.value)}
+                  />
                 </PlatformField>
+                <p className="text-xs text-muted-foreground">
+                  رمز عبور را شما تعیین نمی‌کنید. پس از ایجاد، یک لینک فعال‌سازی یک‌بارمصرف به مالک
+                  تحویل می‌دهید تا خودش رمز عبور، ورود دومرحله‌ای و کدهای بازیابی‌اش را بسازد.
+                </p>
               </PlatformFormSection>
             ) : null}
 
             {step === "review" ? (
               <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3 text-sm">
                 <ReviewRow label="نام کسب‌وکار" value={businessName} />
-                <ReviewRow label="نشانی" value={`${subdomain}.${rootDomain}`} dir="ltr" />
-                <ReviewRow label="نوع" value={industry} />
-                <ReviewRow label="مالک" value={`${ownerName} — ${email}`} dir="ltr" />
-                <ReviewRow label="موبایل مالک" value={ownerPhone} dir="ltr" />
+                <ReviewRow
+                  label="نشانی"
+                  value={rootDomain ? `${subdomain}.${rootDomain}` : "همین نشانی فعلی"}
+                  dir="ltr"
+                />
+                {/* The label, not the key: an operator reading `food_service` in
+                    a confirmation step is being asked to approve something they
+                    cannot read. */}
+                <ReviewRow label="نوع" value={INDUSTRY_LABELS[industry]} />
+                <ReviewRow label="شعبه" value={locationName.trim() || "شعبه مرکزی"} />
+                <ReviewRow label="مالک" value={ownerName} />
+                <ReviewRow label="ایمیل مالک" value={email.trim().toLowerCase()} dir="ltr" />
+                <ReviewRow label="موبایل مالک" value={ownerPhone.trim()} dir="ltr" />
                 <p className="pt-2 text-xs text-muted-foreground">
-                  با ایجاد، سرفصل حساب‌ها ساخته می‌شود و اطلاعات ورود دومرحله‌ای مالک یک‌بار نمایش داده می‌شود.
+                  با ایجاد، سرفصل حساب‌ها ساخته می‌شود و یک لینک فعال‌سازی یک‌بارمصرف برای مالک صادر
+                  می‌شود. رمز عبور مالک را نه شما و نه هیچ اپراتور دیگری تعیین یا مشاهده نمی‌کند.
                 </p>
               </div>
             ) : null}
 
-            <DialogFooter>
-              <Button variant="outline" onClick={close} disabled={create.busy}>
+            <DialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button variant="outline" onClick={close} disabled={create.busy} className="w-full sm:w-auto">
                 انصراف
               </Button>
               {step === "identity" ? (
-                <Button onClick={() => setStep("owner")} disabled={!identityValid}>
+                <Button onClick={() => setStep("owner")} disabled={!identityValid} className="w-full sm:w-auto">
                   بعدی
                 </Button>
               ) : step === "owner" ? (
                 <>
-                  <Button variant="outline" onClick={() => setStep("identity")}>
+                  <Button variant="outline" onClick={() => setStep("identity")} className="w-full sm:w-auto">
                     قبلی
                   </Button>
-                  <Button onClick={() => setStep("review")} disabled={!ownerValid}>
+                  <Button onClick={() => setStep("review")} disabled={!ownerValid} className="w-full sm:w-auto">
                     بعدی
                   </Button>
                 </>
               ) : (
                 <>
-                  <Button variant="outline" onClick={() => setStep("owner")} disabled={create.busy}>
+                  <Button variant="outline" onClick={() => setStep("owner")} disabled={create.busy} className="w-full sm:w-auto">
                     قبلی
                   </Button>
-                  <Button onClick={() => create.mutate()} disabled={create.busy}>
+                  <Button onClick={() => create.mutate()} disabled={create.busy} className="w-full sm:w-auto">
                     {create.busy ? "در حال ایجاد…" : "ایجاد و راه‌اندازی"}
                   </Button>
                 </>
@@ -263,85 +375,93 @@ function ReviewRow({ label, value, dir }: { label: string; value: string; dir?: 
 }
 
 /**
- * The one and only showing of the new owner's second-factor material. Held
- * until the operator confirms hand-over — these values cannot be recovered
- * (the TOTP secret is stored encrypted, the codes only as bcrypt hashes).
+ * The end of the operator's involvement (issue #755 §14).
+ *
+ * What they get is a link, not a password and not a recovery code. The only
+ * reason the token is shown here at all is that there is no mail transport in
+ * this system, so somebody has to carry it — and a single-use, expiring link is
+ * safe to carry, unlike a credential.
  */
-function HandoverPanel({
-  handover,
-  ownerEmail,
+function OwnerHandover({
+  owner,
+  businessName,
+  subdomain,
+  rootDomain,
   onDone,
 }: {
-  handover: ProvisionMfaHandover;
-  ownerEmail: string;
+  owner: ProvisionedOwner;
+  businessName: string;
+  subdomain: string;
+  rootDomain: string;
   onDone: () => void;
 }) {
   const [confirmed, setConfirmed] = useState(false);
   const [copied, setCopied] = useState(false);
+  const url = owner.activationToken
+    ? activationUrl(rootDomain, subdomain, owner.activationToken)
+    : null;
 
   return (
     <>
       <DialogHeader>
-        <DialogTitle>ورود دومرحله‌ای مالک — فقط یک‌بار نمایش داده می‌شود</DialogTitle>
+        <DialogTitle>کسب‌وکار ساخته شد</DialogTitle>
         <DialogDescription>
-          کسب‌وکار ساخته شد. موارد زیر را به مالک ({ownerEmail}) تحویل دهید و نزد خود نگه ندارید؛ پس
-          از بستن این پنجره دیگر قابل نمایش نیستند.
+          {owner.existingLogin
+            ? `«${businessName}» ساخته شد و به حساب موجود ${owner.email} اضافه شد.`
+            : `«${businessName}» ساخته شد. لینک فعال‌سازی را به مالک تحویل دهید.`}
         </DialogDescription>
       </DialogHeader>
 
-      {handover.method === "sms_otp" ? (
+      {owner.existingLogin ? (
+        // The multi-business case: this person already has a platform login, so
+        // there is nothing to activate and nothing for the operator to know.
+        // Asking them to "activate" an account they have used for years would be
+        // a lie, and resetting their password would be a takeover.
         <p className="text-sm text-muted-foreground">
-          روش اصلی ورود دومرحله‌ای این مالک، پیامک یک‌بارمصرف به شمارهٔ موبایلی است که وارد کردید.
+          این ایمیل از قبل حساب کاربری داشت، پس همین‌جا تمام شد: مالک با رمز عبور فعلی خودش وارد
+          می‌شود و این کسب‌وکار کنار کسب‌وکارهای دیگرش نمایش داده می‌شود. رمز عبور او تغییر نکرده و
+          ما آن را نمی‌دانیم.
         </p>
-      ) : null}
-
-      {handover.totpQr ? (
-        <div className="flex justify-center">
-          { }
-          <img src={handover.totpQr} alt="کد QR ورود دومرحله‌ای" className="size-44 rounded-lg bg-card p-2" />
-        </div>
-      ) : null}
-
-      {handover.totpSecret ? (
-        <div>
-          <p className="mb-1 text-sm text-muted-foreground">کد دستی برنامهٔ رمزساز:</p>
-          <p dir="ltr" className="rounded-lg border border-border bg-muted px-3 py-2 font-mono text-sm tracking-wider">
-            {handover.totpSecret}
+      ) : (
+        <>
+          <p className="text-sm text-muted-foreground">
+            این لینک <strong>یک‌بارمصرف</strong> است و تا{" "}
+            {owner.activationExpiresAt ? formatJalali(owner.activationExpiresAt) : "یک هفته"} اعتبار
+            دارد. مالک با باز کردن آن، رمز عبور خودش را تعیین می‌کند و ورود دومرحله‌ای و کدهای
+            بازیابی‌اش را خودش دریافت می‌کند — نه شما.
           </p>
-        </div>
-      ) : null}
 
-      {handover.recoveryCodes.length > 0 ? (
-        <div>
-          <p className="mb-2 text-sm text-muted-foreground">
-            ۱۰ کد بازیابی یک‌بارمصرف — تنها راه ورود مالک در صورت گم‌شدن گوشی:
-          </p>
-          <div dir="ltr" className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-muted px-3 py-2 font-mono text-sm tracking-wider">
-            {handover.recoveryCodes.map((c) => (
-              <span key={c}>{c}</span>
-            ))}
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="mt-2"
-            onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(handover.recoveryCodes.join("\n"));
-                setCopied(true);
-              } catch {
-                setCopied(false);
-              }
-            }}
-          >
-            {copied ? "کپی شد" : "کپی کدها"}
-          </Button>
-        </div>
-      ) : null}
+          {url ? (
+            <div>
+              <p className="mb-1 text-sm text-muted-foreground">لینک فعال‌سازی مالک:</p>
+              <p
+                dir="ltr"
+                className="break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-xs"
+              >
+                {url}
+              </p>
+              <Button
+                variant="ghost"
+                className="mt-2"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(url);
+                    setCopied(true);
+                  } catch {
+                    setCopied(false);
+                  }
+                }}
+              >
+                {copied ? "کپی شد" : "کپی لینک"}
+              </Button>
+            </div>
+          ) : null}
+        </>
+      )}
 
       <label className="flex items-start gap-2 text-sm text-foreground">
         <Checkbox checked={confirmed} onCheckedChange={(v) => setConfirmed(v === true)} className="mt-0.5" />
-        <span>این اطلاعات را به مالک تحویل دادم.</span>
+        <span>{owner.existingLogin ? "متوجه شدم." : "این لینک را به مالک تحویل دادم."}</span>
       </label>
 
       <DialogFooter>

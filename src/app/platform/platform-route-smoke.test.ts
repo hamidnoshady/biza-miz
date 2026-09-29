@@ -80,10 +80,12 @@ const PLATFORM_ROUTES: readonly string[] = [
   "/platform/cms/themes",
   "/platform/system/logs",
   "/platform/businesses/business-1",
+  "/platform/businesses/business-1/profile",
   "/platform/businesses/business-1/settings",
   "/platform/businesses/business-1/plan",
   "/platform/businesses/business-1/billing",
   "/platform/businesses/business-1/features",
+  "/platform/businesses/business-1/devices",
   "/platform/businesses/business-1/support",
   "/platform/businesses/business-1/danger",
 ];

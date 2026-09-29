@@ -5,10 +5,15 @@
  *
  * The plaintext code exists only in the response to the issue request — this
  * component holds it in state so the operator can copy it, and it is gone on
- * the next render pass. Re-issuing revokes whatever was live, so the list
- * never shows two usable codes.
+ * the next render pass. Re-issuing revokes whatever was live *for that branch*,
+ * so the list never shows two usable codes for one location.
+ *
+ * It renders on the Devices & installations section (§15), next to the installs
+ * the codes create — not among the feature flags, where a credential's lifetime
+ * read as an entitlement.
  */
 import { useCallback, useEffect, useState } from "react";
+import { formatJalali } from "@/lib/jalali";
 import { api, errorMessage, Button, Card, ErrorBox, InfoBox, useCan, SkeletonRows } from "../../ui";
 import { useBusiness } from "./context";
 
@@ -30,9 +35,10 @@ const STATE_LABELS: Record<PairingCodeSummary["state"], { label: string; cls: st
   code_revoked: { label: "لغوشده", cls: "text-muted-foreground" },
 };
 
+/** Shamsi, like every other date the console shows. */
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
-  return new Date(iso).toLocaleString("fa-IR", { dateStyle: "short", timeStyle: "short" });
+  return formatJalali(iso, { withMonthName: true, withTime: true });
 }
 
 export function PairingPanel() {

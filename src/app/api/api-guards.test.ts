@@ -86,6 +86,15 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "auth/accept-invite":
     "invitation exchange — the invitee has no session and no membership of the inviting " +
     "business yet; the single-use token is the credential",
+  // Issue #755 §14 — the activation counterpart of accept-invite, and public
+  // for the same reason: a business provisioned from the console is created
+  // with a password nobody knows, so the owner following the link has no
+  // session *and* no usable credential. The single-use token is both. It is
+  // also the only place the owner's own second factor and recovery codes are
+  // minted, which is precisely why the platform console can no longer mint them.
+  "auth/owner-activation":
+    "owner activation exchange — the identity was created with a password nobody knows, so " +
+    "the single-use token in the link is the only credential the owner has until they set one",
   "auth/impersonate-handoff":
     "credential exchange (Phase 23 follow-up) — the console's short-lived single-use handoff " +
     "token is the credential; the caller has no session on the business's origin yet by " +

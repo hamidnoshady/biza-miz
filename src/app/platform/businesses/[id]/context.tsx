@@ -16,6 +16,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { type Industry } from "@/lib/industries";
+import type { BusinessLifecycleStatus } from "@/lib/platform-business-lifecycle";
 import { api, errorMessage } from "../../ui";
 
 export interface Business {
@@ -23,7 +24,8 @@ export interface Business {
   name: string;
   slug: string;
   subdomain: string;
-  status: string;
+  /** The lifecycle state; the transition policy needs the union, not a string. */
+  status: BusinessLifecycleStatus;
   plan: string;
   timezone: string;
   industry: Industry;
