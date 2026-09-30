@@ -6,7 +6,7 @@ import { iamStateHash, sequenceDecision } from "./reconciliation";
 import { validateIamEvent } from "./events";
 import { buildIamSnapshot } from "./service";
 import type { ReplicatedLoginCredential } from "./login-credentials";
-import { applyLoginCredentials } from "./login-credentials-service";
+import { applyLoginCredentials, spentRecoveryCodes } from "./login-credentials-service";
 
 function baseUrl(value:string){return value.trim().replace(/\/+$/,"");}
 
@@ -162,6 +162,11 @@ export async function runIamSync(businessId:string):Promise<boolean>{
     // Global login (password + 2FA). Best-effort: an older cloud without the
     // endpoint must not hold back ordinary sync.
     try{
+      // Spent recovery codes first, so the payload fetched next already
+      // carries them spent and the two replicas compare equal.
+      const spent=await spentRecoveryCodes(businessId);
+      if(spent.length) await fetch(`${baseUrl(config.remoteUrl)}/api/iam/login-credentials`,{method:"POST",
+        headers:{Authorization:`Bearer ${config.token}`,"Content-Type":"application/json"},body:JSON.stringify({spent}),signal:AbortSignal.timeout(30_000)});
       const credentials=await fetch(`${baseUrl(config.remoteUrl)}/api/iam/login-credentials`,{headers:{Authorization:`Bearer ${config.token}`},signal:AbortSignal.timeout(30_000)});
       if(credentials.ok) await applyLoginCredentials(businessId,((await credentials.json()) as {credentials:ReplicatedLoginCredential[]}).credentials??[]);
       else if(credentials.status!==404) console.error(`login credential sync: HTTP ${credentials.status}`);

@@ -5,10 +5,7 @@
  */
 import { getPool, query, withTenant, withoutTenantScope } from "../db";
 import { decryptTotpSecret, encryptTotpSecret } from "../mfa-service";
-import { getSetting, setSetting } from "../settings";
-import { loginCredentialsFingerprint, type ReplicatedLoginCredential } from "./login-credentials";
-
-const FINGERPRINT_KEY = "iam.login_credentials_fingerprint";
+import { loginCredentialsFingerprint, type ReplicatedLoginCredential, type SpentRecoveryCode } from "./login-credentials";
 
 /** Cloud: every identity with a membership in this business. RLS limits platform_users to members. */
 export async function buildLoginCredentials(businessId: string): Promise<ReplicatedLoginCredential[]> {
@@ -61,17 +58,51 @@ export async function buildLoginCredentials(businessId: string): Promise<Replica
 }
 
 /**
+ * Site: every recovery code spent here, so the cloud can stop accepting it.
+ * Sent before each fetch; the cloud keeps the first stamp it sees.
+ */
+export async function spentRecoveryCodes(businessId: string): Promise<SpentRecoveryCode[]> {
+  const { rows } = await query<{ membership_id: string; code_hash: string; used_at: Date }>(
+    `SELECT u.id AS membership_id, r.code_hash, r.used_at
+       FROM users u JOIN mfa_recovery_codes r
+         ON r.subject_realm = 'platform_user' AND r.subject_id = u.platform_user_id
+      WHERE u.business_id = $1 AND r.used_at IS NOT NULL`,
+    [businessId],
+  );
+  return rows.map((row) => ({ membershipId: row.membership_id, codeHash: row.code_hash, usedAt: row.used_at.toISOString() }));
+}
+
+/**
+ * Cloud: mark codes a paired site reports as spent. Only codes of identities
+ * holding a membership in *this* business, matched by exact hash.
+ */
+export async function recordSpentRecoveryCodes(businessId: string, spent: readonly SpentRecoveryCode[]): Promise<void> {
+  if (spent.length === 0) return;
+  await withTenant(businessId, () => query(
+    `UPDATE mfa_recovery_codes r SET used_at = s.used_at
+       FROM unnest($2::uuid[], $3::text[], $4::timestamptz[]) AS s(membership_id, code_hash, used_at)
+       JOIN users u ON u.id = s.membership_id AND u.business_id = $1
+      WHERE r.subject_realm = 'platform_user' AND r.subject_id = u.platform_user_id
+        AND r.code_hash = s.code_hash AND r.used_at IS NULL`,
+    [businessId, spent.map((c) => c.membershipId), spent.map((c) => c.codeHash), spent.map((c) => c.usedAt)],
+  ));
+}
+
+/**
  * Site: make each member's local identity equal the cloud's. Writes
  * platform_users under the documented "identity" bypass — the same narrow
  * write a password reset makes, reached only through a membership row this
- * business owns. Returns false when nothing changed.
+ * business owns. Compared against the site's *current* rows, so a local
+ * change (a reset, a direct edit) is put back rather than silently diverging.
+ * Returns false when the two already agree.
  */
 export async function applyLoginCredentials(
   businessId: string,
   credentials: readonly ReplicatedLoginCredential[],
 ): Promise<boolean> {
-  const fingerprint = loginCredentialsFingerprint(credentials);
-  if ((await getSetting<{ value: string }>(businessId, FINGERPRINT_KEY))?.value === fingerprint) return false;
+  const wanted = new Set(credentials.map((c) => c.membershipId));
+  const local = (await buildLoginCredentials(businessId)).filter((c) => wanted.has(c.membershipId));
+  if (loginCredentialsFingerprint(local) === loginCredentialsFingerprint(credentials)) return false;
 
   const members = await query<{ id: string; platform_user_id: string | null }>(
     `SELECT id, platform_user_id FROM users WHERE business_id = $1 AND id = ANY($2::uuid[])`,
@@ -154,10 +185,6 @@ export async function applyLoginCredentials(
         client.release();
       }
     });
-  }
-  // Only remember a fully-applied set; a membership still missing retries next tick.
-  if (credentials.every((c) => linked.has(c.membershipId))) {
-    await setSetting(businessId, FINGERPRINT_KEY, { value: fingerprint });
   }
   return true;
 }

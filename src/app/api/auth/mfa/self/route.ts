@@ -9,6 +9,7 @@ import { enrolMfaMethod } from "@/lib/mfa-enrol";
 import { countRemainingRecoveryCodes, issueRecoveryCodes } from "@/lib/mfa-recovery";
 import { enrolmentRequirement, graceDaysRemaining, mfaAppliesToRole } from "@/lib/mfa";
 import { getMfaPolicy } from "@/lib/mfa-policy";
+import { readDeploymentProfile } from "@/lib/deployment-mode";
 
 /**
  * Phase 24 Wave 2 — self-service two-factor enrolment for a *signed-in* user.
@@ -77,6 +78,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   const platformUserId = session.platformUserId;
+  // A paired desktop replicates the second factor from the cloud; enrolling or
+  // regenerating codes here would be overwritten on the next sync.
+  if ((await readDeploymentProfile(session.businessId)).profile === "hybrid") {
+    return NextResponse.json({ error: "login_managed_by_cloud" }, { status: 409 });
+  }
 
   return withoutTenantScope("identity", async () => {
     const { rows } = await query<{ email: string }>(

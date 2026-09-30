@@ -11,6 +11,7 @@ import {
   recordAuthSuccess,
 } from "@/lib/login-lockout-service";
 import { PASSWORD_LOCKOUT_POLICY } from "@/lib/login-lockout";
+import { readDeploymentProfile } from "@/lib/deployment-mode";
 
 /**
  * Sets a member's PIN or password.
@@ -66,6 +67,12 @@ export const PUT = withTenantScope(async (request: NextRequest, context: { param
     }
 
     if (body.password !== undefined) {
+      // A paired desktop replicates login from the cloud (src/lib/iam/
+      // login-credentials.ts); a password set here would be overwritten on
+      // the next sync, so it is changed on the cloud or not at all.
+      if ((await readDeploymentProfile(session.businessId)).profile === "hybrid") {
+        return NextResponse.json({ error: "login_managed_by_cloud" }, { status: 409 });
+      }
       if (isSelf) {
         // The same brute-force surface as a login form: a hijacked or
         // walked-up-to session could otherwise script this field against the

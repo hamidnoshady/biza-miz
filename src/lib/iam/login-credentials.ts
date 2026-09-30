@@ -28,14 +28,29 @@ export interface ReplicatedLoginCredential {
   recoveryCodes: Array<{ codeHash: string; usedAt: string | null }>;
 }
 
-/** Order-independent digest, so the desktop rewrites identities only when the cloud's changed. */
+/**
+ * Order-independent digest. The site compares the cloud's against one built
+ * from its *own current* rows (not a remembered payload), so a credential
+ * changed on either side is noticed. A recovery code counts as spent or not —
+ * the two servers stamp the moment independently.
+ */
 export function loginCredentialsFingerprint(credentials: readonly ReplicatedLoginCredential[]): string {
   const canonical = [...credentials]
     .sort((a, b) => a.membershipId.localeCompare(b.membershipId))
     .map((c) => ({
       ...c,
+      email: c.email.trim().toLowerCase(),
       mfa: [...c.mfa].sort((a, b) => a.method.localeCompare(b.method)),
-      recoveryCodes: [...c.recoveryCodes].sort((a, b) => a.codeHash.localeCompare(b.codeHash)),
+      recoveryCodes: [...c.recoveryCodes]
+        .sort((a, b) => a.codeHash.localeCompare(b.codeHash))
+        .map((code) => ({ codeHash: code.codeHash, spent: code.usedAt !== null })),
     }));
   return createHash("sha256").update(stable(canonical)).digest("hex");
+}
+
+/** A recovery code the site saw spent, reported so the cloud stops accepting it too. */
+export interface SpentRecoveryCode {
+  membershipId: string;
+  codeHash: string;
+  usedAt: string;
 }

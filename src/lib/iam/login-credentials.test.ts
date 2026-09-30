@@ -21,6 +21,12 @@ describe("loginCredentialsFingerprint", () => {
     expect(loginCredentialsFingerprint([owner, manager])).toBe(loginCredentialsFingerprint([manager, reordered]));
   });
 
+  it("treats a code spent on both replicas as equal whatever moment each stamped", () => {
+    const at = (usedAt: string) => ({ ...owner, recoveryCodes: [{ codeHash: "h1", usedAt }, { codeHash: "h2", usedAt: null }] });
+    expect(loginCredentialsFingerprint([at("2026-09-30T08:00:00.000Z")]))
+      .toBe(loginCredentialsFingerprint([at("2026-09-30T09:15:00.000Z")]));
+  });
+
   it("changes when a password, second factor or recovery code changes", () => {
     const base = loginCredentialsFingerprint([owner]);
     expect(loginCredentialsFingerprint([{ ...owner, passwordHash: "$2b$10$other" }])).not.toBe(base);

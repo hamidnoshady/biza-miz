@@ -14,7 +14,7 @@ import { provisionBusiness } from "../src/lib/business-provisioning";
 import { provisionMfaEnrolment } from "../src/lib/mfa-service";
 import { issueRecoveryCodes } from "../src/lib/mfa-recovery";
 import { verifyMfaCode } from "../src/lib/mfa-verify";
-import { applyLoginCredentials, buildLoginCredentials } from "../src/lib/iam/login-credentials-service";
+import { applyLoginCredentials, buildLoginCredentials, recordSpentRecoveryCodes, spentRecoveryCodes } from "../src/lib/iam/login-credentials-service";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
@@ -103,5 +103,23 @@ describe("global login replication", () => {
     await withTenant(site.businessId, () => applyLoginCredentials(site.businessId, changed));
     await expect(verifyMfaCode({ subjectRealm: "platform_user", subjectId: localId, method: "totp", code: recovery[0], useRecoveryCode: true }))
       .resolves.toBe("rejected");
+
+    // A password changed on the site alone is noticed and put back to the cloud's.
+    await withoutTenantScope("identity", () =>
+      query(`UPDATE platform_users SET password_hash = $2 WHERE id = $1`, [localId, bcrypt.hashSync("site-only", 4)]));
+    await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId, changed))).resolves.toBe(true);
+    const restored = await withoutTenantScope("identity", () =>
+      query<{ password_hash: string }>(`SELECT password_hash FROM platform_users WHERE id = $1`, [localId]));
+    expect(await bcrypt.compare("cloud-password", restored.rows[0].password_hash)).toBe(true);
+
+    // The code spent on the site is reported and becomes single-use on the cloud too.
+    const spent = await withTenant(site.businessId, () => spentRecoveryCodes(site.businessId));
+    expect(spent).toHaveLength(1);
+    await useDatabase(cloudDb);
+    await recordSpentRecoveryCodes(cloud.businessId, spent);
+    await expect(verifyMfaCode({ subjectRealm: "platform_user", subjectId: cloud.platformUserId!, method: "totp", code: recovery[0], useRecoveryCode: true }))
+      .resolves.toBe("rejected");
+    await expect(verifyMfaCode({ subjectRealm: "platform_user", subjectId: cloud.platformUserId!, method: "totp", code: recovery[1], useRecoveryCode: true }))
+      .resolves.toBe("recovery_code");
   }, 180_000);
 });
