@@ -118,6 +118,8 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "server-to-server master-data feed (migration 0190) — authenticated by the exact site-device credential (requireSiteCredential); the credential, never the request, names the business and branch, and writes are confined to that branch's rows",
   "server-sync/digest":
     "server-to-server drift check (migration 0190) — authenticated by the exact site-device credential; compares figures for that credential's branch only and writes nothing",
+  "server-sync/site-profile":
+    "server-to-server branch settings and switches (Phase 45) — authenticated by the exact site-device credential (requireSiteCredential); the credential names the business and branch, and the route only reads",
   "desktop-releases/promote":
     "release-pipeline ingress — authenticated by the timing-safe DESKTOP_RELEASE_PUBLISH_TOKEN, never by a tenant browser session",
   "server-sync/credential-rotation":

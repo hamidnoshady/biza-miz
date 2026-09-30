@@ -4,6 +4,8 @@ import { deploymentRole } from "@/lib/deployment-role";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { getServerSyncConfig, getServerSyncState } from "@/lib/server-sync";
 import { query } from "@/lib/db";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import type { SiteProfileState } from "@/lib/site-profile";
 import type {
   ConnectionStatus,
   PlatformConnectionState,
@@ -147,6 +149,7 @@ export const GET = withTenantScope(async () => {
       iamError = `iam_sync_blocked: ${row.last_error}`;
     }
   }
+  const siteProfile = await getSetting<SiteProfileState>(session.businessId, SETTING_KEYS.siteProfileState);
   const errorText = syncState.lastPushError || syncState.lastPullError || iamError;
   const configured = Boolean(config?.enabled);
   const sync: ConnectionStatus = !configured
@@ -187,6 +190,7 @@ export const GET = withTenantScope(async () => {
   return NextResponse.json({
     profile: deployment.profile,
     ...state,
+    siteProfile: siteProfile ? { appliedAt: siteProfile.appliedAt, lastError: siteProfile.lastError } : null,
     // Compatibility field for the bounded IndexedDB queue hook.
     cloudSync:
       sync === "connected"

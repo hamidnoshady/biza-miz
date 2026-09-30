@@ -393,6 +393,7 @@ const TERMINAL_SYNC_DOMAIN_ERRORS = new Set([
   "purchase_total_mismatch",
   "received_transfer_requires_reverse_transfer",
   "refund_exceeds_payment",
+  "shift_already_open",
   "stock_count_reversal_inconsistent",
   "supplier_required",
   "supplier_return_lot_not_found",

@@ -37,6 +37,7 @@ import { runIamSync } from "./iam/sync";
 import { refreshAppUpdateStatus } from "./app-update";
 import { expireStalePairingSessions } from "./pairing-service";
 import { runMasterSync } from "./master-sync-transport";
+import { runSiteProfileSync } from "./site-profile-service";
 import { runDriftCheck } from "./sync-health-service";
 import { attemptDue, nextAttemptAt } from "./sync-backoff";
 
@@ -1258,6 +1259,13 @@ export async function runServerSyncTick(): Promise<void> {
       await withTenant(row.business_id, () => runMasterSync(row.business_id));
     } catch (err) {
       console.error(`master-data sync failed for business ${row.business_id}:`, err);
+    }
+    try {
+      // Phase 45: the branch settings and switches the cloud owns, before this
+      // tick's events, so the bills pulled below land on the cloud's business day.
+      await withTenant(row.business_id, () => runSiteProfileSync(row.business_id));
+    } catch (err) {
+      console.error(`site profile sync failed for business ${row.business_id}:`, err);
     }
     try {
       await withTenant(row.business_id, () => runServerPush(row.business_id));

@@ -89,6 +89,7 @@ import { LockButton } from "./lock-screen";
 import { PlatformUserMenu } from "./platform-user-menu";
 import { ShiftButton } from "./shift-panel";
 import { DeploymentStatusIndicator } from "./deployment-status-indicator";
+import { TillNavigation } from "./till-navigation";
 import type { DeploymentProfile } from "@/lib/deployment-mode";
 
 
@@ -197,6 +198,8 @@ interface SidebarProps {
   /** Permission-filtered contextual Workspace entries from the server shell. */
   workspaceSections: readonly WorkspaceSidebarSection[];
   deploymentProfile: DeploymentProfile;
+  /** Phase 45: set on a Hybrid desktop — the sidebar is the till menu plus a cloud door. */
+  till?: { cloudUrl: string | null };
 }
 
 /**
@@ -924,6 +927,7 @@ export function DashboardSidebar({
   brandSubtitle,
   workspaceSections,
   deploymentProfile,
+  till,
 }: SidebarProps) {
   const pathname = usePathname();
   const [preference, setPreference] = useState<DashboardSidebarPreference>("expanded");
@@ -1045,7 +1049,9 @@ export function DashboardSidebar({
         }
       >
         <SidebarBrand title={brandTitle} subtitle={brandSubtitle} />
-        {workspaceRoute ? (
+        {till ? (
+          <TillNavigation navItems={navItems} pathname={pathname} cloudUrl={till.cloudUrl} />
+        ) : workspaceRoute ? (
           <WorkspaceNavigation pathname={pathname} sections={workspaceSections} />
         ) : appShell ? (
           <AppShellNavigation

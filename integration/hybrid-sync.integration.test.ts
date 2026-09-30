@@ -19,6 +19,13 @@ import { applyPairingSnapshot } from "../src/lib/pairing-apply";
 import { acknowledgePendingPairing, runServerPull, runServerPush } from "../src/lib/server-sync";
 import { runMasterSync } from "../src/lib/master-sync-transport";
 import { addItemsToOrder, createOrder, updateOrderItem } from "../src/lib/order-mutations";
+import { closeOwnShift, openShift } from "../src/lib/shift-service";
+import { syncClientEventId } from "../src/lib/sync-outbox";
+import { resetSiteProfileGate, runSiteProfileSync } from "../src/lib/site-profile-service";
+import { EMPTY_SITE_PROFILE_STATE } from "../src/lib/site-profile";
+import { effectiveFeatures } from "../src/lib/features";
+import { effectiveAppAvailability } from "../src/lib/app-availability-service";
+import { setSetting, SETTING_KEYS } from "../src/lib/settings";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
@@ -131,6 +138,8 @@ async function centralFetch(input: string | URL | Request, init?: RequestInit): 
         return (await pullRoute()).GET(request);
       case "/api/server-sync/digest":
         return (await import("../src/app/api/server-sync/digest/route")).POST(request);
+      case "/api/server-sync/site-profile":
+        return (await import("../src/app/api/server-sync/site-profile/route")).GET(request);
       case "/api/pairing/acknowledge":
         return Response.json({ ok: true });
       default:
@@ -563,6 +572,195 @@ describe("orders", () => {
       query("SELECT 1 FROM sync_events WHERE client_event_id = $1 AND origin = 'local'", [orderId]),
     );
     expect(echoed.rowCount).toBe(0);
+  });
+});
+
+/** A signed-in till session for the owner on the desktop (openShift needs one). */
+async function desktopTillSession(): Promise<string> {
+  return withTenant(biz.businessId, async () => {
+    await query("INSERT INTO employees (id, business_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [biz.ownerId, biz.businessId]);
+    const created = await query<{ id: string }>(
+      `INSERT INTO employee_sessions (employee_id, business_id, location_id, token_hash, expires_at)
+       VALUES ($1, $2, $3, $4, now() + interval '1 hour') RETURNING id`,
+      // token_hash is CHECKed to 64 characters (a sha256 hex).
+      [biz.ownerId, biz.businessId, biz.locationId, (randomUUID() + randomUUID()).replaceAll("-", "")],
+    );
+    return created.rows[0].id;
+  });
+}
+
+describe("shifts", () => {
+  it("brings a shift opened and cashed up at the till to the cloud", async () => {
+    const sessionId = await desktopTillSession();
+    const opened = await withTenant(biz.businessId, () =>
+      openShift(biz.ownerId, biz.businessId, sessionId, 5_000_000, biz.locationId, "owner"),
+    );
+    await withTenant(biz.businessId, () => closeOwnShift(biz.ownerId, biz.businessId, 7_500_000, "owner"));
+    await syncRound();
+    const cloud = await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query<{ employee_id: string; location_id: string; opening: string; closing: string; closed: boolean; session_id: string | null }>(
+          `SELECT employee_id, location_id, opening_float::text AS opening, closing_float::text AS closing,
+                  ended_at IS NOT NULL AS closed, session_id
+             FROM employee_shifts WHERE id = $1`,
+          [opened.id],
+        ),
+      ),
+    );
+    expect(cloud.rows[0]).toEqual({
+      employee_id: biz.ownerId,
+      location_id: biz.locationId,
+      opening: "5000000",
+      closing: "7500000",
+      closed: true,
+      session_id: null,
+    });
+  });
+
+  it("refuses, visibly, a second open shift for the same person", async () => {
+    const cloudShiftId = await onCentral(() =>
+      withTenant(biz.businessId, async () => {
+        await query("INSERT INTO employees (id, business_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [biz.ownerId, biz.businessId]);
+        return (
+          await query<{ id: string }>(
+            `INSERT INTO employee_shifts (employee_id, business_id, location_id, business_date)
+             VALUES ($1, $2, $3, current_date) RETURNING id`,
+            [biz.ownerId, biz.businessId, biz.locationId],
+          )
+        ).rows[0].id;
+      }),
+    );
+    const sessionId = await desktopTillSession();
+    const desktopShift = await withTenant(biz.businessId, () =>
+      openShift(biz.ownerId, biz.businessId, sessionId, null, biz.locationId, "owner"),
+    );
+    await syncRound();
+    const deadLetters = await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query<{ error_code: string }>(
+          `SELECT error_code FROM sync_event_dead_letters WHERE business_id = $1 AND client_event_id = $2`,
+          // The outbox stores the name-derived UUID of the identity.
+          [biz.businessId, syncClientEventId(`shift.opened:${desktopShift.id}`)],
+        ),
+      ),
+    );
+    expect(deadLetters.rows.map((row) => row.error_code)).toEqual(["shift_already_open"]);
+    // Tidy both sides so later tests start with nobody clocked in.
+    await onCentral(() =>
+      withTenant(biz.businessId, () => query("UPDATE employee_shifts SET ended_at = now() WHERE id = $1", [cloudShiftId])),
+    );
+    await withTenant(biz.businessId, () => closeOwnShift(biz.ownerId, biz.businessId, null, "owner"));
+    // Deliver that cash-up too, so no unsent work is left for the drift check.
+    await syncRound();
+  });
+});
+
+describe("site profile", () => {
+  // Each call here stands for a tick a full interval after the last one.
+  const syncProfile = () => {
+    resetSiteProfileGate();
+    return withTenant(biz.businessId, () => runSiteProfileSync(biz.businessId));
+  };
+
+  it("asks the cloud at most once per sync interval, however often the tick wakes", async () => {
+    const routed = globalThis.fetch;
+    const spy = vi.fn(routed);
+    globalThis.fetch = spy as typeof fetch;
+    try {
+      resetSiteProfileGate();
+      const at = (ms: number) => withTenant(biz.businessId, () => runSiteProfileSync(biz.businessId, new Date(ms)));
+      const start = Date.now();
+      await at(start);
+      await at(start + 1_500); // a NOTIFY wake right after a local commit
+      expect(spy).toHaveBeenCalledTimes(1);
+      await at(start + 30_000);
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      globalThis.fetch = routed;
+    }
+  });
+
+  it("brings the branch's business-day start, so both sides put an after-midnight bill on the same day", async () => {
+    await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query("UPDATE locations SET business_day_start_minutes = 1080 WHERE id = $1", [biz.locationId]),
+      ),
+    );
+    await syncProfile();
+    const desktop = await withTenant(biz.businessId, () =>
+      query<{ start: number | null; day: string }>(
+        `SELECT business_day_start_minutes AS start,
+                app_business_date('2026-09-30T00:30:00+03:30'::timestamptz, timezone, business_day_start_minutes)::text AS day
+           FROM locations WHERE id = $1`,
+        [biz.locationId],
+      ),
+    );
+    expect(desktop.rows[0]).toEqual({ start: 1080, day: "2026-09-29" });
+  });
+
+  it("follows the cloud's switches: the assistant on, then off, and an app under maintenance", async () => {
+    const setAssistant = (enabled: boolean) =>
+      onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query(
+            `INSERT INTO business_features (business_id, flag_key, enabled) VALUES ($1, 'ai_assistant', $2)
+             ON CONFLICT (business_id, flag_key) DO UPDATE SET enabled = EXCLUDED.enabled`,
+            [biz.businessId, enabled],
+          ),
+        ),
+      );
+    await setAssistant(true);
+    await syncProfile();
+    expect((await withTenant(biz.businessId, () => effectiveFeatures(biz.businessId))).ai_assistant).toBe(true);
+    await setAssistant(false);
+    await syncProfile();
+    expect((await withTenant(biz.businessId, () => effectiveFeatures(biz.businessId))).ai_assistant).toBe(false);
+
+    // An unchanged profile is still applied: a local edit to the cloud's copy is repaired.
+    await withTenant(biz.businessId, () =>
+      query("DELETE FROM business_features WHERE business_id = $1 AND flag_key = 'ai_assistant'", [biz.businessId]),
+    );
+    await syncProfile();
+    const restored = await withTenant(biz.businessId, () =>
+      query<{ enabled: boolean }>(
+        "SELECT enabled FROM business_features WHERE business_id = $1 AND flag_key = 'ai_assistant'",
+        [biz.businessId],
+      ),
+    );
+    expect(restored.rows).toEqual([{ enabled: false }]);
+
+    await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query(
+          `INSERT INTO business_app_availability (business_id, app_key, state) VALUES ($1, 'growth', 'maintenance')
+           ON CONFLICT (business_id, app_key) DO UPDATE SET state = EXCLUDED.state`,
+          [biz.businessId],
+        ),
+      ),
+    );
+    await syncProfile();
+    expect((await withTenant(biz.businessId, () => effectiveAppAvailability(biz.businessId))).growth.state).toBe("maintenance");
+  });
+
+  it("keeps the last copy and backs off when the cloud refuses", async () => {
+    const routed = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => new Response("", { status: 502 })) as typeof fetch;
+    try {
+      const failed = await syncProfile();
+      expect(failed.lastError).toBe("site_profile_rejected: HTTP 502");
+      expect(failed.nextAttemptAt).not.toBeNull();
+      expect(failed.hash).not.toBeNull();
+      const start = await withTenant(biz.businessId, () =>
+        query<{ start: number | null }>("SELECT business_day_start_minutes AS start FROM locations WHERE id = $1", [biz.locationId]),
+      );
+      expect(start.rows[0].start).toBe(1080);
+      // Inside the backoff window the cloud is not asked again.
+      await syncProfile();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = routed;
+      await withTenant(biz.businessId, () => setSetting(biz.businessId, SETTING_KEYS.siteProfileState, EMPTY_SITE_PROFILE_STATE));
+    }
   });
 });
 

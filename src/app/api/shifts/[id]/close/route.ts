@@ -25,7 +25,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   }
 
   try {
-    const result = await closeShiftById(id, session.businessId, session.sub, body.closingFloat ?? null);
+    const result = await closeShiftById(id, session.businessId, session.sub, body.closingFloat ?? null, session.role);
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof ShiftError) {

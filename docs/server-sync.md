@@ -8,6 +8,53 @@ exchange explicitly supported domain events with a hosted deployment.
 This is **not full-database replication**. The current event catalog is listed
 under [Supported event scope](#supported-event-scope).
 
+## Cloud-primary split (Phase 45)
+
+The cloud is the system of record; a paired desktop is the till. On a Hybrid
+desktop only the till screens render locally — selling (`/accounting/pos`,
+`/accounting/orders`, `/accounting/waiter`), floor & kitchen
+(`/accounting/floor`, `/accounting/kitchen`, `/accounting/reservations`,
+`/accounting/delivery`), shifts, and this computer's own settings (cloud sync,
+devices, desktop, printers, backup, logs). The list is `src/lib/site-routes.ts`.
+The desktop's home is the member's till screen (`siteHomeFor`: kitchen →
+`/accounting/kitchen`, waiter → `/accounting/waiter`, everyone else →
+`/accounting/pos`), falling back to `/accounting/pos` and then
+`/accounting/orders` when the role's screen is not available to that member (a
+waiter without reservations, a trade without the kitchen module); with none
+openable it explains rather than redirecting. Every other screen opens the cloud
+in the «نسخهٔ ابری» window (`electron/cloud-window.js`: no preload, sandboxed,
+`persist:cloud` partition, navigation and redirects locked to the origin it was
+opened with — a redirect anywhere else, a renamed business subdomain included,
+goes to the system browser — closed with the till window). Billing and subscription
+(`/settings/billing`, `/settings/subscription`) open in the system browser
+instead, because the payment gateway returns to a page that needs the
+browser's own session. Offline, the hand-off screen says the section needs the Internet and
+opens the cloud window by itself once the connection returns. The cloud itself
+is unchanged and standalone.
+
+Each tick, at most once per sync interval (30 s) however often a wake-up runs
+it — after master data and **before** push/pull, so the bills pulled in
+the same tick land on the cloud's business day — the desktop also reads
+`GET /api/server-sync/site-profile` (bearer, the credential names the branch):
+the branch row (name, address, phone, timezone, business-day start, active)
+and the effective feature switches and app availability. It applies the
+profile in one transaction on every successful fetch (the apply is idempotent;
+the hash only decides whether the state records a new `appliedAt`), writes each
+app's state as a per-business override so the desktop's global catalogue is
+never rewritten, and keeps the last copy offline (`site-profile-service.ts`).
+App keys, availability states and feature keys this desktop does not know yet
+(a newer cloud) are skipped rather than rejected. A failure is recorded in its
+own setting, `server_sync.site_profile_state`, backs off, and is shown as its
+own line («تنظیمات شعبه از ابر») on the sync panel; it never blocks push or
+pull and does not change the overall sync badge.
+
+**Rollout: deploy the cloud first.** The shift events (`shift.opened@1`,
+`shift.closed@1`) record on both sides. A desktop still on an older version
+does not know them, so it dead-letters cloud-recorded `shift.*` events as
+`unknown_event_version` until it is updated; the cloud must already serve
+`/api/server-sync/site-profile` and accept the desktop's shift events before
+any desktop is updated.
+
 ## Production architecture
 
 ```text
@@ -136,15 +183,19 @@ bill after every change** (`order.state.synced`: added lines, voids,
 quantities, discount, customer, table, kitchen status — and once more inside
 the payment transaction), payment v2 and customer returns, **closed-order
 amendments** (`order.amendment.posted`), manual-journal reversals, purchases,
-supplier returns, transfers, waste, retail/standard stock counts, and
-production/reversal events. Each is written in the local mutation transaction,
-uses stable IDs and `client_event_id` idempotency, and is applied through the
-versioned registry. Since contract v2 the **central server records the same
-events for a branch that has an active paired desktop**, so a bill, purchase
-or journal the owner records in the cloud for that branch reaches it; the
-desktop stays the operational authority and a cloud event it cannot apply
-becomes a dead letter the owner sees. Replays keep the sale's own instant
-(`opened_at`, `closed_at`, `received_at`) and the paying side's journal date.
+supplier returns, transfers, waste, retail/standard stock counts,
+production/reversal events, and (contract v3) shifts opened and cashed up
+(`shift.opened@1`, `shift.closed@1`, upserted by shift id; `client_event_id` is
+derived from `shift.opened:<id>` / `shift.closed:<id>`; a second open shift for
+the same person is a terminal error and dead-letters visibly). Each is written
+in the local mutation transaction, uses stable IDs and `client_event_id`
+idempotency, and is applied through the versioned registry. Since contract v2
+the **central server records the same events for a branch that has an active
+paired desktop**, so a bill, purchase or journal the owner records in the
+cloud for that branch reaches it; the desktop stays the operational authority
+and a cloud event it cannot apply becomes a dead letter the owner sees.
+Replays keep the sale's own instant (`opened_at`, `closed_at`, `received_at`)
+and the paying side's journal date.
 
 **Master data** — customers (`parties`, `party_categories`), payment ways, and
 the branch's menu, modifiers, recipes, stock items and tables — synchronises

@@ -120,7 +120,7 @@ const MIN_PASSPHRASE_LENGTH = 8;
  * a bad zone fails loudly at save time rather than silently shifting every
  * schedule slot by hours.
  */
-const TIMEZONE_RE = /^[A-Za-z][A-Za-z0-9_+~/-]*$/;
+export const TIMEZONE_RE = /^[A-Za-z][A-Za-z0-9_+~/-]*$/;
 
 export function timezoneIsResolvable(timeZone: string): boolean {
   try {

@@ -509,6 +509,13 @@ versioned **events** (`sync_events` outbox/inbox) for operations, and the **mast
   closed day.
 - **Cursors are `(txid, …)` under `pg_snapshot_xmin`, never a bare id.** An id is allocated at
   INSERT, not COMMIT, and a cursor over it skips late commits.
+- **The desktop is the till; the cloud is the system of record (Phase 45).** On a Hybrid desktop
+  only the routes in `src/lib/site-routes.ts` render locally; everything else hands off to the
+  «نسخهٔ ابری» window. A new screen is cloud-by-default — add it to that list only if it must
+  work offline at the till, and then give its writes a sync event. Never give the cloud window
+  a preload. Branch settings and switches reach the desktop through
+  `/api/server-sync/site-profile` (fetched before push/pull each tick), not through a copy at
+  pairing.
 
 ## Counting stock — read before touching barcodes or a physical count
 

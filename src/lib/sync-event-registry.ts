@@ -3,7 +3,7 @@ import type { Permission } from "./permissions";
 export const SYNC_EVENT_REGISTRY_VERSION = 1 as const;
 
 type LocationRule = "event_location" | "business_transfer";
-type EffectClass = "order" | "payment" | "refund" | "journal_reversal" | "inventory" | "transfer";
+type EffectClass = "order" | "payment" | "refund" | "journal_reversal" | "inventory" | "transfer" | "shift";
 
 export interface SyncEventDefinition {
   type: string;
@@ -35,6 +35,8 @@ const ORDER_PERMISSION = "orders.create" as const;
 const PAYMENT_PERMISSION = "payments.take" as const;
 const REFUND_PERMISSION = "payments.refund" as const;
 const INVENTORY_PERMISSION = "inventory.adjust" as const;
+/** The permission `/api/shifts/start` already requires to clock in. */
+const SHIFT_PERMISSION = "orders.create" as const;
 
 /**
  * Authoritative, machine-readable sync event catalogue.
@@ -80,6 +82,10 @@ export const SYNC_EVENT_REGISTRY = [
   { type: "retail.stock_count.reversed", schemaVersion: 1, handler: "retail.stock_count.reversed", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["count_not_found"], payloadFields: ["countId", "note"] },
   { type: "inventory.production.recorded", schemaVersion: 1, handler: "inventory.production.recorded", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["formula_not_found", "formula_inactive"], payloadFields: ["runId", "formulaId", "batches", "outputQuantity", "conversionCostRial", "note"] },
   { type: "inventory.production.reversed", schemaVersion: 1, handler: "inventory.production.reversed", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["run_not_found"], payloadFields: ["runId", "note"] },
+  // Phase 45: a shift opened or cashed up at the till reaches the cloud's
+  // shift reports; the row travels whole and replays idempotently by id.
+  { type: "shift.opened", schemaVersion: 1, handler: "shift.opened", permission: SHIFT_PERMISSION, effectClass: "shift", locationRule: "event_location", dependencyErrors: ["employee_not_found"], payloadFields: ["shiftId", "employeeId", "businessDate", "openingFloat", "closingFloat", "startedAt", "endedAt", "closedBy"] },
+  { type: "shift.closed", schemaVersion: 1, handler: "shift.closed", permission: SHIFT_PERMISSION, effectClass: "shift", locationRule: "event_location", dependencyErrors: ["employee_not_found"], payloadFields: ["shiftId", "employeeId", "businessDate", "openingFloat", "closingFloat", "startedAt", "endedAt", "closedBy"] },
 ] as const satisfies readonly SyncEventDefinition[];
 
 export type SyncEventType = (typeof SYNC_EVENT_REGISTRY)[number]["type"];

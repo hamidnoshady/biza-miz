@@ -2,11 +2,18 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { authorize } from "@/lib/authorize";
 import { PERMISSIONS } from "@/lib/permissions";
-import { featureLockedForPage } from "@/lib/features";
+import { featureLockedForPage, isFeatureEnabled } from "@/lib/features";
 import { canManageAi } from "@/lib/ai-panel";
 import { FeatureLock } from "@/components/feature-lock";
 import { AiChatHub } from "./ai/ai-chat-hub";
 import { cardClass } from "./page-chrome";
+import { withTenant } from "@/lib/db";
+import { readDeploymentProfile } from "@/lib/deployment-mode";
+import { deploymentRole } from "@/lib/deployment-role";
+import { isHybridSite, siteHomeFor } from "@/lib/site-routes";
+import { getBusinessIndustry } from "@/lib/industry-guard";
+import { hasModule } from "@/lib/industry-profile";
+import { memberAccessFor } from "@/lib/member-access";
 
 /**
  * `/dashboard` — the tenant's home, and the assistant's one canonical address.
@@ -32,6 +39,34 @@ import { cardClass } from "./page-chrome";
 export default async function DashboardPage() {
   const session = await getSession();
   if (!session) redirect("/login");
+  // Phase 45: the assistant is a cloud screen; a Hybrid desktop opens on the till.
+  const deployment = await withTenant(session.businessId, () => readDeploymentProfile(session.businessId));
+  if (isHybridSite(deployment.profile, deploymentRole())) {
+    const [industry, reservations, member] = await Promise.all([
+      getBusinessIndustry(session.businessId),
+      isFeatureEnabled(session.businessId, "reservations"),
+      memberAccessFor(session),
+    ]);
+    const home = siteHomeFor({
+      role: session.role,
+      // Fails open on an unreadable industry, exactly as `isModuleEnabled` does.
+      hasModule: (module) => industry === null || hasModule(industry, module),
+      reservations,
+      permissions: member?.permissions ?? new Set<string>(),
+    });
+    // Never redirect to a till screen that would send this member straight back here.
+    if (home) redirect(home);
+    return (
+      <div className="flex min-h-full items-center justify-center p-6" dir="rtl">
+        <div className={`${cardClass} w-full max-w-lg p-6 text-center`}>
+          <h1 className="text-lg font-semibold text-foreground">صفحه‌ای از صندوق برای شما باز نیست</h1>
+          <p className="mt-2 text-sm leading-6 text-muted-foreground">
+            روی این دستگاه فقط صندوق، سفارش‌ها، میزها و آشپزخانه کار می‌کنند و هیچ‌کدام برای نقش شما فعال نیست. از مدیر کسب‌وکار بخواهید دسترسی لازم را بدهد، یا بخش‌های دیگر را در نسخهٔ ابری باز کنید.
+          </p>
+        </div>
+      </div>
+    );
+  }
   const locked = await featureLockedForPage(session.businessId, "ai_assistant");
   const access = await authorize(session, { permission: PERMISSIONS.aiUse });
 

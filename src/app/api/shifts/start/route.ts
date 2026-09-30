@@ -39,6 +39,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       session.employeeSessionId ?? null,
       body.openingFloat ?? null,
       location?.id ?? null,
+      session.role,
     );
     return NextResponse.json({ shift }, { status: 201 });
   } catch (err) {

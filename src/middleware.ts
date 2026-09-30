@@ -44,6 +44,7 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/server-sync/runtime-status",
   "/api/server-sync/master",
   "/api/server-sync/digest",
+  "/api/server-sync/site-profile",
   "/api/server-sync/config/generate-token",
   "/api/peer/backup",
   "/api/v1",
@@ -180,6 +181,7 @@ const PUBLIC_PATHS = [
   // server-sync-auth.ts before anything is read or written.
   "/api/server-sync/master",
   "/api/server-sync/digest",
+  "/api/server-sync/site-profile",
   // The IAM control plane a paired desktop reconciles before every sync tick
   // (src/lib/iam/sync.ts): snapshot, events and status are read with the site
   // bearer credential, and commands/detach are posted with it — each route
@@ -575,6 +577,7 @@ const SYNC_TOKEN_RATE_LIMITED_PATHS = [
   "/api/server-sync/update-check",
   "/api/server-sync/master",
   "/api/server-sync/digest",
+  "/api/server-sync/site-profile",
 ];
 
 /**

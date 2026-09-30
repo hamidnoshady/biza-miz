@@ -28,11 +28,13 @@ import { DashboardSidebar, type NavItem } from "./dashboard-sidebar";
 import { DashboardMain } from "./dashboard-main";
 import { AppAvailabilityGate } from "./app-availability-gate";
 import { DeploymentCapabilityGate } from "./deployment-capability-gate";
+import { AssistantLinkProvider } from "@/components/ai/ask-assistant";
 import { OfflineQueueProvider } from "./offline-queue";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
 import { deploymentRole } from "@/lib/deployment-role";
 import { getServerSyncConfig } from "@/lib/server-sync";
+import { isHybridSite, tillNavItems } from "@/lib/site-routes";
 import { getGrant } from "@/lib/platform-service";
 import { SupportSessionBanner, SupportSessionEnded } from "./support-session-banner";
 
@@ -375,6 +377,9 @@ export async function WorkspaceShell({
   if (!member?.isActive) redirect("/login");
   const [industryResult, prefs, appAvailability, features, deployment, serverSyncConfig] = tenantReads;
   const runtimeRole = deploymentRole();
+  // Phase 45: a Hybrid desktop is the till — its menu lists only till screens.
+  const tillMode = isHybridSite(deployment.profile, runtimeRole);
+  const cloudUrl = serverSyncConfig?.enabled ? serverSyncConfig.remoteUrl : null;
   const supportGrant = session.imp ? await getGrant(session.imp.grantId, session.businessId) : null;
   const industry = industryResult.rows[0]?.industry ?? "food_service";
   const currencyDisplay = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
@@ -443,7 +448,7 @@ export async function WorkspaceShell({
         */}
         <div className="flex h-[100dvh] flex-col md:h-screen md:flex-row">
         <DashboardSidebar
-          navItems={navItems}
+          navItems={tillMode ? tillNavItems(navItems) : navItems}
           role={member.role}
           permissions={[...permissions]}
           fullName={session.fullName}
@@ -452,6 +457,7 @@ export async function WorkspaceShell({
           industry={industry}
           workspaceSections={workspaceSections}
           deploymentProfile={deployment.profile}
+          till={tillMode ? { cloudUrl } : undefined}
         />
         <DashboardMain>
           {session.imp && supportGrant ? (
@@ -468,9 +474,11 @@ export async function WorkspaceShell({
             <DeploymentCapabilityGate
               profile={deployment.profile}
               runtimeRole={runtimeRole}
-              cloudUrl={serverSyncConfig?.enabled ? serverSyncConfig.remoteUrl : null}
+              cloudUrl={cloudUrl}
             >
-              {children}
+              <AssistantLinkProvider enabled={features.ai_assistant === true && !tillMode}>
+                {children}
+              </AssistantLinkProvider>
             </DeploymentCapabilityGate>
           </AppAvailabilityGate>
         </DashboardMain>
