@@ -16,14 +16,15 @@ import { promises as dns } from "node:dns";
 import {
   CmsApiError,
   CmsNetworkError,
-  createPage,
-  createPost,
-  deletePage,
   fetchMedia,
   deleteMedia,
   updateMedia,
+  fetchRegistrarDomains,
+  fetchRegistrarOperations,
   fetchRegistrarQuote,
   fetchSiteCdnStatus,
+  type RegistrarDomain,
+  type RegistrarOperationRow,
   orderRegistrarDomain,
   purgeSiteCdn,
   type RegistrarQuote,
@@ -39,8 +40,6 @@ import {
   issueSiteApiKey,
   provisionSite,
   updateOrderStatus,
-  updatePage,
-  updatePost,
   updateProduct,
   updateSiteDomain as updateSiteDomainOnCms,
   type CmsConfig,
@@ -57,9 +56,8 @@ import {
 // Migration 0139: the platform credential now lives in `platform_cms_config`
 // (encrypted, editable in the super-admin console) with the ESHOBE_CMS_* env pair
 // as the fallback for deployments configured before it. `resolvePlatformCmsConfig`
-// is that resolution in one place; `cmsPlatformConfig(process.env)` is the env half
-// and is no longer called directly, so a rotated key is a form submission rather
-// than a redeploy.
+// is that resolution in one place (it reads the env pair itself), so a rotated key
+// is a form submission rather than a redeploy.
 import { resolvePlatformCmsConfig } from "./platform-control-service";
 import { inboxStatusForCmsOrders } from "./order-inbox-service";
 import { dnsHint, ipsOverlap, type DnsCheck } from "./dns";
@@ -288,58 +286,6 @@ function validatePostInput(
   return null;
 }
 
-export async function createCmsPost(businessId: string, input: CmsPostInput): Promise<WebsiteResult<CmsPost>> {
-  const invalid = validatePostInput(input, { requireAll: true });
-  if (invalid) return invalid;
-
-  let config: CmsConfig;
-  try {
-    config = await getCmsConfigForBusiness(businessId);
-  } catch {
-    return { ok: false, error: "not_connected" };
-  }
-
-  try {
-    const post = await createPost(config, {
-      title: input.title.trim(),
-      content: simpleLexicalRoot(input.content),
-      heroImage: input.heroImage,
-      categories: input.categories,
-    });
-    return { ok: true, data: post };
-  } catch (error) {
-    return mapCmsWriteError(error);
-  }
-}
-
-export async function updateCmsPost(
-  businessId: string,
-  id: string,
-  input: Partial<CmsPostInput>,
-): Promise<WebsiteResult<CmsPost>> {
-  const invalid = validatePostInput(input, { requireAll: false });
-  if (invalid) return invalid;
-
-  let config: CmsConfig;
-  try {
-    config = await getCmsConfigForBusiness(businessId);
-  } catch {
-    return { ok: false, error: "not_connected" };
-  }
-
-  try {
-    const post = await updatePost(config, id, {
-      ...(input.title !== undefined ? { title: input.title.trim() } : {}),
-      ...(input.content !== undefined ? { content: simpleLexicalRoot(input.content) } : {}),
-      ...(input.heroImage !== undefined ? { heroImage: input.heroImage } : {}),
-      ...(input.categories !== undefined ? { categories: input.categories } : {}),
-    });
-    return { ok: true, data: post };
-  } catch (error) {
-    return mapCmsWriteError(error);
-  }
-}
-
 export async function deleteCmsPost(businessId: string, id: string): Promise<WebsiteResult<null>> {
   let config: CmsConfig;
   try {
@@ -374,11 +320,6 @@ export async function publishCmsProduct(businessId: string, id: string): Promise
   return { ok: true, data: { id } };
 }
 
-export interface CmsPageInput {
-  title: string;
-  slug?: string;
-}
-
 export async function listCmsPages(
   businessId: string,
   opts?: { limit?: number; page?: number },
@@ -395,61 +336,6 @@ export async function listCmsPages(
   } catch (error) {
     if (error instanceof CmsNetworkError) return { ok: false, error: "cms_unreachable" };
     return { ok: false, error: "cms_error" };
-  }
-}
-
-export async function createCmsPage(businessId: string, input: CmsPageInput): Promise<WebsiteResult<CmsPage>> {
-  if (!input.title?.trim()) return { ok: false, error: "title_required" };
-  if (input.title.trim().length > 200) return { ok: false, error: "field_too_long" };
-  let config: CmsConfig;
-  try {
-    config = await getCmsConfigForBusiness(businessId);
-  } catch {
-    return { ok: false, error: "not_connected" };
-  }
-  try {
-    const page = await createPage(config, { title: input.title.trim(), slug: input.slug?.trim() });
-    return { ok: true, data: page };
-  } catch (error) {
-    return mapCmsWriteError(error);
-  }
-}
-
-export async function updateCmsPage(
-  businessId: string,
-  id: string,
-  input: Partial<CmsPageInput>,
-): Promise<WebsiteResult<CmsPage>> {
-  if (input.title !== undefined && !input.title.trim()) return { ok: false, error: "title_required" };
-  let config: CmsConfig;
-  try {
-    config = await getCmsConfigForBusiness(businessId);
-  } catch {
-    return { ok: false, error: "not_connected" };
-  }
-  try {
-    const page = await updatePage(config, id, {
-      ...(input.title !== undefined ? { title: input.title.trim() } : {}),
-      ...(input.slug !== undefined ? { slug: input.slug.trim() } : {}),
-    });
-    return { ok: true, data: page };
-  } catch (error) {
-    return mapCmsWriteError(error);
-  }
-}
-
-export async function deleteCmsPage(businessId: string, id: string): Promise<WebsiteResult<null>> {
-  let config: CmsConfig;
-  try {
-    config = await getCmsConfigForBusiness(businessId);
-  } catch {
-    return { ok: false, error: "not_connected" };
-  }
-  try {
-    await deletePage(config, id);
-    return { ok: true, data: null };
-  } catch (error) {
-    return mapCmsWriteError(error);
   }
 }
 
@@ -881,6 +767,41 @@ export async function cmsSiteCdn(businessId: string): Promise<WebsiteResult<Site
   }
   try {
     return { ok: true, data: await fetchSiteCdnStatus(config) };
+  } catch (error) {
+    if (error instanceof CmsNetworkError) return { ok: false, error: "cms_unreachable" };
+    if (error instanceof CmsApiError && error.status === 404) return { ok: false, error: "cms_old_version" };
+    return { ok: false, error: "cms_error" };
+  }
+}
+
+/**
+ * The domains the platform's registrar holds for this site, and the timeline of
+ * what was asked of it (register, transfer, renew). Read with the site key, so
+ * the CMS answers for this business's own site only.
+ *
+ * Without it an owner who bought a domain in the wizard never saw it again: not
+ * whether the registrar accepted it, and not where to renew it. A CMS too old to
+ * have a registrar answers 404, which reads as `cms_old_version` — the card
+ * removes itself, the same rule as the CDN card.
+ */
+export async function cmsRegistrarDomains(
+  businessId: string,
+): Promise<WebsiteResult<{ domains: RegistrarDomain[]; operations: RegistrarOperationRow[] }>> {
+  let config: CmsConfig;
+  try {
+    config = await getCmsConfigForBusiness(businessId);
+  } catch {
+    return { ok: false, error: "not_connected" };
+  }
+  try {
+    const [domains, operations] = await Promise.all([
+      fetchRegistrarDomains(config),
+      fetchRegistrarOperations(config),
+    ]);
+    return {
+      ok: true,
+      data: { domains: domains.domains ?? [], operations: (operations.operations ?? []).slice(0, 20) },
+    };
   } catch (error) {
     if (error instanceof CmsNetworkError) return { ok: false, error: "cms_unreachable" };
     if (error instanceof CmsApiError && error.status === 404) return { ok: false, error: "cms_old_version" };

@@ -195,7 +195,8 @@ differently for each:
   tab of this one's marketing suite.
 
 `website` moved to its own app entry in `src/lib/apps.ts` (`/dashboard/website`);
-`/dashboard/growth/website` redirects there for old bookmarks. Nothing else in
+`/dashboard/growth/website` and `/growth/website` redirect there for old bookmarks
+(entries in `LEGACY_PREFIX_MAP`, with no page left at either address). Nothing else in
 this phase's scope changed — the four engines, their posting rules and this
 app's own sidebar are exactly as the revision above left them.
 

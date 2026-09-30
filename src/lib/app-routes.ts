@@ -271,6 +271,11 @@ const LEGACY_PREFIX_MAP: readonly (readonly [string, string])[] = [
   // not app pages now — they are platform settings, addressed as such.
   ["/dashboard/billing", PLATFORM_BILLING_HREF],
   ["/dashboard/connections", "/settings/connections"],
+  // The website manager was seated in Growth before it became its own app
+  // (Phase 36b → migration 0138). Listed before the Growth prefix so the old
+  // dashboard address lands on the website app in one hop, not two.
+  ["/dashboard/growth/website", "/websites"],
+  ["/growth/website", "/websites"],
   ["/dashboard/growth", "/growth"],
   ["/dashboard/crm", "/crm"],
   ["/dashboard/website", "/websites"],

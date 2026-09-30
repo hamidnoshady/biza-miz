@@ -540,10 +540,12 @@ const API_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   // `connections` module (which has no app, so the availability guard fails
   // open) rather than left to the `/api/cms/website` catch-all below: the hub
   // must keep managing the credential while the website app itself is down.
-  // The domain *purchase* endpoints stay website-owned — buying a domain is
-  // the setup wizard's business, not the hub's — so they are listed first.
+  // The domain *purchase* endpoints stay website-owned — buying and renewing a
+  // domain is the website manager's business, not the hub's — so they are
+  // listed first.
   ["/api/cms/website/domain/quote", "website"],
   ["/api/cms/website/domain/order", "website"],
+  ["/api/cms/website/domain/registrar", "website"],
   ["/api/cms/website/state", "connections"],
   ["/api/cms/website/connect", "connections"],
   ["/api/cms/website/connection", "connections"],

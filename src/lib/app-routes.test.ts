@@ -325,6 +325,13 @@ describe("legacyRedirectTarget", () => {
     expect(legacyRedirectTarget("/dashboard/crm/segments", "")).toBe("/crm/segments");
   });
 
+  it("forwards the website manager's old Growth seat to the website app", () => {
+    expect(legacyRedirectTarget("/growth/website")).toBe("/websites/overview");
+    expect(legacyRedirectTarget("/dashboard/growth/website")).toBe("/websites/overview");
+    expect(legacyRedirectTarget("/dashboard/growth/loyalty")).toBe("/growth/loyalty");
+    expect(isCanonicalAppPathname("/growth/website")).toBe(false);
+  });
+
   it("forwards retired CMS grouped sections to their split routes", () => {
     expect(legacyRedirectTarget("/websites/cms/content")).toBe("/websites/cms/pages");
     expect(legacyRedirectTarget("/websites/cms/store")).toBe("/websites/cms/products");

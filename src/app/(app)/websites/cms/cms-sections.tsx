@@ -60,7 +60,8 @@ import {
   InfoBox,
 } from "@/app/dashboard/ui";
 import { cmsDnsHint, isSiteLive } from "@/lib/cms/dns";
-import type { SiteCdnStatus } from "@/lib/cms/client";
+import type { RegistrarDomain, RegistrarOperationRow, SiteCdnStatus } from "@/lib/cms/client";
+import { useMoney } from "@/components/money/money-context";
 import type { CmsDnsStatus, WebsiteOverview } from "@/lib/cms/website-service";
 import { cmsSectionHref } from "../website-routes";
 import { CmsSyncSettings } from "./cms-sync-settings";
@@ -417,6 +418,7 @@ export function CmsDomainSection() {
         currentDomain={site.connection.siteDomain}
         onEditDomain={() => setEditingDomain(true)}
       />
+      <RegistrarDomainsCard />
       <CdnCard />
       {editingDomain ? (
         <DomainDialog
@@ -613,6 +615,19 @@ export function CmsPostsSection() {
 export function CmsProductsSection() {
   const site = useCmsSite();
   const [editingProduct, setEditingProduct] = useState<CmsProduct | "new" | null>(null);
+  const [publishingProduct, setPublishingProduct] = useState("");
+
+  async function publish(product: CmsProduct) {
+    setPublishingProduct(product.id);
+    const { ok, data } = await api<{ error?: string }>(`/api/cms/website/products/${product.id}/publish`, { method: "POST" });
+    setPublishingProduct("");
+    if (!ok) {
+      toast.error(errorMessageOrRaw(data.error));
+      return;
+    }
+    toast.success("محصول در فروشگاه منتشر شد.");
+    site.loadOverview();
+  }
 
   if (site.loading) return <SectionCardSkeleton rows={4} />;
   if (!site.connection) return <NoSiteYet what="محصولات فروشگاه" />;
@@ -625,7 +640,7 @@ export function CmsProductsSection() {
 
       <SectionCard
         title="محصولات"
-        description="فروشگاه آنلاین (۵۰ محصول آخر). محصول ساخته‌شده از این‌جا پیش‌نویس است؛ انتشار از پنل سایت‌ساز انجام می‌شود."
+        description="فروشگاه آنلاین (۵۰ محصول آخر). ذخیره همیشه پیش‌نویس است و انتشار فقط با دکمهٔ جداگانه انجام می‌شود."
         actions={
           <SecondaryButton onClick={() => setEditingProduct("new")}>
             <PlusIcon className="size-4" />
@@ -655,6 +670,17 @@ export function CmsProductsSection() {
                   <StatusBadge tone={product._status === "published" ? "positive" : "active"}>
                     {STATUS_LABELS[product._status ?? "draft"]}
                   </StatusBadge>
+                  {product._status !== "published" ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={publishingProduct === product.id}
+                      onClick={() => void publish(product)}
+                    >
+                      {publishingProduct === product.id ? "در حال انتشار…" : "انتشار"}
+                    </Button>
+                  ) : null}
                   <Button
                     type="button"
                     variant="outline"
@@ -1378,6 +1404,219 @@ function DnsChecklistCard({
           </a>
         </Button>
       </div>
+    </SectionCard>
+  );
+}
+
+const REGISTRAR_STATE_LABELS: Record<string, string> = {
+  requested: "در انتظار ارسال",
+  providerAccepted: "پذیرفته‌شده توسط ثبت‌کننده",
+  active: "فعال",
+  failed: "ناموفق",
+  external: "خارج از نمایندگی",
+  cancelled: "لغوشده",
+};
+
+const REGISTRAR_OPERATION_LABELS: Record<string, string> = {
+  register: "ثبت",
+  transfer: "انتقال",
+  renew: "تمدید",
+};
+
+function registrarStateTone(state: string): "positive" | "danger" | "active" {
+  if (state === "active") return "positive";
+  if (state === "failed" || state === "cancelled") return "danger";
+  return "active";
+}
+
+interface RenewQuote {
+  domain: string;
+  period: number;
+  priceRial: number | null;
+  balanceRial: number;
+  resellerEnabled: boolean;
+}
+
+/**
+ * The domains the platform's registrar holds for this site, and renewing one.
+ *
+ * `fetchRegistrarDomains` existed with no caller, so a domain bought in the
+ * wizard disappeared from view the moment the order was placed: no state, and
+ * no way to renew it short of asking the operator. Renewal reuses the domain
+ * order route (`operation: "renew"`) — priced, wallet-checked, ordered and then
+ * billed, the same order as a registration — so this card adds no money path.
+ */
+function RegistrarDomainsCard() {
+  const money = useMoney();
+  const [domains, setDomains] = useState<RegistrarDomain[] | null>(null);
+  const [operations, setOperations] = useState<RegistrarOperationRow[]>([]);
+  const [error, setError] = useState("");
+  const [errorCode, setErrorCode] = useState("");
+  const [renewing, setRenewing] = useState<RenewQuote | null>(null);
+  const [busy, setBusy] = useState("");
+
+  const load = useCallback(async () => {
+    const { ok, data } = await api<{
+      domains?: RegistrarDomain[];
+      operations?: RegistrarOperationRow[];
+      error?: string;
+    }>("/api/cms/website/domain/registrar");
+    if (!ok) {
+      setError(errorMessageOrRaw(data.error));
+      setErrorCode(data.error ?? "");
+      setDomains([]);
+      return;
+    }
+    setError("");
+    setErrorCode("");
+    setDomains(data.domains ?? []);
+    setOperations(data.operations ?? []);
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function priceRenewal(domain: string) {
+    setBusy(domain);
+    const { ok, data } = await api<{ quote?: RenewQuote; error?: string }>(
+      `/api/cms/website/domain/quote?domain=${encodeURIComponent(domain)}&operation=renew&period=1`,
+    );
+    setBusy("");
+    if (!ok || !data.quote) {
+      toast.error(errorMessageOrRaw(data.error));
+      return;
+    }
+    setRenewing(data.quote);
+  }
+
+  async function renew(quote: RenewQuote) {
+    setBusy(quote.domain);
+    const { ok, data } = await api<{ order?: { unpaid: boolean }; error?: string }>("/api/cms/website/domain/order", {
+      method: "POST",
+      body: JSON.stringify({ domain: quote.domain, operation: "renew", period: quote.period }),
+    });
+    setBusy("");
+    if (!ok) {
+      toast.error(errorMessageOrRaw(data.error));
+      return;
+    }
+    setRenewing(null);
+    toast.success(
+      data.order?.unpaid ? "درخواست تمدید ثبت شد؛ هزینهٔ آن پرداخت‌نشده مانده است." : "درخواست تمدید ثبت شد.",
+    );
+    void load();
+  }
+
+  // A CMS with no registrar is not an error on this screen — the card removes
+  // itself, like the CDN card, and so does a site that never bought a domain here.
+  if (errorCode === "cms_old_version") return null;
+  if (domains === null) return <SectionCardSkeleton rows={2} />;
+  if (!error && domains.length === 0 && operations.length === 0) return null;
+
+  const affordable = renewing ? renewing.priceRial !== null && renewing.balanceRial >= renewing.priceRial : false;
+
+  return (
+    <SectionCard
+      title="دامنه‌های خریداری‌شده"
+      description="دامنه‌هایی که از ثبت‌کنندهٔ پلتفرم گرفته‌اید. هزینهٔ تمدید از اعتبار پلتفرم کم می‌شود."
+      actions={
+        <SecondaryButton onClick={() => void load()}>
+          <RefreshCwIcon className="size-4" />
+          به‌روزرسانی
+        </SecondaryButton>
+      }
+    >
+      <ErrorBox>{error}</ErrorBox>
+      {domains.length > 0 ? (
+        <ul className="divide-y divide-border">
+          {domains.map((row) => (
+            <li key={row.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
+              <div className="min-w-0">
+                <p dir="ltr" className="truncate text-start text-sm font-medium text-foreground">
+                  {row.domain}
+                </p>
+                {row.nameservers.length > 0 ? (
+                  <p dir="ltr" className="truncate text-start text-xs text-muted-foreground">
+                    {row.nameservers.join(" · ")}
+                  </p>
+                ) : null}
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <StatusBadge tone={registrarStateTone(row.state)}>
+                  {REGISTRAR_STATE_LABELS[row.state] ?? row.state}
+                </StatusBadge>
+                {row.state === "active" || row.state === "providerAccepted" ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={busy === row.domain}
+                    onClick={() => void priceRenewal(row.domain)}
+                  >
+                    {busy === row.domain ? "در حال قیمت‌گیری…" : "تمدید"}
+                  </Button>
+                ) : null}
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {operations.length > 0 ? (
+        <div className="mt-3 rounded-xl bg-muted px-3 py-2.5">
+          <p className="text-xs text-muted-foreground">آخرین درخواست‌ها به ثبت‌کننده</p>
+          <ul className="mt-1.5 space-y-1 text-xs text-foreground">
+            {operations.slice(0, 5).map((op) => (
+              <li key={op.id} className="flex flex-wrap items-baseline justify-between gap-2">
+                <span>
+                  {REGISTRAR_OPERATION_LABELS[op.operation] ?? op.operation}
+                  {op.period ? ` — ${toPersianDigits(String(op.period))} سال` : ""}
+                  {op.safeDetail ? ` · ${op.safeDetail}` : ""}
+                </span>
+                <span className="text-muted-foreground">
+                  {op.providerSubmittedAt ? toPersianDigits(formatJalali(op.providerSubmittedAt)) : "ارسال‌نشده"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {renewing ? (
+        <Dialog open onOpenChange={(open) => (!open ? setRenewing(null) : undefined)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>تمدید دامنه</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-2 text-sm">
+              <p>
+                تمدید <span dir="ltr">{renewing.domain}</span> برای {toPersianDigits(String(renewing.period))} سال
+              </p>
+              {renewing.priceRial === null ? (
+                <ErrorBox>قیمت این دامنه به ریال قابل محاسبه نیست؛ تمدید از این‌جا ممکن نیست.</ErrorBox>
+              ) : (
+                <p>
+                  هزینه: <span className="font-bold">{money.format(renewing.priceRial)}</span>
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground">اعتبار فعلی شما: {money.format(renewing.balanceRial)}</p>
+              {!renewing.resellerEnabled ? <ErrorBox>ثبت‌کنندهٔ دامنه فعلاً در دسترس نیست.</ErrorBox> : null}
+              {renewing.priceRial !== null && !affordable ? (
+                <InfoBox>اعتبار کافی نیست؛ ابتدا اعتبار پلتفرم را افزایش دهید.</InfoBox>
+              ) : null}
+            </div>
+            <DialogFooter>
+              <SecondaryButton onClick={() => setRenewing(null)}>انصراف</SecondaryButton>
+              <Button
+                type="button"
+                disabled={!affordable || !renewing.resellerEnabled || busy === renewing.domain}
+                onClick={() => void renew(renewing)}
+              >
+                {busy === renewing.domain ? "در حال ثبت…" : "تمدید و پرداخت"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
     </SectionCard>
   );
 }

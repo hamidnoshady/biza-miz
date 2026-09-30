@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { createCmsPage, listCmsPages } from "@/lib/cms/website-service";
+import { listCmsPages } from "@/lib/cms/website-service";
 
 function statusFor(error: string): number {
   if (error === "not_found") return 404;
@@ -11,6 +11,12 @@ function statusFor(error: string): number {
   return 400;
 }
 
+/**
+ * `GET /api/cms/website/pages` — the site's pages, drafts included. Pages are
+ * read-only here: the CMS refuses a page write from a site key (the block
+ * layout is a CMS-admin surface), so this app lists them and publishes a draft
+ * through `pages/[id]/publish`, nothing more.
+ */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.cmsView);
   if (error) return error;
@@ -19,21 +25,4 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const result = await listCmsPages(session.businessId, { limit, page });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: statusFor(result.error) });
   return NextResponse.json({ pages: result.data.pages, totalDocs: result.data.totalDocs });
-});
-
-export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.cmsContentManage);
-  if (error) return error;
-  let body: { title?: string; slug?: string };
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  }
-  const result = await createCmsPage(session.businessId, {
-    title: typeof body.title === "string" ? body.title : "",
-    slug: typeof body.slug === "string" ? body.slug : undefined,
-  });
-  if (!result.ok) return NextResponse.json({ error: result.error }, { status: statusFor(result.error) });
-  return NextResponse.json({ page: result.data }, { status: 201 });
 });

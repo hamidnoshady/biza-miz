@@ -120,6 +120,10 @@ await updateOrderStatus(cms, orderId, "paid");           // e-commerce ops
 
 ### Connecting a business (flow)
 
+The wizard's `POST /api/cms/website/setup/build` runs these steps (and then
+starts the subscription); an existing site is attached with
+`POST /api/cms/website/connect` instead.
+
 1. Provision the website for the business: `provisionSite(platformConfig, input)`
    (platform key) → returns `site.id`, `site.domain`, `site.url`.
 2. Issue its site key: `issueSiteApiKey(platformConfig, { siteId, role: "site" })`
@@ -214,23 +218,26 @@ can reconcile is worse than saying the platform cannot sell that TLD yet.
 |---|---|
 | `GET /api/cms/website/state` | Masked connection state (never the key). |
 | `POST /api/cms/website/connect` | Attach an existing site (probe descriptor → store key encrypted). |
-| `POST /api/cms/website/provision` | Create a new site + issue its key + connect, in one action. |
 | `DELETE /api/cms/website/connection` | Disconnect (the CMS site and its content remain). |
 | `GET /api/cms/website/overview` | Descriptor + pages + posts + products + orders (private, 30s SWR). |
 | `GET /api/cms/website/dns` | DNS checklist state: does the domain resolve to the CMS (A/AAAA from here) + descriptor `domainVerified`. |
-| `POST /api/cms/website/posts`, `PATCH`/`DELETE /api/cms/website/posts/[id]` | Create/edit/delete a post. Always lands as a draft — a site key can never publish over the API (`writeUnlessPublishing`); publishing is a CMS-admin action. |
+| `GET`/`POST /api/cms/website/drafts`, `PATCH /api/cms/website/drafts/[id]` | List, create and edit posts (the `website.post.draft`/`update` actions the assistant shares). Always lands as a draft — a site key can never publish over the API. |
+| `DELETE /api/cms/website/posts/[id]` | Delete a post. |
 | `POST /api/cms/website/products`, `PATCH`/`DELETE /api/cms/website/products/[id]` | Create/edit/delete a product. Same draft-only rule. |
+| `GET /api/cms/website/pages` | The site's pages, drafts included. Read-only: the CMS refuses a page write from a site key. |
+| `POST /api/cms/website/{drafts,pages,products}/[id]/publish` | Publish one draft. The site key cannot publish, so this goes through the platform-key owner bridge (`POST /api/platform/sites/:id/publish` on the CMS), behind `cms.publish` — always a person's click. |
 | `PATCH /api/cms/website/domain` | Move the connected site to a new domain (`updateSiteDomain` → CMS `PATCH /api/site/domain`, site-key only). Resets `domainVerified` server-side and updates the stored `site_domain`; the DNS checklist has to be re-run and the CMS-side box re-ticked. |
 | `PATCH /api/cms/website/orders/[id]` | Move an order status; the CMS settles stock & snapshot. |
 | `GET`/`PATCH /api/cms/website/setup` | The wizard's state (plus the plan catalogue); record one step's answer. |
 | `POST /api/cms/website/setup/build` | Step 4 — provision, connect and subscribe. Owner only. |
 | `GET /api/cms/website/domain/quote` | Price a domain, with the wallet balance beside it. No side effects, no site required. |
 | `POST /api/cms/website/domain/order` | Buy/transfer/renew through the CMS's registrar and bill it here. Owner only. |
+| `GET /api/cms/website/domain/registrar` | The domains the platform's registrar holds for this site and the timeline of register/transfer/renew requests (CMS `GET /api/site/registrar/{domains,operations}`). Renewal is `POST …/domain/order` with `operation: "renew"` — priced, wallet-checked, ordered, billed. |
 | `GET /api/cms/website/cdn`, `POST …/cdn/purge` | The site's own CDN zone, and emptying its own edge cache. |
 | `GET /api/website/managers` | Which of the app's two managers this business has — what the sidebar and the app home are built from. |
 | `GET`/`POST /api/website/billing` | Plan, subscription and charges; start/change a plan, pay the current period, stop auto-renewal. |
 
-Pages stay read-only from this app — the block-based page builder is a CMS-admin surface, deliberately not duplicated here. «مدیریت محتوا در CMS» keeps that door open for anything this screen doesn't cover (page layout, media, nav, forms, publishing).
+Pages are listed and published from this app but never written — the block-based page builder is a CMS-admin surface, deliberately not duplicated here (and the CMS refuses a page write from a site key). A new site is created only by the wizard's `setup/build` (provision → connect → subscribe); there is no second provisioning route that could create a site nothing bills for. «مدیریت محتوا در CMS» keeps that door open for anything this screen doesn't cover (page layout, media, nav, forms, publishing).
 
 ### DNS checklist + live preview
 
@@ -292,6 +299,15 @@ Landed directly in the `eshobe-cms` repo (not a patch to apply):
   too. `categories`/`media`/`store` needed no change — already host-scoped
   public reads with no draft state, which a site key's forwarded `Host`
   already satisfies.
+  **Open gap — media writes.** That covers *reading* media only. The CMS's
+  `Media` collection still gates `create`/`update`/`delete` on an admin
+  session (`authenticated`), so the «رسانه‌ها» section's upload, alt-text
+  edit and delete — and a post's featured-image upload — are refused (403)
+  when made with a site key. Closing it is a CMS-side access change
+  (`apiKeyCreateAware`/`apiKeyUpdateAware`/`apiKeyAware` around
+  `authenticated`, plus `forceApiKeySite` ahead of `setMediaPrefix`, and
+  `/api/media` in the Caddy `@cms_content` carve-out), and needs the CMS
+  owner's sign-off because it widens what a site key may write.
 - `src/endpoints/siteDescriptor.ts` (`GET /api/site`) falls back to a site
   key when `Host` resolves nothing — the case WAVE-9 names explicitly
   ("a builder can call from a non-customer origin"); the fallback response is
