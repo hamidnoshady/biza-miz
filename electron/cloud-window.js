@@ -96,6 +96,10 @@ function createCloudWindowController({ BrowserWindow, shell }) {
       win.focus();
       return true;
     },
+    /** The cloud window never outlives the till: main.js calls this when the till closes. */
+    close() {
+      if (win && !win.isDestroyed()) win.close();
+    },
   };
 }
 

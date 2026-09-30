@@ -24,6 +24,8 @@ function fakeElectron() {
     webContents = new FakeContents();
     loaded: string[] = [];
     focused = 0;
+    closed = 0;
+    windowHandlers = new Map<string, Handler>();
     constructor(readonly options: { webPreferences: Record<string, unknown> }) {
       created.push(this);
     }
@@ -41,7 +43,12 @@ function fakeElectron() {
     focus() {
       this.focused += 1;
     }
-    on() {}
+    close() {
+      this.closed += 1;
+    }
+    on(event: string, fn: Handler) {
+      this.windowHandlers.set(event, fn);
+    }
   }
   const shell = { openExternal: vi.fn(async () => {}) };
   return { created, shell, BrowserWindow: FakeWindow };
@@ -99,6 +106,26 @@ describe("createCloudWindowController", () => {
     const failed = electron.created[0].webContents.handlers.get("did-fail-load")!;
     failed({}, -106, "ERR_INTERNET_DISCONNECTED", "https://cafe.example.com/accounting/reports", true);
     expect(electron.created[0].loaded.at(-1)).toMatch(/^data:text\/html/);
+  });
+});
+
+describe("the cloud window's lifetime", () => {
+  it("forgets a window once it closes, so the next open creates a new one", () => {
+    const electron = fakeElectron();
+    const controller = createCloudWindowController(electron);
+    controller.open("https://cafe.example.com/accounting/reports");
+    electron.created[0].windowHandlers.get("closed")!();
+    controller.open("https://cafe.example.com/crm/overview");
+    expect(electron.created).toHaveLength(2);
+  });
+
+  it("close() closes an open window and is a no-op without one", () => {
+    const electron = fakeElectron();
+    const controller = createCloudWindowController(electron);
+    controller.close();
+    controller.open("https://cafe.example.com/accounting/reports");
+    controller.close();
+    expect(electron.created[0].closed).toBe(1);
   });
 });
 

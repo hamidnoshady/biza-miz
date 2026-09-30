@@ -64,7 +64,11 @@ if (!gotSingleInstanceLock) {
     mainWindow.webContents.on("will-navigate", (event, url) => {
       if (!url.startsWith(`${appUrl}/`) && url !== appUrl) event.preventDefault();
     });
-    mainWindow.on("closed", () => { mainWindow = null; });
+    mainWindow.on("closed", () => {
+      mainWindow = null;
+      // Otherwise the app keeps running with no till and a relaunch only focuses nothing.
+      cloudWindow.close();
+    });
     await mainWindow.loadURL(appUrl);
   }
 
