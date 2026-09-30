@@ -16,8 +16,10 @@ import { Button } from "@/components/ui/button";
 export function cloudHandoffUrl(cloudUrl: string | null, pathAndQuery: string): string | null {
   if (!cloudUrl) return null;
   try {
-    const url = new URL(pathAndQuery, cloudUrl);
-    return url.protocol === "https:" ? url.toString() : null;
+    const base = new URL(cloudUrl);
+    const url = new URL(pathAndQuery, base);
+    // Pinned to the cloud's origin: a `//host` path must not re-aim the hand-off.
+    return base.protocol === "https:" && url.origin === base.origin ? url.toString() : null;
   } catch {
     return null;
   }

@@ -18,6 +18,12 @@ describe("cloudHandoffUrl", () => {
     expect(cloudHandoffUrl("http://cafe.example.com", "/crm/overview")).toBeNull();
     expect(cloudHandoffUrl(null, "/crm/overview")).toBeNull();
   });
+
+  it("never leaves the configured cloud's origin", () => {
+    expect(cloudHandoffUrl("https://cafe.example.com", "//evil.example.org/x")).toBeNull();
+    expect(cloudHandoffUrl("https://cafe.example.com", "https://evil.example.org/x")).toBeNull();
+    expect(cloudHandoffUrl("https://cafe.example.com/", "/")).toBe("https://cafe.example.com/");
+  });
 });
 
 describe("CloudHandoffState", () => {

@@ -8,6 +8,7 @@
  */
 import Link from "next/link";
 import { CircleIcon, CloudIcon } from "lucide-react";
+import { cloudHandoffUrl } from "@/components/cloud-handoff-state";
 import { SidebarContent, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "@/components/ui/sidebar";
 import { bestNavMatch, flattenNav } from "@/lib/nav-tree";
 import type { NavItem } from "./dashboard-sidebar";
@@ -25,11 +26,13 @@ export function TillNavigation({
 }) {
   const items = flattenNav(navItems);
   const active = bestNavMatch(items, (href) => pathname === href || pathname.startsWith(`${href}/`));
+  // The same https-only, origin-pinned address the hand-off screen opens.
+  const cloudHome = cloudHandoffUrl(cloudUrl, "/");
   const openCloud = () => {
-    if (!cloudUrl) return;
+    if (!cloudHome) return;
     const bridge = window.businessSuiteDesktop;
-    if (bridge?.openCloud) void bridge.openCloud(cloudUrl);
-    else window.open(cloudUrl, "_blank", "noopener,noreferrer");
+    if (bridge?.openCloud) void bridge.openCloud(cloudHome);
+    else window.open(cloudHome, "_blank", "noopener,noreferrer");
   };
   return (
     <SidebarContent className="px-3 py-4">
@@ -50,7 +53,7 @@ export function TillNavigation({
             );
           })}
         </SidebarMenu>
-        {cloudUrl ? (
+        {cloudHome ? (
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarMenuButton tooltip="نسخهٔ ابری" className={APP_NAV_BUTTON_CLASS} onClick={openCloud}>
