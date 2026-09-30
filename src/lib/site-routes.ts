@@ -15,7 +15,9 @@
 import { ACCOUNTING_WORKSPACE_HREFS } from "./app-routes";
 import type { DeploymentProfile } from "./deployment-mode";
 import type { DeploymentRole } from "./deployment-role";
+import type { ModuleKey } from "./industry-profile";
 import type { NavNode } from "./nav-tree";
+import { canUsePos, PERMISSIONS } from "./permissions";
 import { settingsTabHref } from "./settings-routes";
 
 export const SITE_LOCAL_ROUTES: readonly string[] = [
@@ -56,9 +58,36 @@ export function tillNavItems<T extends NavNode>(items: readonly T[]): T[] {
   });
 }
 
-/** Where a signed-in member lands on the desktop (the assistant home is cloud-only). */
-export function siteHomeFor(role: string): string {
-  if (role === "kitchen") return ACCOUNTING_WORKSPACE_HREFS.kitchen;
-  if (role === "waiter") return ACCOUNTING_WORKSPACE_HREFS.waiter;
-  return ACCOUNTING_WORKSPACE_HREFS.pos;
+/** What decides whether a member can open each till screen — the same checks those pages apply. */
+export interface SiteHomeFacts {
+  role: string;
+  /** The trade's modules (`requireModuleForPage`). */
+  hasModule: (module: ModuleKey) => boolean;
+  /** The `reservations` feature, which «میزهای من» also requires. */
+  reservations: boolean;
+  permissions: ReadonlySet<string>;
+}
+
+/**
+ * Where a signed-in member lands on the desktop (the assistant home is
+ * cloud-only): their role's screen first, then the till, then the orders
+ * list — the first one they can actually open. Null when none is: the home
+ * explains instead of redirecting to a page that would bounce back.
+ */
+export function siteHomeFor(facts: SiteHomeFacts): string | null {
+  const { hasModule, permissions } = facts;
+  const openable: Record<string, boolean> = {
+    [ACCOUNTING_WORKSPACE_HREFS.kitchen]: hasModule("kitchen") && permissions.has(PERMISSIONS.kitchenView),
+    [ACCOUNTING_WORKSPACE_HREFS.waiter]:
+      hasModule("waiter") && facts.reservations && permissions.has(PERMISSIONS.ordersCreate),
+    [ACCOUNTING_WORKSPACE_HREFS.pos]: hasModule("pos") && canUsePos(permissions),
+    [ACCOUNTING_WORKSPACE_HREFS.orders]: hasModule("orders") && permissions.has(PERMISSIONS.ordersView),
+  };
+  const roleHome =
+    facts.role === "kitchen"
+      ? ACCOUNTING_WORKSPACE_HREFS.kitchen
+      : facts.role === "waiter"
+        ? ACCOUNTING_WORKSPACE_HREFS.waiter
+        : ACCOUNTING_WORKSPACE_HREFS.pos;
+  return [roleHome, ACCOUNTING_WORKSPACE_HREFS.pos, ACCOUNTING_WORKSPACE_HREFS.orders].find((href) => openable[href]) ?? null;
 }

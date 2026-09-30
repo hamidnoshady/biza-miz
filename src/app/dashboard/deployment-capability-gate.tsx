@@ -35,8 +35,11 @@ export function DeploymentCapabilityGate({
   const pathname = usePathname();
   // Phase 45: on a Hybrid desktop only the till renders locally; every other
   // screen is the cloud's (src/lib/site-routes.ts).
-  if (isHybridSite(profile, runtimeRole) && !isSiteLocalRoute(pathname)) {
-    return <CloudHandoffState pathname={pathname} cloudUrl={cloudUrl} />;
+  if (isHybridSite(profile, runtimeRole)) {
+    // `/dashboard` is the desktop's home: its page redirects to the first till
+    // screen the member can open, or explains that there is none.
+    if (pathname === "/dashboard") return <>{children}</>;
+    if (!isSiteLocalRoute(pathname)) return <CloudHandoffState pathname={pathname} cloudUrl={cloudUrl} />;
   }
   const match = PAGE_CAPABILITIES.find(([prefix]) =>
     prefix === "/dashboard" ? pathname === prefix : pathname === prefix || pathname.startsWith(`${prefix}/`),

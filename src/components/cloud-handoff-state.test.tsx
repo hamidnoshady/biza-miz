@@ -59,6 +59,11 @@ describe("CloudHandoffState", () => {
     expect(screen.queryByText("این بخش به اینترنت نیاز دارد")).toBeNull();
   });
 
+  it("goes back to the desktop home, which picks the till screen this member can open", () => {
+    render(<CloudHandoffState pathname="/accounting/reports" cloudUrl={null} />);
+    expect(screen.getByRole("link", { name: "بازگشت به صندوق" }).getAttribute("href")).toBe("/dashboard");
+  });
+
   it("explains when no cloud address is configured", () => {
     render(<CloudHandoffState pathname="/accounting/reports" cloudUrl={null} />);
     expect(screen.getByText(/نشانی نسخهٔ ابری تنظیم نشده است/)).toBeTruthy();

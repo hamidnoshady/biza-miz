@@ -12,7 +12,6 @@ import { useEffect, useState } from "react";
 import { CloudIcon, CloudOffIcon } from "lucide-react";
 import { cardClass, PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { Button } from "@/components/ui/button";
-import { ACCOUNTING_WORKSPACE_HREFS } from "@/lib/app-routes";
 
 export function cloudHandoffUrl(cloudUrl: string | null, pathAndQuery: string): string | null {
   if (!cloudUrl) return null;
@@ -90,8 +89,9 @@ export function CloudHandoffState({ pathname, cloudUrl }: { pathname: string; cl
                   </Button>
                 )
               ) : null}
+              {/* /dashboard resolves the till screen this member can open. */}
               <Button variant="outline" asChild>
-                <Link href={ACCOUNTING_WORKSPACE_HREFS.pos}>بازگشت به صندوق</Link>
+                <Link href="/dashboard">بازگشت به صندوق</Link>
               </Button>
             </div>
           </div>

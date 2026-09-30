@@ -1,6 +1,7 @@
 // src/lib/site-routes.test.ts
 import { describe, expect, it } from "vitest";
 import { ACCOUNTING_WORKSPACE_HREFS } from "./app-routes";
+import { PERMISSIONS } from "./permissions";
 import { settingsTabHref } from "./settings-routes";
 import { isHybridSite, isSiteLocalRoute, siteHomeFor, tillNavItems } from "./site-routes";
 
@@ -80,10 +81,40 @@ describe("tillNavItems", () => {
 });
 
 describe("siteHomeFor", () => {
+  const all = () => true;
+  const perms = (...keys: string[]) => new Set(keys);
+  const everything = perms(PERMISSIONS.kitchenView, PERMISSIONS.ordersCreate, PERMISSIONS.paymentsTake, PERMISSIONS.ordersView);
+
   it("opens the screen each role works on", () => {
-    expect(siteHomeFor("kitchen")).toBe(ACCOUNTING_WORKSPACE_HREFS.kitchen);
-    expect(siteHomeFor("waiter")).toBe(ACCOUNTING_WORKSPACE_HREFS.waiter);
-    expect(siteHomeFor("owner")).toBe(ACCOUNTING_WORKSPACE_HREFS.pos);
-    expect(siteHomeFor("cashier")).toBe(ACCOUNTING_WORKSPACE_HREFS.pos);
+    const facts = { hasModule: all, reservations: true, permissions: everything };
+    expect(siteHomeFor({ ...facts, role: "kitchen" })).toBe(ACCOUNTING_WORKSPACE_HREFS.kitchen);
+    expect(siteHomeFor({ ...facts, role: "waiter" })).toBe(ACCOUNTING_WORKSPACE_HREFS.waiter);
+    expect(siteHomeFor({ ...facts, role: "owner" })).toBe(ACCOUNTING_WORKSPACE_HREFS.pos);
+    expect(siteHomeFor({ ...facts, role: "cashier" })).toBe(ACCOUNTING_WORKSPACE_HREFS.pos);
+  });
+
+  it("does not send a waiter to «میزهای من» when reservations are off", () => {
+    const waiter = perms(PERMISSIONS.ordersCreate, PERMISSIONS.ordersView);
+    expect(siteHomeFor({ role: "waiter", hasModule: all, reservations: false, permissions: waiter })).toBe(
+      ACCOUNTING_WORKSPACE_HREFS.orders,
+    );
+    expect(siteHomeFor({ role: "waiter", hasModule: all, reservations: false, permissions: everything })).toBe(
+      ACCOUNTING_WORKSPACE_HREFS.pos,
+    );
+  });
+
+  it("does not send kitchen staff to a kitchen the trade does not have", () => {
+    const home = siteHomeFor({
+      role: "kitchen",
+      hasModule: (module) => module !== "kitchen",
+      reservations: true,
+      permissions: everything,
+    });
+    expect(home).toBe(ACCOUNTING_WORKSPACE_HREFS.pos);
+  });
+
+  it("answers null when no till screen can be opened", () => {
+    expect(siteHomeFor({ role: "kitchen", hasModule: (m) => m !== "kitchen", reservations: true, permissions: perms(PERMISSIONS.kitchenView) })).toBeNull();
+    expect(siteHomeFor({ role: "owner", hasModule: () => false, reservations: true, permissions: everything })).toBeNull();
   });
 });
