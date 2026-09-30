@@ -175,11 +175,6 @@ export const WEBSITE_ERROR_LABELS: Record<WebsiteAdapterErrorCode, string> = {
   unsupported: "این کار از راه این اتصال شدنی نیست.",
 };
 
-export function websiteErrorLabel(error: unknown): string {
-  if (error instanceof WebsiteAdapterError) return WEBSITE_ERROR_LABELS[error.code];
-  return WEBSITE_ERROR_LABELS.rejected;
-}
-
 /** A URL-safe slug from a Persian or Latin title; the adapter may still override it. */
 export function slugify(title: string): string {
   const cleaned = title

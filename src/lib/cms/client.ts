@@ -27,15 +27,12 @@
  */
 import type {
   ApiKeySummary,
-  CmsCategory,
   CmsLocale,
   CmsMedia,
   CmsOrder,
   CmsPage,
   CmsPost,
   CmsProduct,
-  CmsSite,
-  CmsStore,
   IssuedApiKey,
   PayloadList,
   ProvisionSiteInput,
@@ -204,11 +201,6 @@ export async function cmsFormRequest<T>(
   return body as T;
 }
 
-/** Payload `where` filter for one value (safe to narrow with, never to widen). */
-export function whereEquals(field: string, value: string): Record<string, unknown> {
-  return { [field]: { equals: value } };
-}
-
 /* ------------------------------------------------------------------ */
 /* Site-level reads — a `role: "site"` key (or an anonymous host call) */
 /* ------------------------------------------------------------------ */
@@ -251,17 +243,6 @@ export function fetchPosts(
   });
 }
 
-export function fetchCategories(
-  config: CmsConfig,
-  opts?: { locale?: CmsLocale; limit?: number; fetchImpl?: FetchLike },
-): Promise<PayloadList<CmsCategory>> {
-  return cmsRequest<PayloadList<CmsCategory>>(config, {
-    path: "/api/categories",
-    query: { locale: opts?.locale, limit: opts?.limit ?? 100, depth: 0 },
-    fetchImpl: opts?.fetchImpl,
-  });
-}
-
 export function fetchProducts(
   config: CmsConfig,
   opts?: { locale?: CmsLocale; limit?: number; page?: number; fetchImpl?: FetchLike },
@@ -271,10 +252,6 @@ export function fetchProducts(
     query: { locale: opts?.locale, limit: opts?.limit ?? 100, page: opts?.page, depth: 0 },
     fetchImpl: opts?.fetchImpl,
   });
-}
-
-export function fetchStore(config: CmsConfig, opts?: { fetchImpl?: FetchLike }): Promise<PayloadList<CmsStore>> {
-  return cmsRequest<PayloadList<CmsStore>>(config, { path: "/api/store", fetchImpl: opts?.fetchImpl });
 }
 
 export function fetchOrders(
@@ -389,37 +366,6 @@ export function deletePost(config: CmsConfig, id: string, opts?: { fetchImpl?: F
   return cmsRequest<null>(config, { method: "DELETE", path: `/api/posts/${id}`, fetchImpl: opts?.fetchImpl });
 }
 
-export function createPage(
-  config: CmsConfig,
-  input: { title: string; slug?: string; layout?: unknown[] },
-  opts?: { fetchImpl?: FetchLike },
-): Promise<CmsPage> {
-  return cmsRequest<CmsPage>(config, {
-    method: "POST",
-    path: "/api/pages",
-    body: { title: input.title, ...(input.slug ? { slug: input.slug } : {}), layout: input.layout ?? [] },
-    fetchImpl: opts?.fetchImpl,
-  });
-}
-
-export function updatePage(
-  config: CmsConfig,
-  id: string,
-  patch: Partial<{ title: string; slug: string; layout: unknown[] }>,
-  opts?: { fetchImpl?: FetchLike },
-): Promise<CmsPage> {
-  return cmsRequest<CmsPage>(config, {
-    method: "PATCH",
-    path: `/api/pages/${id}`,
-    body: patch,
-    fetchImpl: opts?.fetchImpl,
-  });
-}
-
-export function deletePage(config: CmsConfig, id: string, opts?: { fetchImpl?: FetchLike }): Promise<null> {
-  return cmsRequest<null>(config, { method: "DELETE", path: `/api/pages/${id}`, fetchImpl: opts?.fetchImpl });
-}
-
 /**
  * `PATCH /api/site/domain` — moves the connected site to a new domain. Site
  * key only (`src/endpoints/updateSiteDomain.ts` in eshobe-cms); resets
@@ -528,13 +474,53 @@ export function orderRegistrarDomain(
   });
 }
 
+/** One domain the CMS's registrar manages for this site (`publicDomain` on the CMS). */
+export interface RegistrarDomain {
+  id: string;
+  domain: string;
+  tld: string | null;
+  /** `requested` · `providerAccepted` · `active` · `failed` · `external` · `cancelled` */
+  state: string;
+  nameservers: string[];
+}
+
+/**
+ * One registrar request and how far it got (`publicOperation` on the CMS).
+ * Local workflow state: the reseller API reports no order status or expiry, so
+ * this is what was asked and what the provider said, not a claim about the
+ * registry.
+ */
+export interface RegistrarOperationRow {
+  id: string;
+  operation: "register" | "transfer" | "renew" | string;
+  period: number | null;
+  status: string | null;
+  paymentState: string | null;
+  quoteAmount: number | null;
+  currency: string | null;
+  providerSubmittedAt: string | null;
+  providerRespondedAt: string | null;
+  safeDetail: string | null;
+}
+
 /** `GET /api/site/registrar/domains` — the domains the CMS manages for this site. */
 export function fetchRegistrarDomains(
   config: CmsConfig,
   opts?: { fetchImpl?: FetchLike },
-): Promise<{ docs?: unknown[]; domains?: unknown[] }> {
-  return cmsRequest<{ docs?: unknown[]; domains?: unknown[] }>(config, {
+): Promise<{ domains: RegistrarDomain[] }> {
+  return cmsRequest<{ domains: RegistrarDomain[] }>(config, {
     path: "/api/site/registrar/domains",
+    fetchImpl: opts?.fetchImpl,
+  });
+}
+
+/** `GET /api/site/registrar/operations` — this site's registrar request timeline, newest first. */
+export function fetchRegistrarOperations(
+  config: CmsConfig,
+  opts?: { fetchImpl?: FetchLike },
+): Promise<{ operations: RegistrarOperationRow[] }> {
+  return cmsRequest<{ operations: RegistrarOperationRow[] }>(config, {
+    path: "/api/site/registrar/operations",
     fetchImpl: opts?.fetchImpl,
   });
 }
@@ -590,17 +576,6 @@ export function purgeSiteCdn(
 /* ------------------------------------------------------------------ */
 /* Platform-level — requires the `role: "platform"` API key             */
 /* ------------------------------------------------------------------ */
-
-export function fetchSites(
-  config: CmsConfig,
-  opts?: { status?: CmsSite["status"]; limit?: number; fetchImpl?: FetchLike },
-): Promise<PayloadList<CmsSite>> {
-  return cmsRequest<PayloadList<CmsSite>>(config, {
-    path: "/api/sites",
-    query: { limit: opts?.limit ?? 100, depth: 0, ...(opts?.status ? { "where[status][equals]": opts.status } : {}) },
-    fetchImpl: opts?.fetchImpl,
-  });
-}
 
 /** `POST /api/provision-site` — creates a site, seeds starter content, invites the owner. */
 export function provisionSite(

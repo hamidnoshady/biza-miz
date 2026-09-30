@@ -3,7 +3,7 @@
  * settings without giving the browser a platform credential.
  */
 import { cmsRequest, type CmsConfig, type FetchLike } from "./client";
-import { CmsConnectionError, getCmsConfigForBusiness, listCmsConnections } from "./connections";
+import { CmsConnectionError, listCmsConnections } from "./connections";
 import { resolvePlatformCmsConfig } from "./platform-control-service";
 
 export type OwnerPublishCollection = "posts" | "pages" | "products";
@@ -94,7 +94,3 @@ export async function saveOwnerThemeSettings(
   }
 }
 
-/** Used by content-service when the adapter path is not needed. */
-export async function siteConfigForBusiness(businessId: string): Promise<CmsConfig> {
-  return getCmsConfigForBusiness(businessId);
-}

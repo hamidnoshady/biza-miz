@@ -258,6 +258,17 @@ describe("moduleForApiPath", () => {
     expect(moduleForApiPath("/api/integrations/wp-manager/overview")).toBe("integrations");
   });
 
+  it("keeps buying and renewing a domain in the website app, and the credential in the hub", () => {
+    // `/api/cms/website/domain` (the site-domain change) is the connections
+    // hub's; everything under it that spends money or reads the registrar is
+    // the website manager's, so it must be listed above the shorter prefix.
+    expect(moduleForApiPath("/api/cms/website/domain")).toBe("connections");
+    expect(moduleForApiPath("/api/cms/website/domain/quote")).toBe("website");
+    expect(moduleForApiPath("/api/cms/website/domain/order")).toBe("website");
+    expect(moduleForApiPath("/api/cms/website/domain/registrar")).toBe("website");
+    expect(moduleForApiPath("/api/cms/website/products/abc/publish")).toBe("website");
+  });
+
   it("does not match a prefix that is only a string prefix", () => {
     // "/api/ordersomething" is not under "/api/orders".
     expect(moduleForApiPath("/api/ordersomething")).toBeNull();

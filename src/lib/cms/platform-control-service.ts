@@ -147,11 +147,6 @@ export async function resolvePlatformCmsConfig(): Promise<CmsConfig | null> {
   return { apiKey, baseUrl: normalizeCmsBaseUrl(baseUrl) };
 }
 
-/** True when a platform credential exists at all — the cheap check a route makes first. */
-export async function hasPlatformCmsConfig(): Promise<boolean> {
-  return (await resolvePlatformCmsConfig()) !== null;
-}
-
 export async function saveCmsControlConfig(
   changes: ValidatedCmsPatch,
   adminId: null | string,
