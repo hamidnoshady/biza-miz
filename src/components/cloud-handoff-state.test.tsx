@@ -1,6 +1,6 @@
 // src/components/cloud-handoff-state.test.tsx
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudHandoffState, cloudHandoffUrl } from "./cloud-handoff-state";
 
@@ -43,6 +43,20 @@ describe("CloudHandoffState", () => {
     render(<CloudHandoffState pathname="/accounting/reports" cloudUrl="https://cafe.example.com" />);
     expect(await screen.findByText("این بخش به اینترنت نیاز دارد")).toBeTruthy();
     expect(openCloud).not.toHaveBeenCalled();
+  });
+
+  it("opens the screen once the connection returns", async () => {
+    Object.defineProperty(navigator, "onLine", { value: false, configurable: true });
+    const openCloud = vi.fn(async () => true);
+    window.businessSuiteDesktop = { openCloud } as unknown as NonNullable<typeof window.businessSuiteDesktop>;
+    render(<CloudHandoffState pathname="/accounting/reports" cloudUrl="https://cafe.example.com" />);
+    expect(await screen.findByText("این بخش به اینترنت نیاز دارد")).toBeTruthy();
+    Object.defineProperty(navigator, "onLine", { value: true, configurable: true });
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await waitFor(() => expect(openCloud).toHaveBeenCalledWith("https://cafe.example.com/accounting/reports"));
+    expect(screen.queryByText("این بخش به اینترنت نیاز دارد")).toBeNull();
   });
 
   it("explains when no cloud address is configured", () => {

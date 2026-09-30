@@ -31,13 +31,24 @@ export function CloudHandoffState({ pathname, cloudUrl }: { pathname: string; cl
   const [desktop, setDesktop] = useState(false);
 
   useEffect(() => {
-    const next = cloudHandoffUrl(cloudUrl, `${pathname}${window.location.search}`);
-    const bridge = window.businessSuiteDesktop;
-    setTarget(next);
-    setOnline(navigator.onLine);
-    setDesktop(Boolean(bridge?.openCloud));
-    setOpened(false);
-    if (next && navigator.onLine && bridge?.openCloud) void bridge.openCloud(next).then(setOpened);
+    // Runs on mount and again on every online/offline event, so the offline
+    // screen really does open once the connection returns.
+    const handOff = () => {
+      const next = cloudHandoffUrl(cloudUrl, `${pathname}${window.location.search}`);
+      const bridge = window.businessSuiteDesktop;
+      setTarget(next);
+      setOnline(navigator.onLine);
+      setDesktop(Boolean(bridge?.openCloud));
+      setOpened(false);
+      if (next && navigator.onLine && bridge?.openCloud) void bridge.openCloud(next).then(setOpened);
+    };
+    handOff();
+    window.addEventListener("online", handOff);
+    window.addEventListener("offline", handOff);
+    return () => {
+      window.removeEventListener("online", handOff);
+      window.removeEventListener("offline", handOff);
+    };
   }, [pathname, cloudUrl]);
 
   const reopen = () => {
