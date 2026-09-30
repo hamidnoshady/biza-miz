@@ -21,6 +21,11 @@ import { runMasterSync } from "../src/lib/master-sync-transport";
 import { addItemsToOrder, createOrder, updateOrderItem } from "../src/lib/order-mutations";
 import { closeOwnShift, openShift } from "../src/lib/shift-service";
 import { syncClientEventId } from "../src/lib/sync-outbox";
+import { runSiteProfileSync } from "../src/lib/site-profile-service";
+import { EMPTY_SITE_PROFILE_STATE } from "../src/lib/site-profile";
+import { effectiveFeatures } from "../src/lib/features";
+import { effectiveAppAvailability } from "../src/lib/app-availability-service";
+import { setSetting, SETTING_KEYS } from "../src/lib/settings";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
@@ -133,6 +138,8 @@ async function centralFetch(input: string | URL | Request, init?: RequestInit): 
         return (await pullRoute()).GET(request);
       case "/api/server-sync/digest":
         return (await import("../src/app/api/server-sync/digest/route")).POST(request);
+      case "/api/server-sync/site-profile":
+        return (await import("../src/app/api/server-sync/site-profile/route")).GET(request);
       case "/api/pairing/acknowledge":
         return Response.json({ ok: true });
       default:
@@ -645,6 +652,80 @@ describe("shifts", () => {
     await withTenant(biz.businessId, () => closeOwnShift(biz.ownerId, biz.businessId, null, "owner"));
     // Deliver that cash-up too, so no unsent work is left for the drift check.
     await syncRound();
+  });
+});
+
+describe("site profile", () => {
+  const syncProfile = () => withTenant(biz.businessId, () => runSiteProfileSync(biz.businessId));
+
+  it("brings the branch's business-day start, so both sides put an after-midnight bill on the same day", async () => {
+    await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query("UPDATE locations SET business_day_start_minutes = 1080 WHERE id = $1", [biz.locationId]),
+      ),
+    );
+    await syncProfile();
+    const desktop = await withTenant(biz.businessId, () =>
+      query<{ start: number | null; day: string }>(
+        `SELECT business_day_start_minutes AS start,
+                app_business_date('2026-09-30T00:30:00+03:30'::timestamptz, timezone, business_day_start_minutes)::text AS day
+           FROM locations WHERE id = $1`,
+        [biz.locationId],
+      ),
+    );
+    expect(desktop.rows[0]).toEqual({ start: 1080, day: "2026-09-29" });
+  });
+
+  it("follows the cloud's switches: the assistant on, then off, and an app under maintenance", async () => {
+    const setAssistant = (enabled: boolean) =>
+      onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query(
+            `INSERT INTO business_features (business_id, flag_key, enabled) VALUES ($1, 'ai_assistant', $2)
+             ON CONFLICT (business_id, flag_key) DO UPDATE SET enabled = EXCLUDED.enabled`,
+            [biz.businessId, enabled],
+          ),
+        ),
+      );
+    await setAssistant(true);
+    await syncProfile();
+    expect((await withTenant(biz.businessId, () => effectiveFeatures(biz.businessId))).ai_assistant).toBe(true);
+    await setAssistant(false);
+    await syncProfile();
+    expect((await withTenant(biz.businessId, () => effectiveFeatures(biz.businessId))).ai_assistant).toBe(false);
+
+    await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query(
+          `INSERT INTO business_app_availability (business_id, app_key, state) VALUES ($1, 'growth', 'maintenance')
+           ON CONFLICT (business_id, app_key) DO UPDATE SET state = EXCLUDED.state`,
+          [biz.businessId],
+        ),
+      ),
+    );
+    await syncProfile();
+    expect((await withTenant(biz.businessId, () => effectiveAppAvailability(biz.businessId))).growth.state).toBe("maintenance");
+  });
+
+  it("keeps the last copy and backs off when the cloud refuses", async () => {
+    const routed = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => new Response("", { status: 502 })) as typeof fetch;
+    try {
+      const failed = await syncProfile();
+      expect(failed.lastError).toBe("site_profile_rejected: HTTP 502");
+      expect(failed.nextAttemptAt).not.toBeNull();
+      expect(failed.hash).not.toBeNull();
+      const start = await withTenant(biz.businessId, () =>
+        query<{ start: number | null }>("SELECT business_day_start_minutes AS start FROM locations WHERE id = $1", [biz.locationId]),
+      );
+      expect(start.rows[0].start).toBe(1080);
+      // Inside the backoff window the cloud is not asked again.
+      await syncProfile();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = routed;
+      await withTenant(biz.businessId, () => setSetting(biz.businessId, SETTING_KEYS.siteProfileState, EMPTY_SITE_PROFILE_STATE));
+    }
   });
 });
 

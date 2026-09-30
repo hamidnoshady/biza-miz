@@ -35,6 +35,8 @@ export const SETTING_KEYS = {
   masterSyncState: "server_sync.master_state",
   /** DriftState (src/lib/sync-health-service.ts) — last comparison of settled figures with the central server */
   syncDriftState: "server_sync.drift_state",
+  /** Phase 45: the desktop's copy of the cloud's branch settings and switches (site-profile-service.ts). */
+  siteProfileState: "server_sync.site_profile_state",
   /** BackupConfig (src/lib/backup.ts) — schedule/retention/cloud settings (Phase 10) */
   backupConfig: "backup.config",
   /** PricingConfig — menu cost-plus margin, overhead policy and cost-drift threshold */

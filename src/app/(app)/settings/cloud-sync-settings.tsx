@@ -8,7 +8,10 @@ import type { DeploymentProfile } from "@/lib/deployment-mode";
 import { Button } from "@/components/ui/button";
 import { useOfflineQueue } from "@/app/dashboard/offline-queue";
 
-interface StatusResponse extends PlatformConnectionState { profile: DeploymentProfile }
+interface StatusResponse extends PlatformConnectionState {
+  profile: DeploymentProfile;
+  siteProfile?: { appliedAt: string | null; lastError: string | null } | null;
+}
 const LABEL: Record<ConnectionStatus, string> = {
   connected: "متصل", unreachable: "در دسترس نیست", unknown: "نامشخص", connecting: "در حال اتصال",
   paused: "موقتاً متوقف", not_configured: "تنظیم نشده", attention_required: "نیازمند بررسی", not_applicable: "کاربرد ندارد",
@@ -35,6 +38,12 @@ export function CloudSyncSettings() {
                 ? "پایگاه داده و پشتیبان‌گیری محلی فعال‌اند. اتصال ابری فقط پس از بررسی سازگاری، تطبیق داده‌ها، راه‌اندازی اولیه و تأیید نهایی همگام‌سازی فعال می‌شود."
                 : `آخرین همگرایی دوطرفه: ${state.lastConvergedAt ? new Date(state.lastConvergedAt).toLocaleString("fa-IR") : "هنوز انجام نشده"}`}
             </p>
+            {!local ? (
+              <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                {`تنظیمات شعبه از ابر: ${state.siteProfile?.appliedAt ? new Date(state.siteProfile.appliedAt).toLocaleString("fa-IR") : "هنوز دریافت نشده"}`}
+                {state.siteProfile?.lastError ? ` — خطای آخرین دریافت: ${state.siteProfile.lastError}` : ""}
+              </p>
+            ) : null}
           </div>
           {local ? (
             <Button asChild><Link href="/support"><CloudIcon className="size-4" /> درخواست تبدیل امن</Link></Button>
@@ -54,7 +63,7 @@ export function CloudSyncSettings() {
       </section>
       <section className={`${cardClass} p-5`}>
         <div className="flex items-center gap-2"><DatabaseIcon className="size-5 text-muted-foreground" /><h3 className="font-bold">دامنه‌های داده</h3></div>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">سفارش، حسابداری و موجودی در سایت محلی مرجع‌اند؛ مشتری و کالا مشترک‌اند؛ مسیر پشتیبان و چاپگر فقط روی این دستگاه می‌مانند.</p>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">صندوق، میزها، آشپزخانه و شیفت روی این دستگاه کار می‌کنند و با برگشت اینترنت به ابر فرستاده می‌شوند. حسابداری، گزارش‌ها، انبار، مشتریان و تنظیمات کسب‌وکار در نسخهٔ ابری‌اند؛ مسیر پشتیبان و چاپگر فقط روی این دستگاه می‌مانند.</p>
       </section>
     </div>
   );
