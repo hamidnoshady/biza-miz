@@ -28,6 +28,7 @@ import { DashboardSidebar, type NavItem } from "./dashboard-sidebar";
 import { DashboardMain } from "./dashboard-main";
 import { AppAvailabilityGate } from "./app-availability-gate";
 import { DeploymentCapabilityGate } from "./deployment-capability-gate";
+import { AssistantLinkProvider } from "@/components/ai/ask-assistant";
 import { OfflineQueueProvider } from "./offline-queue";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
@@ -475,7 +476,9 @@ export async function WorkspaceShell({
               runtimeRole={runtimeRole}
               cloudUrl={cloudUrl}
             >
-              {children}
+              <AssistantLinkProvider enabled={features.ai_assistant === true && !tillMode}>
+                {children}
+              </AssistantLinkProvider>
             </DeploymentCapabilityGate>
           </AppAvailabilityGate>
         </DashboardMain>

@@ -10,8 +10,21 @@
  * is gone from dashboard pages, and a page that wants assistant help offers this
  * instead, next to its own controls.
  */
+import { createContext, useContext, type ReactNode } from "react";
 import Link from "next/link";
 import { SparklesIcon } from "lucide-react";
+
+/**
+ * Whether this business may use the assistant here. The shell sets it from the
+ * `ai_assistant` switch (and off on a Hybrid desktop, where the assistant is a
+ * cloud screen). The default is off: a link must never invite a member into a
+ * surface the super-admin console switched off.
+ */
+const AssistantLinkContext = createContext(false);
+
+export function AssistantLinkProvider({ enabled, children }: { enabled: boolean; children: ReactNode }) {
+  return <AssistantLinkContext.Provider value={enabled}>{children}</AssistantLinkContext.Provider>;
+}
 
 export function AskAssistant({
   context,
@@ -24,6 +37,7 @@ export function AskAssistant({
   app?: string;
   label?: string;
 }) {
+  if (!useContext(AssistantLinkContext)) return null;
   const params = new URLSearchParams();
   if (context) params.set("ctx", context);
   if (app) params.set("app", app);
