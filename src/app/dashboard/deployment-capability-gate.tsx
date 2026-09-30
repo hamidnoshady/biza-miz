@@ -4,6 +4,8 @@ import { usePathname } from "next/navigation";
 import type { DeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
 import { CloudRequiredState } from "@/components/cloud-required-state";
+import { CloudHandoffState } from "@/components/cloud-handoff-state";
+import { isHybridSite, isSiteLocalRoute } from "@/lib/site-routes";
 
 const PAGE_CAPABILITIES: readonly [string, CapabilityKey, string][] = [
   ["/growth", "app.growth", "رشد و بازاریابی"],
@@ -31,6 +33,11 @@ export function DeploymentCapabilityGate({
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
+  // Phase 45: on a Hybrid desktop only the till renders locally; every other
+  // screen is the cloud's (src/lib/site-routes.ts).
+  if (isHybridSite(profile, runtimeRole) && !isSiteLocalRoute(pathname)) {
+    return <CloudHandoffState pathname={pathname} cloudUrl={cloudUrl} />;
+  }
   const match = PAGE_CAPABILITIES.find(([prefix]) =>
     prefix === "/dashboard" ? pathname === prefix : pathname === prefix || pathname.startsWith(`${prefix}/`),
   );

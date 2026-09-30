@@ -7,6 +7,10 @@ import { canManageAi } from "@/lib/ai-panel";
 import { FeatureLock } from "@/components/feature-lock";
 import { AiChatHub } from "./ai/ai-chat-hub";
 import { cardClass } from "./page-chrome";
+import { withTenant } from "@/lib/db";
+import { readDeploymentProfile } from "@/lib/deployment-mode";
+import { deploymentRole } from "@/lib/deployment-role";
+import { isHybridSite, siteHomeFor } from "@/lib/site-routes";
 
 /**
  * `/dashboard` — the tenant's home, and the assistant's one canonical address.
@@ -32,6 +36,9 @@ import { cardClass } from "./page-chrome";
 export default async function DashboardPage() {
   const session = await getSession();
   if (!session) redirect("/login");
+  // Phase 45: the assistant is a cloud screen; a Hybrid desktop opens on the till.
+  const deployment = await withTenant(session.businessId, () => readDeploymentProfile(session.businessId));
+  if (isHybridSite(deployment.profile, deploymentRole())) redirect(siteHomeFor(session.role));
   const locked = await featureLockedForPage(session.businessId, "ai_assistant");
   const access = await authorize(session, { permission: PERMISSIONS.aiUse });
 
