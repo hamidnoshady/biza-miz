@@ -171,14 +171,15 @@ supplier returns, transfers, waste, retail/standard stock counts,
 production/reversal events, and (contract v3) shifts opened and cashed up
 (`shift.opened@1`, `shift.closed@1`, upserted by shift id; `client_event_id` is
 derived from `shift.opened:<id>` / `shift.closed:<id>`; a second open shift for
-the same person is a terminal error and dead-letters visibly). Each is written in the local mutation transaction,
-uses stable IDs and `client_event_id` idempotency, and is applied through the
-versioned registry. Since contract v2 the **central server records the same
-events for a branch that has an active paired desktop**, so a bill, purchase
-or journal the owner records in the cloud for that branch reaches it; the
-desktop stays the operational authority and a cloud event it cannot apply
-becomes a dead letter the owner sees. Replays keep the sale's own instant
-(`opened_at`, `closed_at`, `received_at`) and the paying side's journal date.
+the same person is a terminal error and dead-letters visibly). Each is written
+in the local mutation transaction, uses stable IDs and `client_event_id`
+idempotency, and is applied through the versioned registry. Since contract v2
+the **central server records the same events for a branch that has an active
+paired desktop**, so a bill, purchase or journal the owner records in the
+cloud for that branch reaches it; the desktop stays the operational authority
+and a cloud event it cannot apply becomes a dead letter the owner sees.
+Replays keep the sale's own instant (`opened_at`, `closed_at`, `received_at`)
+and the paying side's journal date.
 
 **Master data** — customers (`parties`, `party_categories`), payment ways, and
 the branch's menu, modifiers, recipes, stock items and tables — synchronises

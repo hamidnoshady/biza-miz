@@ -78,6 +78,8 @@ Consumers:
 - A second `BrowserWindow` with `partition: "persist:cloud"` (the cloud login survives
   restarts), `sandbox: true`, `contextIsolation: true`, and **no preload**: a remote page never
   gets `pick-folder`, firewall or printer IPC.
+- One cloud window is reused and focused, not one per click, and it closes with the till
+  window.
 - `will-navigate` restricted to the origin it was opened with; `window.open` goes to the system
   browser. A 3xx fires `will-redirect` instead: same origin is followed; any other host — a
   renamed business subdomain included — goes to the system browser, and the window's origin never
@@ -85,8 +87,7 @@ Consumers:
 - **Billing and subscription open in the system browser** (`/settings/billing`,
   `/settings/subscription` and their sub-paths) — from `openCloud`, from a link inside the cloud
   window, and from a client-side navigation. The payment gateway returns to a page that needs a
-  session, and only the browser that started the payment has it. One cloud window is reused and focused, not one per click, and it closes with the till
-  window.
+  session, and only the browser that started the payment has it.
 - Offline, the hand-off screen shows «این بخش به اینترنت نیاز دارد» and opens the cloud window by
   itself once the connection returns.
 - The till's preload exposes `openCloud(url)`; main accepts only `https:` URLs.

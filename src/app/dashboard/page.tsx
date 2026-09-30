@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { authorize } from "@/lib/authorize";
 import { PERMISSIONS } from "@/lib/permissions";
-import { featureLockedForPage } from "@/lib/features";
+import { featureLockedForPage, isFeatureEnabled } from "@/lib/features";
 import { canManageAi } from "@/lib/ai-panel";
 import { FeatureLock } from "@/components/feature-lock";
 import { AiChatHub } from "./ai/ai-chat-hub";
@@ -13,7 +13,6 @@ import { deploymentRole } from "@/lib/deployment-role";
 import { isHybridSite, siteHomeFor } from "@/lib/site-routes";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 import { hasModule } from "@/lib/industry-profile";
-import { isFeatureEnabled } from "@/lib/features";
 import { memberAccessFor } from "@/lib/member-access";
 
 /**
