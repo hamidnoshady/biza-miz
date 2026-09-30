@@ -235,7 +235,9 @@ jobs:
           }
 
       - name: Upload Electron builder diagnostics
-        if: failure()
+        # Only when electron-builder actually ran; a failure in an earlier step
+        # has no log, and "no files found" would bury the real error.
+        if: failure() && hashFiles('electron/electron-builder.log') != ''
         uses: actions/upload-artifact@v7
         with:
           name: electron-builder-failure-log
