@@ -14,6 +14,10 @@ const nativePrinting = require("./native-printing");
 const localStorageChecks = require("./local-storage");
 const { computePaths, migrateLegacyLayout } = require("./app-paths");
 const { DesktopUpdateEngine } = require("./update-engine");
+const { createCloudWindowController } = require("./cloud-window");
+
+// Phase 45: back-office screens open the cloud in their own powerless window.
+const cloudWindow = createCloudWindowController({ BrowserWindow, shell });
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -139,6 +143,7 @@ if (!gotSingleInstanceLock) {
       shell.showItemInFolder(logger.path);
       return logger.path;
     });
+    ipcMain.handle("desktop:open-cloud", (_event, payload) => cloudWindow.open(payload?.url));
 
     // Desktop updates: manual and background downloads share this one engine.
     // Renderer input is still treated as hostile: the engine validates SemVer,

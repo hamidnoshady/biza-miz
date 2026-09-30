@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld("desktop", Object.freeze({
 contextBridge.exposeInMainWorld("businessSuiteDesktop", Object.freeze({
   isDesktop: true,
   pickFolder: (title) => ipcRenderer.invoke("pick-folder", { title }),
+  /** Phase 45: open a cloud screen in the «نسخهٔ ابری» window (https only). */
+  openCloud: (url) => ipcRenderer.invoke("desktop:open-cloud", { url }),
   /**
    * Local storage configuration (Section 3 of the desktop audit): a
    * first-run/settings check of a candidate data folder — free space on its
