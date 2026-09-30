@@ -128,11 +128,14 @@ export async function runSiteProfileSync(businessId: string, now: Date = new Dat
     if (!response.ok) throw new Error(`site_profile_rejected: HTTP ${response.status}`);
     const profile = validateSiteProfile(await response.json());
     if (!profile) throw new Error("invalid_site_profile");
+    // Applied every time, not only on a new hash: the apply is idempotent, and
+    // re-applying is what lands a flag an older desktop skipped once it is
+    // updated, and what repairs a local edit to the cloud's copy.
+    await applySiteProfile(businessId, config.locationId, profile);
     const hash = siteProfileHash(profile);
     const changed = hash !== previous.hash;
     // ponytail: nothing changed and nothing to clear — skip the settings write every 30 s.
     if (!changed && previous.lastError === null) return previous;
-    if (changed) await applySiteProfile(businessId, config.locationId, profile);
     next = siteProfileSucceeded(previous, hash, changed, now);
   } catch (error) {
     next = siteProfileFailed(previous, error instanceof Error ? error.message : String(error), now);

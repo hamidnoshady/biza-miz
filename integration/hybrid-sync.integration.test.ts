@@ -694,6 +694,19 @@ describe("site profile", () => {
     await syncProfile();
     expect((await withTenant(biz.businessId, () => effectiveFeatures(biz.businessId))).ai_assistant).toBe(false);
 
+    // An unchanged profile is still applied: a local edit to the cloud's copy is repaired.
+    await withTenant(biz.businessId, () =>
+      query("DELETE FROM business_features WHERE business_id = $1 AND flag_key = 'ai_assistant'", [biz.businessId]),
+    );
+    await syncProfile();
+    const restored = await withTenant(biz.businessId, () =>
+      query<{ enabled: boolean }>(
+        "SELECT enabled FROM business_features WHERE business_id = $1 AND flag_key = 'ai_assistant'",
+        [biz.businessId],
+      ),
+    );
+    expect(restored.rows).toEqual([{ enabled: false }]);
+
     await onCentral(() =>
       withTenant(biz.businessId, () =>
         query(

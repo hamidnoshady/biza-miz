@@ -74,10 +74,12 @@ export function validateSiteProfile(raw: unknown): SiteProfile | null {
   }
   const apps: Partial<Record<AppKey, AppAvailabilityRecord>> = {};
   for (const [key, record] of Object.entries(raw.apps)) {
-    if (!(APP_KEYS as readonly string[]).includes(key) || !isRecord(record)) return null;
-    if (!isAppAvailabilityState(record.state) || !nullableText(record.note)) return null;
+    if (!isRecord(record) || typeof record.state !== "string" || !nullableText(record.note)) return null;
     const from = record.availableFrom;
     if (!(from === null || (typeof from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(from) && from.startsWith("20")))) return null;
+    // A desktop runs older than the cloud: an app or a state it does not know yet
+    // is dropped, so the rest of the profile (business day, switches) still lands.
+    if (!(APP_KEYS as readonly string[]).includes(key) || !isAppAvailabilityState(record.state)) continue;
     apps[key as AppKey] = { state: record.state, note: record.note, availableFrom: from };
   }
   return { schemaVersion: 1, location, features, apps };

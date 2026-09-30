@@ -36,11 +36,27 @@ describe("validateSiteProfile", () => {
       { ...profile, location: { ...profile.location, businessDayStartMinutes: 1440 } },
       { ...profile, location: { ...profile.location, timezone: "" } },
       { ...profile, features: { ai_assistant: "no" } },
-      { ...profile, apps: { growth: { state: "broken", note: null, availableFrom: null } } },
-      { ...profile, apps: { nosuchapp: { state: "available", note: null, availableFrom: null } } },
+      { ...profile, apps: { growth: { state: 3, note: null, availableFrom: null } } },
+      { ...profile, apps: { growth: { state: "available", note: 5, availableFrom: null } } },
+      { ...profile, apps: { growth: "maintenance" } },
       { ...profile, apps: { growth: { state: "coming_soon", note: null, availableFrom: "1405-07-08" } } },
     ];
     for (const raw of bad) expect(validateSiteProfile(raw)).toBeNull();
+  });
+
+  it("drops an app the desktop does not know yet, and keeps the rest", () => {
+    const newer = { ...profile, apps: { ...profile.apps, nosuchapp: { state: "available", note: null, availableFrom: null } } };
+    expect(validateSiteProfile(newer)).toEqual(profile);
+  });
+
+  it("drops a state the desktop does not know yet, and keeps the rest", () => {
+    const newer = { ...profile, apps: { ...profile.apps, crm: { state: "sunsetting", note: null, availableFrom: null } } };
+    expect(validateSiteProfile(newer)).toEqual(profile);
+  });
+
+  it("accepts a feature switch the desktop does not know yet (the apply skips it)", () => {
+    const newer = { ...profile, features: { ...profile.features, brand_new_flag: true } };
+    expect(validateSiteProfile(newer)?.features).toEqual({ ...profile.features, brand_new_flag: true });
   });
 });
 
