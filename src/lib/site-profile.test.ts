@@ -35,6 +35,9 @@ describe("validateSiteProfile", () => {
       { ...profile, location: { ...profile.location, id: "x" } },
       { ...profile, location: { ...profile.location, businessDayStartMinutes: 1440 } },
       { ...profile, location: { ...profile.location, timezone: "" } },
+      // Written into locations.timezone, a bad zone breaks app_business_date on the till.
+      { ...profile, location: { ...profile.location, timezone: "Asia/Nowhere" } },
+      { ...profile, location: { ...profile.location, timezone: "not a zone" } },
       { ...profile, features: { ai_assistant: "no" } },
       { ...profile, apps: { growth: { state: 3, note: null, availableFrom: null } } },
       { ...profile, apps: { growth: { state: "available", note: 5, availableFrom: null } } },
