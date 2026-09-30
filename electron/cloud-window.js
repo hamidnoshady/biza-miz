@@ -64,6 +64,11 @@ function offlinePageUrl(retryUrl) {
 function createCloudWindowController({ BrowserWindow, shell }) {
   let win = null;
   let origin = null;
+  // The last cloud page the window showed, where a client-side billing move returns.
+  let lastPage = null;
+
+  // A failed load is reported by did-fail-load; the promise's rejection is not news.
+  const load = (target, url) => target.loadURL(url).catch(() => {});
 
   function create() {
     const created = new BrowserWindow({
@@ -95,20 +100,28 @@ function createCloudWindowController({ BrowserWindow, shell }) {
     // A 3xx does not fire will-navigate. Any other host — a renamed business
     // subdomain included — goes to the browser: a window with no address bar
     // must never adopt an origin it was not opened with.
-    created.webContents.on("will-redirect", (event, url) => {
+    created.webContents.on("will-redirect", (event, url, _isInPlace, isMainFrame) => {
+      // A subframe (a website preview, a video embed) may redirect anywhere.
+      if ((event.isMainFrame ?? isMainFrame) === false) return;
       if (sameOrigin(url, origin) && !opensInBrowser(url)) return;
       toBrowser(event, url);
     });
+    const remember = (url) => {
+      if (sameOrigin(url, origin) && !opensInBrowser(url)) lastPage = url;
+    };
+    created.webContents.on("did-navigate", (_event, url) => remember(url));
     // A client-side (Next.js) link fires neither of the above: send billing to
-    // the browser and step the window back to where it was.
+    // the browser and reload the last cloud page. Not goBack(): after a
+    // router.replace there is no history entry to step back over.
     created.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
-      if (!isMainFrame || !opensInBrowser(url)) return;
+      if (!isMainFrame) return;
+      if (!opensInBrowser(url)) return remember(url);
       void shell.openExternal(url);
-      if (created.webContents.navigationHistory?.canGoBack()) created.webContents.navigationHistory.goBack();
+      if (lastPage) load(created, lastPage);
     });
     created.webContents.on("did-fail-load", (_event, code, _description, url, isMainFrame) => {
       // -3 is ERR_ABORTED: one navigation replaced by another, not a failure.
-      if (isMainFrame && code !== -3 && !String(url).startsWith("data:")) void created.loadURL(offlinePageUrl(url));
+      if (isMainFrame && code !== -3 && !String(url).startsWith("data:")) load(created, offlinePageUrl(url));
     });
     created.on("closed", () => {
       win = null;
@@ -126,7 +139,8 @@ function createCloudWindowController({ BrowserWindow, shell }) {
       }
       if (!win || win.isDestroyed()) win = create();
       origin = target.origin;
-      void win.loadURL(target.toString());
+      lastPage = target.toString();
+      load(win, lastPage);
       if (win.isMinimized()) win.restore();
       win.focus();
       return true;

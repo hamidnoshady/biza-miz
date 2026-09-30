@@ -19,7 +19,7 @@ class FakeContents {
   }
 }
 
-function fakeElectron() {
+function fakeElectron(loadResult: () => Promise<void> = () => Promise.resolve()) {
   const created: FakeWindow[] = [];
   class FakeWindow {
     webContents = new FakeContents();
@@ -32,7 +32,7 @@ function fakeElectron() {
     }
     loadURL(url: string) {
       this.loaded.push(url);
-      return Promise.resolve();
+      return loadResult();
     }
     isDestroyed() {
       return false;
@@ -155,12 +155,53 @@ describe("createCloudWindowController", () => {
     contents.handlers.get("will-navigate")!(event, "https://cafe.example.com/settings/billing");
     expect(event.preventDefault).toHaveBeenCalled();
     expect(electron.shell.openExternal).toHaveBeenCalledWith("https://cafe.example.com/settings/billing");
-    // A client-side link: out to the browser, and the window steps back.
+    // A client-side link: out to the browser, and the window goes back to the opened page.
     contents.handlers.get("did-navigate-in-page")!({}, "https://cafe.example.com/settings/subscription", true);
     expect(electron.shell.openExternal).toHaveBeenCalledWith("https://cafe.example.com/settings/subscription");
-    expect(contents.navigationHistory.goBack).toHaveBeenCalledTimes(1);
+    expect(electron.created[0].loaded.at(-1)).toBe("https://cafe.example.com/accounting/reports");
+    const loads = electron.created[0].loaded.length;
     contents.handlers.get("did-navigate-in-page")!({}, "https://cafe.example.com/crm/overview", true);
-    expect(contents.navigationHistory.goBack).toHaveBeenCalledTimes(1);
+    expect(electron.created[0].loaded).toHaveLength(loads);
+  });
+
+  it("returns from a client-side billing move to the last cloud page, even after router.replace", () => {
+    const electron = fakeElectron();
+    createCloudWindowController(electron).open("https://cafe.example.com/accounting/reports");
+    const contents = electron.created[0].webContents;
+    contents.handlers.get("did-navigate")!({}, "https://cafe.example.com/crm/overview");
+    contents.handlers.get("did-navigate-in-page")!({}, "https://cafe.example.com/crm/deals?tab=open", true);
+    // A subframe's move is not where the window is.
+    contents.handlers.get("did-navigate-in-page")!({}, "https://cafe.example.com/embed/x", false);
+    // replaceState: history has no entry to step back to, so goBack would over-step.
+    contents.handlers.get("did-navigate-in-page")!({}, "https://cafe.example.com/settings/billing", true);
+    expect(electron.shell.openExternal).toHaveBeenCalledWith("https://cafe.example.com/settings/billing");
+    expect(contents.navigationHistory.goBack).not.toHaveBeenCalled();
+    expect(electron.created[0].loaded.at(-1)).toBe("https://cafe.example.com/crm/deals?tab=open");
+  });
+
+  it("lets a subframe follow a cross-origin redirect (a website preview, a video embed)", () => {
+    const electron = fakeElectron();
+    createCloudWindowController(electron).open("https://cafe.example.com/websites/cms");
+    const redirect = electron.created[0].webContents.handlers.get("will-redirect")!;
+    const viaEvent = { preventDefault: vi.fn(), isMainFrame: false };
+    redirect(viaEvent, "https://preview.example.org/home", false, false);
+    const viaArgs = { preventDefault: vi.fn() };
+    redirect(viaArgs, "https://www.youtube-nocookie.com/embed/x", false, false);
+    expect(viaEvent.preventDefault).not.toHaveBeenCalled();
+    expect(viaArgs.preventDefault).not.toHaveBeenCalled();
+    expect(electron.shell.openExternal).not.toHaveBeenCalled();
+    // The main frame is still held to the window's origin.
+    const main = { preventDefault: vi.fn(), isMainFrame: true };
+    redirect(main, "https://evil.example.org/", false, true);
+    expect(main.preventDefault).toHaveBeenCalled();
+  });
+
+  it("swallows a rejected load: did-fail-load is what reports it", () => {
+    const rejected = { catch: vi.fn() };
+    const electron = fakeElectron(() => rejected as unknown as Promise<void>);
+    createCloudWindowController(electron).open("https://cafe.example.com/accounting/reports");
+    electron.created[0].webContents.handlers.get("did-fail-load")!({}, -106, "", "https://cafe.example.com/accounting/reports", true);
+    expect(rejected.catch).toHaveBeenCalledTimes(2);
   });
 
   it("shows the offline page when the cloud cannot be reached", () => {
