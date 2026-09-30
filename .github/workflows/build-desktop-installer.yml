@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Installer version (X.Y.Z); empty keeps electron/package.json'
+        description: 'Installer version (X.Y.Z); empty = next patch after electron/package.json'
         type: string
         required: false
   pull_request:
@@ -102,6 +102,9 @@ jobs:
     name: packaged Windows end-to-end
     runs-on: windows-latest
     timeout-minutes: 120
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v7
 
@@ -110,13 +113,47 @@ jobs:
           node-version: 24
           cache: npm
 
-      - name: Set installer version
-        if: inputs.version != ''
+      # Every build gets its own version, so an installed desktop can always
+      # tell two builds apart and the updater (strict SemVer "newer than
+      # installed") never treats a new build as the one already installed.
+      #   - main pushes and manual runs: the next patch (or the typed version);
+      #     the `release-version` job commits it and tags desktop-vX.Y.Z.
+      #   - PR / arena runs: that next patch as a prerelease, X.Y.Z-ci.<run>.
+      #     SemVer orders it *below* X.Y.Z, so the real release still updates it.
+      - name: Compute installer version
+        id: version
         env:
-          VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_BUILD: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
         run: |
-          if ($env:VERSION -notmatch '^\d+\.\d+\.\d+$') { throw "Version must be X.Y.Z" }
-          npm pkg set "version=$env:VERSION" --prefix electron
+          $ErrorActionPreference = "Stop"
+          function Add-GitHubOutput([string]$line) {
+            [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "$line`n", (New-Object System.Text.UTF8Encoding($false)))
+          }
+          $current = (Get-Content electron/package.json -Raw | ConvertFrom-Json).version
+          if ($current -notmatch '^(\d+)\.(\d+)\.(\d+)$') { throw "electron/package.json version '$current' is not X.Y.Z" }
+          $next = "$($Matches[1]).$($Matches[2]).$([int]$Matches[3] + 1)"
+          if ($env:INPUT_VERSION) { $next = $env:INPUT_VERSION.Trim() }
+          if ($next -notmatch '^\d+\.\d+\.\d+$') { throw "Version must be X.Y.Z, got '$next'" }
+
+          # Ask with `git tag --list` (exit 0 either way) and end the step with
+          # an explicit exit - see build-plugin-zip.yml for why a probe's exit
+          # code must never decide a step.
+          $ErrorActionPreference = "Continue"
+          git fetch --tags --force --quiet
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::Could not fetch tags"; exit 1 }
+          if (git tag --list "desktop-v$next") {
+            Write-Host "::error::desktop-v$next already exists - a shipped version is never rebuilt. Bump electron/package.json or pass a higher version."
+            exit 1
+          }
+
+          $version = if ($env:RELEASE_BUILD -eq "true") { $next } else { "$next-ci.$env:GITHUB_RUN_NUMBER" }
+          npm pkg set "version=$version" --prefix electron
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Add-GitHubOutput "version=$version"
+          Add-GitHubOutput "release=$env:RELEASE_BUILD"
+          Write-Host "::notice title=Desktop version::$current -> $version"
+          exit 0
 
       - name: Embed Desktop build provenance
         run: npm pkg set "buildCommit=$env:GITHUB_SHA" "buildId=ci-$env:GITHUB_RUN_ID" "releaseChannel=internal" --prefix electron
@@ -371,7 +408,7 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v7
         with:
-          name: business-suite-desktop-installer
+          name: business-suite-desktop-installer-${{ steps.version.outputs.version }}
           path: electron/dist/*.exe
           if-no-files-found: error
 
@@ -409,3 +446,50 @@ jobs:
           - Acceptance: packaged pg_dump/pg_restore passed custom-format, corruption, encrypted staging, emergency-backup, swap and rollback checks; the packaged executable initialized PostgreSQL UTF-8, migrated, passed RLS boot, bootstrapped through the real API, authenticated, stopped, restarted and retained data
           "@
           [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "$summary`n", (New-Object System.Text.UTF8Encoding($false)))
+
+  # Record the version that was actually built, only once the whole packaged
+  # end-to-end passed: a failed build never burns a number. A fresh checkout,
+  # because the build job wrote CI provenance (buildCommit/buildId/channel)
+  # into electron/package.json that must never be committed. Pushed with
+  # GITHUB_TOKEN, which by design triggers no further workflow runs, so the
+  # bump commit cannot loop back into this workflow.
+  release-version:
+    name: commit and tag the desktop version
+    needs: build
+    if: needs.build.outputs.release == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Commit the bump and tag desktop-vX.Y.Z
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Updates package.json and package-lock.json together, no git tag.
+          npm version $env:VERSION --no-git-tag-version --allow-same-version --prefix electron
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git add electron/package.json electron/package-lock.json
+          git commit -m "Desktop v$env:VERSION"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git tag "desktop-v$env:VERSION"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # The build takes an hour; main may have moved. Replay the one-file
+          # bump on top rather than failing the release on a race.
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            git push origin "HEAD:refs/heads/$env:GITHUB_REF_NAME" "refs/tags/desktop-v$env:VERSION"
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            git pull --rebase origin $env:GITHUB_REF_NAME
+            if ($LASTEXITCODE -ne 0) { Write-Host "::error::Could not rebase the version bump onto $env:GITHUB_REF_NAME"; exit 1 }
+            git tag -f "desktop-v$env:VERSION"
+          }
+          Write-Host "::error::Could not push desktop-v$env:VERSION"
+          exit 1

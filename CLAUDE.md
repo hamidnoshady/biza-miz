@@ -198,8 +198,13 @@ release is a decision rather than a check on a commit. None of them gate a PR.
 - **`build-desktop-installer.yml`** — packages the standalone Windows `.exe`
   (electron-builder → NSIS) and uploads it as a run artifact. Order matters: it runs
   `npm ci` + `npm run build` in the repo root *first*, because `electron/package.json`
-  pulls `../.next`, `../src` and `../node_modules` in through `extraResources`. Optional
-  `version` input rewrites `electron/package.json`. See
+  pulls `../.next`, `../src` and `../node_modules` in through `extraResources`. Every
+  build has its own version: a `main` push or manual run builds the next patch (or the
+  typed `version`) and, only after the whole run passes, its `release-version` job
+  commits the bump and tags `desktop-vX.Y.Z` (never `v*`, which is the plugin's and
+  `publish.yml`'s); PR/arena runs build `X.Y.Z-ci.<run>`, which SemVer orders below
+  `X.Y.Z`. These artifacts are unsigned — the in-app updater only installs a signed
+  manifest from `windows-signed-candidate` → `windows-production-release`. See
   [docs/standalone-desktop-app.md](docs/standalone-desktop-app.md) for the packaging
   constraints that silently re-break this.
 - **`build-plugin-zip.yml`** — bumps the WordPress plugin version in the three places the
