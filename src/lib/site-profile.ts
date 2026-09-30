@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import { isAppAvailabilityState, type AppAvailabilityRecord } from "./app-availability";
 import { APP_KEYS, type AppKey } from "./apps";
-import { timezoneIsResolvable } from "./platform-backup";
+import { TIMEZONE_RE, timezoneIsResolvable } from "./platform-backup";
 import { nextAttemptAt } from "./sync-backoff";
 import { isUuid } from "./uuid";
 
@@ -49,6 +49,9 @@ function validLocation(raw: unknown): SiteProfileLocation | null {
     typeof raw.timezone !== "string" ||
     !raw.timezone.trim() ||
     // It lands in locations.timezone, where a bad zone breaks app_business_date.
+    // The name shape refuses a bare offset: Intl resolves "+03:30", but
+    // Postgres reads it as a POSIX zone with the sign inverted.
+    !TIMEZONE_RE.test(raw.timezone) ||
     !timezoneIsResolvable(raw.timezone) ||
     !(start === null || (Number.isInteger(start) && (start as number) >= 0 && (start as number) < 1440)) ||
     typeof raw.isActive !== "boolean"

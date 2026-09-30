@@ -38,6 +38,9 @@ describe("validateSiteProfile", () => {
       // Written into locations.timezone, a bad zone breaks app_business_date on the till.
       { ...profile, location: { ...profile.location, timezone: "Asia/Nowhere" } },
       { ...profile, location: { ...profile.location, timezone: "not a zone" } },
+      // Intl resolves an offset, but Postgres reads a bare one as a POSIX zone with the sign inverted.
+      { ...profile, location: { ...profile.location, timezone: "+03:30" } },
+      { ...profile, location: { ...profile.location, timezone: "-0330" } },
       { ...profile, features: { ai_assistant: "no" } },
       { ...profile, apps: { growth: { state: 3, note: null, availableFrom: null } } },
       { ...profile, apps: { growth: { state: "available", note: 5, availableFrom: null } } },
