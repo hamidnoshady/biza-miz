@@ -43,8 +43,23 @@ describe("shift sync payload", () => {
       { ...good, openingFloat: -1 },
       { ...good, closingFloat: 1.5 },
       { ...good, closedBy: "someone" },
+      // Postgres would refuse these with a 22xxx cast error, which retries forever.
+      { ...good, startedAt: "2026" },
+      { ...good, startedAt: "Tue, 29 Sep 2026 14:30:00 GMT" },
+      { ...good, startedAt: "2026-09-29T14:30:00" },
+      { ...good, startedAt: "2026-02-30T10:00:00.000Z" },
+      { ...good, endedAt: "2026-13-45T00:00Z" },
+      { ...good, businessDate: "2026-13-45" },
+      { ...good, businessDate: "2026-02-30" },
     ]) {
       expect(parseShiftSyncPayload(bad as Record<string, unknown>)).toBeNull();
+    }
+  });
+
+  it("accepts ISO-8601 instants with Z or an offset", () => {
+    const good = shiftSyncPayload(shift());
+    for (const startedAt of ["2026-09-29T14:30Z", "2026-09-29T14:30:00+03:30", "2026-09-29T14:30:00.123456-05:00"]) {
+      expect(parseShiftSyncPayload({ ...good, startedAt })?.startedAt).toBe(startedAt);
     }
   });
 

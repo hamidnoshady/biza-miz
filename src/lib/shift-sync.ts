@@ -10,6 +10,7 @@
 import type { PoolClient } from "pg";
 import type { Role } from "./auth";
 import type { EmployeeShift } from "./shift-service";
+import { isValidIsoDate } from "./iso-date";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import { isUuid } from "./uuid";
 
@@ -39,8 +40,17 @@ export function shiftSyncPayload(shift: EmployeeShift): ShiftSyncPayload {
   };
 }
 
+const ISO_INSTANT = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * An ISO-8601 instant on a real calendar date. Anything looser reaches the
+ * timestamptz cast as a 22xxx error, which the sync classes transient and
+ * retries forever.
+ */
 function instant(value: unknown): string | null {
-  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+  if (typeof value !== "string") return null;
+  const match = ISO_INSTANT.exec(value);
+  return match && isValidIsoDate(match[1]) && Number.isFinite(Date.parse(value)) ? value : null;
 }
 
 /** A float in integer Rial, null, or `undefined` when invalid. */
@@ -51,7 +61,7 @@ function float(value: unknown): number | null | undefined {
 
 export function parseShiftSyncPayload(raw: Record<string, unknown>): ShiftSyncPayload | null {
   if (!isUuid(raw.shiftId) || !isUuid(raw.employeeId)) return null;
-  if (typeof raw.businessDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(raw.businessDate)) return null;
+  if (!isValidIsoDate(raw.businessDate)) return null;
   const startedAt = instant(raw.startedAt);
   if (!startedAt) return null;
   let endedAt: string | null = null;
