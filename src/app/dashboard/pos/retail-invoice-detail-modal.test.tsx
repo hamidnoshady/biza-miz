@@ -190,18 +190,23 @@ describe("RetailInvoiceDetailModal — void", () => {
     expect(screen.getByText("باطل‌شده")).toBeTruthy();
   });
 
+  /** The in-app reason dialog that replaced window.prompt (Electron throws on it). */
+  async function giveReason(reason: string) {
+    await userEvent.type(await screen.findByRole("textbox", { name: /دلیل ابطال فاکتور/ }), reason);
+    await userEvent.click(screen.getByRole("button", { name: "تأیید" }));
+  }
+
   it("does nothing if the reason prompt is cancelled", async () => {
-    vi.spyOn(window, "prompt").mockReturnValue(null);
     render(<RetailInvoiceDetailModal invoiceId="order-1" open onOpenChange={() => {}} canVoid />);
     await flush();
     await userEvent.click(screen.getByRole("button", { name: /ابطال فاکتور/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "انصراف" }));
     await flush();
     // Only the one initial GET — no POST was attempted.
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("posts the reason, shows the server's Persian refusal, and never touches the order on failure", async () => {
-    vi.spyOn(window, "prompt").mockReturnValue("اشتباه صندوقدار");
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (init?.method === "POST") {
         return new Response(
@@ -219,6 +224,7 @@ describe("RetailInvoiceDetailModal — void", () => {
     render(<RetailInvoiceDetailModal invoiceId="order-1" open onOpenChange={() => {}} canVoid />);
     await flush();
     await userEvent.click(screen.getByRole("button", { name: /ابطال فاکتور/ }));
+    await giveReason("اشتباه صندوقدار");
     await flush();
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -230,7 +236,6 @@ describe("RetailInvoiceDetailModal — void", () => {
   });
 
   it("on success, refetches the invoice and calls onVoided so the list behind it refreshes", async () => {
-    vi.spyOn(window, "prompt").mockReturnValue("اشتباه صندوقدار");
     let voided = false;
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (init?.method === "POST") {
@@ -252,6 +257,7 @@ describe("RetailInvoiceDetailModal — void", () => {
     render(<RetailInvoiceDetailModal invoiceId="order-1" open onOpenChange={() => {}} canVoid onVoided={onVoided} />);
     await flush();
     await userEvent.click(screen.getByRole("button", { name: /ابطال فاکتور/ }));
+    await giveReason("اشتباه صندوقدار");
     await flush();
 
     expect(onVoided).toHaveBeenCalledTimes(1);

@@ -58,7 +58,10 @@ if (!gotSingleInstanceLock) {
       return { action: "deny" };
     });
     mainWindow.webContents.on("will-navigate", (event, url) => {
-      if (!url.startsWith(`${appUrl}/`) && url !== appUrl) event.preventDefault();
+      if (url.startsWith(`${appUrl}/`) || url === appUrl) return;
+      event.preventDefault();
+      // A plain link off the app (e.g. «بازکردن نسخهٔ ابری») would otherwise do nothing.
+      if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     });
     mainWindow.on("closed", () => { mainWindow = null; });
     await mainWindow.loadURL(appUrl);

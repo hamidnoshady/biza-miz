@@ -151,6 +151,12 @@ const RULES: readonly Rule[] = [
     allowed: [],
   },
   {
+    id: "native prompt",
+    why: "The desktop app (Electron) replaces window.prompt with a function that throws, so the action behind it silently does nothing there. Use usePromptDialog (prompt-dialog.tsx).",
+    pattern: /window\.prompt\(/,
+    allowed: [],
+  },
+  {
     id: "bare loading copy",
     why: "Data-loading regions reserve their final shape with LoadingSkeleton/SectionCardSkeleton instead of showing a lone progress sentence (docs/design-system.md §Charts and loading). A spoken label belongs on the skeleton's aria-label, not on a visible sentence.",
     pattern: /<(?:p|div|span)\b[^>]*>\s*در حال (?:بارگذاری|خواندن|جستجو|جست‌وجو|محاسبه|آماده‌سازی پیش‌نمایش)[^<{]*</,

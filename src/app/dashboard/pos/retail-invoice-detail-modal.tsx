@@ -10,6 +10,7 @@
  * invoice actually has: فاکتور (lines + totals), پرداخت (tenders), حسابداری
  * (a pointer to the ledger, not a duplicate of it) and اطلاعات (who/where/when).
  */
+import { usePromptDialog } from "../prompt-dialog";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Ban, PrinterIcon, XIcon } from "lucide-react";
@@ -110,6 +111,7 @@ export function RetailInvoiceDetailModal({
   const [error, setError] = useState("");
   const [printing, setPrinting] = useState(false);
   const [voiding, setVoiding] = useState(false);
+  const [promptDialog, askText] = usePromptDialog();
 
   function loadInvoice() {
     if (!invoiceId) return;
@@ -139,7 +141,7 @@ export function RetailInvoiceDetailModal({
 
   async function voidInvoice() {
     if (!invoiceId) return;
-    const reason = window.prompt("دلیل ابطال فاکتور؟ (این فاکتور و ثبت‌های حسابداری آن به‌طور کامل برگشت می‌خورد)");
+    const reason = await askText("دلیل ابطال فاکتور؟ (این فاکتور و ثبت‌های حسابداری آن به‌طور کامل برگشت می‌خورد)");
     if (reason === null) return; // cancelled
     if (reason.trim().length < 3) {
       toast.error("دلیل ابطال باید حداقل ۳ نویسه باشد.");
@@ -193,6 +195,8 @@ export function RetailInvoiceDetailModal({
   const hasLegacyLines = invoice?.lines.some((l) => l.kind === "legacy") ?? false;
 
   return (
+    <>
+    {promptDialog}
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={false}
@@ -431,5 +435,6 @@ export function RetailInvoiceDetailModal({
         </div>
       </DialogContent>
     </Dialog>
+    </>
   );
 }

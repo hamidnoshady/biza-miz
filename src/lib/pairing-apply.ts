@@ -21,6 +21,16 @@ import { getPool, withoutTenantScope } from "./db";
 import type { PairingSnapshot } from "./pairing-snapshot";
 import { SETTING_KEYS } from "./settings";
 
+/** Electron supplies this durable identity; the deterministic fallback keeps non-Electron development resumable. */
+export function localInstallationId(): string {
+  const desktopId = process.env.DESKTOP_INSTANCE_ID?.trim();
+  if (desktopId && desktopId.length >= 8 && desktopId.length <= 200)
+    return desktopId;
+  return `server:${createHash("sha256")
+    .update(process.env.HOSTNAME || "local-development")
+    .digest("hex")}`;
+}
+
 export interface AppliedSnapshot {
   businessId: string;
   businessSlug: string;
@@ -155,7 +165,9 @@ async function insertTenantRoles(client: PoolClient, snapshot: PairingSnapshot):
 
 /**
  * Recreate the canonical membership replica without Cloud credentials. Cloud
- * password hashes, MFA secrets and sessions never cross the pairing boundary.
+ * password hashes, MFA secrets and sessions never cross the pairing boundary;
+ * once the site credential is active, IAM sync replicates the password and
+ * second factor (src/lib/iam/login-credentials.ts) so login is global.
  * The temporary post-pairing owner session is used to establish an explicit
  * site credential before the next login.
  */
@@ -589,6 +601,7 @@ async function insertFeatures(
 export async function repairPairingSnapshot(
   snapshot: PairingSnapshot,
   remoteUrl: string,
+  pairing: { pairingSessionId?: string; installationId?: string } = {},
 ): Promise<{ businessId: string; locationId: string }> {
   return withoutTenantScope("platform", async () => {
     const client = await getPool().connect();
@@ -634,6 +647,10 @@ export async function repairPairingSnapshot(
             siteDeviceId: snapshot.siteDevice.id,
             siteDevicePublicId: snapshot.siteDevice.publicId,
             locationId: snapshot.location.id,
+            // Without these the sync tick's acknowledgePendingPairing skips and
+            // the cloud device stays pending (every sync call answers 401).
+            ...(pairing.pairingSessionId ? { pairingSessionId: pairing.pairingSessionId } : {}),
+            ...(pairing.installationId ? { installationId: pairing.installationId } : {}),
           }),
         ],
       );

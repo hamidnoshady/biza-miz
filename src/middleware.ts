@@ -76,6 +76,7 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/iam/status",
   "/api/iam/commands",
   "/api/iam/detach",
+  "/api/iam/login-credentials",
   "/mcp",
 ] as const;
 
@@ -194,6 +195,7 @@ const PUBLIC_PATHS = [
   "/api/iam/status",
   "/api/iam/commands",
   "/api/iam/detach",
+  "/api/iam/login-credentials",
   // Migration 0132: the same shape again — the caller is another *server*
   // migrating onto this one, authenticated with a bearer token issued in the
   // super-admin console (`platform_backup_tokens`, hashed), never with a

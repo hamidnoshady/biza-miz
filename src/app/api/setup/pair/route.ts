@@ -1,27 +1,16 @@
-import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
 import {
   classifyConnectionCode,
   normalizeServerAddress,
 } from "@/lib/connection-code";
-import { applyPairingSnapshot } from "@/lib/pairing-apply";
+import { applyPairingSnapshot, localInstallationId } from "@/lib/pairing-apply";
 import { validateSnapshot } from "@/lib/pairing-snapshot";
 import { hasAnyUser } from "@/lib/setup-state";
 import { acknowledgePendingPairing } from "@/lib/server-sync";
 
 /** How long to wait on the online server before calling it unreachable. */
 const REDEEM_TIMEOUT_MS = 30_000;
-
-/** Electron supplies this durable identity; the deterministic fallback keeps non-Electron development resumable. */
-function localInstallationId(): string {
-  const desktopId = process.env.DESKTOP_INSTANCE_ID?.trim();
-  if (desktopId && desktopId.length >= 8 && desktopId.length <= 200)
-    return desktopId;
-  return `server:${createHash("sha256")
-    .update(process.env.HOSTNAME || "local-development")
-    .digest("hex")}`;
-}
 
 /**
  * Where to redeem, in order.

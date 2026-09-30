@@ -53,6 +53,22 @@ are rejected. Legacy per-business and global tokens exist only for migration;
 global fallback is off unless `ALLOW_LEGACY_SYNC_TOKEN=1` is explicitly set.
 New installations must use site credentials.
 
+The cloud device stays `pending` (every sync call answers 401) until the site
+acknowledges the committed snapshot with `pairingSessionId` + `installationId`.
+Both first-run pairing (`/api/setup/pair`) and repair (`/api/setup/reconnect`)
+persist those two fields in `server_sync.config`, and every sync tick retries
+`acknowledgePendingPairing` until the cloud confirms.
+
+**Login is global.** Once the site credential is active, IAM sync fetches
+`/api/iam/login-credentials` and makes each member's local identity equal the
+cloud's: password hash, second factor (TOTP secret re-encrypted under the
+site's own key) and recovery-code hashes (`src/lib/iam/login-credentials*.ts`).
+The cloud is the source of truth: the site compares against its own current
+rows each tick and puts back anything changed locally, and refuses password/2FA
+changes (`login_managed_by_cloud`). A recovery code spent on the site is POSTed
+back to the same endpoint so it is single-use on both replicas; while the site is
+offline, that code still works on the cloud until the next tick reports it.
+
 ## Event transport
 
 On the site, `runServerSyncTick()` (`src/lib/server-sync.ts`, every 30 s):

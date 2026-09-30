@@ -8,11 +8,11 @@
  * factor is true of a super-admin's, and the only thing that legitimately
  * differs between them is which session gets minted afterwards.
  */
-import { createDecipheriv, createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from "otplib";
 import { query, withoutTenantScope } from "./db";
 import { getRealmSecret } from "./jwt-secret";
-import { getMfaSecretKey } from "./mfa-service";
+import { decryptTotpSecret } from "./mfa-service";
 import { consumeRecoveryCode } from "./mfa-recovery";
 
 export type MfaSubjectRealm = "platform_user" | "platform_admin";
@@ -22,22 +22,6 @@ export type MfaVerifyOutcome = "totp" | "sms_otp" | "recovery_code" | "rejected"
 
 /** Five wrong OTPs burn the challenge, per the phase spec. */
 const MAX_OTP_ATTEMPTS = 5;
-
-/** Unwrap a stored TOTP secret: IV(12) ‖ TAG(16) ‖ ciphertext, AES-256-GCM. */
-async function decryptTotpSecret(data: Buffer): Promise<string | null> {
-  try {
-    const key = await getMfaSecretKey();
-    const iv = data.subarray(0, 12);
-    const tag = data.subarray(12, 28);
-    const ciphertext = data.subarray(28);
-    const decipher = createDecipheriv("aes-256-gcm", key, iv);
-    decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
-  } catch (err) {
-    console.error("Failed to decrypt TOTP secret", err);
-    return null;
-  }
-}
 
 async function verifyTotp(subjectRealm: MfaSubjectRealm, subjectId: string, code: string): Promise<boolean> {
   const { rows } = await query<{ totp_secret: Buffer }>(
