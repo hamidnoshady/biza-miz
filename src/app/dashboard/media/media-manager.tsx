@@ -15,6 +15,7 @@
  * as the WordPress media mirror (`websites/wp/media-section.tsx`) rather than
  * a second implementation of the same three rules.
  */
+import { usePromptDialog } from "../prompt-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
@@ -327,6 +328,7 @@ function FolderTreeExplorer({ folders, childrenByParent, actions }: {
 }
 
 export function MediaManager() {
+  const [promptDialog, askText] = usePromptDialog();
   const [payload, setPayload] = useState<Omit<LibraryPayload, "assets" | "total"> | null>(null);
   const [assets, setAssets] = useState<AssetRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -546,7 +548,7 @@ export function MediaManager() {
   }
 
   async function renameFolder(folder: FolderRow) {
-    const name = window.prompt("نام جدید پوشه", folder.name)?.trim();
+    const name = (await askText("نام جدید پوشه", folder.name))?.trim();
     if (!name || name === folder.name) return;
     const { ok, data } = await api<{ message?: string }>(`/api/media/folders/${folder.id}`, {
       method: "PATCH",
@@ -609,7 +611,7 @@ export function MediaManager() {
   }
 
   async function createCollection() {
-    const name = window.prompt("نام مجموعهٔ جدید")?.trim();
+    const name = (await askText("نام مجموعهٔ جدید"))?.trim();
     if (!name) return;
     const { ok, data } = await api<{ message?: string }>("/api/media/collections", {
       method: "POST",
@@ -831,6 +833,7 @@ export function MediaManager() {
 
   return (
     <div className="space-y-4">
+      {promptDialog}
       {!payload.storage.ready ? (
         <InfoBox>
           فضای ذخیره‌سازی رسانه هنوز توسط مدیر پلتفرم پیکربندی نشده است؛ تا آن زمان بارگذاری فایل ممکن نیست.

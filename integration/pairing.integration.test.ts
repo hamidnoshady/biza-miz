@@ -20,7 +20,7 @@ import {
   redeemPairingCode,
   revokePairingCode,
 } from "../src/lib/pairing-service";
-import { applyPairingSnapshot } from "../src/lib/pairing-apply";
+import { applyPairingSnapshot, repairPairingSnapshot } from "../src/lib/pairing-apply";
 import { validateSnapshot } from "../src/lib/pairing-snapshot";
 import { acknowledgePendingPairing } from "../src/lib/server-sync";
 
@@ -360,6 +360,76 @@ describe("pairing round trip", () => {
         installationId,
       ),
     ).resolves.toEqual({ ok: false, error: "code_already_redeemed" });
+  }, 120_000);
+
+  it("repairs an already-paired install and activates the new cloud device", async () => {
+    // Regression: repair used to drop the pairing session, so the sync tick
+    // never acknowledged it and the cloud device stayed pending (sync = 401).
+    await useDatabase(serverDb);
+    const created = await provisionBusiness({
+      businessName: "کافه تعمیر",
+      ownerName: "حمید",
+      email: `owner-${randomUUID()}@example.com`,
+      password: "correct-horse",
+      seedChartOfAccounts: true,
+    });
+    const adminId = await createPlatformAdmin();
+    const installationId = `desktop-installation-${randomUUID()}`;
+    const redeem = async () => {
+      const issued = await withoutTenantScope("platform", () =>
+        issuePairingCode(created.businessId, adminId, created.locationId),
+      );
+      if (!("code" in issued)) throw new Error("no code");
+      const redeemed = await redeemPairingCode(issued.code, "127.0.0.1", "Windows Business Suite", installationId);
+      if (!redeemed.ok) throw new Error(redeemed.error);
+      return redeemed;
+    };
+
+    const first = await redeem();
+    await useDatabase(localDb);
+    await applyPairingSnapshot(first.snapshot, "https://pos.example.com", {
+      pairingSessionId: first.pairingSessionId,
+      installationId,
+    });
+
+    await useDatabase(serverDb);
+    const repair = await redeem();
+    await useDatabase(localDb);
+    await repairPairingSnapshot(repair.snapshot, "https://pos.example.com", {
+      pairingSessionId: repair.pairingSessionId,
+      installationId,
+    });
+
+    let sent: { pairingSessionId?: string; installationId?: string; token?: string } = {};
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+      sent = {
+        ...JSON.parse(String(init?.body)),
+        token: new Headers(init?.headers).get("authorization")?.slice("Bearer ".length),
+      };
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+    try {
+      await expect(
+        withTenant(created.businessId, () => acknowledgePendingPairing(created.businessId)),
+      ).resolves.toEqual({ status: "ok" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(sent).toEqual({
+      pairingSessionId: repair.pairingSessionId,
+      installationId,
+      token: repair.snapshot.syncToken,
+    });
+
+    await useDatabase(serverDb);
+    await expect(
+      acknowledgePairingSession(sent.pairingSessionId!, sent.installationId!, sent.token!),
+    ).resolves.toEqual({ ok: true, state: "completed" });
+    const device = await withoutTenantScope("pairing-redeem", () =>
+      query<{ status: string }>("SELECT status FROM site_devices WHERE id=$1", [repair.snapshot.siteDevice.id]),
+    );
+    expect(device.rows[0].status).toBe("active");
   }, 120_000);
 });
 

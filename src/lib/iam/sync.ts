@@ -5,6 +5,8 @@ import type { IamEvent, IamSnapshot } from "./model";
 import { iamStateHash, sequenceDecision } from "./reconciliation";
 import { validateIamEvent } from "./events";
 import { buildIamSnapshot } from "./service";
+import type { ReplicatedLoginCredential } from "./login-credentials";
+import { applyLoginCredentials } from "./login-credentials-service";
 
 function baseUrl(value:string){return value.trim().replace(/\/+$/,"");}
 
@@ -157,6 +159,13 @@ export async function runIamSync(businessId:string):Promise<boolean>{
       await mark(businessId,config.siteDeviceId,"snapshot_required","iam_drift_detected");
       await applySnapshot(businessId,config.siteDeviceId,cloud);
     }
+    // Global login (password + 2FA). Best-effort: an older cloud without the
+    // endpoint must not hold back ordinary sync.
+    try{
+      const credentials=await fetch(`${baseUrl(config.remoteUrl)}/api/iam/login-credentials`,{headers:{Authorization:`Bearer ${config.token}`},signal:AbortSignal.timeout(30_000)});
+      if(credentials.ok) await applyLoginCredentials(businessId,((await credentials.json()) as {credentials:ReplicatedLoginCredential[]}).credentials??[]);
+      else if(credentials.status!==404) console.error(`login credential sync: HTTP ${credentials.status}`);
+    }catch(error){console.error("login credential sync failed:",error instanceof Error?error.message:error);}
     return true;
   }catch(error){const message=error instanceof Error?error.message:String(error);await mark(businessId,config.siteDeviceId,message.startsWith("sequence_gap")?"snapshot_required":"degraded",message);return false;}
 }

@@ -87,6 +87,7 @@ import { apiOrQueue } from "../offline-queue";
 import { api, errorMessage } from "../ui";
 import { useBusinessInfo } from "../use-printers";
 import { ClosedOrderAmendment } from "./closed-order-amendment";
+import { usePromptDialog } from "../prompt-dialog";
 import {
   CARD,
   DANGER_BUTTON,
@@ -484,6 +485,8 @@ export function OrderDetailModal({
     if (saved) setSelectedTableId(tableId);
   }
 
+  const [promptDialog, askText] = usePromptDialog();
+
   async function run(
     fn: () => Promise<{ ok: boolean; data: { error?: string } }>,
   ) {
@@ -621,7 +624,8 @@ export function OrderDetailModal({
   }
 
   async function voidOrder() {
-    const reason = window.prompt("دلیل ابطال سفارش؟") ?? "";
+    const reason = await askText("دلیل ابطال سفارش؟");
+    if (reason === null) return;
     const voided = await run(() =>
       api(`/api/orders/${orderId}`, {
         method: "PATCH",
@@ -632,7 +636,8 @@ export function OrderDetailModal({
   }
 
   async function voidItem(itemId: string) {
-    const reason = window.prompt("دلیل ابطال قلم؟") ?? "";
+    const reason = await askText("دلیل ابطال قلم؟");
+    if (reason === null) return;
     await run(() =>
       api(`/api/orders/${orderId}/items/${itemId}`, {
         method: "PATCH",
@@ -964,6 +969,7 @@ export function OrderDetailModal({
 
   return (
     <>
+      {promptDialog}
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent
           showCloseButton={false}

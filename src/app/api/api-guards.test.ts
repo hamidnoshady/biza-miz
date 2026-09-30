@@ -105,6 +105,7 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "iam/status": "security sync diagnostics — authenticated by the scoped site credential, not a browser session",
   "iam/commands": "Cloud-authoritative security command — authenticated by the scoped site credential and re-authorizes the actor from current membership state",
   "iam/detach": "site detachment — authenticated by the scoped site credential and requires a current Cloud owner",
+  "iam/login-credentials": "global login replication — authenticated by the scoped site credential; returns only this business's members",
   "server-sync/pull":
     "server-to-server — authenticated by a site/location credential (legacy business/global tokens remain migration-only); not a session",
   "server-sync/push":

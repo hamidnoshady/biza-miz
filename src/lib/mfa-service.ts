@@ -1,6 +1,6 @@
 import { query, withoutTenantScope } from "./db";
 import { getRealmSecret, verifyWithRealmSecret } from "./jwt-secret";
-import { createCipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { SignJWT } from "jose";
 import { enrolmentRequirement, type MfaRequirement } from "./mfa";
 
@@ -128,6 +128,26 @@ export async function resetAccountMfa(
 }
 
 
+/** Wrap a TOTP secret for storage: IV(12) ‖ TAG(16) ‖ ciphertext, AES-256-GCM under this server's key. */
+export async function encryptTotpSecret(plain: Buffer | string): Promise<Buffer> {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", await getMfaSecretKey(), iv);
+  const ciphertext = Buffer.concat([cipher.update(plain), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]);
+}
+
+/** Inverse of encryptTotpSecret; null when this server's key cannot open it. */
+export async function decryptTotpSecret(data: Buffer): Promise<string | null> {
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", await getMfaSecretKey(), data.subarray(0, 12));
+    decipher.setAuthTag(data.subarray(12, 28));
+    return Buffer.concat([decipher.update(data.subarray(28)), decipher.final()]).toString("utf8");
+  } catch (err) {
+    console.error("Failed to decrypt TOTP secret", err);
+    return null;
+  }
+}
+
 export async function provisionMfaEnrolment(
   client: { query(text: string, params?: unknown[]): Promise<unknown> },
   subjectRealm: string,
@@ -137,15 +157,8 @@ export async function provisionMfaEnrolment(
   phoneE164?: string | null,
   totpSecretPlain?: Buffer | null
 ) {
-  let totpSecretEncrypted: Buffer | null = null;
-  if (method === "totp" && totpSecretPlain) {
-    const key = await getMfaSecretKey();
-    const iv = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", key, iv);
-    const ciphertext = Buffer.concat([cipher.update(totpSecretPlain), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    totpSecretEncrypted = Buffer.concat([iv, tag, ciphertext]);
-  }
+  const totpSecretEncrypted =
+    method === "totp" && totpSecretPlain ? await encryptTotpSecret(totpSecretPlain) : null;
 
   await client.query(
     `INSERT INTO mfa_enrolments (subject_realm, subject_id, method, is_primary, phone_e164, totp_secret, confirmed_at)
