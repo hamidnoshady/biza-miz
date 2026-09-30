@@ -79,9 +79,9 @@ Consumers:
   restarts), `sandbox: true`, `contextIsolation: true`, and **no preload**: a remote page never
   gets `pick-folder`, firewall or printer IPC.
 - `will-navigate` restricted to the origin it was opened with; `window.open` goes to the system
-  browser. A 3xx fires `will-redirect` instead: same origin is followed; an https redirect to a
-  sibling host under the same parent domain (a renamed business subdomain) is followed and becomes
-  the window's origin; anything else goes to the system browser.
+  browser. A 3xx fires `will-redirect` instead: same origin is followed; any other host — a
+  renamed business subdomain included — goes to the system browser, and the window's origin never
+  changes (a window with no address bar must not adopt an origin it was not opened with).
 - **Billing and subscription open in the system browser** (`/settings/billing`,
   `/settings/subscription` and their sub-paths) — from `openCloud`, from a link inside the cloud
   window, and from a client-side navigation. The payment gateway returns to a page that needs a

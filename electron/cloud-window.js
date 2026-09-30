@@ -8,9 +8,8 @@
  * preload, so a page from the Internet can never reach the till's IPC
  * (folders, firewall, printers), a sandboxed renderer, and a persistent
  * partition of its own so the cloud login survives restarts without sharing
- * the local server's cookies. Navigation stays on the cloud's origin (or,
- * after a redirect, a sibling business host under the same parent domain);
- * anything else goes to the system browser. So do billing and subscription:
+ * the local server's cookies. Navigation and redirects stay on the cloud's
+ * origin; anything else goes to the system browser. So do billing and subscription:
  * the payment gateway returns to a page that needs a session, and it must be
  * the browser's, which completes the flow end to end.
  */
@@ -41,23 +40,6 @@ function opensInBrowser(raw) {
     );
   } catch {
     return false;
-  }
-}
-
-/**
- * The https origin a redirect may move the window to: a sibling host under
- * the same parent domain (a renamed business subdomain). Null otherwise. A
- * parent of one label ("com") is not a shared domain.
- */
-function siblingOrigin(raw, origin) {
-  try {
-    const next = new URL(String(raw));
-    const current = new URL(origin);
-    const parent = (host) => host.split(".").slice(1).join(".");
-    if (next.protocol !== "https:" || !parent(current.host).includes(".")) return null;
-    return parent(next.host) === parent(current.host) ? next.origin : null;
-  } catch {
-    return null;
   }
 }
 
@@ -110,17 +92,11 @@ function createCloudWindowController({ BrowserWindow, shell }) {
       if (sameOrigin(url, origin) && !opensInBrowser(url)) return;
       toBrowser(event, url);
     });
-    // A 3xx does not fire will-navigate. A sibling host is the business's
-    // renamed subdomain (middleware's cross-host redirect): follow it and
-    // make it the window's origin from now on.
+    // A 3xx does not fire will-navigate. Any other host — a renamed business
+    // subdomain included — goes to the browser: a window with no address bar
+    // must never adopt an origin it was not opened with.
     created.webContents.on("will-redirect", (event, url) => {
-      if (opensInBrowser(url)) return toBrowser(event, url);
-      if (sameOrigin(url, origin)) return;
-      const sibling = siblingOrigin(url, origin);
-      if (sibling) {
-        origin = sibling;
-        return;
-      }
+      if (sameOrigin(url, origin) && !opensInBrowser(url)) return;
       toBrowser(event, url);
     });
     // A client-side (Next.js) link fires neither of the above: send billing to
@@ -162,4 +138,4 @@ function createCloudWindowController({ BrowserWindow, shell }) {
   };
 }
 
-module.exports = { cloudTarget, sameOrigin, opensInBrowser, siblingOrigin, offlinePageUrl, createCloudWindowController };
+module.exports = { cloudTarget, sameOrigin, opensInBrowser, offlinePageUrl, createCloudWindowController };

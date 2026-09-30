@@ -111,21 +111,18 @@ describe("createCloudWindowController", () => {
     expect(electron.shell.openExternal).not.toHaveBeenCalled();
   });
 
-  it("follows a redirect to the business's renamed subdomain and adopts that origin", () => {
+  it("sends a redirect to a sibling subdomain to the browser and keeps the window's origin", () => {
     const electron = fakeElectron();
     createCloudWindowController(electron).open("https://cafe.ac.example.com/accounting/reports");
     const contents = electron.created[0].webContents;
     const event = { preventDefault: vi.fn() };
     contents.handlers.get("will-redirect")!(event, "https://bistro.ac.example.com/accounting/reports");
-    expect(event.preventDefault).not.toHaveBeenCalled();
-    // The new host is now the window's own: navigation on it stays inside…
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(electron.shell.openExternal).toHaveBeenCalledWith("https://bistro.ac.example.com/accounting/reports");
+    // The origin did not move: the opened one is still the window's own.
     const inside = { preventDefault: vi.fn() };
-    contents.handlers.get("will-navigate")!(inside, "https://bistro.ac.example.com/crm/overview");
+    contents.handlers.get("will-navigate")!(inside, "https://cafe.ac.example.com/crm/overview");
     expect(inside.preventDefault).not.toHaveBeenCalled();
-    // …and the old one is a foreign host.
-    const old = { preventDefault: vi.fn() };
-    contents.handlers.get("will-navigate")!(old, "https://cafe.ac.example.com/crm/overview");
-    expect(old.preventDefault).toHaveBeenCalled();
   });
 
   it("sends a redirect to any other host to the system browser", () => {
@@ -138,12 +135,6 @@ describe("createCloudWindowController", () => {
       expect(event.preventDefault).toHaveBeenCalled();
       expect(electron.shell.openExternal).toHaveBeenCalledWith(url);
     }
-    // A two-label host shares only a TLD with its "siblings".
-    const bare = fakeElectron();
-    createCloudWindowController(bare).open("https://example.com/");
-    const event = { preventDefault: vi.fn() };
-    bare.created[0].webContents.handlers.get("will-redirect")!(event, "https://evil.com/");
-    expect(event.preventDefault).toHaveBeenCalled();
   });
 
   it("opens billing and subscription in the system browser instead of the cloud window", () => {

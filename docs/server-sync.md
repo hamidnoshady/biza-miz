@@ -23,9 +23,9 @@ The desktop's home is the member's till screen (`siteHomeFor`: kitchen →
 waiter without reservations, a trade without the kitchen module); with none
 openable it explains rather than redirecting. Every other screen opens the cloud
 in the «نسخهٔ ابری» window (`electron/cloud-window.js`: no preload, sandboxed,
-`persist:cloud` partition, navigation and redirects locked to the cloud's origin
-— a redirect to a renamed business subdomain under the same parent domain is
-followed and adopted — closed with the till window). Billing and subscription
+`persist:cloud` partition, navigation and redirects locked to the origin it was
+opened with — a redirect anywhere else, a renamed business subdomain included,
+goes to the system browser — closed with the till window). Billing and subscription
 (`/settings/billing`, `/settings/subscription`) open in the system browser
 instead, because the payment gateway returns to a page that needs the
 browser's own session. Offline, the hand-off screen says the section needs the Internet and
