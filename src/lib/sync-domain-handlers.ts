@@ -21,6 +21,7 @@ import {
 import { isWasteReason, recordWasteInTransaction } from "./waste-service";
 import type { SyncEventDefinition } from "./sync-event-registry";
 import { applyOrderState, OrderStateTerminal } from "./order-state-sync";
+import { applyShiftReplay, parseShiftSyncPayload } from "./shift-sync";
 import { amendClosedOrder, OrderAmendmentError } from "./order-amendment-service";
 import { validateAmendment, type AmendmentInput } from "./order-amendments";
 
@@ -381,6 +382,13 @@ export async function applySyncDomainHandler(context: SyncDomainContext): Promis
         createdBy: actor.userId,
       });
       return { effectType: "production_reversal", effectId: result.id };
+    }
+    case "shift.opened":
+    case "shift.closed": {
+      const shift = parseShiftSyncPayload(payload);
+      if (!shift) throw new SyncPayloadError("invalid_shift");
+      const effectId = await applyShiftReplay(client, businessId, locationId, shift);
+      return { effectType: context.definition.handler === "shift.closed" ? "shift_close" : "shift_open", effectId };
     }
     default:
       throw new Error(`sync_handler_not_implemented:${context.definition.handler}`);

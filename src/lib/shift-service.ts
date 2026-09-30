@@ -14,6 +14,8 @@ import { getBusinessDayStatus, type BusinessDayStatus } from "./business-day-ser
 import { getPool, query } from "./db";
 import { postgresDateToIso } from "./jalali";
 import { reconcileCash } from "./shift";
+import type { Role } from "./auth";
+import { recordShiftSyncEvent } from "./shift-sync";
 import { isUuid } from "./uuid";
 // Phase 32 — the coworker's event queue. Enqueued, never acted on here: a
 // cashier clocking in or out is a foreground request and must not wait on (or
@@ -303,9 +305,13 @@ export async function openShift(
   sessionId: string | null,
   openingFloat: number | null = null,
   fallbackLocationId: string | null = null,
+  actorRole: Role = "cashier",
 ): Promise<EmployeeShift> {
+  let shift: EmployeeShift;
+  const client = await getPool().connect();
   try {
-    const { rows } = await query<ShiftRow>(
+    await client.query("BEGIN");
+    const { rows } = await client.query<ShiftRow>(
       `INSERT INTO employee_shifts
          (employee_id, business_id, location_id, session_id, device_id, opening_float, business_date)
        SELECT $1, $2, coalesce(s.location_id, $5::uuid), s.id, s.device_id, $4,
@@ -317,34 +323,38 @@ export async function openShift(
       [employeeId, businessId, sessionId, openingFloat, fallbackLocationId],
     );
     if (!rows[0]) throw new ShiftError("session_required", 400);
-    const shift = toShift(rows[0]);
-    await auditShift(businessId, employeeId, "shift.opened", shift.id, { openingFloat });
-    await recordCoworkerEvent({
-      businessId,
-      locationId: shift.locationId,
-      kind: "shift_open",
-      payload: { shiftId: shift.id, employeeId },
-    });
-    await recordNotification({
-      businessId,
-      locationId: shift.locationId,
-      eventKey: "shift.opened",
-      severity: "info",
-      title: "شیفت باز شد",
-      body: `${await employeeName(businessId, employeeId)} شیفت خود را شروع کرد.`,
-      url: "/settings/shifts",
-      // Keyed on the shift, not on now(): a retried request is one shift and
-      // therefore one notification.
-      dedupeKey: notificationDedupeKey("shift.opened", shift.id),
-      payload: { shiftId: shift.id, employeeId },
-    });
-    return shift;
+    shift = toShift(rows[0]);
+    // Phase 45: the cloud's shift reports hear about it in the same commit.
+    await recordShiftSyncEvent(client, "shift.opened", shift, { userId: employeeId, role: actorRole });
+    await client.query("COMMIT");
   } catch (err) {
-    if ((err as { code?: string }).code === "23505") {
-      throw new ShiftError("shift_already_open", 409);
-    }
+    await client.query("ROLLBACK").catch(() => {});
+    if ((err as { code?: string }).code === "23505") throw new ShiftError("shift_already_open", 409);
     throw err;
+  } finally {
+    client.release();
   }
+  await auditShift(businessId, employeeId, "shift.opened", shift.id, { openingFloat });
+  await recordCoworkerEvent({
+    businessId,
+    locationId: shift.locationId,
+    kind: "shift_open",
+    payload: { shiftId: shift.id, employeeId },
+  });
+  await recordNotification({
+    businessId,
+    locationId: shift.locationId,
+    eventKey: "shift.opened",
+    severity: "info",
+    title: "شیفت باز شد",
+    body: `${await employeeName(businessId, employeeId)} شیفت خود را شروع کرد.`,
+    url: "/settings/shifts",
+    // Keyed on the shift, not on now(): a retried request is one shift and
+    // therefore one notification.
+    dedupeKey: notificationDedupeKey("shift.opened", shift.id),
+    payload: { shiftId: shift.id, employeeId },
+  });
+  return shift;
 }
 
 export async function getActiveShift(
@@ -440,6 +450,7 @@ async function closeShiftRow(
   businessId: string,
   actorId: string | null,
   closingFloat: number | null,
+  actorRole: Role,
 ): Promise<CloseShiftResult> {
   const client = await getPool().connect();
   try {
@@ -457,6 +468,7 @@ async function closeShiftRow(
       await client.query("ROLLBACK");
       throw new ShiftError("no_active_shift", 404);
     }
+    await recordShiftSyncEvent(client, "shift.closed", toShift(rows[0]), { userId: actorId, role: actorRole });
     await client.query("COMMIT");
     const shift = toShift(rows[0]);
 
@@ -524,8 +536,9 @@ export async function closeOwnShift(
   employeeId: string,
   businessId: string,
   closingFloat: number | null = null,
+  actorRole: Role = "cashier",
 ): Promise<CloseShiftResult> {
-  return closeShiftRow({ employeeId }, businessId, employeeId, closingFloat);
+  return closeShiftRow({ employeeId }, businessId, employeeId, closingFloat, actorRole);
 }
 
 /**
@@ -542,9 +555,10 @@ export async function closeShiftById(
   businessId: string,
   actorId: string | null,
   closingFloat: number | null = null,
+  actorRole: Role = "manager",
 ): Promise<CloseShiftResult> {
   if (!isUuid(shiftId)) throw new ShiftError("no_active_shift", 404);
-  return closeShiftRow({ id: shiftId }, businessId, actorId, closingFloat);
+  return closeShiftRow({ id: shiftId }, businessId, actorId, closingFloat, actorRole);
 }
 
 export interface ShiftListEntry extends EmployeeShift {

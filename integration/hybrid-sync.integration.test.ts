@@ -19,6 +19,8 @@ import { applyPairingSnapshot } from "../src/lib/pairing-apply";
 import { acknowledgePendingPairing, runServerPull, runServerPush } from "../src/lib/server-sync";
 import { runMasterSync } from "../src/lib/master-sync-transport";
 import { addItemsToOrder, createOrder, updateOrderItem } from "../src/lib/order-mutations";
+import { closeOwnShift, openShift } from "../src/lib/shift-service";
+import { syncClientEventId } from "../src/lib/sync-outbox";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
@@ -563,6 +565,86 @@ describe("orders", () => {
       query("SELECT 1 FROM sync_events WHERE client_event_id = $1 AND origin = 'local'", [orderId]),
     );
     expect(echoed.rowCount).toBe(0);
+  });
+});
+
+/** A signed-in till session for the owner on the desktop (openShift needs one). */
+async function desktopTillSession(): Promise<string> {
+  return withTenant(biz.businessId, async () => {
+    await query("INSERT INTO employees (id, business_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [biz.ownerId, biz.businessId]);
+    const created = await query<{ id: string }>(
+      `INSERT INTO employee_sessions (employee_id, business_id, location_id, token_hash, expires_at)
+       VALUES ($1, $2, $3, $4, now() + interval '1 hour') RETURNING id`,
+      // token_hash is CHECKed to 64 characters (a sha256 hex).
+      [biz.ownerId, biz.businessId, biz.locationId, (randomUUID() + randomUUID()).replaceAll("-", "")],
+    );
+    return created.rows[0].id;
+  });
+}
+
+describe("shifts", () => {
+  it("brings a shift opened and cashed up at the till to the cloud", async () => {
+    const sessionId = await desktopTillSession();
+    const opened = await withTenant(biz.businessId, () =>
+      openShift(biz.ownerId, biz.businessId, sessionId, 5_000_000, biz.locationId, "owner"),
+    );
+    await withTenant(biz.businessId, () => closeOwnShift(biz.ownerId, biz.businessId, 7_500_000, "owner"));
+    await syncRound();
+    const cloud = await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query<{ employee_id: string; location_id: string; opening: string; closing: string; closed: boolean; session_id: string | null }>(
+          `SELECT employee_id, location_id, opening_float::text AS opening, closing_float::text AS closing,
+                  ended_at IS NOT NULL AS closed, session_id
+             FROM employee_shifts WHERE id = $1`,
+          [opened.id],
+        ),
+      ),
+    );
+    expect(cloud.rows[0]).toEqual({
+      employee_id: biz.ownerId,
+      location_id: biz.locationId,
+      opening: "5000000",
+      closing: "7500000",
+      closed: true,
+      session_id: null,
+    });
+  });
+
+  it("refuses, visibly, a second open shift for the same person", async () => {
+    const cloudShiftId = await onCentral(() =>
+      withTenant(biz.businessId, async () => {
+        await query("INSERT INTO employees (id, business_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [biz.ownerId, biz.businessId]);
+        return (
+          await query<{ id: string }>(
+            `INSERT INTO employee_shifts (employee_id, business_id, location_id, business_date)
+             VALUES ($1, $2, $3, current_date) RETURNING id`,
+            [biz.ownerId, biz.businessId, biz.locationId],
+          )
+        ).rows[0].id;
+      }),
+    );
+    const sessionId = await desktopTillSession();
+    const desktopShift = await withTenant(biz.businessId, () =>
+      openShift(biz.ownerId, biz.businessId, sessionId, null, biz.locationId, "owner"),
+    );
+    await syncRound();
+    const deadLetters = await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query<{ error_code: string }>(
+          `SELECT error_code FROM sync_event_dead_letters WHERE business_id = $1 AND client_event_id = $2`,
+          // The outbox stores the name-derived UUID of the identity.
+          [biz.businessId, syncClientEventId(`shift.opened:${desktopShift.id}`)],
+        ),
+      ),
+    );
+    expect(deadLetters.rows.map((row) => row.error_code)).toEqual(["shift_already_open"]);
+    // Tidy both sides so later tests start with nobody clocked in.
+    await onCentral(() =>
+      withTenant(biz.businessId, () => query("UPDATE employee_shifts SET ended_at = now() WHERE id = $1", [cloudShiftId])),
+    );
+    await withTenant(biz.businessId, () => closeOwnShift(biz.ownerId, biz.businessId, null, "owner"));
+    // Deliver that cash-up too, so no unsent work is left for the drift check.
+    await syncRound();
   });
 });
 

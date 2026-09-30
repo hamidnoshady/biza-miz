@@ -9,8 +9,8 @@
 import { SYNC_EVENT_REGISTRY } from "./sync-event-registry";
 import { MASTER_SYNC_TABLES } from "./master-sync-registry";
 
-/** v2 (migration 0190): customers and the menu sync continuously; cloud writes reach the branch. */
-export const REPLICATION_CONTRACT_VERSION = 2 as const;
+/** v3 (Phase 45): shifts travel as events; v2 (migration 0190): customers and the menu sync continuously. */
+export const REPLICATION_CONTRACT_VERSION = 3 as const;
 
 export type DataOwnership =
   | "site_authoritative"
@@ -199,6 +199,20 @@ export const DATA_OWNERSHIP_REGISTRY = {
       event("order.payment.completed", 2),
       event("order.customer_return.created", 1),
     ],
+  }),
+  shifts: replicated({
+    domain: "shifts",
+    authority: "site_authoritative",
+    direction: "bidirectional",
+    conflictPolicy: "immutable_idempotent",
+    tombstonePolicy: "not_applicable",
+    bootstrap: "none",
+    continuousSync: "active",
+    identity: "shift UUID; client_event_id shift.opened:<id> / shift.closed:<id>",
+    retry:
+      "transactional sync_events outbox; the row is upserted by id; a missing employee defers; a second open shift for the same person dead-letters",
+    transport: "events",
+    events: [event("shift.opened", 1), event("shift.closed", 1)],
   }),
   accounting_journals: replicated({
     domain: "accounting_journals",

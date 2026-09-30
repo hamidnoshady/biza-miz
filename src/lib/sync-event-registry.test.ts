@@ -84,6 +84,10 @@ describe("sync domain failure classification", () => {
     expect(classifySyncDomainError(new Error("order_not_found"), payment)).toBe("deferred");
     expect(classifySyncDomainError(new SyncPayloadError("invalid_method"), payment)).toBe("terminal");
     expect(classifySyncDomainError(new Error("refund_exceeds_payment"), payment)).toBe("terminal");
+    // A second open shift for one person is the owner's to resolve, not a retry.
+    const shiftOpened = syncEventDefinition("shift.opened", 1) as SyncEventDefinition;
+    expect(classifySyncDomainError(new Error("employee_not_found"), shiftOpened)).toBe("deferred");
+    expect(classifySyncDomainError(new Error("shift_already_open"), shiftOpened)).toBe("terminal");
   });
 
   it("keeps SQL, network, injected and unexpected programming failures retryable", () => {
