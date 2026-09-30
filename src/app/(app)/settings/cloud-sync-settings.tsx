@@ -41,7 +41,10 @@ export function CloudSyncSettings() {
             {!local ? (
               <p className="mt-1 text-sm leading-6 text-muted-foreground">
                 {`تنظیمات شعبه از ابر: ${state.siteProfile?.appliedAt ? new Date(state.siteProfile.appliedAt).toLocaleString("fa-IR") : "هنوز دریافت نشده"}`}
-                {state.siteProfile?.lastError ? ` — خطای آخرین دریافت: ${state.siteProfile.lastError}` : ""}
+                {state.siteProfile?.lastError ? (
+                  // The raw code is for support, not the reader.
+                  <span title={state.siteProfile.lastError}> — دریافت تنظیمات شعبه از ابر ناموفق بود</span>
+                ) : null}
               </p>
             ) : null}
           </div>
