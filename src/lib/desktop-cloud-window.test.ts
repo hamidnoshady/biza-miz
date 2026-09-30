@@ -9,6 +9,7 @@ type Handler = (...args: unknown[]) => void;
 
 class FakeContents {
   handlers = new Map<string, Handler>();
+  navigationHistory = { canGoBack: vi.fn(() => true), goBack: vi.fn() };
   openHandler: ((details: { url: string }) => { action: string }) | null = null;
   setWindowOpenHandler(fn: (details: { url: string }) => { action: string }) {
     this.openHandler = fn;
@@ -98,6 +99,77 @@ describe("createCloudWindowController", () => {
     navigate(outside, "https://elsewhere.example.org/");
     expect(outside.preventDefault).toHaveBeenCalled();
     expect(electron.shell.openExternal).toHaveBeenCalledWith("https://elsewhere.example.org/");
+  });
+
+  it("follows a redirect on the same origin", () => {
+    const electron = fakeElectron();
+    createCloudWindowController(electron).open("https://cafe.example.com/accounting/reports");
+    const redirect = electron.created[0].webContents.handlers.get("will-redirect")!;
+    const event = { preventDefault: vi.fn() };
+    redirect(event, "https://cafe.example.com/login?next=%2Faccounting%2Freports");
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(electron.shell.openExternal).not.toHaveBeenCalled();
+  });
+
+  it("follows a redirect to the business's renamed subdomain and adopts that origin", () => {
+    const electron = fakeElectron();
+    createCloudWindowController(electron).open("https://cafe.ac.example.com/accounting/reports");
+    const contents = electron.created[0].webContents;
+    const event = { preventDefault: vi.fn() };
+    contents.handlers.get("will-redirect")!(event, "https://bistro.ac.example.com/accounting/reports");
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    // The new host is now the window's own: navigation on it stays inside…
+    const inside = { preventDefault: vi.fn() };
+    contents.handlers.get("will-navigate")!(inside, "https://bistro.ac.example.com/crm/overview");
+    expect(inside.preventDefault).not.toHaveBeenCalled();
+    // …and the old one is a foreign host.
+    const old = { preventDefault: vi.fn() };
+    contents.handlers.get("will-navigate")!(old, "https://cafe.ac.example.com/crm/overview");
+    expect(old.preventDefault).toHaveBeenCalled();
+  });
+
+  it("sends a redirect to any other host to the system browser", () => {
+    const electron = fakeElectron();
+    createCloudWindowController(electron).open("https://cafe.example.com/accounting/reports");
+    const redirect = electron.created[0].webContents.handlers.get("will-redirect")!;
+    for (const url of ["https://evil.example.org/", "http://other.example.com/", "https://cafe.example.com.evil.org/"]) {
+      const event = { preventDefault: vi.fn() };
+      redirect(event, url);
+      expect(event.preventDefault).toHaveBeenCalled();
+      expect(electron.shell.openExternal).toHaveBeenCalledWith(url);
+    }
+    // A two-label host shares only a TLD with its "siblings".
+    const bare = fakeElectron();
+    createCloudWindowController(bare).open("https://example.com/");
+    const event = { preventDefault: vi.fn() };
+    bare.created[0].webContents.handlers.get("will-redirect")!(event, "https://evil.com/");
+    expect(event.preventDefault).toHaveBeenCalled();
+  });
+
+  it("opens billing and subscription in the system browser instead of the cloud window", () => {
+    const electron = fakeElectron();
+    const controller = createCloudWindowController(electron);
+    expect(controller.open("https://cafe.example.com/settings/billing?topup=1")).toBe(true);
+    expect(controller.open("https://cafe.example.com/settings/subscription/plans")).toBe(true);
+    expect(electron.created).toHaveLength(0);
+    expect(electron.shell.openExternal).toHaveBeenCalledWith("https://cafe.example.com/settings/billing?topup=1");
+    expect(electron.shell.openExternal).toHaveBeenCalledWith("https://cafe.example.com/settings/subscription/plans");
+  });
+
+  it("sends a same-origin link to billing out to the system browser", () => {
+    const electron = fakeElectron();
+    createCloudWindowController(electron).open("https://cafe.example.com/accounting/reports");
+    const contents = electron.created[0].webContents;
+    const event = { preventDefault: vi.fn() };
+    contents.handlers.get("will-navigate")!(event, "https://cafe.example.com/settings/billing");
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(electron.shell.openExternal).toHaveBeenCalledWith("https://cafe.example.com/settings/billing");
+    // A client-side link: out to the browser, and the window steps back.
+    contents.handlers.get("did-navigate-in-page")!({}, "https://cafe.example.com/settings/subscription", true);
+    expect(electron.shell.openExternal).toHaveBeenCalledWith("https://cafe.example.com/settings/subscription");
+    expect(contents.navigationHistory.goBack).toHaveBeenCalledTimes(1);
+    contents.handlers.get("did-navigate-in-page")!({}, "https://cafe.example.com/crm/overview", true);
+    expect(contents.navigationHistory.goBack).toHaveBeenCalledTimes(1);
   });
 
   it("shows the offline page when the cloud cannot be reached", () => {
