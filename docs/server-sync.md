@@ -63,7 +63,11 @@ persist those two fields in `server_sync.config`, and every sync tick retries
 `/api/iam/login-credentials` and makes each member's local identity equal the
 cloud's: password hash, second factor (TOTP secret re-encrypted under the
 site's own key) and recovery-code hashes (`src/lib/iam/login-credentials*.ts`).
-The cloud is the source of truth; a recovery code spent on the site stays spent.
+The cloud is the source of truth: the site compares against its own current
+rows each tick and puts back anything changed locally, and refuses password/2FA
+changes (`login_managed_by_cloud`). A recovery code spent on the site is POSTed
+back to the same endpoint so it is single-use on both replicas; while the site is
+offline, that code still works on the cloud until the next tick reports it.
 
 ## Event transport
 
