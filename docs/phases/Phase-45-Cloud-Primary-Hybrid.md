@@ -61,8 +61,14 @@ Consumers:
   cloud window; offline it renders «این بخش به اینترنت نیاز دارد». The existing growth/website/AI
   entries become special cases of the same rule.
 - **Menu** — the till window's navigation lists only local routes plus one «نسخهٔ ابری» button.
-- **Home** — `/dashboard` on a hybrid site redirects to the member's till screen, `siteHomeFor(role)`:
+- **Home** — `/dashboard` on a hybrid site redirects to the member's till screen, `siteHomeFor`:
   kitchen → `/accounting/kitchen`, waiter → `/accounting/waiter`, everyone else → `/accounting/pos`.
+  It falls back when the role's screen is not available — then `/accounting/pos`, then
+  `/accounting/orders` — using the same module, feature and permission checks those pages apply
+  (a waiter without `reservations`, kitchen staff in a trade without the kitchen module). With no
+  till screen openable it explains instead of redirecting, so it never bounces off a page that
+  sends the member back to `/dashboard`. «بازگشت به صندوق» on the hand-off screen links to
+  `/dashboard` for the same reason.
 - **APIs stay open.** Till screens read menu, customers, payment ways and similar endpoints, and
   the local server listens on loopback only. The split is a presentation boundary; the cloud's
   own API guard is what protects cloud data.
@@ -73,7 +79,13 @@ Consumers:
   restarts), `sandbox: true`, `contextIsolation: true`, and **no preload**: a remote page never
   gets `pick-folder`, firewall or printer IPC.
 - `will-navigate` restricted to the origin it was opened with; `window.open` goes to the system
-  browser. One cloud window is reused and focused, not one per click, and it closes with the till
+  browser. A 3xx fires `will-redirect` instead: same origin is followed; an https redirect to a
+  sibling host under the same parent domain (a renamed business subdomain) is followed and becomes
+  the window's origin; anything else goes to the system browser.
+- **Billing and subscription open in the system browser** (`/settings/billing`,
+  `/settings/subscription` and their sub-paths) — from `openCloud`, from a link inside the cloud
+  window, and from a client-side navigation. The payment gateway returns to a page that needs a
+  session, and only the browser that started the payment has it. One cloud window is reused and focused, not one per click, and it closes with the till
   window.
 - Offline, the hand-off screen shows «این بخش به اینترنت نیاز دارد» and opens the cloud window by
   itself once the connection returns.
@@ -109,7 +121,7 @@ Consumers:
   - branch: name, address, phone, timezone, `business_day_start_minutes`, is_active
   - effective feature switches (global flag state × `business_features`)
   - effective app availability (platform row, overridden per business)
-- The desktop calls it on every sync tick **after master sync and before push/pull**, so the bills
+- The desktop calls it on the sync tick — at most once per sync interval — **after master sync and before push/pull**, so the bills
   pulled in the same tick land on the cloud's business day. It applies the profile in one
   transaction on every successful due fetch — updates `locations`, upserts `business_features`,
   and writes each app's effective state as a `business_app_availability` override (so the global
@@ -134,8 +146,9 @@ Hybrid desktop the link is always hidden, because the assistant is a cloud scree
   payments and shifts queue in `sync_events`. Cloud-window screens show the offline page. Branch
   settings and switches keep their last applied values.
 - **Back online:** the existing wake-ups (`pg_notify`, long-poll) run a tick within seconds. It
-  pushes queued events, pulls, refreshes the site profile, and the drift check compares the same
-  business days on both sides.
+  refreshes the site profile, pushes queued events, pulls, and then the drift check compares the
+  same business days on both sides. The site profile is fetched at most once per sync interval
+  (30 s), however often a wake-up runs the tick, so it does not spend the sync token's rate limit.
 
 ## Not in this phase
 

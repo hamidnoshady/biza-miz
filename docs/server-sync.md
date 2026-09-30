@@ -18,14 +18,22 @@ desktop only the till screens render locally — selling (`/accounting/pos`,
 devices, desktop, printers, backup, logs). The list is `src/lib/site-routes.ts`.
 The desktop's home is the member's till screen (`siteHomeFor`: kitchen →
 `/accounting/kitchen`, waiter → `/accounting/waiter`, everyone else →
-`/accounting/pos`). Every other screen opens the cloud in the «نسخهٔ ابری»
-window (`electron/cloud-window.js`: no preload, sandboxed, `persist:cloud`
-partition, navigation locked to the cloud's origin, closed with the till
-window). Offline, the hand-off screen says the section needs the Internet and
+`/accounting/pos`), falling back to `/accounting/pos` and then
+`/accounting/orders` when the role's screen is not available to that member (a
+waiter without reservations, a trade without the kitchen module); with none
+openable it explains rather than redirecting. Every other screen opens the cloud
+in the «نسخهٔ ابری» window (`electron/cloud-window.js`: no preload, sandboxed,
+`persist:cloud` partition, navigation and redirects locked to the cloud's origin
+— a redirect to a renamed business subdomain under the same parent domain is
+followed and adopted — closed with the till window). Billing and subscription
+(`/settings/billing`, `/settings/subscription`) open in the system browser
+instead, because the payment gateway returns to a page that needs the
+browser's own session. Offline, the hand-off screen says the section needs the Internet and
 opens the cloud window by itself once the connection returns. The cloud itself
 is unchanged and standalone.
 
-Each tick — after master data and **before** push/pull, so the bills pulled in
+Each tick, at most once per sync interval (30 s) however often a wake-up runs
+it — after master data and **before** push/pull, so the bills pulled in
 the same tick land on the cloud's business day — the desktop also reads
 `GET /api/server-sync/site-profile` (bearer, the credential names the branch):
 the branch row (name, address, phone, timezone, business-day start, active)
@@ -39,6 +47,13 @@ App keys, availability states and feature keys this desktop does not know yet
 own setting, `server_sync.site_profile_state`, backs off, and is shown as its
 own line («تنظیمات شعبه از ابر») on the sync panel; it never blocks push or
 pull and does not change the overall sync badge.
+
+**Rollout: deploy the cloud first.** The shift events (`shift.opened@1`,
+`shift.closed@1`) record on both sides. A desktop still on an older version
+does not know them, so it dead-letters cloud-recorded `shift.*` events as
+`unknown_event_version` until it is updated; the cloud must already serve
+`/api/server-sync/site-profile` and accept the desktop's shift events before
+any desktop is updated.
 
 ## Production architecture
 
