@@ -8,6 +8,38 @@ exchange explicitly supported domain events with a hosted deployment.
 This is **not full-database replication**. The current event catalog is listed
 under [Supported event scope](#supported-event-scope).
 
+## Cloud-primary split (Phase 45)
+
+The cloud is the system of record; a paired desktop is the till. On a Hybrid
+desktop only the till screens render locally — selling (`/accounting/pos`,
+`/accounting/orders`, `/accounting/waiter`), floor & kitchen
+(`/accounting/floor`, `/accounting/kitchen`, `/accounting/reservations`,
+`/accounting/delivery`), shifts, and this computer's own settings (cloud sync,
+devices, desktop, printers, backup, logs). The list is `src/lib/site-routes.ts`.
+The desktop's home is the member's till screen (`siteHomeFor`: kitchen →
+`/accounting/kitchen`, waiter → `/accounting/waiter`, everyone else →
+`/accounting/pos`). Every other screen opens the cloud in the «نسخهٔ ابری»
+window (`electron/cloud-window.js`: no preload, sandboxed, `persist:cloud`
+partition, navigation locked to the cloud's origin, closed with the till
+window). Offline, the hand-off screen says the section needs the Internet and
+opens the cloud window by itself once the connection returns. The cloud itself
+is unchanged and standalone.
+
+Each tick — after master data and **before** push/pull, so the bills pulled in
+the same tick land on the cloud's business day — the desktop also reads
+`GET /api/server-sync/site-profile` (bearer, the credential names the branch):
+the branch row (name, address, phone, timezone, business-day start, active)
+and the effective feature switches and app availability. It applies the
+profile in one transaction on every successful fetch (the apply is idempotent;
+the hash only decides whether the state records a new `appliedAt`), writes each
+app's state as a per-business override so the desktop's global catalogue is
+never rewritten, and keeps the last copy offline (`site-profile-service.ts`).
+App keys, availability states and feature keys this desktop does not know yet
+(a newer cloud) are skipped rather than rejected. A failure is recorded in its
+own setting, `server_sync.site_profile_state`, backs off, and is shown as its
+own line («تنظیمات شعبه از ابر») on the sync panel; it never blocks push or
+pull and does not change the overall sync badge.
+
 ## Production architecture
 
 ```text
@@ -120,8 +152,11 @@ bill after every change** (`order.state.synced`: added lines, voids,
 quantities, discount, customer, table, kitchen status — and once more inside
 the payment transaction), payment v2 and customer returns, **closed-order
 amendments** (`order.amendment.posted`), manual-journal reversals, purchases,
-supplier returns, transfers, waste, retail/standard stock counts, and
-production/reversal events. Each is written in the local mutation transaction,
+supplier returns, transfers, waste, retail/standard stock counts,
+production/reversal events, and (contract v3) shifts opened and cashed up
+(`shift.opened@1`, `shift.closed@1`, upserted by shift id; `client_event_id` is
+derived from `shift.opened:<id>` / `shift.closed:<id>`; a second open shift for
+the same person is a terminal error and dead-letters visibly). Each is written in the local mutation transaction,
 uses stable IDs and `client_event_id` idempotency, and is applied through the
 versioned registry. Since contract v2 the **central server records the same
 events for a branch that has an active paired desktop**, so a bill, purchase

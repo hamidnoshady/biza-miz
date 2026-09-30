@@ -1,6 +1,6 @@
 # Phase 45 — Cloud-primary Hybrid (the desktop is the till)
 
-**Status:** Designed — awaiting implementation plan.
+**Status:** Implemented (no migration).
 
 Phase 44 made the Hybrid event transport reliable, but a paired desktop still pretended to be a
 second copy of the whole suite. Only the till's data syncs (orders, payments, menu, customers,
@@ -47,8 +47,8 @@ One list decides what a hybrid desktop renders locally:
 - Floor & kitchen: `/accounting/floor`, `/accounting/kitchen`, `/accounting/reservations`,
   `/accounting/delivery`
 - Shifts & cash-up: the shift controls inside those screens (no route of their own)
-- Sign-in family (password, PIN) and the desktop's own settings: cloud sync, local devices/LAN,
-  printers, local backup
+- Sign-in family (password, PIN) and the desktop's own settings: the settings tabs for shifts,
+  cloud sync, local devices/LAN, desktop, printers, local backup and logs
 
 Everything else is **cloud-by-default**, so a feature added later needs no sync work and cannot
 appear half-populated on a desktop. `isSiteLocalRoute(pathname)` is the single predicate; it
@@ -61,7 +61,8 @@ Consumers:
   cloud window; offline it renders «این بخش به اینترنت نیاز دارد». The existing growth/website/AI
   entries become special cases of the same rule.
 - **Menu** — the till window's navigation lists only local routes plus one «نسخهٔ ابری» button.
-- **Home** — `/dashboard` on a hybrid site redirects to `/accounting/pos`.
+- **Home** — `/dashboard` on a hybrid site redirects to the member's till screen, `siteHomeFor(role)`:
+  kitchen → `/accounting/kitchen`, waiter → `/accounting/waiter`, everyone else → `/accounting/pos`.
 - **APIs stay open.** Till screens read menu, customers, payment ways and similar endpoints, and
   the local server listens on loopback only. The split is a presentation boundary; the cloud's
   own API guard is what protects cloud data.
@@ -72,7 +73,10 @@ Consumers:
   restarts), `sandbox: true`, `contextIsolation: true`, and **no preload**: a remote page never
   gets `pick-folder`, firewall or printer IPC.
 - `will-navigate` restricted to the origin it was opened with; `window.open` goes to the system
-  browser. One cloud window is reused and focused, not one per click.
+  browser. One cloud window is reused and focused, not one per click, and it closes with the till
+  window.
+- Offline, the hand-off screen shows «این بخش به اینترنت نیاز دارد» and opens the cloud window by
+  itself once the connection returns.
 - The till's preload exposes `openCloud(url)`; main accepts only `https:` URLs.
 - A failed load (`did-fail-load`) shows a local «اتصال به اینترنت برقرار نیست — دوباره تلاش
   کنید» page with a retry.
@@ -84,12 +88,17 @@ Consumers:
   `appendSyncOutboxEvent` in their own transaction.
 - A handler in `sync-domain-handlers.ts` upserts `employee_shifts` by id. `session_id` and
   `device_id` are device-local and replay as NULL. Closing an already-closed shift is idempotent.
-  A shift whose employee has not arrived yet defers, like any other missing prerequisite.
+  A shift whose employee has not arrived yet defers, like any other missing prerequisite. A second
+  open shift for the same person (`shift_already_open`) is a terminal error and dead-letters
+  visibly rather than retrying forever.
+- `client_event_id` is derived from `shift.opened:<id>` / `shift.closed:<id>` through
+  `syncClientEventId`, and both events require `orders.create` — the permission the shift routes
+  already check.
 - The existing machinery records on both sides, so a shift opened on the cloud POS for the
   branch also reaches the desktop. That keeps both sides' "the night ends at the cash-up" window
   the same.
-- Registered in `data-ownership.ts` as a new `shifts` domain (contract bump) and documented in
-  the supported-event list.
+- Registered as a new `shifts` domain in `data-ownership.ts` (contract v3) and in
+  `replication-catalogue.ts`, and documented in the supported-event list.
 
 ### 4. Site profile — cloud → desktop, `GET /api/server-sync/site-profile`
 
@@ -100,17 +109,24 @@ Consumers:
   - branch: name, address, phone, timezone, `business_day_start_minutes`, is_active
   - effective feature switches (global flag state × `business_features`)
   - effective app availability (platform row, overridden per business)
-- The desktop calls it on every sync tick after pull. If the response hash changed, it applies it
-  in one transaction: updates `locations`, upserts `business_features`, and writes each app's
-  effective state as a `business_app_availability` override (so the global catalogue on the
-  desktop is never rewritten). Offline, the last applied copy stays in force.
-- A failure is logged in the sync state like pull/push, backs off with the same `sync-backoff`,
-  and is shown on the sync panel. It never blocks push or pull.
+- The desktop calls it on every sync tick **after master sync and before push/pull**, so the bills
+  pulled in the same tick land on the cloud's business day. It applies the profile in one
+  transaction on every successful due fetch — updates `locations`, upserts `business_features`,
+  and writes each app's effective state as a `business_app_availability` override (so the global
+  catalogue on the desktop is never rewritten). The apply is idempotent; the response hash only
+  decides whether the state records a new `appliedAt`. Re-applying every time is what lands a
+  switch an older desktop skipped once it is updated, and what repairs a local edit. App keys and
+  availability states from a newer cloud are skipped by validation, not rejected, and unknown
+  feature keys are skipped at apply time. Offline, the last applied copy stays in force.
+- A failure is recorded in its own setting, `server_sync.site_profile_state`, backs off with the
+  same `sync-backoff`, and is shown as its own line («تنظیمات شعبه از ابر») on the sync panel. It
+  never blocks push or pull and does not change the overall sync badge.
 
 ### 5. «از دستیار بپرس» follows the AI switch
 
-`AskAssistant` renders nothing when the business's AI is off (the same entitlement the chat home
-uses). This is a bug fix on every deployment, the cloud included.
+`AskAssistant` renders nothing when the business's `ai_assistant` switch is off (the same
+entitlement the chat home uses). This is a bug fix on every deployment, the cloud included. On a
+Hybrid desktop the link is always hidden, because the assistant is a cloud screen there.
 
 ## Offline and reconnect behaviour
 
@@ -147,3 +163,9 @@ uses). This is a bug fix on every deployment, the cloud included.
   queued bills and shift.
 - `docs/server-sync.md`, the phase index and the CLAUDE.md Hybrid section describe the
   cloud-primary split.
+
+Where each is satisfied: `src/lib/site-routes.test.ts`; `src/lib/desktop-cloud-window.test.ts`;
+`src/components/cloud-handoff-state.test.tsx`; `src/components/ai/ask-assistant.test.tsx`;
+`src/lib/shift-sync.test.ts`; `src/lib/site-profile.test.ts`; the `shifts` and `site profile`
+blocks of `integration/hybrid-sync.integration.test.ts`. The real-install check is the owner's
+manual verification after `verify-shippables.yml` and `build-desktop-installer.yml`.
