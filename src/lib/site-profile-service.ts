@@ -1,7 +1,7 @@
 /**
  * Phase 45 — the cloud serves a paired branch its profile
- * (GET /api/server-sync/site-profile); the desktop applies it on every sync
- * tick. The branch row and the switches are the cloud's, so the desktop
+ * (GET /api/server-sync/site-profile); the desktop applies it at most once
+ * per sync interval. The branch row and the switches are the cloud's, so the desktop
  * overwrites its copy. App availability lands as this business's override,
  * so the desktop's global catalogue is never rewritten. Offline, the last
  * applied copy stays in force.
@@ -113,12 +113,31 @@ export async function applySiteProfile(businessId: string, locationId: string, p
   }
 }
 
+/**
+ * At most one attempt per sync interval. Ticks also run on a NOTIFY wake
+ * (~1.5 s after each local commit); the profile is not urgent, and each fetch
+ * spends the sync token's shared rate limit. `SERVER_SYNC_INTERVAL_MS` in
+ * server-sync.ts — not imported, since server-sync imports this module.
+ * ponytail: process-local, so a restart may attempt early once; that is fine.
+ */
+const SITE_PROFILE_INTERVAL_MS = 30_000;
+const lastAttemptAt = new Map<string, number>();
+
+/** Tests only: forget the per-business interval gate. */
+export function resetSiteProfileGate(): void {
+  lastAttemptAt.clear();
+}
+
 /** One desktop tick. Never throws for a cloud-side failure; it records it and backs off. */
 export async function runSiteProfileSync(businessId: string, now: Date = new Date()): Promise<SiteProfileState> {
   const previous = (await getSetting<SiteProfileState>(businessId, SETTING_KEYS.siteProfileState)) ?? EMPTY_SITE_PROFILE_STATE;
   const config = await getSetting<ServerSyncConfig>(businessId, SETTING_KEYS.serverSyncConfig);
   if (!config?.enabled || !config.remoteUrl?.trim() || !config.token?.trim() || !config.locationId) return previous;
   if (!attemptDue(previous.nextAttemptAt, now)) return previous;
+  const last = lastAttemptAt.get(businessId);
+  // A clock that went backwards (elapsed < 0) does not hold the next attempt hostage.
+  if (last !== undefined && now.getTime() - last >= 0 && now.getTime() - last < SITE_PROFILE_INTERVAL_MS) return previous;
+  lastAttemptAt.set(businessId, now.getTime());
   let next: SiteProfileState;
   try {
     const response = await fetch(`${config.remoteUrl.trim().replace(/\/+$/, "")}/api/server-sync/site-profile`, {

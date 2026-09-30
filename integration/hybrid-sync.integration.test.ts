@@ -21,7 +21,7 @@ import { runMasterSync } from "../src/lib/master-sync-transport";
 import { addItemsToOrder, createOrder, updateOrderItem } from "../src/lib/order-mutations";
 import { closeOwnShift, openShift } from "../src/lib/shift-service";
 import { syncClientEventId } from "../src/lib/sync-outbox";
-import { runSiteProfileSync } from "../src/lib/site-profile-service";
+import { resetSiteProfileGate, runSiteProfileSync } from "../src/lib/site-profile-service";
 import { EMPTY_SITE_PROFILE_STATE } from "../src/lib/site-profile";
 import { effectiveFeatures } from "../src/lib/features";
 import { effectiveAppAvailability } from "../src/lib/app-availability-service";
@@ -656,7 +656,29 @@ describe("shifts", () => {
 });
 
 describe("site profile", () => {
-  const syncProfile = () => withTenant(biz.businessId, () => runSiteProfileSync(biz.businessId));
+  // Each call here stands for a tick a full interval after the last one.
+  const syncProfile = () => {
+    resetSiteProfileGate();
+    return withTenant(biz.businessId, () => runSiteProfileSync(biz.businessId));
+  };
+
+  it("asks the cloud at most once per sync interval, however often the tick wakes", async () => {
+    const routed = globalThis.fetch;
+    const spy = vi.fn(routed);
+    globalThis.fetch = spy as typeof fetch;
+    try {
+      resetSiteProfileGate();
+      const at = (ms: number) => withTenant(biz.businessId, () => runSiteProfileSync(biz.businessId, new Date(ms)));
+      const start = Date.now();
+      await at(start);
+      await at(start + 1_500); // a NOTIFY wake right after a local commit
+      expect(spy).toHaveBeenCalledTimes(1);
+      await at(start + 30_000);
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      globalThis.fetch = routed;
+    }
+  });
 
   it("brings the branch's business-day start, so both sides put an after-midnight bill on the same day", async () => {
     await onCentral(() =>
