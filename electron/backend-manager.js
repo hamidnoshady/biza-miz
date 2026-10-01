@@ -52,12 +52,26 @@ async function recoverInterruptedRestore(client, target, logger) {
   return true;
 }
 
-function canListen(host, port) {
+function answers(host, port) {
   return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    socket.setTimeout(1000);
+    socket.once("connect", () => { socket.destroy(); resolve(true); });
+    socket.once("timeout", () => { socket.destroy(); resolve(false); });
+    socket.once("error", () => resolve(false));
+  });
+}
+
+// Windows lets 127.0.0.1:N bind while another process holds the dual-stack
+// wildcard [::]:N, and loopback connects then reach that other process (e.g. a
+// dev server on 3000). A successful bind alone is not proof the port is ours.
+async function canListen(host, port) {
+  const bound = await new Promise((resolve) => {
     const server = net.createServer();
     server.once("error", () => resolve(false));
     server.listen({ host, port, exclusive: true }, () => server.close(() => resolve(true)));
   });
+  return bound && !(await answers(host, port));
 }
 
 function findFreePort(host, from, to) {
@@ -154,6 +168,7 @@ function desktopServerEnvironment(config, runtimeUrl, superuserUrl, appVersion =
     NODE_ENV: "production",
     DEPLOYMENT_ROLE: "site",
     DESKTOP_INSTANCE_ID: config.instanceId,
+    DESKTOP_PARENT_PID: String(process.pid),
     DESKTOP_DEVICE_NAME: require("node:os").hostname(),
     APP_RELEASE_VERSION: appVersion,
     // SemVer is the update identity. Commit/build remain separate provenance;
@@ -247,6 +262,21 @@ function waitForServerReady(url, instanceId, timeoutMs, child) {
   });
 }
 
+function answersAsInstance(port, instanceId) {
+  return new Promise((resolve) => {
+    const req = http.get(`http://127.0.0.1:${port}/api/health`, { timeout: 2000 }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { if (body.length < 4096) body += chunk; });
+      res.on("end", () => {
+        try { resolve(res.statusCode === 200 && JSON.parse(body)?.instanceId === instanceId); } catch { resolve(false); }
+      });
+    });
+    req.once("timeout", () => req.destroy());
+    req.once("error", () => resolve(false));
+  });
+}
+
 function waitForExit(child, timeoutMs) {
   if (!child || child.exitCode !== null) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -297,6 +327,56 @@ class BackendManager {
     return (await import(pathToFileURL(modulePath).href)).pg_ctl;
   }
 
+  serverPidPath() {
+    return path.join(computePaths(this.app.getPath("userData")).configDir, "server.pid");
+  }
+
+  // A crashed or force-killed shell leaves pg_ctl's detached PostgreSQL and
+  // possibly the server child running hidden. Stop what is provably ours
+  // before probing ports, so we reuse our own ports instead of fleeing them.
+  async stopLeftoversFromUncleanExit(dataDir) {
+    const pidPath = this.serverPidPath();
+    try {
+      const pid = Number(fs.readFileSync(pidPath, "utf8"));
+      // Kill only if our own instance still answers — never a reused PID.
+      if (pid > 0 && (await answersAsInstance(this.config.appPort, this.config.instanceId))) {
+        this.logger.warn("Stopping application server left over from a previous run", { pid });
+        await new Promise((resolve) => {
+          spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { windowsHide: true }).once("exit", resolve).once("error", resolve);
+        });
+      }
+    } catch {}
+    fs.rmSync(pidPath, { force: true });
+
+    if (process.platform === "win32" && fs.existsSync(path.join(dataDir, "postmaster.pid"))) {
+      // pg_ctl stop acts only on the postmaster owning this data directory.
+      const pgCtl = await this.pgControlPath();
+      await runLoggedCommand(pgCtl, ["stop", "-D", dataDir, "-m", "fast", "-w", "-t", "30"], this.logger, "pg_ctl stop (leftover)")
+        .catch(() => {}); // not running: pg_ctl exits non-zero, nothing to do
+    }
+  }
+
+  // Ports are sticky (the window's origin, and so its local storage, includes
+  // the app port) but never a reason to fail: another program on the saved
+  // port moves us to the next free one, persisted for later runs.
+  async ensureFreePorts() {
+    const { config } = this;
+    let changed = false;
+    if (!(await canListen("127.0.0.1", config.pgPort))) {
+      const port = await findFreePort("127.0.0.1", 5544, 5599);
+      this.logger.warn("PostgreSQL port is used by another program; moving", { from: config.pgPort, to: port });
+      config.pgPort = port;
+      changed = true;
+    }
+    if (!(await canListen("127.0.0.1", config.appPort))) {
+      const port = await findFreePort("127.0.0.1", 3000, 3099);
+      this.logger.warn("Application port is used by another program; moving", { from: config.appPort, to: port });
+      config.appPort = port;
+      changed = true;
+    }
+    if (changed) saveConfig(this.configPath, config);
+  }
+
   async startPostgresWithPgCtl(dataDir, port) {
     const pgCtl = await this.pgControlPath();
     const logDir = this.logger.dir || computePaths(this.app.getPath("userData")).logsDir;
@@ -323,14 +403,10 @@ class BackendManager {
     }
     ({ config: this.config, configPath: this.configPath } = await loadOrCreateConfig(userDataDir));
     const { config } = this;
-    if (!(await canListen("127.0.0.1", config.pgPort))) {
-      throw new StartupError("postgres-port", `PostgreSQL loopback port ${config.pgPort} is already in use.`);
-    }
-    if (!(await canListen("127.0.0.1", config.appPort))) {
-      throw new StartupError("application-port", `Application loopback port ${config.appPort} is already in use.`);
-    }
-
     const dataDir = computePaths(userDataDir).pgDataDir;
+    await this.stopLeftoversFromUncleanExit(dataDir);
+    await this.ensureFreePorts();
+
     const firstRun = !isInitialised(dataDir);
     let postgresStage = firstRun ? "initdb" : "postgres-start";
     try {
@@ -411,6 +487,7 @@ class BackendManager {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    fs.writeFileSync(this.serverPidPath(), String(this.server.pid ?? ""), { mode: 0o600 });
     let serverStderr = "";
     this.server.stdout.on("data", (chunk) => this.logger.childOutput("server", chunk));
     this.server.stderr.on("data", (chunk) => {
@@ -478,6 +555,7 @@ class BackendManager {
         if (!(await waitForExit(this.server, 30_000))) stopProcessTree(this.server, this.logger);
       }
       this.server = null;
+      fs.rmSync(this.serverPidPath(), { force: true });
       await this.stopPostgresGracefully();
       this.logger.info("Desktop backend stopped");
     })();

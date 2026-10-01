@@ -679,6 +679,20 @@ app.prepare().then(async () => {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
 
+  // Desktop: Windows does not kill children with their parent, so if the
+  // Electron shell crashes or is killed this server would keep running hidden
+  // and hold its port. Drain and exit once the shell is gone.
+  const desktopParentPid = Number(process.env.DESKTOP_PARENT_PID);
+  if (desktopParentPid > 0) {
+    setInterval(() => {
+      try {
+        process.kill(desktopParentPid, 0);
+      } catch {
+        void shutdown("SIGTERM");
+      }
+    }, 2_000).unref();
+  }
+
   const bindHost = process.env.BIND_ADDR ?? "0.0.0.0";
   server.listen(port, bindHost, () => {
     console.log(`> Ready on http://${bindHost}:${port} (WebSocket sync on /ws)`);
