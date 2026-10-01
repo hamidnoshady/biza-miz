@@ -1956,6 +1956,12 @@ export interface WorkspaceApproval {
   requestedByMe: boolean;
   /** The actor is the named approver. */
   assignedToMe: boolean;
+  /**
+   * For an UNASSIGNED request: the actor may manage its subject, which is what
+   * `decideApproval` requires there. Mirrors `resolveWorkspaceSubject(…,
+   * "manage")` so the inbox never offers a button that ends in a 403.
+   */
+  canDecideUnassigned: boolean;
 }
 
 /**
@@ -1963,6 +1969,20 @@ export interface WorkspaceApproval {
  * round trip per row. A CASE over four tables rather than a stored copy: a
  * copied title is wrong the moment the contract is renamed.
  */
+/** Per-row "may manage the subject" — see `WorkspaceApproval.canDecideUnassigned`. */
+function canManageSubjectSql(owner: WorkspaceOwner): string {
+  if (isAdministrator(owner)) return "TRUE";
+  const contractManager = owner.access?.canManageContracts ? "a.subject_type = 'contract'" : "FALSE";
+  return `CASE WHEN a.project_id IS NOT NULL THEN EXISTS (
+            SELECT 1 FROM workspace_members wm
+             WHERE wm.project_id = a.project_id AND wm.user_id = $2::uuid
+               AND wm.role IN ('owner', 'manager'))
+          ELSE (${contractManager}) OR $2::text = (CASE a.subject_type
+            WHEN 'document' THEN (SELECT created_by FROM workspace_documents WHERE id = a.subject_id)
+            WHEN 'contract' THEN (SELECT created_by FROM workspace_contracts WHERE id = a.subject_id)
+          END) END`;
+}
+
 const APPROVAL_SELECT = `
   a.id, a.subject_type, a.subject_id, a.project_id, p.name AS project_name,
   a.title, a.status, a.requested_by, ru.full_name AS requested_by_name,
@@ -2006,6 +2026,7 @@ function toApproval(row: Record<string, unknown>): WorkspaceApproval {
     createdAt: String(r.created_at),
     requestedByMe: (row.requested_by_me as boolean | undefined) === true,
     assignedToMe: (row.assigned_to_me as boolean | undefined) === true,
+    canDecideUnassigned: (row.can_decide_unassigned as boolean | undefined) === true,
   };
 }
 
@@ -2055,7 +2076,7 @@ export async function listApprovals(
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 300);
 
   const { rows } = await query<Record<string, unknown>>(
-    `SELECT ${APPROVAL_SELECT} ${APPROVAL_JOINS}
+    `SELECT ${APPROVAL_SELECT}, (${canManageSubjectSql(owner)}) AS can_decide_unassigned ${APPROVAL_JOINS}
       WHERE ${where.join(" AND ")}
       ORDER BY (a.status = 'pending') DESC, a.due_date NULLS LAST, a.created_at DESC
       LIMIT ${limit}`,

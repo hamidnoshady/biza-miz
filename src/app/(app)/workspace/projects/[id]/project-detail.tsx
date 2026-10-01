@@ -336,7 +336,12 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         ) : null}
 
         {tab === "tasks" ? (
-          <TasksSection lookups={lookups} canManage={canEdit} projectId={projectId} />
+          <TasksSection
+            lookups={lookups}
+            canManage={canEdit}
+            canContribute={canContribute}
+            projectId={projectId}
+          />
         ) : null}
 
         {tab === "documents" ? (

@@ -98,11 +98,17 @@ const VIEW_TABS = [
 export function TasksSection({
   lookups,
   canManage,
+  canContribute = canManage,
   initialMine = false,
   projectId,
 }: {
   lookups: WorkspaceLookups;
   canManage: boolean;
+  /**
+   * May work tasks (status, checklist) without re-scoping them — a
+   * contributor. The server still limits that to tasks assigned to them.
+   */
+  canContribute?: boolean;
   initialMine?: boolean;
   projectId?: string;
 }) {
@@ -288,7 +294,7 @@ export function TasksSection({
                               <PriorityBadge priority={task.priority} />
                               <DateCell date={task.dueDate} relative={false} className="text-xs" />
                             </div>
-                            {canManage ? (
+                            {canManage || canContribute ? (
                               <label className="block">
                                 <span className="sr-only">ستون «{task.title}»</span>
                                 <select
@@ -380,6 +386,7 @@ export function TasksSection({
           lookups={lookups}
           task={editing}
           canManage={canManage}
+          canContribute={canContribute}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -410,6 +417,7 @@ function TaskDialog({
   task,
   projectId,
   canManage = true,
+  canContribute = canManage,
   onClose,
   onSaved,
   onError,
@@ -418,6 +426,7 @@ function TaskDialog({
   task?: TaskRow;
   projectId?: string;
   canManage?: boolean;
+  canContribute?: boolean;
   onClose: () => void;
   onSaved: () => void;
   onError: (message: string) => void;
@@ -447,7 +456,9 @@ function TaskDialog({
   async function submit() {
     if (!title.trim() || saving) return;
     setSaving(true);
-    const payload = {
+    // A contributor only works the task: send the status alone, which is all
+    // the server lets them change.
+    const payload = !canManage ? { status: status || "open" } : {
       projectId: project,
       title,
       description,
@@ -588,7 +599,7 @@ function TaskDialog({
         </div>
         <div className="flex justify-end gap-2 border-t border-border/80 p-4">
           <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
-          {canManage ? (
+          {canManage || (canContribute && taskId) ? (
             <PrimaryButton
               type="button"
               onClick={submit}

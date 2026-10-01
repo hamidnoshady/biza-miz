@@ -67,6 +67,7 @@ export interface ApprovalRow {
   createdAt: string;
   requestedByMe: boolean;
   assignedToMe: boolean;
+  canDecideUnassigned: boolean;
 }
 
 type Decision = "approved" | "rejected" | "changes_requested" | "cancelled";
@@ -210,7 +211,7 @@ export function ApprovalsSection({
                       <SecondaryButton onClick={() => setDeciding({ row, decision: "cancelled" })}>
                         لغو درخواست
                       </SecondaryButton>
-                    ) : canApprove && (row.assignedToMe || !row.approverUserId) ? (
+                    ) : canApprove && (row.assignedToMe || (!row.approverUserId && row.canDecideUnassigned)) ? (
                       <div className="flex flex-wrap gap-1.5">
                         <PrimaryButton
                           type="button"

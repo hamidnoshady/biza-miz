@@ -21,6 +21,7 @@ CREATE OR REPLACE FUNCTION workspace_sync_project_owner() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
     new_owner uuid;
+    old_owner uuid;
 BEGIN
     new_owner := COALESCE(
         NEW.owner_user_id,
@@ -37,13 +38,20 @@ BEGIN
            SET role = 'owner', updated_at = now();
     END IF;
 
-    IF TG_OP = 'UPDATE'
-       AND OLD.owner_user_id IS NOT NULL
-       AND OLD.owner_user_id IS DISTINCT FROM NEW.owner_user_id
-    THEN
-        UPDATE workspace_members
-           SET role = 'manager', updated_at = now()
-         WHERE project_id = NEW.id AND user_id = OLD.owner_user_id AND role = 'owner';
+    -- The previous EFFECTIVE owner: `owner_user_id`, or — for a project that
+    -- never had one — the same `created_by` fallback the backfill used, so the
+    -- first transfer of such a project demotes its creator too.
+    IF TG_OP = 'UPDATE' AND OLD.owner_user_id IS DISTINCT FROM NEW.owner_user_id THEN
+        old_owner := COALESCE(
+            OLD.owner_user_id,
+            CASE WHEN OLD.created_by ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                 THEN OLD.created_by::uuid END
+        );
+        IF old_owner IS NOT NULL AND old_owner IS DISTINCT FROM new_owner THEN
+            UPDATE workspace_members
+               SET role = 'manager', updated_at = now()
+             WHERE project_id = NEW.id AND user_id = old_owner AND role = 'owner';
+        END IF;
     END IF;
 
     RETURN NEW;

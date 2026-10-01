@@ -867,6 +867,21 @@ describe("project ownership (#761)", () => {
     expect(roleOf(alpha.ownerId)).toBe("manager");
   });
 
+  it("demotes the created_by fallback owner on a project's first transfer", async () => {
+    // A pre-0191 project with no owner_user_id: its creator is the owner.
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO ai_projects (business_id, name, instructions, created_by)
+       VALUES ($1, 'قدیمی بی‌مالک', '', $2) RETURNING id`,
+      [alpha.businessId, alpha.ownerId],
+    );
+    const id = rows[0].id;
+    await db.query("UPDATE ai_projects SET owner_user_id = $2 WHERE id = $1", [id, alpha.memberId]);
+    const members = await inAlpha(() => workspace.listMembers(id));
+    const roleOf = (uid: string) => members.find((m) => m.userId === uid)?.role;
+    expect(roleOf(alpha.memberId)).toBe("owner");
+    expect(roleOf(alpha.ownerId)).toBe("manager");
+  });
+
   it("refuses to demote or remove the named owner without a transfer", async () => {
     const project = await makeProject();
     await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "owner"));
@@ -949,7 +964,12 @@ describe("approvals (#761)", () => {
     await expect(
       inAlpha(() => workspace.decideApproval(owner(alpha.memberId), approval.id, "approved")),
     ).rejects.toThrow(/insufficient_project_role/);
+    // The inbox flag agrees with the service, so the viewer is offered no buttons.
+    const asViewer = await inAlpha(() => workspace.listApprovals(owner(alpha.memberId), { id: approval.id }));
+    expect(asViewer[0].canDecideUnassigned).toBe(false);
     await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "manager"));
+    const asManager = await inAlpha(() => workspace.listApprovals(owner(alpha.memberId), { id: approval.id }));
+    expect(asManager[0].canDecideUnassigned).toBe(true);
     const decided = await inAlpha(() =>
       workspace.decideApproval(owner(alpha.memberId), approval.id, "approved"),
     );
