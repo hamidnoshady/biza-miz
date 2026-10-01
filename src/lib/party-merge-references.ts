@@ -269,6 +269,24 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     reason: "A seated guest attached to a table session must resolve to a live record while the session is open.",
   },
 
+  // -- Platform-company CRM projections -------------------------------------
+  {
+    table: "platform_company_customers",
+    column: "party_id",
+    scope: "business",
+    disposition: "blocked",
+    reason: "Two separately mapped legal/billing customer accounts must be reconciled explicitly before their CRM parties can be merged.",
+  },
+  {
+    table: "platform_company_web_leads",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason: "The attributed website inquiry belongs on the surviving CRM party; its original source and consent snapshot remain unchanged.",
+    preview: true,
+    previewLabel: "درخواست وب‌سایت",
+  },
+
   // -- CRM's own objects ----------------------------------------------------
   {
     table: "customer_notes",
