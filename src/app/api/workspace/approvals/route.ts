@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
-import { listApprovals, requestApproval, type ApprovalListFilter } from "@/lib/workspace";
+import { listApprovals, approvalListPage, requestApproval, type ApprovalListFilter } from "@/lib/workspace";
 import {
   APPROVAL_STATUSES,
   APPROVAL_SUBJECTS,
   type WorkspaceApprovalStatus,
   type WorkspaceApprovalSubject,
 } from "@/lib/workspace-shared";
-import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../guard";
+import { PERMISSIONS, handleWorkspaceError, readBody, pageParams, workspaceOwner } from "../guard";
 
 /**
  * GET  — the approval inbox, scoped to approvals the caller may see.
@@ -25,6 +25,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const status = params.get("status");
   const subjectType = params.get("subjectType");
   const filter: ApprovalListFilter = {
+    ...pageParams(params),
     status: status && (status === "all" || (APPROVAL_STATUSES as readonly string[]).includes(status))
       ? (status as WorkspaceApprovalStatus | "all")
       : undefined,
@@ -37,7 +38,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     requestedByActor: params.get("requested") === "true",
   };
   try {
-    return NextResponse.json({ approvals: await listApprovals(owner, filter) });
+    const [approvals, { page, summary }] = await Promise.all([
+      listApprovals(owner, filter),
+      approvalListPage(owner, filter),
+    ]);
+    return NextResponse.json({ approvals, page, summary });
   } catch (err) {
     return handleWorkspaceError(err);
   }

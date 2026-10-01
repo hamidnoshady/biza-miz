@@ -52,6 +52,7 @@ import {
 import {
   DateCell,
   DateField,
+  LoadMoreFooter,
   PickerField,
   PriorityBadge,
   ProgressBar,
@@ -60,6 +61,14 @@ import {
   TagList,
   workspaceError,
 } from "./workspace-ui";
+import { usePagedList } from "./use-paged-list";
+
+interface ProjectSummary {
+  total: number;
+  active: number;
+  budgetRial: number;
+  tasks: number;
+}
 import type { WorkspaceLookups } from "./use-workspace-lookups";
 
 export interface ProjectRow {
@@ -98,7 +107,6 @@ export function ProjectsSection({
   canManage: boolean;
 }) {
   const money = useMoney();
-  const [projects, setProjects] = useState<ProjectRow[] | null>(null);
   const [templates, setTemplates] = useState<TemplateOption[]>([]);
   const [error, setError] = useState("");
   const [status, setStatus] = useState<WorkspaceProjectStatus | "">("");
@@ -106,21 +114,20 @@ export function ProjectsSection({
   const [search, setSearch] = useState("");
   const [creating, setCreating] = useState(false);
 
-  const load = useCallback(() => {
+  const query = useMemo(() => {
     const params = new URLSearchParams();
     if (status) params.set("status", status);
     if (mine) params.set("mine", "true");
     if (search.trim()) params.set("q", search.trim());
     const qs = params.toString();
-    api<{ projects: ProjectRow[] }>(`/api/workspace/projects${qs ? `?${qs}` : ""}`).then(
-      ({ ok, data }) => {
-        if (ok) setProjects(data.projects);
-        else setError(workspaceError((data as unknown as { error?: string }).error));
-      },
-    );
+    return `/api/workspace/projects${qs ? `?${qs}` : ""}`;
   }, [status, mine, search]);
-
-  useEffect(load, [load]);
+  const list = usePagedList<ProjectRow, ProjectSummary>(query, "projects");
+  const projects = list.rows;
+  const load = list.reload;
+  useEffect(() => {
+    if (list.error) setError(list.error);
+  }, [list.error]);
 
   useEffect(() => {
     api<{ templates: TemplateOption[] }>("/api/workspace/templates").then(({ ok, data }) => {
@@ -128,15 +135,13 @@ export function ProjectsSection({
     });
   }, []);
 
-  const totals = useMemo(() => {
-    const list = projects ?? [];
-    return {
-      count: list.length,
-      active: list.filter((p) => p.status === "active").length,
-      budget: list.reduce((sum, p) => sum + (p.budgetRial ?? 0), 0),
-      tasks: list.reduce((sum, p) => sum + p.taskCount, 0),
-    };
-  }, [projects]);
+  // Server totals over the whole filtered set — not a sum of the loaded page.
+  const totals = {
+    count: list.summary?.total ?? 0,
+    active: list.summary?.active ?? 0,
+    budget: list.summary?.budgetRial ?? 0,
+    tasks: list.summary?.tasks ?? 0,
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -252,6 +257,12 @@ export function ProjectsSection({
             </DataTableBody>
           </DataTable>
         )}
+        <LoadMoreFooter
+          loaded={projects?.length ?? 0}
+          page={list.page}
+          loading={list.loadingMore}
+          onLoadMore={list.loadMore}
+        />
       </SectionCard>
 
       {creating ? (

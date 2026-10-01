@@ -65,7 +65,12 @@ import {
   SelectField,
   TaskStatusBadge,
   workspaceError,
+  LoadMoreFooter,
 } from "./workspace-ui";
+import { usePagedList } from "./use-paged-list";
+
+/** Per-status counts over the whole filtered set (keys match the board columns). */
+type TaskSummary = { total: number; overdue: number } & Record<WorkspaceTaskStatus, number>;
 import type { WorkspaceLookups } from "./use-workspace-lookups";
 
 export interface TaskRow {
@@ -112,7 +117,6 @@ export function TasksSection({
   initialMine?: boolean;
   projectId?: string;
 }) {
-  const [tasks, setTasks] = useState<TaskRow[] | null>(null);
   const [error, setError] = useState("");
   const [view, setView] = useState<View>("list");
   const [mine, setMine] = useState(initialMine);
@@ -121,20 +125,21 @@ export function TasksSection({
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<TaskRow | null>(null);
 
-  const load = useCallback(() => {
+  const query = useMemo(() => {
     const params = new URLSearchParams();
     if (projectId) params.set("projectId", projectId);
     if (mine) params.set("mine", "true");
     if (openOnly) params.set("status", "open_only");
     if (search.trim()) params.set("q", search.trim());
     const qs = params.toString();
-    api<{ tasks: TaskRow[] }>(`/api/workspace/tasks${qs ? `?${qs}` : ""}`).then(({ ok, data }) => {
-      if (ok) setTasks(data.tasks);
-      else setError(workspaceError((data as unknown as { error?: string }).error));
-    });
+    return `/api/workspace/tasks${qs ? `?${qs}` : ""}`;
   }, [projectId, mine, openOnly, search]);
-
-  useEffect(load, [load]);
+  const list = usePagedList<TaskRow, TaskSummary>(query, "tasks");
+  const tasks = list.rows;
+  const load = list.reload;
+  useEffect(() => {
+    if (list.error) setError(list.error);
+  }, [list.error]);
 
   async function move(task: TaskRow, status: WorkspaceTaskStatus) {
     const { ok, data } = await api(`/api/workspace/tasks/${task.id}`, {
@@ -276,7 +281,7 @@ export function TasksSection({
                       <header className="flex items-center justify-between px-1">
                         <h3 className="text-sm font-semibold">{TASK_STATUS_LABELS[column]}</h3>
                         <span className="text-xs tabular-nums text-muted-foreground">
-                          {toPersianDigits(String(items.length))}
+                          {toPersianDigits(String(list.summary?.[column] ?? items.length))}
                         </span>
                       </header>
                       <div className="flex min-h-24 flex-col gap-2 rounded-xl bg-muted/40 p-2">
@@ -366,6 +371,12 @@ export function TasksSection({
             )}
           </TabPanel>
         )}
+        <LoadMoreFooter
+          loaded={tasks?.length ?? 0}
+          page={list.page}
+          loading={list.loadingMore}
+          onLoadMore={list.loadMore}
+        />
       </SectionCard>
 
       {creating ? (

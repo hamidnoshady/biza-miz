@@ -3,10 +3,11 @@ import { withTenantScope } from "@/lib/auth";
 import {
   createWorkspaceProject,
   listWorkspaceProjects,
+  projectListPage,
   type ProjectListFilter,
 } from "@/lib/workspace";
 import type { WorkspacePriority, WorkspaceProjectStatus } from "@/lib/workspace-shared";
-import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../guard";
+import { PERMISSIONS, handleWorkspaceError, readBody, pageParams, workspaceOwner } from "../guard";
 
 /**
  * GET  — the workspace project list, with the filters the Projects section
@@ -27,6 +28,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const params = new URL(request.url).searchParams;
 
   const filter: ProjectListFilter = {
+    ...pageParams(params),
     status: (params.get("status") as WorkspaceProjectStatus | "all") ?? undefined,
     priority: (params.get("priority") as WorkspacePriority) ?? undefined,
     partyId: params.get("partyId") ?? undefined,
@@ -38,7 +40,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     memberUserId: params.get("mine") === "true" ? owner.actorUserId : undefined,
   };
   try {
-    return NextResponse.json({ projects: await listWorkspaceProjects(owner, filter) });
+    const [projects, { page, summary }] = await Promise.all([
+      listWorkspaceProjects(owner, filter),
+      projectListPage(owner, filter),
+    ]);
+    return NextResponse.json({ projects, page, summary });
   } catch (err) {
     return handleWorkspaceError(err);
   }

@@ -58,7 +58,16 @@ import {
   PickerField,
   SelectField,
   workspaceError,
+  LoadMoreFooter,
 } from "./workspace-ui";
+import { usePagedList } from "./use-paged-list";
+
+interface ContractSummary {
+  total: number;
+  active: number;
+  pending: number;
+  valueRial: number;
+}
 import type { WorkspaceLookups } from "./use-workspace-lookups";
 
 export interface ContractRow {
@@ -94,7 +103,6 @@ export function ContractsSection({
   projectId?: string;
 }) {
   const money = useMoney();
-  const [contracts, setContracts] = useState<ContractRow[] | null>(null);
   const [error, setError] = useState("");
   const [status, setStatus] = useState<WorkspaceContractStatus | "">("");
   const [expiring, setExpiring] = useState(initialExpiring ?? 0);
@@ -102,32 +110,29 @@ export function ContractsSection({
   const [editing, setEditing] = useState<ContractRow | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const load = useCallback(() => {
+  const query = useMemo(() => {
     const params = new URLSearchParams();
     if (projectId) params.set("projectId", projectId);
     if (status) params.set("status", status);
     if (expiring) params.set("expiringWithinDays", String(expiring));
     if (search.trim()) params.set("q", search.trim());
     const qs = params.toString();
-    api<{ contracts: ContractRow[] }>(`/api/workspace/contracts${qs ? `?${qs}` : ""}`).then(
-      ({ ok, data }) => {
-        if (ok) setContracts(data.contracts);
-        else setError(workspaceError((data as unknown as { error?: string }).error));
-      },
-    );
+    return `/api/workspace/contracts${qs ? `?${qs}` : ""}`;
   }, [projectId, status, expiring, search]);
+  const list = usePagedList<ContractRow, ContractSummary>(query, "contracts");
+  const contracts = list.rows;
+  const load = list.reload;
+  useEffect(() => {
+    if (list.error) setError(list.error);
+  }, [list.error]);
 
-  useEffect(load, [load]);
-
-  const totals = useMemo(() => {
-    const list = contracts ?? [];
-    return {
-      count: list.length,
-      active: list.filter((c) => c.status === "active").length,
-      value: list.reduce((sum, c) => sum + (c.valueRial ?? 0), 0),
-      pending: list.filter((c) => c.status === "pending_approval").length,
-    };
-  }, [contracts]);
+  // Server totals over the whole filtered set — not the loaded page.
+  const totals = {
+    count: list.summary?.total ?? 0,
+    active: list.summary?.active ?? 0,
+    value: list.summary?.valueRial ?? 0,
+    pending: list.summary?.pending ?? 0,
+  };
 
   async function requestApproval(contract: ContractRow) {
     const { ok, data } = await api("/api/workspace/approvals", {
@@ -250,6 +255,12 @@ export function ContractsSection({
             </DataTableBody>
           </DataTable>
         )}
+        <LoadMoreFooter
+          loaded={contracts?.length ?? 0}
+          page={list.page}
+          loading={list.loadingMore}
+          onLoadMore={list.loadMore}
+        />
       </SectionCard>
 
       {creating || editing ? (

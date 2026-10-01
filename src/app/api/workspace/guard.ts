@@ -117,6 +117,18 @@ export function handleWorkspaceError(err: unknown): NextResponse {
   throw err;
 }
 
+/**
+ * `?offset=&limit=` for a paginated list. Absent or junk values fall back to
+ * the service's own defaults; the service clamps both.
+ */
+export function pageParams(params: URLSearchParams): { offset?: number; limit?: number } {
+  const int = (key: string) => {
+    const n = Number(params.get(key));
+    return params.has(key) && Number.isSafeInteger(n) && n >= 0 ? n : undefined;
+  };
+  return { offset: int("offset"), limit: int("limit") };
+}
+
 /** Reads a JSON body, returning `{}` rather than throwing on a malformed one. */
 export async function readBody(request: Request): Promise<Record<string, unknown>> {
   const body = await request.json().catch(() => null);

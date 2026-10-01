@@ -193,6 +193,12 @@ export async function requireProjectCapability(
   return role;
 }
 
+/** A safe OFFSET: a non-negative integer, capped so a bad cursor cannot scan forever. */
+function pageOffset(value: unknown): number {
+  const n = Number(value ?? 0);
+  return Number.isSafeInteger(n) && n > 0 ? Math.min(n, 100_000) : 0;
+}
+
 function isUuid(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
@@ -383,13 +389,12 @@ export interface ProjectListFilter {
   includeArchived?: boolean;
   tag?: string;
   limit?: number;
+  /** Rows to skip — server pagination (stable: ties break on id). */
+  offset?: number;
 }
 
 /** Only the projects the actor may see — membership, or an override. */
-export async function listWorkspaceProjects(
-  owner: WorkspaceOwner,
-  filter: ProjectListFilter = {},
-): Promise<WorkspaceProject[]> {
+function projectWhere(owner: WorkspaceOwner, filter: ProjectListFilter): { clause: string; params: unknown[] } {
   const where: string[] = ["p.business_id = $1"];
   const params: unknown[] = [owner.businessId, owner.actorUserId];
   where.push(visibilityClause(owner, "p.id", [], "$2"));
@@ -410,15 +415,24 @@ export async function listWorkspaceProjects(
       filter.memberUserId,
     );
   }
+  return { clause: where.join(" AND "), params };
+}
+
+export async function listWorkspaceProjects(
+  owner: WorkspaceOwner,
+  filter: ProjectListFilter = {},
+): Promise<WorkspaceProject[]> {
+  const { clause, params } = projectWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 200);
+  const offset = pageOffset(filter.offset);
 
   const { rows } = await query<ProjectRow>(
     `SELECT ${PROJECT_SELECT} ${PROJECT_JOINS}
-      WHERE ${where.join(" AND ")}
+      WHERE ${clause}
       ORDER BY p.archived_at IS NOT NULL,
                CASE p.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
-               p.end_date NULLS LAST, p.created_at DESC
-      LIMIT ${limit}`,
+               p.end_date NULLS LAST, p.created_at DESC, p.id
+      LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return rows.map(toProject);
@@ -1039,14 +1053,13 @@ export interface TaskListFilter {
   dueAfter?: string;
   search?: string;
   limit?: number;
+  /** Rows to skip — server pagination (stable: ties break on id). */
+  offset?: number;
 }
 
 /** The workspace-wide task read behind the List, Kanban and Calendar views —
  *  the three are the same rows grouped differently, never three queries. */
-export async function listWorkspaceTasks(
-  owner: WorkspaceOwner,
-  filter: TaskListFilter = {},
-): Promise<WorkspaceTask[]> {
+function taskWhere(owner: WorkspaceOwner, filter: TaskListFilter): { clause: string; params: unknown[] } {
   const where: string[] = ["p.business_id = $1"];
   const params: unknown[] = [owner.businessId, owner.actorUserId];
   where.push(visibilityClause(owner, "t.project_id", [], "$2"));
@@ -1063,15 +1076,24 @@ export async function listWorkspaceTasks(
   if (filter.dueBefore) add("t.due_date <= $?", filter.dueBefore);
   if (filter.dueAfter) add("t.due_date >= $?", filter.dueAfter);
   if (filter.search) add("t.title ILIKE '%' || $? || '%'", filter.search.trim());
+  return { clause: where.join(" AND "), params };
+}
+
+export async function listWorkspaceTasks(
+  owner: WorkspaceOwner,
+  filter: TaskListFilter = {},
+): Promise<WorkspaceTask[]> {
+  const { clause, params } = taskWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 200, 1), 500);
+  const offset = pageOffset(filter.offset);
 
   const { rows } = await query<TaskRow>(
     `SELECT ${TASK_SELECT} ${TASK_JOINS}
-      WHERE ${where.join(" AND ")}
+      WHERE ${clause}
       ORDER BY (t.status = 'done'),
                CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
-               t.due_date NULLS LAST, t.position, t.created_at DESC
-      LIMIT ${limit}`,
+               t.due_date NULLS LAST, t.position, t.created_at DESC, t.id
+      LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return rows.map(toTask);
@@ -1424,12 +1446,11 @@ export interface ContractListFilter {
   expiringWithinDays?: number;
   search?: string;
   limit?: number;
+  /** Rows to skip — server pagination (stable: ties break on id). */
+  offset?: number;
 }
 
-export async function listContracts(
-  owner: WorkspaceOwner,
-  filter: ContractListFilter = {},
-): Promise<WorkspaceContract[]> {
+function contractWhere(owner: WorkspaceOwner, filter: ContractListFilter): { clause: string; params: unknown[] } {
   const where: string[] = ["c.business_id = $1"];
   const params: unknown[] = [owner.businessId, owner.actorUserId];
   where.push(visibilityClause(
@@ -1451,13 +1472,22 @@ export async function listContracts(
       filter.expiringWithinDays,
     );
   }
+  return { clause: where.join(" AND "), params };
+}
+
+export async function listContracts(
+  owner: WorkspaceOwner,
+  filter: ContractListFilter = {},
+): Promise<WorkspaceContract[]> {
+  const { clause, params } = contractWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 300);
+  const offset = pageOffset(filter.offset);
 
   const { rows } = await query<Record<string, unknown>>(
     `SELECT ${CONTRACT_SELECT} ${CONTRACT_JOINS}
-      WHERE ${where.join(" AND ")}
-      ORDER BY c.end_date NULLS LAST, c.created_at DESC
-      LIMIT ${limit}`,
+      WHERE ${clause}
+      ORDER BY c.end_date NULLS LAST, c.created_at DESC, c.id
+      LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return rows.map(toContract);
@@ -1668,12 +1698,11 @@ export interface DocumentListFilter {
   currentOnly?: boolean;
   search?: string;
   limit?: number;
+  /** Rows to skip — server pagination (stable: ties break on id). */
+  offset?: number;
 }
 
-export async function listDocuments(
-  owner: WorkspaceOwner,
-  filter: DocumentListFilter = {},
-): Promise<WorkspaceDocument[]> {
+function documentWhere(owner: WorkspaceOwner, filter: DocumentListFilter): { clause: string; params: unknown[] } {
   const where: string[] = ["d.business_id = $1"];
   const params: unknown[] = [owner.businessId, owner.actorUserId];
   where.push(visibilityClause(owner, "d.project_id", ["d.created_by"], "$2"));
@@ -1690,13 +1719,22 @@ export async function listDocuments(
   if (filter.currentOnly !== false) {
     where.push("NOT EXISTS (SELECT 1 FROM workspace_documents s WHERE s.supersedes_id = d.id)");
   }
+  return { clause: where.join(" AND "), params };
+}
+
+export async function listDocuments(
+  owner: WorkspaceOwner,
+  filter: DocumentListFilter = {},
+): Promise<WorkspaceDocument[]> {
+  const { clause, params } = documentWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 300);
+  const offset = pageOffset(filter.offset);
 
   const { rows } = await query<Record<string, unknown>>(
     `SELECT ${DOCUMENT_SELECT} ${DOCUMENT_JOINS}
-      WHERE ${where.join(" AND ")}
-      ORDER BY d.created_at DESC
-      LIMIT ${limit}`,
+      WHERE ${clause}
+      ORDER BY d.created_at DESC, d.id
+      LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return rows.map(toDocument);
@@ -2041,16 +2079,15 @@ export interface ApprovalListFilter {
   subjectType?: WorkspaceApprovalSubject;
   subjectId?: string;
   limit?: number;
+  /** Rows to skip — server pagination (stable: ties break on id). */
+  offset?: number;
 }
 
 /**
  * Approvals the actor may see: those on projects they can see, business-level
  * ones they requested, and any they requested or were named to decide.
  */
-export async function listApprovals(
-  owner: WorkspaceOwner,
-  filter: ApprovalListFilter = {},
-): Promise<WorkspaceApproval[]> {
+function approvalWhere(owner: WorkspaceOwner, filter: ApprovalListFilter): { clause: string; params: unknown[] } {
   const where: string[] = ["a.business_id = $1"];
   const params: unknown[] = [owner.businessId, owner.actorUserId];
   where.push(
@@ -2073,13 +2110,22 @@ export async function listApprovals(
     where.push("a.requested_by IS DISTINCT FROM $2::uuid");
   }
   if (filter.requestedByActor) where.push("a.requested_by = $2::uuid");
+  return { clause: where.join(" AND "), params };
+}
+
+export async function listApprovals(
+  owner: WorkspaceOwner,
+  filter: ApprovalListFilter = {},
+): Promise<WorkspaceApproval[]> {
+  const { clause, params } = approvalWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 300);
+  const offset = pageOffset(filter.offset);
 
   const { rows } = await query<Record<string, unknown>>(
     `SELECT ${APPROVAL_SELECT}, (${canManageSubjectSql(owner)}) AS can_decide_unassigned ${APPROVAL_JOINS}
-      WHERE ${where.join(" AND ")}
-      ORDER BY (a.status = 'pending') DESC, a.due_date NULLS LAST, a.created_at DESC
-      LIMIT ${limit}`,
+      WHERE ${clause}
+      ORDER BY (a.status = 'pending') DESC, a.due_date NULLS LAST, a.created_at DESC, a.id
+      LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return rows.map(toApproval);
@@ -2758,4 +2804,109 @@ export async function projectReport(
     overdueTaskCount: Number(r.overdue_task_count ?? 0),
     openApprovals: Number(r.open_approvals ?? 0),
   }));
+}
+
+/* ===========================================================================
+ * Pages & summaries — server totals for paginated lists (#761)
+ * ======================================================================== */
+
+/**
+ * The block every paginated list returns beside its rows: how many rows match
+ * the filter in total (not how many were loaded), and aggregates over that
+ * whole filtered set. A KPI computed from a loaded page is a number that is
+ * silently wrong for any list longer than one page.
+ */
+export interface WorkspaceListPage {
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+}
+
+async function summarize<K extends string>(
+  from: string,
+  where: { clause: string; params: unknown[] },
+  aggregates: Record<K, string>,
+): Promise<{ total: number } & Record<K, number>> {
+  const keys = Object.keys(aggregates) as K[];
+  const select = keys.map((key) => `(${aggregates[key]}) AS "${key}"`);
+  const { rows } = await query<Record<string, string | null>>(
+    `SELECT count(*) AS total${select.length ? `, ${select.join(", ")}` : ""} ${from}
+      WHERE ${where.clause}`,
+    where.params,
+  );
+  const row = rows[0] ?? {};
+  const out = { total: Number(row.total ?? 0) } as { total: number } & Record<K, number>;
+  for (const key of keys) (out as Record<string, number>)[key] = Number(row[key] ?? 0);
+  return out;
+}
+
+function pageOf(total: number, filter: { offset?: number; limit?: number }, limit: number): WorkspaceListPage {
+  const offset = pageOffset(filter.offset);
+  return { total, offset, limit, hasMore: offset + limit < total };
+}
+
+/** Today as a SQL literal. `todayIsoDate()` only ever yields YYYY-MM-DD. */
+function todayLiteral(): string {
+  const today = todayIsoDate();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(today)) throw new Error("bad today");
+  return `'${today}'::date`;
+}
+
+const clampLimit = (value: number | undefined, fallback: number, max: number) =>
+  Math.min(Math.max(value ?? fallback, 1), max);
+
+export async function projectListPage(owner: WorkspaceOwner, filter: ProjectListFilter = {}) {
+  const s = await summarize("FROM ai_projects p", projectWhere(owner, filter), {
+    active: "count(*) FILTER (WHERE p.status = 'active')",
+    planning: "count(*) FILTER (WHERE p.status = 'planning')",
+    completed: "count(*) FILTER (WHERE p.status = 'completed')",
+    budgetRial: "COALESCE(sum(p.budget_rial), 0)",
+    tasks: "COALESCE(sum((SELECT count(*) FROM ai_project_tasks t WHERE t.project_id = p.id)), 0)",
+  });
+  return { page: pageOf(s.total, filter, clampLimit(filter.limit, 100, 200)), summary: s };
+}
+
+export async function taskListPage(owner: WorkspaceOwner, filter: TaskListFilter = {}) {
+  const s = await summarize(
+    "FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id",
+    taskWhere(owner, filter),
+    {
+      open: "count(*) FILTER (WHERE t.status = 'open')",
+      in_progress: "count(*) FILTER (WHERE t.status = 'in_progress')",
+      blocked: "count(*) FILTER (WHERE t.status = 'blocked')",
+      done: "count(*) FILTER (WHERE t.status = 'done')",
+      overdue: `count(*) FILTER (WHERE t.status <> 'done' AND t.due_date < ${todayLiteral()})`,
+    },
+  );
+  return { page: pageOf(s.total, filter, clampLimit(filter.limit, 200, 500)), summary: s };
+}
+
+export async function contractListPage(owner: WorkspaceOwner, filter: ContractListFilter = {}) {
+  const s = await summarize("FROM workspace_contracts c", contractWhere(owner, filter), {
+    active: "count(*) FILTER (WHERE c.status = 'active')",
+    pending: "count(*) FILTER (WHERE c.status = 'pending_approval')",
+    valueRial: "COALESCE(sum(c.value_rial), 0)",
+    expiringSoon: `count(*) FILTER (WHERE c.status NOT IN ('terminated', 'completed')
+                     AND c.end_date BETWEEN ${todayLiteral()} AND ${todayLiteral()} + 30)`,
+  });
+  return { page: pageOf(s.total, filter, clampLimit(filter.limit, 100, 300)), summary: s };
+}
+
+export async function documentListPage(owner: WorkspaceOwner, filter: DocumentListFilter = {}) {
+  const s = await summarize("FROM workspace_documents d", documentWhere(owner, filter), {
+    approved: "count(*) FILTER (WHERE d.status = 'approved')",
+    in_review: "count(*) FILTER (WHERE d.status = 'in_review')",
+    draft: "count(*) FILTER (WHERE d.status = 'draft')",
+  });
+  return { page: pageOf(s.total, filter, clampLimit(filter.limit, 100, 300)), summary: s };
+}
+
+export async function approvalListPage(owner: WorkspaceOwner, filter: ApprovalListFilter = {}) {
+  const s = await summarize("FROM workspace_approvals a", approvalWhere(owner, filter), {
+    pending: "count(*) FILTER (WHERE a.status = 'pending')",
+    approved: "count(*) FILTER (WHERE a.status = 'approved')",
+    overdue: `count(*) FILTER (WHERE a.status = 'pending' AND a.due_date < ${todayLiteral()})`,
+  });
+  return { page: pageOf(s.total, filter, clampLimit(filter.limit, 100, 300)), summary: s };
 }

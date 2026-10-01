@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
-import { createContract, listContracts, type ContractListFilter } from "@/lib/workspace";
+import { createContract, listContracts, contractListPage, type ContractListFilter } from "@/lib/workspace";
 import type { WorkspaceContractStatus, WorkspaceContractType } from "@/lib/workspace-shared";
-import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../guard";
+import { PERMISSIONS, handleWorkspaceError, readBody, pageParams, workspaceOwner } from "../guard";
 
 /**
  * EXECUTION contracts — contractor, supplier, consultant, subcontractor,
@@ -20,6 +20,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const params = new URL(request.url).searchParams;
   const expiring = params.get("expiringWithinDays");
   const filter: ContractListFilter = {
+    ...pageParams(params),
     projectId: params.get("projectId") ?? undefined,
     partyId: params.get("partyId") ?? undefined,
     status: (params.get("status") as WorkspaceContractStatus | "all") ?? undefined,
@@ -30,7 +31,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       : undefined,
   };
   try {
-    return NextResponse.json({ contracts: await listContracts(owner, filter) });
+    const [contracts, { page, summary }] = await Promise.all([
+      listContracts(owner, filter),
+      contractListPage(owner, filter),
+    ]);
+    return NextResponse.json({ contracts, page, summary });
   } catch (err) {
     return handleWorkspaceError(err);
   }
