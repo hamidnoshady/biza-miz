@@ -1,29 +1,43 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { listApprovals, requestApproval, type ApprovalListFilter } from "@/lib/workspace";
-import type { WorkspaceApprovalStatus, WorkspaceApprovalSubject } from "@/lib/workspace-shared";
+import {
+  APPROVAL_STATUSES,
+  APPROVAL_SUBJECTS,
+  type WorkspaceApprovalStatus,
+  type WorkspaceApprovalSubject,
+} from "@/lib/workspace-shared";
 import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../guard";
 
 /**
- * GET  — the approval queue.
+ * GET  — the approval inbox, scoped to approvals the caller may see.
+ *        `?mine=true` is «منتظر تصمیم من» (assigned to me or unassigned, never
+ *        my own request); `?requested=true` is «درخواست‌های من».
  * POST — REQUEST an approval. Requesting is ordinary workspace work
- *        (`workspace.manage`); DECIDING is `workspace.approve` and lives on
- *        `[id]`. Splitting them is the entire point of an approval gate — if
- *        the requester could also decide, the gate would be decorative.
+ *        (`workspace.manage`) plus `contribute` on the subject; DECIDING is
+ *        `workspace.approve` and lives on `[id]`. The requester can never
+ *        decide their own request.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
   if (error) return error;
   const params = new URL(request.url).searchParams;
+  const status = params.get("status");
+  const subjectType = params.get("subjectType");
   const filter: ApprovalListFilter = {
-    status: (params.get("status") as WorkspaceApprovalStatus | "all") ?? undefined,
+    status: status && (status === "all" || (APPROVAL_STATUSES as readonly string[]).includes(status))
+      ? (status as WorkspaceApprovalStatus | "all")
+      : undefined,
     projectId: params.get("projectId") ?? undefined,
-    subjectType: (params.get("subjectType") as WorkspaceApprovalSubject) ?? undefined,
+    subjectType: subjectType && (APPROVAL_SUBJECTS as readonly string[]).includes(subjectType)
+      ? (subjectType as WorkspaceApprovalSubject)
+      : undefined,
     subjectId: params.get("subjectId") ?? undefined,
-    approverUserId: params.get("mine") === "true" ? owner.actorUserId : undefined,
+    awaitingActor: params.get("mine") === "true",
+    requestedByActor: params.get("requested") === "true",
   };
   try {
-    return NextResponse.json({ approvals: await listApprovals(owner.businessId, filter) });
+    return NextResponse.json({ approvals: await listApprovals(owner, filter) });
   } catch (err) {
     return handleWorkspaceError(err);
   }

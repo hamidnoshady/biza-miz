@@ -46,6 +46,7 @@ import {
   CONTRACT_STATUS_LABELS,
   CONTRACT_TYPES,
   CONTRACT_TYPE_LABELS,
+  type WorkspaceApprovalStatus,
   type WorkspaceContractStatus,
   type WorkspaceContractType,
 } from "@/lib/workspace-shared";
@@ -75,7 +76,7 @@ export interface ContractRow {
   reminderDays: number | null;
   notes: string;
   documentCount: number;
-  approvalStatus: "pending" | "approved" | "rejected" | "cancelled" | null;
+  approvalStatus: WorkspaceApprovalStatus | null;
 }
 
 export function ContractsSection({
@@ -83,11 +84,14 @@ export function ContractsSection({
   canManageContracts,
   canRequestApproval,
   initialExpiring,
+  projectId,
 }: {
   lookups: WorkspaceLookups;
   canManageContracts: boolean;
   canRequestApproval: boolean;
   initialExpiring?: number;
+  /** Inside a project page: only that project's contracts, and new ones default to it. */
+  projectId?: string;
 }) {
   const money = useMoney();
   const [contracts, setContracts] = useState<ContractRow[] | null>(null);
@@ -100,6 +104,7 @@ export function ContractsSection({
 
   const load = useCallback(() => {
     const params = new URLSearchParams();
+    if (projectId) params.set("projectId", projectId);
     if (status) params.set("status", status);
     if (expiring) params.set("expiringWithinDays", String(expiring));
     if (search.trim()) params.set("q", search.trim());
@@ -110,7 +115,7 @@ export function ContractsSection({
         else setError(workspaceError((data as unknown as { error?: string }).error));
       },
     );
-  }, [status, expiring, search]);
+  }, [projectId, status, expiring, search]);
 
   useEffect(load, [load]);
 
@@ -251,6 +256,7 @@ export function ContractsSection({
         <ContractDialog
           lookups={lookups}
           contract={editing ?? undefined}
+          defaultProjectId={projectId}
           canManage={canManageContracts}
           onClose={() => {
             setCreating(false);
@@ -271,6 +277,7 @@ export function ContractsSection({
 function ContractDialog({
   lookups,
   contract,
+  defaultProjectId,
   canManage,
   onClose,
   onSaved,
@@ -278,6 +285,7 @@ function ContractDialog({
 }: {
   lookups: WorkspaceLookups;
   contract?: ContractRow;
+  defaultProjectId?: string;
   canManage: boolean;
   onClose: () => void;
   onSaved: () => void;
@@ -289,7 +297,7 @@ function ContractDialog({
     contract?.contractType ?? "contractor",
   );
   const [status, setStatus] = useState<WorkspaceContractStatus | "">(contract?.status ?? "draft");
-  const [projectId, setProjectId] = useState(contract?.projectId ?? "");
+  const [projectId, setProjectId] = useState(contract?.projectId ?? defaultProjectId ?? "");
   const [partyId, setPartyId] = useState(contract?.partyId ?? "");
   const [value, setValue] = useState(
     contract?.valueRial != null ? String(money.toInput(contract.valueRial)) : "",

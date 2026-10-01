@@ -30,7 +30,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       : undefined,
   };
   try {
-    return NextResponse.json({ contracts: await listContracts(owner.businessId, filter) });
+    return NextResponse.json({ contracts: await listContracts(owner, filter) });
   } catch (err) {
     return handleWorkspaceError(err);
   }

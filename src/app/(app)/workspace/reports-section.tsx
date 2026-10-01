@@ -56,7 +56,8 @@ interface ReportRow {
   startDate: string | null;
   endDate: string | null;
   budgetRial: number | null;
-  spentRial: number;
+  /** Null when the member may not read the ledger (ledger.view). */
+  spentRial: number | null;
   contractValueRial: number;
   taskCount: number;
   doneTaskCount: number;
@@ -87,13 +88,16 @@ export function ReportsSection() {
     let spent = 0;
     let contracts = 0;
     let overdue = 0;
+    // The server sends null spend to a member who may not read the books, so
+    // the screen says "not available" rather than "nothing spent".
+    const financials = visible.some((row) => row.spentRial !== null);
     for (const row of visible) {
       budget += row.budgetRial ?? 0;
-      spent += row.spentRial;
+      spent += row.spentRial ?? 0;
       contracts += row.contractValueRial;
       overdue += row.overdueTaskCount;
     }
-    return { budget, spent, contracts, overdue };
+    return { budget, spent, contracts, overdue, financials };
   }, [visible]);
 
   return (
@@ -109,12 +113,12 @@ export function ReportsSection() {
         />
         <KpiCard
           label="هزینهٔ ثبت‌شده"
-          value={money.format(totals.spent)}
-          hint="از دفتر روزنامهٔ حسابداری"
+          value={totals.financials ? money.format(totals.spent) : "—"}
+          hint={totals.financials ? "از دفتر روزنامهٔ حسابداری" : "نیازمند دسترسی به دفاتر حسابداری"}
         />
         <KpiCard
           label="مانده نسبت به بودجه"
-          value={money.format(totals.budget - totals.spent)}
+          value={totals.financials ? money.format(totals.budget - totals.spent) : "—"}
           hint={totals.budget ? undefined : "بودجه‌ای ثبت نشده است"}
         />
         <KpiCard
@@ -169,7 +173,8 @@ export function ReportsSection() {
             <DataTableBody>
               {visible.map((row) => {
                 const percent = completionPercent(row.doneTaskCount, row.taskCount);
-                const remaining = row.budgetRial === null ? null : row.budgetRial - row.spentRial;
+                const remaining =
+                  row.budgetRial === null || row.spentRial === null ? null : row.budgetRial - row.spentRial;
                 return (
                   <DataTableRow key={row.projectId}>
                     <Td>
@@ -207,7 +212,11 @@ export function ReportsSection() {
                       )}
                     </Td>
                     <Td>
-                      <span className="tabular-nums">{money.format(row.spentRial)}</span>
+                      {row.spentRial === null ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        <span className="tabular-nums">{money.format(row.spentRial)}</span>
+                      )}
                     </Td>
                     <Td>
                       {remaining === null ? (

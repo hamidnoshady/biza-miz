@@ -26,7 +26,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     currentOnly: params.get("versions") !== "all",
   };
   try {
-    return NextResponse.json({ documents: await listDocuments(owner.businessId, filter) });
+    return NextResponse.json({ documents: await listDocuments(owner, filter) });
   } catch (err) {
     return handleWorkspaceError(err);
   }

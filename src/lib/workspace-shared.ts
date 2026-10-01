@@ -285,15 +285,160 @@ export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> =
   contract: "قرارداد",
 };
 
-export const APPROVAL_STATUSES = ["pending", "approved", "rejected", "cancelled"] as const;
+export const APPROVAL_STATUSES = [
+  "pending",
+  "approved",
+  "rejected",
+  "changes_requested",
+  "cancelled",
+] as const;
 export type WorkspaceApprovalStatus = (typeof APPROVAL_STATUSES)[number];
 
 export const APPROVAL_STATUS_LABELS: Record<WorkspaceApprovalStatus, string> = {
   pending: "در انتظار",
   approved: "تأییدشده",
   rejected: "ردشده",
+  changes_requested: "نیازمند اصلاح",
   cancelled: "لغو‌شده",
 };
+
+export type WorkspaceApprovalDecision = Exclude<WorkspaceApprovalStatus, "pending">;
+
+/**
+ * Pure: may this actor record `decision` on a pending approval?
+ *
+ * - Cancelling withdraws a request, so it belongs to whoever asked (or an
+ *   administrator cleaning up).
+ * - Every other decision is the approver's. The requester may never decide
+ *   their own request — an approval you can grant yourself is decorative.
+ * - A named approver is the ONLY one who may decide, apart from an explicit
+ *   business-wide administrator override.
+ * - An unassigned request may be decided by a manager of the subject's
+ *   project (`canManageSubject`).
+ *
+ * Returns null when allowed, or the error code to refuse with.
+ */
+export function approvalDecisionError(input: {
+  decision: WorkspaceApprovalDecision;
+  actorUserId: string;
+  requestedBy: string | null;
+  approverUserId: string | null;
+  isAdministrator: boolean;
+  canManageSubject: boolean;
+}): string | null {
+  const { decision, actorUserId, requestedBy, approverUserId } = input;
+  if (decision === "cancelled") {
+    return requestedBy === actorUserId || input.isAdministrator ? null : "not_the_requester";
+  }
+  if (requestedBy && requestedBy === actorUserId) return "self_approval_forbidden";
+  if (approverUserId) {
+    return approverUserId === actorUserId || input.isAdministrator ? null : "not_the_approver";
+  }
+  return input.isAdministrator || input.canManageSubject ? null : "insufficient_project_role";
+}
+
+/* ---------------------------------------------------------------------------
+ * Business-wide access
+ * ------------------------------------------------------------------------- */
+
+/**
+ * How far past project membership a member reaches.
+ *
+ * - `administer`: holds `workspace.admin` — the business's own workspace
+ *   administrator, who acts as a manager on every project. Explicit, granted
+ *   by preset to manager/admin and revocable per member; never implied by
+ *   `workspace.view` or `workspace.manage`.
+ * - `read`: holds `ledger.view` — projects are cost centres the books post
+ *   against, so the accountant reads every project as a viewer, never writes.
+ * - `null`: membership only.
+ */
+export type WorkspaceOverride = "administer" | "read" | null;
+
+export interface WorkspaceAccessFlags {
+  override: WorkspaceOverride;
+  /** Ledger-derived spend may be shown. */
+  canViewFinancials: boolean;
+  /** May see business-level (project-less) contracts. */
+  canManageContracts: boolean;
+  /** May use the pickers (people, parties, media) a write form needs. */
+  canManage: boolean;
+  /** Holds `workspace.approve`. */
+  canApprove: boolean;
+}
+
+/**
+ * What the actor may do on one project: the platform permission AND the
+ * project role, computed once on the server so the client renders controls
+ * from it instead of guessing. The server still re-checks every write.
+ */
+export interface WorkspaceProjectCapabilities {
+  canView: boolean;
+  canContribute: boolean;
+  canEdit: boolean;
+  canManageProject: boolean;
+  canAdminister: boolean;
+  canManageContracts: boolean;
+  canApprove: boolean;
+  canViewFinancials: boolean;
+}
+
+export function projectCapabilities(
+  role: WorkspaceRole | null,
+  flags: WorkspaceAccessFlags,
+): WorkspaceProjectCapabilities {
+  const can = (capability: WorkspaceCapability) => role !== null && roleCan(role, capability);
+  // Every write also needs `workspace.manage`; a viewer-preset member who is
+  // an editor on a project still cannot write.
+  const writes = flags.canManage;
+  return {
+    canView: can("view"),
+    canContribute: writes && can("contribute"),
+    canEdit: writes && can("edit"),
+    canManageProject: writes && can("manage"),
+    canAdminister: writes && can("administer"),
+    canManageContracts: flags.canManageContracts && can("edit"),
+    canApprove: flags.canApprove && can("view"),
+    canViewFinancials: flags.canViewFinancials && can("view"),
+  };
+}
+
+/** Pure: the access flags a set of effective permissions confers. */
+export function workspaceAccessFlags(permissions: ReadonlySet<string>): WorkspaceAccessFlags {
+  return {
+    override: permissions.has("workspace.admin")
+      ? "administer"
+      : permissions.has("ledger.view")
+        ? "read"
+        : null,
+    canViewFinancials: permissions.has("ledger.view"),
+    canManageContracts: permissions.has("workspace.contracts_manage"),
+    canManage: permissions.has("workspace.manage"),
+    canApprove: permissions.has("workspace.approve"),
+  };
+}
+
+/** Pure: the role an override confers on a project the member is not on. */
+export function overrideRole(override: WorkspaceOverride): WorkspaceRole | null {
+  if (override === "administer") return "manager";
+  if (override === "read") return "viewer";
+  return null;
+}
+
+/** Pure: the stronger of a member role and an override role. */
+export function effectiveProjectRole(
+  memberRole: WorkspaceRole | null,
+  override: WorkspaceOverride,
+): WorkspaceRole | null {
+  const fromOverride = overrideRole(override);
+  if (!memberRole) return fromOverride;
+  if (!fromOverride) return memberRole;
+  return roleAtLeast(memberRole, fromOverride) ? memberRole : fromOverride;
+}
+
+/** Pure: a date/time interval is ordered (either end may be absent). */
+export function intervalOrdered(start: string | null, end: string | null): boolean {
+  return !start || !end || end >= start;
+}
 
 /* ---------------------------------------------------------------------------
  * Calendar

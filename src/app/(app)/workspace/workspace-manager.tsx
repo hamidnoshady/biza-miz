@@ -11,6 +11,7 @@
  */
 
 import { useMemo } from "react";
+import { useSearchParams } from "next/navigation";
 import { PERMISSIONS } from "@/lib/permissions";
 import { useWorkspaceLookups } from "./use-workspace-lookups";
 import { type WorkspaceSection } from "./workspace-routes";
@@ -38,6 +39,13 @@ export function WorkspaceManager({
   permissions: readonly string[];
 }) {
   const lookups = useWorkspaceLookups();
+  // Shortcut links («وظایف من», «قراردادهای رو به انقضا») land here with their
+  // filter in the URL; the section opens already filtered, and the same URL
+  // restores the same view when shared or reloaded.
+  const search = useSearchParams();
+  const initialMine = search.get("mine") === "true";
+  const expiring = Number(search.get("expiring"));
+  const initialExpiring = Number.isInteger(expiring) && expiring > 0 && expiring <= 365 ? expiring : undefined;
   const held = useMemo(() => new Set(permissions), [permissions]);
   const canManage = held.has(PERMISSIONS.workspaceManage);
   const canManageContracts = held.has(PERMISSIONS.workspaceContractsManage);
@@ -50,7 +58,7 @@ export function WorkspaceManager({
         <ProjectsSection lookups={lookups} canManage={canManage} />
       ) : null}
       {activeSection === "tasks" ? (
-        <TasksSection lookups={lookups} canManage={canManage} />
+        <TasksSection lookups={lookups} canManage={canManage} initialMine={initialMine} />
       ) : null}
       {activeSection === "calendar" ? (
         <CalendarSection lookups={lookups} canManage={canManage} />
@@ -67,6 +75,7 @@ export function WorkspaceManager({
           lookups={lookups}
           canManageContracts={canManageContracts}
           canRequestApproval={canManage}
+          initialExpiring={initialExpiring}
         />
       ) : null}
       {activeSection === "teams" ? <TeamsSection lookups={lookups} canManage={canManage} /> : null}

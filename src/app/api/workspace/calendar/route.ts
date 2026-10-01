@@ -20,7 +20,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const to = params.get("to");
   if (!from || !to) return NextResponse.json({ error: "range_required" }, { status: 400 });
   try {
-    const entries = await listCalendar(owner.businessId, {
+    const entries = await listCalendar(owner, {
       from, to, projectId: params.get("projectId") ?? undefined,
     });
     return NextResponse.json({ entries });
@@ -45,7 +45,7 @@ export const DELETE = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
   const id = new URL(request.url).searchParams.get("id") ?? "";
   try {
-    return NextResponse.json({ deleted: await deleteEvent(owner.businessId, id) });
+    return NextResponse.json({ deleted: await deleteEvent(owner, id) });
   } catch (err) {
     return handleWorkspaceError(err);
   }

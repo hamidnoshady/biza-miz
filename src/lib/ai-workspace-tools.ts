@@ -19,7 +19,7 @@
  * the answer is displayed. The one exception is `expiresBeforeJalali`, a
  * convenience field so an answer can quote the Shamsi date the user asked in.
  */
-import { formatJalali } from "./jalali";
+import { formatJalali, todayIsoDate } from "./jalali";
 import {
   getWorkspaceProject,
   listApprovals,
@@ -29,6 +29,9 @@ import {
   listWorkspaceProjects,
   listWorkspaceTasks,
   projectReport,
+  resolveProjectRole,
+  WorkspaceError,
+  type WorkspaceOwner,
 } from "./workspace";
 import {
   CONTRACT_STATUS_LABELS,
@@ -79,7 +82,7 @@ function asNumber(value: unknown): number | undefined {
  * the wrong budget.
  */
 async function resolveProject(
-  businessId: string,
+  owner: WorkspaceOwner,
   args: Record<string, unknown>,
 ): Promise<
   | { kind: "found"; projectId: string }
@@ -88,13 +91,18 @@ async function resolveProject(
 > {
   const id = asString(args.projectId);
   if (id) {
-    const project = await getWorkspaceProject(businessId, id);
-    if (project) return { kind: "found", projectId: project.id };
+    // The same access rule as the project page: a project the caller cannot
+    // open is "not found", never a status report.
+    const role = await resolveProjectRole(owner, id).catch((err) => {
+      if (err instanceof WorkspaceError) return null;
+      throw err;
+    });
+    if (role) return { kind: "found", projectId: id };
   }
   const name = asString(args.projectName) ?? asString(args.name);
   if (!name) return { kind: "none" };
 
-  const matches = await listWorkspaceProjects(businessId, { search: name, status: "all" });
+  const matches = await listWorkspaceProjects(owner, { search: name, status: "all" });
   if (matches.length === 0) return { kind: "none" };
   if (matches.length === 1) return { kind: "found", projectId: matches[0].id };
 
@@ -119,19 +127,21 @@ export interface WorkspaceToolResult {
 /**
  * Execute one workspace read tool.
  *
- * `actorUserId` is the signed-in member. It is the ONLY source of "mine" —
- * `mine: true` means the caller, never a user id the model supplies, because a
- * model-supplied id would let a prompt read another member's task list.
+ * `owner` is the signed-in member with their access flags. It is the ONLY
+ * source of "mine" — `mine: true` means the caller, never a user id the model
+ * supplies — and every read goes through the same project-access scope as the
+ * screens, so the assistant cannot answer about a project the member cannot
+ * open.
  */
 export async function runWorkspaceReadTool(
   name: WorkspaceToolName,
   args: Record<string, unknown>,
-  businessId: string,
-  actorUserId: string,
+  owner: WorkspaceOwner,
 ): Promise<WorkspaceToolResult> {
+  const { businessId, actorUserId } = owner;
   switch (name) {
     case "get_workspace_project_status": {
-      const resolved = await resolveProject(businessId, args);
+      const resolved = await resolveProject(owner, args);
       if (resolved.kind === "none") {
         return { ok: false, error: "پروژه‌ای با این نام یا شناسه پیدا نشد." };
       }
@@ -151,15 +161,15 @@ export async function runWorkspaceReadTool(
         getWorkspaceProject(businessId, projectId),
         listPhases(projectId),
         listMembers(projectId),
-        listWorkspaceTasks(businessId, { projectId, status: "all", limit: 200 }),
-        listContracts(businessId, { projectId, status: "all" }),
-        listApprovals(businessId, { projectId, status: "pending" }),
-        projectReport(businessId),
+        listWorkspaceTasks(owner, { projectId, status: "all", limit: 200 }),
+        listContracts(owner, { projectId, status: "all" }),
+        listApprovals(owner, { projectId, status: "pending" }),
+        projectReport(owner, { projectId }),
       ]);
       if (!project) return { ok: false, error: "پروژه پیدا نشد." };
 
       const financials = report.find((row) => row.projectId === projectId);
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayIsoDate();
       const openTasks = tasks.filter((task) => task.status !== "done");
       const overdue = openTasks.filter((task) => task.dueDate && task.dueDate < today);
 
@@ -186,9 +196,13 @@ export async function runWorkspaceReadTool(
           overdueTaskCount: overdue.length,
           // The money comes from the ledger, not from a workspace counter.
           budgetRial: project.budgetRial,
-          spentRial: financials?.spentRial ?? 0,
+          // Null when the member may not read the ledger — never a 0 that
+          // reads as "nothing spent".
+          spentRial: financials?.spentRial ?? null,
           remainingBudgetRial:
-            project.budgetRial === null ? null : project.budgetRial - (financials?.spentRial ?? 0),
+            project.budgetRial === null || financials?.spentRial == null
+              ? null
+              : project.budgetRial - financials.spentRial,
           contractValueRial: financials?.contractValueRial ?? 0,
           pendingApprovalCount: approvals.length,
           phases: cap(
@@ -238,7 +252,7 @@ export async function runWorkspaceReadTool(
       const mine = args.mine === true || args.mine === "true";
       const resolved =
         asString(args.projectId) || asString(args.projectName)
-          ? await resolveProject(businessId, args)
+          ? await resolveProject(owner, args)
           : null;
       if (resolved?.kind === "ambiguous") {
         return {
@@ -252,7 +266,7 @@ export async function runWorkspaceReadTool(
       }
 
       const status = asString(args.status);
-      const tasks = await listWorkspaceTasks(businessId, {
+      const tasks = await listWorkspaceTasks(owner, {
         projectId: resolved?.kind === "found" ? resolved.projectId : undefined,
         // "Mine" is the caller. A model-supplied user id is never accepted.
         assigneeUserId: mine ? actorUserId : undefined,
@@ -269,7 +283,7 @@ export async function runWorkspaceReadTool(
         limit: Math.min(asNumber(args.limit) ?? 50, 100),
       });
 
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayIsoDate();
       return {
         ok: true,
         data: {
@@ -307,12 +321,12 @@ export async function runWorkspaceReadTool(
       // person asking which contracts expire soon does not mean "within the
       // project I happen to have open".
       const withinDays = Math.min(Math.max(asNumber(args.withinDays) ?? 30, 1), 365);
-      const contracts = await listContracts(businessId, {
+      const contracts = await listContracts(owner, {
         expiringWithinDays: withinDays,
         status: (asString(args.status) as WorkspaceContractStatus | "all") ?? "all",
         projectId: asString(args.projectId),
       });
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayIsoDate();
 
       return {
         ok: true,
@@ -344,12 +358,12 @@ export async function runWorkspaceReadTool(
 
     case "list_workspace_approvals": {
       const mine = args.mine === true || args.mine === "true";
-      const approvals = await listApprovals(businessId, {
+      const approvals = await listApprovals(owner, {
         status: (asString(args.status) as "pending") ?? "pending",
-        approverUserId: mine ? actorUserId : undefined,
+        awaitingActor: mine,
         limit: Math.min(asNumber(args.limit) ?? 50, 100),
       });
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayIsoDate();
 
       return {
         ok: true,

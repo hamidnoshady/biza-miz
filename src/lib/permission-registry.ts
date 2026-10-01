@@ -176,6 +176,7 @@ const DRAFTS: Draft[] = [
   { key: P.workspaceView, group: "workspace", label: "مشاهده میز کار", description: "دیدن پروژه‌ها، وظایف و اسناد.", risk: "low", audit: false },
   { key: P.workspaceManage, group: "workspace", label: "مدیریت میز کار", description: "ایجاد و ویرایش پروژه، وظیفه، سند و تقویم.", risk: "medium", audit: false, implies: [P.workspaceView] },
   { key: P.workspaceContractsManage, group: "workspace", label: "مدیریت قراردادها", description: "ثبت و اصلاح قرارداد اجرا؛ یک تعهد مالی به شخص ثالث است.", risk: "high", audit: true, implies: [P.workspaceView] },
+  { key: P.workspaceAdmin, group: "workspace", label: "مدیریت همهٔ پروژه‌ها", description: "دسترسی مدیر به همهٔ پروژه‌ها، حتی بدون عضویت.", risk: "high", audit: true, implies: [P.workspaceView, P.workspaceManage] },
   { key: P.workspaceApprove, group: "workspace", label: "تأیید درخواست‌ها", description: "تصمیم‌گیری درباره درخواست‌های نیازمند تأیید.", risk: "high", audit: true, implies: [P.workspaceView] },
 
   // --- Accounting ----------------------------------------------------------

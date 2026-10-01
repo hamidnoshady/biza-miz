@@ -6,6 +6,7 @@ import {
   getWorkspaceTask,
   listChecklist,
   requireProjectCapability,
+  requireTaskWork,
   setChecklistItem,
 } from "@/lib/workspace";
 import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../../../guard";
@@ -15,10 +16,6 @@ import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../
  * the contributor role is that somebody doing the job can record progress on
  * it without being able to re-scope the task.
  */
-async function taskProject(businessId: string, taskId: string): Promise<string | null> {
-  const task = await getWorkspaceTask(businessId, taskId);
-  return task?.projectId ?? null;
-}
 
 export const GET = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -26,9 +23,9 @@ export const GET = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
     try {
-      const projectId = await taskProject(owner.businessId, id);
-      if (!projectId) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
-      await requireProjectCapability(owner, projectId, "view", true);
+      const task = await getWorkspaceTask(owner.businessId, id);
+      if (!task) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
+      await requireProjectCapability(owner, task.projectId, "view");
       return NextResponse.json({ checklist: await listChecklist(id) });
     } catch (err) {
       return handleWorkspaceError(err);
@@ -43,9 +40,9 @@ export const POST = withTenantScope(
     const { id } = await context.params;
     const body = await readBody(request);
     try {
-      const projectId = await taskProject(owner.businessId, id);
-      if (!projectId) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
-      await requireProjectCapability(owner, projectId, "contribute", true);
+      const task = await getWorkspaceTask(owner.businessId, id);
+      if (!task) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
+      await requireTaskWork(owner, task, false);
       return NextResponse.json({ checklist: await addChecklistItem(id, String(body.title ?? "")) }, { status: 201 });
     } catch (err) {
       return handleWorkspaceError(err);
@@ -60,9 +57,9 @@ export const PATCH = withTenantScope(
     const { id } = await context.params;
     const body = await readBody(request);
     try {
-      const projectId = await taskProject(owner.businessId, id);
-      if (!projectId) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
-      await requireProjectCapability(owner, projectId, "contribute", true);
+      const task = await getWorkspaceTask(owner.businessId, id);
+      if (!task) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
+      await requireTaskWork(owner, task, false);
       const checklist = await setChecklistItem(id, String(body.itemId ?? ""), body.done === true);
       return NextResponse.json({ checklist });
     } catch (err) {
@@ -78,9 +75,9 @@ export const DELETE = withTenantScope(
     const { id } = await context.params;
     const itemId = new URL(request.url).searchParams.get("itemId") ?? "";
     try {
-      const projectId = await taskProject(owner.businessId, id);
-      if (!projectId) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
-      await requireProjectCapability(owner, projectId, "edit", true);
+      const task = await getWorkspaceTask(owner.businessId, id);
+      if (!task) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
+      await requireTaskWork(owner, task, true);
       return NextResponse.json({ checklist: await deleteChecklistItem(id, itemId) });
     } catch (err) {
       return handleWorkspaceError(err);

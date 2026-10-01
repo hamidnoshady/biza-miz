@@ -8,17 +8,20 @@ import {
   requireProjectCapability,
   updateWorkspaceProject,
 } from "@/lib/workspace";
+import { projectCapabilities, workspaceAccessFlags } from "@/lib/workspace-shared";
 import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../../guard";
 
 /**
- * GET   — one project with everything its page needs: phases, members, activity.
- * PATCH — amend the project record.
+ * GET   — one project with everything its page needs: phases, members,
+ *         activity, the caller's effective role and the capability object the
+ *         page renders its controls from.
+ * PATCH — amend the project record (`manage`); transferring ownership is
+ *         `administer` — an owner act.
  *
- * Both run the per-project capability check on top of the platform permission:
- * holding `workspace.view` means "may use the workspace", not "may read every
- * project in it". `privileged` is passed for a holder of `workspace.manage`,
- * who is the business's own manager and must not be locked out of a project
- * nobody remembered to add them to.
+ * Holding `workspace.view` means "may use the workspace", not "may read every
+ * project in it": the project role decides, and a non-member without the
+ * explicit `workspace.admin` override (or the ledger reader's read-only one)
+ * gets a 404.
  */
 export const GET = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -26,15 +29,16 @@ export const GET = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
     try {
-      const role = await requireProjectCapability(owner, id, "view", true);
+      const role = await requireProjectCapability(owner, id, "view");
       const [project, phases, members, activity] = await Promise.all([
         getWorkspaceProject(owner.businessId, id),
         listPhases(id),
         listMembers(id),
-        listActivity(owner.businessId, { projectId: id, limit: 20 }),
+        listActivity(owner, { projectId: id, limit: 20 }),
       ]);
       if (!project) return NextResponse.json({ error: "project_not_found" }, { status: 404 });
-      return NextResponse.json({ project, phases, members, activity, role });
+      const capabilities = projectCapabilities(role, owner.access ?? workspaceAccessFlags(new Set()));
+      return NextResponse.json({ project, phases, members, activity, role, capabilities });
     } catch (err) {
       return handleWorkspaceError(err);
     }
@@ -48,7 +52,7 @@ export const PATCH = withTenantScope(
     const { id } = await context.params;
     const body = await readBody(request);
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, body.ownerUserId !== undefined ? "administer" : "manage");
       const project = await updateWorkspaceProject(owner, id, body);
       if (!project) return NextResponse.json({ error: "project_not_found" }, { status: 404 });
       return NextResponse.json({ project });

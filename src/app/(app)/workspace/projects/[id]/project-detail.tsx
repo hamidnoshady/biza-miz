@@ -37,6 +37,7 @@ import {
   WORKSPACE_ROLE_LABELS,
   completionPercent,
   type WorkspacePriority,
+  type WorkspaceProjectCapabilities,
   type WorkspaceProjectStatus,
   type WorkspaceRole,
 } from "@/lib/workspace-shared";
@@ -119,17 +120,12 @@ const TABS = [
 
 type TabKey = (typeof TABS)[number]["key"];
 
-export function ProjectDetail({
-  projectId,
-  canManage,
-  canManageContracts,
-  canApprove,
-}: {
-  projectId: string;
-  canManage: boolean;
-  canManageContracts: boolean;
-  canApprove: boolean;
-}) {
+/**
+ * Controls render from the server's `capabilities` — platform permission AND
+ * project role — so a viewer gets a read-only page instead of forms that end
+ * in a predictable 403. The server re-checks every write regardless.
+ */
+export function ProjectDetail({ projectId }: { projectId: string }) {
   const money = useMoney();
   const lookups = useWorkspaceLookups();
   const [project, setProject] = useState<ProjectDetail | null>(null);
@@ -137,6 +133,7 @@ export function ProjectDetail({
   const [members, setMembers] = useState<Member[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [role, setRole] = useState<WorkspaceRole | null>(null);
+  const [capabilities, setCapabilities] = useState<WorkspaceProjectCapabilities | null>(null);
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState<TabKey>("record");
@@ -148,6 +145,7 @@ export function ProjectDetail({
       members: Member[];
       activity: Activity[];
       role: WorkspaceRole;
+      capabilities: WorkspaceProjectCapabilities;
     }>(`/api/workspace/projects/${projectId}`).then(({ ok, data }) => {
       setLoaded(true);
       if (ok) {
@@ -156,6 +154,7 @@ export function ProjectDetail({
         setMembers(data.members);
         setActivity(data.activity);
         setRole(data.role);
+        setCapabilities(data.capabilities);
       } else {
         setError(workspaceError((data as unknown as { error?: string }).error));
       }
@@ -163,6 +162,12 @@ export function ProjectDetail({
   }, [projectId]);
 
   useEffect(load, [load]);
+
+  const canContribute = capabilities?.canContribute ?? false;
+  const canEdit = capabilities?.canEdit ?? false;
+  const canManageProject = capabilities?.canManageProject ?? false;
+  const canManageContracts = capabilities?.canManageContracts ?? false;
+  const canApprove = capabilities?.canApprove ?? false;
 
   if (!loaded) return <SectionCardSkeleton rows={6} label="در حال بارگذاری پروژه" />;
 
@@ -331,31 +336,31 @@ export function ProjectDetail({
         ) : null}
 
         {tab === "tasks" ? (
-          <TasksSection lookups={lookups} canManage={canManage} projectId={projectId} />
+          <TasksSection lookups={lookups} canManage={canEdit} projectId={projectId} />
         ) : null}
 
         {tab === "documents" ? (
           <DocumentsSection
             lookups={lookups}
-            canManage={canManage}
-            canRequestApproval={canManage}
+            canManage={canEdit}
+            canRequestApproval={canContribute}
             projectId={projectId}
           />
         ) : null}
 
-        {/* The contracts register filters itself by project through its own
-            controls; the project id is not forced here because an execution
-            contract can span two projects of the same job. */}
+        {/* A contract has one nullable `project_id`, so a project's tab shows
+            exactly that project's contracts — never the whole register. */}
         {tab === "contracts" ? (
           <ContractsSection
             lookups={lookups}
             canManageContracts={canManageContracts}
-            canRequestApproval={canManage}
+            canRequestApproval={canContribute}
+            projectId={projectId}
           />
         ) : null}
 
         {tab === "team" ? (
-          <TeamsSection lookups={lookups} canManage={canManage} projectId={projectId} />
+          <TeamsSection lookups={lookups} canManage={canManageProject} projectId={projectId} />
         ) : null}
 
         {tab === "approvals" ? (
@@ -363,7 +368,7 @@ export function ProjectDetail({
         ) : null}
 
         {tab === "calendar" ? (
-          <CalendarSection lookups={lookups} canManage={canManage} projectId={projectId} />
+          <CalendarSection lookups={lookups} canManage={canContribute} projectId={projectId} />
         ) : null}
 
         {tab === "assistant" ? <ProjectAssistantPanels projectId={projectId} /> : null}

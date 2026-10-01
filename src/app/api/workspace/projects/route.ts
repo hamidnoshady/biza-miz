@@ -14,7 +14,9 @@ import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../
  * POST — create a project: the workspace record, its template phases and its
  *        creator-as-owner membership.
  *
- * The reads run on `workspace.view`, the write on `workspace.manage`. Both
+ * The list is only the projects the caller is a member of (or every project
+ * for a `workspace.admin` / ledger reader). The reads run on `workspace.view`,
+ * the write on `workspace.manage`. Both
  * operate on `ai_projects`, the same table the pre-Phase-G `/api/ai/projects`
  * routes use — those keep working untouched, which is what "evolution, not
  * rewrite" means at the API boundary.
@@ -36,7 +38,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     memberUserId: params.get("mine") === "true" ? owner.actorUserId : undefined,
   };
   try {
-    return NextResponse.json({ projects: await listWorkspaceProjects(owner.businessId, filter) });
+    return NextResponse.json({ projects: await listWorkspaceProjects(owner, filter) });
   } catch (err) {
     return handleWorkspaceError(err);
   }

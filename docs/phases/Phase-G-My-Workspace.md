@@ -219,15 +219,59 @@ Stated plainly, because each is a decision rather than an oversight:
    hand-ordered index across a status change.
 4. **Document preview is the media library's.** Whatever the media layer can
    preview, Workspace can preview. There is no Workspace-specific renderer.
-5. **Approvals are single-step.** One requester, one approver, one decision.
+5. **Approvals are single-step.** One requester, one approver, one decision
+   (approve / reject / request changes, or the requester withdraws).
    Multi-stage chains and quorum rules are not modelled.
 6. **Contract reminders are computed, not pushed.** `contractNeedsReminder` and
    the expiry window drive the UI and the AI tool; nothing yet writes into the
    notification or messaging queue on its own schedule.
-7. **`projectRoleFor` grants an implicit owner role** to a project's
-   `owner_user_id`/`created_by` when no membership row exists. This is what
-   keeps assistant-created projects reachable, but it means a project's creator
-   cannot be demoted below owner without an explicit membership row.
+
+## 7b. The access model (#761, migration 0191)
+
+**effective capability = platform permission AND project role.** One layer in
+`src/lib/workspace.ts` decides it, and every route, list, the dashboard, the
+calendar, reports, lookups and the AI read tools go through it:
+
+- `workspaceAccessFlags(permissions)` (pure, `workspace-shared.ts`) turns the
+  member's *current* effective permissions into flags. The only way past
+  membership is explicit: **`workspace.admin`** (preset: manager, admin; the
+  owner holds everything) acts as a manager on every project, and
+  **`ledger.view`** reads every project as a viewer, because projects are the
+  cost centres the books post against. `workspace.view`/`workspace.manage`
+  are never an override — the old `privileged = true` bypass is gone.
+- `requireProjectCapability` / `resolveProjectRole` answer one project; a
+  non-member gets `project_not_found`, never a 403 that confirms the project
+  exists. `visibilityClause` is the SQL twin every list uses.
+- `resolveWorkspaceSubject(type, id, capability)` resolves a polymorphic
+  subject (comments, approvals, document links) from the subject itself —
+  existence, tenant, project — so a caller cannot pair an id with the wrong
+  project or write an orphan thread.
+- **Business-level records** (a contract, document or event with no project)
+  are visible to their author and to override holders; project-less
+  contracts also to `workspace.contracts_manage` holders.
+- **Approvals:** the subject's project is the approval's project (a
+  mismatched `projectId` is refused); a named approver is the only decider
+  (or an administrator); the requester never decides their own request
+  (`approvalDecisionError`, pure and unit-tested). Withdrawing your own
+  request runs on `workspace.manage`; every decision needs `workspace.approve`.
+- **Contributors** work (status, position, checklist) only tasks assigned to
+  them (`requireTaskWork`); re-scoping is `edit`.
+- **Spend** in reports and the assistant is null — not 0 — without `ledger.view`.
+- **Ownership:** a trigger on `ai_projects` keeps the owner's member row in
+  step with `owner_user_id` on every write path (the legacy assistant path and
+  the importer included), promoting the new owner and demoting the previous
+  one to manager in the same statement. The named owner cannot be demoted or
+  removed without a transfer; the last owner never.
+- **Integrity:** a task's phase is in its project; a document's task, contract,
+  media asset and journal entry are validated as one record against the final
+  values; an event follows its task's project; partial date PATCHes are checked
+  against the resulting record (also enforced by `NOT VALID` CHECKs for new
+  writes). Template application is a duplicate-safe merge.
+- The project page renders controls from the server's `capabilities` object.
+
+Still open from #761 and deliberately not in this change: server pagination
+and totals, the Workspace shell / command bar / entity drawer, the redesigned
+sections (Phases C–G of the issue).
 
 ## 8. Testing
 
@@ -267,7 +311,8 @@ would have reached a user:
 4. **`projectRoleFor` locked users out of their own projects.** 0167 backfills
    an owner row for projects that existed at migration time, but the legacy
    write path still creates projects without one, so anything created from the
-   assistant after the migration was unreachable by its creator.
+   assistant after the migration was unreachable by its creator. (Since #761 a
+   trigger writes that row on every path; see §7b.)
 5. **The agent-builder label import dragged `pg` into the browser bundle**,
    failing the production build on `Can't resolve 'tls'`. Tool names and labels
    moved to the pure `workspace-shared` module.

@@ -16,23 +16,31 @@ import { NextResponse } from "next/server";
 import { requirePermission } from "@/lib/auth";
 import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { WorkspaceError, type WorkspaceOwner } from "@/lib/workspace";
+import { workspaceAccessFlags } from "@/lib/workspace-shared";
 
 export { PERMISSIONS };
 
 /**
  * Resolves the session behind a workspace permission and shapes it into the
- * `WorkspaceOwner` every service function takes.
+ * `WorkspaceOwner` every service function takes — including its access
+ * flags, read from the member's CURRENT effective permissions (not the
+ * token's), so a revoked `workspace.admin` stops reaching every project on
+ * the next request.
+ *
+ * The platform permission only opens the area. Which projects the member
+ * reaches is decided by the service from these flags and their project role.
  */
 export async function workspaceOwner(
   permission: Permission,
 ): Promise<{ owner: WorkspaceOwner; error: null } | { owner: null; error: NextResponse }> {
-  const { session, error } = await requirePermission(permission);
+  const { session, membership, error } = await requirePermission(permission);
   if (error) return { owner: null, error };
   return {
     owner: {
       businessId: session.businessId,
       actorUserId: session.sub,
       actorName: session.fullName ?? "",
+      access: workspaceAccessFlags(membership.permissions),
     },
     error: null,
   };
@@ -53,9 +61,23 @@ const ERROR_STATUS: Record<string, number> = {
   party_not_found: 400,
   user_not_found: 400,
   template_not_found: 404,
-  not_a_project_member: 403,
+  subject_not_found: 404,
+  phase_not_found: 404,
+  media_not_found: 400,
+  journal_entry_not_found: 400,
   insufficient_project_role: 403,
+  not_the_approver: 403,
+  not_the_requester: 403,
+  self_approval_forbidden: 403,
   last_owner_cannot_be_removed: 409,
+  transfer_ownership_first: 409,
+  phase_not_in_project: 400,
+  task_project_mismatch: 400,
+  contract_project_mismatch: 400,
+  journal_entry_project_mismatch: 400,
+  approval_project_mismatch: 400,
+  invalid_position: 400,
+  invalid_time: 400,
   dependency_cycle: 409,
   dependency_across_projects: 400,
   end_before_start: 400,

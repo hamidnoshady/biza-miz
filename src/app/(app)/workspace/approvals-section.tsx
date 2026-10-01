@@ -1,12 +1,14 @@
 "use client";
 
 /**
- * «تأییدها» — the approval queue.
+ * «تأییدها» — the approval inbox.
  *
  * Requesting and deciding are deliberately different rights: anyone with
- * `workspace.manage` can ask, only `workspace.approve` can answer. This screen
- * shows both sides of that line — the decide buttons simply are not rendered
- * for a user who cannot decide, and the server enforces the same rule again.
+ * `workspace.manage` can ask, only `workspace.approve` can answer, a named
+ * approver is the only one who may answer their request, and nobody answers
+ * their own. Each row carries `requestedByMe`/`assignedToMe` from the server,
+ * so the buttons rendered are the ones that will succeed — and the server
+ * enforces the same rule again (`approvalDecisionError`).
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -37,6 +39,7 @@ import {
   SecondaryButton,
 } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
+import { todayIsoDate } from "@/lib/jalali";
 import {
   APPROVAL_STATUSES,
   APPROVAL_STATUS_LABELS,
@@ -58,12 +61,16 @@ export interface ApprovalRow {
   requestedByName: string | null;
   approverName: string | null;
   dueDate: string | null;
+  approverUserId: string | null;
   decidedAt: string | null;
   note: string;
   createdAt: string;
+  requestedByMe: boolean;
+  assignedToMe: boolean;
 }
 
-type Decision = "approved" | "rejected" | "cancelled";
+type Decision = "approved" | "rejected" | "changes_requested" | "cancelled";
+type Inbox = "all" | "mine" | "requested";
 
 export function ApprovalsSection({
   canApprove,
@@ -75,28 +82,31 @@ export function ApprovalsSection({
   const [approvals, setApprovals] = useState<ApprovalRow[] | null>(null);
   const [error, setError] = useState("");
   const [status, setStatus] = useState<WorkspaceApprovalStatus | "all">("pending");
-  const [mine, setMine] = useState(false);
+  const [inbox, setInbox] = useState<Inbox>("all");
   const [deciding, setDeciding] = useState<{ row: ApprovalRow; decision: Decision } | null>(null);
 
   const load = useCallback(() => {
     const params = new URLSearchParams({ status });
-    if (mine) params.set("mine", "true");
+    if (inbox === "mine") params.set("mine", "true");
+    if (inbox === "requested") params.set("requested", "true");
     if (projectId) params.set("projectId", projectId);
     api<{ approvals: ApprovalRow[] }>(`/api/workspace/approvals?${params}`).then(({ ok, data }) => {
       if (ok) setApprovals(data.approvals);
       else setError(workspaceError((data as unknown as { error?: string }).error));
     });
-  }, [status, mine, projectId]);
+  }, [status, inbox, projectId]);
 
   useEffect(load, [load]);
 
   const counts = useMemo(() => {
     const list = approvals ?? [];
+    // The business's calendar day (Tehran), never the browser's UTC slice.
+    const today = todayIsoDate();
     return {
       total: list.length,
       pending: list.filter((a) => a.status === "pending").length,
       overdue: list.filter(
-        (a) => a.status === "pending" && a.dueDate && a.dueDate < new Date().toISOString().slice(0, 10),
+        (a) => a.status === "pending" && a.dueDate && a.dueDate < today,
       ).length,
       approved: list.filter((a) => a.status === "approved").length,
     };
@@ -142,8 +152,14 @@ export function ApprovalsSection({
             ))}
           </FilterChipRow>
           <FilterChipRow label="فیلتر مخاطب">
-            <FilterChip selected={mine} onClick={() => setMine(!mine)}>
-              فقط تأییدهای من
+            <FilterChip selected={inbox === "all"} onClick={() => setInbox("all")}>
+              همه
+            </FilterChip>
+            <FilterChip selected={inbox === "mine"} onClick={() => setInbox("mine")}>
+              منتظر تصمیم من
+            </FilterChip>
+            <FilterChip selected={inbox === "requested"} onClick={() => setInbox("requested")}>
+              درخواست‌های من
             </FilterChip>
           </FilterChipRow>
         </div>
@@ -190,7 +206,11 @@ export function ApprovalsSection({
                       <span className="text-xs text-muted-foreground">
                         {row.decidedAt ? "تصمیم ثبت شده" : "—"}
                       </span>
-                    ) : canApprove ? (
+                    ) : row.requestedByMe ? (
+                      <SecondaryButton onClick={() => setDeciding({ row, decision: "cancelled" })}>
+                        لغو درخواست
+                      </SecondaryButton>
+                    ) : canApprove && (row.assignedToMe || !row.approverUserId) ? (
                       <div className="flex flex-wrap gap-1.5">
                         <PrimaryButton
                           type="button"
@@ -200,13 +220,20 @@ export function ApprovalsSection({
                           تأیید
                         </PrimaryButton>
                         <SecondaryButton
+                          onClick={() => setDeciding({ row, decision: "changes_requested" })}
+                        >
+                          درخواست اصلاح
+                        </SecondaryButton>
+                        <SecondaryButton
                           onClick={() => setDeciding({ row, decision: "rejected" })}
                         >
                           رد
                         </SecondaryButton>
                       </div>
                     ) : (
-                      <span className="text-xs text-muted-foreground">در انتظار تأییدکننده</span>
+                      <span className="text-xs text-muted-foreground">
+                        {row.approverName ? `در انتظار ${row.approverName}` : "در انتظار تأییدکننده"}
+                      </span>
                     )}
                   </Td>
                 </DataTableRow>
@@ -235,7 +262,15 @@ export function ApprovalsSection({
 const DECISION_LABELS: Record<Decision, string> = {
   approved: "تأیید",
   rejected: "رد",
+  changes_requested: "درخواست اصلاح",
   cancelled: "لغو",
+};
+
+const DECISION_EFFECTS: Record<Decision, string> = {
+  approved: "با تأیید، وضعیت خودِ این مورد هم به‌روز می‌شود (قرارداد فعال، سند تأییدشده).",
+  rejected: "با رد، وضعیت آن مورد «ردشده» ثبت می‌شود و می‌توان دوباره درخواست داد.",
+  changes_requested: "مورد به پیش‌نویس برمی‌گردد تا درخواست‌کننده اصلاحش کند و دوباره بفرستد.",
+  cancelled: "درخواست پس گرفته می‌شود و وضعیت آن مورد تغییری نمی‌کند.",
 };
 
 function DecisionDialog({
@@ -284,8 +319,8 @@ function DecisionDialog({
           <Field
             label="یادداشت"
             hint={
-              decision === "rejected"
-                ? "دلیل رد را بنویسید؛ درخواست‌کننده آن را می‌بیند."
+              decision === "rejected" || decision === "changes_requested"
+                ? "دلیل را بنویسید؛ درخواست‌کننده آن را می‌بیند."
                 : "اختیاری"
             }
           >
@@ -296,11 +331,7 @@ function DecisionDialog({
               autoFocus
             />
           </Field>
-          <p className="text-xs text-muted-foreground">
-            {decision === "approved"
-              ? "با تأیید، وضعیت خودِ این مورد هم به‌روز می‌شود (قرارداد فعال، سند تأییدشده)."
-              : "با رد، وضعیت آن مورد «ردشده» ثبت می‌شود و می‌توان دوباره درخواست داد."}
-          </p>
+          <p className="text-xs text-muted-foreground">{DECISION_EFFECTS[decision]}</p>
         </div>
         <div className="flex justify-end gap-2 border-t border-border/80 p-4">
           <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>

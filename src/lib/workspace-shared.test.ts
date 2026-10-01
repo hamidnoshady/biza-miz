@@ -24,10 +24,15 @@ import {
   WORKSPACE_SECTIONS,
   WORKSPACE_SECTION_LABELS,
   addDays,
+  approvalDecisionError,
   builtinTemplate,
   compareTasksForList,
   completionPercent,
   contractNeedsReminder,
+  effectiveProjectRole,
+  intervalOrdered,
+  projectCapabilities,
+  workspaceAccessFlags,
   daysUntil,
   deadlineTone,
   dependenciesSatisfied,
@@ -291,5 +296,83 @@ describe("templates", () => {
     // The second phase begins where the first ended — the cursor carries.
     expect(phases[1].startDate).toBe("2026-03-11");
     expect(phases[1].endDate).toBe("2026-03-16");
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * #761 — the access model's pure half
+ * ------------------------------------------------------------------------- */
+
+describe("workspaceAccessFlags", () => {
+  it("never treats workspace.view or workspace.manage as an override", () => {
+    expect(workspaceAccessFlags(new Set(["workspace.view", "workspace.manage"])).override).toBeNull();
+  });
+  it("gives workspace.admin the administer override and ledger.view the read one", () => {
+    expect(workspaceAccessFlags(new Set(["workspace.admin"])).override).toBe("administer");
+    expect(workspaceAccessFlags(new Set(["ledger.view"])).override).toBe("read");
+    expect(workspaceAccessFlags(new Set(["ledger.view"])).canViewFinancials).toBe(true);
+    expect(workspaceAccessFlags(new Set()).canViewFinancials).toBe(false);
+  });
+});
+
+describe("effectiveProjectRole", () => {
+  it("takes the stronger of membership and override, and null with neither", () => {
+    expect(effectiveProjectRole(null, null)).toBeNull();
+    expect(effectiveProjectRole("viewer", "administer")).toBe("manager");
+    expect(effectiveProjectRole("owner", "administer")).toBe("owner");
+    expect(effectiveProjectRole(null, "read")).toBe("viewer");
+    expect(effectiveProjectRole("editor", "read")).toBe("editor");
+  });
+});
+
+describe("projectCapabilities", () => {
+  const flags = (perms: string[]) => workspaceAccessFlags(new Set(perms));
+  it("intersects the project role with the platform permission", () => {
+    // An editor on the project without workspace.manage still cannot write.
+    const caps = projectCapabilities("editor", flags(["workspace.view"]));
+    expect(caps.canView).toBe(true);
+    expect(caps.canEdit).toBe(false);
+    expect(projectCapabilities("editor", flags(["workspace.manage"])).canEdit).toBe(true);
+    expect(projectCapabilities("viewer", flags(["workspace.manage"])).canEdit).toBe(false);
+    expect(projectCapabilities(null, flags(["workspace.manage"])).canView).toBe(false);
+  });
+  it("shows spend only to a ledger reader", () => {
+    expect(projectCapabilities("owner", flags(["workspace.manage"])).canViewFinancials).toBe(false);
+    expect(projectCapabilities("viewer", flags(["ledger.view"])).canViewFinancials).toBe(true);
+  });
+});
+
+describe("approvalDecisionError", () => {
+  const base = {
+    actorUserId: "me", requestedBy: "them", approverUserId: null,
+    isAdministrator: false, canManageSubject: false,
+  } as const;
+  it("forbids deciding your own request, even as administrator", () => {
+    expect(approvalDecisionError({ ...base, decision: "approved", requestedBy: "me", isAdministrator: true }))
+      .toBe("self_approval_forbidden");
+  });
+  it("reserves a named request for its approver or an administrator", () => {
+    expect(approvalDecisionError({ ...base, decision: "approved", approverUserId: "x", canManageSubject: true }))
+      .toBe("not_the_approver");
+    expect(approvalDecisionError({ ...base, decision: "rejected", approverUserId: "me" })).toBeNull();
+    expect(approvalDecisionError({ ...base, decision: "changes_requested", approverUserId: "x", isAdministrator: true }))
+      .toBeNull();
+  });
+  it("lets a project manager decide an unassigned request", () => {
+    expect(approvalDecisionError({ ...base, decision: "approved" })).toBe("insufficient_project_role");
+    expect(approvalDecisionError({ ...base, decision: "approved", canManageSubject: true })).toBeNull();
+  });
+  it("lets only the requester (or an administrator) withdraw", () => {
+    expect(approvalDecisionError({ ...base, decision: "cancelled" })).toBe("not_the_requester");
+    expect(approvalDecisionError({ ...base, decision: "cancelled", requestedBy: "me" })).toBeNull();
+  });
+});
+
+describe("intervalOrdered", () => {
+  it("accepts open ends and equal bounds, refuses a reversed interval", () => {
+    expect(intervalOrdered(null, "2026-01-01")).toBe(true);
+    expect(intervalOrdered("2026-01-01", "2026-01-01")).toBe(true);
+    expect(intervalOrdered("2026-02-01", "2026-01-01")).toBe(false);
+    expect(intervalOrdered("10:00", "09:30")).toBe(false);
   });
 });

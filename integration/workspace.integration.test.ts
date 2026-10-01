@@ -18,6 +18,8 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { todayIsoDate } from "../src/lib/jalali";
+import { workspaceAccessFlags, type WorkspaceAccessFlags } from "../src/lib/workspace-shared";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -105,6 +107,9 @@ async function seedUser(businessId: string, name: string, slug: string) {
 }
 
 beforeEach(async () => {
+  // Ledger rows written by the spend test hold accounts → businesses.
+  await db.query("DELETE FROM journal_lines");
+  await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM businesses");
 
   const a = await seedBusiness("Alpha", `alpha-${randomUUID().slice(0, 8)}`);
@@ -124,8 +129,23 @@ beforeEach(async () => {
   beta.ownerId = b.ownerId;
 });
 
-function owner(userId = alpha.ownerId) {
-  return { businessId: alpha.businessId, actorUserId: userId, actorName: "Owner" };
+/** The business owner: every permission, so the `workspace.admin` override. */
+const ADMIN = workspaceAccessFlags(new Set([
+  "workspace.view", "workspace.manage", "workspace.contracts_manage",
+  "workspace.approve", "workspace.admin", "ledger.view",
+]));
+/** A colleague with every workspace write but no override: membership decides. */
+const MEMBER = workspaceAccessFlags(new Set([
+  "workspace.view", "workspace.manage", "workspace.contracts_manage", "workspace.approve",
+]));
+
+function owner(userId = alpha.ownerId, access?: WorkspaceAccessFlags) {
+  return {
+    businessId: alpha.businessId,
+    actorUserId: userId,
+    actorName: "Owner",
+    access: access ?? (userId === alpha.ownerId ? ADMIN : MEMBER),
+  };
 }
 
 /** Run inside Alpha's tenant scope — everything the service does needs one. */
@@ -174,7 +194,7 @@ describe("existing project data", () => {
     expect(seen!.tags).toEqual([]);
 
     const list = await inAlpha(() =>
-      workspace.listWorkspaceProjects(alpha.businessId, { status: "all" }),
+      workspace.listWorkspaceProjects(owner(), { status: "all" }),
     );
     expect(list.map((p) => p.id)).toContain(legacy.id);
   });
@@ -209,13 +229,20 @@ describe("existing project data", () => {
         { name: "پروژهٔ قدیمی" },
       ),
     );
-    // createProject (old path) does not write workspace_members, so the
-    // workspace's own read must still admit the creator: `projectRoleFor`
-    // falls back to the project's owner_user_id/created_by.
+    // The old path knows nothing about workspace_members; the 0191 trigger
+    // writes the owner row anyway, so the creator's project page AND their
+    // «پروژه‌های من» list both admit the project — membership-only access.
     const role = await inAlpha(() =>
-      workspace.projectRoleFor(alpha.businessId, legacy.id, alpha.ownerId),
+      workspace.resolveProjectRole(owner(alpha.ownerId, MEMBER), legacy.id),
     );
-    expect(role).not.toBeNull();
+    expect(role).toBe("owner");
+    const mine = await inAlpha(() =>
+      workspace.listWorkspaceProjects(owner(alpha.ownerId, MEMBER), {
+        memberUserId: alpha.ownerId,
+        status: "all",
+      }),
+    );
+    expect(mine.map((p) => p.id)).toContain(legacy.id);
   });
 });
 
@@ -242,12 +269,18 @@ describe("tenant isolation", () => {
     expect(seen).toBeNull();
 
     const contracts = await dbLib.withTenant(beta.businessId, () =>
-      workspace.listContracts(beta.businessId, { status: "all" }),
+      workspace.listContracts(
+        { businessId: beta.businessId, actorUserId: beta.ownerId, access: ADMIN },
+        { status: "all" },
+      ),
     );
     expect(contracts).toHaveLength(0);
 
     const tasks = await dbLib.withTenant(beta.businessId, () =>
-      workspace.listWorkspaceTasks(beta.businessId, { status: "all" }),
+      workspace.listWorkspaceTasks(
+        { businessId: beta.businessId, actorUserId: beta.ownerId, access: ADMIN },
+        { status: "all" },
+      ),
     );
     expect(tasks).toHaveLength(0);
   });
@@ -310,15 +343,30 @@ describe("project capabilities", () => {
     ).resolves.toBe("editor");
   });
 
-  it("lets a business-wide manager in without a member row (privileged)", async () => {
+  it("lets only the explicit workspace.admin override in without a member row", async () => {
     const project = await makeProject();
-    // `privileged` is what the API passes for a `workspace.manage` holder: a
-    // manager must not be locked out of a project nobody added them to.
+    // `workspace.manage` alone is NOT a pass to every project (#761)…
+    await expect(
+      inAlpha(() => workspace.requireProjectCapability(owner(alpha.outsiderId), project.id, "view")),
+    ).rejects.toThrow(/project_not_found/);
+    // …the explicit override is, as a manager…
     await expect(
       inAlpha(() =>
-        workspace.requireProjectCapability(owner(alpha.outsiderId), project.id, "manage", true),
+        workspace.requireProjectCapability(owner(alpha.outsiderId, ADMIN), project.id, "manage"),
       ),
-    ).resolves.toBeTruthy();
+    ).resolves.toBe("manager");
+    // …and the ledger reader's override is read-only.
+    const reader = workspaceAccessFlags(new Set(["workspace.view", "ledger.view"]));
+    await expect(
+      inAlpha(() =>
+        workspace.requireProjectCapability(owner(alpha.outsiderId, reader), project.id, "view"),
+      ),
+    ).resolves.toBe("viewer");
+    await expect(
+      inAlpha(() =>
+        workspace.requireProjectCapability(owner(alpha.outsiderId, reader), project.id, "edit"),
+      ),
+    ).rejects.toThrow(/insufficient_project_role/);
   });
 
   it("refuses to remove the last owner", async () => {
@@ -384,17 +432,17 @@ describe("tasks", () => {
     );
 
     const open = await inAlpha(() =>
-      workspace.listWorkspaceTasks(alpha.businessId, { status: "open_only" }),
+      workspace.listWorkspaceTasks(owner(), { status: "open_only" }),
     );
     expect(open.map((t) => t.title)).toEqual(["سفارش میلگرد"]);
 
     const all = await inAlpha(() =>
-      workspace.listWorkspaceTasks(alpha.businessId, { status: "all" }),
+      workspace.listWorkspaceTasks(owner(), { status: "all" }),
     );
     expect(all).toHaveLength(2);
 
     const mine = await inAlpha(() =>
-      workspace.listWorkspaceTasks(alpha.businessId, {
+      workspace.listWorkspaceTasks(owner(), {
         assigneeUserId: alpha.memberId,
         status: "all",
       }),
@@ -458,7 +506,7 @@ describe("the approval gate", () => {
         subjectId: contract.id,
         projectId: project.id,
         title: "تأیید پیمان نما",
-        approverUserId: alpha.ownerId,
+        approverUserId: alpha.memberId,
         dueDate: "2026-01-25",
       }),
     );
@@ -468,8 +516,9 @@ describe("the approval gate", () => {
       "pending_approval",
     );
 
+    // The named approver decides — not the requester.
     const decided = await inAlpha(() =>
-      workspace.decideApproval(owner(), approval.id, "approved", "تأیید شد"),
+      workspace.decideApproval(owner(alpha.memberId), approval.id, "approved", "تأیید شد"),
     );
     expect(decided!.status).toBe("approved");
     expect((await inAlpha(() => workspace.getContract(alpha.businessId, contract.id)))!.status).toBe(
@@ -484,7 +533,6 @@ describe("the approval gate", () => {
   });
 
   it("resolves the subject's own title rather than storing a copy", async () => {
-    const project = await makeProject();
     const contract = await inAlpha(() =>
       workspace.createContract(owner(), { title: "نام اول", contractType: "vendor" }),
     );
@@ -492,14 +540,13 @@ describe("the approval gate", () => {
       workspace.requestApproval(owner(), {
         subjectType: "contract",
         subjectId: contract.id,
-        projectId: project.id,
         title: "تأیید",
       }),
     );
     await inAlpha(() => workspace.updateContract(owner(), contract.id, { title: "نام دوم" }));
 
     const [approval] = await inAlpha(() =>
-      workspace.listApprovals(alpha.businessId, { status: "all" }),
+      workspace.listApprovals(owner(), { status: "all" }),
     );
     expect(approval.subjectTitle).toBe("نام دوم");
   });
@@ -527,7 +574,7 @@ describe("documents", () => {
     expect(v2.version).toBe(2);
 
     const current = await inAlpha(() =>
-      workspace.listDocuments(alpha.businessId, { projectId: project.id, currentOnly: true }),
+      workspace.listDocuments(owner(), { projectId: project.id, currentOnly: true }),
     );
     expect(current.map((d) => d.id)).toEqual([v2.id]);
 
@@ -565,7 +612,7 @@ describe("dates crossing the driver boundary", () => {
       workspace.getWorkspaceProject(alpha.businessId, project.id),
     );
     expect(fetched?.startDate).toBe("2026-03-01");
-    const listed = await inAlpha(() => workspace.listWorkspaceProjects(alpha.businessId, {}));
+    const listed = await inAlpha(() => workspace.listWorkspaceProjects(owner(), {}));
     expect(listed.find((p) => p.id === project.id)?.endDate).toBe("2026-07-30");
 
     const task = await inAlpha(() =>
@@ -576,7 +623,7 @@ describe("dates crossing the driver boundary", () => {
     );
     expect(task.dueDate).toBe("2026-04-05");
     const tasks = await inAlpha(() =>
-      workspace.listWorkspaceTasks(alpha.businessId, { projectId: project.id }),
+      workspace.listWorkspaceTasks(owner(), { projectId: project.id }),
     );
     expect(tasks.find((t) => t.id === task.id)?.dueDate).toBe("2026-04-05");
 
@@ -606,7 +653,7 @@ describe("dates crossing the driver boundary", () => {
     // The calendar is the one place dates are compared as strings, so a
     // non-ISO value there silently breaks ordering and range filtering.
     const entries = await inAlpha(() =>
-      workspace.listCalendar(alpha.businessId, { from: "2026-01-01", to: "2026-12-31" }),
+      workspace.listCalendar(owner(), { from: "2026-01-01", to: "2026-12-31" }),
     );
     expect(entries.length).toBeGreaterThan(0);
     for (const entry of entries) expect(entry.date).toMatch(iso);
@@ -653,7 +700,7 @@ describe("the unified calendar", () => {
     );
 
     const entries = await inAlpha(() =>
-      workspace.listCalendar(alpha.businessId, { from: "2026-03-01", to: "2026-03-31" }),
+      workspace.listCalendar(owner(), { from: "2026-03-01", to: "2026-03-31" }),
     );
     const sources = new Set(entries.map((e) => e.source));
     expect(sources).toContain("event");
@@ -664,7 +711,7 @@ describe("the unified calendar", () => {
 
     // A date outside the window is not in the answer.
     const narrow = await inAlpha(() =>
-      workspace.listCalendar(alpha.businessId, { from: "2026-03-11", to: "2026-03-13" }),
+      workspace.listCalendar(owner(), { from: "2026-03-11", to: "2026-03-13" }),
     );
     expect(narrow.every((e) => e.date >= "2026-03-11" && e.date <= "2026-03-13")).toBe(true);
   });
@@ -677,24 +724,28 @@ describe("the dashboard and the report", () => {
       workspace.createWorkspaceTask(owner(), project.id, {
         title: "کار من",
         assigneeUserId: alpha.ownerId,
-        dueDate: new Date().toISOString().slice(0, 10),
+        // The business's day (Tehran), the same "today" the dashboard uses.
+        dueDate: todayIsoDate(),
       }),
     );
     const contract = await inAlpha(() =>
-      workspace.createContract(owner(), { title: "پیمان", contractType: "consultant" }),
+      workspace.createContract(owner(), {
+        title: "پیمان", contractType: "consultant", projectId: project.id,
+      }),
     );
+    // A colleague on the project asks and names the owner, so it is in the
+    // owner's «منتظر تصمیم من» count.
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "editor"));
     await inAlpha(() =>
-      workspace.requestApproval(owner(), {
+      workspace.requestApproval(owner(alpha.memberId), {
         subjectType: "contract",
         subjectId: contract.id,
-        projectId: project.id,
         title: "تأیید",
+        approverUserId: alpha.ownerId,
       }),
     );
 
-    const dash = await inAlpha(() =>
-      workspace.getWorkspaceDashboard(alpha.businessId, alpha.ownerId),
-    );
+    const dash = await inAlpha(() => workspace.getWorkspaceDashboard(owner()));
     expect(dash.activeProjects).toBe(1);
     expect(dash.tasksToday).toBeGreaterThanOrEqual(1);
     expect(dash.pendingApprovals).toBe(1);
@@ -723,9 +774,314 @@ describe("the dashboard and the report", () => {
       [entry.rows[0].id, account.rows[0].id],
     );
 
-    const [row] = await inAlpha(() => workspace.projectReport(alpha.businessId));
+    const [row] = await inAlpha(() => workspace.projectReport(owner()));
     expect(row.projectId).toBe(project.id);
     expect(row.spentRial).toBe(250_000);
     expect(row.budgetRial).toBe(1_000_000);
+
+    // A project member who may not read the books sees the project, not the
+    // ledger figure — null, never a misleading 0.
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "viewer"));
+    const [memberRow] = await inAlpha(() => workspace.projectReport(owner(alpha.memberId)));
+    expect(memberRow.projectId).toBe(project.id);
+    expect(memberRow.spentRial).toBeNull();
+
+    // A colleague not on the project sees no row at all.
+    expect(await inAlpha(() => workspace.projectReport(owner(alpha.outsiderId)))).toEqual([]);
+  });
+});
+
+/* ===========================================================================
+ * #761 — one access model, subject integrity, approvals
+ * ======================================================================== */
+
+describe("project visibility (#761)", () => {
+  it("never lets a non-member enumerate a project or anything inside it", async () => {
+    const project = await makeProject();
+    const task = await inAlpha(() =>
+      workspace.createWorkspaceTask(owner(), project.id, { title: "مخفی", dueDate: "2026-03-10" }),
+    );
+    await inAlpha(() =>
+      workspace.createContract(owner(), {
+        title: "پیمان مخفی", contractType: "vendor", projectId: project.id, endDate: "2026-03-12",
+      }),
+    );
+    await inAlpha(() =>
+      workspace.createDocument(owner(), { title: "سند مخفی", projectId: project.id }),
+    );
+    await inAlpha(() => workspace.addComment(owner(), "task", task.id, "یادداشت"));
+
+    const outsider = owner(alpha.outsiderId);
+    expect(await inAlpha(() => workspace.listWorkspaceProjects(outsider, { status: "all" }))).toEqual([]);
+    expect(await inAlpha(() => workspace.listWorkspaceTasks(outsider, { status: "all" }))).toEqual([]);
+    expect(await inAlpha(() => workspace.listContracts(outsider, { status: "all" }))).toEqual([]);
+    expect(await inAlpha(() => workspace.listDocuments(outsider, {}))).toEqual([]);
+    expect(await inAlpha(() => workspace.listActivity(outsider, {}))).toEqual([]);
+    expect(
+      await inAlpha(() => workspace.listCalendar(outsider, { from: "2026-01-01", to: "2026-12-31" })),
+    ).toEqual([]);
+    const dash = await inAlpha(() => workspace.getWorkspaceDashboard(outsider));
+    expect(dash.activeProjects).toBe(0);
+    // A subject by id is "not found" — existence is not leaked either.
+    await expect(
+      inAlpha(() => workspace.resolveWorkspaceSubject(outsider, "task", task.id, "view")),
+    ).rejects.toThrow(/subject_not_found/);
+
+    // Added as a viewer, the same member sees it — and still cannot write.
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.outsiderId, "viewer"));
+    expect((await inAlpha(() => workspace.listWorkspaceTasks(outsider, { status: "all" }))).length).toBe(1);
+    await expect(
+      inAlpha(() => workspace.addComment(outsider, "task", task.id, "نظر بیننده")),
+    ).rejects.toThrow(/insufficient_project_role/);
+  });
+
+  it("lets a contributor work only the tasks assigned to them", async () => {
+    const project = await makeProject();
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "contributor"));
+    const mine = await inAlpha(() =>
+      workspace.createWorkspaceTask(owner(), project.id, { title: "مال من", assigneeUserId: alpha.memberId }),
+    );
+    const theirs = await inAlpha(() =>
+      workspace.createWorkspaceTask(owner(), project.id, { title: "مال دیگری" }),
+    );
+    const member = owner(alpha.memberId);
+    await expect(inAlpha(() => workspace.requireTaskWork(member, mine, false))).resolves.toBeUndefined();
+    await expect(inAlpha(() => workspace.requireTaskWork(member, theirs, false)))
+      .rejects.toThrow(/insufficient_project_role/);
+    // Re-scoping even their own task is editor work.
+    await expect(inAlpha(() => workspace.requireTaskWork(member, mine, true)))
+      .rejects.toThrow(/insufficient_project_role/);
+  });
+});
+
+describe("project ownership (#761)", () => {
+  it("moves the owner role with owner_user_id, atomically", async () => {
+    const project = await makeProject();
+    await inAlpha(() =>
+      workspace.updateWorkspaceProject(owner(), project.id, { ownerUserId: alpha.memberId }),
+    );
+    const members = await inAlpha(() => workspace.listMembers(project.id));
+    const roleOf = (id: string) => members.find((m) => m.userId === id)?.role;
+    expect(roleOf(alpha.memberId)).toBe("owner");
+    // The previous owner keeps access, as a manager, rather than a stale owner row.
+    expect(roleOf(alpha.ownerId)).toBe("manager");
+  });
+
+  it("refuses to demote or remove the named owner without a transfer", async () => {
+    const project = await makeProject();
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "owner"));
+    await expect(
+      inAlpha(() => workspace.setMember(owner(), project.id, alpha.ownerId, "editor")),
+    ).rejects.toThrow(/transfer_ownership_first/);
+    await expect(
+      inAlpha(() => workspace.removeMember(owner(), project.id, alpha.ownerId)),
+    ).rejects.toThrow(/transfer_ownership_first/);
+    // A co-owner who is not the named owner may step down.
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "editor"));
+  });
+});
+
+describe("approvals (#761)", () => {
+  async function draftContract(projectId: string) {
+    return inAlpha(() =>
+      workspace.createContract(owner(), { title: "پیمان", contractType: "vendor", projectId }),
+    );
+  }
+
+  it("rejects an invalid subject and a mismatched project", async () => {
+    const project = await makeProject();
+    const other = await makeProject({ name: "پروژهٔ دیگر" });
+    const contract = await draftContract(project.id);
+    await expect(
+      inAlpha(() =>
+        workspace.requestApproval(owner(), { subjectType: "contract", subjectId: randomUUID() }),
+      ),
+    ).rejects.toThrow(/subject_not_found/);
+    await expect(
+      inAlpha(() =>
+        workspace.requestApproval(owner(), {
+          subjectType: "contract", subjectId: contract.id, projectId: other.id,
+        }),
+      ),
+    ).rejects.toThrow(/approval_project_mismatch/);
+    // The approval's project is the subject's, whatever the caller omits.
+    const approval = await inAlpha(() =>
+      workspace.requestApproval(owner(), { subjectType: "contract", subjectId: contract.id }),
+    );
+    expect(approval.projectId).toBe(project.id);
+  });
+
+  it("enforces the named approver, forbids self-approval, and supports request-changes", async () => {
+    const project = await makeProject();
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "editor"));
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.outsiderId, "manager"));
+    const contract = await draftContract(project.id);
+    const approval = await inAlpha(() =>
+      workspace.requestApproval(owner(alpha.memberId), {
+        subjectType: "contract", subjectId: contract.id, approverUserId: alpha.ownerId,
+      }),
+    );
+
+    // The requester can never decide their own request…
+    await expect(
+      inAlpha(() => workspace.decideApproval(owner(alpha.memberId), approval.id, "approved")),
+    ).rejects.toThrow(/self_approval_forbidden/);
+    // …and a project manager who is not the named approver cannot either.
+    await expect(
+      inAlpha(() => workspace.decideApproval(owner(alpha.outsiderId), approval.id, "approved")),
+    ).rejects.toThrow(/not_the_approver/);
+
+    const decided = await inAlpha(() =>
+      workspace.decideApproval(owner(), approval.id, "changes_requested", "مبلغ را اصلاح کنید"),
+    );
+    expect(decided!.status).toBe("changes_requested");
+    expect((await inAlpha(() => workspace.getContract(alpha.businessId, contract.id)))!.status)
+      .toBe("draft");
+  });
+
+  it("lets an unassigned request be decided by a project manager, not a viewer", async () => {
+    const project = await makeProject();
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "viewer"));
+    const contract = await draftContract(project.id);
+    const approval = await inAlpha(() =>
+      workspace.requestApproval(owner(), { subjectType: "contract", subjectId: contract.id }),
+    );
+    await expect(
+      inAlpha(() => workspace.decideApproval(owner(alpha.memberId), approval.id, "approved")),
+    ).rejects.toThrow(/insufficient_project_role/);
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "manager"));
+    const decided = await inAlpha(() =>
+      workspace.decideApproval(owner(alpha.memberId), approval.id, "approved"),
+    );
+    expect(decided!.status).toBe("approved");
+  });
+});
+
+describe("comments (#761)", () => {
+  it("refuses an orphan subject instead of writing a thread onto it", async () => {
+    await expect(
+      inAlpha(() => workspace.addComment(owner(), "task", randomUUID(), "یتیم")),
+    ).rejects.toThrow(/subject_not_found/);
+    const { rows } = await db.query("SELECT count(*)::int AS n FROM workspace_comments");
+    expect(rows[0].n).toBe(0);
+  });
+});
+
+describe("cross-entity integrity (#761)", () => {
+  it("keeps a task's phase inside the task's project", async () => {
+    const project = await makeProject({ templateKey: "construction" });
+    const other = await makeProject({ name: "دیگری", templateKey: "construction" });
+    const [foreignPhase] = await inAlpha(() => workspace.listPhases(other.id));
+    await expect(
+      inAlpha(() =>
+        workspace.createWorkspaceTask(owner(), project.id, { title: "x", phaseId: foreignPhase.id }),
+      ),
+    ).rejects.toThrow(/phase_not_in_project/);
+    const task = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "y" }));
+    await expect(
+      inAlpha(() => workspace.updateWorkspaceTask(owner(), task.id, { phaseId: foreignPhase.id })),
+    ).rejects.toThrow(/phase_not_in_project/);
+  });
+
+  it("validates a document's task, contract, media and journal links as one record", async () => {
+    const project = await makeProject();
+    const other = await makeProject({ name: "دیگری" });
+    const foreignTask = await inAlpha(() =>
+      workspace.createWorkspaceTask(owner(), other.id, { title: "کار دیگر" }),
+    );
+    await expect(
+      inAlpha(() =>
+        workspace.createDocument(owner(), { title: "d", projectId: project.id, taskId: foreignTask.id }),
+      ),
+    ).rejects.toThrow(/task_project_mismatch/);
+
+    const foreignContract = await inAlpha(() =>
+      workspace.createContract(owner(), { title: "c", contractType: "vendor", projectId: other.id }),
+    );
+    await expect(
+      inAlpha(() =>
+        workspace.createDocument(owner(), { title: "d", projectId: project.id, contractId: foreignContract.id }),
+      ),
+    ).rejects.toThrow(/contract_project_mismatch/);
+
+    const betaMedia = await db.query<{ id: string }>(
+      `INSERT INTO media_assets (business_id, kind, file_name, mime_type, byte_size, storage_key, sha256)
+       VALUES ($1, 'document', 'x.pdf', 'application/pdf', 1, $2, 'x') RETURNING id`,
+      [beta.businessId, `k-${randomUUID()}`],
+    );
+    try {
+      await expect(
+        inAlpha(() =>
+          workspace.createDocument(owner(), { title: "d", mediaAssetId: betaMedia.rows[0].id }),
+        ),
+      ).rejects.toThrow(/media_not_found/);
+    } finally {
+      // media_assets → businesses is ON DELETE RESTRICT; beforeEach deletes businesses.
+      await db.query("DELETE FROM media_assets WHERE id = $1", [betaMedia.rows[0].id]);
+    }
+
+    const entry = await db.query<{ id: string }>(
+      `INSERT INTO journal_entries (business_id, entry_date, memo, project_id, created_by)
+       VALUES ($1, CURRENT_DATE, 'x', $2, $3) RETURNING id`,
+      [alpha.businessId, other.id, alpha.ownerId],
+    );
+    await expect(
+      inAlpha(() =>
+        workspace.createDocument(owner(), { title: "d", projectId: project.id, journalEntryId: entry.rows[0].id }),
+      ),
+    ).rejects.toThrow(/journal_entry_project_mismatch/);
+
+    // A document given only a task takes that task's project.
+    const ownTask = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "t" }));
+    const doc = await inAlpha(() => workspace.createDocument(owner(), { title: "d", taskId: ownTask.id }));
+    expect(doc.projectId).toBe(project.id);
+  });
+
+  it("keeps an event on its task's project", async () => {
+    const project = await makeProject();
+    const other = await makeProject({ name: "دیگری" });
+    const task = await inAlpha(() => workspace.createWorkspaceTask(owner(), other.id, { title: "t" }));
+    await expect(
+      inAlpha(() =>
+        workspace.createEvent(owner(), {
+          title: "e", eventDate: "2026-03-01", projectId: project.id, taskId: task.id,
+        }),
+      ),
+    ).rejects.toThrow(/task_project_mismatch/);
+  });
+
+  it("validates the FINAL record on a partial date update", async () => {
+    const project = await makeProject({ startDate: "2026-01-05", endDate: "2026-09-30" });
+    await expect(
+      inAlpha(() => workspace.updateWorkspaceProject(owner(), project.id, { endDate: "2025-12-01" })),
+    ).rejects.toThrow(/end_before_start/);
+    const contract = await inAlpha(() =>
+      workspace.createContract(owner(), {
+        title: "c", contractType: "vendor", startDate: "2026-02-01", endDate: "2026-06-01",
+      }),
+    );
+    await expect(
+      inAlpha(() => workspace.updateContract(owner(), contract.id, { startDate: "2026-07-01" })),
+    ).rejects.toThrow(/end_before_start/);
+  });
+});
+
+describe("templates (#761)", () => {
+  it("re-applying a template adds nothing", async () => {
+    const project = await makeProject({ templateKey: "construction" });
+    const before = await inAlpha(() => workspace.listPhases(project.id));
+    const tasksBefore = await inAlpha(() =>
+      workspace.listWorkspaceTasks(owner(), { projectId: project.id, status: "all" }),
+    );
+    const templates = await inAlpha(() => workspace.listTemplates(alpha.businessId));
+    const construction = templates.find((t) => t.key === "construction")!;
+    const added = await inAlpha(() =>
+      workspace.applyTemplate(owner(), project.id, construction, "2026-01-05"),
+    );
+    expect(added).toEqual({ phasesAdded: 0, tasksAdded: 0 });
+    expect(await inAlpha(() => workspace.listPhases(project.id))).toHaveLength(before.length);
+    expect(
+      await inAlpha(() => workspace.listWorkspaceTasks(owner(), { projectId: project.id, status: "all" })),
+    ).toHaveLength(tasksBefore.length);
   });
 });

@@ -31,7 +31,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     assigneeUserId: params.get("mine") === "true" ? owner.actorUserId : undefined,
   };
   try {
-    return NextResponse.json({ tasks: await listWorkspaceTasks(owner.businessId, filter) });
+    return NextResponse.json({ tasks: await listWorkspaceTasks(owner, filter) });
   } catch (err) {
     return handleWorkspaceError(err);
   }
@@ -43,7 +43,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const body = await readBody(request);
   const projectId = String(body.projectId ?? "");
   try {
-    await requireProjectCapability(owner, projectId, "edit", true);
+    await requireProjectCapability(owner, projectId, "edit");
     const task = await createWorkspaceTask(owner, projectId, body);
     return NextResponse.json({ task }, { status: 201 });
   } catch (err) {
