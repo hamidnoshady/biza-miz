@@ -73,7 +73,10 @@ export function PlatformSecretField({
     <div className={cn("space-y-1.5", className)}>
       <div className="flex items-center justify-between gap-2">
         <Label htmlFor={inputId} className="flex items-center gap-1.5">
-          <KeyRoundIcon className="size-3.5 text-muted-foreground" aria-hidden="true" />
+          <KeyRoundIcon
+            className="size-3.5 text-muted-foreground"
+            aria-hidden="true"
+          />
           {label}
         </Label>
         {cleared ? (
@@ -85,12 +88,21 @@ export function PlatformSecretField({
         )}
       </div>
 
-      {description ? <p className="text-xs leading-5 text-muted-foreground">{description}</p> : null}
+      {description ? (
+        <p className="text-xs leading-5 text-muted-foreground">{description}</p>
+      ) : null}
 
       {cleared ? (
         <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm dark:border-amber-400/30 dark:bg-amber-400/10">
-          <span className="text-amber-700 dark:text-amber-300">این اعتبارنامه با ذخیره حذف می‌شود.</span>
-          <Button variant="ghost" size="sm" onClick={() => onClearedChange?.(false)} disabled={disabled}>
+          <span className="text-amber-700 dark:text-amber-300">
+            این اعتبارنامه با ذخیره حذف می‌شود.
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => onClearedChange?.(false)}
+            disabled={disabled}
+          >
             لغو
           </Button>
         </div>
@@ -111,7 +123,7 @@ export function PlatformSecretField({
               type="button"
               onClick={cancelReplace}
               disabled={disabled}
-              className="text-xs text-muted-foreground underline-offset-2 hover:underline disabled:opacity-50"
+              className="text-xs text-muted-foreground underline-offset-2 hover:underline disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50 rounded-sm"
             >
               نگه‌داشتن مقدار فعلی
             </button>
@@ -119,7 +131,10 @@ export function PlatformSecretField({
         </>
       ) : (
         <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2">
-          <span className="flex items-center gap-2 text-sm text-muted-foreground" dir="ltr">
+          <span
+            className="flex items-center gap-2 text-sm text-muted-foreground"
+            dir="ltr"
+          >
             {maskedHint ? (
               <span className="font-mono">{maskedHint}</span>
             ) : (
@@ -127,7 +142,12 @@ export function PlatformSecretField({
             )}
           </span>
           <div className="flex items-center gap-1">
-            <Button variant="outline" size="sm" onClick={beginReplace} disabled={disabled}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={beginReplace}
+              disabled={disabled}
+            >
               جایگزینی
             </Button>
             {canClear ? (
