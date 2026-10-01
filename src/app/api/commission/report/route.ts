@@ -8,7 +8,7 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** The per-staff commission leaderboard — Σ signed accruals per employee. */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.growthView);
+  const { session, error } = await requirePermission(PERMISSIONS.commissionView);
   if (error) return error;
 
   const from = request.nextUrl.searchParams.get("from");

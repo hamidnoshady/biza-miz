@@ -30,7 +30,7 @@ const channel = (value: unknown): "sms" | "email" | null =>
  * the authenticated tenant's templates, campaign records and credit purchase.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.growthView);
+  const { session, error } = await requirePermission(PERMISSIONS.campaignsView);
   if (error) return error;
 
   const [config, billing, packages, ledger, templates, campaigns, segments, projects, promotions] = await Promise.all([

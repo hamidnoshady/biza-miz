@@ -71,11 +71,9 @@ export const MODULE_KEYS = [
   "ai",
   "settings",
   // Phase 35 — module keys for the app ecosystem and the phases that build on
-  // it. `crm` (Phase 36) and `website` (Phase 36b/reversal) are wired into
-  // `CORE_MODULES` below; `messaging` is still the subject of a later phase
-  // and stays unassigned until it wires up its own pages. The key exists so
-  // the app registry (src/lib/apps.ts) can give it a place without touching
-  // the union again. There is deliberately no `workspace` key: the ecosystem
+  // it. `crm` (Phase 36), `website` (Phase 36b/reversal) and `messaging`
+  // (Phase 37's SMS/email campaigns, /growth/messaging + /api/messaging) are
+  // wired into `CORE_MODULES` below. There is deliberately no `workspace` key: the ecosystem
   // shell stopped being a gated module when its flag retired — the chat home
   // and the rail are the product's one shell now, for every trade, so there
   // is nothing left for such a key to gate.
@@ -212,6 +210,11 @@ const CORE_MODULES: readonly ModuleKey[] = [
   "loyalty",
   "promotions",
   "commission",
+  // Phase 37 — SMS/email campaigns. Every trade markets to its customers the
+  // same way; the module exists so Growth's availability state and the trade
+  // guard both reach /growth/messaging and /api/messaging (issue #764), rather
+  // than the pages falling through to `loyalty` and the API to nothing.
+  "messaging",
   // Website manager (#378) ships to every trade too: a jeweller wants a
   // storefront exactly as a café wants a menu site, and the module gates the
   // one CMS connection this app holds rather than a trade-specific screen —
@@ -422,6 +425,7 @@ export const PAGE_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   // trade without commission never has its badge lie about the door.
   ["/growth/commission", "commission"],
   ["/growth/campaigns", "promotions"],
+  ["/growth/messaging", "messaging"],
   ["/growth", "loyalty"],
   // Phase 36 — the CRM app's home. Anchored on `customers` (core for every
   // trade, exactly like the flat «مشتریان» page it absorbed) rather than on the
@@ -505,6 +509,9 @@ const API_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   ["/api/loyalty", "loyalty"],
   ["/api/promotions", "promotions"],
   ["/api/commission", "commission"],
+  // Phase 37 SMS/email campaigns — Growth-owned, so a Growth «در حال تعمیر»
+  // stops the sends' API exactly as it stops the page.
+  ["/api/messaging", "messaging"],
   // The Growth & Marketing app's own API surface, anchored on `loyalty` like
   // its pages: every trade with growth has loyalty.
   ["/api/growth", "loyalty"],

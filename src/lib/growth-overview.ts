@@ -110,10 +110,14 @@ export interface GrowthOverview {
     /** The 2420 balance — the real liability, from the ledger. */
     outstandingRial: number;
   };
+  /**
+   * Compensation data. `null` when the reader lacks `commission.view` —
+   * `redactGrowthOverview` (growth-access.ts) removes it on the server.
+   */
   commission: {
     accrued30d: number;
     top: StaffAccrualRow[];
-  };
+  } | null;
   repurchase: {
     due: number;
     sample: DueForRepurchaseRow[];

@@ -37,6 +37,7 @@ import { getServerSyncConfig } from "@/lib/server-sync";
 import { isHybridSite, tillNavItems } from "@/lib/site-routes";
 import { getGrant } from "@/lib/platform-service";
 import { SupportSessionBanner, SupportSessionEnded } from "./support-session-banner";
+import { GROWTH_APP_PERMISSIONS } from "@/lib/growth-access";
 
 /**
  * The dashboard nav.
@@ -109,8 +110,11 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
     {
       label: "رشد و بازاریابی",
       module: "loyalty",
+      // The door's permission is the union of the section gates (issue #764);
+      // a member without the overview is forwarded by its page to the first
+      // section they may open (`growthFallbackHref`).
       href: "/growth/overview",
-      roles: ["owner", "manager", "cashier"],
+      requiredAnyPermission: [...GROWTH_APP_PERMISSIONS],
     },
     // Its own app (issue #378) — an integration with an external system of
     // record (eshobe-cms), not a Growth engine. Owner/manager only, the same
@@ -260,7 +264,7 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
 function modulePermissions(module: NavItem["module"]): Permission[] {
   const map: Partial<Record<NavItem["module"], Permission[]>> = {
     orders: ["orders.create"], pos: ["orders.create"], customers: ["crm.view", "crm.manage"],
-    loyalty: ["growth.view", "loyalty.view"], website: ["website.view"], stock: ["inventory.view"],
+    loyalty: [...GROWTH_APP_PERMISSIONS], website: ["website.view"], stock: ["inventory.view"],
     tables: ["tables.manage"], kitchen: ["kitchen.view"], reservations: ["reservations.manage"],
     delivery: ["delivery.manage"], inventory: ["inventory.view"], jewelry: ["inventory.view"],
     watch: ["inventory.view"], cosmetics: ["inventory.view"], ledger: ["ledger.view"],

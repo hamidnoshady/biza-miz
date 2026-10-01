@@ -7,7 +7,7 @@ import { getGiftCardByCode, giftCardBalance, issueGiftCard } from "@/lib/promoti
 
 /** One card's outstanding value by code. */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.loyaltyView);
+  const { session, error } = await requirePermission(PERMISSIONS.giftCardsView);
   if (error) return error;
   const code = (request.nextUrl.searchParams.get("code") ?? "").trim();
   if (!code) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
@@ -26,7 +26,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 
 /** Issues a gift card, posting its value as a liability (2420). */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.loyaltyManage);
+  const { session, error } = await requirePermission(PERMISSIONS.giftCardsIssue);
   if (error) return error;
 
   const location = await resolveActiveLocation(session);

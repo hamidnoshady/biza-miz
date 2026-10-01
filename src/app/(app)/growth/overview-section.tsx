@@ -155,6 +155,7 @@ export function OverviewSection({ onGoToSection }: { onGoToSection: (key: Growth
     );
   }
 
+  const commission = overview.commission;
   const storeCredit =
     overview.bridge.find((row) => row.code === WELL_KNOWN_CODES.storeCreditPayable)?.balance ?? 0;
   const firstRun = overview.campaigns.list.length === 0 && overview.loyalty.programs === 0;
@@ -212,9 +213,11 @@ export function OverviewSection({ onGoToSection }: { onGoToSection: (key: Growth
             <Button variant="outline" className="min-h-11 justify-start" onClick={() => onGoToSection("loyalty")}>
               ۲. برنامهٔ وفاداری را تعریف کن
             </Button>
-            <Button variant="outline" className="min-h-11 justify-start" onClick={() => onGoToSection("commission")}>
-              ۳. پورسانت فروشندگان را فعال کن
-            </Button>
+            {overview.commission ? (
+              <Button variant="outline" className="min-h-11 justify-start" onClick={() => onGoToSection("commission")}>
+                ۳. پورسانت فروشندگان را فعال کن
+              </Button>
+            ) : null}
           </div>
         </SectionCard>
       ) : null}
@@ -241,11 +244,14 @@ export function OverviewSection({ onGoToSection }: { onGoToSection: (key: Growth
           value={money.format(storeCredit)}
           hint={`${formatPersianNumber(overview.loyalty.customersWithPoints)} مشتری از ${formatPersianNumber(overview.loyalty.customersTotal)} امتیاز مصرف‌نشده دارد`}
         />
-        <KpiCard
-          label="پورسانت فروشندگان · ۳۰ روز گذشته"
-          value={money.format(overview.commission.accrued30d)}
-          hint={`هزینه ${toPersianDigits(WELL_KNOWN_CODES.commissionExpense)}، بدهی حقوق ${toPersianDigits(WELL_KNOWN_CODES.salariesPayable)}`}
-        />
+        {/* Compensation: present only when the server sent it (commission.view). */}
+        {overview.commission ? (
+          <KpiCard
+            label="پورسانت فروشندگان · ۳۰ روز گذشته"
+            value={money.format(overview.commission.accrued30d)}
+            hint={`هزینه ${toPersianDigits(WELL_KNOWN_CODES.commissionExpense)}، بدهی حقوق ${toPersianDigits(WELL_KNOWN_CODES.salariesPayable)}`}
+          />
+        ) : null}
         <KpiCard
           label="امتیاز در گردش"
           value={formatPersianNumber(overview.loyalty.pointsOutstanding)}
@@ -302,31 +308,33 @@ export function OverviewSection({ onGoToSection }: { onGoToSection: (key: Growth
           )}
         </SectionCard>
 
-        <SectionCard
-          title={<CardTitle eyebrow="پورسانت فروش" title="برترین فروشندگان" />}
-          description="پورسانت انباشته در ۳۰ روز گذشته"
-          actions={
-            <Button variant="ghost" size="xs" onClick={() => onGoToSection("commission")}>
-              رتبه‌بندی کامل
-              <ArrowLeftIcon aria-hidden="true" className="size-3.5" />
-            </Button>
-          }
-        >
-          {overview.commission.top.length === 0 ? (
-            <EmptyState>هنوز پورسانتی ثبت نشده است.</EmptyState>
-          ) : (
-            <ul className="divide-y divide-border/80 text-sm">
-              {overview.commission.top.map((row) => (
-                <li key={row.employeeId} className="flex items-center justify-between gap-3 py-2.5">
-                  <span className="min-w-0 truncate font-medium text-foreground">{row.employeeName}</span>
-                  <span className="shrink-0 font-semibold text-emerald-700 dark:text-emerald-300">
-                    {money.format(row.amount)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </SectionCard>
+        {commission ? (
+          <SectionCard
+            title={<CardTitle eyebrow="پورسانت فروش" title="برترین فروشندگان" />}
+            description="پورسانت انباشته در ۳۰ روز گذشته"
+            actions={
+              <Button variant="ghost" size="xs" onClick={() => onGoToSection("commission")}>
+                رتبه‌بندی کامل
+                <ArrowLeftIcon aria-hidden="true" className="size-3.5" />
+              </Button>
+            }
+          >
+            {commission.top.length === 0 ? (
+              <EmptyState>هنوز پورسانتی ثبت نشده است.</EmptyState>
+            ) : (
+              <ul className="divide-y divide-border/80 text-sm">
+                {commission.top.map((row) => (
+                  <li key={row.employeeId} className="flex items-center justify-between gap-3 py-2.5">
+                    <span className="min-w-0 truncate font-medium text-foreground">{row.employeeName}</span>
+                    <span className="shrink-0 font-semibold text-emerald-700 dark:text-emerald-300">
+                      {money.format(row.amount)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </SectionCard>
+        ) : null}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">

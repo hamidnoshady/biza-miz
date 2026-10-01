@@ -83,9 +83,8 @@ describe("module sets", () => {
         module === "stock"
       )
         continue;
-      // Phase 35 module keys that exist but are not yet wired into any industry:
-      // `messaging` gets its pages in a later phase, and `website` left this
-      // list alongside `crm` once the phases that built the apps shipped.
+      // `website` and `messaging` are core but deliberately not in the
+      // original F&B baseline this loop pins.
       if (module === "website" || module === "messaging") continue;
       expect(modules, module).toContain(module);
     }
@@ -214,18 +213,12 @@ describe("defaultDisabledFeatures", () => {
 });
 
 describe("Phase 35 module keys", () => {
-  it("declares the ecosystem and future-phase keys without assigning them to any industry yet", () => {
-    // This key exists so the app registry (src/lib/apps.ts) can give it a
-    // place, but it is not wired into a trade yet: `messaging` gets its pages
-    // in a later phase. Locking this prevents a profile from silently gaining
-    // it and changing module-gated routing. `crm` and `website` graduated out
-    // of this list once built — see the tests below.
-    const futureKeys = ["messaging"] as const;
-    for (const key of futureKeys) {
-      expect(MODULE_KEYS, key).toContain(key);
-      for (const industry of INDUSTRIES) {
-        expect(hasModule(industry, key as ModuleKey), `${industry} should not yet have ${key}`).toBe(false);
-      }
+  it("gives every trade messaging, now that /growth/messaging is a real section (issue #764)", () => {
+    // It used to be a forward reference no trade had, so the page fell through
+    // to the `loyalty` module and /api/messaging answered no module at all:
+    // a Growth «در حال تعمیر» badged the page and left the sends' API open.
+    for (const industry of INDUSTRIES) {
+      expect(hasModule(industry, "messaging"), `${industry} should have messaging`).toBe(true);
     }
   });
 
