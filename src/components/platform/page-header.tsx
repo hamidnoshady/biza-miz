@@ -33,12 +33,18 @@ export function PlatformPageHeader({
       ) : null}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <h1 className="truncate text-xl font-bold text-foreground">{title}</h1>
+          <h1 className="truncate text-xl font-bold text-foreground">
+            {title}
+          </h1>
           {description ? (
-            <p className="mt-1 text-sm leading-6 text-muted-foreground">{description}</p>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
+              {description}
+            </p>
           ) : null}
         </div>
-        {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+        {actions ? (
+          <div className="flex shrink-0 items-center gap-2">{actions}</div>
+        ) : null}
       </div>
     </div>
   );
@@ -53,21 +59,38 @@ export function PlatformBreadcrumbs({
   className?: string;
 }) {
   return (
-    <nav aria-label="مسیر" className={cn("flex flex-wrap items-center gap-1 text-xs text-muted-foreground", className)}>
+    <nav
+      aria-label="مسیر"
+      className={cn(
+        "flex flex-wrap items-center gap-1 text-xs text-muted-foreground",
+        className,
+      )}
+    >
       {items.map((item, i) => {
         const last = i === items.length - 1;
         return (
           <React.Fragment key={`${item.label}-${i}`}>
             {item.href && !last ? (
-              <Link href={item.href} className="rounded transition-colors hover:text-foreground hover:underline">
+              <Link
+                href={item.href}
+                className="rounded transition-colors hover:text-foreground hover:underline outline-none focus-visible:ring focus-visible:ring-ring/50"
+              >
                 {item.label}
               </Link>
             ) : (
-              <span aria-current={last ? "page" : undefined} className={last ? "text-foreground" : undefined}>
+              <span
+                aria-current={last ? "page" : undefined}
+                className={last ? "text-foreground" : undefined}
+              >
                 {item.label}
               </span>
             )}
-            {!last ? <ChevronLeftIcon className="size-3.5 shrink-0 opacity-50" aria-hidden="true" /> : null}
+            {!last ? (
+              <ChevronLeftIcon
+                className="size-3.5 shrink-0 opacity-50"
+                aria-hidden="true"
+              />
+            ) : null}
           </React.Fragment>
         );
       })}
@@ -91,12 +114,23 @@ export function PlatformSectionHeader({
   className?: string;
 }) {
   return (
-    <div className={cn("mb-3 flex flex-wrap items-start justify-between gap-2", className)}>
+    <div
+      className={cn(
+        "mb-3 flex flex-wrap items-start justify-between gap-2",
+        className,
+      )}
+    >
       <div className="min-w-0">
         <h2 className="text-sm font-semibold text-foreground">{title}</h2>
-        {description ? <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{description}</p> : null}
+        {description ? (
+          <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+            {description}
+          </p>
+        ) : null}
       </div>
-      {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+      {actions ? (
+        <div className="flex shrink-0 items-center gap-2">{actions}</div>
+      ) : null}
     </div>
   );
 }
@@ -111,6 +145,8 @@ export function PlatformPageContainer({
   className?: string;
   width?: "default" | "wide" | "full";
 }) {
-  const max = { default: "max-w-6xl", wide: "max-w-7xl", full: "max-w-none" }[width];
+  const max = { default: "max-w-6xl", wide: "max-w-7xl", full: "max-w-none" }[
+    width
+  ];
   return <div className={cn("mx-auto w-full", max, className)}>{children}</div>;
 }

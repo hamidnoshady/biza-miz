@@ -28,3 +28,6 @@
 ## 2024-05-24 - Extract derived static operations like column configurations out of render loops
 **Learning:** In highly configurable data grids (like the Data Table component), computing visual representation derived from props (such as filtering which columns should be shown on mobile views) inside the row rendering loop creates O(N * C) operations and allocates N new arrays on each render.
 **Action:** Always pre-calculate and cache derived structure data (like the column layout) into a `React.useMemo` at the root of the component whenever the input schema is stable relative to the data rows.
+## 2024-11-21 - Avoid useMemo for simple array operations
+**Learning:** In React components like order modals (`src/app/dashboard/orders/order-detail-modal.tsx`), arrays of items are often small. Using `useMemo` for simple `.filter()` or `.reduce()` calls on these arrays introduces overhead for closure allocations and dependency checks that outweighs any re-render saving. It is considered a premature micro-optimization unless the array is proven to be massive.
+**Action:** Do not use `useMemo` for primitive O(N) operations on small lists like cart or order items. Only apply it to expensive derived state or large data tables when a real bottleneck is observed.

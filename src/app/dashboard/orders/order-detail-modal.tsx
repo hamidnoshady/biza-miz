@@ -69,7 +69,11 @@ import {
   type DisplayModifier,
 } from "@/lib/modifier-display";
 import { ModifierBadges } from "../modifier-badges";
-import { CustomerBalanceBadge, CustomerPicker, type PickerCustomer } from "../customer-picker";
+import {
+  CustomerBalanceBadge,
+  CustomerPicker,
+  type PickerCustomer,
+} from "../customer-picker";
 import { HoldToConfirmButton } from "../hold-to-confirm-button";
 import { isTableOccupied, isTableUnavailable } from "@/lib/pos-selection";
 import {
@@ -111,7 +115,8 @@ const LINE_GRID =
 const STATUS_CHIP: Record<string, { label: string; className: string }> = {
   open: {
     label: "باز",
-    className: "border-amber-500/25 dark:border-amber-500/60 bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300",
+    className:
+      "border-amber-500/25 dark:border-amber-500/60 bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300",
   },
   held: {
     label: "نگه‌داشته",
@@ -119,7 +124,8 @@ const STATUS_CHIP: Record<string, { label: string; className: string }> = {
   },
   completed: {
     label: "تکمیل‌شده",
-    className: "border-emerald-500/25 dark:border-emerald-500/25 bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+    className:
+      "border-emerald-500/25 dark:border-emerald-500/25 bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
   },
   voided: {
     label: "باطل‌شده",
@@ -297,12 +303,16 @@ export function OrderDetailModal({
     error: paymentMethodsError,
     reload: reloadPaymentMethods,
   } = usePaymentMethods(canTakePayment);
-  const [paymentDraft, setPaymentDraft] = useState<PaymentDraft>(() => emptyPaymentDraft([]));
+  const [paymentDraft, setPaymentDraft] = useState<PaymentDraft>(() =>
+    emptyPaymentDraft([]),
+  );
   // The ways land a render or two after the dialog opens, so the draft starts
   // pointing at nothing; this settles it on the first way once they arrive.
   useEffect(() => {
     setPaymentDraft((draft) =>
-      paymentMethods.some((method) => method.id === draft.methodId) ? draft : emptyPaymentDraft(paymentMethods),
+      paymentMethods.some((method) => method.id === draft.methodId)
+        ? draft
+        : emptyPaymentDraft(paymentMethods),
     );
   }, [paymentMethods]);
   const [tipInput, setTipInput] = useState("");
@@ -312,7 +322,9 @@ export function OrderDetailModal({
   );
   /** Bumped to open the customer picker from the payment preview's action. */
   const [customerPickerRequests, setCustomerPickerRequests] = useState(0);
-  const [tables, setTables] = useState<{ id: string; name: string; status: string }[]>([]);
+  const [tables, setTables] = useState<
+    { id: string; name: string; status: string }[]
+  >([]);
   const [tablesLoaded, setTablesLoaded] = useState(false);
   const [selectedTableId, setSelectedTableId] = useState("");
   /**
@@ -412,7 +424,9 @@ export function OrderDetailModal({
     setTables([]);
     setTablesLoaded(false);
     void load();
-    void api<{ tables: { id: string; name: string; status: string }[] }>("/api/tables")
+    void api<{ tables: { id: string; name: string; status: string }[] }>(
+      "/api/tables",
+    )
       .then(({ ok, data }) => {
         if (!cancelled && ok) setTables(data.tables);
       })
@@ -433,11 +447,23 @@ export function OrderDetailModal({
         setMenu(
           ok
             ? toRestaurantMenu(data)
-            : { categories: [], items: [], modifierGroups: [], modifiers: [], itemModifierGroups: [] },
+            : {
+                categories: [],
+                items: [],
+                modifierGroups: [],
+                modifiers: [],
+                itemModifierGroups: [],
+              },
         ),
       )
       .catch(() =>
-        setMenu({ categories: [], items: [], modifierGroups: [], modifiers: [], itemModifierGroups: [] }),
+        setMenu({
+          categories: [],
+          items: [],
+          modifierGroups: [],
+          modifiers: [],
+          itemModifierGroups: [],
+        }),
       );
   }, [menu, open]);
 
@@ -472,7 +498,8 @@ export function OrderDetailModal({
         body: JSON.stringify({ customerId: customer?.id ?? null }),
       }),
     );
-    if (saved) setInfo(customer ? "مشتری سفارش ذخیره شد." : "مشتری سفارش حذف شد.");
+    if (saved)
+      setInfo(customer ? "مشتری سفارش ذخیره شد." : "مشتری سفارش حذف شد.");
   }
 
   async function saveOrderTable(tableId: string) {
@@ -604,7 +631,9 @@ export function OrderDetailModal({
                 type: discountType,
                 value:
                   discountType === "amount"
-                    ? money.fromInput(Math.max(0, Math.round(Number(discountValue) || 0)))
+                    ? money.fromInput(
+                        Math.max(0, Math.round(Number(discountValue) || 0)),
+                      )
                     : Number(discountValue) || 0,
               }
             : { type: null },
@@ -657,13 +686,19 @@ export function OrderDetailModal({
 
   function paymentsFromOrderRows(): { label: string; amount: number }[] {
     return payments.map((payment) => ({
-      label: payment.payment_method_name ?? PAYMENT_LABELS[payment.method] ?? payment.method,
+      label:
+        payment.payment_method_name ??
+        PAYMENT_LABELS[payment.method] ??
+        payment.method,
       amount: Number(payment.amount),
     }));
   }
 
   /** The receipt for this order as it stands — shared by checkout and reprint. */
-  function buildReceipt(tipAmount: number, receiptPayments: { label: string; amount: number }[]): ReceiptData | null {
+  function buildReceipt(
+    tipAmount: number,
+    receiptPayments: { label: string; amount: number }[],
+  ): ReceiptData | null {
     if (!order) return null;
     return {
       business: {
@@ -697,10 +732,7 @@ export function OrderDetailModal({
       tax: Number(order.tax),
       total: Number(order.total),
       tip: tipAmount,
-      payments:
-        payments.length > 0
-          ? paymentsFromOrderRows()
-          : receiptPayments,
+      payments: payments.length > 0 ? paymentsFromOrderRows() : receiptPayments,
     };
   }
 
@@ -708,10 +740,18 @@ export function OrderDetailModal({
   function reprint() {
     const receipt = buildReceipt(
       Number(order?.tip_amount ?? 0),
-      draftReceiptPayments(paymentDraft, paymentMethods, Number(order?.total ?? 0), money.unit),
+      draftReceiptPayments(
+        paymentDraft,
+        paymentMethods,
+        Number(order?.total ?? 0),
+        money.unit,
+      ),
     );
     if (!receipt) return;
-    void printReceipt(null, receipt, { requestId: `reprint:${orderId}:${crypto.randomUUID()}`, entityId: orderId ?? undefined }).then((result) => {
+    void printReceipt(null, receipt, {
+      requestId: `reprint:${orderId}:${crypto.randomUUID()}`,
+      entityId: orderId ?? undefined,
+    }).then((result) => {
       if (!result.ok) setError("ارسال رسید به چاپگر ناموفق بود.");
       else toast.success("رسید برای چاپ ارسال شد");
     });
@@ -729,10 +769,18 @@ export function OrderDetailModal({
   async function pay() {
     if (!order) return;
     const total = Number(order.total);
-    if (draftRequiresCustomer(paymentDraft, paymentMethods, total) && !selectedCustomer) {
+    if (
+      draftRequiresCustomer(paymentDraft, paymentMethods, total) &&
+      !selectedCustomer
+    ) {
       return setError(errorMessage("customer_required"));
     }
-    const built = paymentDraftBody(paymentDraft, paymentMethods, total, money.unit);
+    const built = paymentDraftBody(
+      paymentDraft,
+      paymentMethods,
+      total,
+      money.unit,
+    );
     if (!built.ok) return setError(errorMessage(built.error));
     let tipAmount = 0;
     if (tipInput.trim()) {
@@ -775,16 +823,33 @@ export function OrderDetailModal({
     await load();
     onChanged?.();
 
-    const receipt = buildReceipt(tipAmount, draftReceiptPayments(paymentDraft, paymentMethods, total, money.unit));
+    const receipt = buildReceipt(
+      tipAmount,
+      draftReceiptPayments(paymentDraft, paymentMethods, total, money.unit),
+    );
     if (receipt) {
       const receiptRequestId = `receipt:${orderId}`;
-      void printReceipt(null, receipt, { requestId: receiptRequestId, entityId: orderId ?? undefined }).then((result) => {
+      void printReceipt(null, receipt, {
+        requestId: receiptRequestId,
+        entityId: orderId ?? undefined,
+      }).then((result) => {
         if (!result.ok && result.error !== "printer_not_configured") {
           toast.warning("چاپ رسید انجام نشد؛ پرداخت با موفقیت ثبت شده است.", {
-            action: { label: "چاپ دوباره", onClick: () => void printReceipt(null, receipt, { requestId: `${receiptRequestId}:retry`, entityId: orderId ?? undefined }) },
+            action: {
+              label: "چاپ دوباره",
+              onClick: () =>
+                void printReceipt(null, receipt, {
+                  requestId: `${receiptRequestId}:retry`,
+                  entityId: orderId ?? undefined,
+                }),
+            },
           });
         }
-        if (draftOpensDrawer(paymentDraft, paymentMethods) && result.supportsDrawer && result.printerId) {
+        if (
+          draftOpensDrawer(paymentDraft, paymentMethods) &&
+          result.supportsDrawer &&
+          result.printerId
+        ) {
           void kickDrawer(result.printerId);
         }
       });
@@ -793,23 +858,45 @@ export function OrderDetailModal({
   }
 
   const editable = canEdit && order?.status === "open";
-  const activeItems = menu?.items.filter((i) => i.isActive) ?? [];
+
+  // ⚡ Bolt: Extract O(N) filtering of menu items into useMemo to avoid recreating arrays on every render tick.
+  const activeItems = useMemo(
+    () => menu?.items.filter((i) => i.isActive) ?? [],
+    [menu?.items],
+  );
   const amendable = canAmendClosed && order?.status === "completed";
-  const liveItems = items.filter((it) => it.status !== "voided");
+
+  // ⚡ Bolt: Extract O(N) derived arrays into useMemo to avoid per-render array allocations.
+  const liveItems = useMemo(
+    () => items.filter((it) => it.status !== "voided"),
+    [items],
+  );
   // Voided lines are the order's history — including the ones an add-on edit
   // superseded — so they are kept, but folded away from the bill being read.
-  const voidedItems = items.filter((it) => it.status === "voided");
-  const itemCount = liveItems.reduce((count, it) => count + it.quantity, 0);
+  const voidedItems = useMemo(
+    () => items.filter((it) => it.status === "voided"),
+    [items],
+  );
+
+  // ⚡ Bolt: Cache derived counts and totals relying on `liveItems` instead of computing them on every render tick.
+  const itemCount = useMemo(
+    () => liveItems.reduce((count, it) => count + it.quantity, 0),
+    [liveItems],
+  );
   /** How much of the subtotal came from add-ons — the number a customer disputes most often. */
-  const addOnTotal = liveItems.reduce(
-    (sum, it) =>
-      sum +
-      (addOnsByItem.get(it.id) ?? []).reduce(
-        (lineSum, addOn) => lineSum + addOn.priceDelta,
+  const addOnTotal = useMemo(
+    () =>
+      liveItems.reduce(
+        (sum, it) =>
+          sum +
+          (addOnsByItem.get(it.id) ?? []).reduce(
+            (lineSum, addOn) => lineSum + addOn.priceDelta,
+            0,
+          ) *
+            it.quantity,
         0,
-      ) *
-        it.quantity,
-    0,
+      ),
+    [liveItems, addOnsByItem],
   );
   const statusChip = order
     ? (STATUS_CHIP[order.status] ?? STATUS_CHIP.held)
@@ -895,7 +982,9 @@ export function OrderDetailModal({
           ) : null}
 
           {it.note ? (
-            <p className="mt-2 text-xs text-muted-foreground">یادداشت: {it.note}</p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              یادداشت: {it.note}
+            </p>
           ) : null}
           {voided && it.void_reason ? (
             <p className="mt-2 text-xs font-medium text-destructive">
@@ -961,7 +1050,10 @@ export function OrderDetailModal({
     );
   }
 
-  const paidSum = payments.reduce((sum, payment) => sum + Number(payment.amount), 0);
+  const paidSum = payments.reduce(
+    (sum, payment) => sum + Number(payment.amount),
+    0,
+  );
   const orderTip = Number(order?.tip_amount ?? 0);
   const remainingDue = order
     ? Math.max(0, Number(order.total) + orderTip - paidSum)
@@ -981,9 +1073,7 @@ export function OrderDetailModal({
                 <div className="flex flex-wrap items-center gap-2">
                   <DialogTitle className="font-sans text-lg font-bold text-foreground sm:text-xl">
                     {order
-                      ? toPersianDigits(
-                          orderLabel(order),
-                        )
+                      ? toPersianDigits(orderLabel(order))
                       : "جزئیات سفارش"}
                   </DialogTitle>
                   {statusChip ? (
@@ -998,7 +1088,10 @@ export function OrderDetailModal({
                       bill this is belongs with what bill it is. */}
                   {order?.customer_name ? (
                     <span className="inline-flex min-h-7 max-w-full items-center gap-1 rounded-full border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/15 px-2.5 text-xs font-bold text-amber-700 dark:text-amber-300">
-                      <UserIcon className="size-3.5 shrink-0" aria-hidden="true" />
+                      <UserIcon
+                        className="size-3.5 shrink-0"
+                        aria-hidden="true"
+                      />
                       <span className="truncate">{order.customer_name}</span>
                     </span>
                   ) : null}
@@ -1013,8 +1106,10 @@ export function OrderDetailModal({
                         ? ` · ${order.status === "voided" ? "ابطال" : "تسویه"} ${timeLabel(order.closed_at)}`
                         : ""}
                     </>
+                  ) : orderLoaded ? (
+                    "اطلاعات سفارش در دسترس نیست."
                   ) : (
-                    orderLoaded ? "اطلاعات سفارش در دسترس نیست." : "در حال بارگذاری اطلاعات سفارش…"
+                    "در حال بارگذاری اطلاعات سفارش…"
                   )}
                 </DialogDescription>
               </div>
@@ -1188,7 +1283,11 @@ export function OrderDetailModal({
                             افزودن قلم
                           </h3>
                           {!menu ? (
-                            <LoadingSkeleton rows={2} compact label="در حال بارگذاری منو" />
+                            <LoadingSkeleton
+                              rows={2}
+                              compact
+                              label="در حال بارگذاری منو"
+                            />
                           ) : (
                             <>
                               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -1213,7 +1312,9 @@ export function OrderDetailModal({
                                   inputMode="numeric"
                                   aria-label="تعداد"
                                   value={addQty}
-                                  onChange={(event) => setAddQty(event.target.value)}
+                                  onChange={(event) =>
+                                    setAddQty(event.target.value)
+                                  }
                                 />
                                 <button
                                   type="button"
@@ -1221,13 +1322,16 @@ export function OrderDetailModal({
                                   disabled={busy || !addItemId}
                                   className={`${PRIMARY_BUTTON} sm:w-auto sm:min-w-28`}
                                 >
-                                  <PlusIcon className="size-4" aria-hidden="true" />
+                                  <PlusIcon
+                                    className="size-4"
+                                    aria-hidden="true"
+                                  />
                                   افزودن
                                 </button>
                               </div>
                               <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                                آیتم‌هایی که گروه افزودنی دارند، پیش از ثبت پنجرهٔ
-                                انتخاب افزودنی را باز می‌کنند.
+                                آیتم‌هایی که گروه افزودنی دارند، پیش از ثبت
+                                پنجرهٔ انتخاب افزودنی را باز می‌کنند.
                               </p>
                             </>
                           )}
@@ -1235,99 +1339,110 @@ export function OrderDetailModal({
                       ) : null}
                     </div>
 
-                      <section className={`${CARD} mt-3 p-4`} aria-label="مبلغ و تخفیف سفارش">
-                        {editable ? (
-                          <div className="mb-4 border-b border-border/80 pb-4">
-                            <h3 className="mb-2 font-semibold text-foreground">
-                              تخفیف
-                            </h3>
-                            <div className="flex flex-col gap-2">
-                              <div className="flex gap-2">
-                                <div className="min-w-0 flex-1">
-                                  <SearchableSelect
-                                    value={discountType}
-                                    onChange={(value) =>
-                                      setDiscountType(
-                                        value as "" | "percent" | "amount",
-                                      )
-                                    }
-                                    ariaLabel="نوع تخفیف"
-                                    className={OPS_INPUT}
-                                    options={[
-                                      { value: "", label: "بدون تخفیف" },
-                                      { value: "percent", label: "درصدی" },
-                                      { value: "amount", label: "مبلغ ثابت" },
-                                    ]}
-                                  />
-                                </div>
-                                {discountType ? (
-                                  <PersianNumberInput
-                                    className={`${OPS_INPUT} w-24`}
-                                    dir="ltr"
-                                    inputMode={discountType === "percent" ? "decimal" : "numeric"}
-                                    aria-label="مقدار تخفیف"
-                                    value={discountValue}
-                                    onChange={(event) =>
-                                      setDiscountValue(event.target.value)
-                                    }
-                                    placeholder={
-                                      discountType === "percent" ? "٪" : money.unitLabel
-                                    }
-                                  />
-                                ) : null}
+                    <section
+                      className={`${CARD} mt-3 p-4`}
+                      aria-label="مبلغ و تخفیف سفارش"
+                    >
+                      {editable ? (
+                        <div className="mb-4 border-b border-border/80 pb-4">
+                          <h3 className="mb-2 font-semibold text-foreground">
+                            تخفیف
+                          </h3>
+                          <div className="flex flex-col gap-2">
+                            <div className="flex gap-2">
+                              <div className="min-w-0 flex-1">
+                                <SearchableSelect
+                                  value={discountType}
+                                  onChange={(value) =>
+                                    setDiscountType(
+                                      value as "" | "percent" | "amount",
+                                    )
+                                  }
+                                  ariaLabel="نوع تخفیف"
+                                  className={OPS_INPUT}
+                                  options={[
+                                    { value: "", label: "بدون تخفیف" },
+                                    { value: "percent", label: "درصدی" },
+                                    { value: "amount", label: "مبلغ ثابت" },
+                                  ]}
+                                />
                               </div>
-                              <button
-                                type="button"
-                                onClick={saveDiscount}
-                                disabled={busy}
-                                className={`${SECONDARY_BUTTON} min-h-12 w-full`}
-                              >
-                                اعمال تخفیف
-                              </button>
+                              {discountType ? (
+                                <PersianNumberInput
+                                  className={`${OPS_INPUT} w-24`}
+                                  dir="ltr"
+                                  inputMode={
+                                    discountType === "percent"
+                                      ? "decimal"
+                                      : "numeric"
+                                  }
+                                  aria-label="مقدار تخفیف"
+                                  value={discountValue}
+                                  onChange={(event) =>
+                                    setDiscountValue(event.target.value)
+                                  }
+                                  placeholder={
+                                    discountType === "percent"
+                                      ? "٪"
+                                      : money.unitLabel
+                                  }
+                                />
+                              ) : null}
                             </div>
+                            <button
+                              type="button"
+                              onClick={saveDiscount}
+                              disabled={busy}
+                              className={`${SECONDARY_BUTTON} min-h-12 w-full`}
+                            >
+                              اعمال تخفیف
+                            </button>
                           </div>
-                        ) : null}
+                        </div>
+                      ) : null}
 
-                        <dl className="space-y-2">
+                      <dl className="space-y-2">
+                        <Row
+                          label="جمع جزء"
+                          value={money.format(Number(order.subtotal))}
+                        />
+                        {addOnTotal !== 0 ? (
                           <Row
-                            label="جمع جزء"
-                            value={money.format(Number(order.subtotal))}
+                            label="از این مبلغ، افزودنی‌ها"
+                            value={formatModifierDelta(addOnTotal, {
+                              unit: money.unit,
+                            })}
+                            accent
                           />
-                          {addOnTotal !== 0 ? (
-                            <Row
-                              label="از این مبلغ، افزودنی‌ها"
-                              value={formatModifierDelta(addOnTotal, { unit: money.unit })}
-                              accent
-                            />
-                          ) : null}
-                          {Number(order.discount) > 0 ? (
-                            <Row
-                              label="تخفیف"
-                              value={`- ${money.format(Number(order.discount))}`}
-                            />
-                          ) : null}
-                          {Number(order.service_charge ?? 0) > 0 ? (
-                            <Row
-                              label="هزینهٔ ارسال"
-                              value={money.format(Number(order.service_charge))}
-                            />
-                          ) : null}
-                          {Number(order.tax) > 0 ? (
-                            <Row
-                              label="مالیات"
-                              value={money.format(Number(order.tax))}
-                            />
-                          ) : null}
-                          <div className="mt-1 flex items-center justify-between gap-3 rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/15 px-3 py-2.5">
-                            <dt className="text-sm font-bold text-foreground">
-                              جمع کل
-                            </dt>
-                            <dd className="text-base font-bold tabular-nums text-amber-700 dark:text-amber-300">
-                              {money.format(Number(order.total))}
-                            </dd>
-                          </div>
-                        </dl>
-                      </section>
+                        ) : null}
+                        {Number(order.discount) > 0 ? (
+                          <Row
+                            label="تخفیف"
+                            value={`- ${money.format(Number(order.discount))}`}
+                          />
+                        ) : null}
+                        {Number(order.service_charge ?? 0) > 0 ? (
+                          <Row
+                            label="هزینهٔ ارسال"
+                            value={money.format(Number(order.service_charge))}
+                          />
+                        ) : null}
+                        {Number(order.tax) > 0 ? (
+                          <Row
+                            label="مالیات"
+                            value={money.format(Number(order.tax))}
+                          />
+                        ) : null}
+                        <div className="mt-1 flex items-center justify-between gap-3 rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/15 px-3 py-2.5">
+                          <dt className="text-sm font-bold text-foreground">
+                            جمع کل
+                          </dt>
+                          <dd className="text-base font-bold tabular-nums text-amber-700 dark:text-amber-300">
+                            {money.format(Number(order.total))}
+                          </dd>
+                        </div>
+                      </dl>
+                    </section>
 
                     {canTakePayment && order.status === "open" ? (
                       <section
@@ -1348,7 +1463,9 @@ export function OrderDetailModal({
                         <div className="mb-3">
                           <CustomerPicker
                             customer={selectedCustomer}
-                            onChange={(customer) => void saveOrderCustomer(customer)}
+                            onChange={(customer) =>
+                              void saveOrderCustomer(customer)
+                            }
                             disabled={busy}
                             idPrefix="order-customer"
                             requestOpen={customerPickerRequests}
@@ -1402,7 +1519,11 @@ export function OrderDetailModal({
                             !paymentMethodsLoaded ||
                             Boolean(paymentMethodsError) ||
                             paymentMethods.length === 0 ||
-                            (draftRequiresCustomer(paymentDraft, paymentMethods, Number(order.total)) &&
+                            (draftRequiresCustomer(
+                              paymentDraft,
+                              paymentMethods,
+                              Number(order.total),
+                            ) &&
                               !selectedCustomer)
                           }
                           onComplete={() => void pay()}
@@ -1552,7 +1673,9 @@ export function OrderDetailModal({
                               className="flex items-center justify-between gap-3 rounded-xl bg-muted px-3 py-2.5 text-sm"
                             >
                               <span className="min-w-0 truncate text-foreground">
-                                {payment.payment_method_name ?? PAYMENT_LABELS[payment.method] ?? payment.method}
+                                {payment.payment_method_name ??
+                                  PAYMENT_LABELS[payment.method] ??
+                                  payment.method}
                               </span>
                               <span className="shrink-0 font-bold tabular-nums text-foreground">
                                 {money.format(Number(payment.amount))}
@@ -1567,7 +1690,10 @@ export function OrderDetailModal({
 
                 {tab === "ops" ? (
                   <div className="space-y-3">
-                    <section className={`${CARD} p-4`} aria-label="عملیات سفارش">
+                    <section
+                      className={`${CARD} p-4`}
+                      aria-label="عملیات سفارش"
+                    >
                       <h3 className="mb-3 font-semibold text-foreground">
                         عملیات
                       </h3>
@@ -1578,7 +1704,9 @@ export function OrderDetailModal({
                           className={`${SECONDARY_BUTTON} min-h-12`}
                         >
                           <PrinterIcon className="size-4" aria-hidden="true" />
-                          {order.status === "open" ? "چاپ رسید" : "چاپ مجدد رسید"}
+                          {order.status === "open"
+                            ? "چاپ رسید"
+                            : "چاپ مجدد رسید"}
                         </button>
                         {editable ? (
                           <button
@@ -1596,7 +1724,9 @@ export function OrderDetailModal({
 
                     {editable && order.type === "dine_in" ? (
                       <section className={`${CARD} p-4`} aria-label="تعیین میز">
-                        <h3 className="mb-2 font-semibold text-foreground">تعیین میز</h3>
+                        <h3 className="mb-2 font-semibold text-foreground">
+                          تعیین میز
+                        </h3>
                         {/*
                           A seated table is offered too: moving a bill onto a
                           table that already has guests is how friends sitting
@@ -1605,7 +1735,11 @@ export function OrderDetailModal({
                           those, so offering them would only produce an error.
                         */}
                         {!tablesLoaded ? (
-                          <LoadingSkeleton rows={1} compact label="در حال بارگذاری میزها" />
+                          <LoadingSkeleton
+                            rows={1}
+                            compact
+                            label="در حال بارگذاری میزها"
+                          />
                         ) : (
                           <SearchableSelect
                             value={selectedTableId}
@@ -1641,10 +1775,17 @@ export function OrderDetailModal({
                       ties the two bills to the same visit.
                     */}
                     {editable && order.type === "dine_in" && order.table_id ? (
-                      <section className={`${CARD} p-4`} aria-label="مهمان جدید روی این میز">
-                        <h3 className="mb-2 font-semibold text-foreground">مهمان جدید روی این میز</h3>
+                      <section
+                        className={`${CARD} p-4`}
+                        aria-label="مهمان جدید روی این میز"
+                      >
+                        <h3 className="mb-2 font-semibold text-foreground">
+                          مهمان جدید روی این میز
+                        </h3>
                         <p className="mb-3 text-xs leading-5 text-muted-foreground">
-                          برای مهمانی که تازه به {order.table_name ?? "این میز"} اضافه شده، سفارش جداگانه ثبت کنید؛ صورت‌حساب و تسویهٔ آن کاملاً مستقل از این سفارش است.
+                          برای مهمانی که تازه به {order.table_name ?? "این میز"}{" "}
+                          اضافه شده، سفارش جداگانه ثبت کنید؛ صورت‌حساب و تسویهٔ
+                          آن کاملاً مستقل از این سفارش است.
                         </p>
                         <Link
                           href={`/accounting/pos?table=${encodeURIComponent(order.table_id)}`}
@@ -1702,10 +1843,14 @@ export function OrderDetailModal({
           {order ? (
             <div
               className="flex shrink-0 items-center justify-between gap-3 border-t border-border/80 bg-card px-4 py-3 sm:px-5"
-              style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+              style={{
+                paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))",
+              }}
             >
               <div className="flex items-baseline gap-2">
-                <span className="text-sm font-bold text-foreground">جمع کل</span>
+                <span className="text-sm font-bold text-foreground">
+                  جمع کل
+                </span>
                 <span className="text-xs text-muted-foreground">
                   {toPersianDigits(itemCount)} قلم
                 </span>
