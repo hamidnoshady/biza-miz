@@ -85,19 +85,23 @@ function AiPanelBody({
 
 export function AiManagementSheet({
   section,
+  allowedSections,
   canAutoApply,
   onSectionChange,
   onClose,
 }: {
   /** The open section, or null when the panel is closed. Driven by `?aiPanel=`. */
   section: AiPanelSectionKey | null;
+  /** Server-derived effective capabilities; never infer these from a role in the client. */
+  allowedSections: readonly AiPanelSectionKey[];
   /** Owner only: lets coworker jobs and automations apply unattended. */
   canAutoApply: boolean;
   onSectionChange: (key: AiPanelSectionKey) => void;
   onClose: () => void;
 }) {
-  // While closed, keep the last section mounted so the exit slide has content.
-  const active = aiPanelSection(section ?? "agents");
+  // While closed, keep an authorized section mounted so the exit slide has
+  // content. The parent already rejects unauthorized query-string values.
+  const active = aiPanelSection(section ?? allowedSections[0] ?? "agents");
 
   return (
     <Sheet open={section !== null} onOpenChange={(open) => (open ? null : onClose())}>
@@ -123,7 +127,7 @@ export function AiManagementSheet({
             aria-label="بخش‌های مدیریت دستیار"
             className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-border/80 px-3 py-2 pb-2"
           >
-            {AI_PANEL_SECTIONS.map((item) => {
+            {AI_PANEL_SECTIONS.filter((item) => allowedSections.includes(item.key)).map((item) => {
               const Icon = ICONS[item.icon];
               return (
                 <FilterChip

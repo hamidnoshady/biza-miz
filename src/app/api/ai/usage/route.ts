@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { requireManager } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
 import { getAiUsageSummary } from "@/lib/ai-usage-service";
 import { normalizeWindowDays } from "@/lib/ai-usage-shared";
 
@@ -13,7 +14,7 @@ import { normalizeWindowDays } from "@/lib/ai-usage-shared";
  * wallet already recorded, sliced by origin.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const guard = await requireManager();
+  const guard = await requireManager(PERMISSIONS.aiUsageView);
   if (guard.error) return guard.error;
 
   const url = new URL(request.url);

@@ -3,6 +3,7 @@ import { isPlatformAiConfigured, logAiRuntimeUnavailable } from "@/lib/ai-config
 import { resolveAiConfigFor } from "@/lib/ai-runtime";
 import { reindexBusinessKnowledge } from "@/lib/ai-rag-indexer";
 import { requireManager } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
 import { withTenantScope } from "@/lib/auth";
 
 /**
@@ -16,7 +17,7 @@ import { withTenantScope } from "@/lib/auth";
  * way. `?max=` bounds the run (default 1000, ceiling 5000 chunks).
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const guard = await requireManager();
+  const guard = await requireManager(PERMISSIONS.aiKnowledgeManage);
   if (guard.error) return guard.error;
 
   const config = await resolveAiConfigFor(guard.session.businessId, null, { ensureVirtualKey: true });

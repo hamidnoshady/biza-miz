@@ -135,13 +135,26 @@ export function aiPanelHref(key: AiPanelSectionKey): string {
  * effective permission set so custom roles and revocations cannot drift from
  * the API.
  */
+const AI_PANEL_PERMISSION_MAP: Readonly<Record<AiPanelSectionKey, Permission>> = {
+  agents: PERMISSIONS.aiAgentsManage,
+  coworkers: PERMISSIONS.aiAutomationsManage,
+  automations: PERMISSIONS.aiAutomationsManage,
+  activity: PERMISSIONS.aiAutomationsManage,
+  knowledge: PERMISSIONS.aiKnowledgeManage,
+  usage: PERMISSIONS.aiUsageView,
+};
+
+/**
+ * UI and API authorization are both based on effective permissions. `ai.manage`
+ * is the umbrella capability; section-specific grants support custom roles
+ * without reviving role-name assumptions.
+ */
 export function canManageAi(
-  effective: ReadonlySet<Permission> | readonly Permission[] | string,
-  _key?: AiPanelSectionKey,
+  effective: ReadonlySet<Permission> | readonly Permission[],
+  key?: AiPanelSectionKey,
 ): boolean {
-  if (typeof effective !== "string") {
-    const permissions = effective instanceof Set ? effective : new Set(effective);
-    return permissions.has(PERMISSIONS.aiManage);
-  }
-  return effective === "owner" || effective === "manager";
+  const permissions = effective instanceof Set ? effective : new Set(effective);
+  if (permissions.has(PERMISSIONS.aiManage)) return true;
+  if (key) return permissions.has(AI_PANEL_PERMISSION_MAP[key]);
+  return AI_PANEL_SECTION_KEYS.some((section) => permissions.has(AI_PANEL_PERMISSION_MAP[section]));
 }

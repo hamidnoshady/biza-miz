@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { SYSTEM_AI_READ_PERMISSIONS } from "../src/lib/ai-capabilities";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -109,7 +110,7 @@ describe("Phase C read tools", () => {
     );
 
     const all = await dbLib.withTenant(alpha.businessId, () =>
-      aiTools.runReadTool("list_message_templates", {}, alpha.businessId),
+      aiTools.runReadTool("list_message_templates", {}, alpha.businessId, undefined, undefined, SYSTEM_AI_READ_PERMISSIONS),
     );
     expect(all.ok).toBe(true);
     const allRows = all.data as Array<{ templateId: string; channel: string; name: string }>;
@@ -117,7 +118,7 @@ describe("Phase C read tools", () => {
     expect(allRows.every((r) => typeof r.templateId === "string")).toBe(true);
 
     const sms = await dbLib.withTenant(alpha.businessId, () =>
-      aiTools.runReadTool("list_message_templates", { channel: "sms" }, alpha.businessId),
+      aiTools.runReadTool("list_message_templates", { channel: "sms" }, alpha.businessId, undefined, undefined, SYSTEM_AI_READ_PERMISSIONS),
     );
     const smsRows = sms.data as Array<{ channel: string }>;
     expect(smsRows.length).toBe(1);
@@ -142,7 +143,7 @@ describe("Phase C read tools", () => {
     );
 
     const alphaList = await dbLib.withTenant(alpha.businessId, () =>
-      aiTools.runReadTool("list_message_campaigns", {}, alpha.businessId),
+      aiTools.runReadTool("list_message_campaigns", {}, alpha.businessId, undefined, undefined, SYSTEM_AI_READ_PERMISSIONS),
     );
     expect(alphaList.ok).toBe(true);
     const alphaRows = alphaList.data as Array<{ campaignId: string; name: string; status: string }>;
@@ -151,7 +152,7 @@ describe("Phase C read tools", () => {
 
     // Beta has no campaigns — the tool never leaks Alpha's rows.
     const betaList = await dbLib.withTenant(beta.businessId, () =>
-      aiTools.runReadTool("list_message_campaigns", {}, beta.businessId),
+      aiTools.runReadTool("list_message_campaigns", {}, beta.businessId, undefined, undefined, SYSTEM_AI_READ_PERMISSIONS),
     );
     const betaRows = betaList.data as Array<{ campaignId: string }>;
     expect(betaRows.some((r) => r.campaignId === created.id)).toBe(false);

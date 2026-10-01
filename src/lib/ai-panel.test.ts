@@ -8,6 +8,7 @@ import {
   canManageAi,
   isAiPanelSectionKey,
 } from "./ai-panel";
+import { PERMISSIONS } from "./permissions";
 
 describe("AI panel section registry", () => {
   it("lists every declared section exactly once, in key order", () => {
@@ -48,22 +49,24 @@ describe("AI panel section registry", () => {
   });
 });
 
-describe("AI panel role gate", () => {
-  it("admits owner and manager", () => {
-    expect(canManageAi("owner")).toBe(true);
-    expect(canManageAi("manager")).toBe(true);
-    for (const key of AI_PANEL_SECTION_KEYS) {
-      expect(canManageAi("owner", key)).toBe(true);
-      expect(canManageAi("manager", key)).toBe(true);
-    }
+describe("AI panel capability gate", () => {
+  it("uses the umbrella management permission for every section", () => {
+    const effective = new Set([PERMISSIONS.aiManage]);
+    expect(canManageAi(effective)).toBe(true);
+    for (const key of AI_PANEL_SECTION_KEYS) expect(canManageAi(effective, key)).toBe(true);
   });
 
-  it("keeps cashier, waiter, kitchen and accountant out", () => {
-    for (const role of ["cashier", "waiter", "kitchen", "accountant"]) {
-      expect(canManageAi(role)).toBe(false);
-      for (const key of AI_PANEL_SECTION_KEYS) {
-        expect(canManageAi(role, key)).toBe(false);
-      }
-    }
+  it("supports section-specific custom-role grants without widening other panels", () => {
+    const effective = new Set([PERMISSIONS.aiKnowledgeManage]);
+    expect(canManageAi(effective)).toBe(true);
+    expect(canManageAi(effective, "knowledge")).toBe(true);
+    expect(canManageAi(effective, "agents")).toBe(false);
+    expect(canManageAi(effective, "usage")).toBe(false);
+  });
+
+  it("keeps a member with only ai.use out of every management section", () => {
+    const effective = new Set([PERMISSIONS.aiUse]);
+    expect(canManageAi(effective)).toBe(false);
+    for (const key of AI_PANEL_SECTION_KEYS) expect(canManageAi(effective, key)).toBe(false);
   });
 });

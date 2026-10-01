@@ -11,6 +11,7 @@ import {
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 import { InvoiceOcrError, runInvoiceOcr } from "@/lib/ai-invoice-ocr-service";
 import { requireManager, resolveActiveLocation } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
 import { withTenantScope } from "@/lib/auth";
 import { hasMatchingMediaSignature } from "@/lib/media";
 import {
@@ -36,7 +37,7 @@ import {
  * the extraction/matching logic underneath is unchanged.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const guard = await requireManager();
+  const guard = await requireManager(PERMISSIONS.purchasesManage);
   if (guard.error) return guard.error;
   const session = guard.session;
 

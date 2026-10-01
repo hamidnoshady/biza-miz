@@ -3,7 +3,7 @@ import { getSession } from "@/lib/auth";
 import { authorize } from "@/lib/authorize";
 import { PERMISSIONS } from "@/lib/permissions";
 import { featureLockedForPage, isFeatureEnabled } from "@/lib/features";
-import { canManageAi } from "@/lib/ai-panel";
+import { AI_PANEL_SECTION_KEYS, canManageAi } from "@/lib/ai-panel";
 import { FeatureLock } from "@/components/feature-lock";
 import { AiChatHub } from "./ai/ai-chat-hub";
 import { cardClass } from "./page-chrome";
@@ -89,7 +89,9 @@ export default async function DashboardPage() {
   return (
     <FeatureLock locked={locked} title="دستیار هوشمند">
       <AiChatHub
-        canManageAi={canManageAi(access.membership.permissions)}
+        manageableSections={AI_PANEL_SECTION_KEYS.filter((key) =>
+          canManageAi(access.membership.permissions, key),
+        )}
         canAutoApply={session.role === "owner"}
       />
     </FeatureLock>

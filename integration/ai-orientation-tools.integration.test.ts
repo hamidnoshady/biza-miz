@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { SYSTEM_AI_READ_PERMISSIONS } from "../src/lib/ai-capabilities";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -110,7 +111,7 @@ afterAll(async () => {
 });
 
 function run(name: string, args: Record<string, unknown> = {}) {
-  return dbLib.withTenant(cafe.businessId, () => aiTools.runReadTool(name, args, cafe.businessId));
+  return dbLib.withTenant(cafe.businessId, () => aiTools.runReadTool(name, args, cafe.businessId, undefined, undefined, SYSTEM_AI_READ_PERMISSIONS));
 }
 
 describe("find_items — the owner says a name, not a UUID", () => {

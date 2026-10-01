@@ -10,6 +10,7 @@ import {
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 import { InventoryVisionError, runInventoryVisionCount } from "@/lib/ai-inventory-vision-service";
 import { requireManager, resolveActiveLocation } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { withTenantScope } from "@/lib/auth";
 
@@ -22,7 +23,7 @@ import { withTenantScope } from "@/lib/auth";
  * settled against actual usage.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const guard = await requireManager();
+  const guard = await requireManager(PERMISSIONS.inventoryAdjust);
   if (guard.error) return guard.error;
   const session = guard.session;
 

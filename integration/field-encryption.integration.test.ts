@@ -22,6 +22,7 @@ import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { createAppRole } from "../scripts/create-app-role";
+import { SYSTEM_AI_READ_PERMISSIONS } from "../src/lib/ai-capabilities";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -700,7 +701,7 @@ describe("the other two phone lookups converted in step 3's preparation", () => 
 
     for (const typed of ["09127778899", "+98 912 777 8899", "8899"]) {
       const result = await dbLib.withTenant(biz.id, () =>
-        aiTools.runReadTool("find_customers", { query: typed }, biz.id),
+        aiTools.runReadTool("find_customers", { query: typed }, biz.id, undefined, undefined, SYSTEM_AI_READ_PERMISSIONS),
       );
       const found = JSON.stringify(result);
       expect(found).toContain("جست‌وجوی هوشمند");

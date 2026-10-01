@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { SYSTEM_AI_READ_PERMISSIONS } from "../src/lib/ai-capabilities";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -85,7 +86,7 @@ describe("Wave 13 assistant tools", () => {
     );
     cosmetics.locationId = cLoc.rows[0].id;
 
-    const allowed = await aiTools.runReadTool("get_near_expiry_items", {}, cosmetics.businessId);
+    const allowed = await aiTools.runReadTool("get_near_expiry_items", {}, cosmetics.businessId, undefined, undefined, SYSTEM_AI_READ_PERMISSIONS);
     expect(allowed.ok).toBe(true);
     expect(Array.isArray(allowed.data)).toBe(true);
 
@@ -100,19 +101,19 @@ describe("Wave 13 assistant tools", () => {
     );
     jewelry.locationId = jLoc.rows[0].id;
 
-    const refused = await aiTools.runReadTool("get_near_expiry_items", {}, jewelry.businessId);
+    const refused = await aiTools.runReadTool("get_near_expiry_items", {}, jewelry.businessId, undefined, undefined, SYSTEM_AI_READ_PERMISSIONS);
     expect(refused.ok).toBe(false);
     expect((refused.data as { error?: string }).error).toBeTruthy();
   });
 
   it("get_staff_commission answers with an empty leaderboard for a business with no accruals", async () => {
-    const result = await aiTools.runReadTool("get_staff_commission", {}, cosmetics.businessId);
+    const result = await aiTools.runReadTool("get_staff_commission", {}, cosmetics.businessId, undefined, undefined, SYSTEM_AI_READ_PERMISSIONS);
     expect(result.ok).toBe(true);
     expect(Array.isArray(result.data)).toBe(true);
   });
 
   it("get_repurchase_candidates answers with an empty list when there is no purchase history", async () => {
-    const result = await aiTools.runReadTool("get_repurchase_candidates", {}, cosmetics.businessId);
+    const result = await aiTools.runReadTool("get_repurchase_candidates", {}, cosmetics.businessId, undefined, undefined, SYSTEM_AI_READ_PERMISSIONS);
     expect(result.ok).toBe(true);
     expect(Array.isArray(result.data)).toBe(true);
   });

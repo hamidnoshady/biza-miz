@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { requireManager } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
 import { runAccountingReview } from "@/lib/accounting-review-service";
 
 /**
@@ -9,7 +10,7 @@ import { runAccountingReview } from "@/lib/accounting-review-service";
  * books. See accounting-review.ts for why this is a rule engine, not a prompt.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const guard = await requireManager();
+  const guard = await requireManager(PERMISSIONS.aiAutomationsManage);
   if (guard.error) return guard.error;
 
   const asOfDate = request.nextUrl.searchParams.get("asOfDate") ?? undefined;

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { requireManager } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
 import { coworkerErrorMessage, type CoworkerJobInput } from "@/lib/ai-coworker";
 import { TEMPLATE_PARAM_ERROR_MESSAGES } from "@/lib/ai-coworker-templates";
 import { deleteCoworkerJob, updateCoworkerJob } from "@/lib/ai-coworker-service";
@@ -11,7 +12,7 @@ function messageFor(code: string): string {
 
 export const PATCH = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const guard = await requireManager();
+    const guard = await requireManager(PERMISSIONS.aiAutomationsManage);
     if (guard.error) return guard.error;
     const { id } = await context.params;
 
@@ -39,7 +40,7 @@ export const PATCH = withTenantScope(
 
 export const DELETE = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const guard = await requireManager();
+    const guard = await requireManager(PERMISSIONS.aiAutomationsManage);
     if (guard.error) return guard.error;
     const { id } = await context.params;
     const removed = await deleteCoworkerJob(guard.session.businessId, id);

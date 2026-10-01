@@ -38,6 +38,16 @@ describe("AI capability policy", () => {
     expect(canUseAiTool("find_customers", allowed)).toBe(true);
   });
 
+  it("fails closed when a caller omits its authority", async () => {
+    const result = await runReadTool(
+      "get_payroll_summary",
+      {},
+      "00000000-0000-0000-0000-000000000001",
+    );
+
+    expect(result.ok).toBe(false);
+  });
+
   it("re-checks effective permission in the executor before touching domain data", async () => {
     const result = await runReadTool(
       "get_payroll_summary",

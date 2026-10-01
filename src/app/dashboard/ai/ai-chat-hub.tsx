@@ -45,11 +45,11 @@ import { AiWorkspaceContext } from "./ai-workspace-context";
 import { cardClass, overlayPanelClass } from "../page-chrome";
 
 export function AiChatHub({
-  canManageAi = false,
+  manageableSections = [],
   canAutoApply = false,
 }: {
   /** Owner/manager: shows the «مدیریت دستیار» control and honours `?aiPanel=`. */
-  canManageAi?: boolean;
+  manageableSections?: readonly AiPanelSectionKey[];
   /** Owner only: coworker jobs and automations may apply unattended. */
   canAutoApply?: boolean;
 }) {
@@ -87,7 +87,7 @@ export function AiChatHub({
   // simply never has a panel, whatever the URL says.
   const panelParam = searchParams.get(AI_PANEL_PARAM);
   const panelSection: AiPanelSectionKey | null =
-    canManageAi && isAiPanelSectionKey(panelParam) ? panelParam : null;
+    isAiPanelSectionKey(panelParam) && manageableSections.includes(panelParam) ? panelParam : null;
 
   const replaceParams = useCallback(
     (mutate: (params: URLSearchParams) => void) => {
@@ -296,11 +296,11 @@ export function AiChatHub({
         >
           <PanelLeftIcon className="size-4 shrink-0" aria-hidden="true" />
         </Button>
-        {canManageAi ? (
+        {manageableSections.length > 0 ? (
           <Button
             variant={panelSection ? "secondary" : "outline"}
             size="sm"
-            onClick={() => openPanel(panelSection ?? "agents")}
+            onClick={() => openPanel(panelSection ?? manageableSections[0]!)}
             aria-expanded={panelSection !== null}
             aria-label="مدیریت دستیار"
             title="مدیریت دستیار: ایجنت‌ها، همکاران، اتوماسیون‌ها، دانش و مصرف"
@@ -331,6 +331,7 @@ export function AiChatHub({
 
       <AiManagementSheet
         section={panelSection}
+        allowedSections={manageableSections}
         canAutoApply={canAutoApply}
         onSectionChange={openPanel}
         onClose={closePanel}
