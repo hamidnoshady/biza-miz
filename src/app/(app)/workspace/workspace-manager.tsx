@@ -67,7 +67,10 @@ export function WorkspaceManager({
     const rest = new URLSearchParams(search.toString());
     for (const key of ["create", "project", "open"]) rest.delete(key);
     const qs = rest.toString();
-    window.history.replaceState(window.history.state, "", `${window.location.pathname}${qs ? `?${qs}` : ""}`);
+    // `null` state, as Next documents: passing Next's own history state would
+    // mark this as its internal entry and useSearchParams would never sync,
+    // so the next «+ ایجاد» to the same URL would look like no change at all.
+    window.history.replaceState(null, "", `${window.location.pathname}${qs ? `?${qs}` : ""}`);
   }, [search]);
   const create = { intent };
   const held = useMemo(() => new Set(permissions), [permissions]);
