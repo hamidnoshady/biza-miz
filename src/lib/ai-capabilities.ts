@@ -62,6 +62,10 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // payment certificates), these move with them rather than staying broader.
   get_aec_project_financial_health: PERMISSIONS.workspaceView,
   list_delayed_project_activities: PERMISSIONS.workspaceView,
+  // The BOQ variance quotes an approved estimate (the project's working budget)
+  // and the ledger's actual cost — both of which `workspace.view` already shows
+  // on the project page, so the assistant adds no reach here either.
+  get_boq_variance: PERMISSIONS.workspaceView,
   draft_expense_from_receipt: PERMISSIONS.financeExpensesManage,
   get_accounting_review: PERMISSIONS.ledgerView,
 };

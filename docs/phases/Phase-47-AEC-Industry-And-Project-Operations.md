@@ -157,15 +157,60 @@ decides. A blueprint outside the recommended set is still offered (a contractor 
 office gets the fit-out template, simply not first), and a user may still create their own widget.
 The super-admin's influence is an ordering and a badge, not a gate.
 
-## Waves 4–11 — designed, not built
+## Wave 4 — the BOQ, its revisions and the working budget (implemented, migration 0196)
+
+What shipped:
+
+| Surface | Change |
+|---|---|
+| Domain | `migrations/0196_aec_boq_and_estimates.sql` — five tables: `aec_estimates` → `aec_estimate_versions` → `aec_boq_sections` → `aec_boq_items`, plus `aec_estimate_events` as the audit trail. All five ENABLE + FORCE RLS with a `tenant_isolation` policy, composite `(business_id, …)` foreign keys, and a party reference guarded the same way 0194's are. The migration also widens `workspace_approvals.subject_type` with `estimate_version` and `workspace_activity.subject_type` with `estimate` |
+| Arithmetic | `aec_boq_item_totals()` (BEFORE INSERT/UPDATE) owns `unit_price_rial` and `total_rial`: `unit_price = round(rate_sum × (1+waste)(1+overhead)(1+markup))` in integer basis points, `total = round(quantity × unit_price)`, with the unit price capped at 10¹⁵ and the line at `Number.MAX_SAFE_INTEGER`. A caller's own numbers are overwritten, not validated, so a stale tab cannot store a total that disagrees with the line's own rates. `aec_boq_version_totals()` follows with the revision's `item_count`/`total_rial`; `aec_estimate_version_guard()` freezes a revision the moment it leaves draft (approved → superseded is the only later move) and `aec_boq_line_guard()` refuses a section or line edit outside a draft |
+| Pure half | `src/lib/aec-boq.ts` — the statuses and their transitions, the unit catalogue with the spellings a spreadsheet uses («متر مربع» → `m2`), the event labels, and `computeBoqItemTotals`, an exact BigInt mirror of the trigger (no floating point anywhere, half-up like PostgreSQL) so the form's live preview is the number the row will keep |
+| Service | `src/lib/aec-boq-service.ts` — estimates, revisions with clone-forward, the draft's whole tree in one transaction (chapters and lines are replaced, which is what makes a reorder mean something), the event history, `boqVariance` and `approvedEstimateTotals` |
+| API | `GET/POST /api/aec/projects/[id]/estimates` (the list and the variance in one response), `GET/PATCH/DELETE /api/aec/estimates/[id]`, `POST /api/aec/estimates/[id]/versions`, `GET/PUT /api/aec/boq/versions/[id]`, `POST /api/aec/boq/versions/[id]/status` (`submit \| start_review \| approve \| return`). Every one `withTenantScope` + `aecOwner` + `requireProjectCapability`; submit needs `workspace.manage`, a decision needs `workspace.approve` |
+| Screen | `src/app/(app)/workspace/projects/[id]/boq-panel.tsx` — the BOQ tab: the project's approved total against Accounting's actual cost, the revision list with statuses, the selected revision's chapters and measured rows (inline-editable while it is a draft), one row's rate build-up in a dialog with the live totals, and the revision's history. Money is entered in the business's own unit and crosses the wire as integer Rial |
+| Cockpit | `aec-cockpit.ts` — `boq` is now shipped, `AEC_SHIPPED_WAVE = 4`, and the tab sits between «اسناد» and «قراردادها», where §21 puts it |
+| Assistant | `get_boq_variance` joins §23's two reads (capabilities catalogue, `ai.ts`'s function schema and Persian prompt, MCP) — the approved estimate against the ledger, and nothing invented |
+| Data transfer | `workspace.boq_items` in `src/lib/data-transfer/registry.ts` + its adapter: 19 importable columns including the four rates, waste/overhead/markup, work package and an optional supplier, with the database's `unit_price_rial`/`total_rial` exported and never importable. A row names a project and lands in that project's estimate (created if the file names a new one), in a **draft** revision and in the chapter its title names; a row that cannot be placed comes back as a skipped row with a Persian reason rather than failing the file. The entity declares `requiresIndustry: "architecture_construction"`, and `entitiesForIndustry` — applied by `GET /api/data/entities` — is what keeps a café from ever seeing it |
+
+### Decision 8 — the database owns the price, and the screen computes the same one
+
+§7 lists eleven numbers per BOQ line, of which two are derived. A generated column cannot carry the
+arithmetic (it is a three-factor product with rounding at the end), so the trigger computes and
+stores them — and the form needs the same numbers *before* saving, or the editor is a guess. Rather
+than duplicate the formula approximately (which is how a preview ends up a rial off, and a user
+stops trusting it), `computeBoqItemTotals` is written as the mirror of the trigger in exact integer
+arithmetic, and `integration/aec-boq.integration.test.ts` asserts both sides on the same inputs,
+including a quantity of `0.00005` and a rate that lands on a half rial. One implementation would
+have been better still; two that are proven equal every run is what the constraint allows.
+
+### Decision 9 — approval is the workspace's approval, so §7's step lands in the queue that exists
+
+A submitted revision files one row in `workspace_approvals` with `subject_type = 'estimate_version'`,
+and `decideApproval` delegates to `decideEstimateApproval`. That means §7's approval appears in the
+approvals counters, the project's approval list and the §23 assistant's "pending approvals" widget
+with no new surface; it is gated by `workspace.approve`, the permission the rest of the queue uses;
+and the revision's own `status` is the *projection* of the decision while `aec_estimate_events` is
+the trail a reviewer reads. The one deliberate exception: deciding a request already in the queue is
+**not** gated on the `boq` capability, or switching estimating off would strand an item nobody could
+ever clear.
+
+### Decision 10 — an approved estimate becomes the working budget, but a human number is never overwritten
+
+§7 says approved estimates establish the project working budget. Approval therefore writes
+`ai_projects.budget_rial`, and reports which of four things happened: `set` (the budget was empty),
+`updated` (it still held the total of the revision this one supersedes — the platform's own number,
+moved forward), `already_approved` (it already equals the new total), or `kept_manual` (a person
+typed it, so the screen says the budget was left alone and where to change it). Actual cost is never
+computed here: the variance reads `journal_entries.project_id` through the ledger, and the BOQ
+domain owns five tables, none of which is a cost ledger — asserted in the integration suite rather
+than promised in a comment.
+
+## Waves 5–11 — designed, not built
 
 In the issue's order. Nothing below has a migration or a screen yet; the wave boundaries exist so
 each can be reviewed on its own.
 
-4. **BOQ and estimating.** Estimate → version → BOQ section → item → rate breakdown, the
-   Draft/Submitted/Under Review/Approved/Superseded status model with immutable approved history,
-   and Excel/CSV import through the existing data-transfer engine (preview, mapping, validation,
-   row errors, safe import) — never a second import architecture.
 5. **Document control.** Drawing numbers, revisions, issue purposes and transmittals over the
    existing media library and project documents.
 6. **RFIs and submittals.**

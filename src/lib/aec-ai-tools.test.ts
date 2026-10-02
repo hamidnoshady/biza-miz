@@ -15,10 +15,15 @@ import { READ_TOOL_NAMES } from "./ai-tools";
 import { toolDefinitions } from "./ai";
 
 describe("the AEC read tools", () => {
-  it("declares exactly the two the issue names", () => {
+  it("declares exactly the tree the issue names", () => {
+    // Wave 3 shipped §23's first two; Wave 4 added `get_boq_variance` because
+    // the data it reads (the approved estimate and the ledger's actual cost)
+    // only then existed. The list is asserted literally so a fourth cannot
+    // arrive unnoticed.
     expect([...AEC_AI_TOOL_NAMES]).toEqual([
       "get_aec_project_financial_health",
       "list_delayed_project_activities",
+      "get_boq_variance",
     ]);
     expect(isAecAiToolName("get_aec_project_financial_health")).toBe(true);
     expect(isAecAiToolName("get_workspace_project_status")).toBe(false);
@@ -48,14 +53,16 @@ describe("the AEC read tools", () => {
 
   it("refuses another industry in words the model can relay", async () => {
     for (const industry of ["food_service", "service_saas", null]) {
-      const result = await runAecReadTool(
-        "get_aec_project_financial_health",
-        {},
-        "00000000-0000-0000-0000-000000000000",
-        industry,
-      );
-      expect(result.ok, String(industry)).toBe(false);
-      expect(result.error).toContain("عمران");
+      for (const name of AEC_AI_TOOL_NAMES) {
+        const result = await runAecReadTool(
+          name,
+          {},
+          "00000000-0000-0000-0000-000000000000",
+          industry,
+        );
+        expect(result.ok, `${name} for ${industry}`).toBe(false);
+        expect(result.error).toContain("عمران");
+      }
     }
   });
 

@@ -58,6 +58,35 @@ const ERROR_STATUS: Record<string, number> = {
   project_not_found: 404,
   participant_not_found: 404,
   participant_exists: 409,
+  // Issue #799 Wave 4 — the estimating domain.
+  //
+  // `capability_disabled` is 403 for the same reason `industry_mismatch` is:
+  // the request is well-formed and the caller may be perfectly entitled to use
+  // the product — it is the business's own operating profile that does not
+  // include estimating. The body says so, and the settings screen is where the
+  // answer is one switch away.
+  capability_disabled: 403,
+  estimate_not_found: 404,
+  estimate_version_not_found: 404,
+  approval_not_found: 404,
+  estimate_title_required: 400,
+  invalid_boq_section: 400,
+  invalid_boq_item: 400,
+  invalid_quantity: 400,
+  invalid_material_rate: 400,
+  invalid_labor_rate: 400,
+  invalid_equipment_rate: 400,
+  invalid_subcontract_rate: 400,
+  invalid_waste_percent: 400,
+  invalid_overhead_percent: 400,
+  invalid_markup_percent: 400,
+  boq_total_out_of_range: 400,
+  // Both are conflicts with the state the record is in rather than bad input:
+  // the caller asked something sensible of a revision that has already moved on.
+  version_not_editable: 409,
+  invalid_estimate_transition: 409,
+  estimate_has_approved_version: 409,
+  estimate_empty: 409,
 };
 
 /**

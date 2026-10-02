@@ -15,8 +15,8 @@
  *     later wave flips `shipped: true` (or lowers `maxWave` at the call site)
  *     and the tab appears — no second catalogue, no branching in the UI.
  *   * `aecProjectTabs` composes what a project page renders *today*: the
- *     sections this wave ships, translated for the industry, over the tabs the
- *     workspace already has.
+ *     sections the shipped waves provide, translated for the industry, over the
+ *     tabs the workspace already has.
  *
  * The shipped/unshipped split is why an individual architect does not see ten
  * greyed-out «بهزودی» tabs: an unbuilt section is simply absent.
@@ -76,7 +76,7 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
   { key: "schedule", label: "زمان‌بندی و فازها", wave: 3, shipped: true },
   { key: "tasks", label: "وظایف", wave: 3, shipped: true },
   { key: "documents", label: "نقشه‌ها و اسناد", capability: "document_control", wave: 5, shipped: false },
-  { key: "boq", label: "متره و برآورد", capability: "boq", wave: 4, shipped: false },
+  { key: "boq", label: "متره و برآورد", capability: "boq", wave: 4, shipped: true },
   { key: "contracts", label: "قراردادها", wave: 3, shipped: true },
   { key: "procurement", label: "تأمین و خرید", capability: "procurement", wave: 9, shipped: false },
   { key: "rfis", label: "استعلام‌ها (RFI)", wave: 6, shipped: false },
@@ -93,7 +93,7 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
 ];
 
 /** The highest wave this build implements — the boundary between designed and built. */
-export const AEC_SHIPPED_WAVE = 3;
+export const AEC_SHIPPED_WAVE = 4;
 
 /**
  * The cockpit sections a business sees: shipped, and allowed by its capability
@@ -148,6 +148,7 @@ const TAB_FOR_SECTION: Partial<Record<AecCockpitSectionKey, WorkspaceProjectTabK
   schedule: null, // phases are edited inside «پرونده»
   profile: "record",
   participants: null, // its own tab, before «تیم» — see aecProjectTabs
+  boq: null, // its own tab, between the documents and the contracts
   tasks: "tasks",
   documents: "documents",
   contracts: "contracts",
@@ -177,16 +178,24 @@ export function aecProjectTabs(
     const tab = TAB_FOR_SECTION[section.key];
     if (tab) labelFor.set(tab, section.label);
   }
-  // The one shipped section with no counterpart in the generic tab bar: this
-  // industry alone has external project parties, so the tab is this industry's.
-  const hasParticipants = sections.some((section) => section.key === "participants");
+  // The two shipped sections with no counterpart in the generic tab bar: this
+  // industry alone has external project parties and priced work. Both are
+  // capability-gated above, so an office that does not estimate never grows the
+  // second one.
+  const participantsSection = sections.find((section) => section.key === "participants");
+  const boqSection = sections.find((section) => section.key === "boq");
 
   const tabs: ProjectTab[] = [];
   for (const tab of WORKSPACE_PROJECT_TABS) {
     // The project's parties belong immediately before its team — they are the
     // same question ("who is on this?") asked of the outside world.
-    if (tab.key === "team" && hasParticipants) {
-      tabs.push({ key: "participants", label: "طرف‌های پروژه" });
+    if (tab.key === "team" && participantsSection) {
+      tabs.push({ key: "participants", label: participantsSection.label });
+    }
+    // And the priced work sits where §21 puts it: after the documents, before
+    // the contracts — what is being built, what it costs, then who is bound.
+    if (tab.key === "contracts" && boqSection) {
+      tabs.push({ key: "boq", label: boqSection.label });
     }
     tabs.push({ key: tab.key, label: labelFor.get(tab.key) ?? tab.label });
   }

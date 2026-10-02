@@ -279,7 +279,7 @@ export const DOCUMENT_STATUS_LABELS: Record<WorkspaceDocumentStatus, string> = {
  * Approvals
  * ------------------------------------------------------------------------- */
 
-export const APPROVAL_SUBJECTS = ["project", "task", "document", "contract"] as const;
+export const APPROVAL_SUBJECTS = ["project", "task", "document", "contract", "estimate_version"] as const;
 export type WorkspaceApprovalSubject = (typeof APPROVAL_SUBJECTS)[number];
 
 export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> = {
@@ -287,6 +287,11 @@ export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> =
   task: "وظیفه",
   document: "سند",
   contract: "قرارداد",
+  // Issue #799 §7 — a BOQ revision is approved through the same engine as a
+  // contract, under the same `workspace.approve` key. It is a fifth subject
+  // rather than a second approval table, which is why a submission appears in
+  // the approvals queue, the dashboard counters and the widgets for free.
+  estimate_version: "نسخهٔ برآورد",
 };
 
 export const APPROVAL_STATUSES = ["pending", "approved", "rejected", "cancelled"] as const;

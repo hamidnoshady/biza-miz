@@ -1734,6 +1734,12 @@ const APPROVAL_SELECT = `
       WHEN 'task'     THEN (SELECT title FROM ai_project_tasks    WHERE id = a.subject_id)
       WHEN 'document' THEN (SELECT title FROM workspace_documents WHERE id = a.subject_id)
       WHEN 'contract' THEN (SELECT title FROM workspace_contracts WHERE id = a.subject_id)
+      WHEN 'estimate_version' THEN (
+        SELECT e.title || ' — نسخهٔ ' || v.version_no
+          FROM aec_estimate_versions v
+          JOIN aec_estimates e ON e.id = v.estimate_id
+         WHERE v.id = a.subject_id
+      )
     END, a.title, '') AS subject_title`;
 
 const APPROVAL_JOINS = `
@@ -1804,6 +1810,22 @@ export async function listApprovals(
     params,
   );
   return rows.map(toApproval);
+}
+
+/**
+ * The subject type behind an approval id, for a route that has to hand the
+ * decision to the module owning that subject. Null when there is no such
+ * approval in this business.
+ */
+export async function approvalSubjectType(
+  businessId: string,
+  approvalId: string,
+): Promise<string | null> {
+  const { rows } = await query<{ subject_type: string }>(
+    `SELECT subject_type FROM workspace_approvals WHERE business_id = $1 AND id = $2`,
+    [businessId, approvalId],
+  );
+  return rows[0]?.subject_type ?? null;
 }
 
 export async function requestApproval(

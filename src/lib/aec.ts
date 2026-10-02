@@ -123,7 +123,14 @@ export const AEC_CAPABILITY_LABELS: Record<AecCapabilityKey, string> = {
  * explicit so the settings panel can say so honestly instead of implying that
  * every line is already built.
  */
-export const AEC_LIVE_CAPABILITIES: readonly AecCapabilityKey[] = ["projects", "participants"];
+export const AEC_LIVE_CAPABILITIES: readonly AecCapabilityKey[] = [
+  "projects",
+  "participants",
+  // Issue #799 Wave 4 — the estimating domain has screens and tables behind it
+  // now (`aec-boq-service.ts`, migration 0196), so the capability stops being a
+  // label in a settings panel and starts refusing requests when it is off.
+  "boq",
+];
 
 /* ===========================================================================
  * Specialties — labels, never gates
@@ -575,6 +582,7 @@ export function isAecCapability(value: string): value is AecCapabilityKey {
 export const AEC_AI_TOOL_NAMES = [
   "get_aec_project_financial_health",
   "list_delayed_project_activities",
+  "get_boq_variance",
 ] as const;
 export type AecAiToolName = (typeof AEC_AI_TOOL_NAMES)[number];
 
@@ -586,6 +594,7 @@ export function isAecAiToolName(name: string): name is AecAiToolName {
 export const AEC_AI_TOOL_LABELS: Record<AecAiToolName, string> = {
   get_aec_project_financial_health: "سلامت مالی پروژه (عمرانی)",
   list_delayed_project_activities: "فعالیت‌های عقب‌افتادهٔ پروژه",
+  get_boq_variance: "مغایرت برآورد با هزینهٔ واقعی",
 };
 
 export function isAecOperatingProfile(value: string): value is AecOperatingProfile {

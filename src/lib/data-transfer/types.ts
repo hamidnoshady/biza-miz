@@ -17,6 +17,7 @@
  */
 
 import type { Permission } from "../permissions";
+import type { Industry } from "../industries";
 
 /** Which app a registered entity belongs to. Purely a grouping for the UI. */
 export const DATA_MODULES = [
@@ -182,6 +183,21 @@ export interface EntityDefinition {
   locationScoped?: boolean;
   /** The industry module this entity needs; absent ⇒ every trade has it. */
   requiresModule?: string;
+  /**
+   * The one industry this entity belongs to; absent ⇒ every trade has it.
+   *
+   * Issue #799 §7 — the BOQ's measured rows are an AEC idea: a café has no
+   * chapters, no measured quantities and no rate build-up, so offering it their
+   * import would be a piece of another trade's vocabulary on their screen. The
+   * catalogue route hides such an entity, and the adapter refuses it anyway, so
+   * a hand-made request cannot write BOQ rows into a restaurant either.
+   *
+   * (Deliberately a separate axis from `requiresModule` above, which names a
+   * module key within a trade and is — as of this wave — still unread: wiring
+   * that one up changes which entities three existing POS imports offer, which
+   * is the cleanup wave's decision, not this one's.)
+   */
+  requiresIndustry?: Industry;
 }
 
 /** A parsed file, before any mapping has been applied. */

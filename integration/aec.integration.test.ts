@@ -262,7 +262,7 @@ describe("the AEC workspace overview roll-up (issue #799 §3)", () => {
   });
 });
 
-describe("the three AEC tables are tenant-isolated", () => {
+describe("every AEC table is tenant-isolated", () => {
   it("has RLS enabled, forced, and one policy each", async () => {
     const { rows } = await db.query<{
       relname: string;
@@ -276,8 +276,17 @@ describe("the three AEC tables are tenant-isolated", () => {
         WHERE c.relkind = 'r' AND c.relname LIKE 'aec\\_%' ESCAPE '\\'
         ORDER BY c.relname`,
     );
+    // Listed literally rather than counted: a table added without its policy is
+    // exactly the mistake this guard exists for. Wave 4's five arrive from
+    // migration 0196; `integration/aec-boq.integration.test.ts` owns their
+    // behaviour.
     expect(rows.map((r) => r.relname)).toEqual([
+      "aec_boq_items",
+      "aec_boq_sections",
       "aec_business_profiles",
+      "aec_estimate_events",
+      "aec_estimate_versions",
+      "aec_estimates",
       "aec_project_participants",
       "aec_project_profiles",
     ]);

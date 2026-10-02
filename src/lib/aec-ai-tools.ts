@@ -14,6 +14,11 @@
  *     planned-versus-reported physical progress that §5 keeps as two columns.
  *   - `list_delayed_project_activities` — what is late, across the business or
  *     within one project: overdue tasks and overdue phases.
+ *   - `get_boq_variance` (Wave 4) — the approved estimate against the ledger's
+ *     actual cost, per chapter and in total. §23 names this one
+ *     (`get_boq_variance`) and §23's own rule is why the cost side is read from
+ *     Accounting through the same `projectReport` the cockpit uses: the
+ *     assistant never recomputes a posted financial fact.
  *
  * A business of another industry is refused rather than answered: an empty list
  * would read as "nothing is late", which is a claim about a café's construction
@@ -21,7 +26,8 @@
  * relay, not an error code.
  */
 import { AEC_AI_TOOL_LABELS, AEC_AI_TOOL_NAMES, type AecAiToolName } from "./aec";
-import { type AecProjectProfile, loadProjectAecProfile } from "./aec-service";
+import { AecError, type AecProjectProfile, loadProjectAecProfile } from "./aec-service";
+import { boqVariance } from "./aec-boq-service";
 import { businessToday } from "./business-day-service";
 import { formatJalali } from "./jalali";
 import { daysUntil } from "./workspace-shared";
@@ -182,6 +188,51 @@ async function runTool(
           pendingApprovalCount: financials?.openApprovals ?? 0,
           today,
           note: "ارقام ریالی از اسناد حسابداری همین پروژه خوانده شده‌اند، نه از برآورد.",
+        },
+      };
+    }
+
+    case "get_boq_variance": {
+      const resolved = await resolveProject(businessId, args);
+      if (resolved.kind === "ambiguous") {
+        return {
+          ok: true,
+          data: {
+            ambiguous: true,
+            message: "چند پروژه با این نام هست؛ از کاربر بپرس کدام را می‌خواهد.",
+            candidates: resolved.candidates,
+          },
+        };
+      }
+      if (resolved.kind === "none") return { ok: false, error: "پروژه پیدا نشد." };
+
+      let variance;
+      try {
+        variance = await boqVariance(businessId, resolved.projectId);
+      } catch (err) {
+        // The business estimates nothing (its operating profile has the `boq`
+        // capability off), or is not AEC at all — both answered with a sentence
+        // the model can relay, never with a fabricated zero.
+        if (err instanceof AecError && err.code === "capability_disabled") {
+          return {
+            ok: false,
+            error:
+              "این کسب‌وکار متره و برآورد فعال ندارد. اگر لازم است، از «تنظیمات ← کسب‌وکار» قابلیت متره و برآورد را روشن کنید.",
+          };
+        }
+        throw err;
+      }
+      if (!variance) return { ok: false, error: "پروژه پیدا نشد." };
+
+      return {
+        ok: true,
+        data: {
+          ...variance,
+          today,
+          note:
+            variance.approvedEstimateRial === null
+              ? "هنوز برآورد تأییدشده‌ای برای این پروژه ثبت نشده است؛ هزینهٔ واقعی از اسناد حسابداری خوانده شده است."
+              : "هزینهٔ واقعی از اسناد حسابداری همین پروژه خوانده شده است، نه از برآورد.",
         },
       };
     }

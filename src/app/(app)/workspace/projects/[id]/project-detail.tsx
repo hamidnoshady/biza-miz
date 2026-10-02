@@ -58,6 +58,7 @@ import { ApprovalsSection } from "../../approvals-section";
 import { CalendarSection } from "../../calendar-section";
 import { ProjectAssistantPanels } from "./project-assistant-panels";
 import { AecParticipantsTab, AecProjectProfileCard } from "./aec-panels";
+import { BoqTab } from "./boq-panel";
 
 interface ProjectDetail {
   id: string;
@@ -358,6 +359,19 @@ export function ProjectDetail({
 
         {tab === "participants" ? (
           <AecParticipantsTab projectId={projectId} canManage={canManage} lookups={lookups} />
+        ) : null}
+
+        {/* Issue #799 §7 — the project's priced work. Mounted only when the tab
+            is in the bar, which `aecProjectTabs` decides from the business's own
+            `boq` capability: an office that does not estimate neither sees the
+            tab nor mounts the component that would fetch its data. */}
+        {tab === "boq" ? (
+          <BoqTab
+            projectId={projectId}
+            canManage={canManage}
+            canApprove={canApprove}
+            lookups={lookups}
+          />
         ) : null}
 
         {tab === "team" ? (

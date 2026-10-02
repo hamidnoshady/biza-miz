@@ -936,11 +936,24 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   section whose wave has not landed is absent, never greyed out); the six built-in blueprints live
   in `src/lib/workspace-aec-templates.ts`, industry-scoped in `listTemplates` and recommended
   rather than required; migration 0195 seeds three recommended widgets for the industry; and the
-  assistant's two AEC reads (§23) are `src/lib/aec-ai-tools.ts`, composed from the same functions
+  assistant's AEC reads (§23) are `src/lib/aec-ai-tools.ts`, composed from the same functions
   the screens read so an answer and the cockpit cannot disagree — refused with a sentence, not an
   empty list, when the business's industry is not AEC. Ask a capability, never a profile, and
   remember a participant row is a record — `workspace_members` stays the only source of internal
-  access.
+  access. Wave 4 (issue #799 §7) is the BOQ: `src/lib/aec-boq.ts` is the client-safe half (statuses,
+  the unit catalogue and `computeBoqItemTotals`, an exact BigInt mirror of migration 0196's trigger,
+  which owns `unit_price_rial`/`total_rial` — never compute a line total with floating point and
+  never let a screen and the database hold different numbers), `src/lib/aec-boq-service.ts` holds
+  every query, and a submitted revision is decided through the *existing* `workspace_approvals`
+  queue as a `subject_type = 'estimate_version'` row on `workspace.approve` — do not add a second
+  approval mechanism; the revision's `status` is the projection of that decision and
+  `aec_estimate_events` is the trail. Approval writes `ai_projects.budget_rial` only when the budget
+  is empty or still holds the total of the revision being superseded, and says so (`budgetSync`),
+  because a hand-typed budget is a decision; actual cost keeps coming from
+  `journal_entries.project_id` — no cost ledger inside the BOQ. Import/export is the existing
+  data-transfer engine (registry entity + adapter, draft revisions only, a row that cannot be placed
+  is a skipped row with a reason), and an entity may declare `requiresIndustry` so
+  `entitiesForIndustry` keeps a trade's catalogue to itself.
   Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a

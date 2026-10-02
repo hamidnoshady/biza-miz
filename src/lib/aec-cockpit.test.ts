@@ -39,10 +39,12 @@ describe("the cockpit catalogue", () => {
       if (section.shipped) expect(section.wave, section.key).toBeLessThanOrEqual(AEC_SHIPPED_WAVE);
     }
     // §21's later sections are designed here but not rendered: today's page
-    // must not offer a tab whose wave has not been built.
-    for (const key of ["boq", "procurement", "rfis", "submittals", "site", "inspections", "changes", "payments", "financials"]) {
+    // must not offer a tab whose wave has not been built. `boq` left this list
+    // in Wave 4, when the estimating domain it needs arrived.
+    for (const key of ["procurement", "rfis", "submittals", "site", "inspections", "changes", "payments", "financials"]) {
       expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === key)?.shipped, key).toBe(false);
     }
+    expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === "boq")?.shipped).toBe(true);
   });
 
   it("gives an individual fewer sections than a contractor", () => {
@@ -66,9 +68,11 @@ describe("the cockpit catalogue", () => {
   });
 
   it("hides a section whose live capability is switched off", () => {
+    const all = resolveAecCapabilities({ profile: "multidisciplinary", overrides: {} });
     for (const capability of AEC_LIVE_CAPABILITIES) {
-      const sections = aecCockpitSections([capability === "participants" ? "projects" : "participants"]);
-      expect(sections.some((s) => s.capability === capability)).toBe(false);
+      const without = all.filter((key) => key !== capability);
+      expect(without.length).toBeLessThan(all.length); // the capability is really in the preset
+      expect(aecCockpitSections(without).some((s) => s.capability === capability)).toBe(false);
     }
   });
 });
@@ -97,6 +101,28 @@ describe("the project tab bar", () => {
     expect(lean.some((tab) => String(tab.key) === "boq")).toBe(false);
   });
 
+  it("gives the estimating tab to the profiles that price work, in §21's place", () => {
+    const contractor = aecProjectTabs({
+      capabilities: resolveAecCapabilities({ profile: "contractor", overrides: {} }),
+    });
+    const keys = contractor.map((tab) => tab.key);
+    expect(keys).toContain("boq");
+    // §21's order: what is being built, what it costs, then who is bound.
+    expect(keys.indexOf("boq")).toBe(keys.indexOf("documents") + 1);
+    expect(keys.indexOf("boq")).toBe(keys.indexOf("contracts") - 1);
+
+    // A design office does not estimate by preset, so it never grows the tab —
+    // but switching the capability on is all it takes.
+    const design = aecProjectTabs({
+      capabilities: resolveAecCapabilities({ profile: "architecture_office", overrides: {} }),
+    });
+    expect(design.map((tab) => tab.key)).not.toContain("boq");
+    const designWithEstimating = aecProjectTabs({
+      capabilities: resolveAecCapabilities({ profile: "architecture_office", overrides: { boq: true } }),
+    });
+    expect(designWithEstimating.map((tab) => tab.key)).toContain("boq");
+  });
+
   it("keeps the generic labels for tabs whose section has not shipped", () => {
     const tabs = aecProjectTabs({
       capabilities: resolveAecCapabilities({ profile: "contractor", overrides: {} }),
@@ -112,7 +138,7 @@ describe("the project tab bar", () => {
     // a generic tab, own an AEC-only tab, or be declared as living inside
     // another. The explicit lists are the point — adding a shipped section and
     // forgetting to place it fails here.
-    const ownsItsOwnTab = new Set(["participants"]);
+    const ownsItsOwnTab = new Set(["participants", "boq"]);
     const insideAnotherTab = new Set(["overview", "schedule", "profile"]);
     for (const section of AEC_COCKPIT_SECTIONS.filter((s) => s.shipped)) {
       const reachable =
