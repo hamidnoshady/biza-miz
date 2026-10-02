@@ -14,10 +14,31 @@ const nativePrinting = require("./native-printing");
 const localStorageChecks = require("./local-storage");
 const { computePaths, migrateLegacyLayout } = require("./app-paths");
 const { DesktopUpdateEngine } = require("./update-engine");
-const { createCloudWindowController } = require("./cloud-window");
+const { guardCloudPane, hardenCloudPane } = require("./cloud-pane");
 
-// Phase 45: back-office screens open the cloud in their own powerless window.
-const cloudWindow = createCloudWindowController({ BrowserWindow, shell });
+// Phase 46: «ورود با حساب ابری» — the cloud hands the browser back to the app
+// with businesssuite://cloud-login?code=…&state=…
+const LOGIN_PROTOCOL = "businesssuite";
+if (process.defaultApp && process.argv.length >= 2) {
+  app.setAsDefaultProtocolClient(LOGIN_PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
+} else {
+  app.setAsDefaultProtocolClient(LOGIN_PROTOCOL);
+}
+
+/** The one link shape the app accepts; everything else in argv is ignored. */
+function cloudLoginLink(argv) {
+  for (const raw of argv ?? []) {
+    if (typeof raw !== "string" || !raw.startsWith(`${LOGIN_PROTOCOL}://`)) continue;
+    try {
+      const url = new URL(raw);
+      const code = url.searchParams.get("code") ?? "";
+      const state = url.searchParams.get("state") ?? "";
+      const token = /^[A-Za-z0-9_-]{16,128}$/;
+      if (url.hostname === "cloud-login" && token.test(code) && token.test(state)) return { code, state };
+    } catch {}
+  }
+  return null;
+}
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -32,6 +53,9 @@ if (!gotSingleInstanceLock) {
   let quitting = false;
   let cleanupStarted = null;
   let ipcRegistered = false;
+  let mainAppUrl = null;
+  // A login link that arrived before the till window existed (a cold start from the browser).
+  let pendingLoginLink = cloudLoginLink(process.argv);
 
   function focusMainWindow() {
     if (!mainWindow) return;
@@ -40,7 +64,28 @@ if (!gotSingleInstanceLock) {
     mainWindow.focus();
   }
 
-  app.on("second-instance", focusMainWindow);
+  /**
+   * The local server finishes the sign-in: it checks `state` against the
+   * cookie it set when the button was pressed (so a link nobody here asked
+   * for signs nobody in), then redeems `code` with the cloud.
+   */
+  function completeCloudLogin(link) {
+    if (!link) return;
+    if (!mainWindow || !mainAppUrl) {
+      pendingLoginLink = link;
+      return;
+    }
+    const target = new URL("/api/auth/cloud-login/callback", mainAppUrl);
+    target.searchParams.set("code", link.code);
+    target.searchParams.set("state", link.state);
+    void mainWindow.loadURL(target.toString()).catch(() => {});
+    focusMainWindow();
+  }
+
+  app.on("second-instance", (_event, argv) => {
+    focusMainWindow();
+    completeCloudLogin(cloudLoginLink(argv));
+  });
 
   async function createWindow(appUrl) {
     mainWindow = new BrowserWindow({
@@ -55,7 +100,17 @@ if (!gotSingleInstanceLock) {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        // Phase 46: cloud screens render in a <webview> (cloud-pane.js hardens every one).
+        webviewTag: true,
       },
+    });
+    let paneOrigin = null;
+    mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+      paneOrigin = hardenCloudPane(webPreferences, params);
+      if (!paneOrigin) event.preventDefault();
+    });
+    mainWindow.webContents.on("did-attach-webview", (_event, contents) => {
+      if (paneOrigin) guardCloudPane(contents, paneOrigin, shell);
     });
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
@@ -69,10 +124,12 @@ if (!gotSingleInstanceLock) {
     });
     mainWindow.on("closed", () => {
       mainWindow = null;
-      // Otherwise the app keeps running with no till and a relaunch only focuses nothing.
-      cloudWindow.close();
     });
+    mainAppUrl = appUrl;
     await mainWindow.loadURL(appUrl);
+    const link = pendingLoginLink;
+    pendingLoginLink = null;
+    completeCloudLogin(link);
   }
 
   async function gatewayStatus() {
@@ -142,7 +199,7 @@ if (!gotSingleInstanceLock) {
     });
     ipcMain.handle("desktop:show-ca-certificate", async () => {
       const certPath = gateway.certificates.caCertPath;
-      if (!require("node:fs").existsSync(certPath)) gateway.certificates.ensureLeaf(gateway.availableInterfaces().map((item) => item.address));
+      if (!require("node:fs").existsSync(certPath)) await gateway.certificates.ensureLeaf(gateway.availableInterfaces().map((item) => item.address));
       shell.showItemInFolder(certPath);
       return certPath;
     });
@@ -150,7 +207,6 @@ if (!gotSingleInstanceLock) {
       shell.showItemInFolder(logger.path);
       return logger.path;
     });
-    ipcMain.handle("desktop:open-cloud", (_event, payload) => cloudWindow.open(payload?.url));
 
     // Desktop updates: manual and background downloads share this one engine.
     // Renderer input is still treated as hostile: the engine validates SemVer,

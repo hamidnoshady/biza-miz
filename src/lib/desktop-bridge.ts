@@ -163,8 +163,8 @@ export interface DesktopBridge {
   isDesktop: true;
   /** Opens a native "choose a folder" dialog; `title` customizes the dialog heading. */
   pickFolder(title?: string): Promise<string | null>;
-  /** Phase 45: opens `url` (https only) in the «نسخهٔ ابری» window; false when refused. Optional for older shells. */
-  openCloud?(url: string): Promise<boolean>;
+  /** Phase 46: the shell renders cloud screens in a hardened <webview> (electron/cloud-pane.js). */
+  embedsCloud?: true;
   /** Present since the local-storage wizard shipped; optional so older builds still type-check. */
   storage?: DesktopStorageBridge;
   localGateway: {

@@ -1,10 +1,10 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import type { DeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
 import { CloudRequiredState } from "@/components/cloud-required-state";
-import { CloudHandoffState } from "@/components/cloud-handoff-state";
+import { CloudPane } from "@/components/cloud-pane";
 import { isHybridSite, isSiteLocalRoute } from "@/lib/site-routes";
 
 const PAGE_CAPABILITIES: readonly [string, CapabilityKey, string][] = [
@@ -33,13 +33,13 @@ export function DeploymentCapabilityGate({
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
-  // Phase 45: on a Hybrid desktop only the till renders locally; every other
-  // screen is the cloud's (src/lib/site-routes.ts).
-  if (isHybridSite(profile, runtimeRole)) {
-    // `/dashboard` is the desktop's home: its page redirects to the first till
-    // screen the member can open, or explains that there is none.
-    if (pathname === "/dashboard") return <>{children}</>;
-    if (!isSiteLocalRoute(pathname)) return <CloudHandoffState pathname={pathname} cloudUrl={cloudUrl} />;
+  const search = useSearchParams().toString();
+  // Phase 45/46: on a Hybrid desktop only the till renders locally; every
+  // other screen is the cloud's (src/lib/site-routes.ts), shown in this
+  // window's content area. `/dashboard` (the assistant) included: its page
+  // first sends till-only staff to their till screen.
+  if (isHybridSite(profile, runtimeRole) && !isSiteLocalRoute(pathname)) {
+    return <CloudPane pathAndQuery={search ? `${pathname}?${search}` : pathname} cloudUrl={cloudUrl} />;
   }
   const match = PAGE_CAPABILITIES.find(([prefix]) =>
     prefix === "/dashboard" ? pathname === prefix : pathname === prefix || pathname.startsWith(`${prefix}/`),
