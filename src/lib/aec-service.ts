@@ -16,7 +16,6 @@
 import {
   AEC_DEFAULT_OPERATING_PROFILE,
   AEC_LIVE_CAPABILITIES,
-  AEC_OPERATING_PROFILE_DEFS,
   AEC_PARTICIPANT_GROUPS,
   AEC_PARTICIPANT_GROUP_BY_ROLE,
   aecParticipantRoleAllowed,
@@ -259,23 +258,6 @@ export async function saveBusinessAecProfile(
     normalizeAecCapabilityOverrides(row?.capability_overrides ?? capabilityOverrides, operatingProfile),
     true,
   );
-}
-
-/** A named-profile entry for a picker, with the label the UI shows. */
-export interface AecOperatingProfileOption {
-  key: AecOperatingProfile;
-  label: string;
-  description: string;
-  capabilities: readonly AecCapabilityKey[];
-}
-
-export function aecOperatingProfileOptions(): AecOperatingProfileOption[] {
-  return Object.values(AEC_OPERATING_PROFILE_DEFS).map((def) => ({
-    key: def.key,
-    label: def.label,
-    description: def.description,
-    capabilities: def.capabilities,
-  }));
 }
 
 /**

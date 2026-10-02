@@ -365,6 +365,20 @@ const ERROR_MESSAGES: Record<string, string> = {
     // Not a usable YYYY-MM-DD calendar date — what the ledger's aging and
     // voucher routes answer a malformed date parameter with.
     invalid_date: "تاریخ واردشده معتبر نیست.",
+    // پروفایل کسب‌وکار و پروژه‌های AEC (issue #799، موج ۲)
+    industry_mismatch: "این بخش فقط برای کسب‌وکارهای عمران، معماری و پیمانکاری است.",
+    invalid_operating_profile: "پروفایل کسب‌وکار انتخابی معتبر نیست.",
+    invalid_coordinate: "مختصات جغرافیایی معتبر نیست.",
+    invalid_area: "متراژ باید عددی نامنفی باشد.",
+    invalid_floor_count: "تعداد طبقات باید عددی بین ۰ و ۵۰۰ باشد.",
+    invalid_progress: "درصد پیشرفت باید عددی بین ۰ و ۱۰۰ باشد.",
+    invalid_reference: "یکی از موارد انتخاب‌شده معتبر نیست.",
+    role_not_allowed:
+      "این نقش با پروفایل کسب‌وکار شما سازگار نیست؛ برای فعال‌کردن آن، قابلیت مربوط را در تنظیمات روشن کنید.",
+    participant_exists: "این طرف با همین نقش از قبل برای این پروژه ثبت شده است.",
+    participant_not_found: "طرف پروژه پیدا نشد یا قبلاً حذف شده است.",
+    project_not_found: "پروژه پیدا نشد.",
+    end_before_start: "تاریخ پایان نمی‌تواند پیش از تاریخ شروع باشد.",
     supplier_required: "انتخاب تأمین‌کننده الزامی است.",
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
     // Phase 22 — fixed assets & depreciation

@@ -65,6 +65,7 @@ export function AecProfileForm({
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,6 +74,10 @@ export function AecProfileForm({
         if (cancelled) return;
         if (!ok || !data.profile) {
           setError("بارگذاری پروفایل کسب‌وکار ممکن نشد.");
+          // Saving defaults over a profile that only *failed to load* would
+          // silently reset a real configuration, so the form refuses to save
+          // until a reload succeeds.
+          setLoadFailed(true);
           return;
         }
         setProfile(data.profile.operatingProfile);
@@ -88,7 +93,9 @@ export function AecProfileForm({
         setStored(data.profile.stored);
       })
       .catch(() => {
-        if (!cancelled) setError("بارگذاری پروفایل کسب‌وکار ممکن نشد.");
+        if (cancelled) return;
+        setError("بارگذاری پروفایل کسب‌وکار ممکن نشد.");
+        setLoadFailed(true);
       })
       .finally(() => {
         if (!cancelled) setLoaded(true);
@@ -274,11 +281,23 @@ export function AecProfileForm({
       ) : null}
 
       <div className={`flex flex-wrap items-center justify-between gap-3 ${cardClass} px-4 py-3`}>
-        <Button type="button" size="lg" disabled={busy || !dirty} onClick={() => void save()} className="px-6 font-semibold">
+        <Button
+          type="button"
+          size="lg"
+          disabled={busy || loadFailed || !dirty}
+          onClick={() => void save()}
+          className="px-6 font-semibold"
+        >
           {busy ? "در حال ذخیره…" : submitLabel}
         </Button>
         <p className="min-w-0 text-xs leading-5 text-muted-foreground">
-          {dirty ? "تغییرات ذخیره نشده است." : saved ? "ذخیره شد." : "همه‌چیز ذخیره شده است."}
+          {loadFailed
+            ? "تا بارگذاری موفق پروفایل، ذخیره غیرفعال است."
+            : dirty
+              ? "تغییرات ذخیره نشده است."
+              : saved
+                ? "ذخیره شد."
+                : "همه‌چیز ذخیره شده است."}
         </p>
       </div>
     </div>
