@@ -39,3 +39,7 @@ export function wizardStepsForIndustry(industry: Industry): WizardStep[] {
   if (industry === "food_service") return [...WIZARD_STEPS];
   return WIZARD_STEPS.filter((s) => !FOOD_SERVICE_ONLY_STEPS.includes(s));
 }
+
+export function isAecIndustry(industry: Industry): boolean {
+  return industry === "architecture_construction";
+}

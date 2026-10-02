@@ -84,6 +84,9 @@ export const BUILTIN_PAYMENT_METHODS: readonly PaymentMethodDefaults[] = [
 ];
 
 export function builtinPaymentMethodsFor(industry: string): PaymentMethodDefaults[] {
+  if (industry === "architecture_construction") {
+    return BUILTIN_PAYMENT_METHODS.filter((method) => ["cash", "card", "card_to_card"].includes(method.code));
+  }
   return BUILTIN_PAYMENT_METHODS.filter((method) => !method.foodServiceOnly || industry === "food_service");
 }
 

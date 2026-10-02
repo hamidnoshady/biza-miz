@@ -25,7 +25,7 @@ CREATE POLICY tenant_isolation ON platform_company_entitlements FOR ALL
 ALTER TABLE businesses DROP CONSTRAINT IF EXISTS businesses_industry_check;
 ALTER TABLE businesses ADD CONSTRAINT businesses_industry_check CHECK (industry IN (
   'food_service','jewelry','watch','accessories','cosmetics','wholesale',
-  'tools_fittings','haberdashery','service_saas'
+  'tools_fittings','haberdashery','service_saas','architecture_construction'
 ));
 
 -- A platform identity is mapped to a real tenant membership. The preset limits

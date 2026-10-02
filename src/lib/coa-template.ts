@@ -217,6 +217,15 @@ export const WELL_KNOWN_CODES = {
   accessoryInventory: "1340",
   accessorySalesRevenue: "4560",
   accessoryCogs: "5140",
+  // Phase 43 — AEC (architecture_construction): project-based costing. Every
+  // incurred cost lands in `aecProjectCogs` (expense) and is cost-centred by
+  // journal_entries.project_id; revenue is recognised per completed
+  // certificate/progress claim like a retail sale (credit revenue, debit AR).
+  aecProjectInventory: "1370",
+  aecProjectRevenue: "4590",
+  aecProjectCogs: "5175",
+  aecRetentionReceivable: "1240",
+  aecAdvanceLiability: "2140",
   // Phase 27 Wave 1 — cosmetics & toiletries (COSMETICS_COA_TEMPLATE below).
   // Same three-account finished-goods shape as watch/accessories, plus a
   // fourth account for the two non-COGS ways cosmetics stock leaves the shelf
@@ -313,6 +322,10 @@ const COST_OF_SALES_CODES_BY_INDUSTRY: Record<Industry, readonly string[]> = {
     WELL_KNOWN_CODES.wasteExpense,
     WELL_KNOWN_CODES.inventoryCountExpense,
     WELL_KNOWN_CODES.inventoryWriteDownExpense,
+    WELL_KNOWN_CODES.periodicPurchases,
+  ],
+  architecture_construction: [
+    WELL_KNOWN_CODES.aecProjectCogs,
     WELL_KNOWN_CODES.periodicPurchases,
   ],
   jewelry: [
@@ -976,6 +989,66 @@ export const SERVICE_SAAS_COA_TEMPLATE: TemplateAccount[] = [
   { code: "5670", name: "هزینه میزبانی، ذخیره‌سازی و پیام", type: "expense", parentCode: "5000" },
 ];
 
+export const AEC_COA_TEMPLATE: TemplateAccount[] = [
+  { code: "1000", name: "دارایی‌ها", type: "asset" },
+  { code: "1100", name: "صندوق", type: "asset", parentCode: "1000" },
+  { code: "1110", name: "بانک", type: "asset", parentCode: "1000" },
+  { code: "1120", name: "کارت‌خوان (در راه)", type: "asset", parentCode: "1000" },
+  { code: "1130", name: "تنخواه", type: "asset", parentCode: "1000" },
+  { code: "1200", name: "حساب‌های دریافتنی", type: "asset", parentCode: "1000" },
+  { code: "1210", name: "دریافتنی از تأمین‌کننده", type: "asset", parentCode: "1000" },
+  { code: "1220", name: "مالیات بر ارزش افزوده خرید (قابل استرداد)", type: "asset", parentCode: "1000" },
+  { code: "1240", name: "اسناد دریافتنی", type: "asset", parentCode: "1000" },
+  { code: "1241", name: "چک‌های نزد صندوق", type: "asset", parentCode: "1240" },
+  { code: "1242", name: "چک‌های در جریان وصول", type: "asset", parentCode: "1240" },
+  { code: "1244", name: "چک‌های برگشتی", type: "asset", parentCode: "1240" },
+  { code: "1370", name: "موجودی پروژه / مصالح", type: "asset", parentCode: "1000" },
+  { code: "1360", name: "کالای در راه", type: "asset", parentCode: "1000" },
+  { code: "1400", name: "پیش‌پرداخت‌ها", type: "asset", parentCode: "1000" },
+  { code: "1500", name: "اثاثه و تجهیزات", type: "asset", parentCode: "1000" },
+  { code: "1510", name: "استهلاک انباشته", type: "asset", parentCode: "1500", isContra: true },
+
+  ...SHARED_ASSET_ACCOUNTS.filter((a) => !["1130", "1240", "1241", "1242", "1244", "1370"].includes(a.code)),
+
+  { code: "2000", name: "بدهی‌ها", type: "liability" },
+  { code: "2100", name: "حساب‌های پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2120", name: "اسناد پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2140", name: "پیش‌دریافت کارفرما", type: "liability", parentCode: "2000" },
+  { code: "2200", name: "مالیات بر ارزش افزوده پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2300", name: "حقوق پرداختنی", type: "liability", parentCode: "2000" },
+
+  ...SHARED_LIABILITY_ACCOUNTS.filter((a) => !["2120", "2140"].includes(a.code)),
+
+  { code: "3000", name: "حقوق صاحبان سرمایه", type: "equity" },
+  { code: "3100", name: "سرمایه", type: "equity", parentCode: "3000" },
+  { code: "3800", name: "سود (زیان) انباشته", type: "equity", parentCode: "3000" },
+  { code: "3900", name: "تراز افتتاحیه", type: "equity", parentCode: "3000" },
+
+  ...SHARED_EQUITY_ACCOUNTS,
+
+  { code: "4000", name: "درآمدها", type: "revenue" },
+  { code: "4590", name: "درآمد پروژه‌ها", type: "revenue", parentCode: "4000" },
+  { code: "4900", name: "سایر درآمدها", type: "revenue", parentCode: "4000" },
+  { code: "4910", name: "درآمد اضافه شمارش موجودی", type: "revenue", parentCode: "4000" },
+  { code: "4400", name: "برگشت از فروش", type: "revenue", parentCode: "4000", isContra: true },
+
+  ...SHARED_REVENUE_ACCOUNTS.filter((a) => !["4910"].includes(a.code)),
+
+  { code: "5000", name: "هزینه‌ها", type: "expense" },
+  { code: "5175", name: "بهای تمام‌شده پروژه‌ها", type: "expense", parentCode: "5000" },
+  { code: "5200", name: "حقوق و دستمزد", type: "expense", parentCode: "5000" },
+  { code: "5300", name: "اجاره", type: "expense", parentCode: "5000" },
+  { code: "5400", name: "آب، برق و گاز", type: "expense", parentCode: "5000" },
+  { code: "5500", name: "ملزومات مصرفی", type: "expense", parentCode: "5000" },
+  { code: "5600", name: "بازاریابی و تبلیغات", type: "expense", parentCode: "5000" },
+  { code: "5700", name: "هزینه استهلاک", type: "expense", parentCode: "5000" },
+  { code: "5900", name: "سایر هزینه‌ها", type: "expense", parentCode: "5000" },
+
+  ...SHARED_EXPENSE_ACCOUNTS,
+  { code: "5170", name: "هزینه کاهش ارزش موجودی", type: "expense", parentCode: "5000" },
+  { code: "5190", name: "هزینه کسری انبارگردانی", type: "expense", parentCode: "5000" },
+];
+
 export const ACCOUNT_TYPES: AccountType[] = ["asset", "liability", "equity", "revenue", "expense"];
 
 /**
@@ -1004,6 +1077,8 @@ export function coaTemplateForIndustry(industry: Industry): readonly TemplateAcc
       return TOOLS_FITTINGS_COA_TEMPLATE;
     case "haberdashery":
       return HABERDASHERY_COA_TEMPLATE;
+    case "architecture_construction":
+      return AEC_COA_TEMPLATE;
     case "food_service":
       return FNB_COA_TEMPLATE;
   }

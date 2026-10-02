@@ -19,6 +19,7 @@ export const INDUSTRIES = [
   "tools_fittings",
   "haberdashery",
   "service_saas",
+  "architecture_construction",
 ] as const;
 export type Industry = (typeof INDUSTRIES)[number];
 
@@ -35,6 +36,7 @@ export const INDUSTRY_LABELS: Record<Industry, string> = {
   tools_fittings: "ابزار و یراق‌آلات",
   haberdashery: "خرازی",
   service_saas: "خدمات و نرم‌افزار (SaaS)",
+  architecture_construction: "مهندسی عمران، معماری و پیمانکاری",
 };
 
 export function isIndustry(value: string): value is Industry {

@@ -353,6 +353,21 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: [],
   },
+  architecture_construction: {
+    brandTitle: "عمران، معماری و پیمانکاری",
+    brandSubtitle: "مدیریت پروژه، طراحی، اجرا و امور مالی",
+    modules: [...CORE_MODULES],
+    labels: {
+      saleDocument: "صورت‌وضعیت",
+      saleDocumentPlural: "صورت‌وضعیت‌ها",
+      sellScreen: "پروژه‌ها",
+      catalogue: "پروژه‌ها",
+      catalogueItem: "پروژه",
+    },
+    salesModel: "retail_invoice",
+    defaultDisabledFeatures: ["inventory", "reservations", "delivery", "pos"],
+    capabilities: [],
+  },
 };
 
 export function industryProfile(industry: Industry): IndustryProfile {
