@@ -18,7 +18,6 @@ import { StepShell, api, SetupDataSkeleton } from "../ui";
 import { nextPath, skipToPath, stepsFor } from "../steps";
 import { useSetupIndustry } from "../industry-context";
 import { AecProfileForm } from "@/components/aec/aec-profile-form";
-import type { WizardStep } from "@/lib/wizard-steps";
 
 export default function AecProfileStep() {
   const router = useRouter();
