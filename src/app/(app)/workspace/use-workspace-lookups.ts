@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "@/app/dashboard/ui";
+import type { AecCapabilityKey } from "@/lib/aec";
 
 /**
  * The three pickers every workspace form needs, fetched once per mount of the
@@ -23,6 +24,13 @@ export interface WorkspaceLookups {
    * for every other industry, so a picker can branch on the list's existence.
    */
   participantRoles?: Array<{ key: string; label: string; group: string }>;
+  /**
+   * Present only for an AEC tenant: the resolved capabilities, which is what
+   * the project cockpit reads to decide which sections exist (#799 §21). The
+   * capability keys are the catalogue's, so a component passes this straight
+   * to `aecProjectTabs`.
+   */
+  aecCapabilities?: AecCapabilityKey[];
 }
 
 export const EMPTY_LOOKUPS: WorkspaceLookups = {

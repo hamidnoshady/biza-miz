@@ -201,6 +201,30 @@ async function readBusinessAecProfile(businessId: string): Promise<AecBusinessPr
 }
 
 /**
+ * What the project cockpit needs to know before it renders: whether this
+ * business is AEC at all, and which of its capabilities are on.
+ *
+ * Answered rather than refused — a café's project page calls this too, and an
+ * `industry_mismatch` 403 there would turn an ordinary page into an error. The
+ * project id is still checked against the caller's business by
+ * `requireProjectCapability` at the route, because capabilities are
+ * business-wide today but the *access* to them is per project, and a later wave
+ * may scope a capability to one project.
+ */
+export interface AecProjectCockpit {
+  aec: boolean;
+  capabilities: AecCapabilityKey[];
+}
+
+export async function loadAecProjectCockpit(businessId: string): Promise<AecProjectCockpit> {
+  if ((await getBusinessIndustry(businessId)) !== AEC_INDUSTRY) {
+    return { aec: false, capabilities: [] };
+  }
+  const state = await readBusinessAecProfile(businessId);
+  return { aec: true, capabilities: state.capabilities };
+}
+
+/**
  * The business's operating profile, or `null` for a business of another
  * industry.
  *

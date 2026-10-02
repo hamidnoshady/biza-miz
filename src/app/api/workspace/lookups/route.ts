@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
-import { listAecParticipantRoleOptions } from "@/lib/aec-service";
+import { listAecParticipantRoleOptions, loadAecProjectCockpit } from "@/lib/aec-service";
 import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
 
 /**
@@ -16,11 +16,15 @@ import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
  * so this returns the minimum a picker needs (an id and a display name) behind
  * `workspace.view` and nothing more. No phone, no address, no financial block.
  *
- * The participant roles are the one industry-specific entry, and only for an
- * AEC tenant: an editor building a project's participant list needs the
- * professional roles its operating profile allows, and that read must not
- * require `settings.manage`. A business of another industry simply does not
- * get the field.
+ * Two industry-specific entries, both AEC-only and both behind this same
+ * `workspace.view`: the professional roles a participant may be recorded under,
+ * and the resolved capability list the project cockpit uses to decide which
+ * sections exist (issue #799 §21). Neither may need `settings.manage` — a
+ * project editor does not configure the business — and a business of another
+ * industry simply does not get the fields. Answering here, rather than on a
+ * `/api/aec` route that would refuse with `industry_mismatch`, is what keeps a
+ * café's project page from showing an error banner for a request it had to
+ * make.
  *
  * The media list is here for the same reason and is the sharpest case:
  * the Media Library's own route is owner/manager-only because a file store is
@@ -61,6 +65,10 @@ export const GET = withTenantScope(async () => {
       ),
       listAecParticipantRoleOptions(owner.businessId),
     ]);
+    // One read, two answers: the role list and the capability list come from
+    // the same resolved profile, so they can never disagree about which
+    // sections exist. A non-AEC tenant gets neither field.
+    const cockpit = await loadAecProjectCockpit(owner.businessId);
     return NextResponse.json({
       members: members.rows.map((r) => ({ id: r.id, fullName: r.full_name, role: r.role })),
       parties: parties.rows,
@@ -69,6 +77,7 @@ export const GET = withTenantScope(async () => {
       // Omitted entirely outside AEC rather than sent empty, so a picker can
       // tell "this industry has no such list" from "the list is empty".
       ...(participantRoles ? { participantRoles } : {}),
+      ...(cockpit.aec ? { aecCapabilities: cockpit.capabilities } : {}),
     });
   } catch (err) {
     return handleWorkspaceError(err);

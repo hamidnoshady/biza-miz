@@ -14,6 +14,7 @@ import { requirePermission } from "@/lib/auth";
 import { AecError } from "@/lib/aec-service";
 import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import type { WorkspaceOwner } from "@/lib/workspace";
+import { handleWorkspaceError } from "../workspace/guard";
 
 export { PERMISSIONS };
 
@@ -59,12 +60,21 @@ const ERROR_STATUS: Record<string, number> = {
   participant_exists: 409,
 };
 
-/** Maps a thrown `AecError` onto a response; rethrows anything else as a real 500. */
+/**
+ * Maps a thrown error onto a response; rethrows anything else as a real 500.
+ *
+ * Every AEC project route sits on top of the workspace module's per-project
+ * authorization (`requireProjectCapability`), which refuses with its own
+ * `WorkspaceError` — `not_a_project_member` and `insufficient_project_role`
+ * are 403s, `project_not_found` a 404. Those codes are not AEC codes, so an
+ * AEC-only map would fall through to the `throw` and answer a plain refusal
+ * with a 500; the workspace map owns them and is asked here.
+ */
 export function handleAecError(err: unknown): NextResponse {
   if (err instanceof AecError) {
     return NextResponse.json({ error: err.code }, { status: ERROR_STATUS[err.code] ?? 400 });
   }
-  throw err;
+  return handleWorkspaceError(err);
 }
 
 /** Reads a JSON body, returning `{}` rather than throwing on a malformed one. */

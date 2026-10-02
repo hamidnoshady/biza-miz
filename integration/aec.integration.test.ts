@@ -233,6 +233,25 @@ describe("the business's operating profile", () => {
     });
   });
 
+  it("answers the cockpit question for every industry, refusing nobody", async () => {
+    const { businessId } = await provisionBusiness("architecture_construction");
+    const aecCockpit = await dbLib.withTenant(businessId, () =>
+      aec.loadAecProjectCockpit(businessId),
+    );
+    expect(aecCockpit.aec).toBe(true);
+    // The default preset's live capabilities — what the project page's
+    // capability-aware tabs are computed from (#799 §21).
+    expect(aecCockpit.capabilities).toContain("projects");
+    expect(aecCockpit.capabilities).toContain("participants");
+    expect(aecCockpit.capabilities).not.toContain("boq");
+
+    // A café is answered, not refused: its project page calls the same read
+    // and must show the ordinary workspace rather than an error.
+    const { businessId: cafeId } = await provisionBusiness("food_service");
+    const cafeCockpit = await dbLib.withTenant(cafeId, () => aec.loadAecProjectCockpit(cafeId));
+    expect(cafeCockpit).toEqual({ aec: false, capabilities: [] });
+  });
+
   it("offers the picker's role list to AEC only, and only the allowed roles", async () => {
     const { businessId, owner } = await provisionBusiness("architecture_construction");
     await dbLib.withTenant(businessId, async () => {
