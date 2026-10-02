@@ -3,7 +3,7 @@
 // tablets use the separate HTTPS gateway in gateway-manager.js.
 "use strict";
 
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, session, shell } = require("electron");
 const path = require("node:path");
 const { BackendManager } = require("./backend-manager");
 const { createCertificateManager } = require("./certificate-manager");
@@ -14,7 +14,7 @@ const nativePrinting = require("./native-printing");
 const localStorageChecks = require("./local-storage");
 const { computePaths, migrateLegacyLayout } = require("./app-paths");
 const { DesktopUpdateEngine } = require("./update-engine");
-const { guardCloudPane, hardenCloudPane } = require("./cloud-pane");
+const { CLOUD_PARTITION, guardCloudPane, hardenCloudPane } = require("./cloud-pane");
 
 // Phase 46: «ورود با حساب ابری» — the cloud hands the browser back to the app
 // with businesssuite://cloud-login?code=…&state=…
@@ -107,7 +107,11 @@ if (!gotSingleInstanceLock) {
     let paneOrigin = null;
     mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
       paneOrigin = hardenCloudPane(webPreferences, params);
-      if (!paneOrigin) event.preventDefault();
+      if (!paneOrigin) return event.preventDefault();
+      // The <webview> user agent (carrying the embed token) covers page requests
+      // only. The cloud's service worker re-fetches every navigation with the
+      // session's agent, so without this the cloud draws its own sidebar too.
+      if (params.useragent) session.fromPartition(CLOUD_PARTITION).setUserAgent(params.useragent);
     });
     mainWindow.webContents.on("did-attach-webview", (_event, contents) => {
       if (paneOrigin) guardCloudPane(contents, paneOrigin, shell);
