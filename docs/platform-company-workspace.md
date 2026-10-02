@@ -37,31 +37,113 @@ consulted for business operations.
 ## Billing posting rules
 
 Billing Control Center remains authoritative. Database triggers transactionally append only new
-source transitions to `platform_company_billing_events`; migration/setup does **not** backfill old
-sources.
+source transitions to `platform_company_billing_events`; migration, setup and startup never
+backfill old sources (see *Historical data* below).
+
+### Accounts
+
+| Code | Name | Role |
+|---|---|---|
+| 1110 | Bank | Money actually received |
+| 1200 | Accounts receivable | Customer invoices |
+| 2100 | Accounts payable | Provider invoices |
+| 2455 | Customer wallet liability | Wallet balances held on behalf of customers |
+| 4400 | Sales returns and allowances | Cash/wallet refunds |
+| 4500 | Subscription and usage income | Earned revenue and its reversals |
+| 5670 | Hosting/storage/messaging cost | Authoritative provider cost |
+
+### The settlement model
+
+The invoice is **not** the settlement record. Two sources are, and they are the only ones the
+invoice's own trigger will not double-count:
+
+* a `wallet_ledger` **debit** carrying `metadata.invoiceId`, and
+* a `billing_payments` row that has transitioned to **`verified`**.
+
+Each emits its own `invoice_payment` event, clipped to whatever is still outstanding on the
+invoice. The invoice trigger then emits only the **residual** — the part of `paid_rial` no
+settlement record accounts for — tagged `settlement='residual'`/`method='other'`. So a
+600,000-rial wallet debit plus 400,000 rial by other means on a 1,000,000-rial invoice produces
+two postings with two different debit accounts, and no invented third one. The previous
+implementation guessed the method with an unfiltered
+`SELECT 1 FROM wallet_ledger WHERE metadata->>'invoiceId' = $1`, which was blind to refunds and
+all-or-nothing for a mixed settlement.
+
+### Posting table
 
 | Billing fact | Debit | Credit |
 |---|---|---|
 | Invoice issued | A/R 1200 | Subscription/usage income 4500 |
-| Invoice payment/partial allocation | Bank 1110 | A/R 1200 |
-| Invoice void/credit | Sales returns 4400 | A/R 1200 |
-| Wallet top-up | Bank 1110 | Customer wallet liability 2455 |
-| Wallet spend without an invoice | Wallet liability 2455 | Subscription/usage income 4500 |
-| Invoice settled from wallet | Wallet liability 2455 | A/R 1200 |
-| Partial refund credited to wallet | Sales returns 4400 | Wallet liability 2455 |
-| Promotional/noncash credit | No posting; retained as an ignored reconciliation event |
-| Authoritative provider cost | Hosting/storage/messaging cost 5670 | A/P 2100 |
+| Invoice settled from the customer wallet | Wallet liability 2455 | A/R 1200 |
+| Invoice paid by gateway / manual / residual | Bank 1110 | A/R 1200 |
+| Invoice voided, nothing paid | Subscription/usage income 4500 | A/R 1200 |
+| Invoice voided, partly paid | Income 4500 (full) | A/R 1200 (outstanding) + Wallet liability 2455 (collected) |
+| Credit note (negative `billing_adjustments`) | Income 4500 | A/R 1200 |
+| Commercial adjustment, positive, with a reason | A/R 1200 | Income 4500 |
+| Wallet top-up | Bank 1110 | Wallet liability 2455 |
+| Wallet spend with no invoice | Wallet liability 2455 | Subscription/usage income 4500 |
+| Wallet refund | Sales returns 4400 | Wallet liability 2455 |
+| Cash refund | Sales returns 4400 | Bank 1110 |
+| Promotional / noncash credit | No posting; retained as an **ignored** reconciliation event |
+| Authoritative provider cost | Provider cost 5670 | A/P 2100 |
 
-Unique source versions and unique posting references make delivery and posting idempotent. Events
-are ordered by occurrence, retried with backoff, and stale processing leases recover. A customer
-mapping and every account mapping must exist before a customer event posts; missing mappings stay
-visible as failed events. The Accounting page exposes status and authorized retry. The bridge creates a legal-party/customer
-mapping from the platform directory name on first authoritative billing event, under a per-customer
-transaction lock. It never reads the customer tenant's CRM, contacts, documents or ledger. CRM's
-read-only balance endpoint derives balances only from successfully posted Accounting events.
+A void of a partly-paid invoice never deletes the money that arrived: revenue is reversed in
+full, the unpaid balance goes back to A/R, and the amount actually collected becomes a customer
+credit until a refund settles it. The old rule (`Sales returns 4400 / A/R 1200`) credited the
+receivable for the whole invoice, which silently erased a real collection.
+
+### Idempotency, ordering and failure
+
+Unique source versions (`source_table, source_id, source_version`) and unique posting references
+make delivery and posting idempotent at the database level, so neither a duplicated trigger nor
+two workers claiming at once can post the same fact twice. Events are claimed with
+`FOR UPDATE SKIP LOCKED`, ordered by occurrence (so an out-of-order settlement still posts),
+retried with backoff, and stale processing leases recover automatically.
+
+A customer mapping and every account mapping must exist before a customer event posts; missing
+mappings stay visible as failed events with a `failure_kind` of `missing_account`,
+`missing_customer`, `transient` or `permanent`. The Accounting page exposes every state and an
+authorized retry — but a `permanent` failure shows *why* it cannot succeed instead of a retry
+button that will not help.
+
+### Customer mapping
+
+The bridge creates a legal-party/customer mapping from the platform directory name on the first
+authoritative billing event, under a per-customer transaction lock. It never reads the customer
+tenant's CRM, contacts, documents or ledger. Two tenants that share a business name get their own
+party each: `platform_company_customers` is unique on `(business_id, party_id)`, so a party is
+adopted only when it is genuinely orphaned (same name, referenced by no customer row) — the
+recovery path for a run that died between the two inserts. A tenant therefore maps to exactly one
+company customer, and one company customer may own several tenants.
+
+CRM's read-only balance endpoint derives balances **only** from successfully posted Accounting
+events (`balanceSource: "accounting_postings"`), never from an invoice's `paid_rial`.
 
 MRR and similar Billing metrics are operational metrics. They are not labelled as posted revenue.
 A won deal or completed project never posts revenue.
+
+## Money, dates and units
+
+Money is stored as integer **Rial** everywhere and rendered through `useMoney()` / `formatMoney`
+in the business's chosen unit (`settings('business.prefs')->currencyDisplay`, default Toman). No
+company screen divides by 10 by hand. Every user-visible date is Shamsi (Jalali) via
+`formatJalali`. A static test in `src/app/api/platform/company/route-guards.test.ts` fails the
+build if a company file reintroduces a hand-rolled unit conversion, a hard-coded unit label or a
+`toLocaleDateString`.
+
+## Operational scripts
+
+```bash
+# Read-only health check: entitlement, membership, mapping, posting and failure counts.
+npm run platform-company:health
+
+# Deterministic, non-destructive repairs only (missing entitlements, app availability,
+# a subscription row left auto-renewing). Nothing is deleted.
+npm run platform-company:health -- --apply --actor=<platform-admin-uuid>
+```
+
+Both run against the central install. The billing tick and the maintenance tick are scheduled
+only on a central deployment (`DEPLOYMENT_ROLE=central`).
 
 ## Website lead intake
 
@@ -75,35 +157,74 @@ records. Marketing consent is recorded but does not itself activate or send a ca
 
 ## Historical data and rollback
 
-Dry-run historical discovery:
+The backfill is **explicit only**. It is never run by a migration, at startup, or as part of a
+deployment, and the default is a dry run that writes nothing:
 
 ```bash
+# Dry run: candidate counts per source, per window. Writes nothing.
 npm run platform-company:billing-backfill -- --cutoff=2026-09-30T23:59:59Z
-```
 
-Explicit enqueue (never run as part of deployment):
+# Optional lower bound.
+npm run platform-company:billing-backfill -- --from=2026-01-01T00:00:00Z --cutoff=2026-09-30T23:59:59Z --apply
 
-```bash
+# Explicit enqueue (never run as part of deployment).
 npm run platform-company:billing-backfill -- --cutoff=2026-09-30T23:59:59Z --apply
 ```
 
-Duplicate source keys make repeated runs safe. To disable rollout, deactivate company memberships
-or entitlements and stop the worker. Keep pending/failed events for recovery. Do not delete posted
-journal entries; use normal reversing accounting documents.
+It reproduces the **same event model live operation produces** — the same `(source_table,
+source_id, source_version)` tuples and the same clipping helper
+(`platform_company_invoice_settled_rial`) — so replaying a window that live operation already
+covered adds nothing at all, and a window it missed is reconstructed identically. A static test
+asserts that parity. Without it, a second accounting model would quietly produce a different
+ledger from the same facts.
+
+To disable rollout, deactivate company memberships or entitlements and stop the worker. Keep
+pending/failed events for recovery. Do not delete posted journal entries; use normal reversing
+accounting documents.
 
 ## Canonical routes
 
-- `/platform/company`
-- `/platform/company/workspace`
-- `/platform/company/accounting`
-- `/platform/company/crm`
-- `/platform/company/growth`
-- `/platform/company/websites`
+Browser pages (Central only, platform session required):
 
-The app pages hand off to the existing shared engines. Technical Connections remains the profile
-hub. No quick-reports dashboard or duplicate AI menu was introduced.
+| Route | Purpose |
+|---|---|
+| `/platform/company` | Company home: state, entitlements, members, the four app destinations |
+| `/platform/company/workspace` | My Workspace — projects, plan figures vs posted actuals |
+| `/platform/company/accounting` | Billing → Accounting reconciliation, per-event state and retry |
+| `/platform/company/crm` | Customers and won deals; «ایجاد پروژه» hands a deal to My Workspace |
+| `/platform/company/growth` | Growth audience summary; renewal candidates in Shamsi dates |
+| `/platform/company/websites` | Site credential manager (show once) and the app handoff |
 
-## Confirmed defects fixed in this implementation
+APIs under `/api/platform/company/**` (every handler runs `withPlatformScope`, except `/status`
+and `/setup`, which exist precisely to establish what that adapter requires — the exception is
+allow-listed by name in `route-guards.test.ts`):
+
+| Route | Methods |
+|---|---|
+| `status` | GET |
+| `setup` | POST |
+| `members` | GET, PATCH |
+| `open` | POST (mints the one-use handoff) |
+| `accounting/reconciliation` | GET, POST (POST = authorized retry) |
+| `crm/customers`, `crm/deals` | GET |
+| `growth/audience` | GET |
+| `workspace/projects` | GET |
+| `workspace/from-deal` | POST |
+| `websites/sites`, `websites/credentials` | GET, POST |
+
+Plus two non-company routes that serve the same feature: `GET /api/auth/company-handoff`
+(redeems the token on the tenant origin) and `POST /api/website/leads` (public, bearer-token
+intake that resolves the credential under the platform bypass and then writes under the internal
+company's tenant scope).
+
+The app pages hand off to the existing shared engines — Accounting, CRM, Growth, Websites and My
+Workspace — and never duplicate them. There are exactly four app keys; My Workspace is a work
+area, not a fifth app. Platform Management (`/platform/businesses`, `/platform/billing`, …)
+remains a separate realm and is not the company console.
+
+## Defects fixed in this implementation
+
+### From the original PR #790
 
 - `src/lib/platform-service.ts`: customer directory and acquisition counts included every business;
   the protected internal company is now excluded.
@@ -115,6 +236,33 @@ hub. No quick-reports dashboard or duplicate AI menu was introduced.
   internal activity is no longer counted as customer revenue, wallets or acquisition.
 - Workspace project creation had no durable external idempotency key. `creation_key` now prevents a
   retried CRM deal handoff from creating duplicate projects.
+
+### Found and fixed during the post-deploy audit
+
+- **Billing outbox RLS leak.** The read policy was keyed on `customer_tenant_id = app_current_business()`,
+  which let every customer tenant named in an event read AND write those rows. Migration 0193
+  drops it and replaces it with a policy keyed on `internal_business_id`, plus write policies that
+  require `app_rls_bypass()` (the worker) — proven by integration tests running as an unprivileged
+  `NOBYPASSRLS` role.
+- **Settlement guessed, not accounted.** Replaced with the wallet/verified-payment/residual model
+  above; a mixed 600k-wallet + 400k-other settlement now produces two different postings.
+- **Void of a partly-paid invoice erased the collection.** It now reverses revenue in full, cancels
+  the outstanding receivable, and credits the amount collected to the customer's wallet liability.
+- **Duplicate customer party collision.** Two tenants sharing a business name collided on
+  `platform_company_customers(business_id, party_id)` and failed every event forever. A party is
+  now adopted only when orphaned.
+- **CRM customer card fan-out.** A single `GROUP BY` across the tenant × events × postings joins
+  repeated one tenant once per billing event and multiplied every balance by the same factor.
+  Each roll-up is now its own scalar sub-query.
+- **Provisioning read `businesses.prefs`,** a column that does not exist, on every status call.
+  The money unit is read from `settings('business.prefs')->currencyDisplay`, like everywhere else.
+- **Project revenue aggregation read `journal_lines.project_id`,** which does not exist; it now
+  groups on `journal_entries.project_id`.
+- **The link-validation trigger referenced a `campaigns` table that does not exist** (the Growth
+  engine's table is `message_campaigns`).
+- **The billing tick ran on every deployment role.** It and the maintenance tick are now central-only.
+- `platform_billing` had no Persian ledger source label, so company entries showed raw English in
+  the journal and reports drill-down.
 
 No route or helper in this affected scope was verified as dead, so none was deleted merely from a
 text search. Existing customer routes remain compatible.
