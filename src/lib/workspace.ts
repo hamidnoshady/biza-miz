@@ -151,7 +151,7 @@ function numberOrNull(value: unknown, code: string): number | null {
  * null when they have neither. Throws `project_not_found` for a project that
  * is not this business's.
  *
- * There is no "implicit owner" fallback any more: since migration 0191 a
+ * There is no "implicit owner" fallback any more: since migration 0192 a
  * trigger guarantees every project owner a member row, whichever path created
  * the project, so the project page and «پروژه‌های من» answer from one fact.
  */
@@ -462,6 +462,10 @@ export interface ProjectInput {
   partyId?: string | null;
   ownerUserId?: string | null;
   budgetRial?: unknown;
+  /** Server-derived idempotency/source fields; never accepted from generic browser forms. */
+  creationKey?: string | null;
+  sourceDealId?: string | null;
+  forecastRevenueRial?: unknown;
 }
 
 /**
@@ -469,7 +473,7 @@ export interface ProjectInput {
  * template phases, in ONE transaction: a project whose template seeding
  * failed halfway is a project nobody asked for.
  *
- * The owner's member row is written by the 0191 trigger, not here. When the
+ * The owner's member row is written by the 0192 trigger, not here. When the
  * creator names somebody else as owner, the creator stays on as manager so
  * they can reopen what they just made.
  */
@@ -486,6 +490,7 @@ export async function createWorkspaceProject(
   if (!intervalOrdered(startDate, endDate)) throw new WorkspaceError("end_before_start");
   const tags = normalizeTags(input.tags);
   const budgetRial = numberOrNull(input.budgetRial, "invalid_project_budget");
+  const forecastRevenueRial = numberOrNull(input.forecastRevenueRial, "invalid_project_budget");
   const templateKey = input.templateKey?.trim() || null;
   const ownerUserId = input.ownerUserId || owner.actorUserId;
 
@@ -495,21 +500,30 @@ export async function createWorkspaceProject(
   const template = templateKey ? await resolveTemplate(owner.businessId, templateKey) : null;
   if (templateKey && !template) throw new WorkspaceError("template_not_found");
 
-  const projectId = await withTenantTransaction(owner.businessId, async () => {
-    const { rows } = await query<{ id: string }>(
+  // One transaction (a half-seeded project is a project nobody asked for)
+  // around an idempotent insert: a retry with the same `creation_key` (e.g.
+  // a deal converted twice) returns the project it already made.
+  const outcome = await withTenantTransaction(owner.businessId, async () => {
+    const { rows } = await query<{ id: string; inserted: boolean }>(
       `INSERT INTO ai_projects
          (business_id, name, instructions, created_by, description, status, priority,
           project_type, template_key, start_date, end_date, tags, party_id,
-          owner_user_id, budget_rial)
-       VALUES ($1, $2, '', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       RETURNING id`,
+          owner_user_id, budget_rial, creation_key, source_deal_id, forecast_revenue_rial)
+       VALUES ($1, $2, '', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       ON CONFLICT (business_id, creation_key) WHERE creation_key IS NOT NULL
+         DO UPDATE SET name = ai_projects.name
+       RETURNING id, (xmax = 0) AS inserted`,
       [
         owner.businessId, name, owner.actorUserId, description, status, priority,
         input.projectType?.trim() || template?.projectType || null, templateKey,
         startDate, endDate, tags, input.partyId ?? null, ownerUserId, budgetRial,
+        input.creationKey?.trim() || null, input.sourceDealId ?? null, forecastRevenueRial,
       ],
     );
     const id = rows[0].id;
+    if (!rows[0].inserted) return { id, inserted: false };
+    // The owner's member row is written by the 0192 trigger. A creator who
+    // named somebody else as owner stays on as manager.
     if (ownerUserId !== owner.actorUserId) {
       await query(
         `INSERT INTO workspace_members (project_id, user_id, role, added_by)
@@ -518,8 +532,14 @@ export async function createWorkspaceProject(
       );
     }
     if (template) await applyTemplate(owner, id, template, startDate);
-    return id;
+    return { id, inserted: true };
   });
+  const projectId = outcome.id;
+  if (!outcome.inserted) {
+    const existing = await getWorkspaceProject(owner.businessId, projectId);
+    if (!existing) throw new WorkspaceError("project_not_found");
+    return existing;
+  }
 
   await recordActivity(owner, {
     projectId, subjectType: "project", subjectId: projectId,
@@ -583,7 +603,7 @@ export async function updateWorkspaceProject(
   }
   if (input.ownerUserId !== undefined) {
     // A project always has an owner; transfer is a change of owner, never a
-    // removal. Membership follows in the same statement (0191 trigger).
+    // removal. Membership follows in the same statement (0192 trigger).
     if (!input.ownerUserId) throw new WorkspaceError("user_not_found");
     await assertUserBelongs(owner.businessId, input.ownerUserId);
     set("owner_user_id", input.ownerUserId);
