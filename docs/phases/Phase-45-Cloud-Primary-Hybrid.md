@@ -1,6 +1,8 @@
 # Phase 45 — Cloud-primary Hybrid (the desktop is the till)
 
-**Status:** Implemented (no migration).
+**Status:** Implemented (no migration). Decision 3 (a second window) and the till-only menu were
+reversed by [Phase 46](Phase-46-Desktop-Full-Suite.md): cloud screens now render inside the till
+window under the full menu.
 
 Phase 44 made the Hybrid event transport reliable, but a paired desktop still pretended to be a
 second copy of the whole suite. Only the till's data syncs (orders, payments, menu, customers,

@@ -1045,15 +1045,16 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
   }
 
   // Idle is not logged — see the same note in runServerPush.
+  // An empty answer is still a successful contact: record it, or «آخرین
+  // همگرایی» froze at the last time something happened to arrive.
   if (remoteEvents.length === 0) {
-    if (state.pullFailures > 0) {
-      await setSetting(businessId, SETTING_KEYS.serverSyncState, {
-        ...(await getServerSyncState(businessId)),
-        pullFailures: 0,
-        pullNextAttemptAt: null,
-        lastPullError: null,
-      } satisfies ServerSyncState);
-    }
+    await setSetting(businessId, SETTING_KEYS.serverSyncState, {
+      ...(await getServerSyncState(businessId)),
+      lastPullSuccessAt: now.toISOString(),
+      pullFailures: 0,
+      pullNextAttemptAt: null,
+      lastPullError: null,
+    } satisfies ServerSyncState);
     return { status: "ok", pulled: 0 };
   }
 
@@ -1100,6 +1101,7 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
         {
           siteDeviceId: e.siteDeviceId ?? null,
           schemaVersion: e.schemaVersion ?? 1,
+          pulledFromCloud: true,
         },
       );
       // Deferred and already-canonical terminal events are recoverable through
