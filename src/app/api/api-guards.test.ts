@@ -270,7 +270,6 @@ const BILLING_SERVICE_ROUTES: Record<string, string> = {
 /** Routes that guard via getSession() with route-specific logic instead of requireRole. */
 const SELF_GUARDING_ROUTES: Record<string, string> = {
   "auth/me": "returns the caller's own session (or null) — nothing else",
-  "auth/desktop-login": "mints a one-click desktop sign-in code for the caller themself, bound to a paired install of their business and a branch they may open",
   "auth/cloud-login/session-code": "hands the caller's own pending cloud-pane session code (an httpOnly cookie) back once, and clears it",
   "setup/state": "public only for needsBootstrap; full state requires owner/manager",
   "auth/businesses": "lists the caller's own memberships — any authenticated member may ask",

@@ -464,6 +464,7 @@ export async function WorkspaceShell({
           industry={industry}
           workspaceSections={workspaceSections}
           deploymentProfile={deployment.profile}
+          account={`${session.businessId}:${session.sub}`}
         />}
         <DashboardMain hybridSite={hybridSite}>
           {session.imp && supportGrant ? (

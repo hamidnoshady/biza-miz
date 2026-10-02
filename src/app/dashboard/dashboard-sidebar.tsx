@@ -197,6 +197,8 @@ interface SidebarProps {
   /** Permission-filtered contextual Workspace entries from the server shell. */
   workspaceSections: readonly WorkspaceSidebarSection[];
   deploymentProfile: DeploymentProfile;
+  /** `businessId:memberId` — keys client caches so one member never sees another's. */
+  account: string;
 }
 
 /**
@@ -366,7 +368,7 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
   );
 }
 
-function SidebarBrand({ title, subtitle }: { title: string; subtitle: string }) {
+function SidebarBrand({ title, subtitle, account }: { title: string; subtitle: string; account: string }) {
   return (
     <SidebarHeader className="border-border/80 bg-card p-4 group-data-[state=collapsed]/sidebar:px-2">
       {/*
@@ -408,9 +410,8 @@ function SidebarBrand({ title, subtitle }: { title: string; subtitle: string }) 
         to be useful, and the branch colour still shows on the mobile header
         and on the POS/overview page headers.
       */}
-      {/* No wrapper margin: an empty slot (one branch) must take no space. */}
-      <div className="group-data-[state=collapsed]/sidebar:hidden [&>*]:mt-3">
-        <BranchSwitcher compact quietLoading />
+      <div className="mt-3 group-data-[state=collapsed]/sidebar:hidden">
+        <BranchSwitcher compact quietLoading account={account} />
       </div>
     </SidebarHeader>
   );
@@ -928,6 +929,7 @@ export function DashboardSidebar({
   brandSubtitle,
   workspaceSections,
   deploymentProfile,
+  account,
 }: SidebarProps) {
   const pathname = usePathname();
   const [preference, setPreference] = useState<DashboardSidebarPreference>("expanded");
@@ -1048,7 +1050,7 @@ export function DashboardSidebar({
             : undefined
         }
       >
-        <SidebarBrand title={brandTitle} subtitle={brandSubtitle} />
+        <SidebarBrand title={brandTitle} subtitle={brandSubtitle} account={account} />
         {workspaceRoute ? (
           <WorkspaceNavigation pathname={pathname} sections={workspaceSections} />
         ) : appShell ? (

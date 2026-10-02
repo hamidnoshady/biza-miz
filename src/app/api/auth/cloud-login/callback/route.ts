@@ -62,10 +62,16 @@ export async function GET(request: NextRequest) {
       location_id: string | null;
       business_slug: string;
       business_subdomain: string;
+      platform_user_id: string | null;
+      token_version: number | null;
     }>(
+      // The synced platform identity rides along, so a cloud password change
+      // (which IAM sync replays here as a token_version bump) ends this session.
       `SELECT u.id, u.role, u.full_name, u.location_id,
-              b.slug::text AS business_slug, b.subdomain::text AS business_subdomain
+              b.slug::text AS business_slug, b.subdomain::text AS business_subdomain,
+              u.platform_user_id, pu.token_version
          FROM users u JOIN businesses b ON b.id = u.business_id
+         LEFT JOIN platform_users pu ON pu.id = u.platform_user_id AND pu.is_active
         WHERE u.id = $1 AND u.business_id = $2 AND u.is_active`,
       [userId, businessId],
     );
@@ -83,7 +89,8 @@ export async function GET(request: NextRequest) {
       businessSubdomain: user.business_subdomain,
       locationId: user.location_id,
       fullName: user.full_name,
-      platformUserId: null,
+      platformUserId: user.platform_user_id && user.token_version !== null ? user.platform_user_id : null,
+      ...(user.platform_user_id && user.token_version !== null ? { tokenVersion: user.token_version } : {}),
       employeeSessionId: session.id,
     });
   });
