@@ -232,6 +232,31 @@ describe("the business's operating profile", () => {
       });
     });
   });
+
+  it("offers the picker's role list to AEC only, and only the allowed roles", async () => {
+    const { businessId, owner } = await provisionBusiness("architecture_construction");
+    await dbLib.withTenant(businessId, async () => {
+      const options = await aec.listAecParticipantRoleOptions(businessId);
+      expect(options).not.toBeNull();
+      // Grouped the way the picker renders them: the client's side first, then
+      // the design side, then contractors, then site staff.
+      expect(options!.map((o) => o.group).slice(0, 2)).toEqual(["client", "client"]);
+      const architect = options!.find((o) => o.key === "architect");
+      expect(architect).toEqual({ key: "architect", label: "معمار", group: "consultant" });
+      // The default architecture-office preset allows no foreman — the picker
+      // list and the service's refusal answer from the same resolution.
+      expect(options!.some((o) => o.key === "foreman")).toBe(false);
+      // No field role survives the architecture-office preset, so the last
+      // group is the contracting side's one always-available role.
+      expect(options!.at(-1)!.group).toBe("contractor");
+    });
+
+    const { businessId: cafeId } = await provisionBusiness("food_service");
+    const cafeOptions = await dbLib.withTenant(cafeId, () =>
+      aec.listAecParticipantRoleOptions(cafeId),
+    );
+    expect(cafeOptions).toBeNull();
+  });
 });
 
 describe("a project's AEC profile", () => {

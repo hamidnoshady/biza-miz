@@ -18,6 +18,7 @@ import {
   AEC_LIVE_CAPABILITIES,
   AEC_PARTICIPANT_GROUPS,
   AEC_PARTICIPANT_GROUP_BY_ROLE,
+  AEC_PARTICIPANT_ROLE_DEFS,
   aecParticipantRoleAllowed,
   aecParticipantRolesFor,
   isAecOperatingProfile,
@@ -170,6 +171,11 @@ function resolveBusinessProfile(
  */
 export async function loadBusinessAecProfile(businessId: string): Promise<AecBusinessProfileState> {
   await assertAecIndustry(businessId);
+  return readBusinessAecProfile(businessId);
+}
+
+/** The stored row, resolved — the read half, for callers that already know the industry. */
+async function readBusinessAecProfile(businessId: string): Promise<AecBusinessProfileState> {
   const { rows } = await query<{
     operating_profile: string;
     specialties: string[];
@@ -192,6 +198,38 @@ export async function loadBusinessAecProfile(businessId: string): Promise<AecBus
     normalizeAecCapabilityOverrides(row.capability_overrides, operatingProfile),
     true,
   );
+}
+
+/**
+ * One entry a participant picker renders: the role, its Persian label and the
+ * group it belongs to.
+ */
+export interface AecParticipantRoleOption {
+  key: AecParticipantRole;
+  label: string;
+  group: AecParticipantGroup;
+}
+
+/**
+ * The roles a participant picker may offer, in the order its groups appear.
+ *
+ * `null` — rather than an error or an empty list — for a business of another
+ * industry, so the shared picker endpoint can simply leave AEC out of its
+ * payload while an ordinary tenant keeps working. The returned set is the same
+ * one `addProjectParticipant` enforces, so a picker built from it cannot offer
+ * a role the API would then refuse. It is readable with `workspace.view`
+ * rather than `settings.manage`: a project editor may name the client on a
+ * project without being allowed to reconfigure the business.
+ */
+export async function listAecParticipantRoleOptions(
+  businessId: string,
+): Promise<AecParticipantRoleOption[] | null> {
+  if ((await getBusinessIndustry(businessId)) !== AEC_INDUSTRY) return null;
+  const state = await readBusinessAecProfile(businessId);
+  return state.participantRoles.map((role) => {
+    const def = AEC_PARTICIPANT_ROLE_DEFS[role];
+    return { key: def.key, label: def.label, group: def.group };
+  });
 }
 
 /**

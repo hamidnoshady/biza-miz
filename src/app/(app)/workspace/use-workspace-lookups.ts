@@ -17,6 +17,12 @@ export interface WorkspaceLookups {
   projects: Array<{ id: string; name: string }>;
   /** Files already in the Media Library — id and name only; see the route. */
   media: Array<{ id: string; fileName: string }>;
+  /**
+   * Present only for an AEC tenant: the professional roles its operating
+   * profile allows a participant to be recorded under. Absent — not empty —
+   * for every other industry, so a picker can branch on the list's existence.
+   */
+  participantRoles?: Array<{ key: string; label: string; group: string }>;
 }
 
 export const EMPTY_LOOKUPS: WorkspaceLookups = {
