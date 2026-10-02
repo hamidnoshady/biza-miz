@@ -21,6 +21,8 @@
  * and the form both validate through `parseGrowthSettingsInput`.
  */
 
+import { formatPersianNumber } from "./digits";
+
 export interface GrowthSettings {
   attributionWindowDays: number | null;
   discountBudgetRial: number | null;
@@ -68,7 +70,9 @@ export function parseGrowthSettingsInput(body: unknown): GrowthSettingsParse {
     ) {
       value.attributionWindowDays = raw;
     } else {
-      errors.push(`بازهٔ انتساب باید عددی صحیح بین ${ATTRIBUTION_WINDOW_LIMITS.min} تا ${ATTRIBUTION_WINDOW_LIMITS.max} روز باشد.`);
+      errors.push(
+        `بازهٔ انتساب باید عددی صحیح بین ${formatPersianNumber(ATTRIBUTION_WINDOW_LIMITS.min)} تا ${formatPersianNumber(ATTRIBUTION_WINDOW_LIMITS.max)} روز باشد.`,
+      );
     }
   }
 

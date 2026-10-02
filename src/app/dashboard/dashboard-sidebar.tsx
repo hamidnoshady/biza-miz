@@ -680,11 +680,18 @@ function MobileDashboardHeader({
   navItems,
   pathname,
   deploymentProfile,
+  fallbackLabel,
 }: {
   /** Already flattened and contextual to the route currently open. */
   navItems: readonly { label: string; href: string }[];
   pathname: string;
   deploymentProfile: DeploymentProfile;
+  /**
+   * The title when no link matches. Inside an app it is the app's own name:
+   * the global launcher only links each app's landing page, so every other
+   * section of the app used to be titled «داشبورد» on a phone.
+   */
+  fallbackLabel?: string;
 }) {
   const search = useSearchParams();
   // The longest matching href wins, so a detail page keeps its owning section
@@ -696,7 +703,7 @@ function MobileDashboardHeader({
     <header className="sticky top-0 z-30 flex min-h-14 items-center gap-2 border-b border-border/80 bg-card/95 px-2 py-1 backdrop-blur md:hidden">
       <SidebarTrigger className="text-muted-foreground" />
       <div className="min-w-0 flex-1 text-start">
-        <p className="truncate text-sm font-bold text-foreground">{active?.label ?? "داشبورد"}</p>
+        <p className="truncate text-sm font-bold text-foreground">{active?.label ?? fallbackLabel ?? "داشبورد"}</p>
         <p className="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground">
           <CalendarDaysIcon className="size-3 shrink-0" aria-hidden="true" />
           <span className="truncate">{today}</span>
@@ -1038,7 +1045,12 @@ export function DashboardSidebar({
   return (
     <SidebarProvider open={mode === "expanded"} onOpenChange={setExpanded}>
       <CloseDrawerOnNavigate pathname={pathname} />
-      <MobileDashboardHeader navItems={headerNavItems} pathname={pathname} deploymentProfile={deploymentProfile} />
+      <MobileDashboardHeader
+        navItems={headerNavItems}
+        pathname={pathname}
+        deploymentProfile={deploymentProfile}
+        fallbackLabel={appShell?.shell.label}
+      />
       <Sidebar
         side="right"
         className={`border-border/80 bg-card text-foreground ${draggingWidth ? "transition-none" : ""}`}

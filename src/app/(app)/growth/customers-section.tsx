@@ -227,8 +227,15 @@ export function GrowthCustomersSection({ selectedCustomerId }: { selectedCustome
           </label>
         </div>
 
-        <FilterChipRow label="بخش‌بندی بر اساس چرخهٔ حیات" className="mt-3 flex-wrap gap-1.5">
-          <FilterChip selected={stage === ""} onClick={() => setStage("")} className="min-h-11 px-3 text-xs">
+        {/*
+          Ten stages wrap into four rows on a phone and push the list off the
+          first screen, so below `sm` they are one swipeable row instead.
+        */}
+        <FilterChipRow
+          label="بخش‌بندی بر اساس چرخهٔ حیات"
+          className="-mx-1 mt-3 flex-nowrap gap-1.5 overflow-x-auto px-1 pb-1 sm:flex-wrap sm:overflow-visible"
+        >
+          <FilterChip selected={stage === ""} onClick={() => setStage("")} className="min-h-11 shrink-0 px-3 text-xs">
             همهٔ مخاطبان
           </FilterChip>
           {(Object.keys(LIFECYCLE_STAGES) as LifecycleStage[]).map((key) => (
@@ -236,7 +243,7 @@ export function GrowthCustomersSection({ selectedCustomerId }: { selectedCustome
               key={key}
               selected={stage === key}
               onClick={() => setStage(key)}
-              className="min-h-11 px-3 text-xs"
+              className="min-h-11 shrink-0 px-3 text-xs"
             >
               {LIFECYCLE_STAGES[key].label}
             </FilterChip>

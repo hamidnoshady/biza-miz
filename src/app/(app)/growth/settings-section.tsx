@@ -24,6 +24,7 @@ import { crmSectionHref } from "@/app/(app)/crm/crm-routes";
 import { SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, errorMessageOrRaw, Field, InfoBox, inputClass, SecondaryButton } from "@/app/dashboard/ui";
 import { useMoney } from "@/components/money/money-context";
+import { formatPersianNumber } from "@/lib/digits";
 import { ATTRIBUTION_WINDOW_LIMITS, parseGrowthSettingsInput, type GrowthSettings } from "@/lib/growth-settings";
 import { growthSectionHref } from "./growth-routes";
 
@@ -95,7 +96,7 @@ function GrowthWideSettingsForm({
       <div className="grid gap-4 sm:grid-cols-2">
         <Field
           label="بازهٔ انتساب کمپین پیام (روز)"
-          hint={`فروشی که پروموشن اختصاصی کمپین را تا این تعداد روز پس از شروع ارسال اعمال کند، به بازده آن کمپین نسبت داده می‌شود. خالی یعنی بدون محدودیت (${ATTRIBUTION_WINDOW_LIMITS.min} تا ${ATTRIBUTION_WINDOW_LIMITS.max} روز).`}
+          hint={`فروشی که پروموشن اختصاصی کمپین را تا این تعداد روز پس از شروع ارسال اعمال کند، به بازده آن کمپین نسبت داده می‌شود. خالی یعنی بدون محدودیت (${formatPersianNumber(ATTRIBUTION_WINDOW_LIMITS.min)} تا ${formatPersianNumber(ATTRIBUTION_WINDOW_LIMITS.max)} روز).`}
         >
           <PersianNumberInput
             inputMode="numeric"
