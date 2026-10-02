@@ -17,7 +17,7 @@
  *   5. **Object ids are authorized**, not just scoped: a deal from another
  *      business cannot be handed to My Workspace by id alone.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
@@ -1161,7 +1161,7 @@ describe("website lead intake", () => {
       `INSERT INTO platform_company_site_credentials
          (business_id, site_key, provider, token_hash, requests_per_minute, created_by)
        VALUES ($1,'سایت اصلی','eshobe',$2,3,NULL) RETURNING id`,
-      [internal.businessId, require("node:crypto").createHash("sha256").update(token).digest("hex")],
+      [internal.businessId, createHash("sha256").update(token).digest("hex")],
     );
     credentialId = rows[0].id;
   }, 120_000);
@@ -1181,7 +1181,7 @@ describe("website lead intake", () => {
     );
     const found = await asPlatform(
       `SELECT id FROM platform_company_site_credentials WHERE token_hash=$1 AND is_active`,
-      [require("node:crypto").createHash("sha256").update(token).digest("hex")],
+      [createHash("sha256").update(token).digest("hex")],
     );
     expect(found).toHaveLength(0);
     await superuser.query(

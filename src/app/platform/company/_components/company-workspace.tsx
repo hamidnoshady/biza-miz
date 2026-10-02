@@ -104,10 +104,14 @@ export function CompanyWorkspace({
     else await load();
   }
 
+  // Hooks must run on every render, so this stays above the early return
+  // below. Calling it after the skeleton rendered meant the hook count
+  // changed once `status` arrived, which React rejects outright.
+  const entitlements = useMemo(() => new Set(status?.entitlements ?? []), [status]);
+
   if (!status && !error) return <PlatformPageSkeleton />;
 
   const company = status?.company ?? null;
-  const entitlements = useMemo(() => new Set(status?.entitlements ?? []), [status]);
   const state = status?.state ?? "not_provisioned";
   const message = STATE_MESSAGES[state];
 
