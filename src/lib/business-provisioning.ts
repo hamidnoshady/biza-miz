@@ -103,6 +103,8 @@ export interface ProvisionBusinessInput {
   /** The platform admin provisioning this business, recorded on the
    * activation link so "who invited this owner in" survives it being used. */
   createdBy?: string | null;
+  /** Internal-only lifecycle marker. Ordinary provisioning must leave this omitted. */
+  ownershipKind?: "platform_internal";
   /**
    * `ownerActivation` only: the email already has a platform login and the
    * caller has acknowledged that it is the same person. Without it the
@@ -420,7 +422,12 @@ export async function provisionBusiness(
       if (existingIdentity[0]) {
         const identity = existingIdentity[0];
         if (!identity.is_active) throw new EmailPasswordMismatchError();
-        if (input.ownerActivation) {
+        if (input.ownershipKind === "platform_internal") {
+          // The platform-company member mapping is the authorization proof.
+          // Never ask an infrastructure operator for a tenant password and
+          // never manufacture an impersonation grant for permanent access.
+          platformUserId = identity.id;
+        } else if (input.ownerActivation) {
           // Nobody types their password for an inbound business, so this is not
           // an authentication but a confirmation. It still refuses to attach a
           // business to somebody's account silently.
@@ -438,7 +445,7 @@ export async function provisionBusiness(
         // On the activation path nobody ever knows this password — not the
         // operator, not this code. It is 32 random bytes, replaced by the owner
         // at the activation link, and any comparison against it fails closed.
-        const secret = input.ownerActivation
+        const secret = input.ownerActivation || input.ownershipKind === "platform_internal"
           ? randomBytes(32).toString("hex")
           : (input.password ?? "");
         const { rows } = await client.query<{ id: string }>(
@@ -450,9 +457,16 @@ export async function provisionBusiness(
       }
 
       const { rows: bizRows } = await client.query<{ id: string }>(
-        `INSERT INTO businesses (name, slug, subdomain, timezone, industry)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [businessName, slug, subdomain, input.timezone ?? "Asia/Tehran", input.industry ?? "food_service"],
+        `INSERT INTO businesses (name, slug, subdomain, timezone, industry, ownership_kind)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [
+          businessName,
+          slug,
+          subdomain,
+          input.timezone ?? "Asia/Tehran",
+          input.industry ?? "food_service",
+          input.ownershipKind ?? "customer",
+        ],
       );
       const businessId = bizRows[0].id;
 
@@ -539,7 +553,7 @@ export async function provisionBusiness(
       // owner's credentials.
       let recoveryCodes: string[] | undefined;
       let ownerActivation: { token: string; expiresAt: Date } | undefined;
-      if (!input.ownerActivation) {
+      if (!input.ownerActivation && input.ownershipKind !== "platform_internal") {
         if (input.deploymentMode === "local") {
           await client.query(
             `INSERT INTO settings (business_id, location_id, key, value)

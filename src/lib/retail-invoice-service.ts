@@ -157,6 +157,7 @@ export interface RetailInvoice {
 
 /** Which line kinds an industry may put on an invoice — a shop sells what it stocks. */
 const LINE_KINDS_BY_INDUSTRY: Record<Industry, readonly RetailInvoiceLineInput["kind"][]> = {
+  service_saas: [],
   food_service: [],
   jewelry: ["gold"],
   watch: ["watch"],

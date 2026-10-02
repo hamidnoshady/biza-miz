@@ -11,7 +11,7 @@ import { CAPABILITIES_FOR, PLATFORM_ADMIN_ROLES, platformCan } from "@/lib/platf
 describe("console navigation IA", () => {
   it("groups the sections under the prescribed headings", () => {
     const labels = NAV_GROUPS.map((g) => g.label);
-    expect(labels).toEqual([null, "مشتریان", "درآمد", "محصول", "عملیات", "دسترسی و امنیت"]);
+    expect(labels).toEqual(["فضای کاری", "مشتریان", "درآمد", "محصول", "عملیات", "دسترسی و امنیت"]);
   });
 
   it("puts the overview first and businesses under مشتریان", () => {
