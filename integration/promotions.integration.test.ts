@@ -157,6 +157,14 @@ describe("gift cards", () => {
 
     expect(await promotionsService.giftCardBalance(biz.id, code)).toBe(300_000);
 
+    // The history is read from the same events, newest first (issue #764).
+    const history = await promotionsService.giftCardHistory(biz.id, code);
+    expect(history.map((h) => [h.kind, h.amountRial])).toEqual([
+      ["redeemed", 200_000],
+      ["issued", 500_000],
+    ]);
+    expect(await promotionsService.giftCardHistory(biz.id, "NO-SUCH-CARD")).toEqual([]);
+
     const redeemedEntry = await db.query<{ entry_id: string }>(
       "SELECT entry_id FROM domain_events WHERE event_type = 'promotions.gift_card_redeemed'",
     );

@@ -13,7 +13,10 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
-import { CardTitle, SectionCard } from "@/app/dashboard/page-chrome";
+import { CardTitle, EmptyState, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
+import { toPersianDigits } from "@/lib/digits";
+import { formatJalali } from "@/lib/jalali";
+import type { GiftCardHistoryEntry } from "@/lib/promotions-service";
 import { api, ErrorBox, errorMessageOrRaw, Field, InfoBox, inputClass } from "@/app/dashboard/ui";
 import type { GrowthAbilities } from "@/lib/growth-access";
 
@@ -53,6 +56,8 @@ export function GiftCardsSection({
   // the code afterwards can clear a now-stale figure rather than leaving the
   // previous card's balance attached to a different code.
   const [balance, setBalance] = useState<{ code: string; value: number } | null>(null);
+  /** The looked-up card's movements, paired with its code like the balance is. */
+  const [history, setHistory] = useState<{ code: string; entries: GiftCardHistoryEntry[] } | null>(null);
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
   const [busy, setBusy] = useState(false);
@@ -90,15 +95,22 @@ export function GiftCardsSection({
     setBusy(true);
     setError("");
     setDone("");
-    const { ok, status, data } = await api<{ error?: string; balance?: number; isActive?: boolean }>(
+    const { ok, status, data } = await api<{
+      error?: string;
+      balance?: number;
+      isActive?: boolean;
+      history?: GiftCardHistoryEntry[];
+    }>(
       `/api/promotions/gift-cards?code=${encodeURIComponent(trimmed)}`,
     );
     setBusy(false);
     if (ok && typeof data.balance === "number") {
       setBalance({ code: trimmed, value: data.balance });
+      setHistory({ code: trimmed, entries: data.history ?? [] });
       if (data.isActive === false) setDone("این کارت غیرفعال است.");
     } else {
       setBalance(null);
+      setHistory(null);
       setError(
         status === 404
           ? "کارت هدیه‌ای با این کد پیدا نشد."
@@ -130,6 +142,13 @@ export function GiftCardsSection({
     if (!ok) setError(data.message ?? (errorMessageOrRaw(data.error) || "مصرف کارت هدیه ناموفق بود."));
     else {
       setBalance(typeof data.balance === "number" ? { code: trimmed, value: data.balance } : null);
+      // The history shown is now one movement short; re-read it (without the
+      // lookup's busy guard or message reset, which would hide «مصرف شد»).
+      void api<{ history?: GiftCardHistoryEntry[] }>(`/api/promotions/gift-cards?code=${encodeURIComponent(trimmed)}`).then(
+        ({ ok: read, data: card }) => {
+          if (read && card.history) setHistory({ code: trimmed, entries: card.history });
+        },
+      );
       setRedeemValue("");
       setDone("کارت هدیه مصرف شد.");
     }
@@ -210,6 +229,7 @@ export function GiftCardsSection({
                   // A shown balance belongs to the code it was fetched for;
                   // once that code changes, drop it so it can't mislead.
                   setBalance((prev) => (prev && prev.code === e.target.value.trim() ? prev : null));
+                  setHistory((prev) => (prev && prev.code === e.target.value.trim() ? prev : null));
                 }}
               />
             </Field>
@@ -250,6 +270,34 @@ export function GiftCardsSection({
               ماندهٔ کارت <span dir="ltr" className="font-medium">{balance.code}</span>:{" "}
               <span className="font-semibold">{money.format(balance.value)}</span>
             </p>
+          ) : null}
+          {history && history.code === redeemCode.trim() ? (
+            history.entries.length === 0 ? (
+              <EmptyState>برای این کارت گردشی ثبت نشده است.</EmptyState>
+            ) : (
+              <div>
+                <p className="mb-1 text-xs font-medium text-muted-foreground">گردش کارت</p>
+                <ul className="divide-y divide-border/80 rounded-lg border border-border/80 text-sm">
+                  {history.entries.map((entry, index) => (
+                    <li key={`${entry.at}-${index}`} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+                      <div className="min-w-0">
+                        <StatusBadge tone={entry.kind === "issued" ? "positive" : "neutral"}>
+                          {entry.kind === "issued" ? "صدور" : "مصرف"}
+                        </StatusBadge>
+                        <span className="ms-2 text-xs text-muted-foreground">
+                          {toPersianDigits(formatJalali(entry.at))}
+                          {entry.byName ? ` · ${entry.byName}` : ""}
+                        </span>
+                      </div>
+                      <span className="shrink-0 font-semibold">
+                        {entry.kind === "issued" ? "+" : "−"}
+                        {money.format(entry.amountRial)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )
           ) : null}
           <p className="text-xs leading-5 text-muted-foreground">
             کارت هدیه یک بدهی واقعی است؛ صدور آن را بستانکار و مصرف آن را بدهکار می‌کند و هرگز درآمد را دوباره ثبت

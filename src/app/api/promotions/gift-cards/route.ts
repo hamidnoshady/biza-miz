@@ -3,9 +3,9 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { getGiftCardByCode, giftCardBalance, issueGiftCard } from "@/lib/promotions-service";
+import { getGiftCardByCode, giftCardBalance, giftCardHistory, issueGiftCard } from "@/lib/promotions-service";
 
-/** One card's outstanding value by code. */
+/** One card's outstanding value by code, with its issue/redeem history. */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.giftCardsView);
   if (error) return error;
@@ -17,11 +17,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const card = await getGiftCardByCode(session.businessId, code);
   if (!card) return NextResponse.json({ error: "gift_card_not_found" }, { status: 404 });
 
-  return NextResponse.json({
-    found: true,
-    balance: await giftCardBalance(session.businessId, code),
-    isActive: card.isActive,
-  });
+  const [balance, history] = await Promise.all([
+    giftCardBalance(session.businessId, code),
+    giftCardHistory(session.businessId, code),
+  ]);
+  return NextResponse.json({ found: true, balance, isActive: card.isActive, history });
 });
 
 /** Issues a gift card, posting its value as a liability (2420). */

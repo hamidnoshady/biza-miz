@@ -381,6 +381,40 @@ export async function giftCardBalance(businessId: string, code: string, client?:
   return Number(rows[0]?.issued ?? 0) - Number(rows[0]?.redeemed ?? 0);
 }
 
+export interface GiftCardHistoryEntry {
+  kind: "issued" | "redeemed";
+  amountRial: number;
+  /** ISO timestamp; the screen renders it Shamsi. */
+  at: string;
+  byName: string | null;
+}
+
+/**
+ * A card's movements, newest first (issue #764). Read from the same domain
+ * events the balance and the postings come from, so the history and the
+ * balance can never tell two different stories.
+ */
+export async function giftCardHistory(businessId: string, code: string): Promise<GiftCardHistoryEntry[]> {
+  const card = await getGiftCardByCode(businessId, code);
+  if (!card) return [];
+  const { rows } = await query<{ event_type: string; amount: string; created_at: Date; full_name: string | null }>(
+    `SELECT e.event_type, (e.payload->>'amount') AS amount, e.created_at, u.full_name
+       FROM domain_events e
+       LEFT JOIN users u ON u.id = e.created_by
+      WHERE e.business_id = $1 AND e.payload->>'giftCardId' = $2
+        AND e.event_type IN ('promotions.gift_card_issued', 'promotions.gift_card_redeemed')
+      ORDER BY e.created_at DESC, e.id DESC
+      LIMIT 100`,
+    [businessId, card.id],
+  );
+  return rows.map((row) => ({
+    kind: row.event_type === "promotions.gift_card_issued" ? "issued" : "redeemed",
+    amountRial: Number(row.amount),
+    at: new Date(row.created_at).toISOString(),
+    byName: row.full_name,
+  }));
+}
+
 export async function issueGiftCard(
   client: PoolClient,
   input: { businessId: string; locationId: string; code: string; initialValue: number; createdBy?: string | null },

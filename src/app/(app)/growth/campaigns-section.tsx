@@ -408,8 +408,24 @@ export function CampaignsSection({ canManage }: { canManage: boolean }) {
   );
 }
 
+/**
+ * The builder's steps (issue #764). A promotion has no "goal" field and no
+ * audience — it is a transaction rule — so the steps are exactly the parts the
+ * engine stores, followed by a plain-language review. Distribution is offered
+ * after saving: a message campaign carries the new promotion to a segment.
+ */
+const BUILDER_STEPS = [
+  { key: "offer", label: "پیشنهاد" },
+  { key: "products", label: "کالاها" },
+  { key: "schedule", label: "زمان‌بندی" },
+  { key: "review", label: "بازبینی" },
+] as const;
+
 function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onError: (m: string) => void }) {
   const money = useMoney();
+  const [step, setStep] = useState(0);
+  /** The campaign just saved, so the last screen can offer to distribute it. */
+  const [saved, setSaved] = useState<{ id: string; name: string } | null>(null);
   const [name, setName] = useState("");
   const [kind, setKind] = useState<PromotionRow["kind"]>("percent");
   const [value, setValue] = useState("");
@@ -489,6 +505,29 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
 
   const problems = validateCampaignDraft(draft);
   const warnings = campaignWarnings(draft);
+  // Per-step validation with the same shared rules: the offer step is checked
+  // with an empty schedule, and the schedule step owns whatever is left.
+  const offerProblems = validateCampaignDraft({
+    ...draft,
+    priority: 0,
+    activeFrom: null,
+    activeTo: null,
+    timeFrom: null,
+    timeTo: null,
+    daysOfWeek: [],
+  });
+  const scheduleProblems = problems.filter((problem) => !offerProblems.includes(problem));
+  const stepProblems = [offerProblems, warnings, scheduleProblems, [...problems, ...warnings]][step] ?? [];
+
+  function goNext() {
+    setShowProblems(true);
+    if (stepProblems.length > 0) {
+      problemRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      return;
+    }
+    setShowProblems(false);
+    setStep((current) => Math.min(current + 1, BUILDER_STEPS.length - 1));
+  }
 
   function toggleDay(day: number) {
     setDaysOfWeek((current) =>
@@ -498,6 +537,12 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    // Enter in a field before the last step advances rather than saving a
+    // campaign whose later steps were never seen.
+    if (step < BUILDER_STEPS.length - 1) {
+      goNext();
+      return;
+    }
     setShowProblems(true);
 
     // Checked before anything else: the old form only tested `name`, so an
@@ -510,7 +555,7 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
 
     setBusy(true);
     onError("");
-    const { ok, data } = await api<{ error?: string; message?: string }>("/api/promotions", {
+    const { ok, data } = await api<{ error?: string; message?: string; promotion?: { id: string } }>("/api/promotions", {
       method: "POST",
       // An empty scope is "the whole catalogue" to the engine — sent only when
       // the owner chose «همهٔ کالاها», never as a placeholder.
@@ -533,10 +578,13 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
     setScopeAxis("all");
     setScopeIds([]);
     setShowProblems(false);
+    setStep(0);
+    // The name is the one the owner typed; the engine's row does not echo it.
+    setSaved(data.promotion ? { id: data.promotion.id, name: draft.name.trim() } : null);
     onSaved("کمپین ذخیره شد.");
   }
 
-  const showBlockers = showProblems && (problems.length > 0 || warnings.length > 0);
+  const showBlockers = showProblems && stepProblems.length > 0;
   const summary = campaignSummary({
     kind,
     value: draft.value,
@@ -552,12 +600,50 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
 
   return (
     <SectionCard title="کمپین جدید" bodyClassName="space-y-3 p-4 sm:p-5">
+      {saved ? (
+        <div className="space-y-2 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3 text-sm dark:border-emerald-500/30 dark:bg-emerald-500/10">
+          <p className="font-medium text-foreground">«{saved.name}» ذخیره شد.</p>
+          <p className="text-xs leading-5 text-muted-foreground">
+            قدم بعد، رساندن آن به مشتریان است: یک کمپین پیامی بسازید که همین تخفیف را به یک بخش از مشتریان اطلاع دهد.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button asChild className="min-h-11">
+              <Link href={`${growthSectionHref("messaging")}?promotion=${encodeURIComponent(saved.id)}`}>اطلاع‌رسانی با پیام</Link>
+            </Button>
+            <Button type="button" variant="outline" className="min-h-11" onClick={() => setSaved(null)}>
+              ساخت کمپین دیگر
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      <ol className="flex flex-wrap gap-1.5" aria-label="مراحل ساخت کمپین">
+        {BUILDER_STEPS.map((item, index) => (
+          <li key={item.key}>
+            <button
+              type="button"
+              aria-current={index === step ? "step" : undefined}
+              // A finished step can be revisited; a later one is reached by «بعدی».
+              disabled={index > step}
+              onClick={() => setStep(index)}
+              className={`min-h-11 rounded-full border px-3 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                index === step
+                  ? "border-amber-200 bg-amber-100 text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/20 dark:text-amber-200"
+                  : index < step
+                    ? "border-border/80 bg-card text-foreground"
+                    : "border-border/80 bg-card text-muted-foreground"
+              }`}
+            >
+              {formatPersianNumber(index + 1)}. {item.label}
+            </button>
+          </li>
+        ))}
+      </ol>
       <form onSubmit={submit} className="grid gap-3" noValidate>
         <div ref={problemRef} aria-live="polite">
           {showBlockers ? (
             <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-6 text-destructive">
               <ul className="list-inside list-disc">
-                {[...problems, ...warnings].map((problem) => (
+                {stepProblems.map((problem) => (
                   <li key={problem}>{problem}</li>
                 ))}
               </ul>
@@ -565,6 +651,8 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
           ) : null}
         </div>
 
+        {step === 0 ? (
+        <>
         <Field label="نام کمپین">
           <input
             className={inputClass}
@@ -625,6 +713,11 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
           </Field>
         ) : null}
 
+        </>
+        ) : null}
+
+        {step === 2 ? (
+        <>
         <div className="grid gap-2 sm:grid-cols-2">
           <Field label="اولویت (بیشتر = زودتر)">
             <PersianNumberInput
@@ -708,7 +801,10 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
             ))}
           </div>
         </Field>
+        </>
+        ) : null}
 
+        {step === 1 ? (
         <Field label="شامل چه کالاهایی می‌شود؟" as="div" hint="خالی گذاشتن یعنی همهٔ کالاها. استثنا (به‌جز…) را موتور تخفیف پشتیبانی نمی‌کند.">
           {catalogueFailed ? (
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -757,15 +853,36 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
             </div>
           )}
         </Field>
+        ) : null}
 
+        {step === 3 ? (
         <div aria-live="polite" className="rounded-xl border border-amber-200 bg-amber-50/60 px-3 py-2 text-sm leading-6 text-foreground dark:border-amber-500/30 dark:bg-amber-500/10">
           <span className="block text-xs font-medium text-muted-foreground">خلاصهٔ کمپین پیش از ذخیره</span>
           {summary}
         </div>
 
-        <Button type="submit" disabled={busy} className="min-h-11 w-full">
-          {busy ? "در حال ذخیره…" : "ذخیره کمپین"}
-        </Button>
+        ) : null}
+
+        <div className="flex flex-wrap justify-between gap-2">
+          {step > 0 ? (
+            <Button type="button" variant="outline" className="min-h-11" onClick={() => setStep(step - 1)}>
+              قبلی
+            </Button>
+          ) : (
+            <span />
+          )}
+          {step < BUILDER_STEPS.length - 1 ? (
+            // A submit button, so Enter in any field advances; `submit` routes
+            // every step before the last to `goNext`.
+            <Button type="submit" className="min-h-11">
+              بعدی: {BUILDER_STEPS[step + 1].label}
+            </Button>
+          ) : (
+            <Button type="submit" disabled={busy} className="min-h-11">
+              {busy ? "در حال ذخیره…" : "ذخیره کمپین"}
+            </Button>
+          )}
+        </div>
       </form>
     </SectionCard>
   );

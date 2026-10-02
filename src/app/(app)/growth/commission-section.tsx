@@ -18,6 +18,7 @@
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { computeCommissionAccrual } from "@/lib/commission";
 import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
@@ -302,6 +303,9 @@ function RuleForm({
   const [value, setValue] = useState("");
   const [priority, setPriority] = useState("0");
   const [busy, setBusy] = useState(false);
+  // A sample sale for the preview — never saved, only fed to the engine.
+  const [sampleNet, setSampleNet] = useState("");
+  const [sampleCost, setSampleCost] = useState("");
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -347,6 +351,27 @@ function RuleForm({
       onSaved("قانون پورسانت ذخیره شد.");
     }
   }
+
+  /**
+   * What this rule would accrue on a sample sale, computed by the same
+   * `computeCommissionAccrual` that books real commissions (issue #764), so
+   * the preview can never disagree with the ledger.
+   */
+  const preview = (() => {
+    const read = (raw: string): number | null => {
+      if (!raw.trim()) return null;
+      try {
+        return money.parse(raw);
+      } catch {
+        return null;
+      }
+    };
+    const net = read(sampleNet);
+    const ruleValue = kind === "percent" ? Number(value) : read(value);
+    if (net === null || ruleValue === null || !Number.isFinite(ruleValue)) return null;
+    const cost = basis === "margin" ? read(sampleCost) ?? 0 : null;
+    return computeCommissionAccrual({ net, cost }, [{ id: "preview", kind, value: ruleValue, basis }]).amount;
+  })();
 
   return (
     <SectionCard title="قانون جدید" bodyClassName="space-y-3 p-4 sm:p-5">
@@ -397,6 +422,42 @@ function RuleForm({
             onChange={(e) => setPriority(e.target.value)}
           />
         </Field>
+        <fieldset className="grid gap-2 rounded-xl border border-border/80 p-3">
+          <legend className="px-1 text-xs font-medium text-muted-foreground">پیش‌نمایش روی یک فروش نمونه</legend>
+          <div className={basis === "margin" ? "grid gap-2 sm:grid-cols-2" : "grid gap-2"}>
+            <Field label={`فروش خالص خط (${money.unitLabel})`}>
+              <PersianNumberInput
+                inputMode="numeric"
+                allowNegative={false}
+                className={inputClass}
+                dir="ltr"
+                value={sampleNet}
+                onChange={(e) => setSampleNet(e.target.value)}
+              />
+            </Field>
+            {basis === "margin" ? (
+              <Field label={`بهای تمام‌شده (${money.unitLabel})`}>
+                <PersianNumberInput
+                  inputMode="numeric"
+                  allowNegative={false}
+                  className={inputClass}
+                  dir="ltr"
+                  value={sampleCost}
+                  onChange={(e) => setSampleCost(e.target.value)}
+                />
+              </Field>
+            ) : null}
+          </div>
+          <p aria-live="polite" className="text-sm text-foreground">
+            {preview === null ? (
+              <span className="text-muted-foreground">مبلغ فروش و مقدار قانون را وارد کنید تا پورسانت محاسبه شود.</span>
+            ) : (
+              <>
+                پورسانت این فروش: <b>{money.format(preview)}</b>
+              </>
+            )}
+          </p>
+        </fieldset>
         <Button type="submit" disabled={busy} className="min-h-11 w-full">
           ذخیره قانون
         </Button>
