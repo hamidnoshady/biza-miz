@@ -14,6 +14,7 @@ const CAMPAIGNS = code(read("./campaigns-section.tsx"));
 const COMMISSION = code(read("./commission-section.tsx"));
 const GIFT_CARDS = code(read("./gift-cards-section.tsx"));
 const GIFT_CARD_ROUTE = code(read("../../api/promotions/gift-cards/route.ts"));
+const GIFT_CARD_EXPIRE_ROUTE = code(read("../../api/promotions/gift-cards/expire/route.ts"));
 
 describe("the stepped campaign builder", () => {
   it("walks offer → products → schedule → review, in that order", () => {
@@ -52,5 +53,19 @@ describe("the gift-card history", () => {
   it("is shown with Shamsi dates and kept paired with the code it was read for", () => {
     expect(GIFT_CARDS).toMatch(/formatJalali\(entry\.at\)/);
     expect(GIFT_CARDS).toMatch(/history\.code === redeemCode\.trim\(\)/);
+  });
+});
+
+describe("gift-card expiry", () => {
+  it("dates new cards from the Growth setting, which defaults to never", () => {
+    expect(GIFT_CARD_ROUTE).toMatch(/getGrowthSettings\(session\.businessId\)/);
+    expect(GIFT_CARD_ROUTE).toMatch(/validityMonths: giftCardValidityMonths/);
+  });
+
+  it("posts breakage only on a person's click, by someone who may issue cards", () => {
+    expect(GIFT_CARD_EXPIRE_ROUTE).toMatch(
+      /export const POST[\s\S]*requirePermission\(PERMISSIONS\.giftCardsIssue\)[\s\S]*expireGiftCards\(/,
+    );
+    expect(GIFT_CARDS).toMatch(/abilities\.issueGiftCards \? <ExpiredGiftCardsCard \/> : null/);
   });
 });

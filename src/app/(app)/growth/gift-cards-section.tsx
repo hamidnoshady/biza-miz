@@ -7,6 +7,10 @@
  * هدیه» (۲۴۲۰); redeeming it debits that liability. Neither rule touches a
  * revenue account — the goods the card later buys are posted by the ordinary
  * sale path, so revenue can never be booked twice.
+ *
+ * Issue #764 — expiry is opt-in (Growth settings). An expired card cannot be
+ * spent; its unspent value stays in 2420 until someone who may issue cards
+ * presses «ثبت انقضا», which moves it to «سایر درآمدها» (4900) once per card.
  */
 
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
@@ -16,7 +20,7 @@ import { useMoney } from "@/components/money/money-context";
 import { CardTitle, EmptyState, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
-import type { GiftCardHistoryEntry } from "@/lib/promotions-service";
+import type { ExpiredGiftCard, GiftCardHistoryEntry } from "@/lib/promotions-service";
 import { api, ErrorBox, errorMessageOrRaw, Field, InfoBox, inputClass } from "@/app/dashboard/ui";
 import type { GrowthAbilities } from "@/lib/growth-access";
 
@@ -55,7 +59,12 @@ export function GiftCardsSection({
   // The balance is always paired with the code it was fetched for, so editing
   // the code afterwards can clear a now-stale figure rather than leaving the
   // previous card's balance attached to a different code.
-  const [balance, setBalance] = useState<{ code: string; value: number } | null>(null);
+  const [balance, setBalance] = useState<{
+    code: string;
+    value: number;
+    expiresAt: string | null;
+    expired: boolean;
+  } | null>(null);
   /** The looked-up card's movements, paired with its code like the balance is. */
   const [history, setHistory] = useState<{ code: string; entries: GiftCardHistoryEntry[] } | null>(null);
   const [error, setError] = useState("");
@@ -99,15 +108,23 @@ export function GiftCardsSection({
       error?: string;
       balance?: number;
       isActive?: boolean;
+      expiresAt?: string | null;
+      expired?: boolean;
       history?: GiftCardHistoryEntry[];
     }>(
       `/api/promotions/gift-cards?code=${encodeURIComponent(trimmed)}`,
     );
     setBusy(false);
     if (ok && typeof data.balance === "number") {
-      setBalance({ code: trimmed, value: data.balance });
+      setBalance({
+        code: trimmed,
+        value: data.balance,
+        expiresAt: data.expiresAt ?? null,
+        expired: data.expired === true,
+      });
       setHistory({ code: trimmed, entries: data.history ?? [] });
       if (data.isActive === false) setDone("این کارت غیرفعال است.");
+      else if (data.expired) setDone("این کارت منقضی شده و دیگر قابل مصرف نیست.");
     } else {
       setBalance(null);
       setHistory(null);
@@ -141,7 +158,11 @@ export function GiftCardsSection({
     setBusy(false);
     if (!ok) setError(data.message ?? (errorMessageOrRaw(data.error) || "مصرف کارت هدیه ناموفق بود."));
     else {
-      setBalance(typeof data.balance === "number" ? { code: trimmed, value: data.balance } : null);
+      setBalance((prev) =>
+        typeof data.balance === "number"
+          ? { code: trimmed, value: data.balance, expiresAt: prev?.code === trimmed ? prev.expiresAt : null, expired: false }
+          : null,
+      );
       // The history shown is now one movement short; re-read it (without the
       // lookup's busy guard or message reset, which would hide «مصرف شد»).
       void api<{ history?: GiftCardHistoryEntry[] }>(`/api/promotions/gift-cards?code=${encodeURIComponent(trimmed)}`).then(
@@ -269,6 +290,13 @@ export function GiftCardsSection({
             <p aria-live="polite" className="rounded-lg bg-muted/50 px-3 py-2 text-sm text-foreground">
               ماندهٔ کارت <span dir="ltr" className="font-medium">{balance.code}</span>:{" "}
               <span className="font-semibold">{money.format(balance.value)}</span>
+              {balance.expiresAt ? (
+                <span className="ms-2 inline-block">
+                  <StatusBadge tone={balance.expired ? "danger" : "neutral"}>
+                    {balance.expired ? "منقضی" : "اعتبار تا"} {toPersianDigits(formatJalali(balance.expiresAt))}
+                  </StatusBadge>
+                </span>
+              ) : null}
             </p>
           ) : null}
           {history && history.code === redeemCode.trim() ? (
@@ -281,8 +309,8 @@ export function GiftCardsSection({
                   {history.entries.map((entry, index) => (
                     <li key={`${entry.at}-${index}`} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
                       <div className="min-w-0">
-                        <StatusBadge tone={entry.kind === "issued" ? "positive" : "neutral"}>
-                          {entry.kind === "issued" ? "صدور" : "مصرف"}
+                        <StatusBadge tone={entry.kind === "issued" ? "positive" : entry.kind === "expired" ? "danger" : "neutral"}>
+                          {GIFT_CARD_MOVEMENT_LABELS[entry.kind]}
                         </StatusBadge>
                         <span className="ms-2 text-xs text-muted-foreground">
                           {toPersianDigits(formatJalali(entry.at))}
@@ -305,6 +333,103 @@ export function GiftCardsSection({
           </p>
         </SectionCard>
       </div>
+
+      {abilities.issueGiftCards ? <ExpiredGiftCardsCard /> : null}
     </div>
+  );
+}
+
+const GIFT_CARD_MOVEMENT_LABELS: Record<GiftCardHistoryEntry["kind"], string> = {
+  issued: "صدور",
+  redeemed: "مصرف",
+  expired: "انقضا",
+};
+
+/**
+ * Breakage: expired cards' unspent value. Fetched on request, never on mount —
+ * most businesses never turn expiry on, and the review is a deliberate step
+ * before an income posting, not a figure to keep on screen.
+ */
+function ExpiredGiftCardsCard() {
+  const money = useMoney();
+  const [review, setReview] = useState<{ cards: ExpiredGiftCard[]; totalRial: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState("");
+
+  async function load() {
+    setBusy(true);
+    setError("");
+    setDone("");
+    const { ok, data } = await api<{ cards?: ExpiredGiftCard[]; totalRial?: number; error?: string }>(
+      "/api/promotions/gift-cards/expire",
+    );
+    setBusy(false);
+    if (ok && data.cards) setReview({ cards: data.cards, totalRial: data.totalRial ?? 0 });
+    else setError(errorMessageOrRaw(data.error) || "بررسی کارت‌های منقضی ناموفق بود.");
+  }
+
+  async function post() {
+    if (!review || review.cards.length === 0 || busy) return;
+    setBusy(true);
+    setError("");
+    const { ok, data } = await api<{ cards?: number; totalRial?: number; error?: string; message?: string }>(
+      "/api/promotions/gift-cards/expire",
+      { method: "POST" },
+    );
+    setBusy(false);
+    if (!ok) {
+      setError(data.message ?? (errorMessageOrRaw(data.error) || "ثبت انقضای کارت‌ها ناموفق بود."));
+      return;
+    }
+    setReview({ cards: [], totalRial: 0 });
+    setDone(
+      `انقضای ${toPersianDigits(String(data.cards ?? 0))} کارت ثبت شد؛ ${money.format(data.totalRial ?? 0)} از ۲۴۲۰ به «سایر درآمدها» منتقل شد.`,
+    );
+  }
+
+  return (
+    <SectionCard
+      title={<CardTitle eyebrow="انقضا" title="کارت‌های منقضی" />}
+      bodyClassName="space-y-3 p-4 sm:p-5"
+    >
+      <div aria-live="polite">
+        <ErrorBox>{error}</ErrorBox>
+        {done ? <InfoBox>{done}</InfoBox> : null}
+      </div>
+      <p className="text-xs leading-5 text-muted-foreground">
+        اگر در تنظیمات رشد برای کارت‌ها اعتبار زمانی تعیین کرده باشید، کارت منقضی دیگر مصرف نمی‌شود. ماندهٔ آن تا وقتی
+        این‌جا «ثبت انقضا» نزنید در بدهی ۲۴۲۰ می‌ماند؛ با ثبت، به «سایر درآمدها» (۴۹۰۰) منتقل می‌شود — برای هر کارت فقط
+        یک بار.
+      </p>
+      {review === null ? (
+        <Button type="button" variant="outline" disabled={busy} onClick={() => void load()} className="min-h-11 w-full sm:w-auto">
+          {busy ? "در حال بررسی…" : "بررسی کارت‌های منقضی"}
+        </Button>
+      ) : review.cards.length === 0 ? (
+        done ? null : <EmptyState>کارت منقضیِ دارای مانده‌ای برای ثبت نیست.</EmptyState>
+      ) : (
+        <>
+          <ul className="divide-y divide-border/80 rounded-lg border border-border/80 text-sm">
+            {review.cards.map((card) => (
+              <li key={card.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+                <div className="min-w-0">
+                  <span dir="ltr" className="font-medium">
+                    {card.code}
+                  </span>
+                  <span className="ms-2 text-xs text-muted-foreground">
+                    منقضی از {toPersianDigits(formatJalali(card.expiresAt))}
+                  </span>
+                </div>
+                <span className="shrink-0 font-semibold">{money.format(card.balanceRial)}</span>
+              </li>
+            ))}
+          </ul>
+          <Button type="button" disabled={busy} onClick={() => void post()} className="min-h-11 w-full sm:w-auto">
+            {busy ? "در حال ثبت…" : `ثبت انقضا (${money.format(review.totalRial)})`}
+          </Button>
+        </>
+      )}
+    </SectionCard>
   );
 }

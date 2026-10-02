@@ -90,6 +90,7 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
   "/api/promotions/targets": { GET: PERMISSIONS.campaignsView },
   "/api/promotions/gift-cards": { GET: PERMISSIONS.giftCardsView, POST: PERMISSIONS.giftCardsIssue },
   "/api/promotions/gift-cards/redeem": { POST: PERMISSIONS.giftCardsRedeem },
+  "/api/promotions/gift-cards/expire": { GET: PERMISSIONS.giftCardsView, POST: PERMISSIONS.giftCardsIssue },
   "/api/loyalty/programs": { GET: PERMISSIONS.loyaltyView, POST: PERMISSIONS.loyaltyManage },
   "/api/loyalty/customers/[id]": { GET: PERMISSIONS.loyaltyView },
   "/api/loyalty/customers/[id]/redeem": { POST: PERMISSIONS.loyaltyRedeem },

@@ -95,7 +95,8 @@ beforeEach(async () => {
     `INSERT INTO accounts (business_id, code, name, type)
      VALUES ($1, '1100', 'Cash', 'asset'),
             ($1, '2420', 'Gift Card Payable', 'liability'),
-            ($1, '4560', 'Accessory Sales Revenue', 'revenue')
+            ($1, '4560', 'Accessory Sales Revenue', 'revenue'),
+            ($1, '4900', 'Other Income', 'revenue')
      RETURNING id, code`,
     [biz.id],
   );
@@ -250,5 +251,93 @@ describe("gift cards", () => {
         }),
       ),
     ).rejects.toThrow(/کارت هدیه/);
+  });
+});
+
+describe("gift-card expiry (issue #764, opt-in)", () => {
+  async function issue(code: string, validityMonths: number | null) {
+    return withClient((client) =>
+      promotionsService.issueGiftCard(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        code,
+        initialValue: 400_000,
+        validityMonths,
+      }),
+    );
+  }
+
+  it("never expires a card issued without a validity", async () => {
+    const { card } = await issue("GC-FOREVER", null);
+    expect(card.expiresAt).toBeNull();
+  });
+
+  it("dates a card's expiry from the branch's business day", async () => {
+    const { card } = await issue("GC-12M", 12);
+    const { rows } = await db.query<{ expected: string }>(
+      `SELECT (app_business_date(now(), coalesce(timezone, 'Asia/Tehran'), business_day_start_minutes)
+                + interval '12 months')::date::text AS expected
+         FROM locations WHERE id = $1`,
+      [biz.locationId],
+    );
+    expect(card.expiresAt).toBe(rows[0].expected);
+  });
+
+  it("refuses to spend an expired card, then writes its remainder off to 4900 exactly once", async () => {
+    await issue("GC-OLD", 1);
+    await withClient((client) =>
+      promotionsService.redeemGiftCard(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        code: "GC-OLD",
+        amount: 150_000,
+      }),
+    );
+    await issue("GC-FOREVER", null);
+    // Age the card past its expiry.
+    await db.query(`UPDATE gift_cards SET expires_at = current_date - 10 WHERE code = 'GC-OLD'`);
+
+    await expect(
+      withClient((client) =>
+        promotionsService.redeemGiftCard(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          code: "GC-OLD",
+          amount: 1_000,
+        }),
+      ),
+    ).rejects.toThrow(/منقضی/);
+
+    const today = (await db.query<{ d: string }>(`SELECT (current_date + 1)::text AS d`)).rows[0].d;
+    const preview = await promotionsService.listExpiredGiftCards(biz.id, today);
+    expect(preview.map((card) => [card.code, card.balanceRial])).toEqual([["GC-OLD", 250_000]]);
+
+    const first = await withClient((client) =>
+      promotionsService.expireGiftCards(client, { businessId: biz.id, locationId: biz.locationId }),
+    );
+    expect(first).toEqual({ cards: 1, totalRial: 250_000 });
+
+    const { rows } = await db.query<{ code: string; debit: string; credit: string }>(
+      `SELECT a.code, jl.debit::text AS debit, jl.credit::text AS credit
+         FROM journal_entries je
+         JOIN journal_lines jl ON jl.entry_id = je.id
+         JOIN accounts a ON a.id = jl.account_id
+        WHERE je.business_id = $1 AND je.posting_kind = 'gift_card_expired'
+        ORDER BY a.code`,
+      [biz.id],
+    );
+    expect(rows.map((row) => [row.code, Number(row.debit), Number(row.credit)])).toEqual([
+      ["2420", 250_000, 0],
+      ["4900", 0, 250_000],
+    ]);
+
+    // The balance now reads zero, the history names the expiry, and a second run posts nothing.
+    expect(await promotionsService.giftCardBalance(biz.id, "GC-OLD")).toBe(0);
+    expect((await promotionsService.giftCardHistory(biz.id, "GC-OLD"))[0].kind).toBe("expired");
+    const second = await withClient((client) =>
+      promotionsService.expireGiftCards(client, { businessId: biz.id, locationId: biz.locationId }),
+    );
+    expect(second).toEqual({ cards: 0, totalRial: 0 });
+    expect(await promotionsService.giftCardBalance(biz.id, "GC-FOREVER")).toBe(400_000);
   });
 });

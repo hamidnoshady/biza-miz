@@ -30,8 +30,20 @@ describe("parseGrowthSettingsInput", () => {
     expect(parseGrowthSettingsInput({ unknown: 1 })).toEqual({ ok: true, value: {} });
   });
 
-  it("defaults to no window and no budget, so an untouched business sees the same reports as before", () => {
-    expect(GROWTH_SETTINGS_DEFAULTS).toEqual({ attributionWindowDays: null, discountBudgetRial: null });
+  it("defaults to no window, no budget and no gift-card expiry, so an untouched business sees no change", () => {
+    expect(GROWTH_SETTINGS_DEFAULTS).toEqual({
+      attributionWindowDays: null,
+      discountBudgetRial: null,
+      giftCardValidityMonths: null,
+    });
+  });
+
+  it("accepts a gift-card validity of 1–120 whole months, or null for never", () => {
+    expect(parseGrowthSettingsInput({ giftCardValidityMonths: 12 })).toEqual({ ok: true, value: { giftCardValidityMonths: 12 } });
+    expect(parseGrowthSettingsInput({ giftCardValidityMonths: null })).toEqual({ ok: true, value: { giftCardValidityMonths: null } });
+    for (const bad of [0, 121, 1.5, "12"]) {
+      expect(parseGrowthSettingsInput({ giftCardValidityMonths: bad }).ok).toBe(false);
+    }
   });
 });
 

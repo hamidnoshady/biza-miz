@@ -6,7 +6,8 @@
  * Issue #764: this page used to be a second dashboard (counts of programs,
  * campaigns, templates and commission rules) with links back to the screens
  * that own them. It now owns real Growth-wide configuration — the attribution
- * window and the 30-day discount budget (src/lib/growth-settings.ts), each
+ * window, the 30-day discount budget and the opt-in gift-card validity
+ * (src/lib/growth-settings.ts), each
  * read by a report or the dashboard — and otherwise only points to the one
  * screen that edits each engine. Figures stay on the Growth dashboard; the
  * only state shown here is what would stop the app from working (no default
@@ -26,6 +27,7 @@ import { api, ErrorBox, errorMessageOrRaw, Field, InfoBox, inputClass, Secondary
 import { useMoney } from "@/components/money/money-context";
 import { formatPersianNumber } from "@/lib/digits";
 import { ATTRIBUTION_WINDOW_LIMITS, parseGrowthSettingsInput, type GrowthSettings } from "@/lib/growth-settings";
+import { GIFT_CARD_VALIDITY_LIMITS } from "@/lib/gift-card-expiry";
 import { growthSectionHref } from "./growth-routes";
 
 interface SettingsResponse {
@@ -46,6 +48,7 @@ function GrowthWideSettingsForm({
   const [budget, setBudget] = useState(
     settings.discountBudgetRial === null ? "" : String(money.toInput(settings.discountBudgetRial)),
   );
+  const [validityMonths, setValidityMonths] = useState(settings.giftCardValidityMonths?.toString() ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -66,6 +69,7 @@ function GrowthWideSettingsForm({
     const body = {
       attributionWindowDays: windowDays.trim() ? Number(windowDays) : null,
       discountBudgetRial,
+      giftCardValidityMonths: validityMonths.trim() ? Number(validityMonths) : null,
     };
     // The same rules the server applies, so a mistake is named before a round trip.
     const parsed = parseGrowthSettingsInput(body);
@@ -122,6 +126,21 @@ function GrowthWideSettingsForm({
             value={budget}
             placeholder="بدون سقف"
             onChange={(event) => setBudget(event.target.value)}
+          />
+        </Field>
+        <Field
+          label="اعتبار کارت هدیه (ماه)"
+          hint={`فقط کارت‌هایی که از این پس صادر می‌شوند تا این تعداد ماه قابل مصرف‌اند؛ ماندهٔ کارت منقضی با «ثبت انقضا» در بخش کارت هدیه به «سایر درآمدها» می‌رود. خالی یعنی کارت‌ها منقضی نمی‌شوند (${formatPersianNumber(GIFT_CARD_VALIDITY_LIMITS.min)} تا ${formatPersianNumber(GIFT_CARD_VALIDITY_LIMITS.max)} ماه).`}
+        >
+          <PersianNumberInput
+            inputMode="numeric"
+            allowDecimal={false}
+            allowNegative={false}
+            className={inputClass}
+            dir="ltr"
+            value={validityMonths}
+            placeholder="بدون انقضا"
+            onChange={(event) => setValidityMonths(event.target.value)}
           />
         </Field>
       </div>

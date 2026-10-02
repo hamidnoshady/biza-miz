@@ -9,6 +9,7 @@ import { GROWTH_SETTINGS_DEFAULTS, type GrowthSettings } from "./growth-settings
 interface Row extends Record<string, unknown> {
   attribution_window_days: number | null;
   discount_budget_rial: string | null;
+  gift_card_validity_months: number | null;
 }
 
 function fromRow(row: Row | undefined): GrowthSettings {
@@ -16,12 +17,14 @@ function fromRow(row: Row | undefined): GrowthSettings {
   return {
     attributionWindowDays: row.attribution_window_days,
     discountBudgetRial: row.discount_budget_rial === null ? null : Number(row.discount_budget_rial),
+    giftCardValidityMonths: row.gift_card_validity_months,
   };
 }
 
 /** The business's settings, or the code defaults when it has never saved any. */
 export async function getGrowthSettings(businessId: string, client?: PoolClient): Promise<GrowthSettings> {
-  const sql = `SELECT attribution_window_days, discount_budget_rial::text AS discount_budget_rial
+  const sql = `SELECT attribution_window_days, discount_budget_rial::text AS discount_budget_rial,
+                      gift_card_validity_months
                  FROM growth_settings WHERE business_id = $1`;
   const { rows } = client ? await client.query<Row>(sql, [businessId]) : await query<Row>(sql, [businessId]);
   return fromRow(rows[0]);
@@ -38,15 +41,17 @@ export async function updateGrowthSettings(
 ): Promise<GrowthSettings> {
   const next = { ...(await getGrowthSettings(businessId)), ...patch };
   const { rows } = await query<Row>(
-    `INSERT INTO growth_settings (business_id, attribution_window_days, discount_budget_rial, updated_by, updated_at)
-     VALUES ($1, $2, $3, $4, now())
+    `INSERT INTO growth_settings
+       (business_id, attribution_window_days, discount_budget_rial, gift_card_validity_months, updated_by, updated_at)
+     VALUES ($1, $2, $3, $4, $5, now())
      ON CONFLICT (business_id) DO UPDATE
        SET attribution_window_days = EXCLUDED.attribution_window_days,
            discount_budget_rial = EXCLUDED.discount_budget_rial,
+           gift_card_validity_months = EXCLUDED.gift_card_validity_months,
            updated_by = EXCLUDED.updated_by,
            updated_at = now()
-     RETURNING attribution_window_days, discount_budget_rial::text AS discount_budget_rial`,
-    [businessId, next.attributionWindowDays, next.discountBudgetRial, updatedBy],
+     RETURNING attribution_window_days, discount_budget_rial::text AS discount_budget_rial, gift_card_validity_months`,
+    [businessId, next.attributionWindowDays, next.discountBudgetRial, next.giftCardValidityMonths, updatedBy],
   );
   return fromRow(rows[0]);
 }

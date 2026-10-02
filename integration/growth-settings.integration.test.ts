@@ -124,7 +124,7 @@ async function campaignWithTwoSales() {
 describe("growth settings", () => {
   it("reads the code defaults for a business that never saved any", async () => {
     const settings = await dbLib.withTenant(biz.id, () => settingsService.getGrowthSettings(biz.id));
-    expect(settings).toEqual({ attributionWindowDays: null, discountBudgetRial: null });
+    expect(settings).toEqual({ attributionWindowDays: null, discountBudgetRial: null, giftCardValidityMonths: null });
   });
 
   it("saves a partial update without clearing the other setting", async () => {
@@ -134,7 +134,7 @@ describe("growth settings", () => {
     const next = await dbLib.withTenant(biz.id, () =>
       settingsService.updateGrowthSettings(biz.id, { attributionWindowDays: 14 }, biz.userId),
     );
-    expect(next).toEqual({ attributionWindowDays: 14, discountBudgetRial: 2_000_000 });
+    expect(next).toEqual({ attributionWindowDays: 14, discountBudgetRial: 2_000_000, giftCardValidityMonths: null });
   });
 
   it("bounds message-campaign ROI by the attribution window", async () => {

@@ -17,6 +17,7 @@ import { validateCampaignDraft } from "./campaign-rules";
 import type { Promotion } from "./promotions";
 import { campaignTargetAxes, type CampaignTargetCatalogue, type CampaignTargetOption } from "./campaign-targets";
 import type { SalesModel } from "./industry-profile";
+import { giftCardExpiryDate, isGiftCardExpired } from "./gift-card-expiry";
 // Side-effect import: registers the gift-card posting rules.
 import "./promotions-posting-rules";
 
@@ -328,6 +329,8 @@ export interface GiftCard {
   code: string;
   initialValue: number;
   isActive: boolean;
+  /** Last business day the card can be spent (ISO date); null = never expires. */
+  expiresAt: string | null;
   createdAt: string;
 }
 
@@ -337,7 +340,29 @@ interface GiftCardRow extends Record<string, unknown> {
   code: string;
   initial_value: string;
   is_active: boolean;
+  expires_at: string | Date | null;
   created_at: string;
+}
+
+function isoDate(value: string | Date | null): string | null {
+  if (value === null) return null;
+  if (value instanceof Date) {
+    // node-pg parses a `date` as local midnight; read it back in local terms.
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  }
+  return value.slice(0, 10);
+}
+
+/** The branch's business date, inside the caller's transaction. */
+async function branchBusinessDate(client: PoolClient, locationId: string): Promise<string> {
+  const { rows } = await client.query<{ today: string }>(
+    `SELECT app_business_date(now(), coalesce(timezone, 'Asia/Tehran'), business_day_start_minutes)::text AS today
+       FROM locations WHERE id = $1`,
+    [locationId],
+  );
+  if (!rows[0]) throw new Error("شعبه یافت نشد.");
+  return rows[0].today;
 }
 
 function mapGiftCard(row: GiftCardRow): GiftCard {
@@ -347,6 +372,7 @@ function mapGiftCard(row: GiftCardRow): GiftCard {
     code: row.code,
     initialValue: Number(row.initial_value),
     isActive: row.is_active,
+    expiresAt: isoDate(row.expires_at),
     createdAt: row.created_at,
   };
 }
@@ -361,28 +387,34 @@ export async function getGiftCardByCode(businessId: string, code: string, client
   return rows[0] ? mapGiftCard(rows[0]) : null;
 }
 
-/** The card's outstanding value, reconstructed from its issued/redeemed events — never a stored column. */
+/**
+ * The card's outstanding value, reconstructed from its issued/redeemed/expired
+ * events — never a stored column. An expiry posting removes whatever was left,
+ * so an expired-and-posted card reads zero.
+ */
 export async function giftCardBalance(businessId: string, code: string, client?: PoolClient): Promise<number> {
   const card = await getGiftCardByCode(businessId, code, client);
   if (!card) return 0;
 
   const run = <T extends Record<string, unknown>>(text: string, params: unknown[]) =>
     client ? client.query<T>(text, params as never) : query<T>(text, params);
-  const { rows } = await run<{ issued: string | null; redeemed: string | null }>(
+  const { rows } = await run<{ issued: string | null; redeemed: string | null; expired: string | null }>(
     `SELECT
        COALESCE(SUM(CASE WHEN event_type = 'promotions.gift_card_issued'
                           THEN (payload->>'amount')::bigint ELSE 0 END), 0)::text AS issued,
        COALESCE(SUM(CASE WHEN event_type = 'promotions.gift_card_redeemed'
-                          THEN (payload->>'amount')::bigint ELSE 0 END), 0)::text AS redeemed
+                          THEN (payload->>'amount')::bigint ELSE 0 END), 0)::text AS redeemed,
+       COALESCE(SUM(CASE WHEN event_type = 'promotions.gift_card_expired'
+                          THEN (payload->>'amount')::bigint ELSE 0 END), 0)::text AS expired
        FROM domain_events
       WHERE business_id = $1 AND payload->>'giftCardId' = $2`,
     [businessId, card.id],
   );
-  return Number(rows[0]?.issued ?? 0) - Number(rows[0]?.redeemed ?? 0);
+  return Number(rows[0]?.issued ?? 0) - Number(rows[0]?.redeemed ?? 0) - Number(rows[0]?.expired ?? 0);
 }
 
 export interface GiftCardHistoryEntry {
-  kind: "issued" | "redeemed";
+  kind: "issued" | "redeemed" | "expired";
   amountRial: number;
   /** ISO timestamp; the screen renders it Shamsi. */
   at: string;
@@ -402,13 +434,18 @@ export async function giftCardHistory(businessId: string, code: string): Promise
        FROM domain_events e
        LEFT JOIN users u ON u.id = e.created_by
       WHERE e.business_id = $1 AND e.payload->>'giftCardId' = $2
-        AND e.event_type IN ('promotions.gift_card_issued', 'promotions.gift_card_redeemed')
+        AND e.event_type IN ('promotions.gift_card_issued', 'promotions.gift_card_redeemed', 'promotions.gift_card_expired')
       ORDER BY e.created_at DESC, e.id DESC
       LIMIT 100`,
     [businessId, card.id],
   );
   return rows.map((row) => ({
-    kind: row.event_type === "promotions.gift_card_issued" ? "issued" : "redeemed",
+    kind:
+      row.event_type === "promotions.gift_card_issued"
+        ? "issued"
+        : row.event_type === "promotions.gift_card_expired"
+          ? "expired"
+          : "redeemed",
     amountRial: Number(row.amount),
     at: new Date(row.created_at).toISOString(),
     byName: row.full_name,
@@ -417,7 +454,19 @@ export async function giftCardHistory(businessId: string, code: string): Promise
 
 export async function issueGiftCard(
   client: PoolClient,
-  input: { businessId: string; locationId: string; code: string; initialValue: number; createdBy?: string | null },
+  input: {
+    businessId: string;
+    locationId: string;
+    code: string;
+    initialValue: number;
+    createdBy?: string | null;
+    /**
+     * Growth's opt-in gift-card validity (growth-settings.ts). Null/absent =
+     * the card never expires; otherwise it expires that many months after the
+     * branch's business date of issue.
+     */
+    validityMonths?: number | null;
+  },
 ): Promise<{ card: GiftCard; entryId: string | null }> {
   const code = input.code?.trim();
   if (!code) throw new Error("کد کارت هدیه نمی‌تواند خالی باشد.");
@@ -425,9 +474,13 @@ export async function issueGiftCard(
     throw new Error("ارزش اولیه کارت هدیه باید یک عدد صحیح مثبت (ریال) باشد.");
   }
 
+  const expiresAt = input.validityMonths
+    ? giftCardExpiryDate(await branchBusinessDate(client, input.locationId), input.validityMonths)
+    : null;
+
   const { rows } = await client.query<GiftCardRow>(
-    `INSERT INTO gift_cards (business_id, code, initial_value) VALUES ($1, $2, $3) RETURNING *`,
-    [input.businessId, code, input.initialValue],
+    `INSERT INTO gift_cards (business_id, code, initial_value, expires_at) VALUES ($1, $2, $3, $4) RETURNING *`,
+    [input.businessId, code, input.initialValue, expiresAt],
   );
   const card = mapGiftCard(rows[0]);
 
@@ -451,8 +504,17 @@ export async function redeemGiftCard(
   if (!Number.isInteger(input.amount) || input.amount <= 0) {
     throw new Error("مبلغ مصرف کارت هدیه باید یک عدد صحیح مثبت (ریال) باشد.");
   }
-  const card = await getGiftCardByCode(input.businessId, input.code, client);
+  // Lock the card so a redemption and the expiry sweep cannot both spend
+  // the same remaining balance.
+  const { rows: locked } = await client.query<GiftCardRow>(
+    `SELECT * FROM gift_cards WHERE business_id = $1 AND code = $2 FOR UPDATE`,
+    [input.businessId, input.code.trim()],
+  );
+  const card = locked[0] ? mapGiftCard(locked[0]) : null;
   if (!card || !card.isActive) throw new Error("کارت هدیه یافت نشد.");
+  if (card.expiresAt && isGiftCardExpired(card.expiresAt, await branchBusinessDate(client, input.locationId))) {
+    throw new Error("کارت هدیه منقضی شده است.");
+  }
 
   const balance = await giftCardBalance(input.businessId, input.code, client);
   if (input.amount > balance) throw new Error("اعتبار کارت هدیه کافی نیست.");
@@ -483,6 +545,79 @@ export async function redeemGiftCard(
   });
 
   return { balance: balance - input.amount, entryId };
+}
+
+export interface ExpiredGiftCard {
+  id: string;
+  code: string;
+  expiresAt: string;
+  /** The unspent value that would leave 2420 for «سایر درآمدها». */
+  balanceRial: number;
+}
+
+/**
+ * Expired cards that still carry an unspent balance and have not been
+ * written off yet — what «ثبت انقضا» would post. `today` is the business date.
+ */
+export async function listExpiredGiftCards(
+  businessId: string,
+  today: string,
+  client?: PoolClient,
+): Promise<ExpiredGiftCard[]> {
+  const run = <T extends Record<string, unknown>>(text: string, params: unknown[]) =>
+    client ? client.query<T>(text, params as never) : query<T>(text, params);
+  const { rows } = await run<{ id: string; code: string; expires_at: string; balance: string }>(
+    `SELECT g.id, g.code, g.expires_at::text AS expires_at,
+            (COALESCE(SUM(CASE WHEN e.event_type = 'promotions.gift_card_issued' THEN (e.payload->>'amount')::bigint END), 0)
+             - COALESCE(SUM(CASE WHEN e.event_type = 'promotions.gift_card_redeemed' THEN (e.payload->>'amount')::bigint END), 0)
+            )::text AS balance
+       FROM gift_cards g
+       LEFT JOIN domain_events e
+              ON e.business_id = g.business_id AND e.payload->>'giftCardId' = g.id::text
+      WHERE g.business_id = $1 AND g.expires_at IS NOT NULL AND g.expires_at < $2::date
+      GROUP BY g.id
+     HAVING COUNT(*) FILTER (WHERE e.event_type = 'promotions.gift_card_expired') = 0
+      ORDER BY g.expires_at, g.code`,
+    [businessId, today],
+  );
+  return rows
+    .map((row) => ({ id: row.id, code: row.code, expiresAt: row.expires_at, balanceRial: Number(row.balance) }))
+    .filter((row) => row.balanceRial > 0);
+}
+
+/**
+ * Issue #764 — writes off the unspent balance of every expired gift card:
+ * Dr 2420 / Cr 4900 «سایر درآمدها», one posting per card. Run by a person
+ * (the gift-card issuer), never by a tick: income recognition is a decision.
+ * Each card is locked and re-checked inside the transaction, and the ledger's
+ * (source, posting_kind) uniqueness is the backstop, so a second run — or two
+ * at once — posts nothing twice.
+ */
+export async function expireGiftCards(
+  client: PoolClient,
+  input: { businessId: string; locationId: string; createdBy?: string | null },
+): Promise<{ cards: number; totalRial: number }> {
+  const today = await branchBusinessDate(client, input.locationId);
+  const candidates = await listExpiredGiftCards(input.businessId, today, client);
+  let cards = 0;
+  let totalRial = 0;
+  for (const candidate of candidates) {
+    await client.query(`SELECT id FROM gift_cards WHERE id = $1 FOR UPDATE`, [candidate.id]);
+    const fresh = (await listExpiredGiftCards(input.businessId, today, client)).find((row) => row.id === candidate.id);
+    if (!fresh) continue;
+    await emitDomainEvent(client, {
+      businessId: input.businessId,
+      locationId: input.locationId,
+      eventType: "promotions.gift_card_expired",
+      payload: { giftCardId: fresh.id, amount: rialText(String(fresh.balanceRial)) },
+      sourceType: "gift_card",
+      sourceId: fresh.id,
+      createdBy: input.createdBy ?? null,
+    });
+    cards += 1;
+    totalRial += fresh.balanceRial;
+  }
+  return { cards, totalRial };
 }
 
 /**

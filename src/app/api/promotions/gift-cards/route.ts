@@ -4,6 +4,9 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { getPool } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { getGiftCardByCode, giftCardBalance, giftCardHistory, issueGiftCard } from "@/lib/promotions-service";
+import { getGrowthSettings } from "@/lib/growth-settings-service";
+import { businessToday } from "@/lib/business-day-service";
+import { isGiftCardExpired } from "@/lib/gift-card-expiry";
 
 /** One card's outstanding value by code, with its issue/redeem history. */
 export const GET = withTenantScope(async (request: NextRequest) => {
@@ -17,11 +20,19 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const card = await getGiftCardByCode(session.businessId, code);
   if (!card) return NextResponse.json({ error: "gift_card_not_found" }, { status: 404 });
 
-  const [balance, history] = await Promise.all([
+  const [balance, history, today] = await Promise.all([
     giftCardBalance(session.businessId, code),
     giftCardHistory(session.businessId, code),
+    card.expiresAt ? businessToday(session.businessId) : Promise.resolve(null),
   ]);
-  return NextResponse.json({ found: true, balance, isActive: card.isActive, history });
+  return NextResponse.json({
+    found: true,
+    balance,
+    isActive: card.isActive,
+    expiresAt: card.expiresAt,
+    expired: today !== null && isGiftCardExpired(card.expiresAt, today),
+    history,
+  });
 });
 
 /** Issues a gift card, posting its value as a liability (2420). */
@@ -43,10 +54,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "missing_fields" }, { status: 400 });
   }
 
+  // Opt-in expiry: a business that never set a validity issues cards that never expire.
+  const { giftCardValidityMonths } = await getGrowthSettings(session.businessId);
+
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
     const result = await issueGiftCard(client, {
+      validityMonths: giftCardValidityMonths,
       businessId: session.businessId,
       locationId: location.id,
       code: body.code,

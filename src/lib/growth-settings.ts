@@ -3,7 +3,7 @@
  *
  * The settings page used to be a second dashboard: counts of programs,
  * campaigns and templates with links back to the screens that own them. It
- * now owns two genuinely app-wide decisions, and only two, because each one is
+ * now owns a few genuinely app-wide decisions, each one
  * read by something real:
  *
  *   - `attributionWindowDays` — how long after a message campaign starts a
@@ -16,16 +16,26 @@
  *     It is a *threshold*, not a hard stop: the promotion engine never refuses
  *     a sale on its account. `null` = no budget.
  *
+ *   - `giftCardValidityMonths` — opt-in gift-card expiry: how long a newly
+ *     issued card stays spendable. Read by the gift-card issue route and the
+ *     expiry sweep (gift-card-expiry.ts). `null` = cards never expire.
+ *
  * Module-specific settings (a loyalty program's rates, a campaign's schedule,
  * a commission rule) stay on their own screens. Framework-free; the service
  * and the form both validate through `parseGrowthSettingsInput`.
  */
 
 import { formatPersianNumber } from "./digits";
+import { GIFT_CARD_VALIDITY_LIMITS } from "./gift-card-expiry";
 
 export interface GrowthSettings {
   attributionWindowDays: number | null;
   discountBudgetRial: number | null;
+  /**
+   * How many months a newly issued gift card stays spendable; null = cards
+   * never expire (the default — expiry is opt-in). See gift-card-expiry.ts.
+   */
+  giftCardValidityMonths: number | null;
 }
 
 /**
@@ -35,6 +45,7 @@ export interface GrowthSettings {
 export const GROWTH_SETTINGS_DEFAULTS: GrowthSettings = {
   attributionWindowDays: null,
   discountBudgetRial: null,
+  giftCardValidityMonths: null,
 };
 
 export const ATTRIBUTION_WINDOW_LIMITS = { min: 1, max: 365 } as const;
@@ -83,6 +94,23 @@ export function parseGrowthSettingsInput(body: unknown): GrowthSettingsParse {
       value.discountBudgetRial = raw;
     } else {
       errors.push("سقف تخفیف باید مبلغی مثبت باشد.");
+    }
+  }
+
+  if ("giftCardValidityMonths" in input) {
+    const raw = input.giftCardValidityMonths;
+    if (raw === null) value.giftCardValidityMonths = null;
+    else if (
+      typeof raw === "number" &&
+      Number.isInteger(raw) &&
+      raw >= GIFT_CARD_VALIDITY_LIMITS.min &&
+      raw <= GIFT_CARD_VALIDITY_LIMITS.max
+    ) {
+      value.giftCardValidityMonths = raw;
+    } else {
+      errors.push(
+        `اعتبار کارت هدیه باید عددی صحیح بین ${formatPersianNumber(GIFT_CARD_VALIDITY_LIMITS.min)} تا ${formatPersianNumber(GIFT_CARD_VALIDITY_LIMITS.max)} ماه باشد.`,
+      );
     }
   }
 
