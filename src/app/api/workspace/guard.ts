@@ -79,6 +79,7 @@ const ERROR_STATUS: Record<string, number> = {
   invalid_position: 400,
   invalid_time: 400,
   dependency_cycle: 409,
+  dependency_unresolved: 409,
   dependency_across_projects: 400,
   end_before_start: 400,
   project_name_required: 400,

@@ -1150,3 +1150,22 @@ describe("pagination and server totals (#761)", () => {
     expect(projects.summary.tasks).toBe(7);
   });
 });
+
+describe("the dependency rule (#761)", () => {
+  it("refuses DONE while a task it waits on is unfinished, and allows it after", async () => {
+    const project = await makeProject();
+    const first = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "پی" }));
+    const second = await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "سقف" }));
+    await inAlpha(() => workspace.addDependency(alpha.businessId, second.id, first.id));
+
+    // Starting it is fine — the board only warns.
+    await inAlpha(() => workspace.updateWorkspaceTask(owner(), second.id, { status: "in_progress" }));
+    await expect(
+      inAlpha(() => workspace.updateWorkspaceTask(owner(), second.id, { status: "done" })),
+    ).rejects.toThrow(/dependency_unresolved/);
+
+    await inAlpha(() => workspace.updateWorkspaceTask(owner(), first.id, { status: "done" }));
+    const done = await inAlpha(() => workspace.updateWorkspaceTask(owner(), second.id, { status: "done" }));
+    expect(done?.status).toBe("done");
+  });
+});
