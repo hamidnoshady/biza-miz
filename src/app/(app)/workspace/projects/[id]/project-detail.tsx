@@ -493,7 +493,11 @@ function FinanceCard({ project, attention }: { project: ProjectDetail; attention
         hint={spent === null ? "نیازمند دسترسی به دفاتر حسابداری" : "از اسناد حسابداری همین پروژه"}
       />
       <KpiCard label="مانده از بودجه" value={remaining === null ? "—" : money.format(remaining)} />
-      <KpiCard label="ارزش قراردادهای فعال" value={money.format(attention?.contractValueRial ?? 0)} />
+      <KpiCard
+        label="ارزش قراردادها"
+        value={money.format(attention?.contractValueRial ?? 0)}
+        hint="فعال و انجام‌شده"
+      />
     </KpiRow>
   );
 }

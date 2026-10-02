@@ -1169,3 +1169,20 @@ describe("the dependency rule (#761)", () => {
     expect(done?.status).toBe("done");
   });
 });
+
+describe("expiring contracts are bounded (#761 review)", () => {
+  it("does not count an active contract whose end date has passed as expiring", async () => {
+    const past = new Date(Date.now() - 10 * 86_400_000).toISOString().slice(0, 10);
+    const soon = new Date(Date.now() + 10 * 86_400_000).toISOString().slice(0, 10);
+    await inAlpha(() =>
+      workspace.createContract(owner(), { title: "گذشته", contractType: "vendor", status: "active", endDate: past }),
+    );
+    await inAlpha(() =>
+      workspace.createContract(owner(), { title: "نزدیک", contractType: "vendor", status: "active", endDate: soon }),
+    );
+    const expiring = await inAlpha(() =>
+      workspace.listContracts(owner(), { status: "all", expiringWithinDays: 30 }),
+    );
+    expect(expiring.map((c) => c.title)).toEqual(["نزدیک"]);
+  });
+});

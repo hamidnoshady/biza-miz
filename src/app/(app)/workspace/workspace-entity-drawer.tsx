@@ -29,6 +29,7 @@ import { api, ErrorBox } from "@/app/dashboard/ui";
 import { useMoney } from "@/components/money/money-context";
 import { workspaceProjectHref, workspaceSectionHref } from "@/lib/app-routes";
 import { formatJalali } from "@/lib/jalali";
+import { toPersianDigits } from "@/lib/digits";
 import {
   CONTRACT_STATUS_LABELS,
   DOCUMENT_STATUS_LABELS,
@@ -44,7 +45,7 @@ import {
 import { workspaceError } from "./workspace-ui";
 import { WorkspaceComments, type WorkspaceComment } from "./workspace-comments";
 import { TaskDrawerBody } from "./task-drawer";
-import { EMPTY_LOOKUPS, type WorkspaceLookups } from "./use-workspace-lookups";
+import { EMPTY_LOOKUPS, useWorkspaceLookups, type WorkspaceLookups } from "./use-workspace-lookups";
 
 export type WorkspaceEntityKind = "project" | "task" | "document" | "contract";
 export interface WorkspaceEntityRef {
@@ -69,9 +70,9 @@ const ENDPOINT: Record<WorkspaceEntityKind, string> = {
 /** Where "open the full record" goes for each kind. */
 export function workspaceEntityHref(ref: WorkspaceEntityRef): string {
   if (ref.kind === "project") return workspaceProjectHref(ref.id);
-  return workspaceSectionHref(
-    ref.kind === "task" ? "tasks" : ref.kind === "document" ? "documents" : "contracts",
-  );
+  const section = ref.kind === "task" ? "tasks" : ref.kind === "document" ? "documents" : "contracts";
+  // `?open=` — the section opens this record, not just its list.
+  return `${workspaceSectionHref(section)}?open=${encodeURIComponent(ref.id)}`;
 }
 
 type Comment = WorkspaceComment;
@@ -200,6 +201,10 @@ function TaskDrawer({
 }) {
   const [title, setTitle] = useState("وظیفه");
   const [comments, setComments] = useState<Comment[] | null>(null);
+  // Opened from the command palette there are no lookups to hand down; an
+  // editable assignee with an empty member list would silently clear it.
+  const fetched = useWorkspaceLookups(lookups === EMPTY_LOOKUPS);
+  const people = lookups === EMPTY_LOOKUPS ? fetched : lookups;
   useEffect(() => {
     api<{ comments?: Comment[] }>(`/api/workspace/tasks/${taskId}`).then(({ ok, data }) => {
       if (ok) setComments(data.comments ?? []);
@@ -212,7 +217,7 @@ function TaskDrawer({
         <SheetTitle className="truncate">{title}</SheetTitle>
       </SheetHeader>
       <div className="flex flex-col gap-4 p-4">
-        <TaskDrawerBody taskId={taskId} lookups={lookups} onChanged={onChanged} onTitle={setTitle} />
+        <TaskDrawerBody taskId={taskId} lookups={people} onChanged={onChanged} onTitle={setTitle} />
         <Link
           href={workspaceEntityHref({ kind: "task", id: taskId })}
           className="inline-flex items-center gap-1 self-start text-sm font-medium text-primary underline-offset-4 hover:underline"
@@ -260,7 +265,7 @@ function Facts({ kind, record }: { kind: WorkspaceEntityKind; record: Record_ })
   } else if (kind === "document") {
     rows.push(
       ["وضعیت", DOCUMENT_STATUS_LABELS[record.status as WorkspaceDocumentStatus] ?? "—"],
-      ["نسخه", String(record.version ?? "—")],
+      ["نسخه", record.version == null ? "—" : toPersianDigits(String(record.version))],
       ["پروژه", text(record.projectName)],
       ["فایل", text(record.fileName)],
     );

@@ -158,7 +158,7 @@ export function WorkspaceCommandBar({
 
       <Button variant="outline" asChild>
         <Link
-          href={`${workspaceSectionHref("approvals")}`}
+          href={`${workspaceSectionHref("approvals")}?mine=true`}
           aria-label={
             waiting ? `${toPersianDigits(String(waiting))} مورد منتظر تصمیم شما` : "تأییدهای منتظر تصمیم شما"
           }

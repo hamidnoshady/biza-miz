@@ -74,6 +74,7 @@ import {
   LoadMoreFooter,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import type { WorkspaceIntent } from "./workspace-routes";
 import { WorkspaceEntityDrawer } from "./workspace-entity-drawer";
 
 const WORK_GROUP_LABELS: Record<DeadlineTone, string> = {
@@ -119,18 +120,15 @@ const VIEW_TABS = [
 
 export function TasksSection({
   lookups,
-  initialCreating = false,
-  createProjectId,
+  intent,
   canManage,
   canContribute = canManage,
   initialMine = false,
   projectId,
 }: {
   lookups: WorkspaceLookups;
-  /** From `?create=1` — the command bar's «+ ایجاد» opens the create dialog. */
-  initialCreating?: boolean;
-  /** From `?project=` — the create dialog preselects that project. */
-  createProjectId?: string;
+  /** A consumed URL intent — see `WorkspaceIntent`. */
+  intent?: WorkspaceIntent;
   canManage: boolean;
   /**
    * May work tasks (status, checklist) without re-scoping them — a
@@ -145,8 +143,13 @@ export function TasksSection({
   const [mine, setMine] = useState(initialMine);
   const [openOnly, setOpenOnly] = useState(true);
   const [search, setSearch] = useState("");
-  const [creating, setCreating] = useState(initialCreating);
+  const [creating, setCreating] = useState(false);
   const [drawer, setDrawer] = useState<string | null>(null);
+  useEffect(() => {
+    if (intent?.create) setCreating(true);
+    // `?open=<id>` — the drawer's «باز کردن فهرست وظایف» lands on this record.
+    if (intent?.openId) setDrawer(intent.openId);
+  }, [intent]);
 
   const query = useMemo(() => {
     const params = new URLSearchParams();
@@ -252,14 +255,19 @@ export function TasksSection({
             placeholder="عنوان وظیفه…"
             onClear={() => setSearch("")}
           />
-          <FilterChipRow label="فیلتر وظایف">
-            <FilterChip selected={mine} onClick={() => setMine((prev) => !prev)}>
-              واگذارشده به من
-            </FilterChip>
-            <FilterChip selected={openOnly} onClick={() => setOpenOnly((prev) => !prev)}>
-              فقط باز
-            </FilterChip>
-          </FilterChipRow>
+          {/* «کار من» already means "mine, open" — its chips would show a
+              filter that is not the one applied, so they only appear in the
+              other views. */}
+          {view !== "work" ? (
+            <FilterChipRow label="فیلتر وظایف">
+              <FilterChip selected={mine} onClick={() => setMine((prev) => !prev)}>
+                واگذارشده به من
+              </FilterChip>
+              <FilterChip selected={openOnly} onClick={() => setOpenOnly((prev) => !prev)}>
+                فقط باز
+              </FilterChip>
+            </FilterChipRow>
+          ) : null}
         </div>
 
         {tasks === null ? (
@@ -521,7 +529,7 @@ export function TasksSection({
       {creating ? (
         <TaskDialog
           lookups={lookups}
-          projectId={projectId ?? createProjectId}
+          projectId={projectId ?? intent?.projectId}
           onClose={() => setCreating(false)}
           onSaved={() => {
             setCreating(false);
