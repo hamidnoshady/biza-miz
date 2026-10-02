@@ -1179,6 +1179,7 @@ export async function runMediaBillingTick(now: Date = new Date()): Promise<numbe
             unit: "byte_hour",
             resource: "media_library",
             resourceId: holder.business_id,
+            ratedAmountRial: breakdown.totalRial,
             dimensions: { day, storedBytes: bytes, flatRial: breakdown.flatRial, perGbRial: breakdown.perGbRial },
           }).catch((error) => {
             console.error("media usage event failed:", holder.business_id, error);

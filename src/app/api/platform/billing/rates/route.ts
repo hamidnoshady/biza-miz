@@ -4,6 +4,7 @@ import { getMediaConfig, saveMediaTariff } from "@/lib/media-service";
 import { maskMediaConfig, validateMediaTariffInput } from "@/lib/media";
 import { getPublicMessageConfig, saveMessageRates, MessageConfigError } from "@/lib/messaging-billing";
 import { getAiCostingConfig, saveAiCostingConfig } from "@/lib/ai-gateway-service";
+import { parseSafeIntInput } from "@/lib/platform-money";
 
 /**
  * The ONE commercial rates catalogue (migration 0176): everything a business
@@ -43,8 +44,8 @@ export const GET = withPlatformScope(async () => {
 
 function parseNonNegativeInt(value: unknown): number | undefined {
   if (value === undefined || value === null || value === "") return undefined;
-  const n = Math.floor(Number(value));
-  return Number.isSafeInteger(n) && n >= 0 ? n : NaN;
+  const parsed = parseSafeIntInput(value, { min: 0 });
+  return parsed !== null ? parsed : NaN;
 }
 
 export const PUT = withPlatformScope(async (req: Request) => {

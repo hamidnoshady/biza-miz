@@ -9,20 +9,22 @@
  * The new flow (rebuild Parts 2 & 3):
  *
  *   gateAiTurn()      before the request — refuse when the wallet cannot
- *                     afford AI (blocks the next request when in debt).
+ *                     afford AI (blocks the next request when in debt or when
+ *                     available credit + allowance is below `maxTurnRial`, the
+ *                     pre-request minimum required credit threshold).
  *   settleAiTurn()    after the request  — compute the REAL cost from the
  *                     gateway's reported USD (LiteLLM), or the token-rate
  *                     fallback when the gateway did not price the turn, then
- *                     debit the wallet through wallet-service.
+ *                     debit the wallet through wallet-service. Never discards
+ *                     already-incurred provider costs: any shortfall beyond
+ *                     allowance + wallet balance is booked as AI debt.
  *
  * Cost policy:
  *   - LiteLLM is the source of truth for provider/model cost. When the gateway
- *     reports a per-turn USD figure and gateway costing is on, that figure
- *     (converted to Rial + the platform's optional commercial margin) is the
- *     charge — the application does NOT re-derive what OpenAI/Anthropic charged.
- *   - When the gateway did not report a cost (direct vendor, costing off, or a
- *     provider that omitted it), the platform's per-token Rial rate is the
- *     documented fallback, exactly as before.
+ *     reports a valid non-negative USD figure (including `0` for free/cached
+ *     turns) and gateway costing is on, that figure is authoritative.
+ *   - When the gateway did not report a cost (`null`/`undefined`/malformed, or
+ *     gateway costing off), the platform's per-token Rial rate is the fallback.
  */
 
 import { randomUUID } from "node:crypto";
@@ -47,7 +49,13 @@ export class AiWalletInsufficientError extends Error {
 
 /** The pricing inputs a turn carries from its resolved AiConfig. */
 export interface AiTurnPricingConfig {
-  /** Per-turn ceiling, reused as the minimum-balance affordability guard. */
+  /**
+   * Pre-request minimum required credit threshold (Rial). A turn is only
+   * admitted when `debtRial === 0` and `walletBalanceRial + allowanceRemainingRial >= maxTurnRial`.
+   * Post-turn settlement always records the full actual cost (never discarding
+   * incurred provider cost) and flags `ceilingExceeded` if actual cost exceeded
+   * this pre-request threshold.
+   */
   maxTurnRial: number;
   inputTokenRialPerMillion: number;
   outputTokenRialPerMillion: number;
@@ -68,10 +76,16 @@ export interface AiTurnAttribution {
   metadata?: Record<string, unknown>;
 }
 
+export interface SettledAiTurnResult extends AiSettlementResult {
+  configuredMaxTurnRial: number;
+  ceilingExceeded: boolean;
+}
+
 /**
  * Pre-request gate. Throws `AiWalletInsufficientError` when the business is in
- * AI debt or its balance is below the per-turn ceiling. A zero ceiling means
- * "no minimum" — only outstanding debt blocks.
+ * AI debt or its usable credit (wallet + remaining monthly plan allowance) is
+ * below the configured pre-request threshold (`maxTurnRial`). A zero threshold
+ * means only outstanding debt blocks.
  */
 export async function gateAiTurn(
   businessId: string,
@@ -92,7 +106,8 @@ export function newAiRequestId(): string {
 /**
  * Settle a finished turn against the wallet. `costUsd` is the gateway's
  * reported figure (or null); `usage` is the token count used for the fallback.
- * Returns the wallet settlement result (what was charged, any new debt).
+ * Returns the wallet settlement result (what was charged, any new debt, and
+ * whether the actual cost exceeded the pre-request `maxTurnRial` threshold).
  */
 export async function settleAiTurn(input: {
   businessId: string;
@@ -103,10 +118,12 @@ export async function settleAiTurn(input: {
   litellmCallId?: string | null;
   cacheHit?: boolean;
   attribution?: AiTurnAttribution;
-}): Promise<AiSettlementResult> {
+}): Promise<SettledAiTurnResult> {
   const attribution = input.attribution ?? {};
 
-  // Prefer the gateway's real cost; fall back to the platform token rates.
+  // Prefer the gateway's real cost (including valid 0 for cached/free responses);
+  // fall back to platform token rates only when costUsd is missing/malformed or
+  // gateway costing is off.
   const gatewayPricing = await resolveGatewayTurnPricing(
     input.costUsd,
     input.config.revenueMarginPercent,
@@ -118,7 +135,7 @@ export async function settleAiTurn(input: {
   if (gatewayPricing) {
     chargedRial = Math.max(0, Math.ceil(gatewayPricing.chargedRial));
     providerCostRial = Math.max(0, Math.ceil(gatewayPricing.costRial));
-    pricedBy = "gateway";
+    pricedBy = chargedRial === 0 ? "free" : "gateway";
   } else {
     chargedRial = calculateAiUsageCostRial(input.usage, {
       inputTokenRialPerMillion: input.config.inputTokenRialPerMillion,
@@ -128,12 +145,15 @@ export async function settleAiTurn(input: {
     pricedBy = chargedRial > 0 ? "token_rate" : "free";
   }
 
+  const configuredMaxTurnRial = Math.max(0, Math.floor(input.config.maxTurnRial));
+  const ceilingExceeded = configuredMaxTurnRial > 0 && chargedRial > configuredMaxTurnRial;
+
   const settlement = await settleAiWalletCharge({
     businessId: input.businessId,
     requestId: input.requestId,
     chargedRial,
     providerCostRial,
-    costUsd: gatewayPricing ? input.costUsd ?? null : null,
+    costUsd: gatewayPricing ? gatewayPricing.costUsd : null,
     pricedBy,
     litellmCallId: input.litellmCallId ?? null,
     cacheHit: input.cacheHit ?? false,
@@ -149,7 +169,10 @@ export async function settleAiTurn(input: {
     locationId: attribution.locationId,
     userId: attribution.userId,
     note: attribution.note,
-    metadata: attribution.metadata,
+    metadata: {
+      ...attribution.metadata,
+      ...(configuredMaxTurnRial > 0 ? { configuredMaxTurnRial, ceilingExceeded } : {}),
+    },
   });
   if (!settlement.duplicate) {
     try {
@@ -174,6 +197,13 @@ export async function settleAiTurn(input: {
           unit: "token",
           resource: "ai_turn",
           resourceId: input.requestId,
+          ratedAmountRial:
+            pricedBy === "token_rate"
+              ? Math.ceil(
+                  (input.usage.inputTokens * Math.max(0, input.config.inputTokenRialPerMillion)) /
+                    1_000_000,
+                )
+              : 0,
         });
       }
       if (input.usage.outputTokens > 0) {
@@ -186,11 +216,22 @@ export async function settleAiTurn(input: {
           unit: "token",
           resource: "ai_turn",
           resourceId: input.requestId,
+          ratedAmountRial:
+            pricedBy === "token_rate"
+              ? Math.ceil(
+                  (input.usage.outputTokens * Math.max(0, input.config.outputTokenRialPerMillion)) /
+                    1_000_000,
+                )
+              : 0,
         });
       }
     } catch (error) {
       console.error("ai usage ledger failed:", input.requestId, error);
     }
   }
-  return settlement;
+  return {
+    ...settlement,
+    configuredMaxTurnRial,
+    ceilingExceeded,
+  };
 }

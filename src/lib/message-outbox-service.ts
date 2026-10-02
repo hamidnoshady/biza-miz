@@ -155,7 +155,8 @@ export async function runBusinessMessageDrain(
         [row.id, businessId, result.providerMessageId],
       );
       sent += 1;
-      sentCost.total += sendResultCost(result, row.channel, row.body, config.rate);
+      const rowCost = sendResultCost(result, row.channel, row.body, config.rate);
+      sentCost.total += rowCost;
       const sms = row.channel === "sms";
       await appendUsageEvent({
         eventId: String(row.id),
@@ -166,6 +167,7 @@ export async function runBusinessMessageDrain(
         unit: sms ? "segment" : "send",
         resource: "message_outbox",
         resourceId: String(row.id),
+        ratedAmountRial: rowCost,
       }).catch((error) => {
         console.error("message usage event failed:", row.id, error);
       });
