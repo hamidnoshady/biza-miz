@@ -8,10 +8,8 @@ import { GatewayError, gatewayErrorMessage } from "@/lib/payment-gateway";
 /**
  * Gateway return (Zarinpal redirects the browser here with ?Authority&Status;
  * our callback adds ?payment=<uuid>). The return page calls this route; it is
- * idempotent — verifying an already-settled payment returns its record.
- *
- * After a verified plan/addon purchase the matching entitlement is recorded so
- * the feature unlocks immediately.
+ * idempotent — verifying an already-settled payment returns its record, and
+ * retries any incomplete post-settlement fulfilment.
  */
 export const POST = withTenantScope(async (req: Request) => {
   const { session, error } = await requirePermission(PERMISSIONS.billingManage);
@@ -35,29 +33,26 @@ export const POST = withTenantScope(async (req: Request) => {
   }
 
   try {
-    // Already verified (user refreshed the return page) — just report state.
-    if (existing.status !== "verified") {
-      await verifyPayment({ paymentId, authority, status });
-    }
-    const payment = await getPaymentById(paymentId);
+    await verifyPayment({ paymentId, authority, status });
+    let payment = await getPaymentById(paymentId);
     if (!payment) return NextResponse.json({ error: "payment_not_found" }, { status: 404 });
 
-    // Grant the entitlement a plan/addon purchase paid for — through the one
-    // shared fulfilment path (the super-admin manual approval uses the same
-    // function), so activation logic can never drift between the two.
-    if (payment.status === "verified" && payment.purpose !== "top_up") {
+    if (payment.status === "verified" && payment.fulfilmentStatus !== "succeeded") {
       await fulfilPurchasedPayment({
+        id: payment.id,
         businessId: session.businessId,
         purpose: payment.purpose,
         planKey: payment.planKey,
         featureKey: payment.featureKey,
       });
+      payment = (await getPaymentById(paymentId)) ?? payment;
     }
 
     return NextResponse.json({
       payment: {
         id: payment.id,
         status: payment.status,
+        fulfilmentStatus: payment.fulfilmentStatus,
         amountRial: payment.amountRial,
         creditRial: payment.creditRial,
         gatewayRef: payment.gatewayRef,
@@ -66,9 +61,23 @@ export const POST = withTenantScope(async (req: Request) => {
     });
   } catch (err) {
     if (err instanceof GatewayError) {
+      const clientErrors = new Set([
+        "invalid_payment_gateway",
+        "authority_mismatch",
+        "duplicate_gateway_ref",
+        "gateway_ref_mismatch",
+        "payment_not_pending",
+        "amount_mismatch",
+      ]);
+      const httpStatus =
+        err.code === "payment_not_found"
+          ? 404
+          : clientErrors.has(err.code)
+            ? 400
+            : 502;
       return NextResponse.json(
         { error: err.code, message: gatewayErrorMessage(err.code) },
-        { status: 502 },
+        { status: httpStatus },
       );
     }
     throw err;

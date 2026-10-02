@@ -39,7 +39,8 @@
     "db:encrypt-fields": "tsx scripts/encrypt-fields.ts",
     "db:encrypt-ai-secrets": "tsx scripts/encrypt-ai-gateway-secrets.ts",
     "inventory:cutover": "tsx scripts/inventory-cutover.ts",
-    "deployment:convert-hybrid": "tsx scripts/convert-local-to-hybrid.ts"
+    "deployment:convert-hybrid": "tsx scripts/convert-local-to-hybrid.ts",
+    "platform-company:billing-backfill": "tsx scripts/platform-company-billing-backfill.ts"
   },
   "dependencies": {
     "@gsap/react": "^2.1.2",
@@ -84,6 +85,7 @@
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.7",
+    "@peculiar/x509": "^2.1.0",
     "@tailwindcss/postcss": "^4.1.0",
     "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",
@@ -101,9 +103,9 @@
     "eslint": "^9.39.5",
     "eslint-config-next": "^15.5.25",
     "jsdom": "^27.4.0",
-    "node-forge": "^1.4.0",
     "pdfkit": "^0.20.1",
     "playwright": "1.56.0",
+    "reflect-metadata": "^0.2.2",
     "tailwindcss": "^4.1.0",
     "typescript": "^5.9.3",
     "vitest": "^3.2.7"

@@ -354,6 +354,10 @@ export interface ProjectInput {
   partyId?: string | null;
   ownerUserId?: string | null;
   budgetRial?: unknown;
+  /** Server-derived idempotency/source fields; never accepted from generic browser forms. */
+  creationKey?: string | null;
+  sourceDealId?: string | null;
+  forecastRevenueRial?: unknown;
 }
 
 /**
@@ -376,6 +380,7 @@ export async function createWorkspaceProject(
   if (startDate && endDate && endDate < startDate) throw new WorkspaceError("end_before_start");
   const tags = normalizeTags(input.tags);
   const budgetRial = numberOrNull(input.budgetRial, "invalid_project_budget");
+  const forecastRevenueRial = numberOrNull(input.forecastRevenueRial, "invalid_project_budget");
   const templateKey = input.templateKey?.trim() || null;
 
   await assertPartyBelongs(owner.businessId, input.partyId ?? null);
@@ -384,21 +389,29 @@ export async function createWorkspaceProject(
   const template = templateKey ? await resolveTemplate(owner.businessId, templateKey) : null;
   if (templateKey && !template) throw new WorkspaceError("template_not_found");
 
-  const { rows } = await query<{ id: string }>(
+  const { rows } = await query<{ id: string; inserted: boolean }>(
     `INSERT INTO ai_projects
        (business_id, name, instructions, created_by, description, status, priority,
         project_type, template_key, start_date, end_date, tags, party_id,
-        owner_user_id, budget_rial)
-     VALUES ($1, $2, '', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-     RETURNING id`,
+        owner_user_id, budget_rial, creation_key, source_deal_id, forecast_revenue_rial)
+     VALUES ($1, $2, '', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+     ON CONFLICT (business_id, creation_key) WHERE creation_key IS NOT NULL
+       DO UPDATE SET name = ai_projects.name
+     RETURNING id, (xmax = 0) AS inserted`,
     [
       owner.businessId, name, owner.actorUserId, description, status, priority,
       input.projectType?.trim() || template?.projectType || null, templateKey,
       startDate, endDate, tags, input.partyId ?? null,
       input.ownerUserId ?? owner.actorUserId, budgetRial,
+      input.creationKey?.trim() || null, input.sourceDealId ?? null, forecastRevenueRial,
     ],
   );
   const projectId = rows[0].id;
+  if (!rows[0].inserted) {
+    const existing = await getWorkspaceProject(owner.businessId, projectId);
+    if (!existing) throw new WorkspaceError("project_not_found");
+    return existing;
+  }
 
   // The creator is the project's owner-member. Without this the creator could
   // not reopen what they just made unless they also held workspace.manage.

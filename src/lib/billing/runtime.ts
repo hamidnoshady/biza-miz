@@ -9,7 +9,16 @@ import { getPool, query, withTenant, withoutTenantScope } from "../db";
 import { encryptSecret, resolveEncryptionKey } from "../integrations/secrets";
 import { meterByKey } from "./catalog/meters";
 import { billingLog } from "./observability";
-import { selectPriceVersion, type PriceVersionPoint } from "./rating/engine";
+import {
+  calculateCommercialQuote,
+  rateQuantity,
+  selectPriceVersion,
+  type CommercialQuoteAddonLine,
+  type CommercialQuoteResult,
+  type PriceVersionPoint,
+} from "./rating/engine";
+import { evaluateSpend, type SpendEvaluation, type SpendLimitAction } from "./policy/spend";
+import { tehranMonthWindow } from "../ai-plan-allowance";
 import { verifyBillingServiceRequest as verifyBillingServiceRequestV1 } from "./auth/verify-service-request";
 import type { BillingServiceScope } from "./auth/sign";
 import { parseUsageBatchEnvelope, parseUsageEvent, type UsageEventV1 } from "./contract/v1";
@@ -105,16 +114,46 @@ export async function appendUsageEvent(input: AppendUsageInput, client?: PoolCli
       );
       return { status: "duplicate" as const, id: existing.rows[0]?.id ?? null };
     }
+    const occurredAtIso = input.occurredAt ?? new Date().toISOString();
+    const activePrice =
+      input.priceVersionId != null
+        ? null
+        : await priceAtDb(db, "meter", input.meterKey, occurredAtIso);
+    const resolvedPriceVersionId = input.priceVersionId ?? activePrice?.id ?? null;
+
     if (input.ratedAmountRial != null) {
       await db.query(
         `INSERT INTO billing_usage_ratings
            (usage_event_id, business_id, price_version_id, rated_amount_rial, allowance_quantity, overage_quantity)
          VALUES ($1,$2,$3,$4,0,$5)
          ON CONFLICT (usage_event_id) DO NOTHING`,
-        [rows[0].id, input.businessId, input.priceVersionId ?? null, input.ratedAmountRial, input.quantity],
+        [rows[0].id, input.businessId, resolvedPriceVersionId, Math.max(0, Math.floor(input.ratedAmountRial)), input.quantity],
+      );
+    } else if (activePrice) {
+      const rated = await rateMeterEventDb(db, {
+        businessId: input.businessId,
+        meterKey: input.meterKey,
+        eventId: rows[0].id,
+        quantity: input.quantity,
+        occurredAtIso,
+        price: activePrice,
+      });
+      await db.query(
+        `INSERT INTO billing_usage_ratings
+           (usage_event_id, business_id, price_version_id, rated_amount_rial, allowance_quantity, overage_quantity)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (usage_event_id) DO NOTHING`,
+        [
+          rows[0].id,
+          input.businessId,
+          activePrice.id,
+          rated.amountRial,
+          rated.includedConsumed,
+          rated.overageQuantity,
+        ],
       );
     }
-    await refreshDailyRollup(db, input.businessId, input.meterKey, input.occurredAt ?? new Date().toISOString());
+    await refreshDailyRollup(db, input.businessId, input.meterKey, occurredAtIso);
     return { status: "accepted" as const, id: rows[0].id };
   };
   if (client) return run(client as unknown as Sql);
@@ -161,8 +200,12 @@ async function refreshDailyRollup(
   );
 }
 
-export async function listEffectivePrices(targetType: string, targetKey: string): Promise<StoredPriceVersion[]> {
-  const { rows } = await query<{
+export async function listEffectivePrices(
+  targetType: string,
+  targetKey: string,
+  db: Sql = { query },
+): Promise<StoredPriceVersion[]> {
+  const { rows } = await db.query<{
     id: string;
     target_type: string;
     target_key: string;
@@ -202,6 +245,89 @@ export async function listEffectivePrices(targetType: string, targetKey: string)
 export async function priceAt(targetType: string, targetKey: string, atIso: string): Promise<StoredPriceVersion | null> {
   const versions = await listEffectivePrices(targetType, targetKey);
   return selectPriceVersion(versions, atIso);
+}
+
+async function priceAtDb(
+  db: Sql,
+  targetType: string,
+  targetKey: string,
+  atIso: string,
+): Promise<StoredPriceVersion | null> {
+  const versions = await listEffectivePrices(targetType, targetKey, db);
+  return selectPriceVersion(versions, atIso);
+}
+
+async function rateMeterEventDb(
+  db: Sql,
+  input: {
+    businessId: string;
+    meterKey: string;
+    eventId: string;
+    quantity: number;
+    occurredAtIso: string;
+    price: StoredPriceVersion;
+  },
+): Promise<{ includedConsumed: number; overageQuantity: number; amountRial: number }> {
+  const window = tehranMonthWindow(new Date(input.occurredAtIso));
+  const { rows } = await db.query<{
+    included_quantity: string | null;
+    overage_enabled: boolean | null;
+    hard_limit: string | null;
+    used_before: string;
+    rounding: string | null;
+  }>(
+    `SELECT a.included_quantity::text AS included_quantity,
+            a.overage_enabled,
+            a.hard_limit::text AS hard_limit,
+            COALESCE((
+              SELECT SUM(e.quantity)
+                FROM billing_usage_events e
+               WHERE e.business_id = $1
+                 AND e.meter_key = $2
+                 AND e.id <> $3
+                 AND e.occurred_at >= $4::timestamptz
+                 AND e.occurred_at < $5::timestamptz
+            ), 0)::text AS used_before,
+            cs.rounding
+       FROM businesses b
+       LEFT JOIN billing_plan_meter_allowances a
+              ON a.plan_key = b.plan AND a.meter_key = $2
+       LEFT JOIN billing_commercial_settings cs ON cs.id = true
+      WHERE b.id = $1`,
+    [
+      input.businessId,
+      input.meterKey,
+      input.eventId,
+      window.startUtc.toISOString(),
+      window.nextStartUtc.toISOString(),
+    ],
+  );
+  const row = rows[0];
+  const includedTotal = row?.included_quantity == null ? null : Number(row.included_quantity);
+  const usedBefore = Number(row?.used_before ?? 0);
+  const includedRemaining =
+    includedTotal == null ? null : Math.max(0, includedTotal - usedBefore);
+  const hardLimitTotal = row?.hard_limit == null ? null : Number(row.hard_limit);
+  const hardLimitRemaining =
+    hardLimitTotal == null ? null : Math.max(0, hardLimitTotal - usedBefore);
+  const rounding = row?.rounding === "floor" ? "floor" : "ceil";
+
+  const rated = rateQuantity({
+    quantity: Math.max(0, Math.floor(input.quantity)),
+    includedRemaining,
+    overageEnabled: row?.overage_enabled ?? true,
+    hardLimit: hardLimitRemaining,
+    price: {
+      unitAmountRial: input.price.unitAmountRial,
+      unitSize: input.price.unitSize,
+    },
+    rounding,
+  });
+  return {
+    includedConsumed: rated.includedConsumed,
+    overageQuantity: rated.overageQuantity,
+    amountRial: rated.amountRial,
+  };
 }
 
 /**
@@ -532,34 +658,115 @@ export async function readEntitlementProjection(siteId: string): Promise<Entitle
 // Spend + vendor cost + customer usage
 // ---------------------------------------------------------------------------
 
-export async function getSpendPolicy(businessId: string): Promise<{
+export interface BusinessSpendPolicyRecord {
+  businessId: string;
+  businessName?: string;
   monthlyBudgetRial: number | null;
   thresholds: number[];
-  actionAtLimit: "continue" | "warn_only" | "block_noncritical" | "throttle_noncritical";
-} | null> {
+  actionAtLimit: SpendLimitAction;
+  lastWarnedPeriod?: string | null;
+  lastWarningThreshold: number | null;
+  lastWarningAt: string | null;
+  throttledAt: string | null;
+}
+
+export async function getSpendPolicy(businessId: string): Promise<BusinessSpendPolicyRecord | null> {
   const { rows } = await query<{
+    business_id: string;
     monthly_budget_rial: string | null;
     thresholds: number[];
-    action_at_limit: "continue" | "warn_only" | "block_noncritical" | "throttle_noncritical";
+    action_at_limit: SpendLimitAction;
+    last_warned_period: string | null;
+    last_warning_threshold: number | null;
+    last_warning_at: Date | string | null;
+    throttled_at: Date | string | null;
   }>(
-    `SELECT monthly_budget_rial, thresholds, action_at_limit
+    `SELECT business_id, monthly_budget_rial, thresholds, action_at_limit,
+            last_warned_period, last_warning_threshold, last_warning_at, throttled_at
        FROM business_spend_policies WHERE business_id = $1`,
     [businessId],
   );
   const row = rows[0];
   if (!row) return null;
   return {
+    businessId: row.business_id,
     monthlyBudgetRial: row.monthly_budget_rial == null ? null : Number(row.monthly_budget_rial),
     thresholds: row.thresholds ?? [50, 75, 90, 100],
     actionAtLimit: row.action_at_limit,
+    lastWarnedPeriod: row.last_warned_period ?? null,
+    lastWarningThreshold: row.last_warning_threshold ?? null,
+    lastWarningAt: row.last_warning_at
+      ? row.last_warning_at instanceof Date
+        ? row.last_warning_at.toISOString()
+        : new Date(row.last_warning_at).toISOString()
+      : null,
+    throttledAt: row.throttled_at
+      ? row.throttled_at instanceof Date
+        ? row.throttled_at.toISOString()
+        : new Date(row.throttled_at).toISOString()
+      : null,
   };
+}
+
+export async function listSpendPolicies(): Promise<
+  Array<BusinessSpendPolicyRecord & { spentRial: number; evaluation: SpendEvaluation }>
+> {
+  const { rows } = await query<{
+    business_id: string;
+    business_name: string;
+    monthly_budget_rial: string | null;
+    thresholds: number[];
+    action_at_limit: SpendLimitAction;
+    last_warned_period: string | null;
+    last_warning_threshold: number | null;
+    last_warning_at: Date | string | null;
+    throttled_at: Date | string | null;
+  }>(
+    `SELECT p.business_id, b.name AS business_name, p.monthly_budget_rial, p.thresholds,
+            p.action_at_limit, p.last_warned_period, p.last_warning_threshold, p.last_warning_at, p.throttled_at
+       FROM business_spend_policies p
+       JOIN businesses b ON b.id = p.business_id
+      ORDER BY p.updated_at DESC`,
+  );
+  const results: Array<BusinessSpendPolicyRecord & { spentRial: number; evaluation: SpendEvaluation }> = [];
+  for (const row of rows) {
+    const spentRial = await monthSpendRial(row.business_id);
+    const policy: BusinessSpendPolicyRecord = {
+      businessId: row.business_id,
+      businessName: row.business_name,
+      monthlyBudgetRial: row.monthly_budget_rial == null ? null : Number(row.monthly_budget_rial),
+      thresholds: row.thresholds ?? [50, 75, 90, 100],
+      actionAtLimit: row.action_at_limit,
+      lastWarnedPeriod: row.last_warned_period ?? null,
+      lastWarningThreshold: row.last_warning_threshold ?? null,
+      lastWarningAt: row.last_warning_at
+        ? row.last_warning_at instanceof Date
+          ? row.last_warning_at.toISOString()
+          : new Date(row.last_warning_at).toISOString()
+        : null,
+      throttledAt: row.throttled_at
+        ? row.throttled_at instanceof Date
+          ? row.throttled_at.toISOString()
+          : new Date(row.throttled_at).toISOString()
+        : null,
+    };
+    const evaluation = evaluateSpend({
+      spentRial,
+      budgetRial: policy.monthlyBudgetRial,
+      thresholds: policy.thresholds,
+      action: policy.actionAtLimit,
+      critical: false,
+    });
+    results.push({ ...policy, spentRial, evaluation });
+  }
+  return results;
 }
 
 export async function saveSpendPolicy(input: {
   businessId: string;
   monthlyBudgetRial: number | null;
   thresholds?: number[];
-  actionAtLimit: "continue" | "warn_only" | "block_noncritical" | "throttle_noncritical";
+  actionAtLimit: SpendLimitAction;
 }): Promise<void> {
   const thresholds = input.thresholds ?? [50, 75, 90, 100];
   await query(
@@ -569,22 +776,245 @@ export async function saveSpendPolicy(input: {
        SET monthly_budget_rial = EXCLUDED.monthly_budget_rial,
            thresholds = EXCLUDED.thresholds,
            action_at_limit = EXCLUDED.action_at_limit,
+           throttled_at = CASE
+             WHEN EXCLUDED.action_at_limit = 'throttle_noncritical' THEN business_spend_policies.throttled_at
+             ELSE NULL
+           END,
            updated_at = now()`,
     [input.businessId, input.monthlyBudgetRial, thresholds, input.actionAtLimit],
   );
   billingLog("billing.spend.policy", { businessId: input.businessId, action: input.actionAtLimit });
 }
 
-export async function monthSpendRial(businessId: string, now: Date = new Date()): Promise<number> {
-  const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-01`;
-  const { rows } = await query<{ spent: string }>(
-    `SELECT COALESCE(SUM(rated_amount_rial), 0)::text AS spent
-       FROM billing_usage_ratings r
-       JOIN billing_usage_events e ON e.id = r.usage_event_id
-      WHERE r.business_id = $1 AND e.occurred_at >= $2::date`,
-    [businessId, month],
+export interface MonthlySpendBreakdown {
+  periodMonth: string;
+  walletUsageDebitsRial: number;
+  spendRefundsRial: number;
+  activeReservationsRial: number;
+  allowanceUsedRial: number;
+  aiDebtIncurredRial: number;
+  externalRatedUsageRial: number;
+  totalSpendRial: number;
+}
+
+export async function computeBusinessMonthlySpend(
+  businessId: string,
+  now: Date = new Date(),
+): Promise<MonthlySpendBreakdown> {
+  const window = tehranMonthWindow(now);
+  const startIso = window.startUtc.toISOString();
+  const nextStartIso = window.nextStartUtc.toISOString();
+
+  const { rows } = await query<{
+    wallet_debits_rial: string;
+    spend_refunds_rial: string;
+    active_reservations_rial: string;
+    allowance_used_rial: string;
+    ai_debt_incurred_rial: string;
+    external_rated_rial: string;
+  }>(
+    `SELECT
+       COALESCE((
+         SELECT SUM(amount_rial)
+           FROM wallet_ledger
+          WHERE business_id = $1
+            AND direction = 'debit'
+            AND kind <> 'admin_adjust'
+            AND COALESCE(metadata->>'phase', '') <> 'reserved'
+            AND COALESCE((metadata->>'aiDebtPaydown')::boolean, false) = false
+            AND created_at >= $2::timestamptz
+            AND created_at < $3::timestamptz
+       ), 0)::text AS wallet_debits_rial,
+       COALESCE((
+         SELECT SUM(amount_rial)
+           FROM wallet_ledger
+          WHERE business_id = $1
+            AND direction = 'credit'
+            AND kind = 'refund'
+            AND COALESCE((metadata->>'reversesSpend')::boolean, true) = true
+            AND created_at >= $2::timestamptz
+            AND created_at < $3::timestamptz
+       ), 0)::text AS spend_refunds_rial,
+       COALESCE((
+         SELECT SUM(amount_rial)
+           FROM wallet_ledger
+          WHERE business_id = $1
+            AND direction = 'debit'
+            AND COALESCE(metadata->>'phase', '') = 'reserved'
+            AND created_at >= $2::timestamptz
+            AND created_at < $3::timestamptz
+       ), 0)::text AS active_reservations_rial,
+       COALESCE((
+         SELECT SUM(used_rial)
+           FROM ai_plan_allowance_usage
+          WHERE business_id = $1
+            AND period_month = $4
+       ), 0)::text AS allowance_used_rial,
+       GREATEST(
+         COALESCE((
+           SELECT SUM(debt_rial)
+             FROM ai_wallet_settlements
+            WHERE business_id = $1
+              AND created_at >= $2::timestamptz
+              AND created_at < $3::timestamptz
+         ), 0),
+         COALESCE((
+           SELECT debt_rial
+             FROM ai_wallet_debt
+            WHERE business_id = $1
+              AND updated_at >= $2::timestamptz
+              AND updated_at < $3::timestamptz
+         ), 0)
+       )::text AS ai_debt_incurred_rial,
+       COALESCE((
+         SELECT SUM(r.rated_amount_rial)
+           FROM billing_usage_ratings r
+           JOIN billing_usage_events e ON e.id = r.usage_event_id
+          WHERE r.business_id = $1
+            AND e.occurred_at >= $2::timestamptz
+            AND e.occurred_at < $3::timestamptz
+            AND e.source NOT IN ('ai', 'media', 'messaging', 'ai_wallet_settlement', 'media_billing', 'message_outbox')
+            AND COALESCE((e.dimensions->>'walletBacked')::boolean, false) = false
+       ), 0)::text AS external_rated_rial`,
+    [businessId, startIso, nextStartIso, window.periodMonth],
   );
-  return Number(rows[0]?.spent ?? 0);
+
+  const row = rows[0];
+  const walletUsageDebitsRial = Number(row?.wallet_debits_rial ?? 0);
+  const spendRefundsRial = Number(row?.spend_refunds_rial ?? 0);
+  const activeReservationsRial = Number(row?.active_reservations_rial ?? 0);
+  const allowanceUsedRial = Number(row?.allowance_used_rial ?? 0);
+  const aiDebtIncurredRial = Number(row?.ai_debt_incurred_rial ?? 0);
+  const externalRatedUsageRial = Number(row?.external_rated_rial ?? 0);
+  const totalSpendRial = Math.max(
+    0,
+    walletUsageDebitsRial -
+      spendRefundsRial +
+      activeReservationsRial +
+      allowanceUsedRial +
+      aiDebtIncurredRial +
+      externalRatedUsageRial,
+  );
+
+  return {
+    periodMonth: window.periodMonth,
+    walletUsageDebitsRial,
+    spendRefundsRial,
+    activeReservationsRial,
+    allowanceUsedRial,
+    aiDebtIncurredRial,
+    externalRatedUsageRial,
+    totalSpendRial,
+  };
+}
+
+export async function monthSpendRial(businessId: string, now: Date = new Date()): Promise<number> {
+  const breakdown = await computeBusinessMonthlySpend(businessId, now);
+  return breakdown.totalSpendRial;
+}
+
+export async function evaluateBusinessSpend(
+  businessId: string,
+  opts?: { now?: Date; critical?: boolean },
+): Promise<{
+  policy: BusinessSpendPolicyRecord | null;
+  breakdown: MonthlySpendBreakdown;
+  evaluation: SpendEvaluation;
+  warningEmitted: boolean;
+}> {
+  const now = opts?.now ?? new Date();
+  const critical = opts?.critical ?? false;
+  const [policy, breakdown] = await Promise.all([
+    getSpendPolicy(businessId),
+    computeBusinessMonthlySpend(businessId, now),
+  ]);
+  if (!policy) {
+    return {
+      policy: null,
+      breakdown,
+      evaluation: {
+        percent: null,
+        crossedThresholds: [],
+        warned: false,
+        atLimit: false,
+        blocked: false,
+        throttled: false,
+      },
+      warningEmitted: false,
+    };
+  }
+
+  const evaluation = evaluateSpend({
+    spentRial: breakdown.totalSpendRial,
+    budgetRial: policy.monthlyBudgetRial,
+    thresholds: policy.thresholds,
+    action: policy.actionAtLimit,
+    critical,
+  });
+
+  let warningEmitted = false;
+  if (evaluation.warned && evaluation.crossedThresholds.length > 0) {
+    const highestCrossed = Math.max(...evaluation.crossedThresholds);
+    const prevThreshold =
+      policy.lastWarnedPeriod === breakdown.periodMonth
+        ? (policy.lastWarningThreshold ?? 0)
+        : 0;
+    if (highestCrossed > prevThreshold) {
+      warningEmitted = true;
+      await query(
+        `UPDATE business_spend_policies
+            SET last_warned_period = $2,
+                last_warning_threshold = $3,
+                last_warning_at = now(),
+                warning_count = COALESCE(warning_count, 0) + 1,
+                throttled_at = CASE WHEN $4 THEN COALESCE(throttled_at, now()) ELSE throttled_at END,
+                updated_at = now()
+          WHERE business_id = $1`,
+        [businessId, breakdown.periodMonth, highestCrossed, evaluation.throttled],
+      );
+      billingLog("billing.spend.warning", {
+        businessId,
+        periodMonth: breakdown.periodMonth,
+        spentRial: breakdown.totalSpendRial,
+        budgetRial: policy.monthlyBudgetRial,
+        highestCrossed,
+        action: policy.actionAtLimit,
+      });
+    } else if (evaluation.throttled && !policy.throttledAt) {
+      await query(
+        `UPDATE business_spend_policies
+            SET throttled_at = COALESCE(throttled_at, now()),
+                updated_at = now()
+          WHERE business_id = $1`,
+        [businessId],
+      );
+      billingLog("billing.spend.throttled", {
+        businessId,
+        spentRial: breakdown.totalSpendRial,
+        budgetRial: policy.monthlyBudgetRial,
+      });
+    }
+  } else if (evaluation.throttled && !policy.throttledAt) {
+    await query(
+      `UPDATE business_spend_policies
+          SET throttled_at = COALESCE(throttled_at, now()),
+              updated_at = now()
+        WHERE business_id = $1`,
+      [businessId],
+    );
+    billingLog("billing.spend.throttled", {
+      businessId,
+      spentRial: breakdown.totalSpendRial,
+      budgetRial: policy.monthlyBudgetRial,
+    });
+  }
+
+  return {
+    policy,
+    breakdown,
+    evaluation,
+    warningEmitted,
+  };
 }
 
 export async function recordVendorCost(input: {
@@ -634,9 +1064,17 @@ export async function customerUsageSummary(businessId: string): Promise<{
   planKey: string | null;
   periodEnd: string | null;
   walletBalanceRial: number;
-  spend: { budgetRial: number | null; spentRial: number; action: string | null };
+  spend: {
+    budgetRial: number | null;
+    spentRial: number;
+    action: string | null;
+    crossedThresholds?: number[];
+    blocked?: boolean;
+    throttled?: boolean;
+  };
   meters: CustomerMeterUsage[];
 }> {
+  const window = tehranMonthWindow(new Date());
   const { rows } = await query<{
     meter_key: string;
     name: string;
@@ -666,30 +1104,38 @@ export async function customerUsageSummary(businessId: string): Promise<{
          SELECT SUM(quantity) AS quantity
            FROM billing_usage_rollups_daily d
           WHERE d.business_id = b.id AND d.meter_key = m.key
-            AND d.day >= date_trunc('month', now())::date
+            AND d.day >= $2::date
        ) r ON true
        LEFT JOIN LATERAL (
          SELECT SUM(ur.rated_amount_rial) AS rated
            FROM billing_usage_ratings ur
            JOIN billing_usage_events e ON e.id = ur.usage_event_id
           WHERE ur.business_id = b.id AND e.meter_key = m.key
-            AND e.occurred_at >= date_trunc('month', now())
+            AND e.occurred_at >= $3::timestamptz
+            AND e.occurred_at < $4::timestamptz
        ) rt ON true
       WHERE m.active AND m.customer_visible
       ORDER BY m.key`,
-    [businessId],
+    [
+      businessId,
+      `${window.periodMonth}-01`,
+      window.startUtc.toISOString(),
+      window.nextStartUtc.toISOString(),
+    ],
   );
-  const policy = await getSpendPolicy(businessId);
-  const spent = await monthSpendRial(businessId);
+  const spendEval = await evaluateBusinessSpend(businessId);
   const first = rows[0];
   return {
     planKey: first?.plan_key ?? null,
     periodEnd: first?.period_end ? new Date(first.period_end).toISOString() : null,
     walletBalanceRial: Number(first?.balance ?? 0),
     spend: {
-      budgetRial: policy?.monthlyBudgetRial ?? null,
-      spentRial: spent,
-      action: policy?.actionAtLimit ?? null,
+      budgetRial: spendEval.policy?.monthlyBudgetRial ?? null,
+      spentRial: spendEval.breakdown.totalSpendRial,
+      action: spendEval.policy?.actionAtLimit ?? null,
+      crossedThresholds: spendEval.evaluation.crossedThresholds,
+      blocked: spendEval.evaluation.blocked,
+      throttled: spendEval.evaluation.throttled,
     },
     meters: rows.map((row) => {
       const used = Number(row.used);
@@ -752,4 +1198,177 @@ export async function saveCommercialSettings(patch: {
       patch.taxRateBps ?? null,
     ],
   );
+}
+
+export async function previewCommercialQuote(input: {
+  kind: "plan_subscription" | "custom_top_up" | "package_top_up" | "addon_purchase" | "meter_usage";
+  businessId?: string | null;
+  planKey?: string | null;
+  billingCycle?: "monthly" | "yearly";
+  packageId?: string | null;
+  featureKey?: string | null;
+  meterKey?: string | null;
+  amountRial?: number | null;
+  quantity?: number | null;
+  includeRecurringAddons?: boolean;
+}): Promise<
+  Omit<CommercialQuoteResult, "kind"> & {
+    kind: string;
+    minimumTopUpRial: number;
+    belowMinimumTopUp: boolean;
+    creditGrantedRial?: number;
+  }
+> {
+  const settings = await readCommercialSettings();
+  const taxRateBps = Number(settings.tax_rate_bps ?? 0);
+  const rounding: "ceil" | "floor" = settings.rounding === "floor" ? "floor" : "ceil";
+  const minimumTopUpRial = Number(settings.minimum_top_up_rial ?? 0);
+  const nowIso = new Date().toISOString();
+
+  if (input.kind === "plan_subscription") {
+    let basePlanRial = 0;
+    const addons: CommercialQuoteAddonLine[] = [];
+    if (input.planKey) {
+      const { rows } = await query<{
+        key: string;
+        name: string;
+        monthly_price_rial: string | null;
+      }>(
+        `SELECT key, name, monthly_price_rial
+           FROM billing_plans WHERE key = $1`,
+        [input.planKey],
+      );
+      const plan = rows[0];
+      if (plan) {
+        basePlanRial = Number(plan.monthly_price_rial ?? 0);
+      }
+      if (input.includeRecurringAddons !== false) {
+        const { rows: addonRows } = await query<{
+          feature_key: string;
+          feature_name: string | null;
+          price_rial: string;
+        }>(
+          `SELECT pf.feature_key, f.name AS feature_name, pf.price_rial
+             FROM billing_plan_features pf
+             LEFT JOIN feature_flags f ON f.key = pf.feature_key
+            WHERE pf.plan_key = $1
+              AND pf.pricing_model = 'monthly'
+              AND pf.price_rial > 0
+            ORDER BY pf.sort_order, pf.feature_key`,
+          [input.planKey],
+        );
+        for (const addon of addonRows) {
+          addons.push({
+            featureKey: addon.feature_key,
+            description: addon.feature_name ?? addon.feature_key,
+            amountRial: Number(addon.price_rial),
+          });
+        }
+      }
+    }
+    const quote = calculateCommercialQuote({
+      kind: "plan",
+      basePlanRial,
+      addons,
+      taxRateBps,
+      rounding,
+    });
+    return {
+      ...quote,
+      kind: input.kind,
+      minimumTopUpRial,
+      belowMinimumTopUp: false,
+    };
+  }
+
+  if (input.kind === "custom_top_up") {
+    const amount = Math.max(0, Math.floor(input.amountRial ?? 0));
+    const quote = calculateCommercialQuote({
+      kind: "topup",
+      amountRial: amount,
+      creditRial: amount,
+      minimumTopUpRial,
+      isPackage: false,
+      taxRateBps,
+      rounding,
+    });
+    return {
+      ...quote,
+      kind: input.kind,
+      minimumTopUpRial,
+      belowMinimumTopUp: quote.error === "below_minimum_top_up",
+      creditGrantedRial: amount,
+    };
+  }
+
+  if (input.kind === "package_top_up" && input.packageId) {
+    const { rows } = await query<{
+      name: string;
+      price_rial: string;
+      credit_rial: string;
+    }>(
+      `SELECT name, price_rial, credit_rial FROM credit_packages WHERE id = $1`,
+      [input.packageId],
+    );
+    const pkg = rows[0];
+    const price = pkg ? Number(pkg.price_rial) : 0;
+    const credit = pkg ? Number(pkg.credit_rial) : 0;
+    const quote = calculateCommercialQuote({
+      kind: "topup",
+      amountRial: price,
+      creditRial: credit,
+      minimumTopUpRial,
+      isPackage: true,
+      taxRateBps,
+      rounding,
+    });
+    return {
+      ...quote,
+      kind: input.kind,
+      minimumTopUpRial,
+      belowMinimumTopUp: false,
+      creditGrantedRial: credit,
+    };
+  }
+
+  if (input.kind === "addon_purchase" && input.featureKey) {
+    const { rows } = await query<{
+      price_rial: string;
+    }>(
+      `SELECT price_rial FROM billing_plan_features
+        WHERE feature_key = $1 AND pricing_model = 'addon'
+        ORDER BY price_rial DESC LIMIT 1`,
+      [input.featureKey],
+    );
+    const price = rows[0] ? Number(rows[0].price_rial) : Math.max(0, Math.floor(input.amountRial ?? 0));
+    const quote = calculateCommercialQuote({
+      kind: "addon",
+      amountRial: price,
+      taxRateBps,
+      rounding,
+    });
+    return {
+      ...quote,
+      kind: input.kind,
+      minimumTopUpRial,
+      belowMinimumTopUp: false,
+    };
+  }
+
+  // meter_usage
+  const qty = Math.max(0, Math.floor(input.quantity ?? 0));
+  const pv = input.meterKey ? await priceAt("meter", input.meterKey, nowIso) : null;
+  const quote = calculateCommercialQuote({
+    kind: "meter",
+    quantity: qty,
+    price: pv ? { unitAmountRial: pv.unitAmountRial, unitSize: pv.unitSize } : null,
+    taxRateBps,
+    rounding,
+  });
+  return {
+    ...quote,
+    kind: input.kind,
+    minimumTopUpRial,
+    belowMinimumTopUp: false,
+  };
 }

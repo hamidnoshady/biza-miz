@@ -100,7 +100,7 @@ their own keys — `loyalty.redeem`, `store_credit.issue`, `store_credit.payout`
 `gift_cards.view`/`issue`/`redeem` — and compensation is `commission.view` /
 `commission.manage`. `src/lib/growth-access.ts` is the one page/API/button
 matrix, asserted against the route handlers' source by its test; migration
-0191 rewrote stored overrides and custom roles.
+0194 rewrote stored overrides and custom roles.
 
 ## 4. Backup — keep `main`'s granularity
 

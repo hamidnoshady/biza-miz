@@ -1,0 +1,2 @@
+import { CompanyEnginePage } from "../_components/company-workspace";
+export default function Page(){return <CompanyEnginePage active="workspace" title="فضای کاری من" description="پروژه‌های توسعه پلتفرم، استقرار مشتری، اجرای وب‌سایت، کمپین و عملیات داخلی در همان موتور پروژهٔ مشترک مدیریت می‌شوند." notes={["برد و فهرست وظایف، وابستگی و اولویت","مالک، تیم، مرحله، موعد و تحویل‌دادنی","قرارداد، سند، گفت‌وگو و فعالیت","بودجه و پیش‌بینی جدا از ارقام ثبت‌شدهٔ حسابداری"]}/>}

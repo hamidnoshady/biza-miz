@@ -1,5 +1,5 @@
 /**
- * Reads and writes the Growth-wide settings row (migration 0192). The rules
+ * Reads and writes the Growth-wide settings row (migration 0195). The rules
  * live in `growth-settings.ts`; this file is only the storage half.
  */
 import type { PoolClient } from "pg";

@@ -120,10 +120,11 @@ describe("module sets", () => {
     }
   });
 
-  it("gives every industry a selling screen", () => {
-    for (const industry of INDUSTRIES) {
+  it("gives trading industries a selling screen, but keeps service/SaaS out of POS", () => {
+    for (const industry of INDUSTRIES.filter((value) => value !== "service_saas")) {
       expect(hasModule(industry, "pos"), industry).toBe(true);
     }
+    expect(hasModule("service_saas", "pos")).toBe(false);
   });
 
   it("keeps the open-orders board to F&B", () => {

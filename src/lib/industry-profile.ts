@@ -339,6 +339,22 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: ["barcode"],
     retailDefaults: { vatPercent: 9 },
+  },  service_saas: {
+    brandTitle: "شرکت خدمات و نرم‌افزار",
+    brandSubtitle: "مدیریت مشتری، پروژه و درآمد اشتراکی",
+    modules: [...CORE_MODULES],
+    labels: {
+      saleDocument: "صورتحساب خدمات",
+      saleDocumentPlural: "صورتحساب‌های خدمات",
+      sellScreen: "صورتحساب خدمات",
+      catalogue: "خدمات و اشتراک‌ها",
+      catalogueItem: "خدمت",
+    },
+    // Service companies do not receive restaurant operations, POS, recipes or
+    // retail stock. Their commercial invoices are owned by Billing/Accounting.
+    salesModel: "retail_invoice",
+    defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
+    capabilities: [],
   },
 };
 

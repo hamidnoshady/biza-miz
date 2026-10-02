@@ -303,6 +303,11 @@ export const WELL_KNOWN_CODES = {
 // gross-profit line honest mid-period and changes nothing once a period is
 // closed. Perpetual businesses never post to it.
 const COST_OF_SALES_CODES_BY_INDUSTRY: Record<Industry, readonly string[]> = {
+  service_saas: [
+    WELL_KNOWN_CODES.cogs,
+    WELL_KNOWN_CODES.periodicPurchases,
+    WELL_KNOWN_CODES.inventoryWriteDownExpense,
+  ],
   food_service: [
     WELL_KNOWN_CODES.cogs,
     WELL_KNOWN_CODES.wasteExpense,
@@ -957,6 +962,20 @@ export const HABERDASHERY_COA_TEMPLATE: TemplateAccount[] = [
   ...SHARED_EXPENSE_ACCOUNTS,
 ];
 
+export const SERVICE_SAAS_COA_TEMPLATE: TemplateAccount[] = [
+  // Keep the shared Iranian accounting controls (cheques, payroll, VAT,
+  // installments, assets and project materials) while removing hospitality
+  // revenue channels from the service-company chart.
+  ...FNB_COA_TEMPLATE.filter((account) => ![
+    "4100", "4200", "4310", "4320", "4330", "4360", "5650",
+  ].includes(account.code)),
+  { code: "4500", name: "درآمد اشتراک و مصرف", type: "revenue", parentCode: "4000" },
+  { code: "4510", name: "درآمد پیاده‌سازی و مشاوره", type: "revenue", parentCode: "4000" },
+  { code: "4520", name: "درآمد طراحی و خدمات وب‌سایت", type: "revenue", parentCode: "4000" },
+  { code: "5660", name: "هزینه هوش مصنوعی و پردازش", type: "expense", parentCode: "5000" },
+  { code: "5670", name: "هزینه میزبانی، ذخیره‌سازی و پیام", type: "expense", parentCode: "5000" },
+];
+
 export const ACCOUNT_TYPES: AccountType[] = ["asset", "liability", "equity", "revenue", "expense"];
 
 /**
@@ -969,6 +988,8 @@ export const ACCOUNT_TYPES: AccountType[] = ["asset", "liability", "equity", "re
  */
 export function coaTemplateForIndustry(industry: Industry): readonly TemplateAccount[] {
   switch (industry) {
+    case "service_saas":
+      return SERVICE_SAAS_COA_TEMPLATE;
     case "jewelry":
       return JEWELRY_COA_TEMPLATE;
     case "watch":

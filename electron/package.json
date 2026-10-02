@@ -1,6 +1,6 @@
 {
   "name": "business-suite-desktop",
-  "version": "1.0.9",
+  "version": "1.0.11",
   "buildCommit": "unknown",
   "buildId": "development",
   "releaseChannel": "stable",
@@ -16,7 +16,9 @@
     "size": "node ../scripts/report-desktop-size.mjs --output=dist/desktop-size-report.md"
   },
   "dependencies": {
-    "embedded-postgres": "16.14.0-beta.17"
+    "@peculiar/x509": "^2.1.0",
+    "embedded-postgres": "16.14.0-beta.17",
+    "reflect-metadata": "^0.2.2"
   },
   "devDependencies": {
     "electron": "44.4.3",
@@ -46,9 +48,17 @@
       "local-storage.js",
       "logger.js",
       "update-engine.js",
-      "cloud-window.js",
+      "cloud-pane.js",
       "desktop-release-public-key.pem",
       "package.json"
+    ],
+    "protocols": [
+      {
+        "name": "Business Suite cloud sign-in",
+        "schemes": [
+          "businesssuite"
+        ]
+      }
     ],
     "win": {
       "target": "nsis",

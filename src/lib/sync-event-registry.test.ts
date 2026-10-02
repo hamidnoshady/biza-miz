@@ -5,6 +5,7 @@ import { classifySyncDomainError } from "./sync-events";
 import { SyncPayloadError } from "./sync-domain-handlers";
 import {
   isOfflineQueueEligible,
+  siteSkipsPulledEvent,
   publicSyncEventRegistry,
   SYNC_EVENT_REGISTRY,
   syncEventDefinition,
@@ -95,5 +96,22 @@ describe("sync domain failure classification", () => {
     expect(classifySyncDomainError(Object.assign(new Error("socket reset"), { code: "ECONNRESET" }), payment)).toBe("transient");
     expect(classifySyncDomainError(new Error("injected_sync_failure_after_domain_effect"), payment)).toBe("transient");
     expect(classifySyncDomainError(new TypeError("cannot read property"), payment)).toBe("transient");
+  });
+});
+
+describe("pulled cloud events a desktop acknowledges without applying (Phase 46)", () => {
+  it("skips stock, transfers and ledger reversals — the cloud owns them since Phase 45", () => {
+    const skipped = SYNC_EVENT_REGISTRY.filter((definition) => siteSkipsPulledEvent(definition)).map((d) => d.type);
+    expect(skipped).toContain("inventory.purchase.created");
+    expect(skipped).toContain("inventory.purchase.received");
+    expect(skipped).toContain("accounting.manual_journal.reversed");
+  });
+
+  it("still applies everything the till needs: orders, payments, refunds and shifts", () => {
+    for (const definition of SYNC_EVENT_REGISTRY) {
+      if (["order", "payment", "refund", "shift"].includes(definition.effectClass)) {
+        expect(siteSkipsPulledEvent(definition), definition.type).toBe(false);
+      }
+    }
   });
 });

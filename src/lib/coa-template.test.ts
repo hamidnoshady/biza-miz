@@ -79,6 +79,7 @@ const CORE_REQUIRED_CODES: readonly string[] = [
 
 /** Each trade's own accounts, on top of the core every chart shares. */
 const TRADE_REQUIRED_CODES: Record<Industry, readonly string[]> = {
+  service_saas: ["1200", "2100", "4500", "4510", "4520", "5660", "5670"],
   food_service: [
     WELL_KNOWN_CODES.inventory,
     WELL_KNOWN_CODES.cogs,
