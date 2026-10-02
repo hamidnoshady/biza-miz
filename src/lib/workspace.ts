@@ -194,9 +194,13 @@ export async function requireProjectCapability(
 }
 
 /** A safe OFFSET: a non-negative integer, capped so a bad cursor cannot scan forever. */
+/**
+ * A safe OFFSET: any non-negative integer. Not capped — a cap silently
+ * rewrites deep offsets onto one page, so "load more" would repeat it forever.
+ */
 function pageOffset(value: unknown): number {
   const n = Number(value ?? 0);
-  return Number.isSafeInteger(n) && n > 0 ? Math.min(n, 100_000) : 0;
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
 }
 
 function isUuid(value: unknown): value is string {
@@ -1488,7 +1492,10 @@ function contractWhere(owner: WorkspaceOwner, filter: ContractListFilter): { cla
   if (filter.search) add("c.title ILIKE '%' || $? || '%'", filter.search.trim());
   if (filter.expiringWithinDays !== undefined) {
     add(
-      "(c.end_date IS NOT NULL AND c.end_date <= (CURRENT_DATE + ($?::int || ' days')::interval) AND c.status NOT IN ('terminated','completed'))",
+      // Bounded on both sides, from Tehran's today: an active contract whose
+      // end date has already passed is overdue, not "expiring soon".
+      `(c.end_date BETWEEN ${todayLiteral()} AND ${todayLiteral()} + $?::int
+        AND c.status NOT IN ('terminated','completed'))`,
       filter.expiringWithinDays,
     );
   }
