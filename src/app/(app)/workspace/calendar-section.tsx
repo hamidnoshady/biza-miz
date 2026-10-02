@@ -64,10 +64,16 @@ const WEEKDAYS = ["ش", "ی", "د", "س", "چ", "پ", "ج"];
 
 export function CalendarSection({
   lookups,
+  initialCreating = false,
+  createProjectId,
   canManage,
   projectId,
 }: {
   lookups: WorkspaceLookups;
+  /** From `?create=1` — the command bar's «+ ایجاد» opens the create dialog. */
+  initialCreating?: boolean;
+  /** From `?project=` — the create dialog preselects that project. */
+  createProjectId?: string;
   canManage: boolean;
   projectId?: string;
 }) {
@@ -77,7 +83,7 @@ export function CalendarSection({
   const [entries, setEntries] = useState<CalendarEntry[] | null>(null);
   const [error, setError] = useState("");
   const [hidden, setHidden] = useState<Set<WorkspaceCalendarSource>>(new Set());
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(initialCreating);
   const [selected, setSelected] = useState<string | null>(null);
 
   const monthLength = jalaliMonthLength(year, month);
@@ -276,7 +282,7 @@ export function CalendarSection({
       {creating ? (
         <EventDialog
           lookups={lookups}
-          defaultProjectId={projectId}
+          defaultProjectId={projectId ?? createProjectId}
           onClose={() => setCreating(false)}
           onSaved={() => {
             setCreating(false);

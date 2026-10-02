@@ -5,6 +5,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { ProjectDetail } from "./project-detail";
+import { WorkspaceCommandBar } from "../../workspace-command-bar";
 
 /**
  * `/workspace/projects/<id>` — one project's page, and the address every old
@@ -39,6 +40,7 @@ export default async function WorkspaceProjectPage({
         description="وظایف، اسناد، قراردادهای اجرایی، تیم، تأییدها و تقویم این پروژه — و پنل‌های دستیار هوش مصنوعی همان پروژه."
         actions={<KnowledgeHelpButton section="projects" />}
       />
+      <WorkspaceCommandBar permissions={[...member.permissions]} projectId={id} />
       <ProjectDetail projectId={id} />
     </PageShell>
   );

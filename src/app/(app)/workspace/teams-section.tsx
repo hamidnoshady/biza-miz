@@ -59,14 +59,17 @@ const CAPABILITY_LABELS: Record<keyof typeof WORKSPACE_CAPABILITY_MIN_ROLE, stri
 
 export function TeamsSection({
   lookups,
+  initialProjectId,
   canManage,
   projectId: fixedProjectId,
 }: {
   lookups: WorkspaceLookups;
+  /** From `?project=` — the «افزودن عضو تیم» command lands on that project. */
+  initialProjectId?: string;
   canManage: boolean;
   projectId?: string;
 }) {
-  const [projectId, setProjectId] = useState(fixedProjectId ?? "");
+  const [projectId, setProjectId] = useState(fixedProjectId ?? initialProjectId ?? "");
   const [members, setMembers] = useState<MemberRow[] | null>(null);
   const [error, setError] = useState("");
   const [addUserId, setAddUserId] = useState("");

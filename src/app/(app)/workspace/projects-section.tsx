@@ -101,9 +101,15 @@ interface TemplateOption {
 
 export function ProjectsSection({
   lookups,
+  initialCreating = false,
+  createProjectId,
   canManage,
 }: {
   lookups: WorkspaceLookups;
+  /** From `?create=1` — the command bar's «+ ایجاد» opens the create dialog. */
+  initialCreating?: boolean;
+  /** From `?project=` — the create dialog preselects that project. */
+  createProjectId?: string;
   canManage: boolean;
 }) {
   const money = useMoney();
@@ -112,7 +118,7 @@ export function ProjectsSection({
   const [status, setStatus] = useState<WorkspaceProjectStatus | "">("");
   const [mine, setMine] = useState(false);
   const [search, setSearch] = useState("");
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(initialCreating);
 
   const query = useMemo(() => {
     const params = new URLSearchParams();

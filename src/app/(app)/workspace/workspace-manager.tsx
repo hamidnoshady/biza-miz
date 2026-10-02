@@ -46,6 +46,11 @@ export function WorkspaceManager({
   const initialMine = search.get("mine") === "true";
   const expiring = Number(search.get("expiring"));
   const initialExpiring = Number.isInteger(expiring) && expiring > 0 && expiring <= 365 ? expiring : undefined;
+  // «+ ایجاد» from the command bar: `?create=1` opens the section's create
+  // dialog, `?project=` preselects the project it was started from.
+  const initialCreating = search.get("create") === "1";
+  const createProjectId = search.get("project") ?? undefined;
+  const create = { initialCreating, createProjectId };
   const held = useMemo(() => new Set(permissions), [permissions]);
   const canManage = held.has(PERMISSIONS.workspaceManage);
   const canManageContracts = held.has(PERMISSIONS.workspaceContractsManage);
@@ -55,19 +60,20 @@ export function WorkspaceManager({
     <div className="space-y-6">
       {activeSection === "overview" ? <OverviewSection /> : null}
       {activeSection === "projects" ? (
-        <ProjectsSection lookups={lookups} canManage={canManage} />
+        <ProjectsSection lookups={lookups} canManage={canManage} {...create} />
       ) : null}
       {activeSection === "tasks" ? (
-        <TasksSection lookups={lookups} canManage={canManage} initialMine={initialMine} />
+        <TasksSection lookups={lookups} canManage={canManage} initialMine={initialMine} {...create} />
       ) : null}
       {activeSection === "calendar" ? (
-        <CalendarSection lookups={lookups} canManage={canManage} />
+        <CalendarSection lookups={lookups} canManage={canManage} {...create} />
       ) : null}
       {activeSection === "documents" ? (
         <DocumentsSection
           lookups={lookups}
           canManage={canManage}
           canRequestApproval={canManage}
+          {...create}
         />
       ) : null}
       {activeSection === "contracts" ? (
@@ -76,9 +82,10 @@ export function WorkspaceManager({
           canManageContracts={canManageContracts}
           canRequestApproval={canManage}
           initialExpiring={initialExpiring}
+          {...create}
         />
       ) : null}
-      {activeSection === "teams" ? <TeamsSection lookups={lookups} canManage={canManage} /> : null}
+      {activeSection === "teams" ? <TeamsSection lookups={lookups} canManage={canManage} initialProjectId={createProjectId} /> : null}
       {activeSection === "approvals" ? <ApprovalsSection canApprove={canApprove} /> : null}
       {activeSection === "reports" ? <ReportsSection /> : null}
       {activeSection === "templates" ? <TemplatesSection canManage={canManage} /> : null}

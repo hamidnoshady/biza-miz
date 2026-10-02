@@ -84,11 +84,17 @@ export interface DocumentRow {
 
 export function DocumentsSection({
   lookups,
+  initialCreating = false,
+  createProjectId,
   canManage,
   canRequestApproval,
   projectId,
 }: {
   lookups: WorkspaceLookups;
+  /** From `?create=1` — the command bar's «+ ایجاد» opens the create dialog. */
+  initialCreating?: boolean;
+  /** From `?project=` — the create dialog preselects that project. */
+  createProjectId?: string;
   canManage: boolean;
   canRequestApproval: boolean;
   projectId?: string;
@@ -97,7 +103,7 @@ export function DocumentsSection({
   const [status, setStatus] = useState<WorkspaceDocumentStatus | "">("");
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<DocumentRow | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(initialCreating);
 
   const query = useMemo(() => {
     const params = new URLSearchParams();
@@ -270,7 +276,7 @@ export function DocumentsSection({
           lookups={lookups}
           document={editing ?? undefined}
           canManage={canManage}
-          defaultProjectId={projectId}
+          defaultProjectId={projectId ?? createProjectId}
           onClose={() => {
             setCreating(false);
             setEditing(null);

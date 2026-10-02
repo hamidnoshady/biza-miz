@@ -102,12 +102,18 @@ const VIEW_TABS = [
 
 export function TasksSection({
   lookups,
+  initialCreating = false,
+  createProjectId,
   canManage,
   canContribute = canManage,
   initialMine = false,
   projectId,
 }: {
   lookups: WorkspaceLookups;
+  /** From `?create=1` — the command bar's «+ ایجاد» opens the create dialog. */
+  initialCreating?: boolean;
+  /** From `?project=` — the create dialog preselects that project. */
+  createProjectId?: string;
   canManage: boolean;
   /**
    * May work tasks (status, checklist) without re-scoping them — a
@@ -122,7 +128,7 @@ export function TasksSection({
   const [mine, setMine] = useState(initialMine);
   const [openOnly, setOpenOnly] = useState(true);
   const [search, setSearch] = useState("");
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(initialCreating);
   const [editing, setEditing] = useState<TaskRow | null>(null);
 
   const query = useMemo(() => {
@@ -382,7 +388,7 @@ export function TasksSection({
       {creating ? (
         <TaskDialog
           lookups={lookups}
-          projectId={projectId}
+          projectId={projectId ?? createProjectId}
           onClose={() => setCreating(false)}
           onSaved={() => {
             setCreating(false);

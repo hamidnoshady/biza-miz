@@ -147,12 +147,12 @@ export const WORKSPACE_SECTION_GROUPS: ReadonlyArray<{
   label: string;
   keys: readonly WorkspaceSection[];
 }> = [
-  { label: "نمای کلی", keys: ["overview"] },
-  { label: "کار", keys: ["projects", "tasks", "calendar"] },
-  { label: "اسناد", keys: ["documents", "contracts"] },
-  { label: "سازمان", keys: ["teams", "approvals"] },
-  { label: "بینش", keys: ["reports"] },
-  { label: "پیکربندی", keys: ["templates"] },
+  // #761: the daily loop first — Home, Projects, Tasks, Calendar — and the
+  // rest behind «بیشتر», so the menu reads as how people work, not as a list
+  // of database tables. On a phone the same two groups become the bottom
+  // sheet's primary row and its overflow.
+  { label: "کار روزانه", keys: ["overview", "projects", "tasks", "calendar"] },
+  { label: "بیشتر", keys: ["documents", "contracts", "teams", "approvals", "reports", "templates"] },
 ];
 
 /** The sections a member with this permission set may open, in rail order. */
@@ -171,4 +171,37 @@ export function canOpenWorkspace(
 ): boolean {
   const held = permissions instanceof Set ? permissions : new Set(permissions);
   return held.has(PERMISSIONS.workspaceView);
+}
+
+/**
+ * «+ ایجاد» — the contextual create actions (#761 §5), shared by the command
+ * bar menu and the Ctrl/Cmd+K palette. Each lands on its section with
+ * `?create=1` (the section opens its own create dialog) and, inside a
+ * project, `&project=<id>` so the dialog preselects that project. Filtered by
+ * the platform permission; the project role is re-checked by the API.
+ */
+export interface WorkspaceCreateAction {
+  key: "project" | "task" | "event" | "document" | "contract" | "member";
+  label: string;
+  href: string;
+}
+
+export function workspaceCreateActions(
+  permissions: ReadonlySet<string> | ReadonlyArray<string>,
+  projectId?: string,
+): WorkspaceCreateAction[] {
+  const held = permissions instanceof Set ? permissions : new Set(permissions);
+  const href = (section: WorkspaceSection) =>
+    `${workspaceSectionHref(section)}?create=1${projectId ? `&project=${encodeURIComponent(projectId)}` : ""}`;
+  const actions: Array<WorkspaceCreateAction & { permission: string; outsideProjectOnly?: boolean }> = [
+    { key: "project", label: "پروژهٔ جدید", href: href("projects"), permission: "workspace.manage", outsideProjectOnly: true },
+    { key: "task", label: "وظیفهٔ جدید", href: href("tasks"), permission: "workspace.manage" },
+    { key: "event", label: "رویداد جدید", href: href("calendar"), permission: "workspace.manage" },
+    { key: "document", label: "افزودن سند", href: href("documents"), permission: "workspace.manage" },
+    { key: "contract", label: "قرارداد جدید", href: href("contracts"), permission: "workspace.contracts_manage" },
+    { key: "member", label: "افزودن عضو تیم", href: href("teams"), permission: "workspace.manage" },
+  ];
+  return actions
+    .filter((action) => held.has(action.permission) && !(projectId && action.outsideProjectOnly))
+    .map(({ key, label, href: target }) => ({ key, label, href: target }));
 }

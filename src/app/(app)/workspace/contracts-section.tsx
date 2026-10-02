@@ -90,12 +90,18 @@ export interface ContractRow {
 
 export function ContractsSection({
   lookups,
+  initialCreating = false,
+  createProjectId,
   canManageContracts,
   canRequestApproval,
   initialExpiring,
   projectId,
 }: {
   lookups: WorkspaceLookups;
+  /** From `?create=1` — the command bar's «+ ایجاد» opens the create dialog. */
+  initialCreating?: boolean;
+  /** From `?project=` — the create dialog preselects that project. */
+  createProjectId?: string;
   canManageContracts: boolean;
   canRequestApproval: boolean;
   initialExpiring?: number;
@@ -108,7 +114,7 @@ export function ContractsSection({
   const [expiring, setExpiring] = useState(initialExpiring ?? 0);
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<ContractRow | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(initialCreating);
 
   const query = useMemo(() => {
     const params = new URLSearchParams();
@@ -267,7 +273,7 @@ export function ContractsSection({
         <ContractDialog
           lookups={lookups}
           contract={editing ?? undefined}
-          defaultProjectId={projectId}
+          defaultProjectId={projectId ?? createProjectId}
           canManage={canManageContracts}
           onClose={() => {
             setCreating(false);
