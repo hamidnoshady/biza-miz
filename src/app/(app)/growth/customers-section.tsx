@@ -216,7 +216,7 @@ export function GrowthCustomersSection({ selectedCustomerId }: { selectedCustome
               aria-label="جستجو با نام یا تلفن"
             />
           </label>
-          <label className="flex items-center gap-2 text-sm text-muted-foreground sm:pb-2.5">
+          <label className="flex min-h-11 items-center gap-2 text-sm text-muted-foreground sm:pb-2.5 lg:min-h-0">
             <input
               type="checkbox"
               className="size-4 accent-primary"
@@ -361,7 +361,7 @@ export function GrowthCustomersSection({ selectedCustomerId }: { selectedCustome
                           <a
                             href={`tel:${customer.phone}`}
                             dir="ltr"
-                            className="mt-1 block text-xs text-muted-foreground hover:underline"
+                            className="flex min-h-11 w-fit items-center text-xs text-muted-foreground hover:underline"
                           >
                             {toPersianDigits(customer.phone)}
                           </a>
