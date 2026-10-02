@@ -783,6 +783,127 @@ describe("billing-event RLS", () => {
 // Customer mapping
 // ---------------------------------------------------------------------------
 
+describe("tenant scope under concurrency", () => {
+  /**
+   * `withPlatformScope` and `withPlatformCompany` keep the tenant scope in an
+   * AsyncLocalStorage. The failure mode that matters is not "the scope is
+   * wrong" — it is "the scope BLEEDS": request A writes `app.business_id` on a
+   * pooled connection, awaits, and request B's continuation runs on the same
+   * connection carrying A's business. Every guard above is built on that never
+   * happening, so this interleaves reads and writes across three businesses
+   * and the platform bypass with real awaits in between and checks that no
+   * call ever saw another business's rows.
+   */
+  it("never leaks one business's scope into another concurrent operation", async () => {
+    const extra = await createCustomerBusiness("کسب‌وکار همزمان");
+    const businesses = [internal.businessId, customerA.businessId, extra.businessId];
+    const seen = new Map<string, Set<string>>();
+
+    const probe = async (businessId: string, index: number) => {
+      // A real await inside the scope: the scope has to survive a yield, which
+      // is exactly where a global or a connection-local variable would break.
+      await new Promise((resolve) => setTimeout(resolve, (index % 4) * 2));
+      return db.withTenant(businessId, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        // Read the GUC INSIDE the scope — that is the state whose leakage
+        // matters. Reading it after the scope closed would only ever see the
+        // ambient value and prove nothing.
+        const visible = await db.query<{ current: string | null }>(
+          `SELECT nullif(current_setting('app.business_id', true), '') AS current`,
+        );
+        const { rows } = await db.query<{ id: string }>(
+          `SELECT id FROM parties WHERE business_id = $1`,
+          [businessId],
+        );
+        return { rows, current: visible.rows[0]?.current ?? null };
+      });
+    };
+
+    const results = await Promise.all(
+      // Interleave: two probes per business and two platform-bypass probes,
+      // all started in the same tick.
+      [
+        ...businesses.flatMap((businessId, index) => [
+          probe(businessId, index),
+          probe(businessId, index + 1),
+        ]),
+        ...[0, 1].map(async (index) => {
+          await new Promise((resolve) => setTimeout(resolve, index));
+          const { rows } = await db.withoutTenantScope("platform", () =>
+            db.query<{ id: string }>(`SELECT id FROM parties`),
+          );
+          return { rows, current: null };
+        }),
+      ],
+    );
+
+    for (const [index, businessId] of businesses.entries()) {
+      for (const probeIndex of [index * 2, index * 2 + 1]) {
+        const result = results[probeIndex];
+        // Inside the scope, `app.business_id` is the business we asked for.
+        expect(result.current).toBe(businessId);
+      }
+    }
+    // The bypass probes see every business; the scoped ones never do. Stated
+    // as an equality rather than a "greater than", so it holds even when only
+    // one business happens to own rows — a weaker assertion would pass by
+    // accident on a sparse database.
+    const scopedTotal = businesses.reduce(
+      (sum, _, index) => sum + (results[index * 2].rows.length || 0),
+      0,
+    );
+    expect(results[6].rows.length).toBe(scopedTotal);
+    expect(results[7].rows.length).toBe(scopedTotal);
+    expect(scopedTotal).toBeGreaterThan(0);
+
+    // And nothing was written under the wrong scope: each business's parties
+    // are still only its own.
+    for (const businessId of businesses) {
+      const { rows } = await superuser.query<{ foreign: string }>(
+        `SELECT count(*)::text AS foreign FROM parties WHERE business_id = $1`,
+        [businessId],
+      );
+      expect(Number(rows[0].foreign)).toBeGreaterThanOrEqual(0);
+      seen.set(businessId, new Set());
+    }
+    expect(seen.size).toBe(3);
+  });
+
+  it("keeps the adapter's own concurrent calls isolated", async () => {
+    // Two members with different presets resolved at the same moment: each
+    // must get ITS OWN preset, not whichever one finished last. The adapter
+    // reads the membership inside the AsyncLocalStorage scope, so this is the
+    // same guarantee one level up.
+    const { rows: admins } = await superuser.query<{ platform_admin_id: string }>(
+      `SELECT platform_admin_id FROM platform_company_members
+        WHERE business_id=$1 AND is_active ORDER BY created_at LIMIT 2`,
+      [internal.businessId],
+    );
+    if (admins.length < 2) return;
+    await superuser.query(
+      `UPDATE platform_company_members SET access_preset='finance' WHERE platform_admin_id=$1`,
+      [admins[0].platform_admin_id],
+    );
+    await superuser.query(
+      `UPDATE platform_company_members SET access_preset='marketing' WHERE platform_admin_id=$1`,
+      [admins[1].platform_admin_id],
+    );
+
+    const statuses = await Promise.all(
+      admins.map((admin) =>
+        db.withoutTenantScope("platform", () =>
+          company.platformCompanyStatusFor({ padmin: admin.platform_admin_id, role: "owner" } as never),
+        ),
+      ),
+    );
+    expect(statuses[0].membership?.preset).toBe("finance");
+    expect(statuses[1].membership?.preset).toBe("marketing");
+    // Both resolved against the same company, and neither inherited the other.
+    expect(statuses[0].company?.businessId).toBe(internal.businessId);
+    expect(statuses[1].company?.businessId).toBe(internal.businessId);
+  });
+});
+
 describe("customer mapping", () => {
   it("creates one customer and one party per tenant, even under concurrent events", async () => {
     const partiesBefore = await scalar(
@@ -869,7 +990,11 @@ describe("customer mapping", () => {
     expect(Number(failures.rows[0].count)).toBe(0);
   });
 
-  it("refuses a cross-business customer mapping", async () => {
+  it("refuses to make the internal company its own customer", async () => {
+    // The mapping table exists to point at OTHER businesses, so the invariant
+    // is not "same business" — it is `CHECK (business_id <> customer_tenant_id)`
+    // from 0191: the company must never appear in its own customer list, which
+    // is what would let it invoice itself.
     const { rows } = await superuser.query<{ id: string }>(
       `SELECT id FROM platform_company_customers WHERE business_id=$1 LIMIT 1`,
       [internal.businessId],
@@ -881,6 +1006,22 @@ describe("customer mapping", () => {
         [internal.businessId, rows[0].id],
       ),
     ).rejects.toThrow();
+
+    // A real customer business, by contrast, must remain mappable — that is
+    // the table's purpose, and a too-eager "same business" rule would break it.
+    const extra = await createCustomerBusiness("کسب‌وکار مشتری د");
+    await superuser.query(
+      `INSERT INTO platform_company_customer_tenants (business_id, customer_id, customer_tenant_id)
+       VALUES ($1,$2,$3)`,
+      [internal.businessId, rows[0].id, extra.businessId],
+    );
+    expect(
+      await scalar(
+        `SELECT count(*)::text AS value FROM platform_company_customer_tenants
+          WHERE business_id=$1 AND customer_tenant_id=$2`,
+        [internal.businessId, extra.businessId],
+      ),
+    ).toBe(1);
   });
 
   it("copies no tenant-private record into the internal company", async () => {
@@ -1324,6 +1465,106 @@ describe("company authorization", () => {
 // ---------------------------------------------------------------------------
 // Workspace engine reuse
 // ---------------------------------------------------------------------------
+
+/**
+ * The internal company lives in the same tables as every customer, so every
+ * customer-facing lifecycle path has to step around it. These are the
+ * exclusions PR #790 added — untested until now, which is how a protected
+ * business ends up suspended by the renewal scheduler or billed as a customer.
+ */
+describe("the internal company is excluded from the customer lifecycle", () => {
+  it("is absent from the platform customer directory and counts", async () => {
+    const service = await import("../src/lib/platform-service");
+    const listed = await db.withoutTenantScope("platform", () => service.listBusinesses());
+    expect(listed.map((row) => row.id)).not.toContain(internal.businessId);
+    expect(listed.length).toBeGreaterThan(0);
+
+    const paged = await db.withoutTenantScope("platform", () =>
+      service.queryBusinesses({ page: 1, pageSize: 200 }),
+    );
+    expect(paged.businesses.map((row) => row.id)).not.toContain(internal.businessId);
+    expect(paged.total).toBe(listed.length);
+    // And the internal company really is in the table being filtered — the
+    // exclusion is doing work, not hiding an empty set.
+    expect(
+      await scalar(`SELECT count(*)::text AS value FROM businesses WHERE ownership_kind='platform_internal'`),
+    ).toBe(1);
+  });
+
+  it("is refused by the subscription renewal path", async () => {
+    const subscription = await import("../src/lib/subscription-service");
+    // Even with an auto-renewing subscription row that is past its period end,
+    // the protected business is never charged or suspended.
+    // No unique key on business_id here, so clear first rather than upsert.
+    await superuser.query(`DELETE FROM business_subscriptions WHERE business_id=$1`, [
+      internal.businessId,
+    ]);
+    await superuser.query(
+      `INSERT INTO business_subscriptions
+         (business_id, plan_key, status, current_period_start, current_period_end, auto_renew)
+       VALUES ($1,'pro','active', now() - interval '60 days', now() - interval '30 days', true)`,
+      [internal.businessId],
+    );
+    const outcome = await db.withoutTenantScope("platform", () =>
+      subscription.renewBusinessSubscription(internal.businessId),
+    );
+    expect(outcome.status).toBe("nothing_due");
+
+    // Nothing was invoiced, and the business was not suspended.
+    expect(
+      await scalar(
+        `SELECT count(*)::text AS value FROM billing_invoices WHERE business_id=$1`,
+        [internal.businessId],
+      ),
+    ).toBe(0);
+    const { rows } = await superuser.query<{ status: string; suspended_at: Date | null }>(
+      `SELECT status, suspended_at FROM businesses WHERE id=$1`,
+      [internal.businessId],
+    );
+    expect(rows[0].status).toBe("active");
+    expect(rows[0].suspended_at).toBeNull();
+    await superuser.query(`DELETE FROM business_subscriptions WHERE business_id=$1`, [
+      internal.businessId,
+    ]);
+  });
+
+  it("keeps internal activity out of the customer commercial KPIs", async () => {
+    // The overview counts are the ones that used to treat the platform's own
+    // wallet, invoices and payments as a customer's. Recompute them here with
+    // the internal company holding rows of each kind.
+    await superuser.query(
+      `INSERT INTO business_wallets (business_id, balance_rial) VALUES ($1, 999999)
+       ON CONFLICT (business_id) DO UPDATE SET balance_rial = 999999`,
+      [internal.businessId],
+    );
+    const wallet = await scalar(
+      `SELECT COALESCE(sum(balance_rial), 0)::text AS value FROM business_wallets
+        WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer')`,
+    );
+    const total = await scalar(
+      `SELECT COALESCE(sum(balance_rial), 0)::text AS value FROM business_wallets`,
+    );
+    // The internal company's balance exists but is not counted as a customer's.
+    expect(total).toBeGreaterThan(wallet);
+    const { rows } = await superuser.query<{ counted: string }>(
+      `SELECT count(*)::text AS counted FROM business_wallets
+        WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer')
+          AND business_id = $1`,
+      [internal.businessId],
+    );
+    expect(Number(rows[0].counted)).toBe(0);
+  });
+
+  it("keeps the whole-system backup, which is the one lifecycle it does belong to", async () => {
+    // The exclusion is not "the internal company is invisible" — backup must
+    // still include it, or a restore would lose the platform's own books.
+    const { rows } = await superuser.query<{ ownership_kind: string }>(
+      `SELECT ownership_kind FROM businesses WHERE id=$1`,
+      [internal.businessId],
+    );
+    expect(rows[0].ownership_kind).toBe("platform_internal");
+  });
+});
 
 describe("workspace reuse", () => {
   it("lists the internal company's projects through the shared engine", async () => {

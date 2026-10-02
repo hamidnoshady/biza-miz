@@ -145,6 +145,19 @@ npm run platform-company:health -- --apply --actor=<platform-admin-uuid>
 Both run against the central install. The billing tick and the maintenance tick are scheduled
 only on a central deployment (`DEPLOYMENT_ROLE=central`).
 
+### Tested on both paths
+
+0193 is covered two ways, because "it applies" and "it applies to a live system" are different
+claims:
+
+* `integration/platform-company.integration.test.ts` builds a database from scratch.
+* `integration/platform-company-migration.integration.test.ts` builds one at 0192, seeds it the
+  way a running system leaves it (a company, a mapped customer, a posted event with its journal
+  entry), and applies 0193 on top — then checks that the leaky policy is gone, every pre-existing
+  row survived, no write path is open to a tenant, and the idempotency keys landed.
+
+If someone edits 0191 in place, the second suite is what fails.
+
 ## Website lead intake
 
 Website editors create or rotate a show-once credential from the Websites page. Each credential is
