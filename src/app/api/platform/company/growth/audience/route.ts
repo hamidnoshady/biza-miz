@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { query, withoutTenantScope } from "@/lib/db";
+import { consentCoverage } from "@/lib/crm-service";
 import { PERMISSIONS } from "@/lib/permissions";
 import { withPlatformCompany } from "@/lib/platform-company";
 import { withPlatformScope } from "@/lib/platform-auth";
@@ -38,13 +39,9 @@ export const GET = withPlatformScope(async (): Promise<NextResponse> => {
         GROUP BY status, source`,
       [actor.businessId],
     );
-    const { rows: consentRows } = await query<{ channel: string; parties: string }>(
-      `SELECT channel, count(DISTINCT customer_id)::text AS parties
-         FROM crm_consent_events
-        WHERE business_id = $1 AND granted
-        GROUP BY channel`,
-      [actor.businessId],
-    );
+    // The audit trail records past grants AND revocations. The shared CRM
+    // engine reads current flags on live, unmerged customer parties instead.
+    const consent = await consentCoverage(actor.businessId);
     const { rows: customerRows } = await query<{ churn_risk: string; count: string }>(
       `SELECT churn_risk, count(*)::text AS count
          FROM platform_company_customers WHERE business_id = $1
@@ -60,12 +57,10 @@ export const GET = withPlatformScope(async (): Promise<NextResponse> => {
 
     // The one cross-tenant read: which mapped customer tenants come up for
     // renewal soon. Business name and period end only — nothing else.
-    const { rows: tenantRows } = await withoutTenantScope("platform", () =>
-      query<{ customer_tenant_id: string }>(
-        `SELECT customer_tenant_id FROM platform_company_customer_tenants
-          WHERE business_id = $1`,
-        [actor.businessId],
-      ),
+    const { rows: tenantRows } = await query<{ customer_tenant_id: string }>(
+      `SELECT customer_tenant_id FROM platform_company_customer_tenants
+        WHERE business_id = $1`,
+      [actor.businessId],
     );
     const tenantIds = tenantRows.map((row) => row.customer_tenant_id);
     let renewalCandidates: GrowthAudienceSummary["renewalCandidates"] = [];
@@ -74,9 +69,12 @@ export const GET = withPlatformScope(async (): Promise<NextResponse> => {
         query<{ tenant_id: string; tenant_name: string | null; period_end: Date | null }>(
           `SELECT b.id AS tenant_id, b.name AS tenant_name, s.current_period_end AS period_end
              FROM businesses b
-             LEFT JOIN business_subscriptions s ON s.business_id = b.id
+             JOIN business_subscriptions s ON s.business_id = b.id
             WHERE b.id = ANY($1::uuid[])
-              AND s.current_period_end IS NOT NULL
+              AND b.status = 'active'
+              AND s.status IN ('active', 'trialing', 'past_due')
+              AND NOT s.cancel_at_period_end
+              AND s.current_period_end >= now()
               AND s.current_period_end <= now() + interval '14 days'
             ORDER BY s.current_period_end`,
           [tenantIds],
@@ -102,8 +100,6 @@ export const GET = withPlatformScope(async (): Promise<NextResponse> => {
       if (row.source === "website") websiteLeads += count;
       if (row.status !== "converted") unconverted += count;
     }
-    const consentParties = new Map<string, number>();
-    for (const row of consentRows) consentParties.set(row.channel, Number(row.parties));
     const byChurnRisk: Record<string, number> = {};
     let customersTotal = 0;
     for (const row of customerRows) {
@@ -122,9 +118,9 @@ export const GET = withPlatformScope(async (): Promise<NextResponse> => {
     const summary: GrowthAudienceSummary = {
       leads: { total: leadsTotal, byStatus, websiteLeads, unconverted },
       consent: {
-        sms: consentParties.get("sms") ?? 0,
-        email: consentParties.get("email") ?? 0,
-        partiesWithConsent: [...consentParties.values()].reduce((a, b) => Math.max(a, b), 0),
+        sms: consent.smsGranted,
+        email: consent.emailGranted,
+        partiesWithConsent: consent.partiesWithConsent,
       },
       customers: { total: customersTotal, byChurnRisk },
       campaigns: {

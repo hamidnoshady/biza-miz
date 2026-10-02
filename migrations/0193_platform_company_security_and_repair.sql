@@ -265,7 +265,7 @@ BEGIN
     END IF;
     remaining := total
       - platform_company_invoice_settled_rial(NEW.business_id, invoice)
-      + NEW.amount_rial; -- this row is not visible to the helper yet
+      + NEW.amount_rial; -- AFTER INSERT includes this debit; exclude it from prior settlement
     amount := LEAST(NEW.amount_rial, GREATEST(remaining, 0));
     IF amount > 0 THEN
       PERFORM enqueue_platform_company_billing_event('invoice_payment','wallet_ledger',NEW.id::text,
@@ -304,7 +304,11 @@ BEGIN
   IF NEW.invoice_id IS NULL THEN RETURN NEW; END IF;
   SELECT total_rial INTO total FROM billing_invoices WHERE id = NEW.invoice_id;
   IF total IS NULL THEN RETURN NEW; END IF;
-  remaining := total - platform_company_invoice_settled_rial(NEW.business_id, NEW.invoice_id);
+  -- AFTER UPDATE already exposes this verified row to the helper. Add it
+  -- back to get the capacity BEFORE this payment; otherwise a full payment
+  -- (including the gateway part of a mixed settlement) disappears entirely.
+  remaining := total - platform_company_invoice_settled_rial(NEW.business_id, NEW.invoice_id)
+    + NEW.amount_rial;
   amount := LEAST(NEW.amount_rial, GREATEST(remaining, 0));
   IF amount <= 0 THEN RETURN NEW; END IF;
   method := CASE WHEN NEW.gateway = 'manual' THEN 'manual' ELSE 'gateway' END;

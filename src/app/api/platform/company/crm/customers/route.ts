@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { query, withoutTenantScope } from "@/lib/db";
 import { PERMISSIONS } from "@/lib/permissions";
 import { withPlatformCompany } from "@/lib/platform-company";
+import { POSTING_ACCOUNTS } from "@/lib/platform-company-billing";
 import { withPlatformScope } from "@/lib/platform-auth";
 import type { PlatformCompanyCustomerSummary } from "@/lib/platform-company-types";
 
@@ -51,46 +52,43 @@ export const GET = withPlatformScope(async (): Promise<NextResponse> => {
       settled_rial: string | null;
       project_count: string | null;
     }>(
-      // Every roll-up is its own scalar sub-query. A single GROUP BY over the
-      // tenant join × the events join × the postings join repeats one tenant
-      // once per billing event that mentions it and multiplies every SUM by
-      // the same factor — the customer card then shows a wallet, an open
-      // invoice and a balance several times over, and a total that is not the
-      // customer's.
+      // Aggregate each relationship independently, never tenant × event ×
+      // project joins that multiply balances. Receivables come from the actual
+      // posted journal lines, not whole-event amounts: a partially-paid void
+      // credits only its outstanding portion to A/R; the paid part becomes a
+      // wallet liability. Credits and positive adjustments follow the same
+      // ledger projection without inventing another accounting rule here.
       `SELECT c.id, c.party_id, c.legal_name, c.billing_customer_key, c.churn_risk,
               u.full_name AS owner_name,
               COALESCE((SELECT array_agg(ct.customer_tenant_id ORDER BY ct.created_at)
                           FROM platform_company_customer_tenants ct
                          WHERE ct.customer_id = c.id AND ct.business_id = c.business_id), '{}')
                 AS tenant_ids,
-              COALESCE((SELECT sum(p.amount_rial)
-                          FROM platform_company_customer_tenants ct
-                          JOIN platform_company_billing_events e
-                            ON e.internal_business_id = c.business_id
-                           AND e.customer_tenant_id = ct.customer_tenant_id
-                           AND e.source_kind = 'invoice_issued'
-                          JOIN platform_company_accounting_postings p
-                            ON p.event_id = e.id AND p.business_id = c.business_id
-                         WHERE ct.customer_id = c.id AND ct.business_id = c.business_id), 0)::text
-                AS invoiced_rial,
-              COALESCE((SELECT sum(p.amount_rial)
-                          FROM platform_company_customer_tenants ct
-                          JOIN platform_company_billing_events e
-                            ON e.internal_business_id = c.business_id
-                           AND e.customer_tenant_id = ct.customer_tenant_id
-                           AND e.source_kind IN ('invoice_payment','credit_note')
-                          JOIN platform_company_accounting_postings p
-                            ON p.event_id = e.id AND p.business_id = c.business_id
-                         WHERE ct.customer_id = c.id AND ct.business_id = c.business_id), 0)::text
-                AS settled_rial,
+              COALESCE(ledger.debits, 0)::text AS invoiced_rial,
+              COALESCE(ledger.credits, 0)::text AS settled_rial,
               COALESCE((SELECT count(*) FROM ai_projects pr
                          WHERE pr.business_id = c.business_id
                            AND pr.party_id = c.party_id), 0)::text AS project_count
          FROM platform_company_customers c
          LEFT JOIN users u ON u.id = c.account_owner_user_id AND u.business_id = c.business_id
+         LEFT JOIN LATERAL (
+           SELECT sum(jl.debit) AS debits, sum(jl.credit) AS credits
+             FROM platform_company_customer_tenants ct
+             JOIN platform_company_billing_events e
+               ON e.internal_business_id = c.business_id
+              AND e.customer_tenant_id = ct.customer_tenant_id
+             JOIN platform_company_accounting_postings p
+               ON p.event_id = e.id AND p.business_id = c.business_id
+             JOIN journal_entries je
+               ON je.id = p.journal_entry_id AND je.business_id = c.business_id
+              AND je.posted_at IS NOT NULL
+             JOIN journal_lines jl ON jl.entry_id = je.id
+             JOIN accounts a ON a.id = jl.account_id AND a.business_id = c.business_id AND a.code = $2
+            WHERE ct.customer_id = c.id AND ct.business_id = c.business_id
+         ) ledger ON true
         WHERE c.business_id = $1
         ORDER BY c.legal_name, c.id`,
-      [actor.businessId],
+      [actor.businessId, POSTING_ACCOUNTS.receivable],
     );
 
     const { rows: dealRows } = await query<{

@@ -184,7 +184,8 @@ async function main() {
           customer_tenant_id, amount_rial, payload, occurred_at, settlement_method, customer_invoice_id)
        SELECT $1,'invoice_payment','billing_payments',p.id::text,'settlement:verified',p.business_id,
               LEAST(p.amount_rial, GREATEST(i.total_rial
-                     - platform_company_invoice_settled_rial(p.business_id, p.invoice_id), 0)),
+                     - platform_company_invoice_settled_rial(p.business_id, p.invoice_id)
+                     + p.amount_rial, 0)),
               jsonb_build_object('invoiceId',p.invoice_id,'paymentId',p.id,'gateway',p.gateway,
                                  'settlement',CASE WHEN p.gateway='manual' THEN 'manual' ELSE 'gateway' END,
                                  'backfill',true),

@@ -60,8 +60,10 @@ invoice's own trigger will not double-count:
 * a `wallet_ledger` **debit** carrying `metadata.invoiceId`, and
 * a `billing_payments` row that has transitioned to **`verified`**.
 
-Each emits its own `invoice_payment` event, clipped to whatever is still outstanding on the
-invoice. The invoice trigger then emits only the **residual** — the part of `paid_rial` no
+Each emits its own `invoice_payment` event, clipped to whatever was outstanding **before that
+source row**. Both source triggers run AFTER the write, so the settled-total helper already
+includes the new debit/verified payment; its amount is added back before clipping. The explicit
+historical backfill uses the same calculation. The invoice trigger then emits only the **residual** — the part of `paid_rial` no
 settlement record accounts for — tagged `settlement='residual'`/`method='other'`. So a
 600,000-rial wallet debit plus 400,000 rial by other means on a 1,000,000-rial invoice produces
 two postings with two different debit accounts, and no invented third one. The previous
@@ -116,8 +118,13 @@ adopted only when it is genuinely orphaned (same name, referenced by no customer
 recovery path for a run that died between the two inserts. A tenant therefore maps to exactly one
 company customer, and one company customer may own several tenants.
 
-CRM's read-only balance endpoint derives balances **only** from successfully posted Accounting
-events (`balanceSource: "accounting_postings"`), never from an invoice's `paid_rial`.
+CRM's read-only balance endpoint derives balances **only** from the receivable (1200) journal
+lines linked to Accounting postings (`balanceSource: "accounting_postings"`), never from an
+invoice's operational `paid_rial`/status or the whole amount of a void event. This includes the
+outstanding portion of a posted void, credit notes and positive commercial adjustments, while
+excluding wallet liabilities, cash and provider costs. The compatibility fields `invoicedRial`
+and `settledRial` carry posted A/R debit and credit totals; the UI labels them بدهکار / بستانکار
+rather than calling a cancellation or credit note a cash collection.
 
 MRR and similar Billing metrics are operational metrics. They are not labelled as posted revenue.
 A won deal or completed project never posts revenue.
@@ -126,10 +133,41 @@ A won deal or completed project never posts revenue.
 
 Money is stored as integer **Rial** everywhere and rendered through `useMoney()` / `formatMoney`
 in the business's chosen unit (`settings('business.prefs')->currencyDisplay`, default Toman). No
-company screen divides by 10 by hand. Every user-visible date is Shamsi (Jalali) via
+company screen divides by 10 by hand. CRM/Workspace money-consuming content must mount as a
+**descendant** of `CompanyWorkspace`'s `MoneyProvider`; a hook in the page returning that shell
+would read the outer/default unit instead. Every user-visible date is Shamsi (Jalali) via
 `formatJalali`. A static test in `src/app/api/platform/company/route-guards.test.ts` fails the
 build if a company file reintroduces a hand-rolled unit conversion, a hard-coded unit label or a
 `toLocaleDateString`.
+
+## Growth summary
+
+Consent coverage reuses the shared CRM `consentCoverage()` engine: current `parties.sms_consent`
+and `marketing_consent` flags on active, unmerged customer parties. Historical grants in
+`crm_consent_events` remain an audit trail, not a current audience. `partiesWithConsent` counts
+the union of the two channels once per party, not the maximum or sum of channel totals.
+
+Upcoming renewal candidates are explicitly mapped customer tenants with an active business,
+a renewable subscription status (`active`, `trialing`, `past_due`), no scheduled cancellation,
+and a period end between now and 14 days from now (inclusive). Past periods, cancelled/expired
+subscriptions, archived businesses and unrelated/unmapped tenants are excluded. The summary
+never activates a campaign or sends a reminder.
+
+### Review regressions
+
+`integration/platform-company-review.integration.test.ts` drives source triggers, posting and the
+real CRM/Growth handlers with a signed platform session and a `NOSUPERUSER/NOBYPASSRLS` runtime
+role. It covers full gateway/manual payment, payments larger than half the invoice, real mixed
+600k wallet/400k verified gateway settlement, duplicate verification, posted voids (unpaid,
+partially paid and fully paid), adjustments/credit notes, consent revocation/overlap, the renewal
+window and the actual backfill CLI's dry-run/application/replay behavior. Fixture setup alone
+uses the database owner; no application guard or tenant scope is mocked.
+
+`src/app/platform/company/company-money.test.tsx` mounts the actual company shell/provider and
+both money-consuming pages in Rial and Toman, under an opposite outer money context. It covers
+balances, wallet/open-invoice amounts, deal values, project budgets, forecasts and posted actuals.
+These regressions reproduce the reviewed defects before the fixes rather than only checking
+source-code shapes.
 
 ## Operational scripts
 

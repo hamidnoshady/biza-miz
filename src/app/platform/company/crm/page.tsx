@@ -40,6 +40,16 @@ const SUBSCRIPTION_LABELS: Record<string, string> = {
  * because an email or a phone happens to match.
  */
 export default function Page() {
+  return (
+    <CompanyWorkspace active="crm">
+      <CompanyCrmContent />
+    </CompanyWorkspace>
+  );
+}
+
+// This component mounts beneath CompanyWorkspace's company-specific money
+// provider. A hook in Page would instead read the outer/default money unit.
+function CompanyCrmContent() {
   const money = useMoney();
   const [customers, setCustomers] = useState<PlatformCompanyCustomerSummary[] | null>(null);
   const [deals, setDeals] = useState<PlatformCompanyDealSummary[] | null>(null);
@@ -88,7 +98,7 @@ export default function Page() {
   const wonDeals = (deals ?? []).filter((deal) => deal.outcome === "won");
 
   return (
-    <CompanyWorkspace active="crm">
+    <>
       <div className="space-y-4">
         <section className="rounded-2xl border border-border bg-card p-5">
           <h2 className="text-lg font-bold">حساب‌های مشتری پلتفرم</h2>
@@ -175,7 +185,7 @@ export default function Page() {
                     <td className="p-2 whitespace-nowrap">
                       {money.format(customer.accountingBalanceRial)}
                       <div className="text-xs text-muted-foreground">
-                        صادرشده {money.format(customer.invoicedRial)} · وصول{" "}
+                        بدهکار {money.format(customer.invoicedRial)} · بستانکار{" "}
                         {money.format(customer.settledRial)}
                       </div>
                     </td>
@@ -252,6 +262,6 @@ export default function Page() {
           </Button>
         </section>
       </div>
-    </CompanyWorkspace>
+    </>
   );
 }

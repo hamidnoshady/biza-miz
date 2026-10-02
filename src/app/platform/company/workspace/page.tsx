@@ -56,6 +56,16 @@ const LINK_LABELS: Record<string, string> = {
  * manager sees what they manage without being handed the ledger.
  */
 export default function Page() {
+  return (
+    <CompanyWorkspace active="workspace">
+      <CompanyProjectsContent />
+    </CompanyWorkspace>
+  );
+}
+
+// This component mounts beneath CompanyWorkspace's company-specific money
+// provider. A hook in Page would instead read the outer/default money unit.
+function CompanyProjectsContent() {
   const money = useMoney();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [actualsIncluded, setActualsIncluded] = useState(false);
@@ -74,7 +84,7 @@ export default function Page() {
   }, []);
 
   return (
-    <CompanyWorkspace active="workspace">
+    <>
       <div className="space-y-4">
         <section className="rounded-2xl border border-border bg-card p-5">
           <h2 className="text-lg font-bold">پروژه‌های شرکت پلتفرم</h2>
@@ -174,6 +184,6 @@ export default function Page() {
           ) : null}
         </section>
       </div>
-    </CompanyWorkspace>
+    </>
   );
 }

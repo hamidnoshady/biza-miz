@@ -493,6 +493,8 @@ export async function consentCoverage(businessId: string): Promise<{
   total: number;
   smsGranted: number;
   emailGranted: number;
+  /** Unique live customers with current consent on at least one channel. */
+  partiesWithConsent: number;
   withMobile: number;
   withEmail: number;
   smsReachable: number;
@@ -508,6 +510,7 @@ export async function consentCoverage(businessId: string): Promise<{
     `SELECT count(*)::text AS total,
             count(*) FILTER (WHERE sms_consent)::text AS sms_granted,
             count(*) FILTER (WHERE marketing_consent)::text AS email_granted,
+            count(*) FILTER (WHERE sms_consent OR marketing_consent)::text AS parties_with_consent,
             count(*) FILTER (WHERE ${mobileReachableSql()})::text AS with_mobile,
             count(*) FILTER (WHERE email IS NOT NULL AND btrim(email) <> '')::text AS with_email,
             count(*) FILTER (WHERE sms_consent AND ${mobileReachableSql()})::text AS sms_reachable,
@@ -525,6 +528,7 @@ export async function consentCoverage(businessId: string): Promise<{
     total: n("total"),
     smsGranted: n("sms_granted"),
     emailGranted: n("email_granted"),
+    partiesWithConsent: n("parties_with_consent"),
     withMobile: n("with_mobile"),
     withEmail: n("with_email"),
     // Consent alone is not reachability: consent plus a number an SMS can

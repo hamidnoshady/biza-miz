@@ -147,7 +147,9 @@ export interface PlatformCompanyCustomerSummary {
   }[];
   /** Posted Accounting balance — never a figure computed outside the ledger. */
   accountingBalanceRial: number;
+  /** Posted A/R debits, including invoices and positive commercial adjustments. */
   invoicedRial: number;
+  /** Posted A/R credits, including collections, credit notes and void reversals. */
   settledRial: number;
   deals: { id: string; title: string; valueRial: number; outcome: string | null; projectId: string | null }[];
   projectCount: number;
