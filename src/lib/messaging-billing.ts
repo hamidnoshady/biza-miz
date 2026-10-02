@@ -374,6 +374,7 @@ export async function savePlatformMessageConfig(
 export async function saveMessageRates(input: {
   smsRialPerSegment?: number;
   emailRialPerSend?: number;
+  adminId?: string | null;
 }): Promise<{ smsRialPerSegment: number; emailRialPerSend: number }> {
   const parse = (value: number | undefined) =>
     value === undefined ? undefined : Number.isSafeInteger(value) && value >= 0 ? value : NaN;
@@ -388,6 +389,8 @@ export async function saveMessageRates(input: {
          FROM platform_message_config WHERE id = true`,
     );
     const current = rows[0];
+    const nextSms = sms ?? Number(current?.sms ?? 0);
+    const nextEmail = email ?? Number(current?.email ?? 0);
     await query(
       `INSERT INTO platform_message_config (id, sms_rial_per_segment, email_rial_per_send)
        VALUES (true, $1, $2)
@@ -395,8 +398,29 @@ export async function saveMessageRates(input: {
          sms_rial_per_segment = EXCLUDED.sms_rial_per_segment,
          email_rial_per_send = EXCLUDED.email_rial_per_send,
          updated_at = now()`,
-      [sms ?? Number(current?.sms ?? 0), email ?? Number(current?.email ?? 0)],
+      [nextSms, nextEmail],
     );
+    const { publishPriceVersion } = await import("./billing/runtime");
+    if (sms !== undefined) {
+      await publishPriceVersion({
+        targetType: "meter",
+        targetKey: "messaging.sms_segment",
+        unit: "segment",
+        unitAmountRial: nextSms,
+        unitSize: 1,
+        createdBy: input.adminId ?? null,
+      });
+    }
+    if (email !== undefined) {
+      await publishPriceVersion({
+        targetType: "meter",
+        targetKey: "messaging.email_send",
+        unit: "send",
+        unitAmountRial: nextEmail,
+        unitSize: 1,
+        createdBy: input.adminId ?? null,
+      });
+    }
   });
   const config = await resolveMessageConfig();
   return config.rate;
@@ -799,6 +823,14 @@ export async function settleMessageSend(input: {
           ...input.metadata,
         },
       });
+      await client.query(
+        `UPDATE feature_usage
+            SET spent_rial = GREATEST(0, spent_rial - $2),
+                charged_count = CASE WHEN $3 = 0 THEN GREATEST(0, charged_count - 1) ELSE charged_count END,
+                updated_at = now()
+          WHERE business_id = $1 AND feature_key = 'messaging'`,
+        [input.businessId, refundedRial, chargedRial],
+      );
     }
     await client.query(
       `UPDATE wallet_ledger
@@ -857,6 +889,15 @@ export async function refundUnsentMessage(input: {
           reason: input.reason,
         },
       });
+      await client.query(
+        `UPDATE feature_usage
+            SET spent_rial = GREATEST(0, spent_rial - $2),
+                charged_count = GREATEST(0, charged_count - 1),
+                used_count = GREATEST(0, used_count - 1),
+                updated_at = now()
+          WHERE business_id = $1 AND feature_key = 'messaging'`,
+        [input.businessId, input.reservation.reservedRial],
+      );
       await client.query(
         `UPDATE wallet_ledger
             SET metadata = metadata || '{"phase":"refunded"}'::jsonb

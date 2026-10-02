@@ -41,6 +41,8 @@ export interface WalletSummary {
   balanceRial: number;
   totalToppedUpRial: number;
   totalSpentRial: number;
+  aiDebtRial?: number;
+  netBalanceRial?: number;
 }
 
 export interface LedgerEntry {
@@ -65,10 +67,13 @@ export interface CreditPackage {
 
 export type PaymentStatus = "pending" | "redirect" | "verified" | "failed" | "cancelled";
 
+export type PaymentFulfilmentStatus = "pending" | "succeeded" | "failed";
+
 export interface PaymentRecord {
   id: string;
   businessId: string;
   gateway: "manual" | "zarinpal";
+  sandbox?: boolean;
   purpose: "top_up" | "plan_purchase" | "addon_purchase";
   packageId: string | null;
   planKey: string | null;
@@ -79,6 +84,9 @@ export interface PaymentRecord {
   status: PaymentStatus;
   authority: string | null;
   gatewayRef: string | null;
+  fulfilmentStatus?: PaymentFulfilmentStatus;
+  fulfilledAt?: string | null;
+  fulfilmentError?: string | null;
   createdAt: string;
   verifiedAt: string | null;
   businessName?: string | null;
@@ -237,17 +245,25 @@ export async function getWallet(businessId: string): Promise<WalletSummary> {
     balance_rial: string;
     total_topped_up_rial: string;
     total_spent_rial: string;
+    ai_debt_rial: string;
   }>(
-    `SELECT balance_rial, total_topped_up_rial, total_spent_rial
-       FROM business_wallets WHERE business_id = $1`,
+    `SELECT w.balance_rial, w.total_topped_up_rial, w.total_spent_rial,
+            COALESCE(d.debt_rial, 0)::text AS ai_debt_rial
+       FROM business_wallets w
+       LEFT JOIN ai_wallet_debt d ON d.business_id = w.business_id
+      WHERE w.business_id = $1`,
     [businessId],
   );
   const row = rows[0];
+  const balanceRial = n(row?.balance_rial);
+  const aiDebtRial = n(row?.ai_debt_rial);
   return {
     businessId,
-    balanceRial: n(row?.balance_rial),
+    balanceRial,
     totalToppedUpRial: n(row?.total_topped_up_rial),
     totalSpentRial: n(row?.total_spent_rial),
+    aiDebtRial,
+    netBalanceRial: balanceRial - aiDebtRial,
   };
 }
 
@@ -371,7 +387,7 @@ export async function grantCredits(input: {
   amountRial: number;
   note?: string;
   platformAdminId?: string | null;
-}): Promise<{ balanceRial: number }> {
+}): Promise<{ balanceRial: number; grossBalanceRial: number; debtPaidRial: number; debtRial: number }> {
   if (!positiveInt(input.amountRial)) throw new Error("bad_amount");
   const client = await getPool().connect();
   try {
@@ -384,7 +400,13 @@ export async function grantCredits(input: {
         note: input.note ?? "شارژ دستی توسط مدیر سامانه",
         platformAdminId: input.platformAdminId ?? null,
       });
-      return { balanceRial: balanceAfterRial };
+      const reconciled = await reconcileAiDebtTx(c, input.businessId);
+      return {
+        balanceRial: reconciled.balanceRial,
+        grossBalanceRial: balanceAfterRial,
+        debtPaidRial: Math.max(0, balanceAfterRial - reconciled.balanceRial),
+        debtRial: reconciled.debtRial,
+      };
     });
   } finally {
     client.release();
@@ -700,6 +722,15 @@ async function reconcileAiDebtTx(
     note: "تسویهٔ بدهی هوش مصنوعی",
     metadata: { aiDebtPaydown: true },
   });
+  await client.query(
+    `INSERT INTO feature_usage (business_id, feature_key, used_count, charged_count, spent_rial)
+     VALUES ($1, $2, 0, 1, $3)
+     ON CONFLICT (business_id, feature_key) DO UPDATE SET
+       charged_count = CASE WHEN feature_usage.charged_count = 0 THEN 1 ELSE feature_usage.charged_count END,
+       spent_rial = feature_usage.spent_rial + $3,
+       updated_at = now()`,
+    [businessId, AI_FEATURE_KEY, pay],
+  );
   const remaining = debt - pay;
   await client.query(
     `INSERT INTO ai_wallet_debt (business_id, debt_rial, updated_at)
@@ -980,6 +1011,7 @@ export async function savePaymentConfig(
  */
 export async function createPayment(input: {
   businessId: string;
+  gateway?: "manual" | "zarinpal";
   purpose: "top_up" | "plan_purchase" | "addon_purchase";
   amountRial: number;
   creditRial?: number;
@@ -990,16 +1022,27 @@ export async function createPayment(input: {
   userId?: string | null;
 }): Promise<PaymentRecord> {
   if (!positiveInt(input.amountRial)) throw new Error("bad_amount");
-  const gateway = (await getPaymentConfig()).gateway;
+  if (input.purpose === "top_up" && !input.packageId) {
+    const { rows: settingsRows } = await query<{ minimum_top_up_rial: string }>(
+      `SELECT minimum_top_up_rial FROM billing_commercial_settings WHERE id = true`,
+    );
+    const minTopUp = n(settingsRows[0]?.minimum_top_up_rial);
+    if (minTopUp > 0 && input.amountRial < minTopUp) {
+      throw new Error("below_minimum_top_up");
+    }
+  }
+  const config = await getPaymentConfig();
+  const effectiveGateway = input.gateway ?? config.gateway;
   const { rows } = await query<Record<string, unknown>>(
     `INSERT INTO billing_payments
-       (business_id, gateway, purpose, package_id, plan_key, feature_key,
+       (business_id, gateway, sandbox, purpose, package_id, plan_key, feature_key,
         amount_rial, credit_rial, description, created_by_user_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      RETURNING *`,
     [
       input.businessId,
-      gateway,
+      effectiveGateway,
+      Boolean(config.sandbox),
       input.purpose,
       input.packageId ?? null,
       input.planKey ?? null,
@@ -1043,9 +1086,10 @@ export async function startPayment(
     mobile: opts.mobile ?? null,
   });
   await query(
-    `UPDATE billing_payments SET status = 'redirect', authority = $2, gateway = 'zarinpal'
-      WHERE id = $1`,
-    [paymentId, authority],
+    `UPDATE billing_payments
+        SET status = 'redirect', authority = $2, gateway = 'zarinpal', sandbox = $3
+      WHERE id = $1 AND status = 'pending'`,
+    [paymentId, authority, Boolean(config.sandbox)],
   );
   return { redirectUrl, gateway: "zarinpal" };
 }
@@ -1057,8 +1101,10 @@ export async function startPayment(
  */
 export async function verifyPayment(input: {
   paymentId: string;
+  businessId?: string;
   authority: string;
-  status: string; // Zarinpal returns 'OK' / 'NOK' in query params
+  status?: string; // Zarinpal returns 'OK' / 'NOK' in query params
+  statusParam?: string;
 }): Promise<PaymentRecord> {
   const config = await getPaymentConfig();
   const { rows } = await query<Record<string, unknown>>(
@@ -1067,29 +1113,48 @@ export async function verifyPayment(input: {
   );
   const payment = rows[0] ? rowToPayment(rows[0]) : null;
   if (!payment) throw new GatewayError("payment_not_found");
-  if (payment.status === "verified") return payment;
-  if (payment.status !== "redirect" && payment.status !== "pending") {
+  if (input.businessId && payment.businessId !== input.businessId) {
+    throw new GatewayError("forbidden_business");
+  }
+  if (payment.gateway !== "zarinpal") {
+    throw new GatewayError("invalid_payment_gateway");
+  }
+  if (payment.status !== "redirect" && payment.status !== "verified" && !payment.authority) {
+    throw new GatewayError("payment_not_pending");
+  }
+  const submittedAuthority = String(input.authority ?? "").trim();
+  if (!payment.authority || !submittedAuthority || payment.authority !== submittedAuthority) {
+    throw new GatewayError("authority_mismatch");
+  }
+  if (payment.status === "verified") {
+    return payment;
+  }
+  if (payment.status !== "redirect") {
     throw new GatewayError("payment_not_pending");
   }
 
-  const ok = input.status?.toUpperCase() === "OK" && Boolean(input.authority);
+  const rawStatus = input.status ?? input.statusParam ?? "";
+  const ok = rawStatus.toUpperCase() === "OK";
   if (!ok) {
     await query(
-      `UPDATE billing_payments SET status = 'cancelled', gateway_status = $2 WHERE id = $1`,
-      [payment.id, input.status ?? "NOK"],
+      `UPDATE billing_payments
+          SET status = 'cancelled', gateway_status = $2
+        WHERE id = $1 AND status = 'redirect' AND authority = $3`,
+      [payment.id, rawStatus || "NOK", payment.authority],
     );
     return (await getPaymentById(payment.id))!;
   }
 
   const result = await zarinpalVerify(config, {
     amountRial: payment.amountRial,
-    authority: input.authority,
+    authority: payment.authority,
   });
   if (!result.verified) {
     await query(
-      `UPDATE billing_payments SET status = 'failed', gateway_status = COALESCE($2, 'unverified')
-       WHERE id = $1`,
-      [payment.id, result.code ? String(result.code) : "NOK"],
+      `UPDATE billing_payments
+          SET status = 'failed', gateway_status = COALESCE($2, 'unverified')
+        WHERE id = $1 AND status = 'redirect' AND authority = $3`,
+      [payment.id, result.code ? String(result.code) : "NOK", payment.authority],
     );
     return (await getPaymentById(payment.id))!;
   }
@@ -1097,6 +1162,7 @@ export async function verifyPayment(input: {
   await settlePayment(payment.id, {
     gatewayRef: result.refId ?? null,
     gatewayStatus: result.code ? String(result.code) : "100",
+    authority: payment.authority,
   });
   return (await getPaymentById(payment.id))!;
 }
@@ -1107,7 +1173,12 @@ export async function verifyPayment(input: {
  */
 export async function settlePayment(
   paymentId: string,
-  opts: { gatewayRef?: string | null; gatewayStatus?: string; platformAdminId?: string | null } = {},
+  opts: {
+    gatewayRef?: string | null;
+    gatewayStatus?: string;
+    platformAdminId?: string | null;
+    authority?: string | null;
+  } = {},
 ): Promise<PaymentRecord> {
   const client = await getPool().connect();
   try {
@@ -1121,7 +1192,16 @@ export async function settlePayment(
       await client.query("ROLLBACK");
       throw new GatewayError("payment_not_found");
     }
+    if (opts.authority !== undefined && opts.authority !== null && payment.authority !== opts.authority) {
+      await client.query("ROLLBACK");
+      throw new GatewayError("authority_mismatch");
+    }
+    const cleanGatewayRef = opts.gatewayRef?.trim() ? opts.gatewayRef.trim() : null;
     if (payment.status === "verified") {
+      if (cleanGatewayRef && payment.gatewayRef && cleanGatewayRef !== payment.gatewayRef) {
+        await client.query("ROLLBACK");
+        throw new GatewayError("gateway_ref_mismatch");
+      }
       await client.query("COMMIT");
       return payment;
     }
@@ -1130,10 +1210,27 @@ export async function settlePayment(
       throw new GatewayError("payment_not_pending");
     }
 
+    if (cleanGatewayRef) {
+      const { rows: refCollision } = await client.query<{ id: string }>(
+        `SELECT id FROM billing_payments
+          WHERE gateway = $1 AND sandbox = $2 AND gateway_ref = $3 AND id <> $4
+          LIMIT 1`,
+        [payment.gateway, Boolean(payment.sandbox), cleanGatewayRef, payment.id],
+      );
+      if (refCollision[0]) {
+        await client.query("ROLLBACK");
+        throw new GatewayError("duplicate_gateway_ref");
+      }
+    }
+
     // Wallet credit — the unique payment_id index on wallet_ledger makes the
     // credit exactly-once even if settle is raced.
     await client.query(
       `INSERT INTO business_wallets (business_id) VALUES ($1) ON CONFLICT (business_id) DO NOTHING`,
+      [payment.businessId],
+    );
+    await client.query(
+      `SELECT business_id FROM business_wallets WHERE business_id = $1 FOR UPDATE`,
       [payment.businessId],
     );
     if (payment.creditRial > 0) {
@@ -1159,39 +1256,87 @@ export async function settlePayment(
           opts.platformAdminId ?? null,
         ],
       );
+      await reconcileAiDebtTx(client, payment.businessId);
     }
 
-    // Plan/addon purchases record their entitlement (the plan-builder service
-    // owns entitlement rows; payment only flags the purchase as settled).
+    const isTopUp = payment.purpose === "top_up";
     await client.query(
       `UPDATE billing_payments
-          SET status = 'verified', gateway_ref = $2, gateway_status = COALESCE($3, 'verified'),
-              verified_at = now(), reviewed_at = COALESCE(reviewed_at, now()),
-              reviewed_by = COALESCE(reviewed_by, $4)
-        WHERE id = $1`,
-      [payment.id, opts.gatewayRef ?? null, opts.gatewayStatus ?? null, opts.platformAdminId ?? null],
+          SET status = 'verified',
+              gateway_ref = COALESCE($2, gateway_ref),
+              gateway_status = COALESCE($3, 'verified'),
+              verified_at = now(),
+              reviewed_at = COALESCE(reviewed_at, now()),
+              reviewed_by = COALESCE(reviewed_by, $4),
+              fulfilment_status = CASE WHEN $5 THEN 'succeeded' ELSE fulfilment_status END,
+              fulfilled_at = CASE WHEN $5 THEN COALESCE(fulfilled_at, now()) ELSE fulfilled_at END
+        WHERE id = $1 AND status IN ('pending', 'redirect')`,
+      [payment.id, cleanGatewayRef, opts.gatewayStatus ?? null, opts.platformAdminId ?? null, isTopUp],
     );
     await client.query("COMMIT");
     return (await getPaymentById(payment.id))!;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
+    if (
+      err &&
+      typeof err === "object" &&
+      "code" in err &&
+      (err as { code?: string }).code === "23505" &&
+      "constraint" in err &&
+      String((err as { constraint?: string }).constraint).includes("gateway_ref")
+    ) {
+      throw new GatewayError("duplicate_gateway_ref");
+    }
     throw err;
   } finally {
     client.release();
   }
 }
 
-/** Super-admin: reject a pending manual payment. */
+/**
+ * Super-admin: reject a pending manual payment.
+ * Locks the row and refuses to overwrite an already-verified payment.
+ * Returns the actual persisted PaymentRecord.
+ */
 export async function rejectPayment(
   paymentId: string,
   opts: { platformAdminId?: string | null; note?: string } = {},
-): Promise<void> {
-  await query(
-    `UPDATE billing_payments SET status = 'failed', reviewed_by = $2, reviewed_at = now(),
-            gateway_status = COALESCE(gateway_status, 'rejected')
-      WHERE id = $1 AND status IN ('pending','redirect')`,
-    [paymentId, opts.platformAdminId ?? null],
-  );
+): Promise<PaymentRecord> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<Record<string, unknown>>(
+      `SELECT * FROM billing_payments WHERE id = $1 FOR UPDATE`,
+      [paymentId],
+    );
+    const payment = rows[0] ? rowToPayment(rows[0]) : null;
+    if (!payment) {
+      await client.query("ROLLBACK");
+      throw new GatewayError("payment_not_found");
+    }
+    if (payment.status === "verified") {
+      await client.query("COMMIT");
+      return payment;
+    }
+    if (payment.status === "pending" || payment.status === "redirect") {
+      await client.query(
+        `UPDATE billing_payments
+            SET status = 'failed',
+                reviewed_by = $2,
+                reviewed_at = now(),
+                gateway_status = COALESCE(gateway_status, 'rejected')
+          WHERE id = $1 AND status IN ('pending', 'redirect')`,
+        [paymentId, opts.platformAdminId ?? null],
+      );
+    }
+    await client.query("COMMIT");
+    return (await getPaymentById(paymentId))!;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function getPaymentById(id: string): Promise<PaymentRecord | null> {
@@ -1254,6 +1399,7 @@ function rowToPayment(row: Record<string, unknown>): PaymentRecord {
     id: String(row.id),
     businessId: String(row.business_id),
     gateway: (row.gateway as "manual" | "zarinpal") ?? "zarinpal",
+    sandbox: Boolean(row.sandbox ?? false),
     purpose: (row.purpose as PaymentRecord["purpose"]) ?? "top_up",
     packageId: (row.package_id as string | null) ?? null,
     planKey: (row.plan_key as string | null) ?? null,
@@ -1264,6 +1410,9 @@ function rowToPayment(row: Record<string, unknown>): PaymentRecord {
     status: (row.status as PaymentStatus) ?? "pending",
     authority: (row.authority as string | null) ?? null,
     gatewayRef: (row.gateway_ref as string | null) ?? null,
+    fulfilmentStatus: ((row.fulfilment_status as PaymentFulfilmentStatus | null) ?? "pending"),
+    fulfilledAt: row.fulfilled_at ? String(row.fulfilled_at) : null,
+    fulfilmentError: (row.fulfilment_error as string | null) ?? null,
     createdAt: String(row.created_at),
     verifiedAt: (row.verified_at as string | null) ?? null,
     businessName: (row.business_name as string | null) ?? null,

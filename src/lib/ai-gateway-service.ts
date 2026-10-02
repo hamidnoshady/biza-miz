@@ -318,6 +318,9 @@ export async function saveAiCostingConfig(
     maxTurnRial: nonNegativeInteger(input.maxTurnRial) ?? current.maxTurnRial,
   };
   await query(
+    `INSERT INTO platform_ai_gateway (id) VALUES (true) ON CONFLICT (id) DO NOTHING`,
+  );
+  await query(
     `UPDATE platform_ai_gateway
         SET usd_rial_rate = $1,
             gateway_costing_enabled = $2,
@@ -336,6 +339,25 @@ export async function saveAiCostingConfig(
       next.maxTurnRial,
     ],
   );
+  const { publishPriceVersion } = await import("./billing/runtime");
+  if (input.inputCostRialPerMillion !== undefined) {
+    await publishPriceVersion({
+      targetType: "meter",
+      targetKey: "ai.input_tokens",
+      unit: "token",
+      unitAmountRial: next.inputCostRialPerMillion,
+      unitSize: 1_000_000,
+    });
+  }
+  if (input.outputCostRialPerMillion !== undefined) {
+    await publishPriceVersion({
+      targetType: "meter",
+      targetKey: "ai.output_tokens",
+      unit: "token",
+      unitAmountRial: next.outputCostRialPerMillion,
+      unitSize: 1_000_000,
+    });
+  }
   return getAiCostingConfig();
 }
 
@@ -1300,9 +1322,12 @@ export async function resolveGatewayTurnPricing(
   costUsd: number | null | undefined,
   marginPercent: number,
 ): Promise<AiGatewayTurnPricing | null> {
-  if (costUsd === null || costUsd === undefined || !(costUsd > 0)) return null;
+  if (costUsd === null || costUsd === undefined || !Number.isFinite(costUsd) || costUsd < 0) return null;
   const costing = await resolveGatewayCosting();
   if (!costing) return null;
+  if (costUsd === 0) {
+    return { costUsd: 0, costRial: 0, chargedRial: 0 };
+  }
   const { costRial, chargedRial } = gatewayTurnPricing(costUsd, costing.usdRialRate, marginPercent);
   if (chargedRial <= 0) return null;
   return { costUsd, costRial, chargedRial };

@@ -22,6 +22,9 @@
  *     tick's money math is testable to the Rial.
  */
 
+import { rateStorageDay } from "./billing/rating/engine";
+import { parseSafeIntInput } from "./platform-money";
+
 // ---------------------------------------------------------------------------
 // Kinds and MIME rules
 // ---------------------------------------------------------------------------
@@ -295,8 +298,8 @@ export function validateMediaTariffInput(input: unknown, existing: MediaTariff):
   const bool = (v: unknown, fallback: boolean) => (typeof v === "boolean" ? v : fallback);
   const money = (v: unknown, fallback: number) => {
     if (v === undefined || v === null || v === "") return fallback;
-    const n = Number(v);
-    return Number.isSafeInteger(n) && n >= 0 ? n : NaN;
+    const parsed = parseSafeIntInput(v, { min: 0 });
+    return parsed === null ? NaN : parsed;
   };
 
   const billingEnabled = bool(body.billingEnabled, existing.billingEnabled);
@@ -327,27 +330,23 @@ export interface DailyChargeBreakdown {
   billableBytes: number;
 }
 
-const GB = 1024 * 1024 * 1024;
-const MB = 1024 * 1024;
-
 /**
- * What one local day of storing `storedBytes` costs: the flat base (charged
- * whenever anything at all is stored) plus the per-GB rate pro-rated to the
- * bytes above the free quota. Integer Rial, rounded up — a fraction of a Rial
- * never rounds a paid byte to free.
+ * What one local day of storing `storedBytes` costs: delegates to the unified
+ * rating engine (`rateStorageDay`) so storage billing and commercial rating
+ * share a single implementation.
  */
-export function dailyStorageCharge(storedBytes: number, config: MediaStorageConfig): DailyChargeBreakdown {
-  const bytes = Math.max(0, Math.floor(storedBytes));
-  if (!config.billingEnabled || bytes === 0) {
-    return { flatRial: 0, perGbRial: 0, totalRial: 0, billableBytes: 0 };
-  }
-  const flatRial = Math.max(0, Math.floor(config.dailyFlatRial));
-  const billableBytes = Math.max(0, bytes - Math.max(0, config.freeQuotaMb) * MB);
-  const perGbRial =
-    billableBytes > 0 && config.dailyPerGbRial > 0
-      ? Math.ceil((billableBytes / GB) * config.dailyPerGbRial)
-      : 0;
-  return { flatRial, perGbRial, totalRial: flatRial + perGbRial, billableBytes };
+export function dailyStorageCharge(
+  storedBytes: number,
+  config: MediaStorageConfig,
+  rounding: "ceil" | "floor" = "ceil",
+): DailyChargeBreakdown {
+  const rated = rateStorageDay(storedBytes, config, rounding);
+  return {
+    flatRial: rated.flatRial,
+    perGbRial: rated.perGbRial,
+    totalRial: rated.totalRial,
+    billableBytes: rated.billableBytes,
+  };
 }
 
 /** wallet_ledger/feature_usage key for the daily storage charge. */

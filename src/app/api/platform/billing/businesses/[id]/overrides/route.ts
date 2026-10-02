@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requirePlatformCapability, platformAudit, withPlatformScope } from "@/lib/platform-auth";
+import { parseSafeIntInput } from "@/lib/platform-money";
 import { query } from "@/lib/db";
 
 /**
@@ -100,11 +101,11 @@ export const POST = withPlatformScope(
       if (body.unlimited === true) {
         valueInt = null;
       } else {
-        const value = Math.floor(Number(body.value ?? NaN));
-        if (!Number.isSafeInteger(value) || value < 0) {
+        const parsed = parseSafeIntInput(body.value, { min: 0 });
+        if (parsed === null) {
           return NextResponse.json({ error: "invalid_limit" }, { status: 400 });
         }
-        valueInt = value;
+        valueInt = parsed;
       }
     } else {
       valueBool = body.enabled === true;
