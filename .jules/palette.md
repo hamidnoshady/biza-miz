@@ -5,6 +5,3 @@
 ## 2024-10-25 - Missing focus-visible states on inline links and text buttons
 **Learning:** Interactive text elements like inline links (`<Link>`), breadcrumbs, and small action buttons (e.g., "keep current value") often rely only on `hover:underline` for visual feedback. This leaves keyboard users without any visible focus indicator, making navigation difficult and inaccessible.
 **Action:** Always ensure that inline links and text buttons include standard focus styles (`outline-none focus-visible:ring focus-visible:ring-ring/50`) alongside hover states. This applies to UI primitives (like the `link` variant in Buttons/Badges) and custom text buttons.
-## 2026-10-02 - Added missing focus state to TabsContent component
-**Learning:** The radix `TabsContent` component lacked a `focus-visible:ring` making it not show any visible sign of focus when tabbing into its content (which receives a tabindex of 0).
-**Action:** Always ensure that interactive or focusable content wrappers include standard focus styles (`focus-visible:ring focus-visible:ring-ring/50`) alongside `outline-none` to keep keyboard accessibility intact without breaking visual design.
