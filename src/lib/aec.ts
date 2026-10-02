@@ -43,11 +43,12 @@
  * commercial controls in Wave 8, procurement in Wave 9). Declaring them now is
  * deliberate: the preset a business is *given* is the one its later waves will
  * read, and `AEC_CAPABILITY_LABELS` is what the settings panel shows an owner so
- * the choice is legible before those screens exist. The capabilities that gate
- * something today are marked `live: true`, and they are not decorative — a
+ * the choice is legible before those screens exist. `AEC_LIVE_CAPABILITIES`
+ * names the handful that gate something today, and they are not decorative — a
  * participant role whose capability is off is refused by the API, not merely
  * hidden (see `aec-service.ts`).
  */
+
 /* ===========================================================================
  * Capabilities
  * ======================================================================== */

@@ -6,7 +6,7 @@
  *
  *   * the setup wizard's `aec_profile` step, where an AEC business makes its
  *     first choice (`capabilities={false}`: the profile's preset is the point,
- *     and twenty switches on the first screen would be noise);
+ *     and nineteen switches on the first screen would be noise);
  *   * «تنظیمات ← کسب‌وکار و شعبه», where the same business changes its mind and
  *     tunes the preset line by line.
  *
