@@ -199,7 +199,7 @@ if (!gotSingleInstanceLock) {
     });
     ipcMain.handle("desktop:show-ca-certificate", async () => {
       const certPath = gateway.certificates.caCertPath;
-      if (!require("node:fs").existsSync(certPath)) gateway.certificates.ensureLeaf(gateway.availableInterfaces().map((item) => item.address));
+      if (!require("node:fs").existsSync(certPath)) await gateway.certificates.ensureLeaf(gateway.availableInterfaces().map((item) => item.address));
       shell.showItemInFolder(certPath);
       return certPath;
     });
