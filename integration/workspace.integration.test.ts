@@ -229,7 +229,7 @@ describe("existing project data", () => {
         { name: "پروژهٔ قدیمی" },
       ),
     );
-    // The old path knows nothing about workspace_members; the 0192 trigger
+    // The old path knows nothing about workspace_members; the 0193 trigger
     // writes the owner row anyway, so the creator's project page AND their
     // «پروژه‌های من» list both admit the project — membership-only access.
     const role = await inAlpha(() =>
@@ -868,7 +868,7 @@ describe("project ownership (#761)", () => {
   });
 
   it("demotes the created_by fallback owner on a project's first transfer", async () => {
-    // A pre-0192 project with no owner_user_id: its creator is the owner.
+    // A pre-0193 project with no owner_user_id: its creator is the owner.
     const { rows } = await db.query<{ id: string }>(
       `INSERT INTO ai_projects (business_id, name, instructions, created_by)
        VALUES ($1, 'قدیمی بی‌مالک', '', $2) RETURNING id`,
