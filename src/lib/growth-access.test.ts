@@ -9,7 +9,7 @@
  * read the route handlers' source and compare it with `GROWTH_API_PERMISSIONS`.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Role } from "./auth-edge";
 import { appForApiPath, appForPagePath } from "./app-availability";
@@ -48,8 +48,9 @@ function routeFiles(dir: string): string[] {
   });
 }
 
+/** `/api/promotions/gift-cards` — always forward slashes, so the CI's Windows runner reads the same key. */
 function apiPathOf(file: string): string {
-  return `/api/${file.slice(API_ROOT.length + 1).replace(/\/route\.ts$/, "")}`;
+  return `/api/${relative(API_ROOT, file).split(sep).join("/").replace(/\/route\.ts$/, "")}`;
 }
 
 /** The PERMISSIONS.* keys each exported handler names, by method. */
