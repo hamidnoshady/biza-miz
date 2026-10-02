@@ -46,8 +46,8 @@ class GatewayManager {
       throw new Error(`The selected private IPv4 address is no longer active: ${address}`);
     }
     const certificate = forceCertificate
-      ? this.certificates.regenerate(available.map((item) => item.address))
-      : this.certificates.ensureLeaf(available.map((item) => item.address));
+      ? await this.certificates.regenerate(available.map((item) => item.address))
+      : await this.certificates.ensureLeaf(available.map((item) => item.address));
     const appPort = this.backend.config.appPort;
     this.server = https.createServer(this.certificates.tlsOptions(), (request, response) => {
       this.rememberClient(request.socket, "https");

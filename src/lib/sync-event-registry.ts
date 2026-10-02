@@ -31,6 +31,21 @@ export interface SyncEventDefinition {
   offlineQueueEligible?: boolean;
 }
 
+/**
+ * Phase 45 made the cloud the system of record for stock, transfers and the
+ * ledger; a Hybrid desktop has no screen for them. The cloud still records
+ * those events for a paired branch, so a desktop that tried to replay them
+ * waited forever on master data it never receives (a cloud purchase names a
+ * supplier the desktop does not have) and showed them as «در انتظار پیش‌نیاز».
+ * A desktop acknowledges a pulled event of these classes without applying it.
+ */
+const CLOUD_OWNED_EFFECT_CLASSES: ReadonlySet<EffectClass> = new Set(["inventory", "transfer", "journal_reversal"]);
+
+/** Whether a desktop (runtime role `site`) acknowledges this pulled cloud event instead of applying it. */
+export function siteSkipsPulledEvent(definition: Pick<SyncEventDefinition, "effectClass">): boolean {
+  return CLOUD_OWNED_EFFECT_CLASSES.has(definition.effectClass);
+}
+
 const ORDER_PERMISSION = "orders.create" as const;
 const PAYMENT_PERMISSION = "payments.take" as const;
 const REFUND_PERMISSION = "payments.refund" as const;
