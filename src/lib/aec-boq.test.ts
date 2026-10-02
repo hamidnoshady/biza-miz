@@ -20,7 +20,6 @@ import {
   ESTIMATE_EVENT_LABELS,
   ESTIMATE_VERSION_STATUSES,
   ESTIMATE_VERSION_STATUS_LABELS,
-  ESTIMATE_VERSION_TRANSITIONS,
   isEditableEstimateVersion,
   normalizeBoqUnit,
 } from "./aec-boq";
@@ -83,9 +82,18 @@ describe("the estimate status model", () => {
     }
   });
 
-  it("never lists a status as its own successor", () => {
-    for (const status of ESTIMATE_VERSION_STATUSES) {
-      expect(ESTIMATE_VERSION_TRANSITIONS[status]).not.toContain(status);
+  it("never lets a status move to itself", () => {
+    for (const from of ESTIMATE_VERSION_STATUSES) {
+      for (const to of ESTIMATE_VERSION_STATUSES) {
+        expect(canTransitionEstimateVersion(from, to), `${from} → ${to}`).toBe(from !== to && (
+          // The whole map, stated once as behaviour rather than as a table the
+          // test would have to be kept in step with by hand.
+          (from === "draft" && to === "submitted") ||
+          (from === "submitted" && (to === "under_review" || to === "approved" || to === "draft")) ||
+          (from === "under_review" && (to === "approved" || to === "draft")) ||
+          (from === "approved" && to === "superseded")
+        ));
+      }
     }
   });
 });

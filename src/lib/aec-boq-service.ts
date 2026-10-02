@@ -1643,22 +1643,3 @@ export async function boqVariance(
   };
 }
 
-/**
- * The approved total per project, for the workspace roll-up and the assistant.
- * One query, no by-section detail: this is the number a caller wants when the
- * question is "what did we price this at".
- */
-export async function approvedEstimateTotals(
-  businessId: string,
-  projectIds: readonly string[],
-): Promise<Map<string, number>> {
-  if (projectIds.length === 0) return new Map();
-  const { rows } = await query<{ project_id: string; total_rial: string | number }>(
-    `SELECT e.project_id, v.total_rial
-       FROM aec_estimate_versions v
-       JOIN aec_estimates e ON e.id = v.estimate_id
-      WHERE v.business_id = $1 AND v.status = 'approved' AND e.project_id = ANY($2::uuid[])`,
-    [businessId, [...projectIds]],
-  );
-  return new Map(rows.map((row) => [row.project_id, Number(row.total_rial)]));
-}

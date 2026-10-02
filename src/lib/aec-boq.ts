@@ -47,7 +47,7 @@ export const ESTIMATE_VERSION_STATUS_LABELS: Record<EstimateVersionStatus, strin
  * approve it in one sitting; `under_review` is then bookkeeping the reviewer
  * may or may not fill in, never a gate to pass.
  */
-export const ESTIMATE_VERSION_TRANSITIONS: Record<EstimateVersionStatus, readonly EstimateVersionStatus[]> = {
+const ESTIMATE_VERSION_TRANSITIONS: Record<EstimateVersionStatus, readonly EstimateVersionStatus[]> = {
   draft: ["submitted"],
   submitted: ["under_review", "approved", "draft"],
   under_review: ["approved", "draft"],
@@ -261,11 +261,3 @@ export function computeBoqItemTotals(input: BoqItemRateInput): BoqItemTotals {
 export function boqTotalFitsInApp(totalRial: number): boolean {
   return Number.isSafeInteger(totalRial) && totalRial >= 0 && totalRial <= BOQ_MAX_TOTAL_RIAL;
 }
-
-/* ---------------------------------------------------------------------------
- * The transfer entity's vocabulary
- * ------------------------------------------------------------------------- */
-
-/** What a BOQ import may say about the target revision. */
-export const BOQ_IMPORT_VERSION_HINTS = ["current_draft", "new_version"] as const;
-export type BoqImportVersionHint = (typeof BOQ_IMPORT_VERSION_HINTS)[number];

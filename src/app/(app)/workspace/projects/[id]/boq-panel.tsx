@@ -62,6 +62,7 @@ import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import {
   BOQ_UNITS,
+  boqTotalFitsInApp,
   boqUnitLabel,
   computeBoqItemTotals,
   type EstimateVersionStatus,
@@ -318,6 +319,18 @@ export function BoqTab({
       ...(versionTree?.unsectionedItems ?? []),
     ],
     [versionTree],
+  );
+
+  // The trigger refuses a line whose total leaves the exact range this app can
+  // hold (`Number.MAX_SAFE_INTEGER`, migration 0196). The form asks the same
+  // question first — `boqTotalFitsInApp` is that bound — so an over-range line
+  // is a sentence beside the table rather than a 400 after a click.
+  const outOfRange = useMemo(
+    () =>
+      draft
+        ? draft.items.filter((item) => !boqTotalFitsInApp(draftTotals(item, money).totalRial))
+        : [],
+    [draft, money],
   );
 
   function startEditing() {
@@ -672,7 +685,7 @@ export function BoqTab({
               ) : null}
               {editable && canManage && draft ? (
                 <>
-                  <PrimaryButton onClick={saveDraft} disabled={busy}>
+                  <PrimaryButton onClick={saveDraft} disabled={busy || outOfRange.length > 0}>
                     {busy ? "در حال ذخیره" : "ذخیره"}
                   </PrimaryButton>
                   <SecondaryButton onClick={() => setDraft(null)}>انصراف</SecondaryButton>
@@ -750,6 +763,14 @@ export function BoqTab({
               </PrimaryButton>
               <SecondaryButton onClick={() => setReturning(false)}>انصراف</SecondaryButton>
             </div>
+          ) : null}
+
+          {outOfRange.length > 0 ? (
+            <p className="flex items-start gap-2 rounded-xl border border-amber-300/70 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
+              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
+              جمع {toPersianDigits(String(outOfRange.length))} ردیف از بازهٔ قابل پشتیبانی بزرگ‌تر است.
+              مقدار یا نرخ‌های آن را کم کنید تا ذخیره ممکن شود.
+            </p>
           ) : null}
 
           {allItems.length === 0 && !draft ? (
