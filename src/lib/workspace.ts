@@ -2200,6 +2200,33 @@ export async function listActivity(
  * Dashboard
  * ======================================================================== */
 
+/**
+ * Issue #799 §3 — the construction half of «نمای کلی».
+ *
+ * The issue asks the overview to surface, for this trade, active projects,
+ * projects at risk, delayed milestones, pending approvals, contract expiries,
+ * budget versus actual and committed cost. Most of those are the existing
+ * counters (which every trade gets); the ones here are what the workspace's
+ * own tables can answer and a café's overview has no use for. What is *not*
+ * here — open RFIs, overdue submittals, drawing revisions, site issues,
+ * guarantees, certificates, forecast cost — belongs to Waves 4–9, and a number
+ * for a section with no data would be a fiction rather than a dashboard.
+ */
+export interface AecWorkspaceRollup {
+  /** Active projects with an overdue task or a phase past its end date. */
+  projectsAtRisk: number;
+  /** Overdue open tasks plus phases past their end date — §3's delayed milestones. */
+  lateMilestoneCount: number;
+  /** Sum of the active projects' budgets; null budget rows contribute nothing. */
+  budgetRial: number;
+  /** Actual cost posted to the ledger against those projects. */
+  spentRial: number;
+  /** Value of the projects' active and completed execution contracts. */
+  contractValueRial: number;
+  /** Projects whose posted cost has passed their own budget. */
+  overBudgetProjectCount: number;
+}
+
 export interface WorkspaceDashboard {
   activeProjects: number;
   tasksToday: number;
@@ -2212,6 +2239,55 @@ export interface WorkspaceDashboard {
   deadlines: CalendarEntry[];
   approvals: WorkspaceApproval[];
   activity: ActivityEntry[];
+  /** Present only for `architecture_construction` (issue #799 §3). */
+  aec?: AecWorkspaceRollup;
+}
+
+/**
+ * The AEC roll-up, or null for every other trade.
+ *
+ * Non-throwing by design: «نمای کلی» is the first screen after signing in and
+ * must not be the one that fails, so a business whose industry cannot be read
+ * simply gets the overview it has always had. Risk is counted in one query
+ * against the rows that own the fact (an overdue task, a phase past its end
+ * date) and the money half reuses `projectReport`, so the numbers here and the
+ * project report can never disagree.
+ */
+export async function getAecWorkspaceRollup(businessId: string): Promise<AecWorkspaceRollup | null> {
+  if ((await getBusinessIndustry(businessId)) !== "architecture_construction") return null;
+
+  const [{ rows }, report] = await Promise.all([
+    query<{ projects_at_risk: string; late_tasks: string; late_phases: string }>(
+      `SELECT
+         (SELECT count(*) FROM ai_projects p
+           WHERE p.business_id = $1 AND p.archived_at IS NULL AND p.status = 'active'
+             AND (EXISTS (SELECT 1 FROM ai_project_tasks t
+                           WHERE t.project_id = p.id AND t.status <> 'done' AND t.due_date < CURRENT_DATE)
+               OR EXISTS (SELECT 1 FROM workspace_project_phases ph
+                           WHERE ph.project_id = p.id AND ph.status NOT IN ('done', 'skipped')
+                             AND ph.end_date < CURRENT_DATE))) AS projects_at_risk,
+         (SELECT count(*) FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
+           WHERE p.business_id = $1 AND p.archived_at IS NULL
+             AND t.status <> 'done' AND t.due_date < CURRENT_DATE) AS late_tasks,
+         (SELECT count(*) FROM workspace_project_phases ph JOIN ai_projects p ON p.id = ph.project_id
+           WHERE p.business_id = $1 AND p.archived_at IS NULL
+             AND ph.status NOT IN ('done', 'skipped') AND ph.end_date < CURRENT_DATE) AS late_phases`,
+      [businessId],
+    ),
+    projectReport(businessId),
+  ]);
+
+  const row = rows[0];
+  return {
+    projectsAtRisk: Number(row?.projects_at_risk ?? 0),
+    lateMilestoneCount: Number(row?.late_tasks ?? 0) + Number(row?.late_phases ?? 0),
+    budgetRial: report.reduce((sum, project) => sum + (project.budgetRial ?? 0), 0),
+    spentRial: report.reduce((sum, project) => sum + project.spentRial, 0),
+    contractValueRial: report.reduce((sum, project) => sum + project.contractValueRial, 0),
+    overBudgetProjectCount: report.filter(
+      (project) => project.budgetRial !== null && project.budgetRial > 0 && project.spentRial > project.budgetRial,
+    ).length,
+  };
 }
 
 /**
@@ -2267,7 +2343,7 @@ export async function getWorkspaceDashboard(
   ]);
 
   const row = counts.rows[0];
-  return {
+  const dashboard: WorkspaceDashboard = {
     activeProjects: Number(row?.active_projects ?? 0),
     tasksToday: Number(row?.tasks_today ?? 0),
     myOpenTasks: Number(row?.my_open_tasks ?? 0),
@@ -2280,6 +2356,9 @@ export async function getWorkspaceDashboard(
     approvals,
     activity,
   };
+  // Issue #799 §3 — the construction roll-up, absent for every other trade.
+  const aec = await getAecWorkspaceRollup(businessId);
+  return aec ? { ...dashboard, aec } : dashboard;
 }
 
 /* ===========================================================================

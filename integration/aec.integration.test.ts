@@ -35,6 +35,7 @@ let provisioning: typeof import("../src/lib/business-provisioning");
 let aec: typeof import("../src/lib/aec-service");
 let widgets: typeof import("../src/lib/ai-widgets");
 let tools: typeof import("../src/lib/aec-ai-tools");
+let workspace: typeof import("../src/lib/workspace");
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -67,6 +68,7 @@ beforeAll(async () => {
   aec = await import("../src/lib/aec-service");
   widgets = await import("../src/lib/ai-widgets");
   tools = await import("../src/lib/aec-ai-tools");
+  workspace = await import("../src/lib/workspace");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -217,6 +219,45 @@ describe("the AEC assistant read tools (issue #799 §23)", () => {
       const body = ambiguous.data as { ambiguous?: boolean; candidates?: unknown[] };
       expect(body.ambiguous).toBe(true);
       expect(body.candidates?.length).toBe(2);
+    });
+  });
+});
+
+describe("the AEC workspace overview roll-up (issue #799 §3)", () => {
+  it("counts the risk and the money for a construction business only", async () => {
+    const aecTenant = await provisionBusiness("architecture_construction");
+    const cafe = await provisionBusiness("food_service");
+
+    const projectId = await createProject(aecTenant.businessId, aecTenant.owner.actorUserId, "مجتمع تجاری آفتاب");
+    await db.query(
+      `UPDATE ai_projects SET budget_rial = 5000000000 WHERE id = $1`,
+      [projectId],
+    );
+    await dbLib.withTenant(aecTenant.businessId, async () => {
+      await createTask(aecTenant.businessId, projectId, "تسویه با پیمانکار نما", "2026-01-20", aecTenant.owner.actorUserId);
+
+      const dashboard = await workspace.getWorkspaceDashboard(
+        aecTenant.businessId,
+        aecTenant.owner.actorUserId,
+      );
+      const rollup = dashboard.aec;
+      expect(rollup).toBeTruthy();
+      expect(rollup?.projectsAtRisk).toBe(1);
+      expect(rollup?.lateMilestoneCount).toBeGreaterThanOrEqual(1);
+      expect(rollup?.budgetRial).toBe(5_000_000_000);
+      // A managed task with no ledger posting is late but not a cost, so the
+      // roll-up reports the budget it can see and no invented spend.
+      expect(rollup?.spentRial).toBe(0);
+      expect(rollup?.overBudgetProjectCount).toBe(0);
+
+      // The same call for a café answers the overview it always had.
+      await dbLib.withTenant(cafe.businessId, async () => {
+        const cafeDashboard = await workspace.getWorkspaceDashboard(
+          cafe.businessId,
+          cafe.owner.actorUserId,
+        );
+        expect(cafeDashboard.aec).toBeUndefined();
+      });
     });
   });
 });

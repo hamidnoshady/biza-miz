@@ -29,6 +29,7 @@ import {
   SectionCardSkeleton,
 } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox } from "@/app/dashboard/ui";
+import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
 import { workspaceProjectHref, workspaceSectionHref } from "@/lib/app-routes";
 import { CALENDAR_SOURCE_LABELS } from "@/lib/workspace-shared";
@@ -71,6 +72,20 @@ interface DashboardActivity {
   createdAt: string;
 }
 
+/**
+ * Issue #799 §3 — the construction band, present only for that trade. The
+ * shape is the API's (`AecWorkspaceRollup`); the page reads it defensively, so
+ * a business without it renders exactly the overview it always had.
+ */
+interface DashboardAec {
+  projectsAtRisk: number;
+  lateMilestoneCount: number;
+  budgetRial: number;
+  spentRial: number;
+  contractValueRial: number;
+  overBudgetProjectCount: number;
+}
+
 interface Dashboard {
   activeProjects: number;
   tasksToday: number;
@@ -83,6 +98,7 @@ interface Dashboard {
   deadlines: DashboardEntry[];
   approvals: DashboardApproval[];
   activity: DashboardActivity[];
+  aec?: DashboardAec;
 }
 
 const ACTION_LABELS: Record<string, string> = {
@@ -100,7 +116,37 @@ const ACTION_LABELS: Record<string, string> = {
   status_open: "بازگشایی شد",
 };
 
+/** One figure in the construction band. */
+function AecFigure({
+  label,
+  value,
+  hint,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  hint: string;
+  tone?: "default" | "warning";
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
+      <dd
+        className={
+          tone === "warning"
+            ? "mt-1 text-lg font-semibold text-amber-800 dark:text-amber-200"
+            : "mt-1 text-lg font-semibold"
+        }
+      >
+        {value}
+      </dd>
+      <p className="mt-0.5 text-xs text-muted-foreground">{hint}</p>
+    </div>
+  );
+}
+
 export function OverviewSection() {
+  const money = useMoney();
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState("");
 
@@ -155,6 +201,54 @@ export function OverviewSection() {
           hint="دو هفتهٔ آینده"
         />
       </KpiRow>
+
+      {data.aec ? (
+        <SectionCard
+          title="نمای عمرانی"
+          description="تأخیرها و اعداد مالی پروژه‌های این کسب‌وکار"
+          actions={
+            <Link
+              href={workspaceSectionHref("reports")}
+              className="text-sm text-muted-foreground underline-offset-4 hover:underline"
+            >
+              گزارش پروژه‌ها
+            </Link>
+          }
+        >
+          <dl className="grid grid-cols-2 gap-4 p-4 sm:grid-cols-4">
+            <AecFigure
+              label="پروژه‌های در معرض خطر"
+              value={n(data.aec.projectsAtRisk)}
+              hint={
+                data.aec.lateMilestoneCount
+                  ? `${n(data.aec.lateMilestoneCount)} مهلت عقب‌افتاده`
+                  : "بدون تأخیر"
+              }
+              tone={data.aec.projectsAtRisk > 0 ? "warning" : "default"}
+            />
+            <AecFigure
+              label="بودجهٔ پروژه‌ها"
+              value={money.format(data.aec.budgetRial)}
+              hint="مجموع بودجهٔ ثبت‌شده"
+            />
+            <AecFigure
+              label="هزینهٔ ثبت‌شده"
+              value={money.format(data.aec.spentRial)}
+              hint={
+                data.aec.overBudgetProjectCount
+                  ? `${n(data.aec.overBudgetProjectCount)} پروژه خارج از بودجه`
+                  : "از اسناد حسابداری"
+              }
+              tone={data.aec.overBudgetProjectCount > 0 ? "warning" : "default"}
+            />
+            <AecFigure
+              label="ارزش قراردادها"
+              value={money.format(data.aec.contractValueRial)}
+              hint="قراردادهای در جریان و پایان‌یافته"
+            />
+          </dl>
+        </SectionCard>
+      ) : null}
 
       {data.expiringContracts > 0 ? (
         <SectionCard
