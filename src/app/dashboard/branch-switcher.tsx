@@ -64,9 +64,34 @@ interface ActiveResponse {
  */
 const BRANCH_CHANGED_EVENT = "branch-switcher:changed";
 
-export function BranchSwitcher({ compact = false }: { compact?: boolean }) {
+/**
+ * The last answer, kept for the page's lifetime and keyed by the signed-in
+ * account. The sidebar remounts whenever navigation crosses a layout
+ * (`/accounting/*` ↔ `/settings`); without this it flashed a placeholder each
+ * time and, on a one-branch business, then removed it — every menu entry below
+ * jumped ~56px and a click landed on the wrong one. The key stops another
+ * member signing in on the same window from seeing this one's branches.
+ */
+let lastKnown: { account: string; state: ActiveResponse } | null = null;
+
+export function BranchSwitcher({
+  compact = false,
+  quietLoading = false,
+  account,
+}: {
+  compact?: boolean;
+  /** Render nothing (not a placeholder) until the first answer: for a slot above clickable rows. */
+  quietLoading?: boolean;
+  /** The signed-in business and member; enables the cross-remount cache above. */
+  account?: string;
+}) {
   const router = useRouter();
-  const [state, setState] = useState<ActiveResponse | null>(null);
+  const [state, setState] = useState<ActiveResponse | null>(() =>
+    account && lastKnown?.account === account ? lastKnown.state : null,
+  );
+  useEffect(() => {
+    if (state && account) lastKnown = { account, state };
+  }, [state, account]);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -95,6 +120,7 @@ export function BranchSwitcher({ compact = false }: { compact?: boolean }) {
   }, []);
 
   if (state === null) {
+    if (quietLoading) return null;
     return (
       <div
         role="status"

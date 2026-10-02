@@ -21,16 +21,34 @@ The desktop's home is the member's till screen (`siteHomeFor`: kitchen →
 `/accounting/pos`), falling back to `/accounting/pos` and then
 `/accounting/orders` when the role's screen is not available to that member (a
 waiter without reservations, a trade without the kitchen module); with none
-openable it explains rather than redirecting. Every other screen opens the cloud
-in the «نسخهٔ ابری» window (`electron/cloud-window.js`: no preload, sandboxed,
-`persist:cloud` partition, navigation and redirects locked to the origin it was
-opened with — a redirect anywhere else, a renamed business subdomain included,
-goes to the system browser — closed with the till window). Billing and subscription
-(`/settings/billing`, `/settings/subscription`) open in the system browser
-instead, because the payment gateway returns to a page that needs the
-browser's own session. Offline, the hand-off screen says the section needs the Internet and
-opens the cloud window by itself once the connection returns. The cloud itself
-is unchanged and standalone.
+openable it explains rather than redirecting — except a member who can use the
+assistant, whose home is the cloud's assistant (Phase 46). Every other screen
+renders the cloud inside the till window, under the desktop's full menu
+(`CloudPane`, a `<webview>` hardened by `electron/cloud-pane.js`: no preload, no
+Node, sandboxed, `persist:cloud` partition, navigation and redirects locked to
+the origin it was attached with — a redirect anywhere else, a renamed business
+subdomain included, goes to the system browser). The cloud recognises the pane
+by a user-agent token and draws that page without its own sidebar
+(`src/lib/cloud-embed.ts`). Billing and subscription (`/settings/billing`,
+`/settings/subscription`) open in the system browser instead, because the
+payment gateway returns to a page that needs the browser's own session.
+Offline, the pane says the section needs the Internet and reopens by itself
+once the connection returns, and the desktop toasts the change both ways. The
+cloud itself is unchanged and standalone.
+
+A paired desktop acknowledges a pulled cloud event whose domain it has no
+screen for — stock, transfers and ledger reversals (`siteSkipsPulledEvent`) —
+as an applied no-op, instead of deferring it forever on master data it never
+receives (a cloud purchase names a supplier the desktop does not have).
+
+«ورود با حساب ابری» (Phase 46) signs a member in on the desktop through the
+cloud: the desktop opens `/desktop-login` in the system browser, the cloud
+mints a two-minute single-use code for that one paired install and hands the
+browser back through `businesssuite://cloud-login`, and the desktop redeems it
+with its own bearer credential (`POST /api/server-sync/desktop-login`) after
+checking the `state` cookie it set when the button was pressed. The answer
+also carries a session code the cloud pane redeems once on the business's
+origin (`GET /api/auth/desktop-session`), so one sign-in covers both.
 
 Each tick, at most once per sync interval (30 s) however often a wake-up runs
 it — after master data and **before** push/pull, so the bills pulled in

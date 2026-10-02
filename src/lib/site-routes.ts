@@ -4,19 +4,19 @@
  *
  * The cloud is the system of record; the desktop is the till. Selling, floor
  * & kitchen, shifts and this computer's own settings run on the local server
- * and keep working offline. Every other screen is cloud-by-default: the
- * desktop hands it to the «نسخهٔ ابری» window instead of showing a partial
- * local copy that disagrees with the cloud. A screen added later is therefore
- * cloud unless someone adds it here on purpose.
+ * and keep working offline. Every other screen is cloud-by-default: since
+ * Phase 46 the desktop shows it in its own content area (`CloudPane`) under
+ * the full menu, instead of a partial local copy that disagrees with the
+ * cloud. A screen added later is therefore cloud unless someone adds it here
+ * on purpose (and gives its writes a sync event).
  *
- * Framework-free and unit-tested; the dashboard gate, the till menu and the
+ * Framework-free and unit-tested; the dashboard gate, the cloud pane and the
  * home redirect all read this one list.
  */
 import { ACCOUNTING_WORKSPACE_HREFS } from "./app-routes";
 import type { DeploymentProfile } from "./deployment-mode";
 import type { DeploymentRole } from "./deployment-role";
 import type { ModuleKey } from "./industry-profile";
-import type { NavNode } from "./nav-tree";
 import { canUsePos, PERMISSIONS } from "./permissions";
 import { settingsTabHref } from "./settings-routes";
 
@@ -44,18 +44,6 @@ export function isHybridSite(profile: DeploymentProfile, runtimeRole: Deployment
 
 export function isSiteLocalRoute(pathname: string): boolean {
   return SITE_LOCAL_ROUTES.some((route) => pathname === route || pathname.startsWith(`${route}/`));
-}
-
-/** The dashboard nav reduced to till screens; a group survives only with a till entry in it. */
-export function tillNavItems<T extends NavNode>(items: readonly T[]): T[] {
-  return items.flatMap((item) => {
-    const children = item.children ? tillNavItems(item.children as T[]) : undefined;
-    const local = item.href ? isSiteLocalRoute(item.href.split("?")[0]) : false;
-    if (local) return [children ? { ...item, children } : item];
-    if (!children?.length) return [];
-    // A cloud page with till pages under it stays only as their group heading.
-    return [{ ...item, href: undefined, children }];
-  });
 }
 
 /** What decides whether a member can open each till screen — the same checks those pages apply. */
