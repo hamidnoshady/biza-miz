@@ -15,6 +15,7 @@
 import { WELL_KNOWN_CODES } from "./coa-template";
 import type { Industry } from "./industries";
 import { hasCapability, hasModule, type CapabilityKey, type ModuleKey } from "./industry-profile";
+import { PRODUCT_WORKSPACE_INDUSTRIES } from "./product-workspace";
 import { addDays } from "./rollup";
 
 export type Aggregation = "sum" | "avg" | "count" | "count_distinct";
@@ -1317,10 +1318,12 @@ export const STANDARD_REPORTS: StandardReportDef[] = [
     label: "تحلیل فروش تنوع‌ها",
     description: "کدام تنوع‌ها می‌فروشند: تعداد، درآمد، بهای تمام‌شده و حاشیهٔ هر تنوع.",
     group: "sales",
-    // The five trade-goods industries, not `stock`: jewellery and watch carry
-    // that module too but sell weighted pieces and serialised units, which
-    // write no variant sale event for this to read.
-    requires: { industries: ["accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery"] },
+    // The variant-board trades, not `stock`: jewellery and watch carry that
+    // module too but sell weighted pieces and serialised units, which write no
+    // variant sale event for this to read. Taken from the one place that set
+    // is declared rather than restated — issue #799's coverage guard fails the
+    // build on a hard-coded industry list (industry-coverage.test.ts).
+    requires: { industries: PRODUCT_WORKSPACE_INDUSTRIES },
     shape: "variant_sales",
     view: null,
     defaultChart: null,

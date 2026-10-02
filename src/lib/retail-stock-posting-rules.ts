@@ -25,6 +25,10 @@ const ZERO = "0" as RialText;
 const INVENTORY_CODE_BY_INDUSTRY: Record<Industry, string> = {
   service_saas: WELL_KNOWN_CODES.inventory,
   food_service: WELL_KNOWN_CODES.inventory,
+  // Issue #799 — kept in step with accounting-posting-rules.ts, whose copy of
+  // this mapping the settings panel reads (the pairing is asserted in
+  // accounting-posting-rules.test.ts).
+  architecture_construction: WELL_KNOWN_CODES.inventory,
   jewelry: WELL_KNOWN_CODES.goldInventory,
   watch: WELL_KNOWN_CODES.watchInventory,
   accessories: WELL_KNOWN_CODES.accessoryInventory,

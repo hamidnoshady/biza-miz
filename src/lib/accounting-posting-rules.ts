@@ -52,6 +52,12 @@ import { industryProfile } from "./industry-profile";
 const INVENTORY_CODE_BY_INDUSTRY: Record<Industry, string> = {
   service_saas: WELL_KNOWN_CODES.inventory,
   food_service: WELL_KNOWN_CODES.inventory,
+  // Issue #799 — a contractor's material is ordinary stock on the balance
+  // sheet (موجودی مواد و کالا), so AEC keeps the generic inventory account.
+  // What it does *not* get is the F&B recipe/costing module that manages it:
+  // this mapping only decides which account a purchase or a write-down lands
+  // in, and site material tracking is a later wave's project capability.
+  architecture_construction: WELL_KNOWN_CODES.inventory,
   jewelry: WELL_KNOWN_CODES.goldInventory,
   watch: WELL_KNOWN_CODES.watchInventory,
   accessories: WELL_KNOWN_CODES.accessoryInventory,
@@ -104,6 +110,14 @@ function revenueLine(industry: Industry): PostingRuleLine {
     };
   }
   const codes: Partial<Record<Industry, { code: string; label: string }>> = {
+    // Issue #799 — the default project/service statement account. The other
+    // two (`aecSupervisionRevenue`, `aecConstructionRevenue`) are seeded in
+    // the chart and named in the note below, so an owner can split design
+    // fees from site execution without adding an account first.
+    architecture_construction: {
+      code: WELL_KNOWN_CODES.aecDesignRevenue,
+      label: "درآمد خدمات طراحی و مهندسی",
+    },
     jewelry: { code: WELL_KNOWN_CODES.goldSalesRevenue, label: "فروش طلا (ارزش فلز) و اجرت" },
     watch: { code: WELL_KNOWN_CODES.watchSalesRevenue, label: "فروش ساعت" },
     accessories: { code: WELL_KNOWN_CODES.accessorySalesRevenue, label: "فروش بدلیجات" },
@@ -118,6 +132,11 @@ function revenueLine(industry: Industry): PostingRuleLine {
     ...entry,
     ...(industry === "jewelry"
       ? { note: `اجرت و سود جداگانه به حساب ${WELL_KNOWN_CODES.makingChargeRevenue} می‌نشیند (ارزش فلز از مالیات معاف است).` }
+      : {}),
+    ...(industry === "architecture_construction"
+      ? {
+          note: `درآمد نظارت (${WELL_KNOWN_CODES.aecSupervisionRevenue}) و پیمانکاری (${WELL_KNOWN_CODES.aecConstructionRevenue}) حساب جدا دارند؛ صورتحساب طراحی به ${WELL_KNOWN_CODES.aecDesignRevenue} می‌نشیند.`,
+        }
       : {}),
   };
 }

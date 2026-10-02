@@ -4,8 +4,12 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { bulkUpdateVariantMatrix, withMerchandisingTransaction, type MatrixVariantUpdate } from "@/lib/merchandising-service";
+import { PRODUCT_WORKSPACE_INDUSTRIES } from "@/lib/product-workspace";
 
-const MATRIX_TRADES = ["accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery"];
+// The variant-board trades, declared once in product-workspace.ts. The
+// coverage guard (industry-coverage.test.ts) fails the build on a restated
+// industry list, so this must stay an import.
+const MATRIX_TRADES = PRODUCT_WORKSPACE_INDUSTRIES;
 
 /** Sets price and/or stock across a whole variant grid in one transaction; a failure on one cell rolls back the whole grid. */
 export const POST = withTenantScope(async (request: NextRequest) => {
@@ -13,7 +17,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
 
   const industry = await getBusinessIndustry(session.businessId);
-  if (!industry || !MATRIX_TRADES.includes(industry)) {
+  if (!industry || !(MATRIX_TRADES as readonly string[]).includes(industry)) {
     return NextResponse.json({ error: "industry_unavailable" }, { status: 403 });
   }
 

@@ -62,6 +62,15 @@ const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, { revenue:
     cogs: WELL_KNOWN_CODES.haberdasheryCogs,
     inventory: WELL_KNOWN_CODES.haberdasheryInventory,
   },
+  // Issue #799 — an AEC business's website sells services, not stock: the
+  // order lands in the design/engineering revenue account, its direct cost in
+  // project cost, and any material it consumes against the generic inventory
+  // account. Every code exists in the trade's chart (coa-template.ts).
+  architecture_construction: {
+    revenue: WELL_KNOWN_CODES.aecDesignRevenue,
+    cogs: WELL_KNOWN_CODES.aecProjectDirectCost,
+    inventory: WELL_KNOWN_CODES.inventory,
+  },
 };
 
 function cmsProductId(order: CmsOrder): string | null {

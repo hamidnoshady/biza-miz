@@ -84,6 +84,13 @@ const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, { revenue:
     cogs: WELL_KNOWN_CODES.haberdasheryCogs,
     inventory: WELL_KNOWN_CODES.haberdasheryInventory,
   },
+  // Issue #799 — same mapping as the CMS ingest path above, for the same
+  // reason: an AEC business's online order is a service order.
+  architecture_construction: {
+    revenue: WELL_KNOWN_CODES.aecDesignRevenue,
+    cogs: WELL_KNOWN_CODES.aecProjectDirectCost,
+    inventory: WELL_KNOWN_CODES.inventory,
+  },
 };
 
 export async function handleWooCommerceWebhook(

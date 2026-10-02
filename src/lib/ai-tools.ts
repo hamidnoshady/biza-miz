@@ -422,7 +422,7 @@ async function wasteHistory(businessId: string, args: Record<string, unknown>) {
 /**
  * What this business's copy of the product actually is.
  *
- * The assistant is embedded in an app with five industries, per-trade modules,
+ * The assistant is embedded in an app with ten industries, per-trade modules,
  * per-business feature flags and several branches — and it knew none of that.
  * It would offer to do things this business cannot do, and fail to mention
  * things it can. This is the orientation it was missing.

@@ -913,11 +913,21 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   is refused at the API guard (`moduleForApiPath` in `withTenantScope`), not merely hidden from the
   nav — the same discipline `features.ts` follows. The retail industries sell through a multi-line
   invoice (`retail-invoice-service.ts`) that is an `orders` row settled by Phase 21's own sell
-  services, so no posting rule is duplicated. There are **five** trades: `food_service` is the original F&B app;
+  services, so no posting rule is duplicated. There are **ten** industries: `food_service` is the original F&B app;
   `jewelry`/`watch`/`accessories`/`cosmetics` build on a
   parallel `items`/`item_serials`/`item_weight_attributes`/`item_stock` model and post through the
   domain-event engine (`src/lib/posting-engine.ts` + each industry's `*-posting-rules.ts`) rather
-  than hand-written ledger functions. Cosmetics adds `item_batches` on top (batch/lot number, expiry,
+  than hand-written ledger functions; `wholesale`/`tools_fittings`/`haberdashery` are trade-goods
+  trades on that same item model, reaching it through the shared `stock` module and the variant
+  board; `service_saas` is a services company whose invoices Billing/Accounting owns; and
+  `architecture_construction` (issue #799 — مهندسی عمران، معماری و پیمانکاری) is the AEC trade:
+  architecture offices, civil/structural firms, contractors, design & build teams, supervision
+  consultants and individual professionals, whose operational centre is **My Workspace**
+  (`ai_projects` plus migration 0167's tables) rather than a fifth app, and whose profile carries
+  only the core modules — no POS, no `orders`, no stock. Adding one means the registry entry, a
+  migration that widens `businesses_industry_check`, its chart template and its profile entry;
+  `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a
+  restated industry list anywhere else in `src/`. Cosmetics adds `item_batches` on top (batch/lot number, expiry,
   sold first-expired-first-out via `src/lib/fefo.ts`); every trade shares one promotion engine
   (`src/lib/promotions.ts`) and one loyalty engine (`src/lib/loyalty-service.ts`). **F&B's
   `menu_items`/`inventory_items`/recipes are never
