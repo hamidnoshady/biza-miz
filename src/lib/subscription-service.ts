@@ -725,6 +725,11 @@ export async function renewBusinessSubscription(
   businessId: string,
   now: Date = new Date(),
 ): Promise<RenewalOutcome> {
+  const { rows: lifecycleRows } = await query<{ ownership_kind: string }>(
+    `SELECT ownership_kind FROM businesses WHERE id = $1`,
+    [businessId],
+  );
+  if (lifecycleRows[0]?.ownership_kind === "platform_internal") return { status: "nothing_due" };
   const subscription = await getBusinessSubscription(businessId);
   if (!subscription || !subscription.autoRenew) return { status: "nothing_due" };
   if (subscription.status === "cancelled" || subscription.status === "expired") {
@@ -896,10 +901,12 @@ export async function runSubscriptionRenewalTick(now: Date = new Date()): Promis
   const due = await withoutTenantScope("platform", async () => {
     await markOverdueInvoices(now);
     const { rows } = await query<{ business_id: string }>(
-      `SELECT business_id FROM business_subscriptions
-        WHERE auto_renew
-          AND status IN ('active', 'trialing', 'past_due')
-          AND current_period_end <= now()`,
+      `SELECT s.business_id FROM business_subscriptions s
+        JOIN businesses b ON b.id = s.business_id
+        WHERE b.ownership_kind = 'customer'
+          AND s.auto_renew
+          AND s.status IN ('active', 'trialing', 'past_due')
+          AND s.current_period_end <= now()`,
     );
     return rows;
   });

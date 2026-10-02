@@ -26,6 +26,7 @@ import type { CmsOrder } from "./types";
 const zero = "0" as RialText;
 
 const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, { revenue: string; cogs: string; inventory: string }> = {
+  service_saas: { revenue: "4500", cogs: "5670", inventory: "1400" },
   jewelry: {
     revenue: WELL_KNOWN_CODES.goldSalesRevenue,
     cogs: WELL_KNOWN_CODES.goldCogs,

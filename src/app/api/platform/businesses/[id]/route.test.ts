@@ -53,6 +53,7 @@ function summary(status: string): BusinessSummary {
     plan: "pro",
     timezone: "Asia/Tehran",
     industry: "food_service",
+    ownershipKind: "customer",
     createdAt: "2026-01-01T00:00:00.000Z",
     suspendedAt: null,
     archivedAt: status === "archived" ? "2026-02-01T00:00:00.000Z" : null,

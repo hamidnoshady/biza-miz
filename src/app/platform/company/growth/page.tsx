@@ -1,0 +1,2 @@
+import { CompanyEnginePage } from "../_components/company-workspace";
+export default function Page(){return <CompanyEnginePage active="growth" title="رشد و بازاریابی" description="جذب لید، همراهی دوره آزمایشی، تبدیل، تمدید، بازفعال‌سازی، ارجاع و پورسانت شریک بر پایه مخاطب و رضایت CRM." notes={["تفکیک پیام تراکنشی از بازاریابی","اعمال لغو عضویت و فهرست سرکوب","پیش‌نمایش و آماده‌سازی جدا از فعال‌سازی","ارسال یکتا در retry و درآمد تأییدشده فقط از حسابداری"]}/>}

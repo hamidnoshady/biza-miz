@@ -26,8 +26,10 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
 
   const businessId = request.nextUrl.searchParams.get("businessId");
   if (!businessId) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
-  if (!(await getBusiness(businessId))) {
-    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  const business = await getBusiness(businessId);
+  if (!business) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  if (business.ownershipKind === "platform_internal") {
+    return NextResponse.json({ error: "internal_business_pairing_unsupported" }, { status: 409 });
   }
 
   const [codes, locations] = await Promise.all([
@@ -52,8 +54,10 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   const businessId = body.businessId?.trim();
   const locationId = body.locationId?.trim();
   if (!businessId || !locationId) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
-  if (!(await getBusiness(businessId))) {
-    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  const business = await getBusiness(businessId);
+  if (!business) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  if (business.ownershipKind === "platform_internal") {
+    return NextResponse.json({ error: "internal_business_pairing_unsupported" }, { status: 409 });
   }
 
   // `issued_by` is an FK to `platform_users(id)` (migration 0048). A platform
@@ -96,6 +100,11 @@ export const DELETE = withPlatformScope(async (request: NextRequest) => {
   const businessId = body.businessId?.trim();
   const codeId = body.codeId?.trim();
   if (!businessId || !codeId) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+  const business = await getBusiness(businessId);
+  if (!business) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  if (business.ownershipKind === "platform_internal") {
+    return NextResponse.json({ error: "internal_business_pairing_unsupported" }, { status: 409 });
+  }
 
   const revoked = await revokePairingCode(businessId, codeId);
   if (!revoked) return NextResponse.json({ error: "not_found" }, { status: 404 });
