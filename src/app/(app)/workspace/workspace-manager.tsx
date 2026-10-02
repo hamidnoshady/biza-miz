@@ -11,7 +11,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { PERMISSIONS } from "@/lib/permissions";
 import { useWorkspaceLookups } from "./use-workspace-lookups";
 import { type WorkspaceIntent, type WorkspaceSection } from "./workspace-routes";
@@ -50,8 +50,6 @@ export function WorkspaceManager({
   // full-record link (`?open=<id>`). Consumed: stripped from the URL so a
   // reload does not repeat them, and counted, so the same action fires again
   // on the section already on screen (where only the query string changes).
-  const router = useRouter();
-  const pathname = usePathname();
   const [intent, setIntent] = useState<WorkspaceIntent>({ request: 0, create: false });
   useEffect(() => {
     const create = search.get("create") === "1";
@@ -63,11 +61,14 @@ export function WorkspaceManager({
       projectId: search.get("project") ?? undefined,
       openId,
     }));
+    // History, not the router: this strips a consumed instruction from the
+    // address; it is not navigation (the shell owns that — see the
+    // navigation-architecture test). Next keeps useSearchParams in sync.
     const rest = new URLSearchParams(search.toString());
     for (const key of ["create", "project", "open"]) rest.delete(key);
     const qs = rest.toString();
-    router.replace(`${pathname}${qs ? `?${qs}` : ""}`, { scroll: false });
-  }, [search, pathname, router]);
+    window.history.replaceState(window.history.state, "", `${window.location.pathname}${qs ? `?${qs}` : ""}`);
+  }, [search]);
   const create = { intent };
   const held = useMemo(() => new Set(permissions), [permissions]);
   const canManage = held.has(PERMISSIONS.workspaceManage);
