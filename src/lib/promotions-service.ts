@@ -15,6 +15,8 @@ import { emitDomainEvent } from "./posting-engine";
 import { promotionEffectiveness } from "./industry-reports";
 import { validateCampaignDraft } from "./campaign-rules";
 import type { Promotion } from "./promotions";
+import { campaignTargetAxes, type CampaignTargetCatalogue, type CampaignTargetOption } from "./campaign-targets";
+import type { SalesModel } from "./industry-profile";
 // Side-effect import: registers the gift-card posting rules.
 import "./promotions-posting-rules";
 
@@ -145,6 +147,52 @@ export async function listPromotionCatalogue(businessId: string): Promise<Promot
     stacking: row.stacking,
     isActive: row.is_active,
   }));
+}
+
+/**
+ * What a campaign can be scoped to (issue #764), for the form's
+ * «شامل چه کالاهایی؟» step: the active catalogue rows on the axes this
+ * trade's cart passes to the engine (`campaignTargetAxes`). Every branch of
+ * the business, because a promotion is business-wide while catalogue ids are
+ * per branch — the branch name is returned so two «لاته»s can be told apart.
+ */
+export async function listPromotionTargets(
+  businessId: string,
+  salesModel: SalesModel,
+): Promise<CampaignTargetCatalogue> {
+  const axes = campaignTargetAxes(salesModel);
+  type Row = { id: string; name: string; branch: string | null; branches: number };
+  const branchCount = "(SELECT count(*)::int FROM locations WHERE business_id = $1)";
+  const toOptions = (rows: Row[]): CampaignTargetOption[] =>
+    rows.map((row) => ({ id: row.id, name: row.name, branch: row.branches > 1 ? row.branch : null }));
+  const select = async (table: string, extra = "") =>
+    toOptions(
+      (
+        await query<Row>(
+          `SELECT t.id, t.name, l.name AS branch, ${branchCount} AS branches
+             FROM ${table} t JOIN locations l ON l.id = t.location_id
+            WHERE l.business_id = $1 ${extra}
+            ORDER BY t.name, l.name
+            LIMIT 2000`,
+          [businessId],
+        )
+      ).rows,
+    );
+
+  if (salesModel === "order_ticket") {
+    const [items, categories] = await Promise.all([
+      select("menu_items", "AND t.is_active"),
+      select("menu_categories", "AND t.is_active"),
+    ]);
+    return { axes, items, categories, brands: [] };
+  }
+  // A variant parent is a product family, never a line on an invoice; the
+  // engine matches the sold row's own id.
+  const [items, brands] = await Promise.all([
+    select("items", "AND t.is_active AND t.kind <> 'variant_parent'"),
+    select("item_brands"),
+  ]);
+  return { axes, items, categories: [], brands };
 }
 
 /**

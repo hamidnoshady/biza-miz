@@ -87,6 +87,7 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
   "/api/growth/campaign-audience": { POST: PERMISSIONS.campaignsManage },
   "/api/promotions": { GET: PERMISSIONS.campaignsView, POST: PERMISSIONS.campaignsManage, PATCH: PERMISSIONS.campaignsManage },
   "/api/promotions/reports": { GET: PERMISSIONS.campaignsView },
+  "/api/promotions/targets": { GET: PERMISSIONS.campaignsView },
   "/api/promotions/gift-cards": { GET: PERMISSIONS.giftCardsView, POST: PERMISSIONS.giftCardsIssue },
   "/api/promotions/gift-cards/redeem": { POST: PERMISSIONS.giftCardsRedeem },
   "/api/loyalty/programs": { GET: PERMISSIONS.loyaltyView, POST: PERMISSIONS.loyaltyManage },
@@ -109,7 +110,7 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
 export const GROWTH_SECTION_READS: Readonly<Record<GrowthSectionKey, readonly `${HttpMethod} ${string}`[]>> = {
   overview: ["GET /api/growth/overview"],
   customers: ["GET /api/growth/customers"],
-  campaigns: ["GET /api/promotions", "GET /api/promotions/reports"],
+  campaigns: ["GET /api/promotions", "GET /api/promotions/reports", "GET /api/promotions/targets"],
   messaging: ["GET /api/messaging"],
   "gift-cards": ["GET /api/promotions/gift-cards"],
   loyalty: ["GET /api/loyalty/programs", "GET /api/loyalty/repurchase", "GET /api/loyalty/customers/[id]"],

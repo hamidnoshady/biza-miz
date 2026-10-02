@@ -13,13 +13,7 @@ import {
   resumeMessageCampaign,
   saveMessageTemplate,
 } from "@/lib/message-campaigns-service";
-import {
-  createMessageTopUpRequest,
-  getMessageBusinessBilling,
-  getPublicMessageConfig,
-  listMessageCreditPackages,
-  listRecentMessageLedger,
-} from "@/lib/messaging-billing";
+import { getMessageBusinessBilling, getPublicMessageConfig } from "@/lib/messaging-billing";
 
 const channel = (value: unknown): "sms" | "email" | null =>
   value === "sms" || value === "email" ? value : null;
@@ -27,24 +21,25 @@ const channel = (value: unknown): "sms" | "email" | null =>
 /**
  * Owner/manager messaging workbench. Audience resolution remains in the CRM
  * service and campaign launches snapshot it there; this route only coordinates
- * the authenticated tenant's templates, campaign records and credit purchase.
+ * the authenticated tenant's templates and campaign records. Credit is bought
+ * in the central wallet (/settings/billing), never here.
  */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.campaignsView);
   if (error) return error;
 
-  const [config, billing, packages, ledger, templates, campaigns, segments, projects, promotions] = await Promise.all([
+  // `billing` is the central wallet's usable balance, for the cost warning
+  // only; buying credit is the platform billing page's job (issue #764).
+  const [config, billing, templates, campaigns, segments, projects, promotions] = await Promise.all([
     getPublicMessageConfig(),
     getMessageBusinessBilling(session.businessId),
-    listMessageCreditPackages(true),
-    listRecentMessageLedger(session.businessId),
     listMessageTemplates(session.businessId),
     listMessageCampaigns(session.businessId),
     listSegments(session.businessId),
     listProjects({ businessId: session.businessId, actorUserId: session.sub }),
     listPromotionCatalogue(session.businessId),
   ]);
-  return NextResponse.json({ config, billing, packages, ledger, templates, campaigns, segments, projects, promotions });
+  return NextResponse.json({ config, billing, templates, campaigns, segments, projects, promotions });
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
@@ -112,14 +107,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       if (typeof body.campaignId !== "string") return NextResponse.json({ error: "campaign_required" }, { status: 400 });
       await resumeMessageCampaign(session.businessId, body.campaignId);
       return NextResponse.json({ ok: true });
-    }
-
-    if (body.action === "top_up") {
-      if (typeof body.packageId !== "string" || !body.packageId) {
-        return NextResponse.json({ error: "package_required" }, { status: 400 });
-      }
-      const request = await createMessageTopUpRequest({ businessId: session.businessId, packageId: body.packageId, note: typeof body.note === "string" ? body.note : undefined });
-      return NextResponse.json({ request }, { status: 201 });
     }
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : "messaging_error";

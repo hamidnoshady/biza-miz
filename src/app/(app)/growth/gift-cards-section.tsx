@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
 import { CardTitle, SectionCard } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, errorMessageOrRaw, Field, InfoBox, inputClass } from "@/app/dashboard/ui";
+import type { GrowthAbilities } from "@/lib/growth-access";
 
 /**
  * Parse a money field the user typed, without letting a malformed string throw
@@ -32,7 +33,17 @@ function parsePositiveAmount(money: ReturnType<typeof useMoney>, raw: string): n
   }
 }
 
-export function GiftCardsSection() {
+/**
+ * Three separate permissions (issue #764): a balance lookup is
+ * `gift_cards.view`, issuing creates a liability (`gift_cards.issue`), and
+ * spending one is `gift_cards.redeem`. A control is drawn only when its
+ * endpoint would accept the click.
+ */
+export function GiftCardsSection({
+  abilities,
+}: {
+  abilities: Pick<GrowthAbilities, "issueGiftCards" | "redeemGiftCards">;
+}) {
   const money = useMoney();
   const [code, setCode] = useState("");
   const [issueValue, setIssueValue] = useState("");
@@ -129,7 +140,8 @@ export function GiftCardsSection() {
       <ErrorBox>{error}</ErrorBox>
       {done ? <InfoBox>{done}</InfoBox> : null}
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className={abilities.issueGiftCards ? "grid gap-4 lg:grid-cols-2" : "grid gap-4"}>
+        {abilities.issueGiftCards ? (
         <SectionCard
           title={<CardTitle eyebrow="اعتبار هدیه" title="صدور کارت هدیه" />}
           bodyClassName="space-y-3 p-4 sm:p-5"
@@ -169,12 +181,24 @@ export function GiftCardsSection() {
             کارت خرید می‌کند — نه این‌جا.
           </p>
         </SectionCard>
+        ) : null}
 
         <SectionCard
-          title={<CardTitle eyebrow="استعلام و استفاده" title="مصرف و مانده" />}
+          title={
+            <CardTitle
+              eyebrow="استعلام و استفاده"
+              title={abilities.redeemGiftCards ? "مصرف و مانده" : "استعلام ماندهٔ کارت"}
+            />
+          }
           bodyClassName="space-y-3 p-4 sm:p-5"
         >
-          <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-[1fr_1fr_auto] sm:gap-2">
+          <div
+            className={
+              abilities.redeemGiftCards
+                ? "grid grid-cols-1 items-end gap-3 sm:grid-cols-[1fr_1fr_auto] sm:gap-2"
+                : "grid grid-cols-1 items-end gap-3 sm:grid-cols-[1fr_auto] sm:gap-2"
+            }
+          >
             <Field label="کد کارت">
               <input
                 className={inputClass}
@@ -189,16 +213,18 @@ export function GiftCardsSection() {
                 }}
               />
             </Field>
-            <Field label={`مبلغ مصرف (${money.unitLabel})`}>
-              <PersianNumberInput
-                inputMode="numeric"
-                allowNegative={false}
-                className={inputClass}
-                dir="ltr"
-                value={redeemValue}
-                onChange={(e) => setRedeemValue(e.target.value)}
-              />
-            </Field>
+            {abilities.redeemGiftCards ? (
+              <Field label={`مبلغ مصرف (${money.unitLabel})`}>
+                <PersianNumberInput
+                  inputMode="numeric"
+                  allowNegative={false}
+                  className={inputClass}
+                  dir="ltr"
+                  value={redeemValue}
+                  onChange={(e) => setRedeemValue(e.target.value)}
+                />
+              </Field>
+            ) : null}
             <Button
               type="button"
               variant="outline"
@@ -209,16 +235,18 @@ export function GiftCardsSection() {
               مانده
             </Button>
           </div>
-          <Button
-            type="button"
-            disabled={busy || !canRedeem}
-            onClick={() => void redeem()}
-            className="min-h-11 w-full"
-          >
-            مصرف کارت
-          </Button>
+          {abilities.redeemGiftCards ? (
+            <Button
+              type="button"
+              disabled={busy || !canRedeem}
+              onClick={() => void redeem()}
+              className="min-h-11 w-full"
+            >
+              مصرف کارت
+            </Button>
+          ) : null}
           {balance && balance.code === redeemCode.trim() ? (
-            <p className="rounded-lg bg-muted/50 px-3 py-2 text-sm text-foreground">
+            <p aria-live="polite" className="rounded-lg bg-muted/50 px-3 py-2 text-sm text-foreground">
               ماندهٔ کارت <span dir="ltr" className="font-medium">{balance.code}</span>:{" "}
               <span className="font-semibold">{money.format(balance.value)}</span>
             </p>

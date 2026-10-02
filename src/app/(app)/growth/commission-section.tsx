@@ -74,7 +74,11 @@ function scopeLabel(rule: Pick<CommissionRuleRow, "itemIds" | "brandIds" | "cate
   return "همهٔ کالاها";
 }
 
-export function CommissionSection() {
+/**
+ * Compensation data: reading needs `commission.view`, writing a rule
+ * `commission.manage` (issue #764) — never the broad Growth or campaign keys.
+ */
+export function CommissionSection({ canManage }: { canManage: boolean }) {
   const money = useMoney();
   const [rules, setRules] = useState<CommissionRuleRow[] | null>(null);
   const [staff, setStaff] = useState<StaffMember[]>([]);
@@ -171,7 +175,8 @@ export function CommissionSection() {
       <ErrorBox>{error}</ErrorBox>
       {done ? <InfoBox>{done}</InfoBox> : null}
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className={canManage ? "grid gap-4 lg:grid-cols-2" : "grid gap-4"}>
+        {canManage ? (
         <RuleForm
           staff={staff}
           onSaved={(m) => {
@@ -184,6 +189,7 @@ export function CommissionSection() {
             setDone("");
           }}
         />
+        ) : null}
         <SectionCard
           title={<CardTitle eyebrow="گزارش پورسانت" title="رتبه‌بندی فروشندگان" />}
           description="مجموع پورسانت انباشته — همان عددی که به‌عنوان بدهی حقوق ثبت شده است"
@@ -260,14 +266,16 @@ export function CommissionSection() {
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <StatusBadge tone={r.isActive ? "positive" : "neutral"}>{r.isActive ? "فعال" : "غیرفعال"}</StatusBadge>
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    disabled={togglingId === r.id}
-                    onClick={() => void toggleRule(r)}
-                  >
-                    {r.isActive ? "غیرفعال کردن" : "فعال کردن"}
-                  </Button>
+                  {canManage ? (
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      disabled={togglingId === r.id}
+                      onClick={() => void toggleRule(r)}
+                    >
+                      {r.isActive ? "غیرفعال کردن" : "فعال کردن"}
+                    </Button>
+                  ) : null}
                 </div>
               </li>
             ))}

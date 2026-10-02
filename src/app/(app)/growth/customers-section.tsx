@@ -1,27 +1,27 @@
 "use client";
 
 /**
- * Growth's customer view.
+ * Growth's audience & customer-insights view (issue #764).
  *
- * The customer *row* is the shared `parties` record — Growth keeps no second
- * customer table. What makes this *Growth's* screen rather than Accounting's or
- * CRM's is the columns it answers against (lifecycle/RFM stage, loyalty points
- * and purchase history, not ledger codes and tax rates) and the fact that it is
- * managed here: adding and editing open the same party form every other app
- * writes with, so a name fixed here is fixed everywhere. Only the 360° file
- * (notes, tags, timeline) lives in the CRM, and the customer name links to it.
+ * The customer *row* is the shared `parties` record and the CRM owns it:
+ * identity, profile edits, archiving and the 360° file all live there. Growth
+ * reads the same row through its own lens — lifecycle stage, purchase count
+ * and spend, last purchase, loyalty points — and acts on audiences
+ * (messaging, campaigns). So this screen has no add/edit form of its own;
+ * every row links to the canonical CRM record, and the next action it offers
+ * is a Growth action: message an audience.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ContactIcon } from "lucide-react";
 import { useMoney } from "@/components/money/money-context";
 import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { LIFECYCLE_STAGES, type LifecycleStage } from "@/lib/crm-scoring";
-import { partyScopeFor } from "@/lib/parties-scopes";
 import type { GrowthCustomer } from "@/app/api/growth/customers/route";
 import { Button } from "@/components/ui/button";
 import { crmCustomerHref } from "@/app/(app)/crm/crm-routes";
+import { growthSectionHref } from "./growth-routes";
 import {
   CardTitle,
   EmptyState,
@@ -29,7 +29,6 @@ import {
   SectionCardSkeleton,
   StatusBadge,
 } from "@/app/dashboard/page-chrome";
-import { PartyFormDialog } from "@/app/dashboard/parties/party-form";
 import {
   DataTable,
   DataTableBody,
@@ -38,7 +37,7 @@ import {
   Td,
   Th,
 } from "@/app/dashboard/data-table";
-import { api, ErrorBox, InfoBox, inputClass } from "@/app/dashboard/ui";
+import { api, ErrorBox, inputClass } from "@/app/dashboard/ui";
 
 const PAGE_SIZE = 50;
 
@@ -61,20 +60,13 @@ interface CustomersResponse {
   businessId?: string;
 }
 
-/** Growth's own customers screen: its columns, its add/edit, the shared record. */
-export function GrowthCustomersSection({
-  selectedCustomerId,
-  canManage,
-}: {
-  selectedCustomerId?: string;
-  canManage: boolean;
-}) {
+/** Growth's audience screen: its columns over the shared record; edits go to the CRM. */
+export function GrowthCustomersSection({ selectedCustomerId }: { selectedCustomerId?: string }) {
   const money = useMoney();
 
   const [customers, setCustomers] = useState<GrowthCustomer[] | null>(null);
   const [pinned, setPinned] = useState<GrowthCustomer | null>(null);
   const [total, setTotal] = useState(0);
-  const [businessId, setBusinessId] = useState("");
   const [query, setQuery] = useState("");
   const [includeInactive, setIncludeInactive] = useState(false);
   const [page, setPage] = useState(1);
@@ -83,9 +75,8 @@ export function GrowthCustomersSection({
   // screen and merely dim them, or the list flickers away under every keystroke.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [info, setInfo] = useState("");
+  // Bumped by «تلاش دوباره» to re-run both reads after a failure.
   const [refreshKey, setRefreshKey] = useState(0);
-  const [form, setForm] = useState<{ partyId?: string } | null>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -114,7 +105,6 @@ export function GrowthCustomersSection({
         if (ok) {
           setCustomers(data.customers ?? []);
           setTotal(Number(data.total ?? 0));
-          setBusinessId(data.businessId ?? "");
           setError("");
         } else {
           // The rows already on screen are now stale and unexplained; clearing
@@ -146,8 +136,7 @@ export function GrowthCustomersSection({
       fetchedPinFor.current = null;
       return;
     }
-    // Keyed by refresh too: after a save the pinned copy holds the old name
-    // until it is read again.
+    // Keyed by refresh too, so «تلاش دوباره» re-reads the pinned copy.
     const key = `${selectedCustomerId}:${refreshKey}`;
     if (fetchedPinFor.current === key) return;
     fetchedPinFor.current = key;
@@ -184,8 +173,6 @@ export function GrowthCustomersSection({
     return [pinned, ...list];
   }, [customers, pinned]);
 
-  const openEdit = useCallback((partyId: string) => setForm({ partyId }), []);
-
   if (customers === null) {
     return <SectionCardSkeleton rows={5} label="در حال بارگذاری مشتریان" />;
   }
@@ -196,16 +183,18 @@ export function GrowthCustomersSection({
   return (
     <div className="space-y-4">
       <ErrorBox>{error}</ErrorBox>
-      <InfoBox>{info}</InfoBox>
+      {error ? (
+        <Button type="button" variant="outline" className="min-h-11" onClick={() => setRefreshKey((key) => key + 1)}>
+          تلاش دوباره
+        </Button>
+      ) : null}
       <SectionCard
-        title={<CardTitle eyebrow="مشتریان وفادار" title="مشتریان" />}
-        description="این فهرست رشد از پروندهٔ مشترک مشتریان می‌خواند؛ ستون‌ها برای کار رشد‌اند — چرخهٔ حیات، امتیاز و خرید. افزودن و ویرایش در همین بخش انجام می‌شود و پروندهٔ کامل (یادداشت‌ها و تاریخچه) در CRM است."
+        title={<CardTitle eyebrow="بینش مخاطبان" title="مخاطبان" />}
+        description="چرخهٔ حیات، خرید و امتیاز هر مشتری از پروندهٔ مشترک خوانده می‌شود. پرونده، ویرایش و رضایت ارتباط در CRM است؛ این‌جا برای انتخاب و رساندن پیام به مخاطب است."
         actions={
-          canManage ? (
-            <Button type="button" onClick={() => setForm({})}>
-              افزودن مشتری
-            </Button>
-          ) : null
+          <Button asChild variant="outline">
+            <Link href={growthSectionHref("messaging")}>پیام به یک بخش از مشتریان</Link>
+          </Button>
         }
       >
         <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
@@ -248,7 +237,7 @@ export function GrowthCustomersSection({
           <EmptyState>
             {query.trim()
               ? "مشتری‌ای با این جست‌وجو پیدا نشد."
-              : "هنوز مشتری‌ای ثبت نشده است. با «افزودن مشتری» شروع کنید."}
+              : "هنوز مشتری‌ای ثبت نشده است. مشتری‌ها در CRM یا هنگام فروش ثبت می‌شوند."}
           </EmptyState>
         ) : (
           <>
@@ -263,8 +252,9 @@ export function GrowthCustomersSection({
                 <Th numeric>خریدها</Th>
                 <Th numeric>مجموع خرید</Th>
                 <Th numeric>امتیاز وفاداری</Th>
+                <Th>آخرین خرید</Th>
                 <Th>وضعیت</Th>
-                {canManage ? <Th>عملیات</Th> : null}
+                <Th>پرونده</Th>
               </DataTableHead>
               <DataTableBody>
                 {rows.map((customer) => (
@@ -293,6 +283,7 @@ export function GrowthCustomersSection({
                       {money.format(customer.totalSpentRial)}
                     </Td>
                     <Td numeric>{formatPersianNumber(customer.points)}</Td>
+                    <Td muted>{purchaseDate(customer.lastPurchaseDate)}</Td>
                     <Td>
                       <StatusBadge
                         tone={customer.isActive ? "positive" : "neutral"}
@@ -300,18 +291,13 @@ export function GrowthCustomersSection({
                         {customer.isActive ? "فعال" : "آرشیو"}
                       </StatusBadge>
                     </Td>
-                    {canManage ? (
-                      <Td>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="xs"
-                          onClick={() => setForm({ partyId: customer.id })}
-                        >
-                          ویرایش
-                        </Button>
-                      </Td>
-                    ) : null}
+                    <Td>
+                      <Button asChild variant="ghost" size="xs">
+                        <Link href={crmCustomerHref(customer.id)} aria-label={`پروندهٔ ${customer.displayName} در CRM`}>
+                          ویرایش در CRM
+                        </Link>
+                      </Button>
+                    </Td>
                   </DataTableRow>
                 ))}
               </DataTableBody>
@@ -401,19 +387,13 @@ export function GrowthCustomersSection({
                         </dd>
                       </div>
                     </dl>
-                    {canManage ? (
-                      <div className="mt-3 border-t border-border/80 pt-2">
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="xs"
-                          onClick={() => openEdit(customer.id)}
-                          aria-label={`ویرایش ${customer.displayName}`}
-                        >
-                          ویرایش
-                        </Button>
-                      </div>
-                    ) : null}
+                    <div className="mt-3 border-t border-border/80 pt-2">
+                      <Button asChild variant="ghost" size="xs" className="min-h-11">
+                        <Link href={crmCustomerHref(customer.id)} aria-label={`پروندهٔ ${customer.displayName} در CRM`}>
+                          ویرایش در CRM
+                        </Link>
+                      </Button>
+                    </div>
                   </article>
                 </li>
               ))}
@@ -456,22 +436,6 @@ export function GrowthCustomersSection({
         ) : null}
       </SectionCard>
 
-      {form ? (
-        <PartyFormDialog
-          scope={partyScopeFor("growth")}
-          partyId={form.partyId ?? null}
-          businessId={businessId}
-          onClose={() => setForm(null)}
-          onSaved={() => {
-            const editing = Boolean(form.partyId);
-            setForm(null);
-            setInfo(editing ? "تغییرات مشتری ذخیره شد." : "مشتری تازه ثبت شد.");
-            // Bumping the key re-reads both the page and the pinned deep-link
-            // copy, which would otherwise keep showing the old name.
-            setRefreshKey((key) => key + 1);
-          }}
-        />
-      ) : null}
     </div>
   );
 }

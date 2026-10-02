@@ -30,8 +30,24 @@
  *
  * Dates are Shamsi everywhere (`JalaliDatePicker`, `formatJalali`); only the
  * wire and storage stay Gregorian ISO.
+ *
+ * ## A discount rule, not an audience (issue #764)
+ *
+ * A promotion here is a *transaction* rule — it fires on any cart that matches
+ * its products and schedule, for every customer, named or anonymous. The
+ * screen used to show a CRM-segment audience picker beside this form, which
+ * read as "create this discount for these customers" while nothing stored or
+ * enforced that. The audience now lives only where it is real: the messaging
+ * section, which sends a message to a segment and may attach a promotion. Each
+ * campaign row links there («اطلاع‌رسانی با پیام»).
+ *
+ * The product scope *is* real: the engine has always matched `itemIds`,
+ * `categoryIds`/`brandIds`, and the form now lets the owner pick them
+ * (`campaign-targets.ts`) and reads the whole rule back as one sentence
+ * before saving.
  */
 
+import Link from "next/link";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -65,12 +81,22 @@ import {
 import {
   CardTitle,
   EmptyState,
+  LoadingSkeleton,
   SectionCard,
   SectionCardSkeleton,
   StatusBadge,
 } from "@/app/dashboard/page-chrome";
-import { FilterChip, FilterChipRow } from "@/app/dashboard/filters";
-import { CampaignAudiencePanel } from "./campaign-audience-panel";
+import { FilterChip, FilterChipRow, SearchField } from "@/app/dashboard/filters";
+import {
+  CAMPAIGN_TARGET_AXIS_LABELS,
+  describeCampaignScope,
+  isWholeCatalogue,
+  normaliseCampaignScope,
+  type CampaignTargetAxis,
+  type CampaignTargetCatalogue,
+  type CampaignTargetOption,
+} from "@/lib/campaign-targets";
+import { growthSectionHref } from "./growth-routes";
 import {
   api,
   ErrorBox,
@@ -120,7 +146,7 @@ const STATE_FILTER_LABELS: Record<StateFilter, string> = {
   ...CAMPAIGN_STATE_LABELS,
 };
 
-export function CampaignsSection() {
+export function CampaignsSection({ canManage }: { canManage: boolean }) {
   const money = useMoney();
   const [promotions, setPromotions] = useState<PromotionRow[] | null>(null);
   const [effect, setEffect] = useState<EffectivenessRow[] | null>(null);
@@ -201,25 +227,25 @@ export function CampaignsSection() {
       <ErrorBox>{error}</ErrorBox>
       {done ? <InfoBox>{done}</InfoBox> : null}
 
-      {/*
-        Phase 36d — who a campaign reaches, from the CRM's segments, sitting
-        next to the form that creates the campaign. Placed above the promotion
-        list because audience is the question an owner asks first.
-      */}
-      <CampaignAudiencePanel />
+      <InfoBox>
+        کمپین تخفیف یک قاعدهٔ فروش است: روی هر سبدی که کالا و زمانش بخورد اعمال می‌شود، برای همهٔ مشتریان. برای
+        رساندن آن به یک گروه از مشتریان، از «اطلاع‌رسانی با پیام» کنار هر کمپین استفاده کنید.
+      </InfoBox>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <PromotionForm
-          onSaved={(m) => {
-            setDone(m);
-            setError("");
-            void load();
-          }}
-          onError={(m) => {
-            setError(m);
-            setDone("");
-          }}
-        />
+      <div className={canManage ? "grid gap-4 lg:grid-cols-2" : "grid gap-4"}>
+        {canManage ? (
+          <PromotionForm
+            onSaved={(m) => {
+              setDone(m);
+              setError("");
+              void load();
+            }}
+            onError={(m) => {
+              setError(m);
+              setDone("");
+            }}
+          />
+        ) : null}
         <SectionCard
           title={<CardTitle eyebrow="اثربخشی کمپین" title="اثربخشی کمپین‌ها" />}
           description="چند بار هر کمپین روی فروش اعمال شد و چقدر تخفیف داد — ۳۰ روز گذشته"
@@ -343,12 +369,20 @@ export function CampaignsSection() {
                         </>
                       ) : null}
                       {weekdays ? ` · ${weekdays}` : ""}
+                      {isWholeCatalogue(p) ? "" : " · محدود به کالاهای انتخاب‌شده"}
                     </p>
                   </div>
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                  <Button asChild variant="ghost" size="sm" className="min-h-11">
+                    <Link href={`${growthSectionHref("messaging")}?promotion=${encodeURIComponent(p.id)}`}>
+                      اطلاع‌رسانی با پیام
+                    </Link>
+                  </Button>
+                  {canManage ? (
                   <Button
                     variant="outline"
                     size="sm"
-                    className="min-h-9 shrink-0"
+                    className="min-h-11 shrink-0"
                     /*
                       An ended campaign can still be switched off, and a paused
                       one can still be resumed: `ended` describes the date
@@ -362,6 +396,8 @@ export function CampaignsSection() {
                   >
                     {togglingId === p.id ? "در حال ثبت…" : p.isActive ? "توقف" : "فعال‌سازی"}
                   </Button>
+                  ) : null}
+                  </div>
                 </li>
               );
             })}
@@ -385,6 +421,11 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
   const [timeFrom, setTimeFrom] = useState("");
   const [timeTo, setTimeTo] = useState("");
   const [daysOfWeek, setDaysOfWeek] = useState<number[]>([]);
+  /** «همه» or the one axis the owner is narrowing by. */
+  const [scopeAxis, setScopeAxis] = useState<"all" | CampaignTargetAxis>("all");
+  const [scopeIds, setScopeIds] = useState<string[]>([]);
+  const [catalogue, setCatalogue] = useState<CampaignTargetCatalogue | null>(null);
+  const [catalogueFailed, setCatalogueFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   /** Problems are shown only after a submit attempt, not while first typing. */
   const [showProblems, setShowProblems] = useState(false);
@@ -411,6 +452,26 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
     }
   };
 
+  const loadCatalogue = useCallback(async () => {
+    setCatalogueFailed(false);
+    const { ok, data } = await api<{ targets?: CampaignTargetCatalogue }>("/api/promotions/targets");
+    if (ok && data.targets) setCatalogue(data.targets);
+    else setCatalogueFailed(true);
+  }, []);
+
+  useEffect(() => {
+    void loadCatalogue();
+  }, [loadCatalogue]);
+
+  const scope = normaliseCampaignScope(
+    {
+      itemIds: scopeAxis === "items" ? scopeIds : [],
+      categoryIds: scopeAxis === "categories" ? scopeIds : [],
+      brandIds: scopeAxis === "brands" ? scopeIds : [],
+    },
+    catalogue?.axes ?? [],
+  );
+
   const draft = {
     name,
     kind,
@@ -423,7 +484,7 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
     timeFrom: timeFrom || null,
     timeTo: timeTo || null,
     daysOfWeek,
-    itemIds: [],
+    itemIds: scope.itemIds,
   };
 
   const problems = validateCampaignDraft(draft);
@@ -451,14 +512,9 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
     onError("");
     const { ok, data } = await api<{ error?: string; message?: string }>("/api/promotions", {
       method: "POST",
-      body: JSON.stringify({
-        ...draft,
-        // The engine reads an empty scope as "everything"; the form does not
-        // pick items yet, so it says so rather than sending nulls.
-        itemIds: [],
-        brandIds: [],
-        categoryIds: [],
-      }),
+      // An empty scope is "the whole catalogue" to the engine — sent only when
+      // the owner chose «همهٔ کالاها», never as a placeholder.
+      body: JSON.stringify({ ...draft, ...scope }),
     });
     setBusy(false);
 
@@ -474,11 +530,25 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
     setActiveTo("");
     setTimeFrom("");
     setTimeTo("");
+    setScopeAxis("all");
+    setScopeIds([]);
     setShowProblems(false);
     onSaved("کمپین ذخیره شد.");
   }
 
   const showBlockers = showProblems && (problems.length > 0 || warnings.length > 0);
+  const summary = campaignSummary({
+    kind,
+    value: draft.value,
+    minQuantity: draft.minQuantity,
+    scopeText: describeCampaignScope(scope, catalogue ?? { items: [], categories: [], brands: [] }),
+    daysOfWeek,
+    activeFrom,
+    activeTo,
+    timeFrom,
+    timeTo,
+    formatMoney: (rial) => money.format(rial),
+  });
 
   return (
     <SectionCard title="کمپین جدید" bodyClassName="space-y-3 p-4 sm:p-5">
@@ -639,10 +709,155 @@ function PromotionForm({ onSaved, onError }: { onSaved: (m: string) => void; onE
           </div>
         </Field>
 
+        <Field label="شامل چه کالاهایی می‌شود؟" as="div" hint="خالی گذاشتن یعنی همهٔ کالاها. استثنا (به‌جز…) را موتور تخفیف پشتیبانی نمی‌کند.">
+          {catalogueFailed ? (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              فهرست کالاها خوانده نشد؛ کمپین روی همهٔ کالاها ذخیره می‌شود.
+              <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => void loadCatalogue()}>
+                تلاش دوباره
+              </Button>
+            </div>
+          ) : !catalogue ? (
+            <LoadingSkeleton rows={1} compact label="در حال بارگذاری فهرست کالاها" />
+          ) : (
+            <div className="space-y-2">
+              <div role="radiogroup" aria-label="دامنهٔ کالاها" className="flex flex-wrap gap-1.5">
+                <FilterChip
+                  selected={scopeAxis === "all"}
+                  onClick={() => {
+                    setScopeAxis("all");
+                    setScopeIds([]);
+                  }}
+                  className="min-h-11 px-3 text-xs"
+                >
+                  همهٔ کالاها
+                </FilterChip>
+                {catalogue.axes.map((axis) => (
+                  <FilterChip
+                    key={axis}
+                    selected={scopeAxis === axis}
+                    onClick={() => {
+                      if (scopeAxis !== axis) setScopeIds([]);
+                      setScopeAxis(axis);
+                    }}
+                    className="min-h-11 px-3 text-xs"
+                  >
+                    {CAMPAIGN_TARGET_AXIS_LABELS[axis]}
+                  </FilterChip>
+                ))}
+              </div>
+              {scopeAxis !== "all" ? (
+                <TargetPicker
+                  label={CAMPAIGN_TARGET_AXIS_LABELS[scopeAxis]}
+                  options={catalogue[scopeAxis]}
+                  selected={scopeIds}
+                  onChange={setScopeIds}
+                />
+              ) : null}
+            </div>
+          )}
+        </Field>
+
+        <div aria-live="polite" className="rounded-xl border border-amber-200 bg-amber-50/60 px-3 py-2 text-sm leading-6 text-foreground dark:border-amber-500/30 dark:bg-amber-500/10">
+          <span className="block text-xs font-medium text-muted-foreground">خلاصهٔ کمپین پیش از ذخیره</span>
+          {summary}
+        </div>
+
         <Button type="submit" disabled={busy} className="min-h-11 w-full">
           {busy ? "در حال ذخیره…" : "ذخیره کمپین"}
         </Button>
       </form>
     </SectionCard>
   );
+}
+
+/**
+ * A search-and-tick list over one catalogue axis. A plain list rather than a
+ * combobox: a campaign usually picks a handful of rows, and ticking from a
+ * filtered list works the same with a finger, a mouse and a keyboard.
+ */
+function TargetPicker({
+  label,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string;
+  options: readonly CampaignTargetOption[];
+  selected: readonly string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const chosen = new Set(selected);
+  const matches = options
+    .filter((option) => !needle || option.name.toLowerCase().includes(needle) || option.branch?.toLowerCase().includes(needle))
+    .slice(0, 40);
+  const nameOf = new Map(options.map((option) => [option.id, option]));
+  const toggle = (id: string) => onChange(chosen.has(id) ? selected.filter((item) => item !== id) : [...selected, id]);
+
+  if (options.length === 0) {
+    return <EmptyState>موردی برای انتخاب در «{label}» وجود ندارد.</EmptyState>;
+  }
+
+  return (
+    <div className="space-y-2 rounded-xl border border-border/80 p-3">
+      {selected.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5" aria-label={`${label} انتخاب‌شده`}>
+          {selected.map((id) => (
+            <FilterChip key={id} selected onClick={() => toggle(id)} className="min-h-11 px-3 text-xs">
+              {nameOf.get(id)?.name ?? "مورد حذف‌شده"} ✕
+            </FilterChip>
+          ))}
+        </div>
+      ) : null}
+      <SearchField value={query} onChange={setQuery} label={`جست‌وجو در ${label}`} placeholder={`جست‌وجو در ${label}…`} />
+      <ul className="max-h-56 overflow-y-auto text-sm" aria-label={label}>
+        {matches.map((option) => (
+          <li key={option.id}>
+            <label className="flex min-h-11 cursor-pointer items-center gap-2 rounded-lg px-2 hover:bg-muted/50">
+              <input type="checkbox" className="size-4" checked={chosen.has(option.id)} onChange={() => toggle(option.id)} />
+              <span className="min-w-0 flex-1 truncate">{option.name}</span>
+              {option.branch ? <span className="shrink-0 text-xs text-muted-foreground">{option.branch}</span> : null}
+            </label>
+          </li>
+        ))}
+        {matches.length === 0 ? <li className="px-2 py-3 text-xs text-muted-foreground">موردی پیدا نشد.</li> : null}
+      </ul>
+    </div>
+  );
+}
+
+/** «۲۰٪ تخفیف روی کالاهای دستهٔ نوشیدنی گرم، شنبه و یکشنبه، ساعت ۱۸ تا ۲۲.» */
+function campaignSummary(input: {
+  kind: PromotionRow["kind"];
+  value: number | null;
+  minQuantity: number | null;
+  scopeText: string;
+  daysOfWeek: number[];
+  activeFrom: string;
+  activeTo: string;
+  timeFrom: string;
+  timeTo: string;
+  formatMoney: (rial: number) => string;
+}): string {
+  const value = input.value ?? 0;
+  const offer =
+    input.kind === "percent"
+      ? `${formatPersianNumber(value)}٪ تخفیف`
+      : input.kind === "amount"
+        ? `${input.formatMoney(value)} تخفیف`
+        : `قیمت ثابت ${input.formatMoney(value)}${input.minQuantity ? ` برای ${formatPersianNumber(input.minQuantity)} عدد` : ""}`;
+  const parts = [`${offer} ${input.scopeText}`];
+  const days = formatWeekdays(input.daysOfWeek);
+  parts.push(days ? days : "همهٔ روزها");
+  if (input.timeFrom || input.timeTo) {
+    parts.push(`ساعت ${toPersianDigits(input.timeFrom || "۰۰:۰۰")} تا ${toPersianDigits(input.timeTo || "۲۴:۰۰")}`);
+  }
+  if (input.activeFrom || input.activeTo) {
+    parts.push(
+      `${input.activeFrom ? `از ${toPersianDigits(formatJalali(input.activeFrom))}` : ""}${input.activeFrom && input.activeTo ? " " : ""}${input.activeTo ? `تا ${toPersianDigits(formatJalali(input.activeTo))}` : ""}`,
+    );
+  }
+  return `${parts.join("، ")}.`;
 }
