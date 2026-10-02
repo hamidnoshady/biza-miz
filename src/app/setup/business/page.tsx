@@ -1,9 +1,10 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, ErrorBox, errorMessage, Field, inputClass, PrimaryButton, SetupDataSkeleton, StepShell } from "../ui";
-import { nextPath } from "../steps";
+import { nextPath, stepsFor } from "../steps";
+import { useSetupIndustry } from "../industry-context";
 
 interface StateResponse {
   business?: { name: string } | null;
@@ -14,6 +15,12 @@ interface StateResponse {
 
 export default function BusinessStep() {
   const router = useRouter();
+  const industry = useSetupIndustry();
+  // The AEC industry walks an extra «پروفایل کسب‌وکار» step right after this
+  // one (issue #799); every other industry goes straight to the chart of
+  // accounts. Passing the filtered sequence is what makes `nextPath` return the
+  // right destination for both.
+  const steps = useMemo(() => stepsFor(industry), [industry]);
   const [businessName, setBusinessName] = useState("");
   const [locationName, setLocationName] = useState("شعبه مرکزی");
   const [address, setAddress] = useState("");
@@ -55,7 +62,7 @@ export default function BusinessStep() {
       setError(errorMessage(data.error));
       return;
     }
-    router.push(nextPath("business"));
+    router.push(nextPath("business", steps));
   }
 
   if (!loaded) return <SetupDataSkeleton rows={5} />;

@@ -1,0 +1,74 @@
+/**
+ * The one guard and error map every `/api/aec/*` route uses, the same shape as
+ * `/api/workspace/guard.ts` next door.
+ *
+ * The permission story is the issue's §24 rule: an AEC action is the platform
+ * permission intersected with the member's **project role** where the action is
+ * project-scoped. Reading and writing project AEC data therefore goes through
+ * `requireProjectCapability` on top of `workspace.view`/`workspace.manage`; the
+ * business's operating profile is business configuration and runs on
+ * `settings.manage`, the same key the settings screen that edits it is gated by.
+ */
+import { NextResponse } from "next/server";
+import { requirePermission } from "@/lib/auth";
+import { AecError } from "@/lib/aec-service";
+import { PERMISSIONS, type Permission } from "@/lib/permissions";
+import type { WorkspaceOwner } from "@/lib/workspace";
+
+export { PERMISSIONS };
+
+/** Resolves the session behind a permission into the `WorkspaceOwner` the AEC service takes. */
+export async function aecOwner(
+  permission: Permission,
+): Promise<{ owner: WorkspaceOwner; error: null } | { owner: null; error: NextResponse }> {
+  const { session, error } = await requirePermission(permission);
+  if (error) return { owner: null, error };
+  return {
+    owner: {
+      businessId: session.businessId,
+      actorUserId: session.sub,
+      actorName: session.fullName ?? "",
+    },
+    error: null,
+  };
+}
+
+/**
+ * The status each AEC error code deserves.
+ *
+ * `industry_mismatch` and `role_not_allowed` are 403 rather than 400: the
+ * request is well-formed and the caller may understand it perfectly — the
+ * business's industry or its chosen operating profile is what refuses it, and
+ * the body says exactly which.
+ */
+const ERROR_STATUS: Record<string, number> = {
+  industry_mismatch: 403,
+  role_not_allowed: 403,
+  invalid_operating_profile: 400,
+  invalid_date: 400,
+  invalid_coordinate: 400,
+  invalid_area: 400,
+  invalid_floor_count: 400,
+  invalid_progress: 400,
+  invalid_reference: 400,
+  end_before_start: 400,
+  party_not_found: 400,
+  user_not_found: 400,
+  project_not_found: 404,
+  participant_not_found: 404,
+  participant_exists: 409,
+};
+
+/** Maps a thrown `AecError` onto a response; rethrows anything else as a real 500. */
+export function handleAecError(err: unknown): NextResponse {
+  if (err instanceof AecError) {
+    return NextResponse.json({ error: err.code }, { status: ERROR_STATUS[err.code] ?? 400 });
+  }
+  throw err;
+}
+
+/** Reads a JSON body, returning `{}` rather than throwing on a malformed one. */
+export async function readBody(request: Request): Promise<Record<string, unknown>> {
+  const body = await request.json().catch(() => null);
+  return body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+}

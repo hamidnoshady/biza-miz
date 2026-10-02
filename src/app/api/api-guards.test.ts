@@ -377,6 +377,22 @@ function isDataTransferGuarded(src: string): boolean {
   return /dataOwner\(/.test(src) && /PERMISSIONS\.data(?:Import|Export)/.test(src);
 }
 
+/**
+ * Issue #799 Wave 2 — `aecOwner(PERMISSIONS.<key>)`, the same shape as the
+ * workspace and data helpers above: `src/app/api/aec/guard.ts`'s only body is
+ * `requirePermission(permission)` from `@/lib/auth`, so recognising it narrows
+ * the scan rather than loosening it. The permission keys are named exactly
+ * (the settings key for business-wide AEC configuration, the two workspace
+ * keys for project-scoped reads and writes) rather than accepting any string,
+ * so a future route cannot satisfy the scanner with a permission it invented.
+ */
+function isAecGuarded(src: string): boolean {
+  return (
+    /aecOwner\(/.test(src) &&
+    /PERMISSIONS\.(?:settingsManage|workspaceView|workspaceManage)/.test(src)
+  );
+}
+
 /** Public API routes are session-less only because api-auth.ts authenticates a scoped key. */
 function isApiKeyGuarded(src: string): boolean {
   return /withApiKeyScope\(/.test(src) && /requireApiScope\(/.test(src);
@@ -504,6 +520,8 @@ describe("every API route is guarded", () => {
       // «ورود و خروج داده» — `dataOwner(PERMISSIONS.data…)`, the same shape.
       // See isDataTransferGuarded.
       if (isDataTransferGuarded(src)) return;
+      // Issue #799 Wave 2 — `aecOwner(PERMISSIONS.…)`. See isAecGuarded.
+      if (isAecGuarded(src)) return;
       // Phase 35 — `requireMember` is the fourth guard: any signed-in member,
       // for endpoints where every member acts only on their own rows and there
       // is therefore no role left to gate (notification devices, rules, inbox).
@@ -596,6 +614,37 @@ describe("capability-based back-office guards", () => {
     expect(src!).toMatch(/deploymentRole\(\)\s*===\s*"central"/);
     const put = src!.slice(src!.indexOf("export const PUT"));
     expect(put.indexOf('deploymentRole() === "central"')).toBeLessThan(put.indexOf("request.json()"));
+  });
+});
+
+/**
+ * Issue #799 Wave 2 — the AEC routes (`/api/aec/**`). They reach
+ * `requirePermission` through `aecOwner`, the same shape as the workspace
+ * module's helper, so the same two things are asserted explicitly: every route
+ * names a real permission key, and none of them uses a role list (which would
+ * bypass per-member overrides).
+ */
+describe("the AEC module's API guards", () => {
+  const aecRoutes = [...sources].filter(([key]) => key === "aec" || key.startsWith("aec/"));
+
+  it("has routes to check", () => {
+    expect(aecRoutes.length).toBeGreaterThan(3);
+  });
+
+  it("guards every AEC route on a named permission and no role list", () => {
+    for (const [key, src] of aecRoutes) {
+      expect(src, `src/app/api/${key}/route.ts`).toMatch(/aecOwner\(/);
+      expect(src, `src/app/api/${key}/route.ts`).toMatch(
+        /PERMISSIONS\.(?:settingsManage|workspaceView|workspaceManage)/,
+      );
+      expect(requireRoleCalls(src), `src/app/api/${key}/route.ts uses requireRole`).toEqual([]);
+    }
+  });
+
+  it("keeps the shared helper requirePermission and nothing weaker", () => {
+    const guard = readFileSync(join(API_ROOT, "aec", "guard.ts"), "utf8");
+    expect(guard).toMatch(/requirePermission\(permission\)/);
+    expect(guard).toMatch(/from "@\/lib\/auth"/);
   });
 });
 

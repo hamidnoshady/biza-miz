@@ -35,6 +35,7 @@ import { TeamManager } from "@/app/dashboard/team/team-manager";
 import { AccountsSettings } from "./accounts-settings";
 import { AuditLogSettings } from "./audit-log-settings";
 import { BusinessSettings } from "./business-settings";
+import { AecProfileForm } from "@/components/aec/aec-profile-form";
 import { DeviceSettings } from "./device-settings";
 import { LogsPanel } from "./logs-panel";
 import { MenuSettings } from "./menu-settings";
@@ -220,7 +221,19 @@ export function SettingsManager({
         </div>
       ) : null}
 
-      {activeTab === "business" ? <BusinessSettings /> : null}
+      {activeTab === "business" ? (
+        <div className="space-y-4">
+          <BusinessSettings />
+          {/*
+            Issue #799 Wave 2 — an AEC business's operating profile lives in
+            the business section rather than a tab of its own: it is business
+            configuration, it is meaningless for the other nine industries
+            (whose API refuses it outright), and a tab that only ever appears
+            for one industry would be a rail entry nobody else can explain.
+          */}
+          {industry === "architecture_construction" ? <AecProfileForm /> : null}
+        </div>
+      ) : null}
       {activeTab === "tax" ? <TaxSettings industry={industry} /> : null}
       {activeTab === "pricing" ? <PricingSettings /> : null}
       {activeTab === "online-platforms" ? <OnlinePlatformsSettings /> : null}

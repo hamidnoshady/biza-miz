@@ -924,7 +924,15 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   architecture offices, civil/structural firms, contractors, design & build teams, supervision
   consultants and individual professionals, whose operational centre is **My Workspace**
   (`ai_projects` plus migration 0167's tables) rather than a fifth app, and whose profile carries
-  only the core modules — no POS, no `orders`, no stock. Adding one means the registry entry, a
+  only the core modules — no POS, no `orders`, no stock. Since issue #799's Wave 2 that trade also
+  has an **operating profile** (`src/lib/aec.ts`: architecture office, civil engineering,
+  contractor, design & build, consulting/supervision, multidisciplinary, team, individual) plus
+  specialties and twenty capability keys, stored per business in `aec_business_profiles` (migration
+  0194) and resolved with `resolveAecCapabilities`; project-level AEC metadata and external
+  participants live in `aec_project_profiles` / `aec_project_participants` and are served by
+  `src/lib/aec-service.ts` under `/api/aec/**`. Ask a capability, never a profile, and remember a
+  participant row is a record — `workspace_members` stays the only source of internal access.
+  Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a
   restated industry list anywhere else in `src/`. Cosmetics adds `item_batches` on top (batch/lot number, expiry,

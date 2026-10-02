@@ -469,6 +469,49 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
       "A document filed against the customer. Leaving it on the loser removes it from the surviving file's document list, which is how a signed contract scan goes missing.",
   },
 
+  // -- AEC (issue #799 Wave 2) ----------------------------------------------
+  // Migration 0194's three party columns. All four are `move`: they name a live
+  // counterparty on a project that is still running, and the migration's own
+  // trigger refuses an archived or merged-away party — so leaving one pointing
+  // at the loser would not merely hide it, it would make the row unwritable on
+  // the next edit.
+  {
+    table: "aec_project_profiles",
+    column: "employer_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The project's employer — the party the work is being delivered for. A duplicate-record merge must not leave the profile naming an archived company.",
+    preview: true,
+    previewLabel: "کارفرمای پروژه",
+  },
+  {
+    table: "aec_project_profiles",
+    column: "lead_consultant_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The lead consultant on the project. Same rule as the employer: the merged-away record must not remain the consultant of record.",
+  },
+  {
+    table: "aec_project_profiles",
+    column: "main_contractor_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The main contractor on the project, and a party the profile's trigger requires to be live and unmerged.",
+  },
+  {
+    table: "aec_project_participants",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "An external participant's role on a project. It belongs to the surviving counterparty, and its trigger refuses a merged-away party just as the profile's does.",
+    preview: true,
+    previewLabel: "طرف‌های پروژه",
+  },
+
   // -- Historical / audit: deliberately NOT moved ---------------------------
   {
     table: "crm_merges",

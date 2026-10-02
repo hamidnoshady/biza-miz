@@ -222,20 +222,33 @@ describe("the database admits every industry", () => {
    * one whose omission only shows up at runtime — in production, on the first
    * provisioning — so it is asserted here from the SQL itself.
    */
+  /**
+   * The industry list inside a migration's `industry IN ( … )` clause, or null
+   * when the file does not carry one.
+   *
+   * Detection is on the *clause*, not on the string `businesses_industry_check`:
+   * a later migration that merely mentions the constraint in a comment — 0194
+   * does, explaining why it adds no new industry — is not a migration that
+   * defines it, and treating it as one made this guard fail on prose.
+   */
+  function industryCheckClause(sql: string): string[] | null {
+    const clause = sql.match(
+      /businesses_industry_check[\s\S]*?CHECK\s*\(\s*industry IN\s*\(([\s\S]*?)\)\s*\)/i,
+    );
+    if (!clause) return null;
+    return [...clause[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  }
+
   function newestIndustryCheck(): { file: string; industries: string[] } {
     const candidates = readdirSync(MIGRATIONS_ROOT)
       .filter((name) => name.endsWith(".sql"))
       .sort()
-      .filter((name) =>
-        readFileSync(join(MIGRATIONS_ROOT, name), "utf8").includes("businesses_industry_check"),
-      );
+      .filter((name) => industryCheckClause(readFileSync(join(MIGRATIONS_ROOT, name), "utf8")) !== null);
     expect(candidates.length, "no migration defines businesses_industry_check").toBeGreaterThan(0);
     const file = candidates[candidates.length - 1];
-    const sql = readFileSync(join(MIGRATIONS_ROOT, file), "utf8");
-    const clause = sql.match(/businesses_industry_check[\s\S]*?CHECK\s*\(\s*industry IN\s*\(([\s\S]*?)\)\s*\)/i);
-    expect(clause, `${file}: no industry IN (...) list found`).not.toBeNull();
-    const industries = [...clause![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
-    return { file, industries };
+    const industries = industryCheckClause(readFileSync(join(MIGRATIONS_ROOT, file), "utf8"));
+    expect(industries, `${file}: no industry IN (...) list found`).not.toBeNull();
+    return { file, industries: industries! };
   }
 
   it("names every industry exactly once", () => {
