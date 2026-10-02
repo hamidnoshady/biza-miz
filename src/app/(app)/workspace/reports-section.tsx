@@ -10,6 +10,7 @@
  * rather than a misleading zero.
  */
 
+import { InsightsPanel } from "./insights-panel";
 import { useEffect, useMemo, useState } from "react";
 import { BarChart3Icon } from "lucide-react";
 import {
@@ -103,6 +104,9 @@ export function ReportsSection() {
   return (
     <div className="flex flex-col gap-4">
       {error ? <ErrorBox>{error}</ErrorBox> : null}
+
+      {/* Questions first (#761 §15); the full table stays below for the power user. */}
+      <InsightsPanel />
 
       <KpiRow>
         <KpiCard

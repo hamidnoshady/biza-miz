@@ -32,11 +32,18 @@ import {
   addDays,
   approvalDecisionError,
   builtinTemplate,
+  daysUntil,
   dependencyBlocksStatus,
+  projectHealth,
+  type ProjectHealth,
+  type ProjectHealthReason,
   effectiveProjectRole,
   intervalOrdered,
   normalizeTags,
   phasesFromTemplate,
+  planTemplateApplication,
+  type TemplateApplyMode,
+  type TemplatePlan,
   roleCan,
   wouldCreateDependencyCycle,
   type WorkspaceAccessFlags,
@@ -837,54 +844,63 @@ export async function archiveTemplate(businessId: string, key: string): Promise<
 }
 
 /**
- * Seeds a project's phases and starter tasks from a template — a merge, and
- * deterministic: a phase whose name the project already has, or a starter
- * task whose title it already has, is skipped, so applying the same template
- * twice changes nothing and applying a second one adds only what is new,
- * ordered after the existing phases. Returns what was actually added.
+ * Applies a template to a project — the plan is `planTemplateApplication`
+ * (pure, unit-tested), so a dry run returns exactly what a real run would do
+ * and the preview the member approved is the change that lands. `merge`
+ * (default) only adds what is missing; `replace` also removes empty phases
+ * the template does not name. Tasks are never deleted.
  */
 export async function applyTemplate(
   owner: WorkspaceOwner,
   projectId: string,
   template: WorkspaceTemplate,
   startDate: string | null,
-): Promise<{ phasesAdded: number; tasksAdded: number }> {
-  const key = (text: string) => text.trim().toLowerCase();
+  options: { mode?: TemplateApplyMode; dryRun?: boolean } = {},
+): Promise<TemplatePlan & { phasesAdded: number; tasksAdded: number }> {
   const [{ rows: phaseRows }, { rows: taskRows }] = await Promise.all([
-    query<{ name: string; display_order: number }>(
-      `SELECT name, display_order FROM workspace_project_phases WHERE project_id = $1`,
+    query<{ id: string; name: string; display_order: number; task_count: string }>(
+      `SELECT ph.id, ph.name, ph.display_order,
+              (SELECT count(*) FROM ai_project_tasks t WHERE t.phase_id = ph.id) AS task_count
+         FROM workspace_project_phases ph WHERE ph.project_id = $1`,
       [projectId],
     ),
     query<{ title: string }>(`SELECT title FROM ai_project_tasks WHERE project_id = $1`, [projectId]),
   ]);
-  const havePhases = new Set(phaseRows.map((row) => key(row.name)));
-  const haveTasks = new Set(taskRows.map((row) => key(row.title)));
-  const offset = phaseRows.reduce((max, row) => Math.max(max, row.display_order + 1), 0);
-
-  let phasesAdded = 0;
-  for (const phase of phasesFromTemplate(template, startDate)) {
-    if (havePhases.has(key(phase.name))) continue;
-    havePhases.add(key(phase.name));
-    await query(
-      `INSERT INTO workspace_project_phases (project_id, name, display_order, start_date, end_date)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [projectId, phase.name, offset + phase.displayOrder, phase.startDate, phase.endDate],
-    );
-    phasesAdded += 1;
+  const plan = planTemplateApplication({
+    existingPhases: phaseRows.map((row) => ({
+      id: row.id, name: row.name, displayOrder: row.display_order, taskCount: Number(row.task_count),
+    })),
+    existingTaskTitles: taskRows.map((row) => row.title),
+    templatePhases: phasesFromTemplate(template, startDate),
+    defaultTasks: template.defaultTasks,
+    mode: options.mode ?? "merge",
+  });
+  if (!options.dryRun) {
+    for (const phase of plan.removePhases) {
+      // Re-checked in SQL: a task assigned to the phase since the plan was made keeps it.
+      await query(
+        `DELETE FROM workspace_project_phases ph
+          WHERE ph.id = $1 AND ph.project_id = $2
+            AND NOT EXISTS (SELECT 1 FROM ai_project_tasks t WHERE t.phase_id = ph.id)`,
+        [phase.id, projectId],
+      );
+    }
+    for (const phase of plan.addPhases) {
+      await query(
+        `INSERT INTO workspace_project_phases (project_id, name, display_order, start_date, end_date)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [projectId, phase.name, phase.displayOrder, phase.startDate, phase.endDate],
+      );
+    }
+    for (const title of plan.addTasks) {
+      await query(
+        `INSERT INTO ai_project_tasks (project_id, title, source, created_by)
+         VALUES ($1, $2, 'user', $3)`,
+        [projectId, title, owner.actorUserId],
+      );
+    }
   }
-  let tasksAdded = 0;
-  for (const raw of template.defaultTasks) {
-    const title = raw.slice(0, WORKSPACE_LIMITS.taskTitleMax);
-    if (!title.trim() || haveTasks.has(key(title))) continue;
-    haveTasks.add(key(title));
-    await query(
-      `INSERT INTO ai_project_tasks (project_id, title, source, created_by)
-       VALUES ($1, $2, 'user', $3)`,
-      [projectId, title, owner.actorUserId],
-    );
-    tasksAdded += 1;
-  }
-  return { phasesAdded, tasksAdded };
+  return { ...plan, phasesAdded: plan.addPhases.length, tasksAdded: plan.addTasks.length };
 }
 
 /* ===========================================================================
@@ -2383,6 +2399,8 @@ export interface CalendarEntry {
   /** The row this entry points at, so the calendar can link to its page. */
   refId: string;
   location: string;
+  /** A stored event's own note; derived entries have none. */
+  description: string;
 }
 
 /**
@@ -2406,7 +2424,7 @@ export async function listCalendar(
     `SELECT e.id::text AS id, 'event' AS source, e.title, e.event_date::text AS date,
             e.start_time::text AS start_time, e.end_time::text AS end_time, e.kind,
             e.project_id, (SELECT name FROM ai_projects WHERE id = e.project_id) AS project_name,
-            e.id::text AS ref_id, e.location
+            e.id::text AS ref_id, e.location, e.description
        FROM workspace_events e
       WHERE e.business_id = $1 AND e.event_date BETWEEN $2 AND $3
         AND ${visibilityClause(owner, "e.project_id", ["e.created_by"], "$4")}
@@ -2415,7 +2433,7 @@ export async function listCalendar(
       UNION ALL
 
      SELECT p.id::text, 'project_deadline', p.name, p.end_date::text, NULL, NULL, NULL,
-            p.id, p.name, p.id::text, ''
+            p.id, p.name, p.id::text, '', ''
        FROM ai_projects p
       WHERE p.business_id = $1 AND p.archived_at IS NULL
         AND p.end_date BETWEEN $2 AND $3
@@ -2426,7 +2444,7 @@ export async function listCalendar(
       UNION ALL
 
      SELECT t.id::text, 'task_due', t.title, t.due_date::text, NULL, NULL, NULL,
-            t.project_id, p.name, t.id::text, ''
+            t.project_id, p.name, t.id::text, '', ''
        FROM ai_project_tasks t
        JOIN ai_projects p ON p.id = t.project_id
       WHERE p.business_id = $1 AND t.status <> 'done'
@@ -2437,7 +2455,7 @@ export async function listCalendar(
       UNION ALL
 
      SELECT c.id::text, 'contract_expiry', c.title, c.end_date::text, NULL, NULL, NULL,
-            c.project_id, p.name, c.id::text, ''
+            c.project_id, p.name, c.id::text, '', ''
        FROM workspace_contracts c
        LEFT JOIN ai_projects p ON p.id = c.project_id
       WHERE c.business_id = $1 AND c.status NOT IN ('terminated', 'completed')
@@ -2448,7 +2466,7 @@ export async function listCalendar(
       UNION ALL
 
      SELECT a.id::text, 'approval_due', COALESCE(NULLIF(a.title, ''), 'تأیید'), a.due_date::text,
-            NULL, NULL, NULL, a.project_id, p.name, a.id::text, ''
+            NULL, NULL, NULL, a.project_id, p.name, a.id::text, '', ''
        FROM workspace_approvals a
        LEFT JOIN ai_projects p ON p.id = a.project_id
       WHERE a.business_id = $1 AND a.status = 'pending'
@@ -2475,6 +2493,7 @@ export async function listCalendar(
       projectName: r.project_name ?? null,
       refId: String(r.ref_id),
       location: String(r.location ?? ""),
+      description: String(r.description ?? ""),
     };
   });
 }
@@ -2534,6 +2553,84 @@ export async function createEvent(
     projectId, subjectType: "event", subjectId: null, action: "created", summary: title,
   });
   return listCalendar(owner, { from: eventDate, to: eventDate });
+}
+
+/**
+ * Amends a stored event (#761 §10). Same authority as deleting it — its
+ * author, an editor of its project, or an administrator — and the same
+ * checks as creating it, applied to the record as it will be after the edit
+ * (times in order, a task link inside the event's project, `contribute` on a
+ * project it is moved into). Derived entries are not events: a task's due
+ * date is edited on the task.
+ */
+export async function updateEvent(
+  owner: WorkspaceOwner,
+  id: string,
+  input: {
+    title?: string; description?: string; kind?: string; eventDate?: unknown;
+    startTime?: string | null; endTime?: string | null; location?: string;
+    projectId?: string | null;
+  },
+): Promise<boolean> {
+  if (!isUuid(id)) return false;
+  const { rows } = await query<{
+    project_id: string | null; task_id: string | null; created_by: string;
+    event_date: string; start_time: string | null; end_time: string | null;
+  }>(
+    `SELECT project_id, task_id, created_by, event_date::text AS event_date,
+            start_time::text AS start_time, end_time::text AS end_time
+       FROM workspace_events WHERE id = $1 AND business_id = $2`,
+    [id, owner.businessId],
+  );
+  const event = rows[0];
+  if (!event) return false;
+  if (event.created_by !== owner.actorUserId && !isAdministrator(owner)) {
+    if (!event.project_id) throw new WorkspaceError("insufficient_project_role");
+    await requireProjectCapability(owner, event.project_id, "edit");
+  }
+
+  const sets: string[] = [];
+  const params: unknown[] = [id, owner.businessId];
+  const set = (column: string, value: unknown) => {
+    params.push(value);
+    sets.push(`${column} = $${params.length}`);
+  };
+  if (input.title !== undefined) {
+    set("title", requireText(input.title, WORKSPACE_LIMITS.eventTitleMax, "event_title_required"));
+  }
+  if (input.description !== undefined) set("description", trimTo(input.description, 1000));
+  if (input.kind !== undefined) set("kind", assertEnum(input.kind, EVENT_KINDS, "invalid_event_kind"));
+  if (input.location !== undefined) set("location", trimTo(input.location, 200));
+  if (input.eventDate !== undefined) {
+    const eventDate = isoDateOrNull(input.eventDate, "invalid_date");
+    if (!eventDate) throw new WorkspaceError("event_date_required");
+    set("event_date", eventDate);
+  }
+  const startTime = input.startTime !== undefined ? timeOrNull(input.startTime) : event.start_time?.slice(0, 5) ?? null;
+  const endTime = input.endTime !== undefined ? timeOrNull(input.endTime) : event.end_time?.slice(0, 5) ?? null;
+  if (!intervalOrdered(startTime, endTime)) throw new WorkspaceError("end_before_start");
+  if (input.startTime !== undefined) set("start_time", startTime);
+  if (input.endTime !== undefined) set("end_time", endTime);
+  if (input.projectId !== undefined) {
+    const projectId = input.projectId || null;
+    if (event.task_id) {
+      const task = await getWorkspaceTask(owner.businessId, event.task_id);
+      if (task && projectId !== task.projectId) throw new WorkspaceError("task_project_mismatch");
+    }
+    await requireProjectIfSet(owner, projectId, "contribute");
+    set("project_id", projectId);
+  }
+  if (!sets.length) return true;
+  await query(
+    `UPDATE workspace_events SET ${sets.join(", ")}, updated_at = now()
+      WHERE id = $1 AND business_id = $2`,
+    params,
+  );
+  await recordActivity(owner, {
+    projectId: input.projectId !== undefined ? input.projectId || null : event.project_id,
+    subjectType: "event", subjectId: id, action: "updated", summary: String(input.title ?? ""),
+  });
+  return true;
 }
 
 /**
@@ -2998,4 +3095,151 @@ export async function approvalListPage(owner: WorkspaceOwner, filter: ApprovalLi
     overdue: `count(*) FILTER (WHERE a.status = 'pending' AND a.due_date < ${todayLiteral()})`,
   });
   return { page: pageOf(s.total, filter, clampLimit(filter.limit, 100, 300)), summary: s };
+}
+
+/* ===========================================================================
+ * Insights (#761 §15) — the reports page as answers to questions
+ * ======================================================================== */
+
+export interface WorkspaceInsights {
+  atRisk: Array<{
+    projectId: string; name: string; health: ProjectHealth; reasons: ProjectHealthReason[];
+    progressPercent: number; elapsedPercent: number | null;
+  }>;
+  /** Null when the actor may not read the ledger — overspend is a ledger fact. */
+  overspending: Array<{ projectId: string; name: string; budgetRial: number; spentRial: number }> | null;
+  slipping: Array<{ taskId: string; title: string; projectId: string; projectName: string; dueDate: string; daysLate: number }>;
+  overloaded: Array<{ userId: string; fullName: string; openTasks: number; overdueTasks: number }>;
+  contracts: Array<{
+    contractId: string; title: string; projectName: string | null; endDate: string;
+    state: "expiring" | "lapsed";
+  }>;
+  bottlenecks: Array<{
+    approvalId: string; title: string; projectName: string | null; approverName: string | null; ageDays: number;
+  }>;
+}
+
+/**
+ * Every question answered over the projects the actor can see — the same
+ * `visibilityClause` as the lists — and every answer names the records it
+ * came from, so the page drills down instead of asserting a number.
+ */
+export async function workspaceInsights(owner: WorkspaceOwner): Promise<WorkspaceInsights> {
+  const today = todayIsoDate();
+  const tasks = visibilityClause(owner, "t.project_id", [], "$2");
+  const contractsVis = visibilityClause(
+    owner, "c.project_id", ["c.created_by"], "$2",
+    owner.access?.canManageContracts ? "TRUE" : undefined,
+  );
+  const approvalsVis = `(${visibilityClause(owner, "a.project_id", ["a.requested_by"], "$2")}
+      OR a.approver_user_id = $2::uuid OR a.requested_by = $2::uuid)`;
+
+  const [report, slipping, overloaded, contracts, bottlenecks] = await Promise.all([
+    projectReport(owner),
+    query<{ id: string; title: string; project_id: string; project_name: string; due_date: string }>(
+      `SELECT t.id, t.title, t.project_id, p.name AS project_name, t.due_date::text AS due_date
+         FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
+        WHERE p.business_id = $1 AND ${tasks} AND p.archived_at IS NULL
+          AND t.status <> 'done' AND t.due_date < $3::date
+        ORDER BY t.due_date, t.id LIMIT 10`,
+      [owner.businessId, owner.actorUserId, today],
+    ),
+    query<{ user_id: string; full_name: string | null; open_tasks: string; overdue_tasks: string }>(
+      `SELECT t.assignee_user_id AS user_id, u.full_name,
+              count(*) AS open_tasks,
+              count(*) FILTER (WHERE t.due_date < $3::date) AS overdue_tasks
+         FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
+         LEFT JOIN users u ON u.id = t.assignee_user_id
+        WHERE p.business_id = $1 AND ${tasks} AND p.archived_at IS NULL
+          AND t.status <> 'done' AND t.assignee_user_id IS NOT NULL
+        GROUP BY t.assignee_user_id, u.full_name
+        ORDER BY count(*) FILTER (WHERE t.due_date < $3::date) DESC, count(*) DESC
+        LIMIT 10`,
+      [owner.businessId, owner.actorUserId, today],
+    ),
+    query<{ id: string; title: string; project_name: string | null; end_date: string }>(
+      `SELECT c.id, c.title, p.name AS project_name, c.end_date::text AS end_date
+         FROM workspace_contracts c LEFT JOIN ai_projects p ON p.id = c.project_id
+        WHERE c.business_id = $1 AND ${contractsVis}
+          AND c.status IN ('active', 'pending_approval')
+          AND c.end_date IS NOT NULL AND c.end_date <= $3::date + 30
+        ORDER BY c.end_date, c.id LIMIT 10`,
+      [owner.businessId, owner.actorUserId, today],
+    ),
+    query<{ id: string; title: string; project_name: string | null; approver_name: string | null; age_days: string }>(
+      `SELECT a.id, COALESCE(NULLIF(a.title, ''), 'تأیید') AS title, p.name AS project_name,
+              au.full_name AS approver_name,
+              ($3::date - a.created_at::date) AS age_days
+         FROM workspace_approvals a
+         LEFT JOIN ai_projects p ON p.id = a.project_id
+         LEFT JOIN users au ON au.id = a.approver_user_id
+        WHERE a.business_id = $1 AND ${approvalsVis} AND a.status = 'pending'
+        ORDER BY a.created_at, a.id LIMIT 10`,
+      [owner.businessId, owner.actorUserId, today],
+    ),
+  ]);
+
+  const atRisk = report
+    .map((row) => {
+      const health = projectHealth({
+        today,
+        startDate: row.startDate,
+        endDate: row.endDate,
+        completed: row.status === "completed",
+        taskCount: row.taskCount,
+        doneTaskCount: row.doneTaskCount,
+        overdueTaskCount: row.overdueTaskCount,
+        budgetRial: row.budgetRial,
+        spentRial: row.spentRial,
+        pendingApprovals: row.openApprovals,
+        expiringContracts: 0,
+      });
+      return { projectId: row.projectId, name: row.name, ...health };
+    })
+    .filter((item) => item.health !== "on_track")
+    .sort((a, b) =>
+      a.health === b.health ? b.reasons.length - a.reasons.length : a.health === "off_track" ? -1 : 1,
+    );
+
+  return {
+    atRisk,
+    overspending: owner.access?.canViewFinancials
+      ? report
+          .filter((row) => row.budgetRial !== null && row.spentRial !== null && row.spentRial > row.budgetRial)
+          .map((row) => ({
+            projectId: row.projectId,
+            name: row.name,
+            budgetRial: row.budgetRial as number,
+            spentRial: row.spentRial as number,
+          }))
+          .sort((a, b) => b.spentRial - b.budgetRial - (a.spentRial - a.budgetRial))
+      : null,
+    slipping: slipping.rows.map((r) => {
+      const due = isoDate(r.due_date) ?? r.due_date;
+      return {
+        taskId: r.id, title: r.title, projectId: r.project_id, projectName: r.project_name,
+        dueDate: due, daysLate: -daysUntil(due, today),
+      };
+    }),
+    overloaded: overloaded.rows.map((r) => ({
+      userId: r.user_id,
+      fullName: r.full_name ?? "—",
+      openTasks: Number(r.open_tasks),
+      overdueTasks: Number(r.overdue_tasks),
+    })),
+    contracts: contracts.rows.map((r) => {
+      const end = isoDate(r.end_date) ?? r.end_date;
+      return {
+        contractId: r.id, title: r.title, projectName: r.project_name, endDate: end,
+        state: end < today ? ("lapsed" as const) : ("expiring" as const),
+      };
+    }),
+    bottlenecks: bottlenecks.rows.map((r) => ({
+      approvalId: r.id,
+      title: r.title,
+      projectName: r.project_name,
+      approverName: r.approver_name,
+      ageDays: Number(r.age_days),
+    })),
+  };
 }
