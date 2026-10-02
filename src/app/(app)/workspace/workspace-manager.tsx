@@ -10,11 +10,11 @@
  * URLs and the shared contextual sidebar own movement between sections.
  */
 
-import { useMemo } from "react";
-import { useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { PERMISSIONS } from "@/lib/permissions";
 import { useWorkspaceLookups } from "./use-workspace-lookups";
-import { type WorkspaceSection } from "./workspace-routes";
+import { type WorkspaceIntent, type WorkspaceSection } from "./workspace-routes";
 import { OverviewSection } from "./overview-section";
 import { ProjectsSection } from "./projects-section";
 import { TasksSection } from "./tasks-section";
@@ -46,11 +46,29 @@ export function WorkspaceManager({
   const initialMine = search.get("mine") === "true";
   const expiring = Number(search.get("expiring"));
   const initialExpiring = Number.isInteger(expiring) && expiring > 0 && expiring <= 365 ? expiring : undefined;
-  // «+ ایجاد» from the command bar: `?create=1` opens the section's create
-  // dialog, `?project=` preselects the project it was started from.
-  const initialCreating = search.get("create") === "1";
-  const createProjectId = search.get("project") ?? undefined;
-  const create = { initialCreating, createProjectId };
+  // One-shot intents — «+ ایجاد» (`?create=1&project=`) and the drawer's
+  // full-record link (`?open=<id>`). Consumed: stripped from the URL so a
+  // reload does not repeat them, and counted, so the same action fires again
+  // on the section already on screen (where only the query string changes).
+  const router = useRouter();
+  const pathname = usePathname();
+  const [intent, setIntent] = useState<WorkspaceIntent>({ request: 0, create: false });
+  useEffect(() => {
+    const create = search.get("create") === "1";
+    const openId = search.get("open") ?? undefined;
+    if (!create && !openId) return;
+    setIntent((prev) => ({
+      request: prev.request + 1,
+      create,
+      projectId: search.get("project") ?? undefined,
+      openId,
+    }));
+    const rest = new URLSearchParams(search.toString());
+    for (const key of ["create", "project", "open"]) rest.delete(key);
+    const qs = rest.toString();
+    router.replace(`${pathname}${qs ? `?${qs}` : ""}`, { scroll: false });
+  }, [search, pathname, router]);
+  const create = { intent };
   const held = useMemo(() => new Set(permissions), [permissions]);
   const canManage = held.has(PERMISSIONS.workspaceManage);
   const canManageContracts = held.has(PERMISSIONS.workspaceContractsManage);
@@ -85,8 +103,8 @@ export function WorkspaceManager({
           {...create}
         />
       ) : null}
-      {activeSection === "teams" ? <TeamsSection lookups={lookups} canManage={canManage} initialProjectId={createProjectId} /> : null}
-      {activeSection === "approvals" ? <ApprovalsSection canApprove={canApprove} /> : null}
+      {activeSection === "teams" ? <TeamsSection lookups={lookups} canManage={canManage} intent={intent} /> : null}
+      {activeSection === "approvals" ? <ApprovalsSection canApprove={canApprove} initialInbox={initialMine ? "mine" : "all"} /> : null}
       {activeSection === "reports" ? <ReportsSection /> : null}
       {activeSection === "templates" ? <TemplatesSection canManage={canManage} /> : null}
     </div>

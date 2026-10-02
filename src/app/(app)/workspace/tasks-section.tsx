@@ -68,6 +68,7 @@ import {
   LoadMoreFooter,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import type { WorkspaceIntent } from "./workspace-routes";
 
 /** Per-status counts over the whole filtered set (keys match the board columns). */
 type TaskSummary = { total: number; overdue: number } & Record<WorkspaceTaskStatus, number>;
@@ -102,18 +103,15 @@ const VIEW_TABS = [
 
 export function TasksSection({
   lookups,
-  initialCreating = false,
-  createProjectId,
+  intent,
   canManage,
   canContribute = canManage,
   initialMine = false,
   projectId,
 }: {
   lookups: WorkspaceLookups;
-  /** From `?create=1` — the command bar's «+ ایجاد» opens the create dialog. */
-  initialCreating?: boolean;
-  /** From `?project=` — the create dialog preselects that project. */
-  createProjectId?: string;
+  /** A consumed URL intent — see `WorkspaceIntent`. */
+  intent?: WorkspaceIntent;
   canManage: boolean;
   /**
    * May work tasks (status, checklist) without re-scoping them — a
@@ -128,7 +126,16 @@ export function TasksSection({
   const [mine, setMine] = useState(initialMine);
   const [openOnly, setOpenOnly] = useState(true);
   const [search, setSearch] = useState("");
-  const [creating, setCreating] = useState(initialCreating);
+  const [creating, setCreating] = useState(false);
+  useEffect(() => {
+    if (intent?.create) setCreating(true);
+    // `?open=<id>` — the drawer's «باز کردن صفحهٔ کامل» lands on this record.
+    if (intent?.openId) {
+      api<{ task?: TaskRow }>(`/api/workspace/tasks/${intent.openId}`).then(({ ok, data }) => {
+        if (ok && data.task) setEditing(data.task);
+      });
+    }
+  }, [intent]);
   const [editing, setEditing] = useState<TaskRow | null>(null);
 
   const query = useMemo(() => {
@@ -388,7 +395,7 @@ export function TasksSection({
       {creating ? (
         <TaskDialog
           lookups={lookups}
-          projectId={projectId ?? createProjectId}
+          projectId={projectId ?? intent?.projectId}
           onClose={() => setCreating(false)}
           onSaved={() => {
             setCreating(false);

@@ -180,6 +180,19 @@ export function canOpenWorkspace(
  * project, `&project=<id>` so the dialog preselects that project. Filtered by
  * the platform permission; the project role is re-checked by the API.
  */
+/**
+ * A one-shot instruction carried in the URL (`?create=1`, `?project=`,
+ * `?open=<id>`). The manager consumes it — strips it from the URL so a reload
+ * does not repeat it — and bumps `request`, so the same action fires again
+ * even on the section already on screen.
+ */
+export interface WorkspaceIntent {
+  request: number;
+  create: boolean;
+  projectId?: string;
+  openId?: string;
+}
+
 export interface WorkspaceCreateAction {
   key: "project" | "task" | "event" | "document" | "contract" | "member";
   label: string;

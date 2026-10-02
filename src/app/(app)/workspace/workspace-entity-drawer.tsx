@@ -29,6 +29,7 @@ import { api, ErrorBox, PrimaryButton, inputClass } from "@/app/dashboard/ui";
 import { useMoney } from "@/components/money/money-context";
 import { workspaceProjectHref, workspaceSectionHref } from "@/lib/app-routes";
 import { formatJalali } from "@/lib/jalali";
+import { toPersianDigits } from "@/lib/digits";
 import {
   CONTRACT_STATUS_LABELS,
   DOCUMENT_STATUS_LABELS,
@@ -66,9 +67,9 @@ const ENDPOINT: Record<WorkspaceEntityKind, string> = {
 /** Where "open the full record" goes for each kind. */
 export function workspaceEntityHref(ref: WorkspaceEntityRef): string {
   if (ref.kind === "project") return workspaceProjectHref(ref.id);
-  return workspaceSectionHref(
-    ref.kind === "task" ? "tasks" : ref.kind === "document" ? "documents" : "contracts",
-  );
+  const section = ref.kind === "task" ? "tasks" : ref.kind === "document" ? "documents" : "contracts";
+  // `?open=` — the section opens this record, not just its list.
+  return `${workspaceSectionHref(section)}?open=${encodeURIComponent(ref.id)}`;
 }
 
 interface Comment {
@@ -208,7 +209,7 @@ function Facts({ kind, record }: { kind: WorkspaceEntityKind; record: Record_ })
   } else if (kind === "document") {
     rows.push(
       ["وضعیت", DOCUMENT_STATUS_LABELS[record.status as WorkspaceDocumentStatus] ?? "—"],
-      ["نسخه", String(record.version ?? "—")],
+      ["نسخه", record.version == null ? "—" : toPersianDigits(String(record.version))],
       ["پروژه", text(record.projectName)],
       ["فایل", text(record.fileName)],
     );

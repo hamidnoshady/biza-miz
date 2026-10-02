@@ -11,6 +11,7 @@
  * would be worse than no picker.
  */
 
+import type { WorkspaceIntent } from "./workspace-routes";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { PlusIcon, Trash2Icon, UsersIcon } from "lucide-react";
 import {
@@ -59,17 +60,20 @@ const CAPABILITY_LABELS: Record<keyof typeof WORKSPACE_CAPABILITY_MIN_ROLE, stri
 
 export function TeamsSection({
   lookups,
-  initialProjectId,
+  intent,
   canManage,
   projectId: fixedProjectId,
 }: {
   lookups: WorkspaceLookups;
-  /** From `?project=` — the «افزودن عضو تیم» command lands on that project. */
-  initialProjectId?: string;
+  /** A consumed URL intent — the project «افزودن عضو تیم» came from. */
+  intent?: WorkspaceIntent;
   canManage: boolean;
   projectId?: string;
 }) {
-  const [projectId, setProjectId] = useState(fixedProjectId ?? initialProjectId ?? "");
+  const [projectId, setProjectId] = useState(fixedProjectId ?? "");
+  useEffect(() => {
+    if (!fixedProjectId && intent?.projectId) setProjectId(intent.projectId);
+  }, [intent, fixedProjectId]);
   const [members, setMembers] = useState<MemberRow[] | null>(null);
   const [error, setError] = useState("");
   const [addUserId, setAddUserId] = useState("");
