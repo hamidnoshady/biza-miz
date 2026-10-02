@@ -1,0 +1,2 @@
+import { CompanyEnginePage } from "../_components/company-workspace";
+export default function Page(){return <CompanyEnginePage active="crm" title="CRM مشتریان پلتفرم" description="حساب‌های مشتری، مخاطبان، فرصت‌ها، پیگیری فروش، استقرار و ریسک ریزش؛ بدون کپی داده‌های خصوصی داخل کسب‌وکار مشتری." notes={["نگاشت صریح حساب تجاری، صورتحساب و tenant","مخاطبان متعدد بدون ادغام صرفاً بر اساس ایمیل","مانده مالی فقط از قرارداد خواندنی حسابداری","ارجاع به تیکت پشتیبانی مرجع، نه گفت‌وگوی موازی"]}/>}

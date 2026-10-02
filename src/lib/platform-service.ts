@@ -48,6 +48,7 @@ export interface BusinessSummary {
   timezone: string;
   /** Phase 21's `businesses.industry` — which module set, labels and sales model this tenant gets. */
   industry: Industry;
+  ownershipKind: "customer" | "platform_internal";
   createdAt: string;
   suspendedAt: string | null;
   archivedAt: string | null;
@@ -68,6 +69,7 @@ interface BusinessRow extends Record<string, unknown> {
   plan: string;
   timezone: string;
   industry: Industry;
+  ownership_kind: "customer" | "platform_internal";
   created_at: string;
   suspended_at: string | null;
   archived_at: string | null;
@@ -87,6 +89,7 @@ function toSummary(row: BusinessRow): BusinessSummary {
     plan: row.plan,
     timezone: row.timezone,
     industry: row.industry,
+    ownershipKind: row.ownership_kind,
     createdAt: row.created_at,
     suspendedAt: row.suspended_at,
     archivedAt: row.archived_at,
@@ -103,7 +106,7 @@ export async function listBusinesses(): Promise<BusinessSummary[]> {
     const { rows } = await query<BusinessRow>(
       `SELECT b.id, b.name, b.slug::text AS slug, b.subdomain::text AS subdomain,
               b.status::text AS status, b.plan,
-              b.timezone, b.industry, b.created_at, b.suspended_at, b.archived_at,
+              b.timezone, b.industry, b.ownership_kind, b.created_at, b.suspended_at, b.archived_at,
               (SELECT count(*) FROM locations l WHERE l.business_id = b.id) AS location_count,
               (SELECT count(*) FROM users u WHERE u.business_id = b.id AND u.is_active) AS member_count,
               (SELECT count(*) FROM orders o JOIN locations l ON l.id = o.location_id
@@ -111,6 +114,7 @@ export async function listBusinesses(): Promise<BusinessSummary[]> {
               (SELECT max(o.opened_at) FROM orders o JOIN locations l ON l.id = o.location_id
                 WHERE l.business_id = b.id) AS last_activity_at
          FROM businesses b
+        WHERE b.ownership_kind = 'customer'
         ORDER BY b.created_at DESC`,
     );
     return rows.map(toSummary);
@@ -185,7 +189,7 @@ export async function queryBusinesses(q: BusinessQuery = {}): Promise<BusinessLi
       where: string[];
       params: unknown[];
     }
-    const builder = (): FilterBuilder => ({ where: [], params: [] });
+    const builder = (): FilterBuilder => ({ where: ["b.ownership_kind = 'customer'"], params: [] });
     /** Push a bound value and return its `$n` placeholder. */
     const bind = (b: FilterBuilder, value: unknown): string => {
       b.params.push(value);
@@ -257,7 +261,7 @@ export async function queryBusinesses(q: BusinessQuery = {}): Promise<BusinessLi
     const { rows } = await query<BusinessRow>(
       `SELECT b.id, b.name, b.slug::text AS slug, b.subdomain::text AS subdomain,
               b.status::text AS status, b.plan,
-              b.timezone, b.industry, b.created_at, b.suspended_at, b.archived_at,
+              b.timezone, b.industry, b.ownership_kind, b.created_at, b.suspended_at, b.archived_at,
               (SELECT count(*) FROM locations l WHERE l.business_id = b.id) AS location_count,
               (SELECT count(*) FROM users u WHERE u.business_id = b.id AND u.is_active) AS member_count,
               (SELECT count(*) FROM orders o JOIN locations l ON l.id = o.location_id
@@ -285,8 +289,8 @@ export async function queryBusinesses(q: BusinessQuery = {}): Promise<BusinessLi
 export async function listBusinessPlanKeys(): Promise<string[]> {
   return withoutTenantScope("platform", async () => {
     const { rows } = await query<{ plan: string }>(
-      `SELECT DISTINCT b.plan FROM businesses b
-        WHERE b.plan IS NOT NULL AND b.plan <> ''
+      `SELECT DISTINCT b.plan FROM businesses b WHERE b.ownership_kind = 'customer'
+          AND b.plan IS NOT NULL AND b.plan <> ''
         ORDER BY b.plan`,
     );
     return rows.map((row) => row.plan);
@@ -332,7 +336,7 @@ export async function getBusiness(businessId: string): Promise<BusinessSummary |
     const { rows } = await query<BusinessRow>(
       `SELECT b.id, b.name, b.slug::text AS slug, b.subdomain::text AS subdomain,
               b.status::text AS status, b.plan,
-              b.timezone, b.industry, b.created_at, b.suspended_at, b.archived_at,
+              b.timezone, b.industry, b.ownership_kind, b.created_at, b.suspended_at, b.archived_at,
               (SELECT count(*) FROM locations l WHERE l.business_id = b.id) AS location_count,
               (SELECT count(*) FROM users u WHERE u.business_id = b.id AND u.is_active) AS member_count,
               (SELECT count(*) FROM orders o JOIN locations l ON l.id = o.location_id

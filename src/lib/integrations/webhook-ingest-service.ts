@@ -48,6 +48,7 @@ const zero = "0" as RialText;
  * lands in the same accounts a counter sale of the same item would.
  */
 const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, { revenue: string; cogs: string; inventory: string }> = {
+  service_saas: { revenue: "4500", cogs: "5670", inventory: "1400" },
   jewelry: {
     revenue: WELL_KNOWN_CODES.goldSalesRevenue,
     cogs: WELL_KNOWN_CODES.goldCogs,

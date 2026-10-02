@@ -24,53 +24,53 @@ export const GET = withPlatformScope(async () => {
 
   const [subs, money, invoices, wallet, ai, messaging, media, gateway, aiConfig] = await Promise.all([
     query<{ status: string; count: string }>(
-      `SELECT status, count(*)::text AS count FROM business_subscriptions GROUP BY status`,
+      `SELECT status, count(*)::text AS count FROM business_subscriptions s JOIN businesses b ON b.id=s.business_id WHERE b.ownership_kind='customer' GROUP BY s.status`,
     ),
     query<{ billed: string; payments_ok: string; payments_fail: string; month: string }>(
       `SELECT
          (SELECT COALESCE(SUM(amount_rial), 0)::text FROM wallet_ledger
-           WHERE direction = 'debit' AND kind IN ('subscription', 'plan_fee')
+           WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer') AND direction = 'debit' AND kind IN ('subscription', 'plan_fee')
              AND created_at >= date_trunc('month', now())) AS billed,
          (SELECT count(*)::text FROM billing_payments
-           WHERE status = 'verified' AND created_at >= date_trunc('month', now())) AS payments_ok,
+           WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer') AND status = 'verified' AND created_at >= date_trunc('month', now())) AS payments_ok,
          (SELECT count(*)::text FROM billing_payments
-           WHERE status IN ('failed', 'cancelled') AND created_at >= date_trunc('month', now())) AS payments_fail,
+           WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer') AND status IN ('failed', 'cancelled') AND created_at >= date_trunc('month', now())) AS payments_fail,
          to_char(now(), 'YYYY-MM') AS month`,
     ),
     query<{ open: string; outstanding: string }>(
       `SELECT count(*)::text AS open,
               COALESCE(SUM(total_rial - paid_rial), 0)::text AS outstanding
          FROM billing_invoices
-        WHERE status IN ('open', 'partially_paid', 'overdue')`,
+        WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer') AND status IN ('open', 'partially_paid', 'overdue')`,
     ),
     query<{ liabilities: string; wallets: string }>(
       `SELECT COALESCE(SUM(balance_rial), 0)::text AS liabilities,
               count(*)::text AS wallets
-         FROM business_wallets`,
+         FROM business_wallets WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer')`,
     ),
     query<{ allowance_granted: string; allowance_used: string; wallet_ai: string }>(
       `SELECT
          (SELECT COALESCE(SUM(granted_rial), 0)::text FROM ai_plan_allowance_usage
-           WHERE period_month = to_char(now(), 'YYYY-MM')) AS allowance_granted,
+           WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer') AND period_month = to_char(now(), 'YYYY-MM')) AS allowance_granted,
          (SELECT COALESCE(SUM(used_rial), 0)::text FROM ai_plan_allowance_usage
-           WHERE period_month = to_char(now(), 'YYYY-MM')) AS allowance_used,
+           WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer') AND period_month = to_char(now(), 'YYYY-MM')) AS allowance_used,
          (SELECT COALESCE(SUM(amount_rial), 0)::text FROM wallet_ledger
-           WHERE kind = 'feature_charge' AND feature_key = 'ai'
+           WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer') AND kind = 'feature_charge' AND feature_key = 'ai'
              AND created_at >= date_trunc('month', now())) AS wallet_ai`,
     ),
     query<{ balance: string; usage: string }>(
       `SELECT
-         (SELECT COALESCE(SUM(balance_rial), 0)::text FROM business_wallets) AS balance,
+         (SELECT COALESCE(SUM(balance_rial), 0)::text FROM business_wallets WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer')) AS balance,
          (SELECT COALESCE(SUM(amount_rial), 0)::text FROM wallet_ledger
-           WHERE feature_key = 'messaging' AND kind = 'feature_charge'
+           WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer') AND feature_key = 'messaging' AND kind = 'feature_charge'
              AND created_at >= date_trunc('month', now())) AS usage`,
     ),
     query<{ businesses: string; bytes: string; charges: string }>(
       `SELECT
-         (SELECT count(DISTINCT business_id)::text FROM media_assets) AS businesses,
-         (SELECT COALESCE(SUM(byte_size), 0)::text FROM media_assets) AS bytes,
+         (SELECT count(DISTINCT business_id)::text FROM media_assets WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer')) AS businesses,
+         (SELECT COALESCE(SUM(byte_size), 0)::text FROM media_assets WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer')) AS bytes,
          (SELECT COALESCE(SUM(amount_rial), 0)::text FROM media_usage_charges
-           WHERE day >= to_char(date_trunc('month', now()), 'YYYY-MM-DD')) AS charges`,
+           WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer') AND day >= to_char(date_trunc('month', now()), 'YYYY-MM-DD')) AS charges`,
     ),
     getPaymentConfig(),
     getPlatformAiConfig(),
@@ -85,7 +85,7 @@ export const GET = withPlatformScope(async () => {
   const mediaRow = media.rows[0];
 
   const { rows: lastSuccess } = await query<{ last_verified: string | null }>(
-    `SELECT max(verified_at)::text AS last_verified FROM billing_payments WHERE status = 'verified'`,
+    `SELECT max(verified_at)::text AS last_verified FROM billing_payments WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind='customer') AND status = 'verified'`,
   );
 
   return NextResponse.json({

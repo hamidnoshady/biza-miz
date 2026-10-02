@@ -50,6 +50,7 @@ import { industryProfile } from "./industry-profile";
  * so the two can never drift.
  */
 const INVENTORY_CODE_BY_INDUSTRY: Record<Industry, string> = {
+  service_saas: WELL_KNOWN_CODES.inventory,
   food_service: WELL_KNOWN_CODES.inventory,
   jewelry: WELL_KNOWN_CODES.goldInventory,
   watch: WELL_KNOWN_CODES.watchInventory,
