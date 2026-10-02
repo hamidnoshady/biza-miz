@@ -27,7 +27,7 @@ import { GrowthCustomersSection } from "./customers-section";
 import { MessagingSection } from "./messaging-section";
 import { GrowthSettingsSection } from "./settings-section";
 import { growthSectionHref, type GrowthSectionKey } from "./growth-routes";
-import { growthAbilities } from "@/lib/growth-access";
+import { canViewGrowthSection, growthAbilities } from "@/lib/growth-access";
 
 export function GrowthSection({
   section,
@@ -49,7 +49,12 @@ export function GrowthSection({
   const abilities = growthAbilities(permissionSet);
 
   const screens = {
-    overview: () => <OverviewSection onGoToSection={goToSection} />,
+    overview: () => (
+      <OverviewSection
+        onGoToSection={goToSection}
+        canOpenSection={(key) => canViewGrowthSection(permissionSet, key)}
+      />
+    ),
     customers: () => <GrowthCustomersSection selectedCustomerId={selectedCustomerId} />,
     campaigns: () => <CampaignsSection canManage={abilities.manageCampaigns} />,
     messaging: () => <MessagingSection canManage={abilities.manageCampaigns} initialPromotionId={initialPromotionId} />,

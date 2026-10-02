@@ -38,6 +38,7 @@ import {
   Th,
 } from "@/app/dashboard/data-table";
 import { api, ErrorBox, inputClass } from "@/app/dashboard/ui";
+import { FilterChip, FilterChipRow } from "@/app/dashboard/filters";
 
 const PAGE_SIZE = 50;
 
@@ -69,6 +70,8 @@ export function GrowthCustomersSection({ selectedCustomerId }: { selectedCustome
   const [total, setTotal] = useState(0);
   const [query, setQuery] = useState("");
   const [includeInactive, setIncludeInactive] = useState(false);
+  /** One lifecycle stage, or "" for everyone — the audience the owner is looking at. */
+  const [stage, setStage] = useState<LifecycleStage | "">("");
   const [page, setPage] = useState(1);
   // `loading` is *not* the same state as `customers === null`: the first read
   // gets a skeleton, but a re-read triggered by typing must keep the rows on
@@ -84,7 +87,7 @@ export function GrowthCustomersSection({ selectedCustomerId }: { selectedCustome
   // different, shorter result set — which answered with an empty screen.
   useEffect(() => {
     setPage(1);
-  }, [query, includeInactive]);
+  }, [query, includeInactive, stage]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -93,6 +96,7 @@ export function GrowthCustomersSection({ selectedCustomerId }: { selectedCustome
       const params = new URLSearchParams();
       if (query.trim()) params.set("q", query.trim());
       if (includeInactive) params.set("includeInactive", "1");
+      if (stage) params.set("stage", stage);
       params.set("page", String(page));
       params.set("pageSize", String(PAGE_SIZE));
       void api<CustomersResponse>(`/api/growth/customers?${params}`, {
@@ -119,7 +123,7 @@ export function GrowthCustomersSection({ selectedCustomerId }: { selectedCustome
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [query, includeInactive, page, refreshKey]);
+  }, [query, includeInactive, stage, page, refreshKey]);
 
   // A/R deep-links into this projection by `selectedCustomerId`. The projection
   // is paginated, so the linked customer may be outside the current page; fetch
@@ -223,6 +227,27 @@ export function GrowthCustomersSection({ selectedCustomerId }: { selectedCustome
           </label>
         </div>
 
+        <FilterChipRow label="بخش‌بندی بر اساس چرخهٔ حیات" className="mt-3 flex-wrap gap-1.5">
+          <FilterChip selected={stage === ""} onClick={() => setStage("")} className="min-h-11 px-3 text-xs">
+            همهٔ مخاطبان
+          </FilterChip>
+          {(Object.keys(LIFECYCLE_STAGES) as LifecycleStage[]).map((key) => (
+            <FilterChip
+              key={key}
+              selected={stage === key}
+              onClick={() => setStage(key)}
+              className="min-h-11 px-3 text-xs"
+            >
+              {LIFECYCLE_STAGES[key].label}
+            </FilterChip>
+          ))}
+        </FilterChipRow>
+        {stage ? (
+          <p className="mt-2 text-xs leading-5 text-muted-foreground">
+            {LIFECYCLE_STAGES[stage].description} پیشنهاد: {LIFECYCLE_STAGES[stage].action}
+          </p>
+        ) : null}
+
         {/* The count is spoken, so a screen reader hears the search answer rather
             than only sighted users seeing the list change under them. */}
         <p className="mt-2 text-xs text-muted-foreground" aria-live="polite">
@@ -235,8 +260,8 @@ export function GrowthCustomersSection({ selectedCustomerId }: { selectedCustome
 
         {rows.length === 0 ? (
           <EmptyState>
-            {query.trim()
-              ? "مشتری‌ای با این جست‌وجو پیدا نشد."
+            {query.trim() || stage
+              ? "مشتری‌ای با این جست‌وجو یا بخش پیدا نشد."
               : "هنوز مشتری‌ای ثبت نشده است. مشتری‌ها در CRM یا هنگام فروش ثبت می‌شوند."}
           </EmptyState>
         ) : (

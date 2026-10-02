@@ -81,7 +81,7 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
   "/api/growth/overview": { GET: PERMISSIONS.growthView },
   "/api/growth/customers": { GET: PERMISSIONS.growthView },
   "/api/growth/accounting": { GET: PERMISSIONS.growthView },
-  "/api/growth/settings": { GET: PERMISSIONS.marketingConfigure },
+  "/api/growth/settings": { GET: PERMISSIONS.marketingConfigure, PATCH: PERMISSIONS.marketingConfigure },
   // A read sent as POST, but it can return the matched members themselves —
   // composing a send, not browsing one.
   "/api/growth/campaign-audience": { POST: PERMISSIONS.campaignsManage },

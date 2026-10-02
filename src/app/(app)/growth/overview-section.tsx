@@ -40,6 +40,8 @@ import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { WELL_KNOWN_CODES } from "@/lib/coa-template";
 import type { GrowthOverview } from "@/lib/growth-overview";
+import { growthRecommendations, type RecommendationTone } from "@/lib/growth-recommendations";
+import { discountBudgetUsage } from "@/lib/growth-settings";
 // The campaign life-cycle vocabulary (states, their Persian labels and their
 // badge tones) is `growth-shared.ts`'s, not this screen's. The private copies
 // that used to live here disagreed with the campaigns list about which tone a
@@ -97,7 +99,25 @@ function LoadFailed({ message, onRetry }: { message: string; onRetry: () => void
   );
 }
 
-export function OverviewSection({ onGoToSection }: { onGoToSection: (key: GrowthSectionKey) => void }) {
+const RECOMMENDATION_TONES: Record<RecommendationTone, "danger" | "active" | "neutral"> = {
+  warning: "danger",
+  opportunity: "active",
+  setup: "neutral",
+};
+const RECOMMENDATION_LABELS: Record<RecommendationTone, string> = {
+  warning: "هشدار",
+  opportunity: "فرصت",
+  setup: "راه‌اندازی",
+};
+
+export function OverviewSection({
+  onGoToSection,
+  canOpenSection,
+}: {
+  onGoToSection: (key: GrowthSectionKey) => void;
+  /** The member's own section gate, so a suggestion never leads to a redirect. */
+  canOpenSection: (key: GrowthSectionKey) => boolean;
+}) {
   const money = useMoney();
   const [overview, setOverview] = useState<GrowthOverview | null>(null);
   const [error, setError] = useState("");
@@ -159,6 +179,25 @@ export function OverviewSection({ onGoToSection }: { onGoToSection: (key: Growth
   const storeCredit =
     overview.bridge.find((row) => row.code === WELL_KNOWN_CODES.storeCreditPayable)?.balance ?? 0;
   const firstRun = overview.campaigns.list.length === 0 && overview.loyalty.programs === 0;
+  const budget = discountBudgetUsage(overview.campaigns.discountRial, overview.campaigns.discountBudgetRial);
+  // «قدم بعدی» (issue #764): plain rules over the figures above, filtered to
+  // what this member may open. The first-run card already covers set-up.
+  const recommendations = firstRun
+    ? []
+    : growthRecommendations(
+        {
+          hasLocation: overview.hasLocation,
+          liveCampaigns: overview.campaigns.counts.live,
+          scheduledCampaigns: overview.campaigns.counts.scheduled,
+          loyaltyPrograms: overview.loyalty.programs,
+          repurchaseDue: overview.repurchase.due,
+          customersTotal: overview.loyalty.customersTotal,
+          customersWithPoints: overview.loyalty.customersWithPoints,
+          discountRial: overview.campaigns.discountRial,
+          discountBudgetRial: overview.campaigns.discountBudgetRial,
+        },
+        canOpenSection,
+      );
   const windowLabel = `${toPersianDigits(formatJalali(overview.window.from))} تا ${toPersianDigits(
     formatJalali(overview.window.to),
   )}`;
@@ -201,6 +240,37 @@ export function OverviewSection({ onGoToSection }: { onGoToSection: (key: Growth
         </p>
       ) : null}
 
+      {recommendations.length > 0 ? (
+        <SectionCard
+          title={<CardTitle eyebrow="قدم بعدی" title="پیشنهادهای امروز" />}
+          description="از روی همین اعداد؛ هر پیشنهاد به بخشی می‌رود که کارش را انجام می‌دهد."
+        >
+          <ul className="divide-y divide-border/80">
+            {recommendations.map((recommendation) => (
+              <li key={recommendation.key} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                <div className="min-w-0 flex-1 basis-64">
+                  <p className="flex flex-wrap items-center gap-2 text-sm font-medium leading-6 text-foreground">
+                    <StatusBadge tone={RECOMMENDATION_TONES[recommendation.tone]}>
+                      {RECOMMENDATION_LABELS[recommendation.tone]}
+                    </StatusBadge>
+                    <span className="min-w-0 break-words">{recommendation.title}</span>
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">{recommendation.detail}</p>
+                </div>
+                <Button
+                  variant="outline"
+                  className="min-h-11 w-full shrink-0 sm:w-auto"
+                  onClick={() => onGoToSection(recommendation.section)}
+                >
+                  {recommendation.action}
+                  <ArrowLeftIcon aria-hidden="true" className="size-4" />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </SectionCard>
+      ) : null}
+
       {firstRun ? (
         <SectionCard
           title={<CardTitle eyebrow="شروع سریع" title="شروع برنامهٔ رشد" />}
@@ -232,7 +302,11 @@ export function OverviewSection({ onGoToSection }: { onGoToSection: (key: Growth
         <KpiCard
           label="تخفیف کمپین‌ها · ۳۰ روز گذشته"
           value={money.format(overview.campaigns.discountRial)}
-          hint={`${formatPersianNumber(overview.campaigns.applications)} بار اعمال روی فروش · ${formatPersianNumber(overview.campaigns.counts.live)} کمپین در حال اجرا`}
+          hint={`${formatPersianNumber(overview.campaigns.applications)} بار اعمال روی فروش · ${formatPersianNumber(overview.campaigns.counts.live)} کمپین در حال اجرا${
+            budget
+              ? ` · ${formatPersianNumber(budget.percent)}٪ سقف ${money.format(overview.campaigns.discountBudgetRial ?? 0)}${budget.exceeded ? " (عبور از سقف)" : ""}`
+              : ""
+          }`}
         />
         <KpiCard
           label={`بدهی کارت هدیه (${toPersianDigits(WELL_KNOWN_CODES.giftCardPayable)})`}

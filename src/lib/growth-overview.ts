@@ -23,6 +23,7 @@ import { query } from "./db";
 import type { SessionPayload } from "./auth";
 import { businessToday, getBusinessDayStatus } from "./business-day-service";
 import { resolveActiveLocation } from "./setup-state";
+import { getGrowthSettings } from "./growth-settings-service";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { customersDueForRepurchase, getDefaultProgram, type DueForRepurchaseRow } from "./loyalty-service";
 import {
@@ -92,6 +93,8 @@ export interface GrowthOverview {
     list: CampaignSummaryRow[];
     applications: number;
     discountRial: number;
+    /** The 30-day discount budget from Growth settings (issue #764); null = none set. */
+    discountBudgetRial: number | null;
     top: CampaignPerformanceRow[];
   };
   loyalty: {
@@ -150,6 +153,7 @@ export async function growthOverview(
     accountRows,
     activityRows,
     repurchase,
+    growthSettings,
   ] = await Promise.all([
     query<{
       id: string;
@@ -283,6 +287,7 @@ export async function growthOverview(
     opts.locationId
       ? customersDueForRepurchase(businessId, opts.locationId, opts.today)
       : Promise.resolve([] as DueForRepurchaseRow[]),
+    getGrowthSettings(businessId),
   ]);
 
   const campaignList: CampaignSummaryRow[] = promoRows.rows.map((row) => ({
@@ -338,6 +343,7 @@ export async function growthOverview(
       list: campaignList.slice(0, 6),
       applications: performance.reduce((sum, row) => sum + row.applications, 0),
       discountRial: performance.reduce((sum, row) => sum + row.discountRial, 0),
+      discountBudgetRial: growthSettings.discountBudgetRial,
       top: performance.slice(0, 3),
     },
     loyalty: {

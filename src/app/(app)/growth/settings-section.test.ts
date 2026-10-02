@@ -29,24 +29,24 @@ function physicalClassesIn(source: string): string[] {
 }
 
 describe("Growth settings", () => {
-  it("reports live configuration instead of static coming-soon cards", () => {
+  it("owns real Growth-wide configuration instead of repeating the dashboard (issue #764)", () => {
     expect(SETTINGS_SOURCE).toMatch(/\/api\/growth\/settings/);
-    expect(SETTINGS_SOURCE).toMatch(/defaultProgram/);
-    expect(SETTINGS_SOURCE).toMatch(/pointValueRial/);
-    expect(SETTINGS_SOURCE).toMatch(/امتیاز به‌ازای ۱۰۰٬۰۰۰/);
-    expect(SETTINGS_SOURCE).not.toMatch(/امتیاز به‌ازای ۱۰٬۰۰۰/);
-    expect(SETTINGS_SOURCE).toMatch(/campaigns\.live/);
-    expect(SETTINGS_SOURCE).toMatch(/messaging\.configured/);
-    expect(SETTINGS_SOURCE).toMatch(/commission\.activeRuleCount/);
+    expect(SETTINGS_SOURCE).toMatch(/method: "PATCH"/);
+    expect(SETTINGS_SOURCE).toMatch(/attributionWindowDays/);
+    expect(SETTINGS_SOURCE).toMatch(/discountBudgetRial/);
+    // The same validation the server runs, not a second copy of the rules.
+    expect(SETTINGS_SOURCE).toMatch(/parseGrowthSettingsInput/);
+    // No dashboard figures: those live on the Growth overview.
+    expect(SETTINGS_SOURCE).not.toMatch(/campaigns\.live|commission\.activeRuleCount|templateCount/);
     expect(SETTINGS_SOURCE).not.toMatch(/comingSoon/);
     expect(SETTINGS_SOURCE).not.toMatch(/به‌زودی/);
   });
 
-  it("takes each setting to its one existing editor and identifies the CRM handoff", () => {
+  it("takes each engine to its one existing editor and identifies the CRM handoff", () => {
     for (const section of ["loyalty", "campaigns", "messaging", "commission"]) {
-      expect(SETTINGS_SOURCE).toMatch(new RegExp(`growthSectionHref\\(\\"${section}\\"\\)`));
+      expect(SETTINGS_SOURCE).toMatch(new RegExp(`growthSectionHref\\(\"${section}\"\\)`));
     }
-    expect(SETTINGS_SOURCE).toMatch(/crmSectionHref\(\"consent"\)/);
+    expect(SETTINGS_SOURCE).toMatch(/crmSectionHref\("consent"\)/);
     expect(SETTINGS_SOURCE).toMatch(/مدیریت رضایت ارتباط \(CRM\)/);
     expect(SETTINGS_SOURCE).toMatch(/AppSettingsShortcut/g);
   });
@@ -67,17 +67,14 @@ describe("Growth settings", () => {
   });
 });
 
-describe("the Growth settings read route", () => {
-  it("is tenant-scoped and management-only", () => {
+describe("the Growth settings route", () => {
+  it("is tenant-scoped and management-only for both reading and writing", () => {
     expect(ROUTE_SOURCE).toMatch(/withTenantScope/);
-    expect(ROUTE_SOURCE).toContain("requirePermission(PERMISSIONS.marketingConfigure)");
+    expect(ROUTE_SOURCE.match(/requirePermission\(PERMISSIONS\.marketingConfigure\)/g)).toHaveLength(2);
   });
 
-  it("reports the four engines from their own services", () => {
-    expect(ROUTE_SOURCE).toMatch(/listPrograms/);
-    expect(ROUTE_SOURCE).toMatch(/listPromotionCatalogue/);
-    expect(ROUTE_SOURCE).toMatch(/listMessageTemplates/);
-    expect(ROUTE_SOURCE).toMatch(/listCommissionRules/);
-    expect(ROUTE_SOURCE).toMatch(/getPublicMessageConfig/);
+  it("validates every write through the shared parser and stores it through the service", () => {
+    expect(ROUTE_SOURCE).toMatch(/parseGrowthSettingsInput/);
+    expect(ROUTE_SOURCE).toMatch(/updateGrowthSettings/);
   });
 });
