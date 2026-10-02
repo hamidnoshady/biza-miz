@@ -1101,6 +1101,7 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
         {
           siteDeviceId: e.siteDeviceId ?? null,
           schemaVersion: e.schemaVersion ?? 1,
+          pulledFromCloud: true,
         },
       );
       // Deferred and already-canonical terminal events are recoverable through

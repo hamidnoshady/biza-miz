@@ -367,6 +367,13 @@ interface TransactionalSyncMetadata {
   deadLetterSource?: "domain" | "server_pull";
   /** Deterministic integration-test failure point; never accepted from HTTP. */
   failureInjection?: "after_domain_effect";
+  /**
+   * Phase 46: this desktop pulled the event from its own cloud. Only then is a
+   * cloud-owned event (stock, transfers, ledger) acknowledged without being
+   * applied — never for an event pushed *to* this server, which is validated
+   * and dead-lettered as usual.
+   */
+  pulledFromCloud?: boolean;
 }
 
 function payloadDigest(payload: Record<string, unknown>): string {
@@ -686,7 +693,7 @@ async function applyTransactionalSyncEvent(
     // acknowledged, not replayed — before the actor check, since a cloud
     // back-office user need not exist here — see siteSkipsPulledEvent. Recorded as an
     // applied effect so a re-pull of the same event is a duplicate, not work.
-    if (origin === "remote" && deploymentRole() === "site" && siteSkipsPulledEvent(definition)) {
+    if (origin === "remote" && metadata.pulledFromCloud && siteSkipsPulledEvent(definition)) {
       const skipped = { skipped: "cloud_owned" };
       await client.query(
         `INSERT INTO sync_domain_effects
@@ -916,7 +923,12 @@ export async function reconcileDeferredSyncEvents(
         payload: row.payload,
       },
       row.origin,
-      { siteDeviceId: row.site_device_id, schemaVersion: row.schema_version },
+      {
+        siteDeviceId: row.site_device_id,
+        schemaVersion: row.schema_version,
+        // A remote event stored on a desktop arrived through its pull.
+        pulledFromCloud: row.origin === "remote" && deploymentRole() === "site",
+      },
     );
     if (result.ok) summary.applied += 1;
     else if (result.deferred) summary.deferred += 1;
