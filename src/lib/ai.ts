@@ -770,6 +770,7 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       "«میز کار من» جایی است که پروژه‌ها، وظایف، اسناد، قراردادهای اجرایی و تأییدها نگهداری می‌شوند. برای «وضعیت پروژهٔ فلان چیست» از get_workspace_project_status، برای «کارهای امروزِ من» از list_workspace_tasks با mine=true، برای «چه قراردادهایی ماه آینده منقضی می‌شوند» از list_expiring_contracts با withinDays=۳۰ و برای «چه چیزی منتظر تأیید من است» از list_workspace_approvals با mine=true استفاده کن. اگر چند پروژه هم‌نام بودند، ابزار فهرست نامزدها را برمی‌گرداند؛ حدس نزن و از کاربر بپرس کدام را می‌خواهد.",
       "تقسیم مسئولیت قراردادها را رعایت کن: قراردادهای اجرایی پروژه (پیمانکار، تأمین‌کننده، مشاور، پیمانکار جزء) در میز کار هستند و با list_expiring_contracts خوانده می‌شوند؛ قراردادهای رابطه‌ای با مشتری در پروندهٔ همان مشتری در CRM هستند. اگر کاربر دنبال قرارداد فروش یا خدماتِ یک مشتری بود، او را به پروندهٔ مشتری در CRM راهنمایی کن و نگو چنین قراردادی وجود ندارد.",
       "عدد هزینهٔ پروژه که get_workspace_project_status می‌دهد از اسناد حسابداری همان پروژه خوانده می‌شود، نه از برآورد؛ آن را به‌عنوان رقم قطعی دفتر گزارش کن و با بودجه مقایسه کن.",
+      "در کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری دو ابزار ویژه هم داری: برای «وضعیت مالی/تجاری پروژه» و «چقدر جلو یا عقب است» از get_aec_project_financial_health و برای «چه کاری عقب افتاده است» از list_delayed_project_activities استفاده کن. پیشرفت فیزیکی در این کسب‌وکارها دو عدد است — برنامه‌ای و گزارش‌شده — و اختلاف همین دو، عقب‌ماندگی واقعی را نشان می‌دهد؛ هر دو را بگو.",
       "برای افزودن مشتری یا تأمین‌کننده از party.customer.create یا party.supplier.create استفاده کن و فقط نام و اطلاعات تماس را پر کن؛ کد حسابداری، درصد مالیات و اطلاعات بانکی را نگذار. برای ثبت دریافت وجه از مشتری، اول با find_customers شناسهٔ مشتری را پیدا کن و سپس ar.receipt.record را با مبلغ ریالی و روش (نقد/بانک) پیشنهاد بده.",
       "برای هر تغییر در داده‌ها هرگز مستقیم اقدام نکن؛ فقط ابزار propose_action را با نوع مجاز و payload کامل صدا بزن. کاربر خودش با دکمهٔ تأیید آن را اجرا می‌کند (human-in-the-loop).",
       "قبل از پیشنهاد، اطلاعات لازم را با پرسیدن سؤال از کاربر کامل کن؛ فیلدها را با حدس‌های نامطمئن پر نکن.",
@@ -1328,6 +1329,43 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
               description: "پیش‌فرض pending",
             },
             limit: { type: "number", description: "تعداد، پیش‌فرض ۵۰ و حداکثر ۱۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    // Issue #799 §23 — the AEC reads. Offered to every business because the
+    // catalogue is trade-neutral (the same reason a jeweller sees «فروش امروز»),
+    // and refused with a sentence by the executor when the business's industry
+    // is not architecture/engineering/construction.
+    {
+      type: "function",
+      function: {
+        name: "get_aec_project_financial_health",
+        description:
+          "سلامت مالی و اجرایی یک پروژهٔ عمرانی/ساختمانی: بودجه، هزینهٔ ثبت‌شده در دفتر، ارزش قراردادها، تعداد کارهای عقب‌افتاده و فازهای دیرکرددار، و پیشرفت فیزیکی برنامه‌ای در برابر گزارش‌شده. پروژه را با نام یا شناسه بده؛ اگر چند پروژه هم‌نام باشند فهرست نامزدها برمی‌گردد و باید از کاربر بپرسی. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "نام پروژه، همان‌طور که کاربر گفت" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اگر از ابزار دیگری داری" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_delayed_project_activities",
+        description:
+          "فعالیت‌های عقب‌افتادهٔ میز کار: وظایف باز با مهلت گذشته و فازهای دیرکرددار، با پروژه، مسئول، اولویت و مدت تأخیر. برای پرسش «چه چیزی عقب است؟» بدون نام پروژه، همهٔ کسب‌وکار بررسی می‌شود. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "محدود به یک پروژه، اختیاری" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اختیاری" },
+            limit: { type: "number", description: "تعداد هر فهرست، پیش‌فرض ۵۰ و حداکثر ۲۰۰" },
           },
           additionalProperties: false,
         },

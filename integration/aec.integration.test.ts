@@ -33,6 +33,8 @@ let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let provisioning: typeof import("../src/lib/business-provisioning");
 let aec: typeof import("../src/lib/aec-service");
+let widgets: typeof import("../src/lib/ai-widgets");
+let tools: typeof import("../src/lib/aec-ai-tools");
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -63,6 +65,8 @@ beforeAll(async () => {
   dbLib = await import("../src/lib/db");
   provisioning = await import("../src/lib/business-provisioning");
   aec = await import("../src/lib/aec-service");
+  widgets = await import("../src/lib/ai-widgets");
+  tools = await import("../src/lib/aec-ai-tools");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -125,10 +129,97 @@ async function createProject(businessId: string, ownerUserId: string, name: stri
   return rows[0].id;
 }
 
+/** One open task with a due date — the shape `/api/workspace/tasks` writes. */
+async function createTask(
+  businessId: string,
+  projectId: string,
+  title: string,
+  dueDate: string,
+  actorUserId: string,
+): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    // `created_by` is NOT NULL on this table, like `ai_projects.created_by`.
+    `INSERT INTO ai_project_tasks (project_id, title, status, priority, due_date, created_by)
+     VALUES ($1, $2, 'open', 'normal', $3, $4) RETURNING id`,
+    [projectId, title, dueDate, actorUserId],
+  );
+  return rows[0].id;
+}
+
 function expectAecError(error: unknown, code: string): void {
   expect((error as AecError).name).toBe("AecError");
   expect((error as AecError).code).toBe(code);
 }
+
+describe("the AEC assistant read tools (issue #799 §23)", () => {
+  it("reports a project's commercial position from the ledger and the AEC profile", async () => {
+    const { businessId, owner } = await provisionBusiness("architecture_construction");
+    const projectId = await createProject(businessId, owner.actorUserId, "برج نیلوفر");
+    await dbLib.withTenant(businessId, async () => {
+      await aec.saveProjectAecProfile(owner, projectId, {
+        projectNumber: "A-1404-07",
+        employerPartyId: await createParty(businessId, "کارفرمای نیلوفر"),
+        plannedPhysicalProgress: 60,
+        reportedPhysicalProgress: 42.5,
+      });
+      await createTask(businessId, projectId, "نصب اسکلت طبقهٔ سوم", "2026-01-15", owner.actorUserId);
+
+      const result = await tools.runAecReadTool(
+        "get_aec_project_financial_health",
+        { projectName: "برج نیلوفر" },
+        businessId,
+        "architecture_construction",
+      );
+      expect(result.ok).toBe(true);
+      const data = result.data as {
+        name: string;
+        aec: { recorded: boolean; projectNumber: string | null; reportedPhysicalProgress: string | null };
+        overdueTaskCount: number;
+        today: string;
+      };
+      expect(data.name).toBe("برج نیلوفر");
+      expect(data.aec.recorded).toBe(true);
+      expect(data.aec.projectNumber).toBe("A-1404-07");
+      expect(data.aec.reportedPhysicalProgress).toBe("42.50");
+      // The task was due in the past relative to the business day the tool
+      // reports, so the delay count is real rather than incidental.
+      expect(data.today > "2026-01-15").toBe(true);
+      expect(data.overdueTaskCount).toBe(1);
+    });
+  });
+
+  it("lists what is late, and asks which project when the name is ambiguous", async () => {
+    const { businessId, owner } = await provisionBusiness("architecture_construction");
+    const first = await createProject(businessId, owner.actorUserId, "ساختمان اداری");
+    const second = await createProject(businessId, owner.actorUserId, "ساختمان اداری");
+    await dbLib.withTenant(businessId, async () => {
+      await createTask(businessId, first, "تأیید نقشهٔ سازه", "2026-02-01", owner.actorUserId);
+      await createTask(businessId, second, "تحویل نمونهٔ نما", "2026-03-01", owner.actorUserId);
+
+      const all = await tools.runAecReadTool(
+        "list_delayed_project_activities",
+        {},
+        businessId,
+        "architecture_construction",
+      );
+      expect(all.ok).toBe(true);
+      const data = all.data as { delayedTaskCount: number; tasks: Array<{ daysLate: number | null }> };
+      expect(data.delayedTaskCount).toBeGreaterThanOrEqual(2);
+      expect(data.tasks[0].daysLate).toBeGreaterThan(0);
+
+      const ambiguous = await tools.runAecReadTool(
+        "list_delayed_project_activities",
+        { projectName: "ساختمان اداری" },
+        businessId,
+        "architecture_construction",
+      );
+      expect(ambiguous.ok).toBe(true);
+      const body = ambiguous.data as { ambiguous?: boolean; candidates?: unknown[] };
+      expect(body.ambiguous).toBe(true);
+      expect(body.candidates?.length).toBe(2);
+    });
+  });
+});
 
 describe("the three AEC tables are tenant-isolated", () => {
   it("has RLS enabled, forced, and one policy each", async () => {
@@ -275,6 +366,47 @@ describe("the business's operating profile", () => {
       aec.listAecParticipantRoleOptions(cafeId),
     );
     expect(cafeOptions).toBeNull();
+  });
+});
+
+describe("the AEC widget recommendations", () => {
+  it("offers the industry's widgets to an AEC tenant and not to a café", async () => {
+    const permissions = new Set([
+      "workspace.view",
+      "workspace.approve",
+    ]) as Parameters<typeof widgets.listRecommendedAiWidgets>[1];
+
+    const { businessId: aecBusiness } = await provisionBusiness("architecture_construction");
+    const aecRecommended = await dbLib.withTenant(aecBusiness, () =>
+      widgets.listRecommendedAiWidgets("architecture_construction", permissions),
+    );
+    const names = aecRecommended.map((widget) => widget.name);
+    expect(names).toContain("پروژه‌های در معرض خطر");
+    expect(names).toContain("تأییدهای در انتظار");
+    expect(names).toContain("قراردادهای نزدیک به پایان");
+    // The AEC rows are the platform's, not one tenant's: `business_id IS NULL`.
+    for (const widget of aecRecommended.filter((w) => w.industry === "architecture_construction")) {
+      expect(widget.requiredPermissions.every((key) => permissions.has(key))).toBe(true);
+    }
+
+    // A café sees its own pair — never another industry's.
+    const { businessId: cafeBusiness } = await provisionBusiness("food_service");
+    const cafeRecommended = await dbLib.withTenant(cafeBusiness, () =>
+      widgets.listRecommendedAiWidgets("food_service", permissions),
+    );
+    expect(cafeRecommended.some((w) => w.industry === "architecture_construction")).toBe(false);
+  });
+
+  it("withholds a widget whose permission the caller lacks", async () => {
+    const withoutApprove = new Set(["workspace.view"]) as Parameters<
+      typeof widgets.listRecommendedAiWidgets
+    >[1];
+    const { businessId } = await provisionBusiness("architecture_construction");
+    const recommended = await dbLib.withTenant(businessId, () =>
+      widgets.listRecommendedAiWidgets("architecture_construction", withoutApprove),
+    );
+    expect(recommended.some((w) => w.name === "تأییدهای در انتظار")).toBe(false);
+    expect(recommended.some((w) => w.name === "پروژه‌های در معرض خطر")).toBe(true);
   });
 });
 

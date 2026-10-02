@@ -55,6 +55,13 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_workspace_tasks: PERMISSIONS.workspaceView,
   list_expiring_contracts: PERMISSIONS.workspaceView,
   list_workspace_approvals: PERMISSIONS.workspaceView,
+  // Issue #799 §23 (AEC reads). Both sit on the same key the workspace module
+  // and its financial report use — the cost figures they quote are already
+  // visible to `workspace.view` on the project screen, so the assistant adds no
+  // reach. When §24's dedicated commercial keys arrive (project financial view,
+  // payment certificates), these move with them rather than staying broader.
+  get_aec_project_financial_health: PERMISSIONS.workspaceView,
+  list_delayed_project_activities: PERMISSIONS.workspaceView,
   draft_expense_from_receipt: PERMISSIONS.financeExpensesManage,
   get_accounting_review: PERMISSIONS.ledgerView,
 };

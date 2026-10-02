@@ -140,6 +140,10 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   list_workspace_tasks: "Workspace tasks filtered by project, assignee, status, priority or due date. Pass mine:true for the calling user's own tasks; that resolves from the connection's identity, never from a name in the request.",
   list_expiring_contracts: "Project-execution contracts (contractor, supplier, consultant, subcontractor, vendor) expiring within a window of days, with counterparty, value in integer Rial, project and days remaining. Relationship contracts live on the CRM customer file and are not returned here.",
   list_workspace_approvals: "Pending and recently decided workspace approvals with subject (project, task, document or contract), requester, approver, due date and decision. Pass mine:true for approvals waiting on the calling user.",
+  // Issue #799 §23 — the AEC reads. Architecture/engineering/construction
+  // businesses only; the executor refuses another industry with a sentence.
+  get_aec_project_financial_health: "One construction project's commercial position: budget, ledger-posted cost, contract value, open and overdue work, late phases, and planned versus reported physical progress. Architecture/engineering/construction businesses only.",
+  list_delayed_project_activities: "What is late: open workspace tasks past their due date (whole business, or one named project) and overdue phases, with assignee, priority and days late. Architecture/engineering/construction businesses only.",
 };
 
 function readDescriptor(tool: OpenAiTool): McpToolDescriptor {

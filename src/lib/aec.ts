@@ -557,6 +557,37 @@ export function isAecCapability(value: string): value is AecCapabilityKey {
   return (AEC_CAPABILITY_KEYS as readonly string[]).includes(value);
 }
 
+/* ===========================================================================
+ * Assistant read tools (§23)
+ * ======================================================================== */
+
+/**
+ * The two read tools §23 names. They live here, with the rest of the AEC
+ * catalogue, so the agent builder's tool picker can list them without importing
+ * the executor (which touches the database) — the same split
+ * `workspace-shared.ts` uses for the workspace tools.
+ *
+ * Read tools only, deliberately: the issue's §23 list starts with reads, and
+ * nothing AEC is written by the assistant yet. A write would have to go through
+ * the confirmed-action flow, where §24's rule applies — a commercial action
+ * must not inherit from ordinary task-edit access.
+ */
+export const AEC_AI_TOOL_NAMES = [
+  "get_aec_project_financial_health",
+  "list_delayed_project_activities",
+] as const;
+export type AecAiToolName = (typeof AEC_AI_TOOL_NAMES)[number];
+
+export function isAecAiToolName(name: string): name is AecAiToolName {
+  return (AEC_AI_TOOL_NAMES as readonly string[]).includes(name);
+}
+
+/** Persian labels for the agent builder's tool picker. */
+export const AEC_AI_TOOL_LABELS: Record<AecAiToolName, string> = {
+  get_aec_project_financial_health: "سلامت مالی پروژه (عمرانی)",
+  list_delayed_project_activities: "فعالیت‌های عقب‌افتادهٔ پروژه",
+};
+
 export function isAecOperatingProfile(value: string): value is AecOperatingProfile {
   return (AEC_OPERATING_PROFILES as readonly string[]).includes(value);
 }

@@ -930,8 +930,17 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   specialties and twenty capability keys, stored per business in `aec_business_profiles` (migration
   0194) and resolved with `resolveAecCapabilities`; project-level AEC metadata and external
   participants live in `aec_project_profiles` / `aec_project_participants` and are served by
-  `src/lib/aec-service.ts` under `/api/aec/**`. Ask a capability, never a profile, and remember a
-  participant row is a record — `workspace_members` stays the only source of internal access.
+  `src/lib/aec-service.ts` under `/api/aec/**`. Wave 3 makes a project that trade's cockpit —
+  `src/lib/aec-cockpit.ts` maps each issue-§21 section to the capability that gates it and the wave
+  that builds it, so `aecProjectTabs` shows a section only when it is both shipped and allowed (a
+  section whose wave has not landed is absent, never greyed out); the six built-in blueprints live
+  in `src/lib/workspace-aec-templates.ts`, industry-scoped in `listTemplates` and recommended
+  rather than required; migration 0195 seeds three recommended widgets for the industry; and the
+  assistant's two AEC reads (§23) are `src/lib/aec-ai-tools.ts`, composed from the same functions
+  the screens read so an answer and the cockpit cannot disagree — refused with a sentence, not an
+  empty list, when the business's industry is not AEC. Ask a capability, never a profile, and
+  remember a participant row is a record — `workspace_members` stays the only source of internal
+  access.
   Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a

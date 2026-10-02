@@ -1,6 +1,6 @@
 # Phase 47 — The AEC industry and AEC project operations
 
-**Status:** Waves 1–2 implemented (migrations 0193, 0194); Waves 3–11 designed here, not built.
+**Status:** Waves 1–3 implemented (migrations 0193, 0194, 0195); Waves 4–11 designed here, not built.
 
 Working issue: [#799 — Add Architecture, Civil Engineering & Construction business type with AEC
 project operations](https://github.com/hamidnoshady/cafe-restaurant-pos/issues/799).
@@ -126,16 +126,42 @@ The integration suite asserts that recording a participant leaves `users` and `w
 counts unchanged, so "external parties must not gain business-wide access" is a tested property
 rather than a comment.
 
-## Waves 3–11 — designed, not built
+## Wave 3 — the project cockpit, blueprints and widgets (implemented, migration 0195)
+
+What shipped:
+
+| Surface | Change |
+|---|---|
+| Cockpit | `src/lib/aec-cockpit.ts` — issue §21's tab list as data: every section with the capability that gates it and the wave that builds it. `aecProjectTabs` composes the project page's bar from it: an AEC project's tabs take their industry names («شناسنامهٔ پروژه»), gains «طرف‌های پروژه» when the capability is on, and a section whose wave has not shipped is absent rather than greyed out |
+| Project profile UI | «شناسنامهٔ پروژه» — §5's record on screen: number, category, site, areas, floor count, coordinates, employer/consultant/contractor parties, project manager, contract and delivery methods, permits, planned vs actual dates, and **planned vs reported physical progress side by side with the gap named**. Gregorian in the database, Shamsi on every field (JalaliDatePicker / DateCell) |
+| Participants UI | «طرف‌های پروژه» — §6's external participants over the business's party directory, with the role picker built from `lookups.participantRoles` (the list the API enforces, so it cannot offer a role that will be refused) and one line stating that a participant is a record, not a grant |
+| Blueprints | `src/lib/workspace-aec-templates.ts` — the six §4 templates (Architecture Design, Civil/Structural, General Contractor, Design & Build, Interior/Renovation, Consulting/Supervision), scoped by industry in `listTemplates` so a café can neither see nor apply them, with `recommendedProfiles` for a «پیشنهادی» badge and ordering — a hint, never a gate |
+| Widgets | `migrations/0195_aec_widget_templates.sql` — three recommended AI widgets (projects at risk, pending approvals, contract expiry) for `architecture_construction` only. Deliberately three of the issue's thirteen: the rest name sections that arrive in Waves 4–9, and a recommended widget for a section with no data is a prompt that can only hallucinate |
+| Assistant | `src/lib/aec-ai-tools.ts` — §23's two read tools, `get_aec_project_financial_health` and `list_delayed_project_activities`, composed from `projectReport`, `loadAecProjectProfile`, `listWorkspaceTasks` and `listPhases` so an answer and the cockpit can never disagree. Read-only, on `workspace.view`, refused with a sentence for another industry, and exposed over MCP with the rest of the read tools |
+| Shared picker | `GET /api/workspace/lookups` carries the resolved capability list for an AEC tenant, next to the participant roles it already served, so the project page needs no extra request and a café's page never sees an `industry_mismatch` for a read it had to make |
+| Fix | `handleAecError` rethrew the workspace module's per-project refusals (`not_a_project_member`, `insufficient_project_role`, …) as 500s because those codes are not AEC's; it now delegates what it does not own to `handleWorkspaceError` |
+
+### Decision 6 — a capability decides a tab, and an unbuilt wave decides nothing
+
+§21 asks for eighteen tabs and, two lines later, forbids showing every section to every profile.
+Both are satisfied by making the catalogue *data* and the page derived: the sections a business
+sees are the shipped ones its capabilities allow, so an individual architect gets a short bar
+rather than an ERP, and the sections Waves 4–9 will build are described in the same list but never
+rendered. When Wave 4 lands, `AEC_SHIPPED_WAVE` moves and the BOQ tab appears for the businesses
+whose preset has `boq` — one line, no branching in the UI.
+
+### Decision 7 — recommended, never required
+
+Templates and widgets both follow the same rule: the platform *recommends* and the business
+decides. A blueprint outside the recommended set is still offered (a contractor renovating an
+office gets the fit-out template, simply not first), and a user may still create their own widget.
+The super-admin's influence is an ordering and a badge, not a gate.
+
+## Waves 4–11 — designed, not built
 
 In the issue's order. Nothing below has a migration or a screen yet; the wave boundaries exist so
 each can be reviewed on its own.
 
-3. **AEC Workspace UX + templates.** The project cockpit and overview widgets (projects at risk,
-   delayed milestones, pending approvals, contract and guarantee expiries, budget vs actual,
-   outstanding certificates, today's site activity) and the built-in project templates
-   (Architecture Design, Civil/Structural, General Contractor, Design & Build, Interior/Renovation,
-   Consulting/Supervision) alongside tenant-created ones.
 4. **BOQ and estimating.** Estimate → version → BOQ section → item → rate breakdown, the
    Draft/Submitted/Under Review/Approved/Superseded status model with immutable approved history,
    and Excel/CSV import through the existing data-transfer engine (preview, mapping, validation,
