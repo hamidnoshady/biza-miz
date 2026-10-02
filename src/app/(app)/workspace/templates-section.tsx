@@ -24,20 +24,24 @@ import {
 } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, Field, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
-import { BUILTIN_TEMPLATES, type WorkspaceTemplate } from "@/lib/workspace-shared";
+import {
+  BUILTIN_TEMPLATES,
+  type WorkspaceTemplate,
+  type WorkspaceTemplateChoice,
+} from "@/lib/workspace-shared";
 import { workspaceError } from "./workspace-ui";
 
 const BUILTIN_KEYS = new Set(BUILTIN_TEMPLATES.map((t) => t.key));
 
 export function TemplatesSection({ canManage }: { canManage: boolean }) {
-  const [templates, setTemplates] = useState<WorkspaceTemplate[] | null>(null);
+  const [templates, setTemplates] = useState<WorkspaceTemplateChoice[] | null>(null);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<WorkspaceTemplate | null>(null);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(() => {
-    api<{ templates: WorkspaceTemplate[] }>("/api/workspace/templates").then(({ ok, data }) => {
+    api<{ templates: WorkspaceTemplateChoice[] }>("/api/workspace/templates").then(({ ok, data }) => {
       if (ok) setTemplates(data.templates);
       else setError(workspaceError((data as unknown as { error?: string }).error));
     });
@@ -48,7 +52,7 @@ export function TemplatesSection({ canManage }: { canManage: boolean }) {
   async function archive(key: string) {
     if (busy) return;
     setBusy(true);
-    const { ok, data } = await api<{ templates: WorkspaceTemplate[] }>(
+    const { ok, data } = await api<{ templates: WorkspaceTemplateChoice[] }>(
       `/api/workspace/templates?key=${encodeURIComponent(key)}`,
       { method: "DELETE" },
     );
@@ -63,7 +67,7 @@ export function TemplatesSection({ canManage }: { canManage: boolean }) {
 
       <SectionCard
         title="قالب‌های پروژه"
-        description="فازهای آمادهٔ هر نوع کار — ساختمانی، معماری، نرم‌افزار، بازاریابی — که هنگام ساخت پروژه اعمال می‌شوند. قالب دلخواه خودتان را هم می‌توانید بسازید."
+        description="فازهای آمادهٔ هر نوع کار — ساختمانی، معماری، نرم‌افزار، بازاریابی — که هنگام ساخت پروژه اعمال می‌شوند. برای کسب‌وکارهای عمران و معماری، قالب‌های تخصصی این صنعت با نشان «پیشنهادی» نمایش داده می‌شوند. قالب دلخواه خودتان را هم می‌توانید بسازید."
         actions={
           canManage ? (
             <PrimaryButton type="button" onClick={() => setCreating(true)}>
@@ -91,6 +95,9 @@ export function TemplatesSection({ canManage }: { canManage: boolean }) {
                       <h3 className="truncate text-sm font-semibold">{template.name}</h3>
                       <p className="text-xs text-muted-foreground">{template.description}</p>
                     </div>
+                    {template.recommended ? (
+                      <StatusBadge tone="active">پیشنهادی</StatusBadge>
+                    ) : null}
                     <StatusBadge tone={builtin ? "neutral" : "active"}>
                       {builtin ? "پیش‌فرض" : "این کسب‌وکار"}
                     </StatusBadge>
@@ -168,7 +175,7 @@ function TemplateDialog({
 }: {
   template: WorkspaceTemplate | null;
   onClose: () => void;
-  onSaved: (templates: WorkspaceTemplate[]) => void;
+  onSaved: (templates: WorkspaceTemplateChoice[]) => void;
   onError: (message: string) => void;
 }) {
   const builtin = template ? BUILTIN_KEYS.has(template.key) : false;
@@ -189,7 +196,7 @@ function TemplateDialog({
   async function submit() {
     if (!name.trim() || !phaseNames.length || saving) return;
     setSaving(true);
-    const { ok, data } = await api<{ templates: WorkspaceTemplate[] }>("/api/workspace/templates", {
+    const { ok, data } = await api<{ templates: WorkspaceTemplateChoice[] }>("/api/workspace/templates", {
       method: "POST",
       body: JSON.stringify({
         // A built-in edited here becomes a NEW business template rather than a

@@ -13,7 +13,9 @@
  * Framework-free except for `query`, like every other service here: no `next`,
  * no React. Pure constants and rules live in `workspace-shared.ts`.
  */
+import type { AecOperatingProfile } from "./aec";
 import { query } from "./db";
+import { getBusinessIndustry } from "./industry-guard";
 import { isoDateInTimeZone, postgresDateToIso } from "./jalali";
 import {
   BUILTIN_TEMPLATES,
@@ -44,6 +46,8 @@ import {
   type WorkspaceRole,
   type WorkspaceTaskStatus,
   type WorkspaceTemplate,
+  type WorkspaceTemplateChoice,
+  templatesForIndustry,
 } from "./workspace-shared";
 
 /** Every workspace write carries the business it belongs to and who did it. */
@@ -611,11 +615,25 @@ export async function deletePhase(projectId: string, phaseId: string): Promise<W
 }
 
 /**
- * The catalogue a business sees: the built-ins from code, plus its own rows.
+ * The catalogue a business sees: the built-ins from code, plus its own rows,
+ * scoped to its industry and ordered for its operating profile (#799 §4).
+ *
  * A business template with the same key as a built-in overrides it, so a
  * business can customise «ساخت‌وساز» without losing the name it already uses.
+ *
+ * The industry scoping is *here* rather than in each caller so there is one
+ * answer: `createProject`'s `resolveTemplate` and the phases route's
+ * "apply template" both go through this, which is what stops a café from being
+ * handed — or applying by a crafted key — a blueprint that belongs to the AEC
+ * industry. `profile` is optional because it only decides the «پیشنهادی»
+ * badge and the ordering; a caller that does not know it still gets a
+ * correctly scoped list.
  */
-export async function listTemplates(businessId: string): Promise<WorkspaceTemplate[]> {
+export async function listTemplates(
+  businessId: string,
+  options: { profile?: AecOperatingProfile | null } = {},
+): Promise<WorkspaceTemplateChoice[]> {
+  const industry = await getBusinessIndustry(businessId);
   const { rows } = await query<{
     key: string; name: string; description: string; project_type: string | null;
     phases: unknown; default_tasks: unknown;
@@ -635,11 +653,18 @@ export async function listTemplates(businessId: string): Promise<WorkspaceTempla
     defaultTasks: Array.isArray(row.default_tasks) ? (row.default_tasks as string[]) : [],
   }));
   const overridden = new Set(custom.map((t) => t.key));
-  return [...BUILTIN_TEMPLATES.filter((t) => !overridden.has(t.key)), ...custom];
+  return templatesForIndustry(
+    [...BUILTIN_TEMPLATES.filter((t) => !overridden.has(t.key)), ...custom],
+    industry,
+    options.profile ?? null,
+  );
 }
 
 async function resolveTemplate(businessId: string, key: string): Promise<WorkspaceTemplate | null> {
   const all = await listTemplates(businessId);
+  // The fallback reaches a built-in the business's industry does not list — a
+  // tenant may always apply its own row, and a built-in key it typed by hand
+  // is a phase list it could equally type phase by phase.
   return all.find((t) => t.key === key) ?? builtinTemplate(key);
 }
 

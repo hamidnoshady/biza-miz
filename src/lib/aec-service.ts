@@ -201,6 +201,22 @@ async function readBusinessAecProfile(businessId: string): Promise<AecBusinessPr
 }
 
 /**
+ * The business's operating profile, or `null` for a business of another
+ * industry.
+ *
+ * The read a *shared* surface may make: template ordering and any other
+ * presentation that must answer "is there an AEC profile here, and which" without
+ * the `industry_mismatch` error the API guard turns into a 403. The full
+ * profile read stays the strict one.
+ */
+export async function readAecOperatingProfile(
+  businessId: string,
+): Promise<AecOperatingProfile | null> {
+  if ((await getBusinessIndustry(businessId)) !== AEC_INDUSTRY) return null;
+  return (await readBusinessAecProfile(businessId)).operatingProfile;
+}
+
+/**
  * One entry a participant picker renders: the role, its Persian label and the
  * group it belongs to.
  */

@@ -8,6 +8,10 @@
  * below unit-testable without a database.
  */
 
+import type { AecOperatingProfile } from "./aec";
+import type { Industry } from "./industries";
+import { AEC_BUILTIN_TEMPLATES } from "./workspace-aec-templates";
+
 /* ---------------------------------------------------------------------------
  * Sections
  * ------------------------------------------------------------------------- */
@@ -371,6 +375,23 @@ export interface WorkspaceTemplate {
   projectType: string;
   phases: WorkspaceTemplatePhase[];
   defaultTasks: string[];
+  /**
+   * The industry this blueprint belongs to, or nothing for the generic
+   * catalogue every trade sees. (#799 §4's six AEC templates are the first
+   * industry-scoped ones: a café must not be offered «پیمانکاری عمومی».)
+   */
+  industry?: Industry | null;
+  /**
+   * AEC operating profiles this template is *recommended* for. Ordering and a
+   * badge only — never a gate: a contractor renovating an office still gets
+   * the fit-out template, it is simply not the one marked «پیشنهادی».
+   */
+  recommendedProfiles?: readonly AecOperatingProfile[];
+}
+
+/** A template plus the answer to "should this business see it first". */
+export interface WorkspaceTemplateChoice extends WorkspaceTemplate {
+  recommended: boolean;
 }
 
 /**
@@ -385,6 +406,12 @@ export interface WorkspaceTemplate {
  * software, marketing, event, consulting, and a bare generic — because the
  * brief's requirement is a workspace that fits ANY business, and a
  * restaurant-shaped phase list would have made it fit exactly one.
+ *
+ * Industry-scoped templates (`industry` set) are appended from their own
+ * module — `workspace-aec-templates.ts` holds issue #799 §4's six AEC
+ * blueprints — and are only offered to that industry. Keeping them out of this
+ * literal is what stops the generic catalogue from growing a trade-specific
+ * branch every time an industry is added.
  */
 export const BUILTIN_TEMPLATES: WorkspaceTemplate[] = [
   {
@@ -484,11 +511,39 @@ export const BUILTIN_TEMPLATES: WorkspaceTemplate[] = [
     ],
     defaultTasks: ["جلسهٔ آغازین", "جمع‌آوری داده"],
   },
+  ...AEC_BUILTIN_TEMPLATES,
 ];
 
 /** Pure: looks a built-in template up by key. */
 export function builtinTemplate(key: string): WorkspaceTemplate | null {
   return BUILTIN_TEMPLATES.find((t) => t.key === key) ?? null;
+}
+
+/**
+ * Pure: the templates a business of `industry` may choose, with the ones
+ * recommended for its operating profile first and flagged.
+ *
+ * `industry: null` means the caller could not resolve one (an unprovisioned or
+ * missing row) and keeps only the generic catalogue — an unknown tenant must
+ * never be *offered* a trade it may not be. Sorting is stable, so the built-in
+ * order (generic families, then the industry's own set) survives inside each
+ * group and the catalogue stays authored rather than incidental.
+ */
+export function templatesForIndustry(
+  templates: WorkspaceTemplate[],
+  industry: Industry | null,
+  profile: AecOperatingProfile | null = null,
+): WorkspaceTemplateChoice[] {
+  const eligible = templates
+    .filter((template) => !template.industry || template.industry === industry)
+    .map((template) => ({
+      ...template,
+      recommended: Boolean(profile && template.recommendedProfiles?.includes(profile)),
+    }));
+  return [
+    ...eligible.filter((template) => template.recommended),
+    ...eligible.filter((template) => !template.recommended),
+  ];
 }
 
 /* ---------------------------------------------------------------------------

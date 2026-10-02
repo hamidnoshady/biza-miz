@@ -88,6 +88,8 @@ interface TemplateOption {
   key: string;
   name: string;
   description: string;
+  /** Ordered first and flagged by the API: the blueprint recommended for this business's profile. */
+  recommended?: boolean;
 }
 
 export function ProjectsSection({
@@ -344,7 +346,7 @@ function NewProjectDialog({
             label="قالب فازبندی"
             value={templateKey}
             onChange={setTemplateKey}
-            options={templates.map((t) => ({ id: t.key, label: t.name }))}
+            options={templates.map((t) => ({ id: t.key, label: t.recommended ? `${t.name} (پیشنهادی)` : t.name }))}
             placeholder="— بدون قالب —"
             hint="فازهای قالب پس از ساخت به پروژه افزوده می‌شوند."
           />

@@ -35,6 +35,7 @@ import {
   normalizeTags,
   phasesFromTemplate,
   roleAtLeast,
+  templatesForIndustry,
   roleCan,
   wouldCreateDependencyCycle,
 } from "./workspace-shared";
@@ -259,6 +260,47 @@ describe("templates", () => {
   it("looks a template up by key", () => {
     expect(builtinTemplate("construction")?.name).toBe("ساخت‌وساز");
     expect(builtinTemplate("nope")).toBeNull();
+  });
+
+  it("keeps the industry's own blueprints out of every other trade (#799 §4)", () => {
+    const generic = templatesForIndustry(BUILTIN_TEMPLATES, "food_service");
+    const aec = templatesForIndustry(BUILTIN_TEMPLATES, "architecture_construction");
+    const aecKeys = new Set(aec.map((t) => t.key));
+
+    // All six of the issue's AEC sequences are present for the AEC industry
+    // and absent for a café — the one-directional rule that keeps a
+    // restaurant from being offered «پیمانکاری عمومی».
+    for (const key of [
+      "aec_architecture_design",
+      "aec_civil_structural",
+      "aec_general_contractor",
+      "aec_design_build",
+      "aec_interior_renovation",
+      "aec_consulting_supervision",
+    ]) {
+      expect(aecKeys.has(key), key).toBe(true);
+      expect(generic.some((t) => t.key === key), key).toBe(false);
+    }
+    // …and the generic families survive in both.
+    expect(generic.some((t) => t.key === "construction")).toBe(true);
+    expect(aecKeys.has("construction")).toBe(true);
+  });
+
+  it("recommends a profile's blueprints first without hiding the others", () => {
+    const contractor = templatesForIndustry(BUILTIN_TEMPLATES, "architecture_construction", "contractor");
+    const recommended = contractor.filter((t) => t.recommended);
+    expect(recommended.map((t) => t.key)).toContain("aec_general_contractor");
+    // Filtering, not gating: the fit-out blueprint is still offered.
+    expect(contractor.some((t) => t.key === "aec_interior_renovation")).toBe(true);
+    // Recommended first, and the flag is honest about which are which.
+    expect(contractor.slice(0, recommended.length).every((t) => t.recommended)).toBe(true);
+    expect(templatesForIndustry(BUILTIN_TEMPLATES, "architecture_construction", null).every((t) => !t.recommended)).toBe(true);
+  });
+
+  it("treats an unknown industry as generic-only", () => {
+    const unknown = templatesForIndustry(BUILTIN_TEMPLATES, null);
+    expect(unknown.some((t) => t.industry)).toBe(false);
+    expect(unknown.length).toBeGreaterThan(0);
   });
 
   it("expands into ordered phases, undated when the project has no start", () => {
