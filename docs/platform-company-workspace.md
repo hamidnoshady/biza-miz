@@ -278,6 +278,17 @@ remains a separate realm and is not the company console.
   any non-HTTP caller — a maintenance script, a future job — could have wiped
   the platform's own books. Both now refuse inside the transaction that would
   have done the damage, with a dedicated `ProtectedInternalBusinessError`.
+- **Adding any member after the founder failed outright.** Every
+  `PATCH /api/platform/company/members` call except the very first returned
+  `new row violates row-level security policy for table "platform_users"`. The
+  founder worked only because `ensurePlatformCompany()` runs bypassed; every
+  later member went through `withPlatformCompany()`, which is inside the
+  company's tenant scope — and `platform_users` carries
+  `WITH CHECK (app_rls_bypass())`, so the INSERT can never succeed from there.
+  The identity INSERT/SELECT is now bracketed in
+  `withoutTenantScope("platform", ...)`, the documented narrow-cross-realm-write
+  shape, and throws `platform_identity_unavailable` if the row is still missing.
+  No policy was widened.
 - **The billing tick ran on every deployment role.** It and the maintenance tick are now central-only.
 - `platform_billing` had no Persian ledger source label, so company entries showed raw English in
   the journal and reports drill-down.

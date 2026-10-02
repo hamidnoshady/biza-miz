@@ -681,23 +681,32 @@ export async function setPlatformCompanyMember(
     }
   }
 
-  // The global identity row is created once and never rewritten. `full_name` on
-  // `platform_users` is shared by every business membership this person holds,
-  // so overwriting it here would silently rename them in another business.
-  const { rows: identities } = await query<{ id: string }>(
-    `INSERT INTO platform_users (email, password_hash, full_name)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (email) DO NOTHING
-     RETURNING id`,
-    [admin.email, await bcrypt.hash(randomBytes(32).toString("base64url"), 12), admin.full_name],
-  );
-  let identityId = identities[0]?.id;
-  if (!identityId) {
+  // The global identity row lives in the PLATFORM realm, not the company's:
+  // `platform_users` is created once and never rewritten, and its `full_name`
+  // is shared by every business membership this person holds, so overwriting
+  // it here would silently rename them in another business.
+  //
+  // It also has to be written under the platform bypass. `WITH CHECK
+  // (app_rls_bypass())` on that table means the INSERT is refused from inside
+  // the company's tenant scope — which is exactly where this function runs
+  // when it is called through `withPlatformCompany`. Creating the identity in
+  // its own minimal bypass section is the documented shape (authenticate →
+  // one narrow cross-realm write → back to tenant scope); it widens nothing.
+  const identityId = await withoutTenantScope("platform", async () => {
+    const { rows: identities } = await query<{ id: string }>(
+      `INSERT INTO platform_users (email, password_hash, full_name)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (email) DO NOTHING
+       RETURNING id`,
+      [admin.email, await bcrypt.hash(randomBytes(32).toString("base64url"), 12), admin.full_name],
+    );
+    if (identities[0]?.id) return identities[0].id;
     const { rows: existing } = await query<{ id: string }>(
       `SELECT id FROM platform_users WHERE email = $1`, [admin.email],
     );
-    identityId = existing[0].id;
-  }
+    if (!existing[0]) throw new Error("platform_identity_unavailable");
+    return existing[0].id;
+  });
 
   const role = preset === "company_owner" ? "owner" : preset === "finance" ? "accountant" : "manager";
   const granted = [...PRESET_PERMISSIONS[preset]];

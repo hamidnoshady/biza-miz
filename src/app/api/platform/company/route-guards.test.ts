@@ -26,6 +26,8 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
+import { PERMISSIONS } from "@/lib/permissions";
+import { COMPANY_ACCESS_PRESET_KEYS, companyPresetAllows } from "@/lib/platform-company";
 
 const COMPANY_API_ROOT = join(process.cwd(), "src", "app", "api", "platform", "company");
 
@@ -182,6 +184,37 @@ describe("platform company authorization helpers stay authoritative", () => {
     expect(adapter).toMatch(/withTenant\s*\(\s*actor\.businessId/);
   });
 
+  it("writes the shared platform identity inside the narrow bypass it requires", () => {
+    // `platform_users` carries WITH CHECK (app_rls_bypass()), so the INSERT is
+    // refused from inside the company's tenant scope — and `withPlatformCompany`
+    // leaves the handler in exactly that scope. Adding any member after the
+    // founder used to fail outright because of this. The fix is to bracket the
+    // one cross-realm write in `withoutTenantScope`; the paired policy test in
+    // the integration suite proves the bracket is NECESSARY (the insert really
+    // is rejected without it), and this one proves it is PRESENT.
+    const fn = adapter.slice(adapter.indexOf("export async function setPlatformCompanyMember"));
+    expect(fn.length).toBeGreaterThan(0);
+
+    const callAt = fn.indexOf("withoutTenantScope(");
+    expect(callAt, "setPlatformCompanyMember must bracket the identity write").toBeGreaterThan(-1);
+
+    // Walk to the matching paren so the assertion is about THIS call's body
+    // rather than about anything later in the function.
+    let depth = 0;
+    let end = fn.length;
+    for (let i = fn.indexOf("(", callAt); i < fn.length; i += 1) {
+      if (fn[i] === "(") depth += 1;
+      else if (fn[i] === ")" && --depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+    const bracketed = fn.slice(callAt, end);
+    expect(bracketed).toContain("INSERT INTO platform_users");
+    // And it stays narrow: nothing else in the function reaches for the bypass.
+    expect(fn.slice(end).indexOf("withoutTenantScope(")).toBe(-1);
+  });
+
   it("logs no token, hash, password or raw company-secret value", () => {
     const code = stripComments(adapter);
     for (const pattern of [
@@ -335,5 +368,124 @@ describe("migration 0193 narrows the billing-event RLS hole without widening any
     expect(migration).toContain("ON platform_company_accounting_postings (event_id)");
     expect(migration).toContain("CREATE UNIQUE INDEX journal_entries_platform_billing_source");
     expect(migration).toContain("WHERE source_type = 'platform_billing'");
+  });
+});
+
+/**
+ * The preset × endpoint authorization matrix, pinned.
+ *
+ * Six presets exist, and each one exists because somebody needs a different
+ * slice of the internal company. The failure mode here is quiet: a preset that
+ * quietly grows `crmManage` is not a crash, it is a finance user editing a
+ * customer's pipeline — and no test notices, because nothing about the code
+ * looks wrong. So the intended slice is written down as a table and checked.
+ *
+ * The table is paired with a read of each route file, so the two halves hold
+ * each other honest: the permission claimed in the table is the one the route
+ * actually asks for, and the allow/deny pattern is the one the preset table
+ * actually grants. Change either side alone and this fails.
+ */
+describe("platform company preset authorization matrix", () => {
+  /** What each read endpoint is FOR, expressed as the permission it requires. */
+  const REQUIRED: Record<string, string> = {
+    "accounting/reconciliation": "ledgerView",
+    "crm/customers": "crmView",
+    "crm/deals": "crmView",
+    "growth/audience": "growthView",
+    "websites/credentials": "websiteManage",
+    "workspace/projects": "workspaceView",
+  };
+
+  /** The intended slice for each preset. `a` = allow, `.` = deny. */
+  const MATRIX: Record<string, string> = {
+    //                     acct  cust  deals growth web   work
+    company_owner:  "a     a     a     a      a     a",
+    finance:        "a     .     .     .      .     a",
+    sales_success:  ".     a     a     .      .     a",
+    marketing:      ".     a     a     a      .     a",
+    website_editor: ".     .     .     .      a     a",
+    project_manager: ".    a     a     .      .     a",
+  };
+
+  const ENDPOINTS = Object.keys(REQUIRED);
+
+  function cells(row: string): string[] {
+    return row.trim().split(/\s+/);
+  }
+
+  it("every matrix row has one entry per endpoint", () => {
+    for (const [preset, row] of Object.entries(MATRIX)) {
+      expect(cells(row).length, preset).toBe(ENDPOINTS.length);
+    }
+  });
+
+  for (const [endpoint, permission] of Object.entries(REQUIRED)) {
+    it(`${endpoint} really requires ${permission}`, () => {
+      const src = readFileSync(join(COMPANY_API_ROOT, endpoint, "route.ts"), "utf8");
+      expect(stripComments(src)).toMatch(
+        new RegExp(`withPlatformCompany\\(\\s*PERMISSIONS\\.${permission}\\b`),
+      );
+    });
+  }
+
+  for (const [preset, row] of Object.entries(MATRIX)) {
+    it(`${preset} is granted exactly the slice the matrix says`, () => {
+      const expected = cells(row).map((cell) => (cell === "a" ? "allow" : "deny"));
+      const actual = ENDPOINTS.map((endpoint) =>
+        companyPresetAllows(
+          preset as Parameters<typeof companyPresetAllows>[0],
+          PERMISSIONS[REQUIRED[endpoint] as keyof typeof PERMISSIONS],
+        )
+          ? "allow"
+          : "deny",
+      );
+      expect(actual).toEqual(expected);
+    });
+  }
+
+  it("covers every preset the system can assign", () => {
+    expect(Object.keys(MATRIX).sort()).toEqual([...COMPANY_ACCESS_PRESET_KEYS].sort());
+  });
+
+  /**
+   * The read matrix above deliberately cannot tell `sales_success` and
+   * `project_manager` apart: both need to SEE the pipeline and the workspace,
+   * and they differ in what they may CHANGE (the first can edit parties and
+   * deals, the second can sign off on contracts). That is a real distinction,
+   * so it is checked against the full permission set rather than the six read
+   * endpoints — a clone here would mean the UI offers a choice that changes
+   * nothing at all.
+   */
+  it("no two presets resolve to the same permission set", () => {
+    const granted = (preset: string): string[] =>
+      Object.entries(PERMISSIONS)
+        .filter(([, permission]) =>
+          companyPresetAllows(
+            preset as Parameters<typeof companyPresetAllows>[0],
+            permission as Parameters<typeof companyPresetAllows>[1],
+          ),
+        )
+        .map(([name]) => name)
+        .sort();
+
+    const sets = Object.keys(MATRIX).map((preset) => [preset, granted(preset).join(",")] as const);
+    for (const [a, setA] of sets) {
+      for (const [b, setB] of sets) {
+        if (a < b) expect(setA, `${a} and ${b} grant identical permissions`).not.toEqual(setB);
+      }
+    }
+  });
+
+  it("distinguishes the two presets the read matrix sees as one", () => {
+    const can = (preset: string, permission: keyof typeof PERMISSIONS) =>
+      companyPresetAllows(
+        preset as Parameters<typeof companyPresetAllows>[0],
+        PERMISSIONS[permission],
+      );
+    // sales_success works the pipeline; project_manager only signs contracts.
+    expect(can("sales_success", "crmManage")).toBe(true);
+    expect(can("project_manager", "crmManage")).toBe(false);
+    expect(can("project_manager", "workspaceContractsManage")).toBe(true);
+    expect(can("sales_success", "workspaceContractsManage")).toBe(false);
   });
 });

@@ -1436,6 +1436,72 @@ describe("company authorization", () => {
     );
   });
 
+  it("refuses to write the platform identity from inside a tenant scope — the reason it must be written bypassed", async () => {
+    // The bug this guards: adding any member after the founder failed with
+    // "new row violates row-level security policy for table platform_users".
+    // `platform_users` carries WITH CHECK (app_rls_bypass()), so the INSERT is
+    // impossible from inside the company's tenant scope — which is exactly
+    // where `withPlatformCompany()` leaves the handler. The founder only worked
+    // because `ensurePlatformCompany()` runs bypassed.
+    //
+    // These two statements run as the NOSUPERUSER/NOBYPASSRLS role, so the
+    // policy is really doing the work rather than being waved through.
+    const email = `rls-probe-${randomUUID()}@example.test`;
+    const insert = `INSERT INTO platform_users (email, password_hash, full_name)
+                    VALUES ($1, $2, 'بررسی') RETURNING id`;
+
+    const scoped = await asTenant<{ id: string }>(internal.businessId, insert, [email, "x"]);
+    expect(scoped.error?.message).toMatch(/row-level security/);
+
+    const bypassed = await asPlatform<{ id: string }>(insert, [email, "x"]);
+    expect(bypassed[0]?.id).toBeTruthy();
+  });
+
+  it("adds a second member without duplicating the shared platform identity", async () => {
+    // Called the way production calls it: from inside the company's tenant
+    // scope, which is what `withPlatformCompany()` establishes before the
+    // handler runs. Calling it bypassed would hide the scope the bug lived in.
+    const actor = {
+      platformAdminId: internal.adminId,
+      businessId: internal.businessId,
+      userId: internal.userId,
+      fullName: "مدیر",
+      preset: "company_owner" as const,
+      permissions: new Set<string>() as never,
+      revision: 1,
+    };
+    const { rows: admins } = await superuser.query<{ id: string; email: string }>(
+      `INSERT INTO platform_admins (email, full_name, password_hash, role, is_active)
+       SELECT $1, 'عضو مالی', 'x', 'support', true
+       WHERE NOT EXISTS (SELECT 1 FROM platform_admins WHERE email = $1)
+       RETURNING id, email::text`,
+      [`finance-${randomUUID()}@example.test`],
+    );
+    const added = await db.withTenant(internal.businessId, () =>
+      company.setPlatformCompanyMember(actor, admins[0].id, "finance", true),
+    );
+    expect(added.preset).toBe("finance");
+    expect(added.active).toBe(true);
+
+    // And the identity row is shared, not duplicated: adding a second
+    // membership for the same person must not create a second platform identity.
+    const { rows: identities } = await superuser.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM platform_users WHERE email = $1`,
+      [admins[0].email],
+    );
+    expect(Number(identities[0].count)).toBe(1);
+
+    // A preset change reuses it rather than minting another.
+    await db.withTenant(internal.businessId, () =>
+      company.setPlatformCompanyMember(actor, admins[0].id, "marketing", true),
+    );
+    const { rows: after } = await superuser.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM platform_users WHERE email = $1`,
+      [admins[0].email],
+    );
+    expect(Number(after[0].count)).toBe(1);
+  });
+
   it("protects the last company owner from revocation", async () => {
     const owners = await scalar(
       `SELECT count(*)::text AS value FROM platform_company_members
