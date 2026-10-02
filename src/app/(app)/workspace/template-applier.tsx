@@ -9,6 +9,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
@@ -26,7 +27,7 @@ const MODE_LABELS: Record<TemplateApplyMode, string> = {
 };
 
 export function TemplateApplier({ projectId, onApplied }: { projectId: string; onApplied: () => void }) {
-  const [templates, setTemplates] = useState<TemplateOption[]>([]);
+  const [templates, setTemplates] = useState<TemplateOption[] | null>(null);
   const [key, setKey] = useState("");
   const [mode, setMode] = useState<TemplateApplyMode>("merge");
   const [plan, setPlan] = useState<TemplatePlan | null>(null);
@@ -60,6 +61,14 @@ export function TemplateApplier({ projectId, onApplied }: { projectId: string; o
   }
 
   const nothing = plan && !plan.addPhases.length && !plan.addTasks.length && !plan.removePhases.length;
+
+  if (templates === null) {
+    return (
+      <div className="border-t border-border/80 p-4">
+        <LoadingSkeleton rows={2} label="در حال بارگذاری قالب‌ها" />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-3 border-t border-border/80 p-4">
