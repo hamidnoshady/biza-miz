@@ -74,7 +74,11 @@ export function usePagedList<T, S = Record<string, number>>(url: string, key: st
     void fetchPage(state.rows?.length ?? 0);
   }, [fetchPage, state.rows?.length]);
 
+  // A new filter starts from nothing: keeping the old rows on screen would
+  // let «نمایش بیشتر» request the new filter at the old row count and append
+  // a page of one filter onto rows of another.
   useEffect(() => {
+    setState({ rows: null, page: null, summary: null, error: "", loadingMore: false });
     void fetchPage(0);
     return () => controller.current?.abort();
   }, [fetchPage]);
