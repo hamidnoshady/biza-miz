@@ -95,6 +95,14 @@ export const GET = withPlatformScope(async (req: Request) => {
            (SELECT COALESCE(SUM(amount_rial), 0)::text
               FROM billing_invoice_payments
              WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind = 'customer')
+               AND (
+                 payment_id IS NULL
+                 OR NOT EXISTS (
+                   SELECT 1 FROM billing_payments bp
+                    WHERE bp.id = billing_invoice_payments.payment_id
+                      AND bp.status = 'verified'
+                 )
+               )
                AND created_at >= $1::timestamptz
                AND created_at < $2::timestamptz) AS collected_invoice_payments_rial,
            (SELECT COALESCE(SUM(amount_rial), 0)::text
@@ -119,7 +127,8 @@ export const GET = withPlatformScope(async (req: Request) => {
              WHERE r.business_id IN (SELECT id FROM businesses WHERE ownership_kind = 'customer')
                AND e.occurred_at >= $1::timestamptz
                AND e.occurred_at < $2::timestamptz
-               AND e.source NOT IN ('ai_wallet_settlement', 'media_billing', 'message_outbox')) AS external_rated_rial,
+               AND e.source NOT IN ('ai', 'media', 'messaging', 'ai_wallet_settlement', 'media_billing', 'message_outbox')
+               AND COALESCE((e.dimensions->>'walletBacked')::boolean, false) = false) AS external_rated_rial,
            (SELECT count(*)::text
               FROM billing_payments
              WHERE business_id IN (SELECT id FROM businesses WHERE ownership_kind = 'customer')

@@ -197,6 +197,7 @@ export async function settleAiTurn(input: {
           unit: "token",
           resource: "ai_turn",
           resourceId: input.requestId,
+          dimensions: { walletBacked: true, pricedBy },
           ratedAmountRial:
             pricedBy === "token_rate"
               ? Math.ceil(
@@ -216,6 +217,7 @@ export async function settleAiTurn(input: {
           unit: "token",
           resource: "ai_turn",
           resourceId: input.requestId,
+          dimensions: { walletBacked: true, pricedBy },
           ratedAmountRial:
             pricedBy === "token_rate"
               ? Math.ceil(

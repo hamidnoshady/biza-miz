@@ -167,6 +167,7 @@ export async function runBusinessMessageDrain(
         unit: sms ? "segment" : "send",
         resource: "message_outbox",
         resourceId: String(row.id),
+        dimensions: { walletBacked: true, channel: row.channel },
         ratedAmountRial: rowCost,
       }).catch((error) => {
         console.error("message usage event failed:", row.id, error);

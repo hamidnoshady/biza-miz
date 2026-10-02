@@ -778,10 +778,32 @@ describe("Superadmin billing & credit audit (#791)", () => {
         chargedRial: 70_000,
       }),
     );
+    // Wallet-backed rated usage events (ai/media/messaging) must NOT be double-counted in externalRatedUsageRial
+    await dbLib.withTenant(bizId, async () => {
+      await runtime.appendUsageEvent({
+        businessId: bizId,
+        source: "ai",
+        eventId: `ai-tok-${randomUUID()}`,
+        meterKey: "ai.input_tokens",
+        quantity: 1000,
+        unit: "token",
+        ratedAmountRial: 25_000,
+      });
+      await runtime.appendUsageEvent({
+        businessId: bizId,
+        source: "messaging",
+        eventId: `msg-seg-${randomUUID()}`,
+        meterKey: "messaging.sms_segment",
+        quantity: 2,
+        unit: "segment",
+        ratedAmountRial: 30_000,
+      });
+    });
     const spendAfterAi = await dbLib.withTenant(bizId, () =>
       runtime.computeBusinessMonthlySpend(bizId),
     );
     expect(spendAfterAi.allowanceUsedRial).toBe(50_000);
+    expect(spendAfterAi.externalRatedUsageRial).toBe(0);
     expect(spendAfterAi.totalSpendRial).toBe(100_000);
 
     // 5. Configure spend policy at budget = 100,000 with warn_only -> emits warning, does not block
@@ -803,8 +825,27 @@ describe("Superadmin billing & credit audit (#791)", () => {
     const savedPolicyAfterWarn = await dbLib.withoutTenantScope("platform", () =>
       runtime.getSpendPolicy(bizId),
     );
+    expect(savedPolicyAfterWarn?.lastWarnedPeriod).toBe(spendAfterAi.periodMonth);
     expect(savedPolicyAfterWarn?.lastWarningThreshold).toBe(100);
     expect(savedPolicyAfterWarn?.lastWarningAt).toBeTruthy();
+
+    // If last_warned_period is from a previous month, crossing a lower threshold (50%) in the current month emits a fresh warning
+    await db.query(
+      `UPDATE business_spend_policies
+          SET last_warned_period = '2025-01',
+              last_warning_threshold = 100
+        WHERE business_id = $1`,
+      [bizId],
+    );
+    const rewarnEval = await dbLib.withTenant(bizId, () =>
+      runtime.evaluateBusinessSpend(bizId),
+    );
+    expect(rewarnEval.warningEmitted).toBe(true);
+    const savedAfterRollover = await dbLib.withoutTenantScope("platform", () =>
+      runtime.getSpendPolicy(bizId),
+    );
+    expect(savedAfterRollover?.lastWarnedPeriod).toBe(spendAfterAi.periodMonth);
+    expect(savedAfterRollover?.lastWarningThreshold).toBe(100);
 
     // 6. Switch policy to throttle_noncritical -> allows non-critical capability with throttled=true & throttleDelayMs > 0
     await dbLib.withoutTenantScope("platform", () =>

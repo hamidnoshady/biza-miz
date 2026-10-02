@@ -664,6 +664,7 @@ export interface BusinessSpendPolicyRecord {
   monthlyBudgetRial: number | null;
   thresholds: number[];
   actionAtLimit: SpendLimitAction;
+  lastWarnedPeriod?: string | null;
   lastWarningThreshold: number | null;
   lastWarningAt: string | null;
   throttledAt: string | null;
@@ -675,12 +676,13 @@ export async function getSpendPolicy(businessId: string): Promise<BusinessSpendP
     monthly_budget_rial: string | null;
     thresholds: number[];
     action_at_limit: SpendLimitAction;
+    last_warned_period: string | null;
     last_warning_threshold: number | null;
     last_warning_at: Date | string | null;
     throttled_at: Date | string | null;
   }>(
     `SELECT business_id, monthly_budget_rial, thresholds, action_at_limit,
-            last_warning_threshold, last_warning_at, throttled_at
+            last_warned_period, last_warning_threshold, last_warning_at, throttled_at
        FROM business_spend_policies WHERE business_id = $1`,
     [businessId],
   );
@@ -691,6 +693,7 @@ export async function getSpendPolicy(businessId: string): Promise<BusinessSpendP
     monthlyBudgetRial: row.monthly_budget_rial == null ? null : Number(row.monthly_budget_rial),
     thresholds: row.thresholds ?? [50, 75, 90, 100],
     actionAtLimit: row.action_at_limit,
+    lastWarnedPeriod: row.last_warned_period ?? null,
     lastWarningThreshold: row.last_warning_threshold ?? null,
     lastWarningAt: row.last_warning_at
       ? row.last_warning_at instanceof Date
@@ -714,12 +717,13 @@ export async function listSpendPolicies(): Promise<
     monthly_budget_rial: string | null;
     thresholds: number[];
     action_at_limit: SpendLimitAction;
+    last_warned_period: string | null;
     last_warning_threshold: number | null;
     last_warning_at: Date | string | null;
     throttled_at: Date | string | null;
   }>(
     `SELECT p.business_id, b.name AS business_name, p.monthly_budget_rial, p.thresholds,
-            p.action_at_limit, p.last_warning_threshold, p.last_warning_at, p.throttled_at
+            p.action_at_limit, p.last_warned_period, p.last_warning_threshold, p.last_warning_at, p.throttled_at
        FROM business_spend_policies p
        JOIN businesses b ON b.id = p.business_id
       ORDER BY p.updated_at DESC`,
@@ -733,6 +737,7 @@ export async function listSpendPolicies(): Promise<
       monthlyBudgetRial: row.monthly_budget_rial == null ? null : Number(row.monthly_budget_rial),
       thresholds: row.thresholds ?? [50, 75, 90, 100],
       actionAtLimit: row.action_at_limit,
+      lastWarnedPeriod: row.last_warned_period ?? null,
       lastWarningThreshold: row.last_warning_threshold ?? null,
       lastWarningAt: row.last_warning_at
         ? row.last_warning_at instanceof Date
@@ -868,7 +873,8 @@ export async function computeBusinessMonthlySpend(
           WHERE r.business_id = $1
             AND e.occurred_at >= $2::timestamptz
             AND e.occurred_at < $3::timestamptz
-            AND e.source NOT IN ('ai_wallet_settlement', 'media_billing', 'message_outbox')
+            AND e.source NOT IN ('ai', 'media', 'messaging', 'ai_wallet_settlement', 'media_billing', 'message_outbox')
+            AND COALESCE((e.dimensions->>'walletBacked')::boolean, false) = false
        ), 0)::text AS external_rated_rial`,
     [businessId, startIso, nextStartIso, window.periodMonth],
   );
@@ -949,20 +955,26 @@ export async function evaluateBusinessSpend(
   let warningEmitted = false;
   if (evaluation.warned && evaluation.crossedThresholds.length > 0) {
     const highestCrossed = Math.max(...evaluation.crossedThresholds);
-    const prevThreshold = policy.lastWarningThreshold ?? 0;
+    const prevThreshold =
+      policy.lastWarnedPeriod === breakdown.periodMonth
+        ? (policy.lastWarningThreshold ?? 0)
+        : 0;
     if (highestCrossed > prevThreshold) {
       warningEmitted = true;
       await query(
         `UPDATE business_spend_policies
-            SET last_warning_threshold = $2,
+            SET last_warned_period = $2,
+                last_warning_threshold = $3,
                 last_warning_at = now(),
-                throttled_at = CASE WHEN $3 THEN COALESCE(throttled_at, now()) ELSE throttled_at END,
+                warning_count = COALESCE(warning_count, 0) + 1,
+                throttled_at = CASE WHEN $4 THEN COALESCE(throttled_at, now()) ELSE throttled_at END,
                 updated_at = now()
           WHERE business_id = $1`,
-        [businessId, highestCrossed, evaluation.throttled],
+        [businessId, breakdown.periodMonth, highestCrossed, evaluation.throttled],
       );
       billingLog("billing.spend.warning", {
         businessId,
+        periodMonth: breakdown.periodMonth,
         spentRial: breakdown.totalSpendRial,
         budgetRial: policy.monthlyBudgetRial,
         highestCrossed,
