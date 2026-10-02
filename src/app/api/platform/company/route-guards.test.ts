@@ -24,7 +24,7 @@
  * visible decision in this test.
  */
 import { readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PERMISSIONS } from "@/lib/permissions";
 import { COMPANY_ACCESS_PRESET_KEYS, companyPresetAllows } from "@/lib/platform-company";
@@ -71,7 +71,10 @@ function stripComments(src: string): string {
 }
 
 const files = collectRouteFiles(COMPANY_API_ROOT);
-const relatives = files.map((file) => relative(COMPANY_API_ROOT, file));
+// `relative()` emits backslashes on Windows, and this suite runs on Windows in
+// CI. The inventory below is pinned with forward slashes, so normalise rather
+// than let the comparison silently pass on Linux and fail on the runner.
+const relatives = files.map((file) => relative(COMPANY_API_ROOT, file).split(sep).join("/"));
 
 /**
  * The route inventory, pinned.
@@ -122,7 +125,7 @@ describe("platform company API guard contract", () => {
   });
 
   for (const file of files) {
-    const name = relative(COMPANY_API_ROOT, file);
+    const name = relative(COMPANY_API_ROOT, file).split(sep).join("/");
     if (PRE_MEMBERSHIP_ROUTES.has(name)) continue;
     const src = readFileSync(file, "utf8");
 
@@ -249,7 +252,7 @@ describe("money and dates in the Platform Business UI", () => {
   });
 
   for (const file of tsxFiles) {
-    const name = relative(process.cwd(), file);
+    const name = relative(process.cwd(), file).split(sep).join("/");
     const src = readFileSync(file, "utf8");
     const code = stripComments(src);
 
