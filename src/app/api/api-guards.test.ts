@@ -95,6 +95,8 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "auth/owner-activation":
     "owner activation exchange — the identity was created with a password nobody knows, so " +
     "the single-use token in the link is the only credential the owner has until they set one",
+  "auth/company-handoff": "one-use platform-company staff handoff; token is the credential before the tenant cookie exists",
+  "website/leads": "public form intake authenticated by a hashed, site-scoped bearer credential with durable rate limiting and idempotency",
   "auth/impersonate-handoff":
     "credential exchange (Phase 23 follow-up) — the console's short-lived single-use handoff " +
     "token is the credential; the caller has no session on the business's origin yet by " +
@@ -336,7 +338,7 @@ const SELF_GUARDING_ROUTES: Record<string, string> = {
 
 /** True for the super-admin console's own routes, which use the platform guards. */
 function isPlatformGuarded(src: string): boolean {
-  return /requirePlatformAdmin\(/.test(src) || /requirePlatformCapability\(/.test(src);
+  return /requirePlatformAdmin\(/.test(src) || /requirePlatformCapability\(/.test(src) || /withPlatformCompany\(/.test(src);
 }
 
 /**

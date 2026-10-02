@@ -98,6 +98,12 @@ export const PATCH = withPlatformScope(async (request: NextRequest, ctx: Ctx) =>
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
+  const target = await getBusiness(id);
+  if (!target) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  if (target.ownershipKind === "platform_internal") {
+    return NextResponse.json({ error: "protected_internal_business" }, { status: 409 });
+  }
+
   const hasStatus = body.status !== undefined;
   const hasMetadata = body.name !== undefined || body.timezone !== undefined;
   // Phase 23: renaming the public host is its own action, not another
@@ -292,6 +298,9 @@ export const POST = withPlatformScope(async (request: NextRequest, ctx: Ctx) => 
   const { id } = await ctx.params;
   const business = await getBusiness(id);
   if (!business) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  if (business.ownershipKind === "platform_internal") {
+    return NextResponse.json({ error: "protected_internal_business" }, { status: 409 });
+  }
 
   let body: Record<string, unknown>;
   try {
@@ -346,6 +355,9 @@ export const DELETE = withPlatformScope(async (request: NextRequest, ctx: Ctx) =
   const { id } = await ctx.params;
   const business = await getBusiness(id);
   if (!business) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  if (business.ownershipKind === "platform_internal") {
+    return NextResponse.json({ error: "protected_internal_business" }, { status: 409 });
+  }
 
   let body: Record<string, unknown>;
   try {

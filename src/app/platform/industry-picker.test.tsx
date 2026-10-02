@@ -37,7 +37,7 @@ describe("IndustryPicker — keyboard navigation", () => {
 
   it("wraps from the last option back to the first on ArrowDown, and back the other way on ArrowUp", () => {
     const onChange = vi.fn();
-    render(<IndustryPicker value="haberdashery" onChange={onChange} />);
+    render(<IndustryPicker value="service_saas" onChange={onChange} />);
 
     const radios = screen.getAllByRole("radio") as HTMLButtonElement[];
     const haberdashery = radios[radios.length - 1];
@@ -50,7 +50,7 @@ describe("IndustryPicker — keyboard navigation", () => {
     const foodService = radios[0];
     foodService.focus();
     fireEvent.keyDown(foodService, { key: "ArrowUp" });
-    expect(onChange).toHaveBeenLastCalledWith("haberdashery");
+    expect(onChange).toHaveBeenLastCalledWith("service_saas");
   });
 
   it("jumps to the first and last options on Home and End", () => {
@@ -66,7 +66,7 @@ describe("IndustryPicker — keyboard navigation", () => {
 
     onChange.mockClear();
     fireEvent.keyDown(wholesale, { key: "End" });
-    expect(onChange).toHaveBeenLastCalledWith("haberdashery");
+    expect(onChange).toHaveBeenLastCalledWith("service_saas");
   });
 
   it("does not respond to arrow keys when the whole group is disabled", () => {

@@ -1,6 +1,6 @@
 # Phase 46 — One desktop, the full suite
 
-**Status:** Implemented (migration 0191).
+**Status:** Implemented (migration 0192).
 
 Phase 45 made the cloud the system of record and the desktop the till. It worked, but on a real
 install (2026-10-01) it did not feel like one product:

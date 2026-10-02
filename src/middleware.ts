@@ -135,6 +135,13 @@ const PUBLIC_PATHS = [
   "/api/auth/desktop-session",
   "/api/auth/cloud-login/start",
   "/api/auth/cloud-login/callback",
+  // Platform-company staff cross from the admin origin to the protected
+  // internal tenant with a short-lived one-use token. This is a mapped staff
+  // membership, not a customer impersonation grant.
+  "/api/auth/company-handoff",
+  // Public website forms authenticate with a site-scoped bearer credential;
+  // no tenant session exists in the visitor's browser.
+  "/api/website/leads",
   // First-run flow: /welcome bootstraps an empty install; the state endpoint
   // answers "needsBootstrap" (and nothing more) without a session.
   "/welcome",

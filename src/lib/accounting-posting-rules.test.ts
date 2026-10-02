@@ -29,6 +29,7 @@ import { INDUSTRIES, type Industry } from "./industries";
  * in `pg` at import time; this test is the guard that the copy stays honest.
  */
 const POSTING_ENGINE_INVENTORY_CODES: Record<Industry, string> = {
+  service_saas: WELL_KNOWN_CODES.inventory,
   food_service: WELL_KNOWN_CODES.inventory,
   jewelry: WELL_KNOWN_CODES.goldInventory,
   watch: WELL_KNOWN_CODES.watchInventory,
@@ -70,7 +71,7 @@ describe("the cost-of-sales account the settings page names", () => {
     // The regression this prevents: hard-coding WELL_KNOWN_CODES.cogs, which
     // the seven retail templates deliberately do not seed.
     for (const industry of INDUSTRIES) {
-      if (industry === "food_service") continue;
+      if (industry === "food_service" || industry === "service_saas") continue;
       expect(costOfSalesCodeForIndustry(industry)).not.toBe(WELL_KNOWN_CODES.cogs);
     }
   });

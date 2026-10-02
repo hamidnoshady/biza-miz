@@ -126,6 +126,7 @@ app.prepare().then(async () => {
     SUBSCRIPTION_RENEWAL_TICK_INTERVAL_MS,
   } = await import("./src/lib/subscription-service");
   const { runAiProactiveTick, AI_PROACTIVE_TICK_INTERVAL_MS } = await import("./src/lib/ai-proactive-service");
+  const { runPlatformCompanyBillingTick, PLATFORM_COMPANY_BILLING_TICK_MS } = await import("./src/lib/platform-company-billing");
   const { runWooCommerceSyncTick, WOO_SYNC_TICK_INTERVAL_MS } = await import("./src/lib/integrations/outbox-service");
   const { runWebsiteSyncTick, WEBSITE_SYNC_TICK_INTERVAL_MS } = await import("./src/lib/website/sync-service");
   const { runCrmScoringTick, CRM_SCORING_TICK_INTERVAL_MS } = await import(
@@ -360,6 +361,13 @@ app.prepare().then(async () => {
   const subscriptionRenewalTick = () =>
     runSubscriptionRenewalTick().catch((err) => console.error("subscription renewal tick failed:", err));
   scheduleCentralTick(subscriptionRenewalTick, SUBSCRIPTION_RENEWAL_TICK_INTERVAL_MS, 65_000);
+
+  // Platform-company ledger bridge: source changes are already committed to a
+  // transactional outbox; this worker only performs idempotent tenant-scoped
+  // posting and leaves failures visible for authorized reconciliation/retry.
+  const platformCompanyBillingTick = () =>
+    runPlatformCompanyBillingTick().catch((err) => console.error("platform company billing tick failed:", err));
+  scheduleCentralTick(platformCompanyBillingTick, PLATFORM_COMPANY_BILLING_TICK_MS, 70_000);
 
   // Migration 0149: the media library's daily storage charge. The tick runs
   // hourly but the charge is claimed once per (business, local Tehran day) —

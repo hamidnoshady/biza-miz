@@ -39,7 +39,8 @@
     "db:encrypt-fields": "tsx scripts/encrypt-fields.ts",
     "db:encrypt-ai-secrets": "tsx scripts/encrypt-ai-gateway-secrets.ts",
     "inventory:cutover": "tsx scripts/inventory-cutover.ts",
-    "deployment:convert-hybrid": "tsx scripts/convert-local-to-hybrid.ts"
+    "deployment:convert-hybrid": "tsx scripts/convert-local-to-hybrid.ts",
+    "platform-company:billing-backfill": "tsx scripts/platform-company-billing-backfill.ts"
   },
   "dependencies": {
     "@gsap/react": "^2.1.2",

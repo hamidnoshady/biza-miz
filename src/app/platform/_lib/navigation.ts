@@ -34,8 +34,11 @@ export interface NavGroup {
  */
 export const NAV_GROUPS: NavGroup[] = [
   {
-    label: null,
-    items: [{ label: "نمای کلی", href: "/platform", exact: true }],
+    label: "فضای کاری",
+    items: [
+      { label: "مدیریت پلتفرم", href: "/platform", exact: true },
+      { label: "کسب‌وکار پلتفرم", href: "/platform/company", alsoActive: ["/platform/company/"] },
+    ],
   },
   {
     label: "مشتریان",
