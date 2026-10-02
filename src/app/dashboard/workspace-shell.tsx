@@ -1,3 +1,4 @@
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { endedSupportSessionClaims, getSession, type Role } from "@/lib/auth";
 import { appForModule } from "@/lib/apps";
@@ -34,7 +35,9 @@ import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
 import { deploymentRole } from "@/lib/deployment-role";
 import { getServerSyncConfig } from "@/lib/server-sync";
-import { isHybridSite, tillNavItems } from "@/lib/site-routes";
+import { isHybridSite } from "@/lib/site-routes";
+import { isCloudEmbedUserAgent } from "@/lib/cloud-embed";
+import { HybridConnectivityNotice } from "./hybrid-connectivity-notice";
 import { getGrant } from "@/lib/platform-service";
 import { SupportSessionBanner, SupportSessionEnded } from "./support-session-banner";
 
@@ -377,8 +380,11 @@ export async function WorkspaceShell({
   if (!member?.isActive) redirect("/login");
   const [industryResult, prefs, appAvailability, features, deployment, serverSyncConfig] = tenantReads;
   const runtimeRole = deploymentRole();
-  // Phase 45: a Hybrid desktop is the till — its menu lists only till screens.
-  const tillMode = isHybridSite(deployment.profile, runtimeRole);
+  // Phase 46: a Hybrid desktop shows the full menu; cloud screens open in its
+  // content area (DeploymentCapabilityGate → CloudPane).
+  const hybridSite = isHybridSite(deployment.profile, runtimeRole);
+  // The cloud page inside that pane: the desktop draws the menu, so this page does not.
+  const embedded = runtimeRole === "central" && isCloudEmbedUserAgent((await headers()).get("user-agent"));
   const cloudUrl = serverSyncConfig?.enabled ? serverSyncConfig.remoteUrl : null;
   const supportGrant = session.imp ? await getGrant(session.imp.grantId, session.businessId) : null;
   const industry = industryResult.rows[0]?.industry ?? "food_service";
@@ -447,8 +453,9 @@ export async function WorkspaceShell({
           once the bar retracts.
         */}
         <div className="flex h-[100dvh] flex-col md:h-screen md:flex-row">
-        <DashboardSidebar
-          navItems={tillMode ? tillNavItems(navItems) : navItems}
+        {hybridSite ? <HybridConnectivityNotice /> : null}
+        {embedded ? null : <DashboardSidebar
+          navItems={navItems}
           role={member.role}
           permissions={[...permissions]}
           fullName={session.fullName}
@@ -457,9 +464,8 @@ export async function WorkspaceShell({
           industry={industry}
           workspaceSections={workspaceSections}
           deploymentProfile={deployment.profile}
-          till={tillMode ? { cloudUrl } : undefined}
-        />
-        <DashboardMain>
+        />}
+        <DashboardMain hybridSite={hybridSite}>
           {session.imp && supportGrant ? (
             <SupportSessionBanner session={{
               grantId: supportGrant.id,
@@ -476,7 +482,7 @@ export async function WorkspaceShell({
               runtimeRole={runtimeRole}
               cloudUrl={cloudUrl}
             >
-              <AssistantLinkProvider enabled={features.ai_assistant === true && !tillMode}>
+              <AssistantLinkProvider enabled={features.ai_assistant === true}>
                 {children}
               </AssistantLinkProvider>
             </DeploymentCapabilityGate>

@@ -56,7 +56,7 @@ import {
 } from "./sidebar-nav-styles";
 import { appShellNavFor, type AppShellNavProps } from "./app-shell-nav";
 import type { ModuleKey } from "@/lib/industry-profile";
-import type { Permission } from "@/lib/permissions";
+import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { PIN_ROLES } from "@/lib/roles";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
@@ -89,7 +89,6 @@ import { LockButton } from "./lock-screen";
 import { PlatformUserMenu } from "./platform-user-menu";
 import { ShiftButton } from "./shift-panel";
 import { DeploymentStatusIndicator } from "./deployment-status-indicator";
-import { TillNavigation } from "./till-navigation";
 import type { DeploymentProfile } from "@/lib/deployment-mode";
 
 
@@ -198,8 +197,6 @@ interface SidebarProps {
   /** Permission-filtered contextual Workspace entries from the server shell. */
   workspaceSections: readonly WorkspaceSidebarSection[];
   deploymentProfile: DeploymentProfile;
-  /** Phase 45: set on a Hybrid desktop — the sidebar is the till menu plus a cloud door. */
-  till?: { cloudUrl: string | null };
 }
 
 /**
@@ -411,8 +408,9 @@ function SidebarBrand({ title, subtitle }: { title: string; subtitle: string }) 
         to be useful, and the branch colour still shows on the mobile header
         and on the POS/overview page headers.
       */}
-      <div className="mt-3 group-data-[state=collapsed]/sidebar:hidden">
-        <BranchSwitcher compact />
+      {/* No wrapper margin: an empty slot (one branch) must take no space. */}
+      <div className="group-data-[state=collapsed]/sidebar:hidden [&>*]:mt-3">
+        <BranchSwitcher compact quietLoading />
       </div>
     </SidebarHeader>
   );
@@ -518,6 +516,7 @@ function DashboardSidebarFooter({
   bottomNavHrefs,
   onSaveBottomNav,
   deploymentProfile,
+  canRunShift,
 }: {
   role: string;
   fullName: string;
@@ -525,6 +524,8 @@ function DashboardSidebarFooter({
   bottomNavHrefs: string[];
   onSaveBottomNav: (hrefs: string[]) => void;
   deploymentProfile: DeploymentProfile;
+  /** Opening a shift requires `orders.create` — an owner at the till opens one too. */
+  canRunShift: boolean;
 }) {
   const { expandSidebar } = useSidebar();
   const isPinRole = (PIN_ROLES as readonly string[]).includes(role);
@@ -548,7 +549,7 @@ function DashboardSidebarFooter({
           current={bottomNavHrefs}
           onSave={onSaveBottomNav}
         />
-        {isPinRole && <ShiftButton />}
+        {(isPinRole || canRunShift) && <ShiftButton />}
         {isPinRole && <BiometricSettingsButton />}
         {isPinRole && <LockButton />}
       </div>
@@ -927,7 +928,6 @@ export function DashboardSidebar({
   brandSubtitle,
   workspaceSections,
   deploymentProfile,
-  till,
 }: SidebarProps) {
   const pathname = usePathname();
   const [preference, setPreference] = useState<DashboardSidebarPreference>("expanded");
@@ -1049,9 +1049,7 @@ export function DashboardSidebar({
         }
       >
         <SidebarBrand title={brandTitle} subtitle={brandSubtitle} />
-        {till ? (
-          <TillNavigation navItems={navItems} pathname={pathname} cloudUrl={till.cloudUrl} />
-        ) : workspaceRoute ? (
+        {workspaceRoute ? (
           <WorkspaceNavigation pathname={pathname} sections={workspaceSections} />
         ) : appShell ? (
           <AppShellNavigation
@@ -1075,6 +1073,7 @@ export function DashboardSidebar({
           bottomNavHrefs={resolveBottomNavHrefs(bottomNav, availableHrefs, false)}
           onSaveBottomNav={saveBottomNav}
           deploymentProfile={deploymentProfile}
+          canRunShift={permissions.includes(PERMISSIONS.ordersCreate)}
         />
         {mode === "expanded" ? (
           <SidebarResizeHandle

@@ -32,7 +32,9 @@ import {
   SyncPayloadError,
   syncErrorCode,
 } from "./sync-domain-handlers";
+import { deploymentRole } from "./deployment-role";
 import {
+  siteSkipsPulledEvent,
   syncEventDefinition,
   type SyncEventDefinition,
   type SyncEventType,
@@ -678,6 +680,26 @@ async function applyTransactionalSyncEvent(
         deadLettered: true,
         error,
       };
+    }
+
+    // A pulled cloud event this desktop has no use for (stock, ledger) is
+    // acknowledged, not replayed — before the actor check, since a cloud
+    // back-office user need not exist here — see siteSkipsPulledEvent. Recorded as an
+    // applied effect so a re-pull of the same event is a duplicate, not work.
+    if (origin === "remote" && deploymentRole() === "site" && siteSkipsPulledEvent(definition)) {
+      const skipped = { skipped: "cloud_owned" };
+      await client.query(
+        `INSERT INTO sync_domain_effects
+           (business_id,location_id,site_device_id,client_event_id,event_type,schema_version,status,effect_type,result,applied_at)
+         VALUES($1,$2,$3,$4,$5,$6,'applied','cloud_owned',$7,now())
+         ON CONFLICT (business_id,client_event_id) DO UPDATE
+           SET status='applied',effect_type='cloud_owned',result=EXCLUDED.result,error_code=NULL,
+               applied_at=now(),updated_at=now()`,
+        [scope.businessId, locationId, metadata.siteDeviceId ?? null, event.clientEventId, event.type, schemaVersion, JSON.stringify(skipped)],
+      );
+      await client.query("UPDATE sync_events SET applied_at=now(),error=NULL,deferred_until=NULL WHERE id=$1", [syncEventId]);
+      await client.query("COMMIT");
+      return { clientEventId: event.clientEventId, ok: true, data: skipped };
     }
 
     if (scope.error || !scope.permissions.has(definition.permission)) {

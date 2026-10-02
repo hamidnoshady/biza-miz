@@ -64,9 +64,27 @@ interface ActiveResponse {
  */
 const BRANCH_CHANGED_EVENT = "branch-switcher:changed";
 
-export function BranchSwitcher({ compact = false }: { compact?: boolean }) {
+/**
+ * The last answer, kept for the page's lifetime. The sidebar remounts whenever
+ * navigation crosses a layout (`/accounting/*` ↔ `/settings`); without this it
+ * flashed a placeholder each time and, on a one-branch business, then removed
+ * it — every menu entry below jumped ~56px and a click landed on the wrong one.
+ */
+let lastKnown: ActiveResponse | null = null;
+
+export function BranchSwitcher({
+  compact = false,
+  quietLoading = false,
+}: {
+  compact?: boolean;
+  /** Render nothing (not a placeholder) until the first answer: for a slot above clickable rows. */
+  quietLoading?: boolean;
+}) {
   const router = useRouter();
-  const [state, setState] = useState<ActiveResponse | null>(null);
+  const [state, setState] = useState<ActiveResponse | null>(lastKnown);
+  useEffect(() => {
+    if (state) lastKnown = state;
+  }, [state]);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -95,6 +113,7 @@ export function BranchSwitcher({ compact = false }: { compact?: boolean }) {
   }, []);
 
   if (state === null) {
+    if (quietLoading) return null;
     return (
       <div
         role="status"

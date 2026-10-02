@@ -20,6 +20,7 @@ import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import { readDeviceToken } from "@/lib/device-token";
 import { clearRememberedLoginDoor, readRememberedLoginDoor } from "@/lib/login-door";
+import { CloudLoginButton } from "@/components/auth/cloud-login-button";
 import {
   lockoutMessage,
   retryAfterMs,
@@ -100,7 +101,12 @@ export default function LoginForm() {
   if (!remembered) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
-        <LoginDoorChooser onChoose={chooseDoor} />
+        <div className="w-full max-w-3xl">
+          <LoginDoorChooser onChoose={chooseDoor} />
+          <div className="mx-auto max-w-sm">
+            <CloudLoginButton />
+          </div>
+        </div>
       </main>
     );
   }
@@ -116,6 +122,7 @@ export default function LoginForm() {
         </p>
 
         <PinLogin />
+        <CloudLoginButton />
         {offlineNote ? <OfflineLoginNote /> : null}
         <ChangeLoginTypeLink onClick={changeLoginType} />
       </div>

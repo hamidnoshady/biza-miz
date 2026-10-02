@@ -45,6 +45,14 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/server-sync/master",
   "/api/server-sync/digest",
   "/api/server-sync/site-profile",
+  // Phase 46 — «ورود با حساب ابری»: the cloud half (the page the desktop opens
+  // in the browser, its code-minting POST, the install's redemption and the
+  // embedded pane's session hand-off). The desktop half lives under
+  // /api/auth/cloud-login and runs on the site.
+  "/api/server-sync/desktop-login",
+  "/api/auth/desktop-login",
+  "/api/auth/desktop-session",
+  "/desktop-login",
   "/api/server-sync/config/generate-token",
   "/api/peer/backup",
   "/api/v1",
@@ -118,6 +126,15 @@ const PUBLIC_PATHS = [
   // definition (the token exists precisely to mint the first one). Same shape
   // as accept-invite.
   "/api/auth/impersonate-handoff",
+  // Phase 46 — «ورود با حساب ابری». On the cloud, the desktop pane's
+  // single-use session code is the credential (same shape as the handoff
+  // above). On the desktop, nobody is signed in yet when the button is pressed
+  // or when the browser hands back: `start` mints only a state cookie, and
+  // `callback` signs no one in unless that cookie matches and the cloud
+  // redeems the code for this install's own bearer credential.
+  "/api/auth/desktop-session",
+  "/api/auth/cloud-login/start",
+  "/api/auth/cloud-login/callback",
   // First-run flow: /welcome bootstraps an empty install; the state endpoint
   // answers "needsBootstrap" (and nothing more) without a session.
   "/welcome",
@@ -169,6 +186,9 @@ const PUBLIC_PATHS = [
   "/api/server-sync/push",
   "/api/server-sync/pull",
   "/api/server-sync/media",
+  // Phase 46: a paired desktop redeems a one-click sign-in code with its site
+  // bearer credential, checked in the route (server-sync-auth.ts).
+  "/api/server-sync/desktop-login",
   // The desktop's per-tick runtime report (and the pre-runtime-status
   // update-check older installs still call) authenticate with that same site
   // bearer credential. Missing from this list, every call was answered 401
@@ -490,6 +510,9 @@ function rateLimited(retryAfterMs: number): NextResponse {
 const AUTH_RATE_LIMITED_PATHS = [
   "/api/auth/login",
   "/api/auth/pin-login",
+  // Phase 46: both redeem a single-use sign-in code.
+  "/api/auth/desktop-session",
+  "/api/auth/cloud-login/callback",
   // Phase 20 Wave 3 — the biometric login ceremony's two steps. Deliberately
   // *not* the staff picker's roster read, which preceded the PIN here until it
   // turned out that sharing one 20/min budget let the login page's own loads
@@ -578,6 +601,7 @@ const SYNC_TOKEN_RATE_LIMITED_PATHS = [
   "/api/server-sync/master",
   "/api/server-sync/digest",
   "/api/server-sync/site-profile",
+  "/api/server-sync/desktop-login",
 ];
 
 /**

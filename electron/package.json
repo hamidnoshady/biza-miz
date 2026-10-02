@@ -47,9 +47,15 @@
       "local-storage.js",
       "logger.js",
       "update-engine.js",
-      "cloud-window.js",
+      "cloud-pane.js",
       "desktop-release-public-key.pem",
       "package.json"
+    ],
+    "protocols": [
+      {
+        "name": "Business Suite cloud sign-in",
+        "schemes": ["businesssuite"]
+      }
     ],
     "win": {
       "target": "nsis",

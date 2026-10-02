@@ -573,6 +573,43 @@ describe("orders", () => {
     );
     expect(echoed.rowCount).toBe(0);
   });
+
+  it("acknowledges a cloud purchase instead of waiting forever for a supplier the desktop never gets (Phase 46)", async () => {
+    const clientEventId = randomUUID();
+    await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query(
+          `INSERT INTO sync_events
+             (location_id, client_event_id, event_type, payload, occurred_at, applied_at, actor_user_id, actor_role, origin, schema_version)
+           VALUES ($1, $2, 'inventory.purchase.created', $3, now(), now(), $4, 'owner', 'local', 1)`,
+          [
+            biz.locationId,
+            clientEventId,
+            JSON.stringify({
+              purchaseId: randomUUID(),
+              supplierId: randomUUID(),
+              note: null,
+              purchaseDate: null,
+              items: [{ inventoryItemId: randomUUID(), purchaseQty: "1", totalCost: "1000" }],
+            }),
+            biz.ownerId,
+          ],
+        ),
+      ),
+    );
+
+    await syncRound();
+
+    const onDesktop = await withTenant(biz.businessId, () =>
+      query<{ applied: boolean; status: string; effect_type: string }>(
+        `SELECT se.applied_at IS NOT NULL AS applied, e.status, e.effect_type
+           FROM sync_events se JOIN sync_domain_effects e ON e.client_event_id = se.client_event_id
+          WHERE se.client_event_id = $1`,
+        [clientEventId],
+      ),
+    );
+    expect(onDesktop.rows[0]).toEqual({ applied: true, status: "applied", effect_type: "cloud_owned" });
+  });
 });
 
 /** A signed-in till session for the owner on the desktop (openShift needs one). */
