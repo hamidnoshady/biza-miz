@@ -273,6 +273,11 @@ remains a separate realm and is not the company console.
   groups on `journal_entries.project_id`.
 - **The link-validation trigger referenced a `campaigns` table that does not exist** (the Growth
   engine's table is `message_campaigns`).
+- **The destructive business operations were guarded only at the HTTP route.**
+  `resetBusiness()` and `hardDeleteBusiness()` had no internal-company check, so
+  any non-HTTP caller — a maintenance script, a future job — could have wiped
+  the platform's own books. Both now refuse inside the transaction that would
+  have done the damage, with a dedicated `ProtectedInternalBusinessError`.
 - **The billing tick ran on every deployment role.** It and the maintenance tick are now central-only.
 - `platform_billing` had no Persian ledger source label, so company entries showed raw English in
   the journal and reports drill-down.

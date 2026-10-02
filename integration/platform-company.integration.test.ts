@@ -1555,6 +1555,36 @@ describe("the internal company is excluded from the customer lifecycle", () => {
     expect(Number(rows[0].counted)).toBe(0);
   });
 
+  it("is refused by the destructive service calls, not just by their HTTP route", async () => {
+    // The route layer already answered `protected_internal_business`. The
+    // service is a second caller surface — a maintenance script or a future
+    // job does not go through HTTP — so the refusal has to live there too, or
+    // the protection is one new caller away from being absent.
+    const service = await import("../src/lib/platform-service");
+    const before = await scalar(
+      `SELECT count(*)::text AS value FROM businesses WHERE ownership_kind='platform_internal'`,
+    );
+    await expect(
+      db.withoutTenantScope("platform", () => service.resetBusiness(internal.businessId)),
+    ).rejects.toThrow(service.ProtectedInternalBusinessError);
+    await expect(
+      db.withoutTenantScope("platform", () => service.hardDeleteBusiness(internal.businessId)),
+    ).rejects.toThrow(service.ProtectedInternalBusinessError);
+
+    // Still there, with its ledger intact.
+    expect(
+      await scalar(
+        `SELECT count(*)::text AS value FROM businesses WHERE ownership_kind='platform_internal'`,
+      ),
+    ).toBe(before);
+    expect(
+      await scalar(
+        `SELECT count(*)::text AS value FROM platform_company_customers WHERE business_id=$1`,
+        [internal.businessId],
+      ),
+    ).toBeGreaterThan(0);
+  });
+
   it("keeps the whole-system backup, which is the one lifecycle it does belong to", async () => {
     // The exclusion is not "the internal company is invisible" — backup must
     // still include it, or a restore would lose the platform's own books.

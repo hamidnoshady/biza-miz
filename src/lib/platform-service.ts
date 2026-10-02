@@ -756,6 +756,17 @@ export async function resetBusiness(businessId: string): Promise<void> {
     const client = await getPool().connect();
     try {
       await client.query("BEGIN");
+      // Refuse before touching anything, inside the same transaction that
+      // would have done the damage, so a concurrent call cannot slip between
+      // the check and the first DELETE.
+      const { rows: guardRows } = await client.query<{ ownership_kind: string }>(
+        `SELECT ownership_kind FROM businesses WHERE id = $1 FOR UPDATE`,
+        [businessId],
+      );
+      if (guardRows[0]?.ownership_kind === "platform_internal") {
+        await client.query("ROLLBACK");
+        throw new ProtectedInternalBusinessError();
+      }
 
       const { rows: businessRows } = await client.query<{
         id: string;
@@ -887,11 +898,17 @@ export async function hardDeleteBusiness(businessId: string): Promise<void> {
     const client = await getPool().connect();
     try {
       await client.query("BEGIN");
-      const { rows } = await client.query<{ id: string }>(
-        `SELECT id FROM businesses WHERE id = $1 FOR UPDATE`,
+      // The row is already locked here, so the ownership check rides on the
+      // same SELECT rather than adding a second round trip.
+      const { rows } = await client.query<{ id: string; ownership_kind: string }>(
+        `SELECT id, ownership_kind FROM businesses WHERE id = $1 FOR UPDATE`,
         [businessId],
       );
       if (!rows[0]) throw new BusinessNotFoundError();
+      if (rows[0].ownership_kind === "platform_internal") {
+        await client.query("ROLLBACK");
+        throw new ProtectedInternalBusinessError();
+      }
 
       const { rows: memberIdentities } = await client.query<{ platform_user_id: string }>(
         `SELECT DISTINCT platform_user_id FROM users
@@ -1190,6 +1207,22 @@ function toGrant(row: GrantRow, viewerAdminId?: string | null): ImpersonationGra
 export class BusinessNotImpersonableError extends Error {
   constructor(reason: string) {
     super(reason);
+  }
+}
+
+/**
+ * The internal company cannot be reset, archived or deleted.
+ *
+ * The HTTP route already refused these with `protected_internal_business`;
+ * this puts the same refusal in the service, because the route is only one
+ * caller. A maintenance script, a future job or a new endpoint reaching for
+ * `resetBusiness()` straight would otherwise wipe the platform's own books —
+ * its ledger, its customer mappings and its billing outbox — and take the
+ * correction of every other business's billing with it.
+ */
+export class ProtectedInternalBusinessError extends Error {
+  constructor() {
+    super("protected_internal_business");
   }
 }
 
