@@ -1186,3 +1186,53 @@ describe("expiring contracts are bounded (#761 review)", () => {
     expect(expiring.map((c) => c.title)).toEqual(["نزدیک"]);
   });
 });
+
+describe("contract lifecycle (#761 phase E)", () => {
+  it("transitions for real, refuses an illegal one, and leaves an activity record", async () => {
+    const project = await makeProject();
+    const soon = todayIsoDate();
+    const contract = await inAlpha(() =>
+      workspace.createContract(owner(), {
+        title: "پیمان نما", contractType: "contractor", projectId: project.id,
+        status: "active", startDate: "2026-01-01", endDate: "2099-01-01",
+      }),
+    );
+    const extended = await inAlpha(() =>
+      workspace.transitionContract(owner(), contract.id, "extend", { endDate: "2099-06-01" }),
+    );
+    expect(extended.endDate).toBe("2099-06-01");
+    await expect(
+      inAlpha(() => workspace.transitionContract(owner(), contract.id, "renew", { endDate: "2100-01-01" })),
+    ).rejects.toThrow(/invalid_contract_transition/);
+
+    const terminated = await inAlpha(() => workspace.transitionContract(owner(), contract.id, "terminate", {}));
+    expect(terminated.status).toBe("terminated");
+    expect(terminated.endDate).toBe(soon);
+
+    const activity = await inAlpha(() => workspace.listActivity(owner(), { projectId: project.id }));
+    expect(activity.map((a) => a.action)).toEqual(expect.arrayContaining(["contract_extend", "contract_terminate"]));
+  });
+});
+
+describe("team workload (#761 phase E)", () => {
+  it("counts each member's open, overdue and recently done tasks on the project", async () => {
+    const project = await makeProject();
+    await inAlpha(() => workspace.setMember(owner(), project.id, alpha.memberId, "contributor"));
+    const late = await inAlpha(() =>
+      workspace.createWorkspaceTask(owner(), project.id, { title: "دیر", assigneeUserId: alpha.memberId, dueDate: "2020-01-01" }),
+    );
+    await inAlpha(() =>
+      workspace.createWorkspaceTask(owner(), project.id, { title: "باز", assigneeUserId: alpha.memberId }),
+    );
+    const done = await inAlpha(() =>
+      workspace.createWorkspaceTask(owner(), project.id, { title: "تمام", assigneeUserId: alpha.memberId }),
+    );
+    await inAlpha(() => workspace.updateWorkspaceTask(owner(), done.id, { status: "done" }));
+    void late;
+
+    const member = (await inAlpha(() => workspace.listMembers(project.id))).find((m) => m.userId === alpha.memberId)!;
+    expect(member.openTasks).toBe(2);
+    expect(member.overdueTasks).toBe(1);
+    expect(member.doneThisWeek).toBe(1);
+  });
+});

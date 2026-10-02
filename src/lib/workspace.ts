@@ -17,7 +17,9 @@ import { query, withTenantTransaction } from "./db";
 import { isoDateInTimeZone, postgresDateToIso, todayIsoDate } from "./jalali";
 import {
   BUILTIN_TEMPLATES,
+  CONTRACT_LIFECYCLE_ACTIONS,
   CONTRACT_STATUSES,
+  contractLifecycleChange,
   CONTRACT_TYPES,
   DOCUMENT_STATUSES,
   EVENT_KINDS,
@@ -896,20 +898,34 @@ export interface WorkspaceMember {
   fullName: string;
   role: WorkspaceRole;
   createdAt: string;
+  /** Workload on THIS project (#761 §13): their open tasks, how many are late, and done in the last 7 days. */
+  openTasks: number;
+  overdueTasks: number;
+  doneThisWeek: number;
 }
 
 export async function listMembers(projectId: string): Promise<WorkspaceMember[]> {
   const { rows } = await query<{
     id: string; project_id: string; user_id: string; full_name: string | null;
     role: string; created_at: string;
+    open_tasks: string; overdue_tasks: string; done_this_week: string;
   }>(
-    `SELECT m.id, m.project_id, m.user_id, u.full_name, m.role, m.created_at
+    `SELECT m.id, m.project_id, m.user_id, u.full_name, m.role, m.created_at,
+            (SELECT count(*) FROM ai_project_tasks t
+              WHERE t.project_id = m.project_id AND t.assignee_user_id = m.user_id
+                AND t.status <> 'done') AS open_tasks,
+            (SELECT count(*) FROM ai_project_tasks t
+              WHERE t.project_id = m.project_id AND t.assignee_user_id = m.user_id
+                AND t.status <> 'done' AND t.due_date < $2::date) AS overdue_tasks,
+            (SELECT count(*) FROM ai_project_tasks t
+              WHERE t.project_id = m.project_id AND t.assignee_user_id = m.user_id
+                AND t.status = 'done' AND t.completed_at >= now() - interval '7 days') AS done_this_week
        FROM workspace_members m
        LEFT JOIN users u ON u.id = m.user_id
       WHERE m.project_id = $1
       ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1 WHEN 'editor' THEN 2
                            WHEN 'contributor' THEN 3 ELSE 4 END, u.full_name`,
-    [projectId],
+    [projectId, todayIsoDate()],
   );
   return rows.map((row) => ({
     id: row.id,
@@ -918,6 +934,9 @@ export async function listMembers(projectId: string): Promise<WorkspaceMember[]>
     fullName: row.full_name ?? "—",
     role: row.role as WorkspaceRole,
     createdAt: row.created_at,
+    openTasks: Number(row.open_tasks ?? 0),
+    overdueTasks: Number(row.overdue_tasks ?? 0),
+    doneThisWeek: Number(row.done_this_week ?? 0),
   }));
 }
 
@@ -1636,6 +1655,43 @@ export async function updateContract(
     action: "updated", summary: existing.title,
   });
   return getContract(owner.businessId, id);
+}
+
+/**
+ * A contract lifecycle action (#761 §12) — complete, terminate, extend, renew —
+ * as a real transition: the rule is `contractLifecycleChange` (pure,
+ * unit-tested), the write is one statement guarded on the status it was
+ * decided against (a concurrent change makes it refuse rather than overwrite),
+ * and the activity feed records which action it was.
+ */
+export async function transitionContract(
+  owner: WorkspaceOwner,
+  id: string,
+  action: string,
+  input: { endDate?: unknown },
+): Promise<WorkspaceContract> {
+  const checked = assertEnum(action, CONTRACT_LIFECYCLE_ACTIONS, "invalid_contract_transition");
+  const existing = await getContract(owner.businessId, id);
+  if (!existing) throw new WorkspaceError("contract_not_found");
+  const change = contractLifecycleChange(checked, existing, {
+    endDate: isoDateOrNull(input.endDate, "invalid_date"),
+    today: todayIsoDate(),
+  });
+  if (!change.ok) throw new WorkspaceError(change.error);
+  const { rowCount } = await query(
+    `UPDATE workspace_contracts
+        SET status = $3, start_date = $4, end_date = $5, updated_at = now()
+      WHERE id = $1 AND business_id = $2 AND status = $6`,
+    [id, owner.businessId, change.status, change.startDate, change.endDate, existing.status],
+  );
+  if (!rowCount) throw new WorkspaceError("invalid_contract_transition");
+  await recordActivity(owner, {
+    projectId: existing.projectId, subjectType: "contract", subjectId: id,
+    action: `contract_${checked}`, summary: existing.title,
+  });
+  const updated = await getContract(owner.businessId, id);
+  if (!updated) throw new WorkspaceError("contract_not_found");
+  return updated;
 }
 
 export async function deleteContract(businessId: string, id: string): Promise<boolean> {

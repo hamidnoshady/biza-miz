@@ -9,6 +9,7 @@ import {
   resolveWorkspaceSubject,
   updateContract,
 } from "@/lib/workspace";
+import { allowedContractActions } from "@/lib/workspace-shared";
 import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../../guard";
 
 /**
@@ -33,7 +34,22 @@ export const GET = withTenantScope(
         listApprovals(owner, { subjectType: "contract", subjectId: id }),
         listComments(owner.businessId, "contract", id),
       ]);
-      return NextResponse.json({ contract, documents, approvals, comments });
+      // Whether the drawer may offer lifecycle actions: the platform permission
+      // and `edit` on this contract — the same two checks the action route runs.
+      let canTransition = owner.access?.canManageContracts === true;
+      if (canTransition) {
+        canTransition = await resolveWorkspaceSubject(owner, "contract", id, "edit").then(
+          () => true,
+          () => false,
+        );
+      }
+      return NextResponse.json({
+        contract,
+        documents,
+        approvals,
+        comments,
+        capabilities: { canTransition, allowedActions: canTransition ? allowedContractActions(contract.status) : [] },
+      });
     } catch (err) {
       return handleWorkspaceError(err);
     }

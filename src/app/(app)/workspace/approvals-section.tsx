@@ -49,6 +49,7 @@ import {
 } from "@/lib/workspace-shared";
 import { ApprovalStatusBadge, DateCell, LoadMoreFooter, workspaceError } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import { WorkspaceEntityDrawer, type WorkspaceEntityRef } from "./workspace-entity-drawer";
 
 interface ApprovalSummary {
   total: number;
@@ -95,6 +96,8 @@ export function ApprovalsSection({
   const [status, setStatus] = useState<WorkspaceApprovalStatus | "all">("pending");
   const [inbox, setInbox] = useState<Inbox>(initialInbox);
   const [deciding, setDeciding] = useState<{ row: ApprovalRow; decision: Decision } | null>(null);
+  // What is being approved, opened in the shared drawer (#761 §14).
+  const [viewing, setViewing] = useState<WorkspaceEntityRef | null>(null);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({ status });
@@ -193,7 +196,15 @@ export function ApprovalsSection({
               {approvals.map((row) => (
                 <DataTableRow key={row.id}>
                   <Td>
-                    <div className="font-medium">{row.subjectTitle || row.title}</div>
+                    {/* An explicit button, not a row click: this row also holds the
+                        decision buttons, and one press must do one thing (#761 §23). */}
+                    <button
+                      type="button"
+                      onClick={() => setViewing({ kind: row.subjectType, id: row.subjectId })}
+                      className="text-start font-medium underline-offset-4 hover:underline"
+                    >
+                      {row.subjectTitle || row.title}
+                    </button>
                     {row.note ? (
                       <div className="text-xs text-muted-foreground">{row.note}</div>
                     ) : null}
@@ -254,6 +265,8 @@ export function ApprovalsSection({
           onLoadMore={list.loadMore}
         />
       </SectionCard>
+
+      <WorkspaceEntityDrawer entity={viewing} onClose={() => setViewing(null)} onChanged={load} />
 
       {deciding ? (
         <DecisionDialog

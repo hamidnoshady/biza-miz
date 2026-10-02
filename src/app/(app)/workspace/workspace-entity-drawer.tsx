@@ -44,6 +44,7 @@ import {
 } from "@/lib/workspace-shared";
 import { workspaceError } from "./workspace-ui";
 import { WorkspaceComments, type WorkspaceComment } from "./workspace-comments";
+import { ContractExtras, DocumentExtras } from "./drawer-extras";
 import { TaskDrawerBody } from "./task-drawer";
 import { EMPTY_LOOKUPS, useWorkspaceLookups, type WorkspaceLookups } from "./use-workspace-lookups";
 
@@ -82,6 +83,8 @@ type Record_ = Record<string, unknown>;
 interface Loaded {
   record: Record_;
   comments: Comment[];
+  /** The whole response, for the record-specific extras. */
+  body: Record_;
 }
 
 function pick(body: Record_, kind: WorkspaceEntityKind): Record_ | null {
@@ -125,17 +128,18 @@ export function WorkspaceEntityDrawer({
         {entity?.kind === "task" ? (
           <TaskDrawer key={entity.id} taskId={entity.id} lookups={lookups} onChanged={onChanged} />
         ) : entity ? (
-          <DrawerBody key={`${entity.kind}:${entity.id}`} entity={entity} />
+          <DrawerBody key={`${entity.kind}:${entity.id}`} entity={entity} onChanged={onChanged} />
         ) : null}
       </SheetContent>
     </Sheet>
   );
 }
 
-function DrawerBody({ entity }: { entity: WorkspaceEntityRef }) {
+function DrawerBody({ entity, onChanged }: { entity: WorkspaceEntityRef; onChanged?: () => void }) {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState("");
 
+  const [version, setVersion] = useState(0);
   useEffect(() => {
     const abort = new AbortController();
     api<Record_>(`/api/workspace/${ENDPOINT[entity.kind]}/${entity.id}`, { signal: abort.signal }).then(
@@ -146,11 +150,11 @@ function DrawerBody({ entity }: { entity: WorkspaceEntityRef }) {
           setError(workspaceError(typeof data.error === "string" ? data.error : "subject_not_found"));
           return;
         }
-        setLoaded({ record, comments: (data.comments as Comment[] | undefined) ?? [] });
+        setLoaded({ record, comments: (data.comments as Comment[] | undefined) ?? [], body: data });
       },
     );
     return () => abort.abort();
-  }, [entity.kind, entity.id]);
+  }, [entity.kind, entity.id, version]);
 
   const title = String(loaded?.record.name ?? loaded?.record.title ?? KIND_LABELS[entity.kind]);
 
@@ -168,6 +172,17 @@ function DrawerBody({ entity }: { entity: WorkspaceEntityRef }) {
         ) : (
           <>
             <Facts kind={entity.kind} record={loaded.record} />
+            {entity.kind === "contract" ? (
+              <ContractExtras
+                body={loaded.body}
+                onChanged={() => {
+                  setVersion((n) => n + 1);
+                  onChanged?.();
+                }}
+              />
+            ) : entity.kind === "document" ? (
+              <DocumentExtras body={loaded.body} />
+            ) : null}
             <Link
               href={workspaceEntityHref(entity)}
               className="inline-flex items-center gap-1 self-start text-sm font-medium text-primary underline-offset-4 hover:underline"

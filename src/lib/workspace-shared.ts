@@ -364,6 +364,8 @@ export interface WorkspaceAccessFlags {
   canManage: boolean;
   /** Holds `workspace.approve`. */
   canApprove: boolean;
+  /** Holds `media.view` — may open a document's file (the media route's own rule). */
+  canViewMedia: boolean;
 }
 
 /**
@@ -414,6 +416,7 @@ export function workspaceAccessFlags(permissions: ReadonlySet<string>): Workspac
     canManageContracts: permissions.has("workspace.contracts_manage"),
     canManage: permissions.has("workspace.manage"),
     canApprove: permissions.has("workspace.approve"),
+    canViewMedia: permissions.has("media.view"),
   };
 }
 
@@ -958,4 +961,73 @@ export function dependencyBlocksStatus(
 export function weekStartSaturday(date: string): string {
   const day = new Date(`${date}T00:00:00Z`).getUTCDay(); // Sun=0 … Sat=6
   return addDays(date, -((day + 1) % 7));
+}
+
+/* ---------------------------------------------------------------------------
+ * Contract lifecycle (#761 §12)
+ * ------------------------------------------------------------------------- */
+
+export const CONTRACT_LIFECYCLE_ACTIONS = ["complete", "terminate", "extend", "renew"] as const;
+export type ContractLifecycleAction = (typeof CONTRACT_LIFECYCLE_ACTIONS)[number];
+
+export const CONTRACT_LIFECYCLE_LABELS: Record<ContractLifecycleAction, string> = {
+  complete: "اتمام",
+  terminate: "فسخ",
+  extend: "تمدید مدت",
+  renew: "تجدید",
+};
+
+const LIFECYCLE_FROM: Record<ContractLifecycleAction, readonly WorkspaceContractStatus[]> = {
+  // Work delivered: a live (or lapsed-but-unclosed) contract is closed out.
+  complete: ["active", "expired"],
+  // Ended early, by either side, at any point before it was closed out.
+  terminate: ["draft", "pending_approval", "active", "expired"],
+  // Same agreement, later end date.
+  extend: ["active", "expired"],
+  // A new term of an agreement that ran its course.
+  renew: ["expired", "completed"],
+};
+
+/** Pure: which lifecycle actions a contract in this status can take. */
+export function allowedContractActions(status: WorkspaceContractStatus): ContractLifecycleAction[] {
+  return CONTRACT_LIFECYCLE_ACTIONS.filter((action) => LIFECYCLE_FROM[action].includes(status));
+}
+
+/**
+ * Pure: what a lifecycle action does to a contract, or why it cannot.
+ *
+ * - complete → `completed`; terminate → `terminated` (end date = today when
+ *   it was later, so the record says when it actually stopped).
+ * - extend → stays/returns `active` with a later end date.
+ * - renew → `active` for a new term starting the day after the old end (or
+ *   today, whichever is later) and ending on the given date.
+ */
+export function contractLifecycleChange(
+  action: ContractLifecycleAction,
+  current: { status: WorkspaceContractStatus; startDate: string | null; endDate: string | null },
+  input: { endDate?: string | null; today: string },
+):
+  | { ok: true; status: WorkspaceContractStatus; startDate: string | null; endDate: string | null }
+  | { ok: false; error: string } {
+  if (!LIFECYCLE_FROM[action].includes(current.status)) return { ok: false, error: "invalid_contract_transition" };
+  const today = input.today;
+  if (action === "complete") {
+    return { ok: true, status: "completed", startDate: current.startDate, endDate: current.endDate };
+  }
+  if (action === "terminate") {
+    const endDate = current.endDate && current.endDate < today ? current.endDate : today;
+    return { ok: true, status: "terminated", startDate: current.startDate, endDate };
+  }
+  const newEnd = input.endDate ?? null;
+  if (!newEnd) return { ok: false, error: "end_date_required" };
+  if (action === "extend") {
+    const floor = current.endDate ?? today;
+    if (newEnd <= floor) return { ok: false, error: "extension_not_later" };
+    return { ok: true, status: "active", startDate: current.startDate, endDate: newEnd };
+  }
+  // renew
+  const dayAfterEnd = current.endDate ? addDays(current.endDate, 1) : today;
+  const start = dayAfterEnd > today ? dayAfterEnd : today;
+  if (newEnd <= start) return { ok: false, error: "end_before_start" };
+  return { ok: true, status: "active", startDate: start, endDate: newEnd };
 }

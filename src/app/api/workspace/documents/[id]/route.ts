@@ -28,7 +28,14 @@ export const GET = withTenantScope(
         listDocumentVersions(owner.businessId, id),
         listComments(owner.businessId, "document", id),
       ]);
-      return NextResponse.json({ document, versions, comments });
+      // Opening the file is the Media Library's question (`media.view` for a
+      // document), never widened here.
+      return NextResponse.json({
+        document,
+        versions,
+        comments,
+        capabilities: { canPreview: owner.access?.canViewMedia === true && Boolean(document.mediaAssetId) },
+      });
     } catch (err) {
       return handleWorkspaceError(err);
     }
