@@ -16,8 +16,7 @@
     "size": "node ../scripts/report-desktop-size.mjs --output=dist/desktop-size-report.md"
   },
   "dependencies": {
-    "embedded-postgres": "16.14.0-beta.17",
-    "node-forge": "^1.4.0"
+    "embedded-postgres": "16.14.0-beta.17"
   },
   "devDependencies": {
     "electron": "44.4.3",
