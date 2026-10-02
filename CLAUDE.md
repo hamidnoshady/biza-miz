@@ -509,11 +509,18 @@ versioned **events** (`sync_events` outbox/inbox) for operations, and the **mast
   closed day.
 - **Cursors are `(txid, …)` under `pg_snapshot_xmin`, never a bare id.** An id is allocated at
   INSERT, not COMMIT, and a cursor over it skips late commits.
-- **The desktop is the till; the cloud is the system of record (Phase 45).** On a Hybrid desktop
-  only the routes in `src/lib/site-routes.ts` render locally; everything else hands off to the
-  «نسخهٔ ابری» window. A new screen is cloud-by-default — add it to that list only if it must
-  work offline at the till, and then give its writes a sync event. Never give the cloud window
-  a preload. Branch settings and switches reach the desktop through
+- **The desktop is the till; the cloud is the system of record (Phase 45/46).** On a Hybrid
+  desktop only the routes in `src/lib/site-routes.ts` render locally; every other screen renders
+  the cloud inside the till window's content area (`CloudPane`, a `<webview>` hardened by
+  `electron/cloud-pane.js`) under the desktop's own full menu — no second window. A new screen is
+  cloud-by-default — add it to that list only if it must work offline at the till, and then give
+  its writes a sync event. Never give the cloud pane a preload, Node or the till's partition. The
+  cloud draws an embedded page without its sidebar only on the pane's user-agent token
+  (`src/lib/cloud-embed.ts`) — presentation, never an authorisation input. A desktop acknowledges
+  a pulled cloud event it has no screen for (stock, transfers, ledger — `siteSkipsPulledEvent`)
+  instead of deferring it forever. «ورود با حساب ابری» is single-use codes bound to one paired
+  install and a `state` cookie (`src/lib/desktop-cloud-login.ts`); offline, PIN (owners included)
+  is the way in. Branch settings and switches reach the desktop through
   `/api/server-sync/site-profile` (fetched before push/pull each tick), not through a copy at
   pairing.
 

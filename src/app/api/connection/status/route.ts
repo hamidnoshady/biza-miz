@@ -129,10 +129,15 @@ export const GET = withTenantScope(async () => {
       .at(-1) ?? null;
   // A converged point needs a successful push and pull; it is bounded by the
   // older direction, not the most recent one-way contact.
+  // With nothing waiting to go up, the last pull alone is a converged point
+  // (an idle push contacts nobody, so its timestamp stays where it was).
+  const outboundPending = Number(row?.outbound ?? 0);
   const lastConvergedAt =
-    lastSuccessfulPushAt && lastSuccessfulPullAt
-      ? [lastSuccessfulPushAt, lastSuccessfulPullAt].sort()[0]
-      : null;
+    outboundPending === 0 && lastSuccessfulPullAt
+      ? lastSuccessfulPullAt
+      : lastSuccessfulPushAt && lastSuccessfulPullAt
+        ? [lastSuccessfulPushAt, lastSuccessfulPullAt].sort()[0]
+        : null;
   // The IAM reconciliation gates every operational tick (runServerSyncTick
   // skips master data, push and pull while it fails), and it records its
   // failure only in iam_sync_state. Without reading it here, a blocked site
@@ -177,7 +182,7 @@ export const GET = withTenantScope(async () => {
     cloud,
     sync,
     externalServices: cloud,
-    outboundPending: Number(row?.outbound ?? 0),
+    outboundPending,
     inboundPending: Number(row?.inbound ?? 0),
     deferred: Number(row?.deferred ?? 0),
     conflicts: Number(row?.conflicts ?? 0),
