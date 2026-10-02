@@ -71,6 +71,7 @@ const ERROR_TRANSLATIONS: Record<string, string> = {
   user_not_found: "کاربر انتخاب‌شده فعال نیست.",
   last_owner_cannot_be_removed: "آخرین مالک پروژه را نمی‌توان حذف کرد.",
   dependency_cycle: "این وابستگی حلقه ایجاد می‌کند.",
+  dependency_unresolved: "تا وظایفی که این کار منتظر آن‌هاست انجام نشده‌اند، نمی‌توان آن را انجام‌شده زد.",
   dependency_across_projects: "وابستگی فقط میان وظایف یک پروژه ممکن است.",
   end_before_start: "تاریخ پایان نمی‌تواند پیش از تاریخ شروع باشد.",
   project_name_required: "نام پروژه الزامی است.",

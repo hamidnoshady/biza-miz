@@ -15,7 +15,9 @@ import {
   KanbanIcon,
   ListIcon,
   CalendarDaysIcon,
+  GanttChartIcon,
   PlusIcon,
+  UserCheckIcon,
   XIcon,
 } from "lucide-react";
 import {
@@ -46,14 +48,18 @@ import {
 } from "@/app/dashboard/ui";
 import { cn } from "@/lib/utils";
 import { toPersianDigits } from "@/lib/digits";
-import { formatJalali } from "@/lib/jalali";
+import { formatJalali, todayIsoDate } from "@/lib/jalali";
 import {
   PRIORITIES,
   PRIORITY_LABELS,
   TASK_BOARD_COLUMNS,
   TASK_STATUSES,
   TASK_STATUS_LABELS,
+  addDays,
   compareTasksForList,
+  deadlineTone,
+  weekStartSaturday,
+  type DeadlineTone,
   type WorkspacePriority,
   type WorkspaceTaskStatus,
 } from "@/lib/workspace-shared";
@@ -69,6 +75,15 @@ import {
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
 import type { WorkspaceIntent } from "./workspace-routes";
+import { WorkspaceEntityDrawer } from "./workspace-entity-drawer";
+
+const WORK_GROUP_LABELS: Record<DeadlineTone, string> = {
+  overdue: "عقب‌افتاده",
+  today: "امروز",
+  soon: "این هفته",
+  later: "بعداً",
+  none: "بدون مهلت",
+};
 
 /** Per-status counts over the whole filtered set (keys match the board columns). */
 type TaskSummary = { total: number; overdue: number } & Record<WorkspaceTaskStatus, number>;
@@ -93,11 +108,13 @@ export interface TaskRow {
   blockedBy: number;
 }
 
-type View = "list" | "board" | "calendar";
+type View = "work" | "list" | "board" | "timeline" | "calendar";
 
 const VIEW_TABS = [
+  { key: "work" as const, label: "کار من", icon: UserCheckIcon },
   { key: "list" as const, label: "فهرست", icon: ListIcon },
   { key: "board" as const, label: "کانبان", icon: KanbanIcon },
+  { key: "timeline" as const, label: "خط زمانی", icon: GanttChartIcon },
   { key: "calendar" as const, label: "تقویم", icon: CalendarDaysIcon },
 ];
 
@@ -122,31 +139,27 @@ export function TasksSection({
   projectId?: string;
 }) {
   const [error, setError] = useState("");
-  const [view, setView] = useState<View>("list");
+  const [view, setView] = useState<View>(projectId ? "list" : "work");
   const [mine, setMine] = useState(initialMine);
   const [openOnly, setOpenOnly] = useState(true);
   const [search, setSearch] = useState("");
   const [creating, setCreating] = useState(false);
+  const [drawer, setDrawer] = useState<string | null>(null);
   useEffect(() => {
     if (intent?.create) setCreating(true);
-    // `?open=<id>` — the drawer's «باز کردن صفحهٔ کامل» lands on this record.
-    if (intent?.openId) {
-      api<{ task?: TaskRow }>(`/api/workspace/tasks/${intent.openId}`).then(({ ok, data }) => {
-        if (ok && data.task) setEditing(data.task);
-      });
-    }
+    // `?open=<id>` — the drawer's «باز کردن فهرست وظایف» lands on this record.
+    if (intent?.openId) setDrawer(intent.openId);
   }, [intent]);
-  const [editing, setEditing] = useState<TaskRow | null>(null);
 
   const query = useMemo(() => {
     const params = new URLSearchParams();
     if (projectId) params.set("projectId", projectId);
-    if (mine) params.set("mine", "true");
-    if (openOnly) params.set("status", "open_only");
+    if (mine || view === "work") params.set("mine", "true");
+    if (openOnly || view === "work") params.set("status", "open_only");
     if (search.trim()) params.set("q", search.trim());
     const qs = params.toString();
     return `/api/workspace/tasks${qs ? `?${qs}` : ""}`;
-  }, [projectId, mine, openOnly, search]);
+  }, [projectId, mine, openOnly, search, view]);
   const list = usePagedList<TaskRow, TaskSummary>(query, "tasks");
   const tasks = list.rows;
   const load = list.reload;
@@ -175,6 +188,30 @@ export function TasksSection({
     return map;
   }, [sorted]);
 
+  // «کار من»: what needs me, by urgency — the same buckets as the dashboard.
+  const today = useMemo(() => todayIsoDate(), []);
+  const byUrgency = useMemo(() => {
+    const groups: Record<DeadlineTone, TaskRow[]> = { overdue: [], today: [], soon: [], later: [], none: [] };
+    for (const task of sorted) groups[deadlineTone(task.dueDate, today)].push(task);
+    return groups;
+  }, [sorted, today]);
+
+  // «خط زمانی»: Saturday-first week lanes, earliest first.
+  const byWeek = useMemo(() => {
+    const map = new Map<string, TaskRow[]>();
+    for (const task of sorted) {
+      if (!task.dueDate) continue;
+      const week = weekStartSaturday(task.dueDate);
+      const lane = map.get(week);
+      if (lane) lane.push(task);
+      else map.set(week, [task]);
+    }
+    return [...map.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  }, [sorted]);
+
+  const canMove = canManage || canContribute;
+  const [dragging, setDragging] = useState<string | null>(null);
+
   const byDate = useMemo(() => {
     const map = new Map<string, TaskRow[]>();
     for (const task of sorted) {
@@ -192,7 +229,7 @@ export function TasksSection({
 
       <SectionCard
         title="وظایف"
-        description="یک مجموعه، سه نما: فهرست، تختهٔ کانبان و نمای تقویمی"
+        description="یک مجموعه، چند نما: کار من، فهرست، کانبان، خط زمانی و تقویم"
         actions={
           canManage ? (
             <PrimaryButton type="button" onClick={() => setCreating(true)}>
@@ -218,14 +255,19 @@ export function TasksSection({
             placeholder="عنوان وظیفه…"
             onClear={() => setSearch("")}
           />
-          <FilterChipRow label="فیلتر وظایف">
-            <FilterChip selected={mine} onClick={() => setMine((prev) => !prev)}>
-              واگذارشده به من
-            </FilterChip>
-            <FilterChip selected={openOnly} onClick={() => setOpenOnly((prev) => !prev)}>
-              فقط باز
-            </FilterChip>
-          </FilterChipRow>
+          {/* «کار من» already means "mine, open" — its chips would show a
+              filter that is not the one applied, so they only appear in the
+              other views. */}
+          {view !== "work" ? (
+            <FilterChipRow label="فیلتر وظایف">
+              <FilterChip selected={mine} onClick={() => setMine((prev) => !prev)}>
+                واگذارشده به من
+              </FilterChip>
+              <FilterChip selected={openOnly} onClick={() => setOpenOnly((prev) => !prev)}>
+                فقط باز
+              </FilterChip>
+            </FilterChipRow>
+          ) : null}
         </div>
 
         {tasks === null ? (
@@ -239,7 +281,72 @@ export function TasksSection({
           </EmptyState>
         ) : (
           <TabPanel idPrefix="workspace-tasks" active={view}>
-            {view === "list" ? (
+            {view === "work" ? (
+              <div className="flex flex-col gap-4 p-4">
+                {(["overdue", "today", "soon", "later", "none"] as const).map((tone) =>
+                  byUrgency[tone].length ? (
+                    <section key={tone} aria-label={WORK_GROUP_LABELS[tone]} className="flex flex-col gap-2">
+                      <h3 className="text-sm font-semibold">
+                        {WORK_GROUP_LABELS[tone]}{" "}
+                        <span className="text-xs font-normal text-muted-foreground tabular-nums">
+                          {toPersianDigits(String(byUrgency[tone].length))}
+                        </span>
+                      </h3>
+                      <ul className={cn(cardClass, "divide-y divide-border/80 overflow-hidden")}>
+                        {byUrgency[tone].map((task) => (
+                          <li key={task.id}>
+                            <button
+                              type="button"
+                              onClick={() => setDrawer(task.id)}
+                              className="flex min-h-11 w-full flex-wrap items-center gap-2 px-4 py-2 text-start text-sm hover:bg-muted/40"
+                            >
+                              <span className="min-w-0 flex-1 truncate font-medium">{task.title}</span>
+                              <span className="truncate text-xs text-muted-foreground">{task.projectName}</span>
+                              <PriorityBadge priority={task.priority} />
+                              <DateCell date={task.dueDate} className="text-xs" />
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ) : null,
+                )}
+              </div>
+            ) : view === "timeline" ? (
+              byWeek.length === 0 ? (
+                <EmptyState icon={GanttChartIcon} title="وظیفهٔ مهلت‌داری نیست">
+                  برای دیدن خط زمانی، به وظایف تاریخ مهلت بدهید.
+                </EmptyState>
+              ) : (
+                // Wide by nature, so it scrolls in its own box — never the page.
+                <div className="overflow-x-auto p-4">
+                  <ol className="flex min-w-max gap-3">
+                    {byWeek.map(([week, items]) => (
+                      <li key={week} className="flex w-56 shrink-0 flex-col gap-2">
+                        <h3 className="text-xs font-semibold text-muted-foreground">
+                          هفتهٔ {formatJalali(week)}
+                          {week <= today && today < addDays(week, 7) ? " · این هفته" : ""}
+                        </h3>
+                        {items.map((task) => (
+                          <button
+                            key={task.id}
+                            type="button"
+                            onClick={() => setDrawer(task.id)}
+                            className={cn(cardClass, "flex min-h-11 flex-col gap-1 p-2 text-start text-sm")}
+                          >
+                            <span className="truncate font-medium">{task.title}</span>
+                            <span className="flex items-center gap-1.5">
+                              <TaskStatusBadge status={task.status} />
+                              <DateCell date={task.dueDate} relative={false} className="text-xs" />
+                            </span>
+                          </button>
+                        ))}
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )
+            ) : view === "list" ? (
               <DataTable caption="فهرست وظایف میز کار" frame={false}>
                 <DataTableHead>
                   <Th>عنوان</Th>
@@ -252,7 +359,7 @@ export function TasksSection({
                 </DataTableHead>
                 <DataTableBody>
                   {sorted.map((task) => (
-                    <DataTableRow key={task.id} onClick={() => setEditing(task)}>
+                    <DataTableRow key={task.id} onClick={() => setDrawer(task.id)}>
                       <Td>
                         <div className="flex flex-col">
                           <span className="font-medium">{task.title}</span>
@@ -297,12 +404,37 @@ export function TasksSection({
                           {toPersianDigits(String(list.summary?.[column] ?? items.length))}
                         </span>
                       </header>
-                      <div className="flex min-h-24 flex-col gap-2 rounded-xl bg-muted/40 p-2">
+                      <div
+                        className={cn(
+                          "flex min-h-24 flex-col gap-2 rounded-xl bg-muted/40 p-2",
+                          dragging && "outline-dashed outline-1 outline-border",
+                        )}
+                        onDragOver={(event) => {
+                          if (canMove && dragging) event.preventDefault();
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          const id = event.dataTransfer.getData("text/plain");
+                          const task = sorted.find((t) => t.id === id);
+                          setDragging(null);
+                          if (task && task.status !== column) void move(task, column);
+                        }}
+                      >
                         {items.map((task) => (
-                          <article key={task.id} className={cn(cardClass, "flex flex-col gap-2 p-3")}>
+                          <article
+                            key={task.id}
+                            className={cn(cardClass, "flex flex-col gap-2 p-3", canMove && "cursor-grab")}
+                            draggable={canMove}
+                            onDragStart={(event) => {
+                              event.dataTransfer.setData("text/plain", task.id);
+                              event.dataTransfer.effectAllowed = "move";
+                              setDragging(task.id);
+                            }}
+                            onDragEnd={() => setDragging(null)}
+                          >
                             <button
                               type="button"
-                              onClick={() => setEditing(task)}
+                              onClick={() => setDrawer(task.id)}
                               className="text-start text-sm font-medium underline-offset-4 hover:underline"
                             >
                               {task.title}
@@ -312,7 +444,9 @@ export function TasksSection({
                               <PriorityBadge priority={task.priority} />
                               <DateCell date={task.dueDate} relative={false} className="text-xs" />
                             </div>
-                            {canManage || canContribute ? (
+                            {canMove ? (
+                              // The keyboard / touch path: drag-and-drop is
+                              // never the only way to change a status.
                               <label className="block">
                                 <span className="sr-only">ستون «{task.title}»</span>
                                 <select
@@ -365,7 +499,7 @@ export function TasksSection({
                           <li key={task.id} className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm">
                             <button
                               type="button"
-                              onClick={() => setEditing(task)}
+                              onClick={() => setDrawer(task.id)}
                               className="min-w-0 flex-1 truncate text-start font-medium underline-offset-4 hover:underline"
                             >
                               {task.title}
@@ -405,20 +539,12 @@ export function TasksSection({
         />
       ) : null}
 
-      {editing ? (
-        <TaskDialog
-          lookups={lookups}
-          task={editing}
-          canManage={canManage}
-          canContribute={canContribute}
-          onClose={() => setEditing(null)}
-          onSaved={() => {
-            setEditing(null);
-            load();
-          }}
-          onError={setError}
-        />
-      ) : null}
+      <WorkspaceEntityDrawer
+        entity={drawer ? { kind: "task", id: drawer } : null}
+        onClose={() => setDrawer(null)}
+        lookups={lookups}
+        onChanged={load}
+      />
     </div>
   );
 }

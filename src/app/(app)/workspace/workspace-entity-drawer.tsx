@@ -25,7 +25,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
-import { api, ErrorBox, PrimaryButton, inputClass } from "@/app/dashboard/ui";
+import { api, ErrorBox } from "@/app/dashboard/ui";
 import { useMoney } from "@/components/money/money-context";
 import { workspaceProjectHref, workspaceSectionHref } from "@/lib/app-routes";
 import { formatJalali } from "@/lib/jalali";
@@ -43,6 +43,9 @@ import {
   type WorkspaceTaskStatus,
 } from "@/lib/workspace-shared";
 import { workspaceError } from "./workspace-ui";
+import { WorkspaceComments, type WorkspaceComment } from "./workspace-comments";
+import { TaskDrawerBody } from "./task-drawer";
+import { EMPTY_LOOKUPS, useWorkspaceLookups, type WorkspaceLookups } from "./use-workspace-lookups";
 
 export type WorkspaceEntityKind = "project" | "task" | "document" | "contract";
 export interface WorkspaceEntityRef {
@@ -72,12 +75,7 @@ export function workspaceEntityHref(ref: WorkspaceEntityRef): string {
   return `${workspaceSectionHref(section)}?open=${encodeURIComponent(ref.id)}`;
 }
 
-interface Comment {
-  id: string;
-  body: string;
-  authorName: string;
-  createdAt: string;
-}
+type Comment = WorkspaceComment;
 
 type Record_ = Record<string, unknown>;
 
@@ -95,9 +93,15 @@ export function WorkspaceEntityDrawer({
   entity,
   onClose,
   returnFocusTo,
+  lookups = EMPTY_LOOKUPS,
+  onChanged,
 }: {
   entity: WorkspaceEntityRef | null;
   onClose: () => void;
+  /** The pickers an editable task needs (assignee). */
+  lookups?: WorkspaceLookups;
+  /** A write landed in the drawer — the list behind it refreshes. */
+  onChanged?: () => void;
   /**
    * Where focus goes on close when the drawer was not opened by a trigger
    * Radix knows about (e.g. from the palette, which has already closed) —
@@ -118,7 +122,11 @@ export function WorkspaceEntityDrawer({
           }
         }}
       >
-        {entity ? <DrawerBody key={`${entity.kind}:${entity.id}`} entity={entity} /> : null}
+        {entity?.kind === "task" ? (
+          <TaskDrawer key={entity.id} taskId={entity.id} lookups={lookups} onChanged={onChanged} />
+        ) : entity ? (
+          <DrawerBody key={`${entity.kind}:${entity.id}`} entity={entity} />
+        ) : null}
       </SheetContent>
     </Sheet>
   );
@@ -168,10 +176,58 @@ function DrawerBody({ entity }: { entity: WorkspaceEntityRef }) {
               باز کردن صفحهٔ کامل
             </Link>
             {entity.kind !== "project" ? (
-              <Comments entity={entity} initial={loaded.comments} />
+              <WorkspaceComments
+                subjectType={entity.kind}
+                subjectId={entity.id}
+                initial={loaded.comments}
+              />
             ) : null}
           </>
         )}
+      </div>
+    </>
+  );
+}
+
+/** A task edits in place (#761 §9) — its own body, same frame. */
+function TaskDrawer({
+  taskId,
+  lookups,
+  onChanged,
+}: {
+  taskId: string;
+  lookups: WorkspaceLookups;
+  onChanged?: () => void;
+}) {
+  const [title, setTitle] = useState("وظیفه");
+  const [comments, setComments] = useState<Comment[] | null>(null);
+  // Opened from the command palette there are no lookups to hand down; an
+  // editable assignee with an empty member list would silently clear it.
+  const fetched = useWorkspaceLookups(lookups === EMPTY_LOOKUPS);
+  const people = lookups === EMPTY_LOOKUPS ? fetched : lookups;
+  useEffect(() => {
+    api<{ comments?: Comment[] }>(`/api/workspace/tasks/${taskId}`).then(({ ok, data }) => {
+      if (ok) setComments(data.comments ?? []);
+    });
+  }, [taskId]);
+  return (
+    <>
+      <SheetHeader className="shrink-0 border-b border-border/80 px-4 py-3 pe-12">
+        <SheetDescription>{KIND_LABELS.task}</SheetDescription>
+        <SheetTitle className="truncate">{title}</SheetTitle>
+      </SheetHeader>
+      <div className="flex flex-col gap-4 p-4">
+        <TaskDrawerBody taskId={taskId} lookups={people} onChanged={onChanged} onTitle={setTitle} />
+        <Link
+          href={workspaceEntityHref({ kind: "task", id: taskId })}
+          className="inline-flex items-center gap-1 self-start text-sm font-medium text-primary underline-offset-4 hover:underline"
+        >
+          <ArrowUpLeftIcon className="size-4" aria-hidden />
+          باز کردن فهرست وظایف
+        </Link>
+        {comments ? (
+          <WorkspaceComments subjectType="task" subjectId={taskId} initial={comments} />
+        ) : null}
       </div>
     </>
   );
@@ -239,66 +295,5 @@ function Facts({ kind, record }: { kind: WorkspaceEntityKind; record: Record_ })
         <p className="whitespace-pre-line text-sm text-muted-foreground">{description}</p>
       ) : null}
     </div>
-  );
-}
-
-/**
- * The record's comment thread. Posting goes through `/api/workspace/comments`,
- * which re-checks `contribute` on the subject — a viewer who tries gets the
- * server's Persian refusal, not a silent failure.
- */
-function Comments({ entity, initial }: { entity: WorkspaceEntityRef; initial: Comment[] }) {
-  const [comments, setComments] = useState(initial);
-  const [body, setBody] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  async function submit() {
-    if (!body.trim() || saving) return;
-    setSaving(true);
-    const { ok, data } = await api<{ comments: Comment[]; error?: string }>("/api/workspace/comments", {
-      method: "POST",
-      body: JSON.stringify({ subjectType: entity.kind, subjectId: entity.id, body }),
-    });
-    setSaving(false);
-    if (ok) {
-      setComments(data.comments);
-      setBody("");
-      setError("");
-    } else setError(workspaceError(data.error));
-  }
-
-  return (
-    <section aria-label="یادداشت‌ها" className="flex flex-col gap-2 border-t border-border/80 pt-4">
-      <h3 className="text-sm font-semibold">یادداشت‌ها</h3>
-      {comments.length === 0 ? (
-        <p className="text-sm text-muted-foreground">هنوز یادداشتی نیست.</p>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {comments.map((comment) => (
-            <li key={comment.id} className="rounded-lg bg-muted/40 p-2 text-sm">
-              <div className="text-xs text-muted-foreground">
-                {comment.authorName} · {formatJalali(comment.createdAt)}
-              </div>
-              <p className="whitespace-pre-line">{comment.body}</p>
-            </li>
-          ))}
-        </ul>
-      )}
-      {error ? <ErrorBox>{error}</ErrorBox> : null}
-      <label className="sr-only" htmlFor={`comment-${entity.id}`}>یادداشت تازه</label>
-      <textarea
-        id={`comment-${entity.id}`}
-        className={`${inputClass} min-h-20`}
-        value={body}
-        onChange={(event) => setBody(event.target.value)}
-        placeholder="یادداشتی بنویسید…"
-      />
-      <div>
-        <PrimaryButton type="button" onClick={submit} disabled={!body.trim() || saving}>
-          {saving ? "در حال ثبت…" : "ثبت یادداشت"}
-        </PrimaryButton>
-      </div>
-    </section>
   );
 }

@@ -35,6 +35,9 @@ import {
   workspaceAccessFlags,
   daysUntil,
   deadlineTone,
+  dependencyBlocksStatus,
+  projectHealth,
+  weekStartSaturday,
   dependenciesSatisfied,
   isWorkspaceSection,
   normalizeTags,
@@ -374,5 +377,52 @@ describe("intervalOrdered", () => {
     expect(intervalOrdered("2026-01-01", "2026-01-01")).toBe(true);
     expect(intervalOrdered("2026-02-01", "2026-01-01")).toBe(false);
     expect(intervalOrdered("10:00", "09:30")).toBe(false);
+  });
+});
+
+describe("projectHealth", () => {
+  const base = {
+    today: "2026-06-01", startDate: "2026-01-01", endDate: "2026-12-31", completed: false,
+    taskCount: 10, doneTaskCount: 5, overdueTaskCount: 0, budgetRial: 1000, spentRial: 100,
+    pendingApprovals: 0, expiringContracts: 0,
+  };
+  it("is on track when progress keeps pace with time", () => {
+    expect(projectHealth(base)).toMatchObject({ health: "on_track", reasons: [] });
+  });
+  it("flags trailing progress as at risk, then off track", () => {
+    expect(projectHealth({ ...base, doneTaskCount: 3 }).health).toBe("at_risk");
+    expect(projectHealth({ ...base, doneTaskCount: 1 })).toMatchObject({
+      health: "off_track", reasons: ["behind_schedule"],
+    });
+  });
+  it("puts severe reasons first and never judges budget without the ledger", () => {
+    const r = projectHealth({ ...base, spentRial: 1200, overdueTaskCount: 2 });
+    expect(r.health).toBe("off_track");
+    expect(r.reasons).toEqual(["over_budget", "overdue_tasks"]);
+    expect(projectHealth({ ...base, spentRial: null }).reasons).not.toContain("over_budget");
+    expect(projectHealth({ ...base, spentRial: 950 }).reasons).toContain("budget_nearly_spent");
+  });
+  it("treats a passed deadline with open work as off track, and a completed project as fine", () => {
+    expect(projectHealth({ ...base, today: "2027-01-05" }).reasons).toContain("past_deadline");
+    expect(projectHealth({ ...base, today: "2027-01-05", completed: true }).health).toBe("on_track");
+  });
+  it("does not judge schedule before the start date", () => {
+    expect(projectHealth({ ...base, today: "2025-12-01", doneTaskCount: 0 }).reasons).toEqual([]);
+  });
+});
+
+describe("dependencyBlocksStatus", () => {
+  it("refuses done with open blockers, allows everything else", () => {
+    expect(dependencyBlocksStatus("done", 1)).toBe(true);
+    expect(dependencyBlocksStatus("done", 0)).toBe(false);
+    expect(dependencyBlocksStatus("in_progress", 3)).toBe(false);
+  });
+});
+
+describe("weekStartSaturday", () => {
+  it("snaps any day to the Saturday that opens its Persian week", () => {
+    expect(weekStartSaturday("2026-10-03")).toBe("2026-10-03"); // a Saturday
+    expect(weekStartSaturday("2026-10-09")).toBe("2026-10-03"); // the Friday after
+    expect(weekStartSaturday("2026-10-02")).toBe("2026-09-26"); // the Friday before
   });
 });

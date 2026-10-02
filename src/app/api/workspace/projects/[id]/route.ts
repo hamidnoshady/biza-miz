@@ -1,14 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import {
+  contractListPage,
   getWorkspaceProject,
   listActivity,
   listMembers,
   listPhases,
+  projectReport,
   requireProjectCapability,
   updateWorkspaceProject,
 } from "@/lib/workspace";
-import { projectCapabilities, workspaceAccessFlags } from "@/lib/workspace-shared";
+import { todayIsoDate } from "@/lib/jalali";
+import { projectCapabilities, projectHealth, workspaceAccessFlags } from "@/lib/workspace-shared";
 import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../../guard";
 
 /**
@@ -30,15 +33,40 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     try {
       const role = await requireProjectCapability(owner, id, "view");
-      const [project, phases, members, activity] = await Promise.all([
+      const [project, phases, members, activity, [report], expiring] = await Promise.all([
         getWorkspaceProject(owner.businessId, id),
         listPhases(id),
         listMembers(id),
         listActivity(owner, { projectId: id, limit: 20 }),
+        projectReport(owner, { projectId: id }),
+        contractListPage(owner, { projectId: id, status: "all", expiringWithinDays: 30, limit: 1 }),
       ]);
       if (!project) return NextResponse.json({ error: "project_not_found" }, { status: 404 });
+      // The cockpit's attention strip and health verdict, from the same
+      // scoped report the Reports section reads (spend is null without
+      // ledger.view, and then budget is simply not judged).
+      const attention = {
+        overdueTasks: report?.overdueTaskCount ?? 0,
+        pendingApprovals: report?.openApprovals ?? 0,
+        expiringContracts: expiring.page.total,
+        spentRial: report?.spentRial ?? null,
+        contractValueRial: report?.contractValueRial ?? 0,
+      };
+      const health = projectHealth({
+        today: todayIsoDate(),
+        startDate: project.startDate,
+        endDate: project.endDate,
+        completed: project.status === "completed",
+        taskCount: project.taskCount,
+        doneTaskCount: project.doneTaskCount,
+        overdueTaskCount: attention.overdueTasks,
+        budgetRial: project.budgetRial,
+        spentRial: attention.spentRial,
+        pendingApprovals: attention.pendingApprovals,
+        expiringContracts: attention.expiringContracts,
+      });
       const capabilities = projectCapabilities(role, owner.access ?? workspaceAccessFlags(new Set()));
-      return NextResponse.json({ project, phases, members, activity, role, capabilities });
+      return NextResponse.json({ project, phases, members, activity, role, capabilities, attention, health });
     } catch (err) {
       return handleWorkspaceError(err);
     }
