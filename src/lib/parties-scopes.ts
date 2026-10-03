@@ -171,16 +171,17 @@ export const PARTY_SCOPES_DEF: readonly PartyScopeDef[] = [
     app: "growth",
     roles: ["Customer"],
     defaultRole: "Customer",
-    label: "مشتریان",
-    description: "مشتریان رشد: چرخهٔ حیات، امتیاز و خرید — افزودن و ویرایش در همین بخش",
+    label: "مخاطبان",
+    description: "بینش مخاطبان رشد: چرخهٔ حیات، امتیاز و خرید — ویرایش پرونده در CRM",
     href: "/growth/customers",
     columns: ["displayName", "phone", "status"],
     accounting: "hidden",
-    // Growth manages its own customers screen (its own lifecycle/loyalty columns,
-    // its own add/edit form) over the same shared `parties` row — the record is
-    // still one thing, so there is no second table for the duplicates screen to
-    // clean up. Only the 360° file (notes, tags, timeline) stays CRM's.
-    readOnly: false,
+    // Issue #764: Growth *reads* the shared record (lifecycle, spend, loyalty,
+    // reachability) and acts on audiences; it does not own the customer's
+    // identity. Creating, editing and archiving a customer is the CRM's door,
+    // and the Growth audience screen links there rather than mounting a second
+    // add/edit form over the same row.
+    readOnly: true,
   },
   {
     key: "sales",

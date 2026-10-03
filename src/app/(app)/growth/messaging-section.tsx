@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { MessageCircleIcon, PlusIcon, SendIcon, WalletCardsIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -59,31 +60,14 @@ interface Campaign {
   createdAt: string;
 }
 
-interface CreditPackage {
-  id: string;
-  name: string;
-  priceRial: number;
-  creditAmountRial: number;
-}
-
-interface Ledger {
-  id: string;
-  kind: string;
-  amountRial: number;
-  actualCostRial: number | null;
-  note: string | null;
-  createdAt: string;
-}
-
 interface Data {
   config: {
     enabled: boolean;
     configured: boolean;
     rate: { smsRialPerSegment: number; emailRialPerSend: number };
   };
+  /** The central wallet's usable balance — shown, never bought, here. */
   billing: { balanceRial: number };
-  packages: CreditPackage[];
-  ledger: Ledger[];
   templates: Template[];
   campaigns: Campaign[];
   segments: Segment[];
@@ -138,8 +122,25 @@ function displayMessagingError(code: string | undefined, fallback: string): stri
   return errorMessageOrRaw(code);
 }
 
-/** Campaign composer and message-credit statement; consent and recipient selection remain server-side in CRM. */
-export function MessagingSection() {
+/** The central wallet page: the only place credit is bought (issue #764). */
+export const CENTRAL_BILLING_HREF = "/settings/billing";
+
+/**
+ * Outbound SMS/email campaigns: templates, audience (a CRM segment, filtered
+ * for consent server-side), a real sample, cost estimate and send status.
+ *
+ * Growth does not run a second billing centre. The balance shown is the
+ * platform wallet's, the estimate is checked against it, and buying credit is
+ * a link to `/settings/billing` (issue #764). Composing and sending need
+ * `campaigns.manage`; `campaigns.view` sees the campaigns and their results.
+ */
+export function MessagingSection({
+  canManage,
+  initialPromotionId,
+}: {
+  canManage: boolean;
+  initialPromotionId?: string;
+}) {
   const money = useMoney();
   const [data, setData] = useState<Data | null>(null);
   const [loading, setLoading] = useState(true);
@@ -155,7 +156,9 @@ export function MessagingSection() {
   const [templateId, setTemplateId] = useState("");
   const [segmentId, setSegmentId] = useState("");
   const [projectId, setProjectId] = useState("");
-  const [promotionId, setPromotionId] = useState("");
+  // Arriving from a discount campaign's «اطلاع‌رسانی با پیام» preselects it as
+  // this message's attributable promotion.
+  const [promotionId, setPromotionId] = useState(initialPromotionId ?? "");
   const [audience, setAudience] = useState<Audience | null>(null);
   const [audienceLoading, setAudienceLoading] = useState(false);
   const [messagePreview, setMessagePreview] = useState<MessagePreview | null>(null);
@@ -305,11 +308,6 @@ export function MessagingSection() {
     if (saved) setNotice("فهرست مخاطبانِ مجاز ثابت شد و پیام‌ها در صف ارسال قرار گرفتند.");
   }
 
-  async function requestTopUp(packageId: string) {
-    const saved = await send({ action: "top_up", packageId }, `topup:${packageId}`);
-    if (saved) setNotice("درخواست شارژ برای تأیید پلتفرم ثبت شد.");
-  }
-
   if (!data) {
     if (loading) return <SectionCardSkeleton rows={7} label="در حال بارگذاری پیام‌رسانی" />;
     return (
@@ -328,6 +326,7 @@ export function MessagingSection() {
   const estimatedAudienceCost = messagePreview
     ? sendableAudience * messagePreview.costRial
     : sendableAudience * costPerRecipient;
+  const insufficientCredit = audience !== null && estimatedAudienceCost > data.billing.balanceRial;
 
   return (
     <div className="space-y-4 sm:space-y-5">
@@ -337,8 +336,14 @@ export function MessagingSection() {
       <section className="grid gap-3 md:grid-cols-3" aria-label="وضعیت پیام‌رسانی">
         <div className={`${cardClass} min-w-0 p-4`}>
           <WalletCardsIcon aria-hidden="true" className="size-5 text-amber-600 dark:text-amber-400" />
-          <p className="mt-2 text-xs text-muted-foreground">مانده اعتبار پیام</p>
+          <p className="mt-2 text-xs text-muted-foreground">اعتبار قابل استفاده (کیف پول پلتفرم)</p>
           <b className="mt-1 block break-words text-lg">{money.format(data.billing.balanceRial)}</b>
+          <Link
+            href={CENTRAL_BILLING_HREF}
+            className="mt-2 inline-flex min-h-11 items-center text-xs font-medium text-teal-700 underline-offset-4 hover:underline focus-visible:underline focus-visible:outline-none"
+          >
+            افزایش اعتبار و سوابق پرداخت در «اعتبار و پرداخت‌ها»
+          </Link>
         </div>
         <div className={`${cardClass} min-w-0 p-4`}>
           <MessageCircleIcon aria-hidden="true" className="size-5 text-amber-600 dark:text-amber-400" />
@@ -356,6 +361,7 @@ export function MessagingSection() {
         </div>
       </section>
 
+      {canManage ? (
       <div className="grid gap-4 xl:grid-cols-2">
         <SectionCard
           title="الگوی پیام"
@@ -476,6 +482,15 @@ export function MessagingSection() {
               </select>
             </Field>
 
+            {insufficientCredit ? (
+              <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-6 text-destructive">
+                برآورد هزینهٔ این ارسال ({money.format(estimatedAudienceCost)}) از اعتبار قابل استفاده بیشتر است.{" "}
+                <Link href={CENTRAL_BILLING_HREF} className="font-medium underline underline-offset-4">
+                  افزایش اعتبار
+                </Link>
+              </div>
+            ) : null}
+
             {audienceLoading ? (
               <LoadingSkeleton rows={2} compact label="در حال بررسی مخاطبان مجاز" />
             ) : audience ? (
@@ -528,6 +543,9 @@ export function MessagingSection() {
           </form>
         </SectionCard>
       </div>
+      ) : (
+        <InfoBox>ساخت الگو و ارسال کمپین پیامی به مجوز «اجرای کمپین» نیاز دارد؛ این‌جا وضعیت و نتیجهٔ کمپین‌ها را می‌بینید.</InfoBox>
+      )}
 
       <SectionCard title="کمپین‌های پیام" description="با شروع ارسال، فهرست مشتریانِ مجاز همان لحظه ثابت و در صف خروجی ثبت می‌شود.">
         {data.campaigns.length ? (
@@ -548,7 +566,7 @@ export function MessagingSection() {
                     </p>
                   </div>
 
-                  {campaign.status === "draft" ? (
+                  {!canManage ? null : campaign.status === "draft" ? (
                     <div className="flex w-full flex-wrap items-end gap-2 sm:w-auto sm:flex-nowrap">
                       {needsDiscountCode ? (
                         <label className="min-w-0 flex-1 sm:w-52 sm:flex-none">
@@ -598,51 +616,6 @@ export function MessagingSection() {
         )}
       </SectionCard>
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <SectionCard title="خرید اعتبار" description="بسته را انتخاب کنید؛ مبلغ و اعتبار آن در درخواست شما ثابت می‌شود.">
-          <div className="space-y-2">
-            {data.packages.length ? (
-              data.packages.map((pkg) => (
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/80 p-3" key={pkg.id}>
-                  <div className="min-w-0">
-                    <b className="break-words">{pkg.name}</b>
-                    <p className="text-xs leading-5 text-muted-foreground">
-                      {money.format(pkg.creditAmountRial)} اعتبار در برابر {money.format(pkg.priceRial)}
-                    </p>
-                  </div>
-                  <Button
-                    variant="outline"
-                    className="min-h-11 w-full sm:w-auto"
-                    disabled={busy === `topup:${pkg.id}`}
-                    onClick={() => void requestTopUp(pkg.id)}
-                  >
-                    {busy === `topup:${pkg.id}` ? "در حال ثبت…" : "درخواست شارژ"}
-                  </Button>
-                </div>
-              ))
-            ) : (
-              <EmptyState>بستهٔ فعالی از سوی پلتفرم تعریف نشده است.</EmptyState>
-            )}
-          </div>
-        </SectionCard>
-
-        <SectionCard title="گردش اعتبار اخیر">
-          <div className="space-y-2">
-            {data.ledger.length ? (
-              data.ledger.map((row) => (
-                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-sm" key={row.id}>
-                  <span className="min-w-0 break-words text-muted-foreground">{row.note ?? row.kind}</span>
-                  <b className={row.amountRial >= 0 ? "shrink-0 text-emerald-700 dark:text-emerald-300" : "shrink-0 text-rose-700 dark:text-rose-300"}>
-                    {row.amountRial >= 0 ? "+" : ""}{money.format(row.amountRial)}
-                  </b>
-                </div>
-              ))
-            ) : (
-              <EmptyState>هنوز گردش اعتباری ثبت نشده است.</EmptyState>
-            )}
-          </div>
-        </SectionCard>
-      </div>
     </div>
   );
 }

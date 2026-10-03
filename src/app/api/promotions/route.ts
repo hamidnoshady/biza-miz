@@ -15,14 +15,14 @@ import {
  * `listPromotions` server-side and never through this route.
  */
 export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.loyaltyView);
+  const { session, error } = await requirePermission(PERMISSIONS.campaignsView);
   if (error) return error;
   return NextResponse.json({ promotions: await listPromotionCatalogue(session.businessId) });
 });
 
 /** Creates or edits one promotion. */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.loyaltyManage);
+  const { session, error } = await requirePermission(PERMISSIONS.campaignsManage);
   if (error) return error;
 
   let body: PromotionInput;
@@ -54,7 +54,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
  * validation on the way back in. One boolean in, one boolean written.
  */
 export const PATCH = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.loyaltyManage);
+  const { session, error } = await requirePermission(PERMISSIONS.campaignsManage);
   if (error) return error;
 
   let body: { id?: unknown; isActive?: unknown };

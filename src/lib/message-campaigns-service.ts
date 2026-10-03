@@ -27,6 +27,7 @@ import { toPersianDigits } from "./digits";
 import { getPublicMessageConfig } from "./messaging-billing";
 import { messageCostRial } from "./messaging-billing-pure";
 import { storeCreditBalance } from "./loyalty-service";
+import { getGrowthSettings } from "./growth-settings-service";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested)
@@ -660,7 +661,19 @@ export interface MessageCampaignRoiRow {
   roiPercent: number | null;
 }
 
-export async function listMessageCampaignRoiReport(businessId: string): Promise<MessageCampaignRoiRow[]> {
+/**
+ * `attributionWindowDays` (Growth settings, issue #764) bounds how long after a
+ * campaign starts a sale using its promotion still counts for it; `null` keeps
+ * the old, unbounded reading. Defaults to the business's saved setting.
+ */
+export async function listMessageCampaignRoiReport(
+  businessId: string,
+  options: { attributionWindowDays?: number | null } = {},
+): Promise<MessageCampaignRoiRow[]> {
+  const attributionWindowDays =
+    options.attributionWindowDays !== undefined
+      ? options.attributionWindowDays
+      : (await getGrowthSettings(businessId)).attributionWindowDays;
   const { rows } = await query<{
     campaignId: string;
     campaignName: string;
@@ -697,6 +710,8 @@ export async function listMessageCampaignRoiReport(businessId: string): Promise<
                FROM promotion_applications pa
               WHERE pa.business_id = c.business_id AND pa.promotion_id = c.promotion_id
                 AND pa.created_at >= COALESCE(c.started_at, c.created_at)
+                AND ($2::int IS NULL
+                     OR pa.created_at < COALESCE(c.started_at, c.created_at) + make_interval(days => $2::int))
               GROUP BY pa.source_id
            ) applied
            JOIN orders o ON o.id = applied.source_id AND o.status = 'completed'
@@ -705,7 +720,7 @@ export async function listMessageCampaignRoiReport(businessId: string): Promise<
       WHERE c.business_id = $1 AND c.promotion_id IS NOT NULL
       ORDER BY c.created_at DESC
       LIMIT 200`,
-    [businessId],
+    [businessId, attributionWindowDays],
   );
   return rows.map((row) => {
     const spentRial = Number(row.spentRial);
