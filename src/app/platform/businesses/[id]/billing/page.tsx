@@ -31,7 +31,7 @@ import {
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { PlatformStatusBadge } from "@/components/platform/status-badge";
 import { PlatformConfirmDialog } from "@/components/platform/dialogs";
-import { tomanLabel } from "@/lib/platform-money";
+import { parseSafeIntInput, tomanLabel } from "@/lib/platform-money";
 import { api, Button, Card, ErrorBox, Field, InfoBox, inputClass, selectClass, useCan } from "../../../ui";
 
 // ---------------------------------------------------------------------------
@@ -62,7 +62,17 @@ interface BusinessBillingData {
     totalRial: number;
     lines: { kind: string; description: string; quantity: number; unitAmountRial: number; amountRial: number; featureKey: string | null }[];
   } | null;
-  wallet: { balanceRial: number; totalToppedUpRial: number; totalSpentRial: number };
+  wallet: {
+    balanceRial: number;
+    aiDebtRial?: number;
+    netBalanceRial?: number;
+    aiAllowanceRemainingRial?: number;
+    usableAiCreditRial?: number;
+    totalToppedUpRial?: number;
+    totalSpentRial?: number;
+    totalCreditedRial?: number;
+    totalDebitedRial?: number;
+  };
   ledger: {
     id: string;
     kind: string;
@@ -114,8 +124,16 @@ interface BusinessBillingData {
     }[];
   };
   ai: {
-    allowance: { monthlyCreditRial: number; usedRial: number; remainingRial: number };
+    allowance: {
+      monthlyCreditRial: number;
+      configuredCreditRial?: number;
+      effectiveCreditRial?: number;
+      usedRial: number;
+      remainingRial: number;
+    };
     walletSpentRial: number;
+    aiDebtRial?: number;
+    usableAiCreditRial?: number;
   };
   messaging: { balanceRial: number };
   media: { usage: { totalBytes: number; assetCount: number; byKind: Record<string, { count: number; bytes: number }> } };
@@ -909,19 +927,23 @@ function WalletTab({
   async function adjust(ev: FormEvent) {
     ev.preventDefault();
     onError("");
-    const amount = Number(toLatinDigits(amountToman || "0"));
-    if (!amount) {
-      onError("مبلغ را وارد کنید (برای کسر، منفی).");
+    const amount = parseSafeIntInput(amountToman, { min: -Number.MAX_SAFE_INTEGER });
+    if (amount === null || amount === 0) {
+      onError("مبلغ معتبر (عدد صحیح غیرصفر؛ برای کسر منفی) وارد کنید.");
       return;
     }
     onBusy("adjust");
-    const { ok, data: res } = await api<{ error?: string }>(
+    const { ok, data: res } = await api<{ error?: string; debtPaidRial?: number }>(
       `/api/platform/billing/businesses/${businessId}`,
       { method: "POST", body: JSON.stringify({ amountRial: amount * 10, note: note.trim() || undefined }) },
     );
     onBusy(null);
     if (ok) {
-      onInfo(amount > 0 ? "اعتبار افزوده شد." : "اعتبار کسر شد.");
+      const debtMsg =
+        res.debtPaidRial && res.debtPaidRial > 0
+          ? ` (${tomanLabel(res.debtPaidRial)} بابت بدهی معوق هوش مصنوعی تسویه شد.)`
+          : "";
+      onInfo((amount > 0 ? "اعتبار افزوده شد." : "اعتبار کسر شد.") + debtMsg);
       setAmountToman("");
       setNote("");
       await onReload();
@@ -963,8 +985,22 @@ function WalletTab({
           <div>
             <p className="text-2xl font-extrabold tabular-nums text-foreground">{tomanLabel(data.wallet.balanceRial)}</p>
             <p className="text-xs text-muted-foreground">
-              مجموع شارژ: {tomanLabel(data.wallet.totalToppedUpRial)} • مجموع مصرف: {tomanLabel(data.wallet.totalSpentRial)}
+              مجموع شارژ: {tomanLabel(data.wallet.totalCreditedRial ?? data.wallet.totalToppedUpRial ?? 0)} • مجموع مصرف: {tomanLabel(data.wallet.totalDebitedRial ?? data.wallet.totalSpentRial ?? 0)}
             </p>
+            {((data.wallet.aiDebtRial ?? 0) > 0 || data.wallet.usableAiCreditRial != null) && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                بدهی هوش مصنوعی:{" "}
+                <strong className={(data.wallet.aiDebtRial ?? 0) > 0 ? "text-amber-700 dark:text-amber-300" : "text-foreground"}>
+                  {tomanLabel(data.wallet.aiDebtRial ?? 0)}
+                </strong>
+                {" • "}ماندهٔ خالص کیف پول: <strong>{tomanLabel(data.wallet.netBalanceRial ?? data.wallet.balanceRial)}</strong>
+                {data.wallet.usableAiCreditRial != null && (
+                  <>
+                    {" • "}اعتبار قابل استفادهٔ AI: <strong>{tomanLabel(data.wallet.usableAiCreditRial)}</strong>
+                  </>
+                )}
+              </p>
+            )}
           </div>
         </div>
 
@@ -1263,7 +1299,12 @@ function UsageTab({ data }: { data: BusinessBillingData }) {
         <Card title="اعتبار ماهانهٔ هوش مصنوعی">
           <p className="text-2xl font-extrabold tabular-nums text-foreground">{tomanLabel(allowance.remainingRial)}</p>
           <p className="mt-1 text-xs text-muted-foreground">
-            از {tomanLabel(allowance.monthlyCreditRial)} • مصرف‌شده: {tomanLabel(allowance.usedRial)}
+            سهمیهٔ مؤثر این ماه: {tomanLabel(allowance.effectiveCreditRial ?? allowance.monthlyCreditRial)}
+            {allowance.configuredCreditRial != null &&
+              allowance.configuredCreditRial !== (allowance.effectiveCreditRial ?? allowance.monthlyCreditRial) && (
+                <> (پلن تنظیم‌شده: {tomanLabel(allowance.configuredCreditRial)})</>
+              )}
+            {" • "}مصرف‌شده: {tomanLabel(allowance.usedRial)}
           </p>
           {allowancePct != null && (
             <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-muted">
@@ -1275,6 +1316,9 @@ function UsageTab({ data }: { data: BusinessBillingData }) {
           )}
           <p className="mt-3 text-xs text-muted-foreground">
             مصرف ماه از این اعتبار کسر می‌شود؛ مازاد آن به هزینهٔ کیف پول می‌رود (مجموع تا امروز: {tomanLabel(data.ai.walletSpentRial)}).
+            {(data.ai.aiDebtRial ?? 0) > 0 && (
+              <> • بدهی معوق AI: {tomanLabel(data.ai.aiDebtRial ?? 0)}</>
+            )}
           </p>
         </Card>
 

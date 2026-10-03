@@ -32,6 +32,7 @@
  */
 import { query } from "./db";
 import { n, positiveInt } from "./billing-helpers";
+import { publishPriceVersion } from "./billing/runtime";
 
 /**
  * Postgres `timestamptz` columns come back from node-postgres as JS `Date`
@@ -289,8 +290,17 @@ export async function saveBillingPlan(input: SaveBillingPlanInput): Promise<Bill
       input.sortOrder || 0,
     ],
   );
-  const { syncAiAllowance } = await import("./billing/runtime");
+  const { syncAiAllowance, publishPriceVersion } = await import("./billing/runtime");
   await syncAiAllowance(key, aiCredit);
+  if (price != null) {
+    await publishPriceVersion({
+      targetType: "plan",
+      targetKey: key,
+      unit: "month",
+      unitAmountRial: price,
+      unitSize: 1,
+    });
+  }
   const plan = await getBillingPlan(key);
   if (!plan) throw new Error("save_failed");
   return plan;
@@ -456,6 +466,14 @@ export async function savePlanFeature(input: {
   const all = await listPlanFeatures(input.planKey);
   const row = all.find((f) => f.featureKey === input.featureKey);
   if (!row) throw new Error("save_failed");
+  await publishPriceVersion({
+    targetType: input.pricingModel === "addon" ? "addon" : "capability",
+    targetKey: `${input.planKey}:${input.featureKey}`,
+    unit: input.pricingModel === "monthly" ? "month" : "use",
+    unitAmountRial: price,
+    unitSize: 1,
+    metadata: { planKey: input.planKey, featureKey: input.featureKey, pricingModel: input.pricingModel },
+  });
   return row;
 }
 
@@ -551,22 +569,100 @@ type DbExec = {
   ): Promise<{ rows: T[] }>;
 };
 
+/**
+ * Pure lifecycle evaluation: whether a subscription row still carries the
+ * business's plan at `nowIso`. Shared by `subscriptionCarriesPlan`,
+ * `entitlement-service.ts`, and `ai-plan-allowance.ts`.
+ *
+ *   - no subscription row (`null`/`undefined` or `status == null`) → true
+ *     (pre-0176 businesses keep their `businesses.plan`).
+ *   - `cancelled` (immediate cancellation) or `expired` → false.
+ *   - `past_due` → true while inside grace (`graceEnd == null || graceEnd > nowIso`),
+ *     false once `graceEnd <= nowIso`.
+ *   - `trialing` → false when `(cancelAtPeriodEnd || autoRenew === false)` and
+ *     `(trialEnd ?? currentPeriodEnd) <= nowIso`; otherwise true.
+ *   - `active` → false when `(cancelAtPeriodEnd || autoRenew === false)` and
+ *     `currentPeriodEnd <= nowIso`; otherwise true.
+ */
+export function isSubscriptionCarryingPlan(
+  sub: {
+    status?: string | null;
+    currentPeriodEnd?: string | Date | null;
+    cancelAtPeriodEnd?: boolean | null;
+    autoRenew?: boolean | null;
+    graceEnd?: string | Date | null;
+    trialEnd?: string | Date | null;
+  } | null | undefined,
+  nowIso: string,
+): boolean {
+  if (!sub || sub.status == null) return true;
+  if (sub.status === "cancelled" || sub.status === "expired") return false;
+
+  const periodEnd = sub.currentPeriodEnd ? iso(sub.currentPeriodEnd) : null;
+  const graceEnd = sub.graceEnd ? iso(sub.graceEnd) : null;
+  const trialEnd = sub.trialEnd ? iso(sub.trialEnd) : null;
+
+  if (sub.status === "past_due") {
+    if (graceEnd != null && graceEnd <= nowIso) return false;
+    return true;
+  }
+
+  if (sub.status === "trialing") {
+    const effectiveEnd = trialEnd ?? periodEnd;
+    if (
+      (sub.cancelAtPeriodEnd || sub.autoRenew === false) &&
+      effectiveEnd != null &&
+      effectiveEnd <= nowIso
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  if (sub.status === "active") {
+    if (
+      (sub.cancelAtPeriodEnd || sub.autoRenew === false) &&
+      periodEnd != null &&
+      periodEnd <= nowIso
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 export async function subscriptionCarriesPlan(
   businessId: string,
   nowIso: string,
   exec: DbExec = { query },
 ): Promise<boolean> {
-  const { rows } = await exec.query<{ status: string; current_period_end: string | null }>(
-    `SELECT status, current_period_end FROM business_subscriptions WHERE business_id = $1`,
+  const { rows } = await exec.query<{
+    status: string;
+    current_period_end: string | null;
+    cancel_at_period_end: boolean | null;
+    auto_renew: boolean | null;
+    grace_end: string | null;
+    trial_end: string | null;
+  }>(
+    `SELECT status, current_period_end, cancel_at_period_end, auto_renew, grace_end, trial_end
+       FROM business_subscriptions WHERE business_id = $1`,
     [businessId],
   );
   const row = rows[0];
   if (!row) return true;
-  if (row.status === "active" || row.status === "trialing" || row.status === "past_due") return true;
-  if (row.status === "cancelled") {
-    return row.current_period_end ? iso(row.current_period_end)! > nowIso : false;
-  }
-  return false; // expired
+  return isSubscriptionCarryingPlan(
+    {
+      status: row.status,
+      currentPeriodEnd: row.current_period_end,
+      cancelAtPeriodEnd: row.cancel_at_period_end,
+      autoRenew: row.auto_renew,
+      graceEnd: row.grace_end,
+      trialEnd: row.trial_end,
+    },
+    nowIso,
+  );
 }
 
 /**

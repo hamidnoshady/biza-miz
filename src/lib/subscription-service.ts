@@ -35,6 +35,7 @@ import {
   type BillingPlan,
 } from "./billing-plans-service";
 import { allocateInvoiceNumber } from "./billing/runtime";
+import { applyTaxAndRounding } from "./billing/rating/engine";
 import { billingLog } from "./billing/observability";
 import { decidePlanTransition, PlanTransitionError } from "./billing/policy/transitions";
 import { applyPayment, markOverdue, voidInvoice, InvoiceStateError } from "./billing/policy/invoice-state";
@@ -403,11 +404,13 @@ export interface SubscriptionLine {
   unitAmountRial: number;
   amountRial: number;
   featureKey: string | null;
+  priceVersionId?: string | null;
 }
 
 export interface SubscriptionTotal {
   baseRial: number;
   addonsRial: number;
+  subtotalRial: number;
   discountRial: number;
   taxRial: number;
   totalRial: number;
@@ -417,10 +420,13 @@ export interface SubscriptionTotal {
 /**
  * What one renewal period costs a business: the plan's base fee plus its
  * recurring add-ons (billing_plan_features with pricing_model = 'monthly'),
- * with tax and discounts at 0 until the platform actually configures them.
+ * with tax and rounding from `billing_commercial_settings`.
  * The UI never computes this itself; it displays what this returns.
  */
-export async function calculateSubscriptionTotal(businessId: string): Promise<SubscriptionTotal> {
+export async function calculateSubscriptionTotal(
+  businessId: string,
+  opts?: { planKey?: string; discountRial?: number },
+): Promise<SubscriptionTotal> {
   const { rows } = await query<{
     plan_key: string;
     plan_name: string;
@@ -428,17 +434,26 @@ export async function calculateSubscriptionTotal(businessId: string): Promise<Su
     feature_key: string | null;
     feature_name: string | null;
     price_rial: string | null;
+    price_version_id: string | null;
+    tax_rate_bps: number | null;
+    rounding: string | null;
   }>(
-    `SELECT b.plan AS plan_key, p.name AS plan_name, p.monthly_price_rial,
-            f.feature_key, ff.name AS feature_name, f.price_rial
+    `SELECT p.key AS plan_key, p.name AS plan_name, p.monthly_price_rial,
+            f.feature_key, ff.name AS feature_name, f.price_rial,
+            (SELECT pv.id FROM billing_price_versions pv
+              WHERE pv.target_type = 'plan' AND pv.target_key = p.key AND pv.effective_until IS NULL
+              ORDER BY pv.version DESC LIMIT 1) AS price_version_id,
+            cs.tax_rate_bps,
+            cs.rounding
        FROM businesses b
-       JOIN billing_plans p ON p.key = b.plan
+       JOIN billing_plans p ON p.key = COALESCE($2::text, b.plan)
        LEFT JOIN billing_plan_features f
               ON f.plan_key = p.key AND f.pricing_model = 'monthly'
        LEFT JOIN feature_flags ff ON ff.key = f.feature_key
+       LEFT JOIN billing_commercial_settings cs ON cs.id = true
       WHERE b.id = $1
       ORDER BY f.sort_order, f.feature_key`,
-    [businessId],
+    [businessId, opts?.planKey ?? null],
   );
   if (!rows[0]) throw new SubscriptionError("business_not_found");
 
@@ -452,6 +467,7 @@ export async function calculateSubscriptionTotal(businessId: string): Promise<Su
       unitAmountRial: base,
       amountRial: base,
       featureKey: null,
+      priceVersionId: rows[0].price_version_id ?? null,
     });
   }
   let addons = 0;
@@ -469,14 +485,19 @@ export async function calculateSubscriptionTotal(businessId: string): Promise<Su
     });
   }
   const subtotal = base + addons;
-  const discount = 0;
-  const tax = 0;
+  const taxed = applyTaxAndRounding({
+    subtotalRial: subtotal,
+    discountRial: opts?.discountRial ?? 0,
+    taxRateBps: Number(rows[0].tax_rate_bps ?? 0),
+    rounding: rows[0].rounding === "floor" ? "floor" : "ceil",
+  });
   return {
     baseRial: base,
     addonsRial: addons,
-    discountRial: discount,
-    taxRial: tax,
-    totalRial: Math.max(0, subtotal - discount + tax),
+    subtotalRial: taxed.subtotalRial,
+    discountRial: taxed.discountRial,
+    taxRial: taxed.taxRial,
+    totalRial: taxed.totalRial,
     lines,
   };
 }
@@ -684,8 +705,8 @@ async function claimInvoice(
   for (const line of input.total.lines) {
     await client.query(
       `INSERT INTO billing_invoice_lines
-         (invoice_id, kind, description, quantity, unit_amount_rial, amount_rial, feature_key, sort_order)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+         (invoice_id, kind, description, quantity, unit_amount_rial, amount_rial, feature_key, sort_order, price_version_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [
         invoiceId,
         line.kind,
@@ -695,6 +716,7 @@ async function claimInvoice(
         line.amountRial,
         line.featureKey,
         order++,
+        line.priceVersionId ?? null,
       ],
     );
   }
@@ -710,11 +732,13 @@ export type RenewalOutcome =
   | { status: "free"; invoiceId: null }
   | { status: "duplicate"; invoiceId: string | null }
   | { status: "past_due" }
+  | { status: "cancelled" }
   | { status: "expired" }
   | { status: "nothing_due" };
 
 /**
- * Renew one business's subscription for its next period.
+ * Renew one business's subscription for its next period, or finalize its
+ * period-end cancellation / non-renewing expiration / grace expiration.
  *
  * Idempotency is the UNIQUE (business_id, reference) index on billing_invoices.
  * The invoice is claimed before any money moves. A wallet that cannot cover
@@ -731,25 +755,67 @@ export async function renewBusinessSubscription(
   );
   if (lifecycleRows[0]?.ownership_kind === "platform_internal") return { status: "nothing_due" };
   const subscription = await getBusinessSubscription(businessId);
-  if (!subscription || !subscription.autoRenew) return { status: "nothing_due" };
+  if (!subscription) return { status: "nothing_due" };
   if (subscription.status === "cancelled" || subscription.status === "expired") {
     return { status: "nothing_due" };
   }
-  if (subscription.currentPeriodEnd > now.toISOString()) return { status: "nothing_due" };
+  const nowIso = now.toISOString();
 
-  // A past-due subscription whose grace window has closed expires.
-  if (subscription.status === "past_due" && subscription.graceEnd && subscription.graceEnd <= now.toISOString()) {
+  // A past-due subscription whose grace window has closed expires (regardless
+  // of auto_renew).
+  if (subscription.status === "past_due" && subscription.graceEnd && subscription.graceEnd <= nowIso) {
     await query(
-      `UPDATE business_subscriptions SET status = 'expired', updated_at = now() WHERE business_id = $1`,
+      `UPDATE business_subscriptions
+          SET status = 'expired', auto_renew = false, updated_at = now()
+        WHERE business_id = $1`,
       [businessId],
     );
+    billingLog("billing.subscription.expired", { businessId, reason: "grace_expired" });
+    return { status: "expired" };
+  }
+
+  const effectivePeriodEnd =
+    subscription.status === "trialing" && subscription.trialEnd && subscription.trialEnd < subscription.currentPeriodEnd
+      ? subscription.trialEnd
+      : subscription.currentPeriodEnd;
+
+  if (effectivePeriodEnd > nowIso) return { status: "nothing_due" };
+
+  // Period-end cancellation: paid/trial period has elapsed -> transition to 'cancelled'.
+  if (subscription.cancelAtPeriodEnd) {
+    await query(
+      `UPDATE business_subscriptions
+          SET status = 'cancelled',
+              cancelled_at = COALESCE(cancelled_at, $2::timestamptz),
+              auto_renew = false,
+              updated_at = now()
+        WHERE business_id = $1`,
+      [businessId, nowIso],
+    );
+    billingLog("billing.subscription.cancelled_at_period_end", { businessId });
+    return { status: "cancelled" };
+  }
+
+  // Non-renewing active/trialing/past_due subscription whose period has elapsed -> transition to 'expired'.
+  if (!subscription.autoRenew) {
+    await query(
+      `UPDATE business_subscriptions
+          SET status = 'expired', updated_at = now()
+        WHERE business_id = $1`,
+      [businessId],
+    );
+    billingLog("billing.subscription.expired", { businessId, reason: "auto_renew_off" });
     return { status: "expired" };
   }
 
   const total = await calculateSubscriptionTotal(businessId);
   const reference = `subscription-renewal:${subscription.currentPeriodEnd}`;
   const plan = await getBillingPlan(subscription.planKey);
-  const graceEnd = addDays(subscription.currentPeriodEnd, plan?.graceDays ?? 7);
+  const { rows: csRows } = await query<{ default_grace_days: number }>(
+    `SELECT default_grace_days FROM billing_commercial_settings WHERE id = true`,
+  );
+  const fallbackGraceDays = Number(csRows[0]?.default_grace_days ?? 7);
+  const graceEnd = addDays(subscription.currentPeriodEnd, plan?.graceDays ?? fallbackGraceDays);
 
   // A free plan renews silently: no invoice, no charge, just the next period.
   if (total.totalRial <= 0) {
@@ -896,17 +962,23 @@ export async function runSubscriptionRenewalTick(now: Date = new Date()): Promis
   renewed: number;
   pastDue: number;
   expired: number;
+  cancelled?: number;
 }> {
   const started = Date.now();
+  const nowIso = now.toISOString();
   const due = await withoutTenantScope("platform", async () => {
     await markOverdueInvoices(now);
     const { rows } = await query<{ business_id: string }>(
       `SELECT s.business_id FROM business_subscriptions s
         JOIN businesses b ON b.id = s.business_id
         WHERE b.ownership_kind = 'customer'
-          AND s.auto_renew
           AND s.status IN ('active', 'trialing', 'past_due')
-          AND s.current_period_end <= now()`,
+          AND (
+            s.current_period_end <= $1::timestamptz
+            OR (s.status = 'trialing' AND s.trial_end IS NOT NULL AND s.trial_end <= $1::timestamptz)
+            OR (s.status = 'past_due' AND s.grace_end IS NOT NULL AND s.grace_end <= $1::timestamptz)
+          )`,
+      [nowIso],
     );
     return rows;
   });
@@ -914,6 +986,7 @@ export async function runSubscriptionRenewalTick(now: Date = new Date()): Promis
   let renewed = 0;
   let pastDue = 0;
   let expired = 0;
+  let cancelled = 0;
   for (const row of due) {
     try {
       await withTenant(row.business_id, async () => {
@@ -921,12 +994,13 @@ export async function runSubscriptionRenewalTick(now: Date = new Date()): Promis
         if (outcome.status === "renewed" || outcome.status === "free") renewed += 1;
         else if (outcome.status === "past_due") pastDue += 1;
         else if (outcome.status === "expired") expired += 1;
+        else if (outcome.status === "cancelled") cancelled += 1;
       });
     } catch (error) {
       console.error("subscription renewal tick failed for business:", row.business_id, error);
     }
   }
-  const result = { checked: due.length, renewed, pastDue, expired };
+  const result = { checked: due.length, renewed, pastDue, expired, cancelled };
   billingLog("billing.renewal.tick", { ...result, durationMs: Date.now() - started });
   return result;
 }
@@ -956,48 +1030,218 @@ export async function markOverdueInvoices(now: Date = new Date()): Promise<numbe
   return moved;
 }
 
-/** Apply a payment to an open invoice. Overpayment and void invoices are refused. */
-export async function applyInvoicePayment(invoiceId: string, amountRial: number, now: Date = new Date()): Promise<InvoiceRecord> {
-  const current = await getInvoice(invoiceId, false);
-  if (!current) throw new SubscriptionError("invoice_not_found");
-  let next;
-  try {
-    next = applyPayment(
-      { status: current.status, totalRial: current.totalRial, paidRial: current.paidRial, dueAt: current.dueAt },
-      amountRial,
-      now.toISOString(),
-    );
-  } catch (err) {
-    if (err instanceof InvoiceStateError) throw new SubscriptionError(err.code);
-    throw err;
-  }
-  await query(
-    `UPDATE billing_invoices SET status = $2, paid_rial = $3, updated_at = now() WHERE id = $1`,
-    [invoiceId, next.status, next.paidRial],
-  );
-  billingLog("billing.invoice.payment", { invoiceId, amountRial, status: next.status });
-  return (await getInvoice(invoiceId, false))!;
+export interface ApplyInvoicePaymentOptions {
+  now?: Date;
+  idempotencyKey?: string | null;
+  paymentId?: string | null;
+  note?: string | null;
+  platformAdminId?: string | null;
 }
 
-/** Void an invoice that has taken no payment. */
-export async function voidBillingInvoice(invoiceId: string): Promise<InvoiceRecord> {
-  const current = await getInvoice(invoiceId, false);
-  if (!current) throw new SubscriptionError("invoice_not_found");
-  let next;
-  try {
-    next = voidInvoice({
-      status: current.status,
-      totalRial: current.totalRial,
-      paidRial: current.paidRial,
-      dueAt: current.dueAt,
-    });
-  } catch (err) {
-    if (err instanceof InvoiceStateError) throw new SubscriptionError(err.code);
-    throw err;
+export interface InvoicePaymentRecord {
+  id: string;
+  invoiceId: string;
+  businessId: string;
+  amountRial: number;
+  idempotencyKey: string | null;
+  paymentId: string | null;
+  note: string | null;
+  platformAdminId: string | null;
+  createdAt: string;
+}
+
+export async function listInvoicePayments(invoiceId: string): Promise<InvoicePaymentRecord[]> {
+  const { rows } = await query<{
+    id: string;
+    invoice_id: string;
+    business_id: string;
+    amount_rial: string;
+    idempotency_key: string | null;
+    payment_id: string | null;
+    note: string | null;
+    platform_admin_id: string | null;
+    created_at: Date | string;
+  }>(
+    `SELECT id, invoice_id, business_id, amount_rial, idempotency_key, payment_id, note, platform_admin_id, created_at
+       FROM billing_invoice_payments
+      WHERE invoice_id = $1
+      ORDER BY created_at DESC`,
+    [invoiceId],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    invoiceId: r.invoice_id,
+    businessId: r.business_id,
+    amountRial: Number(r.amount_rial),
+    idempotencyKey: r.idempotency_key,
+    paymentId: r.payment_id,
+    note: r.note,
+    platformAdminId: r.platform_admin_id,
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : new Date(r.created_at).toISOString(),
+  }));
+}
+
+/**
+ * Apply a payment to an open invoice inside one row-locked transaction.
+ * Overpayment, duplicate idempotency keys, and void/paid invoices are handled
+ * deterministically under concurrency.
+ */
+export async function applyInvoicePayment(
+  invoiceId: string,
+  amountRial: number,
+  nowOrOpts?: Date | ApplyInvoicePaymentOptions,
+): Promise<InvoiceRecord> {
+  const opts: ApplyInvoicePaymentOptions =
+    nowOrOpts instanceof Date ? { now: nowOrOpts } : nowOrOpts ?? {};
+  const now = opts.now ?? new Date();
+  const idempotencyKey = opts.idempotencyKey?.trim() ? opts.idempotencyKey.trim() : null;
+
+  if (!Number.isSafeInteger(amountRial) || amountRial <= 0) {
+    throw new SubscriptionError("bad_amount");
   }
-  await query(`UPDATE billing_invoices SET status = $2, updated_at = now() WHERE id = $1`, [invoiceId, next.status]);
-  billingLog("billing.invoice.void", { invoiceId });
-  return (await getInvoice(invoiceId, false))!;
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<Record<string, unknown>>(
+      `SELECT i.*, b.name AS business_name
+         FROM billing_invoices i
+         JOIN businesses b ON b.id = i.business_id
+        WHERE i.id = $1
+        FOR UPDATE OF i`,
+      [invoiceId],
+    );
+    const current = rows[0] ? rowToInvoice(rows[0]) : null;
+    if (!current) {
+      await client.query("ROLLBACK");
+      throw new SubscriptionError("invoice_not_found");
+    }
+
+    if (idempotencyKey) {
+      const { rows: existingPay } = await client.query<{ id: string }>(
+        `SELECT id FROM billing_invoice_payments
+          WHERE invoice_id = $1 AND idempotency_key = $2`,
+        [invoiceId, idempotencyKey],
+      );
+      if (existingPay[0]) {
+        await client.query("COMMIT");
+        return current;
+      }
+    }
+
+    let next;
+    try {
+      next = applyPayment(
+        {
+          status: current.status,
+          totalRial: current.totalRial,
+          paidRial: current.paidRial,
+          dueAt: current.dueAt,
+        },
+        amountRial,
+        now.toISOString(),
+      );
+    } catch (err) {
+      await client.query("ROLLBACK");
+      if (err instanceof InvoiceStateError) throw new SubscriptionError(err.code);
+      throw err;
+    }
+
+    await client.query(
+      `INSERT INTO billing_invoice_payments
+         (invoice_id, business_id, amount_rial, idempotency_key, payment_id, note, platform_admin_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        invoiceId,
+        current.businessId,
+        amountRial,
+        idempotencyKey,
+        opts.paymentId ?? null,
+        opts.note ?? null,
+        opts.platformAdminId ?? null,
+      ],
+    );
+
+    const { rows: updatedRows } = await client.query<Record<string, unknown>>(
+      `UPDATE billing_invoices
+          SET status = $2, paid_rial = $3, updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [invoiceId, next.status, next.paidRial],
+    );
+    await client.query("COMMIT");
+    billingLog("billing.invoice.payment", {
+      invoiceId,
+      amountRial,
+      status: next.status,
+      idempotencyKey,
+    });
+    return rowToInvoice({ ...updatedRows[0], business_name: current.businessName });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (
+      err &&
+      typeof err === "object" &&
+      "code" in err &&
+      (err as { code?: string }).code === "23505" &&
+      idempotencyKey
+    ) {
+      const latest = await getInvoice(invoiceId, false);
+      if (latest) return latest;
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** Void an invoice that has taken no payment, inside one row-locked transaction. */
+export async function voidBillingInvoice(invoiceId: string): Promise<InvoiceRecord> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<Record<string, unknown>>(
+      `SELECT i.*, b.name AS business_name
+         FROM billing_invoices i
+         JOIN businesses b ON b.id = i.business_id
+        WHERE i.id = $1
+        FOR UPDATE OF i`,
+      [invoiceId],
+    );
+    const current = rows[0] ? rowToInvoice(rows[0]) : null;
+    if (!current) {
+      await client.query("ROLLBACK");
+      throw new SubscriptionError("invoice_not_found");
+    }
+    let next;
+    try {
+      next = voidInvoice({
+        status: current.status,
+        totalRial: current.totalRial,
+        paidRial: current.paidRial,
+        dueAt: current.dueAt,
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      if (err instanceof InvoiceStateError) throw new SubscriptionError(err.code);
+      throw err;
+    }
+    const { rows: updatedRows } = await client.query<Record<string, unknown>>(
+      `UPDATE billing_invoices
+          SET status = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [invoiceId, next.status],
+    );
+    await client.query("COMMIT");
+    billingLog("billing.invoice.void", { invoiceId });
+    return rowToInvoice({ ...updatedRows[0], business_name: current.businessName });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // ---------------------------------------------------------------------------

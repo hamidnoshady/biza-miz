@@ -496,7 +496,10 @@ class BackendManager {
     });
     this.server.once("error", (error) => this.logger.error("Application server process error", error));
     try {
-      await waitForServerReady(appUrl, config.instanceId, 90_000, this.server);
+      // ponytail: a first start after install/update (fresh files, antivirus
+      // scan) took >90 s here and was killed while still booting. A crash
+      // still fails at once through the child's exit.
+      await waitForServerReady(appUrl, config.instanceId, 300_000, this.server);
     } catch (error) {
       const detail = serverStderr.trim();
       const cause = detail
