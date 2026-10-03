@@ -9,10 +9,9 @@ import { GatewayError, gatewayErrorMessage } from "@/lib/payment-gateway";
  * unified manual-review queue calls the same `reviewManualPayment` service):
  *  - approve → settle (posts the wallet credit) and grants plan/addon
  *    entitlements. Used for manual (bank-transfer) gateway payments; also a
- *    recovery path if a gateway webhook never arrived.
- *  - reject  → marks the payment failed; no money moves.
- * Idempotent: approving an already-verified payment reports back without
- * double-crediting (the wallet's unique payment-id ledger index enforces it).
+ *    recovery path if a gateway webhook never arrived or fulfilment failed.
+ *  - reject  → marks the payment failed; no money moves, and never clobbers a
+ *    verified payment.
  */
 export const POST = withPlatformScope(
   async (req: Request, ctx: { params: Promise<{ id: string }> }) => {
@@ -20,13 +19,16 @@ export const POST = withPlatformScope(
     if (guard.error) return guard.error;
     const { id } = await ctx.params;
 
-    let body: { action?: "approve" | "reject" };
+    let body: { action?: string };
     try {
       body = await req.json();
     } catch {
       body = {};
     }
-    const action = body.action === "reject" ? "reject" : "approve";
+    if (body.action !== "approve" && body.action !== "reject") {
+      return NextResponse.json({ error: "invalid_action" }, { status: 400 });
+    }
+    const action = body.action;
 
     const payment = await getPaymentById(id);
     if (!payment) return NextResponse.json({ error: "payment_not_found" }, { status: 404 });
@@ -40,12 +42,22 @@ export const POST = withPlatformScope(
       await platformAudit({
         adminId: guard.session.padmin,
         businessId: payment.businessId,
-        action: action === "approve" ? "manual_payment.approved" : "manual_payment.rejected",
+        action:
+          action === "approve"
+            ? "manual_payment.approved"
+            : status === "failed"
+              ? "manual_payment.rejected"
+              : "manual_payment.reject_noop_verified",
         entity: "billing_payments",
         entityId: id,
-        payload: { purpose: payment.purpose, amountRial: payment.amountRial },
+        payload: { purpose: payment.purpose, amountRial: payment.amountRial, status },
       });
-      return NextResponse.json({ ok: true, status });
+      const updated = await getPaymentById(id);
+      return NextResponse.json({
+        ok: true,
+        status,
+        fulfilmentStatus: updated?.fulfilmentStatus ?? payment.fulfilmentStatus,
+      });
     } catch (err) {
       if (err instanceof GatewayError) {
         return NextResponse.json(
