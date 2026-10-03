@@ -255,11 +255,40 @@ export const PERMISSIONS = {
   woocommerceManage: "woocommerce.manage",
   woocommerceSync: "woocommerce.sync",
   woocommerceConfigure: "woocommerce.configure",
+  /**
+   * Growth & Marketing (issue #764). One key per capability, split by what
+   * the act does to money and to people — not by screen:
+   *
+   *   growth.view           the management dashboard, the audience insights and
+   *                         the accounting bridge. Not a floor capability.
+   *   campaigns.*           discount rules and outbound messaging.
+   *   loyalty.view/manage   reading balances / configuring loyalty programs.
+   *   loyalty.redeem        spending a customer's earned points at the till.
+   *   store_credit.issue    *creating* a liability out of nothing (a goodwill
+   *                         credit) — a different trust from redeeming one.
+   *   store_credit.payout   paying a credit balance out in cash or to a bank.
+   *   gift_cards.*          looking a card up / issuing one (a new liability) /
+   *                         spending one.
+   *   commission.*          compensation data. Its own boundary, server-side;
+   *                         hiding the menu entry was never the protection.
+   *   marketing.configure   Growth-wide configuration.
+   *
+   * `src/lib/growth-access.ts` maps every Growth page and API to exactly one of
+   * these, and its test asserts the routes agree.
+   */
   growthView: "growth.view",
   campaignsView: "campaigns.view",
   campaignsManage: "campaigns.manage",
   loyaltyView: "loyalty.view",
   loyaltyManage: "loyalty.manage",
+  loyaltyRedeem: "loyalty.redeem",
+  storeCreditIssue: "store_credit.issue",
+  storeCreditPayout: "store_credit.payout",
+  giftCardsView: "gift_cards.view",
+  giftCardsIssue: "gift_cards.issue",
+  giftCardsRedeem: "gift_cards.redeem",
+  commissionView: "commission.view",
+  commissionManage: "commission.manage",
   marketingConfigure: "marketing.configure",
   integrationsView: "integrations.view",
   integrationsManage: "integrations.manage",
@@ -308,6 +337,10 @@ const HIGH_RISK = new Set<Permission>([
   PERMISSIONS.dataExport,
   PERMISSIONS.teamManage,
   PERMISSIONS.backupManage,
+  PERMISSIONS.storeCreditIssue,
+  PERMISSIONS.storeCreditPayout,
+  PERMISSIONS.giftCardsIssue,
+  PERMISSIONS.commissionManage,
 ]);
 const REASON_REQUIRED = new Set<Permission>([
   PERMISSIONS.ordersAmendClosed,
@@ -383,7 +416,9 @@ const {
   websiteView, websiteManage, websiteSettingsManage,
   cmsView, cmsContentManage, cmsPublish, cmsConfigure,
   woocommerceView, woocommerceManage, woocommerceSync, woocommerceConfigure,
-  growthView, campaignsView, campaignsManage, loyaltyView, loyaltyManage, marketingConfigure,
+  growthView, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
+  storeCreditIssue, storeCreditPayout, giftCardsView, giftCardsIssue, giftCardsRedeem,
+  commissionView, commissionManage, marketingConfigure,
   integrationsView, integrationsManage, mediaView, mediaManage, printingExecute, billingView, billingManage,
 } = PERMISSIONS;
 
@@ -434,7 +469,12 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     websiteView, websiteManage, websiteSettingsManage,
     cmsView, cmsContentManage, cmsPublish, cmsConfigure,
     woocommerceView, woocommerceManage, woocommerceSync, woocommerceConfigure,
-    growthView, campaignsView, campaignsManage, loyaltyView, loyaltyManage, marketingConfigure,
+    // Issue #764 split the old loyalty.manage / growth.view into graded
+    // capabilities; the manager keeps every one of them, so nothing they did
+    // before is lost.
+    growthView, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
+    storeCreditIssue, storeCreditPayout, giftCardsView, giftCardsIssue, giftCardsRedeem,
+    commissionView, commissionManage, marketingConfigure,
     integrationsView, integrationsManage, mediaView, mediaManage, printingExecute, billingView, billingManage,
   ],
   // Phase 16's role: the books, and only the books. No till, no floor. Manages
@@ -464,8 +504,10 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // cost is accounting work, committing the business to a new contractor is
     // not.
     workspaceView,
-    // Growth accounting and customer reads were open to the accountant.
-    growthView,
+    // Growth accounting and customer reads were open to the accountant, and
+    // commission is compensation — the same data class as payroll, which this
+    // role already reads. Read only: writing a commission rule is not books work.
+    growthView, commissionView,
   ],
   cashier: [
     aiUse,
@@ -479,8 +521,14 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // crmView: the 360° file, segments and pipeline are not. No merge, no
     // consent, no export.
     crmManage,
-    // Till staff historically earned/redeemed loyalty and gift-card value.
-    growthView, loyaltyView, loyaltyManage, campaignsView, printingExecute,
+    // Till staff earn and redeem loyalty points and look a gift card's balance
+    // up. Since issue #764 that is all: no growth.view (the management
+    // dashboard and the accounting bridge), no commission data, no
+    // campaigns, and no act that *creates* or pays out a liability — issuing
+    // store credit or a gift card, paying credit out, or spending a gift card
+    // outside the till's own tender flow. An owner who wants a senior cashier
+    // to do one of those grants that exact key.
+    loyaltyView, loyaltyRedeem, giftCardsView, printingExecute,
     // Sees the projects they are a member of and works the tasks on them —
     // the floor-staff case the workspace is for. No contracts, no approvals.
     workspaceView, workspaceManage,
@@ -570,8 +618,17 @@ const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permission[]>
   [PERMISSIONS.cmsContentManage]: [PERMISSIONS.cmsView],
   [PERMISSIONS.cmsPublish]: [PERMISSIONS.cmsView],
   [PERMISSIONS.cmsConfigure]: [PERMISSIONS.cmsView],
-  [PERMISSIONS.campaignsManage]: [PERMISSIONS.campaignsView, PERMISSIONS.growthView],
-  [PERMISSIONS.loyaltyManage]: [PERMISSIONS.loyaltyView, PERMISSIONS.growthView],
+  // Growth (issue #764). A write implies its own read only — never
+  // growth.view, which is the management dashboard: granting a cashier
+  // gift-card redemption must not hand them the business's KPIs.
+  [PERMISSIONS.campaignsManage]: [PERMISSIONS.campaignsView],
+  [PERMISSIONS.loyaltyManage]: [PERMISSIONS.loyaltyView],
+  [PERMISSIONS.loyaltyRedeem]: [PERMISSIONS.loyaltyView],
+  [PERMISSIONS.storeCreditIssue]: [PERMISSIONS.loyaltyView],
+  [PERMISSIONS.storeCreditPayout]: [PERMISSIONS.loyaltyView],
+  [PERMISSIONS.giftCardsIssue]: [PERMISSIONS.giftCardsView],
+  [PERMISSIONS.giftCardsRedeem]: [PERMISSIONS.giftCardsView],
+  [PERMISSIONS.commissionManage]: [PERMISSIONS.commissionView],
   [PERMISSIONS.integrationsManage]: [PERMISSIONS.integrationsView],
   [PERMISSIONS.mediaManage]: [PERMISSIONS.mediaView],
   [PERMISSIONS.billingManage]: [PERMISSIONS.billingView],

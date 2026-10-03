@@ -7,7 +7,7 @@ import { redeemGiftCard } from "@/lib/promotions-service";
 
 /** Redeems (spends) part or all of a gift card, debiting its liability. */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.loyaltyManage);
+  const { session, error } = await requirePermission(PERMISSIONS.giftCardsRedeem);
   if (error) return error;
 
   const location = await resolveActiveLocation(session);

@@ -41,7 +41,8 @@ interface GrowthAccountingData {
   campaigns: { discountRial: number; applications: number; counts: Record<string, number> };
   giftCards: { outstandingRial: number; issued30d: number; issuedValue30d: number };
   loyalty: { pointsOutstanding: number; pointsValueEstimate: number; customersWithPoints: number; customersTotal: number };
-  commission: { accrued30d: number; top: { employeeId: string; employeeName: string; amount: number }[] };
+  /** `null` without `commission.view` — removed server-side (growth-access.ts). */
+  commission: { accrued30d: number; top: { employeeId: string; employeeName: string; amount: number }[] } | null;
 }
 
 function KpiTile({ label, value, hint }: { label: string; value: string; hint?: string }) {
@@ -99,11 +100,13 @@ export function GrowthAccountingView() {
           )}
           hint={`${formatPersianNumber(data.loyalty.customersWithPoints)} مشتری صاحب امتیاز`}
         />
-        <KpiTile
-          label="پورسانت فروشندگان · ۳۰ روز گذشته"
-          value={money.format(data.commission.accrued30d)}
-          hint="هزینه ۵۲۱۰، بدهی حقوق ۲۳۰۰"
-        />
+        {data.commission ? (
+          <KpiTile
+            label="پورسانت فروشندگان · ۳۰ روز گذشته"
+            value={money.format(data.commission.accrued30d)}
+            hint="هزینه ۵۲۱۰، بدهی حقوق ۲۳۰۰"
+          />
+        ) : null}
         <KpiTile
           label="تخفیف کمپین‌ها · ۳۰ روز گذشته"
           value={money.format(data.campaigns.discountRial)}
@@ -152,7 +155,7 @@ export function GrowthAccountingView() {
         {campaignRoi.length === 0 ? <p className="text-sm text-muted-foreground">هنوز کمپینی با پروموشن اختصاصی برای گزارش بازده ثبت نشده است.</p> : <ul className="divide-y divide-border/80 text-sm">{campaignRoi.map((row) => <li key={row.campaignId} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><b>{row.campaignName}</b><p className="mt-1 text-xs text-muted-foreground">پروموشن: {row.promotionName} · {formatPersianNumber(row.attributableSales)} فروشِ ثبت‌شده · {formatPersianNumber(row.sentCount)} ارسال</p></div><div className="text-left"><b>{row.roiPercent === null ? "در انتظار ثبت هزینه" : `${formatPersianNumber(row.roiPercent)}٪ بازده`}</b><p className="text-xs text-muted-foreground">فروش {money.format(row.attributableRevenueRial)} · هزینه {money.format(row.spentRial)} · تخفیف {money.format(row.discountRial)}</p></div></li>)}</ul>}
       </SectionCard>
 
-      {data.commission.top.length > 0 ? (
+      {data.commission && data.commission.top.length > 0 ? (
         <SectionCard title="برترین فروشندگان" description="پورسانت انباشته در ۳۰ روز گذشته">
           <ul className="divide-y divide-border/80 text-sm">
             {data.commission.top.map((row) => (
