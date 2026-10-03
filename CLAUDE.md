@@ -953,7 +953,18 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   `journal_entries.project_id` — no cost ledger inside the BOQ. Import/export is the existing
   data-transfer engine (registry entity + adapter, draft revisions only, a row that cannot be placed
   is a skipped row with a reason), and an entity may declare `requiresIndustry` so
-  `entitiesForIndustry` keeps a trade's catalogue to itself.
+  `entitiesForIndustry` keeps a trade's catalogue to itself. Wave 5 (§9 and §12) is document control:
+  `aec_documents` → `aec_document_revisions` and `aec_transmittals` → its items and recipients
+  (migration 0197), while the bytes stay in `media_assets` reached through a `workspace_documents`
+  row — never a second document store. The revision and transmittal guards make an issued record
+  immutable in the database, the register's `latest_revision_*` columns are trigger-derived (never
+  sort revisions on read to decide what is current), and a transmittal line snapshots the number,
+  title, revision code and purpose it carried, so renaming a drawing later cannot rewrite the answer
+  to "what was issued, in which revision, to whom". Recipients are `parties` — a receipt, not a user
+  and not a grant — and issuing needs its own `workspace.documents_issue` (high risk, audited)
+  rather than inheriting `workspace.manage`; drafting and acknowledging a receipt stay on
+  `workspace.manage`. `src/lib/aec-docs.ts` is the client-safe half and
+  `get_latest_drawing_revision` is the §23 read over it.
   Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a
