@@ -45,6 +45,7 @@ import {
   ProgressBar,
   ProjectStatusBadge,
   workspaceError,
+  stackedTableClass,
 } from "./workspace-ui";
 
 interface ReportRow {
@@ -161,7 +162,7 @@ export function ReportsSection() {
             پس از ساخت پروژه و ثبت هزینه‌ها، وضعیت مالی و پیشرفت هر پروژه اینجا جمع می‌شود.
           </EmptyState>
         ) : (
-          <DataTable caption="گزارش سلامت و سودآوری پروژه‌ها" frame={false}>
+          <DataTable caption="گزارش سلامت و سودآوری پروژه‌ها" frame={false} tableClassName={stackedTableClass}>
             <DataTableHead>
               <tr>
                 <Th>پروژه</Th>
@@ -181,7 +182,7 @@ export function ReportsSection() {
                   row.budgetRial === null || row.spentRial === null ? null : row.budgetRial - row.spentRial;
                 return (
                   <DataTableRow key={row.projectId}>
-                    <Td>
+                    <Td data-label="پروژه">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="font-medium">{row.name}</span>
                         <PriorityBadge priority={row.priority} />
@@ -190,7 +191,7 @@ export function ReportsSection() {
                         {[row.ownerName, row.partyName].filter(Boolean).join(" • ") || "—"}
                       </div>
                     </Td>
-                    <Td>
+                    <Td data-label="وضعیت">
                       <ProjectStatusBadge status={row.status} />
                       {row.openApprovals > 0 ? (
                         <div className="text-xs text-muted-foreground">
@@ -198,7 +199,7 @@ export function ReportsSection() {
                         </div>
                       ) : null}
                     </Td>
-                    <Td>
+                    <Td data-label="پیشرفت">
                       <ProgressBar percent={percent} label={`پیشرفت ${row.name}`} />
                       <div className="text-xs text-muted-foreground">
                         {toPersianDigits(String(row.doneTaskCount))} از{" "}
@@ -208,21 +209,21 @@ export function ReportsSection() {
                           : ""}
                       </div>
                     </Td>
-                    <Td>
+                    <Td data-label="بودجه">
                       {row.budgetRial === null ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
                         <span className="tabular-nums">{money.format(row.budgetRial)}</span>
                       )}
                     </Td>
-                    <Td>
+                    <Td data-label="هزینه">
                       {row.spentRial === null ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
                         <span className="tabular-nums">{money.format(row.spentRial)}</span>
                       )}
                     </Td>
-                    <Td>
+                    <Td data-label="مانده">
                       {remaining === null ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
@@ -237,10 +238,10 @@ export function ReportsSection() {
                         </span>
                       )}
                     </Td>
-                    <Td>
+                    <Td data-label="قراردادها">
                       <span className="tabular-nums">{money.format(row.contractValueRial)}</span>
                     </Td>
-                    <Td>
+                    <Td data-label="مهلت پایان">
                       <DateCell date={row.endDate} />
                     </Td>
                   </DataTableRow>

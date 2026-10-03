@@ -12,14 +12,13 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2Icon, CheckIcon, StampIcon, XIcon } from "lucide-react";
+import { CheckCircle2Icon, CheckIcon, StampIcon } from "lucide-react";
 import {
   EmptyState,
   KpiCard,
   KpiRow,
   LoadingSkeleton,
   SectionCard,
-  overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import {
   DataTable,
@@ -47,7 +46,14 @@ import {
   type WorkspaceApprovalStatus,
   type WorkspaceApprovalSubject,
 } from "@/lib/workspace-shared";
-import { ApprovalStatusBadge, DateCell, LoadMoreFooter, workspaceError } from "./workspace-ui";
+import {
+  ApprovalStatusBadge,
+  DateCell,
+  LoadMoreFooter,
+  workspaceError,
+  WorkspaceFormDialog,
+  stackedTableClass,
+} from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
 import { WorkspaceEntityDrawer, type WorkspaceEntityRef } from "./workspace-entity-drawer";
 
@@ -180,7 +186,7 @@ export function ApprovalsSection({
             وقتی کسی برای قرارداد یا سندی درخواست تأیید بفرستد، اینجا دیده می‌شود.
           </EmptyState>
         ) : (
-          <DataTable caption="فهرست درخواست‌های تأیید" frame={false}>
+          <DataTable caption="فهرست درخواست‌های تأیید" frame={false} tableClassName={stackedTableClass}>
             <DataTableHead>
               <tr>
                 <Th>موضوع</Th>
@@ -195,7 +201,7 @@ export function ApprovalsSection({
             <DataTableBody>
               {approvals.map((row) => (
                 <DataTableRow key={row.id}>
-                  <Td>
+                  <Td data-label="موضوع">
                     {/* An explicit button, not a row click: this row also holds the
                         decision buttons, and one press must do one thing (#761 §23). */}
                     <button
@@ -209,16 +215,16 @@ export function ApprovalsSection({
                       <div className="text-xs text-muted-foreground">{row.note}</div>
                     ) : null}
                   </Td>
-                  <Td>{APPROVAL_SUBJECT_LABELS[row.subjectType]}</Td>
-                  <Td>{row.projectName ?? "—"}</Td>
-                  <Td>{row.requestedByName ?? "—"}</Td>
-                  <Td>
+                  <Td data-label="نوع">{APPROVAL_SUBJECT_LABELS[row.subjectType]}</Td>
+                  <Td data-label="پروژه">{row.projectName ?? "—"}</Td>
+                  <Td data-label="درخواست‌کننده">{row.requestedByName ?? "—"}</Td>
+                  <Td data-label="مهلت">
                     <DateCell date={row.dueDate} />
                   </Td>
-                  <Td>
+                  <Td data-label="وضعیت">
                     <ApprovalStatusBadge status={row.status} />
                   </Td>
-                  <Td>
+                  <Td data-label="اقدام">
                     {row.status !== "pending" ? (
                       <span className="text-xs text-muted-foreground">
                         {row.decidedAt ? "تصمیم ثبت شده" : "—"}
@@ -327,44 +333,35 @@ function DecisionDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/30 p-4 backdrop-blur-sm">
-      <div className={`${overlayPanelClass} w-full max-w-lg`}>
-        <div className="flex items-center justify-between border-b border-border/80 p-4">
-          <h2 className="text-base font-semibold">{DECISION_LABELS[decision]} درخواست</h2>
-          <SecondaryButton onClick={onClose}>
-            <XIcon className="size-4" aria-hidden />
-            <span className="sr-only">بستن</span>
-          </SecondaryButton>
-        </div>
-        <div className="flex flex-col gap-3 p-4">
-          <p className="text-sm text-muted-foreground">
-            {APPROVAL_SUBJECT_LABELS[row.subjectType]}: {row.subjectTitle || row.title}
-            {row.projectName ? ` — ${row.projectName}` : ""}
-          </p>
-          <Field
-            label="یادداشت"
-            hint={
-              decision === "rejected" || decision === "changes_requested"
-                ? "دلیل را بنویسید؛ درخواست‌کننده آن را می‌بیند."
-                : "اختیاری"
-            }
-          >
-            <textarea
-              className={`${inputClass} min-h-24`}
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              autoFocus
-            />
-          </Field>
-          <p className="text-xs text-muted-foreground">{DECISION_EFFECTS[decision]}</p>
-        </div>
-        <div className="flex justify-end gap-2 border-t border-border/80 p-4">
-          <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
-          <PrimaryButton type="button" onClick={submit} disabled={saving}>
-            {saving ? "در حال ثبت" : `ثبت ${DECISION_LABELS[decision]}`}
-          </PrimaryButton>
-        </div>
+    <WorkspaceFormDialog title={<>{DECISION_LABELS[decision]} درخواست</>} width="lg" onClose={onClose}>
+      <div className="flex flex-col gap-3 p-4">
+        <p className="text-sm text-muted-foreground">
+          {APPROVAL_SUBJECT_LABELS[row.subjectType]}: {row.subjectTitle || row.title}
+          {row.projectName ? ` — ${row.projectName}` : ""}
+        </p>
+        <Field
+          label="یادداشت"
+          hint={
+            decision === "rejected" || decision === "changes_requested"
+              ? "دلیل را بنویسید؛ درخواست‌کننده آن را می‌بیند."
+              : "اختیاری"
+          }
+        >
+          <textarea
+            className={`${inputClass} min-h-24`}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            autoFocus
+          />
+        </Field>
+        <p className="text-xs text-muted-foreground">{DECISION_EFFECTS[decision]}</p>
       </div>
-    </div>
+      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+        <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
+        <PrimaryButton type="button" onClick={submit} disabled={saving}>
+          {saving ? "در حال ثبت…" : `ثبت ${DECISION_LABELS[decision]}`}
+        </PrimaryButton>
+      </div>
+    </WorkspaceFormDialog>
   );
 }

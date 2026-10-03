@@ -11,12 +11,11 @@
 
 import type { WorkspaceIntent } from "./workspace-routes";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CalendarDaysIcon, ChevronLeftIcon, ChevronRightIcon, PlusIcon, XIcon } from "lucide-react";
+import { CalendarDaysIcon, ChevronLeftIcon, ChevronRightIcon, PlusIcon } from "lucide-react";
 import {
   EmptyState,
   LoadingSkeleton,
   SectionCard,
-  overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import { FilterChip, FilterChipRow } from "@/app/dashboard/filters";
 import {
@@ -47,7 +46,13 @@ import {
   type WorkspaceCalendarSource,
   type WorkspaceEventKind,
 } from "@/lib/workspace-shared";
-import { DateField, PickerField, SelectField, workspaceError } from "./workspace-ui";
+import {
+  DateField,
+  PickerField,
+  SelectField,
+  workspaceError,
+  WorkspaceFormDialog,
+} from "./workspace-ui";
 import type { WorkspaceLookups } from "./use-workspace-lookups";
 import { WorkspaceEntityDrawer, type WorkspaceEntityRef } from "./workspace-entity-drawer";
 
@@ -388,95 +393,86 @@ function EventDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/30 p-4 backdrop-blur-sm">
-      <div className={`${overlayPanelClass} w-full max-w-xl`}>
-        <div className="flex items-center justify-between border-b border-border/80 p-4">
-          <h2 className="text-base font-semibold">{event ? "رویداد" : "رویداد جدید"}</h2>
-          <SecondaryButton onClick={onClose}>
-            <XIcon className="size-4" aria-hidden />
-            <span className="sr-only">بستن</span>
-          </SecondaryButton>
-        </div>
-        <div className="grid gap-3 p-4 sm:grid-cols-2">
-          <div className="sm:col-span-2">
-            <Field label="عنوان">
-              <input
-                className={inputClass}
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                autoFocus
-              />
-            </Field>
-          </div>
-          <SelectField
-            label="نوع"
-            value={kind}
-            onChange={setKind}
-            options={EVENT_KINDS}
-            labels={EVENT_KIND_LABELS}
-          />
-          <DateField label="تاریخ" value={eventDate} onChange={setEventDate} />
-          <Field label="ساعت شروع" hint="اختیاری">
+    <WorkspaceFormDialog title={event ? "رویداد" : "رویداد جدید"} width="xl" onClose={onClose}>
+      <div className="grid gap-3 p-4 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <Field label="عنوان">
             <input
               className={inputClass}
-              value={startTime}
-              onChange={(e) => setStartTime(e.target.value)}
-              placeholder="۰۹:۳۰"
-              type="time"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              autoFocus
             />
           </Field>
-          <Field label="ساعت پایان" hint="اختیاری">
+        </div>
+        <SelectField
+          label="نوع"
+          value={kind}
+          onChange={setKind}
+          options={EVENT_KINDS}
+          labels={EVENT_KIND_LABELS}
+        />
+        <DateField label="تاریخ" value={eventDate} onChange={setEventDate} />
+        <Field label="ساعت شروع" hint="اختیاری">
+          <input
+            className={inputClass}
+            value={startTime}
+            onChange={(e) => setStartTime(e.target.value)}
+            placeholder="۰۹:۳۰"
+            type="time"
+          />
+        </Field>
+        <Field label="ساعت پایان" hint="اختیاری">
+          <input
+            className={inputClass}
+            value={endTime}
+            onChange={(e) => setEndTime(e.target.value)}
+            type="time"
+          />
+        </Field>
+        <PickerField
+          label="پروژه"
+          value={projectId}
+          onChange={setProjectId}
+          options={lookups.projects.map((p) => ({ id: p.id, label: p.name }))}
+          placeholder="— بدون پروژه —"
+        />
+        <div className="sm:col-span-2">
+          <Field label="مکان">
             <input
               className={inputClass}
-              value={endTime}
-              onChange={(e) => setEndTime(e.target.value)}
-              type="time"
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
             />
           </Field>
-          <PickerField
-            label="پروژه"
-            value={projectId}
-            onChange={setProjectId}
-            options={lookups.projects.map((p) => ({ id: p.id, label: p.name }))}
-            placeholder="— بدون پروژه —"
-          />
-          <div className="sm:col-span-2">
-            <Field label="مکان">
-              <input
-                className={inputClass}
-                value={location}
-                onChange={(e) => setLocation(e.target.value)}
-              />
-            </Field>
-          </div>
-          <div className="sm:col-span-2">
-            <Field label="توضیح" hint="اختیاری">
-              <textarea
-                className={`${inputClass} min-h-20`}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </Field>
-          </div>
         </div>
-        <div className="flex justify-end gap-2 border-t border-border/80 p-4">
-          {event && canEdit ? (
-            <SecondaryButton onClick={remove} disabled={saving}>
-              حذف رویداد
-            </SecondaryButton>
-          ) : null}
-          <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
-          {canEdit ? (
-            <PrimaryButton
-              type="button"
-              onClick={submit}
-              disabled={!title.trim() || !eventDate || saving}
-            >
-              {saving ? "در حال ذخیره" : event ? "ذخیرهٔ تغییرات" : "ثبت رویداد"}
-            </PrimaryButton>
-          ) : null}
+        <div className="sm:col-span-2">
+          <Field label="توضیح" hint="اختیاری">
+            <textarea
+              className={`${inputClass} min-h-20`}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </Field>
         </div>
       </div>
-    </div>
+      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+        {event && canEdit ? (
+          <SecondaryButton onClick={remove} disabled={saving}>
+            حذف رویداد
+          </SecondaryButton>
+        ) : null}
+        <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
+        {canEdit ? (
+          <PrimaryButton
+            type="button"
+            onClick={submit}
+            disabled={!title.trim() || !eventDate || saving}
+          >
+            {saving ? "در حال ذخیره" : event ? "ذخیرهٔ تغییرات" : "ثبت رویداد"}
+          </PrimaryButton>
+        ) : null}
+      </div>
+    </WorkspaceFormDialog>
   );
 }

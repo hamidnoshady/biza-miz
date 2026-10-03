@@ -132,7 +132,8 @@ export function WorkspaceCommandBar({
         aria-keyshortcuts="Control+K Meta+K"
       >
         <SearchIcon className="size-4 shrink-0" aria-hidden />
-        <span className="truncate">جست‌وجو در پروژه‌ها، وظایف، اسناد و قراردادها…</span>
+        <span className="truncate sm:hidden">جست‌وجو…</span>
+        <span className="hidden truncate sm:inline">جست‌وجو در پروژه‌ها، وظایف، اسناد و قراردادها…</span>
         <kbd className="ms-auto hidden rounded border border-border/80 px-1.5 text-xs sm:inline" dir="ltr">
           Ctrl K
         </kbd>
