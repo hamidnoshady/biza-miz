@@ -5,6 +5,7 @@ import {
   listMessageCreditPackages,
   saveMessageCreditPackage,
 } from "@/lib/messaging-billing";
+import { parseSafeIntInput } from "@/lib/platform-money";
 
 /**
  * The ONE credit-package catalogue (migration 0176): wallet top-up packages
@@ -42,12 +43,12 @@ export const POST = withPlatformScope(async (req: Request) => {
 
   const kind = body.kind === "messaging" ? "messaging" : "wallet";
   const name = String(body.name ?? "").trim();
-  const priceRial = Math.floor(Number(body.priceRial ?? 0));
-  const creditRial = Math.floor(Number(body.creditRial ?? 0));
-  if (!name || priceRial <= 0 || creditRial <= 0) {
+  if (!name) {
     return NextResponse.json({ error: "missing_fields" }, { status: 400 });
   }
-  if (!Number.isSafeInteger(priceRial) || !Number.isSafeInteger(creditRial)) {
+  const priceRial = parseSafeIntInput(body.priceRial, { min: 1 });
+  const creditRial = parseSafeIntInput(body.creditRial, { min: 1 });
+  if (priceRial === null || creditRial === null) {
     return NextResponse.json({ error: "INVALID_AMOUNT" }, { status: 400 });
   }
 

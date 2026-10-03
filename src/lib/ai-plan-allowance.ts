@@ -10,15 +10,18 @@
  *
  * Period shape: one row per (business, calendar month) in
  * `ai_plan_allowance_usage`. The month is computed in Asia/Tehran so an
- * Iranian business's "month" flips at Iranian midnight, not UTC's. The
- * `granted_rial` column snapshots the plan's allowance at the month's first
- * use; the effective cap for the rest of the month is
- * min(granted_rial, plan's current value) — lowering a plan takes effect
- * immediately, raising it only next month, and history is never rewritten.
+ * Iranian business's "month" flips at Iranian midnight, not UTC's.
+ *
+ * Effective cap rule (shared across read, affordability gate, and settlement):
+ *   effectiveCreditRial = configuredCreditRial (from the business's current
+ *   plan allowance for the period, or 0 when the subscription is expired/canceled
+ *   or the plan includes no AI credit)
+ *   remainingRial = Math.max(0, effectiveCreditRial - usedRial)
  */
 
 import type { PoolClient } from "./db";
 import { query, withoutTenantScope } from "./db";
+import { isSubscriptionCarryingPlan } from "./billing-plans-service";
 
 /** The billing calendar: everything AI-bills in Asia/Tehran. */
 export const AI_BILLING_TIME_ZONE = "Asia/Tehran";
@@ -44,20 +47,74 @@ export function currentPeriodMonth(): string {
   return periodMonthFor(new Date());
 }
 
-export interface PlanAllowance {
-  /** The plan's monthly AI credit right now (0 when the plan has none). */
-  monthlyCreditRial: number;
-  /** What has already been consumed this month. */
-  usedRial: number;
-  /** monthlyCreditRial - usedRial, never negative. */
-  remainingRial: number;
+function zonedMidnightUtc(year: number, month: number, day: number, timeZone: string): Date {
+  const targetUtc = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  const offsetAt = (utcMs: number): number => {
+    const parts = fmt.formatToParts(new Date(utcMs));
+    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+    const asUtc = Date.UTC(
+      get("year"),
+      get("month") - 1,
+      get("day"),
+      get("hour"),
+      get("minute"),
+      get("second"),
+      0,
+    );
+    return asUtc - utcMs;
+  };
+  const firstGuess = targetUtc - offsetAt(targetUtc);
+  const refined = targetUtc - offsetAt(firstGuess);
+  return new Date(refined);
 }
 
-const ZERO_ALLOWANCE: PlanAllowance = {
-  monthlyCreditRial: 0,
-  usedRial: 0,
-  remainingRial: 0,
-};
+/**
+ * Compute the exact UTC `[startUtc, nextStartUtc)` window for the calendar
+ * month containing `now` in `timeZone` (default `Asia/Tehran`).
+ */
+export function tehranMonthWindow(
+  now: Date = new Date(),
+  timeZone: string = AI_BILLING_TIME_ZONE,
+): { periodMonth: string; startUtc: Date; nextStartUtc: Date } {
+  const periodMonth = periodMonthFor(now, timeZone);
+  const [yStr, mStr] = periodMonth.split("-");
+  const year = Number(yStr);
+  const month = Number(mStr);
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  return {
+    periodMonth,
+    startUtc: zonedMidnightUtc(year, month, 1, timeZone),
+    nextStartUtc: zonedMidnightUtc(nextYear, nextMonth, 1, timeZone),
+  };
+}
+
+export interface PlanAllowance {
+  /** The effective monthly AI credit right now (kept as `monthlyCreditRial` for compatibility). */
+  monthlyCreditRial: number;
+  /** The plan's configured monthly AI credit (0 when plan has none). */
+  configuredCreditRial: number;
+  /** The effective monthly AI credit cap for this billing period. */
+  effectiveCreditRial: number;
+  /** The snapshot grant recorded on the usage row (if any), synced to effectiveCreditRial. */
+  grantedRial: number;
+  /** What has already been consumed this month. */
+  usedRial: number;
+  /** effectiveCreditRial - usedRial, never negative. */
+  remainingRial: number;
+  /** Current period month key ('YYYY-MM') in Asia/Tehran. */
+  periodMonth: string;
+}
 
 function toRial(value: string | number | null | undefined): number {
   const n = Number(value ?? 0);
@@ -65,113 +122,166 @@ function toRial(value: string | number | null | undefined): number {
 }
 
 /**
- * A business's remaining plan allowance for the current month.
- * Read path only — the settlement consumes inside its own transaction via
- * `consumePlanAllowanceTx`.
+ * Shared pure effective-cap calculation used by `getPlanAllowance`,
+ * `checkAiAffordability`, and `consumePlanAllowanceTx`.
  */
-export async function getPlanAllowance(businessId: string): Promise<PlanAllowance> {
-  return withoutTenantScope("platform", async () => readAllowance(businessId, currentPeriodMonth()));
+export function resolveEffectivePlanAllowance(input: {
+  configuredCreditRial: number;
+  grantedRial?: number | null;
+  usedRial: number;
+  subscriptionCarrying?: boolean;
+  periodMonth?: string;
+}): PlanAllowance {
+  const carrying = input.subscriptionCarrying !== false;
+  const configuredCreditRial = toRial(input.configuredCreditRial);
+  const effectiveCreditRial = carrying ? configuredCreditRial : 0;
+  const usedRial = toRial(input.usedRial);
+  const grantedRial = effectiveCreditRial > 0 ? effectiveCreditRial : toRial(input.grantedRial);
+  const remainingRial = Math.max(0, effectiveCreditRial - usedRial);
+  return {
+    monthlyCreditRial: effectiveCreditRial,
+    configuredCreditRial,
+    effectiveCreditRial,
+    grantedRial,
+    usedRial,
+    remainingRial,
+    periodMonth: input.periodMonth ?? currentPeriodMonth(),
+  };
 }
 
-async function readAllowance(businessId: string, periodMonth: string): Promise<PlanAllowance> {
-  const { rows } = await query<{ monthly_credit: string | null; used: string | null }>(
-    `SELECT COALESCE(
-              (SELECT al.included_quantity FROM billing_plan_meter_allowances al
-                WHERE al.plan_key = p.key AND al.meter_key = 'ai.credit'),
-              p.monthly_ai_credit_rial
-            ) AS monthly_credit,
-            a.used_rial AS used
-       FROM businesses b
-       LEFT JOIN billing_plans p ON p.key = b.plan
-       LEFT JOIN ai_plan_allowance_usage a
-              ON a.business_id = b.id AND a.period_month = $2
-      WHERE b.id = $1`,
-    [businessId, periodMonth],
+type AllowanceQueryRow = {
+  monthly_credit: string | null;
+  used: string | null;
+  granted: string | null;
+  sub_status: string | null;
+  sub_period_end: Date | string | null;
+  sub_cancel_at_period_end: boolean | null;
+  sub_auto_renew: boolean | null;
+  sub_grace_end: Date | string | null;
+  sub_trial_end: Date | string | null;
+};
+
+const ALLOWANCE_SELECT_SQL = `
+  SELECT COALESCE(
+           (SELECT al.included_quantity FROM billing_plan_meter_allowances al
+             WHERE al.plan_key = p.key AND al.meter_key = 'ai.credit'),
+           p.monthly_ai_credit_rial
+         ) AS monthly_credit,
+         a.used_rial AS used,
+         a.granted_rial AS granted,
+         s.status AS sub_status,
+         s.current_period_end AS sub_period_end,
+         s.cancel_at_period_end AS sub_cancel_at_period_end,
+         s.auto_renew AS sub_auto_renew,
+         s.grace_end AS sub_grace_end,
+         s.trial_end AS sub_trial_end
+    FROM businesses b
+    LEFT JOIN billing_plans p ON p.key = b.plan
+    LEFT JOIN business_subscriptions s ON s.business_id = b.id
+    LEFT JOIN ai_plan_allowance_usage a
+           ON a.business_id = b.id AND a.period_month = $2
+   WHERE b.id = $1
+`;
+
+function rowToPlanAllowance(
+  row: AllowanceQueryRow | undefined,
+  periodMonth: string,
+  now: Date,
+): PlanAllowance {
+  if (!row) {
+    return resolveEffectivePlanAllowance({
+      configuredCreditRial: 0,
+      usedRial: 0,
+      periodMonth,
+    });
+  }
+  const carrying = isSubscriptionCarryingPlan(
+    {
+      status: row.sub_status,
+      currentPeriodEnd: row.sub_period_end,
+      cancelAtPeriodEnd: row.sub_cancel_at_period_end,
+      autoRenew: row.sub_auto_renew,
+      graceEnd: row.sub_grace_end,
+      trialEnd: row.sub_trial_end,
+    },
+    now.toISOString(),
   );
-  const row = rows[0];
-  if (!row) return ZERO_ALLOWANCE;
-  const monthlyCreditRial = toRial(row.monthly_credit);
-  const usedRial = toRial(row.used);
-  return {
-    monthlyCreditRial,
-    usedRial,
-    remainingRial: Math.max(0, monthlyCreditRial - usedRial),
-  };
+  return resolveEffectivePlanAllowance({
+    configuredCreditRial: toRial(row.monthly_credit),
+    grantedRial: toRial(row.granted),
+    usedRial: toRial(row.used),
+    subscriptionCarrying: carrying,
+    periodMonth,
+  });
+}
+
+/**
+ * A business's remaining plan allowance for the current month.
+ * Read path — uses the exact same `resolveEffectivePlanAllowance` rule as
+ * `consumePlanAllowanceTx`.
+ */
+export async function getPlanAllowance(
+  businessId: string,
+  now: Date = new Date(),
+): Promise<PlanAllowance> {
+  const periodMonth = periodMonthFor(now);
+  return withoutTenantScope("platform", async () => {
+    const { rows } = await query<AllowanceQueryRow>(ALLOWANCE_SELECT_SQL, [businessId, periodMonth]);
+    return rowToPlanAllowance(rows[0], periodMonth, now);
+  });
 }
 
 /**
  * Consume up to `amountRial` of the plan allowance, INSIDE the caller's
- * wallet transaction (the wallet row is already locked; the allowance row is
- * locked the same way). Returns what was actually consumed — `amountRial`
- * itself when the allowance covers it, its remainder otherwise, and 0 when the
- * plan includes no AI credit. Never throws for "no allowance": a business on a
- * plan without AI credit simply pays from the wallet, as it always did.
+ * transaction. Locks the business's wallet row so concurrent calls on the same
+ * business serialize even when invoked outside `withWalletTx`. Returns what
+ * was actually consumed.
  */
 export async function consumePlanAllowanceTx(
   client: PoolClient,
   businessId: string,
   amountRial: number,
+  now: Date = new Date(),
 ): Promise<number> {
   const amount = Math.max(0, Math.floor(amountRial));
   if (amount === 0) return 0;
 
-  const periodMonth = currentPeriodMonth();
+  const periodMonth = periodMonthFor(now);
 
-  // The plan's CURRENT allowance, and the month's snapshot row if one exists.
-  // No FOR UPDATE here, and none is needed: this runs only inside the wallet
-  // settlement, which already holds the per-business lock on business_wallets
-  // (`withWalletTx`), so concurrent AI turns for one business serialize before
-  // they can ever reach this row. (Postgres also refuses FOR UPDATE on the
-  // nullable side of this outer join.)
-  const plan = await client.query<{ monthly_credit: string | null; used: string | null; granted: string | null }>(
-    `SELECT COALESCE(
-              (SELECT al.included_quantity FROM billing_plan_meter_allowances al
-                WHERE al.plan_key = p.key AND al.meter_key = 'ai.credit'),
-              p.monthly_ai_credit_rial
-            ) AS monthly_credit,
-            a.used_rial AS used,
-            a.granted_rial AS granted
-       FROM businesses b
-       LEFT JOIN billing_plans p ON p.key = b.plan
-       LEFT JOIN ai_plan_allowance_usage a
-              ON a.business_id = b.id AND a.period_month = $2
-      WHERE b.id = $1`,
-    [businessId, periodMonth],
+  // Ensure per-business serialization even if called directly in a transaction.
+  await client.query(
+    `INSERT INTO business_wallets (business_id) VALUES ($1) ON CONFLICT (business_id) DO NOTHING`,
+    [businessId],
   );
-  const row = plan.rows[0];
-  if (!row) return 0;
+  await client.query(
+    `SELECT business_id FROM business_wallets WHERE business_id = $1 FOR UPDATE`,
+    [businessId],
+  );
 
-  const monthlyCredit = toRial(row.monthly_credit);
-  const granted = toRial(row.granted);
-  const used = toRial(row.used);
+  const plan = await client.query<AllowanceQueryRow>(ALLOWANCE_SELECT_SQL, [businessId, periodMonth]);
+  const effective = rowToPlanAllowance(plan.rows[0], periodMonth, now);
 
-  if (monthlyCredit <= 0) return 0;
-
-  if (granted <= 0) {
-    // First use this month: snapshot the plan's allowance onto the row.
-    await client.query(
-      `INSERT INTO ai_plan_allowance_usage (business_id, period_month, granted_rial, used_rial)
-       VALUES ($1, $2, $3, 0)
-       ON CONFLICT (business_id, period_month) DO NOTHING`,
-      [businessId, periodMonth, monthlyCredit],
-    );
+  if (effective.effectiveCreditRial <= 0) {
+    if (toRial(plan.rows[0]?.granted) > 0) {
+      await client.query(
+        `UPDATE ai_plan_allowance_usage
+            SET granted_rial = 0, updated_at = now()
+          WHERE business_id = $1 AND period_month = $2`,
+        [businessId, periodMonth],
+      );
+    }
+    return 0;
   }
 
-  // Effective cap: the month's snapshot, never above the plan's current value
-  // (a mid-month plan raise applies next month; a cut applies immediately).
-  const effectiveCap = granted > 0 ? Math.min(granted, monthlyCredit) : monthlyCredit;
-  const remaining = Math.max(0, effectiveCap - used);
-  const consumed = Math.min(amount, remaining);
-  if (consumed <= 0) return 0;
-
+  const consumed = Math.min(amount, effective.remainingRial);
   await client.query(
     `INSERT INTO ai_plan_allowance_usage (business_id, period_month, granted_rial, used_rial)
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (business_id, period_month)
      DO UPDATE SET used_rial = ai_plan_allowance_usage.used_rial + $4,
-                   granted_rial = GREATEST(ai_plan_allowance_usage.granted_rial, EXCLUDED.granted_rial),
+                   granted_rial = EXCLUDED.granted_rial,
                    updated_at = now()`,
-    [businessId, periodMonth, granted > 0 ? granted : monthlyCredit, consumed],
+    [businessId, periodMonth, effective.effectiveCreditRial, consumed],
   );
   return consumed;
 }

@@ -17,6 +17,7 @@ import {
   type PlanLimitsSpec,
   type PlanStatus,
 } from "@/lib/billing-plans-service";
+import { parseOptionalSafeIntInput, parseSafeIntInput } from "@/lib/platform-money";
 
 /**
  * The ONE plan builder's catalogue: every billing plan (identity, base
@@ -43,14 +44,14 @@ function parseLimit(value: unknown): LimitSpec | undefined {
   if (typeof value !== "object") return undefined;
   const spec = value as { unlimited?: unknown; value?: unknown };
   const unlimited = spec.unlimited === true;
-  const parsed =
-    spec.value == null || spec.value === ""
-      ? null
-      : Math.floor(Number(spec.value));
-  if (!unlimited && (parsed == null || !Number.isSafeInteger(parsed) || parsed < 0)) {
+  if (unlimited) {
+    return { unlimited: true, value: null };
+  }
+  const parsed = parseSafeIntInput(spec.value, { min: 0 });
+  if (parsed === null) {
     return { unlimited: false, value: -1 }; // sentinel → validation failure below
   }
-  return { unlimited, value: parsed };
+  return { unlimited: false, value: parsed };
 }
 
 /** Create or update a billing plan, or transition its lifecycle. */
@@ -92,22 +93,18 @@ export const POST = withPlatformScope(async (req: Request) => {
   const name = String(body.name ?? "").trim();
   if (!name) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
 
-  const monthlyPrice =
-    body.monthlyPriceRial == null || body.monthlyPriceRial === ""
-      ? null
-      : Math.max(0, Math.floor(Number(body.monthlyPriceRial)));
-  if (monthlyPrice != null && (!Number.isSafeInteger(monthlyPrice) || monthlyPrice < 0)) {
+  const monthlyPriceParsed = parseOptionalSafeIntInput(body.monthlyPriceRial, { min: 0 });
+  if (!monthlyPriceParsed.ok) {
     return NextResponse.json({ error: "INVALID_AMOUNT" }, { status: 400 });
   }
+  const monthlyPrice = monthlyPriceParsed.value;
   // Plan-included monthly AI credit (migration 0168). Missing/0/null all mean
   // "no included credit" so an update can also clear it.
-  const monthlyAiCredit =
-    body.monthlyAiCreditRial == null || body.monthlyAiCreditRial === ""
-      ? null
-      : Math.max(0, Math.floor(Number(body.monthlyAiCreditRial)));
-  if (monthlyAiCredit != null && (!Number.isSafeInteger(monthlyAiCredit) || monthlyAiCredit < 0)) {
+  const monthlyAiCreditParsed = parseOptionalSafeIntInput(body.monthlyAiCreditRial, { min: 0 });
+  if (!monthlyAiCreditParsed.ok) {
     return NextResponse.json({ error: "INVALID_AMOUNT" }, { status: 400 });
   }
+  const monthlyAiCredit = monthlyAiCreditParsed.value;
 
   const status = body.status == null ? undefined : (String(body.status) as PlanStatus);
   if (status != null && !["draft", "active", "retired"].includes(status)) {
