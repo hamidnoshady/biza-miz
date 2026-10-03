@@ -559,6 +559,11 @@ function ItemSection({
     [data.modifierGroups],
   );
 
+  const categoriesById = useMemo(
+    () => new Map(data.categories.map((c) => [c.id, c])),
+    [data.categories],
+  );
+
   return (
     <SectionCard title="آیتم‌ها">
       <form
@@ -694,6 +699,7 @@ function ItemSection({
                         key={i.id}
                         item={i}
                         categories={data.categories}
+                        categoriesById={categoriesById}
                         groups={data.modifierGroups}
                         groupsById={groupsById}
                         links={data.itemModifierGroups}
@@ -722,6 +728,7 @@ function ItemSection({
                     key={i.id}
                     item={i}
                     categories={data.categories}
+                    categoriesById={categoriesById}
                     groups={data.modifierGroups}
                     groupsById={groupsById}
                     links={data.itemModifierGroups}
@@ -743,6 +750,7 @@ function ItemSection({
 function ItemRow({
   item,
   categories,
+  categoriesById,
   groups,
   groupsById,
   links,
@@ -753,6 +761,7 @@ function ItemRow({
 }: {
   item: Item;
   categories: Category[];
+  categoriesById: Map<string, Category>;
   groups: ModifierGroup[];
   groupsById: Map<string, ModifierGroup>;
   links: ItemModifierGroupLink[];
@@ -775,8 +784,9 @@ function ItemRow({
       .filter((name): name is string => Boolean(name));
   }, [itemLinks, groupsById]);
 
-  const categoryName =
-    categories.find((c) => c.id === item.categoryId)?.name ?? "—";
+  const categoryName = item.categoryId
+    ? (categoriesById.get(item.categoryId)?.name ?? "—")
+    : "—";
 
   async function move(direction: -1 | 1) {
     const index = siblings.findIndex((s) => s.id === item.id);
