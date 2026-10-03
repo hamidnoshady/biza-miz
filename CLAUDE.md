@@ -964,7 +964,25 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   and not a grant — and issuing needs its own `workspace.documents_issue` (high risk, audited)
   rather than inheriting `workspace.manage`; drafting and acknowledging a receipt stay on
   `workspace.manage`. `src/lib/aec-docs.ts` is the client-safe half and
-  `get_latest_drawing_revision` is the §23 read over it.
+  `get_latest_drawing_revision` is the §23 read over it. Wave 6 (§10, §11) is RFIs and submittals:
+  `aec_rfis` and `aec_submittals` → `aec_submittal_revisions` (migration 0198), with `src/lib/aec-rfi.ts`
+  as the client-safe half (both transition tables, the four review determinations, and the one overdue
+  predicate the tab, the assistant and the reminder scan share). Attachments and a submission file are
+  `workspace_documents` rows — a revision links one, an RFI's attachments carry `rfi_id`/`submittal_id`
+  — so §9's "no second document store" holds for §10 and §11 too. §33 is enforced by triggers, not by
+  the service: a number/subject/question freezes when the RFI is asked, a response when it is given, a
+  revision's file and notes when it is submitted, and a delete is legal only in draft; the register's
+  `latest_revision_*`/`revision_count` are derived by `aec_submittal_revision_totals()` behind a
+  transaction-local marker that lets `aec_submittal_guard()` refuse every other write. Submittal
+  review rides the **existing** `workspace_approvals` queue as a `submittal_revision` subject decided
+  on `workspace.approve` (never a second approval mechanism; the queue's binary approve/reject maps
+  onto `approved`/`rejected` and `decideSubmittalRevision` holds the finer four, «اصلاح و ارسال مجدد»
+  opening revision n+1 in the same transaction). **Wave 6 adds no permission**: reading is
+  `workspace.view`, raising/answering/drafting is `workspace.manage`, deciding is `workspace.approve`;
+  the RFI register needs only the industry, while submittals additionally need `document_control`.
+  `list_pending_rfis`/`list_pending_submittals` are the §23 reads and `aec.rfi_overdue`/
+  `aec.submittal_overdue` are the §29 events, produced by a scan in `notification-scans.ts` because an
+  overdue record changes by a date passing, not by a write.
   Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a

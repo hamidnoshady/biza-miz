@@ -20,13 +20,24 @@
  *
  * It only enqueues — the tick in notifications-service.ts is still the only
  * thing that sends.
+ *
+ * Wave 6 (issue #799 §29) adds a second scanned producer for the same reason,
+ * which is why it lives in this file rather than in the AEC module: an RFI or a
+ * submittal becomes overdue by the passage of a *date*, not by any write, so
+ * there is nowhere to hang an event. §29 also says explicitly to ride the
+ * existing engine rather than build a second one, so the scan does what the
+ * low-stock scan does — read, dedupe per business day, `recordNotification` —
+ * and delivery stays entirely in the service above.
  */
 import { query, withoutTenantScope, withTenant } from "./db";
 import { isFeatureEnabled } from "./features";
 import { recordNotification } from "./notification-events";
 import { notificationDedupeKey } from "./notifications";
 import { formatQuantity } from "./digits";
-import { ACCOUNTING_WORKSPACE_HREFS } from "./app-routes";
+import { ACCOUNTING_WORKSPACE_HREFS, workspaceProjectHref } from "./app-routes";
+import { businessToday } from "./business-day-service";
+import { overdueRegisters } from "./aec-rfi-service";
+import { formatJalali } from "./jalali";
 
 /**
  * Slow on purpose. A reorder level is a "order more this week" signal, not a
@@ -101,6 +112,84 @@ export async function scanLowStock(businessId: string): Promise<number> {
   return queued;
 }
 
+/**
+ * §29's two reminders scan on the same slow cadence as the reorder level: an
+ * overdue RFI is a "chase this today" fact, and re-reading every business's
+ * registers every ten minutes to learn the same thing would be waste. One hour
+ * is enough for a reminder whose dedupe key is a business *date* — the second
+ * scan of a day queues nothing at all.
+ */
+export const AEC_OVERDUE_SCAN_INTERVAL_MS = 60 * 60 * 1000;
+
+/** At most this many of each register per business per day, so one project's backlog cannot flood a phone. */
+const MAX_OVERDUE_PER_SCAN = 10;
+
+/**
+ * One business's overdue RFIs and submittals, queued as notifications.
+ *
+ * Both halves come from `overdueRegisters`, which is the same function the
+ * assistant's two pending reads and the two cockpit widgets use — so a
+ * reminder and a screen can never disagree about which register is late. The
+ * function itself is why nothing here checks the industry: it answers no rows
+ * for a business that is not AEC, and its submittal half is skipped when
+ * document control is off, so a trade of any kind can be swept safely.
+ *
+ * The dedupe key is `…:<record id>:<business date>`, exactly like low stock: one
+ * reminder per register entry per trading day, however many times the scan runs.
+ * A record that stays overdue for a fortnight is a fortnight of daily nudges
+ * rather than one lost alert or fifty duplicate ones.
+ */
+export async function scanOverdueAecRegisters(businessId: string): Promise<number> {
+  const today = await businessToday(businessId);
+  const { rfis, submittals } = await overdueRegisters(businessId);
+
+  let queued = 0;
+  for (const rfi of rfis) {
+    if (queued >= MAX_OVERDUE_PER_SCAN) break;
+    if (rfi.daysOverdue <= 0) continue;
+    await recordNotification({
+      businessId,
+      // No location: the registers belong to projects, not to branches.
+      locationId: null,
+      eventKey: "aec.rfi_overdue",
+      severity: "important",
+      title: `استعلام ${rfi.rfiNumber} از مهلت گذشته است`,
+      body: `${rfi.subject} — ${rfi.daysOverdue} روز گذشته، مهلت ${formatJalali(rfi.dueDate ?? "")}${
+        rfi.responsiblePartyName ? ` — مسئول: ${rfi.responsiblePartyName}` : ""
+      }`,
+      url: workspaceProjectHref(rfi.projectId),
+      dedupeKey: notificationDedupeKey("aec.rfi_overdue", rfi.id, today),
+      payload: { rfiId: rfi.id, projectId: rfi.projectId, dueDate: rfi.dueDate },
+    });
+    queued += 1;
+  }
+
+  for (const submittal of submittals) {
+    if (queued >= MAX_OVERDUE_PER_SCAN) break;
+    if (submittal.daysOverdue <= 0) continue;
+    await recordNotification({
+      businessId,
+      locationId: null,
+      eventKey: "aec.submittal_overdue",
+      severity: "important",
+      title: `سابمیتال ${submittal.submittalNumber} از مهلت گذشته است`,
+      body: `${submittal.title} — ${submittal.daysOverdue} روز گذشته، مهلت ${formatJalali(
+        submittal.dueDate ?? "",
+      )}${submittal.reviewerName ? ` — بازبین: ${submittal.reviewerName}` : ""}`,
+      url: workspaceProjectHref(submittal.projectId),
+      dedupeKey: notificationDedupeKey("aec.submittal_overdue", submittal.id, today),
+      payload: {
+        submittalId: submittal.id,
+        projectId: submittal.projectId,
+        dueDate: submittal.dueDate,
+      },
+    });
+    queued += 1;
+  }
+
+  return queued;
+}
+
 let scanInFlight = false;
 
 /**
@@ -136,5 +225,41 @@ export async function runLowStockScanTick(): Promise<number> {
     return queued;
   } finally {
     scanInFlight = false;
+  }
+}
+
+let aecScanInFlight = false;
+
+/**
+ * The AEC overdue sweep (server.ts), with its own in-flight latch: a business
+ * whose register read fails (an install without the AEC tables, a capability
+ * refused mid-flight) is logged and skipped, never allowed to abort the sweep
+ * for everyone else.
+ */
+export async function runAecOverdueScanTick(): Promise<number> {
+  if (aecScanInFlight) return 0;
+  aecScanInFlight = true;
+  try {
+    const businessIds = await withoutTenantScope("platform", async () => {
+      const { rows } = await query<{ id: string }>(
+        "SELECT id FROM businesses WHERE status = 'active' ORDER BY id",
+      );
+      return rows.map((row) => row.id);
+    });
+
+    let queued = 0;
+    for (const businessId of businessIds) {
+      try {
+        queued += await withTenant(businessId, () => scanOverdueAecRegisters(businessId));
+      } catch (error) {
+        console.error(
+          `AEC overdue scan failed for business ${businessId}:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+    return queued;
+  } finally {
+    aecScanInFlight = false;
   }
 }

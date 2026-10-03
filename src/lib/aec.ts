@@ -595,6 +595,12 @@ export const AEC_AI_TOOL_NAMES = [
   // Issue #799 Wave 5 — §23's `get_latest_drawing_revision`, which the drawing
   // register (migration 0197) now makes answerable.
   "get_latest_drawing_revision",
+  // Issue #799 Wave 6 — §23's two pending lists. They answer the question the
+  // issue also writes in Persian («RFIهای بدون پاسخ این هفته چیست؟» and
+  // «چه سابمیتال‌هایی منتظر تأیید هستند؟») from the same service the RFI and
+  // submittal tabs read, so the assistant and the screen cannot disagree.
+  "list_pending_rfis",
+  "list_pending_submittals",
 ] as const;
 export type AecAiToolName = (typeof AEC_AI_TOOL_NAMES)[number];
 
@@ -608,6 +614,8 @@ export const AEC_AI_TOOL_LABELS: Record<AecAiToolName, string> = {
   list_delayed_project_activities: "فعالیت‌های عقب‌افتادهٔ پروژه",
   get_boq_variance: "مغایرت برآورد با هزینهٔ واقعی",
   get_latest_drawing_revision: "آخرین بازنگری نقشه‌ها",
+  list_pending_rfis: "استعلام‌های بی‌پاسخ (RFI)",
+  list_pending_submittals: "سابمیتال‌های منتظر تأیید",
 };
 
 export function isAecOperatingProfile(value: string): value is AecOperatingProfile {

@@ -143,7 +143,12 @@ app.prepare().then(async () => {
   const { runHolooPushTick, HOLOO_PUSH_TICK_INTERVAL_MS } = await import("./src/lib/integrations/holoo/push-service");
   const { runHolooReconciliationTick, HOLOO_RECONCILIATION_TICK_INTERVAL_MS } = await import("./src/lib/integrations/holoo/reconciliation-service");
   const { runNotificationTick, NOTIFICATION_TICK_INTERVAL_MS } = await import("./src/lib/notifications-service");
-  const { runLowStockScanTick, LOW_STOCK_SCAN_INTERVAL_MS } = await import("./src/lib/notification-scans");
+  const {
+    runLowStockScanTick,
+    LOW_STOCK_SCAN_INTERVAL_MS,
+    runAecOverdueScanTick,
+    AEC_OVERDUE_SCAN_INTERVAL_MS,
+  } = await import("./src/lib/notification-scans");
   // OpenObserve integration (docs/openobserve.md): taps console.* and
   // records errors/slow requests. No-op unless OPENOBSERVE_URL +
   // OPENOBSERVE_USER/PASSWORD are set — an install without a collector
@@ -461,6 +466,14 @@ app.prepare().then(async () => {
   const lowStockScan = () =>
     runLowStockScanTick().catch((err) => console.error("low-stock scan failed:", err));
   scheduleBackgroundTick(lowStockScan, LOW_STOCK_SCAN_INTERVAL_MS, 120_000);
+
+  // Issue #799 §29 (Wave 6): the two constructed-world reminders, «RFI overdue»
+  // and «submittal overdue». Same reason as low stock for scanning rather than
+  // being told — a record becomes overdue by the passage of a date, not by a
+  // write — and the same engine for delivering it, per the issue's own rule.
+  const aecOverdueScan = () =>
+    runAecOverdueScanTick().catch((err) => console.error("AEC overdue scan failed:", err));
+  scheduleBackgroundTick(aecOverdueScan, AEC_OVERDUE_SCAN_INTERVAL_MS, 240_000);
 
   // Phase 37: drain the SMS/email marketing outbox. Producers only enqueue —
   // an owner clicking "send" must never wait on (or fail because of) an SMTP or

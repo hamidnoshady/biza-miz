@@ -69,6 +69,11 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // The drawing register is the documents tab the same member already opens, so
   // this read adds no reach either — it answers «آخرین رویژن…» from those rows.
   get_latest_drawing_revision: PERMISSIONS.workspaceView,
+  // The two pending registers (issue #799 §23, Wave 6) are the RFI and submittal
+  // tabs the same member already opens, so these reads add no reach: like the
+  // drawing read above they sit on `workspace.view`.
+  list_pending_rfis: PERMISSIONS.workspaceView,
+  list_pending_submittals: PERMISSIONS.workspaceView,
   draft_expense_from_receipt: PERMISSIONS.financeExpensesManage,
   get_accounting_review: PERMISSIONS.ledgerView,
 };

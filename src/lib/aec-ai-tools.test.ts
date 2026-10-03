@@ -20,13 +20,17 @@ describe("the AEC read tools", () => {
     // Wave 3 shipped §23's first two; Wave 4 added `get_boq_variance` because
     // the data it reads (the approved estimate and the ledger's actual cost)
     // only then existed; Wave 5 added `get_latest_drawing_revision`, which the
-    // issue names in §23 and whose register arrived with §9. The list is
-    // asserted literally so a fifth cannot arrive unnoticed.
+    // issue names in §23 and whose register arrived with §9; Wave 6 added the
+    // two pending lists, which §23 names and which §10/§11's registers made
+    // answerable. The list is asserted literally so a seventh cannot arrive
+    // unnoticed.
     expect([...AEC_AI_TOOL_NAMES]).toEqual([
       "get_aec_project_financial_health",
       "list_delayed_project_activities",
       "get_boq_variance",
       "get_latest_drawing_revision",
+      "list_pending_rfis",
+      "list_pending_submittals",
     ]);
     expect(isAecAiToolName("get_aec_project_financial_health")).toBe(true);
     expect(isAecAiToolName("get_workspace_project_status")).toBe(false);

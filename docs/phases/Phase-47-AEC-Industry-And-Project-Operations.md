@@ -261,12 +261,78 @@ register must never answer ambiguously. Deriving it means the register, the tab'
 and the assistant's `get_latest_drawing_revision` all read one stored answer, while the full history
 stays readable beside it.
 
-## Waves 6–11 — designed, not built
+## Wave 6 — RFIs and submittals (implemented, migration 0198)
+
+What shipped:
+
+| Surface | Change |
+|---|---|
+| Domain | `migrations/0198_aec_rfi_and_submittals.sql` — three tables: `aec_rfis` (the question register), `aec_submittals` (the register of what is sent for review) and `aec_submittal_revisions` (one submission of it, with its own status, file, reviewer and determination). All three ENABLE + FORCE RLS with a `tenant_isolation` policy and composite `(business_id, …)` foreign keys; both party references are guarded the way 0194's are; the migration widens `workspace_approvals.subject_type` with `submittal_revision` and `workspace_activity.subject_type` with `rfi` and `submittal`, and seeds «RFIهای بدون پاسخ» / «سابمیتالهای منتظر تأیید» widgets for the industry |
+| Storage | A submittal revision's file and an RFI's attachments are `workspace_documents` rows: the revision links one (created from a `media_assets` file, exactly as a drawing revision does), and attachments are documents of the project linked by two new nullable columns (`workspace_documents.rfi_id`, `.submittal_id`). There is no second byte store and no second upload path — §9's rule, applied to §10 and §11 |
+| Immutability | `aec_rfi_guard()` allows exactly `draft → open → answered → closed` plus cancellation, refuses any change to the number, subject or question once the RFI has been asked, refuses a second write to the response, and refuses a delete that is not a draft; `aec_submittal_revision_guard()` freezes a revision's file, due date, notes, submitter and reviewer the moment it leaves draft (the reviewer is claimed by the transition itself) and refuses deletion outside draft; `aec_submittal_guard()` refuses a direct write to the four derived columns. §33's "RFI response" and "submittal decision" are therefore history in the database, not only in the service |
+| Derived latest revision | `aec_submittal_revision_totals()` derives `latest_revision_id/no/status` and `revision_count` on the register row (announcing itself through a transaction-local marker, so the register's guard can refuse every other write) — "which revision is current" is one stored answer, never a read-time sort |
+| Approval | §11's review rides the **existing** `workspace_approvals` queue as a `subject_type = 'submittal_revision'` row filed by `submitSubmittalRevision`, decided on `workspace.approve`. No second approval mechanism: the queue, the dashboard counters and the widgets learn about submittals for free. The queue's binary decision maps onto `approved`/`rejected`; the reviewer's two finer outcomes («تأیید با نظر» and «اصلاح و ارسال مجدد») live on the submittal screen, because the queue cannot say which of them a bare "reject" meant |
+| Pure half | `src/lib/aec-rfi.ts` — §10's five statuses with their labels and transition table, §11's eight statuses, eight submission types, the four review determinations with Persian labels, `isRfiOverdue`/`isSubmittalOverdue` against the business's own today, `isRfiWaiting`/`isSubmittalWithAuthor`/`isSubmittalDecided`, and the editability predicates the screens and the service share |
+| Service | `src/lib/aec-rfi-service.ts` — RFI CRUD with `applyRfiAction(open/answer/close/cancel)`, attachment replacement through `workspace_documents`, submittal CRUD with revision 1 created in the same transaction as the register row, `addSubmittalRevision`, `submitSubmittalRevision` (freezes the revision and files one approval), `startSubmittalReview`, `decideSubmittalRevision` («اصلاح و ارسال مجدد» inserts revision n+1 in the same transaction), `closeSubmittalRevision`, the queue-side `decideSubmittalApproval`, and `pendingRfis`/`pendingSubmittals` for the assistant and the widgets |
+| API | `GET/POST /api/aec/projects/[id]/rfis`, `GET/PATCH/DELETE /api/aec/rfis/[id]`, `POST /api/aec/rfis/[id]/status` (`open` \| `answer` \| `close` \| `cancel`), `GET/POST /api/aec/projects/[id]/submittals`, `GET/PATCH/DELETE /api/aec/submittals/[id]`, `POST /api/aec/submittals/[id]/revisions`, `PATCH/DELETE /api/aec/submittal-revisions/[id]`, `POST /api/aec/submittal-revisions/[id]/status` (`submit` \| `start_review` \| `decide` \| `close`). Every one `withTenantScope` + `aecOwner` + `requireProjectCapability`, on the same read/write split as the rest of the module |
+| Permission | **No new key.** Reading needs `workspace.view`, raising/editing/answering/closing needs `workspace.manage`, and a review determination needs `workspace.approve` through the approvals queue — §24's rule (a high-risk decision must not inherit ordinary edit rights) is satisfied by the existing approval key, and a new `rfi.manage`/`submittal.manage` pair would have been a second authorization vocabulary for the same acts |
+| Screens | `src/app/(app)/workspace/projects/[id]/rfis-panel.tsx` and `submittals-panel.tsx` — «استعلامها (RFI)» and «ارسال مدارک (Submittal)»: the register with overdue dates marked, the question/answer panel, the submission cycle with each revision's determination, and one control per legal move (a draft looks editable, a submitted revision looks sent) |
+| Cockpit | `aec-cockpit.ts` — `rfis` and `submittals` are shipped, `AEC_SHIPPED_WAVE = 6`, and both own a tab: an RFI is a question asked of a client, so every AEC shape gets the tab; submittals ride `document_control`, because they are a document cycle pointing at §9's register |
+| Assistant | `list_pending_rfis` and `list_pending_submittals` join §23's reads (capabilities catalogue, `ai.ts`'s function schemas and Persian prompt, MCP summaries) — the issue names both, and they answer the two Persian questions §23 writes out («RFIهای بدون پاسخ این هفته چیست؟» and «چه سابمیتالهایی منتظر تأیید هستند؟») from the same service the tabs read |
+| Notifications | Two new event keys, `aec.rfi_overdue` and `aec.submittal_overdue`, produced by a scan in `src/lib/notification-scans.ts` beside the low-stock one (a record becomes overdue by the passage of a date, not by a write, so there is nothing to emit an event from) and delivered by the existing engine — §29's "do not build a second notification engine" |
+| Party merge | `aec_rfis.responsible_party_id` and `aec_submittals.responsible_party_id` classified in `PARTY_REFERENCES`, both moving with the surviving party — neither is part of what a frozen record froze, and leaving one behind would make the next write fail the trigger |
+
+### Decision 14 — an RFI is not capability-gated, and a submittal is
+
+§10's register is what any AEC business runs on: an individual architect asks the client a question
+as surely as a contractor does, and a question with a due date is the whole feature. So the RFI tab
+and its API need no capability — only the industry. Submittals are different in kind: §11 is a
+document *cycle* over §9's drawing register (a shop drawing, a sample, a method statement), so it
+rides `document_control`. The tab and the API therefore refuse on exactly the same terms, and a
+business that switches document control off sees the RFI tab unchanged and no submittal tab at all —
+rather than an empty register it could never fill.
+
+### Decision 15 — the reviewer's four outcomes, and why the queue only sees two
+
+§11 names four ways a review can end — Approved, Approved with Comments, Revise & Resubmit,
+Rejected — and the temptation is to model them as one status dropdown. They are not four labels, they
+are four different things to do next, which is why the screen offers four buttons and why «اصلاح و
+ارسال مجدد» inserts revision n+1 in the same transaction: leaving that to a second click lets a
+returned submittal sit with nothing to edit. The approvals queue is a generic mechanism with a binary
+decision, so `decideSubmittalApproval` maps it onto `approved`/`rejected` and never guesses which of
+the two *rejections* a reviewer meant; the finer pair lives where it can be expressed. The revision's
+status is the projection of the reviewer's act either way — one implementation of "approved" and one
+of "returned", whichever screen records it.
+
+### Decision 16 — a question freezes when it is asked, an answer when it is given
+
+§33 asks for the RFI response and the submittal decision to be immutable history, and the cheapest
+wrong answer is to trust the service. So the freeze is in the triggers, and its exact shape was chosen
+from the domain rather than from convenience: on an RFI the number, subject and question freeze the
+moment it leaves draft (an asked question that can be reworded is not a record of what was asked), the
+response freezes the moment it exists (a second write is refused, which is why the service can only
+write one through `answer`), and a non-draft cannot be deleted. On a submittal revision everything the
+reviewer saw freezes together — the file, the due date, the notes, the submitter — and the reviewer's
+own identity is claimed by the transition that picks the submission up or decides it, so changing it
+afterwards is refused while recording the determination is not. Service-level checks are not enough:
+`integration/aec-rfi.integration.test.ts` drives the same rules through raw SQL from a connection that
+bypasses every service check.
+
+### Decision 17 — one overdue definition, four readers
+
+An overdue RFI is `status = 'open'` with a due date before the business's own today; an overdue
+submittal is a revision waiting on a reviewer by the same rule. That sentence lives in
+`src/lib/aec-rfi.ts` and is used by the tab's KPI row, the register's red date, the assistant's two
+pending reads and the notification scan — so the number a manager sees on a phone, the number in a
+chat answer and the number that triggers a reminder cannot drift apart. §10's "the system must clearly
+surface overdue RFIs" is therefore one predicate with several callers rather than several queries that
+agree today.
+
+## Waves 7–11 — designed, not built
 
 In the issue's order. Nothing below has a migration or a screen yet; the wave boundaries exist so
 each can be reviewed on its own.
 
-6. **RFIs and submittals.**
 7. **Site execution.** Daily logs, inspections, QA/QC, NCRs and snagging.
 8. **Commercial controls.** Variations/change orders, progress certificates, retention and advance,
    and the project commercial cockpit.
@@ -275,6 +341,14 @@ each can be reviewed on its own.
     report set, and the hybrid/offline classification.
 11. **Cleanup.** The repo-wide audit of hard-coded industry arrays, routes that assume every
     non-F&B tenant is retail, dead routes and duplicate project/financial logic.
+
+Wave 6 leaves two issue items to the waves that own them, deliberately: an RFI's "linked variation /
+change order" (§10) is a field on the *variation*, which Wave 8 builds — the link is owned by the
+later record, so the RFI does not grow a column pointing at a table that does not exist yet; and an
+"RFI draft"/"submittal review draft" being a good offline candidate (§26) is a replication-domain
+decision, which belongs with that classification rather than with this register. The §25 mobile flows
+(create RFI, review submittal) are the same service and the same endpoints the desktop screens call,
+so they need no AEC work of their own — Wave 10 owns the offline storage and the report set.
 
 The "non-F&B ⇒ retail" assumption in the WooCommerce/CMS ingest paths
 (`integrations/sync-service.ts`, `integrations/outbox-service.ts`, `cms/order-ingest-service.ts`,

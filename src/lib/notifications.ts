@@ -85,6 +85,12 @@ export const NOTIFICATION_EVENT_KEYS = [
   "ai.coworker.failed",
   "ai.automation.pending",
   "ai.automation.failed",
+  // Issue #799 §29 (Wave 6). The issue asks for two reminders — «RFI overdue»
+  // and «submittal overdue» — through *this* engine rather than a second one,
+  // which is why they are two keys and a scan here instead of a scheduler of
+  // their own.
+  "aec.rfi_overdue",
+  "aec.submittal_overdue",
   "system.test",
 ] as const;
 export type NotificationEventKey = (typeof NOTIFICATION_EVENT_KEYS)[number];
@@ -94,12 +100,15 @@ export function isNotificationEventKey(value: unknown): value is NotificationEve
 }
 
 /** Grouping for the settings screen only — it has no effect on delivery. */
-export type NotificationGroup = "operations" | "money" | "inventory" | "system" | "ai";
+export type NotificationGroup = "operations" | "money" | "inventory" | "projects" | "system" | "ai";
 
 export const NOTIFICATION_GROUP_LABELS: Record<NotificationGroup, string> = {
   operations: "شیفت و روز کاری",
   money: "فروش و صندوق",
   inventory: "انبار",
+  // «میز کار من» — the project registers. Its own group because the settings
+  // screen groups by trading area, and «نقشه و سابمیتال» is not inventory.
+  projects: "پروژه‌ها و میز کار",
   system: "سلامت سامانه",
   ai: "همکار هوشمند",
 };
@@ -275,6 +284,33 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     defaultSeverity: "important",
     defaultRoles: ["owner"],
     perLocation: true,
+    hasAmount: false,
+  },
+  "aec.rfi_overdue": {
+    key: "aec.rfi_overdue",
+    group: "projects",
+    label: "استعلام بی‌پاسخ از مهلت گذشته (RFI)",
+    description:
+      "وقتی استعلامی هنوز پاسخ نگرفته و مهلت پاسخش گذشته است. روزی یک بار برای هر استعلام، در روز کاری همان شعبه.",
+    defaultSeverity: "important",
+    // The two roles that chase answers: a project manager and the owner. An
+    // engineer or a document controller is not told by default — they are
+    // looking at the RFI tab anyway — and anyone can turn it on for themselves.
+    defaultRoles: ["owner", "manager"],
+    // An RFI belongs to a project, not to a branch: a construction business's
+    // registers have no location to scope by.
+    perLocation: false,
+    hasAmount: false,
+  },
+  "aec.submittal_overdue": {
+    key: "aec.submittal_overdue",
+    group: "projects",
+    label: "سابمیتال معطل‌مانده از مهلت گذشته",
+    description:
+      "وقتی بازنگری‌ای ارسال شده و بازبین هنوز پاسخش را نداده و مهلت گذشته است. روزی یک بار برای هر بازنگری.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
     hasAmount: false,
   },
   "system.test": {

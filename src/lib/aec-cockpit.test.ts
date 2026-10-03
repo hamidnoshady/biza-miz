@@ -40,14 +40,16 @@ describe("the cockpit catalogue", () => {
     }
     // §21's later sections are designed here but not rendered: today's page
     // must not offer a tab whose wave has not been built. `boq` left this list
-    // in Wave 4 (the estimating domain) and `documents` in Wave 5 (the drawing
-    // register), each when the service behind it arrived.
-    for (const key of ["procurement", "rfis", "submittals", "site", "inspections", "changes", "payments", "financials"]) {
+    // in Wave 4 (the estimating domain), `documents` in Wave 5 (the drawing
+    // register) and `rfis`/`submittals` in Wave 6 (the two registers of §10 and
+    // §11), each when the service behind it arrived.
+    for (const key of ["procurement", "site", "inspections", "changes", "payments", "financials"]) {
       expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === key)?.shipped, key).toBe(false);
     }
-    expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === "boq")?.shipped).toBe(true);
-    expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === "documents")?.shipped).toBe(true);
-    expect(AEC_SHIPPED_WAVE).toBe(5);
+    for (const key of ["boq", "documents", "rfis", "submittals"]) {
+      expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === key)?.shipped, key).toBe(true);
+    }
+    expect(AEC_SHIPPED_WAVE).toBe(6);
   });
 
   it("gives an individual fewer sections than a contractor", () => {
@@ -93,9 +95,10 @@ describe("the project tab bar", () => {
     expect(byKey.get("record")).toBe("شناسنامهٔ پروژه");
     expect(byKey.get("participants")).toBe("طرف‌های پروژه");
     expect(byKey.get("tasks")).toBe("وظایف");
-    // Ordered, not appended: the parties tab sits directly before the team.
+    // Ordered, not appended: the parties tab sits before the team (Wave 6's two
+    // registers come between them, so it is *before*, not adjacent).
     const keys = tabs.map((tab) => tab.key);
-    expect(keys.indexOf("participants")).toBe(keys.indexOf("team") - 1);
+    expect(keys.indexOf("participants")).toBeLessThan(keys.indexOf("team"));
     // Nothing AEC-only leaks in for a business that lacks the capability.
     const lean = aecProjectTabs({
       capabilities: resolveAecCapabilities({ profile: "architecture_office", overrides: { participants: false } }),
@@ -126,6 +129,28 @@ describe("the project tab bar", () => {
     expect(designWithEstimating.map((tab) => tab.key)).toContain("boq");
   });
 
+  it("adds the RFI and submittal registers between the contracts and the team", () => {
+    const contractor = aecProjectTabs({
+      capabilities: resolveAecCapabilities({ profile: "contractor", overrides: {} }),
+    });
+    const keys = contractor.map((tab) => tab.key);
+    expect(keys).toContain("rfis");
+    expect(keys).toContain("submittals");
+    // §10 and §11 sit after what is bound (the contracts) and before who is on
+    // it (the team) — the order a project manager reads their morning in.
+    expect(keys.indexOf("rfis")).toBeGreaterThan(keys.indexOf("contracts"));
+    expect(keys.indexOf("submittals")).toBe(keys.indexOf("rfis") + 1);
+    expect(keys.indexOf("submittals")).toBe(keys.indexOf("team") - 1);
+    expect(contractor.find((tab) => tab.key === "rfis")?.label).toBe("استعلام‌ها (RFI)");
+
+    // Submittals ride `document_control` (they are a document cycle pointing at
+    // §9's register), so switching it off removes *that* tab and only it.
+    const withoutDocuments = aecProjectTabs({ capabilities: ["projects", "participants"] });
+    expect(withoutDocuments.some((tab) => String(tab.key) === "submittals")).toBe(false);
+    // An RFI is a question asked of a client, so every AEC shape keeps it.
+    expect(withoutDocuments.some((tab) => String(tab.key) === "rfis")).toBe(true);
+  });
+
   it("names the documents tab after the register the business actually has", () => {
     const contractor = aecProjectTabs({
       capabilities: resolveAecCapabilities({ profile: "contractor", overrides: {} }),
@@ -145,7 +170,7 @@ describe("the project tab bar", () => {
     // a generic tab, own an AEC-only tab, or be declared as living inside
     // another. The explicit lists are the point — adding a shipped section and
     // forgetting to place it fails here.
-    const ownsItsOwnTab = new Set(["participants", "boq"]);
+    const ownsItsOwnTab = new Set(["participants", "boq", "rfis", "submittals"]);
     const insideAnotherTab = new Set(["overview", "schedule", "profile"]);
     for (const section of AEC_COCKPIT_SECTIONS.filter((s) => s.shipped)) {
       const reachable =

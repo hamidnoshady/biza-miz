@@ -1740,6 +1740,12 @@ const APPROVAL_SELECT = `
           JOIN aec_estimates e ON e.id = v.estimate_id
          WHERE v.id = a.subject_id
       )
+      WHEN 'submittal_revision' THEN (
+        SELECT s.submittal_number || ' — ' || s.title || ' (بازنگری ' || r.revision_no || ')'
+          FROM aec_submittal_revisions r
+          JOIN aec_submittals s ON s.id = r.submittal_id
+         WHERE r.id = a.subject_id
+      )
     END, a.title, '') AS subject_title`;
 
 const APPROVAL_JOINS = `

@@ -639,7 +639,7 @@ describe("the AEC module's API guards", () => {
     for (const [key, src] of aecRoutes) {
       expect(src, `src/app/api/${key}/route.ts`).toMatch(/aecOwner\(/);
       expect(src, `src/app/api/${key}/route.ts`).toMatch(
-        /PERMISSIONS\.(?:settingsManage|workspaceView|workspaceManage|workspaceDocumentsIssue)/,
+        /PERMISSIONS\.(?:settingsManage|workspaceView|workspaceManage|workspaceDocumentsIssue|workspaceApprove)/,
       );
       expect(requireRoleCalls(src), `src/app/api/${key}/route.ts uses requireRole`).toEqual([]);
     }
@@ -660,6 +660,35 @@ describe("the AEC module's API guards", () => {
       expect(src as string).not.toMatch(/PERMISSIONS\.workspaceDocumentsIssue/);
       expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
     }
+  });
+
+  it("keeps a submittal decision separate from ordinary edit rights", () => {
+    // §24 — reviewing somebody else's submission is a determination, so it must
+    // not inherit `workspace.manage` (which is what drafting the register and
+    // uploading the file ride). The status route is the only place a review is
+    // started, decided or closed, and it names `workspace.approve`; the routes
+    // that merely create and edit a submittal do not.
+    const status = sources.get("aec/submittal-revisions/[id]/status");
+    expect(status, "src/app/api/aec/submittal-revisions/[id]/status/route.ts is missing").toBeTruthy();
+    expect(status as string).toMatch(/PERMISSIONS\.workspaceApprove/);
+    for (const key of [
+      "aec/projects/[id]/submittals",
+      "aec/submittals/[id]",
+      "aec/submittals/[id]/revisions",
+      "aec/submittal-revisions/[id]",
+    ]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
+    }
+    // An RFI's four moves are project work, not a commercial determination:
+    // answering a question must not need the approval key that decides an
+    // estimate, so the RFI status route stays on `workspace.manage`.
+    const rfiStatus = sources.get("aec/rfis/[id]/status");
+    expect(rfiStatus, "src/app/api/aec/rfis/[id]/status/route.ts is missing").toBeTruthy();
+    expect(rfiStatus as string).toMatch(/PERMISSIONS\.workspaceManage/);
+    expect(rfiStatus as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
   });
 
   it("keeps the shared helper requirePermission and nothing weaker", () => {

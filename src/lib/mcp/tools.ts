@@ -146,6 +146,8 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   list_delayed_project_activities: "What is late: open workspace tasks past their due date (whole business, or one named project) and overdue phases, with assignee, priority and days late. Architecture/engineering/construction businesses only.",
   get_boq_variance: "One construction project's approved BOQ estimate against the actual cost posted in Accounting, with the remaining amount and a per-chapter breakdown. Actual cost is read from the ledger, never recomputed. Architecture/engineering/construction businesses with estimating enabled only.",
   get_latest_drawing_revision: "The current revision of each drawing and document in one project or across the business, optionally filtered by discipline or a search term: document number, title, revision code, status (draft/issued/superseded), issue purpose and date. Read from the drawing register. Architecture/engineering/construction businesses with document control enabled only.",
+  list_pending_rfis: "RFIs still unanswered — open RFIs past their due date first, then those due later, with number, subject, discipline, responsible party, assigned person, due date and how many days late. Optionally one project, or a window in days. Architecture/engineering/construction businesses only.",
+  list_pending_submittals: "Submittals waiting on a reviewer: submitted or under review, overdue first, with number, title, submission type, revision number, reviewer, due date and days late. Optionally one project, or a window in days. Architecture/engineering/construction businesses with document control enabled only.",
 };
 
 function readDescriptor(tool: OpenAiTool): McpToolDescriptor {

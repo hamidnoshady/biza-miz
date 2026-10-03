@@ -60,6 +60,8 @@ import { ProjectAssistantPanels } from "./project-assistant-panels";
 import { AecParticipantsTab, AecProjectProfileCard } from "./aec-panels";
 import { BoqTab } from "./boq-panel";
 import { AecDocumentsTab } from "./documents-panel";
+import { AecRfisTab } from "./rfis-panel";
+import { AecSubmittalsTab } from "./submittals-panel";
 
 interface ProjectDetail {
   id: string;
@@ -387,6 +389,25 @@ export function ProjectDetail({
             tab nor mounts the component that would fetch its data. */}
         {tab === "boq" ? (
           <BoqTab
+            projectId={projectId}
+            canManage={canManage}
+            canApprove={canApprove}
+            lookups={lookups}
+          />
+        ) : null}
+
+        {/* Issue #799 §10 — the RFI register. Every AEC shape has it (an RFI is
+            a question asked of a client, not a capability), so the tab exists
+            wherever the business is AEC at all. */}
+        {tab === "rfis" ? (
+          <AecRfisTab projectId={projectId} canManage={canManage} lookups={lookups} />
+        ) : null}
+
+        {/* Issue #799 §11 — the submittal log, gated by `document_control` in
+            the tab bar itself: it is a document cycle pointing at §9's register,
+            and reviewing is `workspace.approve`, not ordinary edit rights. */}
+        {tab === "submittals" ? (
+          <AecSubmittalsTab
             projectId={projectId}
             canManage={canManage}
             canApprove={canApprove}

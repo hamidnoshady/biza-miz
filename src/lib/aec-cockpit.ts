@@ -79,8 +79,19 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
   { key: "boq", label: "متره و برآورد", capability: "boq", wave: 4, shipped: true },
   { key: "contracts", label: "قراردادها", wave: 3, shipped: true },
   { key: "procurement", label: "تأمین و خرید", capability: "procurement", wave: 9, shipped: false },
-  { key: "rfis", label: "استعلام‌ها (RFI)", wave: 6, shipped: false },
-  { key: "submittals", label: "ارسال مدارک (Submittal)", wave: 6, shipped: false },
+  // Wave 6. An RFI is a question asked of a client or a consultant, so every AEC
+  // shape has the register and the section carries no capability. Submittals are
+  // a *document* cycle — §11's shop drawings, samples and method statements
+  // point at §9's register — so they ride `document_control`, the same switch
+  // that gates the register they answer to.
+  { key: "rfis", label: "استعلام‌ها (RFI)", wave: 6, shipped: true },
+  {
+    key: "submittals",
+    label: "ارسال مدارک (Submittal)",
+    capability: "document_control",
+    wave: 6,
+    shipped: true,
+  },
   { key: "site", label: "کارگاه", capability: "site_operations", wave: 7, shipped: false },
   { key: "inspections", label: "بازرسی و کنترل کیفیت", capability: "qa_qc", wave: 7, shipped: false },
   { key: "changes", label: "تغییرات", capability: "variations", wave: 8, shipped: false },
@@ -93,7 +104,7 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
 ];
 
 /** The highest wave this build implements — the boundary between designed and built. */
-export const AEC_SHIPPED_WAVE = 5;
+export const AEC_SHIPPED_WAVE = 6;
 
 /**
  * The cockpit sections a business sees: shipped, and allowed by its capability
@@ -149,6 +160,8 @@ const TAB_FOR_SECTION: Partial<Record<AecCockpitSectionKey, WorkspaceProjectTabK
   profile: "record",
   participants: null, // its own tab, before «تیم» — see aecProjectTabs
   boq: null, // its own tab, between the documents and the contracts
+  rfis: null, // its own tab, with the submittals — see aecProjectTabs
+  submittals: null,
   tasks: "tasks",
   documents: "documents",
   contracts: "contracts",
@@ -184,6 +197,8 @@ export function aecProjectTabs(
   // second one.
   const participantsSection = sections.find((section) => section.key === "participants");
   const boqSection = sections.find((section) => section.key === "boq");
+  const rfisSection = sections.find((section) => section.key === "rfis");
+  const submittalsSection = sections.find((section) => section.key === "submittals");
 
   const tabs: ProjectTab[] = [];
   for (const tab of WORKSPACE_PROJECT_TABS) {
@@ -191,6 +206,16 @@ export function aecProjectTabs(
     // same question ("who is on this?") asked of the outside world.
     if (tab.key === "team" && participantsSection) {
       tabs.push({ key: "participants", label: participantsSection.label });
+    }
+    // The two registers of §10 and §11 sit between the contracts and the team:
+    // what is being built, what it costs and who is bound come first, then what
+    // is still being asked and what is still being submitted — which is also
+    // the order the project manager works through their morning in.
+    if (tab.key === "team" && rfisSection) {
+      tabs.push({ key: "rfis", label: rfisSection.label });
+    }
+    if (tab.key === "team" && submittalsSection) {
+      tabs.push({ key: "submittals", label: submittalsSection.label });
     }
     // And the priced work sits where §21 puts it: after the documents, before
     // the contracts — what is being built, what it costs, then who is bound.

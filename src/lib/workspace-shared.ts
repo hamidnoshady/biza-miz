@@ -279,7 +279,18 @@ export const DOCUMENT_STATUS_LABELS: Record<WorkspaceDocumentStatus, string> = {
  * Approvals
  * ------------------------------------------------------------------------- */
 
-export const APPROVAL_SUBJECTS = ["project", "task", "document", "contract", "estimate_version"] as const;
+export const APPROVAL_SUBJECTS = [
+  "project",
+  "task",
+  "document",
+  "contract",
+  "estimate_version",
+  // Issue #799 §11 — a submittal revision is reviewed through the same engine
+  // under the same `workspace.approve` key. A sixth subject rather than a second
+  // approval store, for the reason given below for the fifth: the queue, the
+  // dashboard counters and the reminder job learn about submittals for free.
+  "submittal_revision",
+] as const;
 export type WorkspaceApprovalSubject = (typeof APPROVAL_SUBJECTS)[number];
 
 export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> = {
@@ -292,6 +303,7 @@ export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> =
   // rather than a second approval table, which is why a submission appears in
   // the approvals queue, the dashboard counters and the widgets for free.
   estimate_version: "نسخهٔ برآورد",
+  submittal_revision: "بازنگری سابمیتال",
 };
 
 export const APPROVAL_STATUSES = ["pending", "approved", "rejected", "cancelled"] as const;

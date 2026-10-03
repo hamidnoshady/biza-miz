@@ -114,6 +114,34 @@ const ERROR_STATUS: Record<string, number> = {
   transmittal_has_no_recipients: 409,
   transmittal_not_issued: 409,
   recipient_already_acknowledged: 409,
+  // Issue #799 Wave 6 — RFIs (§10) and submittals (§11). Same split again: a
+  // missing record is a 404, a malformed field a 400, and everything a record
+  // refuses *because of where it is in its life cycle* a 409.
+  rfi_not_found: 404,
+  submittal_not_found: 404,
+  submittal_revision_not_found: 404,
+  media_not_found: 404,
+  document_not_found: 404,
+  rfi_number_required: 400,
+  rfi_subject_required: 400,
+  rfi_question_required: 400,
+  rfi_response_required: 400,
+  submittal_number_required: 400,
+  submittal_title_required: 400,
+  submittal_file_required: 400,
+  invalid_submittal_type: 400,
+  invalid_rfi_status: 400,
+  invalid_cost_impact: 400,
+  invalid_schedule_impact: 400,
+  rfi_number_taken: 409,
+  submittal_number_taken: 409,
+  rfi_not_editable: 409,
+  submittal_not_editable: 409,
+  submittal_revision_not_editable: 409,
+  submittal_has_submitted_revisions: 409,
+  submittal_first_revision_required: 409,
+  invalid_rfi_transition: 409,
+  invalid_submittal_transition: 409,
 };
 
 /**

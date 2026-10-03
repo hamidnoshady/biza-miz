@@ -338,7 +338,12 @@ const TRANSMITTAL_JOINS = `
  * ======================================================================== */
 
 /** §9 needs the industry and the `document_control` capability, exactly as §7 needed `boq`. */
-async function assertDocumentControlEnabled(businessId: string): Promise<void> {
+/**
+ * The `document_control` gate, exported so the submittal service (issue §11,
+ * Wave 6) refuses on exactly the same terms as the register it submits against:
+ * one capability, one sentence, one place it is decided.
+ */
+export async function assertDocumentControlEnabled(businessId: string): Promise<void> {
   await assertAecIndustry(businessId);
   const profile = await loadBusinessAecProfile(businessId);
   if (!profile.capabilities.includes("document_control")) throw new AecError("capability_disabled");

@@ -22,6 +22,11 @@
  *   - `get_latest_drawing_revision` (Wave 5) — §23's question «آخرین رویژن نقشه
  *     سازه پروژه A01 چیست؟», answered from the drawing register the documents
  *     tab shows, so the answer and the screen are the same rows.
+ *   - `list_pending_rfis` and `list_pending_submittals` (Wave 6) — §23's two
+ *     pending lists, which are also the two Persian questions the same section
+ *     writes out («RFIهای بدون پاسخ این هفته چیست؟» and «چه سابمیتال‌هایی منتظر
+ *     تأیید هستند؟»). Both call the queue functions the RFI and submittal tabs
+ *     use, so «بدون پاسخ» means the same rows in a chat answer and on screen.
  *
  * A business of another industry is refused rather than answered: an empty list
  * would read as "nothing is late", which is a claim about a café's construction
@@ -32,6 +37,7 @@ import { AEC_AI_TOOL_LABELS, AEC_AI_TOOL_NAMES, type AecAiToolName } from "./aec
 import { AecError, type AecProjectProfile, loadProjectAecProfile } from "./aec-service";
 import { boqVariance } from "./aec-boq-service";
 import { latestDrawingRevisions } from "./aec-doc-service";
+import { pendingRfis, pendingSubmittals } from "./aec-rfi-service";
 import { businessToday } from "./business-day-service";
 import { formatJalali } from "./jalali";
 import { daysUntil } from "./workspace-shared";
@@ -360,7 +366,121 @@ async function runTool(
         },
       };
     }
+
+    case "list_pending_rfis": {
+      const resolved = await resolveProject(businessId, args);
+      if (resolved.kind === "ambiguous") return ambiguousProject(resolved.candidates);
+
+      const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
+      const windowDays = Number(args.dueWithinDays);
+      const rfis = await pendingRfis(businessId, {
+        projectId: resolved.kind === "found" ? resolved.projectId : undefined,
+        limit,
+      });
+      // «RFIهای بدون پاسخ این هفته» is a question about a window, so the model
+      // can pass one; the service's own queue is unwindowed because a screen
+      // wants the whole list.
+      const scoped =
+        Number.isFinite(windowDays) && windowDays > 0
+          ? rfis.filter((rfi) => {
+              if (!rfi.dueDate) return false;
+              const days = daysUntil(rfi.dueDate, today) ?? 0;
+              return days <= windowDays;
+            })
+          : rfis;
+
+      const withJalali = scoped.map((rfi) => ({
+        ...rfi,
+        dueDateJalali: rfi.dueDate ? formatJalali(rfi.dueDate) : null,
+        overdue: rfi.daysOverdue > 0,
+      }));
+      return {
+        ok: true,
+        data: {
+          rfis: withJalali,
+          count: withJalali.length,
+          overdueCount: withJalali.filter((rfi) => rfi.overdue).length,
+          projectScoped: resolved.kind === "found",
+          dueWithinDays: Number.isFinite(windowDays) && windowDays > 0 ? windowDays : null,
+          today,
+          note:
+            withJalali.length === 0
+              ? "هیچ استعلام بی‌پاسخی با این فیلترها نیست."
+              : "«بدون پاسخ» یعنی استعلام‌هایی که هنوز پاسخ نگرفته‌اند؛ عقب‌افتاده‌ها اول می‌آیند.",
+        },
+      };
+    }
+
+    case "list_pending_submittals": {
+      const resolved = await resolveProject(businessId, args);
+      if (resolved.kind === "ambiguous") return ambiguousProject(resolved.candidates);
+
+      const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
+      const windowDays = Number(args.dueWithinDays);
+      let submittals;
+      try {
+        submittals = await pendingSubmittals(businessId, {
+          projectId: resolved.kind === "found" ? resolved.projectId : undefined,
+          limit,
+        });
+      } catch (err) {
+        // Same refusal as the drawing read: document control is off by preset
+        // for the design-and-approval-lean profiles, and «no submittals» would
+        // read as a fact about the project rather than a switch.
+        if (err instanceof AecError && err.code === "capability_disabled") {
+          return {
+            ok: false,
+            error:
+              "این کسب‌وکار کنترل نقشه و مستندات (و در نتیجه سابمیتال‌ها) فعال ندارد. اگر لازم است، از «تنظیمات ← کسب‌وکار» قابلیت آن را روشن کنید.",
+          };
+        }
+        throw err;
+      }
+      const scoped =
+        Number.isFinite(windowDays) && windowDays > 0
+          ? submittals.filter((submittal) => {
+              if (!submittal.dueDate) return false;
+              const days = daysUntil(submittal.dueDate, today) ?? 0;
+              return days <= windowDays;
+            })
+          : submittals;
+
+      const withJalali = scoped.map((submittal) => ({
+        ...submittal,
+        dueDateJalali: submittal.dueDate ? formatJalali(submittal.dueDate) : null,
+        overdue: submittal.daysOverdue > 0,
+      }));
+      return {
+        ok: true,
+        data: {
+          submittals: withJalali,
+          count: withJalali.length,
+          overdueCount: withJalali.filter((submittal) => submittal.overdue).length,
+          projectScoped: resolved.kind === "found",
+          dueWithinDays: Number.isFinite(windowDays) && windowDays > 0 ? windowDays : null,
+          today,
+          note:
+            withJalali.length === 0
+              ? "هیچ سابمیتالی با این فیلترها منتظر تأیید نیست."
+              : "«منتظر تأیید» یعنی بازنگری‌های ارسال‌شده یا در حال بررسی؛ تأییدشده‌ها اینجا نیستند.",
+        },
+      };
+    }
   }
+}
+
+/** The one sentence every project-scoped read gives when a name matched twice. */
+function ambiguousProject(
+  candidates: Array<{ projectId: string; name: string }>,
+): AecToolResult {
+  return {
+    ok: true,
+    data: {
+      ambiguous: true,
+      message: "چند پروژه با این نام هست؛ از کاربر بپرس کدام را می‌خواهد.",
+      candidates,
+    },
+  };
 }
 
 /**

@@ -565,6 +565,39 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "گیرندگان برگهٔ ارسال (پیش‌نویس)",
   },
 
+  // -- AEC (issue #799 Wave 6) ----------------------------------------------
+  {
+    table: "aec_rfis",
+    column: "responsible_party_id",
+    scope: "business",
+    disposition: "move",
+    // Migration 0198's RFI guard freezes number, subject, question and the
+    // original ask once the RFI leaves draft, and freezes the response once one
+    // exists. The party that owes the answer is *not* among the frozen fields,
+    // so the column always moves with the surviving record — a draft in
+    // progress and an answered RFI alike. Leaving a closed RFI pointing at a
+    // merged-away party would fail the trigger the next time the row is touched
+    // (and the RFI's history would name a party that no longer exists).
+    reason:
+      "The party that owes (or owed) the answer to a project question. Always moves with the surviving record; who was asked is not part of a frozen RFI.",
+    preview: true,
+    previewLabel: "استعلام‌ها (RFI)",
+  },
+  {
+    table: "aec_submittals",
+    column: "responsible_party_id",
+    scope: "business",
+    disposition: "move",
+    // Same shape: 0198's submittal guard freezes the identity of a register
+    // entry once a revision has been submitted, but the responsible party is not
+    // part of that identity — the submitter keeps moving so a live log never
+    // names a party the merge removed.
+    reason:
+      "The party answerable for a submittal. Always moves with the surviving record; it is not part of what a submitted revision froze.",
+    preview: true,
+    previewLabel: "سابمیتال‌ها",
+  },
+
   // -- Historical / audit: deliberately NOT moved ---------------------------
   {
     table: "crm_merges",

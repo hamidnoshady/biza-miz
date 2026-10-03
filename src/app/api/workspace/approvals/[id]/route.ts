@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { decideEstimateApproval } from "@/lib/aec-boq-service";
+import { decideSubmittalApproval } from "@/lib/aec-rfi-service";
 import { approvalSubjectType, decideApproval } from "@/lib/workspace";
 import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../../guard";
 
@@ -17,6 +18,11 @@ import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../
  * revision's status, the budget connection and the history. This route only
  * decides WHOSE code runs, so an approval filed against a revision has one
  * implementation of "approved" whether it is decided here or on the BOQ screen.
+ *
+ * §11's submittal revision (Wave 6) is the same arrangement with the document
+ * module (`decideSubmittalApproval`): an approval queued for a submission maps
+ * onto the revision's own decision, so the queue and the submittal screen record
+ * one decision, not two.
  */
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -30,12 +36,20 @@ export const POST = withTenantScope(
     }
     const note = String(body.note ?? "");
     try {
-      if ((await approvalSubjectType(owner.businessId, id)) === "estimate_version") {
+      const subjectType = await approvalSubjectType(owner.businessId, id);
+      if (subjectType === "estimate_version") {
         const result = await decideEstimateApproval(owner, id, decision, note);
         if (!result.applied) {
           return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
         }
         return NextResponse.json({ approval: null, estimateVersionId: result.versionId });
+      }
+      if (subjectType === "submittal_revision") {
+        const result = await decideSubmittalApproval(owner, id, decision, note);
+        if (!result.applied) {
+          return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
+        }
+        return NextResponse.json({ approval: null, submittalRevisionId: result.revisionId });
       }
       const approval = await decideApproval(owner, id, decision, note);
       // Null means "no pending approval with this id" — either it never
