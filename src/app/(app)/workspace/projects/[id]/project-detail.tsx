@@ -59,6 +59,7 @@ import { CalendarSection } from "../../calendar-section";
 import { ProjectAssistantPanels } from "./project-assistant-panels";
 import { AecParticipantsTab, AecProjectProfileCard } from "./aec-panels";
 import { BoqTab } from "./boq-panel";
+import { AecDocumentsTab } from "./documents-panel";
 
 interface ProjectDetail {
   id: string;
@@ -115,11 +116,13 @@ export function ProjectDetail({
   canManage,
   canManageContracts,
   canApprove,
+  canIssueDocuments,
 }: {
   projectId: string;
   canManage: boolean;
   canManageContracts: boolean;
   canApprove: boolean;
+  canIssueDocuments: boolean;
 }) {
   const money = useMoney();
   const lookups = useWorkspaceLookups();
@@ -337,13 +340,30 @@ export function ProjectDetail({
           <TasksSection lookups={lookups} canManage={canManage} projectId={projectId} />
         ) : null}
 
+        {/* Issue #799 §9 — the drawing register. For an AEC business with
+            document control the tab opens with the register and the
+            transmittals, and the ordinary document list follows underneath:
+            the register *references* documents rather than replacing them, so
+            files that are not drawings still have their own screen here.
+            `document_control` is what decides — an office whose profile leaves
+            it off sees exactly the documents tab it had before. */}
         {tab === "documents" ? (
-          <DocumentsSection
-            lookups={lookups}
-            canManage={canManage}
-            canRequestApproval={canManage}
-            projectId={projectId}
-          />
+          <div className="flex flex-col gap-4">
+            {lookups.aecCapabilities?.includes("document_control") ? (
+              <AecDocumentsTab
+                projectId={projectId}
+                canManage={canManage}
+                canIssueDocuments={canIssueDocuments}
+                lookups={lookups}
+              />
+            ) : null}
+            <DocumentsSection
+              lookups={lookups}
+              canManage={canManage}
+              canRequestApproval={canManage}
+              projectId={projectId}
+            />
+          </div>
         ) : null}
 
         {/* The contracts register filters itself by project through its own

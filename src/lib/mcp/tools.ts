@@ -145,6 +145,7 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   get_aec_project_financial_health: "One construction project's commercial position: budget, ledger-posted cost, contract value, open and overdue work, late phases, and planned versus reported physical progress. Architecture/engineering/construction businesses only.",
   list_delayed_project_activities: "What is late: open workspace tasks past their due date (whole business, or one named project) and overdue phases, with assignee, priority and days late. Architecture/engineering/construction businesses only.",
   get_boq_variance: "One construction project's approved BOQ estimate against the actual cost posted in Accounting, with the remaining amount and a per-chapter breakdown. Actual cost is read from the ledger, never recomputed. Architecture/engineering/construction businesses with estimating enabled only.",
+  get_latest_drawing_revision: "The current revision of each drawing and document in one project or across the business, optionally filtered by discipline or a search term: document number, title, revision code, status (draft/issued/superseded), issue purpose and date. Read from the drawing register. Architecture/engineering/construction businesses with document control enabled only.",
 };
 
 function readDescriptor(tool: OpenAiTool): McpToolDescriptor {

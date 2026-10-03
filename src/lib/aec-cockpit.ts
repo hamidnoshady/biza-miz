@@ -75,7 +75,7 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
   { key: "participants", label: "طرف‌های پروژه", capability: "participants", wave: 3, shipped: true },
   { key: "schedule", label: "زمان‌بندی و فازها", wave: 3, shipped: true },
   { key: "tasks", label: "وظایف", wave: 3, shipped: true },
-  { key: "documents", label: "نقشه‌ها و اسناد", capability: "document_control", wave: 5, shipped: false },
+  { key: "documents", label: "نقشه‌ها و اسناد", capability: "document_control", wave: 5, shipped: true },
   { key: "boq", label: "متره و برآورد", capability: "boq", wave: 4, shipped: true },
   { key: "contracts", label: "قراردادها", wave: 3, shipped: true },
   { key: "procurement", label: "تأمین و خرید", capability: "procurement", wave: 9, shipped: false },
@@ -93,7 +93,7 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
 ];
 
 /** The highest wave this build implements — the boundary between designed and built. */
-export const AEC_SHIPPED_WAVE = 4;
+export const AEC_SHIPPED_WAVE = 5;
 
 /**
  * The cockpit sections a business sees: shipped, and allowed by its capability

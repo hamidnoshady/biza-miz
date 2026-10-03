@@ -177,6 +177,7 @@ const DRAFTS: Draft[] = [
   { key: P.workspaceManage, group: "workspace", label: "مدیریت میز کار", description: "ایجاد و ویرایش پروژه، وظیفه، سند و تقویم.", risk: "medium", audit: false, implies: [P.workspaceView] },
   { key: P.workspaceContractsManage, group: "workspace", label: "مدیریت قراردادها", description: "ثبت و اصلاح قرارداد اجرا؛ یک تعهد مالی به شخص ثالث است.", risk: "high", audit: true, implies: [P.workspaceView] },
   { key: P.workspaceApprove, group: "workspace", label: "تأیید درخواست‌ها", description: "تصمیم‌گیری درباره درخواست‌های نیازمند تأیید.", risk: "high", audit: true, implies: [P.workspaceView] },
+  { key: P.workspaceDocumentsIssue, group: "workspace", label: "صدور نقشه و سند", description: "صدور بازنگری نقشه یا سند برای طرف‌های بیرونی با برگهٔ ارسال. پس از صدور، سابقه تغییرناپذیر می‌شود.", risk: "high", audit: true, implies: [P.workspaceView] },
 
   // --- Accounting ----------------------------------------------------------
   { key: P.ledgerView, group: "accounting", label: "مشاهده دفاتر", description: "دیدن اسناد حسابداری، دفتر کل و صورت‌های مالی.", risk: "low", audit: false },

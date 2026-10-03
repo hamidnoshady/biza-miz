@@ -19,6 +19,9 @@
  *     (`get_boq_variance`) and §23's own rule is why the cost side is read from
  *     Accounting through the same `projectReport` the cockpit uses: the
  *     assistant never recomputes a posted financial fact.
+ *   - `get_latest_drawing_revision` (Wave 5) — §23's question «آخرین رویژن نقشه
+ *     سازه پروژه A01 چیست؟», answered from the drawing register the documents
+ *     tab shows, so the answer and the screen are the same rows.
  *
  * A business of another industry is refused rather than answered: an empty list
  * would read as "nothing is late", which is a claim about a café's construction
@@ -28,6 +31,7 @@
 import { AEC_AI_TOOL_LABELS, AEC_AI_TOOL_NAMES, type AecAiToolName } from "./aec";
 import { AecError, type AecProjectProfile, loadProjectAecProfile } from "./aec-service";
 import { boqVariance } from "./aec-boq-service";
+import { latestDrawingRevisions } from "./aec-doc-service";
 import { businessToday } from "./business-day-service";
 import { formatJalali } from "./jalali";
 import { daysUntil } from "./workspace-shared";
@@ -233,6 +237,65 @@ async function runTool(
             variance.approvedEstimateRial === null
               ? "هنوز برآورد تأییدشده‌ای برای این پروژه ثبت نشده است؛ هزینهٔ واقعی از اسناد حسابداری خوانده شده است."
               : "هزینهٔ واقعی از اسناد حسابداری همین پروژه خوانده شده است، نه از برآورد.",
+        },
+      };
+    }
+
+    case "get_latest_drawing_revision": {
+      const resolved = await resolveProject(businessId, args);
+      if (resolved.kind === "ambiguous") {
+        return {
+          ok: true,
+          data: {
+            ambiguous: true,
+            message: "چند پروژه با این نام هست؛ از کاربر بپرس کدام را می‌خواهد.",
+            candidates: resolved.candidates,
+          },
+        };
+      }
+
+      const discipline = typeof args.discipline === "string" ? args.discipline.trim() : "";
+      const search = typeof args.search === "string" ? args.search.trim() : "";
+      const limit = Math.min(Math.max(Number(args.limit) || 50, 1), 200);
+      let drawings;
+      try {
+        drawings = await latestDrawingRevisions(businessId, {
+          projectId: resolved.kind === "found" ? resolved.projectId : undefined,
+          search,
+          discipline,
+          limit,
+        });
+      } catch (err) {
+        // Document control is off for this business (its operating profile
+        // leaves the capability out), or it is not AEC at all. Both are
+        // answered with a sentence rather than an invented empty register.
+        if (err instanceof AecError && err.code === "capability_disabled") {
+          return {
+            ok: false,
+            error:
+              "این کسب‌وکار کنترل نقشه و مستندات فعال ندارد. اگر لازم است، از «تنظیمات ← کسب‌وکار» قابلیت آن را روشن کنید.",
+          };
+        }
+        throw err;
+      }
+      if (resolved.kind === "none") return { ok: false, error: "پروژه پیدا نشد." };
+
+      return {
+        ok: true,
+        data: {
+          // The count matters: «آخرین رویژن» is a claim about a specific
+          // document, so an empty list has to be readable as "this filter
+          // matched nothing" rather than "this project has no drawings".
+          drawings,
+          count: drawings.length,
+          projectScoped: resolved.kind === "found",
+          disciplineFilter: discipline || null,
+          search: search || null,
+          today,
+          note:
+            drawings.length === 0
+              ? "برای این فیلتر نقشه‌ای در دفتر ثبت نشده است. اگر انتظار داشتید نقشه‌ای باشد، فیلتر رشته یا جست‌وجو را بازتر کنید."
+              : "این فهرست از دفتر نقشه‌های همین کسب‌وکار خوانده شده است؛ «بازنگری جاری» بالاترین شمارهٔ بازنگری هر سند است.",
         },
       };
     }

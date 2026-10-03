@@ -66,6 +66,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // and the ledger's actual cost — both of which `workspace.view` already shows
   // on the project page, so the assistant adds no reach here either.
   get_boq_variance: PERMISSIONS.workspaceView,
+  // The drawing register is the documents tab the same member already opens, so
+  // this read adds no reach either — it answers «آخرین رویژن…» from those rows.
+  get_latest_drawing_revision: PERMISSIONS.workspaceView,
   draft_expense_from_receipt: PERMISSIONS.financeExpensesManage,
   get_accounting_review: PERMISSIONS.ledgerView,
 };

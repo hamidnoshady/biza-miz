@@ -533,6 +533,37 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     preview: true,
     previewLabel: "ردیف‌های متره (پیش‌نویس)",
   },
+  {
+    table: "aec_transmittals",
+    column: "sender_party_id",
+    scope: "business",
+    disposition: "move",
+    // Same reasoning as the BOQ line: migration 0197's transmittal guard refuses
+    // any content change to an issued transmittal, so a frozen one keeps the
+    // sender it was issued under. Drafts move, because a draft stays editable
+    // and its trigger refuses a merged-away party.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_transmittals tm WHERE tm.id = {t}.id AND tm.status = 'draft')",
+    reason:
+      "The party a draft transmittal says it came from. A draft moves with the surviving record; an issued transmittal keeps the sender named in the record it issued.",
+    preview: true,
+    previewLabel: "برگه‌های ارسال (پیش‌نویس)",
+  },
+  {
+    table: "aec_transmittal_recipients",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    // Only a *draft* transmittal's recipients may be rewritten: 0197 freezes the
+    // recipient rows of an issued one, so moving a frozen row would abort the
+    // merge — and keeping it is right, because that row is also the receipt.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_transmittals tm WHERE tm.id = {t}.transmittal_id AND tm.status = 'draft')",
+    reason:
+      "Who a draft transmittal is addressed to. Drafts follow the surviving party; an issued transmittal keeps the recipient it was sent to, because that row is the receipt.",
+    preview: true,
+    previewLabel: "گیرندگان برگهٔ ارسال (پیش‌نویس)",
+  },
 
   // -- Historical / audit: deliberately NOT moved ---------------------------
   {

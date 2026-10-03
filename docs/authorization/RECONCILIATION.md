@@ -36,7 +36,7 @@ just a declared name.
 `inventory.adjust` `purchases.manage` `parties.view` `parties.manage`
 `crm.view` `crm.manage` `crm.merge` `crm.consent_manage` `crm.export`
 `crm.configure` `workspace.view` `workspace.manage`
-`workspace.contracts_manage` `workspace.approve` `ledger.view` `ledger.post`
+`workspace.contracts_manage` `workspace.approve` `workspace.documents_issue` `ledger.view` `ledger.post`
 `ledger.approve` `ledger.close_period` `accounts.edit` `reports.view`
 `reports.export` `data.import` `data.export` `team.manage` `settings.manage`
 `locations.manage` `backup.manage` `api.manage` `website.view` `growth.view`

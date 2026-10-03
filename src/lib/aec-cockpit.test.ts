@@ -40,11 +40,14 @@ describe("the cockpit catalogue", () => {
     }
     // §21's later sections are designed here but not rendered: today's page
     // must not offer a tab whose wave has not been built. `boq` left this list
-    // in Wave 4, when the estimating domain it needs arrived.
+    // in Wave 4 (the estimating domain) and `documents` in Wave 5 (the drawing
+    // register), each when the service behind it arrived.
     for (const key of ["procurement", "rfis", "submittals", "site", "inspections", "changes", "payments", "financials"]) {
       expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === key)?.shipped, key).toBe(false);
     }
     expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === "boq")?.shipped).toBe(true);
+    expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === "documents")?.shipped).toBe(true);
+    expect(AEC_SHIPPED_WAVE).toBe(5);
   });
 
   it("gives an individual fewer sections than a contractor", () => {
@@ -123,14 +126,18 @@ describe("the project tab bar", () => {
     expect(designWithEstimating.map((tab) => tab.key)).toContain("boq");
   });
 
-  it("keeps the generic labels for tabs whose section has not shipped", () => {
-    const tabs = aecProjectTabs({
+  it("names the documents tab after the register the business actually has", () => {
+    const contractor = aecProjectTabs({
       capabilities: resolveAecCapabilities({ profile: "contractor", overrides: {} }),
     });
-    const documents = tabs.find((tab) => tab.key === "documents");
-    // The drawing register is Wave 5; until then the tab keeps its plain name
-    // rather than promising a register that does not exist.
-    expect(documents?.label).toBe("اسناد");
+    // Wave 5: with document control on, §21's "Drawings & Documents" is what
+    // this tab is, and it says so.
+    expect(contractor.find((tab) => tab.key === "documents")?.label).toBe("نقشه‌ها و اسناد");
+
+    // Off, and the tab keeps the plain name the rest of the product uses rather
+    // than promising a register that is not there.
+    const plain = aecProjectTabs({ capabilities: ["projects"] });
+    expect(plain.find((tab) => tab.key === "documents")?.label).toBe("اسناد");
   });
 
   it("places every shipped section somewhere a user can reach it", () => {

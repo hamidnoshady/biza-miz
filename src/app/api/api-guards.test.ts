@@ -383,13 +383,17 @@ function isDataTransferGuarded(src: string): boolean {
  * `requirePermission(permission)` from `@/lib/auth`, so recognising it narrows
  * the scan rather than loosening it. The permission keys are named exactly
  * (the settings key for business-wide AEC configuration, the two workspace
- * keys for project-scoped reads and writes) rather than accepting any string,
- * so a future route cannot satisfy the scanner with a permission it invented.
+ * keys for project-scoped reads and writes, and — Wave 5 — the issuing key,
+ * which §24 requires to be separate from ordinary editing) rather than
+ * accepting any string, so a future route cannot satisfy the scanner with a
+ * permission it invented.
  */
 function isAecGuarded(src: string): boolean {
   return (
     /aecOwner\(/.test(src) &&
-    /PERMISSIONS\.(?:settingsManage|workspaceView|workspaceManage)/.test(src)
+    /PERMISSIONS\.(?:settingsManage|workspaceView|workspaceManage|workspaceDocumentsIssue)/.test(
+      src,
+    )
   );
 }
 
@@ -635,9 +639,26 @@ describe("the AEC module's API guards", () => {
     for (const [key, src] of aecRoutes) {
       expect(src, `src/app/api/${key}/route.ts`).toMatch(/aecOwner\(/);
       expect(src, `src/app/api/${key}/route.ts`).toMatch(
-        /PERMISSIONS\.(?:settingsManage|workspaceView|workspaceManage)/,
+        /PERMISSIONS\.(?:settingsManage|workspaceView|workspaceManage|workspaceDocumentsIssue)/,
       );
       expect(requireRoleCalls(src), `src/app/api/${key}/route.ts uses requireRole`).toEqual([]);
+    }
+  });
+
+  it("keeps issuing a transmittal separate from editing the register", () => {
+    // §24 — issuing is a high-risk action and must not inherit ordinary edit
+    // rights. The status route is the only place a transmittal is issued, and
+    // it names the issuing permission; the routes that merely draft the
+    // register and its revisions do not, so a member who can prepare a
+    // transmittal still cannot send it.
+    const status = sources.get("aec/transmittals/[id]/status");
+    expect(status, "src/app/api/aec/transmittals/[id]/status/route.ts is missing").toBeTruthy();
+    expect(status as string).toMatch(/PERMISSIONS\.workspaceDocumentsIssue/);
+    for (const key of ["aec/projects/[id]/transmittals", "aec/documents/[id]/revisions"]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceDocumentsIssue/);
+      expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
     }
   });
 

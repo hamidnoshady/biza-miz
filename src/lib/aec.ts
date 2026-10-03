@@ -130,6 +130,9 @@ export const AEC_LIVE_CAPABILITIES: readonly AecCapabilityKey[] = [
   // now (`aec-boq-service.ts`, migration 0196), so the capability stops being a
   // label in a settings panel and starts refusing requests when it is off.
   "boq",
+  // Wave 5 — same promotion for the drawing register and the transmittals
+  // (`aec-doc-service.ts`, migration 0197).
+  "document_control",
 ];
 
 /* ===========================================================================
@@ -212,6 +215,12 @@ const DESIGN_CAPABILITIES: readonly AecCapabilityKey[] = [
 const CONSTRUCTION_CAPABILITIES: readonly AecCapabilityKey[] = [
   "projects",
   "participants",
+  // Issue #799 Wave 5. A contractor issues shop drawings and as-builts as
+  // routinely as a designer issues drawings — §9's register and §12's
+  // transmittals are how the site gets the revision it is supposed to build
+  // from — so the capability belongs in this preset rather than being something
+  // a contractor has to switch on.
+  "document_control",
   "estimating",
   "boq",
   "tendering",
@@ -583,6 +592,9 @@ export const AEC_AI_TOOL_NAMES = [
   "get_aec_project_financial_health",
   "list_delayed_project_activities",
   "get_boq_variance",
+  // Issue #799 Wave 5 — §23's `get_latest_drawing_revision`, which the drawing
+  // register (migration 0197) now makes answerable.
+  "get_latest_drawing_revision",
 ] as const;
 export type AecAiToolName = (typeof AEC_AI_TOOL_NAMES)[number];
 
@@ -595,6 +607,7 @@ export const AEC_AI_TOOL_LABELS: Record<AecAiToolName, string> = {
   get_aec_project_financial_health: "سلامت مالی پروژه (عمرانی)",
   list_delayed_project_activities: "فعالیت‌های عقب‌افتادهٔ پروژه",
   get_boq_variance: "مغایرت برآورد با هزینهٔ واقعی",
+  get_latest_drawing_revision: "آخرین بازنگری نقشه‌ها",
 };
 
 export function isAecOperatingProfile(value: string): value is AecOperatingProfile {

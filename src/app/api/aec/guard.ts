@@ -87,6 +87,33 @@ const ERROR_STATUS: Record<string, number> = {
   invalid_estimate_transition: 409,
   estimate_has_approved_version: 409,
   estimate_empty: 409,
+  // Issue #799 Wave 5 — document control (§9 and §12). The split is the same
+  // one the estimating codes use: a missing record is a 404, a malformed field
+  // is a 400, and everything a *frozen* record refuses is a 409, because the
+  // request was reasonable and the state is what says no.
+  drawing_not_found: 404,
+  revision_not_found: 404,
+  transmittal_not_found: 404,
+  recipient_not_found: 404,
+  document_number_required: 400,
+  drawing_title_required: 400,
+  transmittal_number_required: 400,
+  invalid_document_type: 400,
+  invalid_discipline: 400,
+  invalid_issue_purpose: 400,
+  invalid_revision_code: 400,
+  invalid_transmittal_item: 400,
+  invalid_recipient: 400,
+  document_number_taken: 409,
+  revision_code_taken: 409,
+  transmittal_number_taken: 409,
+  revision_not_editable: 409,
+  transmittal_not_editable: 409,
+  drawing_has_issued_revisions: 409,
+  transmittal_empty: 409,
+  transmittal_has_no_recipients: 409,
+  transmittal_not_issued: 409,
+  recipient_already_acknowledged: 409,
 };
 
 /**

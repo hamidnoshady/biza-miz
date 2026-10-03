@@ -5,7 +5,8 @@
  * every one has a Persian label, the permission map covers each of them, the
  * model-facing catalogue actually defines them, and a business of another
  * industry is refused with a sentence rather than answered with an empty list.
- * The data the tools read is covered in `integration/aec.integration.test.ts`.
+ * The data the tools read is covered in `integration/aec.integration.test.ts`
+ * and `integration/aec-document-control.integration.test.ts`.
  */
 import { describe, expect, it } from "vitest";
 import { AEC_AI_TOOL_LABELS, AEC_AI_TOOL_NAMES, isAecAiToolName } from "./aec";
@@ -18,12 +19,14 @@ describe("the AEC read tools", () => {
   it("declares exactly the tree the issue names", () => {
     // Wave 3 shipped §23's first two; Wave 4 added `get_boq_variance` because
     // the data it reads (the approved estimate and the ledger's actual cost)
-    // only then existed. The list is asserted literally so a fourth cannot
-    // arrive unnoticed.
+    // only then existed; Wave 5 added `get_latest_drawing_revision`, which the
+    // issue names in §23 and whose register arrived with §9. The list is
+    // asserted literally so a fifth cannot arrive unnoticed.
     expect([...AEC_AI_TOOL_NAMES]).toEqual([
       "get_aec_project_financial_health",
       "list_delayed_project_activities",
       "get_boq_variance",
+      "get_latest_drawing_revision",
     ]);
     expect(isAecAiToolName("get_aec_project_financial_health")).toBe(true);
     expect(isAecAiToolName("get_workspace_project_status")).toBe(false);
@@ -51,6 +54,9 @@ describe("the AEC read tools", () => {
     }
   });
 
+  // Every tool, including the drawing read whose register arrived in Wave 5, is
+  // refused here before it can reach the database — which is also why this file
+  // needs no database of its own.
   it("refuses another industry in words the model can relay", async () => {
     for (const industry of ["food_service", "service_saas", null]) {
       for (const name of AEC_AI_TOOL_NAMES) {

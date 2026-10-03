@@ -207,13 +207,65 @@ computed here: the variance reads `journal_entries.project_id` through the ledge
 domain owns five tables, none of which is a cost ledger — asserted in the integration suite rather
 than promised in a comment.
 
-## Waves 5–11 — designed, not built
+## Wave 5 — drawing revision control and transmittals (implemented, migration 0197)
+
+What shipped:
+
+| Surface | Change |
+|---|---|
+| Domain | `migrations/0197_aec_document_control.sql` — five tables: `aec_documents` (the register), `aec_document_revisions`, `aec_transmittals`, `aec_transmittal_items` and `aec_transmittal_recipients`. All five ENABLE + FORCE RLS with a `tenant_isolation` policy and composite `(business_id, …)` foreign keys; both party references are guarded the way 0194's are; the migration also widens `workspace_activity.subject_type` with `document_revision` and `transmittal`, and seeds a «آخرین بازنگری نقشه‌ها» widget for the industry |
+| Storage | A revision points at a `media_assets` file, and the service files it in `workspace_documents` — the platform's existing document record, with its own version chain (`supersedes_id`). §9's "no parallel document store" is therefore structural: there is no second byte store, no second upload path, and the documents screen shows an issued drawing next to any other project document |
+| Immutability | `aec_document_revision_guard()` allows exactly draft → issued → superseded and refuses any content change once a revision leaves draft; `aec_freeze_issued_revision_file()` stops the underlying `workspace_documents` row from being re-pointed at another file or renamed; `aec_transmittal_guard()` freezes number, sender, date, purpose and comments the moment a transmittal is issued, and `aec_transmittal_line_guard()`/`aec_transmittal_recipient_guard()` freeze its lines (the recipients' one keeps the acknowledgement exception). "A new revision must never overwrite a historical approved file" is a database rule, not a service convention |
+| Latest revision | `aec_document_revision_totals()` derives `latest_revision_id/no/code/status` and `revision_count` on the register row, so "latest" cannot drift from the revision list and needs no read-time sort; full history stays readable in the same row |
+| Transmittal integrity | `aec_transmittal_item_snapshot()` copies the document number, title, revision code and issue purpose onto the line from the revision — a client cannot claim a transmittal carried a revision it did not. Issuing one transmittal is a single transaction: the revisions go out with the transmittal's purpose (if they had none), earlier issued revisions of the same document become superseded, and both sides freeze together |
+| Pure half | `src/lib/aec-docs.ts` — the seven §9 issue purposes with Persian labels, the eight document types, the discipline list taken from `AEC_SPECIALTY_LABELS`, both status models with their transition tables, `pendingAcknowledgements`/`isFullyAcknowledged`, and revision-code arithmetic (`A`…`Z`, `AA`…) |
+| Service | `src/lib/aec-doc-service.ts` — the register's CRUD, revisions (a new one is `max + 1` and links the file, or an existing `workspace_documents` row), transmittals with wholesale line/recipient replacement while draft, `issueTransmittal`, `acknowledgeTransmittal` (defaults to the first pending recipient, flips the transmittal to `acknowledged` on the last required signature) and the assistant's read |
+| API | `GET/POST /api/aec/projects/[id]/documents`, `GET/PATCH/DELETE /api/aec/documents/[id]`, `GET/POST /api/aec/documents/[id]/revisions`, `PATCH/DELETE /api/aec/revisions/[id]`, `GET/POST /api/aec/projects/[id]/transmittals`, `GET/PATCH/DELETE /api/aec/transmittals/[id]`, `POST /api/aec/transmittals/[id]/status` (`issue \| acknowledge`). Every one `withTenantScope` + `aecOwner` + `requireProjectCapability` |
+| Permission | `workspace.documents_issue` — new, high risk, audited, implying `workspace.view`. Reads need `workspace.view`, drafting needs `workspace.manage`, **issuing** needs `workspace.documents_issue`, and acknowledging a receipt stays `workspace.manage` because it is a receipt rather than a decision (§24) |
+| Screen | `src/app/(app)/workspace/projects/[id]/documents-panel.tsx` — «نقشه‌ها و اسناد» above the generic documents section: the register with its latest revision, the full revision history with its statuses, and the transmittal list with a drawer holding lines, recipients and receipts. No control is offered where the API would refuse: the issue button appears only for a member who holds the issuing key, and edit/delete only on a draft revision |
+| Cockpit | `aec-cockpit.ts` — `documents` is now shipped, `AEC_SHIPPED_WAVE = 5`, and the «اسناد» tab (named «نقشه‌ها و اسناد» for a business with the capability) is the register |
+| Assistant | `get_latest_drawing_revision` joins §23's reads (capabilities catalogue, `ai.ts`'s function schema and Persian prompt, MCP) — one row per document with its current revision, optionally filtered by discipline or a search term |
+| Party merge | `aec_transmittals.sender_party_id` and `aec_transmittal_recipients.party_id` classified in `PARTY_REFERENCES`, both moving **drafts only** — a frozen transmittal keeps the sender and recipient it was issued to, because the recipient row is also the receipt |
+
+### Decision 11 — the register is a register, not a second media library
+
+§9 asks for a lot of metadata per drawing: number, discipline, type, revision, status, purpose,
+prepared/checked/approved/issued by, and a link to the file. The temptation is a new document table
+with its own upload; the requirement is the opposite, and both §9 and the repo's standing rule point
+the same way. So `aec_documents` / `aec_document_revisions` own the *engineering* metadata, and the
+bytes stay in `media_assets` reached through a `workspace_documents` row (created by the service when
+a revision is filed from the library, or linked when it already exists). A drawing therefore appears
+in the project's documents list with its own supersede chain, the media library keeps its single
+storage charge and single access check, and the revision trigger freezes the file row so
+"a new revision never overwrites an approved one" is enforced where the file actually lives.
+
+### Decision 12 — issuing moves the whole register in one transaction, and the database owns what "issued" means
+
+An issued drawing is a claim about the world: this revision, for this purpose, went to these people,
+on this date. That claim is spread over four tables, so it is written in one transaction and its
+invariants are triggers rather than service checks: a transmittal cannot be issued empty or without
+recipients (`aec_transmittal_guard`), a line's identity is copied from the revision
+(`aec_transmittal_item_snapshot`), earlier issued revisions are superseded and both sides freeze in
+the same statement that flips the status. The service still checks the same conditions first —
+because a Persian error code is a better answer than a constraint name — and
+`integration/aec-document-control.integration.test.ts` asserts the raw-SQL path is refused too, which
+is how the shared items/recipients guard and a stale `filterSql` alias were caught before review.
+
+### Decision 13 — "latest revision" is derived, so it cannot drift
+
+The register row keeps `latest_revision_id/no/code/status` and `revision_count`, recomputed by the
+revision trigger on every insert, update and delete. The alternative — sorting the revisions on read —
+looks harmless and is not: two screens that sort differently (code vs number, ascending vs
+descending) eventually disagree, and "which revision is current" is the one question a drawing
+register must never answer ambiguously. Deriving it means the register, the tab's KPI row, the widget
+and the assistant's `get_latest_drawing_revision` all read one stored answer, while the full history
+stays readable beside it.
+
+## Waves 6–11 — designed, not built
 
 In the issue's order. Nothing below has a migration or a screen yet; the wave boundaries exist so
 each can be reviewed on its own.
 
-5. **Document control.** Drawing numbers, revisions, issue purposes and transmittals over the
-   existing media library and project documents.
 6. **RFIs and submittals.**
 7. **Site execution.** Daily logs, inspections, QA/QC, NCRs and snagging.
 8. **Commercial controls.** Variations/change orders, progress certificates, retention and advance,

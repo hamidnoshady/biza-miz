@@ -43,6 +43,7 @@ export default async function WorkspaceProjectPage({
         canManage={member.permissions.has(PERMISSIONS.workspaceManage)}
         canManageContracts={member.permissions.has(PERMISSIONS.workspaceContractsManage)}
         canApprove={member.permissions.has(PERMISSIONS.workspaceApprove)}
+        canIssueDocuments={member.permissions.has(PERMISSIONS.workspaceDocumentsIssue)}
       />
     </PageShell>
   );

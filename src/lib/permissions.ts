@@ -157,6 +157,16 @@ export const PERMISSIONS = {
    * approve would make the whole mechanism decorative.
    */
   workspaceApprove: "workspace.approve",
+  /**
+   * Issue a document revision to an outside party (issue #799 §24's
+   * "drawings/document issue"). Drafting a revision is ordinary project work and
+   * rides `workspace.manage`; *issuing* one is the moment a drawing becomes a
+   * record that names what went to whom, and the moment the register stops
+   * accepting changes to it (migration 0197 freezes it). Its own key for the
+   * same reason a contract has one: the act cannot be taken back, so it must not
+   * be inherited by everyone who can tick a task off.
+   */
+  workspaceDocumentsIssue: "workspace.documents_issue",
 
   // Accounting
   ledgerView: "ledger.view",
@@ -396,7 +406,7 @@ const {
   inventoryView, inventoryAdjust, purchasesManage,
   partiesView, partiesManage,
   crmView, crmManage, crmMerge, crmConsentManage, crmExport, crmConfigure, crmDelete,
-  workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove,
+  workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove, workspaceDocumentsIssue,
   ledgerView, ledgerPost, ledgerApprove, ledgerClosePeriod, accountsEdit, ledgerPropose,
   financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
   financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
@@ -443,7 +453,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // open them and do everything on them. Introducing a permission must not
     // remove access somebody already had, so the preset grants all four. A
     // business that wants a narrower manager revokes the individual keys.
-    workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove,
+    workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove, workspaceDocumentsIssue,
     ledgerView, reportsView, reportsExport,
     // Operational finance the manager already did under a role gate. Not
     // accounting authority, and not payroll.
