@@ -43,6 +43,7 @@ let provisioning: typeof import("../src/lib/business-provisioning");
 let aec: typeof import("../src/lib/aec-service");
 let boq: typeof import("../src/lib/aec-boq-service");
 let workspace: typeof import("../src/lib/workspace");
+let crm: typeof import("../src/lib/crm-service");
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -75,6 +76,7 @@ beforeAll(async () => {
   aec = await import("../src/lib/aec-service");
   boq = await import("../src/lib/aec-boq-service");
   workspace = await import("../src/lib/workspace");
+  crm = await import("../src/lib/crm-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -138,6 +140,20 @@ async function createProject(businessId: string, ownerUserId: string, name: stri
 async function createParty(businessId: string, name: string): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
     `INSERT INTO parties (business_id, name, role) VALUES ($1, $2, 'supplier') RETURNING id`,
+    [businessId, name],
+  );
+  return rows[0].id;
+}
+
+/**
+ * A party the CRM may merge. `mergeCustomers` only touches records carrying the
+ * `customer` role, which is exactly the case the BOQ's party reference has to
+ * survive — a business that buys from and bills the same contractor.
+ */
+async function createCustomerParty(businessId: string, name: string): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO parties (business_id, name, role, roles)
+     VALUES ($1, $2, 'customer', ARRAY['customer']::text[]) RETURNING id`,
     [businessId, name],
   );
   return rows[0].id;
@@ -847,6 +863,92 @@ describe("the BOQ against the rest of the product (issue #799 §7 and §30)", ()
       const frozen = await boq.importBoqItem(owner, { ...row, versionNo: 1 });
       expect(frozen.status).toBe("skipped");
       expect(frozen.reason).toContain("تأیید");
+    });
+  });
+
+  it("follows a supplier merge on a draft line, and leaves an approved one as it was", async () => {
+    const { businessId, owner } = await provisionBusiness("architecture_construction");
+    const supplier = await createCustomerParty(businessId, "آهن‌فروشی البرز");
+    const { estimateId, versionId } = await seedEstimate(owner, "پروژهٔ ادغام", [
+      {
+        sectionIndex: 0,
+        itemCode: "05-10",
+        description: "میلگرد آجدار",
+        unit: "kg",
+        quantity: "12000",
+        materialRateRial: 380_000,
+        laborRateRial: 90_000,
+        equipmentRateRial: 20_000,
+        subcontractRateRial: 0,
+        wastePercent: "2",
+        overheadPercent: "3",
+        markupPercent: "8",
+        partyId: supplier,
+      },
+    ]);
+    await dbLib.withTenant(businessId, async () => {
+      await boq.submitEstimateVersion(owner, versionId, {});
+      await boq.approveEstimateVersion(owner, versionId, "");
+    });
+
+    // The next revision names the same supplier, and is still a draft — the
+    // state in which a merge has to be able to re-point the row.
+    const draftVersionId = await dbLib.withTenant(businessId, async () => {
+      const version = await boq.createEstimateVersion(owner, estimateId, {
+        cloneFromVersionId: versionId,
+        title: "نسخهٔ دوم",
+      });
+      return version.id;
+    });
+
+    const duplicate = await createCustomerParty(businessId, "آهن‌فروشی البرز ۲");
+    const merged = await dbLib.withTenant(businessId, () =>
+      crm.mergeCustomers(businessId, duplicate, supplier, { mergedBy: "مالک" }),
+    );
+    expect(merged).not.toBeNull();
+
+    await dbLib.withTenant(businessId, async () => {
+      const { rows } = await dbLib.query<{ version_id: string; party_id: string | null; status: string }>(
+        `SELECT i.version_id, i.party_id, v.status
+           FROM aec_boq_items i JOIN aec_estimate_versions v ON v.id = i.version_id
+          WHERE i.business_id = $1 ORDER BY v.version_no`,
+        [businessId],
+      );
+      // Newest revision last (the rows are ordered by version number).
+      expect(rows).toHaveLength(2);
+      // The approved revision keeps the name it was approved with — migration
+      // 0196's line guard would refuse the write anyway.
+      expect(rows[0].version_id).toBe(versionId);
+      expect(rows[0].status).toBe("approved");
+      expect(rows[0].party_id).toBe(supplier);
+      // …while the draft line follows the surviving record.
+      expect(rows[1].version_id).toBe(draftVersionId);
+      expect(rows[1].status).toBe("draft");
+      expect(rows[1].party_id).toBe(duplicate);
+
+      // And the draft is still editable: the merge left no row the model can
+      // refuse to write.
+      const edited = await boq.saveDraftVersion(owner, draftVersionId, {
+        sections: [{ code: "05", title: "اسکلت" }],
+        items: [
+          {
+            sectionIndex: 0,
+            itemCode: "05-10",
+            description: "میلگرد آجدار",
+            unit: "kg",
+            quantity: "12500",
+            materialRateRial: 380_000,
+            laborRateRial: 90_000,
+            equipmentRateRial: 20_000,
+            subcontractRateRial: 0,
+            wastePercent: "2",
+            overheadPercent: "3",
+            markupPercent: "8",
+            partyId: duplicate,
+          },
+        ],
+      });
+      expect(edited.versionTree?.version.status).toBe("draft");
     });
   });
 

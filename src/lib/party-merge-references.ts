@@ -512,6 +512,28 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "طرف‌های پروژه",
   },
 
+  // -- AEC (issue #799 Wave 4) ----------------------------------------------
+  {
+    table: "aec_boq_items",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    // Only a *draft* revision may be written at all: migration 0196's line
+    // guard refuses an UPDATE to any line of a submitted, approved or
+    // superseded revision, so moving a frozen row would abort the whole merge.
+    // Skipping them is also the right answer rather than a workaround — an
+    // approved estimate is a historical document, and the supplier it named is
+    // part of what was approved. Draft lines do move, because a draft stays
+    // editable and its trigger refuses a merged-away party: leaving one behind
+    // would make the next edit of that line fail.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_estimate_versions v WHERE v.id = {t}.version_id AND v.status = 'draft')",
+    reason:
+      "The supplier or contractor a draft measured line is priced against. A draft line moves with the surviving record; a frozen revision keeps the name it was approved with.",
+    preview: true,
+    previewLabel: "ردیف‌های متره (پیش‌نویس)",
+  },
+
   // -- Historical / audit: deliberately NOT moved ---------------------------
   {
     table: "crm_merges",
