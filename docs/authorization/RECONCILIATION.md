@@ -91,6 +91,17 @@ Both sides gate **the same routes** under `src/app/api/cms/website/**`.
 configure the module), which `main` had already split. `growth.view` survives
 only as the app-wide door.
 
+**Superseded by issue #764.** `growth.view` is no longer the app door: it is
+the management dashboard, audience insights and the accounting bridge, and no
+floor preset holds it. The door is the union of the section keys
+(`GROWTH_APP_PERMISSIONS` in `src/lib/growth-access.ts`). `loyalty.manage` now
+means loyalty-program configuration only; the acts it used to bundle have
+their own keys — `loyalty.redeem`, `store_credit.issue`, `store_credit.payout`,
+`gift_cards.view`/`issue`/`redeem` — and compensation is `commission.view` /
+`commission.manage`. `src/lib/growth-access.ts` is the one page/API/button
+matrix, asserted against the route handlers' source by its test; migration
+0194 rewrote stored overrides and custom roles.
+
 ## 4. Backup — keep `main`'s granularity
 
 | `main` | this branch | Canonical |

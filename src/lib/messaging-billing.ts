@@ -523,75 +523,11 @@ export async function saveMessageCreditPackage(input: {
   });
 }
 
-export async function listRecentMessageLedger(
-  businessId: string,
-  limit = 30,
-): Promise<MessageLedgerEntry[]> {
-  const { rows } = await query<{
-    id: string;
-    kind: MessageLedgerKind;
-    amount_rial: string;
-    actual_cost_rial: string | null;
-    note: string | null;
-    created_at: string;
-  }>(
-    `SELECT id, kind, amount_rial, actual_cost_rial, note, created_at
-       FROM message_credit_ledger
-      WHERE business_id = $1
-      ORDER BY created_at DESC
-      LIMIT $2`,
-    [businessId, Math.min(Math.max(limit, 1), 200)],
-  );
-  return rows.map((r) => ({
-    id: r.id,
-    kind: r.kind,
-    amountRial: numberValue(r.amount_rial),
-    actualCostRial: r.actual_cost_rial === null ? null : numberValue(r.actual_cost_rial),
-    note: r.note,
-    createdAt: r.created_at,
-  }));
-}
-
-export async function createMessageTopUpRequest(input: {
-  businessId: string;
-  /** An offered package fixes both the price and the granted credit server-side. */
-  packageId?: string;
-  /** Kept for manual bank-transfer requests when no package is selected. */
-  amountRial?: number;
-  note?: string;
-}): Promise<MessageTopUpRequest> {
-  let packageId: string | null = null;
-  let packageName = "مبلغ دلخواه";
-  let priceRial = input.amountRial;
-  let creditAmountRial = input.amountRial;
-
-  if (input.packageId) {
-    const packages = await listMessageCreditPackages(true);
-    const selected = packages.find((p) => p.id === input.packageId);
-    if (!selected) throw new Error("message_credit_package_not_found");
-    packageId = selected.id;
-    packageName = selected.name;
-    priceRial = selected.priceRial;
-    creditAmountRial = selected.creditAmountRial;
-  }
-  if (typeof priceRial !== "number" || !Number.isSafeInteger(priceRial) || priceRial <= 0 ||
-      typeof creditAmountRial !== "number" || !Number.isSafeInteger(creditAmountRial) || creditAmountRial <= 0) {
-    throw new Error("invalid_amount");
-  }
-  // TypeScript cannot retain the numeric guard through the branch above.
-  const safePriceRial = priceRial as number;
-  const safeCreditAmountRial = creditAmountRial as number;
-
-  const { rows } = await query<MessageTopUpRequestRow>(
-    `INSERT INTO message_top_up_requests
-       (business_id, package_id, package_name, price_rial, credit_amount_rial, note)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING id, business_id, package_id, package_name, price_rial,
-               credit_amount_rial, note, status, reviewed_at, created_at`,
-    [input.businessId, packageId, packageName, safePriceRial, safeCreditAmountRial, input.note?.trim() || null],
-  );
-  return toTopUpRequest(rows[0], null);
-}
+// Issue #764: the tenant-side message-credit purchase (package list, top-up
+// request, the legacy credit statement) is gone from Growth — credit is bought
+// in the central wallet at /settings/billing. `message_top_up_requests` and
+// `message_credit_ledger` stay: the platform console still reviews requests
+// filed before the change, and the ledger is pre-0177 history.
 
 type MessageTopUpRequestRow = {
   id: string;

@@ -1,75 +1,50 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { businessToday } from "@/lib/business-day-service";
-import { listCommissionRules } from "@/lib/commission-service";
-import { campaignStateCounts, classifyCampaign } from "@/lib/growth-shared";
+import { parseGrowthSettingsInput } from "@/lib/growth-settings";
+import { getGrowthSettings, updateGrowthSettings } from "@/lib/growth-settings-service";
 import { listPrograms } from "@/lib/loyalty-service";
-import { listMessageTemplates } from "@/lib/message-campaigns-service";
 import { getPublicMessageConfig } from "@/lib/messaging-billing";
-import { listPromotionCatalogue } from "@/lib/promotions-service";
 
 /**
- * A concise, read-only snapshot for Growth's settings home.
+ * Growth's own settings (issue #764).
  *
- * This is intentionally an overview rather than a second set of mutation
- * endpoints. Loyalty, campaigns, message templates and commission rules each
- * already have an operational screen that owns its editor. Reporting their
- * current state here lets an owner find a missing default or an unavailable
- * sender before following the clearly labelled link to that owner screen.
+ * `settings` is the Growth-wide configuration this page owns — the
+ * attribution window and the 30-day discount budget (src/lib/growth-settings.ts).
+ * `readiness` is deliberately not a second dashboard: it carries only the two
+ * facts that block the app from working at all (no default loyalty program,
+ * messaging not set up by the platform), each linked from the page to the
+ * screen that fixes it. Counts and figures stay on the Growth dashboard.
  */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.marketingConfigure);
   if (error) return error;
 
-  const [today, programs, promotions, templates, messaging, commissionRules] = await Promise.all([
-    businessToday(session.businessId),
+  const [settings, programs, messaging] = await Promise.all([
+    getGrowthSettings(session.businessId),
     listPrograms(session.businessId),
-    listPromotionCatalogue(session.businessId),
-    listMessageTemplates(session.businessId),
     getPublicMessageConfig(),
-    listCommissionRules(session.businessId, undefined, true),
   ]);
 
-  // The same tally the dashboard shows, from the same shared helper — the two
-  // screens must never be able to disagree about how many campaigns are live.
-  const campaignCounts = campaignStateCounts(
-    promotions.map((promotion) => classifyCampaign(promotion, today)),
-  );
-
-  const defaultProgram = programs.find((program) => program.isDefault && program.isActive) ?? null;
-  const activeRules = commissionRules.filter((rule) => rule.isActive);
-
   return NextResponse.json({
-    settings: {
-      loyalty: {
-        programCount: programs.length,
-        activeProgramCount: programs.filter((program) => program.isActive).length,
-        defaultProgram: defaultProgram
-          ? {
-              name: defaultProgram.name,
-              earnPointsPer100000: defaultProgram.earnPointsPer100000,
-              pointValueRial: defaultProgram.pointValueRial,
-              pointsExpiryDays: defaultProgram.pointsExpiryDays,
-            }
-          : null,
-      },
-      campaigns: {
-        total: promotions.length,
-        ...campaignCounts,
-      },
-      messaging: {
-        templateCount: templates.length,
-        smsTemplateCount: templates.filter((template) => template.channel === "sms").length,
-        emailTemplateCount: templates.filter((template) => template.channel === "email").length,
-        enabled: messaging.enabled,
-        configured: messaging.configured,
-      },
-      commission: {
-        ruleCount: commissionRules.length,
-        activeRuleCount: activeRules.length,
-        staffWithActiveRules: new Set(activeRules.map((rule) => rule.employeeId)).size,
-      },
+    settings,
+    readiness: {
+      hasDefaultLoyaltyProgram: programs.some((program) => program.isDefault && program.isActive),
+      messagingReady: messaging.enabled && messaging.configured,
     },
   });
+});
+
+/** Saves a partial update; keys the body does not name keep their stored value. */
+export const PATCH = withTenantScope(async (request: NextRequest) => {
+  const { session, error } = await requirePermission(PERMISSIONS.marketingConfigure);
+  if (error) return error;
+
+  const body = await request.json().catch(() => null);
+  const parsed = parseGrowthSettingsInput(body);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: "invalid_growth_settings", message: parsed.errors.join(" ") }, { status: 400 });
+  }
+  const settings = await updateGrowthSettings(session.businessId, parsed.value, session.sub);
+  return NextResponse.json({ settings });
 });

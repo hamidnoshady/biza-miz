@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope, requirePermission } from "@/lib/auth";
+import { withTenantScope, requireAnyPermission, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool } from "@/lib/db";
 import { getCustomer } from "@/lib/parties-service";
@@ -8,9 +8,16 @@ import { getBusinessDayStatus } from "@/lib/business-day-service";
 import { issueStoreCredit, storeCreditBalance, useStoreCredit } from "@/lib/loyalty-service";
 import type { SettlementMethod } from "@/lib/ledger";
 
-/** Issues credit for a documented correction, or pays an existing credit balance out. */
+/**
+ * Issues credit for a documented correction, or pays an existing credit balance out.
+ *
+ * Two acts, two permissions (issue #764): `issue` creates a liability out of
+ * nothing, `use` takes money out of the till or the bank. The first guard only
+ * admits someone holding either, so an unauthenticated or unrelated caller is
+ * refused before the body is read; the second is the real gate, per action.
+ */
 export const POST = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.loyaltyManage);
+  const { session, error } = await requireAnyPermission(PERMISSIONS.storeCreditIssue, PERMISSIONS.storeCreditPayout);
   if (error) return error;
   const { id } = await context.params;
 
@@ -29,6 +36,10 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   if (body.action !== "issue" && body.action !== "use") {
     return NextResponse.json({ error: "bad_request", message: "نوع عملیات اعتبار معتبر نیست." }, { status: 400 });
   }
+  const actionGuard = await requirePermission(
+    body.action === "use" ? PERMISSIONS.storeCreditPayout : PERMISSIONS.storeCreditIssue,
+  );
+  if (actionGuard.error) return actionGuard.error;
   if (typeof body.amount !== "number") {
     return NextResponse.json({ error: "bad_request", message: "مبلغ اعتبار معتبر نیست." }, { status: 400 });
   }
