@@ -264,7 +264,7 @@ export function campaignWarnings(draft: CampaignDraft): string[] {
   const itemIds = Array.isArray(draft.itemIds) ? draft.itemIds : [];
   if (needsItemScope(kind) && itemIds.length === 0) {
     warnings.push(
-      "ست هدیه تا وقتی اقلام آن مشخص نشده باشد اعمال نمی‌شود. دامنهٔ اقلام فعلاً از این فرم قابل تعیین نیست؛ نوع دیگری را انتخاب کنید.",
+      "ست هدیه تا وقتی اقلام آن مشخص نشده باشد اعمال نمی‌شود. اقلام ست را در «شامل چه کالاهایی می‌شود؟» به‌صورت «کالاهای مشخص» انتخاب کنید.",
     );
   }
   return warnings;

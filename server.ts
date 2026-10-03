@@ -126,7 +126,12 @@ app.prepare().then(async () => {
     SUBSCRIPTION_RENEWAL_TICK_INTERVAL_MS,
   } = await import("./src/lib/subscription-service");
   const { runAiProactiveTick, AI_PROACTIVE_TICK_INTERVAL_MS } = await import("./src/lib/ai-proactive-service");
-  const { runPlatformCompanyBillingTick, PLATFORM_COMPANY_BILLING_TICK_MS } = await import("./src/lib/platform-company-billing");
+  const {
+    runPlatformCompanyBillingTick,
+    runPlatformCompanyMaintenanceTick,
+    PLATFORM_COMPANY_BILLING_TICK_MS,
+    PLATFORM_COMPANY_MAINTENANCE_TICK_MS,
+  } = await import("./src/lib/platform-company-billing");
   const { runWooCommerceSyncTick, WOO_SYNC_TICK_INTERVAL_MS } = await import("./src/lib/integrations/outbox-service");
   const { runWebsiteSyncTick, WEBSITE_SYNC_TICK_INTERVAL_MS } = await import("./src/lib/website/sync-service");
   const { runCrmScoringTick, CRM_SCORING_TICK_INTERVAL_MS } = await import(
@@ -368,6 +373,16 @@ app.prepare().then(async () => {
   const platformCompanyBillingTick = () =>
     runPlatformCompanyBillingTick().catch((err) => console.error("platform company billing tick failed:", err));
   scheduleCentralTick(platformCompanyBillingTick, PLATFORM_COMPANY_BILLING_TICK_MS, 70_000);
+
+  // Housekeeping for the same feature: prune redeemed and long-expired company
+  // handoff tokens. Central only, like the posting tick it sits beside — a site
+  // or desktop process has no business deleting another realm's credentials,
+  // and the audit trail of who opened what lives in platform_audit_log.
+  const platformCompanyMaintenanceTick = () =>
+    runPlatformCompanyMaintenanceTick().catch((err) =>
+      console.error("platform company maintenance tick failed:", err),
+    );
+  scheduleCentralTick(platformCompanyMaintenanceTick, PLATFORM_COMPANY_MAINTENANCE_TICK_MS, 140_000);
 
   // Migration 0149: the media library's daily storage charge. The tick runs
   // hourly but the charge is claimed once per (business, local Tehran day) —
