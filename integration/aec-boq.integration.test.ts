@@ -785,6 +785,57 @@ describe("the BOQ against the rest of the product (issue #799 §7 and §30)", ()
       expect(open?.openVersionCount).toBe(1);
       expect(open?.approvedEstimateRial).toBe(750_000_000);
     });
+
+    // §7 allows more than one estimate on a project — an original and a
+    // variation, say. When both hold an approved revision, the project's working
+    // figure is the one approved **most recently**, not the one with the
+    // highest version number: revision numbers count within an estimate, so
+    // comparing them across two estimates compares nothing.
+    await dbLib.withTenant(businessId, async () => {
+      const { rows } = await dbLib.query<{ estimate_id: string; version_id: string }>(
+        `SELECT e.id AS estimate_id, v.id AS version_id
+           FROM aec_estimates e JOIN aec_estimate_versions v ON v.estimate_id = e.id
+          WHERE e.business_id = $1 AND e.title = 'برآورد اصلی' AND v.status = 'approved'
+          ORDER BY v.version_no DESC LIMIT 1`,
+        [businessId],
+      );
+      const original = rows[0];
+      // Clone the approved revision — its lines come with it — and approve the
+      // copy, so the original outranks the variation by version number.
+      const second = await boq.createEstimateVersion(owner, original.estimate_id, {
+        cloneFromVersionId: original.version_id,
+        title: "نسخهٔ دوم",
+      });
+      await boq.submitEstimateVersion(owner, second.id, {});
+      await boq.approveEstimateVersion(owner, second.id, "");
+
+      const variation = await boq.createEstimate(owner, projectId, { title: "برآورد تغییرات" });
+      await boq.saveDraftVersion(owner, variation.versions[0].id, {
+        sections: [],
+        items: [
+          {
+            sectionIndex: null,
+            itemCode: "V-01",
+            description: "تغییرات الحاقی",
+            unit: "مقطوع",
+            quantity: "1",
+            materialRateRial: 1_000_000_000,
+            laborRateRial: 0,
+            equipmentRateRial: 0,
+            subcontractRateRial: 0,
+            wastePercent: "0",
+            overheadPercent: "0",
+            markupPercent: "0",
+          },
+        ],
+      });
+      await boq.submitEstimateVersion(owner, variation.versions[0].id, {});
+      await boq.approveEstimateVersion(owner, variation.versions[0].id, "");
+
+      const after = await boq.boqVariance(businessId, projectId);
+      expect(after?.approvedEstimateRial).toBe(1_000_000_000);
+      expect(after?.approvedVersionNo).toBe(1); // the variation's own first revision
+    });
   });
 
   it("lands an imported spreadsheet row in the right estimate, revision and chapter", async () => {

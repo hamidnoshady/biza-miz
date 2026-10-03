@@ -1602,7 +1602,24 @@ export async function boqVariance(
     [businessId, projectId],
   );
 
-  const approved = versions.find((row) => row.status === "approved") ?? null;
+  // The project's working estimate, when it keeps more than one: the revision
+  // approved **most recently**, not merely the one with the highest version
+  // number. §7 lets a project carry several estimates (an original and a
+  // variation, say), and revision numbers count *within* one estimate, so they
+  // are not comparable across two. Ordered by the database rather than in
+  // JavaScript — a `timestamptz`'s rendered text is not a sort key.
+  const { rows: approvedRows } = await query<{
+    id: string; version_no: number; total_rial: string | number; approved_at: string | null;
+  }>(
+    `SELECT v.id, v.version_no, v.total_rial, v.approved_at
+       FROM aec_estimate_versions v
+       JOIN aec_estimates e ON e.id = v.estimate_id
+      WHERE v.business_id = $1 AND e.project_id = $2 AND v.status = 'approved'
+      ORDER BY v.approved_at DESC NULLS LAST, v.version_no DESC
+      LIMIT 1`,
+    [businessId, projectId],
+  );
+  const approved = approvedRows[0] ?? null;
   const bySection: Array<{ title: string; totalRial: number }> = [];
   if (approved) {
     const { rows } = await query<{ title: string; total_rial: string | number }>(
