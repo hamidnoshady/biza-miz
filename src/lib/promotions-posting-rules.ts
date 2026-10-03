@@ -56,3 +56,28 @@ registerPostingRule("promotions.gift_card_redeemed", async (event, client): Prom
     postingKind: "gift_card_redeemed",
   };
 });
+
+/**
+ * Issue #764 — an expired gift card's remaining balance leaves the liability
+ * and becomes «سایر درآمدها» (breakage). Emitted only by the human-run expiry
+ * sweep (`expireGiftCards`), once per card: the ledger's
+ * (source, posting_kind) uniqueness makes a second run a no-op. No cash moves.
+ */
+registerPostingRule("promotions.gift_card_expired", async (event, client): Promise<PostingResult | null> => {
+  const payload = event.payload as unknown as GiftCardEventPayload;
+  if (rialBigInt(payload.amount) === 0n) return null;
+
+  const accounts = await accountIdsByCode(client, event.businessId, [
+    WELL_KNOWN_CODES.giftCardPayable,
+    WELL_KNOWN_CODES.otherIncome,
+  ]);
+
+  return {
+    lines: [
+      { accountId: accounts.get(WELL_KNOWN_CODES.giftCardPayable)!, debit: payload.amount, credit: ZERO },
+      { accountId: accounts.get(WELL_KNOWN_CODES.otherIncome)!, debit: ZERO, credit: payload.amount },
+    ],
+    memo: "انقضای کارت هدیه — ماندهٔ استفاده‌نشده",
+    postingKind: "gift_card_expired",
+  };
+});
