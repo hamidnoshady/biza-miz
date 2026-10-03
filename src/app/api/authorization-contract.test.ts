@@ -137,7 +137,7 @@ describe("families migrated off role-only gating stay migrated", () => {
     expect(routes.length).toBeGreaterThan(8);
     for (const relative of routes) {
       const source = read(relative);
-      expect(source, relative).toMatch(/PERMISSIONS\.(growth|loyalty|campaigns|marketing)\w+/);
+      expect(source, relative).toMatch(/PERMISSIONS\.(growth|loyalty|campaigns|marketing|storeCredit|giftCards|commission)\w+/);
       expect(source, relative).not.toMatch(/requireRole\(/);
     }
   });

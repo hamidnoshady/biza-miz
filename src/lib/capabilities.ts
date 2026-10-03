@@ -7,6 +7,7 @@
  */
 import type { DeploymentProfile } from "./deployment-mode";
 import type { Permission } from "./permissions";
+import { GROWTH_APP_PERMISSIONS } from "./growth-access";
 
 export type ExecutionTarget = "local" | "cloud" | "either";
 export type CapabilityStatus =
@@ -83,7 +84,7 @@ export type CapabilityErrorCode =
 export const CAPABILITY_REGISTRY: Readonly<Record<CapabilityKey, CapabilityDefinition>> = {
   "app.accounting": { key: "app.accounting", executionTarget: "either", profiles: ["cloud", "hybrid", "local"] },
   "app.crm": { key: "app.crm", executionTarget: "either", profiles: ["cloud", "hybrid", "local"] },
-  "app.growth": { key: "app.growth", executionTarget: "cloud", profiles: ["cloud", "hybrid"], requiredAnyPermission: ["growth.view"], cloudDependency: "cloud" },
+  "app.growth": { key: "app.growth", executionTarget: "cloud", profiles: ["cloud", "hybrid"], requiredAnyPermission: GROWTH_APP_PERMISSIONS, cloudDependency: "cloud" },
   "app.website": { key: "app.website", executionTarget: "cloud", profiles: ["cloud", "hybrid"], requiredAnyPermission: ["website.view", "cms.view", "woocommerce.view"], cloudDependency: "cloud" },
   "app.ai": { key: "app.ai", executionTarget: "cloud", profiles: ["cloud", "hybrid"], planCapability: "ai_assistant", cloudDependency: "cloud" },
   "app.workspace": { key: "app.workspace", executionTarget: "cloud", profiles: ["cloud", "hybrid"], cloudDependency: "cloud" },

@@ -23,6 +23,7 @@ import {
   StatusBadge,
 } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "@/app/dashboard/ui";
+import type { GrowthAbilities } from "@/lib/growth-access";
 
 interface Program {
   id: string;
@@ -51,7 +52,18 @@ interface RepurchaseRow {
 
 const CUSTOMER_SEARCH_DELAY_MS = 180;
 
-export function LoyaltySection({ canManage = true }: { canManage?: boolean }) {
+/**
+ * Four acts, four permissions (issue #764): configuring a program
+ * (`loyalty.manage`), spending points (`loyalty.redeem`), creating store
+ * credit (`store_credit.issue`) and paying it out (`store_credit.payout`).
+ * Each control is drawn only for the member its endpoint would accept.
+ */
+export function LoyaltySection({
+  abilities,
+}: {
+  abilities: Pick<GrowthAbilities, "manageLoyaltyPrograms" | "redeemPoints" | "issueStoreCredit" | "payOutStoreCredit">;
+}) {
+  const canManage = abilities.manageLoyaltyPrograms;
   const [programs, setPrograms] = useState<Program[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [customerId, setCustomerId] = useState("");
@@ -196,7 +208,7 @@ export function LoyaltySection({ canManage = true }: { canManage?: boolean }) {
           balance={balance}
           balanceLoaded={balanceLoaded}
           balanceError={balanceError}
-          canManage={canManage}
+          abilities={abilities}
           canRedeem={Boolean(activeProgram)}
           onChanged={(message) => {
             setDone(message);
@@ -467,7 +479,7 @@ function CustomerPanel({
   balance,
   balanceLoaded,
   balanceError,
-  canManage,
+  abilities,
   canRedeem,
   onChanged,
   onError,
@@ -481,7 +493,7 @@ function CustomerPanel({
   balance: { points: number; storeCredit: number } | null;
   balanceLoaded: boolean;
   balanceError: string;
-  canManage: boolean;
+  abilities: Pick<GrowthAbilities, "redeemPoints" | "issueStoreCredit" | "payOutStoreCredit">;
   canRedeem: boolean;
   onChanged: (message: string) => void;
   onError: (message: string) => void;
@@ -490,7 +502,13 @@ function CustomerPanel({
   const [points, setPoints] = useState("");
   const [credit, setCredit] = useState("");
   const [reason, setReason] = useState("");
-  const [creditAction, setCreditAction] = useState<"issue" | "payout">("issue");
+  const creditActions = (["issue", "payout"] as const).filter((action) =>
+    action === "issue" ? abilities.issueStoreCredit : abilities.payOutStoreCredit,
+  );
+  const [chosenCreditAction, setCreditAction] = useState<"issue" | "payout">("issue");
+  // Never hold an action this member cannot take — fall back to the one they can.
+  const creditAction = creditActions.includes(chosenCreditAction) ? chosenCreditAction : (creditActions[0] ?? "issue");
+  const canDoAnything = abilities.redeemPoints || creditActions.length > 0;
   const [payoutMethod, setPayoutMethod] = useState<"cash" | "bank">("cash");
   const [busy, setBusy] = useState(false);
 
@@ -587,11 +605,12 @@ function CustomerPanel({
         </div>
       ) : null}
 
-      {!canManage ? (
-        <InfoBox>برای مشاهدهٔ مانده، مشتری را انتخاب کنید. تبدیل امتیاز و صدور یا بازپرداخت اعتبار به تأیید مدیر یا مالک نیاز دارد.</InfoBox>
+      {!canDoAnything ? (
+        <InfoBox>برای مشاهدهٔ مانده، مشتری را انتخاب کنید. تبدیل امتیاز و صدور یا بازپرداخت اعتبار هرکدام مجوز جداگانه‌ای دارند.</InfoBox>
       ) : (
         <>
-          {!canRedeem ? <InfoBox>برای تبدیل امتیاز، ابتدا یک برنامهٔ فعال و پیش‌فرض وفاداری تعریف کنید.</InfoBox> : null}
+          {abilities.redeemPoints && !canRedeem ? <InfoBox>برای تبدیل امتیاز، ابتدا یک برنامهٔ فعال و پیش‌فرض وفاداری تعریف کنید.</InfoBox> : null}
+          {abilities.redeemPoints ? (
           <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
             <Field label="تبدیل امتیاز به اعتبار">
               <PersianNumberInput
@@ -609,8 +628,11 @@ function CustomerPanel({
               تبدیل به اعتبار
             </Button>
           </div>
+          ) : null}
 
+          {creditActions.length > 0 ? (
           <div className="rounded-xl border border-border/80 p-3">
+            {creditActions.length > 1 ? (
             <div className="mb-3 grid gap-2 sm:grid-cols-2">
               <Button
                 type="button"
@@ -633,6 +655,11 @@ function CustomerPanel({
                 بازپرداخت اعتبار
               </Button>
             </div>
+            ) : (
+              <p className="mb-3 text-sm font-medium text-foreground">
+                {creditAction === "issue" ? "صدور اعتبار" : "بازپرداخت اعتبار"}
+              </p>
+            )}
             <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_11rem] sm:items-end">
               <Field label={`مبلغ (${money.unitLabel})`}>
                 <PersianNumberInput
@@ -673,6 +700,7 @@ function CustomerPanel({
                 : "بازپرداخت، ماندهٔ اعتبار را کم و وجه را نقدی یا بانکی به مشتری پرداخت می‌کند."}
             </p>
           </div>
+          ) : null}
         </>
       )}
     </SectionCard>

@@ -209,12 +209,20 @@ const DRAFTS: Draft[] = [
   { key: P.reportsExport, group: "reports", label: "خروجی گزارش", description: "دانلود گزارش‌ها به صورت فایل.", risk: "medium", audit: true, implies: [P.reportsView] },
 
   // --- Growth --------------------------------------------------------------
-  { key: P.growthView, group: "growth", label: "مشاهده رشد", description: "صفحه مشتریان و گزارش‌های حسابداری رشد.", risk: "low", audit: false },
-  { key: P.campaignsView, group: "growth", label: "مشاهده کمپین‌ها", description: "دیدن کمپین‌ها، کارت هدیه و مخاطبان بدون اجرای آن‌ها.", risk: "low", audit: false, implies: [P.growthView] },
-  { key: P.campaignsManage, group: "growth", label: "اجرای کمپین", description: "ساخت و ارسال کمپین، کارت هدیه و پیام.", risk: "high", audit: true, implies: [P.campaignsView, P.growthView] },
-  { key: P.loyaltyView, group: "growth", label: "مشاهده باشگاه مشتریان", description: "مشاهده برنامه‌های وفاداری، امتیاز مشتری و یادآوری خرید مجدد.", risk: "low", audit: false },
-  { key: P.loyaltyManage, group: "growth", label: "مدیریت باشگاه مشتریان", description: "تعریف برنامه وفاداری، استفاده از امتیاز و اعطای اعتبار فروشگاهی.", risk: "high", audit: true, implies: [P.loyaltyView, P.growthView] },
-  { key: P.marketingConfigure, group: "growth", label: "تنظیمات بازاریابی", description: "پیکربندی برنامه رشد، جدا از اجرای یک کمپین.", risk: "high", audit: true, implies: [P.growthView] },
+  { key: P.growthView, group: "growth", label: "میز کار رشد", description: "داشبورد مدیریتی رشد، بینش مخاطبان و پل حسابداری رشد. ابزار صندوق نیست.", risk: "medium", audit: false },
+  { key: P.campaignsView, group: "growth", label: "مشاهده کمپین‌ها", description: "دیدن کمپین‌های تخفیف، اثربخشی آن‌ها و کمپین‌های پیامی بدون اجرای آن‌ها.", risk: "low", audit: false },
+  { key: P.campaignsManage, group: "growth", label: "اجرای کمپین", description: "ساخت، توقف و ارسال کمپین تخفیف و کمپین پیامی.", risk: "high", audit: true, implies: [P.campaignsView] },
+  { key: P.loyaltyView, group: "growth", label: "مشاهده باشگاه مشتریان", description: "مشاهده برنامه‌های وفاداری، امتیاز و اعتبار فروشگاهی مشتری و یادآوری خرید مجدد.", risk: "low", audit: false },
+  { key: P.loyaltyManage, group: "growth", label: "پیکربندی باشگاه مشتریان", description: "تعریف و تغییر برنامه وفاداری و قواعد امتیاز.", risk: "high", audit: true, implies: [P.loyaltyView] },
+  { key: P.loyaltyRedeem, group: "growth", label: "استفاده از امتیاز مشتری", description: "خرج کردن امتیاز وفاداری مشتری هنگام خرید.", risk: "medium", audit: true, implies: [P.loyaltyView] },
+  { key: P.storeCreditIssue, group: "growth", label: "صدور اعتبار فروشگاهی", description: "ایجاد اعتبار فروشگاهی برای مشتری. یک بدهی تازه برای کسب‌وکار می‌سازد.", risk: "high", audit: true, implies: [P.loyaltyView] },
+  { key: P.storeCreditPayout, group: "growth", label: "بازپرداخت اعتبار فروشگاهی", description: "پرداخت نقدی یا بانکی ماندهٔ اعتبار فروشگاهی مشتری. پول از صندوق یا حساب خارج می‌شود.", risk: "high", audit: true, implies: [P.loyaltyView] },
+  { key: P.giftCardsView, group: "growth", label: "استعلام کارت هدیه", description: "دیدن موجودی و وضعیت کارت هدیه با کد آن.", risk: "low", audit: false },
+  { key: P.giftCardsIssue, group: "growth", label: "صدور کارت هدیه", description: "صدور کارت هدیه تازه؛ ارزش آن به‌عنوان بدهی در دفاتر ثبت می‌شود.", risk: "high", audit: true, implies: [P.giftCardsView] },
+  { key: P.giftCardsRedeem, group: "growth", label: "مصرف کارت هدیه", description: "کسر مبلغ از موجودی کارت هدیه.", risk: "medium", audit: true, implies: [P.giftCardsView] },
+  { key: P.commissionView, group: "growth", label: "مشاهده پورسانت", description: "دیدن قواعد پورسانت و گزارش پورسانت فروشندگان. دادهٔ جبران خدمت است.", risk: "high", audit: true },
+  { key: P.commissionManage, group: "growth", label: "مدیریت پورسانت", description: "تعریف و تغییر قواعد پورسانت فروشندگان.", risk: "high", audit: true, implies: [P.commissionView] },
+  { key: P.marketingConfigure, group: "growth", label: "تنظیمات رشد و بازاریابی", description: "پیکربندی سراسری برنامه رشد، جدا از اجرای یک کمپین.", risk: "high", audit: true, implies: [P.growthView] },
 
   // --- Website -------------------------------------------------------------
   { key: P.websiteView, group: "website", label: "مشاهده وب‌سایت", description: "باز کردن مدیریت وب‌سایت و دیدن وضعیت کلی آن.", risk: "low", audit: false },
