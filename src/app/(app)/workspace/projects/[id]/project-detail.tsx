@@ -15,6 +15,7 @@
  * one screen with one filter, not two implementations that drift.
  */
 
+import { TemplateApplier } from "../../template-applier";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRightIcon, FolderIcon, PencilIcon } from "lucide-react";
@@ -325,7 +326,9 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           >
             {phases.length === 0 ? (
               <EmptyState icon={FolderIcon} title="فازی تعریف نشده است">
-                می‌توانید از بخش «قالب‌ها» یک قالب فازبندی روی این پروژه اعمال کنید.
+                {canManageProject
+                  ? "یک قالب را در پایین همین کارت پیش‌نمایش و اعمال کنید."
+                  : "مدیر پروژه می‌تواند یک قالب فازبندی روی آن اعمال کند."}
               </EmptyState>
             ) : (
               <ol className="divide-y divide-border/80">
@@ -355,6 +358,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                 ))}
               </ol>
             )}
+            {canManageProject ? <TemplateApplier projectId={projectId} onApplied={load} /> : null}
           </SectionCard>
 
         </div>

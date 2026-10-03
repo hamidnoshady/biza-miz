@@ -38,6 +38,7 @@ import {
   daysUntil,
   deadlineTone,
   dependencyBlocksStatus,
+  planTemplateApplication,
   projectHealth,
   weekStartSaturday,
   dependenciesSatisfied,
@@ -463,5 +464,44 @@ describe("contract lifecycle", () => {
       startDate: "2026-07-02",
     });
     expect(contractLifecycleChange("renew", done, { today })).toEqual({ ok: false, error: "end_date_required" });
+  });
+});
+
+describe("planTemplateApplication", () => {
+  const templatePhases = [
+    { name: "طراحی", displayOrder: 0, startDate: null, endDate: null },
+    { name: "اجرا", displayOrder: 1, startDate: null, endDate: null },
+  ];
+  const existingPhases = [
+    { id: "a", name: "طراحی", displayOrder: 0, taskCount: 2 },
+    { id: "b", name: "قدیمی خالی", displayOrder: 1, taskCount: 0 },
+    { id: "c", name: "قدیمی پر", displayOrder: 2, taskCount: 1 },
+  ];
+  it("merges only what is missing, ordered after what exists", () => {
+    const plan = planTemplateApplication({
+      existingPhases, existingTaskTitles: ["خرید"], templatePhases,
+      defaultTasks: ["خرید", "بازدید"], mode: "merge",
+    });
+    expect(plan.addPhases).toEqual([{ name: "اجرا", displayOrder: 4, startDate: null, endDate: null }]);
+    expect(plan.keptPhases).toEqual(["طراحی"]);
+    expect(plan.addTasks).toEqual(["بازدید"]);
+    expect(plan.removePhases).toEqual([]);
+  });
+  it("replace removes only empty phases the template does not name", () => {
+    const plan = planTemplateApplication({
+      existingPhases, existingTaskTitles: [], templatePhases, defaultTasks: [], mode: "replace",
+    });
+    expect(plan.removePhases).toEqual([{ id: "b", name: "قدیمی خالی" }]);
+  });
+  it("is a no-op the second time", () => {
+    const plan = planTemplateApplication({
+      existingPhases: [
+        { id: "a", name: "طراحی", displayOrder: 0, taskCount: 0 },
+        { id: "d", name: "اجرا", displayOrder: 1, taskCount: 0 },
+      ],
+      existingTaskTitles: ["بازدید"], templatePhases, defaultTasks: ["بازدید"], mode: "merge",
+    });
+    expect(plan.addPhases).toEqual([]);
+    expect(plan.addTasks).toEqual([]);
   });
 });

@@ -59,7 +59,7 @@ export async function WorkspacePageBody({ section }: { section?: WorkspaceSectio
         }
         actions={<KnowledgeHelpButton section="projects" />}
       />
-      <WorkspaceCommandBar permissions={permissions} />
+      <WorkspaceCommandBar permissions={permissions} section={activeSection} />
       <WorkspaceManager activeSection={activeSection} permissions={permissions} />
     </PageShell>
   );

@@ -1098,7 +1098,7 @@ describe("templates (#761)", () => {
     const added = await inAlpha(() =>
       workspace.applyTemplate(owner(), project.id, construction, "2026-01-05"),
     );
-    expect(added).toEqual({ phasesAdded: 0, tasksAdded: 0 });
+    expect(added).toMatchObject({ phasesAdded: 0, tasksAdded: 0 });
     expect(await inAlpha(() => workspace.listPhases(project.id))).toHaveLength(before.length);
     expect(
       await inAlpha(() => workspace.listWorkspaceTasks(owner(), { projectId: project.id, status: "all" })),
@@ -1234,5 +1234,76 @@ describe("team workload (#761 phase E)", () => {
     expect(member.openTasks).toBe(2);
     expect(member.overdueTasks).toBe(1);
     expect(member.doneThisWeek).toBe(1);
+  });
+});
+
+describe("calendar events are editable (#761 phase F)", () => {
+  it("lets the author edit, refuses an outsider, and checks the final times", async () => {
+    const project = await makeProject();
+    await inAlpha(() =>
+      workspace.createEvent(owner(), {
+        title: "جلسه", eventDate: "2026-03-10", startTime: "09:00", endTime: "10:00", projectId: project.id,
+      }),
+    );
+    const { rows } = await db.query<{ id: string }>("SELECT id FROM workspace_events WHERE title = 'جلسه'");
+    const id = rows[0].id;
+    await inAlpha(() => workspace.updateEvent(owner(), id, { title: "جلسهٔ کارگاه", description: "با پیمانکار" }));
+    const [entry] = await inAlpha(() => workspace.listCalendar(owner(), { from: "2026-03-10", to: "2026-03-10" }));
+    expect(entry.title).toBe("جلسهٔ کارگاه");
+    expect(entry.description).toBe("با پیمانکار");
+    // Only the start moves, past the stored end: the FINAL record is refused.
+    await expect(
+      inAlpha(() => workspace.updateEvent(owner(), id, { startTime: "11:00" })),
+    ).rejects.toThrow(/end_before_start/);
+    await expect(
+      inAlpha(() => workspace.updateEvent(owner(alpha.outsiderId), id, { title: "x" })),
+    ).rejects.toThrow(/project_not_found/);
+  });
+});
+
+describe("insights (#761 phase F)", () => {
+  it("answers over visible projects only, naming the records", async () => {
+    const project = await makeProject({ startDate: "2025-01-01", endDate: "2025-06-01" });
+    await inAlpha(() =>
+      workspace.createWorkspaceTask(owner(), project.id, {
+        title: "دیرکرد", dueDate: "2025-02-01", assigneeUserId: alpha.memberId,
+      }),
+    );
+    const mine = await inAlpha(() => workspace.workspaceInsights(owner()));
+    expect(mine.atRisk.map((p) => p.projectId)).toContain(project.id);
+    expect(mine.atRisk.find((p) => p.projectId === project.id)?.reasons).toContain("past_deadline");
+    expect(mine.slipping.map((t) => t.title)).toContain("دیرکرد");
+    expect(mine.overloaded.find((m) => m.userId === alpha.memberId)?.overdueTasks).toBe(1);
+
+    const outsider = await inAlpha(() => workspace.workspaceInsights(owner(alpha.outsiderId)));
+    expect(outsider.atRisk).toEqual([]);
+    expect(outsider.slipping).toEqual([]);
+    expect(outsider.overspending).toBeNull();
+  });
+});
+
+describe("template recipes (#761 phase F)", () => {
+  it("previews without writing, and replace removes only empty phases", async () => {
+    const project = await makeProject();
+    await inAlpha(() => workspace.addPhase(owner(), project.id, { name: "فاز خالی" }));
+    const [busy] = await inAlpha(() => workspace.addPhase(owner(), project.id, { name: "فاز پر" }))
+      .then((phases) => phases.filter((p) => p.name === "فاز پر"));
+    await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "کار", phaseId: busy.id }));
+    const templates = await inAlpha(() => workspace.listTemplates(alpha.businessId));
+    const construction = templates.find((t) => t.key === "construction")!;
+
+    const preview = await inAlpha(() =>
+      workspace.applyTemplate(owner(), project.id, construction, null, { mode: "replace", dryRun: true }),
+    );
+    expect(preview.removePhases.map((p) => p.name)).toEqual(["فاز خالی"]);
+    expect(preview.addPhases.length).toBeGreaterThan(0);
+    // A dry run wrote nothing.
+    expect((await inAlpha(() => workspace.listPhases(project.id))).map((p) => p.name)).toEqual(["فاز خالی", "فاز پر"]);
+
+    await inAlpha(() => workspace.applyTemplate(owner(), project.id, construction, null, { mode: "replace" }));
+    const names = (await inAlpha(() => workspace.listPhases(project.id))).map((p) => p.name);
+    expect(names).not.toContain("فاز خالی");
+    expect(names).toContain("فاز پر");
+    expect(names.length).toBe(1 + preview.addPhases.length);
   });
 });

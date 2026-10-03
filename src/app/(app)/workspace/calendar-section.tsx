@@ -27,7 +27,9 @@ import {
   PrimaryButton,
   SecondaryButton,
 } from "@/app/dashboard/ui";
+import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { workspaceSectionHref } from "@/lib/app-routes";
 import { toPersianDigits } from "@/lib/digits";
 import {
   JALALI_MONTHS,
@@ -47,6 +49,7 @@ import {
 } from "@/lib/workspace-shared";
 import { DateField, PickerField, SelectField, workspaceError } from "./workspace-ui";
 import type { WorkspaceLookups } from "./use-workspace-lookups";
+import { WorkspaceEntityDrawer, type WorkspaceEntityRef } from "./workspace-entity-drawer";
 
 interface CalendarEntry {
   id: string;
@@ -58,6 +61,9 @@ interface CalendarEntry {
   projectId: string | null;
   projectName: string | null;
   location: string;
+  endTime: string | null;
+  refId: string;
+  description: string;
 }
 
 /** شنبه-first, which is what a Persian calendar reads as a week. */
@@ -82,6 +88,16 @@ export function CalendarSection({
   const [error, setError] = useState("");
   const [hidden, setHidden] = useState<Set<WorkspaceCalendarSource>>(new Set());
   const [creating, setCreating] = useState(false);
+  const [editingEvent, setEditingEvent] = useState<CalendarEntry | null>(null);
+  const [drawer, setDrawer] = useState<WorkspaceEntityRef | null>(null);
+  const router = useRouter();
+  const openEntry = (entry: CalendarEntry) => {
+    if (entry.source === "event") setEditingEvent(entry);
+    else if (entry.source === "task_due") setDrawer({ kind: "task", id: entry.refId });
+    else if (entry.source === "contract_expiry") setDrawer({ kind: "contract", id: entry.refId });
+    else if (entry.source === "project_deadline") setDrawer({ kind: "project", id: entry.refId });
+    else router.push(`${workspaceSectionHref("approvals")}?mine=true`);
+  };
   useEffect(() => {
     if (intent?.create) setCreating(true);
   }, [intent]);
@@ -261,7 +277,16 @@ export function CalendarSection({
             <ul className="divide-y divide-border/80">
               {selectedEntries.map((entry) => (
                 <li key={entry.id} className="flex flex-wrap items-center gap-2 px-4 py-2.5 text-sm">
-                  <span className="min-w-0 flex-1 truncate font-medium">{entry.title}</span>
+                  {/* Each entry opens the record that owns its date (#761 §10):
+                      a stored event its editor, a task / contract / project
+                      the shared drawer, an approval deadline the inbox. */}
+                  <button
+                    type="button"
+                    onClick={() => openEntry(entry)}
+                    className="min-w-0 flex-1 truncate text-start font-medium underline-offset-4 hover:underline"
+                  >
+                    {entry.title}
+                  </button>
                   <span className="text-xs text-muted-foreground">
                     {CALENDAR_SOURCE_LABELS[entry.source]}
                   </span>
@@ -280,57 +305,83 @@ export function CalendarSection({
         </SectionCard>
       ) : null}
 
-      {creating ? (
+      {creating || editingEvent ? (
         <EventDialog
           lookups={lookups}
+          event={editingEvent ?? undefined}
+          canEdit={canManage}
           defaultProjectId={projectId ?? intent?.projectId}
-          onClose={() => setCreating(false)}
+          onClose={() => {
+            setCreating(false);
+            setEditingEvent(null);
+          }}
           onSaved={() => {
             setCreating(false);
+            setEditingEvent(null);
             load();
           }}
           onError={setError}
         />
       ) : null}
+
+      <WorkspaceEntityDrawer entity={drawer} onClose={() => setDrawer(null)} lookups={lookups} onChanged={load} />
     </div>
   );
 }
 
 function EventDialog({
   lookups,
+  event,
+  canEdit = true,
   defaultProjectId,
   onClose,
   onSaved,
   onError,
 }: {
   lookups: WorkspaceLookups;
+  /** Set to edit a stored event; absent to create one. */
+  event?: CalendarEntry;
+  canEdit?: boolean;
   defaultProjectId?: string;
   onClose: () => void;
   onSaved: () => void;
   onError: (message: string) => void;
 }) {
-  const [title, setTitle] = useState("");
-  const [kind, setKind] = useState<WorkspaceEventKind | "">("meeting");
-  const [eventDate, setEventDate] = useState("");
-  const [startTime, setStartTime] = useState("");
-  const [location, setLocation] = useState("");
-  const [projectId, setProjectId] = useState(defaultProjectId ?? "");
+  const [title, setTitle] = useState(event?.title ?? "");
+  const [kind, setKind] = useState<WorkspaceEventKind | "">(event?.kind ?? "meeting");
+  const [eventDate, setEventDate] = useState(event?.date ?? "");
+  const [startTime, setStartTime] = useState(event?.startTime ?? "");
+  const [endTime, setEndTime] = useState(event?.endTime ?? "");
+  const [location, setLocation] = useState(event?.location ?? "");
+  const [description, setDescription] = useState(event?.description ?? "");
+  const [projectId, setProjectId] = useState(event?.projectId ?? defaultProjectId ?? "");
   const [saving, setSaving] = useState(false);
+
+  async function remove() {
+    if (!event || saving) return;
+    setSaving(true);
+    const { ok, data } = await api(`/api/workspace/calendar?id=${event.refId}`, { method: "DELETE" });
+    setSaving(false);
+    if (ok) onSaved();
+    else onError(workspaceError((data as unknown as { error?: string }).error));
+  }
 
   async function submit() {
     if (!title.trim() || !eventDate || saving) return;
     setSaving(true);
-    const { ok, data } = await api("/api/workspace/calendar", {
-      method: "POST",
-      body: JSON.stringify({
-        title,
-        kind: kind || "meeting",
-        eventDate,
-        startTime: startTime || null,
-        location,
-        projectId: projectId || null,
-      }),
+    const payload = JSON.stringify({
+      title,
+      kind: kind || "meeting",
+      eventDate,
+      startTime: startTime || null,
+      endTime: endTime || null,
+      location,
+      description,
+      projectId: projectId || null,
     });
+    const { ok, data } = event
+      ? await api(`/api/workspace/calendar?id=${event.refId}`, { method: "PATCH", body: payload })
+      : await api("/api/workspace/calendar", { method: "POST", body: payload });
     setSaving(false);
     if (ok) onSaved();
     else onError(workspaceError((data as unknown as { error?: string }).error));
@@ -340,7 +391,7 @@ function EventDialog({
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/30 p-4 backdrop-blur-sm">
       <div className={`${overlayPanelClass} w-full max-w-xl`}>
         <div className="flex items-center justify-between border-b border-border/80 p-4">
-          <h2 className="text-base font-semibold">رویداد جدید</h2>
+          <h2 className="text-base font-semibold">{event ? "رویداد" : "رویداد جدید"}</h2>
           <SecondaryButton onClick={onClose}>
             <XIcon className="size-4" aria-hidden />
             <span className="sr-only">بستن</span>
@@ -374,6 +425,14 @@ function EventDialog({
               type="time"
             />
           </Field>
+          <Field label="ساعت پایان" hint="اختیاری">
+            <input
+              className={inputClass}
+              value={endTime}
+              onChange={(e) => setEndTime(e.target.value)}
+              type="time"
+            />
+          </Field>
           <PickerField
             label="پروژه"
             value={projectId}
@@ -390,16 +449,32 @@ function EventDialog({
               />
             </Field>
           </div>
+          <div className="sm:col-span-2">
+            <Field label="توضیح" hint="اختیاری">
+              <textarea
+                className={`${inputClass} min-h-20`}
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
+            </Field>
+          </div>
         </div>
         <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+          {event && canEdit ? (
+            <SecondaryButton onClick={remove} disabled={saving}>
+              حذف رویداد
+            </SecondaryButton>
+          ) : null}
           <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
-          <PrimaryButton
-            type="button"
-            onClick={submit}
-            disabled={!title.trim() || !eventDate || saving}
-          >
-            {saving ? "در حال ذخیره" : "ثبت رویداد"}
-          </PrimaryButton>
+          {canEdit ? (
+            <PrimaryButton
+              type="button"
+              onClick={submit}
+              disabled={!title.trim() || !eventDate || saving}
+            >
+              {saving ? "در حال ذخیره" : event ? "ذخیرهٔ تغییرات" : "ثبت رویداد"}
+            </PrimaryButton>
+          ) : null}
         </div>
       </div>
     </div>
