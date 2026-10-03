@@ -18,7 +18,6 @@ import {
   GanttChartIcon,
   PlusIcon,
   UserCheckIcon,
-  XIcon,
 } from "lucide-react";
 import {
   EmptyState,
@@ -27,7 +26,6 @@ import {
   TabBar,
   TabPanel,
   cardClass,
-  overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import {
   DataTable,
@@ -72,6 +70,8 @@ import {
   TaskStatusBadge,
   workspaceError,
   LoadMoreFooter,
+  WorkspaceFormDialog,
+  stackedTableClass,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
 import type { WorkspaceIntent } from "./workspace-routes";
@@ -347,7 +347,7 @@ export function TasksSection({
                 </div>
               )
             ) : view === "list" ? (
-              <DataTable caption="فهرست وظایف میز کار" frame={false}>
+              <DataTable caption="فهرست وظایف میز کار" frame={false} tableClassName={stackedTableClass}>
                 <DataTableHead>
                   <Th>عنوان</Th>
                   <Th>پروژه</Th>
@@ -360,7 +360,7 @@ export function TasksSection({
                 <DataTableBody>
                   {sorted.map((task) => (
                     <DataTableRow key={task.id} onClick={() => setDrawer(task.id)}>
-                      <Td>
+                      <Td data-label="عنوان">
                         <div className="flex flex-col">
                           <span className="font-medium">{task.title}</span>
                           {task.blockedBy > 0 ? (
@@ -370,18 +370,18 @@ export function TasksSection({
                           ) : null}
                         </div>
                       </Td>
-                      <Td>{task.projectName}</Td>
-                      <Td>{task.assigneeName ?? <span className="text-muted-foreground">—</span>}</Td>
-                      <Td>
+                      <Td data-label="پروژه">{task.projectName}</Td>
+                      <Td data-label="مسئول">{task.assigneeName ?? <span className="text-muted-foreground">—</span>}</Td>
+                      <Td data-label="وضعیت">
                         <TaskStatusBadge status={task.status} />
                       </Td>
-                      <Td>
+                      <Td data-label="اولویت">
                         <PriorityBadge priority={task.priority} />
                       </Td>
-                      <Td>
+                      <Td data-label="مهلت">
                         <DateCell date={task.dueDate} />
                       </Td>
-                      <Td className="tabular-nums">
+                      <Td data-label="چک‌لیست" className="tabular-nums">
                         {task.checklistTotal === 0 ? (
                           <span className="text-muted-foreground">—</span>
                         ) : (
@@ -647,119 +647,110 @@ function TaskDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/30 p-4 backdrop-blur-sm">
-      <div className={`${overlayPanelClass} w-full max-w-2xl`}>
-        <div className="flex items-center justify-between border-b border-border/80 p-4">
-          <h2 className="text-base font-semibold">{taskId ? "ویرایش وظیفه" : "وظیفهٔ جدید"}</h2>
-          <SecondaryButton onClick={onClose}>
-            <XIcon className="size-4" aria-hidden />
-            <span className="sr-only">بستن</span>
-          </SecondaryButton>
+    <WorkspaceFormDialog title={taskId ? "ویرایش وظیفه" : "وظیفهٔ جدید"} width="2xl" onClose={onClose}>
+      <div className="grid gap-3 p-4 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <Field label="عنوان">
+            <input
+              className={inputClass}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              autoFocus
+            />
+          </Field>
         </div>
-        <div className="grid gap-3 p-4 sm:grid-cols-2">
+        <PickerField
+          label="پروژه"
+          value={project}
+          onChange={setProject}
+          options={lookups.projects.map((p) => ({ id: p.id, label: p.name }))}
+        />
+        <PickerField
+          label="مسئول"
+          value={assignee}
+          onChange={setAssignee}
+          options={lookups.members.map((m) => ({ id: m.id, label: m.fullName }))}
+        />
+        <SelectField
+          label="وضعیت"
+          value={status}
+          onChange={setStatus}
+          options={TASK_STATUSES}
+          labels={TASK_STATUS_LABELS}
+        />
+        <SelectField
+          label="اولویت"
+          value={priority}
+          onChange={setPriority}
+          options={PRIORITIES}
+          labels={PRIORITY_LABELS}
+        />
+        <DateField label="مهلت" value={dueDate} onChange={setDueDate} />
+        <div className="sm:col-span-2">
+          <Field label="توضیح">
+            <textarea
+              className={`${inputClass} min-h-20`}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </Field>
+        </div>
+
+        {taskId ? (
           <div className="sm:col-span-2">
-            <Field label="عنوان">
+            <h3 className="mb-2 text-sm font-medium">چک‌لیست</h3>
+            <ul className="mb-2 flex flex-col gap-1">
+              {checklist.map((item) => (
+                <li key={item.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={item.done}
+                    onChange={() => toggleItem(item)}
+                    id={`check-${item.id}`}
+                    className="size-4 rounded border-border accent-amber-600 dark:accent-amber-400"
+                  />
+                  <label
+                    htmlFor={`check-${item.id}`}
+                    className={item.done ? "text-muted-foreground line-through" : ""}
+                  >
+                    {item.title}
+                  </label>
+                </li>
+              ))}
+            </ul>
+            <div className="flex gap-2">
               <input
                 className={inputClass}
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                autoFocus
+                value={newItem}
+                onChange={(e) => setNewItem(e.target.value)}
+                placeholder="مورد تازه…"
+                aria-label="مورد تازهٔ چک‌لیست"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addItem();
+                  }
+                }}
               />
-            </Field>
-          </div>
-          <PickerField
-            label="پروژه"
-            value={project}
-            onChange={setProject}
-            options={lookups.projects.map((p) => ({ id: p.id, label: p.name }))}
-          />
-          <PickerField
-            label="مسئول"
-            value={assignee}
-            onChange={setAssignee}
-            options={lookups.members.map((m) => ({ id: m.id, label: m.fullName }))}
-          />
-          <SelectField
-            label="وضعیت"
-            value={status}
-            onChange={setStatus}
-            options={TASK_STATUSES}
-            labels={TASK_STATUS_LABELS}
-          />
-          <SelectField
-            label="اولویت"
-            value={priority}
-            onChange={setPriority}
-            options={PRIORITIES}
-            labels={PRIORITY_LABELS}
-          />
-          <DateField label="مهلت" value={dueDate} onChange={setDueDate} />
-          <div className="sm:col-span-2">
-            <Field label="توضیح">
-              <textarea
-                className={`${inputClass} min-h-20`}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </Field>
-          </div>
-
-          {taskId ? (
-            <div className="sm:col-span-2">
-              <h3 className="mb-2 text-sm font-medium">چک‌لیست</h3>
-              <ul className="mb-2 flex flex-col gap-1">
-                {checklist.map((item) => (
-                  <li key={item.id} className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={item.done}
-                      onChange={() => toggleItem(item)}
-                      id={`check-${item.id}`}
-                      className="size-4 rounded border-border accent-amber-600 dark:accent-amber-400"
-                    />
-                    <label
-                      htmlFor={`check-${item.id}`}
-                      className={item.done ? "text-muted-foreground line-through" : ""}
-                    >
-                      {item.title}
-                    </label>
-                  </li>
-                ))}
-              </ul>
-              <div className="flex gap-2">
-                <input
-                  className={inputClass}
-                  value={newItem}
-                  onChange={(e) => setNewItem(e.target.value)}
-                  placeholder="مورد تازه…"
-                  aria-label="مورد تازهٔ چک‌لیست"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      addItem();
-                    }
-                  }}
-                />
-                <SecondaryButton onClick={addItem} disabled={!newItem.trim()}>
-                  افزودن
-                </SecondaryButton>
-              </div>
+              <SecondaryButton onClick={addItem} disabled={!newItem.trim()}>
+                افزودن
+              </SecondaryButton>
             </div>
-          ) : null}
-        </div>
-        <div className="flex justify-end gap-2 border-t border-border/80 p-4">
-          <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
-          {canManage || (canContribute && taskId) ? (
-            <PrimaryButton
-              type="button"
-              onClick={submit}
-              disabled={!title.trim() || !project || saving}
-            >
-              {saving ? "در حال ذخیره" : "ذخیره"}
-            </PrimaryButton>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
       </div>
-    </div>
+      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+        <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
+        {canManage || (canContribute && taskId) ? (
+          <PrimaryButton
+            type="button"
+            onClick={submit}
+            disabled={!title.trim() || !project || saving}
+          >
+            {saving ? "در حال ذخیره" : "ذخیره"}
+          </PrimaryButton>
+        ) : null}
+      </div>
+    </WorkspaceFormDialog>
   );
 }

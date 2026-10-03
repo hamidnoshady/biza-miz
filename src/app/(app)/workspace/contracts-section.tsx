@@ -12,14 +12,13 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FileSignatureIcon, PlusIcon, XIcon } from "lucide-react";
+import { FileSignatureIcon, PlusIcon } from "lucide-react";
 import {
   EmptyState,
   KpiCard,
   KpiRow,
   LoadingSkeleton,
   SectionCard,
-  overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import {
   DataTable,
@@ -59,6 +58,8 @@ import {
   SelectField,
   workspaceError,
   LoadMoreFooter,
+  WorkspaceFormDialog,
+  stackedTableClass,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
 import type { WorkspaceIntent } from "./workspace-routes";
@@ -219,7 +220,7 @@ export function ContractsSection({
             قرارداد پیمانکار یا تأمین‌کنندهٔ هر پروژه را اینجا ثبت کنید تا مبلغ، مهلت و اسناد آن یکجا بماند.
           </EmptyState>
         ) : (
-          <DataTable caption="فهرست قراردادهای اجرایی" frame={false}>
+          <DataTable caption="فهرست قراردادهای اجرایی" frame={false} tableClassName={stackedTableClass}>
             <DataTableHead>
               <Th>عنوان</Th>
               <Th>نوع</Th>
@@ -233,26 +234,26 @@ export function ContractsSection({
             <DataTableBody>
               {contracts.map((contract) => (
                 <DataTableRow key={contract.id} onClick={() => setEditing(contract)}>
-                  <Td>
+                  <Td data-label="عنوان">
                     <span className="font-medium">{contract.title}</span>
                   </Td>
-                  <Td>{CONTRACT_TYPE_LABELS[contract.contractType]}</Td>
-                  <Td>{contract.partyName ?? <span className="text-muted-foreground">—</span>}</Td>
-                  <Td>{contract.projectName ?? <span className="text-muted-foreground">—</span>}</Td>
-                  <Td className="tabular-nums">
+                  <Td data-label="نوع">{CONTRACT_TYPE_LABELS[contract.contractType]}</Td>
+                  <Td data-label="طرف قرارداد">{contract.partyName ?? <span className="text-muted-foreground">—</span>}</Td>
+                  <Td data-label="پروژه">{contract.projectName ?? <span className="text-muted-foreground">—</span>}</Td>
+                  <Td data-label="مبلغ" className="tabular-nums">
                     {contract.valueRial === null ? (
                       <span className="text-muted-foreground">—</span>
                     ) : (
                       money.format(contract.valueRial)
                     )}
                   </Td>
-                  <Td>
+                  <Td data-label="انقضا">
                     <DateCell date={contract.endDate} />
                   </Td>
-                  <Td>
+                  <Td data-label="وضعیت">
                     <ContractStatusBadge status={contract.status} />
                   </Td>
-                  <Td>
+                  <Td data-label="تأیید">
                     {contract.approvalStatus ? (
                       <ApprovalStatusBadge status={contract.approvalStatus} />
                     ) : canRequestApproval && contract.status === "draft" ? (
@@ -361,93 +362,82 @@ function ContractDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/30 p-4 backdrop-blur-sm">
-      <div className={`${overlayPanelClass} w-full max-w-2xl`}>
-        <div className="flex items-center justify-between border-b border-border/80 p-4">
-          <h2 className="text-base font-semibold">
-            {contract ? "ویرایش قرارداد" : "قرارداد اجرایی جدید"}
-          </h2>
-          <SecondaryButton onClick={onClose}>
-            <XIcon className="size-4" aria-hidden />
-            <span className="sr-only">بستن</span>
-          </SecondaryButton>
-        </div>
-        <div className="grid gap-3 p-4 sm:grid-cols-2">
-          <div className="sm:col-span-2">
-            <Field label="عنوان قرارداد">
-              <input
-                className={inputClass}
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                autoFocus
-              />
-            </Field>
-          </div>
-          <SelectField
-            label="نوع"
-            value={contractType}
-            onChange={setContractType}
-            options={CONTRACT_TYPES}
-            labels={CONTRACT_TYPE_LABELS}
-          />
-          <SelectField
-            label="وضعیت"
-            value={status}
-            onChange={setStatus}
-            options={CONTRACT_STATUSES}
-            labels={CONTRACT_STATUS_LABELS}
-          />
-          <PickerField
-            label="پروژه"
-            value={projectId}
-            onChange={setProjectId}
-            options={lookups.projects.map((p) => ({ id: p.id, label: p.name }))}
-            placeholder="— بدون پروژه —"
-            hint="قرارداد چارچوبی می‌تواند پیش از پروژه ثبت شود."
-          />
-          <PickerField
-            label="طرف قرارداد"
-            value={partyId}
-            onChange={setPartyId}
-            options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
-          />
-          <Field label={`مبلغ (${money.unitLabel})`}>
+    <WorkspaceFormDialog title={contract ? "ویرایش قرارداد" : "قرارداد اجرایی جدید"} width="2xl" onClose={onClose}>
+      <div className="grid gap-3 p-4 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <Field label="عنوان قرارداد">
             <input
               className={inputClass}
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              inputMode="numeric"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              autoFocus
             />
           </Field>
-          <Field label="یادآوری پیش از انقضا (روز)">
-            <input
-              className={inputClass}
-              value={reminderDays}
-              onChange={(e) => setReminderDays(e.target.value)}
-              inputMode="numeric"
-            />
-          </Field>
-          <DateField label="تاریخ شروع" value={startDate} onChange={setStartDate} />
-          <DateField label="تاریخ انقضا" value={endDate} onChange={setEndDate} />
-          <div className="sm:col-span-2">
-            <Field label="یادداشت">
-              <textarea
-                className={`${inputClass} min-h-20`}
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-              />
-            </Field>
-          </div>
         </div>
-        <div className="flex justify-end gap-2 border-t border-border/80 p-4">
-          <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
-          {canManage ? (
-            <PrimaryButton type="button" onClick={submit} disabled={!title.trim() || saving}>
-              {saving ? "در حال ذخیره" : "ذخیره"}
-            </PrimaryButton>
-          ) : null}
+        <SelectField
+          label="نوع"
+          value={contractType}
+          onChange={setContractType}
+          options={CONTRACT_TYPES}
+          labels={CONTRACT_TYPE_LABELS}
+        />
+        <SelectField
+          label="وضعیت"
+          value={status}
+          onChange={setStatus}
+          options={CONTRACT_STATUSES}
+          labels={CONTRACT_STATUS_LABELS}
+        />
+        <PickerField
+          label="پروژه"
+          value={projectId}
+          onChange={setProjectId}
+          options={lookups.projects.map((p) => ({ id: p.id, label: p.name }))}
+          placeholder="— بدون پروژه —"
+          hint="قرارداد چارچوبی می‌تواند پیش از پروژه ثبت شود."
+        />
+        <PickerField
+          label="طرف قرارداد"
+          value={partyId}
+          onChange={setPartyId}
+          options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
+        />
+        <Field label={`مبلغ (${money.unitLabel})`}>
+          <input
+            className={inputClass}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            inputMode="numeric"
+          />
+        </Field>
+        <Field label="یادآوری پیش از انقضا (روز)">
+          <input
+            className={inputClass}
+            value={reminderDays}
+            onChange={(e) => setReminderDays(e.target.value)}
+            inputMode="numeric"
+          />
+        </Field>
+        <DateField label="تاریخ شروع" value={startDate} onChange={setStartDate} />
+        <DateField label="تاریخ انقضا" value={endDate} onChange={setEndDate} />
+        <div className="sm:col-span-2">
+          <Field label="یادداشت">
+            <textarea
+              className={`${inputClass} min-h-20`}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+            />
+          </Field>
         </div>
       </div>
-    </div>
+      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+        <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
+        {canManage ? (
+          <PrimaryButton type="button" onClick={submit} disabled={!title.trim() || saving}>
+            {saving ? "در حال ذخیره" : "ذخیره"}
+          </PrimaryButton>
+        ) : null}
+      </div>
+    </WorkspaceFormDialog>
   );
 }

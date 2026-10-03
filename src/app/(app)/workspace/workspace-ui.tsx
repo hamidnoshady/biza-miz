@@ -11,11 +11,12 @@
  * that is not already in `page-chrome.tsx`.
  */
 
-import { useMemo } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/app/dashboard/page-chrome";
 import { Field, inputClass, errorMessageOrRaw, SecondaryButton } from "@/app/dashboard/ui";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import {
@@ -323,6 +324,75 @@ export function PickerField({
         ))}
       </select>
     </Field>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * Phone-width tables
+ * ------------------------------------------------------------------------- */
+
+/**
+ * A `DataTable`'s `tableClassName` that turns each row into a card below the
+ * `sm` breakpoint (#761 §20 — "do not shrink desktop tables"): the first cell
+ * is the card's title, every other cell a «label — value» line whose label is
+ * the cell's own `data-label`. Desktop is untouched; the header stays in the
+ * accessibility tree. A real matrix (the role-permission grid) keeps scrolling.
+ */
+export const stackedTableClass = [
+  "max-sm:block max-sm:[&_thead]:sr-only max-sm:[&_tbody]:block",
+  "max-sm:[&_tr]:block max-sm:[&_tr]:px-4 max-sm:[&_tr]:py-3",
+  "max-sm:[&_td]:flex max-sm:[&_td]:items-baseline max-sm:[&_td]:justify-between max-sm:[&_td]:gap-3 max-sm:[&_td]:px-0 max-sm:[&_td]:py-1",
+  "max-sm:[&_td]:before:shrink-0 max-sm:[&_td]:before:text-xs max-sm:[&_td]:before:text-muted-foreground max-sm:[&_td]:before:content-[attr(data-label)]",
+  "max-sm:[&_td:first-child]:block max-sm:[&_td:first-child]:pb-2 max-sm:[&_td:first-child]:font-semibold max-sm:[&_td:first-child]:before:hidden",
+].join(" ");
+
+/* ---------------------------------------------------------------------------
+ * Form dialog
+ * ------------------------------------------------------------------------- */
+
+const DIALOG_WIDTH = { lg: "sm:max-w-lg", xl: "sm:max-w-xl", "2xl": "sm:max-w-2xl" } as const;
+
+/**
+ * The one create/edit/decide dialog shell every section uses (#761 §24) — the
+ * platform's Radix `Dialog`, so it is a labelled modal that traps focus,
+ * closes on Escape and hands focus back to whatever opened it — a button or a
+ * table row (there is no `DialogTrigger`, so Radix alone would drop focus on
+ * <body>). A click outside does NOT close it: a half-filled form must not
+ * vanish on a stray tap.
+ */
+export function WorkspaceFormDialog({
+  title,
+  width = "2xl",
+  onClose,
+  children,
+}: {
+  title: ReactNode;
+  width?: keyof typeof DIALOG_WIDTH;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const [opener] = useState(() =>
+    typeof document === "undefined" ? null : (document.activeElement as HTMLElement | null),
+  );
+  return (
+    <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
+      <DialogContent
+        aria-describedby={undefined}
+        onInteractOutside={(event) => event.preventDefault()}
+        onCloseAutoFocus={(event) => {
+          if (opener?.isConnected) {
+            event.preventDefault();
+            opener.focus();
+          }
+        }}
+        className={cn("gap-0 p-0", DIALOG_WIDTH[width])}
+      >
+        <DialogHeader className="border-b border-border/80 p-4 pe-12">
+          <DialogTitle className="text-base font-semibold">{title}</DialogTitle>
+        </DialogHeader>
+        {children}
+      </DialogContent>
+    </Dialog>
   );
 }
 

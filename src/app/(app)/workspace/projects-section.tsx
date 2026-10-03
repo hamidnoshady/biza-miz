@@ -11,7 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { BriefcaseIcon, PlusIcon, XIcon } from "lucide-react";
+import { BriefcaseIcon, PlusIcon } from "lucide-react";
 import {
   EmptyState,
   KpiCard,
@@ -20,7 +20,6 @@ import {
   SectionCard,
   TabBar,
   TabPanel,
-  overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import {
   DataTable,
@@ -63,6 +62,8 @@ import {
   SelectField,
   TagList,
   workspaceError,
+  WorkspaceFormDialog,
+  stackedTableClass,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
 import { ProjectCards, ProjectTimeline } from "./project-portfolio";
@@ -239,7 +240,7 @@ export function ProjectsSection({
             ) : view === "timeline" ? (
               <ProjectTimeline projects={projects} today={today} />
             ) : (
-            <DataTable caption="فهرست پروژه‌های میز کار" frame={false}>
+            <DataTable caption="فهرست پروژه‌های میز کار" frame={false} tableClassName={stackedTableClass}>
               <DataTableHead>
                 <Th>نام</Th>
                 <Th>مشتری</Th>
@@ -252,7 +253,7 @@ export function ProjectsSection({
               <DataTableBody>
                 {projects.map((project) => (
                   <DataTableRow key={project.id}>
-                    <Td>
+                    <Td data-label="نام">
                       <div className="flex flex-col gap-1">
                         <Link
                           href={workspaceProjectHref(project.id)}
@@ -263,23 +264,23 @@ export function ProjectsSection({
                         <TagList tags={project.tags} />
                       </div>
                     </Td>
-                    <Td>{project.partyName ?? <span className="text-muted-foreground">—</span>}</Td>
-                    <Td>
+                    <Td data-label="مشتری">{project.partyName ?? <span className="text-muted-foreground">—</span>}</Td>
+                    <Td data-label="وضعیت">
                       <ProjectStatusBadge status={project.status} />
                     </Td>
-                    <Td>
+                    <Td data-label="اولویت">
                       <PriorityBadge priority={project.priority} />
                     </Td>
-                    <Td>
+                    <Td data-label="پیشرفت">
                       <ProgressBar
                         percent={completionPercent(project.doneTaskCount, project.taskCount)}
                         label={`پیشرفت ${project.name}`}
                       />
                     </Td>
-                    <Td>
+                    <Td data-label="پایان">
                       <DateCell date={project.endDate} />
                     </Td>
-                    <Td className="tabular-nums">
+                    <Td data-label="بودجه" className="tabular-nums">
                       {project.budgetRial === null ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
@@ -369,88 +370,79 @@ function NewProjectDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/30 p-4 backdrop-blur-sm">
-      <div className={`${overlayPanelClass} w-full max-w-2xl`}>
-        <div className="flex items-center justify-between border-b border-border/80 p-4">
-          <h2 className="text-base font-semibold">پروژهٔ جدید</h2>
-          <SecondaryButton onClick={onClose}>
-            <XIcon className="size-4" aria-hidden />
-            <span className="sr-only">بستن</span>
-          </SecondaryButton>
-        </div>
-        <div className="grid gap-3 p-4 sm:grid-cols-2">
-          <Field label="نام پروژه">
-            <input
-              className={inputClass}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoFocus
+    <WorkspaceFormDialog title="پروژهٔ جدید" width="2xl" onClose={onClose}>
+      <div className="grid gap-3 p-4 sm:grid-cols-2">
+        <Field label="نام پروژه">
+          <input
+            className={inputClass}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+          />
+        </Field>
+        <PickerField
+          label="قالب فازبندی"
+          value={templateKey}
+          onChange={setTemplateKey}
+          options={templates.map((t) => ({ id: t.key, label: t.name }))}
+          placeholder="— بدون قالب —"
+          hint="فازهای قالب پس از ساخت به پروژه افزوده می‌شوند."
+        />
+        <div className="sm:col-span-2">
+          <Field label="توضیح">
+            <textarea
+              className={`${inputClass} min-h-20`}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
             />
           </Field>
-          <PickerField
-            label="قالب فازبندی"
-            value={templateKey}
-            onChange={setTemplateKey}
-            options={templates.map((t) => ({ id: t.key, label: t.name }))}
-            placeholder="— بدون قالب —"
-            hint="فازهای قالب پس از ساخت به پروژه افزوده می‌شوند."
-          />
-          <div className="sm:col-span-2">
-            <Field label="توضیح">
-              <textarea
-                className={`${inputClass} min-h-20`}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </Field>
-          </div>
-          <SelectField
-            label="وضعیت"
-            value={status}
-            onChange={setStatus}
-            options={PROJECT_STATUSES}
-            labels={PROJECT_STATUS_LABELS}
-          />
-          <SelectField
-            label="اولویت"
-            value={priority}
-            onChange={setPriority}
-            options={PRIORITIES}
-            labels={PRIORITY_LABELS}
-          />
-          <PickerField
-            label="مشتری / طرف حساب"
-            value={partyId}
-            onChange={setPartyId}
-            options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
-          />
-          <PickerField
-            label="مسئول پروژه"
-            value={ownerUserId}
-            onChange={setOwnerUserId}
-            options={lookups.members.map((m) => ({ id: m.id, label: m.fullName }))}
-          />
-          <DateField label="تاریخ شروع" value={startDate} onChange={setStartDate} />
-          <DateField label="تاریخ پایان" value={endDate} onChange={setEndDate} />
-          <Field label={`بودجه (${money.unitLabel})`}>
-            <input
-              className={inputClass}
-              value={budget}
-              onChange={(e) => setBudget(e.target.value)}
-              inputMode="numeric"
-            />
-          </Field>
-          <Field label="برچسب‌ها" hint="با «،» جدا کنید">
-            <input className={inputClass} value={tags} onChange={(e) => setTags(e.target.value)} />
-          </Field>
         </div>
-        <div className="flex justify-end gap-2 border-t border-border/80 p-4">
-          <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
-          <PrimaryButton type="button" onClick={submit} disabled={!name.trim() || saving}>
-            {saving ? "در حال ذخیره" : "ساخت پروژه"}
-          </PrimaryButton>
-        </div>
+        <SelectField
+          label="وضعیت"
+          value={status}
+          onChange={setStatus}
+          options={PROJECT_STATUSES}
+          labels={PROJECT_STATUS_LABELS}
+        />
+        <SelectField
+          label="اولویت"
+          value={priority}
+          onChange={setPriority}
+          options={PRIORITIES}
+          labels={PRIORITY_LABELS}
+        />
+        <PickerField
+          label="مشتری / طرف حساب"
+          value={partyId}
+          onChange={setPartyId}
+          options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
+        />
+        <PickerField
+          label="مسئول پروژه"
+          value={ownerUserId}
+          onChange={setOwnerUserId}
+          options={lookups.members.map((m) => ({ id: m.id, label: m.fullName }))}
+        />
+        <DateField label="تاریخ شروع" value={startDate} onChange={setStartDate} />
+        <DateField label="تاریخ پایان" value={endDate} onChange={setEndDate} />
+        <Field label={`بودجه (${money.unitLabel})`}>
+          <input
+            className={inputClass}
+            value={budget}
+            onChange={(e) => setBudget(e.target.value)}
+            inputMode="numeric"
+          />
+        </Field>
+        <Field label="برچسب‌ها" hint="با «،» جدا کنید">
+          <input className={inputClass} value={tags} onChange={(e) => setTags(e.target.value)} />
+        </Field>
       </div>
-    </div>
+      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+        <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
+        <PrimaryButton type="button" onClick={submit} disabled={!name.trim() || saving}>
+          {saving ? "در حال ذخیره" : "ساخت پروژه"}
+        </PrimaryButton>
+      </div>
+    </WorkspaceFormDialog>
   );
 }
