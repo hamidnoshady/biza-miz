@@ -13,7 +13,7 @@ import Link from "next/link";
 import { Loader2Icon, PlusIcon, SaveIcon, Trash2Icon } from "lucide-react";
 import { toLatinDigits } from "@/lib/digits";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
-import { tomanLabel, formatRial } from "@/lib/platform-money";
+import { tomanLabel, formatRial, parseSafeIntInput } from "@/lib/platform-money";
 import {
   api,
   Button,
@@ -160,24 +160,56 @@ function AiRatesCard({
 }) {
   const [usdRate, setUsdRate] = useState(rates.ai.usdRialRate ? String(rates.ai.usdRialRate) : "");
   const [maxTurn, setMaxTurn] = useState(String(Math.round(rates.ai.maxTurnRial / 10)));
+  const [inputRate, setInputRate] = useState(String(rates.ai.inputCostRialPerMillion));
+  const [outputRate, setOutputRate] = useState(String(rates.ai.outputCostRialPerMillion));
+  const [marginPct, setMarginPct] = useState(String(rates.ai.revenueMarginPercent));
   const [costingEnabled, setCostingEnabled] = useState(rates.ai.gatewayCostingEnabled);
   useEffect(() => {
     setUsdRate(rates.ai.usdRialRate ? String(rates.ai.usdRialRate) : "");
     setMaxTurn(String(Math.round(rates.ai.maxTurnRial / 10)));
+    setInputRate(String(rates.ai.inputCostRialPerMillion));
+    setOutputRate(String(rates.ai.outputCostRialPerMillion));
+    setMarginPct(String(rates.ai.revenueMarginPercent));
     setCostingEnabled(rates.ai.gatewayCostingEnabled);
-  }, [rates.ai.usdRialRate, rates.ai.maxTurnRial, rates.ai.gatewayCostingEnabled]);
+  }, [
+    rates.ai.usdRialRate,
+    rates.ai.maxTurnRial,
+    rates.ai.inputCostRialPerMillion,
+    rates.ai.outputCostRialPerMillion,
+    rates.ai.revenueMarginPercent,
+    rates.ai.gatewayCostingEnabled,
+  ]);
 
   async function save(ev: FormEvent) {
     ev.preventDefault();
     onError("");
+    const parsedUsd =
+      usdRate.trim() === "" ? 0 : parseSafeIntInput(usdRate, { min: 0 });
+    const parsedMaxTurn = parseSafeIntInput(maxTurn, { min: 0 });
+    const parsedInput = parseSafeIntInput(inputRate, { min: 0 });
+    const parsedOutput = parseSafeIntInput(outputRate, { min: 0 });
+    const parsedMargin = parseSafeIntInput(marginPct, { min: 0, max: 1000 });
+    if (
+      parsedUsd === null ||
+      parsedMaxTurn === null ||
+      parsedInput === null ||
+      parsedOutput === null ||
+      parsedMargin === null
+    ) {
+      onError("مقادیر واردشده برای تعرفهٔ هوش مصنوعی معتبر نیستند.");
+      return;
+    }
+
     onBusy("ai");
-    const rateValue = Number(toLatinDigits(usdRate || "0"));
     const { ok, data } = await api<RatesData & { error?: string }>("/api/platform/billing/rates", {
       method: "PUT",
       body: JSON.stringify({
         ai: {
-          usdRialRate: rateValue > 0 ? rateValue : null,
-          maxTurnRial: Math.max(0, Number(toLatinDigits(maxTurn || "0"))) * 10,
+          usdRialRate: parsedUsd > 0 ? parsedUsd : null,
+          maxTurnRial: parsedMaxTurn * 10,
+          inputCostRialPerMillion: parsedInput,
+          outputCostRialPerMillion: parsedOutput,
+          revenueMarginPercent: parsedMargin,
           gatewayCostingEnabled: costingEnabled,
         },
       }),
@@ -188,18 +220,34 @@ function AiRatesCard({
   }
 
   return (
-    <Card title="هوش مصنوعی — تعرفه و سقف مصرف">
-      <form onSubmit={save} className="grid gap-3 sm:grid-cols-3 sm:items-end">
-        <Field label="نرخ تبدیل دلار به ریال" hint="هزینهٔ گزارش‌شدهٔ LiteLLM (دلار) با این نرخ به ریال تبدیل و از کیف پول کسر می‌شود.">
-          <PersianNumberInput className={inputClass} inputMode="numeric" value={usdRate} onChange={(e) => setUsdRate(e.target.value)} disabled={!canManage} placeholder="مثلاً ۷۰۰٬۰۰۰" />
-        </Field>
-        <Field label="سقف هزینهٔ هر گفت‌وگو (تومان)" hint="گارد اعتباری هر درخواست؛ هزینهٔ بیش از این مقدار رد می‌شود.">
-          <PersianNumberInput className={inputClass} inputMode="numeric" value={maxTurn} onChange={(e) => setMaxTurn(e.target.value)} disabled={!canManage} />
-        </Field>
-        <label className="flex items-center gap-2 text-sm text-foreground">
-          <input type="checkbox" checked={costingEnabled} onChange={(e) => setCostingEnabled(e.target.checked)} disabled={!canManage} className="size-4" />
-          تسویه بر پایهٔ گزارش LiteLLM فعال باشد
-        </label>
+    <Card title="هوش مصنوعی — تعرفه و پیش‌بررسی اعتبار">
+      <form onSubmit={save} className="space-y-3">
+        <div className="grid gap-3 sm:grid-cols-3 sm:items-end">
+          <Field label="نرخ تبدیل دلار به ریال" hint="هزینهٔ گزارش‌شدهٔ LiteLLM (دلار) با این نرخ به ریال تبدیل و از کیف پول کسر می‌شود.">
+            <PersianNumberInput className={inputClass} inputMode="numeric" value={usdRate} onChange={(e) => setUsdRate(e.target.value)} disabled={!canManage} placeholder="مثلاً ۷۰۰٬۰۰۰" />
+          </Field>
+          <Field
+            label="حداقل اعتبار لازم / آستانهٔ پیش‌بررسی هر گفت‌وگو (تومان)"
+            hint="پیش از آغاز هر نوبت، وجود این مقدار اعتبار آزاد (سهمیهٔ پلن + کیف پول منهای بدهی) بررسی می‌شود. هزینهٔ واقعی پس از اجرا کامل تسویه شده و مازاد در بدهی هوش مصنوعی ثبت می‌گردد."
+          >
+            <PersianNumberInput className={inputClass} inputMode="numeric" value={maxTurn} onChange={(e) => setMaxTurn(e.target.value)} disabled={!canManage} />
+          </Field>
+          <Field label="حاشیهٔ سود روی نرخ توکن (٪)" hint="در صورت نبود گزارش دلاری درگاه، به نرخ پایهٔ توکن افزوده می‌شود.">
+            <PersianNumberInput className={inputClass} inputMode="numeric" value={marginPct} onChange={(e) => setMarginPct(e.target.value)} disabled={!canManage} />
+          </Field>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-3 sm:items-end">
+          <Field label="نرخ پایهٔ هر میلیون توکن ورودی (ریال)">
+            <PersianNumberInput className={inputClass} inputMode="numeric" value={inputRate} onChange={(e) => setInputRate(e.target.value)} disabled={!canManage} />
+          </Field>
+          <Field label="نرخ پایهٔ هر میلیون توکن خروجی (ریال)">
+            <PersianNumberInput className={inputClass} inputMode="numeric" value={outputRate} onChange={(e) => setOutputRate(e.target.value)} disabled={!canManage} />
+          </Field>
+          <label className="flex items-center gap-2 text-sm text-foreground">
+            <input type="checkbox" checked={costingEnabled} onChange={(e) => setCostingEnabled(e.target.checked)} disabled={!canManage} className="size-4" />
+            تسویه بر پایهٔ گزارش LiteLLM فعال باشد
+          </label>
+        </div>
         {canManage && (
           <Button type="submit" disabled={busy}>
             {busy ? <Loader2Icon className="size-4 animate-spin" /> : <SaveIcon className="size-4" />}
@@ -240,13 +288,19 @@ function MessagingRatesCard({
   async function save(ev: FormEvent) {
     ev.preventDefault();
     onError("");
+    const parsedSms = parseSafeIntInput(sms, { min: 0 });
+    const parsedEmail = parseSafeIntInput(email, { min: 0 });
+    if (parsedSms === null || parsedEmail === null) {
+      onError("تعرفه‌ها باید اعداد صحیح صفر یا بزرگ‌تر باشند.");
+      return;
+    }
     onBusy("messaging");
     const { ok, data } = await api<RatesData & { error?: string }>("/api/platform/billing/rates", {
       method: "PUT",
       body: JSON.stringify({
         messaging: {
-          smsRialPerSegment: Math.max(0, Number(toLatinDigits(sms || "0"))),
-          emailRialPerSend: Math.max(0, Number(toLatinDigits(email || "0"))),
+          smsRialPerSegment: parsedSms,
+          emailRialPerSend: parsedEmail,
         },
       }),
     });
@@ -309,16 +363,29 @@ function MediaRatesCard({
   async function save(ev: FormEvent) {
     ev.preventDefault();
     onError("");
+    const parsedFlat = parseSafeIntInput(flat, { min: 0 });
+    const parsedPerGb = parseSafeIntInput(perGb, { min: 0 });
+    const parsedFree = parseSafeIntInput(freeQuota, { min: 0 });
+    const parsedEnhance = parseSafeIntInput(enhance, { min: 0 });
+    if (
+      parsedFlat === null ||
+      parsedPerGb === null ||
+      parsedFree === null ||
+      parsedEnhance === null
+    ) {
+      onError("مقادیر تعرفهٔ رسانه باید اعداد صحیح صفر یا بزرگ‌تر باشند.");
+      return;
+    }
     onBusy("media");
     const { ok, data } = await api<RatesData & { error?: string }>("/api/platform/billing/rates", {
       method: "PUT",
       body: JSON.stringify({
         media: {
           billingEnabled,
-          dailyFlatRial: Math.max(0, Number(toLatinDigits(flat || "0"))) * 10,
-          dailyPerGbRial: Math.max(0, Number(toLatinDigits(perGb || "0"))) * 10,
-          freeQuotaMb: Math.max(0, Number(toLatinDigits(freeQuota || "0"))),
-          enhancePriceRial: Math.max(0, Number(toLatinDigits(enhance || "0"))) * 10,
+          dailyFlatRial: parsedFlat * 10,
+          dailyPerGbRial: parsedPerGb * 10,
+          freeQuotaMb: parsedFree,
+          enhancePriceRial: parsedEnhance * 10,
         },
       }),
     });
@@ -386,12 +453,14 @@ function PackagesEditor({
   async function add(ev: FormEvent) {
     ev.preventDefault();
     onError("");
-    const priceRial = Math.max(0, Number(toLatinDigits(price || "0"))) * 10;
-    const creditRial = Math.max(0, Number(toLatinDigits(credit || "0"))) * 10;
-    if (!name.trim() || priceRial <= 0 || creditRial <= 0) {
-      onError("نام بسته، مبلغ پرداختی و مبلغ اعتبار الزامی است.");
+    const parsedPrice = parseSafeIntInput(price, { min: 1 });
+    const parsedCredit = parseSafeIntInput(credit, { min: 1 });
+    if (!name.trim() || parsedPrice === null || parsedCredit === null) {
+      onError("نام بسته، مبلغ پرداختی و مبلغ اعتبار (عدد صحیح بزرگ‌تر از صفر) الزامی است.");
       return;
     }
+    const priceRial = parsedPrice * 10;
+    const creditRial = parsedCredit * 10;
     onBusy(`pkg-${kind}`);
     const { ok, data } = await api<{ error?: string }>("/api/platform/billing/packages", {
       method: "POST",
