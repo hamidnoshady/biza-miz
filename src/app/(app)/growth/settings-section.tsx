@@ -1,109 +1,165 @@
 "use client";
 
 /**
- * Growth → «تنظیمات رشد و بازاریابی» — the Growth app's settings home.
+ * Growth → «تنظیمات رشد و بازاریابی» — the Growth app's own settings.
  *
- * The first version was four static «به‌زودی» cards. That was a dead end:
- * loyalty rules, campaigns, messaging and commission already have real owner
- * screens, yet this page neither reported their state nor took the owner to
- * them. It also implied that sender configuration lived in Growth, while the
- * provider credentials and message-credit account are platform-owned.
- *
- * This page therefore reports the real, read-only state of the four Growth
- * engines and links each fact to its single owning editor. It deliberately
- * does not duplicate those editors: a second loyalty/program or campaign form
- * here would be two mutation surfaces over the same records.
+ * Issue #764: this page used to be a second dashboard (counts of programs,
+ * campaigns, templates and commission rules) with links back to the screens
+ * that own them. It now owns real Growth-wide configuration — the attribution
+ * window, the 30-day discount budget and the opt-in gift-card validity
+ * (src/lib/growth-settings.ts), each
+ * read by a report or the dashboard — and otherwise only points to the one
+ * screen that edits each engine. Figures stay on the Growth dashboard; the
+ * only state shown here is what would stop the app from working (no default
+ * loyalty program, messaging not set up by the platform).
  */
 
 import { useCallback, useEffect, useState } from "react";
-import {
-  HandCoinsIcon,
-  HeartIcon,
-  MegaphoneIcon,
-  MessageCircleIcon,
-} from "lucide-react";
-import {
-  AppSettingsPanel,
-  type AppSettingsGroup,
-} from "@/components/app-settings/app-settings-panel";
+import { HandCoinsIcon, HeartIcon, MegaphoneIcon, MessageCircleIcon, SlidersHorizontalIcon } from "lucide-react";
+import { AppSettingsPanel, type AppSettingsGroup } from "@/components/app-settings/app-settings-panel";
 import { AppSettingsShortcut } from "@/components/app-settings/app-settings-shortcut";
+import { PersianNumberInput } from "@/components/ui/persian-number-input";
+import { Button } from "@/components/ui/button";
 import { PLATFORM_BILLING_HREF, PLATFORM_SUBSCRIPTION_HREF } from "@/lib/app-routes";
 import { crmSectionHref } from "@/app/(app)/crm/crm-routes";
 import { SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
-import { api, ErrorBox, errorMessageOrRaw, SecondaryButton } from "@/app/dashboard/ui";
-import { formatPersianNumber } from "@/lib/digits";
+import { api, ErrorBox, errorMessageOrRaw, Field, InfoBox, inputClass, SecondaryButton } from "@/app/dashboard/ui";
 import { useMoney } from "@/components/money/money-context";
+import { formatPersianNumber } from "@/lib/digits";
+import { ATTRIBUTION_WINDOW_LIMITS, parseGrowthSettingsInput, type GrowthSettings } from "@/lib/growth-settings";
+import { GIFT_CARD_VALIDITY_LIMITS } from "@/lib/gift-card-expiry";
 import { growthSectionHref } from "./growth-routes";
 
-interface GrowthSettings {
-  loyalty: {
-    programCount: number;
-    activeProgramCount: number;
-    defaultProgram: {
-      name: string;
-      earnPointsPer100000: number;
-      pointValueRial: number;
-      pointsExpiryDays: number | null;
-    } | null;
-  };
-  campaigns: {
-    total: number;
-    live: number;
-    scheduled: number;
-    paused: number;
-    ended: number;
-  };
-  messaging: {
-    templateCount: number;
-    smsTemplateCount: number;
-    emailTemplateCount: number;
-    enabled: boolean;
-    configured: boolean;
-  };
-  commission: {
-    ruleCount: number;
-    activeRuleCount: number;
-    staffWithActiveRules: number;
-  };
+interface SettingsResponse {
+  settings: GrowthSettings;
+  readiness: { hasDefaultLoyaltyProgram: boolean; messagingReady: boolean };
 }
 
-/** A compact fact that wraps gracefully instead of making a four-column phone grid. */
-function SettingFact({
-  label,
-  value,
-  tone,
-  hint,
+/** The Growth-wide form. Empty fields mean «no limit», which is what `null` stores. */
+function GrowthWideSettingsForm({
+  settings,
+  onSaved,
 }: {
-  label: string;
-  value: string;
-  tone?: "active" | "positive" | "neutral" | "danger";
-  hint?: string;
+  settings: GrowthSettings;
+  onSaved: (next: GrowthSettings) => void;
 }) {
+  const money = useMoney();
+  const [windowDays, setWindowDays] = useState(settings.attributionWindowDays?.toString() ?? "");
+  const [budget, setBudget] = useState(
+    settings.discountBudgetRial === null ? "" : String(money.toInput(settings.discountBudgetRial)),
+  );
+  const [validityMonths, setValidityMonths] = useState(settings.giftCardValidityMonths?.toString() ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    setError("");
+    setSaved(false);
+    let discountBudgetRial: number | null = null;
+    if (budget.trim()) {
+      try {
+        discountBudgetRial = money.parse(budget);
+      } catch {
+        setError(`سقف تخفیف را به ${money.unitLabel} و به‌صورت عدد وارد کنید.`);
+        return;
+      }
+    }
+    const body = {
+      attributionWindowDays: windowDays.trim() ? Number(windowDays) : null,
+      discountBudgetRial,
+      giftCardValidityMonths: validityMonths.trim() ? Number(validityMonths) : null,
+    };
+    // The same rules the server applies, so a mistake is named before a round trip.
+    const parsed = parseGrowthSettingsInput(body);
+    if (!parsed.ok) {
+      setError(parsed.errors.join(" "));
+      return;
+    }
+    setBusy(true);
+    const { ok, data } = await api<{ settings?: GrowthSettings; message?: string; error?: string }>("/api/growth/settings", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+    setBusy(false);
+    if (!ok || !data.settings) {
+      setError(data.message ?? errorMessageOrRaw(data.error) ?? "ذخیرهٔ تنظیمات ناموفق بود.");
+      return;
+    }
+    setSaved(true);
+    onSaved(data.settings);
+  }
+
   return (
-    <div className="min-w-0 rounded-xl border border-border/80 bg-stone-50/60 p-3 dark:bg-stone-800/30">
-      <p className="text-xs leading-5 text-muted-foreground">{label}</p>
-      <div className="mt-1.5 flex flex-wrap items-center gap-2">
-        {tone ? (
-          <StatusBadge tone={tone}>{value}</StatusBadge>
-        ) : (
-          <p className="min-w-0 break-words text-sm font-semibold text-foreground">{value}</p>
-        )}
+    <form className="space-y-4" onSubmit={save} noValidate>
+      <div aria-live="polite">
+        <ErrorBox>{error}</ErrorBox>
+        {saved ? <InfoBox>تنظیمات رشد ذخیره شد.</InfoBox> : null}
       </div>
-      {hint ? <p className="mt-1.5 text-xs leading-5 text-muted-foreground">{hint}</p> : null}
-    </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field
+          label="بازهٔ انتساب کمپین پیام (روز)"
+          hint={`فروشی که پروموشن اختصاصی کمپین را تا این تعداد روز پس از شروع ارسال اعمال کند، به بازده آن کمپین نسبت داده می‌شود. خالی یعنی بدون محدودیت (${formatPersianNumber(ATTRIBUTION_WINDOW_LIMITS.min)} تا ${formatPersianNumber(ATTRIBUTION_WINDOW_LIMITS.max)} روز).`}
+        >
+          <PersianNumberInput
+            inputMode="numeric"
+            allowDecimal={false}
+            allowNegative={false}
+            className={inputClass}
+            dir="ltr"
+            value={windowDays}
+            placeholder="بدون محدودیت"
+            onChange={(event) => setWindowDays(event.target.value)}
+          />
+        </Field>
+        <Field
+          label={`سقف تخفیف کمپین‌ها در ۳۰ روز (${money.unitLabel})`}
+          hint="آستانهٔ هشدار در میز کار رشد؛ فروش هرگز به‌خاطر آن رد نمی‌شود. خالی یعنی بدون سقف."
+        >
+          <PersianNumberInput
+            inputMode="numeric"
+            allowDecimal={false}
+            allowNegative={false}
+            className={inputClass}
+            dir="ltr"
+            value={budget}
+            placeholder="بدون سقف"
+            onChange={(event) => setBudget(event.target.value)}
+          />
+        </Field>
+        <Field
+          label="اعتبار کارت هدیه (ماه)"
+          hint={`فقط کارت‌هایی که از این پس صادر می‌شوند تا این تعداد ماه قابل مصرف‌اند؛ ماندهٔ کارت منقضی با «ثبت انقضا» در بخش کارت هدیه به «سایر درآمدها» می‌رود. خالی یعنی کارت‌ها منقضی نمی‌شوند (${formatPersianNumber(GIFT_CARD_VALIDITY_LIMITS.min)} تا ${formatPersianNumber(GIFT_CARD_VALIDITY_LIMITS.max)} ماه).`}
+        >
+          <PersianNumberInput
+            inputMode="numeric"
+            allowDecimal={false}
+            allowNegative={false}
+            className={inputClass}
+            dir="ltr"
+            value={validityMonths}
+            placeholder="بدون انقضا"
+            onChange={(event) => setValidityMonths(event.target.value)}
+          />
+        </Field>
+      </div>
+      <Button type="submit" disabled={busy} className="min-h-11 w-full sm:w-auto">
+        {busy ? "در حال ذخیره…" : "ذخیرهٔ تنظیمات رشد"}
+      </Button>
+    </form>
   );
 }
 
 export function GrowthSettingsSection() {
-  const money = useMoney();
-  const [settings, setSettings] = useState<GrowthSettings | null>(null);
+  const [data, setData] = useState<SettingsResponse | null>(null);
   const [error, setError] = useState("");
 
   const load = useCallback(() => {
     setError("");
-    void api<{ settings: GrowthSettings; error?: string }>("/api/growth/settings").then(({ ok, data }) => {
-      if (ok) setSettings(data.settings);
-      else setError(data.error ? errorMessageOrRaw(data.error) : "بارگذاری تنظیمات رشد و بازاریابی ناموفق بود.");
+    void api<SettingsResponse & { error?: string }>("/api/growth/settings").then(({ ok, data: body }) => {
+      if (ok) setData({ settings: body.settings, readiness: body.readiness });
+      else setError(body.error ? errorMessageOrRaw(body.error) : "بارگذاری تنظیمات رشد و بازاریابی ناموفق بود.");
     });
   }, []);
 
@@ -111,7 +167,7 @@ export function GrowthSettingsSection() {
     load();
   }, [load]);
 
-  if (error) {
+  if (error && !data) {
     return (
       <div className="space-y-3">
         <ErrorBox>{error}</ErrorBox>
@@ -122,49 +178,40 @@ export function GrowthSettingsSection() {
     );
   }
 
-  if (!settings) {
+  if (!data) {
     return <SectionCardSkeleton rows={4} label="در حال بارگذاری تنظیمات رشد و بازاریابی" />;
   }
 
-  const { loyalty, campaigns, messaging, commission } = settings;
-  const defaultProgram = loyalty.defaultProgram;
+  const { settings, readiness } = data;
   const groups: AppSettingsGroup[] = [
+    {
+      key: "growth",
+      label: "تنظیمات سراسری رشد",
+      description: "قواعدی که همهٔ بخش‌های رشد و بازاریابی از آن‌ها پیروی می‌کنند.",
+      icon: SlidersHorizontalIcon,
+      body: (
+        <GrowthWideSettingsForm
+          settings={settings}
+          onSaved={(next) => setData((current) => (current ? { ...current, settings: next } : current))}
+        />
+      ),
+    },
     {
       key: "loyalty",
       label: "قواعد وفاداری",
       description: "طرح پیش‌فرض، نرخ امتیازدهی و انقضای امتیازها.",
       icon: HeartIcon,
       body: (
-        <div className="space-y-4">
-          {defaultProgram ? (
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-              <SettingFact label="طرح‌های فعال" value={formatPersianNumber(loyalty.activeProgramCount)} />
-              <SettingFact label="طرح پیش‌فرض" value={defaultProgram.name} />
-              <SettingFact
-                label={`امتیاز به‌ازای ۱۰۰٬۰۰۰ ${money.unitLabel}`}
-                value={formatPersianNumber(defaultProgram.earnPointsPer100000)}
-              />
-              <SettingFact label="ارزش هر امتیاز" value={money.format(defaultProgram.pointValueRial)} />
-              <SettingFact
-                label="انقضای امتیاز"
-                value={
-                  defaultProgram.pointsExpiryDays === null
-                    ? "بدون انقضا"
-                    : `${formatPersianNumber(defaultProgram.pointsExpiryDays)} روز`
-                }
-              />
-            </div>
-          ) : (
-            <p className="rounded-xl border border-dashed border-amber-300/70 bg-amber-50/60 px-3 py-4 text-sm leading-6 text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
-              {loyalty.activeProgramCount > 0
-                ? "یک طرح وفاداری فعال دارید، اما هیچ‌کدام پیش‌فرض نیست. تا زمانی که طرح پیش‌فرض تعیین نشود، نرخ امتیازدهی فروش‌ها روشن نیست."
-                : "هنوز برنامهٔ وفاداری فعالی تعریف نشده است؛ تا قبل از تعریف آن، خریدها امتیاز نمی‌گیرند."}
+        <div className="space-y-3">
+          {!readiness.hasDefaultLoyaltyProgram ? (
+            <p className="rounded-xl border border-dashed border-amber-300/70 bg-amber-50/60 px-3 py-3 text-sm leading-6 text-amber-950 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
+              هنوز طرح وفاداری فعال و پیش‌فرضی ندارید؛ تا قبل از تعیین آن، خریدها امتیاز نمی‌گیرند.
             </p>
-          )}
+          ) : null}
           <AppSettingsShortcut
             href={growthSectionHref("loyalty")}
             label="مدیریت برنامهٔ وفاداری"
-            description={`${formatPersianNumber(loyalty.programCount)} طرح ثبت شده است؛ افزودن و تغییر طرح‌ها در صفحهٔ «وفاداری و اعتبار» انجام می‌شود.`}
+            description="افزودن و تغییر طرح‌ها، نرخ امتیاز و انقضا در صفحهٔ «وفاداری و اعتبار» انجام می‌شود."
           />
         </div>
       ),
@@ -172,26 +219,14 @@ export function GrowthSettingsSection() {
     {
       key: "campaigns",
       label: "کمپین‌ها و تخفیف‌ها",
-      description: "وضعیت اجرا، زمان‌بندی و قانون هم‌پوشانی تخفیف‌ها.",
+      description: "قانون تخفیف، کالاهای مشمول، زمان‌بندی و ترکیب‌پذیری.",
       icon: MegaphoneIcon,
       body: (
-        <div className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <SettingFact label="همهٔ کمپین‌ها" value={formatPersianNumber(campaigns.total)} />
-            <SettingFact label="در حال اجرا" value={formatPersianNumber(campaigns.live)} tone="positive" />
-            <SettingFact label="زمان‌بندی‌شده" value={formatPersianNumber(campaigns.scheduled)} tone="active" />
-            <SettingFact
-              label="متوقف / پایان‌یافته"
-              value={`${formatPersianNumber(campaigns.paused)} / ${formatPersianNumber(campaigns.ended)}`}
-              tone={campaigns.paused > 0 ? "neutral" : undefined}
-            />
-          </div>
-          <AppSettingsShortcut
-            href={growthSectionHref("campaigns")}
-            label="مدیریت کمپین‌ها"
-            description="قانون تخفیف، بازهٔ اجرا، اولویت و ترکیب‌پذیری هر کمپین در صفحهٔ «کمپین‌ها» تنظیم می‌شود."
-          />
-        </div>
+        <AppSettingsShortcut
+          href={growthSectionHref("campaigns")}
+          label="مدیریت کمپین‌ها"
+          description="هر کمپین قواعد خودش را دارد و در صفحهٔ «کمپین‌ها» تنظیم می‌شود."
+        />
       ),
     },
     {
@@ -200,60 +235,37 @@ export function GrowthSettingsSection() {
       description: "الگوهای پیام، رضایت ارتباط و آمادگی سرویس ارسال.",
       icon: MessageCircleIcon,
       body: (
-        <div className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            <SettingFact
-              label="وضعیت سرویس ارسال"
-              value={
-                messaging.enabled && messaging.configured
-                  ? "آمادهٔ ارسال"
-                  : messaging.enabled
-                    ? "نیازمند تکمیل تنظیم پلتفرم"
-                    : "غیرفعال در پلتفرم"
-              }
-              tone={messaging.enabled && messaging.configured ? "positive" : "danger"}
-              hint={
-                messaging.enabled && messaging.configured
-                  ? "ارسال همچنان فقط به مشتریانِ دارای رضایت انجام می‌شود."
-                  : "کلید و فرستندهٔ پیامک یا ایمیل، تنظیم فنی پلتفرم است."
-              }
-            />
-            <SettingFact label="الگوهای پیامک" value={formatPersianNumber(messaging.smsTemplateCount)} />
-            <SettingFact label="الگوهای ایمیل" value={formatPersianNumber(messaging.emailTemplateCount)} />
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-muted-foreground">سرویس ارسال پلتفرم:</span>
+            <StatusBadge tone={readiness.messagingReady ? "positive" : "danger"}>
+              {readiness.messagingReady ? "آمادهٔ ارسال" : "نیازمند تنظیم پلتفرم"}
+            </StatusBadge>
           </div>
-          <div className="space-y-3">
-            <AppSettingsShortcut
-              href={growthSectionHref("messaging")}
-              label="مدیریت الگو و کمپین پیام"
-              description={`${formatPersianNumber(messaging.templateCount)} الگو ثبت شده است؛ ساخت الگو، پیش‌نمایش مخاطب و صف ارسال در همین برنامه انجام می‌شود.`}
-            />
-            <AppSettingsShortcut
-              href={crmSectionHref("consent")}
-              label="مدیریت رضایت ارتباط (CRM)"
-              description="رضایت پیامک و ایمیل در برنامهٔ «ارتباط با مشتری» نگهداری می‌شود؛ این پیوند آن برنامه را باز می‌کند."
-            />
-          </div>
+          <AppSettingsShortcut
+            href={growthSectionHref("messaging")}
+            label="مدیریت الگو و کمپین پیام"
+            description="ساخت الگو، پیش‌نمایش مخاطب و صف ارسال در بخش «پیام‌رسانی» است."
+          />
+          <AppSettingsShortcut
+            href={crmSectionHref("consent")}
+            label="مدیریت رضایت ارتباط (CRM)"
+            description="رضایت پیامک و ایمیل در برنامهٔ «ارتباط با مشتری» نگهداری می‌شود؛ این پیوند آن برنامه را باز می‌کند."
+          />
         </div>
       ),
     },
     {
       key: "commission",
       label: "قواعد پورسانت",
-      description: "قاعده‌های فعال، فروشندگان مشمول و مبنای محاسبهٔ پورسانت.",
+      description: "درصد یا مبلغ ثابت، مبنای فروش یا سود و اولویت هر قاعده.",
       icon: HandCoinsIcon,
       body: (
-        <div className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-3">
-            <SettingFact label="همهٔ قاعده‌ها" value={formatPersianNumber(commission.ruleCount)} />
-            <SettingFact label="قاعده‌های فعال" value={formatPersianNumber(commission.activeRuleCount)} tone="positive" />
-            <SettingFact label="فروشندگان مشمول" value={formatPersianNumber(commission.staffWithActiveRules)} />
-          </div>
-          <AppSettingsShortcut
-            href={growthSectionHref("commission")}
-            label="مدیریت قواعد پورسانت"
-            description="درصد یا مبلغ ثابت، مبنای فروش یا سود، و اولویت هر قاعده در صفحهٔ «پورسانت فروشندگان» تنظیم می‌شود."
-          />
-        </div>
+        <AppSettingsShortcut
+          href={growthSectionHref("commission")}
+          label="مدیریت قواعد پورسانت"
+          description="قاعده‌ها در صفحهٔ «پورسانت فروشندگان» تعریف می‌شوند."
+        />
       ),
     },
   ];
