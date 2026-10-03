@@ -88,9 +88,6 @@ const REGISTRY_SETS: readonly (readonly string[])[] = [
 const SOURCE_SCAN_ALLOWLIST: ReadonlyMap<string, string> = new Map([
   // Declares INDUSTRIES itself — the registry the scan is anchored on.
   ["src/lib/industries.ts", "declares the industry registry"],
-  // The accounting app's module list: these are ModuleKeys that happen to
-  // share their names with the retail industries they gate.
-  ["src/lib/apps.ts", "a ModuleKey list, not an industry list"],
 ]);
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -111,6 +108,24 @@ const isTestFile = (file: string) => /\.test\.tsx?$/.test(file);
 /** Every industry key as a quoted string literal, matching the scan below. */
 const KEY_PATTERN = new RegExp(`"(${INDUSTRIES.join("|")})"`, "g");
 
+/**
+ * Whether one array literal is a *restated industry list*.
+ *
+ * The test is that every quoted member is an industry key — a list **of
+ * industries**, not a list that happens to contain some. The difference is not
+ * theoretical: several retail industries share their names with the modules
+ * that gate them, so `MODULE_KEYS` in `industry-profile.ts` holds `"pos"`,
+ * `"jewelry"`, `"watch"`, `"cosmetics"` … and reporting that as a duplicate
+ * industry list is a false positive that teaches the reader to distrust the
+ * guard. A genuine restatement — `["jewelry", "watch", "cosmetics", …]` — has
+ * nothing but industries in it and still fails.
+ */
+function isRestatedIndustryList(literals: readonly string[]): boolean {
+  const unique = [...new Set(literals)];
+  if (unique.length < 3) return false;
+  return unique.every((literal) => (INDUSTRIES as readonly string[]).includes(literal));
+}
+
 function hardCodedIndustryLists(): { file: string; line: number; keys: string[] }[] {
   const found: { file: string; line: number; keys: string[] }[] = [];
   for (const file of walk(SRC_ROOT)) {
@@ -120,8 +135,9 @@ function hardCodedIndustryLists(): { file: string; line: number; keys: string[] 
     // a 2 KB bound keeps a giant unrelated block from ever being scanned as
     // one "list", which is what makes this check readable when it fails.
     for (const match of source.matchAll(/\[[^[\]]{0,2000}?\]/gs)) {
-      const keys = [...new Set(match[0].match(KEY_PATTERN) ?? [])].map((k) => k.slice(1, -1));
-      if (keys.length < 3) continue;
+      const literals = [...match[0].matchAll(/"([^"\n]*)"/g)].map((m) => m[1]);
+      if (!isRestatedIndustryList(literals)) continue;
+      const keys = literals.filter((literal) => (INDUSTRIES as readonly string[]).includes(literal));
       const line = source.slice(0, match.index).split("\n").length;
       found.push({ file: relative(process.cwd(), file).split(sep).join("/"), line, keys });
     }
@@ -268,6 +284,16 @@ describe("the database admits every industry", () => {
 });
 
 describe("industry lists are declared once, not restated", () => {
+  it("tells a restated industry list from a module list that borrows the names", () => {
+    // The scanner's own contract, on literals rather than on the tree: a list
+    // whose every member is an industry is a restatement, and a module list
+    // that happens to contain industry-named keys is not.
+    expect(isRestatedIndustryList(["jewelry", "watch", "cosmetics", "wholesale"])).toBe(true);
+    expect(isRestatedIndustryList(["pos", "kitchen", "jewelry", "watch", "cosmetics"])).toBe(false);
+    expect(isRestatedIndustryList(["jewelry", "watch"])).toBe(false);
+    expect(isRestatedIndustryList(["jewelry", "watch", "jewelry"])).toBe(false);
+  });
+
   it("finds no hard-coded industry list outside the declared registry sets", () => {
     const offenders = hardCodedIndustryLists().filter(({ file, keys }) => {
       if (SOURCE_SCAN_ALLOWLIST.has(file)) return false;
