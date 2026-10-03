@@ -63,7 +63,17 @@ invoice's own trigger will not double-count:
 Each emits its own `invoice_payment` event, clipped to whatever was outstanding **before that
 source row**. Both source triggers run AFTER the write, so the settled-total helper already
 includes the new debit/verified payment; its amount is added back before clipping. The explicit
-historical backfill uses the same calculation. The invoice trigger then emits only the **residual** — the part of `paid_rial` no
+historical backfill uses the same calculation.
+
+Residuals are **increments**, not the cumulative unexplained paid total. The writer subtracts
+previous residual events (including queued/failed events) and caps to this invoice UPDATE's
+increase. Canonical wallet receipts in the same transaction and verified-payment allocations
+linked by the current audit row also reduce that cap, so older paid amounts never become a
+second receipt. These are exact transaction/source identities, not timestamp guesses. Invoice
+row locks serialize concurrent manual payments. All lookups are bounded to this customer/invoice
+under the writer's existing temporary bypass, restored on insertion, no-op and failure.
+
+The invoice trigger then emits only the **residual** — the part of `paid_rial` no
 settlement record accounts for — tagged `settlement='residual'`/`method='other'`. So a
 600,000-rial wallet debit plus 400,000 rial by other means on a 1,000,000-rial invoice produces
 two postings with two different debit accounts, and no invented third one. The previous
@@ -155,6 +165,14 @@ never activates a campaign or sends a reminder.
 
 ### Review regressions
 
+Follow-up payment regressions drive real `applyInvoicePayment()` calls for sequential,
+idempotent and concurrent allocations, then mixed manual/wallet/gateway sources. They verify
+actual posted receivable totals, older paid amounts with/without legacy snapshots, catch-up of
+missing partial history even after a later live payment, and refusal of ambiguous legacy replay.
+Health regressions execute the actual read-only CLI with both 4400 and 5670 absent/inactive;
+the shared required-account list is checked against **every** persisted posting-plan kind.
+
+
 `integration/platform-company-review.integration.test.ts` drives source triggers, posting and the
 real CRM/Growth handlers with a signed platform session and a `NOSUPERUSER/NOBYPASSRLS` runtime
 role. It covers full gateway/manual payment, payments larger than half the invoice, real mixed
@@ -170,6 +188,12 @@ These regressions reproduce the reviewed defects before the fixes rather than on
 source-code shapes.
 
 ## Operational scripts
+
+The health check's `missingAccounts` uses `REQUIRED_POSTING_ACCOUNT_CODES` from the posting
+engine: bank, receivable, payable, wallet liability, returns, subscription income and provider
+costs. It counts absent and inactive accounts alike and separately reports
+`legacyInvoiceSettlements`. No account or journal is repaired by the default read-only run.
+
 
 ```bash
 # Read-only health check: entitlement, membership, mapping, posting and failure counts.
@@ -207,6 +231,18 @@ snapshot, and creates one CRM lead. Retries return the original identifiers with
 records. Marketing consent is recorded but does not itself activate or send a campaign.
 
 ## Historical data and rollback
+
+Backfill subtracts prior residuals. A stable `:catch-up:<covered amount>` version represents a
+missed older increment when a later live event already owns the latest paid-total key; the
+existing event is never changed. Reapplying those historical facts is a no-op.
+
+The report includes `legacyInvoiceSettlements` and refuses **all writes** in a window containing
+deployed 0191 invoice-payment snapshots. Their old wallet/gateway attribution was guessed, so
+blindly replaying source records can double-post. Review these through reconciliation and use
+explicit correcting/reversing Accounting documents; never edit posted journals/outbox history.
+Use a separately reviewed window for non-ambiguous facts, or explicitly add
+`--exclude-legacy-invoices` to apply only non-legacy settlements in the selected window.
+That flag skips ambiguous receipts; it never force-replays them or rewrites their history.
 
 The backfill is **explicit only**. It is never run by a migration, at startup, or as part of a
 deployment, and the default is a dry run that writes nothing:

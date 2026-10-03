@@ -13,6 +13,7 @@
  * or a credential, and it never re-runs opening balances.
  */
 import { query, withoutTenantScope, closeDatabasePool } from "../src/lib/db";
+import { REQUIRED_POSTING_ACCOUNT_CODES } from "../src/lib/platform-company-billing";
 
 const REPAIRABLE = ["entitlements", "app_availability", "auto_renew"] as const;
 type Repairable = (typeof REPAIRABLE)[number];
@@ -140,10 +141,9 @@ async function main() {
       [companyId],
     );
     out.missingAccounts = await scalar(
-      `SELECT (5 - count(DISTINCT a.code))::text AS value FROM accounts a
-        WHERE a.business_id = $1 AND a.is_active
-          AND a.code = ANY(ARRAY['1110','1200','2100','2455','4500'])`,
-      [companyId],
+      `SELECT (cardinality($2::text[]) - count(DISTINCT a.code))::text AS value FROM accounts a
+        WHERE a.business_id = $1 AND a.is_active AND a.code = ANY($2::text[])`,
+      [companyId, REQUIRED_POSTING_ACCOUNT_CODES],
     );
     out.invalidProjectLinks = await scalar(
       `SELECT count(*)::text AS value FROM workspace_project_links l
@@ -172,6 +172,12 @@ async function main() {
     out.postedJournalEntries = await scalar(
       `SELECT count(*)::text AS value FROM journal_entries
         WHERE business_id = $1 AND source_type = 'platform_billing'`,
+      [companyId],
+    );
+    out.legacyInvoiceSettlements = await scalar(
+      `SELECT count(DISTINCT source_id)::text AS value FROM platform_company_billing_events
+        WHERE internal_business_id=$1 AND source_kind='invoice_payment' AND source_table='billing_invoices'
+          AND payload->>'settlement' IS DISTINCT FROM 'residual'`,
       [companyId],
     );
     out.billingEvents = Object.fromEntries(events.map((row) => [row.status, Number(row.count)]));

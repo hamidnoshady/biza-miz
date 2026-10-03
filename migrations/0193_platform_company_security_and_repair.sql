@@ -137,8 +137,10 @@ $$;
 -- 3. The outbox writer.
 --
 --    `set_config(..., true)` is transaction-local; the previous value is read
---    first and restored immediately after the INSERT so the rest of the
---    caller's transaction keeps whatever isolation it had.
+--    first and restored immediately after the INSERT (or a no-op) so the rest
+--    of the caller's transaction keeps whatever isolation it had. For an invoice
+--    residual only, the same narrow bypass reads previously emitted residuals
+--    for that customer/invoice before inserting its next increment.
 -- ---------------------------------------------------------------------------
 DROP FUNCTION IF EXISTS enqueue_platform_company_billing_event(text,text,text,text,uuid,bigint,jsonb,timestamptz);
 CREATE OR REPLACE FUNCTION enqueue_platform_company_billing_event(
@@ -146,7 +148,8 @@ CREATE OR REPLACE FUNCTION enqueue_platform_company_billing_event(
   p_amount bigint, p_payload jsonb, p_occurred timestamptz DEFAULT now(),
   p_method text DEFAULT NULL, p_invoice uuid DEFAULT NULL
 ) RETURNS void LANGUAGE plpgsql AS $$
-DECLARE target uuid; previous text;
+DECLARE target uuid; previous text; event_amount bigint := p_amount;
+        emitted_residual bigint; captured_delta bigint; audited_delta bigint;
 BEGIN
   IF p_amount IS NULL OR p_amount < 0 THEN RETURN; END IF;
   previous := COALESCE(current_setting('app.rls_bypass', true), '');
@@ -157,11 +160,54 @@ BEGIN
       PERFORM set_config('app.rls_bypass', previous, true);
       RETURN;
     END IF;
+    IF p_kind = 'invoice_payment' AND p_table = 'billing_invoices'
+       AND p_payload->>'settlement' = 'residual' THEN
+      -- paid_rial is cumulative. Earlier residual events already account for
+      -- some of it even though wallet/payment source rows do not. Count queued
+      -- and failed events too: retries post the same event, not a new payment.
+      -- The invoice UPDATE row lock serializes concurrent manual payments.
+      SELECT COALESCE(sum(e.amount_rial), 0)::bigint INTO emitted_residual
+        FROM platform_company_billing_events e
+       WHERE e.internal_business_id = target AND e.customer_tenant_id = p_customer
+         AND e.source_kind = p_kind AND e.source_table = p_table AND e.source_id = p_id
+         AND e.payload->>'settlement' = 'residual';
+      -- Wallet renewals debit and update the invoice in one transaction.
+      -- Count that exact receipt, not a timestamp guess, even when older paid
+      -- amounts predate this bridge and have no residual event to subtract.
+      SELECT COALESCE(sum(e.amount_rial),0)::bigint INTO captured_delta
+        FROM platform_company_billing_events e
+        JOIN wallet_ledger w ON w.id::text=e.source_id AND w.business_id=e.customer_tenant_id
+       WHERE e.internal_business_id=target AND e.customer_tenant_id=p_customer
+         AND e.customer_invoice_id=p_invoice AND e.source_kind='invoice_payment'
+         AND e.source_table='wallet_ledger' AND e.settlement_method='wallet'
+         AND w.xmin=pg_current_xact_id()::xid;
+      -- Main's independent 0193 adds this audit table after this migration.
+      -- Refer to it only once present. A gateway/manual verification may be in
+      -- an earlier transaction; its allocation links the exact captured source.
+      IF to_regclass('public.billing_invoice_payments') IS NOT NULL THEN
+        SELECT COALESCE(sum(LEAST(a.amount_rial,e.amount_rial)),0)::bigint INTO audited_delta
+          FROM billing_invoice_payments a
+          JOIN platform_company_billing_events e
+            ON e.source_table='billing_payments' AND e.source_id=a.payment_id::text
+           AND e.source_version='settlement:verified' AND e.source_kind='invoice_payment'
+           AND e.internal_business_id=target AND e.customer_tenant_id=a.business_id
+           AND e.customer_invoice_id=a.invoice_id
+         WHERE a.business_id=p_customer AND a.invoice_id=p_invoice
+           AND a.xmin=pg_current_xact_id()::xid;
+        captured_delta := captured_delta + audited_delta;
+      END IF;
+      event_amount := LEAST(GREATEST(p_amount - emitted_residual, 0),
+                            GREATEST((p_payload->>'paidDeltaRial')::bigint - captured_delta, 0));
+      IF event_amount <= 0 THEN
+        PERFORM set_config('app.rls_bypass', previous, true);
+        RETURN;
+      END IF;
+    END IF;
     INSERT INTO platform_company_billing_events
       (internal_business_id, source_kind, source_table, source_id, source_version,
        customer_tenant_id, amount_rial, payload, occurred_at, settlement_method,
        customer_invoice_id)
-    VALUES (target, p_kind, p_table, p_id, p_version, p_customer, p_amount,
+    VALUES (target, p_kind, p_table, p_id, p_version, p_customer, event_amount,
             COALESCE(p_payload, '{}'::jsonb), COALESCE(p_occurred, now()),
             p_method, p_invoice)
     ON CONFLICT (source_table, source_id, source_version) DO NOTHING;
@@ -215,11 +261,14 @@ BEGIN
     residual := NEW.paid_rial - settled;
     -- `settled` can legitimately exceed `paid_rial` when a wallet debit was
     -- posted before the invoice was marked paid; that is not a new payment.
+    -- The writer subtracts prior residual events and caps to this UPDATE's
+    -- increase, so 300k followed by 200k never emits the cumulative 500k again.
     IF residual > 0 THEN
       PERFORM enqueue_platform_company_billing_event(
         'invoice_payment','billing_invoices',NEW.id::text,'paid:'||NEW.paid_rial::text,
         NEW.business_id, residual,
         jsonb_build_object('invoiceId', NEW.id, 'paidTotalRial', NEW.paid_rial,
+                           'paidDeltaRial', NEW.paid_rial - OLD.paid_rial,
                            'settledBySourceRial', settled, 'settlement', 'residual'),
         COALESCE(NEW.updated_at, now()), 'other', NEW.id);
     END IF;

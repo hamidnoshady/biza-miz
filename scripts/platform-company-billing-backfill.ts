@@ -27,10 +27,11 @@ function arg(name: string): string | null {
 
 function usage(): never {
   throw new Error(
-    "Usage: platform-company:billing-backfill --cutoff=<ISO> [--from=<ISO>] [--apply]\n" +
+    "Usage: platform-company:billing-backfill --cutoff=<ISO> [--from=<ISO>] [--apply] [--exclude-legacy-invoices]\n" +
       "  --cutoff  end of the historical window (required, must be a valid ISO timestamp)\n" +
       "  --from    start of the historical window (optional; default: no lower bound)\n" +
-      "  --apply   actually enqueue. Without it the run is a dry-run and writes nothing.\n\n" +
+      "  --apply   actually enqueue. Without it the run is a dry-run and writes nothing.\n" +
+      "  --exclude-legacy-invoices  skip ambiguous legacy settlements; never force-replay them.\n\n" +
       "Never run this as part of a migration, startup or deployment.",
   );
 }
@@ -39,6 +40,7 @@ async function main() {
   const cutoff = arg("cutoff");
   const from = arg("from");
   const apply = process.argv.includes("--apply");
+  const excludeLegacyInvoices = process.argv.includes("--exclude-legacy-invoices");
   if (!cutoff || Number.isNaN(Date.parse(cutoff))) usage();
   if (from && Number.isNaN(Date.parse(from))) usage();
   if (process.argv.includes("--help") || process.argv.includes("-h")) usage();
@@ -78,6 +80,25 @@ async function main() {
                 WHERE occurred_at > $2::timestamptz AND occurred_at <= $1::timestamptz)`,
       [cutoff, windowFrom],
     );
+    // Deployed 0191 invoice snapshots overlap wallet/gateway source records.
+    // Their attribution was guessed by the old worker; replaying those records
+    // as new canonical receipts would double-post money already in the ledger.
+    // Report this explicitly and refuse the write, rather than guess/rewrite.
+    const { rows: legacy } = await query<{ count: string }>(
+      `SELECT count(DISTINCT e.source_id)::text AS count
+         FROM platform_company_billing_events e
+         JOIN billing_invoices i ON i.id::text=e.source_id AND i.business_id=e.customer_tenant_id
+        WHERE e.internal_business_id=$1 AND e.source_kind='invoice_payment'
+          AND e.source_table='billing_invoices' AND e.payload->>'settlement' IS DISTINCT FROM 'residual'
+          AND ((i.created_at>$3::timestamptz AND i.created_at<=$2::timestamptz)
+            OR (i.updated_at>$3::timestamptz AND i.updated_at<=$2::timestamptz)
+            OR EXISTS (SELECT 1 FROM wallet_ledger w WHERE w.business_id=i.business_id
+                       AND w.metadata->>'invoiceId'=i.id::text AND w.created_at>$3::timestamptz AND w.created_at<=$2::timestamptz)
+            OR EXISTS (SELECT 1 FROM billing_payments p WHERE p.invoice_id=i.id AND p.business_id=i.business_id
+                       AND p.verified_at>$3::timestamptz AND p.verified_at<=$2::timestamptz))`,
+      [companyId, cutoff, windowFrom],
+    );
+    const legacyInvoiceSettlements = Number(legacy[0].count);
     console.log(
       JSON.stringify(
         {
@@ -85,6 +106,8 @@ async function main() {
           companyId,
           from: from ?? null,
           cutoff,
+          legacyInvoiceSettlements,
+          excludeLegacyInvoices,
           candidates: Object.fromEntries(candidates.rows.map((row) => [row.label, Number(row.count)])),
         },
         null,
@@ -92,9 +115,24 @@ async function main() {
       ),
     );
     if (!apply) {
+      if (legacyInvoiceSettlements > 0) console.log("Legacy invoice settlements need explicit reconciliation; --exclude-legacy-invoices applies only non-legacy settlements.");
       console.log("Dry run only. Re-run with --apply to enqueue these events.");
       return;
     }
+
+    if (legacyInvoiceSettlements > 0 && !excludeLegacyInvoices) {
+      throw new Error("legacy_invoice_settlements_require_reconciliation: no events were enqueued; use correction/reversal documents, never rewrite posted journals");
+    }
+
+    // The aliases below are fixed SQL written here, never command-line input.
+    // This is a safe omission, not a force flag: legacy receipts still require
+    // explicit reconciliation and are never converted into new source events.
+    const nonLegacyInvoice = (invoice: string, business: string): string => !excludeLegacyInvoices ? "TRUE" :
+      `NOT EXISTS (SELECT 1 FROM platform_company_billing_events legacy
+                    WHERE legacy.internal_business_id=$1 AND legacy.customer_tenant_id=${business}
+                      AND legacy.source_table='billing_invoices' AND legacy.source_id=${invoice}::text
+                      AND legacy.source_kind='invoice_payment'
+                      AND legacy.payload->>'settlement' IS DISTINCT FROM 'residual')`;
 
     // Every statement below uses the SAME source_version the live triggers in
     // migration 0193 use, so a replay of an already-covered fact is a strict
@@ -132,10 +170,11 @@ async function main() {
                                  'kind',w.kind,'settlement','wallet','backfill',true),
               w.created_at,'wallet',(w.metadata->>'invoiceId')::uuid
          FROM wallet_ledger w
-         JOIN billing_invoices i ON i.id = (w.metadata->>'invoiceId')::uuid
+         JOIN billing_invoices i ON i.id = (w.metadata->>'invoiceId')::uuid AND i.business_id=w.business_id
         WHERE w.created_at > $3::timestamptz AND w.created_at <= $2::timestamptz
           AND w.direction='debit' AND w.metadata->>'invoiceId' IS NOT NULL
           AND w.metadata->>'invoiceId' ~ '^[0-9a-fA-F-]{36}$'
+          AND ${nonLegacyInvoice("i.id", "i.business_id")}
        ON CONFLICT (source_table,source_id,source_version) DO NOTHING`,
       [companyId, cutoff, windowFrom],
     );
@@ -151,7 +190,7 @@ async function main() {
         WHERE w.created_at > $3::timestamptz AND w.created_at <= $2::timestamptz
           AND w.direction='debit' AND w.metadata->>'invoiceId' IS NOT NULL
           AND w.metadata->>'invoiceId' ~ '^[0-9a-fA-F-]{36}$'
-          AND NOT EXISTS (SELECT 1 FROM billing_invoices i WHERE i.id = (w.metadata->>'invoiceId')::uuid)
+          AND NOT EXISTS (SELECT 1 FROM billing_invoices i WHERE i.id = (w.metadata->>'invoiceId')::uuid AND i.business_id=w.business_id)
        ON CONFLICT (source_table,source_id,source_version) DO NOTHING`,
       [companyId, cutoff, windowFrom],
     );
@@ -192,28 +231,46 @@ async function main() {
               COALESCE(p.verified_at, now()),
               CASE WHEN p.gateway='manual' THEN 'manual' ELSE 'gateway' END, p.invoice_id
          FROM billing_payments p
-         JOIN billing_invoices i ON i.id = p.invoice_id
+         JOIN billing_invoices i ON i.id = p.invoice_id AND i.business_id=p.business_id
         WHERE p.status='verified' AND p.verified_at IS NOT NULL AND p.verified_at > $3::timestamptz
           AND p.verified_at <= $2::timestamptz AND p.invoice_id IS NOT NULL
+          AND ${nonLegacyInvoice("p.invoice_id", "p.business_id")}
        ON CONFLICT (source_table,source_id,source_version) DO NOTHING`,
       [companyId, cutoff, windowFrom],
     );
 
     //   5. The residual the invoice itself owes, when no settlement record
-    //      accounts for part of `paid_rial`.
+    //      accounts for part of `paid_rial`. Earlier residual events (including
+    //      pending/failed ones) already claim part of that total; enqueue only
+    //      the remaining difference, just like the live outbox writer. A missed
+    //      older increment needs its own stable catch-up key when a later live
+    //      event already owns the current paid-total key; never alter that event.
     await query(
       `INSERT INTO platform_company_billing_events
          (internal_business_id, source_kind, source_table, source_id, source_version,
           customer_tenant_id, amount_rial, payload, occurred_at, settlement_method, customer_invoice_id)
-       SELECT $1,'invoice_payment','billing_invoices',i.id::text,'paid:'||i.paid_rial::text,i.business_id,
-              i.paid_rial - platform_company_invoice_settled_rial(i.business_id, i.id),
+       SELECT $1,'invoice_payment','billing_invoices',i.id::text,
+              CASE WHEN EXISTS (SELECT 1 FROM platform_company_billing_events existing
+                                 WHERE existing.source_table='billing_invoices' AND existing.source_id=i.id::text
+                                   AND existing.source_version='paid:'||i.paid_rial::text)
+                   THEN 'paid:'||i.paid_rial::text||':catch-up:'||prior.amount::text
+                   ELSE 'paid:'||i.paid_rial::text END,i.business_id,
+              i.paid_rial - platform_company_invoice_settled_rial(i.business_id, i.id) - prior.amount,
               jsonb_build_object('invoiceId',i.id,'paidTotalRial',i.paid_rial,
                                  'settledBySourceRial',platform_company_invoice_settled_rial(i.business_id, i.id),
                                  'settlement','residual','backfill',true),
               COALESCE(i.updated_at, now()),'other',i.id
          FROM billing_invoices i
+         CROSS JOIN LATERAL (
+           SELECT COALESCE(sum(e.amount_rial),0)::bigint AS amount
+             FROM platform_company_billing_events e
+            WHERE e.internal_business_id=$1 AND e.customer_tenant_id=i.business_id
+              AND e.source_kind='invoice_payment' AND e.source_table='billing_invoices'
+              AND e.source_id=i.id::text AND e.payload->>'settlement'='residual'
+         ) prior
         WHERE i.updated_at > $3::timestamptz AND i.updated_at <= $2::timestamptz
-          AND i.paid_rial > platform_company_invoice_settled_rial(i.business_id, i.id)
+          AND i.paid_rial > platform_company_invoice_settled_rial(i.business_id, i.id) + prior.amount
+          AND ${nonLegacyInvoice("i.id", "i.business_id")}
        ON CONFLICT (source_table,source_id,source_version) DO NOTHING`,
       [companyId, cutoff, windowFrom],
     );

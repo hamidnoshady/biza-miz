@@ -56,6 +56,17 @@ export const POSTING_ACCOUNTS = {
   otherExpense: "5900",
 } as const;
 
+/** Every account used by a posting plan; shared with the read-only health check. */
+export const REQUIRED_POSTING_ACCOUNT_CODES = [
+  POSTING_ACCOUNTS.bank,
+  POSTING_ACCOUNTS.receivable,
+  POSTING_ACCOUNTS.payable,
+  POSTING_ACCOUNTS.walletLiability,
+  POSTING_ACCOUNTS.salesReturns,
+  POSTING_ACCOUNTS.subscriptionIncome,
+  POSTING_ACCOUNTS.providerCost,
+] as const;
+
 type EventRow = {
   id: string;
   internal_business_id: string;
