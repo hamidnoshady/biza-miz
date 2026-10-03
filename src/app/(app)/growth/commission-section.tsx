@@ -18,6 +18,7 @@
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { computeCommissionAccrual } from "@/lib/commission";
 import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
@@ -74,7 +75,11 @@ function scopeLabel(rule: Pick<CommissionRuleRow, "itemIds" | "brandIds" | "cate
   return "همهٔ کالاها";
 }
 
-export function CommissionSection() {
+/**
+ * Compensation data: reading needs `commission.view`, writing a rule
+ * `commission.manage` (issue #764) — never the broad Growth or campaign keys.
+ */
+export function CommissionSection({ canManage }: { canManage: boolean }) {
   const money = useMoney();
   const [rules, setRules] = useState<CommissionRuleRow[] | null>(null);
   const [staff, setStaff] = useState<StaffMember[]>([]);
@@ -171,7 +176,8 @@ export function CommissionSection() {
       <ErrorBox>{error}</ErrorBox>
       {done ? <InfoBox>{done}</InfoBox> : null}
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className={canManage ? "grid gap-4 lg:grid-cols-2" : "grid gap-4"}>
+        {canManage ? (
         <RuleForm
           staff={staff}
           onSaved={(m) => {
@@ -184,6 +190,7 @@ export function CommissionSection() {
             setDone("");
           }}
         />
+        ) : null}
         <SectionCard
           title={<CardTitle eyebrow="گزارش پورسانت" title="رتبه‌بندی فروشندگان" />}
           description="مجموع پورسانت انباشته — همان عددی که به‌عنوان بدهی حقوق ثبت شده است"
@@ -260,14 +267,16 @@ export function CommissionSection() {
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <StatusBadge tone={r.isActive ? "positive" : "neutral"}>{r.isActive ? "فعال" : "غیرفعال"}</StatusBadge>
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    disabled={togglingId === r.id}
-                    onClick={() => void toggleRule(r)}
-                  >
-                    {r.isActive ? "غیرفعال کردن" : "فعال کردن"}
-                  </Button>
+                  {canManage ? (
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      disabled={togglingId === r.id}
+                      onClick={() => void toggleRule(r)}
+                    >
+                      {r.isActive ? "غیرفعال کردن" : "فعال کردن"}
+                    </Button>
+                  ) : null}
                 </div>
               </li>
             ))}
@@ -294,6 +303,9 @@ function RuleForm({
   const [value, setValue] = useState("");
   const [priority, setPriority] = useState("0");
   const [busy, setBusy] = useState(false);
+  // A sample sale for the preview — never saved, only fed to the engine.
+  const [sampleNet, setSampleNet] = useState("");
+  const [sampleCost, setSampleCost] = useState("");
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -339,6 +351,27 @@ function RuleForm({
       onSaved("قانون پورسانت ذخیره شد.");
     }
   }
+
+  /**
+   * What this rule would accrue on a sample sale, computed by the same
+   * `computeCommissionAccrual` that books real commissions (issue #764), so
+   * the preview can never disagree with the ledger.
+   */
+  const preview = (() => {
+    const read = (raw: string): number | null => {
+      if (!raw.trim()) return null;
+      try {
+        return money.parse(raw);
+      } catch {
+        return null;
+      }
+    };
+    const net = read(sampleNet);
+    const ruleValue = kind === "percent" ? Number(value) : read(value);
+    if (net === null || ruleValue === null || !Number.isFinite(ruleValue)) return null;
+    const cost = basis === "margin" ? read(sampleCost) ?? 0 : null;
+    return computeCommissionAccrual({ net, cost }, [{ id: "preview", kind, value: ruleValue, basis }]).amount;
+  })();
 
   return (
     <SectionCard title="قانون جدید" bodyClassName="space-y-3 p-4 sm:p-5">
@@ -389,6 +422,42 @@ function RuleForm({
             onChange={(e) => setPriority(e.target.value)}
           />
         </Field>
+        <fieldset className="grid gap-2 rounded-xl border border-border/80 p-3">
+          <legend className="px-1 text-xs font-medium text-muted-foreground">پیش‌نمایش روی یک فروش نمونه</legend>
+          <div className={basis === "margin" ? "grid gap-2 sm:grid-cols-2" : "grid gap-2"}>
+            <Field label={`فروش خالص خط (${money.unitLabel})`}>
+              <PersianNumberInput
+                inputMode="numeric"
+                allowNegative={false}
+                className={inputClass}
+                dir="ltr"
+                value={sampleNet}
+                onChange={(e) => setSampleNet(e.target.value)}
+              />
+            </Field>
+            {basis === "margin" ? (
+              <Field label={`بهای تمام‌شده (${money.unitLabel})`}>
+                <PersianNumberInput
+                  inputMode="numeric"
+                  allowNegative={false}
+                  className={inputClass}
+                  dir="ltr"
+                  value={sampleCost}
+                  onChange={(e) => setSampleCost(e.target.value)}
+                />
+              </Field>
+            ) : null}
+          </div>
+          <p aria-live="polite" className="text-sm text-foreground">
+            {preview === null ? (
+              <span className="text-muted-foreground">مبلغ فروش و مقدار قانون را وارد کنید تا پورسانت محاسبه شود.</span>
+            ) : (
+              <>
+                پورسانت این فروش: <b>{money.format(preview)}</b>
+              </>
+            )}
+          </p>
+        </fieldset>
         <Button type="submit" disabled={busy} className="min-h-11 w-full">
           ذخیره قانون
         </Button>
