@@ -1307,3 +1307,18 @@ describe("template recipes (#761 phase F)", () => {
     expect(names.length).toBe(1 + preview.addPhases.length);
   });
 });
+
+describe("portfolio health inputs (#761 §7)", () => {
+  it("carries overdue tasks and open approvals on every project row", async () => {
+    const project = await makeProject();
+    await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "دیر", dueDate: "2020-01-01" }));
+    await inAlpha(() => workspace.createWorkspaceTask(owner(), project.id, { title: "به‌موقع", dueDate: "2099-01-01" }));
+    const contract = await inAlpha(() =>
+      workspace.createContract(owner(), { title: "پیمان", contractType: "vendor", projectId: project.id }),
+    );
+    await inAlpha(() => workspace.requestApproval(owner(), { subjectType: "contract", subjectId: contract.id }));
+    const [row] = await inAlpha(() => workspace.listWorkspaceProjects(owner(), { status: "all" }));
+    expect(row.overdueTaskCount).toBe(1);
+    expect(row.openApprovalCount).toBe(1);
+  });
+});

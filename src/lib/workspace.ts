@@ -335,6 +335,8 @@ export interface WorkspaceProject {
   memberCount: number;
   contractCount: number;
   documentCount: number;
+  overdueTaskCount: number;
+  openApprovalCount: number;
 }
 
 type ProjectRow = {
@@ -347,6 +349,7 @@ type ProjectRow = {
   created_at: string; updated_at: string;
   task_count?: string; done_task_count?: string; member_count?: string;
   contract_count?: string; document_count?: string;
+  overdue_task_count?: string; open_approval_count?: string;
 };
 
 function toProject(row: ProjectRow): WorkspaceProject {
@@ -374,6 +377,8 @@ function toProject(row: ProjectRow): WorkspaceProject {
     memberCount: Number(row.member_count ?? 0),
     contractCount: Number(row.contract_count ?? 0),
     documentCount: Number(row.document_count ?? 0),
+    overdueTaskCount: Number(row.overdue_task_count ?? 0),
+    openApprovalCount: Number(row.open_approval_count ?? 0),
   };
 }
 
@@ -386,7 +391,13 @@ const PROJECT_SELECT = `
   (SELECT count(*) FROM ai_project_tasks t WHERE t.project_id = p.id AND t.status = 'done') AS done_task_count,
   (SELECT count(*) FROM workspace_members m WHERE m.project_id = p.id) AS member_count,
   (SELECT count(*) FROM workspace_contracts c WHERE c.project_id = p.id) AS contract_count,
-  (SELECT count(*) FROM workspace_documents d WHERE d.project_id = p.id) AS document_count`;
+  (SELECT count(*) FROM workspace_documents d WHERE d.project_id = p.id) AS document_count,
+  -- Health inputs for the portfolio (#761 §7). Tehran's calendar day, the
+  -- same "today" as todayIsoDate(), never the server's UTC CURRENT_DATE.
+  (SELECT count(*) FROM ai_project_tasks t WHERE t.project_id = p.id AND t.status <> 'done'
+      AND t.due_date < (now() AT TIME ZONE 'Asia/Tehran')::date) AS overdue_task_count,
+  (SELECT count(*) FROM workspace_approvals a
+    WHERE a.project_id = p.id AND a.status = 'pending') AS open_approval_count`;
 
 const PROJECT_JOINS = `
   FROM ai_projects p

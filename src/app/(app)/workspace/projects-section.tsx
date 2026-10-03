@@ -18,6 +18,8 @@ import {
   KpiRow,
   LoadingSkeleton,
   SectionCard,
+  TabBar,
+  TabPanel,
   overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import {
@@ -38,6 +40,7 @@ import {
   SecondaryButton,
 } from "@/app/dashboard/ui";
 import { useMoney } from "@/components/money/money-context";
+import { todayIsoDate } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import { workspaceProjectHref } from "@/lib/app-routes";
 import {
@@ -62,6 +65,7 @@ import {
   workspaceError,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import { ProjectCards, ProjectTimeline } from "./project-portfolio";
 import type { WorkspaceIntent } from "./workspace-routes";
 
 interface ProjectSummary {
@@ -92,6 +96,8 @@ export interface ProjectRow {
   memberCount: number;
   contractCount: number;
   documentCount: number;
+  overdueTaskCount: number;
+  openApprovalCount: number;
 }
 
 interface TemplateOption {
@@ -115,6 +121,10 @@ export function ProjectsSection({
   const [error, setError] = useState("");
   const [status, setStatus] = useState<WorkspaceProjectStatus | "">("");
   const [mine, setMine] = useState(false);
+  // Portfolio first (#761 §7): cards to scan, the timeline to see when, the
+  // table for the power user.
+  const [view, setView] = useState<"portfolio" | "table" | "timeline">("portfolio");
+  const today = useMemo(() => todayIsoDate(), []);
   const [search, setSearch] = useState("");
   const [creating, setCreating] = useState(false);
   useEffect(() => {
@@ -175,6 +185,17 @@ export function ProjectsSection({
         flush
       >
         <div className="flex flex-col gap-3 border-b border-border/80 p-4">
+          <TabBar
+            idPrefix="workspace-projects"
+            label="نمای پروژه‌ها"
+            tabs={[
+              { key: "portfolio", label: "کارت‌ها" },
+              { key: "table", label: "جدول" },
+              { key: "timeline", label: "خط زمانی" },
+            ]}
+            active={view}
+            onChange={setView}
+          />
           <SearchField
             label="جست‌وجوی پروژه"
             value={search}
@@ -212,57 +233,65 @@ export function ProjectsSection({
             نخستین پروژه را بسازید تا وظایف، قراردادها و اسناد جایی برای زندگی داشته باشند.
           </EmptyState>
         ) : (
-          <DataTable caption="فهرست پروژه‌های میز کار" frame={false}>
-            <DataTableHead>
-              <Th>نام</Th>
-              <Th>مشتری</Th>
-              <Th>وضعیت</Th>
-              <Th>اولویت</Th>
-              <Th>پیشرفت</Th>
-              <Th>پایان</Th>
-              <Th>بودجه</Th>
-            </DataTableHead>
-            <DataTableBody>
-              {projects.map((project) => (
-                <DataTableRow key={project.id}>
-                  <Td>
-                    <div className="flex flex-col gap-1">
-                      <Link
-                        href={workspaceProjectHref(project.id)}
-                        className="font-medium underline-offset-4 hover:underline"
-                      >
-                        {project.name}
-                      </Link>
-                      <TagList tags={project.tags} />
-                    </div>
-                  </Td>
-                  <Td>{project.partyName ?? <span className="text-muted-foreground">—</span>}</Td>
-                  <Td>
-                    <ProjectStatusBadge status={project.status} />
-                  </Td>
-                  <Td>
-                    <PriorityBadge priority={project.priority} />
-                  </Td>
-                  <Td>
-                    <ProgressBar
-                      percent={completionPercent(project.doneTaskCount, project.taskCount)}
-                      label={`پیشرفت ${project.name}`}
-                    />
-                  </Td>
-                  <Td>
-                    <DateCell date={project.endDate} />
-                  </Td>
-                  <Td className="tabular-nums">
-                    {project.budgetRial === null ? (
-                      <span className="text-muted-foreground">—</span>
-                    ) : (
-                      money.format(project.budgetRial)
-                    )}
-                  </Td>
-                </DataTableRow>
-              ))}
-            </DataTableBody>
-          </DataTable>
+          <TabPanel idPrefix="workspace-projects" active={view}>
+            {view === "portfolio" ? (
+              <ProjectCards projects={projects} today={today} />
+            ) : view === "timeline" ? (
+              <ProjectTimeline projects={projects} today={today} />
+            ) : (
+            <DataTable caption="فهرست پروژه‌های میز کار" frame={false}>
+              <DataTableHead>
+                <Th>نام</Th>
+                <Th>مشتری</Th>
+                <Th>وضعیت</Th>
+                <Th>اولویت</Th>
+                <Th>پیشرفت</Th>
+                <Th>پایان</Th>
+                <Th>بودجه</Th>
+              </DataTableHead>
+              <DataTableBody>
+                {projects.map((project) => (
+                  <DataTableRow key={project.id}>
+                    <Td>
+                      <div className="flex flex-col gap-1">
+                        <Link
+                          href={workspaceProjectHref(project.id)}
+                          className="font-medium underline-offset-4 hover:underline"
+                        >
+                          {project.name}
+                        </Link>
+                        <TagList tags={project.tags} />
+                      </div>
+                    </Td>
+                    <Td>{project.partyName ?? <span className="text-muted-foreground">—</span>}</Td>
+                    <Td>
+                      <ProjectStatusBadge status={project.status} />
+                    </Td>
+                    <Td>
+                      <PriorityBadge priority={project.priority} />
+                    </Td>
+                    <Td>
+                      <ProgressBar
+                        percent={completionPercent(project.doneTaskCount, project.taskCount)}
+                        label={`پیشرفت ${project.name}`}
+                      />
+                    </Td>
+                    <Td>
+                      <DateCell date={project.endDate} />
+                    </Td>
+                    <Td className="tabular-nums">
+                      {project.budgetRial === null ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        money.format(project.budgetRial)
+                      )}
+                    </Td>
+                  </DataTableRow>
+                ))}
+              </DataTableBody>
+            </DataTable>
+            )}
+          </TabPanel>
         )}
         <LoadMoreFooter
           loaded={projects?.length ?? 0}
