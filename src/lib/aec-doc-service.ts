@@ -1253,6 +1253,18 @@ export async function issueTransmittal(
   const today = await businessToday(owner.businessId);
 
   await withTenantTransaction(owner.businessId, async () => {
+    // Lock the transmittal for the length of the transaction and re-check its
+    // status inside it: two people clicking «صدور» at once must not both issue
+    // the same transmittal (each would stamp its own issuer and re-run the
+    // supersede sweep). The check inside the lock is the authoritative one.
+    const { rows: locked } = await query<{ id: string }>(
+      `SELECT id FROM aec_transmittals
+        WHERE business_id = $1 AND id = $2 AND status = 'draft'
+        FOR UPDATE`,
+      [owner.businessId, transmittalId],
+    );
+    if (!locked[0]) throw new AecError("transmittal_not_editable");
+
     for (const item of detail.items) {
       const { rows } = await query<{ document_id: string; revision_no: number; status: RevisionStatus }>(
         `SELECT document_id, revision_no, status FROM aec_document_revisions
@@ -1270,7 +1282,7 @@ export async function issueTransmittal(
                   revision_date = COALESCE(revision_date, $4),
                   issued_by = $5, issued_by_name = $6, issued_at = now(),
                   updated_at = now()
-            WHERE business_id = $1 AND id = $2`,
+            WHERE business_id = $1 AND id = $2 AND status = 'draft'`,
           [
             owner.businessId,
             item.revisionId,
@@ -1320,7 +1332,7 @@ export async function issueTransmittal(
       `UPDATE aec_transmittals
           SET status = 'issued', issued_by = $3, issued_by_name = $4, issued_at = now(),
               issue_date = COALESCE(issue_date, $5), updated_at = now()
-        WHERE business_id = $1 AND id = $2`,
+        WHERE business_id = $1 AND id = $2 AND status = 'draft'`,
       [owner.businessId, transmittalId, owner.actorUserId, owner.actorName ?? "", today],
     );
   });
