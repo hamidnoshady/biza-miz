@@ -226,7 +226,7 @@ Stated plainly, because each is a decision rather than an oversight:
    the expiry window drive the UI and the AI tool; nothing yet writes into the
    notification or messaging queue on its own schedule.
 
-## 7b. The access model (#761, migration 0193)
+## 7b. The access model (#761, migration 0194)
 
 **effective capability = platform permission AND project role.** One layer in
 `src/lib/workspace.ts` decides it, and every route, list, the dashboard, the

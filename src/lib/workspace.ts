@@ -161,7 +161,7 @@ function numberOrNull(value: unknown, code: string): number | null {
  * null when they have neither. Throws `project_not_found` for a project that
  * is not this business's.
  *
- * There is no "implicit owner" fallback any more: since migration 0193 a
+ * There is no "implicit owner" fallback any more: since migration 0194 a
  * trigger guarantees every project owner a member row, whichever path created
  * the project, so the project page and «پروژه‌های من» answer from one fact.
  */
@@ -487,7 +487,7 @@ export interface ProjectInput {
  * template phases, in ONE transaction: a project whose template seeding
  * failed halfway is a project nobody asked for.
  *
- * The owner's member row is written by the 0193 trigger, not here. When the
+ * The owner's member row is written by the 0194 trigger, not here. When the
  * creator names somebody else as owner, the creator stays on as manager so
  * they can reopen what they just made.
  */
@@ -536,7 +536,7 @@ export async function createWorkspaceProject(
     );
     const id = rows[0].id;
     if (!rows[0].inserted) return { id, inserted: false };
-    // The owner's member row is written by the 0193 trigger. A creator who
+    // The owner's member row is written by the 0194 trigger. A creator who
     // named somebody else as owner stays on as manager.
     if (ownerUserId !== owner.actorUserId) {
       await query(
@@ -617,7 +617,7 @@ export async function updateWorkspaceProject(
   }
   if (input.ownerUserId !== undefined) {
     // A project always has an owner; transfer is a change of owner, never a
-    // removal. Membership follows in the same statement (0193 trigger).
+    // removal. Membership follows in the same statement (0194 trigger).
     if (!input.ownerUserId) throw new WorkspaceError("user_not_found");
     await assertUserBelongs(owner.businessId, input.ownerUserId);
     set("owner_user_id", input.ownerUserId);
