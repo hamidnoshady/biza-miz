@@ -31,3 +31,6 @@
 ## 2024-11-21 - Avoid useMemo for simple array operations
 **Learning:** In React components like order modals (`src/app/dashboard/orders/order-detail-modal.tsx`), arrays of items are often small. Using `useMemo` for simple `.filter()` or `.reduce()` calls on these arrays introduces overhead for closure allocations and dependency checks that outweighs any re-render saving. It is considered a premature micro-optimization unless the array is proven to be massive.
 **Action:** Do not use `useMemo` for primitive O(N) operations on small lists like cart or order items. Only apply it to expensive derived state or large data tables when a real bottleneck is observed.
+## 2025-02-20 - Memoizing list item relational lookups
+**Learning:** Found a common pattern where list components look up relational data (like categories or links) using `array.find()` directly inside the `map` render loop. This causes O(N^2) complexity where N is items and C is the related data array size.
+**Action:** Replace `array.find()` inside render loops with an O(1) `useMemo` Map lookup at the parent component level. Always ensure `categoriesById` or similar Maps are passed down as props to individual item rows.
