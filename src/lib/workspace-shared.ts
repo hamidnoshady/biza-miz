@@ -290,6 +290,14 @@ export const APPROVAL_SUBJECTS = [
   // approval store, for the reason given below for the fifth: the queue, the
   // dashboard counters and the reminder job learn about submittals for free.
   "submittal_revision",
+  // Issue #799 §15 and §16 (Wave 8) — an approved change order and a certified
+  // claim are the two commercial determinations, and both go through this same
+  // engine under the same `workspace.approve` key. Two more subjects rather than
+  // a commercial approval store of their own: §24 says high-risk commercial
+  // actions must not inherit ordinary edit rights, and the way to achieve that
+  // without a second framework is to file them where the right key already is.
+  "variation",
+  "payment_certificate",
 ] as const;
 export type WorkspaceApprovalSubject = (typeof APPROVAL_SUBJECTS)[number];
 
@@ -304,6 +312,8 @@ export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> =
   // the approvals queue, the dashboard counters and the widgets for free.
   estimate_version: "نسخهٔ برآورد",
   submittal_revision: "بازنگری سابمیتال",
+  variation: "تغییر / دستور کار",
+  payment_certificate: "صورت‌وضعیت",
 };
 
 export const APPROVAL_STATUSES = [

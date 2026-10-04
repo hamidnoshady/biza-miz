@@ -76,6 +76,9 @@ import { AecRfisTab } from "./rfis-panel";
 import { AecSubmittalsTab } from "./submittals-panel";
 import { AecSiteTab } from "./site-panel";
 import { AecInspectionsTab } from "./inspections-panel";
+import { AecVariationsTab } from "./variations-panel";
+import { AecCertificatesTab } from "./certificates-panel";
+import { AecCommercialCard } from "./commercial-panel";
 
 interface ProjectDetail {
   id: string;
@@ -449,6 +452,18 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             canRequestApproval={canContribute}
             projectId={projectId}
           />
+          {/* Issue #799 §20 — the commercial cockpit, and §17's AEC block on
+              each of the project's contracts. It is in the finance tab rather
+              than a tab of its own because it is the money tab's own summary,
+              and `financials` is what mounts it: a design office that has the
+              cockpit switched off never fetches it. */}
+          {lookups.aecCapabilities?.includes("financials") ? (
+            <AecCommercialCard
+              projectId={projectId}
+              canManage={canManageProject}
+              lookups={lookups}
+            />
+          ) : null}
           </div>
         ) : null}
 
@@ -501,6 +516,32 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             service refuses to let the assignee verify their own fix. */}
         {tab === "inspections" ? (
           <AecInspectionsTab
+            projectId={projectId}
+            canManage={canManageProject}
+            canApprove={canApprove}
+            lookups={lookups}
+          />
+        ) : null}
+
+        {/* Issue #799 §15 — the change-order register. `variations` is what puts
+            the tab in the bar, so a business that does not raise change orders
+            never mounts it. Approving, rejecting, implementing and cancelling a
+            change are §24 determinations and need `workspace.approve`. */}
+        {tab === "changes" ? (
+          <AecVariationsTab
+            projectId={projectId}
+            canManage={canManageProject}
+            canApprove={canApprove}
+            lookups={lookups}
+          />
+        ) : null}
+
+        {/* Issue #799 §16 — progress measurement and payment certificates, both
+            directions: our application to the client and the certificate we
+            issue to a contractor. Certified is not collected — receipts stay in
+            Accounting. */}
+        {tab === "payments" ? (
+          <AecCertificatesTab
             projectId={projectId}
             canManage={canManageProject}
             canApprove={canApprove}

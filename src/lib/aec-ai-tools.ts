@@ -31,6 +31,15 @@
  *     inspection, NCR, corrective action, snag and HSE observation, most severe
  *     first and with its overdue flag, read from the same register the
  *     «بازرسی و کنترل کیفیت» tab shows.
+ *   - `list_change_orders`, `list_payment_certificates` and
+ *     `list_project_commercial_risks` (Wave 8) — §23's commercial three. The
+ *     first two are §23's own names, read from the same change-order and
+ *     certificate registers the tabs read; the third answers the question the
+ *     section poses in Persian («چه ریسک‌های تجاری …») by putting the open
+ *     changes, the uncertified claims, the certified claims the books have not
+ *     seen money for, and the bonds approaching expiry into one answer — with
+ *     every money figure labelled by who owns it (Workspace or Accounting)
+ *     rather than silently mixed.
  *
  * A business of another industry is refused rather than answered: an empty list
  * would read as "nothing is late", which is a claim about a café's construction
@@ -40,6 +49,15 @@
 import { AEC_AI_TOOL_LABELS, AEC_AI_TOOL_NAMES, type AecAiToolName } from "./aec";
 import { AecError, type AecProjectProfile, loadProjectAecProfile } from "./aec-service";
 import { boqVariance } from "./aec-boq-service";
+import {
+  certifiedClaimsAwaitingPayment,
+  expiringSecurities,
+  getProjectCommercialSummary,
+  listProjectCertificates,
+  listProjectVariations,
+  pendingCertificates,
+  pendingVariations,
+} from "./aec-commercial-service";
 import { latestDrawingRevisions } from "./aec-doc-service";
 import { pendingRfis, pendingSubmittals } from "./aec-rfi-service";
 import { pendingSiteIssues } from "./aec-site-service";
@@ -530,6 +548,178 @@ async function runTool(
             rows.length === 0
               ? "با این فیلترها هیچ مورد بازی در کارگاه نیست."
               : "«باز» یعنی در جریان: باز، در دست اقدام یا اصلاح‌شده و منتظر تأیید. موارد بسته اینجا نیستند.",
+        },
+      };
+    }
+
+    case "list_change_orders": {
+      const resolved = await resolveProject(owner, args);
+      if (resolved.kind === "ambiguous") return ambiguousProject(resolved.candidates);
+      if (resolved.kind === "none") return { ok: false, error: "پروژه پیدا نشد." };
+
+      const status = typeof args.status === "string" && args.status.trim() ? args.status.trim() : null;
+      const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
+      let variations;
+      try {
+        variations = await listProjectVariations(businessId, resolved.projectId);
+      } catch (err) {
+        if (err instanceof AecError && err.code === "capability_disabled") {
+          return {
+            ok: false,
+            error:
+              "این کسب‌وکار ثبت تغییرات و دستور کار (variations) فعال ندارد. برای ثبت و پیگیری تغییرات، از «تنظیمات ← کسب‌وکار» آن را روشن کنید.",
+          };
+        }
+        throw err;
+      }
+      const filtered = (status ? variations.filter((row) => row.status === status) : variations).slice(
+        0,
+        limit,
+      );
+      return {
+        ok: true,
+        data: {
+          variations: filtered.map((row) => ({
+            ...row,
+            submittedDateJalali: row.submittedDate ? formatJalali(row.submittedDate) : null,
+            approvedDateJalali: row.approvedDate ? formatJalali(row.approvedDate) : null,
+          })),
+          count: filtered.length,
+          total: variations.length,
+          approvedTotalRial: variations
+            .filter((row) => row.isApproved)
+            .reduce((sum, row) => sum + (row.approvedAmountRial ?? 0), 0),
+          today,
+          note:
+            "مبالغ این ابزار «توافق‌شده» است، نه پرداخت‌شده: پرداخت‌ها در حسابداری ثبت می‌شوند. تغییر تأییدشده ارزش اصلاح‌شدهٔ قرارداد را جابه‌جا می‌کند و مبلغ اصلی قرارداد را بازنویسی نمی‌کند.",
+        },
+      };
+    }
+
+    case "list_payment_certificates": {
+      const resolved = await resolveProject(owner, args);
+      if (resolved.kind === "ambiguous") return ambiguousProject(resolved.candidates);
+      if (resolved.kind === "none") return { ok: false, error: "پروژه پیدا نشد." };
+
+      const status = typeof args.status === "string" && args.status.trim() ? args.status.trim() : null;
+      const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
+      let certificates;
+      try {
+        certificates = await listProjectCertificates(businessId, resolved.projectId);
+      } catch (err) {
+        if (err instanceof AecError && err.code === "capability_disabled") {
+          return {
+            ok: false,
+            error:
+              "این کسب‌وکار صورت‌وضعیت و گواهی پیشرفت (progress_claims) فعال ندارد. برای ثبت آن‌ها، از «تنظیمات ← کسب‌وکار» آن را روشن کنید.",
+          };
+        }
+        throw err;
+      }
+      const filtered = (status ? certificates.filter((row) => row.status === status) : certificates).slice(
+        0,
+        limit,
+      );
+      const certified = certificates.filter((row) => row.isCertified);
+      return {
+        ok: true,
+        data: {
+          certificates: filtered.map((row) => ({
+            ...row,
+            submittedDateJalali: row.submittedDate ? formatJalali(row.submittedDate) : null,
+            certifiedDateJalali: row.certifiedDate ? formatJalali(row.certifiedDate) : null,
+            periodLabel: `${formatJalali(row.periodStart)} تا ${formatJalali(row.periodEnd)}`,
+            approvedAmountRial: row.approvedAmountRial ?? row.currentCertifiedRial,
+          })),
+          count: filtered.length,
+          total: certificates.length,
+          certifiedTotalRial: certified.reduce(
+            (sum, row) => sum + (row.approvedAmountRial ?? row.currentCertifiedRial),
+            0,
+          ),
+          pendingCount: certificates.filter((row) => row.isOpen).length,
+          today,
+          note:
+            "«مبلغ تأییدشده» یعنی آنچه گواهی شده است، نه آنچه وصول شده؛ دریافتی‌ها و مانده‌ها را از حسابداری بخوان و اگر در دسترس نیست بگو که در دسترس نیست.",
+        },
+      };
+    }
+
+    case "list_project_commercial_risks": {
+      const resolved = await resolveProject(owner, args);
+      if (resolved.kind === "ambiguous") return ambiguousProject(resolved.candidates);
+      if (resolved.kind === "none") return { ok: false, error: "پروژه پیدا نشد." };
+
+      const withinDays = Math.min(Math.max(Number(args.withinDays) || 60, 1), 365);
+      let summary;
+      let openChanges;
+      let waitingCertificates;
+      let awaitingPayment;
+      let securities;
+      try {
+        [summary, openChanges, waitingCertificates, awaitingPayment, securities] = await Promise.all([
+          getProjectCommercialSummary(owner, resolved.projectId),
+          pendingVariations(businessId, { projectId: resolved.projectId, limit: 25 }),
+          pendingCertificates(businessId, { projectId: resolved.projectId, limit: 25 }),
+          certifiedClaimsAwaitingPayment(businessId, { projectId: resolved.projectId, limit: 25 }),
+          expiringSecurities(businessId, { projectId: resolved.projectId, withinDays, limit: 25 }),
+        ]);
+      } catch (err) {
+        if (err instanceof AecError && err.code === "capability_disabled") {
+          return {
+            ok: false,
+            error:
+              "چشم‌انداز تجاری پروژه روی این کسب‌وکار روشن نیست؛ برای دیدن آن، از «تنظیمات ← کسب‌وکار» قابلیت مالی پروژه (financials) را روشن کنید.",
+          };
+        }
+        throw err;
+      }
+
+      // The answer separates what the workspace knows from what the books know.
+      // A merged "margin" would be the single most misleading number this tool
+      // could produce, so `accountingOwned` and `awaitingWaves` say what is not
+      // here rather than leaving the model to assume zero.
+      return {
+        ok: true,
+        data: {
+          project: { id: summary.projectId, name: summary.projectName },
+          contract: {
+            originalRial: summary.originalContractRial,
+            approvedVariationsRial: summary.approvedVariationsRial,
+            revisedRial: summary.revisedContractRial,
+            certifiedRial: summary.certifiedRial,
+            remainingCommitmentRial: summary.remainingCommitmentRial,
+            retentionReceivableRial: summary.retentionReceivableRial,
+            retentionPayableRial: summary.retentionPayableRial,
+            advanceRial: summary.advanceRial,
+            recoveredAdvanceRial: summary.advanceRecoveredRial,
+            outstandingAdvanceRial: summary.outstandingAdvanceRial,
+            budgetRial: summary.budgetRial,
+            approvedEstimateRial: summary.approvedEstimateRial,
+            actualCostRial: summary.actualCostRial,
+            budgetVarianceRial: summary.budgetVarianceRial,
+          },
+          openChangeOrders: openChanges.map((row) => ({
+            ...row,
+            submittedDateJalali: null,
+          })),
+          waitingCertificates: waitingCertificates.map((row) => ({
+            ...row,
+            submittedDateJalali: row.submittedDate ? formatJalali(row.submittedDate) : null,
+          })),
+          certifiedAwaitingPayment: awaitingPayment.map((row) => ({
+            ...row,
+            certifiedDateJalali: formatJalali(row.certifiedDate),
+          })),
+          expiringSecurities: securities.map((row) => ({
+            ...row,
+            expiryJalali: formatJalali(row.guaranteeExpiry),
+          })),
+          accountingOwned: summary.readInAccounting,
+          awaitingWaves: summary.awaitingWaves,
+          today,
+          note:
+            "این فهرست «ریسک» است نه ترازنامه: تغییرات باز، صورت‌وضعیت‌های تأییدنشده، موارد تأییدشده‌ای که وصول آن‌ها را باید در حسابداری بررسی کنی، و ضمانت‌نامه‌های نزدیک به انقضا. هزینهٔ واقعی از اسناد حسابداری خوانده می‌شود و اگر در دسترس نباشد null است، نه صفر.",
         },
       };
     }

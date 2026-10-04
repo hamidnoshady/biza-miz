@@ -173,6 +173,52 @@ const ERROR_STATUS: Record<string, number> = {
   checklist_not_for_kind: 409,
   // §14's four-eyes rule: the person the fix was assigned to cannot sign it off.
   site_issue_verifier_is_assignee: 409,
+  // Issue #799 Wave 8 — the commercial controls (§15 variations, §16 payment
+  // certificates, §17 the contract block, §20 the cockpit). Same split as every
+  // wave: 404 for a record that does not exist, 400 for a malformed field, and
+  // 409 for anything a *frozen* record refuses — a submitted change order, a
+  // certified claim, an advance that would be over-recovered.
+  variation_not_found: 404,
+  certificate_not_found: 404,
+  contract_not_found: 404,
+  contract_project_mismatch: 400,
+  rfi_project_mismatch: 400,
+  boq_item_not_found: 404,
+  boq_item_project_mismatch: 400,
+  invalid_variation_source: 400,
+  invalid_certificate_kind: 400,
+  invalid_estimate_amount: 400,
+  invalid_submitted_amount: 400,
+  invalid_approved_amount: 400,
+  invalid_gross_amount: 400,
+  invalid_advance_recovery: 400,
+  invalid_retention: 400,
+  invalid_deductions: 400,
+  invalid_tax: 400,
+  invalid_line_amount: 400,
+  invalid_progress_percent: 400,
+  invalid_advance_percent: 400,
+  invalid_advance_amount: 400,
+  invalid_retention_percent: 400,
+  invalid_guarantee_amount: 400,
+  invalid_defects_period: 400,
+  variation_description_required: 400,
+  certificate_period_required: 400,
+  certificate_line_label_required: 400,
+  invalid_certificate_period: 400,
+  variation_not_editable: 409,
+  certificate_not_editable: 409,
+  invalid_variation_transition: 409,
+  invalid_certificate_transition: 409,
+  variation_estimate_required: 409,
+  variation_submitted_amount_required: 409,
+  variation_approved_amount_required: 409,
+  certificate_deductions_exceed_gross: 409,
+  certificate_lines_mismatch: 409,
+  approved_amount_exceeds_net: 409,
+  // Not a mistake in the request but in the arithmetic it implies: recovering
+  // more advance than the contract booked is a claim for money nobody paid.
+  advance_over_recovery: 409,
 };
 
 /**

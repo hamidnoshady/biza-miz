@@ -449,6 +449,40 @@ const ERROR_MESSAGES: Record<string, string> = {
     invalid_discipline: "رشتهٔ انتخاب‌شده معتبر نیست.",
     checklist_name_required: "نام چک‌لیست الزامی است.",
     checklist_item_required: "عنوان هر ردیف چک‌لیست الزامی است.",
+    // Issue #799 Wave 8 — the commercial controls: change orders, payment
+    // certificates and the contract's commercial block. Every sentence is a
+    // refusal an accountant has to act on, so each says what to do next rather
+    // than only what went wrong.
+    variation_not_found: "تغییر پیدا نشد.",
+    certificate_not_found: "صورت‌وضعیت پیدا نشد.",
+    contract_not_found: "قرارداد پیدا نشد.",
+    contract_project_mismatch: "قرارداد انتخاب‌شده به این پروژه تعلق ندارد.",
+    rfi_project_mismatch: "استعلام انتخاب‌شده به این پروژه تعلق ندارد.",
+    boq_item_not_found: "ردیف متره انتخاب‌شده پیدا نشد.",
+    boq_item_project_mismatch: "ردیف متره انتخاب‌شده به این پروژه تعلق ندارد.",
+    invalid_variation_source: "منشأ تغییر نامعتبر است.",
+    invalid_certificate_kind: "نوع صورت‌وضعیت نامعتبر است.",
+    variation_description_required: "شرح تغییر الزامی است.",
+    variation_not_editable:
+      "این تغییر در این وضعیت قابل ویرایش نیست؛ برای اصلاح، ابتدا آن را بازگشایی کنید.",
+    certificate_not_editable:
+      "این صورت‌وضعیت در این وضعیت قابل ویرایش نیست؛ برای اصلاح، ابتدا آن را به پیش‌نویس برگردانید.",
+    invalid_variation_transition: "این تغییر وضعیت برای تغییر مجاز نیست.",
+    invalid_certificate_transition: "این تغییر وضعیت برای صورت‌وضعیت مجاز نیست.",
+    variation_estimate_required:
+      "برای قیمت‌گذاری تغییر، ابتدا برآورد داخلی آن را ثبت کنید.",
+    variation_submitted_amount_required: "برای ارسال تغییر، مبلغ پیشنهادی را ثبت کنید.",
+    variation_approved_amount_required: "برای تأیید تغییر، مبلغ توافق‌شده را ثبت کنید.",
+    certificate_period_required: "دورهٔ اندازه‌گیری (شروع و پایان) الزامی است.",
+    invalid_certificate_period: "تاریخ پایان دوره نباید پیش از شروع آن باشد.",
+    certificate_line_label_required: "برای هر ردیف اندازه‌گیری، شرح الزامی است.",
+    certificate_deductions_exceed_gross:
+      "جمع کسورات از مبلغ کار انجام‌شده بیشتر است؛ ارقام را بازبینی کنید.",
+    certificate_lines_mismatch:
+      "جمع ردیف‌های اندازه‌گیری با مبلغ ناخالص صورت‌وضعیت برابر نیست؛ یکی را اصلاح کنید.",
+    approved_amount_exceeds_net: "مبلغ تأییدشده نمی‌تواند از مبلغ خالص صورت‌وضعیت بیشتر باشد.",
+    advance_over_recovery:
+      "بازیافت پیش‌پرداخت از ماندهٔ پیش‌پرداخت قرارداد بیشتر است؛ پیش‌پرداخت پرداخت‌شده را بررسی کنید.",
     supplier_required: "انتخاب تأمین‌کننده الزامی است.",
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
     // Phase 22 — fixed assets & depreciation

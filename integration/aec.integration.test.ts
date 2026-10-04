@@ -284,16 +284,19 @@ describe("every AEC table is tenant-isolated", () => {
     );
     // Listed literally rather than counted: a table added without its policy is
     // exactly the mistake this guard exists for. Wave 4's five arrive from
-    // migration 0196, Wave 5's five from 0197, Wave 6's three from 0198 and
-    // Wave 7's six from 0199; their behaviour is owned by
-    // `integration/aec-boq.integration.test.ts`,
+    // migration 0196, Wave 5's five from 0197, Wave 6's three from 0198,
+    // Wave 7's six from 0199 and Wave 8's five from 0200; their behaviour is
+    // owned by `integration/aec-boq.integration.test.ts`,
     // `integration/aec-document-control.integration.test.ts`,
-    // `integration/aec-rfi.integration.test.ts` and
-    // `integration/aec-site.integration.test.ts`.
+    // `integration/aec-rfi.integration.test.ts`,
+    // `integration/aec-site.integration.test.ts` and
+    // `integration/aec-commercial.integration.test.ts`.
     expect(rows.map((r) => r.relname)).toEqual([
       "aec_boq_items",
       "aec_boq_sections",
       "aec_business_profiles",
+      "aec_commercial_events",
+      "aec_contract_commercials",
       "aec_document_revisions",
       "aec_documents",
       "aec_estimate_events",
@@ -301,6 +304,8 @@ describe("every AEC table is tenant-isolated", () => {
       "aec_estimates",
       "aec_inspection_checklist_items",
       "aec_inspection_checklists",
+      "aec_payment_certificate_lines",
+      "aec_payment_certificates",
       "aec_project_participants",
       "aec_project_profiles",
       "aec_rfis",
@@ -313,6 +318,7 @@ describe("every AEC table is tenant-isolated", () => {
       "aec_transmittal_items",
       "aec_transmittal_recipients",
       "aec_transmittals",
+      "aec_variations",
     ]);
     for (const row of rows) {
       expect(row.secured, row.relname).toBe(true);

@@ -150,6 +150,14 @@ export const AEC_LIVE_CAPABILITIES: readonly AecCapabilityKey[] = [
   "qa_qc",
   "snagging",
   "hse",
+  // Wave 8 — the commercial controls (`aec-commercial-service.ts`, migration
+  // 0200): the change-order register, the payment certificates and the project's
+  // commercial cockpit. §15/§16/§20 are the sections a construction business
+  // cannot run without, so they stop being labels the settings panel shows and
+  // start refusing requests when a preset turns them off.
+  "variations",
+  "progress_claims",
+  "financials",
 ];
 
 /* ===========================================================================
@@ -627,6 +635,17 @@ export const AEC_AI_TOOL_NAMES = [
   // Issue #799 Wave 7 — §23's `list_site_issues`: what is open on site, which is
   // the inspection/NCR/snag register the «بازرسی و کنترل کیفیت» tab reads.
   "list_site_issues",
+  // Issue #799 Wave 8 — §23's commercial three. The issue writes the Persian
+  // questions it wants answered («حاشیهٔ برآوردی پروژه چقدر است؟» and «چه
+  // ریسک‌های تجاری در قراردادها و صورت‌وضعیت‌ها داریم؟») and names
+  // `list_change_orders` and `list_payment_certificates`; the third,
+  // `list_project_commercial_risks`, is the question those two exist to answer.
+  // All three read the same service the change-order and certificate tabs read,
+  // and none of them writes: a commercial action still needs a human pressing
+  // «اعمال», where §24's permission split applies.
+  "list_change_orders",
+  "list_payment_certificates",
+  "list_project_commercial_risks",
 ] as const;
 export type AecAiToolName = (typeof AEC_AI_TOOL_NAMES)[number];
 
@@ -643,6 +662,9 @@ export const AEC_AI_TOOL_LABELS: Record<AecAiToolName, string> = {
   list_pending_rfis: "استعلام‌های بی‌پاسخ (RFI)",
   list_pending_submittals: "سابمیتال‌های منتظر تأیید",
   list_site_issues: "موارد باز کارگاه و بازرسی",
+  list_change_orders: "تغییرات و دستور کارها",
+  list_payment_certificates: "صورت‌وضعیت‌ها و گواهی‌ها",
+  list_project_commercial_risks: "ریسک‌های تجاری پروژه",
 };
 
 export function isAecOperatingProfile(value: string): value is AecOperatingProfile {

@@ -29,8 +29,10 @@ describe("the AEC read tools", () => {
     // issue names in §23 and whose register arrived with §9; Wave 6 added the
     // two pending lists, which §23 names and which §10/§11's registers made
     // answerable; Wave 7 added `list_site_issues`, §23's site and quality queue,
-    // which §14's register made answerable. The list is asserted literally so an
-    // eighth cannot arrive unnoticed.
+    // which §14's register made answerable; Wave 8 added the commercial three —
+    // `list_change_orders` and `list_payment_certificates`, which §23 names, and
+    // `list_project_commercial_risks`, the question those two exist to answer.
+    // The list is asserted literally so an eleventh cannot arrive unnoticed.
     expect([...AEC_AI_TOOL_NAMES]).toEqual([
       "get_aec_project_financial_health",
       "list_delayed_project_activities",
@@ -39,6 +41,9 @@ describe("the AEC read tools", () => {
       "list_pending_rfis",
       "list_pending_submittals",
       "list_site_issues",
+      "list_change_orders",
+      "list_payment_certificates",
+      "list_project_commercial_risks",
     ]);
     expect(isAecAiToolName("get_aec_project_financial_health")).toBe(true);
     expect(isAecAiToolName("get_workspace_project_status")).toBe(false);

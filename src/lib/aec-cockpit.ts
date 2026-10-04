@@ -100,17 +100,17 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
   // the API enforces rather than merely hiding a button.
   { key: "site", label: "کارگاه و گزارش روزانه", capability: "site_operations", wave: 7, shipped: true },
   { key: "inspections", label: "بازرسی و کنترل کیفیت", capability: "qa_qc", wave: 7, shipped: true },
-  { key: "changes", label: "تغییرات", capability: "variations", wave: 8, shipped: false },
-  { key: "payments", label: "صورت‌وضعیت و پرداخت", capability: "progress_claims", wave: 8, shipped: false },
+  { key: "changes", label: "تغییرات", capability: "variations", wave: 8, shipped: true },
+  { key: "payments", label: "صورت‌وضعیت و پرداخت", capability: "progress_claims", wave: 8, shipped: true },
   { key: "team", label: "تیم", wave: 3, shipped: true },
   { key: "approvals", label: "تأییدها", capability: "approvals", wave: 3, shipped: true },
   { key: "calendar", label: "تقویم", wave: 3, shipped: true },
-  { key: "financials", label: "مالی پروژه", capability: "financials", wave: 8, shipped: false },
+  { key: "financials", label: "مالی پروژه", capability: "financials", wave: 8, shipped: true },
   { key: "assistant", label: "دستیار", wave: 3, shipped: true },
 ];
 
 /** The highest wave this build implements — the boundary between designed and built. */
-export const AEC_SHIPPED_WAVE = 7;
+export const AEC_SHIPPED_WAVE = 8;
 
 /**
  * The cockpit sections a business sees: shipped, and allowed by its capability
@@ -191,9 +191,9 @@ export const TAB_FOR_SECTION: Record<AecCockpitSectionKey, WorkspaceProjectTabKe
   team: "team",
   assistant: "assistant",
   procurement: null, // unshipped (Wave 9); the wave that ships it places it
-  changes: null, // unshipped (Wave 8)
-  payments: null, // unshipped (Wave 8)
-  financials: null, // unshipped (Wave 8)
+  changes: null, // its own tab, immediately after «مالی» — see aecProjectTabs
+  payments: null, // its own tab, after the change orders
+  financials: null, // §20's cockpit renders inside «مالی», with the budget card
 };
 
 /**
@@ -248,6 +248,13 @@ export function aecProjectTabs(
   const insertBeforeTeam = (["participants", "rfis", "submittals", "site", "inspections"] as const)
     .map(aecOnly)
     .filter((tab): tab is ProjectTab => tab !== null);
+  // §15 and §16 belong to the money: a change order moves the contract's value
+  // and a certificate claims against it, so the two registers sit immediately
+  // after «مالی» (which holds the contracts and §20's cockpit) rather than at
+  // the far end of the bar.
+  const afterFinance = (["changes", "payments"] as const)
+    .map(aecOnly)
+    .filter((tab): tab is ProjectTab => tab !== null);
 
   const tabs: ProjectTab[] = [];
   for (const tab of WORKSPACE_PROJECT_TABS) {
@@ -262,6 +269,7 @@ export function aecProjectTabs(
     // and what failed inspection, before the "who is on it" tabs.
     if (tab.key === "team") tabs.push(...insertBeforeTeam);
     tabs.push({ key: tab.key, label: labelFor.get(tab.key) ?? tab.label });
+    if (tab.key === "finance") tabs.push(...afterFinance);
   }
   return tabs;
 }

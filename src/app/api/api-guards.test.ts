@@ -718,6 +718,50 @@ describe("the AEC module's API guards", () => {
     }
   });
 
+  it("keeps a commercial determination separate from writing the register", () => {
+    // §24 for Wave 8 — agreeing a change-order figure with the client and
+    // certifying a claim are the two high-risk commercial acts, so neither may
+    // inherit `workspace.manage` (which is what drafting the register and
+    // editing a claim ride). Each status route asks for one permission per
+    // action through the module's own catalogue predicate, so the split is a
+    // rule the pure module states rather than a branch each route repeats.
+    for (const [key, predicate] of [
+      ["aec/variations/[id]/status", "variationActionNeedsApproval"],
+      ["aec/certificates/[id]/status", "certificateActionNeedsApproval"],
+    ] as const) {
+      const status = sources.get(key);
+      expect(status, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(status as string).toMatch(new RegExp(predicate));
+      expect(status as string).toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(status as string).toMatch(/PERMISSIONS\.workspaceManage/);
+    }
+
+    // The registers themselves and the §17 contract block are ordinary
+    // workspace edits: they must not name the approval key at all, or a clerk
+    // who may prepare a change order would be able to approve it.
+    for (const key of [
+      "aec/projects/[id]/variations",
+      "aec/variations/[id]",
+      "aec/projects/[id]/certificates",
+      "aec/certificates/[id]",
+      "aec/contracts/[id]/commercial",
+    ]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
+    }
+
+    // The cockpit is a read of somebody else's money — the project's own finance
+    // screen, so it needs the view key and nothing more.
+    for (const key of ["aec/projects/[id]/commercial"]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).toMatch(/PERMISSIONS\.workspaceView/);
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+    }
+  });
+
   it("keeps the shared helper requirePermission and nothing weaker", () => {
     const guard = readFileSync(join(API_ROOT, "aec", "guard.ts"), "utf8");
     expect(guard).toMatch(/requirePermission\(permission\)/);

@@ -34,9 +34,15 @@ import { isFeatureEnabled } from "./features";
 import { recordNotification } from "./notification-events";
 import { notificationDedupeKey } from "./notifications";
 import { formatQuantity } from "./digits";
+import { formatRialText } from "./money";
 import { ACCOUNTING_WORKSPACE_HREFS, workspaceProjectHref } from "./app-routes";
 import { businessToday } from "./business-day-service";
-import { AEC_INDUSTRY } from "./aec-service";
+import { AecError, AEC_INDUSTRY } from "./aec-service";
+import {
+  certifiedClaimsAwaitingPayment,
+  expiringSecurities,
+  pendingCertificates,
+} from "./aec-commercial-service";
 import { overdueRegisters } from "./aec-rfi-service";
 import { overdueSiteIssues } from "./aec-site-service";
 import { getBusinessIndustry } from "./industry-guard";
@@ -155,6 +161,110 @@ const MAX_OVERDUE_PER_SCAN = 10;
  * (the snag, the NCR, the corrective action) the other.
  */
 export async function scanOverdueAecRegisters(businessId: string): Promise<number> {
+  return scanAecRegisters(businessId);
+}
+
+/**
+ * §29's commercial reminders, from the same scan.
+ *
+ * Four facts that become true by a date passing rather than by a write:
+ *
+ *   * a claim submitted and not certified for a fortnight
+ *     (`aec.payment_certificate_pending`);
+ *   * a certified claim a month old whose receipt nobody has confirmed
+ *     (`aec.client_payment_overdue`) — a *follow-up*, worded as one, because the
+ *     workspace does not know whether the money arrived and inventing a
+ *     "received" column to compare against is exactly the duplicated balance
+ *     §16 forbids;
+ *   * a guarantee/bond and an insurance policy approaching their expiry
+ *     (`aec.guarantee_expiring`, `aec.insurance_expiring`), which is §22's
+ *     «Guarantee/Bond Expiry» widget as a reminder.
+ *
+ * Each half skips itself when its capability is off, so a trade of any kind can
+ * be swept safely: the certificate reads raise `capability_disabled`, which is a
+ * switch rather than a failure.
+ */
+async function scanCommercialControls(
+  businessId: string,
+  today: string,
+  queue: (entry: Parameters<typeof recordNotification>[0]) => Promise<void>,
+  budget: { value: number },
+  securityBudget: { guarantee: { value: number }; insurance: { value: number } },
+): Promise<void> {
+  const certificates = await swallowCapability(() =>
+    pendingCertificates(businessId, { limit: MAX_OVERDUE_PER_SCAN }),
+  );
+  for (const certificate of certificates) {
+    if (budget.value >= MAX_OVERDUE_PER_SCAN) break;
+    if (certificate.daysWaiting < CERTIFICATE_PENDING_DAYS) continue;
+    await queue({
+      businessId,
+      // No location: a claim belongs to a project, not to a branch.
+      locationId: null,
+      eventKey: "aec.payment_certificate_pending",
+      severity: "important",
+      title: `${certificate.kindLabel} ${certificate.certificateNumber} در انتظار تأیید است`,
+      body: `${certificate.daysWaiting} روز از ارسال آن گذشته است — مبلغ خالص ${formatRialText(String(certificate.netRial))}${certificate.contractTitle ? ` — قرارداد: ${certificate.contractTitle}` : ""}`,
+      url: workspaceProjectHref(certificate.projectId),
+      dedupeKey: notificationDedupeKey("aec.payment_certificate_pending", certificate.id, today),
+      payload: { certificateId: certificate.id, projectId: certificate.projectId },
+    });
+    budget.value += 1;
+  }
+
+  const awaitingPayment = await swallowCapability(() =>
+    certifiedClaimsAwaitingPayment(businessId, { limit: MAX_OVERDUE_PER_SCAN }),
+  );
+  for (const claim of awaitingPayment) {
+    if (budget.value >= MAX_OVERDUE_PER_SCAN) break;
+    await queue({
+      businessId,
+      locationId: null,
+      eventKey: "aec.client_payment_overdue",
+      severity: "important",
+      title: `وصول صورت‌وضعیت ${claim.certificateNumber} را بررسی کنید`,
+      body: `${claim.daysSinceCertified} روز از تأیید آن گذشته است — مبلغ تأییدشده ${formatRialText(String(claim.certifiedRial))}؛ دریافت را در حسابداری بررسی کنید.`,
+      url: workspaceProjectHref(claim.projectId),
+      dedupeKey: notificationDedupeKey("aec.client_payment_overdue", claim.id, today),
+      payload: { certificateId: claim.id, projectId: claim.projectId },
+    });
+    budget.value += 1;
+  }
+
+  const securities = await swallowCapability(() =>
+    expiringSecurities(businessId, { withinDays: GUARANTEE_WINDOW_DAYS, limit: MAX_OVERDUE_PER_SCAN * 2 }),
+  );
+  for (const security of securities) {
+    const key = security.kind === "insurance" ? "aec.insurance_expiring" : "aec.guarantee_expiring";
+    // One budget per event key: a business with many bonds must not silence the
+    // one insurance policy that is about to lapse.
+    const used = security.kind === "insurance" ? securityBudget.insurance : securityBudget.guarantee;
+    if (used.value >= MAX_OVERDUE_PER_SCAN) continue;
+    await queue({
+      businessId,
+      locationId: null,
+      eventKey: key,
+      severity: "important",
+      title:
+        security.kind === "insurance"
+          ? `بیمه‌نامهٔ قرارداد «${security.contractTitle}» تا ${security.daysRemaining} روز دیگر منقضی می‌شود`
+          : `ضمانت‌نامهٔ قرارداد «${security.contractTitle}» تا ${security.daysRemaining} روز دیگر منقضی می‌شود`,
+      body: `${security.reference} — تاریخ انقضا ${formatJalali(security.guaranteeExpiry)}${
+        security.guaranteeAmountRial
+          ? ` — مبلغ ${formatRialText(String(security.guaranteeAmountRial))}`
+          : ""
+      }`,
+      // A business-level contract has no project to open; the contracts screen is
+      // where its bond is edited either way.
+      url: security.projectId ? workspaceProjectHref(security.projectId) : "/workspace/contracts",
+      dedupeKey: notificationDedupeKey(key, security.contractId + security.kind, today),
+      payload: { contractId: security.contractId, projectId: security.projectId },
+    });
+    used.value += 1;
+  }
+}
+
+async function scanAecRegisters(businessId: string): Promise<number> {
   // The sweep runs for every business; this register is one business's. Asking
   // the RFI register for a restaurant would *throw* (its guard asserts the
   // industry), and an hourly exception per non-AEC business is not a sweep. One
@@ -242,6 +352,20 @@ export async function scanOverdueAecRegisters(businessId: string): Promise<numbe
     fromThisRegister += 1;
   }
 
+  // Wave 8's commercial four, through the same per-register budgets: a company
+  // with fifty late claims must not silence the bond that expires next week.
+  const securityBudget = { guarantee: { value: 0 }, insurance: { value: 0 } };
+  await scanCommercialControls(
+    businessId,
+    today,
+    async (entry) => {
+      await recordNotification(entry);
+      queued += 1;
+    },
+    { value: 0 },
+    securityBudget,
+  );
+
   return queued;
 }
 
@@ -251,6 +375,29 @@ export async function scanOverdueAecRegisters(businessId: string): Promise<numbe
  * else in the register is a defect somebody owes a fix for.
  */
 const SITE_INSPECTION_KINDS = new Set(["inspection_request", "inspection", "handover"]);
+
+/** How long a claim may wait for certification before somebody is nudged. */
+const CERTIFICATE_PENDING_DAYS = 14;
+
+/** The horizon §29's guarantee and insurance reminders look ahead over. */
+const GUARANTEE_WINDOW_DAYS = 60;
+
+/**
+ * Runs a commercial read that may be switched off.
+ *
+ * The certificate, guarantee and insurance queues all raise
+ * `capability_disabled` for a business that has the industry but not the
+ * capability — a switch, not a failure — and the hourly sweep must not throw on
+ * it. Anything else is a real error and goes up.
+ */
+async function swallowCapability<T>(read: () => Promise<T[]>): Promise<T[]> {
+  try {
+    return await read();
+  } catch (error) {
+    if (error instanceof AecError && error.code === "capability_disabled") return [];
+    throw error;
+  }
+}
 
 let scanInFlight = false;
 

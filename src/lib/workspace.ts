@@ -282,6 +282,13 @@ export async function resolveWorkspaceSubject(
     submittal_revision: `SELECT s.project_id, r.created_by
              FROM aec_submittal_revisions r JOIN aec_submittals s ON s.id = r.submittal_id
             WHERE r.id = $1 AND r.business_id = $2`,
+    // Wave 8's two commercial subjects (issue #799 §15/§16). A variation and a
+    // certificate ARE the project row, so they carry their project directly —
+    // which is also why a comment on one lands in the right project's feed.
+    variation: `SELECT project_id, created_by FROM aec_variations
+                 WHERE id = $1 AND business_id = $2`,
+    payment_certificate: `SELECT project_id, created_by FROM aec_payment_certificates
+                 WHERE id = $1 AND business_id = $2`,
   };
   const { rows } = await query<{ project_id: string | null; created_by: string | null }>(
     sql[subjectType],

@@ -73,6 +73,16 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // tabs the same member already opens, so these reads add no reach: like the
   // drawing read above they sit on `workspace.view`.
   list_pending_rfis: PERMISSIONS.workspaceView,
+  // Issue #799 §23/§24 (Wave 8) — the commercial reads. They quote the same
+  // contract, change-order and certificate rows the «تغییرات» and
+  // «صورت‌وضعیت و پرداخت» tabs show to a member with `workspace.view`, and the
+  // ledger's actual cost exactly as `projectReport` gives it (null without
+  // `ledger.view`), so the assistant adds no reach the screen does not already
+  // have. §24's high-risk split is about *writing* a commercial action, which
+  // these tools never do.
+  list_change_orders: PERMISSIONS.workspaceView,
+  list_payment_certificates: PERMISSIONS.workspaceView,
+  list_project_commercial_risks: PERMISSIONS.workspaceView,
   list_pending_submittals: PERMISSIONS.workspaceView,
   // The site and quality queue (issue #799 §23, Wave 7) is the register the same
   // member opens on the project page, so this read adds no reach either.

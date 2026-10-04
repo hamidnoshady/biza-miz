@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { decideEstimateApproval } from "@/lib/aec-boq-service";
+import { decideCertificateApproval, decideVariationApproval } from "@/lib/aec-commercial-service";
 import { decideSubmittalApproval } from "@/lib/aec-rfi-service";
 import { approvalSubjectType, decideApproval } from "@/lib/workspace";
 import type { WorkspaceApprovalDecision } from "@/lib/workspace-shared";
-import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../../guard";
+import { handleAecError } from "../../../aec/guard";
+import { PERMISSIONS, readBody, workspaceOwner } from "../../guard";
 
 const DECISIONS: readonly WorkspaceApprovalDecision[] = [
   "approved", "rejected", "changes_requested", "cancelled",
@@ -33,6 +35,12 @@ const DECISIONS: readonly WorkspaceApprovalDecision[] = [
  * module (`decideSubmittalApproval`): an approval queued for a submission maps
  * onto the revision's own decision, so the queue and the submittal screen record
  * one decision, not two.
+ *
+ * §15 and §16 (Wave 8) are the commercial pair (`decideVariationApproval`,
+ * `decideCertificateApproval`). Approving a change order sets the agreed amount
+ * and, through migration 0200's trigger, the contract's revised value;
+ * certifying a claim fixes the certified figure. Both are `workspace.approve`
+ * decisions however they are reached, which is §24's rule for them.
  */
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -63,13 +71,30 @@ export const POST = withTenantScope(
         }
         return NextResponse.json({ approval: null, submittalRevisionId: result.revisionId });
       }
+      if (subjectType === "variation") {
+        const result = await decideVariationApproval(owner, id, decision, note);
+        if (!result.applied) {
+          return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
+        }
+        return NextResponse.json({ approval: null, variationId: result.variationId });
+      }
+      if (subjectType === "payment_certificate") {
+        const result = await decideCertificateApproval(owner, id, decision, note);
+        if (!result.applied) {
+          return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
+        }
+        return NextResponse.json({ approval: null, certificateId: result.certificateId });
+      }
       const approval = await decideApproval(owner, id, decision, note);
       // Null means "no pending approval with this id" — either it never
       // existed for this business, or somebody else already decided it.
       if (!approval) return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
       return NextResponse.json({ approval });
     } catch (err) {
-      return handleWorkspaceError(err);
+      // The AEC subjects decide through their own modules, whose refusals are
+      // `AecError`s; `handleAecError` maps those and falls through to the
+      // workspace guard for everything else, so one catch covers both.
+      return handleAecError(err);
     }
   },
 );

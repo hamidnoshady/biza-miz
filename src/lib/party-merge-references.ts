@@ -628,6 +628,24 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     preview: true,
     previewLabel: "سابمیتال‌ها",
   },
+  // -- AEC (issue #799 Wave 8) ----------------------------------------------
+  {
+    table: "aec_variations",
+    column: "responsible_party_id",
+    scope: "business",
+    disposition: "move",
+    // Migration 0200's variation guard freezes every field of a change order
+    // once it has been submitted (only a rejected one may be reopened, and only
+    // to be re-priced), so a merge can re-point the party on a draft or priced
+    // change and must leave the rest exactly where they were named — the party a
+    // submitted order was raised against must not change underneath the client
+    // who received it.
+    filterSql: "{t}.status IN ('draft', 'priced')",
+    reason:
+      "The party answerable for a change order. A draft or priced order follows the surviving record; a submitted one keeps the party it was raised against, because the client has seen that document.",
+    preview: true,
+    previewLabel: "تغییرات در حال تنظیم",
+  },
 
   // -- Historical / audit: deliberately NOT moved ---------------------------
   {

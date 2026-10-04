@@ -97,6 +97,16 @@ export const NOTIFICATION_EVENT_KEYS = [
   // keys because they are separate events to switch off.
   "aec.inspection_due",
   "aec.snag_overdue",
+  // Issue #799 §29 (Wave 8) — the commercial four: «payment certificate
+  // pending», «client payment overdue», «guarantee expiry» and «insurance
+  // expiry». They join the same hourly scan as the register reminders above —
+  // they are all facts that become true by a date passing, not by a write — and
+  // they are four keys rather than one because they are four different things
+  // to switch off.
+  "aec.payment_certificate_pending",
+  "aec.client_payment_overdue",
+  "aec.guarantee_expiring",
+  "aec.insurance_expiring",
   "system.test",
 ] as const;
 export type NotificationEventKey = (typeof NOTIFICATION_EVENT_KEYS)[number];
@@ -339,6 +349,54 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     label: "نقص یا عدم‌انطباق عقب‌افتاده",
     description:
       "وقتی نقص (پانچ)، عدم‌انطباق یا اقدام اصلاحی از مهلت گذشته و هنوز بسته نشده است. روزی یک بار برای هر مورد.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "aec.payment_certificate_pending": {
+    key: "aec.payment_certificate_pending",
+    group: "projects",
+    label: "صورت‌وضعیت در انتظار تأیید",
+    description:
+      "وقتی یک صورت‌وضعیت یا گواهی پیشرفت ارسال شده و بیش از دو هفته است که تأیید یا رد نشده. روزی یک بار برای هر صورت‌وضعیت، در روز کاری همان شعبه.",
+    defaultSeverity: "important",
+    // §24's commercial figures are the owner's and the manager's business; a
+    // quantity surveyor can switch it on for themselves from the settings.
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    // The claim has an amount, and a reminder that leads with it is the one an
+    // accountant acts on.
+    hasAmount: true,
+  },
+  "aec.client_payment_overdue": {
+    key: "aec.client_payment_overdue",
+    group: "projects",
+    label: "تأخیر در وصول صورت‌وضعیت",
+    description:
+      "وقتی صورت‌وضعیت تأییدشده‌ای بیش از یک ماه است که تأیید شده و وصول آن هنوز در حسابداری بررسی نشده. این یادآور «بررسی وصول» است، نه ثبت دریافت: دریافتی‌ها فقط در حسابداری ثبت می‌شوند.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: true,
+  },
+  "aec.guarantee_expiring": {
+    key: "aec.guarantee_expiring",
+    group: "projects",
+    label: "ضمانت‌نامه نزدیک به انقضا",
+    description:
+      "وقتی ضمانت‌نامه یا تضمین قراردادی تا دو ماه آینده منقضی می‌شود. روزی یک بار برای هر قرارداد.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: true,
+  },
+  "aec.insurance_expiring": {
+    key: "aec.insurance_expiring",
+    group: "projects",
+    label: "بیمه‌نامه نزدیک به انقضا",
+    description:
+      "وقتی بیمه‌نامهٔ قرارداد تا دو ماه آینده منقضی می‌شود. روزی یک بار برای هر قرارداد.",
     defaultSeverity: "important",
     defaultRoles: ["owner", "manager"],
     perLocation: false,

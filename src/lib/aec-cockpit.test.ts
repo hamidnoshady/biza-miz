@@ -43,15 +43,27 @@ describe("the cockpit catalogue", () => {
     // must not offer a tab whose wave has not been built. `boq` left this list
     // in Wave 4 (the estimating domain), `documents` in Wave 5 (the drawing
     // register), `rfis`/`submittals` in Wave 6 (the two registers of §10 and
-    // §11) and `site`/`inspections` in Wave 7 (the daily log and §14's issue
-    // register), each when the service behind it arrived.
-    for (const key of ["procurement", "changes", "payments", "financials"]) {
+    // §11), `site`/`inspections` in Wave 7 (the daily log and §14's issue
+    // register) and `changes`/`payments`/`financials` in Wave 8 (the change
+    // orders, the payment certificates and §20's commercial cockpit), each when
+    // the service behind it arrived. Procurement is §18's, two waves out.
+    for (const key of ["procurement"]) {
       expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === key)?.shipped, key).toBe(false);
     }
-    for (const key of ["boq", "documents", "rfis", "submittals", "site", "inspections"]) {
+    for (const key of [
+      "boq",
+      "documents",
+      "rfis",
+      "submittals",
+      "site",
+      "inspections",
+      "changes",
+      "payments",
+      "financials",
+    ]) {
       expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === key)?.shipped, key).toBe(true);
     }
-    expect(AEC_SHIPPED_WAVE).toBe(7);
+    expect(AEC_SHIPPED_WAVE).toBe(8);
   });
 
   it("gives an individual fewer sections than a contractor", () => {
@@ -197,6 +209,8 @@ describe("the project tab bar", () => {
       "submittals",
       "site",
       "inspections",
+      "changes",
+      "payments",
     ]);
     // Sections that render inside a tab the generic bar already has: the page's
     // own summary and §21's identity card and phases in «نمای کلی», the
@@ -209,6 +223,9 @@ describe("the project tab bar", () => {
       "contracts",
       "approvals",
       "calendar",
+      // §20's commercial cockpit is the money tab's own summary: it renders
+      // inside «مالی», above the budget card and the contracts it adds up.
+      "financials",
     ]);
     for (const section of AEC_COCKPIT_SECTIONS.filter((s) => s.shipped)) {
       const mapped = TAB_FOR_SECTION[section.key];
