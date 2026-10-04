@@ -70,11 +70,6 @@ export function isEditableRfi(status: RfiStatus): boolean {
   return status === "draft";
 }
 
-/** A record that still accepts attachments and comments. */
-export function isOpenRfi(status: RfiStatus): boolean {
-  return status === "draft" || status === "open" || status === "answered";
-}
-
 /** §10 — "the system must clearly surface overdue RFIs". */
 export function isRfiWaiting(status: RfiStatus): boolean {
   return status === "open";

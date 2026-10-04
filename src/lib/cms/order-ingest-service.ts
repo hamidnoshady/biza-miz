@@ -12,7 +12,7 @@ import { deductForOrder } from "../inventory-service";
 import { getPrimaryLocation } from "../setup-state";
 import { reconcileExternalIdentity } from "../crm-external-identity";
 import { getBusinessIndustry } from "../industry-guard";
-import type { Industry } from "../industries";
+import { INDUSTRY_NOT_STOREFRONT, hasSellableCatalogue, isRetailCatalogueIndustry, type Industry } from "../industries";
 import type { RialText } from "../inventory-exact";
 import type { WebsiteConnectionRow } from "../website/connection-service";
 import { cmsMinorToRial } from "./order-money";
@@ -229,6 +229,13 @@ async function markInboxFailed(inboxId: string, error: string): Promise<void> {
 
 async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOrder): Promise<string> {
   const businessId = connection.business_id;
+  // Issue #799 Wave 11. The site is a shopfront only for a trade that sells
+  // goods: an order from a construction or service business's site has no
+  // catalogue to resolve its lines against, and the two old branches (F&B menu
+  // or retail items) would both write a sale the business never made. Refusing
+  // with a name is what puts it in front of the operator as a failed import.
+  const industry = await getBusinessIndustry(businessId);
+  if (!hasSellableCatalogue(industry)) throw new Error(INDUSTRY_NOT_STOREFRONT);
   const remoteId = order.id;
   const total = cmsMinorToRial(order.total, order.currency);
   const unit = cmsMinorToRial(order.unitPrice, order.currency);
@@ -352,7 +359,7 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
         totalCost,
         inventoryEventId,
       });
-    } else if (mapped?.localKind === "item" && industry && industry !== "food_service") {
+    } else if (mapped?.localKind === "item" && isRetailCatalogueIndustry(industry)) {
       const codes = RETAIL_ACCOUNT_CODES[industry];
       const { rows: stockRows } = await client.query<{ unit_cost: string | null }>(
         `SELECT unit_cost::text FROM item_stock WHERE item_id = $1 AND unit_cost IS NOT NULL`,
@@ -422,8 +429,12 @@ async function postRevenueEntry(
   industry: Industry | null,
   inventoryEventId: string | null,
 ): Promise<void> {
+  // The revenue account follows the family: a goods sale credits the trade's
+  // own sales account, an F&B order credits the channel's delivery revenue.
   const retailRevenue =
-    industry && industry !== "food_service" ? RETAIL_ACCOUNT_CODES[industry].revenue : WELL_KNOWN_CODES.deliveryRevenue;
+    industry && isRetailCatalogueIndustry(industry)
+      ? RETAIL_ACCOUNT_CODES[industry]?.revenue ?? WELL_KNOWN_CODES.deliveryRevenue
+      : WELL_KNOWN_CODES.deliveryRevenue;
   const accounts = await accountIdsByCode(client, businessId, [
     WELL_KNOWN_CODES.bankClearing,
     retailRevenue,

@@ -1097,6 +1097,16 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   library) and upload progress is a real XHR percentage. The project page reads and writes `?tab=` so
   those hand-offs are links, and an update from the phone must carry the attachments the desk already
   wrote rather than replacing the day's lines — see Decision 37.
+  **A shared engine branches on the industry *family*, never on "not F&B".** `src/lib/industries.ts`
+  owns `industryFamily()` (food_service / retail / project_based / service),
+  `hasSellableCatalogue()` (F&B and retail only) and `RETAIL_CATALOGUE_INDUSTRIES`; the WooCommerce
+  sync/outbox, the CMS order ingest and the WooCommerce webhook ingest ask those instead of testing
+  `industry !== "food_service"`, and a trade with no sellable catalogue is refused *by name*
+  (`industry_not_storefront`, surfacing as a failed CMS inbox row / webhook event) rather than written
+  as a retail sale. `industry-coverage.test.ts` scans for the old shape and fails the build if a new
+  one appears. Register numbers are formatted in one place too: `formatAecNumber` (and
+  `nextNumberInSeries` for the field board's RFI suggestion) in `src/lib/aec-numbering.ts` — never a
+  second `padStart(3, "0")`.
   Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a

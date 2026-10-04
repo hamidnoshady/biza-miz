@@ -68,6 +68,7 @@ import {
   type SiteLogStatus,
 } from "./aec-site";
 import { isAecSpecialty } from "./aec";
+import { formatAecNumber } from "./aec-numbering";
 import { AecError, assertAecIndustry, loadBusinessAecProfile } from "./aec-service";
 import { businessToday } from "./business-day-service";
 import { query, withTenantTransaction } from "./db";
@@ -1050,8 +1051,7 @@ async function nextIssueNumber(projectId: string, kind: SiteIssueKind): Promise<
       WHERE project_id = $1 AND issue_number LIKE $2`,
     [projectId, `${prefix}-%`],
   );
-  const next = (rows[0]?.max ?? 0) + 1;
-  return `${prefix}-${String(next).padStart(3, "0")}`;
+  return formatAecNumber(prefix, (rows[0]?.max ?? 0) + 1);
 }
 
 /**

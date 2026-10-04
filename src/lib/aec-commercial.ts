@@ -223,11 +223,6 @@ export function isEditableCertificate(status: CertificateStatus): boolean {
   return status === "draft";
 }
 
-/** A certified claim is a record: its figures never move again. */
-export function isCertifiedCertificate(status: CertificateStatus): boolean {
-  return status === "certified";
-}
-
 /** Still moving — what "certificates waiting" lists. */
 export function isOpenCertificate(status: CertificateStatus): boolean {
   return status !== "certified" && status !== "cancelled";

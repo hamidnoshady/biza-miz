@@ -1,7 +1,9 @@
 # Phase 47 — The AEC industry and AEC project operations
 
-**Status:** Waves 1–9 implemented (migrations 0193–0201); Wave 10's report set, recommended widgets,
-§26 classification and §25 field mode implemented; the rest of Waves 10–11 designed here, not built.
+**Status:** complete. Waves 1–9 implemented (migrations 0193–0201); Wave 10's report set, recommended
+widgets, §26 classification and §25 field mode implemented, plus §34's hardening; Wave 11's cleanup and
+CI gate implemented (migrations 0193–0202, 264 total). Every ✓ item on the issue's Definition of Done is
+built — see «What is still not built» for the two deliberate limits that are not omissions.
 
 Working issue: [#799 — Add Architecture, Civil Engineering & Construction business type with AEC
 project operations](https://github.com/hamidnoshady/cafe-restaurant-pos/issues/799).
@@ -728,31 +730,89 @@ stating: a capture that the phone cannot finish safely is not offered — the da
 the site panel rather than replaced from a phone, and an update carries the attachments the desk
 already wrote instead of detaching them.
 
-## The parts of Waves 10–11 not built yet
+## Wave 11 — cleanup and CI (implemented)
 
-In the issue's order. Nothing below has a migration or a screen yet; the wave boundaries exist so each
-can be reviewed on its own.
+Wave 11 is the last wave the issue names, and it has no migration: it is the sweep the ten waves
+before it owe. Four things were asked for — dead code, dead routes, duplicate logic, integration
+coverage — plus the documentation and a full CI run. What each turned into:
 
-10. **What Wave 10 still owns.** §25's **mobile/field flows** and §34's UX hardening on top of them
-    (the report set, §22's widgets and §26's classification are built; the platform console's
-    «ویجت‌های پیشنهادی» page administers the recommendations without touching a member's own
-    widgets).
-11. **Cleanup.** The repo-wide audit of hard-coded industry arrays, routes that assume every
-    non-F&B tenant is retail, dead routes and duplicate project/financial logic.
+| Asked for | What the audit found |
+|---|---|
+| Duplicate logic | The four WooCommerce/CMS engines still assumed "not F&B ⇒ retail", and three modules each formatted a register number with their own `String(n).padStart(3, "0")`. Both are fixed (Decision 38 and below) |
+| Dead code | A usage scan across `src/` (every exported symbol, counting only references outside its own file) left three genuinely unreferenced exports, all removed: `aec-commercial.ts`'s `isCertifiedCertificate` (a one-line predicate no reader called — the certified test lives in the SQL and in `isOpenCertificate`), `aec-docs.ts`'s `DOCUMENT_DISCIPLINES` (superseded by `isDocumentDiscipline`, which delegates to `isAecSpecialty`), and `aec-rfi.ts`'s `isOpenRfi` (its "still accepts work" meaning was never used: the queues ask `isRfiWaiting`) |
+| Dead routes | A route scan that strips the `[param]` segments and looks for the literal parts in every non-`api` source found **no orphan**: every one of the ~40 `/api/aec/**` routes and the two `/api/platform/ai/widgets` routes has a caller in a panel, the field screen, the console page, or the AI tool layer. The Wave 11 answer is therefore "none to delete" rather than a list of deletions — which is itself worth recording, because the next audit should start from the same scan |
+| Integration coverage | The family rule is a *behaviour* (which table a product lands in, which row a refused order fails), not a source shape, so it got a real-database suite of its own: `integration/industry-family.integration.test.ts` |
+| Documentation | This section, the «not built» note below, `CLAUDE.md`'s AEC block and `docs/phases/README.md` |
 
-Wave 6 leaves two issue items to the waves that own them, deliberately: an RFI's "linked variation /
-change order" (§10) is a field on the *variation*, which Wave 8 builds — the link is owned by the
-later record, so the RFI does not grow a column pointing at a table that does not exist yet; and an
-"RFI draft"/"submittal review draft" being a good offline candidate (§26) is a replication-domain
-decision, which belongs with that classification rather than with this register. The §25 mobile flows
-(create RFI, review submittal) are the same service and the same endpoints the desktop screens call,
-so they need no AEC work of their own — Wave 10 owns the offline storage, and its report set is now
-built (see «Wave 10» below).
+The three duplicated number formatters became one function. `formatAecNumber(prefix, value)` (in
+`aec-numbering.ts`) is now what the advisory-locked allocation and the site register's `SNG-…`
+counter both return, and `nextNumberInSeries(prefix, numbers)` is the suggestion the field board
+uses to prefill an RFI's number. That last one is a real fix, not just a tidy-up: the board used to
+compute its suggestion with its own SQL `MAX(regexp_replace(...))`, which would have taken the
+highest number *whatever its prefix*; it now reads the register's numbers and counts only the ones
+that follow `RFI-…`, so a hand-typed number cannot move the suggestion. `src/lib/aec-numbering.test.ts`
+(4 tests) pins the shared rule including the two edges the copies disagreed about — four-digit series
+and a prefix that contains regex characters.
 
-The "non-F&B ⇒ retail" assumption in the WooCommerce/CMS ingest paths
-(`integrations/sync-service.ts`, `integrations/outbox-service.ts`, `cms/order-ingest-service.ts`,
-`integrations/webhook-ingest-service.ts`) is knowingly left in place for Wave 11: those branches
-read `items`/`item_stock`, which an AEC tenant cannot create (the products workspace is gated to
-the five trade-goods industries), so the path is unreachable rather than wrong. Wave 11 turns that
-"not a café" test into an explicit stock-model question so the next trade cannot inherit it by
-accident.
+`integration/industry-family.integration.test.ts` (4 tests) puts the three families in one database
+and asserts each engine's door: `upsertProductFromWoo` writes a menu item for `food_service`, an
+`items` row for `jewelry`, and returns `skipped` with no mapping row for
+`architecture_construction`; `catalogueFor` answers the AEC business with an empty register rather
+than another table's rows; the CMS `order.paid` webhook to an AEC business answers 422
+`industry_not_storefront`, leaves `cms_store_order_inbox.status = 'failed'` with that message and
+writes no order; and the WooCommerce webhook (order and refund) fails
+`integration_webhook_events.status` the same way. Both refusals are asserted through the failure
+plumbing the operator actually sees, not just the thrown error.
+
+The CI gate for this branch is the issue's own Definition of Done: `tsc --noEmit`, ESLint, the unit
+suite, the database-integration suites, `next build`, the route/guard smoke tests and the workflow
+matrix — all green on the wave's head commit.
+
+### Decision 38 — a family, not a negation
+
+The bug Wave 11 fixes is a shape of thought, not a typo: four engines had each written "if this is
+not the trade I was built for, it must be the *other* trade I know about", and the code was correct
+only because no third trade existed yet. An AEC business could not reach those branches (its
+products workspace is gated off), so the branches were unreachable rather than wrong — which is
+exactly why they would have survived until the next trade made them reachable and wrong at the same
+time.
+
+So the fix is not "add an AEC case to each branch". It is to stop asking whether the industry *is*
+something and start asking which family it belongs to:
+
+- `industryFamily(industry)` names one of four families — `food_service`, `retail`,
+  `project_based`, `service` — and `industry-coverage.test.ts` proves every industry in the registry
+  lands in exactly one of them. A new trade has to choose a family, which is the point: the choice is
+  visible in one table instead of being implied by every `!==` in `src/`.
+- `hasSellableCatalogue(industry)` is the question the shared engines actually need ("does this trade
+  sell goods on a website?"), and it is true for exactly the two families that do. An engine that
+  asks it gets a correct answer for the tenth trade without being edited.
+- `RETAIL_CATALOGUE_INDUSTRIES` is the family as data, and it is *derived* — the coverage suite
+  asserts it is a superset of both `PRODUCT_WORKSPACE_INDUSTRIES` and `TRADE_GOODS_INDUSTRIES`, so a
+  trade that gains the retail workspaces without joining the family fails the build.
+- Refusing is a **named** outcome, not a silent skip: `INDUSTRY_NOT_STOREFRONT` is thrown where the
+  row would have been written, which the two ingest doors turn into a failed inbox row and a failed
+  webhook event. A skip with no name would have been the same bug wearing a different hat — the
+  operator would have seen an order that vanished.
+
+The same test file now scans the sources for the old shape: no non-test file may compare an industry
+to `"food_service"` with `!=`/`!==` unless it is allowlisted by name. There is exactly one such
+allowlist entry after this wave — `ai-autopilot-service.ts`'s waste detection, which *deliberately*
+skips every non-F&B trade because waste is an F&B concept — and adding a second requires saying why
+in the test file rather than in a review comment.
+
+## What is still not built
+
+Nothing on §36's wave list. The ten waves the issue names are implemented, and the items the earlier
+waves deferred were closed by the waves that own them:
+
+- §10's "linked variation/change order" field is **built**, on the variation rather than on the RFI:
+  `aec_variations.rfi_id` (Wave 8's migration, cross-project checked by trigger) is settable from the
+  variation form and printed as «استعلام مرتبط» on the variation's row and detail. A change order
+  cites the RFI that caused it, so the pointer lives with the later record — see Decision 9's
+  reasoning about not growing a column that points forward.
+- §25's mobile flows are built (§25's own section above), and §26's classification is a *decision*
+  about syncing, not a sync engine: nothing AEC replicates today, deliberately.
+- AEC's own limits are recorded where they belong rather than as omissions: no AEC table travels in a
+  pairing snapshot, the report set prints the worst `AEC_REPORT_ROW_LIMIT` rows and names the
+  register the rest live in, and the field board caps every queue for the same reason.

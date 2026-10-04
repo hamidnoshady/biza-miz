@@ -60,11 +60,6 @@ export function isDocumentType(value: string): value is DocumentType {
   return (DOCUMENT_TYPES as readonly string[]).includes(value);
 }
 
-/** §9's discipline: one of the business's own AEC specialties, or none. */
-export const DOCUMENT_DISCIPLINES: readonly AecSpecialty[] = Object.keys(
-  AEC_SPECIALTY_LABELS,
-) as AecSpecialty[];
-
 export function isDocumentDiscipline(value: string): boolean {
   return isAecSpecialty(value);
 }

@@ -40,6 +40,7 @@ import {
   type SiteIssueSummary,
   type SiteLogSummary,
 } from "./aec-site-service";
+import { nextNumberInSeries } from "./aec-numbering";
 import { query } from "./db";
 import { listWorkspaceTasks, type WorkspaceOwner, type WorkspaceTask } from "./workspace";
 import { PROJECT_STATUS_LABELS, type WorkspaceProjectStatus } from "./workspace-shared";
@@ -411,13 +412,10 @@ export async function fieldBoard(
   // The next free RFI number for this project, in the register's own shape
   // (`RFI-004`). Only rows that already follow the shape are counted, so a
   // hand-typed number can never break the read.
-  const { rows: rfiNumbers } = await query<{ max: number | null }>(
-    `SELECT MAX(NULLIF(regexp_replace(rfi_number, '^.*-', ''), '')::integer) AS max
-       FROM aec_rfis
-      WHERE business_id = $1 AND project_id = $2 AND rfi_number ~ '^.*-[0-9]+$'`,
+  const { rows: rfiNumbers } = await query<{ rfi_number: string }>(
+    `SELECT rfi_number FROM aec_rfis WHERE business_id = $1 AND project_id = $2`,
     [owner.businessId, projectId],
   );
-  const nextRfi = (rfiNumbers[0]?.max ?? 0) + 1;
 
   const pendingDeliveries = commitments.filter((commitment) => commitment.status === "approved");
   const deliveryRows: FieldQueueRow[] = pendingDeliveries.slice(0, limit).map((commitment) => {
@@ -445,7 +443,9 @@ export async function fieldBoard(
     },
     capabilities,
     checklists,
-    suggestions: { rfiNumber: `RFI-${String(nextRfi).padStart(3, "0")}` },
+    suggestions: {
+      rfiNumber: nextNumberInSeries("RFI", rfiNumbers.map((row) => row.rfi_number)),
+    },
     queues: {
       siteLog: { todayLogged: logs.length > 0, todayLogId: logs[0]?.id ?? null },
       snags: {

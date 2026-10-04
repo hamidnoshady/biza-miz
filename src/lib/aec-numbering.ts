@@ -51,6 +51,39 @@ const NUMBER_COLUMN: Record<AecNumberedTable, AecNumberedColumn> = {
  * insert it exists to serialise has to be in the same transaction or the lock
  * guards nothing.
  */
+/**
+ * A register number, formatted the one way every register formats it.
+ *
+ * Extracted in Wave 11: `RFQ-004`, `SNG-004`, `RFI-004` and the commercial
+ * registers' numbers are all `<prefix>-<at least three digits>`, and the same
+ * `String(n).padStart(3, "0")` was appearing in three modules — a shared shape
+ * is a shared function, so a register that needs four digits later changes one
+ * place rather than being the odd one out.
+ */
+export function formatAecNumber(prefix: string, value: number): string {
+  return `${prefix}-${String(Math.max(0, Math.trunc(value))).padStart(3, "0")}`;
+}
+
+/**
+ * The next number in a series, from the numbers already issued.
+ *
+ * For a *suggestion* rather than an allocation: the field screen prefills an
+ * RFI number the person may keep or overwrite (§10 keeps numbering the team's).
+ * Only members that already follow the `<prefix>-digits` shape are counted, so a
+ * hand-typed number can never break the arithmetic and the result is the number
+ * the register would hand out next.
+ */
+export function nextNumberInSeries(prefix: string, numbers: readonly string[]): string {
+  let highest = 0;
+  const pattern = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-(\\d+)$`);
+  for (const number of numbers) {
+    const match = pattern.exec(number.trim());
+    if (!match) continue;
+    highest = Math.max(highest, Number(match[1]));
+  }
+  return formatAecNumber(prefix, highest + 1);
+}
+
 export async function nextAecNumber(
   table: AecNumberedTable,
   projectId: string,
@@ -67,6 +100,5 @@ export async function nextAecNumber(
       WHERE project_id = $1 AND ${column} LIKE $2`,
     [projectId, `${prefix}-%`],
   );
-  const next = (rows[0]?.max ?? 0) + 1;
-  return `${prefix}-${String(next).padStart(3, "0")}`;
+  return formatAecNumber(prefix, (rows[0]?.max ?? 0) + 1);
 }

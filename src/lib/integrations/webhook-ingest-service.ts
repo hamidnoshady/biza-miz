@@ -37,7 +37,7 @@ import { deleteWpContent, safeWpUrl, upsertWpContent, type WpContentPayload } fr
 import { confirmWordPressMediaSync } from "../media-service";
 import { replaceTerms, type WooTermSnapshot } from "./woo-taxonomy-service";
 import type { WooCustomer, WooOrder, WooOrderLineItem, WooProduct, WooRefund } from "./woocommerce-client";
-import type { Industry } from "../industries";
+import { INDUSTRY_NOT_STOREFRONT, hasSellableCatalogue, isRetailCatalogueIndustry, type Industry } from "../industries";
 
 const zero = "0" as RialText;
 
@@ -615,7 +615,12 @@ function relievesStock(line: ResolvedOrderLine): boolean {
 
 async function ingestOrder(connection: ConnectionRow, order: WooOrder): Promise<void> {
   const industry = await getBusinessIndustry(connection.business_id);
-  if (industry && industry !== "food_service") {
+  // Issue #799 Wave 11: "not F&B" is not "retail". A trade with no sellable
+  // catalogue gets the order refused by name — the caller marks the webhook
+  // event failed with this message, which is visible on the connection's own
+  // screen, rather than a retail sale appearing in its books.
+  if (!hasSellableCatalogue(industry)) throw new Error(INDUSTRY_NOT_STOREFRONT);
+  if (isRetailCatalogueIndustry(industry)) {
     await ingestRetailOrder(connection, order, industry);
     return;
   }
@@ -1147,7 +1152,8 @@ async function ingestRefund(connection: ConnectionRow, refund: WooRefund, inboxI
     }
 
     const industry = await getBusinessIndustry(businessId);
-    if (industry && industry !== "food_service") {
+    if (!hasSellableCatalogue(industry)) throw new Error(INDUSTRY_NOT_STOREFRONT);
+    if (isRetailCatalogueIndustry(industry)) {
       await ingestRetailRefund(client, connection, refund, { businessId, locationId, amount, tax, net, remoteId, inboxId, industry });
     } else {
       await ingestFnBRefund(client, connection, refund, { businessId, locationId, amount, tax, net, remoteId, inboxId });

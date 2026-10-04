@@ -43,7 +43,15 @@ import {
   costOfSalesCodesForIndustry,
   validateAccounts,
 } from "./coa-template";
-import { ENABLED_INDUSTRIES, INDUSTRIES, INDUSTRY_LABELS } from "./industries";
+import {
+  ENABLED_INDUSTRIES,
+  INDUSTRIES,
+  INDUSTRY_LABELS,
+  RETAIL_CATALOGUE_INDUSTRIES,
+  hasSellableCatalogue,
+  industryFamily,
+  isRetailCatalogueIndustry,
+} from "./industries";
 import { INDUSTRY_PROFILES, MODULE_KEYS } from "./industry-profile";
 import { PRODUCT_WORKSPACE_INDUSTRIES } from "./product-workspace";
 import { TRADE_GOODS_INDUSTRIES } from "./trade-goods";
@@ -78,6 +86,7 @@ const REGISTRY_SETS: readonly (readonly string[])[] = [
   INDUSTRIES,
   PRODUCT_WORKSPACE_INDUSTRIES,
   TRADE_GOODS_INDUSTRIES,
+  RETAIL_CATALOGUE_INDUSTRIES,
 ];
 
 /**
@@ -88,6 +97,29 @@ const REGISTRY_SETS: readonly (readonly string[])[] = [
 const SOURCE_SCAN_ALLOWLIST: ReadonlyMap<string, string> = new Map([
   // Declares INDUSTRIES itself — the registry the scan is anchored on.
   ["src/lib/industries.ts", "declares the industry registry"],
+  // The one legitimate "not F&B": the autopilot's waste-detection job is a
+  // stock-recipe job that only F&B can answer, and it *skips* (records
+  // `skipped: "not_food_service"`) rather than branching into a retail shape.
+  [
+    "src/lib/ai-autopilot-service.ts",
+    "waste detection is an F&B-only job and skips other trades explicitly",
+  ],
+]);
+
+/**
+ * Files allowed to compare an industry against `"food_service"` with `!==`.
+ *
+ * Wave 11 replaced `industry !== "food_service"` (which quietly meant "retail")
+ * with `isRetailCatalogueIndustry`/`hasSellableCatalogue` in the four engines
+ * that had it. This scan keeps the pattern from coming back: a new "everything
+ * that is not F&B" branch fails here and has to choose a family instead.
+ */
+const NON_FNB_BRANCH_ALLOWLIST: ReadonlyMap<string, string> = new Map([
+  ["src/lib/industries.ts", "the module that documents the family rule"],
+  [
+    "src/lib/ai-autopilot-service.ts",
+    "waste detection skips every non-F&B trade instead of branching to retail",
+  ],
 ]);
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -280,6 +312,78 @@ describe("the database admits every industry", () => {
     const { file, industries } = newestIndustryCheck();
     expect(file.length).toBeGreaterThan(0);
     for (const industry of industries) expect(INDUSTRIES as readonly string[]).toContain(industry);
+  });
+});
+
+describe("an industry's family decides which shape a shared engine uses", () => {
+  it("puts every industry in exactly one family", () => {
+    const families = INDUSTRIES.map((industry) => industryFamily(industry));
+    expect(families.every((family) => family !== null)).toBe(true);
+    for (const industry of INDUSTRIES) {
+      const family = industryFamily(industry);
+      expect(["food_service", "retail", "project_based", "service"], industry).toContain(family);
+      expect(hasSellableCatalogue(industry), industry).toBe(family === "food_service" || family === "retail");
+    }
+    // A business whose industry is unreadable is nobody's family, and nothing
+    // gets a sellable catalogue by accident.
+    expect(industryFamily(null)).toBeNull();
+    expect(industryFamily("not_a_trade")).toBeNull();
+    expect(hasSellableCatalogue(null)).toBe(false);
+    expect(hasSellableCatalogue("not_a_trade")).toBe(false);
+  });
+
+  it("covers both catalogue registries in the retail set", () => {
+    // The retail family is defined here rather than imported from a UI registry
+    // (the engines run on webhooks and must not depend on screens) — so the two
+    // registries are asserted to be subsets of it instead of trusted to be.
+    for (const industry of PRODUCT_WORKSPACE_INDUSTRIES) {
+      expect(isRetailCatalogueIndustry(industry), industry).toBe(true);
+    }
+    for (const industry of TRADE_GOODS_INDUSTRIES) {
+      expect(isRetailCatalogueIndustry(industry), industry).toBe(true);
+    }
+    // …and F&B is never in it: a menu item and a stock item are different rows.
+    expect(isRetailCatalogueIndustry("food_service")).toBe(false);
+    expect(isRetailCatalogueIndustry("architecture_construction")).toBe(false);
+    expect(isRetailCatalogueIndustry("service_saas")).toBe(false);
+  });
+
+  it("never treats a non-F&B industry as retail in the shared engines", () => {
+    // The four engines Wave 11 fixed (`sync-service.ts`, `outbox-service.ts`,
+    // `cms/order-ingest-service.ts`, `webhook-ingest-service.ts`) all learned
+    // the family rule; this assertion is what keeps a later edit from
+    // reintroducing the two-shape assumption.
+    const offenders: string[] = [];
+    for (const file of walk(SRC_ROOT)) {
+      if (isTestFile(file)) continue;
+      const rel = relative(process.cwd(), file).split(sep).join("/");
+      if (NON_FNB_BRANCH_ALLOWLIST.has(rel)) continue;
+      const source = readFileSync(file, "utf8");
+      source.split("\n").forEach((line, index) => {
+        // A code line, not prose: the rule lives in comments too.
+        const code = line.split("//")[0];
+        if (/["'`]food_service["'`]/.test(code) && /!==|!=/.test(code)) {
+          offenders.push(`${rel}:${index + 1} → ${line.trim()}`);
+        }
+      });
+    }
+    expect(
+      offenders.join("\n"),
+      "a shared engine branched on 'not F&B' — use isRetailCatalogueIndustry/hasSellableCatalogue",
+    ).toBe("");
+  });
+
+  it("scans the four engines it names", () => {
+    // A guard against the guard: the scan must actually see the files it fixed.
+    for (const rel of [
+      "src/lib/integrations/sync-service.ts",
+      "src/lib/integrations/outbox-service.ts",
+      "src/lib/cms/order-ingest-service.ts",
+      "src/lib/integrations/webhook-ingest-service.ts",
+    ]) {
+      const source = readFileSync(join(process.cwd(), rel), "utf8");
+      expect(source, rel).toContain("hasSellableCatalogue");
+    }
   });
 });
 
