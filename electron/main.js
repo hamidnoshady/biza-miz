@@ -14,7 +14,7 @@ const nativePrinting = require("./native-printing");
 const localStorageChecks = require("./local-storage");
 const { computePaths, migrateLegacyLayout } = require("./app-paths");
 const { DesktopUpdateEngine } = require("./update-engine");
-const { CLOUD_PARTITION, guardCloudPane, hardenCloudPane } = require("./cloud-pane");
+const { CLOUD_PARTITION, guardCloudPane, hardenCloudPane, stampEmbedAgent } = require("./cloud-pane");
 
 // Phase 46: «ورود با حساب ابری» — the cloud hands the browser back to the app
 // with businesssuite://cloud-login?code=…&state=…
@@ -108,11 +108,10 @@ if (!gotSingleInstanceLock) {
     mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
       paneOrigin = hardenCloudPane(webPreferences, params);
       if (!paneOrigin) return event.preventDefault();
-      // The pane's session carries the embed token too (the worker script's own
-      // request, for one). It does not reach a navigation the cloud's service
-      // worker forwards — that goes out with Electron's default agent — so the
-      // cloud also hides its sidebar client-side (src/lib/cloud-embed.ts).
-      if (params.useragent) session.fromPartition(CLOUD_PARTITION).setUserAgent(params.useragent);
+      // Every request to the cloud carries the embed token — service-worker
+      // navigations included — so the cloud never draws its own sidebar here.
+      const cloudSession = session.fromPartition(CLOUD_PARTITION);
+      stampEmbedAgent(cloudSession, paneOrigin, params.useragent || cloudSession.getUserAgent());
     });
     mainWindow.webContents.on("did-attach-webview", (_event, contents) => {
       if (paneOrigin) guardCloudPane(contents, paneOrigin, shell);

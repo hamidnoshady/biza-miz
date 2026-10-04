@@ -19,6 +19,8 @@
  */
 
 const CLOUD_PARTITION = "persist:cloud";
+// Must equal CLOUD_EMBED_UA_TOKEN in src/lib/cloud-embed.ts (a unit test compares them).
+const EMBED_UA_TOKEN = "BusinessSuiteEmbed/1";
 
 function cloudTarget(raw) {
   try {
@@ -112,4 +114,44 @@ function guardCloudPane(contents, origin, shell) {
   });
 }
 
-module.exports = { CLOUD_PARTITION, cloudTarget, sameOrigin, opensInBrowser, hardenCloudPane, guardCloudPane };
+/** `userAgent` with the embed token, added once. */
+function embedAgent(userAgent) {
+  const agent = String(userAgent || "").trim();
+  return agent.includes(EMBED_UA_TOKEN) ? agent : `${agent} ${EMBED_UA_TOKEN}`.trim();
+}
+
+/**
+ * The cloud draws a page without its own sidebar only when the request
+ * carries the embed token. The <webview>'s agent covers requests the page
+ * itself makes, and the session's agent covers the service-worker script —
+ * but once the cloud's service worker controls the pane, every navigation it
+ * forwards goes out with Electron's *default* agent, and the cloud drew a
+ * second sidebar next to the desktop's (reproduced in Electron 44). Stamping
+ * the header on the session's outgoing requests reaches those too, so the
+ * cloud sees the token on every request to its origin, whatever image it runs.
+ */
+function stampEmbedAgent(ses, origin, userAgent) {
+  const agent = embedAgent(userAgent);
+  ses.setUserAgent(agent);
+  ses.webRequest.onBeforeSendHeaders((details, callback) => {
+    if (!sameOrigin(details.url, origin)) return callback({});
+    const requestHeaders = { ...details.requestHeaders };
+    for (const name of Object.keys(requestHeaders)) {
+      if (name.toLowerCase() === "user-agent") delete requestHeaders[name];
+    }
+    requestHeaders["User-Agent"] = agent;
+    callback({ requestHeaders });
+  });
+}
+
+module.exports = {
+  CLOUD_PARTITION,
+  EMBED_UA_TOKEN,
+  cloudTarget,
+  sameOrigin,
+  opensInBrowser,
+  hardenCloudPane,
+  guardCloudPane,
+  embedAgent,
+  stampEmbedAgent,
+};
