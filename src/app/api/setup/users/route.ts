@@ -10,7 +10,7 @@ import { canonicalMemberPhone } from "@/lib/phone-otp";
 import type { Role } from "@/lib/auth";
 import { withTenantScope } from "@/lib/auth";
 
-/** Step 5 — roles & initial users (owner already exists from bootstrap/seed). */
+/** Roles & initial users (owner already exists from bootstrap/seed). Optional step. */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requireManager();
   if (error) return error;

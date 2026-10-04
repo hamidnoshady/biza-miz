@@ -15,7 +15,7 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
  */
 import { useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
-import { SetupDataSkeleton, StepShell } from "../ui";
+import { api, errorMessage, SetupDataSkeleton, StepShell } from "../ui";
 import { useRouter } from "next/navigation";
 import { nextPath, prevPath } from "../steps";
 import type { DesktopFolderCheckResult } from "@/lib/desktop-bridge";
@@ -142,39 +142,50 @@ export default function BackupStepPage() {
     }
   }
 
+  /**
+   * Saves the destination, then records the step. Both writes matter (issue
+   * #808 §6): the second one used to be fired and its failure swallowed, so a
+   * dropped connection moved the owner on while `/setup` still considered this
+   * step incomplete. A failed progress write now stops here with a retry, and
+   * the busy flag is released in `finally` on every path.
+   */
   async function save(skip: boolean) {
     setBusy(true);
     setError("");
-    if (!skip) {
-      const res = await fetch("/api/backup/config", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          enabled,
-          intervalHours: 24,
-          anchorTime,
-          localRetention,
-          directory,
-          cloud: { enabled: false },
-        }),
+    try {
+      if (!skip) {
+        const { ok, data } = await api<{ error?: string }>("/api/backup/config", {
+          method: "PUT",
+          body: JSON.stringify({
+            enabled,
+            intervalHours: 24,
+            anchorTime,
+            localRetention,
+            directory,
+            cloud: { enabled: false },
+          }),
+        });
+        if (!ok) {
+          setError(
+            data.error === "cloud_backup_unavailable_local"
+              ? "در نصب محلی، پشتیبان‌گیری ابری در دسترس نیست."
+              : "ذخیرهٔ تنظیمات پشتیبان‌گیری ممکن نشد.",
+          );
+          return;
+        }
+      }
+      const progress = await api<{ error?: string }>("/api/setup/progress", {
+        method: "POST",
+        body: JSON.stringify({ step: "backup" }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setBusy(false);
-        setError(
-          data.error === "cloud_backup_unavailable_local"
-            ? "در نصب محلی، پشتیبان‌گیری ابری در دسترس نیست."
-            : "ذخیرهٔ تنظیمات پشتیبان‌گیری ممکن نشد.",
-        );
+      if (!progress.ok) {
+        setError(errorMessage(progress.data?.error, undefined, progress.status));
         return;
       }
+      router.push(nextPath("backup"));
+    } finally {
+      setBusy(false);
     }
-    await fetch("/api/setup/progress", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ step: "backup" }),
-    }).catch(() => {});
-    router.push(nextPath("backup"));
   }
 
   if (!loaded || !localOnly) return <SetupDataSkeleton rows={4} />;

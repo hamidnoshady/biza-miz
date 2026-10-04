@@ -401,6 +401,10 @@ async function provisionInternalCompany(session: PlatformSessionPayload) {
       industry: "service_saas",
       subdomain: "platform-company",
       seedChartOfAccounts: true,
+      // The platform's own company workspace is provisioned ready to use, not
+      // onboarded: it must not be routed through the tenant wizard either
+      // (issue #808 §4).
+      completeSetup: true,
       ownershipKind: "platform_internal",
       createdBy: session.padmin,
     });

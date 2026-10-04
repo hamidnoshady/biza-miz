@@ -201,6 +201,20 @@ async function main() {
       );
     }
 
+    // The seed exists to skip the wizard (README: "to skip the wizard and get
+    // a ready-to-login demo"), and onboarding routing now keys on the formal
+    // completion marker alone (issue #808 §1/§2). Without this row the seeded
+    // owner would be sent into /setup on every login. Written idempotently so
+    // re-running the seed neither errors nor rewrites an existing stamp.
+    await client.query(
+      `INSERT INTO settings (business_id, location_id, key, value)
+       VALUES ($1, NULL, 'setup.progress', jsonb_build_object(
+         'steps', jsonb_build_object('seeded', to_jsonb(now()::text)),
+         'completedAt', to_jsonb(now()::text)))
+       ON CONFLICT (business_id, location_id, key) DO NOTHING`,
+      [businessId],
+    );
+
     await client.query("COMMIT");
     console.log("Seed complete.");
   } catch (err) {

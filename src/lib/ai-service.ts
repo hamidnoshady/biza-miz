@@ -772,6 +772,8 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     retrieval: retrievalReady,
     toolAllowlist: opts.toolAllowlist,
     projectScoped: opts.projectScoped,
+    // Issue #808 §8 — the wizard surface follows the business's own step list.
+    industry: promptContext.industry,
   }).filter((tool) => allowActions || tool.function.name !== "propose_action");
   // Filtering happens before provider serialization and again in the executor.
   // A newly-added tool without a registry entry therefore cannot accidentally

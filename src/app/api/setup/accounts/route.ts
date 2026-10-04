@@ -12,7 +12,7 @@ import {
 import { withTenantScope } from "@/lib/auth";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 
-/** Step 2 — chart of accounts. GET returns the industry-appropriate template + what already exists. */
+/** Chart of accounts. GET returns the industry-appropriate template + what already exists. */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requireManager();
   if (error) return error;
@@ -110,14 +110,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       }
     }
 
+    // The step marker commits with the chart it describes (issue #808 §6), so
+    // a failed progress write can no longer leave accounts that exist while
+    // the wizard believes the step was never done.
+    const progress = await markStepDone(session.businessId, "accounts", client);
     await client.query("COMMIT");
+    return NextResponse.json({ ok: true, created: accounts.length, progress });
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
   }
-
-  const progress = await markStepDone(session.businessId, "accounts");
-  return NextResponse.json({ ok: true, created: accounts.length, progress });
 });

@@ -46,16 +46,19 @@ export default function BusinessStep() {
     e.preventDefault();
     setBusy(true);
     setError("");
-    const { ok, data } = await api<{ error?: string }>("/api/setup/business", {
-      method: "POST",
-      body: JSON.stringify({ businessName, locationName, address, phone, currencyDisplay }),
-    });
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error));
-      return;
+    try {
+      const { ok, data, status } = await api<{ error?: string }>("/api/setup/business", {
+        method: "POST",
+        body: JSON.stringify({ businessName, locationName, address, phone, currencyDisplay }),
+      });
+      if (!ok) {
+        setError(errorMessage(data.error, undefined, status));
+        return;
+      }
+      router.push(nextPath("business"));
+    } finally {
+      setBusy(false);
     }
-    router.push(nextPath("business"));
   }
 
   if (!loaded) return <SetupDataSkeleton rows={5} />;

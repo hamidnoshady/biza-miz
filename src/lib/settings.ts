@@ -2,6 +2,7 @@
  * Typed access to the key/value `settings` table.
  * location_id NULL = business-wide setting (all wizard settings are business-wide).
  */
+import type { PoolClient } from "pg";
 import { query } from "./db";
 
 export const SETTING_KEYS = {
@@ -21,7 +22,17 @@ export const SETTING_KEYS = {
   costing: "inventory.costing",
   /** { defaultRate: number } — percent, applied to new menu categories */
   tax: "tax.config",
-  /** { steps: Record<string, string>, completedAt: string|null } — step → ISO time done */
+  /**
+   * WizardProgress (see below) — { steps: Record<string, string>,
+   * completedAt: string|null }, step → ISO time done.
+   *
+   * `completedAt` is the canonical "the onboarding wizard has formally
+   * finished" marker (stamped only by POST /api/setup/complete, provisioning
+   * and pairing). `steps` records which steps were visited and drives the
+   * wizard's ordering/`/setup` landing; it is *not* what makes a business
+   * operational, and `isSetupComplete()` does not read it — readiness is
+   * derived from the domain data (src/lib/setup-state.ts).
+   */
   wizardProgress: "setup.progress",
   /** { centralUrl, token, enabled } — this location's push target (Phase 9) */
   rollupConfig: "rollup.config",
@@ -102,9 +113,137 @@ export async function getWizardProgress(businessId: string): Promise<WizardProgr
   return p ?? { steps: {}, completedAt: null };
 }
 
-export async function markStepDone(businessId: string, step: string): Promise<WizardProgress> {
-  const progress = await getWizardProgress(businessId);
-  progress.steps[step] = new Date().toISOString();
-  await setSetting(businessId, SETTING_KEYS.wizardProgress, progress);
-  return progress;
+/**
+ * Marks one step done, in a single atomic statement.
+ *
+ * Deliberately not "read the whole row, mutate, write the whole row": two
+ * concurrent callers (a wizard step's own save, a skip, a repair pass, or two
+ * staff on two devices) both read the same old object and the later write then
+ * erases the other's marker. The `||` below is evaluated by PostgreSQL against
+ * the row as it is *at update time*, so every caller's own step is merged into
+ * whatever the row currently holds — including a `completedAt` stamped by a
+ * concurrent `/api/setup/complete`.
+ *
+ * Pass `client` to participate in a caller's transaction (the opening step
+ * does: its marker must commit with the accounting rows it describes, or not
+ * at all).
+ */
+export async function markStepDone(
+  businessId: string,
+  step: string,
+  client?: PoolClient,
+): Promise<WizardProgress> {
+  const sql = `
+    INSERT INTO settings (business_id, location_id, key, value)
+    VALUES ($1, NULL, $2, jsonb_build_object(
+      'steps', jsonb_build_object($3::text, to_jsonb(now()::text)),
+      'completedAt', NULL))
+    ON CONFLICT (business_id, location_id, key) DO UPDATE
+    SET value = COALESCE(settings.value, '{}'::jsonb) || jsonb_build_object(
+          'steps',
+          COALESCE(settings.value -> 'steps', '{}'::jsonb)
+            || jsonb_build_object($3::text, to_jsonb(now()::text))),
+        updated_at = now()
+    RETURNING value`;
+  const params = [businessId, SETTING_KEYS.wizardProgress, step];
+  const { rows } = client
+    ? await client.query<{ value: WizardProgress }>(sql, params)
+    : await query<{ value: WizardProgress }>(sql, params);
+  return rows[0]?.value ?? { steps: { [step]: new Date().toISOString() }, completedAt: null };
+}
+
+/**
+ * Reconciles step markers with the persisted domain state, atomically.
+ *
+ * Setup readiness is derived from real data (a chart of accounts exists, a
+ * costing method is set, a sellable item exists for F&B), so a marker that
+ * disagrees with that data is stale in one of two ways: a failed progress write
+ * left a step unmarked although its data committed, or an older flow marked a
+ * step done on weaker evidence (the menu step used to complete on creating a
+ * *category*). `done` marks steps whose data is present, `undone` clears
+ * markers whose data is not. One statement, so a concurrent `markStepDone`
+ * cannot be lost. A business that already finished is never rewritten — the
+ * stamp is preserved and callers skip reconciliation for it.
+ */
+export async function reconcileWizardSteps(
+  businessId: string,
+  diff: { done: string[]; undone: string[] },
+): Promise<WizardProgress> {
+  const done: Record<string, string> = {};
+  const now = new Date().toISOString();
+  for (const step of diff.done) done[step] = now;
+  const sql = `
+    INSERT INTO settings (business_id, location_id, key, value)
+    VALUES ($1, NULL, $2, jsonb_build_object(
+      'steps', $3::jsonb,
+      'completedAt', NULL))
+    ON CONFLICT (business_id, location_id, key) DO UPDATE
+    SET value = jsonb_set(
+          jsonb_set(
+            COALESCE(settings.value, '{}'::jsonb),
+            '{steps}',
+            (COALESCE(settings.value -> 'steps', '{}'::jsonb) - $4::text[]) || $3::jsonb,
+            true),
+          '{completedAt}',
+          COALESCE(settings.value -> 'completedAt', 'null'::jsonb),
+          true),
+        updated_at = now()
+    RETURNING value`;
+  const params = [
+    businessId,
+    SETTING_KEYS.wizardProgress,
+    JSON.stringify(done),
+    diff.undone,
+  ];
+  const { rows } = await query<{ value: WizardProgress }>(sql, params);
+  return rows[0]?.value ?? { steps: done, completedAt: null };
+}
+
+export interface SetupCompletion {
+  progress: WizardProgress;
+  /**
+   * True only for the call that actually stamped `completedAt`. A retry (or a
+   * second device) gets `false`, which is what keeps the completion audit
+   * event written exactly once.
+   */
+  stamped: boolean;
+}
+
+/**
+ * The canonical interactive completion transition: stamp `completedAt` if it
+ * is not already set, in one atomic statement.
+ *
+ * The `WHERE` on the conflict update is what makes "exactly once" safe under
+ * concurrency: two simultaneous Finish presses cannot both observe an unset
+ * `completedAt`, because the second one's update matches no row and returns
+ * nothing.
+ */
+export async function markSetupComplete(
+  businessId: string,
+  client?: PoolClient,
+): Promise<SetupCompletion> {
+  const sql = `
+    WITH upsert AS (
+      INSERT INTO settings (business_id, location_id, key, value)
+      VALUES ($1, NULL, $2, jsonb_build_object(
+        'steps', '{}'::jsonb,
+        'completedAt', to_jsonb(now()::text)))
+      ON CONFLICT (business_id, location_id, key) DO UPDATE
+      SET value = jsonb_set(
+            COALESCE(settings.value, '{}'::jsonb),
+            '{completedAt}',
+            to_jsonb(now()::text),
+            true),
+          updated_at = now()
+      WHERE settings.value ->> 'completedAt' IS NULL
+      RETURNING value
+    )
+    SELECT (SELECT value FROM upsert) AS value`;
+  const params = [businessId, SETTING_KEYS.wizardProgress];
+  const { rows } = client
+    ? await client.query<{ value: WizardProgress | null }>(sql, params)
+    : await query<{ value: WizardProgress | null }>(sql, params);
+  const stampedProgress = rows[0]?.value ?? null;
+  if (stampedProgress) return { progress: stampedProgress, stamped: true };
+  return { progress: await getWizardProgress(businessId), stamped: false };
 }
