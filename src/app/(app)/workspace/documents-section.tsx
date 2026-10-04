@@ -11,7 +11,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ExternalLinkIcon, FilesIcon, PlusIcon, XIcon } from "lucide-react";
+import { ExternalLinkIcon, FilesIcon, PlusIcon } from "lucide-react";
 import { mediaFileUrl } from "@/app/dashboard/media/media-picker";
 import {
   EmptyState,
@@ -19,7 +19,6 @@ import {
   KpiRow,
   LoadingSkeleton,
   SectionCard,
-  overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import {
   DataTable,
@@ -52,6 +51,8 @@ import {
   TagList,
   workspaceError,
   LoadMoreFooter,
+  WorkspaceFormDialog,
+  stackedTableClass,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
 import type { WorkspaceIntent } from "./workspace-routes";
@@ -200,7 +201,7 @@ export function DocumentsSection({
             نقشه، صورت‌جلسه یا پیوست قرارداد را ثبت کنید تا نسخه و وضعیت تأیید آن پیگیری شود.
           </EmptyState>
         ) : (
-          <DataTable caption="فهرست اسناد میز کار" frame={false}>
+          <DataTable caption="فهرست اسناد میز کار" frame={false} tableClassName={stackedTableClass}>
             <DataTableHead>
               <Th>عنوان</Th>
               <Th>تعلق به</Th>
@@ -212,19 +213,17 @@ export function DocumentsSection({
             <DataTableBody>
               {documents.map((document) => (
                 <DataTableRow key={document.id} onClick={() => setEditing(document)}>
-                  <Td>
+                  <Td data-label="عنوان">
                     <div className="flex flex-col gap-1">
                       <span className="font-medium">{document.title}</span>
                       {document.fileName ? (
                         document.mediaAssetId ? (
-                          // The row's own onClick opens the metadata dialog; this link
-                          // must stop that propagation or the file could never be
-                          // opened directly — the whole point of listing it here.
+                          // The row's own onClick opens the metadata dialog; `DataTableRow`
+                          // ignores clicks on a link inside it, so this opens the file.
                           <a
                             href={mediaFileUrl(document.mediaAssetId)}
                             target="_blank"
                             rel="noreferrer"
-                            onClick={(event) => event.stopPropagation()}
                             className="inline-flex w-fit items-center gap-1 text-xs text-amber-700 underline-offset-2 hover:underline dark:text-amber-400"
                           >
                             <ExternalLinkIcon className="size-3" aria-hidden />
@@ -237,7 +236,7 @@ export function DocumentsSection({
                       <TagList tags={document.tags} />
                     </div>
                   </Td>
-                  <Td>
+                  <Td data-label="تعلق به">
                     <div className="flex flex-col text-xs text-muted-foreground">
                       {document.projectName ? <span>پروژه: {document.projectName}</span> : null}
                       {document.contractTitle ? <span>قرارداد: {document.contractTitle}</span> : null}
@@ -247,16 +246,16 @@ export function DocumentsSection({
                       ) : null}
                     </div>
                   </Td>
-                  <Td className="tabular-nums">
+                  <Td data-label="نسخه" className="tabular-nums">
                     نسخهٔ {toPersianDigits(String(document.version))}
                   </Td>
-                  <Td>
+                  <Td data-label="وضعیت">
                     <DocumentStatusBadge status={document.status} />
                   </Td>
-                  <Td>
+                  <Td data-label="ثبت">
                     <DateCell date={document.createdAt.slice(0, 10)} relative={false} />
                   </Td>
-                  <Td>
+                  <Td data-label="تأیید">
                     {canRequestApproval && document.status === "draft" ? (
                       <SecondaryButton onClick={() => requestApproval(document)}>
                         درخواست تأیید
@@ -393,101 +392,92 @@ function DocumentDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/30 p-4 backdrop-blur-sm">
-      <div className={`${overlayPanelClass} w-full max-w-2xl`}>
-        <div className="flex items-center justify-between border-b border-border/80 p-4">
-          <h2 className="text-base font-semibold">{document ? "ویرایش سند" : "ثبت سند"}</h2>
-          <SecondaryButton onClick={onClose}>
-            <XIcon className="size-4" aria-hidden />
-            <span className="sr-only">بستن</span>
-          </SecondaryButton>
-        </div>
-        <div className="grid gap-3 p-4 sm:grid-cols-2">
-          <div className="sm:col-span-2">
-            <Field label="عنوان سند">
-              <input
-                className={inputClass}
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                autoFocus
-              />
-            </Field>
-          </div>
-          <div>
-            <PickerField
-              label="فایل از کتابخانهٔ رسانه"
-              value={mediaAssetId}
-              onChange={setMediaAssetId}
-              options={media.map((m) => ({ id: m.id, label: m.fileName }))}
-              placeholder="— بدون فایل —"
-              hint="بارگذاری فایل در بخش «رسانه» انجام می‌شود."
+    <WorkspaceFormDialog title={document ? "ویرایش سند" : "ثبت سند"} width="2xl" onClose={onClose}>
+      <div className="grid gap-3 p-4 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <Field label="عنوان سند">
+            <input
+              className={inputClass}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              autoFocus
             />
-            {mediaAssetId ? (
-              <a
-                href={mediaFileUrl(mediaAssetId)}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-1 inline-flex items-center gap-1 text-xs text-amber-700 underline-offset-2 hover:underline dark:text-amber-400"
-              >
-                <ExternalLinkIcon className="size-3" aria-hidden />
-                مشاهدهٔ فایل فعلی
-              </a>
-            ) : null}
-          </div>
-          <SelectField
-            label="وضعیت"
-            value={status}
-            onChange={setStatus}
-            options={DOCUMENT_STATUSES}
-            labels={DOCUMENT_STATUS_LABELS}
-          />
-          <PickerField
-            label="پروژه"
-            value={projectId}
-            onChange={setProjectId}
-            options={lookups.projects.map((p) => ({ id: p.id, label: p.name }))}
-            placeholder="— بدون پروژه —"
-          />
-          <PickerField
-            label="قرارداد"
-            value={contractId}
-            onChange={setContractId}
-            options={contracts.map((c) => ({ id: c.id, label: c.title }))}
-            placeholder="— بدون قرارداد —"
-          />
-          <PickerField
-            label="مشتری / طرف حساب"
-            value={partyId}
-            onChange={setPartyId}
-            options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
-          />
-          <Field label="برچسب‌ها" hint="با «،» جدا کنید">
-            <input className={inputClass} value={tags} onChange={(e) => setTags(e.target.value)} />
           </Field>
-          <div className="sm:col-span-2">
-            <Field label="توضیح">
-              <textarea
-                className={`${inputClass} min-h-20`}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </Field>
-          </div>
         </div>
-        <div className="flex flex-wrap justify-end gap-2 border-t border-border/80 p-4">
-          <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
-          {document && canManage ? (
-            <SecondaryButton onClick={saveAsNewVersion} disabled={saving}>
-              ثبت نسخهٔ تازه
-            </SecondaryButton>
+        <div>
+          <PickerField
+            label="فایل از کتابخانهٔ رسانه"
+            value={mediaAssetId}
+            onChange={setMediaAssetId}
+            options={media.map((m) => ({ id: m.id, label: m.fileName }))}
+            placeholder="— بدون فایل —"
+            hint="بارگذاری فایل در بخش «رسانه» انجام می‌شود."
+          />
+          {mediaAssetId ? (
+            <a
+              href={mediaFileUrl(mediaAssetId)}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 inline-flex items-center gap-1 text-xs text-amber-700 underline-offset-2 hover:underline dark:text-amber-400"
+            >
+              <ExternalLinkIcon className="size-3" aria-hidden />
+              مشاهدهٔ فایل فعلی
+            </a>
           ) : null}
-          {canManage ? (
-            <PrimaryButton type="button" onClick={submit} disabled={!title.trim() || saving}>
-              {saving ? "در حال ذخیره" : "ذخیره"}
-            </PrimaryButton>
-          ) : null}
+        </div>
+        <SelectField
+          label="وضعیت"
+          value={status}
+          onChange={setStatus}
+          options={DOCUMENT_STATUSES}
+          labels={DOCUMENT_STATUS_LABELS}
+        />
+        <PickerField
+          label="پروژه"
+          value={projectId}
+          onChange={setProjectId}
+          options={lookups.projects.map((p) => ({ id: p.id, label: p.name }))}
+          placeholder="— بدون پروژه —"
+        />
+        <PickerField
+          label="قرارداد"
+          value={contractId}
+          onChange={setContractId}
+          options={contracts.map((c) => ({ id: c.id, label: c.title }))}
+          placeholder="— بدون قرارداد —"
+        />
+        <PickerField
+          label="مشتری / طرف حساب"
+          value={partyId}
+          onChange={setPartyId}
+          options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
+        />
+        <Field label="برچسب‌ها" hint="با «،» جدا کنید">
+          <input className={inputClass} value={tags} onChange={(e) => setTags(e.target.value)} />
+        </Field>
+        <div className="sm:col-span-2">
+          <Field label="توضیح">
+            <textarea
+              className={`${inputClass} min-h-20`}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </Field>
         </div>
       </div>
-    </div>
+      <div className="flex flex-wrap justify-end gap-2 border-t border-border/80 p-4">
+        <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
+        {document && canManage ? (
+          <SecondaryButton onClick={saveAsNewVersion} disabled={saving}>
+            ثبت نسخهٔ تازه
+          </SecondaryButton>
+        ) : null}
+        {canManage ? (
+          <PrimaryButton type="button" onClick={submit} disabled={!title.trim() || saving}>
+            {saving ? "در حال ذخیره" : "ذخیره"}
+          </PrimaryButton>
+        ) : null}
+      </div>
+    </WorkspaceFormDialog>
   );
 }

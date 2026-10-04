@@ -39,7 +39,9 @@ import {
   roleCan,
   type WorkspaceRole,
 } from "@/lib/workspace-shared";
-import { PickerField, SelectField, workspaceError } from "./workspace-ui";
+import { PickerField, SelectField, workspaceError,
+  stackedTableClass,
+} from "./workspace-ui";
 import type { WorkspaceLookups } from "./use-workspace-lookups";
 
 interface MemberRow {
@@ -177,7 +179,7 @@ export function TeamsSection({
             مالک پروژه به‌صورت خودکار عضو است؛ بقیه را از فرم پایین اضافه کنید.
           </EmptyState>
         ) : (
-          <DataTable caption="اعضای پروژه">
+          <DataTable caption="اعضای پروژه" tableClassName={stackedTableClass}>
             <DataTableHead>
               <tr>
                 <Th>عضو</Th>
@@ -190,10 +192,10 @@ export function TeamsSection({
             <DataTableBody>
               {members.map((member) => (
                 <DataTableRow key={member.id}>
-                  <Td>
+                  <Td data-label="عضو">
                     <span className="font-medium">{member.fullName}</span>
                   </Td>
-                  <Td>
+                  <Td data-label="نقش در پروژه">
                     {canManage ? (
                       <select
                         className={inputClass}
@@ -214,7 +216,7 @@ export function TeamsSection({
                       </StatusBadge>
                     )}
                   </Td>
-                  <Td>
+                  <Td data-label="بار کاری">
                     {/* Workload on this project (#761 §13), from the task rows themselves. */}
                     <div className="flex flex-col gap-0.5 text-xs tabular-nums">
                       <span>{toPersianDigits(String(member.openTasks))} وظیفهٔ باز</span>
@@ -228,10 +230,10 @@ export function TeamsSection({
                       </span>
                     </div>
                   </Td>
-                  <Td>
+                  <Td data-label="از تاریخ">
                     <span className="tabular-nums">{formatJalali(member.createdAt)}</span>
                   </Td>
-                  <Td>
+                  <Td data-label="حذف">
                     {canManage ? (
                       <SecondaryButton onClick={() => remove(member.userId)} disabled={busy}>
                         <Trash2Icon className="size-4" aria-hidden />

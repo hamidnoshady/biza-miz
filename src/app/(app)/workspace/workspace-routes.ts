@@ -165,14 +165,6 @@ export function visibleWorkspaceSections(
   );
 }
 
-/** May this member open the workspace at all? */
-export function canOpenWorkspace(
-  permissions: ReadonlySet<string> | ReadonlyArray<string>,
-): boolean {
-  const held = permissions instanceof Set ? permissions : new Set(permissions);
-  return held.has(PERMISSIONS.workspaceView);
-}
-
 /**
  * «+ ایجاد» — the contextual create actions (#761 §5), shared by the command
  * bar menu and the Ctrl/Cmd+K palette. Each lands on its section with
