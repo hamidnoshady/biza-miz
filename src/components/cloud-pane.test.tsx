@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CLOUD_EMBED_UA_TOKEN } from "@/lib/cloud-embed";
+import { CLOUD_EMBED_UA_TOKEN, cloudThemeScript } from "@/lib/cloud-embed";
 import { CloudPane } from "./cloud-pane";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+
+const theme = vi.hoisted(() => ({ resolvedTheme: "dark" as string | undefined }));
+vi.mock("next-themes", () => ({ useTheme: () => theme }));
 
 function desktop(sessionCode: string | null = null) {
   window.businessSuiteDesktop = { embedsCloud: true } as unknown as NonNullable<typeof window.businessSuiteDesktop>;
@@ -30,6 +33,24 @@ describe("CloudPane", () => {
     expect(guest.getAttribute("src")).toBe("https://cafe.example.com/crm/deals?tab=open");
     expect(guest.getAttribute("partition")).toBe("persist:cloud");
     expect(guest.getAttribute("useragent")).toContain(CLOUD_EMBED_UA_TOKEN);
+  });
+
+  it("dresses the cloud screen in the desktop's theme and follows the toggle", async () => {
+    desktop();
+    theme.resolvedTheme = "dark";
+    const { container, rerender } = render(<CloudPane pathAndQuery="/reports" cloudUrl="https://cafe.example.com" />);
+    await waitFor(() => expect(container.querySelector("webview")).not.toBeNull());
+    const guest = container.querySelector("webview") as HTMLElement & Record<string, unknown>;
+    const executeJavaScript = vi.fn(async () => undefined);
+    guest.executeJavaScript = executeJavaScript;
+    guest.getURL = () => "https://cafe.example.com/reports";
+
+    guest.dispatchEvent(new Event("dom-ready"));
+    expect(executeJavaScript).toHaveBeenLastCalledWith(cloudThemeScript("dark"));
+
+    theme.resolvedTheme = "light";
+    rerender(<CloudPane pathAndQuery="/reports" cloudUrl="https://cafe.example.com" />);
+    await waitFor(() => expect(executeJavaScript).toHaveBeenLastCalledWith(cloudThemeScript("light")));
   });
 
   it("spends a one-click sign-in code on its first load, then lands on the screen asked for", async () => {
