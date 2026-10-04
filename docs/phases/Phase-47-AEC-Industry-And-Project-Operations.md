@@ -1,6 +1,6 @@
 # Phase 47 — The AEC industry and AEC project operations
 
-**Status:** Waves 1–3 implemented (migrations 0193, 0194, 0195); Waves 4–11 designed here, not built.
+**Status:** Waves 1–8 implemented (migrations 0193–0200); Waves 9–11 designed here, not built.
 
 Working issue: [#799 — Add Architecture, Civil Engineering & Construction business type with AEC
 project operations](https://github.com/hamidnoshady/cafe-restaurant-pos/issues/799).
@@ -409,13 +409,95 @@ the offline candidates) is a replication-domain decision, which Wave 10 owns tog
 capture flows. `material_tracking` stays out of `AEC_LIVE_CAPABILITIES` until Wave 9 builds it, which
 is why no tab in this wave can show a delivery-tracking screen that does not exist.
 
-## Waves 8–11 — designed, not built
+## Wave 8 — commercial controls (implemented, migration 0200)
+
+What shipped:
+
+| Surface | Change |
+|---|---|
+| Domain | `migrations/0200_aec_commercial_controls.sql` — five tables: `aec_contract_commercials` (§17's AEC block, one row per `workspace_contracts` contract), `aec_variations` (§15, numbered `VO-001` per project), `aec_payment_certificates` (§16, numbered `PC-001`, `kind IN ('application','certificate')` for the two directions) with `aec_payment_certificate_lines` (the measurement, linked to BOQ items or free-labelled), and `aec_commercial_events` (§33's trail for both subjects). All five ENABLE + FORCE RLS with a `tenant_isolation` policy and `UNIQUE (business_id, id)`; `workspace_contracts` gains the `UNIQUE (business_id, id)` the composite keys need; `workspace_documents` gains nullable `variation_id`/`payment_certificate_id`; `workspace_approvals.subject_type` widens with `variation` and `payment_certificate` and `workspace_activity.subject_type` with the same two; the migration seeds §22's «صورت‌وضعیت‌های در انتظار» and «ریسک تجاری پروژه‌ها» widgets for the industry |
+| Arithmetic | The certificate's net is the database's: `net_rial = gross − advance_recovery − retention − other_deductions − tax` with `approved_amount_rial <= net_rial`, and the measured lines must add up to the gross before a claim leaves draft. §15's status CHECKs make a priced order without an estimate, a submitted one without an amount and an approved one without an agreed figure impossible rows, so the service's codes and the schema agree instead of one backstopping the other |
+| Immutability | `aec_variation_guard()` refuses every content change once an order has been submitted (the client's copy is the client's), refuses a delete that is not a draft, and freezes an implemented or cancelled order outright; `aec_certificate_guard()` refuses any `UPDATE` at all to a certified claim and any `DELETE` of a non-draft, and `aec_certificate_line_guard()` freezes a claim's lines with it. Withdrawal is the chain's own move (a rejected order is re-priced, a rejected claim returns to `draft`), which is §33's "immutable history" without a second audit table |
+| The revised value | `aec_recompute_contract_revised_value()` and three triggers keep `aec_contract_commercials.revised_value_rial = workspace_contracts.value_rial + approved variations`, and a `BEFORE` trigger overwrites a hand-typed figure. The original contract amount, the approved BOQ revision and its lines are never written by an approval — §15's "must not rewrite the original contract amount, the original approved BOQ, old estimate versions" is a property of the schema rather than a promise in a service |
+| Pure half | `src/lib/aec-commercial.ts` — §15's eight statuses and one chain with its two deliberate reopenings (`rejected → priced`, `submitted → priced`), its six sources, `isEditableVariation`/`isApprovedVariation`/`isOpenVariation`; §16's two kinds, six statuses and its cycle (`draft → submitted → under_review → certified \| rejected`, `rejected → draft`); `certificateTotals` (the CHECK, in TypeScript); `revisedContractValueRial`, `previousCertifiedRial`, `outstandingAdvanceRial`, `retentionTotalRial`; both action catalogues with their labels and events and one predicate each — `variationActionNeedsApproval` (false only for `price`, `submit`, `reopen`) and `certificateActionNeedsApproval` (false only for `submit`, `reopen`); and `COMMERCIAL_CAPABILITY_FOR` (`variations`, `progress_claims`, `financials`) |
+| Service | `src/lib/aec-commercial-service.ts` — variation and claim CRUD with per-project numbering under `pg_advisory_xact_lock`, the two action chains with their preconditions, `decideVariationApproval`/`decideCertificateApproval` (the queue's half), §17's `saveContractCommercial` (which never writes the revised value), `getProjectCommercialSummary` (§20), and the four queues the widgets, the scan and the assistant read: `pendingVariations`, `pendingCertificates`, `expiringSecurities`, `certifiedClaimsAwaitingPayment` |
+| API | `GET/POST /api/aec/projects/[id]/variations`, `GET/PATCH/DELETE /api/aec/variations/[id]`, `POST /api/aec/variations/[id]/status`, the same three for certificates, `GET /api/aec/projects/[id]/commercial` and `GET/PUT /api/aec/contracts/[id]/commercial`. Every one `withTenantScope` + `aecOwner` + `requireProjectCapability` (the contract block checks the project role only when the contract is project-scoped; a business-level framework agreement has none to check) |
+| Permission | **No new key.** Reading is `workspace.view`; writing the registers, preparing an order and drafting or submitting a claim are `workspace.manage`; reviewing, approving, rejecting, implementing, cancelling and certifying are `workspace.approve` — §24's "change-order manage/approve", "commercial/payment certificate manage/approve" and "project financial view" expressed through the two keys the product already has, with the split asserted per route in `api-guards.test.ts` |
+| Screens | `src/app/(app)/workspace/projects/[id]/variations-panel.tsx` («تغییرات»: the register with the four money figures side by side — estimated, cost impact, submitted, agreed — the contract-value line an approval will move, and the §33 trail), `certificates-panel.tsx` («صورت‌وضعیت و پرداخت»: both directions on one register, an arithmetic preview that never lets the net be typed, measurement lines that must sum to the gross, the previous/current certified pair, and the «تأییدشده ≠ وصول‌شده» note), `commercial-panel.tsx` (§20's cockpit and §17's per-contract block, mounted inside «مالی» behind the `financials` capability). Both registers get their own tabs after «مالی», because a change order moves the contract's value and a claim claims against it |
+| Cockpit | `aec-cockpit.ts` — `changes` («تغییرات», `variations`), `payments` («صورت‌وضعیت و پرداخت», `progress_claims`) and `financials` («مالی پروژه») are shipped and `AEC_SHIPPED_WAVE = 8`; `AEC_LIVE_CAPABILITIES` is now 11, and `material_tracking` is still absent until Wave 9 |
+| Assistant | §23's three commercial reads join the AEC tool set: `list_change_orders`, `list_payment_certificates` and `list_project_commercial_risks` (the last one merging pending changes, pending claims and expiring securities). `AEC_AI_TOOL_NAMES` is ten, and the pure suite pins the list literally |
+| Notifications | Four event keys on the **existing** hourly AEC sweep — `aec.payment_certificate_pending` (a claim sent more than fourteen days ago), `aec.client_payment_overdue` (certified and still uncollected), `aec.guarantee_expiring` and `aec.insurance_expiring` — each with its own budget, so fifty late claims cannot silence the bond that expires next week |
+| Party merge | `aec_variations.responsible_party_id` classified in `PARTY_REFERENCES` with `filterSql: status IN ('draft','priced')`: a merge re-points the party of an order still being prepared and leaves a submitted one naming the party it was raised against, which is what migration 0200's freeze and the registry's filter agree on |
+
+### Decision 22 — the revised value is derived, and the contract is never rewritten
+
+§15 says an approved variation "must not rewrite the original contract amount, the original approved
+BOQ, or old estimate versions", and the tempting shortcut — add the approved amount to
+`workspace_contracts.value_rial` and move on — destroys exactly the figure a claim is later argued
+against. So the contract keeps its original value for good, the revised value lives on the contract's
+*commercial* row, and the database recomputes it from the original plus the approved variations on
+every relevant write. A `BEFORE` trigger overwrites a figure typed by hand, which makes "the revised
+value" one answer rather than two, and the database suite asserts all three halves: the revised figure
+moves, the contract does not, and the approved BOQ revision and its lines are byte-for-byte what they
+were.
+
+### Decision 23 — certified is not collected, so this wave stores no balance
+
+§16's last line is the one that shapes the whole register: "Accounting remains authoritative for actual
+A/R, A/P, receipts, payments, journal postings; Workspace manages the commercial certificate only —
+never duplicate paid/received balances." So no table here has a paid or received column, and the
+cockpit does not invent one. §20's actual cost is read from the ledger through `projectReport`
+(`journal_lines` via `journal_entries.project_id`) and is `null` for an actor without `ledger.view` —
+the same rule and the same reason the project report already uses, because «۰ ریال هزینه» is a claim
+about money and an absent one is not. The figures only the books own (receipts, payments, A/R, A/P) are
+*named* in `readInAccounting` rather than recomputed, and the four §20 figures that need registers this
+build does not have yet (committed cost, cost to complete, forecast final cost, forecast margin) are
+named in `awaitingWaves` with the wave that brings them. The «Project Margin» widget is deliberately
+**not** seeded for the same reason: a margin computed from a cost nobody has booked is a
+plausible-looking wrong number, which is worse than a missing one.
+
+### Decision 24 — a decision in the queue is the review, so the queue walks that step
+
+§15's chain is Draft → Priced → Submitted → Under Review → Approved, and §16's is
+Draft → Submitted → Under Review → Certified. The approvals inbox offers exactly two buttons on a
+pending row, and the first version of `decide*Approval` called `approve`/`certify` straight off the
+submission — which neither chain allows, so approving a freshly submitted order from the inbox failed
+with an invalid transition. The fix is not a wider transition table (a chain that can jump its own
+review step is not a chain); the queue now takes the review step itself before deciding, because the
+person deciding in the inbox *is* the reviewer. The database suite covers both subjects, and it is the
+kind of defect that only a suite which walks the real path — submit, then decide *from the queue* —
+can find.
+
+### Decision 25 — three switches, not one, because they are three different businesses
+
+`variations`, `progress_claims` and `financials` came into `AEC_LIVE_CAPABILITIES` together, and they
+stay independent: a design office can watch a project's money (§20's cockpit, which is
+`financials`) without ever raising a change order or certifying a claim, a contractor can raise changes
+without issuing certificates, and a supervisor issues certificates against work somebody else
+performed. The service asserts each domain against its own capability, and the database suite proves it
+on one fixture — a design-preset business reads a cockpit and is refused both registers with
+`capability_disabled`, not with a 403 about permissions.
+
+### Decision 26 — the measurement is the claim, and the trigger is what says so
+
+§16 asks for progress, work completed and the certified figure, and the tempting shape is a claim whose
+gross is typed and whose lines are a note. Then the lines are decoration: two answers to one question,
+and the one the client is paid against is whichever somebody looked at last. So when a claim has lines
+they *are* the measurement — they must sum to the gross before the claim can leave draft — and the rule
+is enforced in the service (with a code), in the route (a 409 rather than a 500) and in
+`aec_certificate_guard()` (so a raw status flip is refused too). A draft, by contrast, is allowed to
+disagree with itself: that is what drafting is, and the suite asserts both halves.
+
+Wave 8 also closes the two links Wave 6 and Wave 7 deliberately left open: an RFI's "linked variation /
+change order" is `aec_variations.rfi_id` (the reference is owned by the later record, so the RFI never
+grew a column pointing at a table that did not exist), and a day's or an inspection's "cost impact" is
+the variation's own `cost_impact_rial`, which is why neither the site log nor the issue grew one.
+
+## Waves 9–11 — designed, not built
 
 In the issue's order. Nothing below has a migration or a screen yet; the wave boundaries exist so
 each can be reviewed on its own.
 
-8. **Commercial controls.** Variations/change orders, progress certificates, retention and advance,
-   and the project commercial cockpit.
 9. **Procurement.** Requests, RFQs, comparison, approvals and delivery tracking.
 10. **AI, reporting and mobile/offline.** AEC tools and widgets on the existing assistant, the AEC
     report set, and the hybrid/offline classification.

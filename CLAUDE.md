@@ -1000,6 +1000,27 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   (`site_operations` and `qa_qc`), `snag`/`hse_observation` need `snagging`/`hse` (still
   `material_tracking`-free until Wave 9), `list_site_issues` is §23's seventh AEC read, and
   `aec.inspection_due`/`aec.snag_overdue` ride the same hourly scan as the Wave 6 pair.
+  Wave 8 (§15, §16, §17, §20) is the commercial controls: `aec_contract_commercials` (the §17 block on a
+  `workspace_contracts` contract), `aec_variations` (§15's change orders, `VO`-numbered per project),
+  `aec_payment_certificates` + `aec_payment_certificate_lines` (§16, both directions: `application` for
+  our claim to the client, `certificate` for what we issue to a contractor) and `aec_commercial_events`
+  (migration 0200, five tables, FORCE RLS), with `src/lib/aec-commercial.ts` as the client-safe half
+  (both chains, `certificateTotals` mirroring the CHECK, the two action catalogues, one
+  `*ActionNeedsApproval` each) and `src/lib/aec-commercial-service.ts` doing the writes. Two rules are
+  the reason it is shaped this way: **an approved change moves the revised contract value and never the
+  contract** — `revised_value_rial` is recomputed by trigger from the original plus the approved
+  variations, so the contract, the approved BOQ revision and old estimate versions cannot be rewritten —
+  and **Accounting keeps the money that moved**: no table here has a paid or received column, §20's
+  actual cost comes from the ledger through `projectReport` (and is `null` without `ledger.view`), and
+  A/R, A/P, receipts, payments, committed cost, cost to complete and the forecast margin are named as the
+  books' or as a later wave's rather than recomputed. §15's approvals and §16's certification file one
+  `workspace_approvals` row each (`variation`, `payment_certificate`), the register is `workspace.manage`
+  and every determination (`approve`, `reject`, `implement`, `cancel`, `review`, `certify`) is
+  `workspace.approve` — **no new permission**, §24's rule that a high-risk commercial act must not inherit
+  ordinary edit rights. `changes` and `payments` are their own tabs after «مالی», §20's cockpit rides
+  `financials` inside it, `AEC_LIVE_CAPABILITIES` is 11 with `variations`/`progress_claims`/`financials`
+  independent, §23 adds `list_change_orders`/`list_payment_certificates`/`list_project_commercial_risks`
+  (ten tools in all), and four reminder keys ride the same hourly scan.
   Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a
