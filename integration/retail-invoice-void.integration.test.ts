@@ -560,17 +560,28 @@ describe("voidRetailInvoice — cosmetics", () => {
     expect(await orderStatus(created.orderId)).toBe("voided");
   });
 
-  it("refuses a batch-tracked cosmetic line — FEFO allocation is not recoverable after the fact", async () => {
+  it("voids a batch-tracked cosmetic line and restores the exact FEFO allocation", async () => {
     const item = await itemsService.createItem({
       locationId: biz.locationId,
       name: "کرم ضدآفتاب",
       kind: "simple",
       tracking: "batch",
     });
+    // Two lots of the same item: FEFO must take the earlier-expiring one
+    // first, and the void must put the quantity back into *that* lot.
     await withTransaction((client) =>
       cosmeticsService.receiveBatch(client, {
         itemId: item.id,
-        batchNumber: "B1",
+        batchNumber: "B-LATE",
+        expiryDate: "2031-01-01",
+        quantity: "10",
+        unitCost: 30_000,
+      }),
+    );
+    await withTransaction((client) =>
+      cosmeticsService.receiveBatch(client, {
+        itemId: item.id,
+        batchNumber: "B-EARLY",
         expiryDate: "2030-01-01",
         quantity: "10",
         unitCost: 20_000,
@@ -587,8 +598,75 @@ describe("voidRetailInvoice — cosmetics", () => {
       lines: [{ kind: "cosmetic", itemId: item.id, quantity: "2", unitPrice: 60_000, vatPercent: 9 }],
     });
 
+    const batchQty = async (batchNumber: string): Promise<string> => {
+      const { rows } = await db.query<{ quantity: string }>(
+        "SELECT quantity::text FROM item_batches WHERE item_id = $1 AND batch_number = $2",
+        [item.id, batchNumber],
+      );
+      return rows[0].quantity;
+    };
+    expect(await batchQty("B-EARLY")).toBe("8.000000000");
+    expect(await batchQty("B-LATE")).toBe("10.000000000");
+    expect(await stockOf(item.id)).toBe("18.000000000");
+
+    // The exact allocation the sale consumed is persisted against the line.
+    const { rows: allocationRows } = await db.query<{ batch_number: string; quantity: string }>(
+      `SELECT a.batch_number, a.quantity::text FROM order_item_batch_allocations a
+         JOIN order_items oi ON oi.id = a.order_item_id
+        WHERE oi.order_id = $1`,
+      [created.orderId],
+    );
+    expect(allocationRows).toEqual([{ batch_number: "B-EARLY", quantity: "2.000000000" }]);
+
+    await voidInvoice(created.orderId);
+
+    // Voided: the same lot is back to its pre-sale quantity, the item_stock
+    // rollup matches the batches, and the invoice is voided.
+    expect(await batchQty("B-EARLY")).toBe("10.000000000");
+    expect(await batchQty("B-LATE")).toBe("10.000000000");
+    expect(await stockOf(item.id)).toBe("20.000000000");
+    expect(await orderStatus(created.orderId)).toBe("voided");
+  });
+
+  it("still refuses a batch-tracked line whose sale predates persisted allocations", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ریمل",
+      kind: "simple",
+      tracking: "batch",
+    });
+    await withTransaction((client) =>
+      cosmeticsService.receiveBatch(client, {
+        itemId: item.id,
+        batchNumber: "LEGACY",
+        expiryDate: "2030-01-01",
+        quantity: "5",
+        unitCost: 20_000,
+      }),
+    );
+
+    const created = await invoice({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      industry: "cosmetics",
+      tenders: [{ method: "cash" }],
+      lines: [{ kind: "cosmetic", itemId: item.id, quantity: "1", unitPrice: 60_000, vatPercent: 9 }],
+    });
+
+    // Simulate a line sold before migration 0198: no allocation recorded.
+    const { rows } = await db.query<{ item_id: string }>(
+      `SELECT id AS item_id FROM order_items WHERE order_id = $1 LIMIT 1`,
+      [created.orderId],
+    );
+    expect(rows[0]).toBeTruthy();
+    await db.query(
+      `DELETE FROM order_item_batch_allocations WHERE order_item_id IN
+         (SELECT id FROM order_items WHERE order_id = $1)`,
+      [created.orderId],
+    );
+
     await expect(voidInvoice(created.orderId)).rejects.toThrow(voidService.RetailInvoiceVoidError);
-    await expect(voidInvoice(created.orderId)).rejects.toThrow(/بچ‌محور/);
+    await expect(voidInvoice(created.orderId)).rejects.toThrow(/تخصیص بچ/);
     expect(await orderStatus(created.orderId)).toBe("completed");
   });
 });

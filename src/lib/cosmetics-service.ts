@@ -21,7 +21,18 @@ import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { getStock, receiveStock, setUnitPrice, type ItemStock } from "./accessories-service";
 import { cosmeticCogs, computeCosmeticSalePrice, type CosmeticSalePriceBreakdown } from "./cosmetics";
-import { allocateFefo, expiredBatches, isBatchExpired, sellableQuantity, type Batch } from "./fefo";
+import { isBatchExpired, sellableQuantity } from "./fefo";
+import {
+  allocateBatchLots,
+  allocationBatchNumbers,
+  allocationCostValue,
+  allocationExpiryDate,
+  consumeBatchAllocations,
+  loadBatchLotsForUpdate,
+  recomputeItemStockRollup,
+  averageCostAcrossBatches,
+  type BatchAllocation,
+} from "./retail-batch-inventory";
 import { quantityText, rialText, roundRial, type RialText } from "./inventory-exact";
 import { getItem, type Item } from "./items-service";
 import { buildVariantMatrix, type MatrixAxis } from "./variant-matrix";
@@ -32,6 +43,10 @@ import { resolveLineTenders, type RetailTenderQueueEntry } from "./retail-tender
 import "./cosmetics-posting-rules";
 
 export { getStock, receiveStock, setUnitPrice, type ItemStock };
+// The 0078 rollup now lives in the canonical engine (retail-batch-inventory.ts)
+// so every stock-changing channel shares one implementation. Re-exported under
+// its historical name for the modules that already import it from here.
+export { recomputeItemStockRollup as rollItemStockToBatches } from "./retail-batch-inventory";
 
 interface StockRow extends Record<string, unknown> {
   item_id: string;
@@ -55,6 +70,8 @@ export interface ItemBatch {
   batchNumber: string;
   /** ISO date (YYYY-MM-DD) or null. */
   expiryDate: string | null;
+  /** Manufacturer date from the label, when known. */
+  manufactureDate: string | null;
   quantity: string;
   unitCost: number | null;
   receivedDate: string;
@@ -66,6 +83,7 @@ interface BatchRow extends Record<string, unknown> {
   item_id: string;
   batch_number: string;
   expiry_date: string | null;
+  manufacture_date: string | null;
   quantity: string;
   unit_cost: string | null;
   received_date: string;
@@ -73,7 +91,7 @@ interface BatchRow extends Record<string, unknown> {
 }
 
 const BATCH_COLUMNS =
-  "id, item_id, batch_number, expiry_date::text AS expiry_date, quantity, unit_cost, received_date::text AS received_date, supplier_reference";
+  "id, item_id, batch_number, expiry_date::text AS expiry_date, manufacture_date::text AS manufacture_date, quantity, unit_cost, received_date::text AS received_date, supplier_reference";
 
 function mapBatch(row: BatchRow): ItemBatch {
   return {
@@ -81,6 +99,7 @@ function mapBatch(row: BatchRow): ItemBatch {
     itemId: row.item_id,
     batchNumber: row.batch_number,
     expiryDate: row.expiry_date,
+    manufactureDate: row.manufacture_date,
     quantity: row.quantity,
     unitCost: row.unit_cost == null ? null : Number(row.unit_cost),
     receivedDate: row.received_date,
@@ -104,10 +123,16 @@ function todayIso(): string {
 }
 
 /**
- * Receives a batch of a `tracking='batch'` item: creates the batch row and
+ * Receives a batch of a `tracking='batch'` item: creates the batch row — or
+ * merges into the existing lot with the same manufacturer/supplier number,
+ * re-averaging its unit cost exactly as the warehouse receipt path does — and
  * rolls `item_stock` forward so its quantity stays the sum of its batches and
  * its unit cost the weighted average across them. Runs in the caller's
  * transaction so the batch and its rollup commit together.
+ *
+ * The lot number is the real manufacturer/supplier number whenever the caller
+ * has it (purchase receipts pass it through); an internal reference is only
+ * ever generated when there is genuinely none.
  */
 export async function receiveBatch(
   client: PoolClient,
@@ -115,6 +140,8 @@ export async function receiveBatch(
     itemId: string;
     batchNumber: string;
     expiryDate?: string | null;
+    /** Manufacturer date, when the label carries one. */
+    manufactureDate?: string | null;
     quantity: string;
     unitCost: number;
     supplierReference?: string | null;
@@ -136,14 +163,61 @@ export async function receiveBatch(
     throw new Error("بهای تمام‌شده هر واحد باید یک عدد صحیح غیرمنفی (ریال) باشد.");
   }
 
+  // Same lot arriving again (a repeat purchase of one manufacturer lot, or a
+  // supplementary delivery) merges into the existing batch row rather than
+  // violating UNIQUE (item_id, batch_number): quantity adds up, unit cost
+  // becomes the weighted average of what the lot actually cost, and an expiry
+  // already recorded is never overwritten by a blank one. This is the same
+  // rule `nextLotUnitCost`/`preservedExpiry` apply to warehouse receipts.
+  const { rows: existingRows } = await client.query<BatchRow>(
+    `SELECT ${BATCH_COLUMNS} FROM item_batches
+      WHERE item_id = $1 AND batch_number = $2 FOR UPDATE`,
+    [input.itemId, batchNumber],
+  );
+  if (existingRows[0]) {
+    const existing = mapBatch(existingRows[0]);
+    const previousQty = new Decimal(existing.quantity);
+    const incomingQty = new Decimal(quantity);
+    const previousCost = existing.unitCost == null ? null : new Decimal(existing.unitCost);
+    const incomingCost = new Decimal(input.unitCost);
+    const mergedCost = previousCost == null
+      ? incomingCost
+      : previousQty.plus(incomingQty).isZero()
+        ? incomingCost
+        : previousQty.times(previousCost).plus(incomingQty.times(incomingCost)).div(previousQty.plus(incomingQty));
+    const { rows } = await client.query<BatchRow>(
+      `UPDATE item_batches
+          SET quantity = quantity + $3,
+              unit_cost = $4,
+              expiry_date = COALESCE(expiry_date, $5::date),
+              manufacture_date = COALESCE(manufacture_date, $6::date),
+              supplier_reference = COALESCE(supplier_reference, $7)
+        WHERE id = $1 AND item_id = $2
+        RETURNING ${BATCH_COLUMNS}`,
+      [
+        existing.id,
+        input.itemId,
+        quantity,
+        roundRial(mergedCost),
+        input.expiryDate ?? null,
+        input.manufactureDate ?? null,
+        input.supplierReference?.trim() || null,
+      ],
+    );
+    await recomputeItemStockRollup(client, input.itemId);
+    return mapBatch(rows[0]);
+  }
+
   const { rows } = await client.query<BatchRow>(
-    `INSERT INTO item_batches (item_id, batch_number, expiry_date, quantity, unit_cost, received_date, supplier_reference)
-     VALUES ($1, $2, $3::date, $4, $5, CURRENT_DATE, $6)
+    `INSERT INTO item_batches
+       (item_id, batch_number, expiry_date, manufacture_date, quantity, unit_cost, received_date, supplier_reference)
+     VALUES ($1, $2, $3::date, $4::date, $5, $6, CURRENT_DATE, $7)
      RETURNING ${BATCH_COLUMNS}`,
     [
       input.itemId,
       batchNumber,
       input.expiryDate ?? null,
+      input.manufactureDate ?? null,
       quantity,
       input.unitCost,
       input.supplierReference?.trim() || null,
@@ -151,61 +225,9 @@ export async function receiveBatch(
   );
   const batch = mapBatch(rows[0]);
 
-  await rollItemStockToBatches(client, input.itemId);
+  await recomputeItemStockRollup(client, input.itemId);
 
   return batch;
-}
-
-/**
- * Rolls an item's `item_stock` forward to the 0078 invariant: quantity is the
- * authoritative SUM of the item's batches and unit cost the weighted average
- * across them (falling back to the existing stock cost when no batch carries
- * quantity). Runs in the caller's transaction.
- *
- * Extracted from `receiveBatch` (Phase 42b) so the retail warehouse document
- * flow relieves and receives lots through the *same* rollup write — one
- * invariant, one implementation, whether the batches were touched by a
- * purchase, a sale or a warehouse document.
- */
-export async function rollItemStockToBatches(client: PoolClient, itemId: string): Promise<void> {
-  const { rows: existingRows } = await client.query<StockRow>(
-    `SELECT * FROM item_stock WHERE item_id = $1 FOR UPDATE`,
-    [itemId],
-  );
-  const existing = existingRows[0] ? mapStock(existingRows[0]) : null;
-  const unitCost = Number(
-    await averageAcrossBatches(client, itemId, existing?.unitCost ?? null),
-  );
-  await client.query(
-    `INSERT INTO item_stock (item_id, quantity, unit_cost)
-     VALUES ($1, (SELECT COALESCE(SUM(quantity), 0) FROM item_batches WHERE item_id = $1), $2)
-     ON CONFLICT (item_id) DO UPDATE
-       SET quantity = EXCLUDED.quantity, unit_cost = EXCLUDED.unit_cost, updated_at = now()`,
-    [itemId, unitCost],
-  );
-}
-
-/**
- * The weighted-average unit cost across all of an item's batches, falling
- * back to the item's existing stock cost when it has no batches yet. This is
- * the single place the rollup cost is computed, so the COGS posting and the
- * shelf view can never disagree.
- */
-async function averageAcrossBatches(
-  client: PoolClient,
-  itemId: string,
-  fallback: number | null,
-): Promise<RialText> {
-  const { rows } = await client.query<{ total_value: string; total_qty: string }>(
-    `SELECT COALESCE(SUM(quantity * unit_cost), 0)::text AS total_value,
-            COALESCE(SUM(quantity), 0)::text AS total_qty
-       FROM item_batches
-      WHERE item_id = $1 AND unit_cost IS NOT NULL`,
-    [itemId],
-  );
-  const qty = new Decimal(rows[0].total_qty);
-  if (qty.lte(0)) return rialText(String(fallback ?? 0));
-  return roundRial(new Decimal(rows[0].total_value).div(qty));
 }
 
 export interface SellCosmeticInput {
@@ -234,6 +256,13 @@ export interface SellCosmeticResult {
   batchNumbers?: string[];
   /** The earliest expiry date among the consumed batches, when batch-tracked. */
   expiryDate?: string | null;
+  /**
+   * The exact per-batch allocation this sale consumed (which `item_batches`
+   * rows, how much of each, at which cost). The caller persists it against the
+   * order line it writes — see `recordOrderItemBatchAllocations` — so the sale
+   * can later be returned, refunded or voided exactly.
+   */
+  batchAllocations?: BatchAllocation[];
 }
 
 /**
@@ -281,46 +310,22 @@ export async function sellCosmeticUnits(
   let cost: RialText;
   let batchNumbers: string[] | undefined;
   let expiryDate: string | null | undefined;
+  let batchAllocations: BatchAllocation[] | undefined;
 
   if (item.tracking === "batch") {
-    const batches = await listBatches(input.itemId, client);
-    const today = todayIso();
-    const expired = expiredBatches(batches, today);
-    const sellable = sellableQuantity(batches, today);
-    if (Number(sellable) < Number(input.quantity)) {
-      throw new Error(
-        expired.length > 0
-          ? "موجودی قابل فروش کافی نیست؛ بخشی از این کالا منقضی شده است."
-          : "موجودی کافی نیست.",
-      );
-    }
-
-    const allocation = allocateFefo(
-      batches.filter((b) => !expired.some((e) => e.id === b.id)),
+    // The canonical path (retail-batch-inventory.ts): FEFO across the sellable
+    // batches, expired stock refused (never silently sold), exact per-batch
+    // COGS, the allocated rows relieved and the `item_stock` rollup recomputed
+    // — this function never decrements `item_stock.quantity` for a batch item.
+    batchAllocations = allocateBatchLots(
+      await loadBatchLotsForUpdate(client, input.itemId),
       input.quantity,
+      todayIso(),
     );
-    // COGS is the actual cost of the consumed batches, not the shelf average —
-    // FEFO's whole point.
-    cost = rialText(
-      allocation
-        .reduce((sum, a) => {
-          const batch = batches.find((b) => b.id === a.batchId)!;
-          return sum + BigInt(roundRial(new Decimal(a.quantity).times(batch.unitCost ?? 0)));
-        }, 0n)
-        .toString(),
-    );
-    batchNumbers = allocation.map((a) => batches.find((b) => b.id === a.batchId)!.batchNumber);
-    expiryDate = allocation
-      .map((a) => batches.find((b) => b.id === a.batchId)!.expiryDate)
-      .filter((d): d is string => d != null)
-      .sort()[0] ?? null;
-
-    for (const a of allocation) {
-      await client.query(`UPDATE item_batches SET quantity = quantity - $2 WHERE id = $1`, [
-        a.batchId,
-        a.quantity,
-      ]);
-    }
+    cost = allocationCostValue(batchAllocations);
+    batchNumbers = allocationBatchNumbers(batchAllocations);
+    expiryDate = allocationExpiryDate(batchAllocations);
+    await consumeBatchAllocations(client, input.itemId, batchAllocations);
   } else {
     cost = cosmeticCogs(input.quantity, stock.unitCost);
   }
@@ -369,12 +374,21 @@ export async function sellCosmeticUnits(
     createdBy: input.createdBy ?? null,
   });
 
-  await client.query(
-    `UPDATE item_stock SET quantity = quantity - $2, last_sold_at = now(), updated_at = now() WHERE item_id = $1`,
-    [input.itemId, input.quantity],
-  );
+  if (item.tracking === "batch") {
+    // The batches were relieved (and the rollup recomputed) by the engine
+    // above; writing `quantity - n` here as well would double-count the sale
+    // and desynchronise `item_stock` from `item_batches`.
+    await client.query(`UPDATE item_stock SET last_sold_at = now(), updated_at = now() WHERE item_id = $1`, [
+      input.itemId,
+    ]);
+  } else {
+    await client.query(
+      `UPDATE item_stock SET quantity = quantity - $2, last_sold_at = now(), updated_at = now() WHERE item_id = $1`,
+      [input.itemId, input.quantity],
+    );
+  }
 
-  return { breakdown, revenueEntryId, cogsEntryId, cost, batchNumbers, expiryDate };
+  return { breakdown, revenueEntryId, cogsEntryId, cost, batchNumbers, expiryDate, batchAllocations };
 }
 
 /**
@@ -436,12 +450,9 @@ export async function writeOffExpiredBatches(
   for (const b of expired) {
     await client.query(`DELETE FROM item_batches WHERE id = $1`, [b.id]);
   }
-  await client.query(
-    `UPDATE item_stock SET quantity = (SELECT COALESCE(SUM(quantity), 0) FROM item_batches WHERE item_id = $1),
-            unit_cost = $2, updated_at = now()
-      WHERE item_id = $1`,
-    [input.itemId, await averageAcrossBatches(client, input.itemId, 0)],
-  );
+  // The rollup is the engine's, so a write-off can never leave the shared
+  // `item_stock` cache disagreeing with the authoritative batch rows.
+  await recomputeItemStockRollup(client, input.itemId);
 
   return { writtenOffQuantity, cost, entryId };
 }
@@ -656,23 +667,20 @@ export async function openTester(
   if (Number(stock.quantity) < 1) throw new Error("موجودی کافی نیست.");
 
   let cost: RialText;
+  let testerFromBatches = false;
   if (item.tracking === "batch") {
-    const batches = await listBatches(input.itemId, client);
-    const today = todayIso();
-    const expired = expiredBatches(batches, today);
-    if (Number(sellableQuantity(batches, today)) < 1) {
-      throw new Error("موجودی قابل فروش کافی نیست؛ بخشی از این کالا منقضی شده است.");
-    }
-    const allocation = allocateFefo(
-      batches.filter((b) => !expired.some((e) => e.id === b.id)),
+    // Opening a tester consumes a real sellable unit, so it goes through the
+    // same canonical engine a sale does: FEFO across the sellable lots, the
+    // allocated lot relieved, the item_stock rollup recomputed. Expired stock
+    // is refused — a tester made from an expired lot is still expired.
+    const allocations = allocateBatchLots(
+      await loadBatchLotsForUpdate(client, input.itemId),
       "1",
+      todayIso(),
     );
-    const batch = batches.find((b) => b.id === allocation[0].batchId)!;
-    cost = roundRial(new Decimal(allocation[0].quantity).times(batch.unitCost ?? 0));
-    await client.query(`UPDATE item_batches SET quantity = quantity - $2 WHERE id = $1`, [
-      batch.id,
-      allocation[0].quantity,
-    ]);
+    cost = allocationCostValue(allocations);
+    await consumeBatchAllocations(client, input.itemId, allocations);
+    testerFromBatches = true;
   } else {
     cost = rialText(String(stock.unitCost));
   }
@@ -695,10 +703,16 @@ export async function openTester(
     createdBy: input.createdBy ?? null,
   });
 
-  await client.query(
-    `UPDATE item_stock SET quantity = quantity - 1, updated_at = now() WHERE item_id = $1`,
-    [input.itemId],
-  );
+  if (!testerFromBatches) {
+    await client.query(
+      `UPDATE item_stock SET quantity = quantity - 1, updated_at = now() WHERE item_id = $1`,
+      [input.itemId],
+    );
+  } else {
+    // The batch consumption already rolled `item_stock` down; decrementing it
+    // again here would double-count the tester.
+    await client.query(`UPDATE item_stock SET updated_at = now() WHERE item_id = $1`, [input.itemId]);
+  }
 
   return { cost, entryId };
 }

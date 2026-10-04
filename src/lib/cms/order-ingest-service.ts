@@ -7,6 +7,7 @@ import { NextResponse } from "next/server";
 import type { PoolClient } from "pg";
 import { getPool, query, withoutTenantScope, withTenant } from "../db";
 import { WELL_KNOWN_CODES } from "../coa-template";
+import { RETAIL_ACCOUNT_CODES } from "../retail-account-codes";
 import { accountIdsByCode, postExactCogsEntry, postExactJournalEntry } from "../ledger-service";
 import { deductForOrder } from "../inventory-service";
 import { getPrimaryLocation } from "../setup-state";
@@ -16,6 +17,7 @@ import type { Industry } from "../industries";
 import type { RialText } from "../inventory-exact";
 import type { WebsiteConnectionRow } from "../website/connection-service";
 import { cmsMinorToRial } from "./order-money";
+import { sellOnlineRetailLine } from "../retail-online-sale-service";
 import {
   cmsReversalStatusMatches,
   isCmsReversalEvent,
@@ -25,44 +27,6 @@ import type { CmsOrder } from "./types";
 
 const zero = "0" as RialText;
 
-const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, { revenue: string; cogs: string; inventory: string }> = {
-  service_saas: { revenue: "4500", cogs: "5670", inventory: "1400" },
-  jewelry: {
-    revenue: WELL_KNOWN_CODES.goldSalesRevenue,
-    cogs: WELL_KNOWN_CODES.goldCogs,
-    inventory: WELL_KNOWN_CODES.goldInventory,
-  },
-  watch: {
-    revenue: WELL_KNOWN_CODES.watchSalesRevenue,
-    cogs: WELL_KNOWN_CODES.watchCogs,
-    inventory: WELL_KNOWN_CODES.watchInventory,
-  },
-  accessories: {
-    revenue: WELL_KNOWN_CODES.accessorySalesRevenue,
-    cogs: WELL_KNOWN_CODES.accessoryCogs,
-    inventory: WELL_KNOWN_CODES.accessoryInventory,
-  },
-  cosmetics: {
-    revenue: WELL_KNOWN_CODES.cosmeticSalesRevenue,
-    cogs: WELL_KNOWN_CODES.cosmeticCogs,
-    inventory: WELL_KNOWN_CODES.cosmeticInventory,
-  },
-  wholesale: {
-    revenue: WELL_KNOWN_CODES.wholesaleSalesRevenue,
-    cogs: WELL_KNOWN_CODES.wholesaleCogs,
-    inventory: WELL_KNOWN_CODES.wholesaleInventory,
-  },
-  tools_fittings: {
-    revenue: WELL_KNOWN_CODES.toolsSalesRevenue,
-    cogs: WELL_KNOWN_CODES.toolsCogs,
-    inventory: WELL_KNOWN_CODES.toolsInventory,
-  },
-  haberdashery: {
-    revenue: WELL_KNOWN_CODES.haberdasherySalesRevenue,
-    cogs: WELL_KNOWN_CODES.haberdasheryCogs,
-    inventory: WELL_KNOWN_CODES.haberdasheryInventory,
-  },
-};
 
 function cmsProductId(order: CmsOrder): string | null {
   if (typeof order.product === "string") return order.product;
@@ -271,24 +235,33 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
     const orderNumber = Number(counter[0].next_number);
     const note = buyer.note ? `${buyer.name} — ${buyer.note}` : `مشتری: ${buyer.name}`;
 
-    const { rows: orderRows } = await client.query<{ id: string }>(
-      `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, note, customer_id)
-       VALUES ($1, $2, 'delivery', 'open', $3, 0, 0, $4, $5, $6, $7)
-       RETURNING id`,
-      [locationId, orderNumber, net.toString(), tax.toString(), total.toString(), note, customerId],
-    );
-    const orderId = orderRows[0].id;
-
     const title =
       typeof order.product === "object" && order.product && "title" in order.product
         ? String(order.product.title)
         : order.productTitle ?? "محصول فروشگاه";
     const quantity = Math.max(1, order.quantity);
+    // Resolve the mapping BEFORE writing the order header: a store product
+    // mapped to a retail catalogue `item` makes this a *retail* order, not a
+    // delivery order. Getting that wrong was why a CMS reversal later ran
+    // through the F&B closed-order engine: the order it was handed had no
+    // retail shape to recognise (issue #770).
     const mapped = await resolveWebsiteProductMap(client, businessId, cmsProductId(order));
     const industry = await getBusinessIndustry(businessId);
+    const orderType = mapped?.localKind === "item" ? "retail" : "delivery";
+
+    const { rows: orderRows } = await client.query<{ id: string }>(
+      `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, note, customer_id)
+       VALUES ($1, $2, $3, 'open', $4, 0, 0, $5, $6, $7, $8)
+       RETURNING id`,
+      [locationId, orderNumber, orderType, net.toString(), tax.toString(), total.toString(), note, customerId],
+    );
+    const orderId = orderRows[0].id;
 
     let inventoryEventId: string | null = null;
     let cogsRial = "0";
+    // The `order_items` row a retail line wrote, so the canonical sale
+    // service can persist the exact batch allocation against it.
+    let retailOrderItemId: string | null = null;
 
     if (mapped?.localKind === "menu_item") {
       await client.query(
@@ -297,11 +270,13 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
         [locationId, orderId, mapped.localId, title, unit.toString(), quantity],
       );
     } else if (mapped?.localKind === "item") {
-      await client.query(
+      const { rows: lineRows } = await client.query<{ id: string }>(
         `INSERT INTO order_items (location_id, order_id, item_id, name_snapshot, unit_price, quantity, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'served')`,
+         VALUES ($1, $2, $3, $4, $5, $6, 'served')
+         RETURNING id`,
         [locationId, orderId, mapped.localId, title, unit.toString(), quantity],
       );
+      retailOrderItemId = lineRows[0].id;
     } else {
       await client.query(
         `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, status)
@@ -345,18 +320,24 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
       });
     } else if (mapped?.localKind === "item" && industry && industry !== "food_service") {
       const codes = RETAIL_ACCOUNT_CODES[industry];
-      const { rows: stockRows } = await client.query<{ unit_cost: string | null }>(
-        `SELECT unit_cost::text FROM item_stock WHERE item_id = $1 AND unit_cost IS NOT NULL`,
-        [mapped.localId],
-      );
-      const unitCost = stockRows[0]?.unit_cost ? BigInt(stockRows[0].unit_cost) : 0n;
-      if (unitCost > 0n) {
-        cogsRial = (unitCost * BigInt(quantity)).toString();
-        await client.query(
-          `UPDATE item_stock SET quantity = GREATEST(0, quantity - $2), last_sold_at = now(), updated_at = now()
-            WHERE item_id = $1`,
-          [mapped.localId, quantity],
-        );
+      // The canonical online retail sale: FEFO + expired-batch exclusion +
+      // exact batch COGS and a persisted allocation for a `tracking='batch'`
+      // item; the fungible `item_stock` rule otherwise. The adapter must not
+      // decide any of this itself — it used to, and that is exactly how a
+      // cosmetics paid order could bypass the batch engine.
+      const sold = retailOrderItemId
+        ? await sellOnlineRetailLine(client, {
+            locationId,
+            orderId,
+            orderItemId: retailOrderItemId,
+            itemId: mapped.localId,
+            quantity: String(quantity),
+            sourceType: "cms_store_order",
+            sourceId: orderId,
+          })
+        : null;
+      cogsRial = sold ? sold.cogsRial : "0";
+      if (BigInt(cogsRial) > 0n) {
         const cogsAccounts = await accountIdsByCode(client, businessId, [codes.cogs, codes.inventory]);
         await postExactJournalEntry(client, {
           businessId,

@@ -30,6 +30,7 @@ import { sellWeightedItem } from "./gold-sales-service";
 import { sellSerializedUnit } from "./watch-sales-service";
 import { getStock, sellAccessoryUnits } from "./accessories-service";
 import { sellCosmeticUnits } from "./cosmetics-service";
+import { recordOrderItemBatchAllocations, type BatchAllocation } from "./retail-batch-inventory";
 import { sellTradeGoodsUnits } from "./trade-goods-service";
 import { isTradeGoodsIndustry } from "./trade-goods";
 import { getItem } from "./items-service";
@@ -287,6 +288,23 @@ export async function createRetailInvoice(
       ],
     );
 
+    // Batch-tracked cosmetics: the exact allocation this line consumed is
+    // persisted against the line, in the same transaction, so a later
+    // return/refund/void can restore the SAME lots instead of guessing from
+    // the current shelf state. Legacy lines (sold before this table existed)
+    // simply have no rows and are treated as legacy by the reversal paths.
+    if (settled.batchAllocations && settled.batchAllocations.length > 0) {
+      await recordOrderItemBatchAllocations(client, {
+        orderItemId: itemRows[0].id,
+        orderId,
+        locationId: input.locationId,
+        itemId: settled.itemId,
+        sourceType: "retail_invoice",
+        sourceId: orderId,
+        allocations: settled.batchAllocations,
+      });
+    }
+
     lines.push({
       orderItemId: itemRows[0].id,
       itemId: settled.itemId,
@@ -431,6 +449,13 @@ interface SettledLine {
   profit?: RialText;
   batchNumbers?: string[];
   expiryDate?: string | null;
+  /**
+   * Batch-tracked cosmetics only: the exact batches this line consumed. The
+   * invoice writes them to `order_item_batch_allocations` right after it
+   * inserts the `order_items` row, so the allocation and the line share one
+   * transaction and a later return/void has something exact to reverse.
+   */
+  batchAllocations?: BatchAllocation[];
   /**
    * The full sold-line snapshot for `order_items.retail_snapshot` (migration
    * 0174) — everything `getRetailInvoiceDetail`/`getRetailInvoicePrintData`
@@ -750,6 +775,7 @@ async function settleLine(
     brandId: item.brandId,
     batchNumbers: cosmeticSale?.batchNumbers,
     expiryDate: cosmeticSale?.expiryDate,
+    batchAllocations: cosmeticSale?.batchAllocations,
     snapshot:
       line.kind === "cosmetic"
         ? { kind: "cosmetic", ...baseSnapshot, batchNumbers: cosmeticSale?.batchNumbers ?? [], expiryDate: cosmeticSale?.expiryDate ?? null }

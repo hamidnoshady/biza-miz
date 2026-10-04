@@ -16,7 +16,10 @@ import { WELL_KNOWN_CODES } from "../coa-template";
 import { accountIdsByCode, postExactCogsEntry, postExactJournalEntry } from "../ledger-service";
 import { deductForOrder } from "../inventory-service";
 import { createCustomerReturn, type ReturnLine } from "../customer-return-service";
+import { RETAIL_ACCOUNT_CODES } from "../retail-account-codes";
 import { quantityText, type RialText } from "../inventory-exact";
+import { sellOnlineRetailLine } from "../retail-online-sale-service";
+import { restoreOrderItemBatchStock } from "../retail-batch-inventory";
 import { getPrimaryLocation } from "../setup-state";
 import {
   CONNECTION_COLUMNS,
@@ -47,44 +50,6 @@ const zero = "0" as RialText;
  * own chart of accounts seeds (see coa-template.ts), so the WooCommerce order
  * lands in the same accounts a counter sale of the same item would.
  */
-const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, { revenue: string; cogs: string; inventory: string }> = {
-  service_saas: { revenue: "4500", cogs: "5670", inventory: "1400" },
-  jewelry: {
-    revenue: WELL_KNOWN_CODES.goldSalesRevenue,
-    cogs: WELL_KNOWN_CODES.goldCogs,
-    inventory: WELL_KNOWN_CODES.goldInventory,
-  },
-  watch: {
-    revenue: WELL_KNOWN_CODES.watchSalesRevenue,
-    cogs: WELL_KNOWN_CODES.watchCogs,
-    inventory: WELL_KNOWN_CODES.watchInventory,
-  },
-  accessories: {
-    revenue: WELL_KNOWN_CODES.accessorySalesRevenue,
-    cogs: WELL_KNOWN_CODES.accessoryCogs,
-    inventory: WELL_KNOWN_CODES.accessoryInventory,
-  },
-  cosmetics: {
-    revenue: WELL_KNOWN_CODES.cosmeticSalesRevenue,
-    cogs: WELL_KNOWN_CODES.cosmeticCogs,
-    inventory: WELL_KNOWN_CODES.cosmeticInventory,
-  },
-  wholesale: {
-    revenue: WELL_KNOWN_CODES.wholesaleSalesRevenue,
-    cogs: WELL_KNOWN_CODES.wholesaleCogs,
-    inventory: WELL_KNOWN_CODES.wholesaleInventory,
-  },
-  tools_fittings: {
-    revenue: WELL_KNOWN_CODES.toolsSalesRevenue,
-    cogs: WELL_KNOWN_CODES.toolsCogs,
-    inventory: WELL_KNOWN_CODES.toolsInventory,
-  },
-  haberdashery: {
-    revenue: WELL_KNOWN_CODES.haberdasherySalesRevenue,
-    cogs: WELL_KNOWN_CODES.haberdasheryCogs,
-    inventory: WELL_KNOWN_CODES.haberdasheryInventory,
-  },
-};
 
 export async function handleWooCommerceWebhook(
   connectionId: string,
@@ -808,10 +773,15 @@ async function ingestFnBOrder(connection: ConnectionRow, order: WooOrder): Promi
 /**
  * Retail: one WooCommerce order -> a `retail` order whose lines point at the
  * `items` model (order_items.item_id) rather than F&B's `menu_items`, with the
- * revenue posted to the trade's own sales-revenue account. COGS is posted only
- * for lines whose item already has a weighted-average cost basis — the same
- * "no cost yet, no COGS" rule the counter sale enforces — and the stock
- * quantity is relieved in the same step.
+ * revenue posted to the trade's own sales-revenue account.
+ *
+ * Stock and COGS are not decided here: every line goes through
+ * `sellOnlineRetailLine` (retail-online-sale-service.ts), the same domain
+ * service the counter path's rules come from. A `tracking='batch'` cosmetics
+ * line therefore gets FEFO allocation, expired stock is refused, the exact
+ * batch rows are relieved, its allocation is persisted and COGS is the actual
+ * cost of the lots consumed — the Woo channel can no longer bypass the batch
+ * engine. A fungible line keeps the retail "no cost basis, no COGS" rule.
  */
 async function ingestRetailOrder(
   connection: ConnectionRow,
@@ -887,20 +857,9 @@ async function ingestRetailOrder(
       }
     }
 
-    // The cost basis for every mapped line, fetched once so COGS and stock
-    // relief use the exact weighted-average cost the counter sale would.
-    const itemIds = resolvedIds;
-    const costById = new Map<string, bigint>();
-    if (itemIds.length > 0) {
-      const { rows: stockRows } = await client.query<{ item_id: string; unit_cost: string | null }>(
-        `SELECT item_id, unit_cost::text FROM item_stock WHERE item_id = ANY($1::uuid[]) AND unit_cost IS NOT NULL`,
-        [itemIds],
-      );
-      for (const r of stockRows) costById.set(r.item_id, BigInt(r.unit_cost as string));
-    }
-
     let cogsRial = "0";
     let stubbedVariations = 0;
+    let batchLines = 0;
     for (const [index, line] of (order.line_items ?? []).entries()) {
       const unitPrice = wooAmountToRial(line.price ?? "0", connection.currency_unit);
       const quantity = Math.max(1, Math.round(line.quantity ?? 1));
@@ -921,26 +880,30 @@ async function ingestRetailOrder(
         }
       }
 
-      await client.query(
+      const { rows: itemRows } = await client.query<{ id: string }>(
         `INSERT INTO order_items (location_id, order_id, item_id, name_snapshot, unit_price, quantity, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'served')`,
+         VALUES ($1, $2, $3, $4, $5, $6, 'served')
+         RETURNING id`,
         [locationId, orderId, itemId, line.name, unitPrice.toString(), quantity],
       );
 
-      // COGS + stock relief only for a mapped item with a known cost basis —
-      // the retail analogue of F&B's "no recipe, no COGS" — and only when the
-      // line resolved to the row that actually carries stock.
-      const unitCost = itemId && relievesStock(resolution[index]) ? costById.get(itemId) : undefined;
-      if (unitCost != null && unitCost > 0n) {
-        cogsRial = (BigInt(cogsRial) + unitCost * BigInt(quantity)).toString();
-        // GREATEST(0, …) so a stock picture already synced post-sale (WooCommerce
-        // deducted it) can never drive the quantity negative and abort the order;
-        // the next catalogue sync re-establishes the authoritative level.
-        await client.query(
-          `UPDATE item_stock SET quantity = GREATEST(0, quantity - $2), last_sold_at = now(), updated_at = now()
-            WHERE item_id = $1`,
-          [itemId, quantity],
-        );
+      // The sale itself — FEFO + expired-batch exclusion + exact batch COGS
+      // for a `tracking='batch'` item, or the fungible item_stock rule for
+      // everything else — is decided by the canonical online retail sale
+      // service, never by this adapter. A line that resolved to a container
+      // (a variable parent) holds no stock and is skipped, exactly as before.
+      if (itemId && relievesStock(resolution[index])) {
+        const sold = await sellOnlineRetailLine(client, {
+          locationId,
+          orderId,
+          orderItemId: itemRows[0].id,
+          itemId,
+          quantity: String(quantity),
+          sourceType: "woocommerce_order",
+          sourceId: orderId,
+        });
+        if (sold.tracking === "batch") batchLines += 1;
+        cogsRial = (BigInt(cogsRial) + BigInt(sold.cogsRial)).toString();
       }
     }
 
@@ -1023,6 +986,7 @@ async function ingestRetailOrder(
         totalRial: total.toString(),
         cogsRial,
         stubbedVariations,
+        batchLines,
       },
     });
   } catch (err) {
@@ -1181,12 +1145,22 @@ interface RefundMeta {
 }
 
 /**
- * Retail refund: restock `item_stock` directly and post a trade-specific COGS
- * reversal — the retail analogue of `createCustomerReturn`. Because retail
- * orders don't populate `order_item_inventory_snapshots` (that's F&B's recipe
- * deductor), inventory recovery bypasses the customer-return machinery and
- * updates `item_stock.quantity` directly, using the unit_cost the order
- * import recorded.
+ * Retail refund: restore the stock the refunded lines actually relieved and
+ * post a trade-specific COGS reversal — the retail analogue of
+ * `createCustomerReturn`. Because retail orders don't populate
+ * `order_item_inventory_snapshots` (that's F&B's recipe deductor), inventory
+ * recovery bypasses the customer-return machinery and goes through the
+ * canonical batch engine instead:
+ *
+ *   - a batch-tracked line restores its ORIGINAL allocation
+ *     (`order_item_batch_allocations`), lot by lot, and the item_stock rollup
+ *     is recomputed — never a bare `item_stock.quantity += n`, which used to
+ *     leave aggregate stock belonging to no lot;
+ *   - a fungible line keeps the running weighted-average restock;
+ *   - COGS is reversed by exactly the value that came back.
+ *
+ * Variation lines map to their variation's local item, symmetrically with the
+ * sale side.
  */
 async function ingestRetailRefund(
   client: import("pg").PoolClient,
@@ -1205,10 +1179,22 @@ async function ingestRetailRefund(
   const orderId = orderRows[0]?.id ?? null;
 
   // Resolve product mappings for the refund's line items so we can match
-  // them to item_id rows in order_items and find their cost basis.
-  const remoteProductIds = (refund.line_items ?? [])
-    .map((line) => String(line.product_id))
-    .filter((id): id is string => Boolean(id));
+  // them to item_id rows in order_items. A refunded VARIATION identifies
+  // itself exactly like the order line did — `variation_id` when present —
+  // so the mapping is looked up for the variation first and only then for the
+  // parent product. Looking up `product_id` alone (as this did) resolved a
+  // variable product's refund to the parent, which holds no stock and was
+  // never the sold row: the refund then restored the wrong sellable item.
+  const remoteProductIds = [
+    ...new Set(
+      (refund.line_items ?? [])
+        .flatMap((line) => [
+          Number(line.variation_id ?? 0) || 0 ? String(line.variation_id) : "",
+          line.product_id ? String(line.product_id) : "",
+        ])
+        .filter(Boolean),
+    ),
+  ];
   const itemByRemote = new Map<string, string>();
   if (remoteProductIds.length > 0) {
     const { rows: productMappings } = await client.query<{ remote_id: string; local_id: string }>(
@@ -1220,14 +1206,13 @@ async function ingestRetailRefund(
     for (const m of productMappings) itemByRemote.set(m.remote_id, m.local_id);
   }
 
-  // Fetch the unit_cost for every mapped item so the COGS reversal uses the
-  // same weighted-average cost the sale side posted.
-  const itemIds = [...new Set(itemByRemote.values())];
+  // The fallback cost basis for fungible (non-batch) lines, read once.
+  const mappedItemIds = [...new Set(itemByRemote.values())];
   const costById = new Map<string, bigint>();
-  if (itemIds.length > 0) {
+  if (mappedItemIds.length > 0) {
     const { rows: stockRows } = await client.query<{ item_id: string; unit_cost: string | null }>(
       `SELECT item_id, unit_cost::text FROM item_stock WHERE item_id = ANY($1::uuid[]) AND unit_cost IS NOT NULL FOR UPDATE`,
-      [itemIds],
+      [mappedItemIds],
     );
     for (const r of stockRows) costById.set(r.item_id, BigInt(r.unit_cost as string));
   }
@@ -1236,7 +1221,10 @@ async function ingestRetailRefund(
 
   if (orderId) {
     for (const line of refund.line_items ?? []) {
-      const itemId = itemByRemote.get(String(line.product_id));
+      const variationId = Number(line.variation_id ?? 0) || 0;
+      const itemId =
+        (variationId > 0 ? itemByRemote.get(String(variationId)) : undefined) ??
+        itemByRemote.get(String(line.product_id));
       if (!itemId) continue;
       const qty = Math.max(0, Math.abs(Math.round(line.quantity ?? 0)));
       if (qty === 0) continue;
@@ -1267,7 +1255,7 @@ async function ingestRetailRefund(
           `INSERT INTO customer_returns
              (business_id, location_id, order_id, refund_method, refund_amount_rial, reason, created_by, idempotency_key)
            VALUES ($1, $2, $3, 'online', $4, $5, $6, $7)
-           ON CONFLICT (idempotency_key) DO NOTHING
+           ON CONFLICT (business_id, idempotency_key) DO NOTHING
            RETURNING id`,
           [meta.businessId, meta.locationId, orderId, "0",
             `WooCommerce refund #${meta.remoteId}`, null,
@@ -1283,16 +1271,34 @@ async function ingestRetailRefund(
           );
         }
 
-        // Restock item_stock: add the returned quantity back.
-        await client.query(
-          `UPDATE item_stock SET quantity = quantity + $2, updated_at = now()
-            WHERE item_id = $1`,
-          [itemId, take],
-        );
-
-        // Reverse COGS if we have a cost basis.
-        if (unitCost != null && unitCost > 0n) {
-          recoveredCogsRial = (BigInt(recoveredCogsRial) + unitCost * BigInt(take)).toString();
+        // Restock the returned quantity. A batch-tracked line has its exact
+        // original allocation persisted (migration 0198): each unit goes back
+        // into the SAME lot it was sold from, and the item_stock rollup is
+        // recomputed — so a refund can never create aggregate stock that
+        // belongs to no batch. The COGS reversal is then the actual value of
+        // the lots restored, not a shelf average.
+        const batchRestore = await restoreOrderItemBatchStock(client, {
+          orderItemId: item.id,
+          itemId,
+          locationId: meta.locationId,
+          quantity: String(take),
+          disposition: "restockable",
+          sourceType: "woocommerce_refund",
+          sourceId: `${connection.id}:${meta.remoteId}`,
+        });
+        if (batchRestore) {
+          recoveredCogsRial = (BigInt(recoveredCogsRial) + BigInt(batchRestore.restockedValue)).toString();
+        } else {
+          // Fungible stock: add the returned quantity back and reverse COGS
+          // at the running weighted-average cost the sale posted.
+          await client.query(
+            `UPDATE item_stock SET quantity = quantity + $2, updated_at = now()
+              WHERE item_id = $1`,
+            [itemId, take],
+          );
+          if (unitCost != null && unitCost > 0n) {
+            recoveredCogsRial = (BigInt(recoveredCogsRial) + unitCost * BigInt(take)).toString();
+          }
         }
 
         remaining -= take;

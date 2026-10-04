@@ -53,13 +53,15 @@
  *   explicitly decided against widening this fix to cover, since it would
  *   mean relaxing a rule several other invariants may already assume is
  *   permanent.
- * - **Batch-tracked cosmetics: refused.** A batch sale's exact FEFO
- *   allocation (which specific `item_batches` rows, and how much of each,
- *   were consumed) is not persisted anywhere recoverable after the fact —
- *   only the batch *numbers* are, for the receipt. Restoring `item_stock`'s
- *   quantity alone without restoring the same batch rows would violate the
- *   "item_stock is the authoritative SUM of item_batches" invariant
- *   `rollItemStockToBatches` exists to guarantee (migration 0078).
+ * - **Batch-tracked cosmetics: reversible when the sale persisted its exact
+ *   allocation.** Issue #770's `order_item_batch_allocations` (migration 0198)
+ *   records which `item_batches` rows a line consumed, how much of each and at
+ *   which cost; the void restores each of those lots through
+ *   `restoreOrderItemBatchStock`, which also recomputes the item_stock rollup —
+ *   so the "item_stock is the authoritative SUM of item_batches" invariant
+ *   (migration 0078) still holds afterwards. A batch line sold *before*
+ *   allocations were persisted has nothing to restore into, and is still
+ *   refused rather than silently desynchronised.
  * - **A line sold before this fix shipped: refused.** The per-line
  *   `ledgerEntryIds` this reversal needs did not exist before this session;
  *   there is no reliable way to re-derive them after the fact (see
@@ -74,6 +76,7 @@ import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { postExactMirrorEntry } from "./ledger-service";
 import { snapshotOrder } from "./order-amendment-service";
+import { restoreOrderItemBatchStock } from "./retail-batch-inventory";
 import { planPaymentRows, type AmendmentPaymentMethod, type PaymentRow } from "./order-amendments";
 import type { RetailInvoiceLineSnapshotStored } from "./retail-invoice/types";
 
@@ -202,6 +205,15 @@ export async function voidRetailInvoice(
   );
   if (lineRows.length === 0) throw new RetailInvoiceVoidError("این فاکتور کالایی ندارد.", 409);
 
+  // Which lines carry an exact batch allocation? One query for the whole
+  // invoice, so the per-line validation below stays a pure check.
+  const { rows: allocationRows } = await client.query<{ order_item_id: string }>(
+    `SELECT DISTINCT order_item_id FROM order_item_batch_allocations
+      WHERE order_item_id = ANY($1::uuid[])`,
+    [lineRows.map((l) => l.id)],
+  );
+  const allocatedLineIds = new Set(allocationRows.map((r) => r.order_item_id));
+
   // ---- validate every line before mutating anything ----
   for (const line of lineRows) {
     const snapshot = line.retail_snapshot;
@@ -217,9 +229,16 @@ export async function voidRetailInvoice(
         409,
       );
     }
-    if (snapshot.kind === "cosmetic" && (snapshot.batchNumbers?.length ?? 0) > 0) {
+    if (
+      snapshot.kind === "cosmetic" &&
+      (snapshot.batchNumbers?.length ?? 0) > 0 &&
+      !allocatedLineIds.has(line.id)
+    ) {
+      // A batch sale from before exact allocations were persisted (migration
+      // 0198): the lots it consumed were never recorded, so restoring
+      // item_stock's quantity alone would leave stock that belongs to no lot.
       throw new RetailInvoiceVoidError(
-        "این فاکتور شامل کالای آرایشی بچ‌محور (تاریخ‌دار) است؛ ابطال خودکار برای این نوع کالا پشتیبانی نمی‌شود.",
+        "این فاکتور کالای آرایشی بچ‌محور (تاریخ‌دار) پیش از ثبت تخصیص بچ دارد؛ ابطال خودکار ممکن نیست و باید دستی اصلاح شود.",
         409,
       );
     }
@@ -282,17 +301,34 @@ export async function voidRetailInvoice(
       if (reversedId) reversedEntryIds.push(reversedId);
     }
 
-    // Restore the quantity this line consumed. item_stock is the fungible
-    // stock model accessories, non-batch cosmetics and trade-goods all
-    // share; a sale only ever decrements `quantity`, never `unit_cost`
-    // (average cost moves on *receipt*, not sale), so adding the same
-    // quantity back is the exact, symmetric inverse. The real sold quantity
-    // is `snapshot.quantity` — never `order_items.quantity`, which retail
-    // lines always store as `1` (see LineRow's own doc comment).
-    await client.query(
-      `UPDATE item_stock SET quantity = quantity + $2, updated_at = now() WHERE item_id = $1`,
-      [line.item_id, snapshot.quantity],
-    );
+    // Restore the quantity this line consumed.
+    //
+    // A batch-tracked cosmetics line restores through the canonical engine:
+    // its persisted allocation says exactly which lots were relieved, and
+    // those same rows get the quantity back (with the rollup recomputed), so
+    // the shelf and the books agree down to the lot. Anything else uses the
+    // fungible `item_stock` model accessories, non-batch cosmetics and
+    // trade-goods share; a sale only ever decrements `quantity`, never
+    // `unit_cost` (average cost moves on *receipt*, not sale), so adding the
+    // same quantity back is the exact, symmetric inverse. The real sold
+    // quantity is `snapshot.quantity` — never `order_items.quantity`, which
+    // retail lines always store as `1` (see LineRow's own doc comment).
+    if (allocatedLineIds.has(line.id)) {
+      await restoreOrderItemBatchStock(client, {
+        orderItemId: line.id,
+        itemId: line.item_id!,
+        locationId: params.locationId,
+        quantity: snapshot.quantity,
+        disposition: "restockable",
+        sourceType: "retail_invoice_void",
+        sourceId: params.orderId,
+      });
+    } else {
+      await client.query(
+        `UPDATE item_stock SET quantity = quantity + $2, updated_at = now() WHERE item_id = $1`,
+        [line.item_id, snapshot.quantity],
+      );
+    }
 
     await client.query(`UPDATE order_items SET status = 'voided', void_reason = $2 WHERE id = $1`, [
       line.id,
