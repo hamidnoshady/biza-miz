@@ -364,6 +364,8 @@ export interface WorkspaceAccessFlags {
   canManage: boolean;
   /** Holds `workspace.approve`. */
   canApprove: boolean;
+  /** Holds `media.view` — may open a document's file (the media route's own rule). */
+  canViewMedia: boolean;
 }
 
 /**
@@ -414,6 +416,7 @@ export function workspaceAccessFlags(permissions: ReadonlySet<string>): Workspac
     canManageContracts: permissions.has("workspace.contracts_manage"),
     canManage: permissions.has("workspace.manage"),
     canApprove: permissions.has("workspace.approve"),
+    canViewMedia: permissions.has("media.view"),
   };
 }
 
@@ -958,4 +961,141 @@ export function dependencyBlocksStatus(
 export function weekStartSaturday(date: string): string {
   const day = new Date(`${date}T00:00:00Z`).getUTCDay(); // Sun=0 … Sat=6
   return addDays(date, -((day + 1) % 7));
+}
+
+/* ---------------------------------------------------------------------------
+ * Contract lifecycle (#761 §12)
+ * ------------------------------------------------------------------------- */
+
+export const CONTRACT_LIFECYCLE_ACTIONS = ["complete", "terminate", "extend", "renew"] as const;
+export type ContractLifecycleAction = (typeof CONTRACT_LIFECYCLE_ACTIONS)[number];
+
+export const CONTRACT_LIFECYCLE_LABELS: Record<ContractLifecycleAction, string> = {
+  complete: "اتمام",
+  terminate: "فسخ",
+  extend: "تمدید مدت",
+  renew: "تجدید",
+};
+
+const LIFECYCLE_FROM: Record<ContractLifecycleAction, readonly WorkspaceContractStatus[]> = {
+  // Work delivered: a live (or lapsed-but-unclosed) contract is closed out.
+  complete: ["active", "expired"],
+  // Ended early, by either side, at any point before it was closed out.
+  terminate: ["draft", "pending_approval", "active", "expired"],
+  // Same agreement, later end date.
+  extend: ["active", "expired"],
+  // A new term of an agreement that ran its course.
+  renew: ["expired", "completed"],
+};
+
+/** Pure: which lifecycle actions a contract in this status can take. */
+export function allowedContractActions(status: WorkspaceContractStatus): ContractLifecycleAction[] {
+  return CONTRACT_LIFECYCLE_ACTIONS.filter((action) => LIFECYCLE_FROM[action].includes(status));
+}
+
+/**
+ * Pure: what a lifecycle action does to a contract, or why it cannot.
+ *
+ * - complete → `completed`; terminate → `terminated` (end date = today when
+ *   it was later, so the record says when it actually stopped).
+ * - extend → stays/returns `active` with a later end date.
+ * - renew → `active` for a new term starting the day after the old end (or
+ *   today, whichever is later) and ending on the given date.
+ */
+export function contractLifecycleChange(
+  action: ContractLifecycleAction,
+  current: { status: WorkspaceContractStatus; startDate: string | null; endDate: string | null },
+  input: { endDate?: string | null; today: string },
+):
+  | { ok: true; status: WorkspaceContractStatus; startDate: string | null; endDate: string | null }
+  | { ok: false; error: string } {
+  if (!LIFECYCLE_FROM[action].includes(current.status)) return { ok: false, error: "invalid_contract_transition" };
+  const today = input.today;
+  if (action === "complete") {
+    return { ok: true, status: "completed", startDate: current.startDate, endDate: current.endDate };
+  }
+  if (action === "terminate") {
+    const endDate = current.endDate && current.endDate < today ? current.endDate : today;
+    return { ok: true, status: "terminated", startDate: current.startDate, endDate };
+  }
+  const newEnd = input.endDate ?? null;
+  if (!newEnd) return { ok: false, error: "end_date_required" };
+  if (action === "extend") {
+    const floor = current.endDate ?? today;
+    if (newEnd <= floor) return { ok: false, error: "extension_not_later" };
+    return { ok: true, status: "active", startDate: current.startDate, endDate: newEnd };
+  }
+  // renew
+  const dayAfterEnd = current.endDate ? addDays(current.endDate, 1) : today;
+  const start = dayAfterEnd > today ? dayAfterEnd : today;
+  if (newEnd <= start) return { ok: false, error: "end_before_start" };
+  return { ok: true, status: "active", startDate: start, endDate: newEnd };
+}
+
+/* ---------------------------------------------------------------------------
+ * Template application plan (#761 §16)
+ * ------------------------------------------------------------------------- */
+
+export const TEMPLATE_APPLY_MODES = ["merge", "replace"] as const;
+export type TemplateApplyMode = (typeof TEMPLATE_APPLY_MODES)[number];
+
+export interface TemplatePlan {
+  addPhases: Array<{ name: string; displayOrder: number; startDate: string | null; endDate: string | null }>;
+  addTasks: string[];
+  /** Existing phases a `replace` removes — only empty ones, never a phase holding tasks. */
+  removePhases: Array<{ id: string; name: string }>;
+  /** Phases the template names that the project already has (left as they are). */
+  keptPhases: string[];
+}
+
+/**
+ * Pure: exactly what applying a template would do — the preview IS the plan
+ * that runs, so what the member saw is what happens.
+ *
+ * - **merge** (default): add the template's phases and starter tasks the
+ *   project does not already have (matched by name, case-insensitively).
+ *   Applying the same template twice changes nothing.
+ * - **replace**: merge, and also remove existing phases the template does not
+ *   name — but only phases with no tasks. Tasks are never deleted, so a
+ *   phase that holds work stays and is reported as kept.
+ */
+export function planTemplateApplication(input: {
+  existingPhases: Array<{ id: string; name: string; displayOrder: number; taskCount: number }>;
+  existingTaskTitles: string[];
+  templatePhases: Array<{ name: string; displayOrder: number; startDate: string | null; endDate: string | null }>;
+  defaultTasks: string[];
+  mode: TemplateApplyMode;
+}): TemplatePlan {
+  const key = (text: string) => text.trim().toLowerCase();
+  const templateNames = new Set(input.templatePhases.map((phase) => key(phase.name)));
+  const removePhases =
+    input.mode === "replace"
+      ? input.existingPhases
+          .filter((phase) => !templateNames.has(key(phase.name)) && phase.taskCount === 0)
+          .map((phase) => ({ id: phase.id, name: phase.name }))
+      : [];
+  const removed = new Set(removePhases.map((phase) => phase.id));
+  const remaining = input.existingPhases.filter((phase) => !removed.has(phase.id));
+  const have = new Set(remaining.map((phase) => key(phase.name)));
+  const offset = remaining.reduce((max, phase) => Math.max(max, phase.displayOrder + 1), 0);
+
+  const addPhases: TemplatePlan["addPhases"] = [];
+  const keptPhases: string[] = [];
+  for (const phase of input.templatePhases) {
+    if (have.has(key(phase.name))) {
+      keptPhases.push(phase.name);
+      continue;
+    }
+    have.add(key(phase.name));
+    addPhases.push({ ...phase, displayOrder: offset + phase.displayOrder });
+  }
+  const haveTasks = new Set(input.existingTaskTitles.map(key));
+  const addTasks: string[] = [];
+  for (const raw of input.defaultTasks) {
+    const title = raw.slice(0, WORKSPACE_LIMITS.taskTitleMax);
+    if (!title.trim() || haveTasks.has(key(title))) continue;
+    haveTasks.add(key(title));
+    addTasks.push(title);
+  }
+  return { addPhases, addTasks, removePhases, keptPhases };
 }

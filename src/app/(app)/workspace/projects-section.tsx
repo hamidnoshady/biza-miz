@@ -11,14 +11,15 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { BriefcaseIcon, PlusIcon, XIcon } from "lucide-react";
+import { BriefcaseIcon, PlusIcon } from "lucide-react";
 import {
   EmptyState,
   KpiCard,
   KpiRow,
   LoadingSkeleton,
   SectionCard,
-  overlayPanelClass,
+  TabBar,
+  TabPanel,
 } from "@/app/dashboard/page-chrome";
 import {
   DataTable,
@@ -38,6 +39,7 @@ import {
   SecondaryButton,
 } from "@/app/dashboard/ui";
 import { useMoney } from "@/components/money/money-context";
+import { todayIsoDate } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import { workspaceProjectHref } from "@/lib/app-routes";
 import {
@@ -60,8 +62,11 @@ import {
   SelectField,
   TagList,
   workspaceError,
+  WorkspaceFormDialog,
+  stackedTableClass,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import { ProjectCards, ProjectTimeline } from "./project-portfolio";
 import type { WorkspaceIntent } from "./workspace-routes";
 
 interface ProjectSummary {
@@ -92,6 +97,8 @@ export interface ProjectRow {
   memberCount: number;
   contractCount: number;
   documentCount: number;
+  overdueTaskCount: number;
+  openApprovalCount: number;
 }
 
 interface TemplateOption {
@@ -115,6 +122,10 @@ export function ProjectsSection({
   const [error, setError] = useState("");
   const [status, setStatus] = useState<WorkspaceProjectStatus | "">("");
   const [mine, setMine] = useState(false);
+  // Portfolio first (#761 §7): cards to scan, the timeline to see when, the
+  // table for the power user.
+  const [view, setView] = useState<"portfolio" | "table" | "timeline">("portfolio");
+  const today = useMemo(() => todayIsoDate(), []);
   const [search, setSearch] = useState("");
   const [creating, setCreating] = useState(false);
   useEffect(() => {
@@ -175,6 +186,17 @@ export function ProjectsSection({
         flush
       >
         <div className="flex flex-col gap-3 border-b border-border/80 p-4">
+          <TabBar
+            idPrefix="workspace-projects"
+            label="نمای پروژه‌ها"
+            tabs={[
+              { key: "portfolio", label: "کارت‌ها" },
+              { key: "table", label: "جدول" },
+              { key: "timeline", label: "خط زمانی" },
+            ]}
+            active={view}
+            onChange={setView}
+          />
           <SearchField
             label="جست‌وجوی پروژه"
             value={search}
@@ -212,57 +234,65 @@ export function ProjectsSection({
             نخستین پروژه را بسازید تا وظایف، قراردادها و اسناد جایی برای زندگی داشته باشند.
           </EmptyState>
         ) : (
-          <DataTable caption="فهرست پروژه‌های میز کار" frame={false}>
-            <DataTableHead>
-              <Th>نام</Th>
-              <Th>مشتری</Th>
-              <Th>وضعیت</Th>
-              <Th>اولویت</Th>
-              <Th>پیشرفت</Th>
-              <Th>پایان</Th>
-              <Th>بودجه</Th>
-            </DataTableHead>
-            <DataTableBody>
-              {projects.map((project) => (
-                <DataTableRow key={project.id}>
-                  <Td>
-                    <div className="flex flex-col gap-1">
-                      <Link
-                        href={workspaceProjectHref(project.id)}
-                        className="font-medium underline-offset-4 hover:underline"
-                      >
-                        {project.name}
-                      </Link>
-                      <TagList tags={project.tags} />
-                    </div>
-                  </Td>
-                  <Td>{project.partyName ?? <span className="text-muted-foreground">—</span>}</Td>
-                  <Td>
-                    <ProjectStatusBadge status={project.status} />
-                  </Td>
-                  <Td>
-                    <PriorityBadge priority={project.priority} />
-                  </Td>
-                  <Td>
-                    <ProgressBar
-                      percent={completionPercent(project.doneTaskCount, project.taskCount)}
-                      label={`پیشرفت ${project.name}`}
-                    />
-                  </Td>
-                  <Td>
-                    <DateCell date={project.endDate} />
-                  </Td>
-                  <Td className="tabular-nums">
-                    {project.budgetRial === null ? (
-                      <span className="text-muted-foreground">—</span>
-                    ) : (
-                      money.format(project.budgetRial)
-                    )}
-                  </Td>
-                </DataTableRow>
-              ))}
-            </DataTableBody>
-          </DataTable>
+          <TabPanel idPrefix="workspace-projects" active={view}>
+            {view === "portfolio" ? (
+              <ProjectCards projects={projects} today={today} />
+            ) : view === "timeline" ? (
+              <ProjectTimeline projects={projects} today={today} />
+            ) : (
+            <DataTable caption="فهرست پروژه‌های میز کار" frame={false} tableClassName={stackedTableClass}>
+              <DataTableHead>
+                <Th>نام</Th>
+                <Th>مشتری</Th>
+                <Th>وضعیت</Th>
+                <Th>اولویت</Th>
+                <Th>پیشرفت</Th>
+                <Th>پایان</Th>
+                <Th>بودجه</Th>
+              </DataTableHead>
+              <DataTableBody>
+                {projects.map((project) => (
+                  <DataTableRow key={project.id}>
+                    <Td data-label="نام">
+                      <div className="flex flex-col gap-1">
+                        <Link
+                          href={workspaceProjectHref(project.id)}
+                          className="font-medium underline-offset-4 hover:underline"
+                        >
+                          {project.name}
+                        </Link>
+                        <TagList tags={project.tags} />
+                      </div>
+                    </Td>
+                    <Td data-label="مشتری">{project.partyName ?? <span className="text-muted-foreground">—</span>}</Td>
+                    <Td data-label="وضعیت">
+                      <ProjectStatusBadge status={project.status} />
+                    </Td>
+                    <Td data-label="اولویت">
+                      <PriorityBadge priority={project.priority} />
+                    </Td>
+                    <Td data-label="پیشرفت">
+                      <ProgressBar
+                        percent={completionPercent(project.doneTaskCount, project.taskCount)}
+                        label={`پیشرفت ${project.name}`}
+                      />
+                    </Td>
+                    <Td data-label="پایان">
+                      <DateCell date={project.endDate} />
+                    </Td>
+                    <Td data-label="بودجه" className="tabular-nums">
+                      {project.budgetRial === null ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        money.format(project.budgetRial)
+                      )}
+                    </Td>
+                  </DataTableRow>
+                ))}
+              </DataTableBody>
+            </DataTable>
+            )}
+          </TabPanel>
         )}
         <LoadMoreFooter
           loaded={projects?.length ?? 0}
@@ -340,88 +370,79 @@ function NewProjectDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/30 p-4 backdrop-blur-sm">
-      <div className={`${overlayPanelClass} w-full max-w-2xl`}>
-        <div className="flex items-center justify-between border-b border-border/80 p-4">
-          <h2 className="text-base font-semibold">پروژهٔ جدید</h2>
-          <SecondaryButton onClick={onClose}>
-            <XIcon className="size-4" aria-hidden />
-            <span className="sr-only">بستن</span>
-          </SecondaryButton>
-        </div>
-        <div className="grid gap-3 p-4 sm:grid-cols-2">
-          <Field label="نام پروژه">
-            <input
-              className={inputClass}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoFocus
+    <WorkspaceFormDialog title="پروژهٔ جدید" width="2xl" onClose={onClose}>
+      <div className="grid gap-3 p-4 sm:grid-cols-2">
+        <Field label="نام پروژه">
+          <input
+            className={inputClass}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+          />
+        </Field>
+        <PickerField
+          label="قالب فازبندی"
+          value={templateKey}
+          onChange={setTemplateKey}
+          options={templates.map((t) => ({ id: t.key, label: t.name }))}
+          placeholder="— بدون قالب —"
+          hint="فازهای قالب پس از ساخت به پروژه افزوده می‌شوند."
+        />
+        <div className="sm:col-span-2">
+          <Field label="توضیح">
+            <textarea
+              className={`${inputClass} min-h-20`}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
             />
           </Field>
-          <PickerField
-            label="قالب فازبندی"
-            value={templateKey}
-            onChange={setTemplateKey}
-            options={templates.map((t) => ({ id: t.key, label: t.name }))}
-            placeholder="— بدون قالب —"
-            hint="فازهای قالب پس از ساخت به پروژه افزوده می‌شوند."
-          />
-          <div className="sm:col-span-2">
-            <Field label="توضیح">
-              <textarea
-                className={`${inputClass} min-h-20`}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </Field>
-          </div>
-          <SelectField
-            label="وضعیت"
-            value={status}
-            onChange={setStatus}
-            options={PROJECT_STATUSES}
-            labels={PROJECT_STATUS_LABELS}
-          />
-          <SelectField
-            label="اولویت"
-            value={priority}
-            onChange={setPriority}
-            options={PRIORITIES}
-            labels={PRIORITY_LABELS}
-          />
-          <PickerField
-            label="مشتری / طرف حساب"
-            value={partyId}
-            onChange={setPartyId}
-            options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
-          />
-          <PickerField
-            label="مسئول پروژه"
-            value={ownerUserId}
-            onChange={setOwnerUserId}
-            options={lookups.members.map((m) => ({ id: m.id, label: m.fullName }))}
-          />
-          <DateField label="تاریخ شروع" value={startDate} onChange={setStartDate} />
-          <DateField label="تاریخ پایان" value={endDate} onChange={setEndDate} />
-          <Field label={`بودجه (${money.unitLabel})`}>
-            <input
-              className={inputClass}
-              value={budget}
-              onChange={(e) => setBudget(e.target.value)}
-              inputMode="numeric"
-            />
-          </Field>
-          <Field label="برچسب‌ها" hint="با «،» جدا کنید">
-            <input className={inputClass} value={tags} onChange={(e) => setTags(e.target.value)} />
-          </Field>
         </div>
-        <div className="flex justify-end gap-2 border-t border-border/80 p-4">
-          <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
-          <PrimaryButton type="button" onClick={submit} disabled={!name.trim() || saving}>
-            {saving ? "در حال ذخیره" : "ساخت پروژه"}
-          </PrimaryButton>
-        </div>
+        <SelectField
+          label="وضعیت"
+          value={status}
+          onChange={setStatus}
+          options={PROJECT_STATUSES}
+          labels={PROJECT_STATUS_LABELS}
+        />
+        <SelectField
+          label="اولویت"
+          value={priority}
+          onChange={setPriority}
+          options={PRIORITIES}
+          labels={PRIORITY_LABELS}
+        />
+        <PickerField
+          label="مشتری / طرف حساب"
+          value={partyId}
+          onChange={setPartyId}
+          options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
+        />
+        <PickerField
+          label="مسئول پروژه"
+          value={ownerUserId}
+          onChange={setOwnerUserId}
+          options={lookups.members.map((m) => ({ id: m.id, label: m.fullName }))}
+        />
+        <DateField label="تاریخ شروع" value={startDate} onChange={setStartDate} />
+        <DateField label="تاریخ پایان" value={endDate} onChange={setEndDate} />
+        <Field label={`بودجه (${money.unitLabel})`}>
+          <input
+            className={inputClass}
+            value={budget}
+            onChange={(e) => setBudget(e.target.value)}
+            inputMode="numeric"
+          />
+        </Field>
+        <Field label="برچسب‌ها" hint="با «،» جدا کنید">
+          <input className={inputClass} value={tags} onChange={(e) => setTags(e.target.value)} />
+        </Field>
       </div>
-    </div>
+      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+        <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
+        <PrimaryButton type="button" onClick={submit} disabled={!name.trim() || saving}>
+          {saving ? "در حال ذخیره" : "ساخت پروژه"}
+        </PrimaryButton>
+      </div>
+    </WorkspaceFormDialog>
   );
 }

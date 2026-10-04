@@ -44,7 +44,13 @@ import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 import { toPersianDigits } from "@/lib/digits";
 import { workspaceSectionHref } from "@/lib/app-routes";
 import { cn } from "@/lib/utils";
-import { WORKSPACE_SECTION_META, visibleWorkspaceSections, workspaceCreateActions } from "./workspace-routes";
+import {
+  WORKSPACE_SECTION_META,
+  visibleWorkspaceSections,
+  workspaceAssistantHref,
+  workspaceCreateActions,
+  type WorkspaceSection,
+} from "./workspace-routes";
 import {
   WorkspaceEntityDrawer,
   type WorkspaceEntityKind,
@@ -65,14 +71,15 @@ const KIND_META: Record<WorkspaceEntityKind, { label: string; icon: LucideIcon }
   contract: { label: "قرارداد", icon: FileSignatureIcon },
 };
 
-/** The assistant is the platform home (`/dashboard`), not a Workspace page. */
-const ASSISTANT_HREF = "/dashboard";
 
 export function WorkspaceCommandBar({
   permissions,
   projectId,
+  section = "overview",
 }: {
   permissions: readonly string[];
+  /** The page the member is on — the assistant opens with its question. */
+  section?: WorkspaceSection;
   /** Inside a project page: create actions preselect it. */
   projectId?: string;
 }) {
@@ -125,7 +132,8 @@ export function WorkspaceCommandBar({
         aria-keyshortcuts="Control+K Meta+K"
       >
         <SearchIcon className="size-4 shrink-0" aria-hidden />
-        <span className="truncate">جست‌وجو در پروژه‌ها، وظایف، اسناد و قراردادها…</span>
+        <span className="truncate sm:hidden">جست‌وجو…</span>
+        <span className="hidden truncate sm:inline">جست‌وجو در پروژه‌ها، وظایف، اسناد و قراردادها…</span>
         <kbd className="ms-auto hidden rounded border border-border/80 px-1.5 text-xs sm:inline" dir="ltr">
           Ctrl K
         </kbd>
@@ -150,7 +158,7 @@ export function WorkspaceCommandBar({
       ) : null}
 
       <Button variant="outline" asChild>
-        <Link href={ASSISTANT_HREF}>
+        <Link href={workspaceAssistantHref(section, projectId)}>
           <BotIcon className="size-4" aria-hidden />
           پرسش از دستیار
         </Link>
@@ -175,6 +183,7 @@ export function WorkspaceCommandBar({
         onOpenChange={setPaletteOpen}
         permissions={permissions}
         projectId={projectId}
+        section={section}
         returnFocusTo={searchButton}
         onOpenEntity={(entity) => {
           setPaletteOpen(false);
@@ -203,9 +212,11 @@ function CommandPalette({
   onOpenChange,
   permissions,
   projectId,
+  section,
   returnFocusTo,
   onOpenEntity,
 }: {
+  section: WorkspaceSection;
   returnFocusTo: React.RefObject<HTMLButtonElement | null>;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -292,7 +303,7 @@ function CommandPalette({
         label: "پرسش از دستیار",
         hint: "فرمان",
         icon: BotIcon,
-        run: () => go(ASSISTANT_HREF),
+        run: () => go(workspaceAssistantHref(section, projectId)),
       },
     ].filter((command) => !q || command.label.includes(q));
     const found: PaletteItem[] = results.map((result) => ({
@@ -303,7 +314,7 @@ function CommandPalette({
       run: () => onOpenEntity({ kind: result.kind, id: result.id }),
     }));
     return [...found, ...commands];
-  }, [query, results, permissions, projectId, go, onOpenEntity]);
+  }, [query, results, permissions, projectId, section, go, onOpenEntity]);
 
   function onKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (event.key === "ArrowDown") {

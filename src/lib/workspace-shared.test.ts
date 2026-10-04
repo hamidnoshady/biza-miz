@@ -24,6 +24,8 @@ import {
   WORKSPACE_SECTIONS,
   WORKSPACE_SECTION_LABELS,
   addDays,
+  allowedContractActions,
+  contractLifecycleChange,
   approvalDecisionError,
   builtinTemplate,
   compareTasksForList,
@@ -36,6 +38,7 @@ import {
   daysUntil,
   deadlineTone,
   dependencyBlocksStatus,
+  planTemplateApplication,
   projectHealth,
   weekStartSaturday,
   dependenciesSatisfied,
@@ -424,5 +427,81 @@ describe("weekStartSaturday", () => {
     expect(weekStartSaturday("2026-10-03")).toBe("2026-10-03"); // a Saturday
     expect(weekStartSaturday("2026-10-09")).toBe("2026-10-03"); // the Friday after
     expect(weekStartSaturday("2026-10-02")).toBe("2026-09-26"); // the Friday before
+  });
+});
+
+describe("contract lifecycle", () => {
+  const today = "2026-06-01";
+  const active = { status: "active" as const, startDate: "2026-01-01", endDate: "2026-12-31" };
+  it("offers only the transitions a status allows", () => {
+    expect(allowedContractActions("active")).toEqual(["complete", "terminate", "extend"]);
+    expect(allowedContractActions("completed")).toEqual(["renew"]);
+    expect(allowedContractActions("terminated")).toEqual([]);
+    expect(contractLifecycleChange("renew", active, { today, endDate: "2027-12-31" })).toEqual({
+      ok: false, error: "invalid_contract_transition",
+    });
+  });
+  it("terminates as of today, never in the future", () => {
+    expect(contractLifecycleChange("terminate", active, { today })).toMatchObject({
+      ok: true, status: "terminated", endDate: today,
+    });
+  });
+  it("extends only to a later date", () => {
+    expect(contractLifecycleChange("extend", active, { today, endDate: "2026-10-01" })).toEqual({
+      ok: false, error: "extension_not_later",
+    });
+    expect(contractLifecycleChange("extend", active, { today, endDate: "2027-03-01" })).toMatchObject({
+      ok: true, status: "active", endDate: "2027-03-01",
+    });
+  });
+  it("renews a finished contract for a new term after the old one", () => {
+    const done = { status: "completed" as const, startDate: "2025-01-01", endDate: "2025-12-31" };
+    expect(contractLifecycleChange("renew", done, { today, endDate: "2027-05-31" })).toEqual({
+      ok: true, status: "active", startDate: today, endDate: "2027-05-31",
+    });
+    const fresh = { status: "expired" as const, startDate: "2026-01-01", endDate: "2026-07-01" };
+    expect(contractLifecycleChange("renew", fresh, { today, endDate: "2027-07-01" })).toMatchObject({
+      startDate: "2026-07-02",
+    });
+    expect(contractLifecycleChange("renew", done, { today })).toEqual({ ok: false, error: "end_date_required" });
+  });
+});
+
+describe("planTemplateApplication", () => {
+  const templatePhases = [
+    { name: "طراحی", displayOrder: 0, startDate: null, endDate: null },
+    { name: "اجرا", displayOrder: 1, startDate: null, endDate: null },
+  ];
+  const existingPhases = [
+    { id: "a", name: "طراحی", displayOrder: 0, taskCount: 2 },
+    { id: "b", name: "قدیمی خالی", displayOrder: 1, taskCount: 0 },
+    { id: "c", name: "قدیمی پر", displayOrder: 2, taskCount: 1 },
+  ];
+  it("merges only what is missing, ordered after what exists", () => {
+    const plan = planTemplateApplication({
+      existingPhases, existingTaskTitles: ["خرید"], templatePhases,
+      defaultTasks: ["خرید", "بازدید"], mode: "merge",
+    });
+    expect(plan.addPhases).toEqual([{ name: "اجرا", displayOrder: 4, startDate: null, endDate: null }]);
+    expect(plan.keptPhases).toEqual(["طراحی"]);
+    expect(plan.addTasks).toEqual(["بازدید"]);
+    expect(plan.removePhases).toEqual([]);
+  });
+  it("replace removes only empty phases the template does not name", () => {
+    const plan = planTemplateApplication({
+      existingPhases, existingTaskTitles: [], templatePhases, defaultTasks: [], mode: "replace",
+    });
+    expect(plan.removePhases).toEqual([{ id: "b", name: "قدیمی خالی" }]);
+  });
+  it("is a no-op the second time", () => {
+    const plan = planTemplateApplication({
+      existingPhases: [
+        { id: "a", name: "طراحی", displayOrder: 0, taskCount: 0 },
+        { id: "d", name: "اجرا", displayOrder: 1, taskCount: 0 },
+      ],
+      existingTaskTitles: ["بازدید"], templatePhases, defaultTasks: ["بازدید"], mode: "merge",
+    });
+    expect(plan.addPhases).toEqual([]);
+    expect(plan.addTasks).toEqual([]);
   });
 });

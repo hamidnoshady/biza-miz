@@ -269,9 +269,25 @@ calendar, reports, lookups and the AI read tools go through it:
   writes). Template application is a duplicate-safe merge.
 - The project page renders controls from the server's `capabilities` object.
 
-Still open from #761 and deliberately not in this change: server pagination
-and totals, the Workspace shell / command bar / entity drawer, the redesigned
-sections (Phases C–G of the issue).
+## 7c. Shared interaction rules (#761 §20, §23, §24)
+
+The later #761 phases added server pagination and filter-aware totals
+(`usePagedList`), the command bar and Ctrl/Cmd+K palette, the entity drawer,
+and the redesigned sections. The cleanup phase fixed three rules in one place
+each, so a new section inherits them instead of re-deriving them:
+
+- **One form dialog.** Every create/edit/decide form is `WorkspaceFormDialog`
+  (`workspace-ui.tsx`), the platform's Radix `Dialog`: labelled, focus-trapped,
+  Escape closes it, focus returns to whatever opened it (a button or a table
+  row), and a stray click outside does not discard a half-filled form. The
+  seven hand-rolled `fixed inset-0` overlays it replaced had none of that.
+- **A clickable row is a button.** `DataTableRow` with `onClick` opens on
+  Enter/Space and ignores clicks on a link or control inside it, so an action
+  cell never also opens the row — no per-cell `stopPropagation`.
+- **Tables become cards on a phone.** `stackedTableClass` on a `DataTable`
+  turns each row into a card below `sm` — the first cell is the title, the rest
+  read «label — value» from each cell's `data-label`. Desktop is unchanged; the
+  role-permission matrix is a real grid and keeps scrolling.
 
 ## 8. Testing
 

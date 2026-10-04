@@ -165,14 +165,6 @@ export function visibleWorkspaceSections(
   );
 }
 
-/** May this member open the workspace at all? */
-export function canOpenWorkspace(
-  permissions: ReadonlySet<string> | ReadonlyArray<string>,
-): boolean {
-  const held = permissions instanceof Set ? permissions : new Set(permissions);
-  return held.has(PERMISSIONS.workspaceView);
-}
-
 /**
  * «+ ایجاد» — the contextual create actions (#761 §5), shared by the command
  * bar menu and the Ctrl/Cmd+K palette. Each lands on its section with
@@ -217,4 +209,36 @@ export function workspaceCreateActions(
   return actions
     .filter((action) => held.has(action.permission) && !(projectId && action.outsideProjectOnly))
     .map(({ key, label, href: target }) => ({ key, label, href: target }));
+}
+
+/**
+ * «پرسش از دستیار» that follows the member (#761 §17): the assistant home
+ * opens focused on the Workspace, inside the project when there is one, with a
+ * question for the page already typed — prefilled, never sent, so asking is
+ * still the member's own click. Uses the chat home's existing `ctx`, `focus`
+ * and `project` parameters; nothing about the assistant's model or tools
+ * changes, and any action it proposes still goes through confirmation.
+ */
+const ASSISTANT_QUESTIONS: Record<WorkspaceSection, string> = {
+  overview: "امروز در میز کارم چه چیزهایی نیاز به توجه من دارد؟",
+  projects: "کدام پروژه‌ها در معرض خطرند و چرا؟",
+  tasks: "چه چیزی تحویل وظایف را متوقف کرده است؟",
+  calendar: "مهلت‌ها و جلسه‌های مهم این هفته کدام‌اند؟",
+  documents: "کدام اسناد منتظر بررسی یا تأییدند؟",
+  contracts: "کدام قراردادها پرریسک‌اند یا به‌زودی منقضی می‌شوند؟",
+  teams: "بار کاری اعضای تیم چطور تقسیم شده و چه کسی تحت فشار است؟",
+  approvals: "کدام تأییدها گلوگاه شده‌اند؟",
+  reports: "چرا هزینه یا زمان پروژه‌ها از برنامه جلو زده است؟",
+  templates: "برای پروژهٔ تازه‌ام کدام قالب مناسب‌تر است؟",
+};
+
+export function workspaceAssistantHref(section: WorkspaceSection, projectId?: string): string {
+  const params = new URLSearchParams({ focus: "workspace" });
+  if (projectId) {
+    params.set("project", projectId);
+    params.set("ctx", "این پروژه را خلاصه کن: کجا هستیم، چه چیزی عقب است و چرا؟");
+  } else {
+    params.set("ctx", ASSISTANT_QUESTIONS[section]);
+  }
+  return `/dashboard?${params.toString()}`;
 }

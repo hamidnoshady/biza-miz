@@ -6,6 +6,7 @@ import {
   visibleWorkspaceSections,
   WORKSPACE_SECTION_GROUPS,
   WORKSPACE_SECTION_META,
+  workspaceAssistantHref,
   workspaceCreateActions,
 } from "./workspace-routes";
 import { WORKSPACE_SECTIONS } from "@/lib/workspace-shared";
@@ -56,5 +57,20 @@ describe("workspaceCreateActions", () => {
     expect(actions.find((a) => a.key === "task")?.href).toBe(
       `${workspaceSectionHref("tasks")}?create=1&project=p-1`,
     );
+  });
+});
+
+describe("workspaceAssistantHref", () => {
+  it("opens the assistant focused on the workspace with the page's question prefilled", () => {
+    const url = new URL(workspaceAssistantHref("contracts"), "https://x.test");
+    expect(url.pathname).toBe("/dashboard");
+    expect(url.searchParams.get("focus")).toBe("workspace");
+    expect(url.searchParams.get("ctx")).toContain("قرارداد");
+    expect(url.searchParams.has("project")).toBe(false);
+  });
+  it("scopes to the project inside one", () => {
+    const url = new URL(workspaceAssistantHref("projects", "p-9"), "https://x.test");
+    expect(url.searchParams.get("project")).toBe("p-9");
+    expect(url.searchParams.get("ctx")).toContain("پروژه");
   });
 });

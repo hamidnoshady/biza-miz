@@ -46,10 +46,15 @@ export const POST = withTenantScope(
         const template = templates.find((t) => t.key === body.templateKey);
         if (!template) return NextResponse.json({ error: "template_not_found" }, { status: 404 });
         const project = await getWorkspaceProject(owner.businessId, id);
-        // A merge: phases and starter tasks the project already has are
-        // skipped, so re-applying a template never duplicates anything.
-        const added = await applyTemplate(owner, id, template, project?.startDate ?? null);
-        return NextResponse.json({ phases: await listPhases(id), added }, { status: 201 });
+        // `mode`: merge (default — adds only what is missing, so re-applying
+        // never duplicates) or replace (also removes EMPTY phases the template
+        // does not name). `dryRun` returns the exact plan without writing —
+        // the preview the member approves is the change that lands.
+        const mode = body.mode === "replace" ? "replace" : "merge";
+        const dryRun = body.dryRun === true;
+        const plan = await applyTemplate(owner, id, template, project?.startDate ?? null, { mode, dryRun });
+        if (dryRun) return NextResponse.json({ plan });
+        return NextResponse.json({ phases: await listPhases(id), plan }, { status: 201 });
       }
       const phases = await addPhase(owner, id, {
         name: String(body.name ?? ""),

@@ -30,6 +30,7 @@ import {
 } from "@/app/dashboard/data-table";
 import { api, ErrorBox, Field, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { formatJalali } from "@/lib/jalali";
+import { toPersianDigits } from "@/lib/digits";
 import {
   WORKSPACE_CAPABILITY_MIN_ROLE,
   WORKSPACE_ROLES,
@@ -38,7 +39,9 @@ import {
   roleCan,
   type WorkspaceRole,
 } from "@/lib/workspace-shared";
-import { PickerField, SelectField, workspaceError } from "./workspace-ui";
+import { PickerField, SelectField, workspaceError,
+  stackedTableClass,
+} from "./workspace-ui";
 import type { WorkspaceLookups } from "./use-workspace-lookups";
 
 interface MemberRow {
@@ -48,6 +51,9 @@ interface MemberRow {
   fullName: string;
   role: WorkspaceRole;
   createdAt: string;
+  openTasks: number;
+  overdueTasks: number;
+  doneThisWeek: number;
 }
 
 const CAPABILITY_LABELS: Record<keyof typeof WORKSPACE_CAPABILITY_MIN_ROLE, string> = {
@@ -173,11 +179,12 @@ export function TeamsSection({
             مالک پروژه به‌صورت خودکار عضو است؛ بقیه را از فرم پایین اضافه کنید.
           </EmptyState>
         ) : (
-          <DataTable caption="اعضای پروژه">
+          <DataTable caption="اعضای پروژه" tableClassName={stackedTableClass}>
             <DataTableHead>
               <tr>
                 <Th>عضو</Th>
                 <Th>نقش در پروژه</Th>
+                <Th>بار کاری</Th>
                 <Th>از تاریخ</Th>
                 <Th>حذف</Th>
               </tr>
@@ -185,10 +192,10 @@ export function TeamsSection({
             <DataTableBody>
               {members.map((member) => (
                 <DataTableRow key={member.id}>
-                  <Td>
+                  <Td data-label="عضو">
                     <span className="font-medium">{member.fullName}</span>
                   </Td>
-                  <Td>
+                  <Td data-label="نقش در پروژه">
                     {canManage ? (
                       <select
                         className={inputClass}
@@ -209,10 +216,24 @@ export function TeamsSection({
                       </StatusBadge>
                     )}
                   </Td>
-                  <Td>
+                  <Td data-label="بار کاری">
+                    {/* Workload on this project (#761 §13), from the task rows themselves. */}
+                    <div className="flex flex-col gap-0.5 text-xs tabular-nums">
+                      <span>{toPersianDigits(String(member.openTasks))} وظیفهٔ باز</span>
+                      {member.overdueTasks > 0 ? (
+                        <span className="text-rose-700 dark:text-rose-300">
+                          {toPersianDigits(String(member.overdueTasks))} عقب‌افتاده
+                        </span>
+                      ) : null}
+                      <span className="text-muted-foreground">
+                        {toPersianDigits(String(member.doneThisWeek))} انجام در ۷ روز اخیر
+                      </span>
+                    </div>
+                  </Td>
+                  <Td data-label="از تاریخ">
                     <span className="tabular-nums">{formatJalali(member.createdAt)}</span>
                   </Td>
-                  <Td>
+                  <Td data-label="حذف">
                     {canManage ? (
                       <SecondaryButton onClick={() => remove(member.userId)} disabled={busy}>
                         <Trash2Icon className="size-4" aria-hidden />
