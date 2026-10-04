@@ -1,23 +1,24 @@
 "use client";
 
 /**
- * «تأییدها» — the approval queue.
+ * «تأییدها» — the approval inbox.
  *
  * Requesting and deciding are deliberately different rights: anyone with
- * `workspace.manage` can ask, only `workspace.approve` can answer. This screen
- * shows both sides of that line — the decide buttons simply are not rendered
- * for a user who cannot decide, and the server enforces the same rule again.
+ * `workspace.manage` can ask, only `workspace.approve` can answer, a named
+ * approver is the only one who may answer their request, and nobody answers
+ * their own. Each row carries `requestedByMe`/`assignedToMe` from the server,
+ * so the buttons rendered are the ones that will succeed — and the server
+ * enforces the same rule again (`approvalDecisionError`).
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2Icon, CheckIcon, StampIcon, XIcon } from "lucide-react";
+import { CheckCircle2Icon, CheckIcon, StampIcon } from "lucide-react";
 import {
   EmptyState,
   KpiCard,
   KpiRow,
   LoadingSkeleton,
   SectionCard,
-  overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import {
   DataTable,
@@ -37,6 +38,7 @@ import {
   SecondaryButton,
 } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
+import { todayIsoDate } from "@/lib/jalali";
 import {
   APPROVAL_STATUSES,
   APPROVAL_STATUS_LABELS,
@@ -44,7 +46,23 @@ import {
   type WorkspaceApprovalStatus,
   type WorkspaceApprovalSubject,
 } from "@/lib/workspace-shared";
-import { ApprovalStatusBadge, DateCell, workspaceError } from "./workspace-ui";
+import {
+  ApprovalStatusBadge,
+  DateCell,
+  LoadMoreFooter,
+  workspaceError,
+  WorkspaceFormDialog,
+  stackedTableClass,
+} from "./workspace-ui";
+import { usePagedList } from "./use-paged-list";
+import { WorkspaceEntityDrawer, type WorkspaceEntityRef } from "./workspace-entity-drawer";
+
+interface ApprovalSummary {
+  total: number;
+  pending: number;
+  approved: number;
+  overdue: number;
+}
 
 export interface ApprovalRow {
   id: string;
@@ -58,49 +76,56 @@ export interface ApprovalRow {
   requestedByName: string | null;
   approverName: string | null;
   dueDate: string | null;
+  approverUserId: string | null;
   decidedAt: string | null;
   note: string;
   createdAt: string;
+  requestedByMe: boolean;
+  assignedToMe: boolean;
+  canDecideUnassigned: boolean;
 }
 
-type Decision = "approved" | "rejected" | "cancelled";
+type Decision = "approved" | "rejected" | "changes_requested" | "cancelled";
+type Inbox = "all" | "mine" | "requested";
 
 export function ApprovalsSection({
   canApprove,
   projectId,
+  initialInbox = "all",
 }: {
+  /** `?mine=true` — the command bar's bell lands on «منتظر تصمیم من». */
+  initialInbox?: Inbox;
   canApprove: boolean;
   projectId?: string;
 }) {
-  const [approvals, setApprovals] = useState<ApprovalRow[] | null>(null);
   const [error, setError] = useState("");
   const [status, setStatus] = useState<WorkspaceApprovalStatus | "all">("pending");
-  const [mine, setMine] = useState(false);
+  const [inbox, setInbox] = useState<Inbox>(initialInbox);
   const [deciding, setDeciding] = useState<{ row: ApprovalRow; decision: Decision } | null>(null);
+  // What is being approved, opened in the shared drawer (#761 §14).
+  const [viewing, setViewing] = useState<WorkspaceEntityRef | null>(null);
 
-  const load = useCallback(() => {
+  const query = useMemo(() => {
     const params = new URLSearchParams({ status });
-    if (mine) params.set("mine", "true");
+    if (inbox === "mine") params.set("mine", "true");
+    if (inbox === "requested") params.set("requested", "true");
     if (projectId) params.set("projectId", projectId);
-    api<{ approvals: ApprovalRow[] }>(`/api/workspace/approvals?${params}`).then(({ ok, data }) => {
-      if (ok) setApprovals(data.approvals);
-      else setError(workspaceError((data as unknown as { error?: string }).error));
-    });
-  }, [status, mine, projectId]);
+    return `/api/workspace/approvals?${params}`;
+  }, [status, inbox, projectId]);
+  const list = usePagedList<ApprovalRow, ApprovalSummary>(query, "approvals");
+  const approvals = list.rows;
+  const load = list.reload;
+  useEffect(() => {
+    if (list.error) setError(list.error);
+  }, [list.error]);
 
-  useEffect(load, [load]);
-
-  const counts = useMemo(() => {
-    const list = approvals ?? [];
-    return {
-      total: list.length,
-      pending: list.filter((a) => a.status === "pending").length,
-      overdue: list.filter(
-        (a) => a.status === "pending" && a.dueDate && a.dueDate < new Date().toISOString().slice(0, 10),
-      ).length,
-      approved: list.filter((a) => a.status === "approved").length,
-    };
-  }, [approvals]);
+  // Server totals over the whole filtered set — not the loaded page.
+  const counts = {
+    total: list.summary?.total ?? 0,
+    pending: list.summary?.pending ?? 0,
+    overdue: list.summary?.overdue ?? 0,
+    approved: list.summary?.approved ?? 0,
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -142,8 +167,14 @@ export function ApprovalsSection({
             ))}
           </FilterChipRow>
           <FilterChipRow label="فیلتر مخاطب">
-            <FilterChip selected={mine} onClick={() => setMine(!mine)}>
-              فقط تأییدهای من
+            <FilterChip selected={inbox === "all"} onClick={() => setInbox("all")}>
+              همه
+            </FilterChip>
+            <FilterChip selected={inbox === "mine"} onClick={() => setInbox("mine")}>
+              منتظر تصمیم من
+            </FilterChip>
+            <FilterChip selected={inbox === "requested"} onClick={() => setInbox("requested")}>
+              درخواست‌های من
             </FilterChip>
           </FilterChipRow>
         </div>
@@ -155,7 +186,7 @@ export function ApprovalsSection({
             وقتی کسی برای قرارداد یا سندی درخواست تأیید بفرستد، اینجا دیده می‌شود.
           </EmptyState>
         ) : (
-          <DataTable caption="فهرست درخواست‌های تأیید" frame={false}>
+          <DataTable caption="فهرست درخواست‌های تأیید" frame={false} tableClassName={stackedTableClass}>
             <DataTableHead>
               <tr>
                 <Th>موضوع</Th>
@@ -170,27 +201,39 @@ export function ApprovalsSection({
             <DataTableBody>
               {approvals.map((row) => (
                 <DataTableRow key={row.id}>
-                  <Td>
-                    <div className="font-medium">{row.subjectTitle || row.title}</div>
+                  <Td data-label="موضوع">
+                    {/* An explicit button, not a row click: this row also holds the
+                        decision buttons, and one press must do one thing (#761 §23). */}
+                    <button
+                      type="button"
+                      onClick={() => setViewing({ kind: row.subjectType, id: row.subjectId })}
+                      className="text-start font-medium underline-offset-4 hover:underline"
+                    >
+                      {row.subjectTitle || row.title}
+                    </button>
                     {row.note ? (
                       <div className="text-xs text-muted-foreground">{row.note}</div>
                     ) : null}
                   </Td>
-                  <Td>{APPROVAL_SUBJECT_LABELS[row.subjectType]}</Td>
-                  <Td>{row.projectName ?? "—"}</Td>
-                  <Td>{row.requestedByName ?? "—"}</Td>
-                  <Td>
+                  <Td data-label="نوع">{APPROVAL_SUBJECT_LABELS[row.subjectType]}</Td>
+                  <Td data-label="پروژه">{row.projectName ?? "—"}</Td>
+                  <Td data-label="درخواست‌کننده">{row.requestedByName ?? "—"}</Td>
+                  <Td data-label="مهلت">
                     <DateCell date={row.dueDate} />
                   </Td>
-                  <Td>
+                  <Td data-label="وضعیت">
                     <ApprovalStatusBadge status={row.status} />
                   </Td>
-                  <Td>
+                  <Td data-label="اقدام">
                     {row.status !== "pending" ? (
                       <span className="text-xs text-muted-foreground">
                         {row.decidedAt ? "تصمیم ثبت شده" : "—"}
                       </span>
-                    ) : canApprove ? (
+                    ) : row.requestedByMe ? (
+                      <SecondaryButton onClick={() => setDeciding({ row, decision: "cancelled" })}>
+                        لغو درخواست
+                      </SecondaryButton>
+                    ) : canApprove && (row.assignedToMe || (!row.approverUserId && row.canDecideUnassigned)) ? (
                       <div className="flex flex-wrap gap-1.5">
                         <PrimaryButton
                           type="button"
@@ -200,13 +243,20 @@ export function ApprovalsSection({
                           تأیید
                         </PrimaryButton>
                         <SecondaryButton
+                          onClick={() => setDeciding({ row, decision: "changes_requested" })}
+                        >
+                          درخواست اصلاح
+                        </SecondaryButton>
+                        <SecondaryButton
                           onClick={() => setDeciding({ row, decision: "rejected" })}
                         >
                           رد
                         </SecondaryButton>
                       </div>
                     ) : (
-                      <span className="text-xs text-muted-foreground">در انتظار تأییدکننده</span>
+                      <span className="text-xs text-muted-foreground">
+                        {row.approverName ? `در انتظار ${row.approverName}` : "در انتظار تأییدکننده"}
+                      </span>
                     )}
                   </Td>
                 </DataTableRow>
@@ -214,7 +264,15 @@ export function ApprovalsSection({
             </DataTableBody>
           </DataTable>
         )}
+        <LoadMoreFooter
+          loaded={approvals?.length ?? 0}
+          page={list.page}
+          loading={list.loadingMore}
+          onLoadMore={list.loadMore}
+        />
       </SectionCard>
+
+      <WorkspaceEntityDrawer entity={viewing} onClose={() => setViewing(null)} onChanged={load} />
 
       {deciding ? (
         <DecisionDialog
@@ -235,7 +293,15 @@ export function ApprovalsSection({
 const DECISION_LABELS: Record<Decision, string> = {
   approved: "تأیید",
   rejected: "رد",
+  changes_requested: "درخواست اصلاح",
   cancelled: "لغو",
+};
+
+const DECISION_EFFECTS: Record<Decision, string> = {
+  approved: "با تأیید، وضعیت خودِ این مورد هم به‌روز می‌شود (قرارداد فعال، سند تأییدشده).",
+  rejected: "با رد، وضعیت آن مورد «ردشده» ثبت می‌شود و می‌توان دوباره درخواست داد.",
+  changes_requested: "مورد به پیش‌نویس برمی‌گردد تا درخواست‌کننده اصلاحش کند و دوباره بفرستد.",
+  cancelled: "درخواست پس گرفته می‌شود و وضعیت آن مورد تغییری نمی‌کند.",
 };
 
 function DecisionDialog({
@@ -267,48 +333,35 @@ function DecisionDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/30 p-4 backdrop-blur-sm">
-      <div className={`${overlayPanelClass} w-full max-w-lg`}>
-        <div className="flex items-center justify-between border-b border-border/80 p-4">
-          <h2 className="text-base font-semibold">{DECISION_LABELS[decision]} درخواست</h2>
-          <SecondaryButton onClick={onClose}>
-            <XIcon className="size-4" aria-hidden />
-            <span className="sr-only">بستن</span>
-          </SecondaryButton>
-        </div>
-        <div className="flex flex-col gap-3 p-4">
-          <p className="text-sm text-muted-foreground">
-            {APPROVAL_SUBJECT_LABELS[row.subjectType]}: {row.subjectTitle || row.title}
-            {row.projectName ? ` — ${row.projectName}` : ""}
-          </p>
-          <Field
-            label="یادداشت"
-            hint={
-              decision === "rejected"
-                ? "دلیل رد را بنویسید؛ درخواست‌کننده آن را می‌بیند."
-                : "اختیاری"
-            }
-          >
-            <textarea
-              className={`${inputClass} min-h-24`}
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              autoFocus
-            />
-          </Field>
-          <p className="text-xs text-muted-foreground">
-            {decision === "approved"
-              ? "با تأیید، وضعیت خودِ این مورد هم به‌روز می‌شود (قرارداد فعال، سند تأییدشده)."
-              : "با رد، وضعیت آن مورد «ردشده» ثبت می‌شود و می‌توان دوباره درخواست داد."}
-          </p>
-        </div>
-        <div className="flex justify-end gap-2 border-t border-border/80 p-4">
-          <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
-          <PrimaryButton type="button" onClick={submit} disabled={saving}>
-            {saving ? "در حال ثبت" : `ثبت ${DECISION_LABELS[decision]}`}
-          </PrimaryButton>
-        </div>
+    <WorkspaceFormDialog title={<>{DECISION_LABELS[decision]} درخواست</>} width="lg" onClose={onClose}>
+      <div className="flex flex-col gap-3 p-4">
+        <p className="text-sm text-muted-foreground">
+          {APPROVAL_SUBJECT_LABELS[row.subjectType]}: {row.subjectTitle || row.title}
+          {row.projectName ? ` — ${row.projectName}` : ""}
+        </p>
+        <Field
+          label="یادداشت"
+          hint={
+            decision === "rejected" || decision === "changes_requested"
+              ? "دلیل را بنویسید؛ درخواست‌کننده آن را می‌بیند."
+              : "اختیاری"
+          }
+        >
+          <textarea
+            className={`${inputClass} min-h-24`}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            autoFocus
+          />
+        </Field>
+        <p className="text-xs text-muted-foreground">{DECISION_EFFECTS[decision]}</p>
       </div>
-    </div>
+      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+        <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
+        <PrimaryButton type="button" onClick={submit} disabled={saving}>
+          {saving ? "در حال ثبت…" : `ثبت ${DECISION_LABELS[decision]}`}
+        </PrimaryButton>
+      </div>
+    </WorkspaceFormDialog>
   );
 }

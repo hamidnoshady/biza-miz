@@ -640,8 +640,12 @@ describe("the workspace module's API guards", () => {
     };
     // Deciding an approval is its own permission: if the requester could also
     // approve, the gate would be decorative.
-    expect(read("workspace/approvals/[id]")).toMatch(/PERMISSIONS\.workspaceApprove/);
-    expect(read("workspace/approvals/[id]")).not.toMatch(/PERMISSIONS\.workspaceManage/);
+    // Withdrawing your OWN request is not a decision, so it alone runs on
+    // workspace.manage (#761); every actual decision still needs approve.
+    expect(read("workspace/approvals/[id]")).toMatch(
+      /decision === "cancelled" \? PERMISSIONS\.workspaceManage : PERMISSIONS\.workspaceApprove/,
+    );
+    expect(read("workspace/approvals/[id]").match(/PERMISSIONS\.workspaceManage/g)).toHaveLength(1);
     // Recording an execution contract commits the business to money, so it is
     // carved out of the general manage permission.
     expect(read("workspace/contracts")).toMatch(/PERMISSIONS\.workspaceContractsManage/);
