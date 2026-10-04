@@ -458,7 +458,13 @@ export async function WorkspaceShell({
         */}
         <div className="flex h-[100dvh] flex-col md:h-screen md:flex-row">
         {hybridSite ? <HybridConnectivityNotice /> : null}
-        {embedded ? null : <DashboardSidebar
+        {/*
+          `embedded` covers a request that arrived with the pane's token. The
+          wrapper's attribute covers the rest: a navigation the cloud's service
+          worker forwarded without it (globals.css hides it under
+          `html[data-cloud-embed]`). `contents` keeps it out of the layout.
+        */}
+        {embedded ? null : <div data-workspace-sidebar="" className="contents"><DashboardSidebar
           navItems={navItems}
           role={member.role}
           permissions={[...permissions]}
@@ -469,7 +475,7 @@ export async function WorkspaceShell({
           workspaceSections={workspaceSections}
           deploymentProfile={deployment.profile}
           account={`${session.businessId}:${session.sub}`}
-        />}
+        /></div>}
         <DashboardMain hybridSite={hybridSite}>
           {session.imp && supportGrant ? (
             <SupportSessionBanner session={{

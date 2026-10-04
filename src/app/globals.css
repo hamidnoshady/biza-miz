@@ -124,6 +124,16 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+/*
+ * Phase 46 — a cloud page inside the desktop's cloud pane. The desktop draws
+ * the menu, so the page's own sidebar goes. The marker on <html> is set by an
+ * inline script in the root layout from navigator.userAgent (src/lib/cloud-embed.ts
+ * explains why the server-side check alone misses service-worker navigations).
+ */
+html[data-cloud-embed] [data-workspace-sidebar] {
+  display: none;
+}
+
 .dark {
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);

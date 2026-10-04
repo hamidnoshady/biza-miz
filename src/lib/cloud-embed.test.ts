@@ -1,11 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { CLOUD_EMBED_UA_TOKEN, cloudPageUrl, isCloudEmbedUserAgent, mirroredPath } from "./cloud-embed";
+import {
+  CLOUD_EMBED_ATTRIBUTE,
+  CLOUD_EMBED_MARKER_SCRIPT,
+  CLOUD_EMBED_UA_TOKEN,
+  cloudPageUrl,
+  isCloudEmbedUserAgent,
+  mirroredPath,
+} from "./cloud-embed";
 
 describe("isCloudEmbedUserAgent", () => {
   it("recognises only the pane's token", () => {
     expect(isCloudEmbedUserAgent(`Mozilla/5.0 Electron/33 ${CLOUD_EMBED_UA_TOKEN}`)).toBe(true);
     expect(isCloudEmbedUserAgent("Mozilla/5.0 Chrome/130")).toBe(false);
     expect(isCloudEmbedUserAgent(null)).toBe(false);
+  });
+});
+
+describe("CLOUD_EMBED_MARKER_SCRIPT", () => {
+  function run(userAgent: string): Record<string, string> {
+    const attributes: Record<string, string> = {};
+    const documentElement = { setAttribute: (name: string, value: string) => (attributes[name] = value) };
+    new Function("navigator", "document", CLOUD_EMBED_MARKER_SCRIPT)({ userAgent }, { documentElement });
+    return attributes;
+  }
+
+  it("marks the page only inside the pane", () => {
+    expect(run(`Mozilla/5.0 Electron/44 ${CLOUD_EMBED_UA_TOKEN}`)).toEqual({ [CLOUD_EMBED_ATTRIBUTE]: "" });
+    expect(run("Mozilla/5.0 Electron/44 Safari/537.36")).toEqual({});
   });
 });
 
