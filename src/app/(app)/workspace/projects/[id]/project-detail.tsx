@@ -23,7 +23,8 @@
 import { TemplateApplier } from "../../template-applier";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowRightIcon, FolderIcon, PencilIcon } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { ArrowRightIcon, FolderIcon, HardHatIcon, PencilIcon } from "lucide-react";
 import {
   EmptyState,
   KpiCard,
@@ -168,7 +169,27 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const [health, setHealth] = useState<Health | null>(null);
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
+  // §34's "filters that persist in URL where useful" and §25's field screen both
+  // need the tab to be addressable: `?tab=submittals` is what a phone's review
+  // link points at, and a reload or a shared link keeps the tab the reader was
+  // on. The value is only accepted once the tab bar is known, because a link to
+  // a register this business does not have must land on «نمای کلی» rather than
+  // on an empty panel.
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const requestedTab = searchParams.get("tab");
   const [tab, setTab] = useState<ProjectTab["key"]>("overview");
+  const [tabInitialised, setTabInitialised] = useState(false);
+
+  const selectTab = useCallback(
+    (next: ProjectTab["key"]) => {
+      setTab(next);
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("tab", String(next));
+      router.replace(`/workspace/projects/${projectId}?${params.toString()}`, { scroll: false });
+    },
+    [projectId, router, searchParams],
+  );
 
   const load = useCallback(() => {
     api<{
@@ -214,6 +235,16 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     lookups.aecCapabilities ? { capabilities: lookups.aecCapabilities } : null,
   );
 
+  // The requested tab is honoured once — the first time the bar is known. A
+  // later `tabs` change must not yank the reader back to a tab they left.
+  useEffect(() => {
+    if (tabInitialised || requestedTab === null) return;
+    if (tabs.some((entry) => String(entry.key) === requestedTab)) {
+      setTab(requestedTab as ProjectTab["key"]);
+    }
+    setTabInitialised(true);
+  }, [requestedTab, tabInitialised, tabs]);
+
   if (!loaded) return <SectionCardSkeleton rows={6} label="در حال بارگذاری پروژه" />;
 
   if (!project) {
@@ -258,12 +289,25 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             </StatusBadge>
           ) : null}
         </div>
-        <Link href={`${WORKSPACE_MODULE_HOME}/projects`}>
-          <SecondaryButton>
-            <ArrowRightIcon className="size-4 rtl:rotate-180" aria-hidden />
-            همهٔ پروژه‌ها
-          </SecondaryButton>
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Issue #799 §25 — the phone's door into the same project. A link
+              rather than a tab: a field user bookmarks it, and the screen is a
+              queue with big touch targets, not the desktop page squeezed. */}
+          {lookups.aecCapabilities && lookups.aecCapabilities.length > 0 ? (
+            <Link href={`/workspace/projects/${projectId}/field`}>
+              <SecondaryButton>
+                <HardHatIcon className="size-4" aria-hidden />
+                حالت کارگاه
+              </SecondaryButton>
+            </Link>
+          ) : null}
+          <Link href={`${WORKSPACE_MODULE_HOME}/projects`}>
+            <SecondaryButton>
+              <ArrowRightIcon className="size-4 rtl:rotate-180" aria-hidden />
+              همهٔ پروژه‌ها
+            </SecondaryButton>
+          </Link>
+        </div>
       </div>
 
       {attention && health ? (
@@ -290,7 +334,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         label="بخش‌های پروژه"
         tabs={tabs}
         active={tab}
-        onChange={setTab}
+        onChange={selectTab}
       />
 
       <TabPanel idPrefix="workspace-project" active={tab}>

@@ -1,7 +1,7 @@
 # Phase 47 — The AEC industry and AEC project operations
 
-**Status:** Waves 1–9 implemented (migrations 0193–0201); Wave 10's report set, recommended widgets
-and §26 classification implemented; the rest of Waves 10–11 designed here, not built.
+**Status:** Waves 1–9 implemented (migrations 0193–0201); Wave 10's report set, recommended widgets,
+§26 classification and §25 field mode implemented; the rest of Waves 10–11 designed here, not built.
 
 Working issue: [#799 — Add Architecture, Civil Engineering & Construction business type with AEC
 project operations](https://github.com/hamidnoshady/cafe-restaurant-pos/issues/799).
@@ -639,6 +639,25 @@ What shipped:
 | Permission | **No new key.** Reading a report is the same `workspace.view` the cockpit needs, writing nothing is possible (a report prints approvals, it does not grant them), and the two figures the books own stay behind `ledger.view` — with the row's value `null` rather than a zero the reader would believe |
 | Isolation | `integration/aec-reports.integration.test.ts` (6 tests) against a real database: the bundle's keys equal `reportsForCapabilities`'s exactly and in §30's order; every figure is asserted against the register that owns it (the phase's overdue tasks, the ledger's actual cost, §18's late award, the RFI/submittal/snag ages and their buckets, the site log's crew and incidents, the certified claim); the design preset's switched-off capabilities leave eight reports **absent** while the design office still reads its own seven; an actor without `ledger.view` gets `null` where the ledger would be; another tenant's project is `project_not_found` and none of its rows reach my project's bundle; an F&B business is refused with `industry_mismatch`; and a thirty-row register prints `AEC_REPORT_ROW_LIMIT` rows with `omittedRows` saying how many stayed behind. `src/lib/aec-reports.test.ts` (8 tests) proves the pure half, and `api-guards.test.ts` asserts the route's permission shape from its source |
 
+### §25's field mode (implemented) — and §34's hardening
+
+§25 lists eleven flows a site user does from a phone and eight rules. The flow
+list is data, not prose: `src/lib/aec-field.ts`'s `AEC_FIELD_ACTIONS` names each
+one with its §25 wording, the capability that has to be on for it to mean
+anything, whether a partial draft is *safe*, and the project tab that owns the
+long form — so the phone cannot quietly grow a second editor for the same
+information (§34's "no duplicate screens").
+
+| Surface | Change |
+|---|---|
+| Board | `src/lib/aec-field.ts` — `fieldBoard(owner, projectId)` composes the queues from **the registers' own list functions** (site logs, site issues, RFIs, tasks, commitments, drawings, submittals, checklists) rather than adding a fifth query per register, reads the capability list once and asks a register only when its switch is on, caps every queue (`AEC_FIELD_QUEUE_LIMIT = 5`), sorts by urgency, and formats every date Shamsi with the day count from the business's own today. It also carries the number a capture would need (`suggestions.rfiNumber`) and the log id of today's report, so "add a photo" is an append rather than a refusal |
+| API | `GET /api/aec/projects/[id]/field` (one read for the whole screen) and `POST /api/aec/projects/[id]/field/photo` — the narrow door for §25's photo capture: the Media Library's own upload is gated on `media.manage` (back-office custody), so a site user photographs through the project write capability instead, with the library's rules kept (byte-signature check, per-kind size cap, tenant-scoped duplicate reuse) by calling the same `storeMediaAsset` |
+| Screen | `/workspace/projects/[id]/field` — «حالت کارگاه»: one column on a phone, thumb-sized targets (`min-h-12`/`min-h-20`), a sticky today banner, a two-column action grid, then the queue cards. Photos come from `<input capture="environment">` and upload through an XHR with a real percentage bar (`fetch` cannot report upload progress). Drafts are kept in `localStorage` under the project and action for exactly the captures the catalogue marks `draftSafe`, with a retrieve chip when one is found; the two decisions say on screen that they are never drafted. Reviews (submittal, latest drawing, approve/reject) are links into the project's own tab |
+| Screen test | `src/app/(app)/workspace/projects/[id]/field/field-screen.test.ts` (8 tests) — the §25 rules asserted mechanically: all eleven flows on the screen, `capture="environment"` + `upload.onprogress` + `role="progressbar"`, drafts only where safe, no `<table>` and no `animate-spin` (the repo's design lint), the endpoints are the registers' own, and the tab links are `?tab=` |
+| Database test | `integration/aec-field.integration.test.ts` (4 tests) — the board against real registers: every queue agrees with the register that owns it (including the soonest-first order and the Shamsi day counts), the design preset gets empty site queues instead of refusals, another tenant's project is `project_not_found`, a food-service business is `industry_mismatch`, and a nine-row register still returns exactly the three soonest rows under a cap |
+| §34's URL rule | The project page now reads and writes `?tab=` (`project-detail.tsx`), so a phone's review link opens the register it names, a reload keeps the tab, and the field screen's hand-offs are links rather than duplicated screens. The requested tab is honoured once, against the tab bar actually built for that business — a link to a register the tenant does not have lands on «نمای کلی» rather than an empty panel |
+| §34's audit | Prefer: cockpit (`aec-cockpit.ts`, `AEC_SHIPPED_WAVE = 10`), contextual actions (per-panel forms; the command bar), smart queues (the attention strip, the notification scans, the field board), activity feeds (the project activity tab and the site diary), compact cards over tables (the field board and every report card), progressive disclosure (tabs, `<details>`), URL-persisted filters (workspace sections and now project tabs), side sheets (`overlayPanelClass`), capability-aware UI (`visibleWorkspaceSections`, `aecProjectTabs`, the board's own queue suppression), AI summaries that name their source (`AEC_REPORT_AI_TOOL` prints the §23 read under each report). Avoid: no giant table for a capture flow, no second screen for the same data (the field screen links), no duplicate Accounting totals (every report reads `projectReport`'s ledger figures once), no separate "modules" per table (the cockpit's sections) |
+
 ### §26's deployment-mode classification (implemented)
 
 §26 asks for an audit rather than for replication: *"Audit all new entities for
@@ -696,6 +715,18 @@ financial registers say `null` for "what may travel" rather than an empty string
 and the database suite proves the second half of the claim (§26's "do not simply
 put transactional commercial/accounting operations into generic last-write-wins
 master-data sync") by asserting the capture trigger is absent from all of them.
+
+### Decision 37 — the phone is a queue, not a smaller table
+
+§25 says "no desktop-only large tables for critical work" and §34 says "avoid giant tables for every
+workflow". The tempting reading is to shrink the registers onto a phone; the shipped reading is that
+the phone answers three questions — *what is late, what is waiting for me, what did I just find* — and
+hands everything else to the screen that already owns it. So the field board caps at five rows per
+register, composes them from the registers' own reads (a second query per register is how the phone
+starts disagreeing with the desk), and every review is a link with `?tab=`. The consequence worth
+stating: a capture that the phone cannot finish safely is not offered — the day's *lines* are left to
+the site panel rather than replaced from a phone, and an update carries the attachments the desk
+already wrote instead of detaching them.
 
 ## The parts of Waves 10–11 not built yet
 

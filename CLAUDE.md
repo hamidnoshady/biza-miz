@@ -1088,6 +1088,15 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   carries `aec_field_capture`/`aec_commercial_registers` as `not_replicated`, and the database suite
   proves no AEC table carries `trg_sync_capture` and that a paired desktop database holds zero rows
   in every one of them. Never add an AEC table to `MASTER_SYNC_TABLES` to "fix" a missing sync.
+  §25's field mode is `/workspace/projects/<id>/field` («حالت کارگاه»): a single API
+  (`/api/aec/projects/<id>/field`), a queue board capped at `AEC_FIELD_QUEUE_LIMIT` composed from the
+  registers' own list functions, and `src/lib/aec-field.ts`'s `AEC_FIELD_ACTIONS` — eleven entries, one
+  per §25 bullet, each naming its capability, whether a draft is *safe* (a capture is; an approval
+  never is) and the project tab that owns the long form. Photos go through the narrow upload route
+  (`/api/aec/projects/<id>/field/photo`, project write capability, same `storeMediaAsset` rules as the
+  library) and upload progress is a real XHR percentage. The project page reads and writes `?tab=` so
+  those hand-offs are links, and an update from the phone must carry the attachments the desk already
+  wrote rather than replacing the day's lines — see Decision 37.
   Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a
