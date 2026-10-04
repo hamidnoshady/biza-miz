@@ -68,6 +68,13 @@ describe("packaged desktop production posture", () => {
     }
   });
 
+  it("checks stable tag collisions only for releases, not unique CI previews", () => {
+    const workflow = readFileSync(path.resolve(".github/workflows/build-desktop-installer.yml"), "utf8");
+    expect(workflow).toContain('if ($env:RELEASE_BUILD -eq "true" -and (git tag --list "desktop-v$next")) {');
+    expect(workflow).not.toContain('if (git tag --list "desktop-v$next") {');
+    expect(workflow).toContain('$version = if ($env:RELEASE_BUILD -eq "true") { $next } else { "$next-ci.$env:GITHUB_RUN_NUMBER" }');
+  });
+
   it("always launches the internal server as a loopback-only production site", () => {
     const env = desktopServerEnvironment(
       { jwtSecret: "test", appPort: 3042, instanceId: "instance" },
