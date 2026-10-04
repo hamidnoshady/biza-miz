@@ -406,8 +406,9 @@ change order" and a day's "cost impact" are fields on the *variation*, which Wav
 is owned by the later record, so neither register grows a column pointing at a table that does not
 exist yet; and a day or an inspection drafted on site with no signal (§26's "excellent on mobile" and
 the offline candidates) is a replication-domain decision, which Wave 10 owns together with the mobile
-capture flows. `material_tracking` stays out of `AEC_LIVE_CAPABILITIES` until Wave 9 builds it, which
-is why no tab in this wave can show a delivery-tracking screen that does not exist.
+capture flows. `material_tracking` stays out of `AEC_LIVE_CAPABILITIES` — Wave 9 shipped delivery
+tracking on `procurement` instead and left the ledger switch reserved with its reason written down — so
+no tab in this wave can show a delivery-tracking screen that does not exist.
 
 ## Wave 8 — commercial controls (implemented, migration 0200)
 
@@ -495,8 +496,9 @@ and this wave respects that: what it owns is the data behind the three commercia
 §30's "change-order exposure" is the change-order register plus `pendingVariations` and
 `getProjectCommercialSummary.approvedVariationsRial`; "certificate/payment status" is the certificate
 register plus `certifiedClaimsAwaitingPayment`; and "project margin" **cannot** be reported yet — the
-margin needs committed cost and cost to complete, which are Wave 9's procurement registers, so the
-cockpit names the figure in `awaitingWaves` instead of printing a plausible number.
+margin needs committed cost and cost to complete, which were Wave 9's procurement registers — the
+cockpit named the figure in `awaitingWaves` instead of printing a plausible number, and Wave 9 has
+since filled that list in.
 §30's "financial
 amounts must use Accounting as the source where they represent posted financial facts" is Decision 23
 above, and it is why the cockpit's actual cost is read from the ledger rather than kept here.
