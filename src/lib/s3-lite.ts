@@ -238,6 +238,77 @@ export async function s3Get(config: S3Config, key: string): Promise<Buffer> {
   return Buffer.from(await res.arrayBuffer());
 }
 
+/**
+ * Upload a file without loading it (issue #807). The payload hash SigV4 signs
+ * is still the sha256 of the whole object — computed by the caller while it
+ * wrote the file — but the body is a stream, so a multi-gigabyte artifact costs
+ * a socket buffer rather than that much RAM. `Content-Length` is sent
+ * explicitly so the request is not chunked (S3's plain chunked PUT would
+ * require aws-chunked signing).
+ */
+export async function s3PutFile(
+  config: S3Config,
+  key: string,
+  filePath: string,
+  opts: { payloadHash: string; sizeBytes: number },
+): Promise<void> {
+  const signed = signS3Request(config, { method: "PUT", key, payloadHash: opts.payloadHash });
+  const { createReadStream } = await import("node:fs");
+  const { Readable } = await import("node:stream");
+  const res = await fetch(signed.url, {
+    method: "PUT",
+    headers: { ...signed.headers, "content-length": String(opts.sizeBytes) },
+    body: Readable.toWeb(createReadStream(filePath)) as unknown as BodyInit,
+    // undici requires this explicitly for a streamed request body.
+    duplex: "half",
+    signal: AbortSignal.timeout(S3_REQUEST_TIMEOUT_MS),
+  } as RequestInit & { duplex: "half" });
+  await throwOnError(res, `upload ${key}`);
+}
+
+/**
+ * Download an object straight to a file, enforcing a size cap *while* the bytes
+ * arrive (a lying or absent content-length cannot fill the disk). Returns the
+ * received byte count and its sha256 — computed over what actually landed, not
+ * what the header claimed.
+ */
+export async function s3GetToFile(
+  config: S3Config,
+  key: string,
+  filePath: string,
+  opts: { maxBytes?: number } = {},
+): Promise<{ sizeBytes: number; sha256: string }> {
+  const res = await s3Fetch(config, { method: "GET", key, payloadHash: sha256Hex("") });
+  await throwOnError(res, `download ${key}`);
+  const maxBytes = opts.maxBytes ?? PLATFORM_S3_DOWNLOAD_LIMIT;
+  const declared = Number(res.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > maxBytes) throw new Error(`download ${key}: artifact_too_large`);
+  if (!res.body) throw new Error(`download ${key}: empty_body`);
+
+  const { createHash } = await import("node:crypto");
+  const { createWriteStream } = await import("node:fs");
+  const { pipeline } = await import("node:stream/promises");
+  const hash = createHash("sha256");
+  let total = 0;
+  const counting = new (await import("node:stream")).Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      total += chunk.byteLength;
+      if (total > maxBytes) return callback(new Error(`download ${key}: artifact_too_large`));
+      hash.update(chunk);
+      callback(null, chunk);
+    },
+  });
+  await pipeline(
+    res.body as unknown as NodeJS.ReadableStream,
+    counting,
+    createWriteStream(filePath, { mode: 0o600 }),
+  );
+  return { sizeBytes: total, sha256: hash.digest("hex") };
+}
+
+/** Ceiling for a streamed object download; overridable per call. */
+export const PLATFORM_S3_DOWNLOAD_LIMIT = 8 * 1024 * 1024 * 1024;
+
 export async function s3Delete(config: S3Config, key: string): Promise<void> {
   const res = await s3Fetch(config, { method: "DELETE", key, payloadHash: sha256Hex("") });
   await throwOnError(res, `delete ${key}`);
