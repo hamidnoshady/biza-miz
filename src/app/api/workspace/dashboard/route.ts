@@ -8,15 +8,15 @@ import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
  * upcoming deadlines, my pending approvals and the recent-activity strip.
  *
  * Read-only and gated on `workspace.view`, the same permission that opens the
- * module; the counters are scoped to the caller's business and the personal
- * lists to the caller's own user id.
+ * module; every counter and list is scoped to the projects the caller can
+ * see, and the personal lists to the caller's own user id.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView);
   if (error) return error;
   const horizon = Number(new URL(request.url).searchParams.get("days") ?? 14);
   try {
-    const dashboard = await getWorkspaceDashboard(owner.businessId, owner.actorUserId, {
+    const dashboard = await getWorkspaceDashboard(owner, {
       horizonDays: Number.isFinite(horizon) ? Math.min(Math.max(horizon, 1), 90) : 14,
     });
     return NextResponse.json({ dashboard });

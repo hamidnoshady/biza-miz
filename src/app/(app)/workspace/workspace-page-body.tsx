@@ -6,6 +6,7 @@ import { WORKSPACE_MODULE_HOME } from "@/lib/app-routes";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { WorkspaceManager } from "./workspace-manager";
+import { WorkspaceCommandBar } from "./workspace-command-bar";
 import { WORKSPACE_SECTION_META, type WorkspaceSection } from "./workspace-routes";
 
 /**
@@ -58,6 +59,7 @@ export async function WorkspacePageBody({ section }: { section?: WorkspaceSectio
         }
         actions={<KnowledgeHelpButton section="projects" />}
       />
+      <WorkspaceCommandBar permissions={permissions} section={activeSection} />
       <WorkspaceManager activeSection={activeSection} permissions={permissions} />
     </PageShell>
   );

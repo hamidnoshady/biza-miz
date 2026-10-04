@@ -28,7 +28,7 @@ import {
   SectionCard,
   SectionCardSkeleton,
 } from "@/app/dashboard/page-chrome";
-import { api, ErrorBox } from "@/app/dashboard/ui";
+import { api, ErrorBox, SecondaryButton } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
 import { workspaceProjectHref, workspaceSectionHref } from "@/lib/app-routes";
 import { CALENDAR_SOURCE_LABELS } from "@/lib/workspace-shared";
@@ -105,6 +105,7 @@ export function OverviewSection() {
   const [error, setError] = useState("");
 
   const load = useCallback(() => {
+    setError("");
     api<{ dashboard: Dashboard }>("/api/workspace/dashboard").then(({ ok, data: body }) => {
       if (ok) setData(body.dashboard);
       else setError(workspaceError((body as unknown as { error?: string }).error));
@@ -112,6 +113,16 @@ export function OverviewSection() {
   }, []);
 
   useEffect(load, [load]);
+
+  // A failed first load is an error with a retry, not an endless skeleton.
+  if (!data && error) {
+    return (
+      <div className="flex flex-col items-start gap-3">
+        <ErrorBox>{error}</ErrorBox>
+        <SecondaryButton onClick={load}>تلاش دوباره</SecondaryButton>
+      </div>
+    );
+  }
 
   if (!data) {
     return (
