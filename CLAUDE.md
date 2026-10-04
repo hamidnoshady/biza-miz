@@ -1056,6 +1056,24 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   `payload jsonb := to_jsonb(NEW)` and compare `payload ->> 'col'` in the *conditions*: PL/pgSQL
   resolves `NEW.col` when it executes the expression, so reading a column a sibling table lacks raises
   42703 before the branch is chosen (that is the bug migration 0201 records).
+  Wave 10 (§30, §34) is the report set: `src/lib/aec-reports.ts` is the pure catalogue of §30's
+  seventeen reports in the issue's order, each with the capability that has to be on (`null` for the
+  three every profile has), the kind of each column, its empty message and note, and the §23 read that
+  answers the same question (`AEC_REPORT_AI_TOOL`; `reportsForCapabilities` is the gate and
+  `agingBucket`/`reportAgeDays`/`reportPercent` the one aging vocabulary the RFI, submittal, snag,
+  change-order and delay reports share). `src/lib/aec-reports-service.ts` answers them without
+  recomputing anything: the actual cost is `projectReport`'s ledger read (`null`, never `0`, without
+  `ledger.view`), the estimate/revised contract/forecast are §20's (`costForecast`, with
+  `forecastBasis` printed), and the register figures come from the same reads and predicates the tabs
+  use — one shared read per group, `AEC_REPORT_ROW_LIMIT = 25`, and `omittedRows` naming the register
+  where the rest lives. The project is asserted once up front (`project_not_found`, not a page of empty
+  reports), a switched-off capability is **absent rather than empty** (the filter runs before the first
+  query, §21's rule), and `GET /api/aec/projects/[id]/reports` is `workspace.view` + the project's
+  `view` capability with **no new permission key** — a report prints approvals, it does not grant them.
+  The «گزارش‌ها» tab (`reports-panel.tsx`, `AEC_SHIPPED_WAVE = 10`) renders each report by column kind
+  through `useMoney()`/`DateCell`, and `integration/aec-reports.integration.test.ts` asserts every
+  figure against the register that owns it, the absent-not-empty rule, the ledger boundary,
+  cross-tenant `project_not_found`, `industry_mismatch` and the row cap.
   Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a

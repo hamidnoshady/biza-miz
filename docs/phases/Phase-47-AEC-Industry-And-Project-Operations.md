@@ -1,6 +1,7 @@
 # Phase 47 — The AEC industry and AEC project operations
 
-**Status:** Waves 1–9 implemented (migrations 0193–0201); Waves 10–11 designed here, not built.
+**Status:** Waves 1–9 implemented (migrations 0193–0201); Wave 10's report set implemented; the rest
+of Waves 10–11 designed here, not built.
 
 Working issue: [#799 — Add Architecture, Civil Engineering & Construction business type with AEC
 project operations](https://github.com/hamidnoshady/cafe-restaurant-pos/issues/799).
@@ -405,8 +406,8 @@ Wave 7 leaves two issue items to the waves that own them, deliberately: an issue
 change order" and a day's "cost impact" are fields on the *variation*, which Wave 8 builds — the link
 is owned by the later record, so neither register grows a column pointing at a table that does not
 exist yet; and a day or an inspection drafted on site with no signal (§26's "excellent on mobile" and
-the offline candidates) is a replication-domain decision, which Wave 10 owns together with the mobile
-capture flows. `material_tracking` stays out of `AEC_LIVE_CAPABILITIES` — Wave 9 shipped delivery
+the offline candidates) is a replication-domain decision, which Wave 10 still owns together with the
+mobile capture flows (its report half is built; see «Wave 10» below). `material_tracking` stays out of `AEC_LIVE_CAPABILITIES` — Wave 9 shipped delivery
 tracking on `procurement` instead and left the ledger switch reserved with its reason written down — so
 no tab in this wave can show a delivery-tracking screen that does not exist.
 
@@ -501,7 +502,8 @@ cockpit named the figure in `awaitingWaves` instead of printing a plausible numb
 since filled that list in.
 §30's "financial
 amounts must use Accounting as the source where they represent posted financial facts" is Decision 23
-above, and it is why the cockpit's actual cost is read from the ledger rather than kept here.
+above, and it is why the cockpit's actual cost is read from the ledger rather than kept here. Wave 10
+has since built the seventeen reports themselves — see «Wave 10» below.
 Wave 9 has since supplied the missing half — committed cost, cost to complete and the forecast margin —
 and the Wave 9 section below records what it took to make the margin a number the cockpit may print.
 
@@ -617,14 +619,70 @@ originally froze a delivered award completely, which made §18's chain unwalkabl
 delivered award may now move to `closed` (and only that), and the suite that walks the chain end to end
 is what caught it.
 
-## Waves 10–11 — designed, not built
+## Wave 10 — AI, reporting and mobile/offline (implemented in part)
 
-In the issue's order. Nothing below has a migration or a screen yet; the wave boundaries exist so
-each can be reviewed on its own.
+The issue's own sentence for this wave is "tools, recommended widgets, reports, sync classification,
+UX hardening". §30's report set shipped first because it is the half that needs no new storage: every
+entry reads a register an earlier wave already owns.
 
-10. **AI, reporting and mobile/offline.** The AEC report set — the six registers Wave 9 leaves behind
-    (procurement status and delay, spend against commitment) supply the data but not the pages — the
-    remaining recommended widgets, and the hybrid/offline classification.
+### §30's report set (implemented)
+
+What shipped:
+
+| Surface | Change |
+|---|---|
+| Catalogue | `src/lib/aec-reports.ts` — §30's seventeen reports in the issue's own order (`project_health`, `schedule_variance`, `budget_vs_actual`, `committed_vs_budget`, `forecast_final_cost`, `project_margin`, `boq_variance`, `change_order_exposure`, `procurement_delay`, `rfi_aging`, `submittal_aging`, `document_status`, `contractor_performance`, `site_productivity`, `snag_aging`, `inspection_status`, `certificate_status`). Each entry carries the capability that has to be on (`null` for the three that every profile has — health, schedule variance, RFI aging), its Persian label and description, its columns with a `kind` (`text`/`number`/`money`/`date`/`percent`/`status`) so the screen formats by kind rather than by guessing, its empty message and its §34 note, and `AEC_REPORT_AI_TOOL`: the §23 read that answers the same question, typed `Partial<Record<AecReportKey, AecAiToolName>>` so a key that names a tool the assistant does not have fails the type check. Two shared vocabularies live here too: `reportsForCapabilities` (the gate) and the aging buckets (`AEC_AGING_BUCKET_LABELS` with `agingBucket`/`reportAgeDays`/`reportPercent`) that the RFI, submittal, snag, change-order and delay reports all speak |
+| Service | `src/lib/aec-reports-service.ts` — `projectAecReports(owner, projectId)` returns `AecReportBundle` (project, the business's own today, the capabilities, the reports) and reads each *group* once rather than each report: §20's commercial summary answers the four financial reports, the commitment register answers the delay and the supplier tables, the drawings register answers the document and the submittal reports. Three reads are new SQL because no register prints them — the phase/task variance (with a «بدون فاز» row, so a project that runs without phases does not understate its schedule), the supplier performance table and the quality counts — and each uses the register's own predicate (an award counts from `approved` through `delivered`/`closed`; a site issue is open while it is not closed or cancelled). Financial figures are never recomputed: actual cost is `projectReport`'s ledger read (`null` without `ledger.view`), the forecast is §20's `costForecast` with `forecastBasis` printed under it. `AEC_REPORT_ROW_LIMIT = 25` keeps a report a screen rather than an export: the worst rows print and `omittedRows` says how many did not, with the register named as where the rest lives |
+| API | `src/app/api/aec/projects/[id]/reports/route.ts` — `GET` behind `withTenantScope` + `aecOwner(PERMISSIONS.workspaceView)` + `requireProjectCapability(owner, id, "view")` + `handleAecError`, the same four gates every other AEC aggregate uses. The project is asserted once, up front, so another tenant's id is `project_not_found` rather than a page of empty reports that hides a typo. No `?key=` narrowing: a bundle is small and a page that asked for one report at a time would issue a dozen round trips |
+| Screen | `src/app/(app)/workspace/projects/[id]/reports-panel.tsx` — the «گزارش‌ها» tab: a §30 KPI row (budget basis, posted cost, forecast final cost, delayed commitments), then one card per report with its totals line, its table through the shared `DataTable` + `stackedTableClass`, every cell rendered by `kind` (`useMoney()` for rials, `DateCell` for Shamsi dates, `StatusBadge` for statuses) and the assistant read that answers the same question named under the title — §34's "summaries with transparent source links". A report whose capability is off is not rendered at all, and the panel explains that in one sentence when the business has no reports to show |
+| Cockpit | `src/lib/aec-cockpit.ts` — a `reports` section (Wave 10, shipped) between «صورت‌وضعیت‌ها» and «تیم», `AEC_SHIPPED_WAVE = 10`, and its own tab in `aecProjectTabs`, so an AEC project's bar ends `… finance → procurement → changes → payments → reports → team` |
+| Permission | **No new key.** Reading a report is the same `workspace.view` the cockpit needs, writing nothing is possible (a report prints approvals, it does not grant them), and the two figures the books own stay behind `ledger.view` — with the row's value `null` rather than a zero the reader would believe |
+| Isolation | `integration/aec-reports.integration.test.ts` (6 tests) against a real database: the bundle's keys equal `reportsForCapabilities`'s exactly and in §30's order; every figure is asserted against the register that owns it (the phase's overdue tasks, the ledger's actual cost, §18's late award, the RFI/submittal/snag ages and their buckets, the site log's crew and incidents, the certified claim); the design preset's switched-off capabilities leave eight reports **absent** while the design office still reads its own seven; an actor without `ledger.view` gets `null` where the ledger would be; another tenant's project is `project_not_found` and none of its rows reach my project's bundle; an F&B business is refused with `industry_mismatch`; and a thirty-row register prints `AEC_REPORT_ROW_LIMIT` rows with `omittedRows` saying how many stayed behind. `src/lib/aec-reports.test.ts` (8 tests) proves the pure half, and `api-guards.test.ts` asserts the route's permission shape from its source |
+
+### Decision 33 — a report reads the register, it never recomputes it
+
+§30's last sentence ("financial amounts must use Accounting as the source where they represent posted
+financial facts") is the whole design. The service computes no money: the actual cost is the ledger's
+read through `projectReport`, the estimate and the revised contract value are §20's, the forecast is
+§20's `costForecast` with its basis printed, and the register figures — delays, exposure, ages, counts
+— come from the predicates the registers themselves use. Where §30 asks a question no register prints
+(supplier performance, quality counts by kind, the phase/task variance) the service adds one query
+over the *same tables with the same predicates* rather than a materialised copy, so a report and the
+tab it summarises cannot drift; and where the books answer (actual cost without `ledger.view`) the
+cell is `null` — the screen prints «—» and says the ledger is unreadable, never `0`.
+
+### Decision 34 — a switched-off capability is absent, never empty
+
+`reportsForCapabilities` runs *before* the first query, so an architecture office that switched
+`procurement`, `boq`, `variations`, `site_operations`, `qa_qc`, `snagging` and `progress_claims` off
+gets nine reports instead of seventeen — not nine plus eight empty cards, and not eight queries the
+business does not want. This is §21's rule the rest of the module already follows (an unbuilt or
+switched-off section is absent, never greyed out), and it is why §30's list is expressed as
+capability-tagged catalogue entries rather than a screen with sections hidden by CSS. §34's "cockpit
+over giant tables" is the other half: each report prints its worst twenty-five rows and names the
+register where the full list lives.
+
+### Decision 35 — one aging vocabulary, shared by five reports
+
+"RFI aging", "submittal aging", "snag aging", "procurement delay" and "change-order exposure" are
+five registers asking the same question — how long has this been waiting, and how bad is that. They
+answer it through one `agingBucket` (بهموقع / تا ۱۴ روز / تا ۳۰ روز / بیش از ۳۰ روز) and one
+`reportAgeDays`, both measured against the business's own today (`businessToday`), never the server's
+date and never a second definition of "late". A report that invented its own thresholds would be the
+one screen where the RFI tab and the report disagree about the same RFI.
+
+## The parts of Waves 10–11 not built yet
+
+In the issue's order. Nothing below has a migration or a screen yet; the wave boundaries exist so each
+can be reviewed on its own.
+
+10. **What Wave 10 still owns.** The **remaining recommended widgets** of §22 (the ones §30's reports
+    now make answerable), §26's **sync classification** — which AEC surfaces are offline candidates
+    (tasks, checklists, site logs, photo metadata, inspections, snags, daily progress, document and
+    drawing metadata, RFI and submittal drafts) and which financial/high-risk ones need explicit event
+    semantics rather than last-write-wins master-data sync, with every new replication touching the
+    catalogue, the pairing snapshot, the drift checks, the desktop bootstrap and the two-database
+    tests — and §25's **mobile/field flows** with §34's UX hardening on top of them.
 11. **Cleanup.** The repo-wide audit of hard-coded industry arrays, routes that assume every
     non-F&B tenant is retail, dead routes and duplicate project/financial logic.
 
@@ -634,7 +692,8 @@ later record, so the RFI does not grow a column pointing at a table that does no
 "RFI draft"/"submittal review draft" being a good offline candidate (§26) is a replication-domain
 decision, which belongs with that classification rather than with this register. The §25 mobile flows
 (create RFI, review submittal) are the same service and the same endpoints the desktop screens call,
-so they need no AEC work of their own — Wave 10 owns the offline storage and the report set.
+so they need no AEC work of their own — Wave 10 owns the offline storage, and its report set is now
+built (see «Wave 10» below).
 
 The "non-F&B ⇒ retail" assumption in the WooCommerce/CMS ingest paths
 (`integrations/sync-service.ts`, `integrations/outbox-service.ts`, `cms/order-ingest-service.ts`,

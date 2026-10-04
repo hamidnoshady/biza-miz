@@ -813,11 +813,16 @@ describe("the AEC module's API guards", () => {
       expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
       expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
     }
-    for (const key of ["aec/projects/[id]/procurement"]) {
+    // Wave 10's report bundle is a read of the project the caller may see, and
+    // §30's financial figures stay behind `ledger.view` inside the service — the
+    // route itself is `workspace.view` and never an approval or edit key,
+    // because printing a report approves nothing.
+    for (const key of ["aec/projects/[id]/procurement", "aec/projects/[id]/reports"]) {
       const src = sources.get(key);
       expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
       expect(src as string).toMatch(/PERMISSIONS\.workspaceView/);
       expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceManage/);
     }
   });
 

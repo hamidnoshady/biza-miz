@@ -40,6 +40,8 @@ export const AEC_COCKPIT_SECTION_KEYS = [
   "inspections",
   "changes",
   "payments",
+  // Wave 10 (§30): the report set, after the registers it reads.
+  "reports",
   "team",
   "approvals",
   "calendar",
@@ -107,6 +109,12 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
   { key: "inspections", label: "بازرسی و کنترل کیفیت", capability: "qa_qc", wave: 7, shipped: true },
   { key: "changes", label: "تغییرات", capability: "variations", wave: 8, shipped: true },
   { key: "payments", label: "صورت‌وضعیت و پرداخت", capability: "progress_claims", wave: 8, shipped: true },
+  // Wave 10. §30's report set, which §21's list does not name a tab for — the
+  // issue's tab list stops at the registers, and a report page is where those
+  // registers are read *together* (aging, variance, exposure). It is ungated
+  // like the schedule: the financial four inside it are gated per report by the
+  // service, and the rest answer from registers every AEC business has.
+  { key: "reports", label: "گزارش‌ها", wave: 10, shipped: true },
   { key: "team", label: "تیم", wave: 3, shipped: true },
   { key: "approvals", label: "تأییدها", capability: "approvals", wave: 3, shipped: true },
   { key: "calendar", label: "تقویم", wave: 3, shipped: true },
@@ -115,7 +123,7 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
 ];
 
 /** The highest wave this build implements — the boundary between designed and built. */
-export const AEC_SHIPPED_WAVE = 9;
+export const AEC_SHIPPED_WAVE = 10;
 
 /**
  * The cockpit sections a business sees: shipped, and allowed by its capability
@@ -199,6 +207,7 @@ export const TAB_FOR_SECTION: Record<AecCockpitSectionKey, WorkspaceProjectTabKe
   changes: null, // its own tab, immediately after «مالی» — see aecProjectTabs
   payments: null, // its own tab, after the change orders
   financials: null, // §20's cockpit renders inside «مالی», with the budget card
+  reports: null, // Wave 10's §30 report set — its own tab, after the money registers
 };
 
 /**
@@ -260,7 +269,10 @@ export function aecProjectTabs(
   // §21 puts Procurement after Contracts, and the money tabs read best together
   // (finance → procurement → changes → payments): a purchase commitment and a
   // change order are the two things that move a project's committed cost.
-  const afterFinance = (["procurement", "changes", "payments"] as const)
+  // Wave 10's reports follow the registers they read (money → procurement →
+  // changes → payments → گزارش‌ها): a report is where those registers are read
+  // together, so it sits at the end of the run rather than in the middle.
+  const afterFinance = (["procurement", "changes", "payments", "reports"] as const)
     .map(aecOnly)
     .filter((tab): tab is ProjectTab => tab !== null);
 

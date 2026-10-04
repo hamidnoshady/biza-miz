@@ -61,10 +61,14 @@ describe("the cockpit catalogue", () => {
       "payments",
       "financials",
       "procurement",
+      // Wave 10's §30 report set. It is not one of §21's tabs — the issue's tab
+      // list stops at the registers — and it ships when the registers it reads
+      // do, which is why the wave boundary moved with it.
+      "reports",
     ]) {
       expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === key)?.shipped, key).toBe(true);
     }
-    expect(AEC_SHIPPED_WAVE).toBe(9);
+    expect(AEC_SHIPPED_WAVE).toBe(10);
   });
 
   it("gives an individual fewer sections than a contractor", () => {
@@ -213,6 +217,7 @@ describe("the project tab bar", () => {
       "changes",
       "payments",
       "procurement",
+      "reports",
     ]);
     // Sections that render inside a tab the generic bar already has: the page's
     // own summary and §21's identity card and phases in «نمای کلی», the

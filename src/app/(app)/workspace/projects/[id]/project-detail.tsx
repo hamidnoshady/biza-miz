@@ -77,6 +77,7 @@ import { AecSubmittalsTab } from "./submittals-panel";
 import { AecSiteTab } from "./site-panel";
 import { AecInspectionsTab } from "./inspections-panel";
 import { AecProcurementTab } from "./procurement-panel";
+import { AecReportsTab } from "./reports-panel";
 import { AecVariationsTab } from "./variations-panel";
 import { AecCertificatesTab } from "./certificates-panel";
 import { AecCommercialCard } from "./commercial-panel";
@@ -566,6 +567,13 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             lookups={lookups}
           />
         ) : null}
+
+        {/* Issue #799 §30 — the project's report set: §30's questions answered
+            from the registers and the ledger, with the assistant read that
+            answers each one named under it. It is a read-only tab (printing a
+            report approves nothing), and the financial four inside it need
+            `ledger.view`, which the service honours rather than the page. */}
+        {tab === "reports" ? <AecReportsTab projectId={projectId} /> : null}
 
         {tab === "team" ? (
           <TeamsSection lookups={lookups} canManage={canManageProject} projectId={projectId} />
