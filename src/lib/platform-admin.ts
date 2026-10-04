@@ -34,12 +34,33 @@ export type PlatformCapability =
   | "ai.read"
   // Operational writes
   | "features.write"
-  // Migration 0132 — the whole-system backup the console owns: its schedule and
-  // destinations, its run history, and the peer tokens that let another server
-  // pull artifacts from this one. An engineer may operate it because backing up
-  // is ordinary operations, like flags and suspension: it reads everything and
-  // overwrites nothing. …
+  // Migration 0132, split by issue #807. The single `backup.manage` capability
+  // gave whoever held it custody of a complete copy of every tenant's data:
+  // changing the S3 destination, minting peer tokens that hand the dump to
+  // another server, and running the whole-database dump. Those are three
+  // different trusts, so they are three (well, six) capabilities now:
+  //
+  //   backup.read        health, run history, artifact lists — any admin role
+  //   backup.run         take a whole-system backup now
+  //   backup.verify      verify an artifact into a scratch database
+  //   backup.configure   schedule, directories, destinations, passphrase
+  //   backup.share       serving toggle + peer tokens (custody of the dump)
+  //   backup.peer.manage add/edit/delete the servers this install pulls from
+  //   backup.restore     destructive apply — owner only, always
+  //
+  // `backup.manage` is retained as the *operational* alias (read + run +
+  // verify) so existing routes and expectations that meant "operate the backup
+  // system day to day" keep working, and so no engineer loses the work they
+  // could do before. It deliberately no longer implies configure/share, and it
+  // never implied restore.
+  /** @deprecated Use the specific backup.* capability; equals read+run+verify. */
   | "backup.manage"
+  | "backup.read"
+  | "backup.run"
+  | "backup.verify"
+  | "backup.configure"
+  | "backup.share"
+  | "backup.peer.manage"
   // Migration 0139 — administering the website platform (eshobe-cms) from this
   // console: its address and platform key, a site's lifecycle, issuing and revoking
   // site keys, and syncing content in either direction. An engineer holds it for the
@@ -102,6 +123,12 @@ export type PlatformCapability =
   // than deleting every business on the platform, so it needs `backup.restore`,
   // which no role but owner holds.
   | "backup.restore"
+  // Owner-only halves of the split above: custody of the destination and of the
+  // credentials that hand a full copy of every tenant's data to another machine
+  // (#807). Named here rather than left implicit so a reviewer sees the split.
+  | "backup.configure"
+  | "backup.share"
+  | "backup.peer.manage"
   // Owner-only, most dangerous
   | "business.provision"
   | "business.archive"
@@ -117,6 +144,10 @@ const READ: PlatformCapability[] = [
   "system.read",
   "usage.read",
   "ai.read",
+  // Backup reads ride with every admin role (issue #807): "was last night's
+  // copy taken?" is a question the support desk must answer without being able
+  // to change a destination or start a destructive restore.
+  "backup.read",
   // Billing reads (rates, invoices, subscription state) ride along for every
   // role — exactly what the billing GET routes allowed when they only checked
   // a login.
@@ -150,7 +181,11 @@ const CAPABILITIES: Record<PlatformAdminRole, PlatformCapability[]> = {
     "impersonate.revoke",
     "impersonate.extend",
     "knowledge.manage",
+    // Issue #807: an engineer runs and verifies backups (operational work) but
+    // does not configure destinations, mint sharing tokens, or restore.
     "backup.manage",
+    "backup.run",
+    "backup.verify",
     "cms.manage",
     // Messaging and media are operational, granted at the same level as the
     // capabilities they used to ride (billing.manage / backup.manage).
@@ -169,6 +204,11 @@ const CAPABILITIES: Record<PlatformAdminRole, PlatformCapability[]> = {
     "impersonate.extend",
     "knowledge.manage",
     "backup.manage",
+    "backup.run",
+    "backup.verify",
+    "backup.configure",
+    "backup.share",
+    "backup.peer.manage",
     "cms.manage",
     "messaging.manage",
     "media.manage",

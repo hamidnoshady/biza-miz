@@ -19,6 +19,7 @@ interface LoginResponse {
   mfaRequired?: boolean;
   mfaToken?: string;
   mfaMethod?: MfaMethod | null;
+  availableMethods?: MfaMethod[];
   mfaState?: "grace" | "required";
   graceUntil?: string | null;
   graceDaysLeft?: number | null;
@@ -50,7 +51,11 @@ export default function AdminLoginForm() {
    * now nothing in the UI read that, so the response looked to the user exactly
    * like a wrong password.
    */
-  const [pending, setPending] = useState<{ token: string; method: MfaMethod | null } | null>(null);
+  const [pending, setPending] = useState<{
+    token: string;
+    method: MfaMethod | null;
+    availableMethods: MfaMethod[];
+  } | null>(null);
   /**
    * The grace nag: `mfaState: "grace"` arrives *alongside* a real session, so
    * this is a prompt, not a gate — the user is already signed in and may
@@ -86,7 +91,11 @@ export default function AdminLoginForm() {
     }
 
     if (res.ok && data.mfaRequired && data.mfaToken) {
-      setPending({ token: data.mfaToken, method: data.mfaMethod ?? null });
+      setPending({
+        token: data.mfaToken,
+        method: data.mfaMethod ?? null,
+        availableMethods: data.availableMethods ?? [],
+      });
       return;
     }
 
@@ -110,6 +119,7 @@ export default function AdminLoginForm() {
       <MfaStep
         mfaToken={pending.token}
         mfaMethod={pending.method}
+        availableMethods={pending.availableMethods}
         theme={TENANT_MFA_THEME}
         endpoints={{
           challenge: "/api/auth/mfa/challenge",
@@ -237,7 +247,7 @@ function GracePrompt({ daysLeft, onContinue }: { daysLeft: number | null; onCont
       <button
         type="button"
         onClick={() => {
-          router.push("/settings/security");
+          router.push("/settings/profile");
           router.refresh();
         }}
         className="w-full rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:bg-primary/85 outline-none focus-visible:ring focus-visible:ring-ring/50"

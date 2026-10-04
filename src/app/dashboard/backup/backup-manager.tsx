@@ -29,6 +29,8 @@ interface Health {
   enabled: boolean;
   cloudEnabled: boolean;
   intervalHours: number;
+  /** `physical` = the whole database (site installs); `logical` = this tenant only (central). */
+  scope: "physical" | "logical";
   localLastSuccessAt: string | null;
   localLastError: string | null;
   cloudLastSuccessAt: string | null;
@@ -41,6 +43,8 @@ interface RunRow {
   kind: "local" | "cloud";
   trigger: "scheduled" | "manual";
   status: "running" | "success" | "failed";
+  /** What the artifact holds — see `Health.scope` (issue #807). */
+  scope: "physical" | "logical";
   artifact: string | null;
   sizeBytes: number | null;
   error: string | null;
@@ -67,6 +71,9 @@ interface ConfigForm {
   anchorTime: string;
   localRetention: number;
   directory: string;
+  /** Server-derived: what a backup on this deployment actually contains (#807). */
+  scope?: "physical" | "logical";
+  scopeNote?: string;
   passphrase?: string;
   encryptLocal?: boolean;
   hasPassphrase?: boolean;
@@ -152,6 +159,22 @@ function restoreErrorMessage(code: string): string {
   }
   return RESTORE_ERRORS[code] ?? code;
 }
+
+/**
+ * What "a backup" means on this install. Issue #807 made the two deployments
+ * genuinely different, so the dashboard says which one the operator is looking
+ * at instead of calling both of them «پشتیبان محلی».
+ */
+const SCOPE_LABELS: Record<"physical" | "logical", { label: string; hint: string }> = {
+  physical: {
+    label: "فیزیکی (کل پایگاه‌داده)",
+    hint: "نسخهٔ pg_dump از کل پایگاه‌دادهٔ این نصب — فقط روی نصب تک‌کسب‌وکاری/سایت معنا دارد.",
+  },
+  logical: {
+    label: "منطقی (فقط همین کسب‌وکار)",
+    hint: "خروجی SQL فقط از ردیف‌های همین کسب‌وکار؛ سایر کسب‌وکارهای این سامانه در آن نیستند.",
+  },
+};
 
 function formatTime(iso: string | null): string {
   if (!iso) return "هرگز";
@@ -804,6 +827,10 @@ function StatusCard({
               <dt className="text-muted-foreground">آخرین پشتیبان ابری موفق:</dt>
               <dd>{health.cloudEnabled ? formatTime(health.cloudLastSuccessAt) : "غیرفعال"}</dd>
             </div>
+            <div className="flex justify-between gap-2 sm:justify-start">
+              <dt className="text-muted-foreground">نوع نسخه:</dt>
+              <dd title={SCOPE_LABELS[health.scope].hint}>{SCOPE_LABELS[health.scope].label}</dd>
+            </div>
           </dl>
         </>
       )}
@@ -814,10 +841,11 @@ function StatusCard({
       ) : runs.length === 0 ? (
         <p className="text-sm text-muted-foreground">هنوز پشتیبانی گرفته نشده است.</p>
       ) : (
-        <DataTable caption="تاریخچه پشتیبان‌گیری" frame={false} tableClassName="min-w-[560px]">
+        <DataTable caption="تاریخچه پشتیبان‌گیری" frame={false} tableClassName="min-w-[620px]">
           <DataTableHead>
             <Th>زمان</Th>
             <Th>نوع</Th>
+            <Th>نسخه</Th>
             <Th>شروع</Th>
             <Th numeric>حجم</Th>
             <Th>وضعیت</Th>
@@ -827,6 +855,7 @@ function StatusCard({
               <DataTableRow key={r.id} className="align-top">
                 <Td>{formatTime(r.startedAt)}</Td>
                 <Td>{r.kind === "local" ? "محلی" : "ابری"}</Td>
+                <Td title={SCOPE_LABELS[r.scope]?.hint}>{r.scope === "logical" ? "منطقی" : "فیزیکی"}</Td>
                 <Td>{r.trigger === "scheduled" ? "زمان‌بندی" : "دستی"}</Td>
                 <Td numeric>{formatSize(r.sizeBytes)}</Td>
                 <Td>
@@ -906,6 +935,13 @@ function SettingsCard({ onSaved }: { onSaved: () => void }) {
 
   return (
     <SectionCard title="تنظیمات پشتیبان‌گیری">
+      {config.scopeNote ? (
+        <InfoBox>
+          {config.scope === "logical"
+            ? "این سامانه چند کسب‌وکار را نگه می‌دارد؛ هر پشتیبان فقط ردیف‌های همین کسب‌وکار است (خروجی منطقی)، نه کل پایگاه‌داده."
+            : "پایگاه‌دادهٔ این نصب فقط همین کسب‌وکار را دارد؛ هر پشتیبان یک نسخهٔ کامل (pg_dump) از آن است."}
+        </InfoBox>
+      ) : null}
       {config.warnings && config.warnings.length > 0 ? (
         <div className="mb-6 rounded-lg border border-amber-500/40 dark:border-amber-500/60 bg-amber-500/10 dark:bg-amber-500/15 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
           <ul className="list-inside list-disc">

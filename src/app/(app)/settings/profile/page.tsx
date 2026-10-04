@@ -23,29 +23,28 @@ export default async function ProfilePage() {
   const { rows } = await withTenant(
     session.businessId,
     () =>
-      query<{ full_name: string; phone_e164: string | null; role: Role; is_active: boolean }>(
-        "SELECT full_name, phone_e164, role, is_active FROM users WHERE id = $1 AND business_id = $2",
+      query<{ full_name: string; email: string | null; phone_e164: string | null; role: Role; is_active: boolean }>(
+        "SELECT full_name, email, phone_e164, role, is_active FROM users WHERE id = $1 AND business_id = $2",
         [session.sub, session.businessId],
       ),
     { locationId: session.locationId, userId: session.sub },
   );
   const member = rows[0];
-  // The row is the authority on the role — the token's can lag a change made
-  // from the team screen, the same correction requirePermission makes — and a
-  // membership that is gone or deactivated has no profile left to show.
   if (!member?.is_active) redirect("/login");
 
   return (
     <PageShell className="max-w-[1100px]">
       <PageHeader
         title="حساب کاربری"
-        description="نام، نقش و ورود دومرحله‌ای شما در این کسب‌وکار. تنظیمات کسب‌وکار جای دیگری است."
+        description="نام، نقش، رمز عبور، ورود دومرحله‌ای و نشست‌های فعال شما در این کسب‌وکار. تنظیمات کسب‌وکار جای دیگری است."
       />
       <ProfileSection
         fullName={member.full_name ?? session.fullName}
         phone={member.phone_e164}
+        email={member.email ?? null}
         role={member.role}
         isOwner={member.role === "owner"}
+        canUseMfa={["owner", "manager"].includes(member.role)}
       />
     </PageShell>
   );

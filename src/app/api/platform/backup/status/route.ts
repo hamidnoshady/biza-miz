@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requirePlatformAdmin, withPlatformScope } from "@/lib/platform-auth";
+import { requirePlatformCapability, withPlatformScope } from "@/lib/platform-auth";
 import {
   getPlatformBackupHealth,
   listPlatformBackupRuns,
@@ -16,13 +16,15 @@ import {
  * against, so the page can say "the newest backup is 3 migrations behind"
  * without a second request).
  *
- * Readable by any admin; nothing in it is secret. Artifacts are listed even when
- * retention has already pruned the file (`exists: false`), because "we had it,
- * then we did not" is the difference between an operator finding a copy and
- * giving up.
+ * Readable under `backup.read` — every admin role holds it (issue #807): the
+ * support desk must be able to answer «کپی دیشب را داریم؟» without holding the
+ * capability that can change a destination or replace the database. Nothing in
+ * the payload is secret. Artifacts are listed even when retention has already
+ * pruned the file (`exists: false`), because "we had it, then we did not" is the
+ * difference between an operator finding a copy and giving up.
  */
 export const GET = withPlatformScope(async () => {
-  const { error } = await requirePlatformAdmin();
+  const { error } = await requirePlatformCapability("backup.read");
   if (error) return error;
 
   const [health, runs, local, cloud, restores, localSchema] = await Promise.all([

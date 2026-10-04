@@ -9,8 +9,9 @@
  *   ۱ سلامت    — the one-line answer to «کپی دیشب را داریم؟», plus «پشتیبان‌گیری فوری».
  *   ۲ تنظیمات   — schedule, retention, destinations, passphrase, cloud bucket.
  *   ۳ دسترسی   — which credentials may *pull* this server's backups (serving).
- *   ۴ بازیابی   — the address half: pull another server's artifact, verify it in a
- *                scratch database, and only then replace this one.
+ *   ۴ بازیابی   — pick the artifact from anywhere it lives (this server's disk,
+ *                the configured S3 bucket, a registered peer, or a direct URL),
+ *                verify it in a scratch database, and only then replace this one.
  *   ۵ تاریخچه   — every run and every restore, with the artifact name verbatim so
  *                it can be pasted into `npm run db:restore` on a machine that has
  *                no console left to click.
@@ -20,7 +21,7 @@
  * passphrase field keeps the stored one, and the explicit «پاک کردن» button is the
  * only way to clear it.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Check,
   Copy,
@@ -232,12 +233,46 @@ const CODES: Record<string, string> = {
   weak_passphrase: "عبارت عبور رمزنگاری باید دست‌کم ۸ نویسه باشد.",
   secondary_same_as_primary: "پوشهٔ دوم نباید همان پوشهٔ اول باشد.",
   invalid_expiry: "تعداد روزهای انقضا نامعتبر است.",
+  // Issue #807: cloud artifact identity and SSRF refusals the server can
+  // return now that a restore may name an object key or an external URL.
+  blocked_address: "آدرس مقصد مجاز نیست (حلقهٔ محلی، شبکهٔ داخلی، آدرس ابری سرویس‌دهنده یا مشابه آن).",
+  object_key_outside_prefix: "نام شیء بیرون از پیشوند فضای ابری تنظیم‌شده است.",
+  artifact_key_mismatch: "نام فایل با کلید شیء انتخاب‌شده هم‌خوانی ندارد.",
+  invalid_object_key: "کلید شیء فضای ابری نامعتبر است.",
+  invalid_passphrase: "عبارت عبور نامعتبر است؛ نویسهٔ غیرمجاز دارد.",
+  invalid_source: "منبع بازگردانی نامعتبر است.",
+  invalid_redirect: "سرور مقصد به آدرس نامعتبری هدایت کرد.",
+  too_many_redirects: "سرور مقصد بیش از حد مجاز هدایت کرد.",
+  redirect_blocked_address: "سرور مقصد به آدرسی هدایت کرد که سیاست خروج اجازه نمی‌دهد.",
+  dns_resolution_failed: "نام سرور مقصد قابل تبدیل به آدرس نیست.",
+  credentials_in_url: "آدرس نباید نام کاربری یا رمز داشته باشد.",
+  invalid_url_scheme: "آدرس باید با http:// یا https:// شروع شود.",
+  url_fragment_not_allowed: "آدرس نباید بخش # داشته باشد.",
+  missing_url: "آدرس بازگردانی را وارد کنید.",
+  artifact_scope_mismatch: "این نسخهٔ پشتیبان به کسب‌وکار دیگری تعلق دارد و قابل استفاده نیست.",
+  physical_tenant_backup_forbidden: "این سرور نسخهٔ فیزیکی «کل پایگاه‌داده» را به‌جای دادهٔ این کسب‌وکار ساخته است؛ عملیات متوقف شد.",
+  physical_tenant_restore_forbidden: "بازگردانی نسخهٔ فیزیکی کسب‌وکار روی این سرور مجاز نیست.",
+  platform_backup_not_available_on_site: "پشتیبان‌گیری کل سیستم فقط از کنسول مرکزی انجام می‌شود.",
+  platform_backup_lock_unavailable: "یک عملیات پشتیبان‌گیری یا بازگردانی کل سیستم همین حالا در جریان است.",
+  restore_lock_unavailable: "بازگردانی سرور مقصد همین حالا در حال اجراست.",
+  restore_regrant_failed: "پس از بازگردانی، دسترسی نقش برنامه بازگردانده نشد و عملیات متوقف شد.",
+  runtime_role_validation_failed: "پس از بازگردانی، بررسی خواندن با نقش برنامه ناموفق بود.",
+  artifact_is_logical_snapshot: "این فایل نسخهٔ منطقی کسب‌وکار است، نه نسخهٔ فیزیکی کل پایگاه‌داده.",
 };
 
 function text(code: string | undefined, extra?: string): string {
   if (!code) return "خطای غیرمنتظره.";
-  const base = CODES[code] ?? code;
-  return extra && !CODES[code] ? `${base}: ${extra}` : extra ? `${base} ${extra}` : base;
+  const known = CODES[code];
+  if (known) return extra ? `${known} ${extra}` : known;
+  // Server errors are often `code:detail` (e.g. `blocked_address:metadata` or
+  // `restore_regrant_failed:permission denied`). Translate the head, keep the
+  // machine detail for the operator's report.
+  const separator = code.indexOf(":");
+  if (separator > 0) {
+    const head = CODES[code.slice(0, separator)];
+    if (head) return `${head} (${code.slice(separator + 1)})`;
+  }
+  return extra ? `${code}: ${extra}` : code;
 }
 
 function bytes(n: number | null | undefined): string {
@@ -249,16 +284,30 @@ function bytes(n: number | null | undefined): string {
 
 export function BackupManager() {
   const can = useCan();
-  const canManage = can("backup.manage");
+  // Issue #807 split `backup.manage` into the capabilities each control actually
+  // needs, so the page shows exactly what the signed-in role may do: a support
+  // admin reads the health line, an engineer runs and verifies, and only an
+  // owner reconfigures the destination, mints sharing tokens, manages peers or
+  // applies a destructive restore.
+  const canRun = can("backup.run") || can("backup.manage");
+  const canVerify = can("backup.verify") || can("backup.manage");
+  const canConfigure = can("backup.configure");
+  const canShare = can("backup.share");
+  const canPeerManage = can("backup.peer.manage");
   const canRestore = can("backup.restore");
 
   const [health, setHealth] = useState<Health | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [local, setLocal] = useState<ArtifactRow[]>([]);
+  const [cloud, setCloud] = useState<ArtifactRow[]>([]);
   const [tokens, setTokens] = useState<TokenRow[]>([]);
   const [peers, setPeers] = useState<PeerRow[]>([]);
   const [restores, setRestores] = useState<RestoreRun[]>([]);
+  // The restore form is a different card from the artifact list, so "restore
+  // this one" only names the file; the form below owns the actual restore.
+  const [presetArtifact, setPresetArtifact] = useState<string | null>(null);
+  const consumePreset = useCallback(() => setPresetArtifact(null), []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -267,9 +316,13 @@ export function BackupManager() {
 
   async function load() {
     const [status, cfg, tk, pr, phraseRes] = await Promise.all([
-      api<{ health?: Health; runs?: RunRow[]; local?: ArtifactRow[]; restores?: RestoreRun[] }>(
-        "/api/platform/backup/status",
-      ),
+      api<{
+        health?: Health;
+        runs?: RunRow[];
+        local?: ArtifactRow[];
+        cloud?: ArtifactRow[];
+        restores?: RestoreRun[];
+      }>("/api/platform/backup/status"),
       api<{ config?: Config }>("/api/platform/backup/config"),
       api<{ tokens?: TokenRow[]; servingEnabled?: boolean }>("/api/platform/backup/tokens"),
       api<{ peers?: PeerRow[] }>("/api/platform/backup/peers"),
@@ -280,6 +333,7 @@ export function BackupManager() {
       setHealth(status.data.health);
       setRuns(status.data.runs ?? []);
       setLocal(status.data.local ?? []);
+      setCloud(status.data.cloud ?? []);
       setRestores(status.data.restores ?? []);
       setError(null);
     } else {
@@ -337,7 +391,7 @@ export function BackupManager() {
             <RefreshCw className="me-1.5 h-4 w-4" />
             تازه‌سازی
           </Button>
-          {canManage ? (
+          {canRun ? (
             <Button onClick={() => void runNow()} disabled={busy !== null}>
               {busy === "run" ? (
                 <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" />
@@ -361,7 +415,7 @@ export function BackupManager() {
         <>
           <HealthCard health={health} config={config} />
 
-          {canManage ? (
+          {canConfigure ? (
             <ConfigCard
               config={config}
               busy={busy}
@@ -369,7 +423,7 @@ export function BackupManager() {
             />
           ) : null}
 
-          {canManage ? (
+          {canShare ? (
             <ServingCard
               config={config}
               tokens={tokens}
@@ -381,13 +435,17 @@ export function BackupManager() {
 
           <RestoreCard
             peers={peers}
-            canManage={canManage}
+            local={local}
+            cloud={cloud}
+            canVerify={canVerify}
             canRestore={canRestore}
+            canPeerManage={canPeerManage}
             confirmPhrase={confirmPhrase}
             busy={busy}
             setBusy={setBusy}
+            presetArtifact={presetArtifact}
+            onPresetConsumed={consumePreset}
             onReload={() => void load()}
-            onSave={(patch, key) => void saveConfig(patch, key)}
           />
 
           <HistoryCard
@@ -396,8 +454,7 @@ export function BackupManager() {
             restores={restores}
             health={health}
             tone={alertTone}
-            canRestore={canRestore}
-            confirmPhrase={confirmPhrase}
+            onPickLocal={setPresetArtifact}
             onChanged={() => void load()}
           />
         </>
@@ -861,28 +918,58 @@ function ServingCard({
 }
 
 // ---------------------------------------------------------------------------
-// ۴ — restore by address (the NEW server's half)
+// ۴ — restore (the NEW server's half)
 // ---------------------------------------------------------------------------
+//
+// Issue #807: all four sources the audit named are selectable here, and each
+// one posts the identity the server expects:
+//
+//   local  — an artifact this server itself wrote (from the run history)
+//   cloud  — an object key inside the configured bucket/prefix (validated
+//            against the prefix server-side; the browser cannot name an
+//            arbitrary key)
+//   peer   — an address registered in the peer table, with its token
+//   url    — a bare download address; the artifact name is derived from the
+//            address itself, so there is no second name to mistype
+
+const SOURCE_TABS: { id: "local" | "cloud" | "peer" | "url"; label: string; hint: string }[] = [
+  { id: "local", label: "دیسک این سرور", hint: "نسخهٔ پشتیبانی که خودِ این سرور نوشته است" },
+  { id: "cloud", label: "فضای ابری (S3)", hint: "شیء داخل باکت و پیشوند تنظیم‌شدهٔ همین سرور" },
+  { id: "peer", label: "سرور مقابل", hint: "از سروری که آدرس و کلیدش ثبت شده است" },
+  { id: "url", label: "آدرس مستقیم", hint: "پیوند مستقیم به فایل پشتیبان روی NAS یا فضای ابری" },
+];
 
 function RestoreCard({
   peers,
-  canManage,
+  local,
+  cloud,
+  canVerify,
   canRestore,
+  canPeerManage,
   confirmPhrase,
   busy,
   setBusy,
+  presetArtifact,
+  onPresetConsumed,
   onReload,
-  onSave,
 }: {
   peers: PeerRow[];
-  canManage: boolean;
+  local: ArtifactRow[];
+  cloud: ArtifactRow[];
+  canVerify: boolean;
   canRestore: boolean;
+  canPeerManage: boolean;
   confirmPhrase: string;
   busy: string | null;
   setBusy: (v: string | null) => void;
+  /** An artifact picked in the history card's list, pre-selected here. */
+  presetArtifact: string | null;
+  onPresetConsumed: () => void;
   onReload: () => void;
-  onSave: (patch: Record<string, unknown>, key: string) => void;
 }) {
+  const [source, setSource] = useState<"local" | "cloud" | "peer" | "url">(
+    local.some((a) => a.exists) ? "local" : "url",
+  );
   const [label, setLabel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [token, setToken] = useState("");
@@ -892,6 +979,7 @@ function RestoreCard({
   const [check, setCheck] = useState<{ manifest: PeerManifest; warnings: string[] } | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [artifact, setArtifact] = useState<string>("");
+  const [url, setUrl] = useState<string>("");
   const [passphrase, setPassphrase] = useState("");
   const [confirm, setConfirm] = useState("");
   const [result, setResult] = useState<{ status: string; summary?: unknown; notice?: string } | null>(null);
@@ -911,6 +999,34 @@ function RestoreCard({
     setActionError(null);
     setArtifact("");
   }, [selected]);
+
+  // Switching source invalidates whatever was selected in the previous one.
+  useEffect(() => {
+    setResult(null);
+    setActionError(null);
+    setArtifact("");
+    setCheck(null);
+    setCheckError(null);
+  }, [source]);
+
+  const localChoices = useMemo(() => local.filter((a) => a.exists), [local]);
+  const cloudChoices = useMemo(() => cloud, [cloud]);
+
+  // Issue #807: one restore implementation. A "restore this one" button in the
+  // artifact list only *preselects* this form; it no longer opens a second copy
+  // of the same flow with the same confirm phrase and the same endpoint.
+  useEffect(() => {
+    if (!presetArtifact) return;
+    setSource("local");
+    setArtifact(presetArtifact);
+    setResult(null);
+    setActionError(null);
+    setConfirm("");
+    onPresetConsumed();
+    if (typeof document !== "undefined") {
+      document.getElementById("platform-restore-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [presetArtifact, onPresetConsumed]);
 
   async function addPeer() {
     setFormError(null);
@@ -958,24 +1074,45 @@ function RestoreCard({
     setBusy(null);
   }
 
+  /**
+   * What this source contributes to the request body. A cloud restore sends the
+   * selected object key explicitly alongside the artifact name; a URL restore
+   * sends the address and lets the server derive (and cross-check) the name.
+   */
+  function requestBody(apply: boolean): Record<string, unknown> {
+    const shared = {
+      apply,
+      ...(passphrase ? { passphrase } : {}),
+      ...(apply ? { confirm } : {}),
+    };
+    if (source === "local") return { source, artifact, ...shared };
+    // The cloud row's `artifact` is the full object key, and it travels as
+    // both fields: the server validates the key against the configured prefix
+    // and the artifact name against the key's last segment.
+    if (source === "cloud") return { source, artifact, objectKey: artifact, ...shared };
+    if (source === "url") return { source, url: url.trim(), ...shared };
+    return { source, peerId: peer?.id ?? "", artifact, ...shared };
+  }
+
+
+  /** Whether the current source has something to restore from. */
+  const ready =
+    source === "local"
+      ? Boolean(artifact)
+      : source === "cloud"
+        ? Boolean(artifact)
+        : source === "url"
+          ? Boolean(url.trim())
+          : Boolean(peer && artifact);
+
   async function restore(apply: boolean) {
-    if (!peer || !artifact) return;
+    if (!ready) return;
     setBusy(apply ? "apply" : "verify");
     setActionError(null);
     setResult(null);
     const res = await api<{ status?: string; summary?: unknown; notice?: string; error?: string; detail?: string }>(
       "/api/platform/backup/restore",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          source: "peer",
-          peerId: peer.id,
-          artifact,
-          apply,
-          ...(passphrase ? { passphrase } : {}),
-          ...(apply ? { confirm } : {}),
-        }),
-      },
+      { method: "POST", body: JSON.stringify(requestBody(apply)) },
     );
     setBusy(null);
     if (res.ok) {
@@ -990,199 +1127,267 @@ function RestoreCard({
   const chosen = check?.manifest.artifacts.find((a) => a.artifact === artifact) ?? null;
 
   return (
-    <Card title="بازیابی از آدرس (سرور قدیم ← این سرور)">
+    <div id="platform-restore-card">
+    <Card title="بازیابی کامل سیستم">
       <InfoBox>
-        روی سرور جدید همین صفحه را باز کنید، آدرس سرور قدیم و کلیدی که آنجا ساخته‌اید را وارد
-        کنید، و نسخه را اول «اعتبارسنجی» کنید. اعتبارسنجی فایل را دانلود و در یک پایگاه‌دادهٔ
-        موقت بازمی‌گرداند و چیزی را در این سرور تغییر نمی‌دهد. «بازگردانی کامل» همان فایل را
-        جای پایگاه‌دادهٔ جاری می‌گذارد و برگشت‌پذیر نیست.
+        نسخه را از هر جایی که هست انتخاب کنید — دیسک همین سرور، باکت ابری، سرور قدیم، یا یک
+        پیوند مستقیم — و اول «اعتبارسنجی» کنید: فایل در یک پایگاه‌دادهٔ موقت بازمی‌گردد و هیچ
+        چیزی در این سرور تغییر نمی‌کند. «بازگردانی کامل» همان فایل را جای پایگاه‌دادهٔ جاری
+        می‌گذارد و برگشت‌پذیر نیست.
       </InfoBox>
 
-      <div className="grid gap-x-4 md:grid-cols-3">
-        <Field label="نام سرور مقابل">
-          <input className={inputClass} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="سرور قدیم" />
-        </Field>
-        <Field label="آدرس (با http:// یا https://)">
-          <input className={inputClass} dir="ltr" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value.trim())} placeholder="https://pos.example.com" />
-        </Field>
-        <Field label="کلید دسترسی آن سرور">
-          <input className={inputClass} dir="ltr" type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value.trim())} placeholder="POS1-…" />
-        </Field>
+      <div className="mb-4 flex flex-wrap gap-2">
+        {SOURCE_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            title={tab.hint}
+            onClick={() => setSource(tab.id)}
+            className={`rounded-xl border px-3 py-1.5 text-xs transition-colors ${
+              source === tab.id
+                ? "border-sky-400/50 bg-sky-500/10 text-foreground"
+                : "border-border text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
-      {formError ? <ErrorBox>{formError}</ErrorBox> : null}
-      {canManage ? (
-        <Button onClick={() => void addPeer()} disabled={!label.trim() || !baseUrl.trim() || busy === "add-peer"}>
-          {busy === "add-peer" ? <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" /> : null}
-          افزودن این سرور
-        </Button>
+
+      {source === "local" ? (
+        <Field label="نسخهٔ روی دیسک این سرور">
+          {localChoices.length === 0 ? (
+            <EmptyState title="نسخه‌ای روی دیسک نیست" hint="از همین صفحه یک پشتیبان فوری بگیرید یا از منابع دیگر انتخاب کنید." />
+          ) : (
+            <select className={selectClass} value={artifact} onChange={(e) => setArtifact(e.target.value)}>
+              <option value="">— انتخاب نسخه —</option>
+              {localChoices.map((a) => (
+                <option key={a.artifact} value={a.artifact} className="bg-popover">
+                  {a.artifact} — {bytes(a.sizeBytes)}
+                  {a.encrypted ? " (رمزشده)" : ""}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
       ) : null}
 
-      {peers.length === 0 ? (
-        <div className="mt-4">
-          <EmptyState
-            title="هنوز سروری ثبت نشده"
-            hint={
-              canManage
-                ? "برای بازیابی، اول آدرس سروری که نسخه‌ها آن‌جا هستند را ثبت کنید."
-                : "ثبت سرور، و هر بازیابی از آن، به دسترسی «پشتیبان‌گیری» نیاز دارد."
-            }
+      {source === "cloud" ? (
+        <Field label="شیء داخل فضای ابری (باکت و پیشوند تنظیم‌شده)">
+          {cloudChoices.length === 0 ? (
+            <EmptyState
+              title="شیئی در فهرست ابری نیست"
+              hint="اگر بارگذاری ابری خاموش است یا باکت در دسترس نیست، این فهرست خالی می‌ماند."
+            />
+          ) : (
+            <select className={selectClass} value={artifact} onChange={(e) => setArtifact(e.target.value)}>
+              <option value="">— انتخاب شیء —</option>
+              {cloudChoices.map((a) => (
+                <option key={a.artifact} value={a.artifact} className="bg-popover">
+                  {a.artifact.split("/").at(-1)} — {bytes(a.sizeBytes)}
+                  {a.encrypted ? " (رمزشده)" : ""}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+      ) : null}
+
+      {source === "url" ? (
+        <Field label="پیوند مستقیم به فایل پشتیبان" hint="بخش آخر آدرس باید نام یک فایل پشتیبان باشد؛ همان نام، مبنای اعتبارسنجی است">
+          <input
+            className={inputClass}
+            dir="ltr"
+            value={url}
+            onChange={(e) => setUrl(e.target.value.trim())}
+            placeholder="https://nas.example.com/backups/pos-backup-20260101-033000-abcd1234.dump.enc"
           />
-        </div>
-      ) : (
-        <div className="mt-4 space-y-3">
-          <div className="space-y-1.5">
-            {peers.map((p) => (
-              <label
-                key={p.id}
-                className={`flex cursor-pointer flex-wrap items-center gap-2 rounded-xl border px-3 py-2 transition-colors ${
-                  selected === p.id ? "border-sky-400/50 bg-sky-500/10" : "border-border hover:bg-muted"
-                }`}
-              >
-                <input type="radio" name="peer" className="accent-sky-500" checked={selected === p.id} onChange={() => setSelected(p.id)} />
-                <span className="min-w-0 flex-1 truncate text-sm">{p.label}</span>
-                <code dir="ltr" className="truncate text-xs text-muted-foreground">{p.baseUrl}</code>
-                {!p.hasToken ? <span className="text-xs text-amber-700 dark:text-amber-300">کلید ندارد</span> : null}
-                {!p.secure ? <span className="text-xs text-amber-700 dark:text-amber-300">http</span> : null}
-                <span className="text-xs text-muted-foreground">
-                  {p.lastCheckAt ? `بررسی: ${fmtDate(p.lastCheckAt)}` : "بررسی نشده"}
-                  {p.lastCheckStatus === "failed" ? " · ناموفق" : ""}
-                </span>
-                {canManage ? (
-                  <>
-                    {/* Both live inside the row's <label>, so each one has to stop the
-                        label from also activating its radio — otherwise "delete this
-                        server" silently re-selects the row you are deleting. */}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        void togglePeer(p.id, !p.enabled);
-                      }}
-                      className="text-xs text-muted-foreground hover:text-foreground"
-                    >
-                      {p.enabled ? "غیرفعال" : "فعال"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        void removePeer(p.id);
-                      }}
-                      aria-label={`حذف ${p.label}`}
-                      className="text-muted-foreground transition-colors hover:text-red-700 dark:hover:text-red-300"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </>
-                ) : null}
-              </label>
-            ))}
+        </Field>
+      ) : null}
+
+      {source === "peer" ? (
+        <>
+          <div className="grid gap-x-4 md:grid-cols-3">
+            <Field label="نام سرور مقابل">
+              <input className={inputClass} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="سرور قدیم" />
+            </Field>
+            <Field label="آدرس (با http:// یا https://)">
+              <input className={inputClass} dir="ltr" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value.trim())} placeholder="https://pos.example.com" />
+            </Field>
+            <Field label="کلید دسترسی آن سرور">
+              <input className={inputClass} dir="ltr" type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value.trim())} placeholder="POS1-…" />
+            </Field>
           </div>
-
-          {peer && !peer.enabled ? (
-            <InfoBox>این سرور غیرفعال است؛ برای بررسی یا بازیابی اول آن را فعال کنید.</InfoBox>
-          ) : null}
-
-          <div className="flex flex-wrap items-center gap-2">
-            {!canManage ? (
-              <InfoBox>
-                بررسی اتصال و بازیابی از همین سرور انجام می‌شود، پس به دسترسی
-                «پشتیبان‌گیری» نیاز دارد؛ فهرست پایین فقط برای اطلاع است.
-              </InfoBox>
-            ) : null}
-            <Button
-              variant="ghost"
-              onClick={() => void runCheck()}
-              disabled={!peer || busy === "check" || !canManage}
-            >
-              {busy === "check" ? <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Unplug className="me-1.5 h-4 w-4" />}
-              بررسی اتصال و خواندن فهرست
+          {formError ? <ErrorBox>{formError}</ErrorBox> : null}
+          {canPeerManage ? (
+            <Button onClick={() => void addPeer()} disabled={!label.trim() || !baseUrl.trim() || busy === "add-peer"}>
+              {busy === "add-peer" ? <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" /> : null}
+              افزودن این سرور
             </Button>
-            {check ? (
-              <span className="text-xs text-muted-foreground">
-                {toPersianDigits(check.manifest.artifacts.length)} نسخه · {toPersianDigits(check.manifest.schemaMigrations)} مهاجرت ·
-                Postgres {toPersianDigits(check.manifest.pgServerMajor)} · {toPersianDigits(check.manifest.businessCount)} کسب‌وکار
-              </span>
-            ) : null}
-          </div>
-          {checkError ? <ErrorBox>{checkError}</ErrorBox> : null}
+          ) : (
+            <InfoBox>افزودن یا تغییر سرور به دسترسی «مدیریت سرورهای مقابل» نیاز دارد.</InfoBox>
+          )}
 
-          {check && check.warnings.length > 0 ? (
-            <InfoBox>
-              <ul className="list-inside list-disc space-y-1">
-                {check.warnings.map((w) => (
-                  <li key={w}>{w}</li>
+          {peers.length === 0 ? (
+            <div className="mt-4">
+              <EmptyState
+                title="هنوز سروری ثبت نشده"
+                hint={
+                  canPeerManage
+                    ? "برای بازیابی، اول آدرس سروری که نسخه‌ها آن‌جا هستند را ثبت کنید."
+                    : "ثبت سرور به دسترسی «مدیریت سرورهای مقابل» نیاز دارد."
+                }
+              />
+            </div>
+          ) : (
+            <div className="mt-4 space-y-3">
+              <div className="space-y-1.5">
+                {peers.map((p) => (
+                  <label
+                    key={p.id}
+                    className={`flex cursor-pointer flex-wrap items-center gap-2 rounded-xl border px-3 py-2 transition-colors ${
+                      selected === p.id ? "border-sky-400/50 bg-sky-500/10" : "border-border hover:bg-muted"
+                    }`}
+                  >
+                    <input type="radio" name="peer" className="accent-sky-500" checked={selected === p.id} onChange={() => setSelected(p.id)} />
+                    <span className="min-w-0 flex-1 truncate text-sm">{p.label}</span>
+                    <code dir="ltr" className="truncate text-xs text-muted-foreground">{p.baseUrl}</code>
+                    {!p.hasToken ? <span className="text-xs text-amber-700 dark:text-amber-300">کلید ندارد</span> : null}
+                    {!p.secure ? <span className="text-xs text-amber-700 dark:text-amber-300">http</span> : null}
+                    <span className="text-xs text-muted-foreground">
+                      {p.lastCheckAt ? `بررسی: ${fmtDate(p.lastCheckAt)}` : "بررسی نشده"}
+                      {p.lastCheckStatus === "failed" ? " · ناموفق" : ""}
+                    </span>
+                    {canPeerManage ? (
+                      <>
+                        {/* Both live inside the row's <label>, so each one has to stop the
+                            label from also activating its radio — otherwise "delete this
+                            server" silently re-selects the row you are deleting. */}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            void togglePeer(p.id, !p.enabled);
+                          }}
+                          className="text-xs text-muted-foreground hover:text-foreground"
+                        >
+                          {p.enabled ? "غیرفعال" : "فعال"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            void removePeer(p.id);
+                          }}
+                          aria-label={`حذف ${p.label}`}
+                          className="text-muted-foreground transition-colors hover:text-red-700 dark:hover:text-red-300"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </>
+                    ) : null}
+                  </label>
                 ))}
-              </ul>
-            </InfoBox>
-          ) : null}
-
-          {check && canManage ? (
-            <div className="rounded-xl border border-border bg-muted p-3">
-              <div className="mb-2 flex flex-wrap items-center gap-2">
-                <span className="text-xs text-muted-foreground">نسخه</span>
-                <select className={`${selectClass} h-9 w-auto min-w-[22rem]`} value={artifact} onChange={(e) => setArtifact(e.target.value)}>
-                  {check.manifest.artifacts.map((a) => (
-                    <option key={a.artifact} value={a.artifact} className="bg-popover">
-                      {a.artifact} — {bytes(a.sizeBytes)}
-                      {a.encrypted ? " (رمزشده)" : ""}
-                    </option>
-                  ))}
-                </select>
               </div>
-              {chosen?.sha256 ? (
-                <p className="mb-2 text-[11px] text-muted-foreground" dir="ltr">
-                  sha256: {chosen.sha256.slice(0, 32)}…
-                </p>
+
+              {peer && !peer.enabled ? (
+                <InfoBox>این سرور غیرفعال است؛ برای بررسی یا بازیابی اول آن را فعال کنید.</InfoBox>
               ) : null}
 
-              <div className="grid gap-x-3 md:grid-cols-2">
-                <Field label="عبارت عبور (اگر این سرور آن را ذخیره نکرده)" hint="برای همین یک بار استفاده می‌شود و جایی ذخیره نمی‌شود">
-                  <input type="password" className={inputClass} dir="ltr" autoComplete="new-password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} />
-                </Field>
-                {canRestore ? (
-                  <Field label={confirmPhrase ? `برای بازگردانی این را دقیق بنویسید: ${confirmPhrase}` : "در حال خواندن عبارت تأیید…"}>
-                    <input className={inputClass} dir="rtl" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-                  </Field>
-                ) : (
-                  <InfoBox>اعتبارسنجی را می‌توانید؛ بازگردانی کامل فقط برای نقش «مدیر ارشد» است.</InfoBox>
-                )}
-              </div>
-
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <Button variant="ghost" onClick={() => void restore(false)} disabled={!artifact || busy === "verify"}>
-                  {busy === "verify" ? <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" /> : <ShieldAlert className="me-1.5 h-4 w-4" />}
-                  اعتبارسنجی در پایگاه‌دادهٔ موقت
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="ghost" onClick={() => void runCheck()} disabled={!peer || busy === "check" || !canPeerManage}>
+                  {busy === "check" ? <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Unplug className="me-1.5 h-4 w-4" />}
+                  بررسی اتصال و خواندن فهرست
                 </Button>
-                {canRestore ? (
-                  <Button
-                    variant="danger"
-                    onClick={() => void restore(true)}
-                    disabled={!artifact || !confirmPhrase || confirm.trim() !== confirmPhrase || busy === "apply"}
-                  >
-                    {busy === "apply" ? <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Download className="me-1.5 h-4 w-4" />}
-                    بازگردانی کامل روی این سرور
-                  </Button>
+                {check ? (
+                  <span className="text-xs text-muted-foreground">
+                    {toPersianDigits(check.manifest.artifacts.length)} نسخه · {toPersianDigits(check.manifest.schemaMigrations)} مهاجرت ·
+                    Postgres {toPersianDigits(check.manifest.pgServerMajor)} · {toPersianDigits(check.manifest.businessCount)} کسب‌وکار
+                  </span>
                 ) : null}
               </div>
-              {actionError ? <ErrorBox>{actionError}</ErrorBox> : null}
-              {result ? <RestoreResult result={result} /> : null}
-            </div>
-          ) : null}
+              {!canPeerManage ? (
+                <InfoBox>
+                  خواندن فهرست سرور مقابل و کلیدهایش به دسترسی «مدیریت سرورهای مقابل» نیاز دارد؛
+                  بازگردانی از سرور مقابل هم از همین مسیر انجام می‌شود.
+                </InfoBox>
+              ) : null}
+              {checkError ? <ErrorBox>{checkError}</ErrorBox> : null}
 
-          <p className="text-[11px] text-muted-foreground">
-            اگر رمزنگاری محلی روشن باشد ولی عبارت عبور این سرور خالی باشد، فایل رمزگشایی نمی‌شود و
-            بازگردانی پیش از هر تغییری می‌ایستد. آن را در همان پاکت بسته‌بندی نگه دارید که رمز عبور
-            مالک در آن است.
-          </p>
-        </div>
-      )}
+              {check && check.warnings.length > 0 ? (
+                <InfoBox>
+                  <ul className="list-inside list-disc space-y-1">
+                    {check.warnings.map((w) => (
+                      <li key={w}>{w}</li>
+                    ))}
+                  </ul>
+                </InfoBox>
+              ) : null}
+
+              {check && canVerify ? (
+                <div className="rounded-xl border border-border bg-muted p-3">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-muted-foreground">نسخه</span>
+                    <select className={`${selectClass} h-9 w-auto min-w-[22rem]`} value={artifact} onChange={(e) => setArtifact(e.target.value)}>
+                      {check.manifest.artifacts.map((a) => (
+                        <option key={a.artifact} value={a.artifact} className="bg-popover">
+                          {a.artifact} — {bytes(a.sizeBytes)}
+                          {a.encrypted ? " (رمزشده)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {chosen?.sha256 ? (
+                    <p className="mb-2 text-[11px] text-muted-foreground" dir="ltr">
+                      sha256: {chosen.sha256.slice(0, 32)}…
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          )}
+        </>
+      ) : null}
+
+      <div className="mt-4 grid gap-x-3 md:grid-cols-2">
+        <Field label="عبارت عبور (اگر این سرور آن را ذخیره نکرده)" hint="برای همین یک بار استفاده می‌شود و جایی ذخیره نمی‌شود">
+          <input type="password" className={inputClass} dir="ltr" autoComplete="new-password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} />
+        </Field>
+        {canRestore ? (
+          <Field label={confirmPhrase ? `برای بازگردانی این را دقیق بنویسید: ${confirmPhrase}` : "در حال خواندن عبارت تأیید…"}>
+            <input className={inputClass} dir="rtl" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+          </Field>
+        ) : null}
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button variant="ghost" onClick={() => void restore(false)} disabled={!ready || !canVerify || busy === "verify"}>
+          {busy === "verify" ? <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" /> : <ShieldAlert className="me-1.5 h-4 w-4" />}
+          اعتبارسنجی در پایگاه‌دادهٔ موقت
+        </Button>
+        {canRestore ? (
+          <Button
+            variant="danger"
+            onClick={() => void restore(true)}
+            disabled={!ready || !confirmPhrase || confirm.trim() !== confirmPhrase || busy === "apply"}
+          >
+            {busy === "apply" ? <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Download className="me-1.5 h-4 w-4" />}
+            بازگردانی کامل روی این سرور
+          </Button>
+        ) : (
+          <span className="text-[11px] text-muted-foreground">بازگردانی کامل فقط برای نقش «مدیر ارشد» است.</span>
+        )}
+      </div>
+      {actionError ? <ErrorBox>{actionError}</ErrorBox> : null}
+      {result ? <RestoreResult result={result} /> : null}
 
       <p className="mt-3 text-[11px] text-muted-foreground">
-        سروری که http دارد فقط وقتی بررسی می‌شود که «اجازهٔ اتصال ناامن» در تنظیمات روشن باشد —
-        روی شبکهٔ داخلی، همان NAS که فایل‌ها روی آن است، همین لازم است.
+        سروری که http دارد فقط وقتی بررسی می‌شود که «اجازهٔ اتصال ناامن» در تنظیمات روشن باشد؛
+        آدرس‌های داخلی (LAN) هم به «اجازهٔ سرورهای شبکهٔ داخلی» نیاز دارند. آدرس‌های metadata و
+        link-local هرگز پذیرفته نمی‌شوند.
       </p>
     </Card>
+    </div>
   );
 }
 
@@ -1221,8 +1426,7 @@ function HistoryCard({
   restores,
   health,
   tone,
-  canRestore,
-  confirmPhrase,
+  onPickLocal,
   onChanged,
 }: {
   runs: RunRow[];
@@ -1230,12 +1434,11 @@ function HistoryCard({
   restores: RestoreRun[];
   health: Health;
   tone: "neutral" | "ok" | "warn" | "bad";
-  canRestore: boolean;
-  confirmPhrase: string;
+  /** Hands a local artifact to the one restore form above this card. */
+  onPickLocal: (artifact: string) => void;
   onChanged: () => void;
 }) {
   const [copied, setCopied] = useState<string | null>(null);
-  const [openFor, setOpenFor] = useState<string | null>(null);
   async function copy(value: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -1325,22 +1528,13 @@ function HistoryCard({
                     {a.exists ? (
                       <button
                         type="button"
-                        onClick={() => setOpenFor(openFor === a.artifact ? null : a.artifact)}
+                        onClick={() => onPickLocal(a.artifact)}
                         className="rounded-lg border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                       >
-                        {openFor === a.artifact ? "بستن" : "بازیابی این نسخه"}
+                        بازیابی این نسخه
                       </button>
                     ) : null}
                   </div>
-                  {openFor === a.artifact ? (
-                    <LocalRestore
-                      artifact={a.artifact}
-                      encrypted={a.encrypted}
-                      canRestore={canRestore}
-                      confirmPhrase={confirmPhrase}
-                      onDone={onChanged}
-                    />
-                  ) : null}
                 </li>
               ))}
             </ul>
@@ -1402,108 +1596,6 @@ const SOURCE_LABELS: Record<string, string> = {
   peer: "از سرور مقابل",
   url: "از آدرس مستقیم",
 };
-
-/**
- * Verify (and, for an owner, apply) one of *this* server's own artifacts.
- *
- * The peer card handles the migration case; this one is for the machine whose
- * database is broken but whose backup folder is intact — the operator should not
- * have to reach a shell to find out whether the file is good, and `npm run
- * db:restore` is the same engine with the same guarantees minus the console. So
- * the two-step is the same as everywhere else on this page: restore into a
- * scratch database and read the counts, then, with a typed phrase, replace the
- * live one.
- */
-function LocalRestore({
-  artifact,
-  encrypted,
-  canRestore,
-  confirmPhrase,
-  onDone,
-}: {
-  artifact: string;
-  encrypted: boolean;
-  canRestore: boolean;
-  confirmPhrase: string;
-  onDone: () => void;
-}) {
-  const [passphrase, setPassphrase] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ status: string; summary?: unknown; notice?: string } | null>(null);
-
-  async function go(apply: boolean) {
-    setBusy(apply ? "apply" : "verify");
-    setError(null);
-    setResult(null);
-    const res = await api<{ status?: string; summary?: unknown; notice?: string; error?: string; detail?: string }>(
-      "/api/platform/backup/restore",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          source: "local",
-          artifact,
-          apply,
-          ...(passphrase ? { passphrase } : {}),
-          ...(apply ? { confirm } : {}),
-        }),
-      },
-    );
-    setBusy(null);
-    if (res.ok) {
-      setResult({ status: res.data.status ?? "verified", summary: res.data.summary, notice: res.data.notice });
-      onDone();
-    } else {
-      setError(text(res.data.error, res.data.detail));
-    }
-  }
-
-  return (
-    <div className="rounded-xl border border-border bg-muted p-3">
-      <div className="grid gap-x-3 md:grid-cols-2">
-        <Field
-          label="عبارت عبور"
-          hint={encrypted ? "این نسخه رمزشده است؛ بدون عبارت عبور باز نمی‌شود" : "فقط اگر عبارت عبور این سرور پاک شده لازم است"}
-        >
-          <input
-            type="password"
-            className={inputClass}
-            dir="ltr"
-            autoComplete="new-password"
-            value={passphrase}
-            onChange={(e) => setPassphrase(e.target.value)}
-          />
-        </Field>
-        {canRestore ? (
-          <Field label={confirmPhrase ? `برای بازگردانی این را دقیق بنویسید: ${confirmPhrase}` : "در حال خواندن عبارت تأیید…"}>
-            <input className={inputClass} dir="rtl" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-          </Field>
-        ) : null}
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button variant="ghost" onClick={() => void go(false)} disabled={busy !== null}>
-          {busy === "verify" ? <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" /> : null}
-          اعتبارسنجی در پایگاه‌دادهٔ موقت
-        </Button>
-        {canRestore ? (
-          <Button
-            variant="danger"
-            onClick={() => void go(true)}
-            disabled={busy !== null || !confirmPhrase || confirm.trim() !== confirmPhrase}
-          >
-            {busy === "apply" ? <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" /> : null}
-            بازگردانی کامل روی این سرور
-          </Button>
-        ) : (
-          <span className="text-[11px] text-muted-foreground">بازگردانی کامل فقط برای نقش «مدیر ارشد» است.</span>
-        )}
-      </div>
-      {error ? <ErrorBox>{error}</ErrorBox> : null}
-      {result ? <RestoreResult result={result} /> : null}
-    </div>
-  );
-}
 
 /** A labelled switch — the console's own idiom (no native checkbox styling). */
 function Toggle({

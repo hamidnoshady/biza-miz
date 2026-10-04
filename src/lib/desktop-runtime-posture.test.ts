@@ -49,6 +49,32 @@ describe("packaged desktop production posture", () => {
     expect(runtimeBuilder).toContain('engines: { node: ">=24" }');
   });
 
+  it("keeps component-generation tooling out of the production dependency graph", () => {
+    const rootManifest = JSON.parse(readFileSync(path.resolve("package.json"), "utf8"));
+    const rootLock = JSON.parse(readFileSync(path.resolve("package-lock.json"), "utf8"));
+
+    // The shadcn CLI generates source and supplies a build-time CSS import;
+    // neither the application server nor the packaged desktop runs it. Keeping
+    // it in dependencies also misclassifies its glob/code-generation tooling
+    // as shipped code and fails both production dependency audit gates.
+    expect(rootManifest.dependencies).not.toHaveProperty("shadcn");
+    expect(rootManifest.devDependencies.shadcn).toBeTruthy();
+    expect(rootLock.packages[""].dependencies).not.toHaveProperty("shadcn");
+    expect(rootLock.packages[""].devDependencies.shadcn).toBe(rootManifest.devDependencies.shadcn);
+    for (const name of ["shadcn", "ts-morph", "@ts-morph/common", "fast-glob", "micromatch", "braces"]) {
+      expect(rootLock.packages[`node_modules/${name}`], `${name} must remain development-only`).toMatchObject({
+        dev: true,
+      });
+    }
+  });
+
+  it("checks stable tag collisions only for releases, not unique CI previews", () => {
+    const workflow = readFileSync(path.resolve(".github/workflows/build-desktop-installer.yml"), "utf8");
+    expect(workflow).toContain('if ($env:RELEASE_BUILD -eq "true" -and (git tag --list "desktop-v$next")) {');
+    expect(workflow).not.toContain('if (git tag --list "desktop-v$next") {');
+    expect(workflow).toContain('$version = if ($env:RELEASE_BUILD -eq "true") { $next } else { "$next-ci.$env:GITHUB_RUN_NUMBER" }');
+  });
+
   it("always launches the internal server as a loopback-only production site", () => {
     const env = desktopServerEnvironment(
       { jwtSecret: "test", appPort: 3042, instanceId: "instance" },

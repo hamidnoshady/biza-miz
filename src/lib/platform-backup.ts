@@ -85,6 +85,14 @@ export interface PlatformBackupConfig {
   servingEnabled: boolean;
   /** allow a peer address to be plain http (a machine on the operator's LAN) */
   allowInsecurePeers: boolean;
+  /**
+   * Issue #807 — allow a peer/direct-URL target on the private network
+   * (RFC1918, CGNAT, IPv6 ULA, or loopback). LAN restore is a real feature, but
+   * it is a deliberate decision, not a default: the outbound policy refuses
+   * private targets unless this is set, and always refuses link-local,
+   * multicast and cloud-metadata addresses whatever it says.
+   */
+  allowPrivatePeers: boolean;
 }
 
 export const DEFAULT_PLATFORM_BACKUP_CONFIG: PlatformBackupConfig = {
@@ -109,6 +117,7 @@ export const DEFAULT_PLATFORM_BACKUP_CONFIG: PlatformBackupConfig = {
   },
   servingEnabled: false,
   allowInsecurePeers: false,
+  allowPrivatePeers: false,
 };
 
 const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -240,6 +249,8 @@ export function validatePlatformBackupConfig(
   const servingEnabled = b.servingEnabled === undefined ? existing.servingEnabled : Boolean(b.servingEnabled);
   const allowInsecurePeers =
     b.allowInsecurePeers === undefined ? existing.allowInsecurePeers : Boolean(b.allowInsecurePeers);
+  const allowPrivatePeers =
+    b.allowPrivatePeers === undefined ? existing.allowPrivatePeers : Boolean(b.allowPrivatePeers);
 
   // Same two rules as the tenant config, and for the same reasons: an empty
   // passphrase would derive an AES key from a publicly known input, and the
@@ -272,8 +283,26 @@ export function validatePlatformBackupConfig(
       cloud,
       servingEnabled,
       allowInsecurePeers,
+      allowPrivatePeers,
     };
   }
+}
+
+/**
+ * The outbound-network policy this install's config authorizes: an operator who
+ * already allowed plain http to a LAN address has declared their LAN intent
+ * (the pre-#807 setting), and the explicit `allowPrivatePeers` covers the https
+ * LAN case. Metadata/link-local/multicast stay blocked either way.
+ */
+export function outboundPolicyFor(
+  config: Pick<PlatformBackupConfig, "allowInsecurePeers" | "allowPrivatePeers">,
+): { allowInsecure: boolean; allowPrivateNetwork: boolean; allowLoopback: boolean } {
+  return {
+    allowInsecure: config.allowInsecurePeers,
+    allowPrivateNetwork: config.allowPrivatePeers || config.allowInsecurePeers,
+    // Loopback is never a restore target an operator configured by accident.
+    allowLoopback: false,
+  };
 }
 
 /**
@@ -314,6 +343,11 @@ export function maskPlatformBackupConfig(config: PlatformBackupConfig, env?: Par
   }
   if (config.cloud.enabled && !config.cloud.endpoint) {
     warnings.push("Cloud mirroring is enabled without an endpoint; uploads will fail.");
+  }
+  if (config.allowPrivatePeers) {
+    warnings.push(
+      "Restoring from private/LAN addresses is allowed. Link-local, loopback and cloud-metadata targets remain blocked.",
+    );
   }
   return {
     ...config,
@@ -726,7 +760,14 @@ export type RestorePlan =
       ok: true;
       mode: "verify" | "apply";
       source: RestoreSource;
+      /** the bare artifact name (never a path, never a key) */
       artifact: string;
+      /**
+       * Only for source="cloud": the full S3 object key, server-derived or
+       * server-validated against the configured prefix (issue #807). The
+       * browser never gets to name an arbitrary key.
+       */
+      objectKey: string | null;
       peerId: string | null;
       /** only for source="url": a one-off address, not a stored peer */
       url: string | null;
@@ -734,6 +775,55 @@ export type RestorePlan =
       passphrase: string;
     }
   | { ok: false; error: string };
+
+/**
+ * The object key a cloud artifact is restored from, validated against the
+ * configured prefix (issue #807).
+ *
+ * The audit found that `listPlatformCloudArtifacts()` returned full S3 keys
+ * (`platform-backups/pos-backup-….dump.enc`) while the restore plan required a
+ * plain name without `/` — so prefixed cloud artifacts could never be restored
+ * from the UI at all, and "fixing" it by trusting the key from the browser
+ * would have let a caller name any object in the bucket. This resolves the
+ * contradiction: the key is *checked* against the prefix and the artifact
+ * grammar, and when the caller supplied only a name the key is derived from the
+ * prefix rather than taken from the request.
+ */
+export function resolveCloudObjectKey(
+  raw: { objectKey?: unknown; artifact?: unknown },
+  prefix: string,
+  opts: { allowedArtifacts?: ReadonlySet<string> } = {},
+): { ok: true; objectKey: string; artifact: string } | { ok: false; error: string } {
+  const normalizedPrefix = prefix && !prefix.endsWith("/") ? `${prefix}/` : prefix;
+  const rawKey = str(raw.objectKey);
+  const rawArtifact = str(raw.artifact);
+
+  let key = rawKey;
+  if (!key) {
+    // Backward compatible: a request that names only the artifact gets the key
+    // the prefix implies. The artifact must still be a real artifact name.
+    if (!rawArtifact) return { ok: false, error: "missing_artifact" };
+    if (!isServeableArtifactName(rawArtifact)) return { ok: false, error: "unsafe_artifact_name" };
+    key = `${normalizedPrefix}${rawArtifact}`;
+  }
+  if (key.length > 1024) return { ok: false, error: "invalid_object_key" };
+  if (key.startsWith("/") || key.includes("\\") || key.split("/").some((segment) => segment === ".." || segment === ".")) {
+    return { ok: false, error: "invalid_object_key" };
+  }
+  if (normalizedPrefix && !key.startsWith(normalizedPrefix)) {
+    return { ok: false, error: "object_key_outside_prefix" };
+  }
+  const suffix = normalizedPrefix ? key.slice(normalizedPrefix.length) : key;
+  // Exactly one path segment after the prefix: an artifact, not a sub-path.
+  if (!suffix || suffix.includes("/") || !isServeableArtifactName(suffix)) {
+    return { ok: false, error: "unsafe_artifact_name" };
+  }
+  if (rawArtifact && rawArtifact !== suffix) return { ok: false, error: "artifact_key_mismatch" };
+  if (opts.allowedArtifacts && !opts.allowedArtifacts.has(suffix)) {
+    return { ok: false, error: "unknown_artifact" };
+  }
+  return { ok: true, objectKey: key, artifact: suffix };
+}
 
 /**
  * Turn POST /api/platform/backup/restore's body into an exact plan, or a
@@ -747,7 +837,14 @@ export type RestorePlan =
  */
 export function resolveRestorePlan(
   body: unknown,
-  opts: { allowInsecurePeers?: boolean; knownPeerIds?: ReadonlySet<string> } = {},
+  opts: {
+    allowInsecurePeers?: boolean;
+    knownPeerIds?: ReadonlySet<string>;
+    /** the configured cloud prefix; required so a cloud source can be resolved */
+    cloudPrefix?: string;
+    /** artifact names the server knows about (from its own listing/run history) */
+    knownCloudArtifacts?: ReadonlySet<string>;
+  } = {},
 ): RestorePlan {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return { ok: false, error: "not_an_object" };
@@ -785,6 +882,23 @@ export function resolveRestorePlan(
   const passphrase = typeof b.passphrase === "string" ? b.passphrase : "";
   if (passphrase.includes("\0")) return { ok: false, error: "invalid_passphrase" };
 
+  // Cloud identity is explicit (issue #807): the artifact *and* the object key
+  // travel separately, and the key is validated against the configured prefix
+  // rather than trusted. A request naming only the artifact still works — the
+  // key is derived — but a request naming an arbitrary key outside the prefix
+  // is refused before any S3 credential is used.
+  let objectKey: string | null = null;
+  if (source === "cloud") {
+    const resolved = resolveCloudObjectKey(
+      { objectKey: b.objectKey, artifact },
+      opts.cloudPrefix ?? "",
+      opts.knownCloudArtifacts ? { allowedArtifacts: opts.knownCloudArtifacts } : {},
+    );
+    if (!resolved.ok) return { ok: false, error: resolved.error };
+    objectKey = resolved.objectKey;
+    artifact = resolved.artifact;
+  }
+
   let peerId: string | null = null;
   let url: string | null = null;
   if (source === "peer") {
@@ -808,7 +922,7 @@ export function resolveRestorePlan(
     url = resolved.url;
   }
 
-  return { ok: true, mode, source, artifact, peerId, url, passphrase };
+  return { ok: true, mode, source, artifact, objectKey, peerId, url, passphrase };
 }
 
 /**

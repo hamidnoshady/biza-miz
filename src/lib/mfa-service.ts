@@ -2,13 +2,43 @@ import { query, withoutTenantScope } from "./db";
 import { getRealmSecret, verifyWithRealmSecret } from "./jwt-secret";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { SignJWT } from "jose";
-import { enrolmentRequirement, type MfaRequirement } from "./mfa";
+import {
+  enrolmentRequirement,
+  isMfaEnrolmentConfirmed,
+  selectPrimaryMfaEnrolment,
+  sortMfaEnrolments,
+  type MfaMethod,
+  type MfaRequirement,
+  type PrimaryAuthMethod,
+} from "./mfa";
+import { countRemainingRecoveryCodes, issueRecoveryCodes } from "./mfa-recovery";
+
+export interface MfaPendingEmployeeSession {
+  userId: string;
+  businessId: string;
+  locationId: string | null;
+  role: string;
+  employeeSessionId: string;
+}
 
 export interface MfaPendingPayload {
   sub: string;
-  method: "sms_otp" | "totp" | null;
+  method: MfaMethod | null;
   authRealm: "tenant_password" | "platform_admin";
   businessId?: string;
+  /** Which primary factor minted this pending token (defaults to "password"). */
+  primaryAuth?: PrimaryAuthMethod;
+  /** Present when primaryAuth === "phone_otp" on the employee/tenant door. */
+  employeeSession?: MfaPendingEmployeeSession;
+}
+
+export interface MfaEnrolmentRow extends Record<string, unknown> {
+  id: string;
+  method: MfaMethod;
+  is_primary: boolean;
+  phone_e164: string | null;
+  confirmed_at: Date | null;
+  created_at: Date;
 }
 
 export async function signMfaPendingToken(payload: MfaPendingPayload): Promise<string> {
@@ -22,7 +52,12 @@ export async function signMfaPendingToken(payload: MfaPendingPayload): Promise<s
 
 export async function verifyMfaPendingToken(token: string): Promise<MfaPendingPayload | null> {
   try {
-    const payload = await verifyWithRealmSecret<{ realm?: string; sub?: string; method?: string; authRealm?: string }>(token, "mfa");
+    const payload = await verifyWithRealmSecret<{
+      realm?: string;
+      sub?: string;
+      method?: string;
+      authRealm?: string;
+    }>(token, "mfa");
     if (!payload || payload.realm !== "mfa") return null;
     return payload as unknown as MfaPendingPayload;
   } catch {
@@ -30,32 +65,78 @@ export async function verifyMfaPendingToken(token: string): Promise<MfaPendingPa
   }
 }
 
-export async function getAccountMfaEnrolments(subjectRealm: string, subjectId: string) {
-  const { rows } = await withoutTenantScope("platform", () => 
-    query<{ method: "sms_otp" | "totp"; is_primary: boolean; phone_e164: string | null; confirmed_at: Date | null }>(
-      `SELECT method, is_primary, phone_e164, confirmed_at 
-       FROM mfa_enrolments 
+export async function getAccountMfaEnrolments(
+  subjectRealm: string,
+  subjectId: string,
+): Promise<MfaEnrolmentRow[]> {
+  const { rows } = await withoutTenantScope("platform", () =>
+    query<MfaEnrolmentRow>(
+      `SELECT id, method, is_primary, phone_e164, confirmed_at, created_at
+       FROM mfa_enrolments
        WHERE subject_realm = $1 AND subject_id = $2`,
-      [subjectRealm, subjectId]
-    )
+      [subjectRealm, subjectId],
+    ),
   );
-  return rows;
+  return sortMfaEnrolments(rows);
 }
 
-export async function getMfaGracePeriod(subjectRealm: string, subjectId: string): Promise<Date | null> {
-  const { rows } = await withoutTenantScope("platform", () => 
-    query<{ grace_until: Date }>(`SELECT grace_until FROM mfa_grace_periods WHERE subject_realm = $1 AND subject_id = $2`, [subjectRealm, subjectId])
+/**
+ * Returns only confirmed MFA enrolments (`confirmed_at IS NOT NULL`), plus any
+ * explicit owner-activation bootstrap SMS enrolment (`method = 'sms_otp'` with
+ * `is_primary = true` created during owner activation before first login).
+ * Interactive pending enrolments (`is_primary = false AND confirmed_at IS NULL`)
+ * are excluded so abandoned setups never act as active factors.
+ */
+export function filterActiveMfaEnrolments(
+  enrolments: readonly MfaEnrolmentRow[],
+): MfaEnrolmentRow[] {
+  return sortMfaEnrolments(
+    enrolments.filter(
+      (e) => isMfaEnrolmentConfirmed(e) || (e.method === "sms_otp" && e.is_primary === true),
+    ),
+  );
+}
+
+/**
+ * Canonical primary-factor selector for an account (Issue #809 — Finding 9).
+ */
+export async function getPrimaryMfaEnrolment(
+  subjectRealm: string,
+  subjectId: string,
+  options: { allowUnconfirmedFallback?: boolean } = {},
+): Promise<MfaEnrolmentRow | null> {
+  const enrolments = await getAccountMfaEnrolments(subjectRealm, subjectId);
+  const confirmedChoice = selectPrimaryMfaEnrolment(enrolments, options);
+  if (confirmedChoice) return confirmedChoice;
+  // Owner-activation bootstrap SMS row (is_primary = true, confirmed_at = NULL)
+  const active = filterActiveMfaEnrolments(enrolments);
+  return active[0] ?? null;
+}
+
+export async function getMfaGracePeriod(
+  subjectRealm: string,
+  subjectId: string,
+): Promise<Date | null> {
+  const { rows } = await withoutTenantScope("platform", () =>
+    query<{ grace_until: Date }>(
+      `SELECT grace_until FROM mfa_grace_periods WHERE subject_realm = $1 AND subject_id = $2`,
+      [subjectRealm, subjectId],
+    ),
   );
   return rows.length > 0 ? rows[0].grace_until : null;
 }
 
-export async function markMfaGracePeriod(subjectRealm: string, subjectId: string, graceDays: number) {
+export async function markMfaGracePeriod(
+  subjectRealm: string,
+  subjectId: string,
+  graceDays: number,
+) {
   await withoutTenantScope("platform", async () => {
     await query(
       `INSERT INTO mfa_grace_periods (subject_realm, subject_id, grace_until)
        VALUES ($1, $2, now() + interval '1 day' * $3)
        ON CONFLICT (subject_realm, subject_id) DO NOTHING`,
-      [subjectRealm, subjectId, graceDays]
+      [subjectRealm, subjectId, graceDays],
     );
   });
 }
@@ -64,12 +145,6 @@ export async function markMfaGracePeriod(subjectRealm: string, subjectId: string
  * Push one account's grace window out — the super-admin's documented escape
  * valve for the person whose stored mobile is wrong, or who is mid-holiday
  * when the deadline lands.
- *
- * Measured from *now*, not from the existing deadline: "give them another
- * week" is what the operator means, and adding a week to a window that expired
- * last month would grant nothing at all. Deliberately per-account rather than
- * platform-wide, so rescuing one person never quietly disarms the requirement
- * for everyone. The caller writes the audit row; this only moves the date.
  */
 export async function extendMfaGracePeriod(
   subjectRealm: string,
@@ -93,11 +168,6 @@ export async function extendMfaGracePeriod(
  * Clear every second factor an account holds — enrolments, live challenges and
  * unspent recovery codes — and re-stamp a fresh grace window so the next login
  * enrols instead of hard-gating.
- *
- * The mechanism behind both the console's "reset a business Owner's 2FA"
- * button and `scripts/reset-platform-mfa.ts`. It is destructive by design: a
- * reset that left the old TOTP secret in place would leave the account still
- * locked out by the device it no longer has.
  */
 export async function resetAccountMfa(
   subjectRealm: string,
@@ -127,7 +197,6 @@ export async function resetAccountMfa(
   });
 }
 
-
 /** Wrap a TOTP secret for storage: IV(12) ‖ TAG(16) ‖ ciphertext, AES-256-GCM under this server's key. */
 export async function encryptTotpSecret(plain: Buffer | string): Promise<Buffer> {
   const iv = randomBytes(12);
@@ -139,7 +208,11 @@ export async function encryptTotpSecret(plain: Buffer | string): Promise<Buffer>
 /** Inverse of encryptTotpSecret; null when this server's key cannot open it. */
 export async function decryptTotpSecret(data: Buffer): Promise<string | null> {
   try {
-    const decipher = createDecipheriv("aes-256-gcm", await getMfaSecretKey(), data.subarray(0, 12));
+    const decipher = createDecipheriv(
+      "aes-256-gcm",
+      await getMfaSecretKey(),
+      data.subarray(0, 12),
+    );
     decipher.setAuthTag(data.subarray(12, 28));
     return Buffer.concat([decipher.update(data.subarray(28)), decipher.final()]).toString("utf8");
   } catch (err) {
@@ -155,17 +228,192 @@ export async function provisionMfaEnrolment(
   method: "sms_otp" | "totp",
   isPrimary: boolean,
   phoneE164?: string | null,
-  totpSecretPlain?: Buffer | null
+  totpSecretPlain?: Buffer | null,
+  options: { confirmed?: boolean } = {},
 ) {
+  const confirmed = options.confirmed ?? true;
   const totpSecretEncrypted =
     method === "totp" && totpSecretPlain ? await encryptTotpSecret(totpSecretPlain) : null;
 
-  await client.query(
-    `INSERT INTO mfa_enrolments (subject_realm, subject_id, method, is_primary, phone_e164, totp_secret, confirmed_at)
-     VALUES ($1, $2, $3, $4, $5, $6, now())
-     ON CONFLICT (subject_realm, subject_id, method) DO NOTHING`,
-    [subjectRealm, subjectId, method, isPrimary, phoneE164 || null, totpSecretEncrypted]
-  );
+  if (confirmed) {
+    if (isPrimary) {
+      await client.query(
+        `UPDATE mfa_enrolments
+            SET is_primary = false
+          WHERE subject_realm = $1 AND subject_id = $2 AND method <> $3 AND is_primary = true`,
+        [subjectRealm, subjectId, method],
+      );
+    }
+    await client.query(
+      `INSERT INTO mfa_enrolments (subject_realm, subject_id, method, is_primary, phone_e164, totp_secret, confirmed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())
+       ON CONFLICT (subject_realm, subject_id, method) DO UPDATE SET
+         is_primary = EXCLUDED.is_primary,
+         phone_e164 = COALESCE(EXCLUDED.phone_e164, mfa_enrolments.phone_e164),
+         totp_secret = COALESCE(EXCLUDED.totp_secret, mfa_enrolments.totp_secret),
+         confirmed_at = COALESCE(mfa_enrolments.confirmed_at, now())`,
+      [subjectRealm, subjectId, method, isPrimary, phoneE164 || null, totpSecretEncrypted],
+    );
+  } else {
+    // Stage as pending (unconfirmed, non-primary) and allow re-staging if a
+    // previous attempt for this method was never confirmed (Issue #809 — Finding 4).
+    await client.query(
+      `INSERT INTO mfa_enrolments (subject_realm, subject_id, method, is_primary, phone_e164, totp_secret, confirmed_at)
+       VALUES ($1, $2, $3, false, $4, $5, NULL)
+       ON CONFLICT (subject_realm, subject_id, method)
+       DO UPDATE SET
+         phone_e164 = EXCLUDED.phone_e164,
+         totp_secret = EXCLUDED.totp_secret,
+         is_primary = false,
+         confirmed_at = NULL
+       WHERE mfa_enrolments.confirmed_at IS NULL`,
+      [subjectRealm, subjectId, method, phoneE164 || null, totpSecretEncrypted],
+    );
+  }
+}
+
+/**
+ * Confirm a pending (or bootstrap) MFA enrolment after code verification.
+ *
+ * Sets `confirmed_at = COALESCE(confirmed_at, now())`, promotes `is_primary`
+ * if the account has no confirmed primary enrolment yet, and issues initial
+ * recovery codes if the account currently has none.
+ */
+export async function confirmMfaEnrolment(
+  subjectRealm: MfaSubjectRealm,
+  subjectId: string,
+  method: MfaMethod,
+): Promise<{
+  confirmed: boolean;
+  wasUnconfirmed: boolean;
+  isPrimary: boolean;
+  recoveryCodes: string[];
+}> {
+  return withoutTenantScope("platform", async () => {
+    const existing = await getAccountMfaEnrolments(subjectRealm, subjectId);
+    const target = existing.find((e) => e.method === method);
+    if (!target) {
+      return { confirmed: false, wasUnconfirmed: false, isPrimary: false, recoveryCodes: [] };
+    }
+
+    const wasUnconfirmed = target.confirmed_at === null;
+    const otherConfirmedPrimary = existing.some(
+      (e) => e.method !== method && e.confirmed_at !== null && e.is_primary,
+    );
+    const shouldBePrimary = !otherConfirmedPrimary;
+
+    if (shouldBePrimary) {
+      await query(
+        `UPDATE mfa_enrolments
+            SET is_primary = false
+          WHERE subject_realm = $1 AND subject_id = $2 AND method <> $3`,
+        [subjectRealm, subjectId, method],
+      );
+    }
+
+    await query(
+      `UPDATE mfa_enrolments
+          SET confirmed_at = COALESCE(confirmed_at, now()),
+              is_primary = CASE WHEN $4::boolean THEN true ELSE is_primary END
+        WHERE subject_realm = $1 AND subject_id = $2 AND method = $3`,
+      [subjectRealm, subjectId, method, shouldBePrimary],
+    );
+
+    let recoveryCodes: string[] = [];
+    if (wasUnconfirmed) {
+      const remaining = await countRemainingRecoveryCodes(subjectRealm, subjectId);
+      if (remaining === 0) {
+        recoveryCodes = await issueRecoveryCodes(subjectRealm, subjectId);
+      }
+    }
+
+    return {
+      confirmed: true,
+      wasUnconfirmed,
+      isPrimary: shouldBePrimary || target.is_primary,
+      recoveryCodes,
+    };
+  });
+}
+
+/**
+ * Explicitly switch the primary MFA method among confirmed enrolments.
+ */
+export async function setPrimaryMfaEnrolment(
+  subjectRealm: MfaSubjectRealm,
+  subjectId: string,
+  method: MfaMethod,
+): Promise<{ ok: true } | { ok: false; error: "not_enrolled" | "not_confirmed" }> {
+  return withoutTenantScope("platform", async () => {
+    const enrolments = await getAccountMfaEnrolments(subjectRealm, subjectId);
+    const target = enrolments.find((e) => e.method === method);
+    if (!target) return { ok: false, error: "not_enrolled" };
+    if (!target.confirmed_at) return { ok: false, error: "not_confirmed" };
+
+    await query(
+      `UPDATE mfa_enrolments
+          SET is_primary = false
+        WHERE subject_realm = $1 AND subject_id = $2 AND method <> $3`,
+      [subjectRealm, subjectId, method],
+    );
+    await query(
+      `UPDATE mfa_enrolments
+          SET is_primary = true
+        WHERE subject_realm = $1 AND subject_id = $2 AND method = $3`,
+      [subjectRealm, subjectId, method],
+    );
+    return { ok: true };
+  });
+}
+
+/**
+ * Remove a specific MFA enrolment from an account.
+ *
+ * Refuses to remove the last confirmed factor when MFA is mandatory for the
+ * caller (`allowRemoveLast = false`), while always permitting removal of an
+ * unconfirmed pending enrolment or a secondary confirmed factor.
+ */
+export async function removeMfaEnrolment(
+  subjectRealm: MfaSubjectRealm,
+  subjectId: string,
+  method: MfaMethod,
+  options: { allowRemoveLast?: boolean } = {},
+): Promise<{ ok: true } | { ok: false; error: "not_enrolled" | "cannot_remove_last_factor" }> {
+  return withoutTenantScope("platform", async () => {
+    const enrolments = await getAccountMfaEnrolments(subjectRealm, subjectId);
+    const target = enrolments.find((e) => e.method === method);
+    if (!target) return { ok: false, error: "not_enrolled" };
+
+    const confirmed = enrolments.filter((e) => e.confirmed_at !== null);
+    if (
+      target.confirmed_at !== null &&
+      confirmed.length <= 1 &&
+      !options.allowRemoveLast
+    ) {
+      return { ok: false, error: "cannot_remove_last_factor" };
+    }
+
+    await query(
+      `DELETE FROM mfa_enrolments
+        WHERE subject_realm = $1 AND subject_id = $2 AND method = $3`,
+      [subjectRealm, subjectId, method],
+    );
+
+    const remainingConfirmed = confirmed.filter((e) => e.method !== method);
+    if (remainingConfirmed.length > 0 && !remainingConfirmed.some((e) => e.is_primary)) {
+      const nextPrimary = selectPrimaryMfaEnrolment(remainingConfirmed);
+      if (nextPrimary) {
+        await query(
+          `UPDATE mfa_enrolments
+              SET is_primary = true
+            WHERE subject_realm = $1 AND subject_id = $2 AND method = $3`,
+          [subjectRealm, subjectId, nextPrimary.method],
+        );
+      }
+    }
+
+    return { ok: true };
+  });
 }
 
 export async function getMfaSecretKey(): Promise<Buffer> {
@@ -173,10 +421,6 @@ export async function getMfaSecretKey(): Promise<Buffer> {
   if (envKey) {
     return Buffer.from(envKey, "hex");
   }
-  // No MFA_SECRET_KEY configured — derive a key from the dedicated "mfa"
-  // signing realm (the same realm signMfaPendingToken uses) rather than
-  // reusing the platform realm's secret for both session signing and
-  // TOTP-secret-at-rest encryption.
   return Buffer.from(await getRealmSecret("mfa"));
 }
 
@@ -206,17 +450,6 @@ interface MfaFacts {
   recoveryRemaining: number;
 }
 
-/**
- * Enrolments, grace and unspent recovery codes for a set of subjects, in one
- * round trip per fact rather than one per account.
- *
- * Split out from the identity queries because the three MFA tables are keyed
- * on `(subject_realm, subject_id)` for both realms alike, while "who is an
- * Owner" and "who is a platform admin" are questions of two entirely different
- * tables. Joining them in a single statement means casting one realm's
- * vocabulary into the other's, which is how a security readout ends up quietly
- * wrong.
- */
 async function mfaFactsFor(
   subjectRealm: MfaSubjectRealm,
   subjectIds: string[],
@@ -236,11 +469,13 @@ async function mfaFactsFor(
     subject_id: string;
     method: "totp" | "sms_otp";
     is_primary: boolean;
+    confirmed_at: Date | null;
     created_at: Date;
   }>(
-    `SELECT subject_id, method, is_primary, created_at
+    `SELECT subject_id, method, is_primary, confirmed_at, created_at
        FROM mfa_enrolments
       WHERE subject_realm = $1 AND subject_id = ANY($2::uuid[])
+        AND (confirmed_at IS NOT NULL OR (method = 'sms_otp' AND is_primary = true))
       ORDER BY is_primary DESC, method`,
     [subjectRealm, subjectIds],
   );
@@ -307,17 +542,6 @@ function toStatus(
   };
 }
 
-/**
- * Every account the 2FA requirement applies to, and where each one stands —
- * the readout Phase 24 asks `/platform` for: "who is enrolled, who is in grace
- * and how long remains".
- *
- * The tenant side lists identities holding an `owner` membership, plus
- * `manager` memberships in businesses that opted in (settings key `mfa.policy`).
- * Those are exactly the accounts `enrolmentRequirement` will gate, so those are
- * the ones an operator needs to see *before* a deadline arrives rather than
- * after a support call.
- */
 export async function listMfaAccountStatus(now: Date = new Date()): Promise<MfaAccountStatus[]> {
   return withoutTenantScope("platform", async () => {
     const { rows: admins } = await query<{
@@ -366,13 +590,24 @@ export async function listMfaAccountStatus(now: Date = new Date()): Promise<MfaA
       mfaFactsFor("platform_user", owners.map((o) => o.id)),
     ]);
 
-    const blank: MfaFacts = { methods: [], enrolledAt: null, graceUntil: null, recoveryRemaining: 0 };
+    const blank: MfaFacts = {
+      methods: [],
+      enrolledAt: null,
+      graceUntil: null,
+      recoveryRemaining: 0,
+    };
 
     return [
       ...admins.map((a) =>
         toStatus(
           "platform_admin",
-          { subjectId: a.id, email: a.email, fullName: a.full_name, role: a.role, businesses: [] },
+          {
+            subjectId: a.id,
+            email: a.email,
+            fullName: a.full_name,
+            role: a.role,
+            businesses: [],
+          },
           adminFacts.get(a.id) ?? blank,
           now,
         ),

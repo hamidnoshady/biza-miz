@@ -98,6 +98,47 @@ describe("platformCan — role → capability presets", () => {
     }
   });
 
+  it("spells the #807 backup split out role by role", () => {
+    // The audit's table, asserted literally: read is everyone's, run+verify is
+    // operations, and custody of the destination, of the tenants' data
+    // (sharing/peers) and of a destructive restore is owner-only.
+    const READ_ONLY = ["backup.read", "system.read", "businesses.read"] as const;
+    const OPERATIONS = ["backup.run", "backup.verify", "backup.manage"] as const;
+    const OWNER_ONLY = [
+      "backup.configure",
+      "backup.share",
+      "backup.peer.manage",
+      "backup.restore",
+    ] as const;
+
+    for (const cap of READ_ONLY) expect(platformCan("support", cap), cap).toBe(true);
+    for (const cap of OPERATIONS) {
+      expect(platformCan("support", cap), `support ${cap}`).toBe(false);
+      expect(platformCan("engineer", cap), `engineer ${cap}`).toBe(true);
+      expect(platformCan("owner", cap), `owner ${cap}`).toBe(true);
+    }
+    for (const cap of OWNER_ONLY) {
+      expect(platformCan("support", cap), `support ${cap}`).toBe(false);
+      expect(platformCan("engineer", cap), `engineer ${cap}`).toBe(false);
+      expect(platformCan("owner", cap), `owner ${cap}`).toBe(true);
+    }
+
+    // Nothing may hold a specific backup capability without also holding the
+    // read half — that is the invariant that keeps the console's buttons and
+    // the API's guards from disagreeing.
+    for (const role of PLATFORM_ADMIN_ROLES) {
+      for (const cap of CAPABILITIES_FOR(role).filter((c) => c.startsWith("backup."))) {
+        expect(platformCan(role, "backup.read"), `${role} ${cap}`).toBe(true);
+      }
+    }
+    // An engineer's operational alias never silently grows into the owner's
+    // half: `backup.manage` is read+run+verify, spelled out here so a future
+    // preset edit cannot widen it by accident.
+    for (const cap of OWNER_ONLY) {
+      expect(CAPABILITIES_FOR("engineer")).not.toContain(cap);
+    }
+  });
+
   it("administering the website platform is operations, reading it is not gated at all", () => {
     // Migration 0139. An engineer keeps the fleet's websites serving — suspending a
     // site, re-issuing a key, pushing content back after a bad edit — for the same

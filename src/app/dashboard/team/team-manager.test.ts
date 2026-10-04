@@ -65,11 +65,14 @@ describe("the team screen sends what the API accepts", () => {
   it("resets credentials through the route that owns them", () => {
     expect(TEAM_MANAGER).toContain("/credentials");
     expect(TEAM_MANAGER).toContain("{ pin }");
-    expect(TEAM_MANAGER).toContain("{ password }");
+    expect(TEAM_MANAGER).toContain("send_password_reset");
+    expect(TEAM_MANAGER).toContain("revoke_sessions");
+    expect(TEAM_MANAGER).not.toContain("JSON.stringify({ password })");
     // The route is the one that decides owner-vs-self rules; the screen must
     // not invent its own write path.
     expect(CREDENTIALS_API).toContain("body.pin !== undefined");
     expect(CREDENTIALS_API).toContain("body.password !== undefined");
+    expect(CREDENTIALS_API).toContain("cross_user_password_reset_forbidden");
   });
 
   it("assigns branches from the list the API returned with the members", () => {

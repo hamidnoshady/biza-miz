@@ -315,12 +315,12 @@ async function platformIdentityRevoked(session: SessionPayload): Promise<boolean
   if (!session.platformUserId) return false;
   if (!session.tokenVersion) return true;
   const { rows } = await withoutTenantScope("authorization-membership", () =>
-    query<{ token_version: number }>(
-      `SELECT token_version FROM platform_users WHERE id = $1`,
+    query<{ token_version: number; is_active: boolean }>(
+      `SELECT token_version, is_active FROM platform_users WHERE id = $1`,
       [session.platformUserId],
     ),
   );
-  return rows.length === 0 || rows[0].token_version !== session.tokenVersion;
+  return rows.length === 0 || !rows[0].is_active || rows[0].token_version !== session.tokenVersion;
 }
 
 // ---------------------------------------------------------------------------

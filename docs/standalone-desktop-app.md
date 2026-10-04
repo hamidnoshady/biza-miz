@@ -161,6 +161,18 @@ than treating `navigator.onLine` as proof that the local service is reachable.
 
 ## Build and verification
 
+The `shadcn` component-generation CLI is a **development dependency**. Its
+`shadcn/tailwind.css` import is compiled into the application styles at build
+time; neither the production server nor the installed desktop runs the CLI.
+Keep its code-generation/glob dependency graph marked development-only in the
+lockfile. Both desktop CI workflows retain the unchanged
+`npm audit --omit=dev --audit-level=high` production vulnerability gate.
+
+PR/branch installer builds use unique `X.Y.Z-ci.<run>` preview versions and do
+not publish release tags. They may still build when `desktop-vX.Y.Z` was
+released after their branch was created. Stable tag-collision checks apply to
+main/manual release builds, where rebuilding a shipped version remains blocked.
+
 From the repository root:
 
 ```bash

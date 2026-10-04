@@ -14,7 +14,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateSyncToken } from "./sync-token";
 import {
-  artifactNameFromUrl,
   checkPeerManifest,
   DEFAULT_PLATFORM_BACKUP_CONFIG,
   hashPeerToken,
@@ -787,6 +786,111 @@ describe("resolveRestorePlan", () => {
       {},
     );
     expect(plan.ok && (plan as { passphrase: string }).passphrase).toBe("typed-for-this-attempt-only");
+  });
+});
+
+describe("cloud artifact identity (issue #807)", () => {
+  const prefix = "platform-backups";
+  const cloudArtifact = "pos-backup-20260101-033000-abcdef01.dump.enc";
+
+  it("derives the object key from the configured prefix when only a name is sent", () => {
+    const plan = resolveRestorePlan(
+      { source: "cloud", artifact: cloudArtifact },
+      { cloudPrefix: prefix },
+    );
+    expect(plan).toMatchObject({
+      ok: true,
+      source: "cloud",
+      artifact: cloudArtifact,
+      objectKey: `${prefix}/${cloudArtifact}`,
+    });
+  });
+
+  it("refuses a key outside the configured prefix instead of trusting the browser", () => {
+    const plan = resolveRestorePlan(
+      { source: "cloud", objectKey: `someone-elses-bucket/${cloudArtifact}`, artifact: cloudArtifact },
+      { cloudPrefix: prefix },
+    );
+    expect(plan).toEqual({ ok: false, error: "object_key_outside_prefix" });
+  });
+
+  it("refuses an object key that disagrees with the artifact name", () => {
+    const plan = resolveRestorePlan(
+      {
+        source: "cloud",
+        objectKey: `${prefix}/pos-backup-20260101-033000-99999999.dump.enc`,
+        artifact: cloudArtifact,
+      },
+      { cloudPrefix: prefix },
+    );
+    expect(plan).toEqual({ ok: false, error: "artifact_key_mismatch" });
+  });
+
+  it("refuses traversal, absolute keys, backslashes and nested sub-paths", () => {
+    const attempts = [
+      `${prefix}/../${cloudArtifact}`,
+      `/${prefix}/${cloudArtifact}`,
+      `${prefix}\\${cloudArtifact}`,
+      `${prefix}/nested/${cloudArtifact}`,
+      `${prefix}/`,
+      `${prefix}/notes.txt`,
+    ];
+    for (const objectKey of attempts) {
+      const plan = resolveRestorePlan({ source: "cloud", objectKey, artifact: cloudArtifact }, { cloudPrefix: prefix });
+      expect(plan.ok, objectKey).toBe(false);
+    }
+  });
+
+  it("refuses an artifact the server cannot vouch for when a listing was supplied", () => {
+    const known = new Set([cloudArtifact]);
+    const stranger = "pos-backup-20250101-033000-11111111.dump.enc";
+    expect(
+      resolveRestorePlan({ source: "cloud", artifact: stranger }, { cloudPrefix: prefix, knownCloudArtifacts: known }),
+    ).toEqual({ ok: false, error: "unknown_artifact" });
+    expect(
+      resolveRestorePlan({ source: "cloud", artifact: cloudArtifact }, { cloudPrefix: prefix, knownCloudArtifacts: known }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("requires an artifact name for a cloud restore, and validates the key length", () => {
+    expect(resolveRestorePlan({ source: "cloud" }, { cloudPrefix: prefix })).toEqual({
+      ok: false,
+      error: "missing_artifact",
+    });
+    expect(
+      resolveRestorePlan({ source: "cloud", objectKey: `${prefix}/${"a".repeat(1100)}` }, { cloudPrefix: prefix }),
+    ).toEqual({ ok: false, error: "missing_artifact" });
+  });
+
+  it("treats an empty prefix as the bucket root, not as 'anything goes'", () => {
+    // No prefix configured: the key is the artifact name itself, and a
+    // *prefixed* key is then the one that is out of scope.
+    const plan = resolveRestorePlan({ source: "cloud", artifact: cloudArtifact }, { cloudPrefix: "" });
+    expect(plan).toMatchObject({ ok: true, objectKey: cloudArtifact });
+    // A key with a directory in it is not "the root prefix" — it is a sub-path.
+    expect(
+      resolveRestorePlan({ source: "cloud", objectKey: `sub/${cloudArtifact}`, artifact: cloudArtifact }, { cloudPrefix: "" }),
+    ).toEqual({ ok: false, error: "unsafe_artifact_name" });
+    // …and a cloud restore with no artifact name at all never reaches the key.
+    expect(resolveRestorePlan({ source: "cloud", objectKey: `sub/${cloudArtifact}` }, { cloudPrefix: "" })).toEqual({
+      ok: false,
+      error: "missing_artifact",
+    });
+  });
+
+  it("resolves the same identity for local, peer and url sources as null", () => {
+    for (const source of ["local", "peer", "url"] as const) {
+      const body =
+        source === "peer"
+          ? { source, peerId: "11111111-1111-4111-8111-111111111111", artifact: NEWEST }
+          : source === "url"
+            ? { source, url: `https://nas.example.com/${NEWEST}` }
+            : { source, artifact: NEWEST };
+      const plan = resolveRestorePlan(body, {
+        knownPeerIds: new Set(["11111111-1111-4111-8111-111111111111"]),
+      });
+      expect(plan.ok && (plan as { objectKey: string | null }).objectKey, source).toBeNull();
+    }
   });
 });
 

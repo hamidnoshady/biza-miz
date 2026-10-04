@@ -10,8 +10,12 @@
  * result either as restorable SQL (INSERT statements, in dependency order)
  * or as a business-readable Excel workbook (one sheet per table).
  *
- * Restoring that SQL back into a target database is not built yet — this
- * covers the export half of the Phase 17 scope item; see the phase doc.
+ * This is the **export** half of the Phase 17 scope item, and — since issue
+ * #807 — the artifact a central deployment writes as a tenant's backup. The
+ * other half, replaying this SQL into a live database, is still not built: the
+ * dashboard's restore card drives the shared *physical* restore engine
+ * (`restore-engine.ts`) and refuses a logical snapshot with
+ * `artifact_is_logical_snapshot` rather than pretending to restore it.
  */
 import { getBusinessDek } from "./business-keys";
 import { query, withTenant } from "./db";

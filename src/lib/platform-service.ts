@@ -21,7 +21,12 @@ import type { Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
 import { clampImpersonationMinutes, platformCan } from "./platform-admin";
 import type { PlatformAdminRole } from "./platform-auth-edge";
-import { platformAudit } from "./platform-auth";
+import { platformAudit, revokeAllPlatformAdminSessions } from "./platform-auth";
+import { issuePasswordResetToken } from "./password-reset";
+import { markMfaGracePeriod } from "./mfa-service";
+import { MFA_GRACE_DAYS_PLATFORM } from "./mfa";
+import { randomBytes } from "node:crypto";
+import bcrypt from "bcryptjs";
 import { isTicketCategory, isTicketPriority, isTicketStatus, statusAfterAdminReply } from "./support-tickets";
 import {
   generateImpersonationHandoffToken,
@@ -2685,31 +2690,323 @@ export interface PlatformAdminSummary {
   isActive: boolean;
   lastLoginAt: string | null;
   createdAt: string;
+  mfaMethods: ("totp" | "sms_otp")[];
+  activeSessionsCount: number;
+}
+
+const VALID_PLATFORM_ROLES: readonly PlatformAdminRole[] = ["owner", "support", "engineer"];
+
+export function isValidPlatformAdminRole(value: unknown): value is PlatformAdminRole {
+  return typeof value === "string" && (VALID_PLATFORM_ROLES as readonly string[]).includes(value);
 }
 
 export async function listPlatformAdmins(): Promise<PlatformAdminSummary[]> {
-  const { rows } = await query<{
-    id: string;
-    email: string;
-    full_name: string;
-    role: string;
-    is_active: boolean;
-    last_login_at: string | null;
-    created_at: string;
-  }>(
-    `SELECT id, email::text AS email, full_name, role::text AS role,
-            is_active, last_login_at, created_at
-       FROM platform_admins ORDER BY created_at`,
-  );
-  return rows.map((r) => ({
-    id: r.id,
-    email: r.email,
-    fullName: r.full_name,
-    role: r.role,
-    isActive: r.is_active,
-    lastLoginAt: r.last_login_at,
-    createdAt: r.created_at,
-  }));
+  return withoutTenantScope("platform", async () => {
+    const { rows } = await query<{
+      id: string;
+      email: string;
+      full_name: string;
+      role: string;
+      is_active: boolean;
+      last_login_at: string | null;
+      created_at: string;
+      mfa_methods: ("totp" | "sms_otp")[] | null;
+      active_sessions_count: string;
+    }>(
+      `SELECT pa.id, pa.email::text AS email, pa.full_name, pa.role::text AS role,
+              pa.is_active, pa.last_login_at, pa.created_at,
+              COALESCE(
+                (SELECT array_agg(me.method ORDER BY me.is_primary DESC, me.method)
+                   FROM mfa_enrolments me
+                  WHERE me.subject_realm = 'platform_admin'
+                    AND me.subject_id = pa.id
+                    AND me.confirmed_at IS NOT NULL),
+                '{}'
+              ) AS mfa_methods,
+              (SELECT count(*)
+                 FROM auth_admin_sessions s
+                WHERE s.admin_id = pa.id
+                  AND s.revoked_at IS NULL
+                  AND s.expires_at > now()
+                  AND s.token_version = pa.token_version) AS active_sessions_count
+         FROM platform_admins pa
+        ORDER BY pa.created_at`,
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      email: r.email,
+      fullName: r.full_name,
+      role: r.role,
+      isActive: r.is_active,
+      lastLoginAt: r.last_login_at,
+      createdAt: r.created_at,
+      mfaMethods: r.mfa_methods ?? [],
+      activeSessionsCount: Number(r.active_sessions_count ?? 0),
+    }));
+  });
+}
+
+export async function createPlatformAdmin(params: {
+  email: string;
+  fullName: string;
+  role: PlatformAdminRole;
+  actorAdminId: string;
+}): Promise<
+  | {
+      ok: true;
+      admin: PlatformAdminSummary;
+      resetToken: string;
+      resetExpiresAt: string;
+    }
+  | {
+      ok: false;
+      error: "missing_fields" | "invalid_email" | "invalid_role" | "email_taken";
+    }
+> {
+  const email = params.email.trim().toLowerCase();
+  const fullName = params.fullName.trim();
+  if (!email || !fullName) return { ok: false, error: "missing_fields" };
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false, error: "invalid_email" };
+  if (!isValidPlatformAdminRole(params.role)) return { ok: false, error: "invalid_role" };
+
+  return withoutTenantScope("platform", async () => {
+    const existing = await query<{ id: string }>(
+      `SELECT id FROM platform_admins WHERE email = $1`,
+      [email],
+    );
+    if (existing.rows.length > 0) {
+      return { ok: false, error: "email_taken" };
+    }
+
+    // Bootstrap with an unguessable throwaway hash; the invited admin chooses
+    // their own permanent password via the one-time activation/reset link.
+    const bootstrapSecret = randomBytes(32).toString("hex");
+    const passwordHash = await bcrypt.hash(bootstrapSecret, 12);
+
+    const { rows } = await query<{
+      id: string;
+      email: string;
+      full_name: string;
+      role: string;
+      is_active: boolean;
+      last_login_at: string | null;
+      created_at: string;
+    }>(
+      `INSERT INTO platform_admins (email, password_hash, full_name, role, is_active)
+       VALUES ($1, $2, $3, $4, true)
+       RETURNING id, email::text AS email, full_name, role::text AS role,
+                 is_active, last_login_at, created_at`,
+      [email, passwordHash, fullName, params.role],
+    );
+    const created = rows[0];
+
+    await markMfaGracePeriod("platform_admin", created.id, MFA_GRACE_DAYS_PLATFORM);
+
+    const reset = await issuePasswordResetToken({
+      subjectRealm: "platform_admin",
+      subjectId: created.id,
+      email: created.email,
+      createdById: params.actorAdminId,
+    });
+
+    await platformAudit({
+      adminId: params.actorAdminId,
+      action: "platform_admin.created",
+      entity: "platform_admin",
+      entityId: created.id,
+      payload: {
+        email: created.email,
+        fullName: created.full_name,
+        role: created.role,
+        resetExpiresAt: reset.expiresAt.toISOString(),
+      },
+    });
+
+    return {
+      ok: true,
+      admin: {
+        id: created.id,
+        email: created.email,
+        fullName: created.full_name,
+        role: created.role,
+        isActive: created.is_active,
+        lastLoginAt: created.last_login_at,
+        createdAt: created.created_at,
+        mfaMethods: [],
+        activeSessionsCount: 0,
+      },
+      resetToken: reset.token,
+      resetExpiresAt: reset.expiresAt.toISOString(),
+    };
+  });
+}
+
+export async function updatePlatformAdmin(params: {
+  targetAdminId: string;
+  fullName?: string;
+  role?: PlatformAdminRole;
+  isActive?: boolean;
+  actorAdminId: string;
+}): Promise<
+  | { ok: true; admin: PlatformAdminSummary }
+  | {
+      ok: false;
+      error:
+        | "not_found"
+        | "invalid_role"
+        | "missing_fields"
+        | "last_platform_owner";
+    }
+> {
+  if (params.role !== undefined && !isValidPlatformAdminRole(params.role)) {
+    return { ok: false, error: "invalid_role" };
+  }
+  if (params.fullName !== undefined && !params.fullName.trim()) {
+    return { ok: false, error: "missing_fields" };
+  }
+
+  return withoutTenantScope("platform", async () => {
+    const { rows: allAdmins } = await query<{
+      id: string;
+      email: string;
+      full_name: string;
+      role: PlatformAdminRole;
+      is_active: boolean;
+    }>(
+      `SELECT id, email::text AS email, full_name, role::text AS role, is_active
+         FROM platform_admins`,
+    );
+    const target = allAdmins.find((a) => a.id === params.targetAdminId);
+    if (!target) return { ok: false, error: "not_found" };
+
+    const nextRole = params.role ?? target.role;
+    const nextActive = params.isActive ?? target.is_active;
+    const nextName = params.fullName !== undefined ? params.fullName.trim() : target.full_name;
+
+    // Prevent demoting or deactivating the last active platform owner.
+    if (target.role === "owner" && target.is_active && (nextRole !== "owner" || !nextActive)) {
+      const otherActiveOwners = allAdmins.filter(
+        (a) => a.id !== target.id && a.role === "owner" && a.is_active,
+      );
+      if (otherActiveOwners.length === 0) {
+        return { ok: false, error: "last_platform_owner" };
+      }
+    }
+
+    const shouldBumpToken = nextRole !== target.role || !nextActive;
+
+    await query(
+      `UPDATE platform_admins
+          SET full_name = $2,
+              role = $3,
+              is_active = $4,
+              token_version = token_version + CASE WHEN $5::boolean THEN 1 ELSE 0 END,
+              updated_at = now()
+        WHERE id = $1`,
+      [target.id, nextName, nextRole, nextActive, shouldBumpToken],
+    );
+
+    if (!nextActive || nextRole !== target.role) {
+      await query(
+        `UPDATE auth_admin_sessions
+            SET revoked_at = now()
+          WHERE admin_id = $1 AND revoked_at IS NULL`,
+        [target.id],
+      );
+      await query(
+        `UPDATE impersonation_grants
+            SET revoked_at = now()
+          WHERE platform_admin_id = $1 AND ended_at IS NULL AND revoked_at IS NULL`,
+        [target.id],
+      );
+    }
+
+    await platformAudit({
+      adminId: params.actorAdminId,
+      action: "platform_admin.updated",
+      entity: "platform_admin",
+      entityId: target.id,
+      payload: {
+        before: {
+          fullName: target.full_name,
+          role: target.role,
+          isActive: target.is_active,
+        },
+        after: {
+          fullName: nextName,
+          role: nextRole,
+          isActive: nextActive,
+        },
+      },
+    });
+
+    const updated = (await listPlatformAdmins()).find((a) => a.id === target.id)!;
+    return { ok: true, admin: updated };
+  });
+}
+
+export async function revokePlatformAdminAccessSessions(params: {
+  targetAdminId: string;
+  actorAdminId: string;
+}): Promise<{ ok: true; revokedSessions: number } | { ok: false; error: "not_found" }> {
+  return withoutTenantScope("platform", async () => {
+    const { rows } = await query<{ id: string }>(
+      `SELECT id FROM platform_admins WHERE id = $1`,
+      [params.targetAdminId],
+    );
+    if (!rows[0]) return { ok: false, error: "not_found" };
+
+    const result = await revokeAllPlatformAdminSessions(params.targetAdminId);
+
+    await platformAudit({
+      adminId: params.actorAdminId,
+      action: "platform_admin.sessions_revoked",
+      entity: "platform_admin",
+      entityId: params.targetAdminId,
+      payload: { revokedSessions: result.revokedSessions },
+    });
+
+    return { ok: true, revokedSessions: result.revokedSessions };
+  });
+}
+
+export async function initiatePlatformAdminPasswordReset(params: {
+  targetAdminId: string;
+  actorAdminId: string;
+}): Promise<
+  | { ok: true; token: string; expiresAt: string; email: string }
+  | { ok: false; error: "not_found" }
+> {
+  return withoutTenantScope("platform", async () => {
+    const { rows } = await query<{ id: string; email: string }>(
+      `SELECT id, email::text AS email FROM platform_admins WHERE id = $1`,
+      [params.targetAdminId],
+    );
+    const admin = rows[0];
+    if (!admin) return { ok: false, error: "not_found" };
+
+    const reset = await issuePasswordResetToken({
+      subjectRealm: "platform_admin",
+      subjectId: admin.id,
+      email: admin.email,
+      createdById: params.actorAdminId,
+    });
+
+    await platformAudit({
+      adminId: params.actorAdminId,
+      action: "platform_admin.password_reset_initiated",
+      entity: "platform_admin",
+      entityId: admin.id,
+      payload: { email: admin.email, expiresAt: reset.expiresAt.toISOString() },
+    });
+
+    return {
+      ok: true,
+      token: reset.token,
+      expiresAt: reset.expiresAt.toISOString(),
+      email: admin.email,
+    };
+  });
 }
 
 /** Suppress unused-import lint: PoolClient is referenced only in a type slot. */

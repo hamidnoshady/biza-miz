@@ -9,13 +9,16 @@ import { runPlatformBackupNow } from "@/lib/platform-backup-service";
  * takes, so a manual run is recorded (and mirrored, and pruned) exactly like a
  * scheduled one rather than being a second, weaker kind of backup.
  *
+ * Needs `backup.run` (issue #807) — an engineer may take a backup, because
+ * backing up destroys nothing. Restoring is the owner-only half.
+ *
  * Deliberately synchronous: the caller is an operator watching a button, and a
  * half-finished background job the console cannot observe would be worse than a
  * slow request. A dump that outlives the request still lands its run row, so a
  * reload shows the truth either way.
  */
 export const POST = withPlatformScope(async (request: NextRequest) => {
-  const { session, error } = await requirePlatformCapability("backup.manage");
+  const { session, error } = await requirePlatformCapability("backup.run");
   if (error) return error;
 
   const result = await runPlatformBackupNow(session.padmin);
