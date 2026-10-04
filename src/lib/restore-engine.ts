@@ -30,14 +30,16 @@
  * lets the integration test drive a whole restore round-trip against a stub.
  */
 import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { constants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "pg";
 import { decryptBackup, isEncryptedBackup } from "./backup";
+import { decryptFileToFile, fileHasBackupMagic, sha256File } from "./backup-streams";
 import { pgRestoreBin, runPgDump, runPgRestore } from "./pg-tools";
 import { createAppRole } from "./create-app-role";
 import { secureRemoveDirectory } from "./secure-temp";
+import { appendRestoreJournal, tryAppendRestoreJournal, type RestoreJournalEntry, type RestorePhase } from "./restore-journal";
 
 /** Re-exported so existing importers (`backup-service.ts`, the console routes) keep one name for them. */
 export { PG_RESTORE_TIMEOUT_MS, runPgRestore } from "./pg-tools";
@@ -185,20 +187,161 @@ export async function validateRestoredDb(databaseUrl: string, source: string): P
  */
 export async function regrantAppRole(databaseUrl: string): Promise<void> {
   const runtimeUrl = process.env.DATABASE_URL;
-  if (!runtimeUrl) return;
+  if (!runtimeUrl) {
+    // Without a runtime URL there is no role to grant to and no way to prove
+    // the restored database is usable by the application. Issue #807: this is
+    // a hard failure, not a log line — a "successful" restore the app cannot
+    // read is indistinguishable from data loss.
+    throw new Error("restore_runtime_url_missing: DATABASE_URL is not set, so the app role cannot be re-granted or validated");
+  }
   let parsed: URL;
   try {
     parsed = new URL(runtimeUrl);
   } catch {
-    return;
+    throw new Error("restore_runtime_url_invalid: DATABASE_URL is not a usable connection string");
   }
   const roleName = parsed.username;
   const password = parsed.password;
-  if (!roleName || !password) return;
+  if (!roleName || !password) {
+    throw new Error("restore_runtime_url_incomplete: DATABASE_URL must carry a role name and password");
+  }
   try {
     await createAppRole({ databaseUrl, roleName, password, quiet: true });
   } catch (err) {
-    console.error(`restore: re-granting app role ${roleName} on the restored database failed:`, errText(err));
+    // Fail hard. The previous behaviour swallowed this and then validated the
+    // restored database through the *privileged* connection, so a database the
+    // runtime role could not read was reported healthy; the apply path's
+    // rollback now runs instead.
+    throw new Error(`restore_regrant_failed:${errText(err)}`);
+  }
+}
+
+/**
+ * Minimum application-level proof that the *runtime* role can use the restored
+ * database. Issue #807: validation used to run only over the privileged
+ * connection, which says nothing about `pos_app`. This opens a connection with
+ * the process's own DATABASE_URL — the credentials the app boots with — and
+ * checks it can read the schema and the core tables and write to them.
+ *
+ * Read-only by design: the check must be safe to run on a database that is
+ * about to be reported as restored, and an actual write probe would mutate
+ * production data.
+ */
+export async function validateRuntimeAccess(env: Partial<NodeJS.ProcessEnv> = process.env): Promise<void> {
+  const runtimeUrl = env.DATABASE_URL?.trim();
+  if (!runtimeUrl) throw new Error("runtime_role_validation_failed:not_configured");
+  const client = new Client({ connectionString: runtimeUrl });
+  try {
+    await client.connect();
+  } catch (err) {
+    throw new Error(`runtime_role_validation_failed:connect:${errText(err)}`);
+  }
+  try {
+    const migrations = await client.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM schema_migrations",
+    );
+    if (Number(migrations.rows[0]?.n ?? 0) === 0) {
+      throw new Error("runtime_role_validation_failed:no_migrations_visible");
+    }
+    for (const table of RESTORE_CORE_TABLES) {
+      // A plain read proves SELECT (and therefore the schema) is reachable for
+      // this role; RLS may legitimately return zero rows with no tenant scope.
+      await client.query(`SELECT 1 FROM ${table} LIMIT 1`);
+    }
+    const writeCheck = await client.query<{ ok: boolean }>(
+      `SELECT bool_and(has_table_privilege(current_user, t, 'INSERT')) AS ok
+         FROM unnest($1::text[]) AS t`,
+      [RESTORE_CORE_TABLES],
+    );
+    if (!writeCheck.rows[0]?.ok) {
+      throw new Error("runtime_role_validation_failed:missing_insert_privilege");
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("runtime_role_validation_failed:")) throw err;
+    throw new Error(`runtime_role_validation_failed:${errText(err)}`);
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Durable restore journal (issue #807)
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything the engine needs to journal one restore end to end. Optional so
+ * unit/integration callers that are not a real restore (the engine's own tests)
+ * can run without writing to a journal.
+ */
+export interface RestoreJournalContext {
+  id: string;
+  scope: string;
+  source: string;
+  artifact: string;
+  mode: "verify" | "apply";
+  actorId?: string | null;
+  actorLabel?: string | null;
+  /** journal directory override — the platform service passes its configured one */
+  dir?: string;
+}
+
+async function journal(
+  context: RestoreJournalContext | undefined,
+  phase: RestorePhase,
+  detail?: Record<string, unknown>,
+): Promise<boolean> {
+  if (!context) return true;
+  return tryAppendRestoreJournal(
+    {
+      id: context.id,
+      phase,
+      scope: context.scope,
+      source: context.source,
+      artifact: context.artifact,
+      mode: context.mode,
+      actorId: context.actorId ?? null,
+      actorLabel: context.actorLabel ?? null,
+      detail,
+    },
+    context.dir,
+  );
+}
+
+/**
+ * The pre-apply journal write, which must be durable: a destructive act that
+ * cannot be recorded does not happen. Throws so the apply is refused before the
+ * first rename.
+ */
+async function journalApplyStarted(
+  context: RestoreJournalContext | undefined,
+  detail?: Record<string, unknown>,
+): Promise<void> {
+  if (!context) return;
+  await appendRestoreJournal(
+    {
+      id: context.id,
+      phase: "apply_started",
+      scope: context.scope,
+      source: context.source,
+      artifact: context.artifact,
+      mode: "apply",
+      actorId: context.actorId ?? null,
+      actorLabel: context.actorLabel ?? null,
+      detail,
+    },
+    context.dir,
+  );
+}
+
+/** The last phase a failed apply reached, so the journal tells the truth about it. */
+export class RestoreApplyError extends Error {
+  readonly phase: "apply_failed_before_swap" | "apply_rolled_back";
+  readonly rollbackFailed: boolean;
+  constructor(phase: "apply_failed_before_swap" | "apply_rolled_back", message: string, rollbackFailed = false) {
+    super(message);
+    this.name = "RestoreApplyError";
+    this.phase = phase;
+    this.rollbackFailed = rollbackFailed;
   }
 }
 
@@ -340,6 +483,8 @@ export async function applyDumpToTarget(opts: {
   source: string;
   verifiedDb?: string;
   emergencyDir?: string;
+  /** where to look for the runtime-role credentials; defaults to process.env */
+  runtimeEnv?: Partial<NodeJS.ProcessEnv>;
   /** Integration-only deterministic crash points; never sourced from a request. */
   failureInjection?: "after_original_rename" | "after_target_swap" | "after_regrant";
 }): Promise<RestoreSummary> {
@@ -374,8 +519,12 @@ export async function applyDumpToTarget(opts: {
       await admin.end().catch(() => {});
     }
 
+    // Re-grant and then prove the *runtime* role can actually use the restored
+    // database before anything is reported successful (issue #807). Both are
+    // inside this try block on purpose: either failing rolls the swap back.
     await regrantAppRole(databaseUrl);
     if (opts.failureInjection === "after_regrant") throw new Error("injected_failure_after_regrant");
+    await validateRuntimeAccess(opts.runtimeEnv ?? process.env);
     const summary = await validateRestoredDb(databaseUrl, source);
 
     // The new target is now fully usable. Only now may the preserved original
@@ -384,17 +533,30 @@ export async function applyDumpToTarget(opts: {
     originalRenamed = false;
     return { ...summary, emergencyBackup };
   } catch (error) {
-    if (originalRenamed) {
-      try {
-        await rollbackDatabaseSwap(databaseUrl, targetDb, recoveryDb);
-        originalRenamed = false;
-      } catch (rollbackError) {
-        throw new Error(
-          `restore_failed_and_rollback_requires_intervention:${errText(error)};rollback:${errText(rollbackError)};recovery_database:${recoveryDb};emergency_backup:${emergencyBackup}`,
-        );
-      }
+    // The swap had not happened yet (the failure is in emergency-backup
+    // creation, in the pre-swap admin work, or before the first rename): the
+    // production database is untouched, and the journal must say so rather than
+    // claiming a rollback that never ran.
+    if (!originalRenamed) {
+      throw new RestoreApplyError(
+        "apply_failed_before_swap",
+        `restore_apply_failed_before_swap:${errText(error)}`,
+      );
     }
-    throw new Error(`restore_apply_rolled_back:${errText(error)};emergency_backup:${emergencyBackup}`);
+    try {
+      await rollbackDatabaseSwap(databaseUrl, targetDb, recoveryDb);
+      originalRenamed = false;
+    } catch (rollbackError) {
+      throw new RestoreApplyError(
+        "apply_rolled_back",
+        `restore_failed_and_rollback_requires_intervention:${errText(error)};rollback:${errText(rollbackError)};recovery_database:${recoveryDb};emergency_backup:${emergencyBackup}`,
+        true,
+      );
+    }
+    throw new RestoreApplyError(
+      "apply_rolled_back",
+      `restore_apply_rolled_back:${errText(error)};emergency_backup:${emergencyBackup}`,
+    );
   } finally {
     if (ownsPreparedDb && !preparedRenamed) await dropDatabase(databaseUrl, preparedDb);
   }
@@ -417,30 +579,70 @@ export async function restoreDumpFile(opts: {
   pgRestore?: string;
   pgDump?: string;
   emergencyDir?: string;
+  /** the durable journal to record every phase into (issue #807) */
+  journal?: RestoreJournalContext;
+  /** where to look for the runtime-role credentials; defaults to process.env */
+  runtimeEnv?: Partial<NodeJS.ProcessEnv>;
   failureInjection?: "after_original_rename" | "after_target_swap" | "after_regrant";
 }): Promise<{ verified: RestoreSummary; applied: RestoreSummary | null }> {
   const databaseUrl = opts.databaseUrl;
   const targetDb = new URL(databaseUrl).pathname.replace(/^\//, "") || "pos";
   const scratchDb = opts.scratchDb ?? `${targetDb}_restore_verify`;
   const pgRestore = opts.pgRestore ?? pgRestoreBin();
+  const journalContext = opts.journal;
+
+  await journal(journalContext, "verify_started");
+  let verified: RestoreSummary;
   try {
-    const verified = await verifyIntoScratch(databaseUrl, scratchDb, pgRestore, opts.dumpPath, opts.source);
+    verified = await verifyIntoScratch(databaseUrl, scratchDb, pgRestore, opts.dumpPath, opts.source);
+  } catch (error) {
+    // A scratch database that failed to build must not be left behind either:
+    // a leak per failed verify is what fills a CI cluster with `*_restore_verify`
+    // databases (issue #807's "leaves nothing behind" contract).
+    await dropDatabase(databaseUrl, scratchDb);
+    await journal(journalContext, "verify_failed", { error: errText(error).slice(0, 500) });
+    throw error;
+  }
+  await journal(journalContext, "verify_succeeded", {
+    migrations: verified.migrations,
+    latestMigration: verified.latestMigration,
+  });
+
+  try {
     if (!opts.apply) return { verified, applied: null };
-    const applied = await applyDumpToTarget({
-      databaseUrl,
-      targetDb,
-      pgRestore,
-      pgDump: opts.pgDump,
-      dumpPath: opts.dumpPath,
-      source: opts.source,
-      verifiedDb: scratchDb,
-      emergencyDir: opts.emergencyDir,
-      failureInjection: opts.failureInjection,
-    });
-    return { verified, applied };
+
+    // A destructive apply requires a durable record *before* it starts. If the
+    // journal cannot be written, the apply does not happen — and because the
+    // scratch verify above already succeeded, nothing on disk has changed.
+    await journalApplyStarted(journalContext, { migrations: verified.migrations });
+
+    try {
+      const applied = await applyDumpToTarget({
+        databaseUrl,
+        targetDb,
+        pgRestore,
+        pgDump: opts.pgDump,
+        dumpPath: opts.dumpPath,
+        source: opts.source,
+        verifiedDb: scratchDb,
+        emergencyDir: opts.emergencyDir,
+        runtimeEnv: opts.runtimeEnv,
+        failureInjection: opts.failureInjection,
+      });
+      await journal(journalContext, "apply_succeeded", {
+        migrations: applied.migrations,
+        emergencyBackup: applied.emergencyBackup,
+      });
+      return { verified, applied };
+    } catch (error) {
+      const phase = error instanceof RestoreApplyError ? error.phase : "apply_failed_before_swap";
+      await journal(journalContext, phase, { error: errText(error).slice(0, 500) });
+      throw error;
+    }
   } finally {
     // After a successful apply the scratch database has been renamed to the
-    // target, so this is a no-op. On every other path it removes partial data.
+    // target, so this is a no-op. On every other path — verify-only included —
+    // it removes the scratch database the dry run built.
     await dropDatabase(databaseUrl, scratchDb);
   }
 }
@@ -496,84 +698,57 @@ export async function stageDumpFile(
   }
 }
 
+/**
+ * The streaming twin of `stageDumpFile` (issue #807): take an artifact that is
+ * already a file on disk (a peer download, a cloud download, a local backup
+ * file, an uploaded chunk set) and produce a plaintext dump path for
+ * `pg_restore`, decrypting file → file and never holding the artifact in
+ * memory.
+ *
+ * A plaintext source is hard-linked into the private work directory when the
+ * filesystem allows it (no second copy of a multi-GB dump) and stream-copied
+ * when it does not. The work directory is removed by the caller either way, so
+ * a hard link can never be mistaken for "the artifact was deleted" — the
+ * original path is untouched.
+ */
+export async function stageDumpFileFromPath(
+  sourcePath: string,
+  passphrase: string,
+  sourceName: string,
+): Promise<{ workDir: string; dumpPath: string; sourceName: string; sha256: string }> {
+  const encrypted = await fileHasBackupMagic(sourcePath);
+  const digest = await sha256File(sourcePath);
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "pos-restore-"));
+  const dumpPath = path.join(workDir, "restore.dump");
+  try {
+    if (encrypted) {
+      if (!passphrase) throw new RestoreRefusal("passphrase_required");
+      try {
+        await decryptFileToFile(sourcePath, dumpPath, passphrase);
+      } catch (err) {
+        throw new RestoreRefusal(`decrypt_failed:${errText(err)}`);
+      }
+    } else {
+      try {
+        await fs.link(sourcePath, dumpPath);
+      } catch {
+        await fs.copyFile(sourcePath, dumpPath, constants.COPYFILE_FICLONE);
+      }
+      await fs.chmod(dumpPath, 0o600).catch(() => {});
+    }
+    return { workDir, dumpPath, sourceName, sha256: digest };
+  } catch (error) {
+    await secureRemoveDirectory(workDir);
+    throw error;
+  }
+}
+
 /** Scrub the staged plaintext dump before removing its private directory. */
 export async function cleanupStagedDump(workDir: string): Promise<void> {
   await secureRemoveDirectory(workDir);
 }
 
-/**
- * Row counts + migration state for a database, for the *manifest* a backup is
- * taken with (what a peer server shows an operator before they restore it).
- * Fails soft: a manifest is informative, not a gate, so a table this build
- * doesn't have yet just isn't in it.
- */
-export async function buildBackupManifest(databaseUrl: string): Promise<{
-  migrations: number;
-  latestMigration: string;
-  coreTables: { name: string; rows: number }[];
-}> {
-  const client = new Client({ connectionString: databaseUrl });
-  await client.connect();
-  try {
-    let migrations = 0;
-    let latestMigration = "";
-    try {
-      const { rows } = await client.query<{ filename: string }>(
-        "SELECT filename FROM schema_migrations ORDER BY filename",
-      );
-      migrations = rows.length;
-      latestMigration = rows.at(-1)?.filename ?? "";
-    } catch {
-      /* a database with no migration table has nothing to report */
-    }
-    const coreTables: { name: string; rows: number }[] = [];
-    for (const name of RESTORE_CORE_TABLES) {
-      try {
-        const { rows } = await client.query<{ n: string }>(`SELECT count(*)::text AS n FROM ${name}`);
-        coreTables.push({ name, rows: Number(rows[0].n) });
-      } catch {
-        /* table absent in this build — omit it */
-      }
-    }
-    return { migrations, latestMigration, coreTables };
-  } finally {
-    await client.end();
-  }
-}
-
 /** The target database name a whole-system dump would replace. */
 export function targetDatabaseName(databaseUrl: string): string {
   return new URL(databaseUrl).pathname.replace(/^\//, "") || "pos";
-}
-
-/**
- * Whether this install's own database is currently reachable as the privileged
- * connection — checked before an apply so a half-configured `BACKUP_DATABASE_URL`
- * fails as "you cannot restore" rather than as a dropped database that cannot
- * be repopulated.
- */
-export async function assertRestoreConnectionUsable(databaseUrl: string): Promise<void> {
-  const client = new Client({ connectionString: databaseUrl });
-  try {
-    await client.connect();
-    await client.query("SELECT 1");
-  } catch (err) {
-    throw new Error(`restore_connection_unreachable: ${errText(err)}`);
-  } finally {
-    await client.end().catch(() => {});
-  }
-  // The dump/restore connection must be able to CREATE DATABASE: a restore drops
-  // and recreates the target, and discovering that mid-apply is the worst
-  // possible moment to learn the role lacks the privilege.
-  const admin = await adminClient(databaseUrl);
-  try {
-    const { rows } = await admin.query<{ can: boolean }>(
-      `SELECT pg_has_role(current_user, 'CREATEDB', 'USAGE') OR has_database_privilege(current_user, current_database(), 'CREATE') AS can`,
-    );
-    if (!rows[0]?.can) {
-      throw new Error("restore_connection_not_privileged: the connection cannot create databases");
-    }
-  } finally {
-    await admin.end().catch(() => {});
-  }
 }
