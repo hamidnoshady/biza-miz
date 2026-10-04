@@ -23,7 +23,7 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await siteLogProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "view", true);
+      await requireProjectCapability(owner, projectId, "view");
       return NextResponse.json({ log: await loadSiteLog(owner.businessId, id) });
     } catch (err) {
       return handleAecError(err);
@@ -38,7 +38,7 @@ export const PATCH = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await siteLogProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       return NextResponse.json({ log: await updateSiteLog(owner, id, await readBody(request)) });
     } catch (err) {
       return handleAecError(err);
@@ -53,7 +53,7 @@ export const DELETE = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await siteLogProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       await deleteSiteLog(owner, id);
       return NextResponse.json({ ok: true });
     } catch (err) {

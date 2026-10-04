@@ -11,6 +11,12 @@
 import { describe, expect, it } from "vitest";
 import { AEC_AI_TOOL_LABELS, AEC_AI_TOOL_NAMES, isAecAiToolName } from "./aec";
 import { runAecReadTool } from "./aec-ai-tools";
+import type { WorkspaceOwner } from "./workspace";
+
+/** The signed-in member the executor scopes its reads to (#761). */
+function actor(businessId: string): WorkspaceOwner {
+  return { businessId, actorUserId: "00000000-0000-0000-0000-0000000000ff", actorName: "آزمون" };
+}
 import { AI_TOOL_PERMISSION_MAP } from "./ai-capabilities";
 import { READ_TOOL_NAMES } from "./ai-tools";
 import { toolDefinitions } from "./ai";
@@ -69,7 +75,7 @@ describe("the AEC read tools", () => {
         const result = await runAecReadTool(
           name,
           {},
-          "00000000-0000-0000-0000-000000000000",
+          actor("00000000-0000-0000-0000-000000000000"),
           industry,
         );
         expect(result.ok, `${name} for ${industry}`).toBe(false);
@@ -82,7 +88,7 @@ describe("the AEC read tools", () => {
     const result = await runAecReadTool(
       "get_workspace_project_status",
       {},
-      "00000000-0000-0000-0000-000000000000",
+      actor("00000000-0000-0000-0000-000000000000"),
       "architecture_construction",
     );
     expect(result.ok).toBe(false);

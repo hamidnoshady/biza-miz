@@ -544,7 +544,7 @@ describe("the submittal log (issue #799 §11)", () => {
 
     // The queue lists it under §11's label, not under a bare UUID.
     const queue = await dbLib.withTenant(businessId, () =>
-      workspace.listApprovals(businessId, { subjectType: "submittal_revision", limit: 5 }),
+      workspace.listApprovals(owner, { subjectType: "submittal_revision", limit: 5 }),
     );
     expect(queue[0]?.subjectTitle).toContain("SUB-001");
 

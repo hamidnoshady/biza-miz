@@ -25,7 +25,7 @@ export const POST = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await drawingProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       const revision = await addRevision(owner, id, await readBody(request));
       return NextResponse.json({ revision }, { status: 201 });
     } catch (err) {
@@ -41,7 +41,7 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await drawingProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "view", true);
+      await requireProjectCapability(owner, projectId, "view");
       return NextResponse.json({ drawing: await loadDrawing(owner.businessId, id) });
     } catch (err) {
       return handleAecError(err);

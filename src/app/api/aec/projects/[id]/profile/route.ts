@@ -17,9 +17,10 @@ import { PERMISSIONS, aecOwner, handleAecError, readBody } from "../../../guard"
  *
  * Authorization is the two-layer rule from the workspace module: the platform
  * permission (`workspace.view` / `workspace.manage`) narrows to the area, and
- * `requireProjectCapability` narrows it to THIS project. A manager holding
- * `workspace.manage` is privileged past the membership check, the same escape
- * hatch every other project write has.
+ * `requireProjectCapability` narrows it to THIS project. Membership — not the
+ * permission alone — is what grants the project, exactly as everywhere else in
+ * the module (#761); `workspace.admin` remains the single business-wide
+ * override, and it rides the project role resolver rather than a flag here.
  */
 export const GET = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -27,7 +28,7 @@ export const GET = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
     try {
-      await requireProjectCapability(owner, id, "view", true);
+      await requireProjectCapability(owner, id, "view");
       return NextResponse.json({ profile: await loadProjectAecProfile(owner.businessId, id) });
     } catch (err) {
       return handleAecError(err);
@@ -44,7 +45,7 @@ export const PUT = withTenantScope(
     const partial = body.patch === true;
     delete body.patch;
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       return NextResponse.json({
         profile: await saveProjectAecProfile(owner, id, body, { partial }),
       });

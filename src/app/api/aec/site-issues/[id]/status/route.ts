@@ -41,7 +41,6 @@ export const POST = withTenantScope(
         owner,
         projectId,
         siteIssueActionNeedsApproval(action) ? "view" : "manage",
-        true,
       );
       const issue = await applySiteIssueAction(owner, id, action, {
         resolutionNote: body.resolutionNote,

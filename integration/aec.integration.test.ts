@@ -36,6 +36,7 @@ let aec: typeof import("../src/lib/aec-service");
 let widgets: typeof import("../src/lib/ai-widgets");
 let tools: typeof import("../src/lib/aec-ai-tools");
 let workspace: typeof import("../src/lib/workspace");
+let workspaceAccessFlags: typeof import("../src/lib/workspace-shared").workspaceAccessFlags;
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -69,6 +70,7 @@ beforeAll(async () => {
   widgets = await import("../src/lib/ai-widgets");
   tools = await import("../src/lib/aec-ai-tools");
   workspace = await import("../src/lib/workspace");
+  workspaceAccessFlags = (await import("../src/lib/workspace-shared")).workspaceAccessFlags;
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -169,7 +171,7 @@ describe("the AEC assistant read tools (issue #799 §23)", () => {
       const result = await tools.runAecReadTool(
         "get_aec_project_financial_health",
         { projectName: "برج نیلوفر" },
-        businessId,
+        owner,
         "architecture_construction",
       );
       expect(result.ok).toBe(true);
@@ -201,7 +203,7 @@ describe("the AEC assistant read tools (issue #799 §23)", () => {
       const all = await tools.runAecReadTool(
         "list_delayed_project_activities",
         {},
-        businessId,
+        owner,
         "architecture_construction",
       );
       expect(all.ok).toBe(true);
@@ -212,7 +214,7 @@ describe("the AEC assistant read tools (issue #799 §23)", () => {
       const ambiguous = await tools.runAecReadTool(
         "list_delayed_project_activities",
         { projectName: "ساختمان اداری" },
-        businessId,
+        owner,
         "architecture_construction",
       );
       expect(ambiguous.ok).toBe(true);
@@ -236,26 +238,30 @@ describe("the AEC workspace overview roll-up (issue #799 §3)", () => {
     await dbLib.withTenant(aecTenant.businessId, async () => {
       await createTask(aecTenant.businessId, projectId, "تسویه با پیمانکار نما", "2026-01-20", aecTenant.owner.actorUserId);
 
-      const dashboard = await workspace.getWorkspaceDashboard(
-        aecTenant.businessId,
-        aecTenant.owner.actorUserId,
-      );
+      const dashboard = await workspace.getWorkspaceDashboard(aecTenant.owner);
       const rollup = dashboard.aec;
       expect(rollup).toBeTruthy();
       expect(rollup?.projectsAtRisk).toBe(1);
       expect(rollup?.lateMilestoneCount).toBeGreaterThanOrEqual(1);
       expect(rollup?.budgetRial).toBe(5_000_000_000);
       // A managed task with no ledger posting is late but not a cost, so the
-      // roll-up reports the budget it can see and no invented spend.
-      expect(rollup?.spentRial).toBe(0);
+      // roll-up reports the budget it can see and no invented spend. Spend is
+      // a number only for a caller who may read the ledger (#761's flags);
+      // for anyone else it is null, the same rule `projectReport` applies, so
+      // «نامعلوم» is never printed as «۰».
+      expect(rollup?.spentRial).toBeNull();
       expect(rollup?.overBudgetProjectCount).toBe(0);
+      const withLedger = (
+        await workspace.getWorkspaceDashboard({
+          ...aecTenant.owner,
+          access: workspaceAccessFlags(new Set(["ledger.view"])),
+        })
+      ).aec;
+      expect(withLedger?.spentRial).toBe(0);
 
       // The same call for a café answers the overview it always had.
       await dbLib.withTenant(cafe.businessId, async () => {
-        const cafeDashboard = await workspace.getWorkspaceDashboard(
-          cafe.businessId,
-          cafe.owner.actorUserId,
-        );
+        const cafeDashboard = await workspace.getWorkspaceDashboard(cafe.owner);
         expect(cafeDashboard.aec).toBeUndefined();
       });
     });

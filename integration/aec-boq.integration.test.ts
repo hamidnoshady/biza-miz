@@ -397,7 +397,7 @@ describe("the revision life cycle (issue #799 §7)", () => {
     expect(submitted.status).toBe("submitted");
 
     const approvals = await dbLib.withTenant(businessId, () =>
-      workspace.listApprovals(businessId, { subjectType: "estimate_version" }),
+      workspace.listApprovals(owner, { subjectType: "estimate_version" }),
     );
     expect(approvals).toHaveLength(1);
     const approval = approvals[0];
@@ -428,7 +428,7 @@ describe("the revision life cycle (issue #799 §7)", () => {
     expect(tree.events[0].actionLabel).toBe("تأیید شد");
 
     const closed = await dbLib.withTenant(businessId, () =>
-      workspace.listApprovals(businessId, { subjectType: "estimate_version" }),
+      workspace.listApprovals(owner, { subjectType: "estimate_version" }),
     );
     expect(closed[0].status).toBe("approved");
     expect(closed[0].decidedBy).toBe(owner.actorUserId);
@@ -676,7 +676,7 @@ describe("the revision life cycle (issue #799 §7)", () => {
     const { approvalId } = await dbLib.withTenant(businessId, async () => {
       await boq.submitEstimateVersion(owner, versionId, {});
       await boq.startEstimateReview(owner, versionId);
-      const [pending] = await workspace.listApprovals(businessId, {
+      const [pending] = await workspace.listApprovals(owner, {
         subjectType: "estimate_version",
         status: "pending",
       });
@@ -716,7 +716,7 @@ describe("the revision life cycle (issue #799 §7)", () => {
       expect(edited.versionTree?.version.status).toBe("draft");
       expect(edited.versionTree?.totalRial).toBeGreaterThan(0);
       await boq.submitEstimateVersion(owner, versionId, {});
-      const queue = await workspace.listApprovals(businessId, { subjectType: "estimate_version" });
+      const queue = await workspace.listApprovals(owner, { subjectType: "estimate_version" });
       expect(queue.map((row) => row.status)).toEqual(["pending", "rejected"]);
     });
   });

@@ -85,6 +85,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   "workspace.manage": "مدیریت پروژه‌ها و وظایف",
   "workspace.contracts_manage": "مدیریت قراردادهای اجرایی",
   "workspace.approve": "تأیید درخواست‌ها",
+  "workspace.admin": "مدیریت همهٔ پروژه‌ها",
   "ledger.view": "مشاهدهٔ دفتر",
   "ledger.post": "ثبت سند",
   "ledger.approve": "تأیید سند",

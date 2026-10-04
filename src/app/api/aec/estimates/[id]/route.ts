@@ -27,7 +27,7 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await estimateProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "view", true);
+      await requireProjectCapability(owner, projectId, "view");
       const versionId = new URL(request.url).searchParams.get("version");
       return NextResponse.json({ tree: await loadEstimateTree(owner.businessId, id, { versionId }) });
     } catch (err) {
@@ -43,7 +43,7 @@ export const PATCH = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await estimateProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       return NextResponse.json({ estimate: await updateEstimate(owner, id, await readBody(request)) });
     } catch (err) {
       return handleAecError(err);
@@ -58,7 +58,7 @@ export const DELETE = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await estimateProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       await deleteEstimate(owner, id);
       return NextResponse.json({ ok: true });
     } catch (err) {

@@ -37,12 +37,14 @@ export const EMPTY_LOOKUPS: WorkspaceLookups = {
   members: [], parties: [], projects: [], media: [],
 };
 
-export function useWorkspaceLookups(): WorkspaceLookups {
+/** `enabled: false` skips the read — for a caller that was handed lookups. */
+export function useWorkspaceLookups(enabled = true): WorkspaceLookups {
   const [lookups, setLookups] = useState<WorkspaceLookups>(EMPTY_LOOKUPS);
   useEffect(() => {
+    if (!enabled) return;
     api<WorkspaceLookups>("/api/workspace/lookups").then(({ ok, data }) => {
       if (ok) setLookups(data);
     });
-  }, []);
+  }, [enabled]);
   return lookups;
 }

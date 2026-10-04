@@ -22,7 +22,7 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     try {
       const { projectId, estimateId } = await versionContextProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "view", true);
+      await requireProjectCapability(owner, projectId, "view");
       const tree = await loadEstimateTree(owner.businessId, estimateId, { versionId: id });
       return NextResponse.json({ tree });
     } catch (err) {
@@ -38,7 +38,7 @@ export const PUT = withTenantScope(
     const { id } = await context.params;
     try {
       const { projectId } = await versionContextProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       const tree = await saveDraftVersion(owner, id, await readBody(request));
       return NextResponse.json({ tree });
     } catch (err) {

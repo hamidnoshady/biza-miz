@@ -24,7 +24,7 @@ export const POST = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await submittalProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       const submittal = await addSubmittalRevision(owner, id, await readBody(request));
       return NextResponse.json({ submittal }, { status: 201 });
     } catch (err) {

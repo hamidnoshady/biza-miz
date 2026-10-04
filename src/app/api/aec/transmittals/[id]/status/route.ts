@@ -47,7 +47,7 @@ export const POST = withTenantScope(
 
     try {
       const projectId = await transmittalProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       if (action === "issue") {
         return NextResponse.json({ transmittal: await issueTransmittal(owner, id) });
       }

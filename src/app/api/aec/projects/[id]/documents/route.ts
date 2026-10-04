@@ -16,8 +16,10 @@ import { PERMISSIONS, aecOwner, handleAecError, readBody } from "../../../guard"
  * Both go through the workspace module's per-project authorization on top of the
  * platform permission, exactly like the estimates route next door:
  * `workspace.view` narrows to «میز کار من», `requireProjectCapability` narrows
- * to this project, and `workspace.manage` is the escape hatch for the business's
- * own owner/manager. Issuing is a different question — see the status route.
+ * to this project, and `workspace.admin` is the one business-wide override — the
+ * business's own owner/manager reaches a project the same way every other
+ * module user does, by being on it. Issuing is a different question — see the
+ * status route.
  */
 export const GET = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -25,7 +27,7 @@ export const GET = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
     try {
-      await requireProjectCapability(owner, id, "view", true);
+      await requireProjectCapability(owner, id, "view");
       const [drawings, transmittals] = await Promise.all([
         listProjectDrawings(owner.businessId, id),
         listProjectTransmittals(owner.businessId, id),
@@ -43,7 +45,7 @@ export const POST = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       const drawing = await createDrawing(owner, id, await readBody(request));
       return NextResponse.json({ drawing }, { status: 201 });
     } catch (err) {

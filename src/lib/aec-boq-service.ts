@@ -41,6 +41,7 @@ import {
 import { AecError, AEC_INDUSTRY, assertAecIndustry, loadBusinessAecProfile } from "./aec-service";
 import { getBusinessIndustry } from "./industry-guard";
 import { query, withTenantTransaction } from "./db";
+import type { WorkspaceApprovalDecision } from "./workspace-shared";
 import { recordActivity, type WorkspaceOwner } from "./workspace";
 
 /* ===========================================================================
@@ -1290,7 +1291,7 @@ export async function returnEstimateVersion(
 export async function decideEstimateApproval(
   owner: WorkspaceOwner,
   approvalId: string,
-  decision: "approved" | "rejected" | "cancelled",
+  decision: WorkspaceApprovalDecision,
   note = "",
 ): Promise<{ versionId: string | null; applied: boolean }> {
   // Deliberately NOT gated on the `boq` capability, unlike every other entry
@@ -1311,8 +1312,20 @@ export async function decideEstimateApproval(
     await approveEstimateVersion(owner, approval.subject_id, note);
     return { versionId: approval.subject_id, applied: true };
   }
-  if (decision === "rejected") {
+  if (decision === "rejected" || decision === "changes_requested") {
+    // Both mean "not in this state": the revision goes back to draft with the
+    // note attached. The approval row then records which of the two the queue
+    // actually said, because the module's own action cannot tell them apart and
+    // the queue's wording is what the author reads.
     await returnEstimateVersion(owner, approval.subject_id, note);
+    if (decision === "changes_requested") {
+      await query(
+        `UPDATE workspace_approvals
+            SET status = 'changes_requested', updated_at = now()
+          WHERE business_id = $1 AND id = $2 AND status = 'rejected'`,
+        [owner.businessId, approvalId],
+      );
+    }
     return { versionId: approval.subject_id, applied: true };
   }
   // Cancelled: the revision keeps its submitted status and the request simply

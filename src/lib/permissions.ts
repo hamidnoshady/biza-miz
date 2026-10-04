@@ -167,6 +167,15 @@ export const PERMISSIONS = {
    * be inherited by everyone who can tick a task off.
    */
   workspaceDocumentsIssue: "workspace.documents_issue",
+  /**
+   * Reach every project regardless of membership, acting as its manager.
+   * The explicit business-wide override (#761): `workspace.view` and
+   * `workspace.manage` only ever reach the projects a member is on, and this
+   * is the one key that lifts that — so a business owner is never locked out
+   * of a project nobody added them to, without every viewer being able to
+   * enumerate every project.
+   */
+  workspaceAdmin: "workspace.admin",
 
   // Accounting
   ledgerView: "ledger.view",
@@ -407,6 +416,7 @@ const {
   partiesView, partiesManage,
   crmView, crmManage, crmMerge, crmConsentManage, crmExport, crmConfigure, crmDelete,
   workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove, workspaceDocumentsIssue,
+  workspaceAdmin,
   ledgerView, ledgerPost, ledgerApprove, ledgerClosePeriod, accountsEdit, ledgerPropose,
   financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
   financeInstallmentsManage, financeReconciliationManage, financeAssetsManage,
@@ -454,6 +464,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // remove access somebody already had, so the preset grants all four. A
     // business that wants a narrower manager revokes the individual keys.
     workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove, workspaceDocumentsIssue,
+    workspaceAdmin,
     ledgerView, reportsView, reportsExport,
     // Operational finance the manager already did under a role gate. Not
     // accounting authority, and not payroll.
@@ -607,6 +618,7 @@ const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permission[]>
   [PERMISSIONS.ledgerApprove]: [PERMISSIONS.ledgerView],
   [PERMISSIONS.accountsEdit]: [PERMISSIONS.ledgerView],
   [PERMISSIONS.reportsExport]: [PERMISSIONS.reportsView],
+  [PERMISSIONS.workspaceAdmin]: [PERMISSIONS.workspaceView, PERMISSIONS.workspaceManage],
   [PERMISSIONS.reservationsManage]: [PERMISSIONS.reservationsView],
   [PERMISSIONS.teamManage]: [PERMISSIONS.teamView],
   [PERMISSIONS.teamPermissionsManage]: [PERMISSIONS.teamView],

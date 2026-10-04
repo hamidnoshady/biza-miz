@@ -24,7 +24,7 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     const params = request.nextUrl.searchParams;
     try {
-      await requireProjectCapability(owner, id, "view", true);
+      await requireProjectCapability(owner, id, "view");
       const submittals = await listProjectSubmittals(owner.businessId, id, {
         status: params.get("status") ?? undefined,
         type: params.get("type") ?? undefined,
@@ -44,7 +44,7 @@ export const POST = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       const submittal = await createSubmittal(owner, id, await readBody(request));
       return NextResponse.json({ submittal }, { status: 201 });
     } catch (err) {

@@ -20,7 +20,7 @@ export const POST = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await estimateProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       const version = await createEstimateVersion(owner, id, await readBody(request));
       return NextResponse.json({ version }, { status: 201 });
     } catch (err) {

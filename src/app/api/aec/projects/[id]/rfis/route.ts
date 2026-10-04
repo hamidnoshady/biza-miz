@@ -17,7 +17,8 @@ import { PERMISSIONS, aecOwner, handleAecError, readBody } from "../../../guard"
  * Both go through the workspace module's per-project authorization on top of the
  * platform permission, like every other AEC route: `workspace.view` narrows to
  * «میز کار من», `requireProjectCapability` narrows to this project, and the
- * owner/manager's `workspace.manage` is the escape hatch.
+ * owner/manager reaches a project it is not on through `workspace.admin`, the
+ * module's single business-wide override.
  */
 export const GET = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -26,7 +27,7 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     const params = request.nextUrl.searchParams;
     try {
-      await requireProjectCapability(owner, id, "view", true);
+      await requireProjectCapability(owner, id, "view");
       const rfis = await listProjectRfis(owner.businessId, id, {
         status: params.get("status") ?? undefined,
         discipline: params.get("discipline") ?? undefined,
@@ -46,7 +47,7 @@ export const POST = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       const rfi = await createRfi(owner, id, await readBody(request));
       return NextResponse.json({ rfi }, { status: 201 });
     } catch (err) {

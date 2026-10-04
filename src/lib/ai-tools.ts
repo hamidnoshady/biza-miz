@@ -45,6 +45,7 @@ import { listMessageCampaigns, listMessageTemplates } from "./message-campaigns-
 import { CAMPAIGN_CHANNELS, type CampaignChannel } from "./campaign-channels";
 import { isWorkspaceToolName, runWorkspaceReadTool, WORKSPACE_TOOL_NAMES } from "./ai-workspace-tools";
 import { AEC_AI_TOOL_NAMES, isAecAiToolName, runAecReadTool } from "./aec-ai-tools";
+import { workspaceAccessFlags } from "./workspace-shared";
 import { WEBSITE_ERROR_LABELS } from "./website/adapter";
 import {
   describeSegment,
@@ -1278,8 +1279,19 @@ export async function runReadTool(
   // executor needs the business's industry (an AEC question from a café must
   // be refused with a sentence, not answered with an empty list).
   if (isAecAiToolName(name)) {
+    // The AEC reads go through the workspace services, which are scoped to the
+    // signed-in member (#761), so they need the same owner the workspace tools
+    // build below — and the same refusal when there is none.
+    if (!actorUserId) {
+      return { ok: false, data: { error: "این ابزار به کاربر وارد‌شده نیاز دارد." } };
+    }
     const industry = await getBusinessIndustry(businessId);
-    const result = await runAecReadTool(name, args, businessId, industry);
+    const result = await runAecReadTool(
+      name,
+      args,
+      { businessId, actorUserId, access: workspaceAccessFlags(permissions ?? new Set()) },
+      industry,
+    );
     return result.ok
       ? { ok: true, data: result.data }
       : { ok: false, data: { error: result.error ?? "خطا در خواندن داده‌های پروژه" } };
@@ -1291,7 +1303,13 @@ export async function runReadTool(
     if (!actorUserId) {
       return { ok: false, data: { error: "این ابزار به کاربر وارد‌شده نیاز دارد." } };
     }
-    const result = await runWorkspaceReadTool(name, args, businessId, actorUserId);
+    const result = await runWorkspaceReadTool(name, args, {
+      businessId,
+      actorUserId,
+      // Same access flags the screens use. No permission set (an internal
+      // caller) means membership only — fail closed, never "everything".
+      access: workspaceAccessFlags(permissions ?? new Set()),
+    });
     return result.ok
       ? { ok: true, data: result.data }
       : { ok: false, data: { error: result.error ?? "خطا در خواندن میز کار" } };

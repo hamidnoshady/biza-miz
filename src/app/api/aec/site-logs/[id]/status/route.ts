@@ -28,7 +28,7 @@ export const POST = withTenantScope(
     }
     try {
       const projectId = await siteLogProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       return NextResponse.json({ log: await applySiteLogAction(owner, id, action) });
     } catch (err) {
       return handleAecError(err);

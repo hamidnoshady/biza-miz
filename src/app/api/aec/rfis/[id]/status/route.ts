@@ -32,7 +32,7 @@ export const POST = withTenantScope(
     }
     try {
       const projectId = await rfiProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       const rfi = await applyRfiAction(owner, id, action, body);
       return NextResponse.json({ rfi });
     } catch (err) {

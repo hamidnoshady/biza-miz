@@ -28,8 +28,10 @@ describe("handleAecError", () => {
   });
 
   it("maps the workspace codes the project gate throws", async () => {
+    // #761 folded the separate `not_a_project_member` code into
+    // `project_not_found`: whether a project exists is itself something a
+    // non-member must not learn, so the gate refuses both with the same 404.
     expect(await statusOf(new WorkspaceError("project_not_found"))).toBe(404);
-    expect(await statusOf(new WorkspaceError("not_a_project_member"))).toBe(403);
     expect(await statusOf(new WorkspaceError("insufficient_project_role"))).toBe(403);
   });
 

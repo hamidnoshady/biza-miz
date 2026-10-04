@@ -16,6 +16,7 @@ import {
 import {
   AEC_COCKPIT_SECTIONS,
   AEC_SHIPPED_WAVE,
+  TAB_FOR_SECTION,
   WORKSPACE_PROJECT_TABS,
   aecCockpitSections,
   aecProjectTabs,
@@ -91,16 +92,23 @@ describe("the project tab bar", () => {
     expect(aecProjectTabs(null)).toEqual(WORKSPACE_PROJECT_TABS.map((tab) => ({ ...tab })));
   });
 
-  it("relabels the tabs and adds the parties tab for AEC", () => {
+  it("adds the parties tab and the AEC registers without renaming the generic ones", () => {
     const tabs = aecProjectTabs({
       capabilities: resolveAecCapabilities({ profile: "architecture_office", overrides: {} }),
     });
     const byKey = new Map(tabs.map((tab) => [tab.key, tab.label]));
-    expect(byKey.get("record")).toBe("شناسنامهٔ پروژه");
     expect(byKey.get("participants")).toBe("طرف‌های پروژه");
-    expect(byKey.get("tasks")).toBe("وظایف");
-    // Ordered, not appended: the parties tab sits before the team (Wave 6's two
-    // registers come between them, so it is *before*, not adjacent).
+    // The generic tabs keep #761's names: an AEC section that renders *inside*
+    // one never renames it, and «کار» is still «کار» whether it holds tasks or
+    // (as the workspace merges them) a calendar too.
+    expect(byKey.get("overview")).toBe("نمای کلی");
+    expect(byKey.get("work")).toBe("کار");
+    expect(byKey.get("finance")).toBe("مالی");
+    expect(byKey.get("activity")).toBe("رویدادها");
+    // «کار» holds the tasks *and* #761's calendar, so the AEC tasks section
+    // does not rename it; only the documents tab takes the register's name.
+    expect(byKey.get("files")).toBe("نقشه‌ها و اسناد");
+    // Ordered, not appended: the parties tab sits before the team.
     const keys = tabs.map((tab) => tab.key);
     expect(keys.indexOf("participants")).toBeLessThan(keys.indexOf("team"));
     // Nothing AEC-only leaks in for a business that lacks the capability.
@@ -117,9 +125,10 @@ describe("the project tab bar", () => {
     });
     const keys = contractor.map((tab) => tab.key);
     expect(keys).toContain("boq");
-    // §21's order: what is being built, what it costs, then who is bound.
-    expect(keys.indexOf("boq")).toBe(keys.indexOf("documents") + 1);
-    expect(keys.indexOf("boq")).toBe(keys.indexOf("contracts") - 1);
+    // §21's order: what is being built, what it costs, then who is bound — the
+    // BOQ sits between «اسناد» and «مالی» (which holds the contracts register).
+    expect(keys.indexOf("boq")).toBe(keys.indexOf("files") + 1);
+    expect(keys.indexOf("boq")).toBe(keys.indexOf("finance") - 1);
 
     // A design office does not estimate by preset, so it never grows the tab —
     // but switching the capability on is all it takes.
@@ -133,16 +142,17 @@ describe("the project tab bar", () => {
     expect(designWithEstimating.map((tab) => tab.key)).toContain("boq");
   });
 
-  it("adds the RFI and submittal registers between the contracts and the team", () => {
+  it("adds the RFI and submittal registers after the money and before the team", () => {
     const contractor = aecProjectTabs({
       capabilities: resolveAecCapabilities({ profile: "contractor", overrides: {} }),
     });
     const keys = contractor.map((tab) => tab.key);
     expect(keys).toContain("rfis");
     expect(keys).toContain("submittals");
-    // §10 and §11 sit after what is bound (the contracts) and before who is on
-    // it (the team) — the order a project manager reads their morning in.
-    expect(keys.indexOf("rfis")).toBeGreaterThan(keys.indexOf("contracts"));
+    // §10 and §11 sit after what is bound (the contracts, inside «مالی») and
+    // before who is on it (the team) — the order a project manager reads their
+    // morning in.
+    expect(keys.indexOf("rfis")).toBeGreaterThan(keys.indexOf("finance"));
     expect(keys.indexOf("submittals")).toBe(keys.indexOf("rfis") + 1);
     // §21's next two — the site and the quality register — follow the document
     // registers, so the group still ends right before the team.
@@ -166,19 +176,20 @@ describe("the project tab bar", () => {
     });
     // Wave 5: with document control on, §21's "Drawings & Documents" is what
     // this tab is, and it says so.
-    expect(contractor.find((tab) => tab.key === "documents")?.label).toBe("نقشه‌ها و اسناد");
+    expect(contractor.find((tab) => tab.key === "files")?.label).toBe("نقشه‌ها و اسناد");
 
     // Off, and the tab keeps the plain name the rest of the product uses rather
     // than promising a register that is not there.
     const plain = aecProjectTabs({ capabilities: ["projects"] });
-    expect(plain.find((tab) => tab.key === "documents")?.label).toBe("اسناد");
+    expect(plain.find((tab) => tab.key === "files")?.label).toBe("اسناد");
   });
 
   it("places every shipped section somewhere a user can reach it", () => {
-    // A guard against the two lists drifting: a shipped section must either be
-    // a generic tab, own an AEC-only tab, or be declared as living inside
-    // another. The explicit lists are the point — adding a shipped section and
-    // forgetting to place it fails here.
+    // A guard against the two lists drifting: a shipped section must either own
+    // an AEC-only tab that `aecProjectTabs` builds, map onto a tab the generic
+    // bar has, or be declared as content *inside* one. The two explicit lists
+    // are the point — adding a shipped section and forgetting to place it fails
+    // here rather than silently rendering nowhere.
     const ownsItsOwnTab = new Set([
       "participants",
       "boq",
@@ -187,12 +198,24 @@ describe("the project tab bar", () => {
       "site",
       "inspections",
     ]);
-    const insideAnotherTab = new Set(["overview", "schedule", "profile"]);
+    // Sections that render inside a tab the generic bar already has: the page's
+    // own summary and §21's identity card and phases in «نمای کلی», the
+    // contracts register in «مالی», the approval queue in «رویدادها» and the
+    // calendar in «کار».
+    const insideAnotherTab = new Set([
+      "overview",
+      "profile",
+      "schedule",
+      "contracts",
+      "approvals",
+      "calendar",
+    ]);
     for (const section of AEC_COCKPIT_SECTIONS.filter((s) => s.shipped)) {
+      const mapped = TAB_FOR_SECTION[section.key];
       const reachable =
         ownsItsOwnTab.has(section.key) ||
         insideAnotherTab.has(section.key) ||
-        WORKSPACE_PROJECT_TABS.some((tab) => tab.key === section.key);
+        (mapped !== null && WORKSPACE_PROJECT_TABS.some((tab) => tab.key === mapped));
       expect(reachable, section.key).toBe(true);
     }
   });
@@ -202,8 +225,8 @@ describe("the project tab bar", () => {
       const tabs = aecProjectTabs({
         capabilities: resolveAecCapabilities({ profile: profile as keyof typeof AEC_OPERATING_PROFILE_DEFS, overrides: {} }),
       });
-      expect(tabs.length, profile).toBeGreaterThanOrEqual(WORKSPACE_PROJECT_TABS.length - 1);
-      expect(tabs.some((tab) => tab.key === "record"), profile).toBe(true);
+      expect(tabs.length, profile).toBeGreaterThanOrEqual(WORKSPACE_PROJECT_TABS.length);
+      expect(tabs.some((tab) => tab.key === "overview"), profile).toBe(true);
     }
   });
 });

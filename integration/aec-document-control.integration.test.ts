@@ -888,7 +888,7 @@ describe("tenancy, capability and the party references", () => {
     });
 
     const activity = await dbLib.withTenant(businessId, () =>
-      workspace.listActivity(businessId, { projectId, limit: 50 }),
+      workspace.listActivity(owner, { projectId, limit: 50 }),
     );
     const subjects = activity.map((entry) => entry.subjectType);
     expect(subjects).toContain("document");

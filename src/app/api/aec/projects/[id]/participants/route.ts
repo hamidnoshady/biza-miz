@@ -25,7 +25,7 @@ export const GET = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
     try {
-      await requireProjectCapability(owner, id, "view", true);
+      await requireProjectCapability(owner, id, "view");
       return NextResponse.json({ participants: await listProjectParticipants(owner.businessId, id) });
     } catch (err) {
       return handleAecError(err);
@@ -40,7 +40,7 @@ export const POST = withTenantScope(
     const { id } = await context.params;
     const body = await readBody(request);
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       return NextResponse.json(
         { participants: await addProjectParticipant(owner, id, body) },
         { status: 201 },

@@ -30,7 +30,7 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await submittalProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "view", true);
+      await requireProjectCapability(owner, projectId, "view");
       return NextResponse.json({ submittal: await loadSubmittal(owner.businessId, id) });
     } catch (err) {
       return handleAecError(err);
@@ -45,7 +45,7 @@ export const PATCH = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await submittalProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       const submittal = await updateSubmittal(owner, id, await readBody(request));
       return NextResponse.json({ submittal });
     } catch (err) {
@@ -61,7 +61,7 @@ export const DELETE = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await submittalProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       await deleteSubmittal(owner, id);
       return NextResponse.json({ ok: true });
     } catch (err) {

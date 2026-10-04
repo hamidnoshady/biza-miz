@@ -14,12 +14,14 @@
  * no React. Pure constants and rules live in `workspace-shared.ts`.
  */
 import type { AecOperatingProfile } from "./aec";
-import { query } from "./db";
+import { query, withTenantTransaction } from "./db";
 import { getBusinessIndustry } from "./industry-guard";
-import { isoDateInTimeZone, postgresDateToIso } from "./jalali";
+import { isoDateInTimeZone, postgresDateToIso, todayIsoDate } from "./jalali";
 import {
   BUILTIN_TEMPLATES,
+  CONTRACT_LIFECYCLE_ACTIONS,
   CONTRACT_STATUSES,
+  contractLifecycleChange,
   CONTRACT_TYPES,
   DOCUMENT_STATUSES,
   EVENT_KINDS,
@@ -28,11 +30,26 @@ import {
   TASK_STATUSES,
   WORKSPACE_LIMITS,
   WORKSPACE_ROLES,
+  APPROVAL_SUBJECTS,
+  addDays,
+  approvalDecisionError,
   builtinTemplate,
+  daysUntil,
+  dependencyBlocksStatus,
+  projectHealth,
+  type ProjectHealth,
+  type ProjectHealthReason,
+  effectiveProjectRole,
+  intervalOrdered,
   normalizeTags,
   phasesFromTemplate,
+  planTemplateApplication,
+  type TemplateApplyMode,
+  type TemplatePlan,
   roleCan,
   wouldCreateDependencyCycle,
+  type WorkspaceAccessFlags,
+  type WorkspaceApprovalDecision,
   type WorkspaceApprovalStatus,
   type WorkspaceApprovalSubject,
   type WorkspaceCapability,
@@ -50,11 +67,22 @@ import {
   templatesForIndustry,
 } from "./workspace-shared";
 
-/** Every workspace write carries the business it belongs to and who did it. */
+/**
+ * The actor behind every workspace read and write: the business, who is
+ * acting, and how far past project membership they reach.
+ *
+ * `access` absent means membership only — the safe default, so a caller that
+ * forgets to resolve flags sees less, never more.
+ */
 export interface WorkspaceOwner {
   businessId: string;
   actorUserId: string;
   actorName?: string;
+  access?: WorkspaceAccessFlags;
+}
+
+function isAdministrator(owner: WorkspaceOwner): boolean {
+  return owner.access?.override === "administer";
 }
 
 /** Thrown with a machine-readable code the API layer maps to a status + message. */
@@ -132,70 +160,164 @@ function numberOrNull(value: unknown, code: string): number | null {
  * ======================================================================== */
 
 /**
- * A member's role on one project, or null when they are not on it.
+ * The actor's effective role on one project: their `workspace_members` row,
+ * lifted by their business-wide override (see `workspaceAccessFlags`), or
+ * null when they have neither. Throws `project_not_found` for a project that
+ * is not this business's.
  *
- * The caller has ALREADY passed the platform permission check
- * (`requirePermission("workspace.view")` and friends) before reaching here.
- * This narrows that business-wide answer to one project, which the platform
- * permissions cannot express because they have no project dimension.
+ * There is no "implicit owner" fallback any more: since migration 0194 a
+ * trigger guarantees every project owner a member row, whichever path created
+ * the project, so the project page and «پروژه‌های من» answer from one fact.
  */
-export async function projectRoleFor(
-  businessId: string,
+export async function resolveProjectRole(
+  owner: WorkspaceOwner,
   projectId: string,
-  userId: string,
 ): Promise<WorkspaceRole | null> {
-  const { rows } = await query<{ role: string | null; implicit_owner: boolean }>(
-    `SELECT m.role,
-            (p.owner_user_id = $2 OR CASE
-               WHEN p.created_by ~ '^[0-9a-fA-F-]{36}$' THEN p.created_by::uuid = $2
-               ELSE false
-             END) AS implicit_owner
+  if (!isUuid(projectId)) throw new WorkspaceError("project_not_found");
+  const { rows } = await query<{ role: string | null }>(
+    `SELECT m.role
        FROM ai_projects p
        LEFT JOIN workspace_members m ON m.project_id = p.id AND m.user_id = $2
       WHERE p.id = $1 AND p.business_id = $3`,
-    [projectId, userId, businessId],
+    [projectId, owner.actorUserId, owner.businessId],
   );
-  const row = rows[0];
-  if (!row) return null;
-  if (row.role && (WORKSPACE_ROLES as readonly string[]).includes(row.role)) {
-    return row.role as WorkspaceRole;
-  }
-  // No membership row, but this member owns or created the project. That is
-  // not a hole in the model — it is the pre-Phase-G write path, which is still
-  // live: `/api/ai/projects` (and the AI tools behind it) insert into
-  // `ai_projects` and know nothing about `workspace_members`. 0167 backfilled
-  // an owner row for every project that existed at migration time; this covers
-  // every project written the old way SINCE. Without it, a user who creates a
-  // project from the assistant cannot reopen it, which is exactly the "existing
-  // functionality keeps working" promise breaking in the other direction.
-  return row.implicit_owner ? "owner" : null;
+  if (!rows[0]) throw new WorkspaceError("project_not_found");
+  const member = rows[0].role && (WORKSPACE_ROLES as readonly string[]).includes(rows[0].role)
+    ? (rows[0].role as WorkspaceRole)
+    : null;
+  return effectiveProjectRole(member, owner.access?.override ?? null);
 }
 
 /**
- * Asserts a capability on one project.
+ * Asserts a capability on one project and returns the effective role.
  *
- * `privileged` is the escape hatch for the business's own owner/manager, who
- * hold `workspace.manage` business-wide: they must be able to open a project
- * nobody added them to, because a business owner locked out of their own
- * project by a membership row is a support ticket, not a security feature.
- * Everyone else needs a membership row.
+ * effective capability = platform permission (the route guard) AND project
+ * role (here). A non-member with no override gets `project_not_found`, not a
+ * 403: whether a project exists is itself something a non-member must not
+ * learn.
  */
 export async function requireProjectCapability(
   owner: WorkspaceOwner,
   projectId: string,
   capability: WorkspaceCapability,
-  privileged = false,
 ): Promise<WorkspaceRole> {
-  const { rows } = await query<{ id: string }>(
-    `SELECT id FROM ai_projects WHERE id = $1 AND business_id = $2`,
-    [projectId, owner.businessId],
-  );
-  if (!rows[0]) throw new WorkspaceError("project_not_found");
+  const role = await resolveProjectRole(owner, projectId);
+  if (!role) throw new WorkspaceError("project_not_found");
+  if (!roleCan(role, capability)) throw new WorkspaceError("insufficient_project_role");
+  return role;
+}
 
-  const role = await projectRoleFor(owner.businessId, projectId, owner.actorUserId);
-  if (role && roleCan(role, capability)) return role;
-  if (privileged) return role ?? "manager";
-  throw new WorkspaceError(role ? "insufficient_project_role" : "not_a_project_member");
+/** A safe OFFSET: a non-negative integer, capped so a bad cursor cannot scan forever. */
+/**
+ * A safe OFFSET: any non-negative integer. Not capped — a cap silently
+ * rewrites deep offsets onto one page, so "load more" would repeat it forever.
+ */
+function pageOffset(value: unknown): number {
+  const n = Number(value ?? 0);
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+/**
+ * SQL predicate: may the actor see a row whose project is `projectCol`?
+ *
+ * A row with a project is visible to that project's members. A row with NO
+ * project is business-level and visible to whoever authored it (`ownCols`),
+ * plus anyone `extra` admits. An override (`administer` or `read`) sees all.
+ * `param` is the placeholder the actor's user id is bound to.
+ */
+function visibilityClause(
+  owner: WorkspaceOwner,
+  projectCol: string,
+  ownCols: string[],
+  param: string,
+  extra?: string,
+): string {
+  // Always TRUE for an override, but still references the actor's
+  // placeholder so Postgres can type it when nothing else does.
+  if (owner.access?.override) return `(${param}::uuid IS NOT NULL)`;
+  const member = `${projectCol} IN (SELECT wm.project_id FROM workspace_members wm WHERE wm.user_id = ${param}::uuid)`;
+  const own = ownCols.map((col) => `${col}::text = ${param}::text`);
+  if (extra) own.push(extra);
+  return own.length
+    ? `(${member} OR (${projectCol} IS NULL AND (${own.join(" OR ")})))`
+    : `(${member})`;
+}
+
+/**
+ * Resolves a polymorphic workspace subject — what a comment, an approval or
+ * an AI action points at — and asserts the actor's capability on it. It
+ * proves the subject exists in this business, derives its project from the
+ * subject itself (never from the caller), and refuses an inaccessible or
+ * orphan subject as `subject_not_found`.
+ *
+ * A business-level subject (a contract or document with no project) is
+ * readable by its author, by an override holder and — for contracts — by a
+ * contract manager; writing it needs authorship, `administer`, or (contracts)
+ * the contract-manager permission.
+ */
+export async function resolveWorkspaceSubject(
+  owner: WorkspaceOwner,
+  subjectType: WorkspaceApprovalSubject,
+  subjectId: string,
+  capability: WorkspaceCapability,
+): Promise<{ projectId: string | null; role: WorkspaceRole | null; createdBy: string | null }> {
+  if (!isUuid(subjectId)) throw new WorkspaceError("subject_not_found");
+  const sql: Record<WorkspaceApprovalSubject, string> = {
+    project: `SELECT id AS project_id, created_by FROM ai_projects WHERE id = $1 AND business_id = $2`,
+    task: `SELECT t.project_id, t.created_by FROM ai_project_tasks t
+             JOIN ai_projects p ON p.id = t.project_id WHERE t.id = $1 AND p.business_id = $2`,
+    document: `SELECT project_id, created_by FROM workspace_documents WHERE id = $1 AND business_id = $2`,
+    contract: `SELECT project_id, created_by FROM workspace_contracts WHERE id = $1 AND business_id = $2`,
+    // Issue #799 — the two AEC subjects reach their project through the register
+    // they belong to, exactly as a task reaches it through its project. Five and
+    // six are subjects of the same engine rather than a second approval store,
+    // so the module has to know where they live and who raised them.
+    estimate_version: `SELECT e.project_id, v.created_by
+             FROM aec_estimate_versions v JOIN aec_estimates e ON e.id = v.estimate_id
+            WHERE v.id = $1 AND v.business_id = $2`,
+    submittal_revision: `SELECT s.project_id, r.created_by
+             FROM aec_submittal_revisions r JOIN aec_submittals s ON s.id = r.submittal_id
+            WHERE r.id = $1 AND r.business_id = $2`,
+  };
+  const { rows } = await query<{ project_id: string | null; created_by: string | null }>(
+    sql[subjectType],
+    [subjectId, owner.businessId],
+  );
+  const row = rows[0];
+  if (!row) throw new WorkspaceError("subject_not_found");
+
+  if (row.project_id) {
+    const role = await resolveProjectRole(owner, row.project_id);
+    if (!role) throw new WorkspaceError("subject_not_found");
+    if (!roleCan(role, capability)) throw new WorkspaceError("insufficient_project_role");
+    return { projectId: row.project_id, role, createdBy: row.created_by };
+  }
+
+  const author = row.created_by === owner.actorUserId;
+  const contractManager = subjectType === "contract" && owner.access?.canManageContracts === true;
+  const override = owner.access?.override ?? null;
+  if (!author && !contractManager && !override) throw new WorkspaceError("subject_not_found");
+  const writable = author || contractManager || override === "administer";
+  if (capability !== "view" && !writable) throw new WorkspaceError("insufficient_project_role");
+  return { projectId: null, role: null, createdBy: row.created_by };
+}
+
+/**
+ * Asserts the actor may put work into (or move work out of) `projectId`:
+ * `capability` on it when set; for a business-level record (null) only the
+ * contract-manager / administrator / author paths decide, handled by the
+ * caller through `resolveWorkspaceSubject`.
+ */
+async function requireProjectIfSet(
+  owner: WorkspaceOwner,
+  projectId: string | null | undefined,
+  capability: WorkspaceCapability,
+): Promise<void> {
+  if (projectId) await requireProjectCapability(owner, projectId, capability);
 }
 
 /* ===========================================================================
@@ -227,6 +349,8 @@ export interface WorkspaceProject {
   memberCount: number;
   contractCount: number;
   documentCount: number;
+  overdueTaskCount: number;
+  openApprovalCount: number;
 }
 
 type ProjectRow = {
@@ -239,6 +363,7 @@ type ProjectRow = {
   created_at: string; updated_at: string;
   task_count?: string; done_task_count?: string; member_count?: string;
   contract_count?: string; document_count?: string;
+  overdue_task_count?: string; open_approval_count?: string;
 };
 
 function toProject(row: ProjectRow): WorkspaceProject {
@@ -266,6 +391,8 @@ function toProject(row: ProjectRow): WorkspaceProject {
     memberCount: Number(row.member_count ?? 0),
     contractCount: Number(row.contract_count ?? 0),
     documentCount: Number(row.document_count ?? 0),
+    overdueTaskCount: Number(row.overdue_task_count ?? 0),
+    openApprovalCount: Number(row.open_approval_count ?? 0),
   };
 }
 
@@ -278,7 +405,13 @@ const PROJECT_SELECT = `
   (SELECT count(*) FROM ai_project_tasks t WHERE t.project_id = p.id AND t.status = 'done') AS done_task_count,
   (SELECT count(*) FROM workspace_members m WHERE m.project_id = p.id) AS member_count,
   (SELECT count(*) FROM workspace_contracts c WHERE c.project_id = p.id) AS contract_count,
-  (SELECT count(*) FROM workspace_documents d WHERE d.project_id = p.id) AS document_count`;
+  (SELECT count(*) FROM workspace_documents d WHERE d.project_id = p.id) AS document_count,
+  -- Health inputs for the portfolio (#761 §7). Tehran's calendar day, the
+  -- same "today" as todayIsoDate(), never the server's UTC CURRENT_DATE.
+  (SELECT count(*) FROM ai_project_tasks t WHERE t.project_id = p.id AND t.status <> 'done'
+      AND t.due_date < (now() AT TIME ZONE 'Asia/Tehran')::date) AS overdue_task_count,
+  (SELECT count(*) FROM workspace_approvals a
+    WHERE a.project_id = p.id AND a.status = 'pending') AS open_approval_count`;
 
 const PROJECT_JOINS = `
   FROM ai_projects p
@@ -295,14 +428,15 @@ export interface ProjectListFilter {
   includeArchived?: boolean;
   tag?: string;
   limit?: number;
+  /** Rows to skip — server pagination (stable: ties break on id). */
+  offset?: number;
 }
 
-export async function listWorkspaceProjects(
-  businessId: string,
-  filter: ProjectListFilter = {},
-): Promise<WorkspaceProject[]> {
+/** Only the projects the actor may see — membership, or an override. */
+function projectWhere(owner: WorkspaceOwner, filter: ProjectListFilter): { clause: string; params: unknown[] } {
   const where: string[] = ["p.business_id = $1"];
-  const params: unknown[] = [businessId];
+  const params: unknown[] = [owner.businessId, owner.actorUserId];
+  where.push(visibilityClause(owner, "p.id", [], "$2"));
   const add = (clause: string, value: unknown) => {
     params.push(value);
     where.push(clause.replace("$?", `$${params.length}`));
@@ -320,15 +454,24 @@ export async function listWorkspaceProjects(
       filter.memberUserId,
     );
   }
+  return { clause: where.join(" AND "), params };
+}
+
+export async function listWorkspaceProjects(
+  owner: WorkspaceOwner,
+  filter: ProjectListFilter = {},
+): Promise<WorkspaceProject[]> {
+  const { clause, params } = projectWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 200);
+  const offset = pageOffset(filter.offset);
 
   const { rows } = await query<ProjectRow>(
     `SELECT ${PROJECT_SELECT} ${PROJECT_JOINS}
-      WHERE ${where.join(" AND ")}
+      WHERE ${clause}
       ORDER BY p.archived_at IS NOT NULL,
                CASE p.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
-               p.end_date NULLS LAST, p.created_at DESC
-      LIMIT ${limit}`,
+               p.end_date NULLS LAST, p.created_at DESC, p.id
+      LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return rows.map(toProject);
@@ -365,11 +508,13 @@ export interface ProjectInput {
 }
 
 /**
- * Creates a project with its workspace fields, seeds its phases from a
- * template and makes the creator its owner-member — the three writes that
- * together make a project usable, done in one transaction-less sequence
- * because each is independently correct and a half-seeded project is still a
- * working project.
+ * Creates a project with its workspace fields, its owner membership and its
+ * template phases, in ONE transaction: a project whose template seeding
+ * failed halfway is a project nobody asked for.
+ *
+ * The owner's member row is written by the 0194 trigger, not here. When the
+ * creator names somebody else as owner, the creator stays on as manager so
+ * they can reopen what they just made.
  */
 export async function createWorkspaceProject(
   owner: WorkspaceOwner,
@@ -381,51 +526,59 @@ export async function createWorkspaceProject(
   const priority = assertEnum(input.priority ?? "normal", PRIORITIES, "invalid_priority");
   const startDate = isoDateOrNull(input.startDate, "invalid_date");
   const endDate = isoDateOrNull(input.endDate, "invalid_date");
-  if (startDate && endDate && endDate < startDate) throw new WorkspaceError("end_before_start");
+  if (!intervalOrdered(startDate, endDate)) throw new WorkspaceError("end_before_start");
   const tags = normalizeTags(input.tags);
   const budgetRial = numberOrNull(input.budgetRial, "invalid_project_budget");
   const forecastRevenueRial = numberOrNull(input.forecastRevenueRial, "invalid_project_budget");
   const templateKey = input.templateKey?.trim() || null;
+  const ownerUserId = input.ownerUserId || owner.actorUserId;
 
   await assertPartyBelongs(owner.businessId, input.partyId ?? null);
-  await assertUserBelongs(owner.businessId, input.ownerUserId ?? null);
+  await assertUserBelongs(owner.businessId, ownerUserId);
 
   const template = templateKey ? await resolveTemplate(owner.businessId, templateKey) : null;
   if (templateKey && !template) throw new WorkspaceError("template_not_found");
 
-  const { rows } = await query<{ id: string; inserted: boolean }>(
-    `INSERT INTO ai_projects
-       (business_id, name, instructions, created_by, description, status, priority,
-        project_type, template_key, start_date, end_date, tags, party_id,
-        owner_user_id, budget_rial, creation_key, source_deal_id, forecast_revenue_rial)
-     VALUES ($1, $2, '', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-     ON CONFLICT (business_id, creation_key) WHERE creation_key IS NOT NULL
-       DO UPDATE SET name = ai_projects.name
-     RETURNING id, (xmax = 0) AS inserted`,
-    [
-      owner.businessId, name, owner.actorUserId, description, status, priority,
-      input.projectType?.trim() || template?.projectType || null, templateKey,
-      startDate, endDate, tags, input.partyId ?? null,
-      input.ownerUserId ?? owner.actorUserId, budgetRial,
-      input.creationKey?.trim() || null, input.sourceDealId ?? null, forecastRevenueRial,
-    ],
-  );
-  const projectId = rows[0].id;
-  if (!rows[0].inserted) {
+  // One transaction (a half-seeded project is a project nobody asked for)
+  // around an idempotent insert: a retry with the same `creation_key` (e.g.
+  // a deal converted twice) returns the project it already made.
+  const outcome = await withTenantTransaction(owner.businessId, async () => {
+    const { rows } = await query<{ id: string; inserted: boolean }>(
+      `INSERT INTO ai_projects
+         (business_id, name, instructions, created_by, description, status, priority,
+          project_type, template_key, start_date, end_date, tags, party_id,
+          owner_user_id, budget_rial, creation_key, source_deal_id, forecast_revenue_rial)
+       VALUES ($1, $2, '', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       ON CONFLICT (business_id, creation_key) WHERE creation_key IS NOT NULL
+         DO UPDATE SET name = ai_projects.name
+       RETURNING id, (xmax = 0) AS inserted`,
+      [
+        owner.businessId, name, owner.actorUserId, description, status, priority,
+        input.projectType?.trim() || template?.projectType || null, templateKey,
+        startDate, endDate, tags, input.partyId ?? null, ownerUserId, budgetRial,
+        input.creationKey?.trim() || null, input.sourceDealId ?? null, forecastRevenueRial,
+      ],
+    );
+    const id = rows[0].id;
+    if (!rows[0].inserted) return { id, inserted: false };
+    // The owner's member row is written by the 0194 trigger. A creator who
+    // named somebody else as owner stays on as manager.
+    if (ownerUserId !== owner.actorUserId) {
+      await query(
+        `INSERT INTO workspace_members (project_id, user_id, role, added_by)
+         VALUES ($1, $2, 'manager', $2) ON CONFLICT (project_id, user_id) DO NOTHING`,
+        [id, owner.actorUserId],
+      );
+    }
+    if (template) await applyTemplate(owner, id, template, startDate);
+    return { id, inserted: true };
+  });
+  const projectId = outcome.id;
+  if (!outcome.inserted) {
     const existing = await getWorkspaceProject(owner.businessId, projectId);
     if (!existing) throw new WorkspaceError("project_not_found");
     return existing;
   }
-
-  // The creator is the project's owner-member. Without this the creator could
-  // not reopen what they just made unless they also held workspace.manage.
-  await query(
-    `INSERT INTO workspace_members (project_id, user_id, role, added_by)
-     VALUES ($1, $2, 'owner', $3) ON CONFLICT (project_id, user_id) DO NOTHING`,
-    [projectId, input.ownerUserId ?? owner.actorUserId, owner.actorUserId],
-  );
-
-  if (template) await applyTemplate(owner, projectId, template, startDate);
 
   await recordActivity(owner, {
     projectId, subjectType: "project", subjectId: projectId,
@@ -471,8 +624,14 @@ export async function updateWorkspaceProject(
     set("priority", assertEnum(input.priority, PRIORITIES, "invalid_priority"));
   }
   if (input.projectType !== undefined) set("project_type", input.projectType?.trim() || null);
-  if (input.startDate !== undefined) set("start_date", isoDateOrNull(input.startDate, "invalid_date"));
-  if (input.endDate !== undefined) set("end_date", isoDateOrNull(input.endDate, "invalid_date"));
+  const startDate = input.startDate !== undefined
+    ? isoDateOrNull(input.startDate, "invalid_date") : existing.startDate;
+  const endDate = input.endDate !== undefined
+    ? isoDateOrNull(input.endDate, "invalid_date") : existing.endDate;
+  // The record that will exist after the PATCH, not just the fields in it.
+  if (!intervalOrdered(startDate, endDate)) throw new WorkspaceError("end_before_start");
+  if (input.startDate !== undefined) set("start_date", startDate);
+  if (input.endDate !== undefined) set("end_date", endDate);
   if (input.tags !== undefined) set("tags", normalizeTags(input.tags));
   if (input.budgetRial !== undefined) {
     set("budget_rial", numberOrNull(input.budgetRial, "invalid_project_budget"));
@@ -482,6 +641,9 @@ export async function updateWorkspaceProject(
     set("party_id", input.partyId);
   }
   if (input.ownerUserId !== undefined) {
+    // A project always has an owner; transfer is a change of owner, never a
+    // removal. Membership follows in the same statement (0194 trigger).
+    if (!input.ownerUserId) throw new WorkspaceError("user_not_found");
     await assertUserBelongs(owner.businessId, input.ownerUserId);
     set("owner_user_id", input.ownerUserId);
   }
@@ -567,15 +729,14 @@ export async function addPhase(
   input: { name: string; displayOrder?: number; startDate?: unknown; endDate?: unknown },
 ): Promise<WorkspacePhase[]> {
   const name = requireText(input.name, 120, "phase_name_required");
+  const startDate = isoDateOrNull(input.startDate, "invalid_date");
+  const endDate = isoDateOrNull(input.endDate, "invalid_date");
+  if (!intervalOrdered(startDate, endDate)) throw new WorkspaceError("end_before_start");
   await query(
     `INSERT INTO workspace_project_phases (project_id, name, display_order, start_date, end_date)
      VALUES ($1, $2, COALESCE($3, (SELECT COALESCE(max(display_order), -1) + 1
                                      FROM workspace_project_phases WHERE project_id = $1)), $4, $5)`,
-    [
-      projectId, name, input.displayOrder ?? null,
-      isoDateOrNull(input.startDate, "invalid_date"),
-      isoDateOrNull(input.endDate, "invalid_date"),
-    ],
+    [projectId, name, input.displayOrder ?? null, startDate, endDate],
   );
   return listPhases(projectId);
 }
@@ -597,8 +758,17 @@ export async function updatePhase(
     set("status", assertEnum(input.status, ["pending", "active", "done", "skipped"] as const, "invalid_phase_status"));
   }
   if (input.displayOrder !== undefined) set("display_order", input.displayOrder);
-  if (input.startDate !== undefined) set("start_date", isoDateOrNull(input.startDate, "invalid_date"));
-  if (input.endDate !== undefined) set("end_date", isoDateOrNull(input.endDate, "invalid_date"));
+  if (input.startDate !== undefined || input.endDate !== undefined) {
+    const current = (await listPhases(projectId)).find((phase) => phase.id === phaseId);
+    if (!current) throw new WorkspaceError("phase_not_found");
+    const startDate = input.startDate !== undefined
+      ? isoDateOrNull(input.startDate, "invalid_date") : current.startDate;
+    const endDate = input.endDate !== undefined
+      ? isoDateOrNull(input.endDate, "invalid_date") : current.endDate;
+    if (!intervalOrdered(startDate, endDate)) throw new WorkspaceError("end_before_start");
+    if (input.startDate !== undefined) set("start_date", startDate);
+    if (input.endDate !== undefined) set("end_date", endDate);
+  }
   if (sets.length) {
     await query(
       `UPDATE workspace_project_phases SET ${sets.join(", ")}, updated_at = now()
@@ -719,29 +889,64 @@ export async function archiveTemplate(businessId: string, key: string): Promise<
   return listTemplates(businessId);
 }
 
-/** Seeds a project's phases and starter tasks from a template. Idempotent-ish:
- *  it appends, so applying a second template adds its phases after the first. */
+/**
+ * Applies a template to a project — the plan is `planTemplateApplication`
+ * (pure, unit-tested), so a dry run returns exactly what a real run would do
+ * and the preview the member approved is the change that lands. `merge`
+ * (default) only adds what is missing; `replace` also removes empty phases
+ * the template does not name. Tasks are never deleted.
+ */
 export async function applyTemplate(
   owner: WorkspaceOwner,
   projectId: string,
   template: WorkspaceTemplate,
   startDate: string | null,
-): Promise<void> {
-  const phases = phasesFromTemplate(template, startDate);
-  for (const phase of phases) {
-    await query(
-      `INSERT INTO workspace_project_phases (project_id, name, display_order, start_date, end_date)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [projectId, phase.name, phase.displayOrder, phase.startDate, phase.endDate],
-    );
+  options: { mode?: TemplateApplyMode; dryRun?: boolean } = {},
+): Promise<TemplatePlan & { phasesAdded: number; tasksAdded: number }> {
+  const [{ rows: phaseRows }, { rows: taskRows }] = await Promise.all([
+    query<{ id: string; name: string; display_order: number; task_count: string }>(
+      `SELECT ph.id, ph.name, ph.display_order,
+              (SELECT count(*) FROM ai_project_tasks t WHERE t.phase_id = ph.id) AS task_count
+         FROM workspace_project_phases ph WHERE ph.project_id = $1`,
+      [projectId],
+    ),
+    query<{ title: string }>(`SELECT title FROM ai_project_tasks WHERE project_id = $1`, [projectId]),
+  ]);
+  const plan = planTemplateApplication({
+    existingPhases: phaseRows.map((row) => ({
+      id: row.id, name: row.name, displayOrder: row.display_order, taskCount: Number(row.task_count),
+    })),
+    existingTaskTitles: taskRows.map((row) => row.title),
+    templatePhases: phasesFromTemplate(template, startDate),
+    defaultTasks: template.defaultTasks,
+    mode: options.mode ?? "merge",
+  });
+  if (!options.dryRun) {
+    for (const phase of plan.removePhases) {
+      // Re-checked in SQL: a task assigned to the phase since the plan was made keeps it.
+      await query(
+        `DELETE FROM workspace_project_phases ph
+          WHERE ph.id = $1 AND ph.project_id = $2
+            AND NOT EXISTS (SELECT 1 FROM ai_project_tasks t WHERE t.phase_id = ph.id)`,
+        [phase.id, projectId],
+      );
+    }
+    for (const phase of plan.addPhases) {
+      await query(
+        `INSERT INTO workspace_project_phases (project_id, name, display_order, start_date, end_date)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [projectId, phase.name, phase.displayOrder, phase.startDate, phase.endDate],
+      );
+    }
+    for (const title of plan.addTasks) {
+      await query(
+        `INSERT INTO ai_project_tasks (project_id, title, source, created_by)
+         VALUES ($1, $2, 'user', $3)`,
+        [projectId, title, owner.actorUserId],
+      );
+    }
   }
-  for (const title of template.defaultTasks) {
-    await query(
-      `INSERT INTO ai_project_tasks (project_id, title, source, created_by)
-       VALUES ($1, $2, 'user', $3)`,
-      [projectId, title.slice(0, WORKSPACE_LIMITS.taskTitleMax), owner.actorUserId],
-    );
-  }
+  return { ...plan, phasesAdded: plan.addPhases.length, tasksAdded: plan.addTasks.length };
 }
 
 /* ===========================================================================
@@ -755,20 +960,34 @@ export interface WorkspaceMember {
   fullName: string;
   role: WorkspaceRole;
   createdAt: string;
+  /** Workload on THIS project (#761 §13): their open tasks, how many are late, and done in the last 7 days. */
+  openTasks: number;
+  overdueTasks: number;
+  doneThisWeek: number;
 }
 
 export async function listMembers(projectId: string): Promise<WorkspaceMember[]> {
   const { rows } = await query<{
     id: string; project_id: string; user_id: string; full_name: string | null;
     role: string; created_at: string;
+    open_tasks: string; overdue_tasks: string; done_this_week: string;
   }>(
-    `SELECT m.id, m.project_id, m.user_id, u.full_name, m.role, m.created_at
+    `SELECT m.id, m.project_id, m.user_id, u.full_name, m.role, m.created_at,
+            (SELECT count(*) FROM ai_project_tasks t
+              WHERE t.project_id = m.project_id AND t.assignee_user_id = m.user_id
+                AND t.status <> 'done') AS open_tasks,
+            (SELECT count(*) FROM ai_project_tasks t
+              WHERE t.project_id = m.project_id AND t.assignee_user_id = m.user_id
+                AND t.status <> 'done' AND t.due_date < $2::date) AS overdue_tasks,
+            (SELECT count(*) FROM ai_project_tasks t
+              WHERE t.project_id = m.project_id AND t.assignee_user_id = m.user_id
+                AND t.status = 'done' AND t.completed_at >= now() - interval '7 days') AS done_this_week
        FROM workspace_members m
        LEFT JOIN users u ON u.id = m.user_id
       WHERE m.project_id = $1
       ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1 WHEN 'editor' THEN 2
                            WHEN 'contributor' THEN 3 ELSE 4 END, u.full_name`,
-    [projectId],
+    [projectId, todayIsoDate()],
   );
   return rows.map((row) => ({
     id: row.id,
@@ -777,6 +996,9 @@ export async function listMembers(projectId: string): Promise<WorkspaceMember[]>
     fullName: row.full_name ?? "—",
     role: row.role as WorkspaceRole,
     createdAt: row.created_at,
+    openTasks: Number(row.open_tasks ?? 0),
+    overdueTasks: Number(row.overdue_tasks ?? 0),
+    doneThisWeek: Number(row.done_this_week ?? 0),
   }));
 }
 
@@ -788,6 +1010,7 @@ export async function setMember(
 ): Promise<WorkspaceMember[]> {
   const checked = assertEnum(role, WORKSPACE_ROLES, "invalid_workspace_role");
   await assertUserBelongs(owner.businessId, userId);
+  if (checked !== "owner") await assertNotLosingOwner(projectId, userId);
   await query(
     `INSERT INTO workspace_members (project_id, user_id, role, added_by)
      VALUES ($1, $2, $3, $4)
@@ -812,20 +1035,35 @@ export async function removeMember(
   projectId: string,
   userId: string,
 ): Promise<WorkspaceMember[]> {
-  const { rows } = await query<{ count: string }>(
-    `SELECT count(*) AS count FROM workspace_members
-      WHERE project_id = $1 AND role = 'owner' AND user_id <> $2`,
-    [projectId, userId],
-  );
-  const { rows: target } = await query<{ role: string }>(
-    `SELECT role FROM workspace_members WHERE project_id = $1 AND user_id = $2`,
-    [projectId, userId],
-  );
-  if (target[0]?.role === "owner" && Number(rows[0].count) === 0) {
-    throw new WorkspaceError("last_owner_cannot_be_removed");
-  }
+  await assertNotLosingOwner(projectId, userId);
   await query(`DELETE FROM workspace_members WHERE project_id = $1 AND user_id = $2`, [projectId, userId]);
+  await recordActivity(owner, {
+    projectId, subjectType: "member", subjectId: null, action: "member_removed", summary: "",
+  });
   return listMembers(projectId);
+}
+
+/**
+ * Refuses to demote or remove `userId` when that would leave the project
+ * without an owner, or when they are the project's named owner
+ * (`ai_projects.owner_user_id`) — the displayed owner and the access row must
+ * not disagree, so that change is an ownership transfer, done on the project.
+ */
+async function assertNotLosingOwner(projectId: string, userId: string): Promise<void> {
+  const { rows } = await query<{ role: string | null; is_named_owner: boolean; other_owners: string }>(
+    `SELECT m.role,
+            (p.owner_user_id = $2) AS is_named_owner,
+            (SELECT count(*) FROM workspace_members o
+              WHERE o.project_id = $1 AND o.role = 'owner' AND o.user_id <> $2) AS other_owners
+       FROM ai_projects p
+       LEFT JOIN workspace_members m ON m.project_id = p.id AND m.user_id = $2
+      WHERE p.id = $1`,
+    [projectId, userId],
+  );
+  const row = rows[0];
+  if (!row || row.role !== "owner") return;
+  if (Number(row.other_owners) === 0) throw new WorkspaceError("last_owner_cannot_be_removed");
+  if (row.is_named_owner) throw new WorkspaceError("transfer_ownership_first");
 }
 
 /* ===========================================================================
@@ -921,16 +1159,16 @@ export interface TaskListFilter {
   dueAfter?: string;
   search?: string;
   limit?: number;
+  /** Rows to skip — server pagination (stable: ties break on id). */
+  offset?: number;
 }
 
 /** The workspace-wide task read behind the List, Kanban and Calendar views —
  *  the three are the same rows grouped differently, never three queries. */
-export async function listWorkspaceTasks(
-  businessId: string,
-  filter: TaskListFilter = {},
-): Promise<WorkspaceTask[]> {
+function taskWhere(owner: WorkspaceOwner, filter: TaskListFilter): { clause: string; params: unknown[] } {
   const where: string[] = ["p.business_id = $1"];
-  const params: unknown[] = [businessId];
+  const params: unknown[] = [owner.businessId, owner.actorUserId];
+  where.push(visibilityClause(owner, "t.project_id", [], "$2"));
   const add = (clause: string, value: unknown) => {
     params.push(value);
     where.push(clause.replace("$?", `$${params.length}`));
@@ -944,15 +1182,24 @@ export async function listWorkspaceTasks(
   if (filter.dueBefore) add("t.due_date <= $?", filter.dueBefore);
   if (filter.dueAfter) add("t.due_date >= $?", filter.dueAfter);
   if (filter.search) add("t.title ILIKE '%' || $? || '%'", filter.search.trim());
+  return { clause: where.join(" AND "), params };
+}
+
+export async function listWorkspaceTasks(
+  owner: WorkspaceOwner,
+  filter: TaskListFilter = {},
+): Promise<WorkspaceTask[]> {
+  const { clause, params } = taskWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 200, 1), 500);
+  const offset = pageOffset(filter.offset);
 
   const { rows } = await query<TaskRow>(
     `SELECT ${TASK_SELECT} ${TASK_JOINS}
-      WHERE ${where.join(" AND ")}
+      WHERE ${clause}
       ORDER BY (t.status = 'done'),
                CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
-               t.due_date NULLS LAST, t.position, t.created_at DESC
-      LIMIT ${limit}`,
+               t.due_date NULLS LAST, t.position, t.created_at DESC, t.id
+      LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return rows.map(toTask);
@@ -991,6 +1238,7 @@ export async function createWorkspaceTask(
   const priority = assertEnum(input.priority ?? "normal", PRIORITIES, "invalid_priority");
   await assertUserBelongs(owner.businessId, input.assigneeUserId ?? null);
   await assertPartyBelongs(owner.businessId, input.partyId ?? null);
+  await assertPhaseInProject(projectId, input.phaseId ?? null);
 
   const { rows } = await query<{ id: string }>(
     `INSERT INTO ai_project_tasks
@@ -1037,6 +1285,11 @@ export async function updateWorkspaceTask(
   }
   if (input.status !== undefined) {
     const status = assertEnum(input.status, TASK_STATUSES, "invalid_task_status");
+    // The dependency rule (#761 §9), shared with the board: never DONE while
+    // a task it waits on is unfinished.
+    if (dependencyBlocksStatus(status, existing.blockedBy)) {
+      throw new WorkspaceError("dependency_unresolved");
+    }
     set("status", status);
     // completed_at is derived from the status, never set by the caller: a
     // "done" with no stamp (or a stamp on a reopened task) is how a
@@ -1055,8 +1308,14 @@ export async function updateWorkspaceTask(
     await assertPartyBelongs(owner.businessId, input.partyId);
     set("party_id", input.partyId);
   }
-  if (input.phaseId !== undefined) set("phase_id", input.phaseId);
-  if (input.position !== undefined) set("position", input.position);
+  if (input.phaseId !== undefined) {
+    await assertPhaseInProject(existing.projectId, input.phaseId);
+    set("phase_id", input.phaseId || null);
+  }
+  if (input.position !== undefined) {
+    if (!Number.isSafeInteger(input.position)) throw new WorkspaceError("invalid_position");
+    set("position", input.position);
+  }
   if (!sets.length) return existing;
 
   await query(
@@ -1068,6 +1327,34 @@ export async function updateWorkspaceTask(
     action: input.status ? `status_${input.status}` : "updated", summary: existing.title,
   });
   return getWorkspaceTask(owner.businessId, taskId);
+}
+
+/**
+ * Asserts the actor may write to a task. Structural changes (re-scoping,
+ * re-assigning, re-dating, deleting) are `edit`. Working the task — status,
+ * board position, checklist ticks — is `contribute`, and a contributor may
+ * only work a task assigned to them: that is the whole contributor role.
+ */
+export async function requireTaskWork(
+  owner: WorkspaceOwner,
+  task: Pick<WorkspaceTask, "projectId" | "assigneeUserId">,
+  structural: boolean,
+): Promise<void> {
+  const role = await requireProjectCapability(owner, task.projectId, structural ? "edit" : "contribute");
+  if (!roleCan(role, "edit") && task.assigneeUserId !== owner.actorUserId) {
+    throw new WorkspaceError("insufficient_project_role");
+  }
+}
+
+/** A task's phase must be one of its own project's phases. */
+async function assertPhaseInProject(projectId: string, phaseId: string | null): Promise<void> {
+  if (!phaseId) return;
+  if (!isUuid(phaseId)) throw new WorkspaceError("phase_not_found");
+  const { rows } = await query<{ id: string }>(
+    `SELECT id FROM workspace_project_phases WHERE id = $1 AND project_id = $2`,
+    [phaseId, projectId],
+  );
+  if (!rows[0]) throw new WorkspaceError("phase_not_in_project");
 }
 
 export async function deleteWorkspaceTask(businessId: string, taskId: string): Promise<boolean> {
@@ -1270,14 +1557,17 @@ export interface ContractListFilter {
   expiringWithinDays?: number;
   search?: string;
   limit?: number;
+  /** Rows to skip — server pagination (stable: ties break on id). */
+  offset?: number;
 }
 
-export async function listContracts(
-  businessId: string,
-  filter: ContractListFilter = {},
-): Promise<WorkspaceContract[]> {
+function contractWhere(owner: WorkspaceOwner, filter: ContractListFilter): { clause: string; params: unknown[] } {
   const where: string[] = ["c.business_id = $1"];
-  const params: unknown[] = [businessId];
+  const params: unknown[] = [owner.businessId, owner.actorUserId];
+  where.push(visibilityClause(
+    owner, "c.project_id", ["c.created_by"], "$2",
+    owner.access?.canManageContracts ? "TRUE" : undefined,
+  ));
   const add = (clause: string, value: unknown) => {
     params.push(value);
     where.push(clause.replace("$?", `$${params.length}`));
@@ -1289,17 +1579,29 @@ export async function listContracts(
   if (filter.search) add("c.title ILIKE '%' || $? || '%'", filter.search.trim());
   if (filter.expiringWithinDays !== undefined) {
     add(
-      "(c.end_date IS NOT NULL AND c.end_date <= (CURRENT_DATE + ($?::int || ' days')::interval) AND c.status NOT IN ('terminated','completed'))",
+      // Bounded on both sides, from Tehran's today: an active contract whose
+      // end date has already passed is overdue, not "expiring soon".
+      `(c.end_date BETWEEN ${todayLiteral()} AND ${todayLiteral()} + $?::int
+        AND c.status NOT IN ('terminated','completed'))`,
       filter.expiringWithinDays,
     );
   }
+  return { clause: where.join(" AND "), params };
+}
+
+export async function listContracts(
+  owner: WorkspaceOwner,
+  filter: ContractListFilter = {},
+): Promise<WorkspaceContract[]> {
+  const { clause, params } = contractWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 300);
+  const offset = pageOffset(filter.offset);
 
   const { rows } = await query<Record<string, unknown>>(
     `SELECT ${CONTRACT_SELECT} ${CONTRACT_JOINS}
-      WHERE ${where.join(" AND ")}
-      ORDER BY c.end_date NULLS LAST, c.created_at DESC
-      LIMIT ${limit}`,
+      WHERE ${clause}
+      ORDER BY c.end_date NULLS LAST, c.created_at DESC, c.id
+      LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return rows.map(toContract);
@@ -1335,9 +1637,9 @@ export async function createContract(
   const status = assertEnum(input.status ?? "draft", CONTRACT_STATUSES, "invalid_contract_status");
   const startDate = isoDateOrNull(input.startDate, "invalid_date");
   const endDate = isoDateOrNull(input.endDate, "invalid_date");
-  if (startDate && endDate && endDate < startDate) throw new WorkspaceError("end_before_start");
+  if (!intervalOrdered(startDate, endDate)) throw new WorkspaceError("end_before_start");
   await assertPartyBelongs(owner.businessId, input.partyId ?? null);
-  if (input.projectId) await assertProjectBelongs(owner.businessId, input.projectId);
+  await requireProjectIfSet(owner, input.projectId, "edit");
 
   const { rows } = await query<{ id: string }>(
     `INSERT INTO workspace_contracts
@@ -1384,16 +1686,21 @@ export async function updateContract(
     set("status", assertEnum(input.status, CONTRACT_STATUSES, "invalid_contract_status"));
   }
   if (input.projectId !== undefined) {
-    if (input.projectId) await assertProjectBelongs(owner.businessId, input.projectId);
-    set("project_id", input.projectId);
+    await requireProjectIfSet(owner, input.projectId, "edit");
+    set("project_id", input.projectId || null);
   }
   if (input.partyId !== undefined) {
     await assertPartyBelongs(owner.businessId, input.partyId);
     set("party_id", input.partyId);
   }
   if (input.valueRial !== undefined) set("value_rial", numberOrNull(input.valueRial, "invalid_contract_value"));
-  if (input.startDate !== undefined) set("start_date", isoDateOrNull(input.startDate, "invalid_date"));
-  if (input.endDate !== undefined) set("end_date", isoDateOrNull(input.endDate, "invalid_date"));
+  const startDate = input.startDate !== undefined
+    ? isoDateOrNull(input.startDate, "invalid_date") : existing.startDate;
+  const endDate = input.endDate !== undefined
+    ? isoDateOrNull(input.endDate, "invalid_date") : existing.endDate;
+  if (!intervalOrdered(startDate, endDate)) throw new WorkspaceError("end_before_start");
+  if (input.startDate !== undefined) set("start_date", startDate);
+  if (input.endDate !== undefined) set("end_date", endDate);
   if (input.reminderDays !== undefined) {
     set("reminder_days", numberOrNull(input.reminderDays, "invalid_reminder_days"));
   }
@@ -1412,20 +1719,49 @@ export async function updateContract(
   return getContract(owner.businessId, id);
 }
 
+/**
+ * A contract lifecycle action (#761 §12) — complete, terminate, extend, renew —
+ * as a real transition: the rule is `contractLifecycleChange` (pure,
+ * unit-tested), the write is one statement guarded on the status it was
+ * decided against (a concurrent change makes it refuse rather than overwrite),
+ * and the activity feed records which action it was.
+ */
+export async function transitionContract(
+  owner: WorkspaceOwner,
+  id: string,
+  action: string,
+  input: { endDate?: unknown },
+): Promise<WorkspaceContract> {
+  const checked = assertEnum(action, CONTRACT_LIFECYCLE_ACTIONS, "invalid_contract_transition");
+  const existing = await getContract(owner.businessId, id);
+  if (!existing) throw new WorkspaceError("contract_not_found");
+  const change = contractLifecycleChange(checked, existing, {
+    endDate: isoDateOrNull(input.endDate, "invalid_date"),
+    today: todayIsoDate(),
+  });
+  if (!change.ok) throw new WorkspaceError(change.error);
+  const { rowCount } = await query(
+    `UPDATE workspace_contracts
+        SET status = $3, start_date = $4, end_date = $5, updated_at = now()
+      WHERE id = $1 AND business_id = $2 AND status = $6`,
+    [id, owner.businessId, change.status, change.startDate, change.endDate, existing.status],
+  );
+  if (!rowCount) throw new WorkspaceError("invalid_contract_transition");
+  await recordActivity(owner, {
+    projectId: existing.projectId, subjectType: "contract", subjectId: id,
+    action: `contract_${checked}`, summary: existing.title,
+  });
+  const updated = await getContract(owner.businessId, id);
+  if (!updated) throw new WorkspaceError("contract_not_found");
+  return updated;
+}
+
 export async function deleteContract(businessId: string, id: string): Promise<boolean> {
   const { rowCount } = await query(
     `DELETE FROM workspace_contracts WHERE id = $1 AND business_id = $2`,
     [id, businessId],
   );
   return (rowCount ?? 0) > 0;
-}
-
-async function assertProjectBelongs(businessId: string, projectId: string): Promise<void> {
-  const { rows } = await query<{ id: string }>(
-    `SELECT id FROM ai_projects WHERE id = $1 AND business_id = $2`,
-    [projectId, businessId],
-  );
-  if (!rows[0]) throw new WorkspaceError("project_not_found");
 }
 
 /* ===========================================================================
@@ -1513,14 +1849,14 @@ export interface DocumentListFilter {
   currentOnly?: boolean;
   search?: string;
   limit?: number;
+  /** Rows to skip — server pagination (stable: ties break on id). */
+  offset?: number;
 }
 
-export async function listDocuments(
-  businessId: string,
-  filter: DocumentListFilter = {},
-): Promise<WorkspaceDocument[]> {
+function documentWhere(owner: WorkspaceOwner, filter: DocumentListFilter): { clause: string; params: unknown[] } {
   const where: string[] = ["d.business_id = $1"];
-  const params: unknown[] = [businessId];
+  const params: unknown[] = [owner.businessId, owner.actorUserId];
+  where.push(visibilityClause(owner, "d.project_id", ["d.created_by"], "$2"));
   const add = (clause: string, value: unknown) => {
     params.push(value);
     where.push(clause.replace("$?", `$${params.length}`));
@@ -1534,13 +1870,22 @@ export async function listDocuments(
   if (filter.currentOnly !== false) {
     where.push("NOT EXISTS (SELECT 1 FROM workspace_documents s WHERE s.supersedes_id = d.id)");
   }
+  return { clause: where.join(" AND "), params };
+}
+
+export async function listDocuments(
+  owner: WorkspaceOwner,
+  filter: DocumentListFilter = {},
+): Promise<WorkspaceDocument[]> {
+  const { clause, params } = documentWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 300);
+  const offset = pageOffset(filter.offset);
 
   const { rows } = await query<Record<string, unknown>>(
     `SELECT ${DOCUMENT_SELECT} ${DOCUMENT_JOINS}
-      WHERE ${where.join(" AND ")}
-      ORDER BY d.created_at DESC
-      LIMIT ${limit}`,
+      WHERE ${clause}
+      ORDER BY d.created_at DESC, d.id
+      LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return rows.map(toDocument);
@@ -1603,19 +1948,87 @@ export interface DocumentInput {
   supersedesId?: string | null;
 }
 
+interface DocumentLinks {
+  projectId: string | null;
+  taskId: string | null;
+  contractId: string | null;
+  partyId: string | null;
+  mediaAssetId: string | null;
+  journalEntryId: string | null;
+}
+
+/**
+ * Validates a document's links as ONE record, not field by field: the task
+ * must be in the document's project, a linked contract must be visible and
+ * on the same project, the media asset and the journal entry must be this
+ * business's, and a journal entry posted against a project must be posted
+ * against this one. A document with a task but no project takes the task's
+ * project, which is the only project it can honestly belong to.
+ *
+ * Linking work into a project is `contribute` on that project.
+ */
+async function validateDocumentLinks(owner: WorkspaceOwner, links: DocumentLinks): Promise<DocumentLinks> {
+  const out = { ...links };
+  if (out.taskId) {
+    if (!isUuid(out.taskId)) throw new WorkspaceError("task_not_found");
+    const task = await getWorkspaceTask(owner.businessId, out.taskId);
+    if (!task) throw new WorkspaceError("task_not_found");
+    if (out.projectId && out.projectId !== task.projectId) throw new WorkspaceError("task_project_mismatch");
+    out.projectId = task.projectId;
+  }
+  await requireProjectIfSet(owner, out.projectId, "contribute");
+  if (out.contractId) {
+    const contract = await resolveWorkspaceSubject(owner, "contract", out.contractId, "view");
+    if (contract.projectId && out.projectId && contract.projectId !== out.projectId) {
+      throw new WorkspaceError("contract_project_mismatch");
+    }
+  }
+  await assertPartyBelongs(owner.businessId, out.partyId);
+  if (out.mediaAssetId) {
+    const { rows } = isUuid(out.mediaAssetId)
+      ? await query<{ id: string }>(
+          `SELECT id FROM media_assets WHERE id = $1 AND business_id = $2`,
+          [out.mediaAssetId, owner.businessId],
+        )
+      : { rows: [] };
+    if (!rows[0]) throw new WorkspaceError("media_not_found");
+  }
+  if (out.journalEntryId) {
+    const { rows } = isUuid(out.journalEntryId)
+      ? await query<{ project_id: string | null }>(
+          `SELECT project_id FROM journal_entries WHERE id = $1 AND business_id = $2`,
+          [out.journalEntryId, owner.businessId],
+        )
+      : { rows: [] };
+    if (!rows[0]) throw new WorkspaceError("journal_entry_not_found");
+    if (rows[0].project_id && rows[0].project_id !== out.projectId) {
+      throw new WorkspaceError("journal_entry_project_mismatch");
+    }
+  }
+  return out;
+}
+
 export async function createDocument(
   owner: WorkspaceOwner,
   input: DocumentInput,
 ): Promise<WorkspaceDocument> {
   const title = requireText(input.title, WORKSPACE_LIMITS.documentTitleMax, "document_title_required");
   const status = assertEnum(input.status ?? "draft", DOCUMENT_STATUSES, "invalid_document_status");
-  if (input.projectId) await assertProjectBelongs(owner.businessId, input.projectId);
-  await assertPartyBelongs(owner.businessId, input.partyId ?? null);
+  const links = await validateDocumentLinks(owner, {
+    projectId: input.projectId || null,
+    taskId: input.taskId || null,
+    contractId: input.contractId || null,
+    partyId: input.partyId || null,
+    mediaAssetId: input.mediaAssetId || null,
+    journalEntryId: input.journalEntryId || null,
+  });
 
   // A new revision inherits its predecessor's version number plus one, so the
-  // chain reads v1, v2, v3 without the caller having to count.
+  // chain reads v1, v2, v3 without the caller having to count. Revising needs
+  // `edit` on the document being superseded.
   let version = 1;
   if (input.supersedesId) {
+    await resolveWorkspaceSubject(owner, "document", input.supersedesId, "edit");
     const previous = await getDocument(owner.businessId, input.supersedesId);
     if (!previous) throw new WorkspaceError("document_not_found");
     version = previous.version + 1;
@@ -1628,14 +2041,14 @@ export async function createDocument(
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      RETURNING id`,
     [
-      owner.businessId, input.mediaAssetId ?? null, title,
-      trimTo(input.description, 2000), input.projectId ?? null, input.taskId ?? null,
-      input.contractId ?? null, input.partyId ?? null, input.journalEntryId ?? null,
+      owner.businessId, links.mediaAssetId, title,
+      trimTo(input.description, 2000), links.projectId, links.taskId,
+      links.contractId, links.partyId, links.journalEntryId,
       status, version, input.supersedesId ?? null, normalizeTags(input.tags), owner.actorUserId,
     ],
   );
   await recordActivity(owner, {
-    projectId: input.projectId ?? null, subjectType: "document", subjectId: rows[0].id,
+    projectId: links.projectId, subjectType: "document", subjectId: rows[0].id,
     action: version > 1 ? "revised" : "created", summary: title,
   });
   const created = await getDocument(owner.businessId, rows[0].id);
@@ -1663,19 +2076,27 @@ export async function updateDocument(
   if (input.status !== undefined) {
     set("status", assertEnum(input.status, DOCUMENT_STATUSES, "invalid_document_status"));
   }
-  if (input.projectId !== undefined) {
-    if (input.projectId) await assertProjectBelongs(owner.businessId, input.projectId);
-    set("project_id", input.projectId);
-  }
-  if (input.taskId !== undefined) set("task_id", input.taskId);
-  if (input.contractId !== undefined) set("contract_id", input.contractId);
-  if (input.partyId !== undefined) {
-    await assertPartyBelongs(owner.businessId, input.partyId);
-    set("party_id", input.partyId);
-  }
-  if (input.journalEntryId !== undefined) set("journal_entry_id", input.journalEntryId);
   if (input.tags !== undefined) set("tags", normalizeTags(input.tags));
-  if (input.mediaAssetId !== undefined) set("media_asset_id", input.mediaAssetId);
+
+  const linkKeys = ["projectId", "taskId", "contractId", "partyId", "mediaAssetId", "journalEntryId"] as const;
+  if (linkKeys.some((key) => input[key] !== undefined)) {
+    const pick = (key: (typeof linkKeys)[number]) =>
+      input[key] !== undefined ? input[key] || null : existing[key];
+    const links = await validateDocumentLinks(owner, {
+      projectId: pick("projectId"),
+      taskId: pick("taskId"),
+      contractId: pick("contractId"),
+      partyId: pick("partyId"),
+      mediaAssetId: pick("mediaAssetId"),
+      journalEntryId: pick("journalEntryId"),
+    });
+    set("project_id", links.projectId);
+    set("task_id", links.taskId);
+    set("contract_id", links.contractId);
+    set("party_id", links.partyId);
+    set("media_asset_id", links.mediaAssetId);
+    set("journal_entry_id", links.journalEntryId);
+  }
   if (!sets.length) return existing;
 
   await query(
@@ -1683,6 +2104,10 @@ export async function updateDocument(
       WHERE id = $1 AND business_id = $2`,
     params,
   );
+  await recordActivity(owner, {
+    projectId: existing.projectId, subjectType: "document", subjectId: id,
+    action: "updated", summary: existing.title,
+  });
   return getDocument(owner.businessId, id);
 }
 
@@ -1716,6 +2141,16 @@ export interface WorkspaceApproval {
   decidedAt: string | null;
   note: string;
   createdAt: string;
+  /** The actor asked for this — they may withdraw it, never decide it. */
+  requestedByMe: boolean;
+  /** The actor is the named approver. */
+  assignedToMe: boolean;
+  /**
+   * For an UNASSIGNED request: the actor may manage its subject, which is what
+   * `decideApproval` requires there. Mirrors `resolveWorkspaceSubject(…,
+   * "manage")` so the inbox never offers a button that ends in a 403.
+   */
+  canDecideUnassigned: boolean;
 }
 
 /**
@@ -1723,11 +2158,27 @@ export interface WorkspaceApproval {
  * round trip per row. A CASE over four tables rather than a stored copy: a
  * copied title is wrong the moment the contract is renamed.
  */
+/** Per-row "may manage the subject" — see `WorkspaceApproval.canDecideUnassigned`. */
+function canManageSubjectSql(owner: WorkspaceOwner): string {
+  if (isAdministrator(owner)) return "TRUE";
+  const contractManager = owner.access?.canManageContracts ? "a.subject_type = 'contract'" : "FALSE";
+  return `CASE WHEN a.project_id IS NOT NULL THEN EXISTS (
+            SELECT 1 FROM workspace_members wm
+             WHERE wm.project_id = a.project_id AND wm.user_id = $2::uuid
+               AND wm.role IN ('owner', 'manager'))
+          ELSE (${contractManager}) OR $2::text = (CASE a.subject_type
+            WHEN 'document' THEN (SELECT created_by FROM workspace_documents WHERE id = a.subject_id)
+            WHEN 'contract' THEN (SELECT created_by FROM workspace_contracts WHERE id = a.subject_id)
+          END) END`;
+}
+
 const APPROVAL_SELECT = `
   a.id, a.subject_type, a.subject_id, a.project_id, p.name AS project_name,
   a.title, a.status, a.requested_by, ru.full_name AS requested_by_name,
   a.approver_user_id, au.full_name AS approver_name, a.due_date,
   a.decided_by, a.decided_at, a.note, a.created_at,
+  (a.requested_by IS NOT DISTINCT FROM $2::uuid) AS requested_by_me,
+  (a.approver_user_id IS NOT DISTINCT FROM $2::uuid) AS assigned_to_me,
   COALESCE(
     CASE a.subject_type
       WHEN 'project'  THEN (SELECT name  FROM ai_projects         WHERE id = a.subject_id)
@@ -1774,54 +2225,85 @@ function toApproval(row: Record<string, unknown>): WorkspaceApproval {
     decidedAt: r.decided_at ?? null,
     note: String(r.note ?? ""),
     createdAt: String(r.created_at),
+    requestedByMe: (row.requested_by_me as boolean | undefined) === true,
+    assignedToMe: (row.assigned_to_me as boolean | undefined) === true,
+    canDecideUnassigned: (row.can_decide_unassigned as boolean | undefined) === true,
   };
 }
 
 export interface ApprovalListFilter {
+  id?: string;
   status?: WorkspaceApprovalStatus | "all";
   projectId?: string;
-  approverUserId?: string;
+  /** «منتظر تصمیم من»: assigned to the actor, or unassigned — never their own request. */
+  awaitingActor?: boolean;
+  /** Requests the actor made. */
+  requestedByActor?: boolean;
   subjectType?: WorkspaceApprovalSubject;
   subjectId?: string;
   limit?: number;
+  /** Rows to skip — server pagination (stable: ties break on id). */
+  offset?: number;
 }
 
-export async function listApprovals(
-  businessId: string,
-  filter: ApprovalListFilter = {},
-): Promise<WorkspaceApproval[]> {
+/**
+ * Approvals the actor may see: those on projects they can see, business-level
+ * ones they requested, and any they requested or were named to decide.
+ */
+function approvalWhere(owner: WorkspaceOwner, filter: ApprovalListFilter): { clause: string; params: unknown[] } {
   const where: string[] = ["a.business_id = $1"];
-  const params: unknown[] = [businessId];
+  const params: unknown[] = [owner.businessId, owner.actorUserId];
+  where.push(
+    `(${visibilityClause(owner, "a.project_id", ["a.requested_by"], "$2")}
+      OR a.approver_user_id = $2::uuid OR a.requested_by = $2::uuid)`,
+  );
   const add = (clause: string, value: unknown) => {
     params.push(value);
     where.push(clause.replace("$?", `$${params.length}`));
   };
+  if (filter.id) add("a.id = $?", filter.id);
   if (filter.status && filter.status !== "all") add("a.status = $?", filter.status);
   if (filter.projectId) add("a.project_id = $?", filter.projectId);
   if (filter.subjectType) add("a.subject_type = $?", filter.subjectType);
   if (filter.subjectId) add("a.subject_id = $?", filter.subjectId);
-  if (filter.approverUserId) {
-    // A pending approval with no named approver is everybody's to decide, so
-    // the "mine" filter has to include it — otherwise unassigned requests sit
-    // in a queue nobody sees.
-    add("(a.approver_user_id = $? OR a.approver_user_id IS NULL)", filter.approverUserId);
+  if (filter.awaitingActor) {
+    // An unassigned request is any eligible decider's, so it shows here too;
+    // a request the actor made never does — they cannot decide it.
+    where.push("(a.approver_user_id = $2::uuid OR a.approver_user_id IS NULL)");
+    where.push("a.requested_by IS DISTINCT FROM $2::uuid");
   }
+  if (filter.requestedByActor) where.push("a.requested_by = $2::uuid");
+  return { clause: where.join(" AND "), params };
+}
+
+export async function listApprovals(
+  owner: WorkspaceOwner,
+  filter: ApprovalListFilter = {},
+): Promise<WorkspaceApproval[]> {
+  const { clause, params } = approvalWhere(owner, filter);
   const limit = Math.min(Math.max(filter.limit ?? 100, 1), 300);
+  const offset = pageOffset(filter.offset);
 
   const { rows } = await query<Record<string, unknown>>(
-    `SELECT ${APPROVAL_SELECT} ${APPROVAL_JOINS}
-      WHERE ${where.join(" AND ")}
-      ORDER BY (a.status = 'pending') DESC, a.due_date NULLS LAST, a.created_at DESC
-      LIMIT ${limit}`,
+    `SELECT ${APPROVAL_SELECT}, (${canManageSubjectSql(owner)}) AS can_decide_unassigned ${APPROVAL_JOINS}
+      WHERE ${clause}
+      ORDER BY (a.status = 'pending') DESC, a.due_date NULLS LAST, a.created_at DESC, a.id
+      LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return rows.map(toApproval);
 }
 
+async function getApproval(owner: WorkspaceOwner, id: string): Promise<WorkspaceApproval | null> {
+  if (!isUuid(id)) return null;
+  return (await listApprovals(owner, { id, limit: 1 }))[0] ?? null;
+}
+
 /**
  * The subject type behind an approval id, for a route that has to hand the
- * decision to the module owning that subject. Null when there is no such
- * approval in this business.
+ * decision to the module owning that subject (issue #799: a BOQ revision's
+ * decision belongs to the estimating module, a submittal revision's to the
+ * document module). Null when there is no such approval in this business.
  */
 export async function approvalSubjectType(
   businessId: string,
@@ -1834,6 +2316,13 @@ export async function approvalSubjectType(
   return rows[0]?.subject_type ?? null;
 }
 
+/**
+ * Requests an approval. The subject must exist, be reachable by the
+ * requester (`contribute`), and the approval's project is the SUBJECT's
+ * project — a caller-supplied `projectId` that disagrees is refused rather
+ * than stored, because a mismatched pair is how an approval shows up in a
+ * project it has nothing to do with.
+ */
 export async function requestApproval(
   owner: WorkspaceOwner,
   input: {
@@ -1841,103 +2330,131 @@ export async function requestApproval(
     title?: string; approverUserId?: string | null; dueDate?: unknown; note?: string;
   },
 ): Promise<WorkspaceApproval> {
-  const subjectType = assertEnum(input.subjectType ?? "", ["project", "task", "document", "contract"] as const, "invalid_approval_subject");
+  const subjectType = assertEnum(input.subjectType ?? "", APPROVAL_SUBJECTS, "invalid_approval_subject");
   const subjectId = input.subjectId?.trim();
   if (!subjectId) throw new WorkspaceError("subject_required");
-  await assertUserBelongs(owner.businessId, input.approverUserId ?? null);
+  const subject = await resolveWorkspaceSubject(owner, subjectType, subjectId, "contribute");
+  if (input.projectId && input.projectId !== subject.projectId) {
+    throw new WorkspaceError("approval_project_mismatch");
+  }
+  const approverUserId = input.approverUserId || null;
+  await assertUserBelongs(owner.businessId, approverUserId);
+  if (approverUserId === owner.actorUserId) throw new WorkspaceError("self_approval_forbidden");
 
-  const { rows } = await query<{ id: string }>(
-    `INSERT INTO workspace_approvals
-       (business_id, subject_type, subject_id, project_id, title, requested_by,
-        approver_user_id, due_date, note)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     RETURNING id`,
-    [
-      owner.businessId, subjectType, subjectId, input.projectId ?? null,
-      trimTo(input.title, 200), owner.actorUserId, input.approverUserId ?? null,
-      isoDateOrNull(input.dueDate, "invalid_date"), trimTo(input.note, 1000),
-    ],
-  );
-  // A contract put up for approval moves to `pending_approval` so the
-  // contracts list shows the same truth as the approvals queue.
-  if (subjectType === "contract") {
-    await query(
-      `UPDATE workspace_contracts SET status = 'pending_approval', updated_at = now()
-        WHERE id = $1 AND business_id = $2 AND status = 'draft'`,
-      [subjectId, owner.businessId],
+  const id = await withTenantTransaction(owner.businessId, async () => {
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO workspace_approvals
+         (business_id, subject_type, subject_id, project_id, title, requested_by,
+          approver_user_id, due_date, note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        owner.businessId, subjectType, subjectId, subject.projectId,
+        trimTo(input.title, 200), owner.actorUserId, approverUserId,
+        isoDateOrNull(input.dueDate, "invalid_date"), trimTo(input.note, 1000),
+      ],
     );
-  }
-  if (subjectType === "document") {
-    await query(
-      `UPDATE workspace_documents SET status = 'in_review', updated_at = now()
-        WHERE id = $1 AND business_id = $2 AND status = 'draft'`,
-      [subjectId, owner.businessId],
-    );
-  }
+    // A contract put up for approval moves to `pending_approval` so the
+    // contracts list shows the same truth as the approvals queue.
+    if (subjectType === "contract") {
+      await query(
+        `UPDATE workspace_contracts SET status = 'pending_approval', updated_at = now()
+          WHERE id = $1 AND business_id = $2 AND status = 'draft'`,
+        [subjectId, owner.businessId],
+      );
+    }
+    if (subjectType === "document") {
+      await query(
+        `UPDATE workspace_documents SET status = 'in_review', updated_at = now()
+          WHERE id = $1 AND business_id = $2 AND status = 'draft'`,
+        [subjectId, owner.businessId],
+      );
+    }
+    return rows[0].id;
+  });
   await recordActivity(owner, {
-    projectId: input.projectId ?? null, subjectType: "approval", subjectId: rows[0].id,
+    projectId: subject.projectId, subjectType: "approval", subjectId: id,
     action: "requested", summary: trimTo(input.title, 200),
   });
-  const list = await listApprovals(owner.businessId, { subjectType, subjectId, limit: 1 });
-  const created = list[0];
+  const created = await getApproval(owner, id);
   if (!created) throw new WorkspaceError("approval_not_found");
   return created;
 }
 
 /**
  * Records a decision and propagates it to the subject: approving a contract
- * activates it, rejecting a document marks it rejected. The propagation is the
- * whole point of the gate — an approval that changes nothing is a comment.
+ * activates it, rejecting or asking for changes sends it back to draft;
+ * a document follows the same shape. The propagation is the whole point of
+ * the gate — an approval that changes nothing is a comment.
+ *
+ * Who may decide is `approvalDecisionError` (pure, unit-tested). Returns null
+ * when the approval does not exist for this actor or is no longer pending.
  */
 export async function decideApproval(
   owner: WorkspaceOwner,
   id: string,
-  decision: "approved" | "rejected" | "cancelled",
+  decision: WorkspaceApprovalDecision,
   note?: string,
 ): Promise<WorkspaceApproval | null> {
-  const { rows } = await query<{ subject_type: string; subject_id: string; project_id: string | null }>(
-    `UPDATE workspace_approvals
-        SET status = $3, decided_by = $4, decided_at = now(),
-            note = COALESCE(NULLIF($5, ''), note), updated_at = now()
-      WHERE id = $1 AND business_id = $2 AND status = 'pending'
-      RETURNING subject_type, subject_id, project_id`,
-    [id, owner.businessId, decision, owner.actorUserId, trimTo(note, 1000)],
-  );
-  const decided = rows[0];
-  if (!decided) return null;
+  const approval = await getApproval(owner, id);
+  if (!approval) throw new WorkspaceError("approval_not_found");
+  if (approval.status !== "pending") return null;
 
-  if (decided.subject_type === "contract") {
-    if (decision === "approved") {
-      await query(
-        `UPDATE workspace_contracts SET status = 'active', updated_at = now()
-          WHERE id = $1 AND business_id = $2 AND status = 'pending_approval'`,
-        [decided.subject_id, owner.businessId],
-      );
-    } else if (decision === "rejected") {
-      await query(
-        `UPDATE workspace_contracts SET status = 'draft', updated_at = now()
-          WHERE id = $1 AND business_id = $2 AND status = 'pending_approval'`,
-        [decided.subject_id, owner.businessId],
-      );
+  let canManageSubject = false;
+  if (!approval.approverUserId && decision !== "cancelled") {
+    try {
+      await resolveWorkspaceSubject(owner, approval.subjectType, approval.subjectId, "manage");
+      canManageSubject = true;
+    } catch (err) {
+      if (!(err instanceof WorkspaceError)) throw err;
     }
   }
-  if (decided.subject_type === "document" && decision !== "cancelled") {
-    await query(
-      `UPDATE workspace_documents SET status = $3, updated_at = now()
-        WHERE id = $1 AND business_id = $2 AND status = 'in_review'`,
-      [decided.subject_id, owner.businessId, decision === "approved" ? "approved" : "rejected"],
+  const refusal = approvalDecisionError({
+    decision,
+    actorUserId: owner.actorUserId,
+    requestedBy: approval.requestedBy,
+    approverUserId: approval.approverUserId,
+    isAdministrator: isAdministrator(owner),
+    canManageSubject,
+  });
+  if (refusal) throw new WorkspaceError(refusal);
+
+  const decided = await withTenantTransaction(owner.businessId, async () => {
+    const { rows } = await query<{ subject_type: string; subject_id: string }>(
+      `UPDATE workspace_approvals
+          SET status = $3, decided_by = $4, decided_at = now(),
+              note = COALESCE(NULLIF($5, ''), note), updated_at = now()
+        WHERE id = $1 AND business_id = $2 AND status = 'pending'
+        RETURNING subject_type, subject_id`,
+      [id, owner.businessId, decision, owner.actorUserId, trimTo(note, 1000)],
     );
-  }
+    const row = rows[0];
+    if (!row) return null;
+    if (row.subject_type === "contract" && decision !== "cancelled") {
+      await query(
+        `UPDATE workspace_contracts SET status = $3, updated_at = now()
+          WHERE id = $1 AND business_id = $2 AND status = 'pending_approval'`,
+        [row.subject_id, owner.businessId, decision === "approved" ? "active" : "draft"],
+      );
+    }
+    if (row.subject_type === "document" && decision !== "cancelled") {
+      const status = decision === "approved" ? "approved" : decision === "rejected" ? "rejected" : "draft";
+      await query(
+        `UPDATE workspace_documents SET status = $3, updated_at = now()
+          WHERE id = $1 AND business_id = $2 AND status = 'in_review'`,
+        [row.subject_id, owner.businessId, status],
+      );
+    }
+    return row;
+  });
+  // Somebody else decided it between the read and the write.
+  if (!decided) return null;
+
   await recordActivity(owner, {
-    projectId: decided.project_id, subjectType: "approval", subjectId: id,
-    action: decision, summary: "",
+    projectId: approval.projectId, subjectType: "approval", subjectId: id,
+    action: decision, summary: approval.subjectTitle,
   });
-  const list = await listApprovals(owner.businessId, {
-    subjectType: decided.subject_type as WorkspaceApprovalSubject,
-    subjectId: decided.subject_id,
-    limit: 1,
-  });
-  return list[0] ?? null;
+  return getApproval(owner, id);
 }
 
 /* ===========================================================================
@@ -1957,69 +2474,81 @@ export interface CalendarEntry {
   /** The row this entry points at, so the calendar can link to its page. */
   refId: string;
   location: string;
+  /** A stored event's own note; derived entries have none. */
+  description: string;
 }
 
 /**
  * The unified calendar: one stored source (`workspace_events`) unioned with
  * four derived ones. Every date already lives on a row that owns it, so the
  * calendar reads them rather than keeping copies — rescheduling a task moves
- * its calendar entry because they are the same fact.
+ * its calendar entry because they are the same fact. Each source is scoped by
+ * the same visibility rule as its own list, so the calendar cannot show a
+ * deadline the matching list would hide.
  */
 export async function listCalendar(
-  businessId: string,
+  owner: WorkspaceOwner,
   range: { from: string; to: string; projectId?: string },
 ): Promise<CalendarEntry[]> {
-  const projectFilter = range.projectId ? " AND project_id = $4" : "";
-  const params: unknown[] = [businessId, range.from, range.to];
+  const params: unknown[] = [owner.businessId, range.from, range.to, owner.actorUserId];
   if (range.projectId) params.push(range.projectId);
+  const only = (col: string) => (range.projectId ? `AND ${col} = $5` : "");
+  const contractExtra = owner.access?.canManageContracts ? "TRUE" : undefined;
 
   const { rows } = await query<Record<string, unknown>>(
-    `SELECT id::text AS id, 'event' AS source, title, event_date::text AS date,
-            start_time::text AS start_time, end_time::text AS end_time, kind,
-            project_id, (SELECT name FROM ai_projects WHERE id = e.project_id) AS project_name,
-            id::text AS ref_id, location
+    `SELECT e.id::text AS id, 'event' AS source, e.title, e.event_date::text AS date,
+            e.start_time::text AS start_time, e.end_time::text AS end_time, e.kind,
+            e.project_id, (SELECT name FROM ai_projects WHERE id = e.project_id) AS project_name,
+            e.id::text AS ref_id, e.location, e.description
        FROM workspace_events e
-      WHERE business_id = $1 AND event_date BETWEEN $2 AND $3${projectFilter}
+      WHERE e.business_id = $1 AND e.event_date BETWEEN $2 AND $3
+        AND ${visibilityClause(owner, "e.project_id", ["e.created_by"], "$4")}
+        ${only("e.project_id")}
 
       UNION ALL
 
      SELECT p.id::text, 'project_deadline', p.name, p.end_date::text, NULL, NULL, NULL,
-            p.id, p.name, p.id::text, ''
+            p.id, p.name, p.id::text, '', ''
        FROM ai_projects p
       WHERE p.business_id = $1 AND p.archived_at IS NULL
         AND p.end_date BETWEEN $2 AND $3
         AND p.status NOT IN ('completed', 'cancelled')
-        ${range.projectId ? "AND p.id = $4" : ""}
+        AND ${visibilityClause(owner, "p.id", [], "$4")}
+        ${only("p.id")}
 
       UNION ALL
 
      SELECT t.id::text, 'task_due', t.title, t.due_date::text, NULL, NULL, NULL,
-            t.project_id, p.name, t.id::text, ''
+            t.project_id, p.name, t.id::text, '', ''
        FROM ai_project_tasks t
        JOIN ai_projects p ON p.id = t.project_id
       WHERE p.business_id = $1 AND t.status <> 'done'
         AND t.due_date BETWEEN $2 AND $3
-        ${range.projectId ? "AND t.project_id = $4" : ""}
+        AND ${visibilityClause(owner, "t.project_id", [], "$4")}
+        ${only("t.project_id")}
 
       UNION ALL
 
      SELECT c.id::text, 'contract_expiry', c.title, c.end_date::text, NULL, NULL, NULL,
-            c.project_id, p.name, c.id::text, ''
+            c.project_id, p.name, c.id::text, '', ''
        FROM workspace_contracts c
        LEFT JOIN ai_projects p ON p.id = c.project_id
       WHERE c.business_id = $1 AND c.status NOT IN ('terminated', 'completed')
         AND c.end_date BETWEEN $2 AND $3
-        ${range.projectId ? "AND c.project_id = $4" : ""}
+        AND ${visibilityClause(owner, "c.project_id", ["c.created_by"], "$4", contractExtra)}
+        ${only("c.project_id")}
 
       UNION ALL
 
      SELECT a.id::text, 'approval_due', COALESCE(NULLIF(a.title, ''), 'تأیید'), a.due_date::text,
-            NULL, NULL, NULL, a.project_id, p.name, a.id::text, ''
+            NULL, NULL, NULL, a.project_id, p.name, a.id::text, '', ''
        FROM workspace_approvals a
        LEFT JOIN ai_projects p ON p.id = a.project_id
       WHERE a.business_id = $1 AND a.status = 'pending'
         AND a.due_date BETWEEN $2 AND $3
-        ${range.projectId ? "AND a.project_id = $4" : ""}
+        AND (${visibilityClause(owner, "a.project_id", ["a.requested_by"], "$4")}
+             OR a.approver_user_id = $4::uuid)
+        ${only("a.project_id")}
 
       ORDER BY date, start_time NULLS FIRST`,
     params,
@@ -2039,10 +2568,25 @@ export async function listCalendar(
       projectName: r.project_name ?? null,
       refId: String(r.ref_id),
       location: String(r.location ?? ""),
+      description: String(r.description ?? ""),
     };
   });
 }
 
+function timeOrNull(value: unknown): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string" || !/^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(value)) {
+    throw new WorkspaceError("invalid_time");
+  }
+  return value.slice(0, 5);
+}
+
+/**
+ * Stores a calendar event. A task link must be a task this business owns and
+ * the event's project must be that task's project (an event linked to a task
+ * but no project takes the task's). Putting an event on a project's calendar
+ * is `contribute` on it.
+ */
 export async function createEvent(
   owner: WorkspaceOwner,
   input: {
@@ -2055,7 +2599,19 @@ export async function createEvent(
   const kind = assertEnum(input.kind ?? "meeting", EVENT_KINDS, "invalid_event_kind");
   const eventDate = isoDateOrNull(input.eventDate, "invalid_date");
   if (!eventDate) throw new WorkspaceError("event_date_required");
-  if (input.projectId) await assertProjectBelongs(owner.businessId, input.projectId);
+  const startTime = timeOrNull(input.startTime);
+  const endTime = timeOrNull(input.endTime);
+  if (!intervalOrdered(startTime, endTime)) throw new WorkspaceError("end_before_start");
+
+  let projectId = input.projectId || null;
+  const taskId = input.taskId || null;
+  if (taskId) {
+    const task = isUuid(taskId) ? await getWorkspaceTask(owner.businessId, taskId) : null;
+    if (!task) throw new WorkspaceError("task_not_found");
+    if (projectId && projectId !== task.projectId) throw new WorkspaceError("task_project_mismatch");
+    projectId = task.projectId;
+  }
+  await requireProjectIfSet(owner, projectId, "contribute");
 
   await query(
     `INSERT INTO workspace_events
@@ -2063,23 +2619,115 @@ export async function createEvent(
         start_time, end_time, location, created_by)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
     [
-      owner.businessId, input.projectId ?? null, input.taskId ?? null, title,
+      owner.businessId, projectId, taskId, title,
       trimTo(input.description, 1000), kind, eventDate,
-      input.startTime || null, input.endTime || null, trimTo(input.location, 200),
-      owner.actorUserId,
+      startTime, endTime, trimTo(input.location, 200), owner.actorUserId,
     ],
   );
   await recordActivity(owner, {
-    projectId: input.projectId ?? null, subjectType: "event", subjectId: null,
-    action: "created", summary: title,
+    projectId, subjectType: "event", subjectId: null, action: "created", summary: title,
   });
-  return listCalendar(owner.businessId, { from: eventDate, to: eventDate });
+  return listCalendar(owner, { from: eventDate, to: eventDate });
 }
 
-export async function deleteEvent(businessId: string, id: string): Promise<boolean> {
+/**
+ * Amends a stored event (#761 §10). Same authority as deleting it — its
+ * author, an editor of its project, or an administrator — and the same
+ * checks as creating it, applied to the record as it will be after the edit
+ * (times in order, a task link inside the event's project, `contribute` on a
+ * project it is moved into). Derived entries are not events: a task's due
+ * date is edited on the task.
+ */
+export async function updateEvent(
+  owner: WorkspaceOwner,
+  id: string,
+  input: {
+    title?: string; description?: string; kind?: string; eventDate?: unknown;
+    startTime?: string | null; endTime?: string | null; location?: string;
+    projectId?: string | null;
+  },
+): Promise<boolean> {
+  if (!isUuid(id)) return false;
+  const { rows } = await query<{
+    project_id: string | null; task_id: string | null; created_by: string;
+    event_date: string; start_time: string | null; end_time: string | null;
+  }>(
+    `SELECT project_id, task_id, created_by, event_date::text AS event_date,
+            start_time::text AS start_time, end_time::text AS end_time
+       FROM workspace_events WHERE id = $1 AND business_id = $2`,
+    [id, owner.businessId],
+  );
+  const event = rows[0];
+  if (!event) return false;
+  if (event.created_by !== owner.actorUserId && !isAdministrator(owner)) {
+    if (!event.project_id) throw new WorkspaceError("insufficient_project_role");
+    await requireProjectCapability(owner, event.project_id, "edit");
+  }
+
+  const sets: string[] = [];
+  const params: unknown[] = [id, owner.businessId];
+  const set = (column: string, value: unknown) => {
+    params.push(value);
+    sets.push(`${column} = $${params.length}`);
+  };
+  if (input.title !== undefined) {
+    set("title", requireText(input.title, WORKSPACE_LIMITS.eventTitleMax, "event_title_required"));
+  }
+  if (input.description !== undefined) set("description", trimTo(input.description, 1000));
+  if (input.kind !== undefined) set("kind", assertEnum(input.kind, EVENT_KINDS, "invalid_event_kind"));
+  if (input.location !== undefined) set("location", trimTo(input.location, 200));
+  if (input.eventDate !== undefined) {
+    const eventDate = isoDateOrNull(input.eventDate, "invalid_date");
+    if (!eventDate) throw new WorkspaceError("event_date_required");
+    set("event_date", eventDate);
+  }
+  const startTime = input.startTime !== undefined ? timeOrNull(input.startTime) : event.start_time?.slice(0, 5) ?? null;
+  const endTime = input.endTime !== undefined ? timeOrNull(input.endTime) : event.end_time?.slice(0, 5) ?? null;
+  if (!intervalOrdered(startTime, endTime)) throw new WorkspaceError("end_before_start");
+  if (input.startTime !== undefined) set("start_time", startTime);
+  if (input.endTime !== undefined) set("end_time", endTime);
+  if (input.projectId !== undefined) {
+    const projectId = input.projectId || null;
+    if (event.task_id) {
+      const task = await getWorkspaceTask(owner.businessId, event.task_id);
+      if (task && projectId !== task.projectId) throw new WorkspaceError("task_project_mismatch");
+    }
+    await requireProjectIfSet(owner, projectId, "contribute");
+    set("project_id", projectId);
+  }
+  if (!sets.length) return true;
+  await query(
+    `UPDATE workspace_events SET ${sets.join(", ")}, updated_at = now()
+      WHERE id = $1 AND business_id = $2`,
+    params,
+  );
+  await recordActivity(owner, {
+    projectId: input.projectId !== undefined ? input.projectId || null : event.project_id,
+    subjectType: "event", subjectId: id, action: "updated", summary: String(input.title ?? ""),
+  });
+  return true;
+}
+
+/**
+ * Deletes a stored event: its author, an editor of its project, or an
+ * administrator. Derived entries (task due dates, expiries) are not events
+ * and cannot be deleted here — they belong to the row that owns the date.
+ */
+export async function deleteEvent(owner: WorkspaceOwner, id: string): Promise<boolean> {
+  if (!isUuid(id)) return false;
+  const { rows } = await query<{ project_id: string | null; created_by: string }>(
+    `SELECT project_id, created_by FROM workspace_events WHERE id = $1 AND business_id = $2`,
+    [id, owner.businessId],
+  );
+  const event = rows[0];
+  if (!event) return false;
+  if (event.created_by !== owner.actorUserId && !isAdministrator(owner)) {
+    if (!event.project_id) throw new WorkspaceError("insufficient_project_role");
+    await requireProjectCapability(owner, event.project_id, "edit");
+  }
   const { rowCount } = await query(
     `DELETE FROM workspace_events WHERE id = $1 AND business_id = $2`,
-    [id, businessId],
+    [id, owner.businessId],
   );
   return (rowCount ?? 0) > 0;
 }
@@ -2135,11 +2783,17 @@ export async function addComment(
   body: string,
 ): Promise<WorkspaceComment[]> {
   const text = requireText(body, WORKSPACE_LIMITS.commentMax, "comment_required");
+  // The subject must exist and the actor must be able to contribute to it —
+  // otherwise this would write orphan threads onto arbitrary ids.
+  const subject = await resolveWorkspaceSubject(owner, subjectType, subjectId, "contribute");
   await query(
     `INSERT INTO workspace_comments (business_id, subject_type, subject_id, body, author_id, author_name)
      VALUES ($1, $2, $3, $4, $5, $6)`,
     [owner.businessId, subjectType, subjectId, text, owner.actorUserId, owner.actorName ?? ""],
   );
+  await recordActivity(owner, {
+    projectId: subject.projectId, subjectType, subjectId, action: "commented", summary: text.slice(0, 120),
+  });
   return listComments(owner.businessId, subjectType, subjectId);
 }
 
@@ -2186,15 +2840,15 @@ export async function recordActivity(
 }
 
 export async function listActivity(
-  businessId: string,
+  owner: WorkspaceOwner,
   options: { projectId?: string; limit?: number } = {},
 ): Promise<ActivityEntry[]> {
   const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
-  const params: unknown[] = [businessId];
+  const params: unknown[] = [owner.businessId, owner.actorUserId];
   let filter = "";
   if (options.projectId) {
     params.push(options.projectId);
-    filter = " AND a.project_id = $2";
+    filter = " AND a.project_id = $3";
   }
   const { rows } = await query<{
     id: string; project_id: string | null; project_name: string | null;
@@ -2206,7 +2860,8 @@ export async function listActivity(
        FROM workspace_activity a
        LEFT JOIN ai_projects p ON p.id = a.project_id
        LEFT JOIN users u ON u.id = a.actor_id
-      WHERE a.business_id = $1${filter}
+      WHERE a.business_id = $1
+        AND ${visibilityClause(owner, "a.project_id", ["a.actor_id"], "$2")}${filter}
       ORDER BY a.created_at DESC
       LIMIT ${limit}`,
     params,
@@ -2247,8 +2902,12 @@ export interface AecWorkspaceRollup {
   lateMilestoneCount: number;
   /** Sum of the active projects' budgets; null budget rows contribute nothing. */
   budgetRial: number;
-  /** Actual cost posted to the ledger against those projects. */
-  spentRial: number;
+  /**
+   * Actual cost posted to the ledger against those projects; null when the
+   * caller may not read the ledger — the same rule `projectReport` applies, so
+   * the band and the report can never disagree about whether a number exists.
+   */
+  spentRial: number | null;
   /** Value of the projects' active and completed execution contracts. */
   contractValueRial: number;
   /** Projects whose posted cost has passed their own budget. */
@@ -2281,8 +2940,9 @@ export interface WorkspaceDashboard {
  * date) and the money half reuses `projectReport`, so the numbers here and the
  * project report can never disagree.
  */
-export async function getAecWorkspaceRollup(businessId: string): Promise<AecWorkspaceRollup | null> {
-  if ((await getBusinessIndustry(businessId)) !== "architecture_construction") return null;
+export async function getAecWorkspaceRollup(owner: WorkspaceOwner): Promise<AecWorkspaceRollup | null> {
+  if ((await getBusinessIndustry(owner.businessId)) !== "architecture_construction") return null;
+  const businessId = owner.businessId;
 
   const [{ rows }, report] = await Promise.all([
     query<{ projects_at_risk: string; late_tasks: string; late_phases: string }>(
@@ -2302,7 +2962,7 @@ export async function getAecWorkspaceRollup(businessId: string): Promise<AecWork
              AND ph.status NOT IN ('done', 'skipped') AND ph.end_date < CURRENT_DATE) AS late_phases`,
       [businessId],
     ),
-    projectReport(businessId),
+    projectReport(owner),
   ]);
 
   const row = rows[0];
@@ -2310,23 +2970,30 @@ export async function getAecWorkspaceRollup(businessId: string): Promise<AecWork
     projectsAtRisk: Number(row?.projects_at_risk ?? 0),
     lateMilestoneCount: Number(row?.late_tasks ?? 0) + Number(row?.late_phases ?? 0),
     budgetRial: report.reduce((sum, project) => sum + (project.budgetRial ?? 0), 0),
-    spentRial: report.reduce((sum, project) => sum + project.spentRial, 0),
+    spentRial:
+      owner.access?.canViewFinancials === true
+        ? report.reduce((sum, project) => sum + (project.spentRial ?? 0), 0)
+        : null,
     contractValueRial: report.reduce((sum, project) => sum + project.contractValueRial, 0),
     overBudgetProjectCount: report.filter(
-      (project) => project.budgetRial !== null && project.budgetRial > 0 && project.spentRial > project.budgetRial,
+      (project) =>
+        project.budgetRial !== null &&
+        project.budgetRial > 0 &&
+        project.spentRial !== null &&
+        project.spentRial > project.budgetRial,
     ).length,
   };
 }
 
 /**
- * The «نمای کلی» screen in one round trip's worth of parallel reads. The four
- * headline numbers are the brief's — active projects, tasks today, pending
- * approvals, upcoming deadlines — and each is computed from the rows that own
- * the fact rather than from a counter that could drift.
+ * The «نمای کلی» screen in one round trip's worth of parallel reads. Every
+ * counter is scoped by the same visibility rule as the list it summarises,
+ * so a headline can never count a project the member cannot open; and
+ * "today" is Tehran's calendar day passed in, never the database's UTC
+ * `CURRENT_DATE`.
  */
 export async function getWorkspaceDashboard(
-  businessId: string,
-  userId: string,
+  owner: WorkspaceOwner,
   options: { horizonDays?: number } = {},
 ): Promise<WorkspaceDashboard> {
   const horizon = options.horizonDays ?? 14;
@@ -2338,6 +3005,14 @@ export async function getWorkspaceDashboard(
   const today = isoDateInTimeZone(now) ?? postgresDateToIso(now);
   const horizonDate = new Date(now.getTime() + horizon * 86_400_000);
   const until = isoDateInTimeZone(horizonDate) ?? postgresDateToIso(horizonDate);
+  const in30 = addDays(today, 30);
+
+  const projects = visibilityClause(owner, "p.id", [], "$2");
+  const tasks = visibilityClause(owner, "t.project_id", [], "$2");
+  const contracts = visibilityClause(
+    owner, "c.project_id", ["c.created_by"], "$2",
+    owner.access?.canManageContracts ? "TRUE" : undefined,
+  );
 
   const [counts, myTasks, deadlines, approvals, activity] = await Promise.all([
     query<{
@@ -2346,28 +3021,36 @@ export async function getWorkspaceDashboard(
       expiring_contracts: string;
     }>(
       `SELECT
-         (SELECT count(*) FROM ai_projects
-           WHERE business_id = $1 AND archived_at IS NULL AND status = 'active') AS active_projects,
+         (SELECT count(*) FROM ai_projects p
+           WHERE p.business_id = $1 AND p.archived_at IS NULL AND p.status = 'active'
+             AND ${projects}) AS active_projects,
          (SELECT count(*) FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
-           WHERE p.business_id = $1 AND t.status <> 'done' AND t.due_date = CURRENT_DATE) AS tasks_today,
+           WHERE p.business_id = $1 AND t.status <> 'done' AND t.due_date = $3::date
+             AND ${tasks}) AS tasks_today,
          (SELECT count(*) FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
-           WHERE p.business_id = $1 AND t.status <> 'done' AND t.assignee_user_id = $2) AS my_open_tasks,
-         (SELECT count(*) FROM workspace_approvals
-           WHERE business_id = $1 AND status = 'pending') AS pending_approvals,
+           WHERE p.business_id = $1 AND t.status <> 'done' AND t.assignee_user_id = $2::uuid
+             AND ${tasks}) AS my_open_tasks,
+         (SELECT count(*) FROM workspace_approvals a
+           WHERE a.business_id = $1 AND a.status = 'pending'
+             AND (a.approver_user_id = $2::uuid OR a.approver_user_id IS NULL)
+             AND a.requested_by IS DISTINCT FROM $2::uuid
+             AND (${visibilityClause(owner, "a.project_id", ["a.requested_by"], "$2")}
+                  OR a.approver_user_id = $2::uuid)) AS pending_approvals,
          (SELECT count(*) FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
            WHERE p.business_id = $1 AND t.status <> 'done'
-             AND t.due_date BETWEEN CURRENT_DATE AND $3::date) AS upcoming_deadlines,
+             AND t.due_date BETWEEN $3::date AND $4::date AND ${tasks}) AS upcoming_deadlines,
          (SELECT count(*) FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
-           WHERE p.business_id = $1 AND t.status <> 'done' AND t.due_date < CURRENT_DATE) AS overdue_tasks,
-         (SELECT count(*) FROM workspace_contracts
-           WHERE business_id = $1 AND status NOT IN ('terminated', 'completed')
-             AND end_date BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '30 days')) AS expiring_contracts`,
-      [businessId, userId, until],
+           WHERE p.business_id = $1 AND t.status <> 'done' AND t.due_date < $3::date
+             AND ${tasks}) AS overdue_tasks,
+         (SELECT count(*) FROM workspace_contracts c
+           WHERE c.business_id = $1 AND c.status NOT IN ('terminated', 'completed')
+             AND c.end_date BETWEEN $3::date AND $5::date AND ${contracts}) AS expiring_contracts`,
+      [owner.businessId, owner.actorUserId, today, until, in30],
     ),
-    listWorkspaceTasks(businessId, { assigneeUserId: userId, status: "open_only", limit: 10 }),
-    listCalendar(businessId, { from: today, to: until }),
-    listApprovals(businessId, { status: "pending", approverUserId: userId, limit: 8 }),
-    listActivity(businessId, { limit: 12 }),
+    listWorkspaceTasks(owner, { assigneeUserId: owner.actorUserId, status: "open_only", limit: 10 }),
+    listCalendar(owner, { from: today, to: until }),
+    listApprovals(owner, { status: "pending", awaitingActor: true, limit: 8 }),
+    listActivity(owner, { limit: 12 }),
   ]);
 
   const row = counts.rows[0];
@@ -2385,7 +3068,7 @@ export async function getWorkspaceDashboard(
     activity,
   };
   // Issue #799 §3 — the construction roll-up, absent for every other trade.
-  const aec = await getAecWorkspaceRollup(businessId);
+  const aec = await getAecWorkspaceRollup(owner);
   return aec ? { ...dashboard, aec } : dashboard;
 }
 
@@ -2403,8 +3086,11 @@ export interface ProjectReportRow {
   startDate: string | null;
   endDate: string | null;
   budgetRial: number | null;
-  /** Posted cost from the ledger — the accounting integration's own number. */
-  spentRial: number;
+  /**
+   * Posted cost from the ledger — the accounting integration's own number.
+   * Null when the actor may not read the ledger (`ledger.view`).
+   */
+  spentRial: number | null;
   contractValueRial: number;
   taskCount: number;
   doneTaskCount: number;
@@ -2413,32 +3099,45 @@ export interface ProjectReportRow {
 }
 
 /**
- * The profitability/health report. `spent_rial` comes from `journal_lines`
- * through `journal_entries.project_id` — the cost-centre dimension Phase 37
- * added — so the workspace never keeps its own copy of a figure the books own.
+ * The profitability/health report over the projects the actor can see.
+ * `spent_rial` comes from `journal_lines` through `journal_entries.project_id`
+ * — the cost-centre dimension Phase 37 added — so the workspace never keeps
+ * its own copy of a figure the books own; and it is only computed for a
+ * member who may read the books.
  */
-export async function projectReport(businessId: string): Promise<ProjectReportRow[]> {
+export async function projectReport(
+  owner: WorkspaceOwner,
+  options: { projectId?: string } = {},
+): Promise<ProjectReportRow[]> {
+  const financials = owner.access?.canViewFinancials === true;
+  const today = todayIsoDate();
+  const params: unknown[] = [owner.businessId, owner.actorUserId, today];
+  if (options.projectId) params.push(options.projectId);
   const { rows } = await query<Record<string, string | null>>(
     `SELECT p.id AS project_id, p.name, p.status, p.priority,
             party.name AS party_name, u.full_name AS owner_name,
             p.start_date, p.end_date, p.budget_rial,
-            COALESCE((SELECT sum(jl.debit) FROM journal_lines jl
-                        JOIN journal_entries je ON je.id = jl.entry_id
-                       WHERE je.project_id = p.id AND je.business_id = p.business_id), 0) AS spent_rial,
+            ${financials
+              ? `COALESCE((SELECT sum(jl.debit) FROM journal_lines jl
+                            JOIN journal_entries je ON je.id = jl.entry_id
+                           WHERE je.project_id = p.id AND je.business_id = p.business_id), 0)`
+              : "NULL"} AS spent_rial,
             COALESCE((SELECT sum(c.value_rial) FROM workspace_contracts c
                        WHERE c.project_id = p.id AND c.status IN ('active', 'completed')), 0) AS contract_value_rial,
             (SELECT count(*) FROM ai_project_tasks t WHERE t.project_id = p.id) AS task_count,
             (SELECT count(*) FROM ai_project_tasks t WHERE t.project_id = p.id AND t.status = 'done') AS done_task_count,
             (SELECT count(*) FROM ai_project_tasks t
-              WHERE t.project_id = p.id AND t.status <> 'done' AND t.due_date < CURRENT_DATE) AS overdue_task_count,
+              WHERE t.project_id = p.id AND t.status <> 'done' AND t.due_date < $3::date) AS overdue_task_count,
             (SELECT count(*) FROM workspace_approvals a
               WHERE a.project_id = p.id AND a.status = 'pending') AS open_approvals
        FROM ai_projects p
        LEFT JOIN parties party ON party.id = p.party_id
        LEFT JOIN users u ON u.id = p.owner_user_id
       WHERE p.business_id = $1 AND p.archived_at IS NULL
+        AND ${visibilityClause(owner, "p.id", [], "$2")}
+        ${options.projectId ? "AND p.id = $4" : ""}
       ORDER BY p.created_at DESC`,
-    [businessId],
+    params,
   );
   return rows.map((r) => ({
     projectId: String(r.project_id),
@@ -2450,11 +3149,263 @@ export async function projectReport(businessId: string): Promise<ProjectReportRo
     startDate: isoDate(r.start_date),
     endDate: isoDate(r.end_date),
     budgetRial: r.budget_rial === null ? null : Number(r.budget_rial),
-    spentRial: Number(r.spent_rial ?? 0),
+    spentRial: r.spent_rial === null ? null : Number(r.spent_rial),
     contractValueRial: Number(r.contract_value_rial ?? 0),
     taskCount: Number(r.task_count ?? 0),
     doneTaskCount: Number(r.done_task_count ?? 0),
     overdueTaskCount: Number(r.overdue_task_count ?? 0),
     openApprovals: Number(r.open_approvals ?? 0),
   }));
+}
+
+/* ===========================================================================
+ * Pages & summaries — server totals for paginated lists (#761)
+ * ======================================================================== */
+
+/**
+ * The block every paginated list returns beside its rows: how many rows match
+ * the filter in total (not how many were loaded), and aggregates over that
+ * whole filtered set. A KPI computed from a loaded page is a number that is
+ * silently wrong for any list longer than one page.
+ */
+export interface WorkspaceListPage {
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+}
+
+async function summarize<K extends string>(
+  from: string,
+  where: { clause: string; params: unknown[] },
+  aggregates: Record<K, string>,
+): Promise<{ total: number } & Record<K, number>> {
+  const keys = Object.keys(aggregates) as K[];
+  const select = keys.map((key) => `(${aggregates[key]}) AS "${key}"`);
+  const { rows } = await query<Record<string, string | null>>(
+    `SELECT count(*) AS total${select.length ? `, ${select.join(", ")}` : ""} ${from}
+      WHERE ${where.clause}`,
+    where.params,
+  );
+  const row = rows[0] ?? {};
+  const out = { total: Number(row.total ?? 0) } as { total: number } & Record<K, number>;
+  for (const key of keys) (out as Record<string, number>)[key] = Number(row[key] ?? 0);
+  return out;
+}
+
+function pageOf(total: number, filter: { offset?: number; limit?: number }, limit: number): WorkspaceListPage {
+  const offset = pageOffset(filter.offset);
+  return { total, offset, limit, hasMore: offset + limit < total };
+}
+
+/** Today as a SQL literal. `todayIsoDate()` only ever yields YYYY-MM-DD. */
+function todayLiteral(): string {
+  const today = todayIsoDate();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(today)) throw new Error("bad today");
+  return `'${today}'::date`;
+}
+
+const clampLimit = (value: number | undefined, fallback: number, max: number) =>
+  Math.min(Math.max(value ?? fallback, 1), max);
+
+export async function projectListPage(owner: WorkspaceOwner, filter: ProjectListFilter = {}) {
+  const s = await summarize("FROM ai_projects p", projectWhere(owner, filter), {
+    active: "count(*) FILTER (WHERE p.status = 'active')",
+    planning: "count(*) FILTER (WHERE p.status = 'planning')",
+    completed: "count(*) FILTER (WHERE p.status = 'completed')",
+    budgetRial: "COALESCE(sum(p.budget_rial), 0)",
+    tasks: "COALESCE(sum((SELECT count(*) FROM ai_project_tasks t WHERE t.project_id = p.id)), 0)",
+  });
+  return { page: pageOf(s.total, filter, clampLimit(filter.limit, 100, 200)), summary: s };
+}
+
+export async function taskListPage(owner: WorkspaceOwner, filter: TaskListFilter = {}) {
+  const s = await summarize(
+    "FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id",
+    taskWhere(owner, filter),
+    {
+      open: "count(*) FILTER (WHERE t.status = 'open')",
+      in_progress: "count(*) FILTER (WHERE t.status = 'in_progress')",
+      blocked: "count(*) FILTER (WHERE t.status = 'blocked')",
+      done: "count(*) FILTER (WHERE t.status = 'done')",
+      overdue: `count(*) FILTER (WHERE t.status <> 'done' AND t.due_date < ${todayLiteral()})`,
+    },
+  );
+  return { page: pageOf(s.total, filter, clampLimit(filter.limit, 200, 500)), summary: s };
+}
+
+export async function contractListPage(owner: WorkspaceOwner, filter: ContractListFilter = {}) {
+  const s = await summarize("FROM workspace_contracts c", contractWhere(owner, filter), {
+    active: "count(*) FILTER (WHERE c.status = 'active')",
+    pending: "count(*) FILTER (WHERE c.status = 'pending_approval')",
+    valueRial: "COALESCE(sum(c.value_rial), 0)",
+    expiringSoon: `count(*) FILTER (WHERE c.status NOT IN ('terminated', 'completed')
+                     AND c.end_date BETWEEN ${todayLiteral()} AND ${todayLiteral()} + 30)`,
+  });
+  return { page: pageOf(s.total, filter, clampLimit(filter.limit, 100, 300)), summary: s };
+}
+
+export async function documentListPage(owner: WorkspaceOwner, filter: DocumentListFilter = {}) {
+  const s = await summarize("FROM workspace_documents d", documentWhere(owner, filter), {
+    approved: "count(*) FILTER (WHERE d.status = 'approved')",
+    in_review: "count(*) FILTER (WHERE d.status = 'in_review')",
+    draft: "count(*) FILTER (WHERE d.status = 'draft')",
+  });
+  return { page: pageOf(s.total, filter, clampLimit(filter.limit, 100, 300)), summary: s };
+}
+
+export async function approvalListPage(owner: WorkspaceOwner, filter: ApprovalListFilter = {}) {
+  const s = await summarize("FROM workspace_approvals a", approvalWhere(owner, filter), {
+    pending: "count(*) FILTER (WHERE a.status = 'pending')",
+    approved: "count(*) FILTER (WHERE a.status = 'approved')",
+    overdue: `count(*) FILTER (WHERE a.status = 'pending' AND a.due_date < ${todayLiteral()})`,
+  });
+  return { page: pageOf(s.total, filter, clampLimit(filter.limit, 100, 300)), summary: s };
+}
+
+/* ===========================================================================
+ * Insights (#761 §15) — the reports page as answers to questions
+ * ======================================================================== */
+
+export interface WorkspaceInsights {
+  atRisk: Array<{
+    projectId: string; name: string; health: ProjectHealth; reasons: ProjectHealthReason[];
+    progressPercent: number; elapsedPercent: number | null;
+  }>;
+  /** Null when the actor may not read the ledger — overspend is a ledger fact. */
+  overspending: Array<{ projectId: string; name: string; budgetRial: number; spentRial: number }> | null;
+  slipping: Array<{ taskId: string; title: string; projectId: string; projectName: string; dueDate: string; daysLate: number }>;
+  overloaded: Array<{ userId: string; fullName: string; openTasks: number; overdueTasks: number }>;
+  contracts: Array<{
+    contractId: string; title: string; projectName: string | null; endDate: string;
+    state: "expiring" | "lapsed";
+  }>;
+  bottlenecks: Array<{
+    approvalId: string; title: string; projectName: string | null; approverName: string | null; ageDays: number;
+  }>;
+}
+
+/**
+ * Every question answered over the projects the actor can see — the same
+ * `visibilityClause` as the lists — and every answer names the records it
+ * came from, so the page drills down instead of asserting a number.
+ */
+export async function workspaceInsights(owner: WorkspaceOwner): Promise<WorkspaceInsights> {
+  const today = todayIsoDate();
+  const tasks = visibilityClause(owner, "t.project_id", [], "$2");
+  const contractsVis = visibilityClause(
+    owner, "c.project_id", ["c.created_by"], "$2",
+    owner.access?.canManageContracts ? "TRUE" : undefined,
+  );
+  const approvalsVis = `(${visibilityClause(owner, "a.project_id", ["a.requested_by"], "$2")}
+      OR a.approver_user_id = $2::uuid OR a.requested_by = $2::uuid)`;
+
+  const [report, slipping, overloaded, contracts, bottlenecks] = await Promise.all([
+    projectReport(owner),
+    query<{ id: string; title: string; project_id: string; project_name: string; due_date: string }>(
+      `SELECT t.id, t.title, t.project_id, p.name AS project_name, t.due_date::text AS due_date
+         FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
+        WHERE p.business_id = $1 AND ${tasks} AND p.archived_at IS NULL
+          AND t.status <> 'done' AND t.due_date < $3::date
+        ORDER BY t.due_date, t.id LIMIT 10`,
+      [owner.businessId, owner.actorUserId, today],
+    ),
+    query<{ user_id: string; full_name: string | null; open_tasks: string; overdue_tasks: string }>(
+      `SELECT t.assignee_user_id AS user_id, u.full_name,
+              count(*) AS open_tasks,
+              count(*) FILTER (WHERE t.due_date < $3::date) AS overdue_tasks
+         FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
+         LEFT JOIN users u ON u.id = t.assignee_user_id
+        WHERE p.business_id = $1 AND ${tasks} AND p.archived_at IS NULL
+          AND t.status <> 'done' AND t.assignee_user_id IS NOT NULL
+        GROUP BY t.assignee_user_id, u.full_name
+        ORDER BY count(*) FILTER (WHERE t.due_date < $3::date) DESC, count(*) DESC
+        LIMIT 10`,
+      [owner.businessId, owner.actorUserId, today],
+    ),
+    query<{ id: string; title: string; project_name: string | null; end_date: string }>(
+      `SELECT c.id, c.title, p.name AS project_name, c.end_date::text AS end_date
+         FROM workspace_contracts c LEFT JOIN ai_projects p ON p.id = c.project_id
+        WHERE c.business_id = $1 AND ${contractsVis}
+          AND c.status IN ('active', 'pending_approval')
+          AND c.end_date IS NOT NULL AND c.end_date <= $3::date + 30
+        ORDER BY c.end_date, c.id LIMIT 10`,
+      [owner.businessId, owner.actorUserId, today],
+    ),
+    query<{ id: string; title: string; project_name: string | null; approver_name: string | null; age_days: string }>(
+      `SELECT a.id, COALESCE(NULLIF(a.title, ''), 'تأیید') AS title, p.name AS project_name,
+              au.full_name AS approver_name,
+              ($3::date - a.created_at::date) AS age_days
+         FROM workspace_approvals a
+         LEFT JOIN ai_projects p ON p.id = a.project_id
+         LEFT JOIN users au ON au.id = a.approver_user_id
+        WHERE a.business_id = $1 AND ${approvalsVis} AND a.status = 'pending'
+        ORDER BY a.created_at, a.id LIMIT 10`,
+      [owner.businessId, owner.actorUserId, today],
+    ),
+  ]);
+
+  const atRisk = report
+    .map((row) => {
+      const health = projectHealth({
+        today,
+        startDate: row.startDate,
+        endDate: row.endDate,
+        completed: row.status === "completed",
+        taskCount: row.taskCount,
+        doneTaskCount: row.doneTaskCount,
+        overdueTaskCount: row.overdueTaskCount,
+        budgetRial: row.budgetRial,
+        spentRial: row.spentRial,
+        pendingApprovals: row.openApprovals,
+        expiringContracts: 0,
+      });
+      return { projectId: row.projectId, name: row.name, ...health };
+    })
+    .filter((item) => item.health !== "on_track")
+    .sort((a, b) =>
+      a.health === b.health ? b.reasons.length - a.reasons.length : a.health === "off_track" ? -1 : 1,
+    );
+
+  return {
+    atRisk,
+    overspending: owner.access?.canViewFinancials
+      ? report
+          .filter((row) => row.budgetRial !== null && row.spentRial !== null && row.spentRial > row.budgetRial)
+          .map((row) => ({
+            projectId: row.projectId,
+            name: row.name,
+            budgetRial: row.budgetRial as number,
+            spentRial: row.spentRial as number,
+          }))
+          .sort((a, b) => b.spentRial - b.budgetRial - (a.spentRial - a.budgetRial))
+      : null,
+    slipping: slipping.rows.map((r) => {
+      const due = isoDate(r.due_date) ?? r.due_date;
+      return {
+        taskId: r.id, title: r.title, projectId: r.project_id, projectName: r.project_name,
+        dueDate: due, daysLate: -daysUntil(due, today),
+      };
+    }),
+    overloaded: overloaded.rows.map((r) => ({
+      userId: r.user_id,
+      fullName: r.full_name ?? "—",
+      openTasks: Number(r.open_tasks),
+      overdueTasks: Number(r.overdue_tasks),
+    })),
+    contracts: contracts.rows.map((r) => {
+      const end = isoDate(r.end_date) ?? r.end_date;
+      return {
+        contractId: r.id, title: r.title, projectName: r.project_name, endDate: end,
+        state: end < today ? ("lapsed" as const) : ("expiring" as const),
+      };
+    }),
+    bottlenecks: bottlenecks.rows.map((r) => ({
+      approvalId: r.id,
+      title: r.title,
+      projectName: r.project_name,
+      approverName: r.approver_name,
+      ageDays: Number(r.age_days),
+    })),
+  };
 }

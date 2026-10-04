@@ -61,6 +61,7 @@ import { AecError, assertAecIndustry, loadBusinessAecProfile } from "./aec-servi
 import { assertDocumentControlEnabled } from "./aec-doc-service";
 import { businessToday } from "./business-day-service";
 import { query, withTenantTransaction } from "./db";
+import type { WorkspaceApprovalDecision } from "./workspace-shared";
 import { recordActivity, type WorkspaceOwner } from "./workspace";
 import {
   loadLinkedDocuments,
@@ -1557,7 +1558,7 @@ export async function closeSubmittalRevision(
 export async function decideSubmittalApproval(
   owner: WorkspaceOwner,
   approvalId: string,
-  decision: "approved" | "rejected" | "cancelled",
+  decision: WorkspaceApprovalDecision,
   note = "",
 ): Promise<{ revisionId: string | null; applied: boolean }> {
   await assertAecIndustry(owner.businessId);
@@ -1586,10 +1587,12 @@ export async function decideSubmittalApproval(
     return { revisionId: approval.subject_id, applied: true };
   }
 
-  // The queue's two decisions are the two the four outcomes contain verbatim:
-  // "revise and resubmit" and "approved with comments" need the note they were
-  // accompanied by, and the queue's comment box cannot say which of the two was
-  // meant, so the submittal screen is where those are chosen.
+  // The queue's decisions are the ones its wording can express: "approved" and
+  // "not approved". "revise and resubmit" and "approved with comments" need the
+  // note they were accompanied by and the queue's comment box cannot say which
+  // of the two was meant, so the submittal screen is where those are chosen —
+  // both here and there the revision's own status is the projection of the
+  // decision, and the approval row keeps the queue's exact word.
   const mapped: SubmittalDecision = decision === "approved" ? "approved" : "rejected";
   await decideSubmittalRevision(owner, approval.subject_id, mapped, note);
   await query(

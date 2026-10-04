@@ -23,7 +23,7 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await drawingProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "view", true);
+      await requireProjectCapability(owner, projectId, "view");
       return NextResponse.json({ drawing: await loadDrawing(owner.businessId, id) });
     } catch (err) {
       return handleAecError(err);
@@ -38,7 +38,7 @@ export const PATCH = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await drawingProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       const drawing = await updateDrawing(owner, id, await readBody(request));
       return NextResponse.json({ drawing });
     } catch (err) {
@@ -54,7 +54,7 @@ export const DELETE = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await drawingProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       await deleteDrawing(owner, id);
       return NextResponse.json({ ok: true });
     } catch (err) {

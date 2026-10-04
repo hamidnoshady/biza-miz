@@ -135,15 +135,21 @@ export function aecCockpitSections(
  * The project page's tab bar
  * ------------------------------------------------------------------------- */
 
-/** The tabs the workspace project page has today, for every industry. */
+/**
+ * The tabs the workspace project page has today, for every industry — #761's
+ * Project Cockpit: seven tabs organised around how a project is run, not one
+ * tab per table.
+ *
+ * This list is the *generic* bar. `aecProjectTabs` composes the AEC one from
+ * it, so the two can never disagree about what a tab is called.
+ */
 export const WORKSPACE_PROJECT_TABS = [
-  { key: "record", label: "پرونده" },
-  { key: "tasks", label: "وظایف" },
-  { key: "documents", label: "اسناد" },
-  { key: "contracts", label: "قراردادها" },
+  { key: "overview", label: "نمای کلی" },
+  { key: "work", label: "کار" },
+  { key: "files", label: "اسناد" },
+  { key: "finance", label: "مالی" },
   { key: "team", label: "تیم" },
-  { key: "approvals", label: "تأییدها" },
-  { key: "calendar", label: "تقویم" },
+  { key: "activity", label: "رویدادها" },
   { key: "assistant", label: "دستیار" },
 ] as const;
 
@@ -155,38 +161,66 @@ export interface ProjectTab {
 }
 
 /**
- * How a cockpit section maps onto a tab the page already has. `null` means the
- * section has no surface of its own yet (its content lives inside another tab,
- * or a later wave brings it) — so a shipped section never has to invent a tab
- * to be declared.
+ * How a cockpit section maps onto a tab the generic bar already has. `null`
+ * means the section renders *inside* another tab rather than owning one — the
+ * page's own summary, §21's project identity card, the phases, the contracts
+ * register (which shares «مالی» with the budget card), the approval queue
+ * (which shares «رویدادها» with the activity feed) and #761's calendar (which
+ * was merged into «کار»). A shipped section never has to invent a tab to be
+ * declared, and a later wave changes one line here rather than the bar.
+ *
+ * Exported because the coverage test in `aec-cockpit.test.ts` asserts every
+ * shipped section is placed — either by owning a tab or by naming the tab it
+ * lives in — and a private map would make that assertion a restatement.
  */
-const TAB_FOR_SECTION: Partial<Record<AecCockpitSectionKey, WorkspaceProjectTabKey | null>> = {
-  overview: null, // the page IS the project; its summary sits at the top of «پرونده»
-  schedule: null, // phases are edited inside «پرونده»
-  profile: "record",
-  participants: null, // its own tab, before «تیم» — see aecProjectTabs
-  boq: null, // its own tab, between the documents and the contracts
-  rfis: null, // its own tab, with the submittals — see aecProjectTabs
+export const TAB_FOR_SECTION: Record<AecCockpitSectionKey, WorkspaceProjectTabKey | null> = {
+  overview: null, // the page IS the project; its summary is the KPI row above the bar
+  profile: null, // the identity card sits at the top of «نمای کلی»
+  schedule: null, // phases are edited inside «نمای کلی»
+  participants: null, // its own tab, immediately before «تیم» — see aecProjectTabs
+  boq: null, // its own tab, between «اسناد» and «مالی»
+  rfis: null, // its own tab, before «تیم», with the submittals
   submittals: null,
   site: null, // its own tab, after the submittals — see aecProjectTabs
   inspections: null,
-  tasks: "tasks",
-  documents: "documents",
-  contracts: "contracts",
-  approvals: "approvals",
-  calendar: "calendar",
+  tasks: "work",
+  documents: "files",
+  contracts: null, // the register renders inside «مالی», above the budget card
+  approvals: null, // the queue renders inside «رویدادها», above the feed
+  calendar: null, // #761 merged the calendar into «کار»
+  team: "team",
   assistant: "assistant",
+  procurement: null, // unshipped (Wave 9); the wave that ships it places it
+  changes: null, // unshipped (Wave 8)
+  payments: null, // unshipped (Wave 8)
+  financials: null, // unshipped (Wave 8)
 };
 
 /**
- * The AEC tab bar: the labels the tabs take on for this industry, plus the AEC
- * tabs that do not exist for anyone else.
+ * The one generic tab an AEC section renames: «اسناد» becomes §9's «نقشه‌ها و
+ * اسناد» when the business has the drawing register, because that is what the
+ * tab then contains.
  *
- * The set is derived, not restated — a section this business lacks collapses
- * its tab back to the generic label, and a tab that only AEC has (`participants`
- * — nothing else in the product has external project parties) appears only when
- * its capability is on. A non-AEC caller passes `null` and gets exactly today's
- * tab bar, which is what keeps this change invisible to every other industry.
+ * Every other generic tab keeps #761's name. A section that renders *inside* a
+ * tab does not get to rename it («کار» holds the tasks and the calendar,
+ * «مالی» the budget card and the contracts, «رویدادها» the queue and the feed),
+ * and renaming a tab to match one of the things inside it would promise a
+ * screen the tab is not.
+ */
+const TAB_RENAMED_BY: Partial<Record<WorkspaceProjectTabKey, AecCockpitSectionKey>> = {
+  files: "documents",
+};
+
+/**
+ * The AEC tab bar: the tabs the page already has, with the sections this
+ * business's capabilities add, placed where §21 puts them.
+ *
+ * An AEC-only tab (parties, the BOQ, §10–§14's registers) appears only when its
+ * capability is on: an individual architect never gets ten greyed-out tabs, and
+ * a business that does not estimate never grows a «متره و برآورد».
+ *
+ * A non-AEC caller passes `null` and gets exactly today's bar, which is what
+ * keeps this file invisible to the other nine industries.
  */
 export function aecProjectTabs(
   aec: { capabilities: readonly AecCapabilityKey[] } | null,
@@ -194,53 +228,39 @@ export function aecProjectTabs(
   if (!aec) return WORKSPACE_PROJECT_TABS.map((tab) => ({ ...tab }));
 
   const sections = aecCockpitSections(aec.capabilities);
+  const labelOf = new Map(sections.map((section) => [section.key, section.label]));
   const labelFor = new Map<WorkspaceProjectTabKey, string>();
-  for (const section of sections) {
-    const tab = TAB_FOR_SECTION[section.key];
-    if (tab) labelFor.set(tab, section.label);
+  for (const tab of Object.keys(TAB_RENAMED_BY) as WorkspaceProjectTabKey[]) {
+    const sectionKey = TAB_RENAMED_BY[tab];
+    const label = sectionKey ? labelOf.get(sectionKey) : undefined;
+    // The rename only happens when the section is actually there: without the
+    // register, «اسناد» keeps the plain name rather than promising drawings it
+    // cannot show.
+    if (label) labelFor.set(tab, label);
   }
-  // The two shipped sections with no counterpart in the generic tab bar: this
-  // industry alone has external project parties and priced work. Both are
-  // capability-gated above, so an office that does not estimate never grows the
-  // second one.
-  const participantsSection = sections.find((section) => section.key === "participants");
-  const boqSection = sections.find((section) => section.key === "boq");
-  const rfisSection = sections.find((section) => section.key === "rfis");
-  const submittalsSection = sections.find((section) => section.key === "submittals");
-  const siteSection = sections.find((section) => section.key === "site");
-  const inspectionsSection = sections.find((section) => section.key === "inspections");
+
+  const owns = (key: AecCockpitSectionKey) => sections.some((section) => section.key === key);
+  // The shipped sections with no counterpart in the generic bar. Each is
+  // capability-gated by `aecCockpitSections` above, so the bar only grows for a
+  // business that actually has the thing.
+  const aecOnly = (key: AecCockpitSectionKey): ProjectTab | null =>
+    owns(key) ? { key, label: labelOf.get(key) ?? key } : null;
+  const insertBeforeTeam = (["participants", "rfis", "submittals", "site", "inspections"] as const)
+    .map(aecOnly)
+    .filter((tab): tab is ProjectTab => tab !== null);
 
   const tabs: ProjectTab[] = [];
   for (const tab of WORKSPACE_PROJECT_TABS) {
-    // The project's parties belong immediately before its team — they are the
-    // same question ("who is on this?") asked of the outside world.
-    if (tab.key === "team" && participantsSection) {
-      tabs.push({ key: "participants", label: participantsSection.label });
+    // §21's order for the priced work: what is being built, what it costs, then
+    // who is bound — the BOQ tab sits between «اسناد» and «مالی».
+    if (tab.key === "finance") {
+      const boq = aecOnly("boq");
+      if (boq) tabs.push(boq);
     }
-    // The two registers of §10 and §11 sit between the contracts and the team:
-    // what is being built, what it costs and who is bound come first, then what
-    // is still being asked and what is still being submitted — which is also
-    // the order the project manager works through their morning in.
-    if (tab.key === "team" && rfisSection) {
-      tabs.push({ key: "rfis", label: rfisSection.label });
-    }
-    if (tab.key === "team" && submittalsSection) {
-      tabs.push({ key: "submittals", label: submittalsSection.label });
-    }
-    // §21 puts the site and the quality register after the document registers
-    // and before the team: what was asked and sent, then what is happening on
-    // the ground and what failed inspection — before the "who is on it" tabs.
-    if (tab.key === "team" && siteSection) {
-      tabs.push({ key: "site", label: siteSection.label });
-    }
-    if (tab.key === "team" && inspectionsSection) {
-      tabs.push({ key: "inspections", label: inspectionsSection.label });
-    }
-    // And the priced work sits where §21 puts it: after the documents, before
-    // the contracts — what is being built, what it costs, then who is bound.
-    if (tab.key === "contracts" && boqSection) {
-      tabs.push({ key: "boq", label: boqSection.label });
-    }
+    // And the registers §21 puts after the documents and the money and before
+    // the team: what was asked and sent, then what is happening on the ground
+    // and what failed inspection, before the "who is on it" tabs.
+    if (tab.key === "team") tabs.push(...insertBeforeTeam);
     tabs.push({ key: tab.key, label: labelFor.get(tab.key) ?? tab.label });
   }
   return tabs;

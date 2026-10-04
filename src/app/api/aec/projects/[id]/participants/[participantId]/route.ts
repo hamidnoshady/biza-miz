@@ -23,7 +23,7 @@ export const PATCH = withTenantScope(
     const { id, participantId } = await context.params;
     const body = await readBody(request);
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       return NextResponse.json({
         participants: await updateProjectParticipant(owner, id, participantId, body),
       });
@@ -39,7 +39,7 @@ export const DELETE = withTenantScope(
     if (error) return error;
     const { id, participantId } = await context.params;
     try {
-      await requireProjectCapability(owner, id, "manage", true);
+      await requireProjectCapability(owner, id, "manage");
       return NextResponse.json({
         participants: await removeProjectParticipant(owner, id, participantId),
       });

@@ -46,7 +46,7 @@ export const POST = withTenantScope(
 
     try {
       const { projectId } = await versionContextProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, action === "submit" ? "manage" : "view", true);
+      await requireProjectCapability(owner, projectId, action === "submit" ? "manage" : "view");
       const note = String(body.note ?? "");
       if (action === "submit") {
         const version = await submitEstimateVersion(owner, id, body);

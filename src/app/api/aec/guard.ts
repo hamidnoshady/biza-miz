@@ -180,8 +180,9 @@ const ERROR_STATUS: Record<string, number> = {
  *
  * Every AEC project route sits on top of the workspace module's per-project
  * authorization (`requireProjectCapability`), which refuses with its own
- * `WorkspaceError` — `not_a_project_member` and `insufficient_project_role`
- * are 403s, `project_not_found` a 404. Those codes are not AEC codes, so an
+ * `WorkspaceError` — `insufficient_project_role` is a 403 and
+ * `project_not_found` a 404 (#761 answers a non-member with the same 404, so
+ * project existence is not disclosed). Those codes are not AEC codes, so an
  * AEC-only map would fall through to the `throw` and answer a plain refusal
  * with a 500; the workspace map owns them and is asked here.
  */

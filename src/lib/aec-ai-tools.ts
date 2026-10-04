@@ -47,6 +47,7 @@ import { SITE_ISSUE_STATUS_LABELS, type SiteIssueStatus } from "./aec-site";
 import { businessToday } from "./business-day-service";
 import { formatJalali } from "./jalali";
 import { daysUntil } from "./workspace-shared";
+import type { WorkspaceOwner } from "./workspace";
 import {
   getWorkspaceProject,
   listPhases,
@@ -76,7 +77,7 @@ export interface AecToolResult {
  * list is what the model is told to ask the user about.
  */
 async function resolveProject(
-  businessId: string,
+  owner: WorkspaceOwner,
   args: Record<string, unknown>,
 ): Promise<
   | { kind: "found"; projectId: string }
@@ -85,13 +86,13 @@ async function resolveProject(
 > {
   const id = typeof args.projectId === "string" && args.projectId.trim() ? args.projectId.trim() : null;
   if (id) {
-    const project = await getWorkspaceProject(businessId, id);
+    const project = await getWorkspaceProject(owner.businessId, id);
     return project ? { kind: "found", projectId: project.id } : { kind: "none" };
   }
   const name = typeof args.projectName === "string" ? args.projectName.trim() : "";
   if (!name) return { kind: "none" };
 
-  const matches = await listWorkspaceProjects(businessId, { search: name, status: "all" });
+  const matches = await listWorkspaceProjects(owner, { search: name, status: "all" });
   if (matches.length === 0) return { kind: "none" };
   if (matches.length === 1) return { kind: "found", projectId: matches[0].id };
   const exact = matches.filter((project) => project.name.trim() === name);
@@ -137,13 +138,14 @@ function describeAecProfile(profile: AecProjectProfile | null): Record<string, u
 async function runTool(
   name: AecAiToolName,
   args: Record<string, unknown>,
-  businessId: string,
+  owner: WorkspaceOwner,
 ): Promise<AecToolResult> {
+  const businessId = owner.businessId;
   const today = await businessToday(businessId);
 
   switch (name) {
     case "get_aec_project_financial_health": {
-      const resolved = await resolveProject(businessId, args);
+      const resolved = await resolveProject(owner, args);
       if (resolved.kind === "ambiguous") {
         return {
           ok: true,
@@ -159,14 +161,18 @@ async function runTool(
       const [project, profile, report, tasks, phases] = await Promise.all([
         getWorkspaceProject(businessId, resolved.projectId),
         loadProjectAecProfile(businessId, resolved.projectId),
-        projectReport(businessId),
-        listWorkspaceTasks(businessId, { projectId: resolved.projectId, status: "all", limit: 200 }),
+        projectReport(owner),
+        listWorkspaceTasks(owner, { projectId: resolved.projectId, status: "all", limit: 200 }),
         listPhases(resolved.projectId),
       ]);
       if (!project) return { ok: false, error: "پروژه پیدا نشد." };
 
       const financials = report.find((row) => row.projectId === resolved.projectId);
-      const spent = financials?.spentRial ?? 0;
+      // `projectReport` reports spend as null to a caller without the ledger
+      // permission — the same rule the finance card applies. The assistant
+      // states that as unknown rather than as zero: a café-with-no-books answer
+      // of «۰ ریال هزینه» is a claim, and a wrong one.
+      const spent = financials?.spentRial ?? null;
       const contractValue = financials?.contractValueRial ?? 0;
       const open = tasks.filter((task) => task.status !== "done");
       const overdue = open.filter((task) => task.dueDate && task.dueDate < today);
@@ -188,13 +194,14 @@ async function runTool(
           // quote the unit rather than invent a conversion.
           budgetRial: project.budgetRial,
           spentRial: spent,
-          remainingBudgetRial: project.budgetRial === null ? null : project.budgetRial - spent,
+          remainingBudgetRial:
+            project.budgetRial === null || spent === null ? null : project.budgetRial - spent,
           contractValueRial: contractValue,
           // Contract value is revenue, cost is what the ledger has posted;
           // both are stated plainly rather than pre-divided into a margin the
           // data cannot support (no revenue recognition exists yet).
           budgetUsedPercent:
-            project.budgetRial && project.budgetRial > 0
+            project.budgetRial && project.budgetRial > 0 && spent !== null
               ? Math.round((spent / project.budgetRial) * 1000) / 10
               : null,
           taskCount: tasks.length,
@@ -209,7 +216,7 @@ async function runTool(
     }
 
     case "get_boq_variance": {
-      const resolved = await resolveProject(businessId, args);
+      const resolved = await resolveProject(owner, args);
       if (resolved.kind === "ambiguous") {
         return {
           ok: true,
@@ -254,7 +261,7 @@ async function runTool(
     }
 
     case "get_latest_drawing_revision": {
-      const resolved = await resolveProject(businessId, args);
+      const resolved = await resolveProject(owner, args);
       if (resolved.kind === "ambiguous") {
         return {
           ok: true,
@@ -313,7 +320,7 @@ async function runTool(
     }
 
     case "list_delayed_project_activities": {
-      const resolved = await resolveProject(businessId, args);
+      const resolved = await resolveProject(owner, args);
       if (resolved.kind === "ambiguous") {
         return {
           ok: true,
@@ -328,7 +335,7 @@ async function runTool(
       const projectId = resolved.kind === "found" ? resolved.projectId : undefined;
       const limit = Math.min(Math.max(Number(args.limit) || 50, 1), 200);
       const [tasks, phases] = await Promise.all([
-        listWorkspaceTasks(businessId, { projectId, status: "open_only", limit: 200 }),
+        listWorkspaceTasks(owner, { projectId, status: "open_only", limit: 200 }),
         projectId ? listPhases(projectId) : Promise.resolve([]),
       ]);
 
@@ -374,7 +381,7 @@ async function runTool(
     }
 
     case "list_pending_rfis": {
-      const resolved = await resolveProject(businessId, args);
+      const resolved = await resolveProject(owner, args);
       if (resolved.kind === "ambiguous") return ambiguousProject(resolved.candidates);
 
       const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
@@ -418,7 +425,7 @@ async function runTool(
     }
 
     case "list_pending_submittals": {
-      const resolved = await resolveProject(businessId, args);
+      const resolved = await resolveProject(owner, args);
       if (resolved.kind === "ambiguous") return ambiguousProject(resolved.candidates);
 
       const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
@@ -474,7 +481,7 @@ async function runTool(
     }
 
     case "list_site_issues": {
-      const resolved = await resolveProject(businessId, args);
+      const resolved = await resolveProject(owner, args);
       if (resolved.kind === "ambiguous") return ambiguousProject(resolved.candidates);
 
       const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
@@ -551,7 +558,7 @@ function ambiguousProject(
 export async function runAecReadTool(
   name: string,
   args: Record<string, unknown>,
-  businessId: string,
+  owner: WorkspaceOwner,
   industry: string | null,
 ): Promise<AecToolResult> {
   if (!isAecAiToolName(name)) return { ok: false, error: "ابزار ناشناخته." };
@@ -561,5 +568,5 @@ export async function runAecReadTool(
       error: "این ابزار فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری است.",
     };
   }
-  return runTool(name, args, businessId);
+  return runTool(name, args, owner);
 }

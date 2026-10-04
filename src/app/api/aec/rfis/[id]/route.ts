@@ -28,7 +28,7 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await rfiProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "view", true);
+      await requireProjectCapability(owner, projectId, "view");
       return NextResponse.json({ rfi: await loadRfi(owner.businessId, id) });
     } catch (err) {
       return handleAecError(err);
@@ -43,7 +43,7 @@ export const PATCH = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await rfiProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       const rfi = await updateRfi(owner, id, await readBody(request));
       return NextResponse.json({ rfi });
     } catch (err) {
@@ -59,7 +59,7 @@ export const DELETE = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await rfiProjectId(owner.businessId, id);
-      await requireProjectCapability(owner, projectId, "manage", true);
+      await requireProjectCapability(owner, projectId, "manage");
       await deleteRfi(owner, id);
       return NextResponse.json({ ok: true });
     } catch (err) {

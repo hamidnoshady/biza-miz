@@ -22,7 +22,7 @@ export const GET = withTenantScope(
     try {
       const task = await getWorkspaceTask(owner.businessId, id);
       if (!task) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
-      await requireProjectCapability(owner, task.projectId, "view", true);
+      await requireProjectCapability(owner, task.projectId, "view");
       return NextResponse.json({ dependencies: await listDependencies(id) });
     } catch (err) {
       return handleWorkspaceError(err);
@@ -39,7 +39,7 @@ export const POST = withTenantScope(
     try {
       const task = await getWorkspaceTask(owner.businessId, id);
       if (!task) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
-      await requireProjectCapability(owner, task.projectId, "edit", true);
+      await requireProjectCapability(owner, task.projectId, "edit");
       const dependencies = await addDependency(owner.businessId, id, String(body.dependsOnId ?? ""));
       return NextResponse.json({ dependencies }, { status: 201 });
     } catch (err) {
@@ -57,7 +57,7 @@ export const DELETE = withTenantScope(
     try {
       const task = await getWorkspaceTask(owner.businessId, id);
       if (!task) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
-      await requireProjectCapability(owner, task.projectId, "edit", true);
+      await requireProjectCapability(owner, task.projectId, "edit");
       return NextResponse.json({ dependencies: await removeDependency(id, dependsOnId) });
     } catch (err) {
       return handleWorkspaceError(err);

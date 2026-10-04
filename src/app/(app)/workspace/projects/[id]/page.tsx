@@ -5,14 +5,16 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { ProjectDetail } from "./project-detail";
+import { WorkspaceCommandBar } from "../../workspace-command-bar";
 
 /**
  * `/workspace/projects/<id>` — one project's page, and the address every old
  * `/projects/<id>` bookmark lands on through the middleware redirect.
  *
  * The gate is the same two-layer one the rest of the module uses: the platform
- * permission here decides which buttons exist, and the per-project role
- * (`workspace_members.role`) is checked by every API call the page makes. This
+ * permission opens the page, and which buttons exist comes from the API's
+ * `capabilities` (platform permission AND `workspace_members.role`), which
+ * every API call the page makes re-checks. This
  * page deliberately does not read the project server-side — the detail
  * component does it in one request that also brings phases, members, activity
  * and the caller's project role, so the page cannot disagree with the API
@@ -38,13 +40,8 @@ export default async function WorkspaceProjectPage({
         description="وظایف، اسناد، قراردادهای اجرایی، تیم، تأییدها و تقویم این پروژه — و پنل‌های دستیار هوش مصنوعی همان پروژه."
         actions={<KnowledgeHelpButton section="projects" />}
       />
-      <ProjectDetail
-        projectId={id}
-        canManage={member.permissions.has(PERMISSIONS.workspaceManage)}
-        canManageContracts={member.permissions.has(PERMISSIONS.workspaceContractsManage)}
-        canApprove={member.permissions.has(PERMISSIONS.workspaceApprove)}
-        canIssueDocuments={member.permissions.has(PERMISSIONS.workspaceDocumentsIssue)}
-      />
+      <WorkspaceCommandBar permissions={[...member.permissions]} projectId={id} />
+      <ProjectDetail projectId={id} />
     </PageShell>
   );
 }

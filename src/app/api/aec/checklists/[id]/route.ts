@@ -22,7 +22,7 @@ export const GET = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await checklistProjectId(owner.businessId, id);
-      if (projectId) await requireProjectCapability(owner, projectId, "view", true);
+      if (projectId) await requireProjectCapability(owner, projectId, "view");
       return NextResponse.json({ checklist: await loadChecklist(owner.businessId, id) });
     } catch (err) {
       return handleAecError(err);
@@ -37,7 +37,7 @@ export const PATCH = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await checklistProjectId(owner.businessId, id);
-      if (projectId) await requireProjectCapability(owner, projectId, "manage", true);
+      if (projectId) await requireProjectCapability(owner, projectId, "manage");
       return NextResponse.json({
         checklist: await updateChecklist(owner, id, await readBody(request)),
       });
@@ -54,7 +54,7 @@ export const DELETE = withTenantScope(
     const { id } = await context.params;
     try {
       const projectId = await checklistProjectId(owner.businessId, id);
-      if (projectId) await requireProjectCapability(owner, projectId, "manage", true);
+      if (projectId) await requireProjectCapability(owner, projectId, "manage");
       await deleteChecklist(owner, id);
       return NextResponse.json({ ok: true });
     } catch (err) {

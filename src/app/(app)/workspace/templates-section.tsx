@@ -13,14 +13,13 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { LayoutTemplateIcon, PlusIcon, Trash2Icon, XIcon } from "lucide-react";
+import { LayoutTemplateIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import {
   EmptyState,
   LoadingSkeleton,
   SectionCard,
   StatusBadge,
   cardClass,
-  overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, Field, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
@@ -29,7 +28,10 @@ import {
   type WorkspaceTemplate,
   type WorkspaceTemplateChoice,
 } from "@/lib/workspace-shared";
-import { workspaceError } from "./workspace-ui";
+import {
+  workspaceError,
+  WorkspaceFormDialog,
+} from "./workspace-ui";
 
 const BUILTIN_KEYS = new Set(BUILTIN_TEMPLATES.map((t) => t.key));
 
@@ -218,78 +220,67 @@ function TemplateDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-foreground/30 p-4 backdrop-blur-sm">
-      <div className={`${overlayPanelClass} w-full max-w-xl`}>
-        <div className="flex items-center justify-between border-b border-border/80 p-4">
-          <h2 className="text-base font-semibold">
-            {template ? (builtin ? "نسخهٔ اختصاصی از قالب" : "ویرایش قالب") : "قالب جدید"}
-          </h2>
-          <SecondaryButton onClick={onClose}>
-            <XIcon className="size-4" aria-hidden />
-            <span className="sr-only">بستن</span>
-          </SecondaryButton>
-        </div>
-        <div className="grid gap-3 p-4 sm:grid-cols-2">
-          <Field label="نام قالب">
+    <WorkspaceFormDialog title={template ? (builtin ? "نسخهٔ اختصاصی از قالب" : "ویرایش قالب") : "قالب جدید"} width="xl" onClose={onClose}>
+      <div className="grid gap-3 p-4 sm:grid-cols-2">
+        <Field label="نام قالب">
+          <input
+            className={inputClass}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+          />
+        </Field>
+        <Field label="نوع پروژه" hint="مثلاً ساختمانی، نرم‌افزاری — اختیاری">
+          <input
+            className={inputClass}
+            value={projectType}
+            onChange={(e) => setProjectType(e.target.value)}
+          />
+        </Field>
+        <div className="sm:col-span-2">
+          <Field label="توضیح">
             <input
               className={inputClass}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoFocus
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
             />
           </Field>
-          <Field label="نوع پروژه" hint="مثلاً ساختمانی، نرم‌افزاری — اختیاری">
-            <input
-              className={inputClass}
-              value={projectType}
-              onChange={(e) => setProjectType(e.target.value)}
-            />
-          </Field>
-          <div className="sm:col-span-2">
-            <Field label="توضیح">
-              <input
-                className={inputClass}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </Field>
-          </div>
-          <div className="sm:col-span-2">
-            <Field label="فازها" hint="هر خط یک فاز، به ترتیب اجرا">
-              <textarea
-                className={`${inputClass} min-h-32`}
-                value={phases}
-                onChange={(e) => setPhases(e.target.value)}
-                placeholder={"طراحی\nاجرا\nتحویل"}
-              />
-            </Field>
-          </div>
-          <div className="sm:col-span-2">
-            <Field label="وظیفه‌های آغازین" hint="هر خط یک وظیفه — هنگام اعمال قالب ساخته می‌شوند">
-              <textarea
-                className={`${inputClass} min-h-24`}
-                value={tasks}
-                onChange={(e) => setTasks(e.target.value)}
-              />
-            </Field>
-          </div>
         </div>
-        <div className="flex items-center justify-between gap-2 border-t border-border/80 p-4">
-          <span className="text-xs text-muted-foreground">
-            {toPersianDigits(String(phaseNames.length))} فاز
-          </span>
-          <div className="flex gap-2">
-            <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
-            <PrimaryButton
-              type="button"
-              onClick={submit}
-              disabled={!name.trim() || !phaseNames.length || saving}
-            >
-              {saving ? "در حال ذخیره" : "ذخیرهٔ قالب"}
-            </PrimaryButton>
-          </div>
+        <div className="sm:col-span-2">
+          <Field label="فازها" hint="هر خط یک فاز، به ترتیب اجرا">
+            <textarea
+              className={`${inputClass} min-h-32`}
+              value={phases}
+              onChange={(e) => setPhases(e.target.value)}
+              placeholder={"طراحی\nاجرا\nتحویل"}
+            />
+          </Field>
+        </div>
+        <div className="sm:col-span-2">
+          <Field label="وظیفه‌های آغازین" hint="هر خط یک وظیفه — هنگام اعمال قالب ساخته می‌شوند">
+            <textarea
+              className={`${inputClass} min-h-24`}
+              value={tasks}
+              onChange={(e) => setTasks(e.target.value)}
+            />
+          </Field>
         </div>
       </div>
-    </div>
+      <div className="flex items-center justify-between gap-2 border-t border-border/80 p-4">
+        <span className="text-xs text-muted-foreground">
+          {toPersianDigits(String(phaseNames.length))} فاز
+        </span>
+        <div className="flex gap-2">
+          <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
+          <PrimaryButton
+            type="button"
+            onClick={submit}
+            disabled={!name.trim() || !phaseNames.length || saving}
+          >
+            {saving ? "در حال ذخیره" : "ذخیرهٔ قالب"}
+          </PrimaryButton>
+        </div>
+      </div>
+    </WorkspaceFormDialog>
   );
 }

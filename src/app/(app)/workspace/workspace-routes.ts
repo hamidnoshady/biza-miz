@@ -147,12 +147,12 @@ export const WORKSPACE_SECTION_GROUPS: ReadonlyArray<{
   label: string;
   keys: readonly WorkspaceSection[];
 }> = [
-  { label: "نمای کلی", keys: ["overview"] },
-  { label: "کار", keys: ["projects", "tasks", "calendar"] },
-  { label: "اسناد", keys: ["documents", "contracts"] },
-  { label: "سازمان", keys: ["teams", "approvals"] },
-  { label: "بینش", keys: ["reports"] },
-  { label: "پیکربندی", keys: ["templates"] },
+  // #761: the daily loop first — Home, Projects, Tasks, Calendar — and the
+  // rest behind «بیشتر», so the menu reads as how people work, not as a list
+  // of database tables. On a phone the same two groups become the bottom
+  // sheet's primary row and its overflow.
+  { label: "کار روزانه", keys: ["overview", "projects", "tasks", "calendar"] },
+  { label: "بیشتر", keys: ["documents", "contracts", "teams", "approvals", "reports", "templates"] },
 ];
 
 /** The sections a member with this permission set may open, in rail order. */
@@ -165,10 +165,80 @@ export function visibleWorkspaceSections(
   );
 }
 
-/** May this member open the workspace at all? */
-export function canOpenWorkspace(
+/**
+ * «+ ایجاد» — the contextual create actions (#761 §5), shared by the command
+ * bar menu and the Ctrl/Cmd+K palette. Each lands on its section with
+ * `?create=1` (the section opens its own create dialog) and, inside a
+ * project, `&project=<id>` so the dialog preselects that project. Filtered by
+ * the platform permission; the project role is re-checked by the API.
+ */
+/**
+ * A one-shot instruction carried in the URL (`?create=1`, `?project=`,
+ * `?open=<id>`). The manager consumes it — strips it from the URL so a reload
+ * does not repeat it — and bumps `request`, so the same action fires again
+ * even on the section already on screen.
+ */
+export interface WorkspaceIntent {
+  request: number;
+  create: boolean;
+  projectId?: string;
+  openId?: string;
+}
+
+export interface WorkspaceCreateAction {
+  key: "project" | "task" | "event" | "document" | "contract" | "member";
+  label: string;
+  href: string;
+}
+
+export function workspaceCreateActions(
   permissions: ReadonlySet<string> | ReadonlyArray<string>,
-): boolean {
+  projectId?: string,
+): WorkspaceCreateAction[] {
   const held = permissions instanceof Set ? permissions : new Set(permissions);
-  return held.has(PERMISSIONS.workspaceView);
+  const href = (section: WorkspaceSection) =>
+    `${workspaceSectionHref(section)}?create=1${projectId ? `&project=${encodeURIComponent(projectId)}` : ""}`;
+  const actions: Array<WorkspaceCreateAction & { permission: string; outsideProjectOnly?: boolean }> = [
+    { key: "project", label: "پروژهٔ جدید", href: href("projects"), permission: "workspace.manage", outsideProjectOnly: true },
+    { key: "task", label: "وظیفهٔ جدید", href: href("tasks"), permission: "workspace.manage" },
+    { key: "event", label: "رویداد جدید", href: href("calendar"), permission: "workspace.manage" },
+    { key: "document", label: "افزودن سند", href: href("documents"), permission: "workspace.manage" },
+    { key: "contract", label: "قرارداد جدید", href: href("contracts"), permission: "workspace.contracts_manage" },
+    { key: "member", label: "افزودن عضو تیم", href: href("teams"), permission: "workspace.manage" },
+  ];
+  return actions
+    .filter((action) => held.has(action.permission) && !(projectId && action.outsideProjectOnly))
+    .map(({ key, label, href: target }) => ({ key, label, href: target }));
+}
+
+/**
+ * «پرسش از دستیار» that follows the member (#761 §17): the assistant home
+ * opens focused on the Workspace, inside the project when there is one, with a
+ * question for the page already typed — prefilled, never sent, so asking is
+ * still the member's own click. Uses the chat home's existing `ctx`, `focus`
+ * and `project` parameters; nothing about the assistant's model or tools
+ * changes, and any action it proposes still goes through confirmation.
+ */
+const ASSISTANT_QUESTIONS: Record<WorkspaceSection, string> = {
+  overview: "امروز در میز کارم چه چیزهایی نیاز به توجه من دارد؟",
+  projects: "کدام پروژه‌ها در معرض خطرند و چرا؟",
+  tasks: "چه چیزی تحویل وظایف را متوقف کرده است؟",
+  calendar: "مهلت‌ها و جلسه‌های مهم این هفته کدام‌اند؟",
+  documents: "کدام اسناد منتظر بررسی یا تأییدند؟",
+  contracts: "کدام قراردادها پرریسک‌اند یا به‌زودی منقضی می‌شوند؟",
+  teams: "بار کاری اعضای تیم چطور تقسیم شده و چه کسی تحت فشار است؟",
+  approvals: "کدام تأییدها گلوگاه شده‌اند؟",
+  reports: "چرا هزینه یا زمان پروژه‌ها از برنامه جلو زده است؟",
+  templates: "برای پروژهٔ تازه‌ام کدام قالب مناسب‌تر است؟",
+};
+
+export function workspaceAssistantHref(section: WorkspaceSection, projectId?: string): string {
+  const params = new URLSearchParams({ focus: "workspace" });
+  if (projectId) {
+    params.set("project", projectId);
+    params.set("ctx", "این پروژه را خلاصه کن: کجا هستیم، چه چیزی عقب است و چرا؟");
+  } else {
+    params.set("ctx", ASSISTANT_QUESTIONS[section]);
+  }
+  return `/dashboard?${params.toString()}`;
 }
