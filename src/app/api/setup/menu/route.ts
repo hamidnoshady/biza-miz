@@ -1,13 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
-import { getSetting, markStepDone, SETTING_KEYS } from "@/lib/settings";
-import { resolveActiveLocation, requireManager, type TaxSetting } from "@/lib/setup-state";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import {
+  resolveActiveLocation,
+  requireManager,
+  requireSetupStepForIndustry,
+  syncMenuStepProgress,
+  type TaxSetting,
+} from "@/lib/setup-state";
 import { withTenantScope } from "@/lib/auth";
 
-/** Step 6 — menu. GET returns current categories + items for the wizard. */
+/**
+ * The menu step. GET returns current categories + items for the wizard.
+ *
+ * The step's progress marker is derived from the branch's sellable data after
+ * every write (`syncMenuStepProgress`): a category with no items does *not*
+ * complete it (issue #808 §3), and the old category-only marker is corrected
+ * rather than trusted.
+ */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requireManager();
   if (error) return error;
+  const stepError = await requireSetupStepForIndustry(session.businessId, "menu");
+  if (stepError) return stepError;
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ categories: [], items: [] });
@@ -34,6 +49,8 @@ export const GET = withTenantScope(async () => {
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requireManager();
   if (error) return error;
+  const stepError = await requireSetupStepForIndustry(session.businessId, "menu");
+  if (stepError) return stepError;
 
   let body: {
     addCategory?: { name?: string };
@@ -68,7 +85,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
        RETURNING id`,
       [location.id, name, tax?.defaultRate ?? 0],
     );
-    const progress = await markStepDone(session.businessId, "menu");
+    const progress = await syncMenuStepProgress(session.businessId, location.id);
     return NextResponse.json({ ok: true, id: rows[0].id, progress });
   }
 
@@ -93,7 +110,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
        RETURNING id`,
       [location.id, categoryId, name, price, description?.trim() || null, sku?.trim() || null],
     );
-    const progress = await markStepDone(session.businessId, "menu");
+    const progress = await syncMenuStepProgress(session.businessId, location.id);
     return NextResponse.json({ ok: true, id: rows[0].id, progress });
   }
 

@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSetting, markStepDone, SETTING_KEYS } from "@/lib/settings";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import {
   resolveActiveLocation,
   requireManager,
+  requireSetupStepForIndustry,
+  syncMenuStepProgress,
   type TaxSetting,
 } from "@/lib/setup-state";
 import {
@@ -20,7 +22,7 @@ import { withTenantScope } from "@/lib/auth";
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
 /**
- * Step 6 — CSV/Excel menu import (multipart form, field "file").
+ * The wizard's menu step — CSV/Excel import (multipart form, field "file").
  *
  * The write itself is the shared upsert (menu-import-apply.ts) the Settings
  * import uses: categories are matched by name (created with the default tax
@@ -32,6 +34,8 @@ const MAX_FILE_BYTES = 5 * 1024 * 1024;
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requireManager();
   if (error) return error;
+  const stepError = await requireSetupStepForIndustry(session.businessId, "menu");
+  if (stepError) return stepError;
 
   const location = await resolveActiveLocation(session);
   if (!location)
@@ -95,7 +99,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     tax?.defaultRate ?? 0,
   );
 
-  const progress = await markStepDone(session.businessId, "menu");
+  // The marker follows the imported data: import counts as menu progress only
+  // when at least one active item now exists at this branch (issue #808 §3).
+  const progress = await syncMenuStepProgress(session.businessId, location.id);
   return NextResponse.json({
     ok: true,
     createdCategories: counts.createdCategories,

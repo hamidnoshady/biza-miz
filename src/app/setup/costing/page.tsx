@@ -146,16 +146,19 @@ export default function CostingStep() {
     }
     setBusy(true);
     setError("");
-    const { ok, data } = await api<{ error?: string }>("/api/setup/costing", {
-      method: "POST",
-      body: JSON.stringify({ method, system }),
-    });
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error));
-      return;
+    try {
+      const { ok, data, status } = await api<{ error?: string }>("/api/setup/costing", {
+        method: "POST",
+        body: JSON.stringify({ method, system }),
+      });
+      if (!ok) {
+        setError(errorMessage(data.error, undefined, status));
+        return;
+      }
+      router.push(nextPath("costing"));
+    } finally {
+      setBusy(false);
     }
-    router.push(nextPath("costing"));
   }
 
   const radioCard = (checked: boolean) =>

@@ -75,36 +75,48 @@ export default function MenuStep() {
     if (!newCategory.trim()) return;
     setBusy(true);
     setError("");
-    const { ok, data } = await api<{ error?: string }>("/api/setup/menu", {
-      method: "POST",
-      body: JSON.stringify({ addCategory: { name: newCategory } }),
-    });
-    setBusy(false);
-    if (!ok) return setError(errorMessage(data.error));
-    setNewCategory("");
-    load();
+    try {
+      const { ok, data, status } = await api<{ error?: string }>("/api/setup/menu", {
+        method: "POST",
+        body: JSON.stringify({ addCategory: { name: newCategory } }),
+      });
+      if (!ok) {
+        setError(errorMessage(data.error, undefined, status));
+        return;
+      }
+      setNewCategory("");
+      load();
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function addItem(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError("");
-    let price: number;
     try {
-      price = money.parse(itemPrice);
-    } catch {
+      let price: number;
+      try {
+        price = money.parse(itemPrice);
+      } catch {
+        setError("قیمت معتبر نیست.");
+        return;
+      }
+      const { ok, data, status } = await api<{ error?: string }>("/api/setup/menu", {
+        method: "POST",
+        body: JSON.stringify({ addItem: { categoryId: itemCategory, name: itemName, price } }),
+      });
+      if (!ok) {
+        setError(errorMessage(data.error, undefined, status));
+        return;
+      }
+      setItemName("");
+      setItemPrice("");
+      load();
+    } finally {
       setBusy(false);
-      return setError("قیمت معتبر نیست.");
     }
-    const { ok, data } = await api<{ error?: string }>("/api/setup/menu", {
-      method: "POST",
-      body: JSON.stringify({ addItem: { categoryId: itemCategory, name: itemName, price } }),
-    });
-    setBusy(false);
-    if (!ok) return setError(errorMessage(data.error));
-    setItemName("");
-    setItemPrice("");
-    load();
   }
 
   async function importFile(e: React.FormEvent) {
@@ -117,29 +129,32 @@ export default function MenuStep() {
     setImportErrors([]);
     const form = new FormData();
     form.append("file", file);
-    const { ok, data } = await api<{
-      error?: string;
-      messages?: string[];
-      createdCategories?: number;
-      createdItems?: number;
-      updatedItems?: number;
-      errors?: string[];
-    }>("/api/setup/menu/import", { method: "POST", body: form });
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error, data.messages));
-      return;
+    try {
+      const { ok, data, status } = await api<{
+        error?: string;
+        messages?: string[];
+        createdCategories?: number;
+        createdItems?: number;
+        updatedItems?: number;
+        errors?: string[];
+      }>("/api/setup/menu/import", { method: "POST", body: form });
+      if (!ok) {
+        setError(errorMessage(data.error, data.messages, status));
+        return;
+      }
+      setImportSummary(
+        `${toPersianDigits(data.createdCategories ?? 0)} دسته و ${toPersianDigits(
+          data.createdItems ?? 0,
+        )} آیتم ساخته شد` +
+          (data.updatedItems ? `، ${toPersianDigits(data.updatedItems)} آیتم به‌روزرسانی شد` : "") +
+          ".",
+      );
+      setImportErrors(data.errors ?? []);
+      if (fileRef.current) fileRef.current.value = "";
+      load();
+    } finally {
+      setBusy(false);
     }
-    setImportSummary(
-      `${toPersianDigits(data.createdCategories ?? 0)} دسته و ${toPersianDigits(
-        data.createdItems ?? 0,
-      )} آیتم ساخته شد` +
-        (data.updatedItems ? `، ${toPersianDigits(data.updatedItems)} آیتم به‌روزرسانی شد` : "") +
-        ".",
-    );
-    setImportErrors(data.errors ?? []);
-    if (fileRef.current) fileRef.current.value = "";
-    load();
   }
 
   if (!available) return null;

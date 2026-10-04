@@ -80,16 +80,19 @@ export default function AccountsStep() {
     e.preventDefault();
     setBusy(true);
     setError("");
-    const { ok, data } = await api<{ error?: string; messages?: string[] }>("/api/setup/accounts", {
-      method: "POST",
-      body: JSON.stringify({ accounts: rows }),
-    });
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error, data.messages));
-      return;
+    try {
+      const { ok, data, status } = await api<{ error?: string; messages?: string[] }>("/api/setup/accounts", {
+        method: "POST",
+        body: JSON.stringify({ accounts: rows }),
+      });
+      if (!ok) {
+        setError(errorMessage(data.error, data.messages, status));
+        return;
+      }
+      router.push(nextPath("accounts", steps));
+    } finally {
+      setBusy(false);
     }
-    router.push(nextPath("accounts", steps));
   }
 
   if (!loaded) return <SetupDataSkeleton rows={4} />;
