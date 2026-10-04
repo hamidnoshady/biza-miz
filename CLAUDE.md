@@ -997,8 +997,10 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   editing or deleting the firm's template cannot rewrite what was inspected; photos and evidence are
   `workspace_documents` rows via `src/lib/workspace-document-links.ts`, the one attachment
   implementation all four AEC registers now share. The register and the daily log are separate tabs
-  (`site_operations` and `qa_qc`), `snag`/`hse_observation` need `snagging`/`hse` (still
-  `material_tracking`-free until Wave 9), `list_site_issues` is §23's seventh AEC read, and
+  (`site_operations` and `qa_qc`), `snag`/`hse_observation` need `snagging`/`hse` (and stay
+  `material_tracking`-free: Wave 9's delivery tracking is `procurement`, and a materials ledger
+  would need the stock model an AEC tenant does not have), `list_site_issues` is §23's seventh AEC
+  read, and
   `aec.inspection_due`/`aec.snag_overdue` ride the same hourly scan as the Wave 6 pair.
   Wave 8 (§15, §16, §17, §20) is the commercial controls: `aec_contract_commercials` (the §17 block on a
   `workspace_contracts` contract), `aec_variations` (§15's change orders, `VO`-numbered per project),
@@ -1021,6 +1023,39 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   `financials` inside it, `AEC_LIVE_CAPABILITIES` is 11 with `variations`/`progress_claims`/`financials`
   independent, §23 adds `list_change_orders`/`list_payment_certificates`/`list_project_commercial_risks`
   (ten tools in all), and four reminder keys ride the same hourly scan.
+  Wave 9 (§18, §22, §23, §24, §29, §33) is procurement: `aec_material_requests` +
+  `aec_material_request_lines` (the requirement), `aec_rfqs` + `aec_rfq_suppliers` (the enquiry and
+  who was invited), `aec_supplier_quotations` (what came back, with the award link), `aec_commitments`
+  (one register for both §18 endings, `kind IN ('purchase','subcontract')`, `PO`/`SC`-numbered) +
+  `aec_commitment_deliveries` (what arrived) and `aec_procurement_events` (migration 0201, eight
+  tables, FORCE RLS), numbered per project per kind by `nextAecNumber` in
+  `src/lib/aec-numbering.ts` under an advisory lock — unique but never gapless, so a deleted draft
+  returns its number. `src/lib/aec-procurement.ts` is the client-safe half and the *only* place the
+  domain's definitions live: the four chains with their deliberate `rejected → draft` reopening,
+  `commitmentTotals`, `commitmentDelayDays`/`isCommitmentDelayed` (one delay predicate for the tab,
+  the widget, the scan and the assistant), `costForecast`/`forecastMarginRial`/
+  `FORECAST_BASIS_LABEL`, and both `*ActionNeedsApproval` predicates;
+  `src/lib/aec-procurement-service.ts` does the writes. §18's boundaries are load-bearing: **a
+  supplier is a CRM `parties` row** (the wave adds only three columns to
+  `party-merge-references.ts`), the F&B `purchases`/`suppliers`/`items` stock model is never touched
+  (an AEC tenant has no products workspace and no `location_id`), and **no table here stores a paid
+  or invoiced balance** — the last status is `closed`, the moment the invoice becomes Accounting's.
+  A submitted request, an issued RFQ, a decided quotation and a submitted award are frozen by trigger
+  guards, and a delivered award has exactly one move left (close it out); `recordDelivery` is a fact
+  about a box and never moves the award's status (`deliver` does), which is why `deliveredRial` only
+  counts delivered awards and a receipt does not clear the delay warning. Approval rides the existing
+  `workspace_approvals` queue as `material_request`/`commitment` subjects — the register is
+  `workspace.manage`, every determination is `workspace.approve`, **no new permission key**.
+  `procurement` and `subcontractors` join `AEC_LIVE_CAPABILITIES` (twelve live keys, `material_tracking`
+  still reserved with its reason), the «تأمین کالا» tab sits between «مالی» and «تغییرات», §20's roll-up
+  now prints committed/delivered cost, cost to complete, forecast final cost and a **forecast** margin
+  with `FORECAST_BASIS_LABEL` under it (`COMMERCIAL_AWAITING_WAVES` is empty; the margin widget stays
+  unseeded until that basis is on screen, which it now is), `list_procurement_delays` is §23's
+  eleventh AEC read across all six AI surfaces, and `aec.procurement_delivery_delay` is the wave's
+  reminder key on the same hourly scan. When a future shared trigger branches between tables, declare
+  `payload jsonb := to_jsonb(NEW)` and compare `payload ->> 'col'` in the *conditions*: PL/pgSQL
+  resolves `NEW.col` when it executes the expression, so reading a column a sibling table lacks raises
+  42703 before the branch is chosen (that is the bug migration 0201 records).
   Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a

@@ -40,8 +40,10 @@
  *
  * Most capabilities here describe domains that arrive wave by wave (BOQ and
  * estimating in Wave 4, document control in Wave 5, site execution in Wave 7,
- * commercial controls in Wave 8, procurement in Wave 9 — the last two still to
- * come). Declaring them all at once is deliberate: the preset a business is
+ * commercial controls in Wave 8, procurement in Wave 9 — all landed). What a
+ * wave has not reached yet keeps its key off `AEC_LIVE_CAPABILITIES` with the
+ * reason written next to it, so the switch exists for the settings panel without
+ * pretending a screen is behind it. Declaring them all at once is deliberate: the preset a business is
  * *given* is the one each wave reads, and `AEC_CAPABILITY_LABELS` is what the
  * settings panel shows an owner so the choice is legible before a screen exists. `AEC_LIVE_CAPABILITIES`
  * names the handful that gate something today, and they are not decorative — a
@@ -152,8 +154,9 @@ export const AEC_LIVE_CAPABILITIES: readonly AecCapabilityKey[] = [
   // Wave 7 — the site and the QA register (`aec-site-service.ts`, migration
   // 0199): the daily log, the issue/QA register, snagging and HSE observations.
   // `material_tracking` deliberately stays out: §13's "materials delivered" line
-  // on a day's log rides `site_operations`, and a material *tracking* register
-  // is Wave 9's procurement half.
+  // on a day's log rides `site_operations`, and Wave 9's procurement half is
+  // delivery *tracking* (`aec_commitments` / `aec_commitment_deliveries`, gated
+  // by `procurement`), not a materials ledger.
   "site_operations",
   "qa_qc",
   "snagging",

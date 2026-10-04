@@ -1,6 +1,6 @@
 # Phase 47 — The AEC industry and AEC project operations
 
-**Status:** Waves 1–8 implemented (migrations 0193–0200); Waves 9–11 designed here, not built.
+**Status:** Waves 1–9 implemented (migrations 0193–0201); Waves 10–11 designed here, not built.
 
 Working issue: [#799 — Add Architecture, Civil Engineering & Construction business type with AEC
 project operations](https://github.com/hamidnoshady/cafe-restaurant-pos/issues/799).
@@ -343,7 +343,7 @@ What shipped:
 | API | `GET/POST /api/aec/projects/[id]/site-logs`, `GET/PATCH/DELETE /api/aec/site-logs/[id]`, `POST /api/aec/site-logs/[id]/status` (`submit` \| `reopen`), `GET/POST /api/aec/projects/[id]/site-issues`, `GET/PATCH/DELETE /api/aec/site-issues/[id]`, `POST /api/aec/site-issues/[id]/status` (`start` \| `resolve` \| `close` \| `cancel`), `GET/POST /api/aec/checklists`, `GET/PATCH/DELETE /api/aec/checklists/[id]`. Every one `withTenantScope` + `aecOwner` + `requireProjectCapability` (the checklists are business-scoped, so they check the project role only when the template is scoped to one) |
 | Permission | **No new key.** Reading is `workspace.view`; raising, editing, starting, resolving and cancelling are `workspace.manage`; the closeout verification is `workspace.approve` — §24's "a decision must not inherit ordinary edit rights" applied to §14's closeout, and the same key the approvals queue already uses |
 | Screens | `src/app/(app)/workspace/projects/[id]/site-panel.tsx` («کارگاه و گزارش روزانه»: the day register, the day's card with its lines, evidence and the submit/reopen control, and «روزنگار» — the diary view that merges the days with the quality register on one timeline), `inspections-panel.tsx` («بازرسی و کنترل کیفیت»: one register over the seven kinds with the four acts and the closeout dialog) and `checklists-panel.tsx` (the firm's inspection and handover templates, with their items and their active switch). A signed day renders as text with a reopen button, because offering an edit that only ever fails is worse than offering none |
-| Cockpit | `aec-cockpit.ts` — `site` and `inspections` are shipped, `AEC_SHIPPED_WAVE = 7`: `site` rides `site_operations` and `inspections` rides `qa_qc`, so a designer sees neither, a supervisor sees the register without the daily log, and a contractor sees both. Wave 9's `material_tracking` is still absent from `AEC_LIVE_CAPABILITIES` on purpose, so the two wave-9 kinds cannot leak into an enabled tab |
+| Cockpit | `aec-cockpit.ts` — `site` and `inspections` are shipped, `AEC_SHIPPED_WAVE = 7`: `site` rides `site_operations` and `inspections` rides `qa_qc`, so a designer sees neither, a supervisor sees the register without the daily log, and a contractor sees both. `material_tracking` is still absent from `AEC_LIVE_CAPABILITIES` on purpose — Wave 9 keeps it reserved (delivery tracking rides `procurement`; an AEC tenant has no stock ledger to track materials in) — so a kind with no register behind it cannot leak into an enabled tab |
 | Assistant | `list_site_issues` joins §23's reads — open inspections, NCRs, corrective actions, snags and HSE observations, worst first, with the same `pendingSiteIssues` the tab's KPI row reads. §23 now names seven AEC tools, and the Persian prompt answers «چه چیزی در کارگاه باز است» from the same function the screen uses |
 | Notifications | Two new event keys, `aec.inspection_due` and `aec.snag_overdue`, produced by the existing hourly AEC sweep in `src/lib/notification-scans.ts` (no second engine, no new tick) and split by kind so a manager can switch the inspection reminders and the defect reminders off separately. This wave also fixes the sweep's first line: a non-AEC business now costs it one industry read instead of an hourly logged exception, which is what the scan's own comment already claimed |
 | Party merge | `aec_site_log_lines.party_id` (moves while the day is a draft, refused once it is submitted — a frozen day's crew is part of what froze) and `aec_site_issues.responsible_party_id` (moves while the issue is open) classified in `PARTY_REFERENCES`; `integration/party-merge-coverage.integration.test.ts` derives its coverage from PostgreSQL, so it proves the pair is complete |
@@ -424,7 +424,7 @@ What shipped:
 | API | `GET/POST /api/aec/projects/[id]/variations`, `GET/PATCH/DELETE /api/aec/variations/[id]`, `POST /api/aec/variations/[id]/status`, the same three for certificates, `GET /api/aec/projects/[id]/commercial` and `GET/PUT /api/aec/contracts/[id]/commercial`. Every one `withTenantScope` + `aecOwner` + `requireProjectCapability` (the contract block checks the project role only when the contract is project-scoped; a business-level framework agreement has none to check) |
 | Permission | **No new key.** Reading is `workspace.view`; writing the registers, preparing an order and drafting or submitting a claim are `workspace.manage`; reviewing, approving, rejecting, implementing, cancelling and certifying are `workspace.approve` — §24's "change-order manage/approve", "commercial/payment certificate manage/approve" and "project financial view" expressed through the two keys the product already has, with the split asserted per route in `api-guards.test.ts` |
 | Screens | `src/app/(app)/workspace/projects/[id]/variations-panel.tsx` («تغییرات»: the register with the four money figures side by side — estimated, cost impact, submitted, agreed — the contract-value line an approval will move, and the §33 trail), `certificates-panel.tsx` («صورت‌وضعیت و پرداخت»: both directions on one register, an arithmetic preview that never lets the net be typed, measurement lines that must sum to the gross, the previous/current certified pair, and the «تأییدشده ≠ وصول‌شده» note), `commercial-panel.tsx` (§20's cockpit and §17's per-contract block, mounted inside «مالی» behind the `financials` capability). Both registers get their own tabs after «مالی», because a change order moves the contract's value and a claim claims against it |
-| Cockpit | `aec-cockpit.ts` — `changes` («تغییرات», `variations`), `payments` («صورت‌وضعیت و پرداخت», `progress_claims`) and `financials` («مالی پروژه») are shipped and `AEC_SHIPPED_WAVE = 8`; `AEC_LIVE_CAPABILITIES` is now 11, and `material_tracking` is still absent until Wave 9 |
+| Cockpit | `aec-cockpit.ts` — `changes` («تغییرات», `variations`), `payments` («صورت‌وضعیت و پرداخت», `progress_claims`) and `financials` («مالی پروژه») are shipped and `AEC_SHIPPED_WAVE = 8`; `AEC_LIVE_CAPABILITIES` is now 11, and `material_tracking` is still absent — Wave 9 keeps it reserved with the reason written next to the key |
 | Assistant | §23's three commercial reads join the AEC tool set: `list_change_orders`, `list_payment_certificates` and `list_project_commercial_risks` (the last one merging pending changes, pending claims and expiring securities). `AEC_AI_TOOL_NAMES` is ten, and the pure suite pins the list literally |
 | Notifications | Four event keys on the **existing** hourly AEC sweep — `aec.payment_certificate_pending` (a claim sent more than fourteen days ago), `aec.client_payment_overdue` (certified and still uncollected), `aec.guarantee_expiring` and `aec.insurance_expiring` — each with its own budget, so fifty late claims cannot silence the bond that expires next week |
 | Party merge | `aec_variations.responsible_party_id` classified in `PARTY_REFERENCES` with `filterSql: status IN ('draft','priced')`: a merge re-points the party of an order still being prepared and leaves a submitted one naming the party it was raised against, which is what migration 0200's freeze and the registry's filter agree on |
@@ -500,20 +500,129 @@ cockpit names the figure in `awaitingWaves` instead of printing a plausible numb
 §30's "financial
 amounts must use Accounting as the source where they represent posted financial facts" is Decision 23
 above, and it is why the cockpit's actual cost is read from the ledger rather than kept here.
+Wave 9 has since supplied the missing half — committed cost, cost to complete and the forecast margin —
+and the Wave 9 section below records what it took to make the margin a number the cockpit may print.
 
 Wave 8 also closes the two links Wave 6 and Wave 7 deliberately left open: an RFI's "linked variation /
 change order" is `aec_variations.rfi_id` (the reference is owned by the later record, so the RFI never
 grew a column pointing at a table that did not exist), and a day's or an inspection's "cost impact" is
 the variation's own `cost_impact_rial`, which is why neither the site log nor the issue grew one.
 
-## Waves 9–11 — designed, not built
+## Wave 9 — procurement (implemented, migration 0201)
+
+§18's chain, end to end: Requirement → Material Request → RFQ → Supplier Quotations → Comparison →
+Approval → Purchase Commitment → Delivery, and then the invoice, which is Accounting's.
+
+What shipped:
+
+| Surface | Change |
+|---|---|
+| Domain | `migrations/0201_aec_procurement.sql` — eight tables: `aec_material_requests` with `aec_material_request_lines` (the requirement and its scope), `aec_rfqs` with `aec_rfq_suppliers` (the enquiry and who was invited), `aec_supplier_quotations` (what came back, one row per supplier per RFQ, with the award link back to the comparison), `aec_commitments` (one register for both §18 endings, `kind IN ('purchase','subcontract')`) with `aec_commitment_deliveries` (what arrived, when, who received it), and `aec_procurement_events` (§33's trail for all five subjects). All eight ENABLE + FORCE RLS with a `tenant_isolation` policy and `UNIQUE (business_id, id)` for the composite keys; `workspace_documents` gains nullable `commitment_id` so a delivery photo is the same `workspace_documents` row every other register uses; `workspace_approvals.subject_type` widens with `material_request` and `commitment` and `workspace_activity.subject_type` with the same two; the migration seeds §22's «تأخیر تأمین» widget for the industry |
+| Numbering | `src/lib/aec-numbering.ts` — one `nextAecNumber(table, projectId, prefix)` under `pg_advisory_xact_lock`, with the four prefixes `MR-`, `RFQ-`, `PO-` and `SC-`. Numbers are unique per project and per kind, and deliberately **not gapless**: a deleted draft returns its number, which the suite asserts instead of papering over |
+| Immutability | Five guards make §33's history a property of the schema rather than a promise in a service: a submitted material request is frozen (reject it to revise it) and only a draft may be deleted; an issued RFQ is frozen while the suppliers are quoting it; a decided quotation is history; a submitted commitment is frozen, and a **delivered** one has exactly one move left — closing it out, which is where the invoice becomes Accounting's business (every other change to a delivered award is refused). The commitment's deliveries belong to an approved award and become history with it |
+| Ownership | `aec_assert_procurement_references_owned()` refuses a row whose project, party, BOQ item or receipt disagrees with its tenant — the same shape Wave 2/4 established, and the reason a cross-project `request_id` or a foreign party is a `23514` from the database and a named code (`project_not_found`, `party_not_found`, `request_not_found`, …) from the service |
+| Pure half | `src/lib/aec-procurement.ts` — §18's six material-request statuses, four RFQ statuses, four quotation statuses and seven commitment statuses with their chains and their deliberate reopenings (`rejected → draft`), the four priorities, both kinds with their prefixes and `COMMITMENT_CAPABILITY_FOR`; `commitmentTotals`, `commitmentDelayDays`, `isCommitmentDelayed` (the one delay predicate the tab, the widget, the scan and the assistant share), `costForecast`, `forecastMarginRial` and `FORECAST_BASIS_LABEL`; every action catalogue with its labels, its past-tense labels and its events, and one predicate each — `materialRequestActionNeedsApproval` and `commitmentActionNeedsApproval` |
+| Service | `src/lib/aec-procurement-service.ts` — request, RFQ, quotation, commitment and delivery CRUD with their preconditions, `applyMaterialRequestAction`/`applyRfqAction`/`applyQuotationAction`/`applyCommitmentAction`, the two queue halves `decideMaterialRequestApproval`/`decideCommitmentApproval`, `recordDelivery`, and the four reads the cockpit, the widgets, the scan and the assistant share: `projectCommitmentTotals`, `projectProcurementSummary`, `delayedCommitments`, `pendingMaterialRequests` |
+| API | Fifteen route files under `/api/aec`: `GET/POST` for a project's `requests`, `rfqs` and `commitments` plus the aggregate `GET /api/aec/projects/[id]/procurement`; `GET/PATCH/DELETE` and `POST …/status` for `requests/[id]`, `rfqs/[id]`, `quotations/[id]` and `commitments/[id]`; `GET/POST /api/aec/rfqs/[id]/quotations`; `GET/POST /api/aec/commitments/[id]/deliveries`; and `DELETE /api/aec/deliveries/[id]` (a receipt is deleted, never edited). Every one `withTenantScope` + `aecOwner` + `requireProjectCapability` |
+| Permission | **No new key.** Reading is `workspace.view`; writing the registers is `workspace.manage`; approving a request or an award is `workspace.approve` — §24's "procurement manage" expressed through the two keys the product already has, with the split asserted per route in `api-guards.test.ts` |
+| Capabilities | `procurement` and `subcontractors` join `AEC_LIVE_CAPABILITIES` (twelve live keys). §18's "small architecture offices should be able to disable/hide this entire capability" is the settings panel's existing switch, and the design presets already have procurement off. `subcontractors` gates the subcontract half of the register (and the subcontractor role in the participant catalogue) independently, so a fit-out contractor that buys materials but employs its own crews switches the second one off alone. `material_tracking` stays reserved: delivery tracking is `procurement`, and a materials ledger would need the stock model an AEC tenant deliberately does not have |
+| Screens | `src/app/(app)/workspace/projects/[id]/procurement-panel.tsx` («تأمین کالا») — a KPI row (committed, delivered, delayed), three registers (requests, RFQs with their quotation comparison and «ثبت تعهد از این پیشنهاد», commitments with their deliveries), detail overlays and the §33 trail, all with Shamsi dates and rial formatting through the shared workspace UI. Mounted in the project cockpit behind the capability, in the tab order `… finance → procurement → changes → payments`, because the award is what the change order then argues about |
+| §20 roll-up | `getProjectCommercialSummary` now reads the wave's registers: committed cost, delivered cost, the delayed count and their rial, cost to complete, forecast final cost and the forecast margin — `COMMERCIAL_AWAITING_WAVES` is **empty**, and the cockpit prints the method (`FORECAST_BASIS_LABEL`) under the figure. The forecast returns `null`, never zero, when the ledger or the approved estimate is unreadable; the margin widget stays deliberately unseeded until somebody can see that basis on screen, which is what the panel now shows |
+| Assistant | `list_procurement_delays` — §23's eleventh AEC read and §22's "Procurement Delays": the late awards with their supplier, project and days late, plus the pending requests and the §20 figures. Wired on all six AI surfaces (`ai.ts`, `ai-capabilities.ts`, `mcp/tools.ts`, `aec.ts`, `aec-ai-tools.ts` and its suite) |
+| Notifications | `aec.procurement_delivery_delay` on the **existing** hourly AEC sweep — an approved award past its promised delivery date, deduped per award per day through `notificationDedupeKey`, `important`, owner/manager, with `MAX_OVERDUE_PER_SCAN` as the per-scan budget so a hundred late boxes cannot silence the one that matters |
+| Party merge | The three supplier columns are classified in `PARTY_REFERENCES`: `aec_rfq_suppliers.party_id` and `aec_commitments.supplier_party_id` move while the row is a draft, `aec_supplier_quotations.party_id` while the quotation is undecided — which is exactly what the guards freeze, so a merge and the schema agree. `integration/party-merge-coverage.integration.test.ts` derives its coverage from PostgreSQL and passes |
+| Isolation | `integration/aec-procurement.integration.test.ts` (10 tests) runs against a real database: numbering for all four prefixes, approval once, the quotation comparison and its cross-tenant party refusal, both commitment-submission refusals, the committed/delivered/closed roll-ups without double-counting the ledger, the event trail, the subcontractor capability override, cross-project ownership, the §20 forecast and margin, the delay scan with its dedupe, and a per-table RLS sweep (row present for the owner, `relrowsecurity AND relforcerowsecurity`, one `pg_policies` row each) plus service-level refusals for a foreign tenant. `integration/aec.integration.test.ts`'s sweep now walks all eight new tables |
+
+### Decision 27 — a supplier is a `parties` row, and the flow stops where the ledger starts
+
+§18 could be read as an invitation to build a supplier master and a purchasing ledger, and the repo
+already has both — for the trades that sell goods: `suppliers`, `purchases`, `purchase_items` and
+`inventory_items`, all `location_id`-scoped. An AEC tenant has no products workspace and no location,
+so those tables are unreachable for it, and duplicating them inside procurement would create a second
+supplier identity next to CRM's. So a supplier stays a `parties` row (as the issue's own boundary says:
+"suppliers remain `parties`"), reached through the same party picker the participants tab uses, its
+merge handled by the existing registry — this wave only adds the three columns that point at it. The
+same restraint ends the flow: no table here has a paid, invoiced or received balance, and the last
+status of an award is `closed`, which is precisely the moment the invoice and the payment become
+Accounting's business. The cockpit's actual cost is still read from the ledger, and the wave's numbers
+are the ones the registers own — committed, delivered, delayed, forecast.
+
+### Decision 28 — the approval is the award, and the queue already has the two buttons
+
+§18's chain names one Approval step between the comparison and the commitment, and the shape that
+suggests — a general "procurement approvals" screen — would be a second approval mechanism next to
+`workspace_approvals`. Instead the wave adds two *subjects* to the queue that exists (`material_request`
+and `commitment`), and the decision in the inbox moves the register: approving a commitment is what
+turns a chosen quotation into a Purchase Commitment, and rejecting a request is what sends it back to
+draft so it can be revised. There is no review state in these two chains, so unlike Wave 8's decision
+(Decision 24) the queue applies the transition directly — the difference is the chain, not the
+mechanism. `api-guards.test.ts` asserts the route split, and the database suite asserts that a second
+decision on the same subject is refused rather than silently repeated.
+
+### Decision 29 — delivery is a fact about a box, not a status of the award
+
+A delivery row is evidence that something arrived; the award's status is a decision that the
+commitment is complete. Conflating them looks convenient — record a receipt, the award flips to
+`delivered` — and it quietly turns a note about a box into a financial fact. So `recordDelivery` never
+touches the award's status: the award moves to `delivered` when somebody takes that act
+(`applyCommitmentAction(…, 'deliver')`), and §20's `deliveredRial` counts exactly those awards, which
+is why the suite asserts the figure stays at zero after a receipt and moves after the act. The delay
+warning follows the same rule from the other side: only an *approved* award can be late (a delivered
+one is no longer waiting), and `commitmentDelayDays` is one predicate the tab, the §22 widget, the §29
+scan and §23's assistant all call, so no two screens can disagree about which box is late.
+
+### Decision 30 — a forecast must say what it is made of
+
+§20 asks for committed cost, cost to complete, forecast final cost and the project margin, and the
+margin is the number a contractor will make a decision with. The temptation is a single figure
+computed by whatever formula happens to be nearest. Instead the method is written down and displayed:
+what has been spent (the ledger), what has been committed (this wave's awards) and what is left of the
+approved estimate covers the rest, with `costToCompleteRial` clamped at zero and `FORECAST_BASIS_LABEL`
+printed under the figure in both the cockpit and the assistant's answer. And the forecast returns
+`null` — never zero — whenever a half of the arithmetic is unknown (no approved estimate, or an actor
+without `ledger.view`): a number built on a missing half is a guess wearing a number. That is also why
+`COMMERCIAL_AWAITING_WAVES` can now be empty and the «Project Margin» widget is *still* not seeded:
+the wave that supplied the arithmetic also had to supply the sentence that explains it, and the
+cockpit shows it.
+
+### Decision 31 — two switches, not one, because subcontracted work is a different business decision
+
+§18 asks for one switch — a small architecture office hides procurement entirely — and the wave
+provides two, because they answer two questions: «do we buy materials and services on this project?»
+(`procurement`) and «do we hand work to subcontractors?» (`subcontractors`). The commitment register
+carries both endings, and `COMMITMENT_CAPABILITY_FOR` decides which key each kind needs — so a fit-out
+contractor that buys materials but employs its own crews turns the subcontract half off without losing
+the purchase register, and `subcontractors` keeps its second job of gating the subcontractor role in
+the participant catalogue. The database suite proves the split on one fixture: with
+`capabilityOverrides` switching `subcontractors` off, saving the profile drops it from the resolved
+capabilities and the subcontract path refuses with `capability_disabled`, not with a 403 about
+permissions. An override only works when the key is spelled right, which is exactly the bug that first
+made this test pass for the wrong reason (`overrides` was silently ignored) — the lesson is in the
+service's own signature, not in a comment.
+
+### Decision 32 — a shared trigger must not read a column in its first condition
+
+`aec_assert_procurement_references_owned()` serves eight tables with different columns, so it branches
+on which table it is running for before reading anything. Its first version read `NEW.created_by` in
+those branch conditions — the same columns the branch *bodies* legitimately use — and PL/pgSQL
+resolved them when it executed the condition rather than after the branch was chosen, so the trigger
+that fired for `aec_material_request_lines` (a table with no `created_by`) died with
+`record "new" has no field "created_by"` even though the branch it belonged to never read the column.
+The fix is one line of discipline for any future shared trigger: declare
+`payload jsonb := to_jsonb(NEW)` and compare `payload ->> 'col'` in the conditions, keeping `NEW.col`
+in the bodies. The same migration also learned a lesson about late statuses: its commitment guard
+originally froze a delivered award completely, which made §18's chain unwalkable past delivery — a
+delivered award may now move to `closed` (and only that), and the suite that walks the chain end to end
+is what caught it.
+
+## Waves 10–11 — designed, not built
 
 In the issue's order. Nothing below has a migration or a screen yet; the wave boundaries exist so
 each can be reviewed on its own.
 
-9. **Procurement.** Requests, RFQs, comparison, approvals and delivery tracking.
-10. **AI, reporting and mobile/offline.** AEC tools and widgets on the existing assistant, the AEC
-    report set, and the hybrid/offline classification.
+10. **AI, reporting and mobile/offline.** The AEC report set — the six registers Wave 9 leaves behind
+    (procurement status and delay, spend against commitment) supply the data but not the pages — the
+    remaining recommended widgets, and the hybrid/offline classification.
 11. **Cleanup.** The repo-wide audit of hard-coded industry arrays, routes that assume every
     non-F&B tenant is retail, dead routes and duplicate project/financial logic.
 
