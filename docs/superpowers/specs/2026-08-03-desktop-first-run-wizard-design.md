@@ -4,12 +4,17 @@
 **Status:** Approved for implementation
 **Phase:** Post-Phase-20 (standalone desktop gap)
 
+> **Wizard shape today (updated after #808):** the wizard is industry-shaped, not a fixed
+> 8-step list. Food service walks all nine steps (the eighth being Backup, added by this spec,
+> which is optional and local-only); retail and service industries drop the costing/menu steps.
+> When this document says "step N" or "as today" it means the flow as of 2026-08-03.
+
 ---
 
 ## Problem
 
 The Electron desktop app starts a local Postgres + Next.js server and opens `/welcome`, which
-collects a business name and owner account, then drops into the 8-step setup wizard. This works
+collects a business name and owner account, then drops into the setup wizard. This works
 for a brand-new business, but there is no path for:
 
 1. A business that already exists on the online platform and wants to pair a local desktop install.
@@ -45,7 +50,7 @@ scope for this phase; Settings shows an explanatory note instead of a button).
 3. `POST /api/setup/bootstrap` — `provisionBusiness()` runs as today, plus:
    - writes `deployment.mode = { mode: 'local', pairedAt: null }` to settings
    - seeds `business_features` overrides for `LOCAL_DISABLED_FEATURES`
-4. Redirect → `/setup/business` (8-step wizard, as today).
+4. Redirect → `/setup/business` (the setup wizard, as today).
 
 ### Connected path
 
@@ -202,7 +207,7 @@ block that defaults to `enabled: false`. Changes needed:
 
 - Backup settings page hides the S3/cloud section when `isLocalOnly()`.
 - `PUT /api/backup/config` rejects `cloud.enabled = true` in local mode.
-- The 8-step wizard gains **one new optional step** for local installs: «مقصد پشتیبان‌گیری» —
+- The wizard gains **one new optional step** for local installs: «مقصد پشتیبان‌گیری» —
   pick a backup folder, set the schedule. Joins `OPTIONAL_STEPS`. Only shown in local mode.
 
 ### Electron bridge addition

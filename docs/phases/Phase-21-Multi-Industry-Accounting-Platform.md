@@ -111,8 +111,8 @@ is built once in Wave 1 instead of separately in Waves 2, 5, and 6:
    parallel model the new industries build on — **not** a migration target for `menu_items`/
    `inventory_items`/`recipes`, which stay exactly as they are (see the revised scope decision
    above); industry-aware setup wizard (Wizard step 1 picks the industry; each industry gets its
-   own COA seed template and its own remaining wizard steps — F&B's 8-step wizard is one instance
-   of this, not special-cased code).
+   own COA seed template and its own remaining wizard steps — the food-service path through the
+   wizard is one instance of this, not special-cased code).
 2. **Wave 2 — Weighted goods & gold inventory.** Fractional-weight quantities (grams, a new
    numeric-precision convention alongside integer-Rial money and the existing item primitive),
    purity/karat attributes, weight-based lots and stock counts, daily gold-price entry

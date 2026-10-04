@@ -32,25 +32,40 @@ npm run dev             # http://localhost:3000
 ### First run — the Setup Wizard (Phase 1)
 
 On a **completely empty database**, opening the app sends you to `/welcome`, which
-creates the business + first Owner account, then walks you through an 8-step guided
-wizard (`/setup/*`) — no manual DB edits needed:
+creates the business + first Owner account, then walks you through the guided
+wizard (`/setup/*`) — no manual DB edits needed. The step sequence is
+industry-shaped (`src/lib/wizard-steps.ts` is the one place that decides it):
 
-1. **Business info** — name, location, currency/language defaults
-2. **Chart of accounts** — editable pre-built F&B template
-3. **Inventory costing** — FIFO vs Weighted Average (locked after the first transaction)
-4. **Tax** — default VAT rate + per-category rates
-5. **Roles & users** — Manager (email/password) and Cashier/Waiter/Kitchen (4–12-digit PIN)
-6. **Menu** — manual entry or CSV/Excel import (downloadable template)
-7. **Hardware** — printer pairing + test print (a Windows-installed or network printer, reached through the one-click local print connector; same screen as Settings)
-8. **Opening balances** — opening inventory count + balanced opening journal entry
+- **Food service (کافه و رستوران)** — the full path:
 
-A standalone desktop install gets one extra optional step between hardware and opening —
-**backup destination**, with a real OS folder dialog — and `/welcome` there first asks
-whether to set up locally or pair with an existing online business
-([docs/standalone-desktop-app.md](docs/standalone-desktop-app.md#first-run--local-setup-or-pairing)).
+  1. **Business info** — name, location, currency/language defaults
+  2. **Chart of accounts** — editable pre-built F&B template
+  3. **Inventory costing** — FIFO/LIFO/Weighted Average, perpetual vs periodic (locked after the first inventory transaction)
+  4. **Tax** — default VAT rate + per-category rates
+  5. **Roles & users** — Manager (email/password) and Cashier/Waiter/Kitchen (4–12-digit PIN) *(optional)*
+  6. **Menu** — manual entry or CSV/Excel import (downloadable template). The step is only ready once at least one active item exists.
+  7. **Hardware** — printer pairing + test print, the *same* panel as Settings → Printers. On the desktop app printing goes straight through Electron; in a browser/cloud till the panel installs the one-click Windows print connector. *(optional)*
+  8. **Backup destination** — local-only installs, with a real OS folder dialog *(optional)*
+  9. **Opening balances** — opening inventory count + balanced opening journal entry *(optional)*
 
-Until the wizard is completed, Owner/Manager logins are routed into it; the dashboard
-shows a "resume setup" banner.
+- **Trade-goods retail (طلا و جواهر، ساعت، بدلیجات، آرایشی، عمده‌فروشی، ابزار، خرازی)** —
+  the same path without costing and menu: the catalogue is managed in the products
+  workspace (`/accounting/products`, or the trade's own items page), and the wizard's
+  finish page points at it.
+- **Services / SaaS** — business info, chart of accounts, tax, then the optional
+  users/hardware/backup/opening steps.
+
+A standalone desktop install also has `/welcome` ask whether to set up locally or pair
+with an existing online business
+([docs/standalone-desktop-app.md](docs/standalone-desktop-app.md#first-run--local-setup-or-pairing));
+pairing imports an already-configured business and marks setup complete outright.
+
+Until `POST /api/setup/complete` stamps the completion marker (the Finish step), Owner/
+Manager logins are routed into the wizard; the dashboard shows a "resume setup" banner.
+Reaching a required step does *not* end the wizard on its own — Hardware, Backup,
+Opening and Finish stay reachable for every industry. Businesses created ready-to-use by
+the platform console (and the demo seed) are stamped complete up front, so they never
+enter onboarding.
 
 ### Optional: seed a demo business instead
 
