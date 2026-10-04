@@ -350,6 +350,20 @@ export async function updateBusinessOwnerProfile(
         update.membershipId,
         update.isActive,
       ]);
+      if (!update.isActive) {
+        await client.query(
+          `UPDATE employee_sessions
+              SET revoked_at = now()
+            WHERE business_id = $1 AND employee_id = $2 AND revoked_at IS NULL`,
+          [businessId, update.membershipId],
+        );
+        await client.query(
+          `UPDATE impersonation_grants
+              SET revoked_at = now()
+            WHERE business_id = $1 AND user_id = $2 AND ended_at IS NULL AND revoked_at IS NULL`,
+          [businessId, update.membershipId],
+        );
+      }
       notices.push(
         update.isActive
           ? "عضویت دوباره فعال شد؛ فرد می‌تواند وارد شود."
@@ -364,6 +378,25 @@ export async function updateBusinessOwnerProfile(
               SET email = $2, token_version = token_version + 1, updated_at = now()
             WHERE id = $1`,
           [before.platformUserId, email],
+        );
+        await client.query(
+          `UPDATE employee_sessions es
+              SET revoked_at = now()
+             FROM users u
+            WHERE es.employee_id = u.id
+              AND u.platform_user_id = $1
+              AND es.revoked_at IS NULL`,
+          [before.platformUserId],
+        );
+        await client.query(
+          `UPDATE impersonation_grants ig
+              SET revoked_at = now()
+             FROM users u
+            WHERE ig.user_id = u.id
+              AND u.platform_user_id = $1
+              AND ig.ended_at IS NULL
+              AND ig.revoked_at IS NULL`,
+          [before.platformUserId],
         );
       } catch (err) {
         await client.query("ROLLBACK");

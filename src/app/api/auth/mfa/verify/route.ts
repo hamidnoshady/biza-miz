@@ -1,32 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyMfaPendingToken, getAccountMfaEnrolments } from "@/lib/mfa-service";
-import { verifyMfaCode } from "@/lib/mfa-verify";
+import {
+  getAccountMfaEnrolments,
+  verifyMfaPendingToken,
+} from "@/lib/mfa-service";
+import { verifyAndConfirmMfaCode } from "@/lib/mfa-verify";
 import { countRemainingRecoveryCodes } from "@/lib/mfa-recovery";
-import { query, withoutTenantScope } from "@/lib/db";
-import { signSession, SESSION_COOKIE, sessionCookieOptions } from "@/lib/auth";
-import { membershipsForPlatformUser } from "@/lib/memberships";
+import { query, withTenant, withoutTenantScope } from "@/lib/db";
+import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
+import { createSession } from "@/lib/employee-service";
+import {
+  membershipBlockedReason,
+  membershipsForPlatformUser,
+} from "@/lib/memberships";
+import {
+  checkAuthLockout,
+  recordAuthFailure,
+  recordAuthSuccess,
+} from "@/lib/login-lockout-service";
+import { PASSWORD_LOCKOUT_POLICY } from "@/lib/login-lockout";
+import { selectPrimaryMfaEnrolment, type MfaMethod } from "@/lib/mfa";
 
-/**
- * Second-factor verification for the tenant password realm — the step that
- * turns an `mfa_pending` token into a real session.
- *
- * Accepts either the enrolled factor's code, or (with `useRecoveryCode`) one of
- * the ten single-use codes issued at enrolment. The recovery path is what makes
- * a lost phone a bad afternoon rather than a database edit, and it is
- * deliberately explicit rather than sniffed from the shape of the input: a
- * mistyped TOTP code must never silently burn a recovery code.
- */
 export async function POST(request: NextRequest) {
-  const auth = request.headers.get("authorization");
-  const bearer = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
-  if (!bearer) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-
-  const payload = await verifyMfaPendingToken(bearer);
-  if (!payload || payload.authRealm !== "tenant_password" || !payload.businessId) {
+  const authHeader = request.headers.get("authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+  const token = authHeader.slice(7);
+  const payload = await verifyMfaPendingToken(token);
+  if (!payload || payload.authRealm !== "tenant_password") {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  let body: { code?: string; useRecoveryCode?: boolean };
+  let body: { code?: string; useRecoveryCode?: boolean; method?: string };
   try {
     body = await request.json();
   } catch {
@@ -34,65 +39,102 @@ export async function POST(request: NextRequest) {
   }
 
   const code = body.code?.trim();
+  const useRecoveryCode = Boolean(body.useRecoveryCode);
+
   if (!code) {
     return NextResponse.json({ error: "missing_code" }, { status: 400 });
   }
 
-  const useRecoveryCode = body.useRecoveryCode === true;
-  const enrolments = await getAccountMfaEnrolments("platform_user", payload.sub);
-  const activeEnrolment =
-    enrolments.find((e) => e.method === payload.method) || enrolments.find((e) => e.is_primary);
-
-  // A recovery code is honoured against the account, not against a method —
-  // the whole reason it is being used is that the enrolled method is out of
-  // reach. Without an enrolment *and* without a recovery attempt there is
-  // nothing to check against.
-  if (!activeEnrolment && !useRecoveryCode) {
-    return NextResponse.json({ error: "not_enrolled" }, { status: 400 });
-  }
-
-  const outcome = await verifyMfaCode({
-    subjectRealm: "platform_user",
-    subjectId: payload.sub,
-    method: activeEnrolment?.method ?? null,
-    code,
-    useRecoveryCode,
-  });
-
-  if (outcome === "rejected") {
-    // A failed OTP counts toward the Wave 1 lockout streak.
-    const { recordAuthFailure } = await import("@/lib/login-lockout-service");
-    const { rows } = await withoutTenantScope("platform", () =>
-      query(`SELECT email FROM platform_users WHERE id = $1`, [payload.sub]),
-    );
-    if (rows[0]) {
-      await recordAuthFailure("tenant_password", rows[0].email as string);
-    }
-    return NextResponse.json(
-      { error: useRecoveryCode ? "invalid_recovery_code" : "invalid_code" },
-      { status: 401 },
-    );
-  }
-
-  const recoveryCodesRemaining =
-    outcome === "recovery_code"
-      ? await countRemainingRecoveryCodes("platform_user", payload.sub)
-      : null;
-
   return withoutTenantScope("login", async () => {
-    // Generate real session
-    const memberships = await membershipsForPlatformUser(payload.sub);
-    const chosen = memberships.find((m) => m.businessId === payload.businessId);
-    if (!chosen) {
-      return NextResponse.json({ error: "no_business_membership" }, { status: 403 });
+    const { rows: users } = await query<{
+      id: string;
+      email: string;
+      full_name: string;
+      token_version: number;
+    }>(
+      `SELECT id, email::text AS email, full_name, token_version
+         FROM platform_users
+        WHERE id = $1 AND is_active = true`,
+      [payload.sub],
+    );
+    if (users.length === 0) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
+    const user = users[0];
+
+    // Issue #809 (Finding 8 — P1): Enforce account lockout BEFORE checking the
+    // MFA code so a valid 5-minute pending token cannot bypass an active lockout.
+    const lockout = await checkAuthLockout(
+      "tenant_password",
+      user.email,
+      PASSWORD_LOCKOUT_POLICY,
+    );
+    if (lockout.locked) {
+      return NextResponse.json(
+        { error: "account_locked", lockedUntil: lockout.lockedUntil },
+        { status: 423 },
+      );
     }
 
-    const { rows } = await query<{ token_version: number }>(
-      `SELECT token_version FROM platform_users WHERE id = $1`,
-      [payload.sub]
+    const enrolments = await getAccountMfaEnrolments("platform_user", user.id);
+    const requestedMethod: MfaMethod | null =
+      body.method === "totp" || body.method === "sms_otp" ? body.method : null;
+    const primaryChoice = selectPrimaryMfaEnrolment(enrolments, {
+      allowUnconfirmedFallback: true,
+    });
+    const method: MfaMethod | null =
+      requestedMethod && enrolments.some((e) => e.method === requestedMethod)
+        ? requestedMethod
+        : (primaryChoice?.method ?? payload.method);
+
+    // Issue #809 (Finding 1 — P0): Never accept SMS OTP as the second factor
+    // when phone OTP was already used as the primary login factor.
+    if (payload.primaryAuth === "phone_otp" && !useRecoveryCode && method === "sms_otp") {
+      return NextResponse.json({ error: "mfa_distinct_factor_required" }, { status: 400 });
+    }
+
+    const detail = await verifyAndConfirmMfaCode({
+      subjectRealm: "platform_user",
+      subjectId: user.id,
+      method,
+      code,
+      useRecoveryCode,
+    });
+
+    if (detail.outcome === "rejected") {
+      await recordAuthFailure("tenant_password", user.email);
+      return NextResponse.json({ error: "invalid_code" }, { status: 401 });
+    }
+
+    await recordAuthSuccess("tenant_password", user.email);
+
+    const remainingRecoveryCodes = await countRemainingRecoveryCodes(
+      "platform_user",
+      user.id,
     );
 
-    const token = await signSession({
+    const memberships = await membershipsForPlatformUser(user.id);
+    const usable = memberships.filter((m) => membershipBlockedReason(m) === null);
+    const chosen = payload.businessId
+      ? usable.find((m) => m.businessId === payload.businessId)
+      : usable[0];
+
+    if (!chosen) {
+      return NextResponse.json({ error: "business_unavailable" }, { status: 403 });
+    }
+
+    const employeeSessionId =
+      payload.employeeSession?.employeeSessionId ??
+      (
+        await withTenant(chosen.businessId, () =>
+          createSession(chosen.userId, chosen.businessId, {
+            locationId: chosen.locationId,
+            deviceLabel: request.headers.get("user-agent")?.slice(0, 120) ?? "Web (MFA)",
+          }),
+        )
+      ).session.id;
+
+    const sessionToken = await signSession({
       sub: chosen.userId,
       role: chosen.role,
       businessId: chosen.businessId,
@@ -100,19 +142,26 @@ export async function POST(request: NextRequest) {
       businessSubdomain: chosen.businessSubdomain,
       locationId: chosen.locationId,
       fullName: chosen.fullName,
-      platformUserId: payload.sub,
-      tokenVersion: rows[0].token_version,
+      platformUserId: user.id,
+      tokenVersion: user.token_version,
+      employeeSessionId,
+      mfaVerified: true,
+      recentAuthAt: Math.floor(Date.now() / 1000),
     });
 
     const res = NextResponse.json({
+      status: "verified",
       user: { id: chosen.userId, role: chosen.role, fullName: chosen.fullName },
-      business: { id: chosen.businessId, name: chosen.businessName, slug: chosen.businessSlug },
-      // Surfaced so the UI can say «۶ کد بازیابی باقی مانده» right after one is
-      // spent. Someone down to their last code needs to know before, not after.
-      usedRecoveryCode: outcome === "recovery_code",
-      recoveryCodesRemaining,
+      business: {
+        id: chosen.businessId,
+        name: chosen.businessName,
+        slug: chosen.businessSlug,
+      },
+      recoveryCodesRemaining: remainingRecoveryCodes,
+      recoveryCodes: detail.recoveryCodes,
     });
-    res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
+
+    res.cookies.set(SESSION_COOKIE, sessionToken, sessionCookieOptions());
     return res;
   });
 }

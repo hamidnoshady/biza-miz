@@ -180,6 +180,8 @@ const PUBLIC_PATHS = [
   // accept-invite, and public for the same reason.
   "/activate",
   "/api/auth/owner-activation",
+  "/reset-password",
+  "/api/auth/password-reset",
   // Phase 9: the caller is another location's server, not a browser — the
   // route authenticates it with a per-location bearer token, not a session.
   "/api/rollup/ingest",

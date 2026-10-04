@@ -95,6 +95,9 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "auth/owner-activation":
     "owner activation exchange — the identity was created with a password nobody knows, so " +
     "the single-use token in the link is the only credential the owner has until they set one",
+  "auth/password-reset":
+    "user-controlled password reset / recovery exchange (Issue #809) — the single-use hashed " +
+    "token in the link is the credential before the account holder sets a new password",
   "auth/company-handoff": "one-use platform-company staff handoff; token is the credential before the tenant cookie exists",
   "website/leads": "public form intake authenticated by a hashed, site-scoped bearer credential with durable rate limiting and idempotency",
   "auth/impersonate-handoff":

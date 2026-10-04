@@ -15,6 +15,7 @@
  * a role-and-toggles editor and nothing else, so a member's name or branches
  * could only be fixed by removing and re-adding the person.
  */
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ALL_PERMISSIONS,
@@ -358,6 +359,7 @@ export function TeamManager({
       {credentialsEditing ? (
         <CredentialsEditorDialog
           member={credentialsEditing}
+          isSelf={credentialsEditing.id === currentUserId}
           onClose={() => setCredentialsEditing(null)}
           onSaved={() => setCredentialsEditing(null)}
         />
@@ -699,16 +701,17 @@ function PhoneEditorDialog({
  */
 function CredentialsEditorDialog({
   member,
+  isSelf,
   onClose,
-  onSaved,
 }: {
   member: Member;
+  isSelf: boolean;
   onClose: () => void;
   onSaved: () => void;
 }) {
   const isPinMember = member.hasPin || (PIN_ROLES as readonly string[]).includes(member.role);
   const [pin, setPin] = useState("");
-  const [password, setPassword] = useState("");
+  const [resetUrl, setResetUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
@@ -734,32 +737,48 @@ function CredentialsEditorDialog({
     setDone("رمز عددی جدید ثبت شد.");
   }
 
-  async function resetPassword() {
-    if (password.length < 8) {
-      setError("رمز عبور باید حداقل ۸ نویسه باشد.");
+  async function sendPasswordReset() {
+    setBusy(true);
+    setError("");
+    setDone("");
+    setResetUrl("");
+    const res = await api<{ error?: string; resetUrl?: string }>(
+      `/api/team/${member.id}/credentials`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ action: "send_password_reset" }),
+      },
+    );
+    setBusy(false);
+    if (!res.ok) {
+      setError(errorMessage(res.data.error));
       return;
     }
+    if (res.data.resetUrl) setResetUrl(res.data.resetUrl);
+    setDone("لینک یک‌بارمصرف بازیابی رمز عبور صادر شد تا خود کاربر رمز جدیدش را تعیین کند.");
+  }
+
+  async function revokeSessions() {
     setBusy(true);
     setError("");
     setDone("");
     const res = await api<{ error?: string }>(`/api/team/${member.id}/credentials`, {
       method: "PUT",
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ action: "revoke_sessions" }),
     });
     setBusy(false);
     if (!res.ok) {
       setError(errorMessage(res.data.error));
       return;
     }
-    setPassword("");
-    setDone("رمز عبور جدید ثبت شد؛ ورود این شخص در همهٔ کسب‌وکارهایش با همین رمز باز می‌شود.");
+    setDone("نشست‌های فعال این عضو در این کسب‌وکار خاتمه یافتند.");
   }
 
   return (
     <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>رمز ورود «{member.fullName}»</DialogTitle>
+          <DialogTitle>اعتبارنامه و نشست‌های «{member.fullName}»</DialogTitle>
         </DialogHeader>
         <ErrorBox>{error}</ErrorBox>
         {done ? <InfoBox>{done}</InfoBox> : null}
@@ -781,19 +800,47 @@ function CredentialsEditorDialog({
         ) : null}
 
         {member.hasLogin ? (
-          <Field
-            label="رمز عبور جدید"
-            hint="این رمز برای ورودِ ایمیلی این شخص در همهٔ کسب‌وکارها یکی است."
-          >
-            <input
-              className={inputClass}
-              dir="ltr"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              minLength={8}
-            />
-          </Field>
+          isSelf ? (
+            <InfoBox>
+              برای تغییر رمز عبور خودتان (با تأیید رمز فعلی و مدیریت نشست‌ها) به بخش{" "}
+              <Link
+                href="/settings/profile"
+                className="font-semibold text-primary underline underline-offset-4"
+              >
+                حساب کاربری من
+              </Link>{" "}
+              مراجعه کنید.
+            </InfoBox>
+          ) : (
+            <div className="space-y-3 rounded-xl border border-border/80 bg-muted/30 p-3 text-xs">
+              <p className="font-semibold text-foreground">بازیابی امن رمز عبور سراسری</p>
+              <p className="text-muted-foreground">
+                به‌دلایل امنیتی، مدیر کسب‌وکار نمی‌تواند رمز عبور سراسری کاربر دیگری را مستقیماً
+                تعیین کند. در صورت فراموشی رمز، لینک یک‌بارمصرف بازیابی صادر کنید تا خود کاربر رمز
+                جدیدش را ثبت نماید.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <SecondaryButton onClick={sendPasswordReset} disabled={busy}>
+                  ارسال لینک بازیابی رمز عبور
+                </SecondaryButton>
+                <SecondaryButton onClick={revokeSessions} disabled={busy}>
+                  خاتمه دادن به نشست‌های فعال
+                </SecondaryButton>
+              </div>
+              {resetUrl ? (
+                <div className="mt-2 space-y-1">
+                  <p className="text-muted-foreground">لینک یک‌بارمصرف بازیابی (معتبر به مدت محدود):</p>
+                  <input
+                    className={`${inputClass} font-mono text-xs`}
+                    dir="ltr"
+                    readOnly
+                    value={resetUrl}
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                </div>
+              ) : null}
+            </div>
+          )
         ) : null}
 
         {!isPinMember && !member.hasLogin ? (
@@ -805,11 +852,6 @@ function CredentialsEditorDialog({
           {isPinMember ? (
             <PrimaryButton onClick={resetPin} disabled={busy || !pin}>
               ثبت رمز عددی
-            </PrimaryButton>
-          ) : null}
-          {member.hasLogin ? (
-            <PrimaryButton onClick={resetPassword} disabled={busy || password.length < 8}>
-              ثبت رمز عبور
             </PrimaryButton>
           ) : null}
         </DialogFooter>

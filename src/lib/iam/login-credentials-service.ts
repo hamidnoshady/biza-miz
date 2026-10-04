@@ -12,9 +12,10 @@ export async function buildLoginCredentials(businessId: string): Promise<Replica
   return withTenant(businessId, async () => {
     const people = await query<{
       membership_id: string; platform_user_id: string; email: string; full_name: string;
-      password_hash: string; is_active: boolean;
+      password_hash: string; is_active: boolean; token_version: number;
     }>(
-      `SELECT u.id AS membership_id, p.id AS platform_user_id, p.email, p.full_name, p.password_hash, p.is_active
+      `SELECT u.id AS membership_id, p.id AS platform_user_id, p.email, p.full_name,
+              p.password_hash, p.is_active, p.token_version
          FROM users u JOIN platform_users p ON p.id = u.platform_user_id
         WHERE u.business_id = $1 ORDER BY u.id`,
       [businessId],
@@ -47,6 +48,7 @@ export async function buildLoginCredentials(businessId: string): Promise<Replica
         fullName: person.full_name,
         passwordHash: person.password_hash,
         isActive: person.is_active,
+        tokenVersion: person.token_version,
         mfa,
         recoveryCodes: codes.rows
           .filter((c) => c.subject_id === person.platform_user_id)
@@ -128,19 +130,24 @@ export async function applyLoginCredentials(
           [linked.get(credential.membershipId) ?? "00000000-0000-0000-0000-000000000000", email],
         );
         let platformUserId = existing.rows[0]?.id;
+        const incomingTokenVersion = credential.tokenVersion ?? 1;
         if (platformUserId) {
-          // A changed password ends the sessions the old one opened.
+          // A changed password or bumped cloud token_version ends the sessions the old one opened.
           await client.query(
             `UPDATE platform_users SET email = $2, full_name = $3, password_hash = $4, is_active = $5,
-                    token_version = token_version + CASE WHEN password_hash IS DISTINCT FROM $4 THEN 1 ELSE 0 END,
+                    token_version = GREATEST(
+                      token_version + CASE WHEN password_hash IS DISTINCT FROM $4 THEN 1 ELSE 0 END,
+                      $6
+                    ),
                     updated_at = now()
               WHERE id = $1`,
-            [platformUserId, email, credential.fullName, credential.passwordHash, credential.isActive],
+            [platformUserId, email, credential.fullName, credential.passwordHash, credential.isActive, incomingTokenVersion],
           );
         } else {
           const inserted = await client.query<{ id: string }>(
-            `INSERT INTO platform_users (email, password_hash, full_name, is_active) VALUES ($1, $2, $3, $4) RETURNING id`,
-            [email, credential.passwordHash, credential.fullName, credential.isActive],
+            `INSERT INTO platform_users (email, password_hash, full_name, is_active, token_version)
+             VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+            [email, credential.passwordHash, credential.fullName, credential.isActive, incomingTokenVersion],
           );
           platformUserId = inserted.rows[0].id;
         }
@@ -153,11 +160,14 @@ export async function applyLoginCredentials(
           `DELETE FROM mfa_enrolments WHERE subject_realm = 'platform_user' AND subject_id = $1`,
           [platformUserId],
         );
+        let primaryAssigned = false;
         for (const m of mfa) {
+          const isPrimary = m.isPrimary && !primaryAssigned;
+          if (isPrimary) primaryAssigned = true;
           await client.query(
             `INSERT INTO mfa_enrolments (subject_realm, subject_id, method, is_primary, phone_e164, totp_secret, confirmed_at)
              VALUES ('platform_user', $1, $2, $3, $4, $5, now())`,
-            [platformUserId, m.method, m.isPrimary, m.phoneE164, m.encrypted],
+            [platformUserId, m.method, isPrimary, m.phoneE164, m.encrypted],
           );
         }
         // A code already spent here stays spent even if the cloud has not heard yet.

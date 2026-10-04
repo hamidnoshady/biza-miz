@@ -8,7 +8,27 @@ import {
   createSession,
   ensureEmployeeProfile,
 } from "@/lib/employee-service";
-import { stampPhoneVerified, verifyEmployeePhoneOtp, verifyPhonePendingToken } from "@/lib/phone-otp";
+import {
+  stampPhoneVerified,
+  verifyEmployeePhoneOtp,
+  verifyPhonePendingToken,
+} from "@/lib/phone-otp";
+import {
+  distinctSecondFactorMethods,
+  enrolmentRequirement,
+  graceDaysRemaining,
+  mfaAppliesToRole,
+  MFA_GRACE_DAYS_TENANT,
+  shouldChallengeMfaOnLogin,
+} from "@/lib/mfa";
+import { getMfaPolicy } from "@/lib/mfa-policy";
+import {
+  filterActiveMfaEnrolments,
+  getAccountMfaEnrolments,
+  getMfaGracePeriod,
+  markMfaGracePeriod,
+  signMfaPendingToken,
+} from "@/lib/mfa-service";
 
 interface MemberRow extends Record<string, unknown> {
   id: string;
@@ -19,23 +39,18 @@ interface MemberRow extends Record<string, unknown> {
   role: Role;
   full_name: string;
   platform_user_id: string | null;
+  identity_active: boolean | null;
   token_version: number | null;
 }
 
 /**
- * Phase 42 — the second half of the phone-OTP door: check the code, and on
- * success mint exactly the session `pin-login` would have (employee_sessions
- * row + JWT cookie), so everything downstream — revocation re-checks, app
- * gating, the lot — treats a phone login and a PIN login identically.
+ * Phase 42 — the second half of the phone-OTP door.
  *
- * A correct code does three things at once: it proves possession of the
- * number (the login), it stamps `phone_verified_at` the first time (the
- * first-time verification), and it re-opens the 7-day PIN window
- * (`otp_login_at`) — one write, because they all become true together.
- *
- * A wrong code is audited and counted against the employee lockout the PIN
- * failures share (`invalid_phone_otp`): five wrong guesses of *either* kind
- * pause the door for that member.
+ * Issue #809 (Finding 1 — P0): Phone OTP is primary authentication only.
+ * For Owner/Manager accounts (or any account with enrolled MFA), phone OTP
+ * must evaluate the same MFA policy as password login and require a DISTINCT
+ * second factor (`totp` or recovery code — never counting the same SMS OTP
+ * as both primary and second factor) before minting the tenant session.
  */
 export async function POST(request: NextRequest) {
   let body: { code?: string; deviceToken?: string };
@@ -81,7 +96,8 @@ export async function POST(request: NextRequest) {
     const { rows } = await query<MemberRow>(
       `SELECT u.id, u.business_id, b.slug::text AS business_slug,
               b.subdomain::text AS business_subdomain, u.location_id,
-              u.role, u.full_name, u.platform_user_id, p.token_version
+              u.role, u.full_name, u.platform_user_id,
+              p.is_active AS identity_active, p.token_version
          FROM users u
          JOIN businesses b ON b.id = u.business_id
          LEFT JOIN platform_users p ON p.id = u.platform_user_id
@@ -89,15 +105,86 @@ export async function POST(request: NextRequest) {
       [payload.sub, payload.businessId],
     );
     const member = rows[0];
-    if (!member) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    if (!member || member.identity_active === false) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
 
-    // The one write that makes all three facts true together — verified
-    // number, fresh OTP window, and (first-time flow) the number itself.
     await stampPhoneVerified({
       businessId: payload.businessId,
       userId: member.id,
       phone: payload.mayAttachPhone ? (payload.phone ?? null) : null,
     });
+
+    let graceNotice: {
+      mfaState: "grace";
+      graceUntil: string | null;
+      graceDaysLeft: number | null;
+    } | null = null;
+
+    if (member.platform_user_id) {
+      const mfaPolicy = await getMfaPolicy(member.business_id);
+      const requiresMfa = mfaAppliesToRole(member.role, mfaPolicy.requireForManagers);
+      const allEnrolments = await getAccountMfaEnrolments(
+        "platform_user",
+        member.platform_user_id,
+      );
+      const activeEnrolments = filterActiveMfaEnrolments(allEnrolments);
+      const distinctMethods = distinctSecondFactorMethods(activeEnrolments, "phone_otp");
+
+      if (requiresMfa || activeEnrolments.length > 0) {
+        let graceUntil = await getMfaGracePeriod("platform_user", member.platform_user_id);
+        const hasGraceRecord = graceUntil !== null;
+
+        if (requiresMfa && !hasGraceRecord && activeEnrolments.length === 0) {
+          await markMfaGracePeriod(
+            "platform_user",
+            member.platform_user_id,
+            MFA_GRACE_DAYS_TENANT,
+          );
+          graceUntil = await getMfaGracePeriod("platform_user", member.platform_user_id);
+        }
+
+        const req = enrolmentRequirement({
+          hasPrimary: activeEnrolments.length > 0,
+          graceUntil,
+          hasGraceRecord,
+          role: member.role,
+        });
+
+        if (
+          shouldChallengeMfaOnLogin({
+            hasConfirmedEnrolment: activeEnrolments.length > 0,
+            appliesToRole: requiresMfa,
+            requirement: req,
+          })
+        ) {
+          const mfaToken = await signMfaPendingToken({
+            sub: member.platform_user_id,
+            method: distinctMethods[0] ?? null,
+            authRealm: "tenant_password",
+            businessId: member.business_id,
+            primaryAuth: "phone_otp",
+          });
+
+          return NextResponse.json({
+            mfaRequired: true,
+            mfaState: req,
+            mfaToken,
+            mfaMethod: distinctMethods[0] ?? null,
+            availableMethods: distinctMethods,
+            primaryAuth: "phone_otp",
+          });
+        }
+
+        if (requiresMfa && req === "grace") {
+          graceNotice = {
+            mfaState: "grace",
+            graceUntil: graceUntil ? new Date(graceUntil).toISOString() : null,
+            graceDaysLeft: graceDaysRemaining(graceUntil),
+          };
+        }
+      }
+    }
 
     await ensureEmployeeProfile(member.id, member.business_id);
     const deviceLabel = request.headers.get("user-agent")?.slice(0, 120) ?? null;
@@ -116,16 +203,16 @@ export async function POST(request: NextRequest) {
       businessSubdomain: member.business_subdomain,
       locationId: member.location_id,
       fullName: member.full_name,
-      // Admin roles hold a platform identity; carrying it (with the live token
-      // version, exactly like /api/auth/login does) keeps a phone login by an
-      // owner or manager the same session a password login would have minted.
       platformUserId: member.platform_user_id,
       tokenVersion: member.token_version ?? undefined,
       employeeSessionId: employeeSession.id,
+      mfaVerified: false,
+      recentAuthAt: Math.floor(Date.now() / 1000),
     });
 
     const res = NextResponse.json({
       user: { id: member.id, role: member.role, fullName: member.full_name },
+      ...(graceNotice ?? {}),
     });
     res.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
     return res;

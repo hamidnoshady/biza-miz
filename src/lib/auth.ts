@@ -4,7 +4,7 @@ import {
   SESSION_COOKIE,
   sessionCookieOptions,
   sessionHours,
-  signSession,
+  signSession as signSessionEdge,
   verifySession,
   type Role,
   type SessionPayload,
@@ -80,6 +80,54 @@ async function checkEmployeeSession(session: SessionPayload | null): Promise<Ses
   return session;
 }
 
+/**
+ * Re-check `platform_users.token_version` and `is_active` on every token
+ * resolution so a password change/reset or global sign-out invalidates
+ * existing sessions even on routes that call `getSession()` directly without
+ * going through `authorize()`.
+ */
+async function checkPlatformIdentity(session: SessionPayload | null): Promise<SessionPayload | null> {
+  if (!session || !session.platformUserId || session.imp) return session;
+  if (typeof session.tokenVersion !== "number") return null;
+
+  const valid = await withoutTenantScope("authorization-membership", async () => {
+    const { rows } = await query<{ token_version: number; is_active: boolean }>(
+      `SELECT token_version, is_active FROM platform_users WHERE id = $1`,
+      [session.platformUserId],
+    );
+    const row = rows[0];
+    return Boolean(row && row.is_active && row.token_version === session.tokenVersion);
+  });
+
+  return valid ? session : null;
+}
+
+/**
+ * Signs a tenant session JWT, automatically populating `tokenVersion` from
+ * `platform_users` whenever `platformUserId` is present and `tokenVersion`
+ * was omitted by the caller.
+ */
+export async function signSession(payload: SessionPayload): Promise<string> {
+  let nextPayload = payload;
+  if (payload.platformUserId && typeof payload.tokenVersion !== "number") {
+    try {
+      const { rows } = await withoutTenantScope("login", () =>
+        query<{ token_version: number }>(
+          `SELECT token_version FROM platform_users WHERE id = $1`,
+          [payload.platformUserId],
+        ),
+      );
+      nextPayload = {
+        ...payload,
+        tokenVersion: rows[0]?.token_version ?? 1,
+      };
+    } catch {
+      nextPayload = { ...payload, tokenVersion: 1 };
+    }
+  }
+  return signSessionEdge(nextPayload);
+}
+
 // Re-exported so the ~93 route handlers that import these from "@/lib/auth"
 // keep working; the definitions live in auth-edge.ts because src/middleware.ts
 // needs them without dragging in the tenant context or the database pool.
@@ -87,7 +135,6 @@ export {
   SESSION_COOKIE,
   sessionCookieOptions,
   sessionHours,
-  signSession,
   verifySession,
   type Role,
   type SessionPayload,
@@ -107,7 +154,10 @@ export {
  */
 export async function resolveSessionFromToken(token: string | null | undefined): Promise<SessionPayload | null> {
   if (!token) return null;
-  return checkEmployeeSession(await checkImpersonation(await verifySession(token)));
+  const verified = await verifySession(token);
+  const afterImpersonation = await checkImpersonation(verified);
+  const afterEmployeeSession = await checkEmployeeSession(afterImpersonation);
+  return checkPlatformIdentity(afterEmployeeSession);
 }
 
 export async function getSession(): Promise<SessionPayload | null> {

@@ -26,6 +26,19 @@ Platform administration is a separate JWT realm and capability system. Tenant Ow
 
 Membership lifecycle values are `invited`, `active`, `suspended`, `locked`, `inactive`, and `offboarded`. Offboarding preserves the membership row and historical attribution while revoking credentials and sessions.
 
+### Global vs. tenant credential boundaries
+
+- **Tenant-local credentials (`employee_credentials` — PIN, WebAuthn)** belong to a single `(business_id, employee_id)` membership. A tenant administrator with `team.manage` may set or reset a member's PIN and revoke that member's active `employee_sessions` within their own business (`revokeMemberTenantSessions`).
+- **Global credentials (`platform_users.password_hash`, `mfa_enrolments`, `mfa_recovery_codes`)** belong to the account holder across all businesses. A tenant administrator in Business A **cannot** directly choose or overwrite another user's global password (`cross_user_password_reset_forbidden`). Instead, tenant administrators and platform operators issue a single-use, expiring user-controlled recovery token (`auth_password_resets`, redeemed at `/reset-password`).
+- **Password & credential revocation**: Every password change or reset (`changeOwnPassword`, `consumePasswordResetToken`) atomically increments `token_version = token_version + 1` on `platform_users` (or `platform_admins`), revokes active `employee_sessions` / `auth_admin_sessions` and `impersonation_grants`, and clears password lockouts. Hybrid desktop credential sync (`ReplicatedLoginCredential`) carries `tokenVersion` and confirmed MFA factors so stale sessions are invalidated offline as well.
+
+### Multi-factor authentication & step-up security
+
+- **Distinct second factor**: Phone OTP (`/api/auth/phone-otp/verify`) is a primary authentication method (`primaryAuth: "phone_otp"`), never a bypass of Owner/Manager MFA. When MFA applies to the membership or the identity has confirmed MFA enrolled, phone-OTP login mints an `mfa_pending` token and requires a **distinct** second factor (`totp` or recovery code — `sms_otp` is rejected when `primaryAuth === "phone_otp"`).
+- **Two-step factor confirmation**: Enrolling TOTP or SMS MFA stages an unconfirmed row (`confirmed_at IS NULL, is_primary = false`). The factor only becomes active and eligible as primary (`confirmed_at = now()`) after the user proves possession with a valid code (`verifyAndConfirmMfaCode`). At most one confirmed primary factor exists per identity (`idx_mfa_enrolments_single_confirmed_primary`), selected deterministically via `selectPrimaryMfaEnrolment`.
+- **Recent authentication (`requireRecentAuth`)**: Sensitive account mutations (changing password/phone, enrolling/removing/switching MFA factors, regenerating recovery codes, revoking all sessions) require authentication within the last 15 minutes (`RECENT_AUTH_WINDOW_SECONDS = 900`), refreshed in-place via `/api/auth/step-up` or `/api/platform/auth/step-up`.
+- **Personal vs. policy surfaces**: Personal account security lives in `/settings/profile` (tenant) and `/platform/account` (superadmin), separate from business-wide MFA/session policy in `/settings` (Security Center) and platform-wide policy/roster in `/platform/security` and `/platform/admins`.
+
 ## Roles and effective permissions
 
 Roles are presets. `owner` is an irreducible system rule; `admin` receives every delegatable capability; `manager` is an operational preset. Existing accountant, cashier, waiter and kitchen presets remain supported.

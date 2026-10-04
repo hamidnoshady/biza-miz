@@ -41,6 +41,7 @@ describe("console navigation IA", () => {
       "/platform/media",
       "/platform/updates",
       "/platform/audit",
+      "/platform/account",
       "/platform/security",
       "/platform/admins",
     ]) {

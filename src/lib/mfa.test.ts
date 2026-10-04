@@ -1,77 +1,229 @@
-import { describe, it, expect } from "vitest";
-import { enrolmentRequirement, graceDaysRemaining, mfaAppliesToRole } from "./mfa";
+import { describe, expect, it } from "vitest";
+import {
+  distinctSecondFactorMethods,
+  enrolmentRequirement,
+  graceDaysRemaining,
+  isMfaEnrolmentConfirmed,
+  mfaAppliesToRole,
+  selectPrimaryMfaEnrolment,
+  shouldChallengeMfaOnLogin,
+  sortMfaEnrolments,
+} from "./mfa";
 
-describe("mfa enrolmentRequirement", () => {
-  const now = new Date("2024-01-10T12:00:00Z");
+const NOW = new Date("2026-04-06T12:00:00Z");
 
-  it("returns not_required if already enrolled", () => {
+describe("enrolmentRequirement", () => {
+  it("says not_required once a primary method is enrolled", () => {
     expect(
-      enrolmentRequirement({ hasPrimary: true, graceUntil: null, hasGraceRecord: false, role: "owner" }, now)
+      enrolmentRequirement(
+        {
+          hasPrimary: true,
+          graceUntil: "2026-04-01T00:00:00Z", // even if the grace window is in the past
+          hasGraceRecord: true,
+          role: "owner",
+        },
+        NOW,
+      ),
     ).toBe("not_required");
   });
 
-  it("returns grace if grace period is active", () => {
-    expect(
-      enrolmentRequirement(
-        { hasPrimary: false, graceUntil: new Date("2024-01-15T12:00:00Z"), hasGraceRecord: true, role: "owner" },
-        now
-      )
-    ).toBe("grace");
-  });
-
-  it("returns required if grace period has expired", () => {
-    expect(
-      enrolmentRequirement(
-        { hasPrimary: false, graceUntil: new Date("2024-01-05T12:00:00Z"), hasGraceRecord: true, role: "owner" },
-        now
-      )
-    ).toBe("required");
-  });
-
-  it("returns grace if no record exists yet", () => {
+  it("says grace when the account has never been evaluated (no grace row yet)", () => {
+    // First password login for a brand-new Owner: the caller will stamp the
+    // 14-day window right after this and let them in with the banner.
     expect(
       enrolmentRequirement(
         { hasPrimary: false, graceUntil: null, hasGraceRecord: false, role: "owner" },
-        now
-      )
+        NOW,
+      ),
     ).toBe("grace");
+  });
+
+  it("says grace while the window is still open", () => {
+    expect(
+      enrolmentRequirement(
+        {
+          hasPrimary: false,
+          graceUntil: "2026-04-10T12:00:00Z",
+          hasGraceRecord: true,
+          role: "owner",
+        },
+        NOW,
+      ),
+    ).toBe("grace");
+  });
+
+  it("says required the moment the window closes", () => {
+    expect(
+      enrolmentRequirement(
+        {
+          hasPrimary: false,
+          graceUntil: "2026-04-06T12:00:00Z", // exact boundary -> closed
+          hasGraceRecord: true,
+          role: "owner",
+        },
+        NOW,
+      ),
+    ).toBe("required");
+    expect(
+      enrolmentRequirement(
+        {
+          hasPrimary: false,
+          graceUntil: "2026-04-05T00:00:00Z",
+          hasGraceRecord: true,
+          role: "owner",
+        },
+        NOW,
+      ),
+    ).toBe("required");
+  });
+
+  it("says required when a grace row exists with graceUntil = null", () => {
+    // The explicit "skip the window, enforce immediately" shape used by tests
+    // and by platform security actions.
+    expect(
+      enrolmentRequirement(
+        { hasPrimary: false, graceUntil: null, hasGraceRecord: true, role: "owner" },
+        NOW,
+      ),
+    ).toBe("required");
   });
 });
 
 describe("graceDaysRemaining", () => {
-  const now = new Date("2024-01-10T12:00:00Z");
-
-  it("is null when there is no window to count", () => {
-    expect(graceDaysRemaining(null, now)).toBeNull();
+  it("rounds partial days up so the banner never says 0 while login still works", () => {
+    // 11 hours left -> still 1 day on the counter.
+    expect(graceDaysRemaining("2026-04-06T23:00:00Z", NOW)).toBe(1);
+    // 3 days and 1 second left -> 4 days.
+    expect(graceDaysRemaining("2026-04-09T12:00:01Z", NOW)).toBe(4);
   });
 
-  it("rounds up — a window closing in eleven hours must not read as zero days", () => {
-    expect(graceDaysRemaining(new Date("2024-01-10T23:00:00Z"), now)).toBe(1);
-  });
-
-  it("counts whole days", () => {
-    expect(graceDaysRemaining(new Date("2024-01-13T12:00:00Z"), now)).toBe(3);
-  });
-
-  it("floors at zero rather than going negative once expired", () => {
-    expect(graceDaysRemaining(new Date("2024-01-01T12:00:00Z"), now)).toBe(0);
+  it("floors at zero once the window has passed and returns null when unset", () => {
+    expect(graceDaysRemaining("2026-04-01T00:00:00Z", NOW)).toBe(0);
+    expect(graceDaysRemaining(null, NOW)).toBeNull();
   });
 });
 
 describe("mfaAppliesToRole", () => {
-  it("always applies to the owner — the full permission set is the point of the wave", () => {
+  it("always applies to owner and never to floor staff", () => {
     expect(mfaAppliesToRole("owner")).toBe(true);
-    expect(mfaAppliesToRole("owner", false)).toBe(true);
+    expect(mfaAppliesToRole("cashier")).toBe(false);
+    expect(mfaAppliesToRole("waiter")).toBe(false);
+    expect(mfaAppliesToRole("kitchen")).toBe(false);
   });
 
-  it("applies to a manager only where the business opted in; off by default", () => {
-    expect(mfaAppliesToRole("manager")).toBe(false);
+  it("applies to manager only when the business opts in", () => {
+    expect(mfaAppliesToRole("manager", false)).toBe(false);
     expect(mfaAppliesToRole("manager", true)).toBe(true);
   });
+});
 
-  it("never applies to the PIN roles — a till cannot receive an SMS mid-service", () => {
-    for (const role of ["cashier", "waiter", "kitchen"]) {
-      expect(mfaAppliesToRole(role, true)).toBe(false);
-    }
+describe("selectPrimaryMfaEnrolment & sortMfaEnrolments", () => {
+  it("prefers confirmed explicit primary, ignoring unconfirmed enrolments", () => {
+    const rows = [
+      {
+        id: "1",
+        method: "sms_otp" as const,
+        is_primary: true,
+        confirmed_at: null,
+        created_at: "2026-04-01T00:00:00Z",
+      },
+      {
+        id: "2",
+        method: "sms_otp" as const,
+        is_primary: true,
+        confirmed_at: "2026-04-02T00:00:00Z",
+        created_at: "2026-04-02T00:00:00Z",
+      },
+      {
+        id: "3",
+        method: "totp" as const,
+        is_primary: false,
+        confirmed_at: "2026-04-01T00:00:00Z",
+        created_at: "2026-04-01T00:00:00Z",
+      },
+    ];
+    expect(isMfaEnrolmentConfirmed(rows[0])).toBe(false);
+    expect(isMfaEnrolmentConfirmed(rows[1])).toBe(true);
+    expect(selectPrimaryMfaEnrolment(rows)?.id).toBe("2");
+  });
+
+  it("breaks ties deterministically (totp before sms_otp, then created_at, then id)", () => {
+    const rows = [
+      {
+        id: "b",
+        method: "sms_otp" as const,
+        is_primary: false,
+        confirmed_at: "2026-04-01T00:00:00Z",
+        created_at: "2026-04-01T00:00:00Z",
+      },
+      {
+        id: "a",
+        method: "totp" as const,
+        is_primary: false,
+        confirmed_at: "2026-04-02T00:00:00Z",
+        created_at: "2026-04-02T00:00:00Z",
+      },
+    ];
+    expect(sortMfaEnrolments(rows).map((r) => r.id)).toEqual(["a", "b"]);
+    expect(selectPrimaryMfaEnrolment(rows)?.id).toBe("a");
+  });
+
+  it("returns null when only unconfirmed enrolments exist unless fallback is requested", () => {
+    const rows = [
+      {
+        id: "u1",
+        method: "totp" as const,
+        is_primary: false,
+        confirmed_at: null,
+        created_at: "2026-04-01T00:00:00Z",
+      },
+    ];
+    expect(selectPrimaryMfaEnrolment(rows)).toBeNull();
+    expect(selectPrimaryMfaEnrolment(rows, { allowUnconfirmedFallback: true })?.id).toBe("u1");
+  });
+});
+
+describe("distinctSecondFactorMethods & shouldChallengeMfaOnLogin", () => {
+  it("excludes sms_otp when primaryAuth is phone_otp so SMS is not counted twice", () => {
+    const enrolments = [
+      {
+        id: "1",
+        method: "sms_otp" as const,
+        is_primary: true,
+        confirmed_at: "2026-04-01T00:00:00Z",
+      },
+      {
+        id: "2",
+        method: "totp" as const,
+        is_primary: false,
+        confirmed_at: "2026-04-02T00:00:00Z",
+      },
+    ];
+    expect(distinctSecondFactorMethods(enrolments, "password")).toEqual(["sms_otp", "totp"]);
+    expect(distinctSecondFactorMethods(enrolments, "phone_otp")).toEqual(["totp"]);
+  });
+
+  it("challenges MFA on login whenever confirmed enrolment exists OR grace has expired", () => {
+    expect(
+      shouldChallengeMfaOnLogin({
+        hasConfirmedEnrolment: true,
+        appliesToRole: true,
+        requirement: "not_required",
+      }),
+    ).toBe(true);
+    expect(
+      shouldChallengeMfaOnLogin({
+        hasConfirmedEnrolment: false,
+        appliesToRole: true,
+        requirement: "grace",
+      }),
+    ).toBe(false);
+    expect(
+      shouldChallengeMfaOnLogin({
+        hasConfirmedEnrolment: false,
+        appliesToRole: true,
+        requirement: "required",
+      }),
+    ).toBe(true);
   });
 });
