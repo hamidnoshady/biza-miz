@@ -5,7 +5,13 @@
  */
 import { getPool, query, withTenant, withoutTenantScope } from "../db";
 import { decryptTotpSecret, encryptTotpSecret } from "../mfa-service";
-import { loginCredentialsFingerprint, type ReplicatedLoginCredential, type SpentRecoveryCode } from "./login-credentials";
+import {
+  loginCredentialsFingerprint,
+  planPinReplication,
+  type ReplicatedLoginCredential,
+  type ReplicatedPin,
+  type SpentRecoveryCode,
+} from "./login-credentials";
 
 /** Cloud: every identity with a membership in this business. RLS limits platform_users to members. */
 export async function buildLoginCredentials(businessId: string): Promise<ReplicatedLoginCredential[]> {
@@ -197,4 +203,69 @@ export async function applyLoginCredentials(
     });
   }
   return true;
+}
+
+const ACTIVE_PIN = `LEFT JOIN LATERAL (
+           SELECT secret_hash FROM employee_credentials
+            WHERE employee_id = u.id AND business_id = u.business_id
+              AND credential_type = 'pin' AND status = 'active'
+            ORDER BY created_at DESC LIMIT 1
+         ) ec ON true`;
+
+/** Cloud: the active quick-login PIN of every active member that has one. */
+export async function buildReplicatedPins(businessId: string): Promise<ReplicatedPin[]> {
+  return withTenant(businessId, async () => {
+    const { rows } = await query<{ id: string; pin_hash: string }>(
+      `SELECT u.id, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash
+         FROM users u ${ACTIVE_PIN}
+        WHERE u.business_id = $1 AND u.is_active
+          AND coalesce(ec.secret_hash, u.pin_hash) IS NOT NULL
+        ORDER BY u.id`,
+      [businessId],
+    );
+    return rows.map((row) => ({ membershipId: row.id, pinHash: row.pin_hash }));
+  });
+}
+
+/**
+ * Site: give each replicated member the cloud's PIN (see planPinReplication
+ * for whose PIN the cloud may replace). Without this a cashier created on the
+ * cloud reaches the desktop as a membership with no PIN, and the quick-login
+ * roster — which lists only members a PIN can sign in — never shows them.
+ * Returns how many members' PINs were written.
+ */
+export async function applyReplicatedPins(businessId: string, pins: readonly ReplicatedPin[]): Promise<number> {
+  if (pins.length === 0) return 0;
+  const local = await query<{ id: string; role: string; pin_hash: string | null }>(
+    `SELECT u.id, u.role::text AS role, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash
+       FROM users u ${ACTIVE_PIN}
+      WHERE u.business_id = $1 AND u.id = ANY($2::uuid[])`,
+    [businessId, pins.map((pin) => pin.membershipId)],
+  );
+  const plan = planPinReplication(pins, local.rows.map((row) => ({ membershipId: row.id, role: row.role, pinHash: row.pin_hash })));
+  if (plan.length === 0) return 0;
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    for (const pin of plan) {
+      await client.query(`INSERT INTO employees (id, business_id) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [pin.membershipId, businessId]);
+      await client.query(
+        `UPDATE employee_credentials SET status = 'revoked', revoked_at = now()
+          WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin' AND status = 'active'`,
+        [pin.membershipId, businessId],
+      );
+      await client.query(
+        `INSERT INTO employee_credentials (employee_id, business_id, credential_type, secret_hash) VALUES ($1, $2, 'pin', $3)`,
+        [pin.membershipId, businessId, pin.pinHash],
+      );
+      await client.query(`UPDATE users SET pin_hash = NULL WHERE id = $1 AND business_id = $2 AND pin_hash IS NOT NULL`, [pin.membershipId, businessId]);
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+  return plan.length;
 }

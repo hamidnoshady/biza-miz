@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loginCredentialsFingerprint, type ReplicatedLoginCredential } from "./login-credentials";
+import { loginCredentialsFingerprint, planPinReplication, type ReplicatedLoginCredential } from "./login-credentials";
 
 const owner: ReplicatedLoginCredential = {
   membershipId: "b",
@@ -32,5 +32,33 @@ describe("loginCredentialsFingerprint", () => {
     expect(loginCredentialsFingerprint([{ ...owner, passwordHash: "$2b$10$other" }])).not.toBe(base);
     expect(loginCredentialsFingerprint([{ ...owner, mfa: [] }])).not.toBe(base);
     expect(loginCredentialsFingerprint([{ ...owner, recoveryCodes: [{ codeHash: "h1", usedAt: "2026-09-30T00:00:00.000Z" }] }])).not.toBe(base);
+  });
+});
+
+describe("planPinReplication", () => {
+  const cloud = [
+    { membershipId: "cashier", pinHash: "$cloud-cashier" },
+    { membershipId: "owner", pinHash: "$cloud-owner" },
+  ];
+
+  it("gives a cloud-made cashier with no PIN on the desktop the cloud's", () => {
+    expect(planPinReplication(cloud, [{ membershipId: "cashier", role: "cashier", pinHash: null }]))
+      .toEqual([{ membershipId: "cashier", pinHash: "$cloud-cashier" }]);
+  });
+
+  it("puts a staff PIN changed on the desktop back to the cloud's", () => {
+    expect(planPinReplication(cloud, [{ membershipId: "cashier", role: "waiter", pinHash: "$local" }]))
+      .toEqual([{ membershipId: "cashier", pinHash: "$cloud-cashier" }]);
+  });
+
+  it("keeps the owner's own offline PIN, and fills it only when the desktop has none", () => {
+    expect(planPinReplication(cloud, [{ membershipId: "owner", role: "owner", pinHash: "$wizard" }])).toEqual([]);
+    expect(planPinReplication(cloud, [{ membershipId: "owner", role: "owner", pinHash: null }]))
+      .toEqual([{ membershipId: "owner", pinHash: "$cloud-owner" }]);
+  });
+
+  it("writes nothing when equal, and skips members not replicated yet", () => {
+    expect(planPinReplication(cloud, [{ membershipId: "cashier", role: "cashier", pinHash: "$cloud-cashier" }])).toEqual([]);
+    expect(planPinReplication(cloud, [])).toEqual([]);
   });
 });

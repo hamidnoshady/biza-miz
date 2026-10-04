@@ -57,3 +57,48 @@ export interface SpentRecoveryCode {
   codeHash: string;
   usedAt: string;
 }
+
+/**
+ * A member's quick-login PIN as the cloud holds it. The bcrypt hash is as
+ * portable as a password hash, and the cloud is where staff are created and
+ * given a PIN, so a paired desktop takes it from here. Travels next to the
+ * global credentials on the same site-authenticated endpoint; a PIN-only
+ * cashier has no `platform_users` identity, which is why it is its own list.
+ */
+export interface ReplicatedPin {
+  membershipId: string;
+  pinHash: string;
+}
+
+/** What the site holds today for one member: its role and its active PIN, if any. */
+export interface LocalPinState {
+  membershipId: string;
+  role: string;
+  pinHash: string | null;
+}
+
+const STAFF_PIN_ROLES: ReadonlySet<string> = new Set(["cashier", "waiter", "kitchen"]);
+
+/**
+ * Which members' site PIN to replace with the cloud's. Pure.
+ *
+ * - Staff roles (cashier/waiter/kitchen) sign in with a PIN on the cloud too,
+ *   so the cloud's PIN is authoritative: a different local one is put back.
+ * - An owner/manager's PIN is the offline door the pairing wizard asks for on
+ *   the desktop itself; the cloud's only fills it in when the site has none,
+ *   and never overrides the one the owner chose at the till.
+ * - A member the cloud has no PIN for keeps whatever the site has; a member the
+ *   site has not replicated yet is skipped until the IAM snapshot creates it.
+ */
+export function planPinReplication(
+  cloud: readonly ReplicatedPin[],
+  local: readonly LocalPinState[],
+): ReplicatedPin[] {
+  const byId = new Map(local.map((row) => [row.membershipId, row]));
+  return cloud.filter((pin) => {
+    const here = byId.get(pin.membershipId);
+    if (!here || !pin.pinHash) return false;
+    if (here.pinHash === pin.pinHash) return false;
+    return STAFF_PIN_ROLES.has(here.role) || here.pinHash === null;
+  });
+}
