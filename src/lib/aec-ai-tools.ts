@@ -40,6 +40,12 @@
  *     seen money for, and the bonds approaching expiry into one answer — with
  *     every money figure labelled by who owns it (Workspace or Accounting)
  *     rather than silently mixed.
+ *   - `list_upcoming_milestones` (Wave 10) — §22's «نقاط عطف پیش رو» widget and
+ *     §23's "what is due next" question. The delayed list answers what has
+ *     already slipped; this one reads the same three dated things (a phase's end
+ *     date, an open task's due date, a project's end date) in the *other*
+ *     direction, so a widget can be offered whose prompt a read can actually
+ *     answer.
  *   - `list_procurement_delays` (Wave 9) — §23's procurement-delay question, and
  *     the data behind §22's widget of the same name and §29's warning. It names
  *     both halves honestly: the awards a supplier is late on (with how many days
@@ -53,7 +59,12 @@
  * relay, not an error code.
  */
 import { AEC_AI_TOOL_LABELS, AEC_AI_TOOL_NAMES, type AecAiToolName } from "./aec";
-import { AecError, type AecProjectProfile, loadProjectAecProfile } from "./aec-service";
+import {
+  AecError,
+  type AecProjectProfile,
+  loadProjectAecProfile,
+  upcomingProjectMilestones,
+} from "./aec-service";
 import { boqVariance } from "./aec-boq-service";
 import {
   certifiedClaimsAwaitingPayment,
@@ -648,6 +659,41 @@ async function runTool(
           today,
           note:
             "«مبلغ تأییدشده» یعنی آنچه گواهی شده است، نه آنچه وصول شده؛ دریافتی‌ها و مانده‌ها را از حسابداری بخوان و اگر در دسترس نیست بگو که در دسترس نیست.",
+        },
+      };
+    }
+
+    case "list_upcoming_milestones": {
+      const resolved = await resolveProject(owner, args);
+      if (resolved.kind === "ambiguous") return ambiguousProject(resolved.candidates);
+      const withinDays = Math.min(Math.max(Number(args.withinDays) || 30, 1), 365);
+      const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
+      const milestones = await upcomingProjectMilestones(owner.businessId, {
+        projectId: resolved.kind === "found" ? resolved.projectId : null,
+        withinDays,
+        limit,
+      });
+
+      return {
+        ok: true,
+        data: {
+          today,
+          withinDays,
+          projectId: resolved.kind === "found" ? resolved.projectId : null,
+          milestoneCount: milestones.length,
+          milestones: milestones.map((milestone) => ({
+            kind: milestone.kind,
+            title: milestone.title,
+            project: milestone.projectName,
+            projectId: milestone.projectId,
+            status: milestone.status,
+            date: milestone.date,
+            dateJalali: formatJalali(milestone.date),
+            daysRemaining: milestone.daysRemaining,
+            ...(milestone.kind === "phase"
+              ? { taskCount: milestone.taskCount, doneTaskCount: milestone.doneTaskCount }
+              : {}),
+          })),
         },
       };
     }

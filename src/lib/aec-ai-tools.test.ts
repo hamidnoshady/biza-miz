@@ -32,7 +32,10 @@ describe("the AEC read tools", () => {
     // which §14's register made answerable; Wave 8 added the commercial three —
     // `list_change_orders` and `list_payment_certificates`, which §23 names, and
     // `list_project_commercial_risks`, the question those two exist to answer.
-    // The list is asserted literally so an eleventh cannot arrive unnoticed.
+    // Wave 10 added `list_upcoming_milestones`, the read §22's «نقاط عطف پیش رو»
+    // widget needs and `list_delayed_project_activities` deliberately cannot
+    // answer (it only lists what has already slipped). The list is asserted
+    // literally so a twelfth cannot arrive unnoticed.
     expect([...AEC_AI_TOOL_NAMES]).toEqual([
       "get_aec_project_financial_health",
       "list_delayed_project_activities",
@@ -45,6 +48,7 @@ describe("the AEC read tools", () => {
       "list_payment_certificates",
       "list_project_commercial_risks",
       "list_procurement_delays",
+      "list_upcoming_milestones",
     ]);
     expect(isAecAiToolName("get_aec_project_financial_health")).toBe(true);
     expect(isAecAiToolName("get_workspace_project_status")).toBe(false);

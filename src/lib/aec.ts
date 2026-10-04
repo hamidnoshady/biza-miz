@@ -670,6 +670,12 @@ export const AEC_AI_TOOL_NAMES = [
   // queue functions the procurement tab reads, so the chat answer and the screen
   // are the same rows.
   "list_procurement_delays",
+  // Issue #799 Wave 10 — §22's «نقاط عطف پیش رو» widget needs a read of what is
+  // *coming*, and `list_delayed_project_activities` deliberately only answers
+  // what is already late: a widget whose prompt cannot be answered by a tool is
+  // a prompt that can only hallucinate. This one reads the same phases, tasks
+  // and project dates the schedule screen shows, in the positive direction.
+  "list_upcoming_milestones",
 ] as const;
 export type AecAiToolName = (typeof AEC_AI_TOOL_NAMES)[number];
 
@@ -690,6 +696,7 @@ export const AEC_AI_TOOL_LABELS: Record<AecAiToolName, string> = {
   list_payment_certificates: "صورت‌وضعیت‌ها و گواهی‌ها",
   list_project_commercial_risks: "ریسک‌های تجاری پروژه",
   list_procurement_delays: "تأخیر تأمین و تعهدات باز",
+  list_upcoming_milestones: "نقاط عطف پیش رو",
 };
 
 export function isAecOperatingProfile(value: string): value is AecOperatingProfile {

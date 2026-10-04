@@ -22,6 +22,7 @@ import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import type { AecError } from "../src/lib/aec-service";
+import { businessToday } from "../src/lib/business-day-service";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -221,6 +222,65 @@ describe("the AEC assistant read tools (issue #799 §23)", () => {
       const body = ambiguous.data as { ambiguous?: boolean; candidates?: unknown[] };
       expect(body.ambiguous).toBe(true);
       expect(body.candidates?.length).toBe(2);
+    });
+  });
+
+  it("lists what is coming, not what is late, inside a window the caller sets", async () => {
+    const { businessId, owner } = await provisionBusiness("architecture_construction");
+    const projectId = await createProject(businessId, owner.actorUserId, "ویلای شمال");
+    const today = await businessToday(businessId);
+    const inDays = (days: number) =>
+      new Date(Date.parse(`${today}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+
+    const phaseId = await db.query<{ id: string }>(
+      `INSERT INTO workspace_project_phases (project_id, name, status, display_order, start_date, end_date)
+       VALUES ($1, 'فاز نازک‌کاری', 'active', 1, $2::date, $3::date) RETURNING id`,
+      [projectId, inDays(-20), inDays(5)],
+    ).then((rows) => rows.rows[0].id);
+    await db.query(
+      `INSERT INTO ai_project_tasks (project_id, title, status, created_by, phase_id, due_date)
+       VALUES ($1, 'گچ‌کاری دیوارها', 'done', 'سیستم', $2, $3::date)`,
+      [projectId, phaseId, inDays(-1)],
+    );
+    await createTask(businessId, projectId, "رنگ‌آمیزی نما", inDays(10), owner.actorUserId);
+    await createTask(businessId, projectId, "تحویل نهایی", inDays(200), owner.actorUserId);
+
+    await dbLib.withTenant(businessId, async () => {
+      const soon = await tools.runAecReadTool(
+        "list_upcoming_milestones",
+        { projectName: "ویلای شمال" },
+        owner,
+        "architecture_construction",
+      );
+      expect(soon.ok).toBe(true);
+      const data = soon.data as {
+        today: string;
+        withinDays: number;
+        milestoneCount: number;
+        milestones: Array<{ kind: string; title: string; date: string; daysRemaining: number }>;
+      };
+      expect(data.today).toBe(today);
+      expect(data.withinDays).toBe(30);
+      // The phase (5 days), the painting task (10) and nothing else: the far
+      // task is outside the window, and the finished one is not a milestone.
+      expect(data.milestones.map((milestone) => milestone.title)).toEqual([
+        "فاز نازک‌کاری",
+        "رنگ‌آمیزی نما",
+      ]);
+      expect(data.milestones[0].kind).toBe("phase");
+      expect(data.milestones[0].daysRemaining).toBe(5);
+      expect(data.milestones[1].daysRemaining).toBe(10);
+
+      const wide = await tools.runAecReadTool(
+        "list_upcoming_milestones",
+        { projectName: "ویلای شمال", withinDays: 365, limit: 50 },
+        owner,
+        "architecture_construction",
+      );
+      const wideData = wide.data as { milestones: Array<{ title: string }> };
+      expect(wideData.milestones.map((milestone) => milestone.title)).toContain("تحویل نهایی");
+      // Soonest first, which is the order a widget prints.
+      expect(wideData.milestones.at(-1)?.title).toBe("تحویل نهایی");
     });
   });
 });
@@ -474,6 +534,18 @@ describe("the AEC widget recommendations", () => {
     expect(names).toContain("پروژه‌های در معرض خطر");
     expect(names).toContain("تأییدهای در انتظار");
     expect(names).toContain("قراردادهای نزدیک به پایان");
+    // Wave 10's three: §22's remaining examples, each naming the read that can
+    // actually answer it — a recommendation whose prompt no tool can serve is a
+    // prompt that can only hallucinate.
+    expect(names).toContain("نقاط عطف پیش رو");
+    expect(names).toContain("سررسید ضمانت‌نامه‌ها");
+    expect(names).toContain("حاشیهٔ پروژه");
+    const milestones = aecRecommended.find((widget) => widget.name === "نقاط عطف پیش رو")!;
+    expect(milestones.prompt).toContain("list_upcoming_milestones");
+    const bonds = aecRecommended.find((widget) => widget.name === "سررسید ضمانت‌نامه‌ها")!;
+    expect(bonds.prompt).toContain("list_project_commercial_risks");
+    const margin = aecRecommended.find((widget) => widget.name === "حاشیهٔ پروژه")!;
+    expect(margin.prompt).toContain("get_aec_project_financial_health");
     // The AEC rows are the platform's, not one tenant's: `business_id IS NULL`.
     for (const widget of aecRecommended.filter((w) => w.industry === "architecture_construction")) {
       expect(widget.requiredPermissions.every((key) => permissions.has(key))).toBe(true);

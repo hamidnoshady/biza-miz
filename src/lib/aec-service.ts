@@ -33,8 +33,10 @@ import {
   type AecParticipantRole,
   type AecSpecialty,
 } from "./aec";
+import { businessToday } from "./business-day-service";
 import { getBusinessIndustry } from "./industry-guard";
 import { query } from "./db";
+import { addDays } from "./workspace-shared";
 import type { WorkspaceOwner } from "./workspace";
 
 /** The one industry these tables belong to. Spelled once, here. */
@@ -880,4 +882,107 @@ async function assertUserOfBusiness(businessId: string, userId: string | null): 
     businessId,
   ]);
   if (!rows[0]) throw new AecError("user_not_found");
+}
+
+/* ===========================================================================
+ * Milestones — what is coming, not what is late (§22, Wave 10)
+ * ======================================================================== */
+
+/** One dated thing in the future: a phase, an open task, or the project itself. */
+export interface AecUpcomingMilestone {
+  kind: "phase" | "task" | "project";
+  id: string;
+  title: string;
+  projectId: string;
+  projectName: string;
+  status: string;
+  /** Phase only: how much of it is done, so the answer can say "۲ از ۵". */
+  taskCount?: number;
+  doneTaskCount?: number;
+  date: string;
+  daysRemaining: number;
+}
+
+/**
+ * Everything dated inside the next `withinDays` days, soonest first.
+ *
+ * §22's «نقاط عطف پیش رو» widget and §23's question «چه چیزی تا ماه بعد موعد
+ * دارد؟» are the same read, and it is deliberately **not**
+ * `list_delayed_project_activities` upside down: the schedule screen shows
+ * planned dates (a phase's end date, a task's due date, the project's end date),
+ * and this reads exactly those three — the same tables, the same rows, the same
+ * business boundary — so the chat answer and the cockpit cannot disagree about
+ * what is due next. Only unfinished things are milestones: a completed phase's
+ * end date is history.
+ *
+ * The window is measured against the business's own today, like every other
+ * AEC aging read, never the server's date.
+ */
+export async function upcomingProjectMilestones(
+  businessId: string,
+  options: { projectId?: string | null; withinDays?: number; limit?: number } = {},
+): Promise<AecUpcomingMilestone[]> {
+  await assertAecIndustry(businessId);
+  const withinDays = Math.min(Math.max(Math.trunc(options.withinDays ?? 30) || 30, 1), 365);
+  const limit = Math.min(Math.max(Math.trunc(options.limit ?? 25) || 25, 1), 100);
+  const today = await businessToday(businessId);
+  const windowEnd = addDays(today, withinDays);
+
+  const params: unknown[] = [businessId, today, windowEnd];
+  let projectClause = "";
+  if (options.projectId) {
+    params.push(options.projectId);
+    projectClause = ` AND p.id = $${params.length}`;
+  }
+  params.push(limit);
+
+  const { rows } = await query<{
+    kind: string; id: string; title: string; project_id: string; project_name: string;
+    status: string; task_count: number | null; done_task_count: number | null;
+    date: string; days_remaining: number;
+  }>(
+    `SELECT 'phase'::text AS kind, ph.id, ph.name AS title, p.id AS project_id, p.name AS project_name,
+            ph.status,
+            (SELECT count(*)::integer FROM ai_project_tasks t WHERE t.phase_id = ph.id) AS task_count,
+            (SELECT count(*)::integer FROM ai_project_tasks t
+              WHERE t.phase_id = ph.id AND t.status = 'done') AS done_task_count,
+            ph.end_date::text AS date,
+            (ph.end_date - $2::date)::integer AS days_remaining
+       FROM workspace_project_phases ph
+       JOIN ai_projects p ON p.id = ph.project_id
+      WHERE p.business_id = $1 AND p.archived_at IS NULL${projectClause}
+        AND ph.end_date IS NOT NULL AND ph.end_date >= $2::date AND ph.end_date <= $3::date
+        AND ph.status NOT IN ('done', 'skipped')
+     UNION ALL
+     SELECT 'task'::text, t.id, t.title, p.id, p.name, t.status, NULL, NULL,
+            t.due_date::text, (t.due_date - $2::date)::integer
+       FROM ai_project_tasks t
+       JOIN ai_projects p ON p.id = t.project_id
+      WHERE p.business_id = $1 AND p.archived_at IS NULL${projectClause}
+        AND t.status <> 'done' AND t.due_date IS NOT NULL
+        AND t.due_date >= $2::date AND t.due_date <= $3::date
+     UNION ALL
+     SELECT 'project'::text, p.id, p.name, p.id, p.name, p.status, NULL, NULL,
+            p.end_date::text, (p.end_date - $2::date)::integer
+       FROM ai_projects p
+      WHERE p.business_id = $1 AND p.archived_at IS NULL${projectClause}
+        AND p.end_date IS NOT NULL AND p.end_date >= $2::date AND p.end_date <= $3::date
+     ORDER BY date, kind, title
+     LIMIT $${params.length}`,
+    params,
+  );
+
+  return rows.map((row) => ({
+    kind: row.kind as AecUpcomingMilestone["kind"],
+    id: row.id,
+    title: row.title,
+    projectId: row.project_id,
+    projectName: row.project_name,
+    status: row.status,
+    ...(row.kind === "phase"
+      ? { taskCount: Number(row.task_count ?? 0), doneTaskCount: Number(row.done_task_count ?? 0) }
+      : {}),
+    date: row.date,
+    daysRemaining: Number(row.days_remaining ?? 0),
+  }));
 }
