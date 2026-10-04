@@ -17,7 +17,7 @@ import {
  * the peer row needs server-side and the browser has no business holding.
  */
 export const GET = withPlatformScope(async () => {
-  const { error } = await requirePlatformCapability("backup.manage");
+  const { error } = await requirePlatformCapability("backup.peer.manage");
   if (error) return error;
   return NextResponse.json({ peers: await listPlatformBackupPeers() });
 });
@@ -29,7 +29,7 @@ export const GET = withPlatformScope(async () => {
  * `https_required`, not a mysterious network failure three dialogs later.
  */
 export const POST = withPlatformScope(async (request: NextRequest) => {
-  const { session, error } = await requirePlatformCapability("backup.manage");
+  const { session, error } = await requirePlatformCapability("backup.peer.manage");
   if (error) return error;
 
   let body: Record<string, unknown>;

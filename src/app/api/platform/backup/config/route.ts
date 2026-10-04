@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { platformAudit, requirePlatformAdmin, requirePlatformCapability, withPlatformScope } from "@/lib/platform-auth";
+import { platformAudit, requirePlatformCapability, withPlatformScope } from "@/lib/platform-auth";
 import { clientIpFrom } from "@/lib/rate-limit";
 import {
   getPlatformBackupConfig,
@@ -10,24 +10,29 @@ import {
 /**
  * The console's whole-system backup settings (migration 0132).
  *
- * Readable by any platform admin — the schedule and the health of the
- * deployment's backups are what the `support` role needs when it tells an Owner
- * "yes, we do have last night's copy" — but every secret is masked by
+ * Readable under `backup.read` — the schedule and the health of the deployment's
+ * backups are what the `support` role needs when it tells an Owner "yes, we do
+ * have last night's copy" — but every secret is masked by
  * `getPlatformBackupConfigMasked`, so a read never returns a passphrase or an
- * S3 secret. Writes need `backup.manage`.
+ * S3 secret.
+ *
+ * Writes need `backup.configure` (issue #807): changing the destination of a
+ * full copy of every tenant's data, or the passphrase it is encrypted with, is
+ * custody of that data — a different trust from running and verifying backups,
+ * which is what an engineer does day to day.
  *
  * Secrets follow the tenant-side convention exactly: an omitted field keeps what
  * is stored, an empty string clears it. That is what lets the form change the
  * retention count without re-typing a 40-character passphrase.
  */
 export const GET = withPlatformScope(async () => {
-  const { error } = await requirePlatformAdmin();
+  const { error } = await requirePlatformCapability("backup.read");
   if (error) return error;
   return NextResponse.json({ config: await getPlatformBackupConfigMasked() });
 });
 
 export const PUT = withPlatformScope(async (request: NextRequest) => {
-  const { session, error } = await requirePlatformCapability("backup.manage");
+  const { session, error } = await requirePlatformCapability("backup.configure");
   if (error) return error;
 
   let body: unknown;
@@ -60,6 +65,7 @@ export const PUT = withPlatformScope(async (request: NextRequest) => {
       cloudEnabled: result.config.cloud.enabled,
       servingEnabled: result.config.servingEnabled,
       allowInsecurePeers: result.config.allowInsecurePeers,
+      allowPrivatePeers: result.config.allowPrivatePeers,
       // Which secrets moved, never what they were.
       secretsChanged: {
         passphrase: before.passphrase !== result.config.passphrase,
