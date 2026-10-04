@@ -1,7 +1,7 @@
 # Phase 47 — The AEC industry and AEC project operations
 
-**Status:** Waves 1–9 implemented (migrations 0193–0201); Wave 10's report set implemented; the rest
-of Waves 10–11 designed here, not built.
+**Status:** Waves 1–9 implemented (migrations 0193–0201); Wave 10's report set, recommended widgets
+and §26 classification implemented; the rest of Waves 10–11 designed here, not built.
 
 Working issue: [#799 — Add Architecture, Civil Engineering & Construction business type with AEC
 project operations](https://github.com/hamidnoshady/cafe-restaurant-pos/issues/799).
@@ -639,6 +639,19 @@ What shipped:
 | Permission | **No new key.** Reading a report is the same `workspace.view` the cockpit needs, writing nothing is possible (a report prints approvals, it does not grant them), and the two figures the books own stay behind `ledger.view` — with the row's value `null` rather than a zero the reader would believe |
 | Isolation | `integration/aec-reports.integration.test.ts` (6 tests) against a real database: the bundle's keys equal `reportsForCapabilities`'s exactly and in §30's order; every figure is asserted against the register that owns it (the phase's overdue tasks, the ledger's actual cost, §18's late award, the RFI/submittal/snag ages and their buckets, the site log's crew and incidents, the certified claim); the design preset's switched-off capabilities leave eight reports **absent** while the design office still reads its own seven; an actor without `ledger.view` gets `null` where the ledger would be; another tenant's project is `project_not_found` and none of its rows reach my project's bundle; an F&B business is refused with `industry_mismatch`; and a thirty-row register prints `AEC_REPORT_ROW_LIMIT` rows with `omittedRows` saying how many stayed behind. `src/lib/aec-reports.test.ts` (8 tests) proves the pure half, and `api-guards.test.ts` asserts the route's permission shape from its source |
 
+### §26's deployment-mode classification (implemented)
+
+§26 asks for an audit rather than for replication: *"Audit all new entities for
+deployment-mode behavior … Classify each new entity … If new entities are
+replicated, update [the replication catalogue, sync registry, pairing snapshot,
+drift checks, desktop bootstrap, sync tests, conflict behavior]."*
+
+| Surface | Change |
+|---|---|
+| Classification | `src/lib/aec-sync-classification.ts` — every AEC table in one of §26's buckets, with what a future protocol must add first. **Field-capture candidates** (§26's own eleven: tasks, checklists, site logs, site-photo metadata, inspections, snag lists, daily progress, document and drawing metadata, RFI drafts, submittal review drafts) carry the *boundary* that may ever travel — a draft, never a frozen row — because each register's guard freezes the submitted half; **financial/high-risk** (BOQ and estimates, variations, certificates, procurement, transmittals) carry `offlineBoundary: null` and the reason §26 gives them: a commitment, a certificate or a variation is a status machine whose terminal states move money, and a field-by-field merge could produce the very states their triggers refuse. `aecSyncClassificationProblems(schemaTables)` is the audit's own guard (an unclassified table, or a claim without a table), and `AEC_SYNC_ISSUE_OFFLINE_CANDIDATES` maps §26's own words onto the entries |
+| Contract | `src/lib/data-ownership.ts` gains `aec_field_capture` and `aec_commercial_registers` as `not_replicated` / `transport: "none"` domains — the machine-readable contract pairing disclosure, diagnostics and docs already consume — and `src/lib/replication-catalogue.ts` gains the matching cloud-only domains, so the pairing screen names the AEC registers as central-only instead of staying silent about them. `pairing-service.ts`'s coverage copy says it in one English sentence the operator and the desktop both read |
+| Proof | `integration/aec-sync-classification.integration.test.ts` (3 tests): the schema's own table list has no unclassified AEC table and the classification claims nothing the schema lacks; **no classified table carries `trg_sync_capture`** (with a control assertion that the same query finds it on `parties` and `menu_items`); and a pairing round trip into a **second database** leaves that database with the business and its chart of accounts and **zero rows in every AEC table** — §26's "do not silently create cloud-only AEC workflows where the desktop expects operational continuity", answered by showing the desktop has none to lose. `src/lib/aec-sync-classification.test.ts` (7 tests) is the pure half |
+
 ### Decision 33 — a report reads the register, it never recomputes it
 
 §30's last sentence ("financial amounts must use Accounting as the source where they represent posted
@@ -671,18 +684,28 @@ answer it through one `agingBucket` (بهموقع / تا ۱۴ روز / تا ۳۰
 date and never a second definition of "late". A report that invented its own thresholds would be the
 one screen where the RFI tab and the report disagree about the same RFI.
 
+### Decision 36 — a classification is a decision with a reason, not a missing entry
+
+An entity that is not in the sync catalogue looks exactly like an entity that was
+forgotten. §26 asks for the difference to be written down, so every AEC table
+names its bucket, the write model that put it there (`append_fact`,
+`signed_record`, `state_machine`, `derived_by_register`), the conflict rule that
+*would* apply, and the things a protocol must add before the bucket changes —
+server-side numbering, an event key, the register's freeze boundary. The
+financial registers say `null` for "what may travel" rather than an empty string,
+and the database suite proves the second half of the claim (§26's "do not simply
+put transactional commercial/accounting operations into generic last-write-wins
+master-data sync") by asserting the capture trigger is absent from all of them.
+
 ## The parts of Waves 10–11 not built yet
 
 In the issue's order. Nothing below has a migration or a screen yet; the wave boundaries exist so each
 can be reviewed on its own.
 
-10. **What Wave 10 still owns.** The **remaining recommended widgets** of §22 (the ones §30's reports
-    now make answerable), §26's **sync classification** — which AEC surfaces are offline candidates
-    (tasks, checklists, site logs, photo metadata, inspections, snags, daily progress, document and
-    drawing metadata, RFI and submittal drafts) and which financial/high-risk ones need explicit event
-    semantics rather than last-write-wins master-data sync, with every new replication touching the
-    catalogue, the pairing snapshot, the drift checks, the desktop bootstrap and the two-database
-    tests — and §25's **mobile/field flows** with §34's UX hardening on top of them.
+10. **What Wave 10 still owns.** §25's **mobile/field flows** and §34's UX hardening on top of them
+    (the report set, §22's widgets and §26's classification are built; the platform console's
+    «ویجت‌های پیشنهادی» page administers the recommendations without touching a member's own
+    widgets).
 11. **Cleanup.** The repo-wide audit of hard-coded industry arrays, routes that assume every
     non-F&B tenant is retail, dead routes and duplicate project/financial logic.
 

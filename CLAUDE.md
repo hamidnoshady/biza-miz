@@ -1074,6 +1074,20 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   through `useMoney()`/`DateCell`, and `integration/aec-reports.integration.test.ts` asserts every
   figure against the register that owns it, the absent-not-empty rule, the ledger boundary,
   cross-tenant `project_not_found`, `industry_mismatch` and the row cap.
+  Wave 10's §22 half is the recommended widgets: migration 0202 seeds «نقاط عطف پیش رو»,
+  «سررسید ضمانت‌نامه‌ها» and «حاشیهٔ پروژه» (each prompt naming the read that answers it — the margin
+  widget was deliberately unseeded until §20's basis was on screen), `list_upcoming_milestones` is
+  §23's twelfth read, and `src/lib/ai-widget-admin.ts` + `GET/POST /api/platform/ai/widgets` +
+  `PATCH /api/platform/ai/widgets/[id]` + the console page «ویجت‌های پیشنهادی» are §22's last
+  sentence: recommendations are platform rows (`business_id IS NULL`) that any admin reads
+  (`ai.read`) and only `ai.config.manage` writes, a member's own `ai_widgets` are never touched, and
+  retiring a template keeps the row so `ai_widgets.template_id` provenance survives. §26's
+  classification lives in `src/lib/aec-sync-classification.ts` — every AEC table in one of §26's two
+  buckets with the write model that put it there, the boundary that may ever travel (a draft, never
+  a frozen row) and the protocol it would need first; nothing AEC replicates today, `data-ownership.ts`
+  carries `aec_field_capture`/`aec_commercial_registers` as `not_replicated`, and the database suite
+  proves no AEC table carries `trg_sync_capture` and that a paired desktop database holds zero rows
+  in every one of them. Never add an AEC table to `MASTER_SYNC_TABLES` to "fix" a missing sync.
   Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a

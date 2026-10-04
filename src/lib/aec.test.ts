@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MASTER_SYNC_TABLES } from "./master-sync-registry";
+import { aecClassifiedTables } from "./aec-sync-classification";
 import {
   AEC_CAPABILITY_KEYS,
   AEC_CAPABILITY_LABELS,
@@ -78,12 +79,18 @@ describe("migration 0194 and the catalogue are one contract", () => {
     expect(migration).toContain(`operating_profile    text NOT NULL DEFAULT '${AEC_DEFAULT_OPERATING_PROFILE}'`);
   });
 
-  it("leaves the tables out of the continuous sync feed for now", () => {
-    // §36 puts sync classification in Wave 10. Stating that here means adding
-    // an AEC table to MASTER_SYNC_TABLES is a decision with a test attached,
-    // not a silent side effect of a later migration.
+  it("leaves the tables out of the continuous sync feed", () => {
+    // Wave 10 wrote the classification down (§26): every AEC table is in
+    // `aec-sync-classification.ts` with the bucket, the reason and the protocol
+    // it would need first, and the database suite proves none of them carries
+    // the master-data capture trigger. This assertion is the cheap half of the
+    // same rule — adding an AEC table to MASTER_SYNC_TABLES is a decision with
+    // tests attached, not a silent side effect of a later migration.
     const captured = new Set(MASTER_SYNC_TABLES.map((config) => config.table));
     for (const table of ["aec_business_profiles", "aec_project_profiles", "aec_project_participants"]) {
+      expect(captured.has(table), table).toBe(false);
+    }
+    for (const table of aecClassifiedTables()) {
       expect(captured.has(table), table).toBe(false);
     }
   });

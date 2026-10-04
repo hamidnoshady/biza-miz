@@ -990,6 +990,14 @@ const PAIRING_DATA_CLASSIFICATION = {
     "platform administrators, impersonation grants, plans, wallet billing, and global feature catalogue",
     "cloud media/update/backup distribution credentials",
     "cross-business support and platform audit data",
+    // Issue #799 §26. The AEC registers are classified in
+    // `aec-sync-classification.ts` (every table in one of §26's two buckets,
+    // with the reason and the protocol each would need first) and nothing there
+    // replicates today: a pair is a till, and an AEC business has no till
+    // modules, so the desktop shows the cloud pane rather than a half-copy of a
+    // register. This line is what the operator and the desktop both read, so the
+    // absence is stated instead of assumed.
+    "AEC project registers (site capture, documents, RFI/submittal and the commercial registers) — cloud-only until a field-capture protocol exists",
   ],
   notYetReplicated: [
     "historical/full orders, tenders, payments, refunds, reservations, and shifts",
