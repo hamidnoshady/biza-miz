@@ -488,6 +488,19 @@ is enforced in the service (with a code), in the route (a 409 rather than a 500)
 `aec_certificate_guard()` (so a raw status flip is refused too). A draft, by contrast, is allowed to
 disagree with itself: that is what drafting is, and the suite asserts both halves.
 
+### What Wave 8 does and does not do about §30's reports
+
+The issue's own wave list puts the **report set** in Wave 10 ("tools, recommended widgets, reports"),
+and this wave respects that: what it owns is the data behind the three commercial entries on §30's list.
+§30's "change-order exposure" is the change-order register plus `pendingVariations` and
+`getProjectCommercialSummary.approvedVariationsRial`; "certificate/payment status" is the certificate
+register plus `certifiedClaimsAwaitingPayment`; and "project margin" **cannot** be reported yet — the
+margin needs committed cost and cost to complete, which are Wave 9's procurement registers, so the
+cockpit names the figure in `awaitingWaves` instead of printing a plausible number.
+§30's "financial
+amounts must use Accounting as the source where they represent posted financial facts" is Decision 23
+above, and it is why the cockpit's actual cost is read from the ledger rather than kept here.
+
 Wave 8 also closes the two links Wave 6 and Wave 7 deliberately left open: an RFI's "linked variation /
 change order" is `aec_variations.rfi_id` (the reference is owned by the later record, so the RFI never
 grew a column pointing at a table that did not exist), and a day's or an inspection's "cost impact" is
