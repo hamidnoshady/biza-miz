@@ -142,6 +142,37 @@ const ERROR_STATUS: Record<string, number> = {
   submittal_first_revision_required: 409,
   invalid_rfi_transition: 409,
   invalid_submittal_transition: 409,
+  // Issue #799 Wave 7 — site execution (§13) and the QA register (§14). The
+  // split is the same one every wave before it uses: a missing record is a 404,
+  // a malformed field a 400, and everything a *frozen* day or a closed issue
+  // refuses — including a closeout by the person who did the work — a 409,
+  // because the request was reasonable and the state says no.
+  site_log_not_found: 404,
+  site_issue_not_found: 404,
+  checklist_not_found: 404,
+  invalid_site_log_line: 400,
+  invalid_site_issue_kind: 400,
+  invalid_site_check: 400,
+  invalid_site_issue_result: 400,
+  invalid_category: 400,
+  invalid_severity: 400,
+  site_issue_title_required: 400,
+  site_log_work_required: 400,
+  invalid_checklist_kind: 400,
+  checklist_name_required: 400,
+  checklist_item_required: 400,
+  site_log_exists: 409,
+  site_issue_number_taken: 409,
+  checklist_name_taken: 409,
+  site_log_not_editable: 409,
+  site_issue_not_editable: 409,
+  invalid_site_log_transition: 409,
+  invalid_site_issue_transition: 409,
+  site_issue_resolution_required: 409,
+  site_issue_result_required: 409,
+  checklist_not_for_kind: 409,
+  // §14's four-eyes rule: the person the fix was assigned to cannot sign it off.
+  site_issue_verifier_is_assignee: 409,
 };
 
 /**

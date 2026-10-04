@@ -62,6 +62,8 @@ import { BoqTab } from "./boq-panel";
 import { AecDocumentsTab } from "./documents-panel";
 import { AecRfisTab } from "./rfis-panel";
 import { AecSubmittalsTab } from "./submittals-panel";
+import { AecSiteTab } from "./site-panel";
+import { AecInspectionsTab } from "./inspections-panel";
 
 interface ProjectDetail {
   id: string;
@@ -408,6 +410,26 @@ export function ProjectDetail({
             and reviewing is `workspace.approve`, not ordinary edit rights. */}
         {tab === "submittals" ? (
           <AecSubmittalsTab
+            projectId={projectId}
+            canManage={canManage}
+            canApprove={canApprove}
+            lookups={lookups}
+          />
+        ) : null}
+
+        {/* Issue #799 §13 — the site diary: the day-by-day record, gated by
+            `site_operations` in the tab bar, with its own «روزنگار» view that
+            merges the days with §14's quality register. */}
+        {tab === "site" ? (
+          <AecSiteTab projectId={projectId} canManage={canManage} lookups={lookups} />
+        ) : null}
+
+        {/* Issue #799 §14 — inspections, NCRs, snags, HSE observations and
+            handover items in one register, gated by `qa_qc`. Closing one is the
+            closeout verification, so it needs `workspace.approve` — and the
+            service refuses to let the assignee verify their own fix. */}
+        {tab === "inspections" ? (
+          <AecInspectionsTab
             projectId={projectId}
             canManage={canManage}
             canApprove={canApprove}

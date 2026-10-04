@@ -74,6 +74,9 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   // drawing read above they sit on `workspace.view`.
   list_pending_rfis: PERMISSIONS.workspaceView,
   list_pending_submittals: PERMISSIONS.workspaceView,
+  // The site and quality queue (issue #799 §23, Wave 7) is the register the same
+  // member opens on the project page, so this read adds no reach either.
+  list_site_issues: PERMISSIONS.workspaceView,
   draft_expense_from_receipt: PERMISSIONS.financeExpensesManage,
   get_accounting_review: PERMISSIONS.ledgerView,
 };

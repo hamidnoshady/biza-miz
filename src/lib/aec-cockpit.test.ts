@@ -41,15 +41,16 @@ describe("the cockpit catalogue", () => {
     // §21's later sections are designed here but not rendered: today's page
     // must not offer a tab whose wave has not been built. `boq` left this list
     // in Wave 4 (the estimating domain), `documents` in Wave 5 (the drawing
-    // register) and `rfis`/`submittals` in Wave 6 (the two registers of §10 and
-    // §11), each when the service behind it arrived.
-    for (const key of ["procurement", "site", "inspections", "changes", "payments", "financials"]) {
+    // register), `rfis`/`submittals` in Wave 6 (the two registers of §10 and
+    // §11) and `site`/`inspections` in Wave 7 (the daily log and §14's issue
+    // register), each when the service behind it arrived.
+    for (const key of ["procurement", "changes", "payments", "financials"]) {
       expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === key)?.shipped, key).toBe(false);
     }
-    for (const key of ["boq", "documents", "rfis", "submittals"]) {
+    for (const key of ["boq", "documents", "rfis", "submittals", "site", "inspections"]) {
       expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === key)?.shipped, key).toBe(true);
     }
-    expect(AEC_SHIPPED_WAVE).toBe(6);
+    expect(AEC_SHIPPED_WAVE).toBe(7);
   });
 
   it("gives an individual fewer sections than a contractor", () => {
@@ -64,7 +65,10 @@ describe("the cockpit catalogue", () => {
     expect(contractor).toContain("participants");
     // The lean preset is not offered a section whose capability it lacks…
     expect(individual).not.toContain("site");
-    expect(contractor).not.toContain("site"); // …and neither is a contractor *today*: Wave 7.
+    expect(individual).not.toContain("inspections");
+    // …while a contractor runs a site, so Wave 7's two sections are his.
+    expect(contractor).toContain("site");
+    expect(contractor).toContain("inspections");
     // An override is what changes the answer, not the profile's name.
     const individualWithWorkspace = aecCockpitSections(
       resolveAecCapabilities({ profile: "individual", overrides: { participants: false } }),
@@ -140,8 +144,13 @@ describe("the project tab bar", () => {
     // it (the team) — the order a project manager reads their morning in.
     expect(keys.indexOf("rfis")).toBeGreaterThan(keys.indexOf("contracts"));
     expect(keys.indexOf("submittals")).toBe(keys.indexOf("rfis") + 1);
-    expect(keys.indexOf("submittals")).toBe(keys.indexOf("team") - 1);
+    // §21's next two — the site and the quality register — follow the document
+    // registers, so the group still ends right before the team.
+    expect(keys.indexOf("site")).toBe(keys.indexOf("submittals") + 1);
+    expect(keys.indexOf("inspections")).toBe(keys.indexOf("site") + 1);
+    expect(keys.indexOf("inspections")).toBe(keys.indexOf("team") - 1);
     expect(contractor.find((tab) => tab.key === "rfis")?.label).toBe("استعلام‌ها (RFI)");
+    expect(contractor.find((tab) => tab.key === "site")?.label).toBe("کارگاه و گزارش روزانه");
 
     // Submittals ride `document_control` (they are a document cycle pointing at
     // §9's register), so switching it off removes *that* tab and only it.
@@ -170,7 +179,14 @@ describe("the project tab bar", () => {
     // a generic tab, own an AEC-only tab, or be declared as living inside
     // another. The explicit lists are the point — adding a shipped section and
     // forgetting to place it fails here.
-    const ownsItsOwnTab = new Set(["participants", "boq", "rfis", "submittals"]);
+    const ownsItsOwnTab = new Set([
+      "participants",
+      "boq",
+      "rfis",
+      "submittals",
+      "site",
+      "inspections",
+    ]);
     const insideAnotherTab = new Set(["overview", "schedule", "profile"]);
     for (const section of AEC_COCKPIT_SECTIONS.filter((s) => s.shipped)) {
       const reachable =

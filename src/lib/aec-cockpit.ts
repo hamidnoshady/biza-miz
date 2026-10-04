@@ -92,8 +92,14 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
     wave: 6,
     shipped: true,
   },
-  { key: "site", label: "کارگاه", capability: "site_operations", wave: 7, shipped: false },
-  { key: "inspections", label: "بازرسی و کنترل کیفیت", capability: "qa_qc", wave: 7, shipped: false },
+  // Wave 7. §13's daily log and site diary ride `site_operations` — a business
+  // that does not run a site has no day to report. §14's issue register
+  // (inspections, NCRs, corrective actions, snags, HSE, handover) rides
+  // `qa_qc`, and two of its *kinds* have their own switch inside the register:
+  // a snag needs `snagging` and an HSE observation needs `hse`, both of which
+  // the API enforces rather than merely hiding a button.
+  { key: "site", label: "کارگاه و گزارش روزانه", capability: "site_operations", wave: 7, shipped: true },
+  { key: "inspections", label: "بازرسی و کنترل کیفیت", capability: "qa_qc", wave: 7, shipped: true },
   { key: "changes", label: "تغییرات", capability: "variations", wave: 8, shipped: false },
   { key: "payments", label: "صورت‌وضعیت و پرداخت", capability: "progress_claims", wave: 8, shipped: false },
   { key: "team", label: "تیم", wave: 3, shipped: true },
@@ -104,7 +110,7 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
 ];
 
 /** The highest wave this build implements — the boundary between designed and built. */
-export const AEC_SHIPPED_WAVE = 6;
+export const AEC_SHIPPED_WAVE = 7;
 
 /**
  * The cockpit sections a business sees: shipped, and allowed by its capability
@@ -162,6 +168,8 @@ const TAB_FOR_SECTION: Partial<Record<AecCockpitSectionKey, WorkspaceProjectTabK
   boq: null, // its own tab, between the documents and the contracts
   rfis: null, // its own tab, with the submittals — see aecProjectTabs
   submittals: null,
+  site: null, // its own tab, after the submittals — see aecProjectTabs
+  inspections: null,
   tasks: "tasks",
   documents: "documents",
   contracts: "contracts",
@@ -199,6 +207,8 @@ export function aecProjectTabs(
   const boqSection = sections.find((section) => section.key === "boq");
   const rfisSection = sections.find((section) => section.key === "rfis");
   const submittalsSection = sections.find((section) => section.key === "submittals");
+  const siteSection = sections.find((section) => section.key === "site");
+  const inspectionsSection = sections.find((section) => section.key === "inspections");
 
   const tabs: ProjectTab[] = [];
   for (const tab of WORKSPACE_PROJECT_TABS) {
@@ -216,6 +226,15 @@ export function aecProjectTabs(
     }
     if (tab.key === "team" && submittalsSection) {
       tabs.push({ key: "submittals", label: submittalsSection.label });
+    }
+    // §21 puts the site and the quality register after the document registers
+    // and before the team: what was asked and sent, then what is happening on
+    // the ground and what failed inspection — before the "who is on it" tabs.
+    if (tab.key === "team" && siteSection) {
+      tabs.push({ key: "site", label: siteSection.label });
+    }
+    if (tab.key === "team" && inspectionsSection) {
+      tabs.push({ key: "inspections", label: inspectionsSection.label });
     }
     // And the priced work sits where §21 puts it: after the documents, before
     // the contracts — what is being built, what it costs, then who is bound.

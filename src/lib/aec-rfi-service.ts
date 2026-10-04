@@ -62,6 +62,11 @@ import { assertDocumentControlEnabled } from "./aec-doc-service";
 import { businessToday } from "./business-day-service";
 import { query, withTenantTransaction } from "./db";
 import { recordActivity, type WorkspaceOwner } from "./workspace";
+import {
+  loadLinkedDocuments,
+  replaceLinkedDocuments,
+  resolveLinkedDocument,
+} from "./workspace-document-links";
 
 /* ===========================================================================
  * Coercion
@@ -538,14 +543,12 @@ async function recordRfiActivity(
  * ======================================================================== */
 
 /**
- * Replace the attachment list of a record with the documents named.
+ * The attachment trio, over the shared `workspace-document-links.ts` module.
  *
- * Each entry is either an existing `workspace_documents` row of the project
- * (`workspaceDocumentId`) or a file from the Media Library
- * (`mediaAssetId` + `title`), which becomes one — the same reuse the drawing
- * register makes for a revision's file. Wholesale replacement, like a
- * transmittal's lines: the panel sends what the record should have, and the
- * database's own trigger refuses an attachment from another project.
+ * These were private to this file until Wave 7's site registers needed the same
+ * three operations; they are thin adapters now so the RFI, submittal, site-log
+ * and site-issue registers cannot drift apart on how a file is attached, and so
+ * a `mediaAssetId` lookup is fixed once rather than in four places.
  */
 async function replaceAttachments(
   owner: WorkspaceOwner,
@@ -553,101 +556,15 @@ async function replaceAttachments(
   projectId: string,
   input: unknown,
 ): Promise<void> {
-  const column = target.rfiId ? "rfi_id" : "submittal_id";
-  const targetId = target.rfiId ?? target.submittalId;
-  const incoming = Array.isArray(input) ? input : [];
-  const keep: string[] = [];
-
-  for (const entry of incoming.slice(0, 50)) {
-    const item = (entry ?? {}) as Record<string, unknown>;
-    const existing = optionalUuid(item.workspaceDocumentId);
-    if (existing) {
-      const { rows } = await query<{ id: string }>(
-        `SELECT id FROM workspace_documents
-          WHERE business_id = $1 AND project_id = $2 AND id = $3`,
-        [owner.businessId, projectId, existing],
-      );
-      if (!rows[0]) throw new AecError("document_not_found");
-      keep.push(rows[0].id);
-      continue;
-    }
-    const mediaAssetId = optionalUuid(item.mediaAssetId);
-    if (!mediaAssetId) continue;
-    const title = trimTo(item.title, 200) || trimTo(item.fileName, 200) || "پیوست";
-    const { rows: asset } = await query<{ file_name: string }>(
-      `SELECT file_name FROM media_assets WHERE business_id = $1 AND id = $2`,
-      [owner.businessId, mediaAssetId],
-    );
-    if (!asset[0]) throw new AecError("media_not_found");
-    const { rows: created } = await query<{ id: string }>(
-      `INSERT INTO workspace_documents
-         (business_id, media_asset_id, title, project_id, status, created_by, ${column})
-       VALUES ($1, $2, $3, $4, 'draft', $5, $6)
-       RETURNING id`,
-      [
-        owner.businessId,
-        mediaAssetId,
-        trimTo(title, 200) || asset[0].file_name,
-        projectId,
-        owner.actorUserId,
-        targetId,
-      ],
-    );
-    keep.push(created[0].id);
-  }
-
-  // Detach the ones that are gone rather than deleting the document row: the
-  // file is the Media Library's and the record may still be referenced elsewhere.
-  await query(
-    `UPDATE workspace_documents
-        SET ${column} = NULL, updated_at = now()
-      WHERE business_id = $1 AND ${column} = $2
-        AND ($3::uuid[] IS NULL OR NOT (id = ANY($3::uuid[])))`,
-    [owner.businessId, targetId, keep.length > 0 ? keep : null],
+  await replaceLinkedDocuments(
+    owner,
+    {
+      column: target.rfiId ? "rfi_id" : "submittal_id",
+      targetId: (target.rfiId ?? target.submittalId) as string,
+    },
+    projectId,
+    input,
   );
-}
-
-/**
- * The file a revision points at, from either form the screen can send: an
- * existing `workspaceDocumentId` of this project, or a `mediaAssetId` from the
- * Media Library that becomes one — the same two shapes `replaceAttachments`
- * accepts, so "pick a file" behaves identically on the RFI and the submittal
- * screens. Returns `undefined` when the input says nothing about the file
- * (callers keep what they have) and `null` when it explicitly clears it.
- */
-async function resolveRevisionDocument(
-  owner: WorkspaceOwner,
-  projectId: string,
-  input: { workspaceDocumentId?: unknown; mediaAssetId?: unknown },
-): Promise<string | null | undefined> {
-  if (input.workspaceDocumentId !== undefined) {
-    const existing = optionalUuid(input.workspaceDocumentId);
-    if (!existing) return null;
-    const { rows } = await query<{ id: string }>(
-      `SELECT id FROM workspace_documents
-        WHERE business_id = $1 AND project_id = $2 AND id = $3`,
-      [owner.businessId, projectId, existing],
-    );
-    if (!rows[0]) throw new AecError("document_not_found");
-    return rows[0].id;
-  }
-  if (input.mediaAssetId === undefined) return undefined;
-
-  const mediaAssetId = optionalUuid(input.mediaAssetId);
-  if (!mediaAssetId) return null;
-  const { rows: asset } = await query<{ file_name: string }>(
-    `SELECT file_name FROM media_assets WHERE business_id = $1 AND id = $2`,
-    [owner.businessId, mediaAssetId],
-  );
-  if (!asset[0]) throw new AecError("media_not_found");
-  const { rows: created } = await query<{ id: string }>(
-    `INSERT INTO workspace_documents
-       (business_id, media_asset_id, title, project_id, status, created_by)
-     VALUES ($1, $2, $3, $4, 'draft', $5)
-     RETURNING id`,
-    [owner.businessId, mediaAssetId, asset[0].file_name, projectId, owner.actorUserId],
-  );
-  return created[0].id;
 }
 
 async function loadAttachments(
@@ -655,23 +572,16 @@ async function loadAttachments(
   column: "rfi_id" | "submittal_id",
   targetId: string,
 ): Promise<RfiAttachment[]> {
-  const { rows } = await query<Record<string, unknown>>(
-    `SELECT wd.id, wd.title, ma.file_name, ma.mime_type, wd.media_asset_id,
-            wd.created_at::text AS created_at
-       FROM workspace_documents wd
-       LEFT JOIN media_assets ma ON ma.id = wd.media_asset_id
-      WHERE wd.business_id = $1 AND wd.${column} = $2
-      ORDER BY wd.created_at`,
-    [businessId, targetId],
-  );
-  return rows.map((row) => ({
-    documentId: String(row.id),
-    title: String(row.title ?? ""),
-    fileName: (row.file_name as string | null) ?? null,
-    mimeType: (row.mime_type as string | null) ?? null,
-    mediaAssetId: (row.media_asset_id as string | null) ?? null,
-    createdAt: String(row.created_at ?? ""),
-  }));
+  return loadLinkedDocuments(businessId, column, targetId);
+}
+
+/** The file a revision points at, from either form the screen can send. */
+function resolveRevisionDocument(
+  owner: WorkspaceOwner,
+  projectId: string,
+  input: { workspaceDocumentId?: unknown; mediaAssetId?: unknown },
+): Promise<string | null | undefined> {
+  return resolveLinkedDocument(owner, projectId, input);
 }
 
 /* ===========================================================================

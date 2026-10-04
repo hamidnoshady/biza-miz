@@ -38,12 +38,12 @@
  *
  * ## Honest status
  *
- * Most capabilities here describe domains that arrive in later waves (BOQ and
+ * Most capabilities here describe domains that arrive wave by wave (BOQ and
  * estimating in Wave 4, document control in Wave 5, site execution in Wave 7,
- * commercial controls in Wave 8, procurement in Wave 9). Declaring them now is
- * deliberate: the preset a business is *given* is the one its later waves will
- * read, and `AEC_CAPABILITY_LABELS` is what the settings panel shows an owner so
- * the choice is legible before those screens exist. `AEC_LIVE_CAPABILITIES`
+ * commercial controls in Wave 8, procurement in Wave 9 — the last two still to
+ * come). Declaring them all at once is deliberate: the preset a business is
+ * *given* is the one each wave reads, and `AEC_CAPABILITY_LABELS` is what the
+ * settings panel shows an owner so the choice is legible before a screen exists. `AEC_LIVE_CAPABILITIES`
  * names the handful that gate something today, and they are not decorative — a
  * participant role whose capability is off is refused by the API, not merely
  * hidden (see `aec-service.ts`).
@@ -82,6 +82,13 @@ export const AEC_CAPABILITY_KEYS = [
   "qa_qc",
   /** Snagging / punch lists. Wave 7. */
   "snagging",
+  /**
+   * HSE observations and incidents (issue §14's "where enabled"). Wave 7.
+   * A business that does not run a site — a pure design office — has no
+   * observations to record, which is why this is a switch rather than a field
+   * every issue register carries.
+   */
+  "hse",
   /** Material tracking on site. Wave 7/9. */
   "material_tracking",
   /** Supervision cycles and inspection visits. Wave 8. */
@@ -110,6 +117,7 @@ export const AEC_CAPABILITY_LABELS: Record<AecCapabilityKey, string> = {
   site_operations: "عملیات کارگاه و گزارش روزانه",
   qa_qc: "کنترل کیفیت و بازرسی",
   snagging: "رفع نقص و لیست نواقص",
+  hse: "ایمنی و بهداشت کارگاه (HSE)",
   material_tracking: "ردیابی مصالح",
   supervision: "نظارت و بازدید",
   progress_claims: "صورت‌وضعیت و گواهی پیشرفت",
@@ -133,6 +141,15 @@ export const AEC_LIVE_CAPABILITIES: readonly AecCapabilityKey[] = [
   // Wave 5 — same promotion for the drawing register and the transmittals
   // (`aec-doc-service.ts`, migration 0197).
   "document_control",
+  // Wave 7 — the site and the QA register (`aec-site-service.ts`, migration
+  // 0199): the daily log, the issue/QA register, snagging and HSE observations.
+  // `material_tracking` deliberately stays out: §13's "materials delivered" line
+  // on a day's log rides `site_operations`, and a material *tracking* register
+  // is Wave 9's procurement half.
+  "site_operations",
+  "qa_qc",
+  "snagging",
+  "hse",
 ];
 
 /* ===========================================================================
@@ -229,6 +246,9 @@ const CONSTRUCTION_CAPABILITIES: readonly AecCapabilityKey[] = [
   "site_operations",
   "qa_qc",
   "snagging",
+  // Issue #799 Wave 7. §14 lists HSE observations "where enabled", and a
+  // contractor running a site is exactly the profile that has them.
+  "hse",
   "material_tracking",
   "progress_claims",
   "variations",
@@ -245,6 +265,9 @@ const SUPERVISION_CAPABILITIES: readonly AecCapabilityKey[] = [
   "supervision",
   "qa_qc",
   "snagging",
+  // A supervisor records incidents as often as a contractor does — §14's "HSE
+  // observations/incidents where enabled" is part of the verification job.
+  "hse",
   "progress_claims",
   "variations",
   "financials",
@@ -601,6 +624,9 @@ export const AEC_AI_TOOL_NAMES = [
   // submittal tabs read, so the assistant and the screen cannot disagree.
   "list_pending_rfis",
   "list_pending_submittals",
+  // Issue #799 Wave 7 — §23's `list_site_issues`: what is open on site, which is
+  // the inspection/NCR/snag register the «بازرسی و کنترل کیفیت» tab reads.
+  "list_site_issues",
 ] as const;
 export type AecAiToolName = (typeof AEC_AI_TOOL_NAMES)[number];
 
@@ -616,6 +642,7 @@ export const AEC_AI_TOOL_LABELS: Record<AecAiToolName, string> = {
   get_latest_drawing_revision: "آخرین بازنگری نقشه‌ها",
   list_pending_rfis: "استعلام‌های بی‌پاسخ (RFI)",
   list_pending_submittals: "سابمیتال‌های منتظر تأیید",
+  list_site_issues: "موارد باز کارگاه و بازرسی",
 };
 
 export function isAecOperatingProfile(value: string): value is AecOperatingProfile {

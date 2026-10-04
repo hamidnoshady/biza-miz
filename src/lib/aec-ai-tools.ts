@@ -27,6 +27,10 @@
  *     writes out («RFIهای بدون پاسخ این هفته چیست؟» and «چه سابمیتال‌هایی منتظر
  *     تأیید هستند؟»). Both call the queue functions the RFI and submittal tabs
  *     use, so «بدون پاسخ» means the same rows in a chat answer and on screen.
+ *   - `list_site_issues` (Wave 7) — §23's site and quality queue: every open
+ *     inspection, NCR, corrective action, snag and HSE observation, most severe
+ *     first and with its overdue flag, read from the same register the
+ *     «بازرسی و کنترل کیفیت» tab shows.
  *
  * A business of another industry is refused rather than answered: an empty list
  * would read as "nothing is late", which is a claim about a café's construction
@@ -38,6 +42,8 @@ import { AecError, type AecProjectProfile, loadProjectAecProfile } from "./aec-s
 import { boqVariance } from "./aec-boq-service";
 import { latestDrawingRevisions } from "./aec-doc-service";
 import { pendingRfis, pendingSubmittals } from "./aec-rfi-service";
+import { pendingSiteIssues } from "./aec-site-service";
+import { SITE_ISSUE_STATUS_LABELS, type SiteIssueStatus } from "./aec-site";
 import { businessToday } from "./business-day-service";
 import { formatJalali } from "./jalali";
 import { daysUntil } from "./workspace-shared";
@@ -463,6 +469,60 @@ async function runTool(
             withJalali.length === 0
               ? "هیچ سابمیتالی با این فیلترها منتظر تأیید نیست."
               : "«منتظر تأیید» یعنی بازنگری‌های ارسال‌شده یا در حال بررسی؛ تأییدشده‌ها اینجا نیستند.",
+        },
+      };
+    }
+
+    case "list_site_issues": {
+      const resolved = await resolveProject(businessId, args);
+      if (resolved.kind === "ambiguous") return ambiguousProject(resolved.candidates);
+
+      const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
+      const kind = typeof args.kind === "string" && args.kind.trim() ? args.kind.trim() : undefined;
+      const severity =
+        typeof args.severity === "string" && args.severity.trim() ? args.severity.trim() : undefined;
+      let issues;
+      try {
+        issues = await pendingSiteIssues(businessId, {
+          projectId: resolved.kind === "found" ? resolved.projectId : undefined,
+          kind,
+          severity,
+          overdueOnly: args.overdueOnly === true,
+          limit,
+        });
+      } catch (err) {
+        // §14's register is the `qa_qc` capability; a design-lean preset that
+        // does not keep one would otherwise be told "nothing is open", which is
+        // a claim about a project rather than a switch.
+        if (err instanceof AecError && err.code === "capability_disabled") {
+          return {
+            ok: false,
+            error:
+              "این کسب‌وکار کنترل کیفیت و بازرسی (qa_qc) فعال ندارد، پس دفتر بازرسی و نقص‌ها خالی نیست بلکه وجود ندارد. اگر لازم است، از «تنظیمات ← کسب‌وکار» قابلیت آن را روشن کنید.",
+          };
+        }
+        throw err;
+      }
+
+      const rows = issues.map((issue) => ({
+        ...issue,
+        statusLabel: SITE_ISSUE_STATUS_LABELS[issue.status as SiteIssueStatus] ?? issue.status,
+        dueDateJalali: issue.dueDate ? formatJalali(issue.dueDate) : null,
+        overdue: issue.daysOverdue > 0,
+      }));
+      return {
+        ok: true,
+        data: {
+          issues: rows,
+          count: rows.length,
+          overdueCount: rows.filter((issue) => issue.overdue).length,
+          criticalCount: rows.filter((issue) => issue.severity === "critical").length,
+          projectScoped: resolved.kind === "found",
+          today,
+          note:
+            rows.length === 0
+              ? "با این فیلترها هیچ مورد بازی در کارگاه نیست."
+              : "«باز» یعنی در جریان: باز، در دست اقدام یا اصلاح‌شده و منتظر تأیید. موارد بسته اینجا نیستند.",
         },
       };
     }

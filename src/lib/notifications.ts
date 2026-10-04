@@ -91,6 +91,12 @@ export const NOTIFICATION_EVENT_KEYS = [
   // their own.
   "aec.rfi_overdue",
   "aec.submittal_overdue",
+  // Issue #799 §29 (Wave 7) — «inspection due» and «snag overdue», the two the
+  // issue names for the site. One scan produces all four AEC reminders (a
+  // record becomes late by a date passing, not by a write); they are separate
+  // keys because they are separate events to switch off.
+  "aec.inspection_due",
+  "aec.snag_overdue",
   "system.test",
 ] as const;
 export type NotificationEventKey = (typeof NOTIFICATION_EVENT_KEYS)[number];
@@ -308,6 +314,31 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     label: "سابمیتال معطل‌مانده از مهلت گذشته",
     description:
       "وقتی بازنگری‌ای ارسال شده و بازبین هنوز پاسخش را نداده و مهلت گذشته است. روزی یک بار برای هر بازنگری.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "aec.inspection_due": {
+    key: "aec.inspection_due",
+    group: "projects",
+    label: "بازرسی سررسیدشده",
+    description:
+      "وقتی یک درخواست بازرسی یا بازرسی کیفیت تا مهلتش نتیجه نگرفته است. روزی یک بار برای هر مورد، در روز کاری همان شعبه.",
+    defaultSeverity: "important",
+    // The same two roles §29's other AEC reminders go to: whoever chases the
+    // site, plus the owner. A supervisor or a QA engineer can switch it on for
+    // themselves from the settings screen.
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "aec.snag_overdue": {
+    key: "aec.snag_overdue",
+    group: "projects",
+    label: "نقص یا عدم‌انطباق عقب‌افتاده",
+    description:
+      "وقتی نقص (پانچ)، عدم‌انطباق یا اقدام اصلاحی از مهلت گذشته و هنوز بسته نشده است. روزی یک بار برای هر مورد.",
     defaultSeverity: "important",
     defaultRoles: ["owner", "manager"],
     perLocation: false,

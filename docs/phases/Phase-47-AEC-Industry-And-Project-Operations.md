@@ -328,12 +328,92 @@ chat answer and the number that triggers a reminder cannot drift apart. §10's "
 surface overdue RFIs" is therefore one predicate with several callers rather than several queries that
 agree today.
 
-## Waves 7–11 — designed, not built
+## Wave 7 — site execution (implemented, migration 0199)
+
+What shipped:
+
+| Surface | Change |
+|---|---|
+| Domain | `migrations/0199_aec_site_execution.sql` — six tables: `aec_site_logs` (the day) with `aec_site_log_lines` (its crews, plant, deliveries, delays, incidents, instructions and visitors), `aec_inspection_checklists` with `aec_inspection_checklist_items` (the firm's templates), and `aec_site_issues` (the one register) with `aec_site_issue_checks` (the checklist as it was carried out). All six ENABLE + FORCE RLS with a `tenant_isolation` policy, composite `(business_id, …)` foreign keys, an `(project_id, log_date)` unique index and an `(project_id, issue_number)` unique index; the migration widens `workspace_activity.subject_type` with `site_log` and `site_issue` and seeds the «امروز در کارگاه» and «موارد باز کارگاه» widgets |
+| Immutability | `aec_site_log_guard()` allows exactly `draft ↔ submitted`, refuses every content change to a submitted day and refuses its deletion; `aec_site_log_line_guard()` freezes the lines with the header, because a signed day whose attendance could still be edited is not signed. `aec_site_issue_guard()` is the one chain for all seven kinds (`open → in_progress → resolved → closed`, `cancelled` until work starts, `resolved → in_progress` for a failed verification) and enforces §14's closeout: a result is required before an inspection or a handover leaves work, a close needs a verifier, the verifier may not be the assignee, and a closed or cancelled issue accepts no further change and cannot be deleted. `aec_site_issue_check_guard()` freezes a closed issue's checklist with it. §33's "inspection result" and "NCR closeout" are therefore history in the database, not only in the service |
+| Line shapes | The kind's inputs are one table, `SITE_LOG_LINE_SHAPES` in `src/lib/aec-site.ts`: attendance has a headcount, a delivery a quantity and a unit, plant hours, a visitor neither a party nor a headcount. The same shape is a CHECK on `aec_site_log_lines`, so the form cannot ask for a field the schema refuses and a raw INSERT cannot invent one |
+| Pure half | `src/lib/aec-site.ts` — §13's two day statuses, seven line kinds and their shapes, §14's seven issue kinds with their number prefixes and their capability, four severities, eight categories, five statuses with the transition table, the four acts with `siteIssueActionNeedsApproval`, the three inspection results and the four checklist-line results, `isSiteIssueOverdue` (the one definition the tab, the scan and the assistant share), and `summariseSiteChecks`/`summariseSiteLogLines` |
+| Service | `src/lib/aec-site-service.ts` — day CRUD with wholesale line replacement, `applySiteLogAction(submit/reopen)`, issue CRUD with per-kind numbering under `pg_advisory_xact_lock`, `applySiteIssueAction(start/resolve/close/cancel)`, checklist CRUD (`createChecklist`/`updateChecklist`/`deleteChecklist`) with the item snapshot onto an issue, attachment replacement, and `pendingSiteIssues`/`overdueSiteIssues` for the widgets, the scan and the assistant |
+| Storage | §13's "photos" and §14's "photos, evidence" are the platform's files: `workspace_documents` gains nullable `site_log_id`/`site_issue_id` columns (migration 0199) and `aec_assert_attachment_owned()` refuses a document whose project or business disagrees with the record it points at. This wave also extracts the four registers' shared half into `src/lib/workspace-document-links.ts` and moves `aec-rfi-service.ts` onto it, so "attach a file to a register row" is one implementation rather than four |
+| API | `GET/POST /api/aec/projects/[id]/site-logs`, `GET/PATCH/DELETE /api/aec/site-logs/[id]`, `POST /api/aec/site-logs/[id]/status` (`submit` \| `reopen`), `GET/POST /api/aec/projects/[id]/site-issues`, `GET/PATCH/DELETE /api/aec/site-issues/[id]`, `POST /api/aec/site-issues/[id]/status` (`start` \| `resolve` \| `close` \| `cancel`), `GET/POST /api/aec/checklists`, `GET/PATCH/DELETE /api/aec/checklists/[id]`. Every one `withTenantScope` + `aecOwner` + `requireProjectCapability` (the checklists are business-scoped, so they check the project role only when the template is scoped to one) |
+| Permission | **No new key.** Reading is `workspace.view`; raising, editing, starting, resolving and cancelling are `workspace.manage`; the closeout verification is `workspace.approve` — §24's "a decision must not inherit ordinary edit rights" applied to §14's closeout, and the same key the approvals queue already uses |
+| Screens | `src/app/(app)/workspace/projects/[id]/site-panel.tsx` («کارگاه و گزارش روزانه»: the day register, the day's card with its lines, evidence and the submit/reopen control, and «روزنگار» — the diary view that merges the days with the quality register on one timeline), `inspections-panel.tsx` («بازرسی و کنترل کیفیت»: one register over the seven kinds with the four acts and the closeout dialog) and `checklists-panel.tsx` (the firm's inspection and handover templates, with their items and their active switch). A signed day renders as text with a reopen button, because offering an edit that only ever fails is worse than offering none |
+| Cockpit | `aec-cockpit.ts` — `site` and `inspections` are shipped, `AEC_SHIPPED_WAVE = 7`: `site` rides `site_operations` and `inspections` rides `qa_qc`, so a designer sees neither, a supervisor sees the register without the daily log, and a contractor sees both. Wave 9's `material_tracking` is still absent from `AEC_LIVE_CAPABILITIES` on purpose, so the two wave-9 kinds cannot leak into an enabled tab |
+| Assistant | `list_site_issues` joins §23's reads — open inspections, NCRs, corrective actions, snags and HSE observations, worst first, with the same `pendingSiteIssues` the tab's KPI row reads. §23 now names seven AEC tools, and the Persian prompt answers «چه چیزی در کارگاه باز است» from the same function the screen uses |
+| Notifications | Two new event keys, `aec.inspection_due` and `aec.snag_overdue`, produced by the existing hourly AEC sweep in `src/lib/notification-scans.ts` (no second engine, no new tick) and split by kind so a manager can switch the inspection reminders and the defect reminders off separately. This wave also fixes the sweep's first line: a non-AEC business now costs it one industry read instead of an hourly logged exception, which is what the scan's own comment already claimed |
+| Party merge | `aec_site_log_lines.party_id` (moves while the day is a draft, refused once it is submitted — a frozen day's crew is part of what froze) and `aec_site_issues.responsible_party_id` (moves while the issue is open) classified in `PARTY_REFERENCES`; `integration/party-merge-coverage.integration.test.ts` derives its coverage from PostgreSQL, so it proves the pair is complete |
+| Isolation | `integration/aec.integration.test.ts`'s RLS sweep now walks **22** tables (the six new ones included), and `integration/aec-site.integration.test.ts` (16 tests) adds the §13 and §14 rules the pure suite cannot reach: the signed day and its lines refused by raw SQL, the one-day-per-date unique index, the line CHECK shape, the four-eyes close refused by the trigger, the frozen closed record, the checklist snapshot surviving both an edit and a delete of the template, and the two capabilities' gates |
+
+### Decision 18 — one register, seven kinds
+
+§14 lists nine artifacts — inspection requests, checklists, quality inspections, NCRs, corrective
+actions, punch/snags, the handover checklist, HSE observations — and then states the fields **once**:
+project/location, category, severity, responsible party, raised by, assigned to, due date, photos,
+evidence, status, closeout verification, approval, activity history. Nine tables with that same column
+list would be nine migrations of duplication, nine ways for "closed" to mean slightly different things
+and nine places for the reminder scan to miss one. So the register keeps the kind in a column and
+models the three things that genuinely differ explicitly: a result belongs to an inspection and a
+handover (`issueNeedsResult`), a checklist does too (`issueSupportsChecks`), and a snag and an HSE
+observation have their own capability switch (`snagging`, `hse`) — which is how "where enabled"
+becomes a real gate rather than a hidden button. The consequence is visible on site: an NCR and a punch
+item are referred to by different prefixes from the same queue (`NCR-004`, `SNG-011`), and one report
+covers both without a second closeout definition.
+
+### Decision 19 — a day is signed, and its lines inherit the signature
+
+§13's daily log is the record of what happened on site, which is only worth something if "what the day
+says" cannot change afterwards. The freeze is therefore in the trigger and it covers the **lines**:
+`aec_site_log_line_guard` consults its header, so attendance, deliveries and incidents stop being
+editable the moment the day is submitted — a signed day whose headcount could still move would be a
+signature over an empty promise. Going back is allowed and explicit (`reopen`), because a site manager
+genuinely does remember a late truck; what is *not* allowed is a silent edit, and the activity feed
+records which of the two happened. The same reasoning gives the day its `(project_id, log_date)`
+unique index: a site that reports twice on one date is not keeping a log, so the second report is an
+edit of the first day, refused by the database rather than by a form hint.
+
+### Decision 20 — the closeout is a permission and a four-eyes rule, and a failure loops back
+
+§14 says an issue ends with "closeout verification", which is a decision about somebody else's work
+rather than more site work. So closing needs `workspace.approve` while raising, starting, resolving
+and cancelling need `workspace.manage`, and the service — and the trigger behind it — refuse a close
+whose verifier is the issue's assignee. That single refusal is what turns "the snag list is empty" into
+a claim somebody had to stand behind. The other half is what happens when the verification fails: the
+issue goes back to `in_progress` on the **same** record (`resolved → in_progress`, the chain's one
+backward edge), rather than being closed and re-raised as a second NCR — so the count of times a fix
+came back is readable from one history instead of inferable from numbers on two rows.
+
+### Decision 21 — a checklist is a snapshot, not a live reference
+
+An inspection is carried out against the firm's checklist, and the temptation is to store the link and
+read the items through it. That would mean editing the template tomorrow rewrites what was inspected
+yesterday — the opposite of §33 — so the items are **copied** onto the issue (`aec_site_issue_checks`),
+label, guidance and result included, and the link back to the template item is provenance that
+`ON DELETE SET NULL` may drop without losing the record. Two database lessons came out of building it
+that way. A composite foreign key cannot carry `ON DELETE SET NULL`: PostgreSQL nulls *every* column of
+the key, `business_id` included, and that column is NOT NULL — so the reference to a template item is a
+single-column FK and the same-business half is the trigger, exactly as the register's own nullable
+links already do it. And the ownership predicate is not the CRM's: `parties` has no `archived_at`, so
+the register asks `is_active AND merged_into_id IS NULL` like every other AEC register — a mismatch the
+database suite caught, which is the reason §32 asks for these tests rather than for care.
+
+Wave 7 leaves two issue items to the waves that own them, deliberately: an issue's "linked variation /
+change order" and a day's "cost impact" are fields on the *variation*, which Wave 8 builds — the link
+is owned by the later record, so neither register grows a column pointing at a table that does not
+exist yet; and a day or an inspection drafted on site with no signal (§26's "excellent on mobile" and
+the offline candidates) is a replication-domain decision, which Wave 10 owns together with the mobile
+capture flows. `material_tracking` stays out of `AEC_LIVE_CAPABILITIES` until Wave 9 builds it, which
+is why no tab in this wave can show a delivery-tracking screen that does not exist.
+
+## Waves 8–11 — designed, not built
 
 In the issue's order. Nothing below has a migration or a screen yet; the wave boundaries exist so
 each can be reviewed on its own.
 
-7. **Site execution.** Daily logs, inspections, QA/QC, NCRs and snagging.
 8. **Commercial controls.** Variations/change orders, progress certificates, retention and advance,
    and the project commercial cockpit.
 9. **Procurement.** Requests, RFQs, comparison, approvals and delivery tracking.

@@ -691,6 +691,33 @@ describe("the AEC module's API guards", () => {
     expect(rfiStatus as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
   });
 
+  it("keeps a closeout verification separate from ordinary site work", () => {
+    // §24 again, for Wave 7 — accepting somebody's fix (§14's "closeout
+    // verification") is a determination, so it must not inherit the key that
+    // raises a snag, starts it and resolves it. The status route asks for one
+    // permission per action through `siteIssueActionNeedsApproval`, which is
+    // asserted to be the rule rather than a hardcoded branch; the routes that
+    // merely write the register do not name the approval key at all.
+    const status = sources.get("aec/site-issues/[id]/status");
+    expect(status, "src/app/api/aec/site-issues/[id]/status/route.ts is missing").toBeTruthy();
+    expect(status as string).toMatch(/siteIssueActionNeedsApproval/);
+    expect(status as string).toMatch(/PERMISSIONS\.workspaceApprove/);
+    for (const key of [
+      "aec/projects/[id]/site-issues",
+      "aec/site-issues/[id]",
+      "aec/projects/[id]/site-logs",
+      "aec/site-logs/[id]",
+      "aec/site-logs/[id]/status",
+      "aec/checklists",
+      "aec/checklists/[id]",
+    ]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
+    }
+  });
+
   it("keeps the shared helper requirePermission and nothing weaker", () => {
     const guard = readFileSync(join(API_ROOT, "aec", "guard.ts"), "utf8");
     expect(guard).toMatch(/requirePermission\(permission\)/);

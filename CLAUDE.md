@@ -983,6 +983,23 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   `list_pending_rfis`/`list_pending_submittals` are the §23 reads and `aec.rfi_overdue`/
   `aec.submittal_overdue` are the §29 events, produced by a scan in `notification-scans.ts` because an
   overdue record changes by a date passing, not by a write.
+  Wave 7 (§13, §14) is site execution: `aec_site_logs` → `aec_site_log_lines`,
+  `aec_inspection_checklists` → their items, and `aec_site_issues` → `aec_site_issue_checks`
+  (migration 0199), with `src/lib/aec-site.ts` as the client-safe half (the day's seven line kinds and
+  the *shapes* that say which inputs each has, the seven issue kinds with their number prefixes, the
+  one transition chain — including `resolved → in_progress`, the failed-verification loop — the four
+  acts, and the one overdue predicate). A submitted day and its lines freeze together in the database
+  (`aec_site_log_guard`, `aec_site_log_line_guard`), one day per project per date is a unique index,
+  and `aec_site_issue_guard` enforces §14's closeout: a result before an inspection or a handover
+  leaves work, a verifier on close, and **the verifier may not be the assignee**. So the register's
+  acts need `workspace.manage` but the closeout needs `workspace.approve` — the one high-risk move of
+  the tab, and again no new permission key. A checklist's items are *snapshotted* onto the issue, so
+  editing or deleting the firm's template cannot rewrite what was inspected; photos and evidence are
+  `workspace_documents` rows via `src/lib/workspace-document-links.ts`, the one attachment
+  implementation all four AEC registers now share. The register and the daily log are separate tabs
+  (`site_operations` and `qa_qc`), `snag`/`hse_observation` need `snagging`/`hse` (still
+  `material_tracking`-free until Wave 9), `list_site_issues` is §23's seventh AEC read, and
+  `aec.inspection_due`/`aec.snag_overdue` ride the same hourly scan as the Wave 6 pair.
   Adding an industry means the registry entry, a
   migration that widens `businesses_industry_check`, its chart template and its profile entry;
   `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a

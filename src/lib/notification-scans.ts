@@ -36,7 +36,10 @@ import { notificationDedupeKey } from "./notifications";
 import { formatQuantity } from "./digits";
 import { ACCOUNTING_WORKSPACE_HREFS, workspaceProjectHref } from "./app-routes";
 import { businessToday } from "./business-day-service";
+import { AEC_INDUSTRY } from "./aec-service";
 import { overdueRegisters } from "./aec-rfi-service";
+import { overdueSiteIssues } from "./aec-site-service";
+import { getBusinessIndustry } from "./industry-guard";
 import { formatJalali } from "./jalali";
 
 /**
@@ -113,7 +116,7 @@ export async function scanLowStock(businessId: string): Promise<number> {
 }
 
 /**
- * §29's two reminders scan on the same slow cadence as the reorder level: an
+ * §29's AEC reminders scan on the same slow cadence as the reorder level: an
  * overdue RFI is a "chase this today" fact, and re-reading every business's
  * registers every ten minutes to learn the same thing would be waste. One hour
  * is enough for a reminder whose dedupe key is a business *date* — the second
@@ -121,31 +124,54 @@ export async function scanLowStock(businessId: string): Promise<number> {
  */
 export const AEC_OVERDUE_SCAN_INTERVAL_MS = 60 * 60 * 1000;
 
-/** At most this many of each register per business per day, so one project's backlog cannot flood a phone. */
+/**
+ * At most this many entries of *each* register per business per day, so one
+ * project's backlog cannot flood a phone and cannot silence another register
+ * either: with four registers feeding this scan, one shared budget would let a
+ * stack of late RFIs hide the snags somebody has to fix this week.
+ */
 const MAX_OVERDUE_PER_SCAN = 10;
 
 /**
- * One business's overdue RFIs and submittals, queued as notifications.
+ * One business's overdue registers, queued as notifications.
  *
- * Both halves come from `overdueRegisters`, which is the same function the
- * assistant's two pending reads and the two cockpit widgets use — so a
- * reminder and a screen can never disagree about which register is late. The
- * function itself is why nothing here checks the industry: it answers no rows
- * for a business that is not AEC, and its submittal half is skipped when
- * document control is off, so a trade of any kind can be swept safely.
+ * The four halves come from `overdueRegisters` (§10/§11) and `overdueSiteIssues`
+ * (§14), which are the same functions the assistant's pending reads and the
+ * cockpit widgets use — so a reminder and a screen can never disagree about
+ * which register is late. The RFI half is why nothing here checks the industry:
+ * it answers no rows for a business that is not AEC, and the submittal and site
+ * halves skip themselves when document control or quality control is off, so a
+ * trade of any kind can be swept safely.
  *
  * The dedupe key is `…:<record id>:<business date>`, exactly like low stock: one
  * reminder per register entry per trading day, however many times the scan runs.
  * A record that stays overdue for a fortnight is a fortnight of daily nudges
  * rather than one lost alert or fifty duplicate ones.
+ *
+ * §29 names «inspection due» and «snag overdue» separately from the two
+ * registers, and they are separate keys here because they are separate things to
+ * switch off — the split between them is the issue's own: inspection-ish kinds
+ * (the request, the inspection, the handover) raise one, and defect-ish kinds
+ * (the snag, the NCR, the corrective action) the other.
  */
 export async function scanOverdueAecRegisters(businessId: string): Promise<number> {
+  // The sweep runs for every business; this register is one business's. Asking
+  // the RFI register for a restaurant would *throw* (its guard asserts the
+  // industry), and an hourly exception per non-AEC business is not a sweep. One
+  // industry read, then nothing — the reason low stock needs no such check is
+  // that every business can have stock.
+  if ((await getBusinessIndustry(businessId)) !== AEC_INDUSTRY) return 0;
+
   const today = await businessToday(businessId);
   const { rfis, submittals } = await overdueRegisters(businessId);
+  const siteIssues = await overdueSiteIssues(businessId, MAX_OVERDUE_PER_SCAN);
 
   let queued = 0;
+  // One budget per register, not one for the scan: a project with fifty late
+  // RFIs must not silence the snags somebody has to fix this week.
+  let fromThisRegister = 0;
   for (const rfi of rfis) {
-    if (queued >= MAX_OVERDUE_PER_SCAN) break;
+    if (fromThisRegister >= MAX_OVERDUE_PER_SCAN) break;
     if (rfi.daysOverdue <= 0) continue;
     await recordNotification({
       businessId,
@@ -162,10 +188,12 @@ export async function scanOverdueAecRegisters(businessId: string): Promise<numbe
       payload: { rfiId: rfi.id, projectId: rfi.projectId, dueDate: rfi.dueDate },
     });
     queued += 1;
+    fromThisRegister += 1;
   }
 
+  fromThisRegister = 0;
   for (const submittal of submittals) {
-    if (queued >= MAX_OVERDUE_PER_SCAN) break;
+    if (fromThisRegister >= MAX_OVERDUE_PER_SCAN) break;
     if (submittal.daysOverdue <= 0) continue;
     await recordNotification({
       businessId,
@@ -185,10 +213,44 @@ export async function scanOverdueAecRegisters(businessId: string): Promise<numbe
       },
     });
     queued += 1;
+    fromThisRegister += 1;
+  }
+
+  fromThisRegister = 0;
+  for (const issue of siteIssues) {
+    if (fromThisRegister >= MAX_OVERDUE_PER_SCAN) break;
+    if (issue.daysOverdue <= 0) continue;
+    const inspection = SITE_INSPECTION_KINDS.has(issue.kind);
+    const eventKey = inspection ? "aec.inspection_due" : "aec.snag_overdue";
+    await recordNotification({
+      businessId,
+      // No location: the site belongs to a project, not to a branch.
+      locationId: null,
+      eventKey,
+      severity: "important",
+      title: inspection
+        ? `${issue.kindLabel} ${issue.issueNumber} از مهلت گذشته است`
+        : `${issue.kindLabel} ${issue.issueNumber} عقب افتاده است`,
+      body: `${issue.title} — ${issue.daysOverdue} روز گذشته، مهلت ${formatJalali(
+        issue.dueDate ?? "",
+      )}${issue.assigneeName ? ` — مسئول: ${issue.assigneeName}` : ""}`,
+      url: workspaceProjectHref(issue.projectId),
+      dedupeKey: notificationDedupeKey(eventKey, issue.id, today),
+      payload: { siteIssueId: issue.id, projectId: issue.projectId, dueDate: issue.dueDate },
+    });
+    queued += 1;
+    fromThisRegister += 1;
   }
 
   return queued;
 }
+
+/**
+ * Which §14 kinds are «inspections» for §29's reminder split. The request, the
+ * inspection itself and the handover: things that happen on a date. Everything
+ * else in the register is a defect somebody owes a fix for.
+ */
+const SITE_INSPECTION_KINDS = new Set(["inspection_request", "inspection", "handover"]);
 
 let scanInFlight = false;
 

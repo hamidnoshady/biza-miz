@@ -583,6 +583,37 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     preview: true,
     previewLabel: "استعلام‌ها (RFI)",
   },
+  // -- AEC (issue #799 Wave 7) ----------------------------------------------
+  {
+    table: "aec_site_log_lines",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    // 0199's line guard refuses any change to the lines of a *submitted* day, so
+    // the filter moves a draft day's lines and leaves a signed day's exactly as
+    // they were signed — the same shape as a draft transmittal's recipients.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_site_logs sl WHERE sl.id = {t}.log_id AND sl.status = 'draft')",
+    reason:
+      "The contractor, plant owner or supplier a draft day's line names. A draft moves with the surviving party; a submitted day keeps the crew and supplier it was signed with.",
+    preview: true,
+    previewLabel: "عوامل و تجهیزات گزارش روزانه (پیش‌نویس)",
+  },
+  {
+    table: "aec_site_issues",
+    column: "responsible_party_id",
+    scope: "business",
+    disposition: "move",
+    // Same reasoning as the RFI and submittal registers one wave earlier: a
+    // closed or cancelled issue is frozen by 0199's guard and refuses the UPDATE,
+    // and leaving the reference behind would abort the next write against it.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_site_issues si WHERE si.id = {t}.id AND si.status NOT IN ('closed', 'cancelled'))",
+    reason:
+      "The contractor or supplier who owes a fix. A live issue follows the surviving party; a closed one keeps the party it was closed against.",
+    preview: true,
+    previewLabel: "موارد باز کارگاه",
+  },
   {
     table: "aec_submittals",
     column: "responsible_party_id",
