@@ -11,6 +11,7 @@ import {
   requireTaskWork,
   updateWorkspaceTask,
 } from "@/lib/workspace";
+import { roleCan } from "@/lib/workspace-shared";
 import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../../guard";
 
 /**
@@ -26,14 +27,23 @@ export const GET = withTenantScope(
     try {
       const task = await getWorkspaceTask(owner.businessId, id);
       if (!task) return NextResponse.json({ error: "task_not_found" }, { status: 404 });
-      await requireProjectCapability(owner, task.projectId, "view");
+      const role = await requireProjectCapability(owner, task.projectId, "view");
       const [checklist, dependencies, comments, documents] = await Promise.all([
         listChecklist(id),
         listDependencies(id),
         listComments(owner.businessId, "task", id),
         listDocuments(owner, { taskId: id }),
       ]);
-      return NextResponse.json({ task, checklist, dependencies, comments, documents });
+      // What the drawer may offer — the same rule `requireTaskWork` enforces:
+      // editors re-scope, the assigned contributor works the task.
+      const writes = owner.access?.canManage === true;
+      const canEdit = writes && roleCan(role, "edit");
+      const capabilities = {
+        canEdit,
+        canWork: canEdit || (writes && roleCan(role, "contribute") && task.assigneeUserId === owner.actorUserId),
+        canComment: writes && roleCan(role, "contribute"),
+      };
+      return NextResponse.json({ task, checklist, dependencies, comments, documents, capabilities });
     } catch (err) {
       return handleWorkspaceError(err);
     }

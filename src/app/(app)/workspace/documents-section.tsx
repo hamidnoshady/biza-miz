@@ -54,6 +54,7 @@ import {
   LoadMoreFooter,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import type { WorkspaceIntent } from "./workspace-routes";
 
 interface DocumentSummary {
   total: number;
@@ -84,11 +85,14 @@ export interface DocumentRow {
 
 export function DocumentsSection({
   lookups,
+  intent,
   canManage,
   canRequestApproval,
   projectId,
 }: {
   lookups: WorkspaceLookups;
+  /** A consumed URL intent — see `WorkspaceIntent`. */
+  intent?: WorkspaceIntent;
   canManage: boolean;
   canRequestApproval: boolean;
   projectId?: string;
@@ -98,6 +102,15 @@ export function DocumentsSection({
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<DocumentRow | null>(null);
   const [creating, setCreating] = useState(false);
+  useEffect(() => {
+    if (intent?.create) setCreating(true);
+    // `?open=<id>` — the drawer's «باز کردن صفحهٔ کامل» lands on this record.
+    if (intent?.openId) {
+      api<{ document?: DocumentRow }>(`/api/workspace/documents/${intent.openId}`).then(({ ok, data }) => {
+        if (ok && data.document) setEditing(data.document);
+      });
+    }
+  }, [intent]);
 
   const query = useMemo(() => {
     const params = new URLSearchParams();
@@ -270,7 +283,7 @@ export function DocumentsSection({
           lookups={lookups}
           document={editing ?? undefined}
           canManage={canManage}
-          defaultProjectId={projectId}
+          defaultProjectId={projectId ?? intent?.projectId}
           onClose={() => {
             setCreating(false);
             setEditing(null);

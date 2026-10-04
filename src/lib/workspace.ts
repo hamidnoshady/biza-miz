@@ -30,6 +30,7 @@ import {
   addDays,
   approvalDecisionError,
   builtinTemplate,
+  dependencyBlocksStatus,
   effectiveProjectRole,
   intervalOrdered,
   normalizeTags,
@@ -1203,6 +1204,11 @@ export async function updateWorkspaceTask(
   }
   if (input.status !== undefined) {
     const status = assertEnum(input.status, TASK_STATUSES, "invalid_task_status");
+    // The dependency rule (#761 §9), shared with the board: never DONE while
+    // a task it waits on is unfinished.
+    if (dependencyBlocksStatus(status, existing.blockedBy)) {
+      throw new WorkspaceError("dependency_unresolved");
+    }
     set("status", status);
     // completed_at is derived from the status, never set by the caller: a
     // "done" with no stamp (or a stamp on a reopened task) is how a

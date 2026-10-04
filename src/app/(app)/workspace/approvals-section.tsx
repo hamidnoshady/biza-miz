@@ -84,13 +84,16 @@ type Inbox = "all" | "mine" | "requested";
 export function ApprovalsSection({
   canApprove,
   projectId,
+  initialInbox = "all",
 }: {
+  /** `?mine=true` — the command bar's bell lands on «منتظر تصمیم من». */
+  initialInbox?: Inbox;
   canApprove: boolean;
   projectId?: string;
 }) {
   const [error, setError] = useState("");
   const [status, setStatus] = useState<WorkspaceApprovalStatus | "all">("pending");
-  const [inbox, setInbox] = useState<Inbox>("all");
+  const [inbox, setInbox] = useState<Inbox>(initialInbox);
   const [deciding, setDeciding] = useState<{ row: ApprovalRow; decision: Decision } | null>(null);
 
   const query = useMemo(() => {

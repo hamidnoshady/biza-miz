@@ -836,3 +836,126 @@ export const WORKSPACE_TOOL_LABELS: Record<WorkspaceToolName, string> = {
   list_expiring_contracts: "قراردادهای رو به انقضا",
   list_workspace_approvals: "تأییدهای در انتظار",
 };
+
+/* ---------------------------------------------------------------------------
+ * Project health (#761 §7, §8, §15)
+ * ------------------------------------------------------------------------- */
+
+export type ProjectHealth = "on_track" | "at_risk" | "off_track";
+
+export const PROJECT_HEALTH_LABELS: Record<ProjectHealth, string> = {
+  on_track: "طبق برنامه",
+  at_risk: "در معرض خطر",
+  off_track: "عقب از برنامه",
+};
+
+export type ProjectHealthReason =
+  | "overdue_tasks"
+  | "behind_schedule"
+  | "past_deadline"
+  | "over_budget"
+  | "budget_nearly_spent"
+  | "pending_approvals"
+  | "contracts_expiring";
+
+export const PROJECT_HEALTH_REASON_LABELS: Record<ProjectHealthReason, string> = {
+  overdue_tasks: "وظیفهٔ عقب‌افتاده",
+  behind_schedule: "پیشرفت کمتر از زمان سپری‌شده",
+  past_deadline: "مهلت پروژه گذشته است",
+  over_budget: "هزینه از بودجه گذشته است",
+  budget_nearly_spent: "بیش از ۹۰٪ بودجه مصرف شده",
+  pending_approvals: "تأیید در انتظار",
+  contracts_expiring: "قرارداد رو به انقضا",
+};
+
+export interface ProjectHealthInput {
+  today: string;
+  startDate: string | null;
+  endDate: string | null;
+  completed: boolean;
+  taskCount: number;
+  doneTaskCount: number;
+  overdueTaskCount: number;
+  budgetRial: number | null;
+  /** Null when the actor may not read the ledger — budget is then not judged. */
+  spentRial: number | null;
+  pendingApprovals: number;
+  expiringContracts: number;
+}
+
+/**
+ * Pure: how a project is doing, and why — the same answer on the portfolio,
+ * the project page and the reports, from facts the server already has.
+ *
+ * - **off_track**: the deadline has passed with work open, spend is over
+ *   budget, or progress trails elapsed time by 25 points or more.
+ * - **at_risk**: overdue tasks, progress trailing time by 10+ points, ≥90%
+ *   of budget spent, approvals waiting, or contracts expiring within 30 days.
+ * - **on_track** otherwise. A completed project is always on track.
+ *
+ * "Behind schedule" compares the share of the project's duration that has
+ * elapsed with the share of its tasks that are done; it needs both dates and
+ * at least one task, and is not judged before the start date.
+ */
+export function projectHealth(input: ProjectHealthInput): {
+  health: ProjectHealth;
+  reasons: ProjectHealthReason[];
+  elapsedPercent: number | null;
+  progressPercent: number;
+} {
+  const progressPercent = completionPercent(input.doneTaskCount, input.taskCount);
+  let elapsedPercent: number | null = null;
+  if (input.startDate && input.endDate && input.endDate > input.startDate) {
+    const total = daysUntil(input.endDate, input.startDate);
+    const gone = daysUntil(input.today, input.startDate);
+    elapsedPercent = Math.max(0, Math.min(100, Math.round((gone / total) * 100)));
+  }
+  if (input.completed) return { health: "on_track", reasons: [], elapsedPercent, progressPercent };
+
+  const severe: ProjectHealthReason[] = [];
+  const warn: ProjectHealthReason[] = [];
+  const open = input.taskCount - input.doneTaskCount;
+
+  if (input.endDate && input.endDate < input.today && open > 0) severe.push("past_deadline");
+  if (input.budgetRial !== null && input.spentRial !== null && input.budgetRial > 0) {
+    if (input.spentRial > input.budgetRial) severe.push("over_budget");
+    else if (input.spentRial >= input.budgetRial * 0.9) warn.push("budget_nearly_spent");
+  }
+  if (elapsedPercent !== null && input.taskCount > 0 && elapsedPercent > 0) {
+    const gap = elapsedPercent - progressPercent;
+    if (gap >= 25) severe.push("behind_schedule");
+    else if (gap >= 10) warn.push("behind_schedule");
+  }
+  if (input.overdueTaskCount > 0) warn.push("overdue_tasks");
+  if (input.pendingApprovals > 0) warn.push("pending_approvals");
+  if (input.expiringContracts > 0) warn.push("contracts_expiring");
+
+  const reasons = [...severe, ...warn];
+  return {
+    health: severe.length ? "off_track" : warn.length ? "at_risk" : "on_track",
+    reasons,
+    elapsedPercent,
+    progressPercent,
+  };
+}
+
+/**
+ * The dependency rule, explicit (#761 §9): a task may not be marked DONE
+ * while any task it waits on is unfinished. Moving it to in-progress or
+ * blocked is allowed — the board shows the open blockers as a warning.
+ */
+export function dependencyBlocksStatus(
+  nextStatus: WorkspaceTaskStatus,
+  unfinishedBlockers: number,
+): boolean {
+  return nextStatus === "done" && unfinishedBlockers > 0;
+}
+
+/**
+ * Pure: the Saturday that starts the week `date` falls in — the Persian week,
+ * which the timeline lanes and the calendar both use.
+ */
+export function weekStartSaturday(date: string): string {
+  const day = new Date(`${date}T00:00:00Z`).getUTCDay(); // Sun=0 … Sat=6
+  return addDays(date, -((day + 1) % 7));
+}

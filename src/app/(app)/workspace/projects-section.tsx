@@ -62,6 +62,7 @@ import {
   workspaceError,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import type { WorkspaceIntent } from "./workspace-routes";
 
 interface ProjectSummary {
   total: number;
@@ -101,9 +102,12 @@ interface TemplateOption {
 
 export function ProjectsSection({
   lookups,
+  intent,
   canManage,
 }: {
   lookups: WorkspaceLookups;
+  /** A consumed URL intent — see `WorkspaceIntent`. */
+  intent?: WorkspaceIntent;
   canManage: boolean;
 }) {
   const money = useMoney();
@@ -113,6 +117,9 @@ export function ProjectsSection({
   const [mine, setMine] = useState(false);
   const [search, setSearch] = useState("");
   const [creating, setCreating] = useState(false);
+  useEffect(() => {
+    if (intent?.create) setCreating(true);
+  }, [intent]);
 
   const query = useMemo(() => {
     const params = new URLSearchParams();

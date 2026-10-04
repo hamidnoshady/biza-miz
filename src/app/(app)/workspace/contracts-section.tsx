@@ -61,6 +61,7 @@ import {
   LoadMoreFooter,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import type { WorkspaceIntent } from "./workspace-routes";
 
 interface ContractSummary {
   total: number;
@@ -90,12 +91,15 @@ export interface ContractRow {
 
 export function ContractsSection({
   lookups,
+  intent,
   canManageContracts,
   canRequestApproval,
   initialExpiring,
   projectId,
 }: {
   lookups: WorkspaceLookups;
+  /** A consumed URL intent — see `WorkspaceIntent`. */
+  intent?: WorkspaceIntent;
   canManageContracts: boolean;
   canRequestApproval: boolean;
   initialExpiring?: number;
@@ -109,6 +113,15 @@ export function ContractsSection({
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<ContractRow | null>(null);
   const [creating, setCreating] = useState(false);
+  useEffect(() => {
+    if (intent?.create) setCreating(true);
+    // `?open=<id>` — the drawer's «باز کردن صفحهٔ کامل» lands on this record.
+    if (intent?.openId) {
+      api<{ contract?: ContractRow }>(`/api/workspace/contracts/${intent.openId}`).then(({ ok, data }) => {
+        if (ok && data.contract) setEditing(data.contract);
+      });
+    }
+  }, [intent]);
 
   const query = useMemo(() => {
     const params = new URLSearchParams();
@@ -267,7 +280,7 @@ export function ContractsSection({
         <ContractDialog
           lookups={lookups}
           contract={editing ?? undefined}
-          defaultProjectId={projectId}
+          defaultProjectId={projectId ?? intent?.projectId}
           canManage={canManageContracts}
           onClose={() => {
             setCreating(false);
