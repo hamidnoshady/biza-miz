@@ -294,6 +294,17 @@ Then the two steps are the same for every source:
    typing a confirmation phrase and the `backup.restore` capability, which the
    **owner** role alone holds.
 
+   The re-grant re-applies the lock-down and the grants for the role named by
+   the runtime `DATABASE_URL`. When that role *is* the connection performing the
+   restore — the packaged-desktop acceptance run, or a deployment whose
+   `DATABASE_URL` is the cluster's bootstrap superuser — PostgreSQL refuses to
+   change that role's own `SUPERUSER` attribute ("Only roles with the SUPERUSER
+   attribute may change the SUPERUSER attribute"). Exactly that one clause is
+   skipped then: the restore succeeds, and the operator is told the role kept
+   unrestricted access (the warning is written into the restore journal and
+   returned with the result). Re-granting from a separate admin connection, so
+   the runtime role is a different role, is what clears it.
+
 **The audit trail survives the swap.** Every phase is appended to a durable
 journal *outside* the target database (`RESTORE_JOURNAL_DIR`, default
 `<PLATFORM_BACKUP_DIR>/journal`): verify started/failed/succeeded, apply

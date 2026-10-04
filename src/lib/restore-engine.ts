@@ -37,7 +37,7 @@ import { Client } from "pg";
 import { decryptBackup, isEncryptedBackup } from "./backup";
 import { decryptFileToFile, fileHasBackupMagic, sha256File } from "./backup-streams";
 import { pgRestoreBin, runPgDump, runPgRestore } from "./pg-tools";
-import { createAppRole } from "./create-app-role";
+import { createAppRole, decodeUrlCredential } from "./create-app-role";
 import { secureRemoveDirectory } from "./secure-temp";
 import { appendRestoreJournal, tryAppendRestoreJournal, type RestoreJournalEntry, type RestorePhase } from "./restore-journal";
 
@@ -61,6 +61,13 @@ export interface RestoreSummary {
   };
   /** Persistent pre-restore safety dump; present only after an apply. */
   emergencyBackup?: string;
+  /**
+   * Non-fatal conditions the operator has to be told about — today, a runtime
+   * role that could not be stripped of SUPERUSER because the restore ran as
+   * that very role (issue #807; see create-app-role.ts). The restore is still a
+   * success, so it is a warning and not an error, but it must not be invisible.
+   */
+  warnings?: string[];
 }
 
 /** The core tables a dump must contain to be worth restoring at all. */
@@ -184,9 +191,17 @@ export async function validateRestoredDb(databaseUrl: string, source: string): P
  * at boot) using the app role's credentials from the running process's own
  * DATABASE_URL. On a fresh machine where the role does not exist yet,
  * createAppRole creates it; the next boot's derive-runtime then keeps it.
+ *
+ * Returns whether the runtime role is still a superuser (only possible when the
+ * role *is* the connection's own role, which PostgreSQL will not let a session
+ * demote) so the apply path can warn the operator instead of implying a
+ * hardening that did not happen.
  */
-export async function regrantAppRole(databaseUrl: string): Promise<void> {
-  const runtimeUrl = process.env.DATABASE_URL;
+export async function regrantAppRole(
+  databaseUrl: string,
+  env: Partial<NodeJS.ProcessEnv> = process.env,
+): Promise<{ role: string; superuser: boolean }> {
+  const runtimeUrl = env.DATABASE_URL?.trim();
   if (!runtimeUrl) {
     // Without a runtime URL there is no role to grant to and no way to prove
     // the restored database is usable by the application. Issue #807: this is
@@ -200,13 +215,18 @@ export async function regrantAppRole(databaseUrl: string): Promise<void> {
   } catch {
     throw new Error("restore_runtime_url_invalid: DATABASE_URL is not a usable connection string");
   }
-  const roleName = parsed.username;
-  const password = parsed.password;
+  // Decode: URL keeps the percent-encoded spelling that `pg` decodes when it
+  // connects, so re-provisioning with the raw value would set a different
+  // password on the role and lock the application out of the database it just
+  // restored.
+  const roleName = decodeUrlCredential(parsed.username);
+  const password = decodeUrlCredential(parsed.password);
   if (!roleName || !password) {
     throw new Error("restore_runtime_url_incomplete: DATABASE_URL must carry a role name and password");
   }
   try {
-    await createAppRole({ databaseUrl, roleName, password, quiet: true });
+    const result = await createAppRole({ databaseUrl, roleName, password, quiet: true });
+    return { role: result.role, superuser: result.superuser };
   } catch (err) {
     // Fail hard. The previous behaviour swallowed this and then validated the
     // restored database through the *privileged* connection, so a database the
@@ -522,16 +542,23 @@ export async function applyDumpToTarget(opts: {
     // Re-grant and then prove the *runtime* role can actually use the restored
     // database before anything is reported successful (issue #807). Both are
     // inside this try block on purpose: either failing rolls the swap back.
-    await regrantAppRole(databaseUrl);
+    const regrant = await regrantAppRole(databaseUrl, opts.runtimeEnv ?? process.env);
     if (opts.failureInjection === "after_regrant") throw new Error("injected_failure_after_regrant");
     await validateRuntimeAccess(opts.runtimeEnv ?? process.env);
     const summary = await validateRestoredDb(databaseUrl, source);
+    const warnings = regrant.superuser
+      ? [
+          `The runtime role ${regrant.role} could not be demoted: it is this connection's own role and PostgreSQL does not allow a session to remove its own SUPERUSER attribute. ` +
+            "The restored database is reachable, but the application still runs with unrestricted access — provision the runtime role from a separate admin connection.",
+        ]
+      : undefined;
+    if (warnings) console.warn(`restore: ${warnings[0]}`);
 
     // The new target is now fully usable. Only now may the preserved original
     // be removed; the verified emergency dump remains for operator recovery.
     await dropDatabase(databaseUrl, recoveryDb);
     originalRenamed = false;
-    return { ...summary, emergencyBackup };
+    return { ...summary, emergencyBackup, ...(warnings ? { warnings } : {}) };
   } catch (error) {
     // The swap had not happened yet (the failure is in emergency-backup
     // creation, in the pre-swap admin work, or before the first rename): the
@@ -632,6 +659,7 @@ export async function restoreDumpFile(opts: {
       await journal(journalContext, "apply_succeeded", {
         migrations: applied.migrations,
         emergencyBackup: applied.emergencyBackup,
+        ...(applied.warnings ? { warnings: applied.warnings } : {}),
       });
       return { verified, applied };
     } catch (error) {

@@ -1853,6 +1853,7 @@ async function restorePlatformFromPlanLocked(
         journal,
       });
       const summary = applied ?? verified;
+      if (summary.warnings?.length) warnings.push(...summary.warnings);
       if (applied) {
         // The database was replaced. Prove the app can reach the *restored*
         // database before claiming success, then leave a receipt inside it.
