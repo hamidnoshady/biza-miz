@@ -3,7 +3,8 @@
  *
  * The board's data is proven against PostgreSQL
  * (`integration/aec-field.integration.test.ts`) and the catalogue in
- * `src/lib/aec-field.test.ts`; what is left is the part only the screen can get
+ * `src/lib/aec-field.test.ts` (which imports it through the server module's
+ * re-export); what is left is the part only the screen can get
  * wrong, and it is the part §25 wrote as *rules*: no desktop-only tables, fast
  * photo capture with real progress, drafts where safe, Shamsi dates, and links
  * into the panels rather than a second editor. A static scan is how this repo
@@ -12,7 +13,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { AEC_FIELD_ACTION_KEYS } from "@/lib/aec-field";
+import { AEC_FIELD_ACTION_KEYS } from "@/lib/aec-field-catalogue";
 import { FIELD_SCREEN_ACTION_KEYS } from "./field-screen";
 
 const HERE = join(process.cwd(), "src", "app", "(app)", "workspace", "projects", "[id]", "field");

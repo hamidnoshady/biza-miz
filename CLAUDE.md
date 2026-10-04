@@ -1097,6 +1097,12 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   library) and upload progress is a real XHR percentage. The project page reads and writes `?tab=` so
   those hand-offs are links, and an update from the phone must carry the attachments the desk already
   wrote rather than replacing the day's lines — see Decision 37.
+  The screen's catalogue (`AEC_FIELD_ACTIONS`, `AEC_FIELD_RULES`, the queue shapes, the Shamsi
+  helpers) lives in `src/lib/aec-field-catalogue.ts`, which imports nothing but types, because a
+  client component that imports a *runtime* value from `aec-field.ts` drags `pg` into the browser
+  bundle and fails `next build` with "Can't resolve 'fs'" — the failure Wave 11 chased through CI.
+  `src/lib/client-bundle-boundary.test.ts` fails the build if any `"use client"` file reaches
+  `src/lib/db.ts` or a module importing a `node:` builtin through value imports — see Decision 39.
   **A shared engine branches on the industry *family*, never on "not F&B".** `src/lib/industries.ts`
   owns `industryFamily()` (food_service / retail / project_based / service),
   `hasSellableCatalogue()` (F&B and retail only) and `RETAIL_CATALOGUE_INDUSTRIES`; the WooCommerce

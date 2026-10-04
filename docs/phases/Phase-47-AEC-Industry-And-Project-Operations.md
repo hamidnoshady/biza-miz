@@ -764,6 +764,38 @@ writes no order; and the WooCommerce webhook (order and refund) fails
 `integration_webhook_events.status` the same way. Both refusals are asserted through the failure
 plumbing the operator actually sees, not just the thrown error.
 
+### The build the CI gate caught
+
+Wave 11's first full CI run turned four of the wave's own promises into a
+finding, which is what a cleanup wave is for: `production build` failed, and so
+did every job that builds the app (media E2E, visual regression, the desktop
+shell, the production container, the packaged Windows candidate) — all at their
+build step, on both runner images, while type check, ESLint, the unit suite and
+the database suites passed. The Actions job logs are stored on a host this
+workspace cannot reach, so the message was recovered by rebuilding on the CI
+runner itself and re-emitting the log tail as a check annotation. It said:
+
+```
+Failed to compile.
+./node_modules/pg-connection-string/index.js
+Module not found: Can't resolve 'fs'
+```
+
+The field screen is a client component and it imported `AEC_FIELD_ACTIONS` — a
+runtime value — from `aec-field.ts`, which composes the board out of the
+services and therefore imports the pool. Webpack followed that import into the
+browser bundle and `pg` came with it. Nothing else noticed, because under vitest
+the same import resolves perfectly: only the production build compiles the
+client graph. Two changes fix it and one prevents the next one:
+
+| Change | Detail |
+|---|---|
+| Split the data out | `src/lib/aec-field-catalogue.ts` now holds the eleven `AEC_FIELD_ACTIONS`, `AEC_FIELD_RULES`, the queue shapes, `AEC_FIELD_QUEUE_LIMIT` and the two Shamsi helpers — no runtime import at all, only `import type`s (which the compiler erases). `aec-field.ts` re-exports the whole catalogue, so the server side and the tests keep one import point, and `field-screen.tsx` imports the catalogue module directly |
+| Keep the type | The screen still needs `FieldBoard`/`FieldQueueRow`; those are `import type`s from the catalogue, and the board itself never reaches it — the screen fetches `/api/aec/projects/[id]/field` like every other panel. The catalogue's own `SiteChecklistSummary` is a type-only import from the site register for the same reason |
+| Guard it | `src/lib/client-bundle-boundary.test.ts` (2 tests) walks every `"use client"` file, follows **value** imports only (`import type` is erased and allowed), and fails with the whole chain if any of them reaches `src/lib/db.ts` or a module importing a `node:` builtin. Verified by re-introducing the broken import: the failure message names `field-screen.tsx -> src/lib/aec-field.ts -> src/lib/business-day-service.ts -> src/lib/db.ts` |
+
+Decision 39 records the rule this leaves behind.
+
 The CI gate for this branch is the issue's own Definition of Done: `tsc --noEmit`, ESLint, the unit
 suite, the database-integration suites, `next build`, the route/guard smoke tests and the workflow
 matrix — all green on the wave's head commit.
@@ -800,6 +832,31 @@ to `"food_service"` with `!=`/`!==` unless it is allowlisted by name. There is e
 allowlist entry after this wave — `ai-autopilot-service.ts`'s waste detection, which *deliberately*
 skips every non-F&B trade because waste is an F&B concept — and adding a second requires saying why
 in the test file rather than in a review comment.
+
+### Decision 39 — a screen renders data; the board composes it
+
+The bug was one import, but the rule it broke is worth stating, because the
+symptom is a build failure with no type error to warn you. A `"use client"`
+module is compiled for the browser: everything it imports for its *values* comes
+with it, transitively and unconditionally. So a client component may import a
+type from anywhere — types are erased before webpack sees them — but its runtime
+imports have to stay on the browser-safe side of the line, and `src/lib/db.ts`
+is the far side of it.
+
+The split that follows from that is the one this wave made: the phone screen
+renders **data** (the eleven flows, their rules, the queue rows) and asks the
+server for **board state** (`GET /api/aec/projects/[id]/field`) like every other
+panel does. `aec-field-catalogue.ts` is the data and is importable from a
+browser; `aec-field.ts` is the board and is not. Had the screen imported the
+actions from the board module "just for now", the price would have been a
+bundle full of PostgreSQL — which is how the failure surfaced, twice, in CI
+before it surfaced in review.
+
+The same reasoning is why the catalogue is a *re-export* in `aec-field.ts`
+rather than a moved file with a new import in two places: the server half and
+the tests should not have to care which side of the line a name lives on, and
+the next person adding a flow adds it to the catalogue and sees the boundary
+once.
 
 ## What is still not built
 

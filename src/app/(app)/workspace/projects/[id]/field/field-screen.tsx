@@ -46,6 +46,10 @@ import {
 import { SectionCardSkeleton, overlayPanelClass } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, Field, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
+// The catalogue lives in its own module because it is *data*, and this screen is
+// a client component: importing it from `aec-field.ts` (which composes the board
+// from the services) would pull `pg` and the server layer into the browser
+// bundle. `client-bundle-boundary.test.ts` guards the rule.
 import {
   AEC_FIELD_ACTIONS,
   AEC_FIELD_RULES,
@@ -53,7 +57,7 @@ import {
   type FieldBoard,
   type FieldDrawingRow,
   type FieldQueueRow,
-} from "@/lib/aec-field";
+} from "@/lib/aec-field-catalogue";
 import { SITE_ISSUE_SEVERITIES, SITE_ISSUE_SEVERITY_LABELS } from "@/lib/aec-site";
 import { TASK_STATUSES, TASK_STATUS_LABELS, type WorkspaceTaskStatus } from "@/lib/workspace-shared";
 
