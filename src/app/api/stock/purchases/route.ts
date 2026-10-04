@@ -55,7 +55,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   let body: {
     supplierId?: string | null;
     note?: string | null;
-    lines?: { itemId?: string; quantity?: string; unitCost?: number; expiryDate?: string | null }[];
+    lines?: {
+      itemId?: string;
+      quantity?: string;
+      unitCost?: number;
+      /** Batch-tracked items: the real manufacturer/supplier lot number. */
+      batchNumber?: string | null;
+      expiryDate?: string | null;
+      manufactureDate?: string | null;
+      supplierReference?: string | null;
+    }[];
   };
   try {
     body = await request.json();
