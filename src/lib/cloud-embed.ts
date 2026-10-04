@@ -68,3 +68,27 @@ export function mirroredPath(guestUrl: string, cloudUrl: string | null): string 
     return null;
   }
 }
+
+/** The key next-themes keeps the choice under (its default `storageKey`). */
+const THEME_STORAGE_KEY = "theme";
+
+/**
+ * The script the desktop runs inside the pane so the cloud page wears the
+ * till's light/dark theme. The pane is another origin with its own storage,
+ * and the cloud's theme toggle lives in the sidebar the pane hides, so without
+ * this the two halves of one window could disagree and nothing could fix it.
+ * It stores the choice where next-themes reads it on the next load, and fires
+ * the `storage` event next-themes listens to so the open page switches now.
+ * Returns null for anything but `light`/`dark`: nothing else is ever sent.
+ */
+export function cloudThemeScript(theme: string | null | undefined): string | null {
+  if (theme !== "light" && theme !== "dark") return null;
+  const key = JSON.stringify(THEME_STORAGE_KEY);
+  const value = JSON.stringify(theme);
+  return (
+    `(function(){try{var o=localStorage.getItem(${key});` +
+    `if(o===${value})return;localStorage.setItem(${key},${value});` +
+    `window.dispatchEvent(new StorageEvent("storage",{key:${key},oldValue:o,newValue:${value}}));` +
+    `}catch(e){}})()`
+  );
+}
