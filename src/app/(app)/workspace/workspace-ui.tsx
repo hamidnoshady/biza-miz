@@ -14,7 +14,7 @@
 import { useMemo } from "react";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/app/dashboard/page-chrome";
-import { Field, inputClass, errorMessageOrRaw } from "@/app/dashboard/ui";
+import { Field, inputClass, errorMessageOrRaw, SecondaryButton } from "@/app/dashboard/ui";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
@@ -364,6 +364,35 @@ export function TagList({ tags }: { tags: readonly string[] }) {
           {tag}
         </span>
       ))}
+    </div>
+  );
+}
+
+/**
+ * The footer of a paginated list: how many of the server's filter-aware total
+ * are on screen, and the button that loads the next page. Renders nothing once
+ * everything is loaded.
+ */
+export function LoadMoreFooter({
+  loaded,
+  page,
+  loading,
+  onLoadMore,
+}: {
+  loaded: number;
+  page: { total: number; hasMore: boolean } | null;
+  loading: boolean;
+  onLoadMore: () => void;
+}) {
+  if (!page?.hasMore) return null;
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-border/80 px-4 py-3 text-sm text-muted-foreground">
+      <span>
+        {toPersianDigits(String(loaded))} از {toPersianDigits(String(page.total))}
+      </span>
+      <SecondaryButton onClick={onLoadMore} disabled={loading}>
+        {loading ? "در حال بارگذاری…" : "نمایش بیشتر"}
+      </SecondaryButton>
     </div>
   );
 }

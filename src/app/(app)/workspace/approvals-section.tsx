@@ -47,7 +47,15 @@ import {
   type WorkspaceApprovalStatus,
   type WorkspaceApprovalSubject,
 } from "@/lib/workspace-shared";
-import { ApprovalStatusBadge, DateCell, workspaceError } from "./workspace-ui";
+import { ApprovalStatusBadge, DateCell, LoadMoreFooter, workspaceError } from "./workspace-ui";
+import { usePagedList } from "./use-paged-list";
+
+interface ApprovalSummary {
+  total: number;
+  pending: number;
+  approved: number;
+  overdue: number;
+}
 
 export interface ApprovalRow {
   id: string;
@@ -80,38 +88,32 @@ export function ApprovalsSection({
   canApprove: boolean;
   projectId?: string;
 }) {
-  const [approvals, setApprovals] = useState<ApprovalRow[] | null>(null);
   const [error, setError] = useState("");
   const [status, setStatus] = useState<WorkspaceApprovalStatus | "all">("pending");
   const [inbox, setInbox] = useState<Inbox>("all");
   const [deciding, setDeciding] = useState<{ row: ApprovalRow; decision: Decision } | null>(null);
 
-  const load = useCallback(() => {
+  const query = useMemo(() => {
     const params = new URLSearchParams({ status });
     if (inbox === "mine") params.set("mine", "true");
     if (inbox === "requested") params.set("requested", "true");
     if (projectId) params.set("projectId", projectId);
-    api<{ approvals: ApprovalRow[] }>(`/api/workspace/approvals?${params}`).then(({ ok, data }) => {
-      if (ok) setApprovals(data.approvals);
-      else setError(workspaceError((data as unknown as { error?: string }).error));
-    });
+    return `/api/workspace/approvals?${params}`;
   }, [status, inbox, projectId]);
+  const list = usePagedList<ApprovalRow, ApprovalSummary>(query, "approvals");
+  const approvals = list.rows;
+  const load = list.reload;
+  useEffect(() => {
+    if (list.error) setError(list.error);
+  }, [list.error]);
 
-  useEffect(load, [load]);
-
-  const counts = useMemo(() => {
-    const list = approvals ?? [];
-    // The business's calendar day (Tehran), never the browser's UTC slice.
-    const today = todayIsoDate();
-    return {
-      total: list.length,
-      pending: list.filter((a) => a.status === "pending").length,
-      overdue: list.filter(
-        (a) => a.status === "pending" && a.dueDate && a.dueDate < today,
-      ).length,
-      approved: list.filter((a) => a.status === "approved").length,
-    };
-  }, [approvals]);
+  // Server totals over the whole filtered set — not the loaded page.
+  const counts = {
+    total: list.summary?.total ?? 0,
+    pending: list.summary?.pending ?? 0,
+    overdue: list.summary?.overdue ?? 0,
+    approved: list.summary?.approved ?? 0,
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -242,6 +244,12 @@ export function ApprovalsSection({
             </DataTableBody>
           </DataTable>
         )}
+        <LoadMoreFooter
+          loaded={approvals?.length ?? 0}
+          page={list.page}
+          loading={list.loadingMore}
+          onLoadMore={list.loadMore}
+        />
       </SectionCard>
 
       {deciding ? (

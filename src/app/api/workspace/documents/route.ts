@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
-import { createDocument, listDocuments, type DocumentListFilter } from "@/lib/workspace";
+import { createDocument, listDocuments, documentListPage, type DocumentListFilter } from "@/lib/workspace";
 import type { WorkspaceDocumentStatus } from "@/lib/workspace-shared";
-import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../guard";
+import { PERMISSIONS, handleWorkspaceError, readBody, pageParams, workspaceOwner } from "../guard";
 
 /**
  * The unified document register. The BYTES are the Media Library's
@@ -17,6 +17,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
   const params = new URL(request.url).searchParams;
   const filter: DocumentListFilter = {
+    ...pageParams(params),
     projectId: params.get("projectId") ?? undefined,
     taskId: params.get("taskId") ?? undefined,
     contractId: params.get("contractId") ?? undefined,
@@ -26,7 +27,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     currentOnly: params.get("versions") !== "all",
   };
   try {
-    return NextResponse.json({ documents: await listDocuments(owner, filter) });
+    const [documents, { page, summary }] = await Promise.all([
+      listDocuments(owner, filter),
+      documentListPage(owner, filter),
+    ]);
+    return NextResponse.json({ documents, page, summary });
   } catch (err) {
     return handleWorkspaceError(err);
   }

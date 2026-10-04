@@ -51,7 +51,16 @@ import {
   SelectField,
   TagList,
   workspaceError,
+  LoadMoreFooter,
 } from "./workspace-ui";
+import { usePagedList } from "./use-paged-list";
+
+interface DocumentSummary {
+  total: number;
+  approved: number;
+  in_review: number;
+  draft: number;
+}
 import type { WorkspaceLookups } from "./use-workspace-lookups";
 
 export interface DocumentRow {
@@ -84,38 +93,34 @@ export function DocumentsSection({
   canRequestApproval: boolean;
   projectId?: string;
 }) {
-  const [documents, setDocuments] = useState<DocumentRow[] | null>(null);
   const [error, setError] = useState("");
   const [status, setStatus] = useState<WorkspaceDocumentStatus | "">("");
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<DocumentRow | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const load = useCallback(() => {
+  const query = useMemo(() => {
     const params = new URLSearchParams();
     if (projectId) params.set("projectId", projectId);
     if (status) params.set("status", status);
     if (search.trim()) params.set("q", search.trim());
     const qs = params.toString();
-    api<{ documents: DocumentRow[] }>(`/api/workspace/documents${qs ? `?${qs}` : ""}`).then(
-      ({ ok, data }) => {
-        if (ok) setDocuments(data.documents);
-        else setError(workspaceError((data as unknown as { error?: string }).error));
-      },
-    );
+    return `/api/workspace/documents${qs ? `?${qs}` : ""}`;
   }, [projectId, status, search]);
+  const list = usePagedList<DocumentRow, DocumentSummary>(query, "documents");
+  const documents = list.rows;
+  const load = list.reload;
+  useEffect(() => {
+    if (list.error) setError(list.error);
+  }, [list.error]);
 
-  useEffect(load, [load]);
-
-  const totals = useMemo(() => {
-    const list = documents ?? [];
-    return {
-      count: list.length,
-      approved: list.filter((d) => d.status === "approved").length,
-      review: list.filter((d) => d.status === "in_review").length,
-      draft: list.filter((d) => d.status === "draft").length,
-    };
-  }, [documents]);
+  // Server totals over the whole filtered set — not the loaded page.
+  const totals = {
+    count: list.summary?.total ?? 0,
+    approved: list.summary?.approved ?? 0,
+    review: list.summary?.in_review ?? 0,
+    draft: list.summary?.draft ?? 0,
+  };
 
   async function requestApproval(document: DocumentRow) {
     const { ok, data } = await api("/api/workspace/approvals", {
@@ -252,6 +257,12 @@ export function DocumentsSection({
             </DataTableBody>
           </DataTable>
         )}
+        <LoadMoreFooter
+          loaded={documents?.length ?? 0}
+          page={list.page}
+          loading={list.loadingMore}
+          onLoadMore={list.loadMore}
+        />
       </SectionCard>
 
       {creating || editing ? (

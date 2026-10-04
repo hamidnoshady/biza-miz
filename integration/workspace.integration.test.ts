@@ -1105,3 +1105,65 @@ describe("templates (#761)", () => {
     ).toHaveLength(tasksBefore.length);
   });
 });
+
+describe("pagination and server totals (#761)", () => {
+  it("keeps totals right across pages, pages stably, and filters on the server", async () => {
+    const project = await makeProject({ budgetRial: 700 });
+    for (let i = 0; i < 7; i += 1) {
+      await inAlpha(() =>
+        workspace.createWorkspaceTask(owner(), project.id, {
+          title: `کار ${i}`,
+          status: i < 2 ? "done" : "open",
+          // Same due date and priority for all: the ordering ties, so only the
+          // id tiebreaker keeps pages from overlapping.
+          dueDate: "2026-05-01",
+        }),
+      );
+    }
+
+    const filter = { projectId: project.id, status: "all" as const, limit: 3 };
+    const seen: string[] = [];
+    for (let offset = 0; offset < 9; offset += 3) {
+      const rows = await inAlpha(() => workspace.listWorkspaceTasks(owner(), { ...filter, offset }));
+      seen.push(...rows.map((t) => t.id));
+    }
+    expect(seen).toHaveLength(7);
+    expect(new Set(seen).size).toBe(7);
+
+    const { page, summary } = await inAlpha(() => workspace.taskListPage(owner(), { ...filter, offset: 3 }));
+    expect(page).toEqual({ total: 7, offset: 3, limit: 3, hasMore: true });
+    expect(summary.done).toBe(2);
+    expect(summary.open).toBe(5);
+
+    // The filter applies to the total, not just the rows.
+    const open = await inAlpha(() =>
+      workspace.taskListPage(owner(), { projectId: project.id, status: "open_only", limit: 3 }),
+    );
+    expect(open.page.total).toBe(5);
+
+    // A non-member's totals are their own (zero), not the business's.
+    const outsider = await inAlpha(() => workspace.taskListPage(owner(alpha.outsiderId), filter));
+    expect(outsider.page.total).toBe(0);
+
+    const projects = await inAlpha(() => workspace.projectListPage(owner(), { limit: 1 }));
+    expect(projects.summary.budgetRial).toBe(700);
+    expect(projects.summary.tasks).toBe(7);
+  });
+});
+
+describe("expiring contracts are bounded (#761 review)", () => {
+  it("does not count an active contract whose end date has passed as expiring", async () => {
+    const past = new Date(Date.now() - 10 * 86_400_000).toISOString().slice(0, 10);
+    const soon = new Date(Date.now() + 10 * 86_400_000).toISOString().slice(0, 10);
+    await inAlpha(() =>
+      workspace.createContract(owner(), { title: "گذشته", contractType: "vendor", status: "active", endDate: past }),
+    );
+    await inAlpha(() =>
+      workspace.createContract(owner(), { title: "نزدیک", contractType: "vendor", status: "active", endDate: soon }),
+    );
+    const expiring = await inAlpha(() =>
+      workspace.listContracts(owner(), { status: "all", expiringWithinDays: 30 }),
+    );
+    expect(expiring.map((c) => c.title)).toEqual(["نزدیک"]);
+  });
+});
