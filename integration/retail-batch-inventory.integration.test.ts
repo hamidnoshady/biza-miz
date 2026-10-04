@@ -637,28 +637,30 @@ describe("supplier returns and purchases", () => {
 });
 
 describe("concurrency", () => {
-  it("lets only one of two concurrent sales take the last units, and keeps the rollup consistent", async () => {
+  it("lets exactly one of two concurrent sales take the last units", async () => {
     const item = await createBatchItem("کرم آخر");
     await receive(item, "LAST", "2", 10_000, "2030-01-01");
 
+    // Two independent transactions, each asking for the whole lot. They both
+    // touch the same batch row; the engine's FOR UPDATE plus the guarded
+    // decrement (`WHERE quantity >= n`) is what serializes them, so exactly
+    // one can win and the loser must fail with the honest shortage message —
+    // never oversell, never leave the rollup disagreeing with the batches.
     const attempt = () =>
       withTransaction(async (client) => {
-        // Two separate transactions, each allocating from the same lots. The
-        // engine's FOR UPDATE on `item_batches` plus the guarded UPDATE is what
-        // makes the loser fail instead of overselling.
-        await client.query("SELECT id FROM item_batches WHERE item_id = $1 FOR UPDATE", [item]);
         const allocations = await engine.allocateBatchStock(client, { itemId: item, quantity: "2" });
         await engine.consumeBatchAllocations(client, item, allocations);
+        return allocations;
       });
 
     const results = await Promise.allSettled([attempt(), attempt()]);
     const fulfilled = results.filter((r) => r.status === "fulfilled");
-    expect(fulfilled.length).toBeGreaterThanOrEqual(1);
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String(rejected[0].reason?.message ?? rejected[0].reason)).toMatch(/موجودی کافی نیست/);
 
-    const remaining = await batchQuantity(item, "LAST");
-    expect(["0.000000000", "2.000000000"]).toContain(remaining);
-    // Whatever happened, the rollup equals the sum of the batches.
-    expect(await stockQuantity(item)).toBe(remaining);
-    expect(results.some((r) => r.status === "rejected" || r.status === "fulfilled")).toBe(true);
+    expect(await batchQuantity(item, "LAST")).toBe("0.000000000");
+    expect(await stockQuantity(item)).toBe("0.000000000");
   });
 });
