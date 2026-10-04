@@ -17,6 +17,25 @@ export function isCloudEmbedUserAgent(userAgent: string | null | undefined): boo
   return Boolean(userAgent?.includes(CLOUD_EMBED_UA_TOKEN));
 }
 
+/**
+ * The attribute the marker script below puts on `<html>` inside the pane.
+ * globals.css hides the workspace shell's `[data-workspace-sidebar]` under it.
+ */
+export const CLOUD_EMBED_ATTRIBUTE = "data-cloud-embed";
+
+/**
+ * Why the server's user-agent check is not enough on its own: once the
+ * cloud's service worker controls the pane, it forwards every page navigation
+ * with Electron's *default* agent, not the <webview>'s, so the server never
+ * sees the token and draws the sidebar (reproduced in Electron 44; setting the
+ * agent on the pane's session does not reach those requests either). The
+ * page's own `navigator.userAgent` always carries it, so the root layout runs
+ * this inline, before the body is painted, and the sidebar never flashes.
+ */
+export const CLOUD_EMBED_MARKER_SCRIPT =
+  `if(navigator.userAgent.indexOf(${JSON.stringify(CLOUD_EMBED_UA_TOKEN)})!==-1)` +
+  `document.documentElement.setAttribute(${JSON.stringify(CLOUD_EMBED_ATTRIBUTE)},"")`;
+
 /** `pathAndQuery` on the cloud's origin, or null: https only, and a `//host` path never re-aims it. */
 export function cloudPageUrl(cloudUrl: string | null, pathAndQuery: string): string | null {
   if (!cloudUrl) return null;

@@ -108,9 +108,10 @@ if (!gotSingleInstanceLock) {
     mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
       paneOrigin = hardenCloudPane(webPreferences, params);
       if (!paneOrigin) return event.preventDefault();
-      // The <webview> user agent (carrying the embed token) covers page requests
-      // only. The cloud's service worker re-fetches every navigation with the
-      // session's agent, so without this the cloud draws its own sidebar too.
+      // The pane's session carries the embed token too (the worker script's own
+      // request, for one). It does not reach a navigation the cloud's service
+      // worker forwards — that goes out with Electron's default agent — so the
+      // cloud also hides its sidebar client-side (src/lib/cloud-embed.ts).
       if (params.useragent) session.fromPartition(CLOUD_PARTITION).setUserAgent(params.useragent);
     });
     mainWindow.webContents.on("did-attach-webview", (_event, contents) => {
