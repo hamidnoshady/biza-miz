@@ -70,6 +70,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     locationId: membership.locationId,
     fullName: membership.fullName,
     platformUserId: session.platformUserId,
+    tokenVersion: session.tokenVersion,
+    mfaVerified: session.mfaVerified,
+    recentAuthAt: session.recentAuthAt,
   });
 
   const res = NextResponse.json({

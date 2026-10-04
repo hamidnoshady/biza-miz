@@ -14,6 +14,7 @@
  */
 import { useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
+import { MfaStep } from "./mfa-step";
 
 /** How to address a resend — mirrors the three modes of /api/auth/phone-otp/request. */
 export type PhoneOtpSendSpec =
@@ -83,6 +84,11 @@ export function PhoneOtpStep({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [mfaPending, setMfaPending] = useState<{
+    token: string;
+    method: "totp" | "sms_otp" | null;
+    availableMethods: ("totp" | "sms_otp")[];
+  } | null>(null);
 
   useEffect(() => {
     setToken(initialToken);
@@ -143,11 +149,24 @@ export function PhoneOtpStep({
         },
         body: JSON.stringify({ code, deviceToken }),
       });
+      const data = (await res.json().catch(() => ({}))) as RequestResponse & {
+        mfaRequired?: boolean;
+        mfaToken?: string;
+        mfaMethod?: "totp" | "sms_otp" | null;
+        availableMethods?: ("totp" | "sms_otp")[];
+      };
       if (res.ok) {
+        if (data.mfaRequired && data.mfaToken) {
+          setMfaPending({
+            token: data.mfaToken,
+            method: data.mfaMethod ?? null,
+            availableMethods: data.availableMethods ?? [],
+          });
+          return;
+        }
         onVerified();
         return;
       }
-      const data = (await res.json().catch(() => ({}))) as RequestResponse;
       setError(phoneOtpErrorMessage(data.error, res.status, data.message));
       setCode("");
     } catch {
@@ -155,6 +174,23 @@ export function PhoneOtpStep({
     } finally {
       setBusy(false);
     }
+  }
+
+  if (mfaPending) {
+    return (
+      <MfaStep
+        mfaToken={mfaPending.token}
+        initialMethod={mfaPending.method}
+        availableMethods={mfaPending.availableMethods}
+        primaryAuth="phone_otp"
+        endpointPrefix="/api/auth/mfa"
+        onVerified={onVerified}
+        onCancel={() => {
+          setMfaPending(null);
+          onCancel();
+        }}
+      />
+    );
   }
 
   return (

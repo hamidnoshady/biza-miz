@@ -1,20 +1,5 @@
 "use client";
 
-/**
- * Phase 24 Wave 2 — the second-factor screen, for both login realms.
- *
- * The backend for this shipped complete (`/api/auth/mfa/*` and its
- * `/api/platform/auth/mfa/*` twin) and nothing in the product ever called it:
- * an Owner past the grace window received an `mfaToken` and a blank stare. This
- * is the missing half.
- *
- * One component serves both front doors because the *flow* is identical — enrol
- * if there is no factor yet, challenge, verify, or fall back to a recovery
- * code — and only the paint differs. The two realms' visual identities are
- * deliberately distinct (a light tenant card, a dark console card, so an
- * operator is never in doubt which realm they are in), so the palette arrives
- * as a `theme` prop rather than being negotiated with Tailwind variants.
- */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 
@@ -79,7 +64,6 @@ export const PLATFORM_MFA_THEME: MfaTheme = {
     "rounded-lg border border-border bg-muted px-3 py-2 font-mono text-sm tracking-wider text-foreground",
 };
 
-/** Persian for the error codes the three MFA endpoints return. */
 function mfaErrorMessage(
   code: string | undefined,
   status: number,
@@ -95,21 +79,20 @@ function mfaErrorMessage(
     invalid_phone: "شمارهٔ موبایل معتبر نیست.",
     already_enrolled: "این روش قبلاً برای حساب شما ثبت شده است.",
     missing_phone: "برای این حساب شمارهٔ موبایلی ثبت نشده است.",
+    sms_not_enrolled: "برای این حساب تأیید پیامکی فعال نیست.",
     sms_dispatch_failed: "ارسال پیامک ممکن نشد. کمی بعد دوباره تلاش کنید.",
+    mfa_distinct_factor_required:
+      "چون مرحلهٔ اول با پیامک انجام شده است، مرحلهٔ دوم باید با برنامهٔ رمزساز یا کد بازیابی انجام شود.",
+    account_locked: "حساب شما موقتاً قفل شده است؛ کمی بعد دوباره تلاش کنید.",
     unauthorized: "مهلت این مرحله تمام شده است؛ دوباره وارد شوید.",
     no_business_membership: "دسترسی شما به این کسب‌وکار برقرار نیست.",
   };
-  // The SMS challenge route hands back Kavenegar's own status mapped to
-  // Persian when — and only when — the fault is something the user can act on
-  // (a bad receptor, say, rather than the platform's empty credit balance).
-  // That sentence is more useful than the generic one, so it wins.
   if (serverMessage) return serverMessage;
   if (code && map[code]) return map[code];
   if (status === 401) return "کد واردشده درست نیست.";
   return "خطای غیرمنتظره. دوباره تلاش کنید.";
 }
 
-/** «۲ دقیقه دیگر» for a rate-limited resend. */
 function retryAfterMessage(retryAfterMs: unknown): string {
   const ms = typeof retryAfterMs === "number" ? retryAfterMs : 0;
   const seconds = Math.max(1, Math.ceil(ms / 1000));
@@ -119,15 +102,16 @@ function retryAfterMessage(retryAfterMs: unknown): string {
   return `درخواست بعدی تا ${toPersianDigits(String(Math.ceil(seconds / 60)))} دقیقهٔ دیگر ممکن نیست.`;
 }
 
-type Stage = "enrol_choose" | "enrol_sms_phone" | "enrol_show" | "challenge";
+type Stage = "enrol_choose" | "enrol_sms_phone" | "enrol_show" | "challenge" | "handover";
 
 interface EnrolResponse {
   status?: string;
   method?: MfaMethod;
-  totpSecret?: string;
-  totpUrl?: string;
+  totpSecret?: string | null;
+  totpUrl?: string | null;
   totpQr?: string | null;
-  phone?: string;
+  phone?: string | null;
+  maskedPhone?: string | null;
   recoveryCodes?: string[];
   error?: string;
 }
@@ -136,9 +120,13 @@ export interface MfaStepProps {
   /** The five-minute `mfa_pending` token from the login response. */
   mfaToken: string;
   /** Which factor the account already holds, or null when it has none yet. */
-  mfaMethod: MfaMethod | null;
-  endpoints: MfaEndpoints;
-  theme: MfaTheme;
+  mfaMethod?: MfaMethod | null;
+  initialMethod?: MfaMethod | null;
+  availableMethods?: MfaMethod[];
+  primaryAuth?: "password" | "phone_otp";
+  endpoints?: MfaEndpoints;
+  endpointPrefix?: "/api/auth/mfa" | "/api/platform/auth/mfa";
+  theme?: MfaTheme;
   /** Called after `verify` has minted the real session cookie. */
   onVerified: () => void;
   /** Back to the email/password form — the token is discarded. */
@@ -148,20 +136,32 @@ export interface MfaStepProps {
 export function MfaStep({
   mfaToken,
   mfaMethod,
-  endpoints,
-  theme,
+  initialMethod,
+  availableMethods = [],
+  primaryAuth = "password",
+  endpoints: explicitEndpoints,
+  endpointPrefix = "/api/auth/mfa",
+  theme = TENANT_MFA_THEME,
   onVerified,
   onCancel,
 }: MfaStepProps) {
+  const resolvedInitialMethod = mfaMethod !== undefined ? mfaMethod : (initialMethod ?? null);
+  const endpoints: MfaEndpoints = explicitEndpoints ?? {
+    challenge: `${endpointPrefix}/challenge`,
+    verify: `${endpointPrefix}/verify`,
+    enrol: `${endpointPrefix}/enrol`,
+  };
+
   const [stage, setStage] = useState<Stage>(
-    mfaMethod ? "challenge" : "enrol_choose",
+    resolvedInitialMethod ? "challenge" : "enrol_choose",
   );
-  const [method, setMethod] = useState<MfaMethod | null>(mfaMethod);
+  const [method, setMethod] = useState<MfaMethod | null>(resolvedInitialMethod);
   const [code, setCode] = useState("");
   const [phone, setPhone] = useState("");
   const [recoveryMode, setRecoveryMode] = useState(false);
   const [enrolment, setEnrolment] = useState<EnrolResponse | null>(null);
   const [maskedPhone, setMaskedPhone] = useState<string | null>(null);
+  const [issuedRecoveryCodes, setIssuedRecoveryCodes] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -171,16 +171,9 @@ export function MfaStep({
     Authorization: `Bearer ${mfaToken}`,
   };
 
-  /**
-   * Ask the server to start a challenge.
-   *
-   * A no-op for TOTP (the server answers `ready` — there is nothing to send),
-   * an SMS for `sms_otp`. Every send costs money and the endpoint is rate
-   * limited to one per minute, so this is never called speculatively: once when
-   * the SMS step opens, and thereafter only when the user asks to resend.
-   */
   const sendChallenge = useCallback(
     async (silent = false) => {
+      if (primaryAuth === "phone_otp") return;
       setBusy(true);
       if (!silent) setError(null);
       try {
@@ -207,7 +200,8 @@ export function MfaStep({
           );
           return;
         }
-        if ((data as { status?: string }).status === "sent") {
+        const status = (data as { status?: string }).status;
+        if (status === "sent" || status === "challenge_sent") {
           const masked = (data as { maskedPhone?: string }).maskedPhone ?? null;
           setMaskedPhone(masked);
           setNotice(
@@ -222,25 +216,22 @@ export function MfaStep({
         setBusy(false);
       }
     },
-    // `authHeaders` is rebuilt each render but only ever depends on mfaToken.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [endpoints.challenge, mfaToken],
+    [endpoints.challenge, mfaToken, primaryAuth],
   );
 
-  // Kick off the SMS exactly once when an already-enrolled SMS account lands
-  // here. A ref rather than a state flag so React 18's double-invoked effects
-  // in development cannot send two messages (and bill for two).
   const challengeStarted = useRef(false);
   useEffect(() => {
     if (
       stage !== "challenge" ||
       method !== "sms_otp" ||
+      primaryAuth === "phone_otp" ||
       challengeStarted.current
     )
       return;
     challengeStarted.current = true;
     void sendChallenge(true);
-  }, [stage, method, sendChallenge]);
+  }, [stage, method, primaryAuth, sendChallenge]);
 
   async function submitEnrol(chosen: MfaMethod) {
     setBusy(true);
@@ -280,14 +271,21 @@ export function MfaStep({
         body: JSON.stringify({
           code: code.trim(),
           useRecoveryCode: recoveryMode,
+          ...(method ? { method } : {}),
         }),
       });
-      const data = await res.json().catch(() => ({}));
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        recoveryCodes?: string[];
+      };
       if (!res.ok) {
-        setError(
-          mfaErrorMessage((data as { error?: string }).error, res.status),
-        );
+        setError(mfaErrorMessage(data.error, res.status));
         setCode("");
+        return;
+      }
+      if (Array.isArray(data.recoveryCodes) && data.recoveryCodes.length > 0) {
+        setIssuedRecoveryCodes(data.recoveryCodes);
+        setStage("handover");
         return;
       }
       onVerified();
@@ -298,39 +296,74 @@ export function MfaStep({
     }
   }
 
+  const alternateMethod =
+    !recoveryMode &&
+    availableMethods.find((m) => m !== method && (primaryAuth !== "phone_otp" || m !== "sms_otp"));
+
+  if (stage === "handover") {
+    return (
+      <div className={theme.card}>
+        <div>
+          <h2 className={theme.heading}>کدهای بازیابی یک‌بارمصرف</h2>
+          <p className={theme.muted}>
+            ورود دومرحله‌ای شما تأیید و فعال شد. این کدها فقط همین یک بار نمایش داده می‌شوند.
+          </p>
+        </div>
+        <RecoveryCodeSheet codes={issuedRecoveryCodes} theme={theme} />
+        <button type="button" className={theme.primaryButton} onClick={onVerified}>
+          ذخیره کردم؛ ادامه
+        </button>
+      </div>
+    );
+  }
+
   if (stage === "enrol_choose") {
     return (
       <div className={theme.card}>
         <div>
           <h2 className={theme.heading}>ورود دومرحله‌ای را فعال کنید</h2>
           <p className={theme.muted}>
-            برای این حساب هنوز روش دومرحله‌ای ثبت نشده و مهلت فعال‌سازی تمام شده
-            است. یکی از دو روش زیر را انتخاب کنید.
+            {primaryAuth === "phone_otp"
+              ? "چون مرحلهٔ اول با پیامک انجام شده است، برای تکمیل ورود باید برنامهٔ رمزساز یا کد بازیابی را به کار ببرید."
+              : "برای این حساب هنوز روش دومرحله‌ای ثبت نشده و مهلت فعال‌سازی تمام شده است. یکی از دو روش زیر را انتخاب کنید."}
           </p>
         </div>
         {error ? <p className={theme.error}>{error}</p> : null}
         <button
           type="button"
           disabled={busy}
-          onClick={() => submitEnrol("totp")}
+          onClick={() => void submitEnrol("totp")}
           className={theme.primaryButton}
         >
           برنامهٔ رمزساز (Google Authenticator)
         </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => {
-            setError(null);
-            setStage("enrol_sms_phone");
-          }}
-          className={theme.secondaryButton}
-        >
-          پیامک یک‌بارمصرف
-        </button>
+        {primaryAuth !== "phone_otp" ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setError(null);
+              setStage("enrol_sms_phone");
+            }}
+            className={theme.secondaryButton}
+          >
+            پیامک یک‌بارمصرف
+          </button>
+        ) : (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setRecoveryMode(true);
+              setStage("challenge");
+            }}
+            className={theme.secondaryButton}
+          >
+            استفاده از کد بازیابی
+          </button>
+        )}
         <p className={theme.muted}>
-          روی نصب محلی و بدون اینترنت، برنامهٔ رمزساز تنها روشی است که همیشه کار
-          می‌کند.
+          روی نصب محلی و بدون اینترنت، برنامهٔ رمزساز تنها روشی است که همیشه کار می‌کند.
         </p>
         <div className="text-center">
           <button type="button" onClick={onCancel} className={theme.linkButton}>
@@ -368,7 +401,7 @@ export function MfaStep({
           className={theme.input}
         />
         <button type="submit" disabled={busy} className={theme.primaryButton}>
-          {busy ? "در حال ثبت…" : "ثبت شماره"}
+          {busy ? <Spinner /> : "ثبت شماره"}
         </button>
         <div className="text-center">
           <button
@@ -397,20 +430,19 @@ export function MfaStep({
           </h2>
           {method === "totp" ? (
             <p className={theme.muted}>
-              این کد QR را در برنامهٔ رمزساز اسکن کنید. این تصویر فقط همین یک
-              بار نمایش داده می‌شود.
+              این کد QR را در برنامهٔ رمزساز اسکن کنید و در مرحلهٔ بعد کد ۶ رقمی را برای تأیید نهایی
+              وارد نمایید.
             </p>
           ) : (
             <p className={theme.muted}>
-              از این پس کد یک‌بارمصرف به{" "}
-              {toPersianDigits(enrolment?.phone ?? "")} پیامک می‌شود.
+              کد یک‌بارمصرف به{" "}
+              {toPersianDigits(enrolment?.phone ?? "")} پیامک می‌شود تا شماره تأیید گردد.
             </p>
           )}
         </div>
 
         {method === "totp" && enrolment?.totpQr ? (
           <div className="flex justify-center">
-            { }
             <img
               src={enrolment.totpQr}
               alt="کد QR ورود دومرحله‌ای"
@@ -443,13 +475,12 @@ export function MfaStep({
             setStage("challenge");
           }}
         >
-          ذخیره کردم؛ ادامه
+          ادامه و تأیید کد ۶ رقمی
         </button>
       </div>
     );
   }
 
-  // stage === "challenge"
   return (
     <form onSubmit={submitVerify} className={theme.card}>
       <div>
@@ -488,10 +519,10 @@ export function MfaStep({
         disabled={busy || code.trim().length === 0}
         className={theme.primaryButton}
       >
-        {busy ? "در حال بررسی…" : "تأیید و ورود"}
+        {busy ? <Spinner /> : "تأیید و ورود"}
       </button>
 
-      {!recoveryMode && method === "sms_otp" ? (
+      {!recoveryMode && method === "sms_otp" && primaryAuth !== "phone_otp" ? (
         <button
           type="button"
           disabled={busy}
@@ -499,6 +530,27 @@ export function MfaStep({
           className={theme.secondaryButton}
         >
           ارسال دوبارهٔ کد
+        </button>
+      ) : null}
+
+      {alternateMethod ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            setError(null);
+            setCode("");
+            setMethod(alternateMethod);
+            if (alternateMethod === "sms_otp") {
+              challengeStarted.current = true;
+              void sendChallenge();
+            }
+          }}
+          className={theme.secondaryButton}
+        >
+          {alternateMethod === "totp"
+            ? "استفاده از برنامهٔ رمزساز"
+            : "استفاده از کد پیامکی (SMS)"}
         </button>
       ) : null}
 
@@ -522,22 +574,10 @@ export function MfaStep({
   );
 }
 
-/**
- * The busy label every waiting button shares — text, not a spinner: the
- * dashboard's motion budget is skeletons for regions and words for actions.
- */
 function Spinner() {
   return <span className="animate-pulse">لطفاً صبر کنید…</span>;
 }
 
-/**
- * The one and only showing of the ten recovery codes.
- *
- * Deliberately noisy — a bordered block, a copy button, an explicit warning —
- * because the entire value of these codes depends on somebody writing them
- * down in the thirty seconds they are on screen. Nothing stores the plaintext,
- * so a page reload really does lose them.
- */
 export function RecoveryCodeSheet({
   codes,
   theme,
@@ -567,8 +607,6 @@ export function RecoveryCodeSheet({
             await navigator.clipboard.writeText(codes.join("\n"));
             setCopied(true);
           } catch {
-            // Clipboard access can be refused (insecure context, permissions);
-            // the codes are on screen either way, so this is a convenience.
             setCopied(false);
           }
         }}

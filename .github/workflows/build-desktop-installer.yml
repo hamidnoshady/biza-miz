@@ -142,7 +142,10 @@ jobs:
           $ErrorActionPreference = "Continue"
           git fetch --tags --force --quiet
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::Could not fetch tags"; exit 1 }
-          if (git tag --list "desktop-v$next") {
+          # Only releases consume desktop-vX.Y.Z. A stale PR/arena branch may
+          # propose the same base as an already-shipped stable version, but its
+          # actual X.Y.Z-ci.<run> preview is distinct and never publishes a tag.
+          if ($env:RELEASE_BUILD -eq "true" -and (git tag --list "desktop-v$next")) {
             Write-Host "::error::desktop-v$next already exists - a shipped version is never rebuilt. Bump electron/package.json or pass a higher version."
             exit 1
           }

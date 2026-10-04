@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
-import { query, withoutTenantScope } from "@/lib/db";
+import { query, withTenant, withoutTenantScope } from "@/lib/db";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
+import { createSession } from "@/lib/employee-service";
 import { hostRoutingEnabled, parseHost, requestHost, rootDomain } from "@/lib/host";
 import { resolveBusinessByLabel } from "@/lib/host-resolution";
 import {
@@ -16,6 +17,7 @@ import {
   type Membership,
 } from "@/lib/memberships";
 import {
+  filterActiveMfaEnrolments,
   getAccountMfaEnrolments,
   getMfaGracePeriod,
   markMfaGracePeriod,
@@ -26,6 +28,7 @@ import {
   graceDaysRemaining,
   mfaAppliesToRole,
   MFA_GRACE_DAYS_TENANT,
+  shouldChallengeMfaOnLogin,
 } from "@/lib/mfa";
 import { getMfaPolicy } from "@/lib/mfa-policy";
 
@@ -40,7 +43,12 @@ interface PlatformUserRow extends Record<string, unknown> {
 /** A bcrypt hash of nothing in particular, used to keep timing uniform. */
 const DUMMY_HASH = "$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy";
 
-function sessionFor(membership: Membership, platformUserId: string, tokenVersion: number) {
+async function sessionFor(
+  membership: Membership,
+  platformUserId: string,
+  tokenVersion: number,
+  employeeSessionId: string,
+) {
   return signSession({
     sub: membership.userId,
     role: membership.role,
@@ -51,21 +59,12 @@ function sessionFor(membership: Membership, platformUserId: string, tokenVersion
     fullName: membership.fullName,
     platformUserId,
     tokenVersion,
+    employeeSessionId,
+    mfaVerified: false,
+    recentAuthAt: Math.floor(Date.now() / 1000),
   });
 }
 
-/**
- * Which business this origin is allowed to sign anyone into.
- *
- * `null` on an install with no root domain — a desktop or single-café install,
- * where the session simply is not host-scoped and the membership list decides.
- * Otherwise the host does: the cookie about to be minted is valid on this
- * origin and no other (see `handleHostIsolation` in src/middleware.ts), so
- * signing someone into business B on business A's host would hand them a
- * session they get bounced out of on their next click — a login loop, not a
- * login. `wrong_origin` covers the hosts that serve no tenant at all (the
- * apex, the console): there is nothing here to sign into.
- */
 async function loginHostBusinessId(
   host: string | null,
 ): Promise<{ businessId: string | null; error: string | null }> {
@@ -75,34 +74,12 @@ async function loginHostBusinessId(
   if (parsed.kind !== "business") return { businessId: null, error: "wrong_origin" };
 
   const business = await resolveBusinessByLabel(parsed.label);
-  // An alias is a business's *old* host after a rename. It must not mint a
-  // session: the cookie about to be written would be host-scoped to this old
-  // origin while the session's `businessSubdomain` names the current one, so
-  // middleware would bounce the visitor straight back to a login on a host
-  // that no longer serves the business. The canonical host is where login
-  // happens; the alias only forwards there.
   if (!business || business.status !== "active" || business.viaAlias) {
     return { businessId: null, error: "wrong_origin" };
   }
   return { businessId: business.businessId, error: null };
 }
 
-/**
- * Email + password login.
- *
- * Since Phase 12 an email identifies a *person*, not a user of one business,
- * so this resolves the identity first and then their memberships:
- *
- *   - exactly one usable membership → signed straight in, as before;
- *   - several → 200 carrying `businesses` and no cookie; the client posts back
- *     with the chosen `businessId`;
- *   - none usable → 403 saying why (suspended business, or no membership).
- *
- * The whole handler runs bypassed: "which businesses does this email belong
- * to" is necessarily a cross-tenant question, asked before any business has
- * been chosen. It is one of the two documented holes in the isolation boundary
- * — see `withoutTenantScope` in src/lib/db.ts.
- */
 export async function POST(request: NextRequest) {
   let body: { email?: string; password?: string; businessId?: string };
   try {
@@ -116,32 +93,27 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "missing_credentials" }, { status: 400 });
   }
 
-  // Ahead of the credential check, and no oracle: which business a hostname
-  // serves is exactly what DNS and the certificate already say out loud.
   const hostScope = await loginHostBusinessId(requestHost(request.headers));
   if (hostScope.error) {
     return NextResponse.json({ error: hostScope.error }, { status: 400 });
   }
 
   return withoutTenantScope("login", async () => {
+    const normalizedEmail = email.trim().toLowerCase();
     const { rows } = await query<PlatformUserRow>(
       `SELECT id, full_name, password_hash, is_active, token_version FROM platform_users WHERE email = $1`,
-      [email.trim().toLowerCase()],
+      [normalizedEmail],
     );
 
-    // Compare against a dummy hash when the identity is missing or disabled so
-    // a wrong email and a wrong password cost the same time and can't be told
-    // apart by an enumeration attempt.
     const identity = rows[0];
     const usableIdentity = identity?.is_active ? identity : null;
     const passwordOk = await bcrypt.compare(password, usableIdentity?.password_hash ?? DUMMY_HASH);
 
-    // The lockout gate answers *before* the credential verdict is acted on.
-    // Checking it afterwards would make it useless twice over: a wrong
-    // password would return 401 without ever consulting the lockout (so it
-    // throttles nothing), and a locked account would answer 423 only when the
-    // password happened to be right — an oracle confirming the password.
-    const lockout = await checkAuthLockout("tenant_password", email.trim().toLowerCase(), PASSWORD_LOCKOUT_POLICY);
+    const lockout = await checkAuthLockout(
+      "tenant_password",
+      normalizedEmail,
+      PASSWORD_LOCKOUT_POLICY,
+    );
     if (lockout.locked) {
       return NextResponse.json(
         { error: "account_locked", lockedUntil: lockout.lockedUntil },
@@ -150,11 +122,11 @@ export async function POST(request: NextRequest) {
     }
 
     if (!usableIdentity || !passwordOk) {
-      await recordAuthFailure("tenant_password", email.trim().toLowerCase());
+      await recordAuthFailure("tenant_password", normalizedEmail);
       return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
     }
 
-    await recordAuthSuccess("tenant_password", email.trim().toLowerCase());
+    await recordAuthSuccess("tenant_password", normalizedEmail);
 
     const memberships = await membershipsForPlatformUser(usableIdentity.id);
     if (memberships.length === 0) {
@@ -169,16 +141,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // On a business host there is one candidate at most, so a person with
-    // several memberships is never asked to pick here: they sign in on each
-    // business's own address, which the apex directory hands them.
     const usable = hostScope.businessId
       ? allUsable.filter((m) => m.businessId === hostScope.businessId)
       : allUsable;
     if (usable.length === 0) {
-      // Membership elsewhere, none here. Deliberately the same answer as no
-      // membership at all: this origin should not confirm that the account
-      // exists on some other business.
       return NextResponse.json({ error: "no_business_membership" }, { status: 403 });
     }
 
@@ -204,72 +170,62 @@ export async function POST(request: NextRequest) {
       usableIdentity.id,
     ]);
 
-    // MFA Enrolment / Verification check
-    //
-    // Who it applies to: the `owner` role always, and `manager` only where the
-    // business has opted in (settings key `mfa.policy`) — the extension the
-    // phase spec describes as off by default. Cashier/waiter PIN logins never
-    // reach this route at all.
     const mfaPolicy = await getMfaPolicy(chosen.businessId);
     const requiresMfa = mfaAppliesToRole(chosen.role, mfaPolicy.requireForManagers);
 
-    // `grace` is resolved before the session is minted but does not stop it —
-    // see below.
-    let graceNotice: { mfaState: "grace"; graceUntil: string | null; graceDaysLeft: number | null } | null =
-      null;
+    let graceNotice: {
+      mfaState: "grace";
+      graceUntil: string | null;
+      graceDaysLeft: number | null;
+    } | null = null;
 
-    if (requiresMfa) {
-      const enrolments = await getAccountMfaEnrolments("platform_user", usableIdentity.id);
+    const allEnrolments = await getAccountMfaEnrolments("platform_user", usableIdentity.id);
+    const activeEnrolments = filterActiveMfaEnrolments(allEnrolments);
+    const primaryEnrolment = activeEnrolments[0] ?? null;
+
+    if (requiresMfa || activeEnrolments.length > 0) {
       let graceUntil = await getMfaGracePeriod("platform_user", usableIdentity.id);
       const hasGraceRecord = graceUntil !== null;
 
-      if (!hasGraceRecord && enrolments.length === 0) {
-        // Stamp grace at first login after deploy
+      if (requiresMfa && !hasGraceRecord && activeEnrolments.length === 0) {
         await markMfaGracePeriod("platform_user", usableIdentity.id, MFA_GRACE_DAYS_TENANT);
         graceUntil = await getMfaGracePeriod("platform_user", usableIdentity.id);
       }
 
       const mfaState = {
-        hasPrimary: enrolments.length > 0,
+        hasPrimary: activeEnrolments.length > 0,
         graceUntil,
         hasGraceRecord,
-        role: chosen.role
+        role: chosen.role,
       };
 
       const req = enrolmentRequirement(mfaState);
 
-      // Only `required` is a gate.
-      //
-      // Grace exists precisely so that turning 2FA on does not lock out every
-      // Owner on the platform the day it ships — an account still inside its
-      // window is signed in exactly as before and shown a dismissible nag with
-      // a countdown (see PasswordForm in src/app/login/login-form.tsx). Treating
-      // it as a gate, as this route did until now, made the window a hard
-      // lockout with a friendlier name and contradicted the phase spec, which
-      // asks for "an enrolment prompt with a 'later' button and a visible
-      // countdown" during the window and a hard gate only afterwards.
-      if (req === "required") {
-        // Issue mfa_pending token instead of full session
+      if (
+        shouldChallengeMfaOnLogin({
+          hasConfirmedEnrolment: activeEnrolments.length > 0,
+          appliesToRole: requiresMfa,
+          requirement: req,
+        })
+      ) {
         const mfaToken = await signMfaPendingToken({
           sub: usableIdentity.id,
-          method: enrolments.length > 0 ? enrolments[0].method : null,
+          method: primaryEnrolment ? primaryEnrolment.method : null,
           authRealm: "tenant_password",
           businessId: chosen.businessId,
+          primaryAuth: "password",
         });
 
         return NextResponse.json({
           mfaRequired: true,
           mfaState: req,
           mfaToken,
-          // Which second factor to ask for, so the client can show "enter the
-          // code from your authenticator" rather than waiting for an SMS that
-          // is never coming. Null means the account is not enrolled at all and
-          // the screen has to enrol it first.
-          mfaMethod: enrolments.length > 0 ? enrolments[0].method : null,
+          mfaMethod: primaryEnrolment ? primaryEnrolment.method : null,
+          availableMethods: activeEnrolments.map((e) => e.method),
         });
       }
 
-      if (req === "grace") {
+      if (requiresMfa && req === "grace") {
         graceNotice = {
           mfaState: "grace",
           graceUntil: graceUntil ? new Date(graceUntil).toISOString() : null,
@@ -278,6 +234,13 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    const { session: empSession } = await withTenant(chosen.businessId, () =>
+      createSession(chosen.userId, chosen.businessId, {
+        locationId: chosen.locationId,
+        deviceLabel: request.headers.get("user-agent")?.slice(0, 120) ?? "Web (Password)",
+      }),
+    );
+
     const res = NextResponse.json({
       user: { id: chosen.userId, role: chosen.role, fullName: chosen.fullName },
       business: { id: chosen.businessId, name: chosen.businessName, slug: chosen.businessSlug },
@@ -285,7 +248,7 @@ export async function POST(request: NextRequest) {
     });
     res.cookies.set(
       SESSION_COOKIE,
-      await sessionFor(chosen, usableIdentity.id, usableIdentity.token_version),
+      await sessionFor(chosen, usableIdentity.id, usableIdentity.token_version, empSession.id),
       sessionCookieOptions(),
     );
     return res;

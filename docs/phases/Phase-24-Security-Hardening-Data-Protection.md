@@ -851,8 +851,13 @@ device.
   (`src/lib/platform-auth.ts:148-173`) become loud.
 - Postgres-backed rate limiting, replacing the per-process `Map`s at `src/middleware.ts:148-151`
   that reset on restart and multiply across replicas.
-- Session revocation for password logins — either extending `employee_sessions` to cover them
-  or a `token_version` claim checked in `requireRole`.
+- Session revocation for password logins (`platform_users.token_version` and
+  `platform_admins.token_version`, paired with `employee_sessions` and `auth_admin_sessions`
+  tracking and `impersonation_grants` revocation on password/MFA/role mutations), two-step MFA
+  factor confirmation (`confirmed_at` set only after code verification, single confirmed primary
+  via `idx_mfa_enrolments_single_confirmed_primary`), distinct second-factor enforcement after
+  phone-OTP primary login, step-up re-authentication (`requireRecentAuth`), and user-controlled
+  password reset tokens (`auth_password_resets` — forbidding cross-tenant password overwrite).
 - Real JWT key rotation with two live keys, and deletion of Wave 1's legacy verify fallback.
 - `tsx` moved to `dependencies` and the image built with `npm ci --omit=dev`.
 - Periodic re-authorization for long-lived `/ws` sockets.

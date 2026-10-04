@@ -120,6 +120,12 @@ export interface SessionPayload {
    * pin-login) and on any token minted before this field existed.
    */
   employeeSessionId?: string | null;
+  /** True when this session completed MFA verification at login. */
+  mfaVerified?: boolean;
+  /** Epoch seconds of the most recent primary/MFA/step-up authentication. */
+  recentAuthAt?: number;
+  /** Registered JWT issued-at claim (epoch seconds). */
+  iat?: number;
 }
 
 

@@ -245,11 +245,7 @@ export function SettingsManager({
       {activeTab === "audit-log" ? <AuditLogSettings /> : null}
       {activeTab === "security-center" ? (
         <div className="space-y-6">
-          {/* Phase 24 Wave 2 — two-factor enrolment for the signed-in
-              owner/manager, plus the business's manager opt-in. Placed first
-              because it is the one thing on this tab a grace-period nag sends
-              somebody here to do. */}
-          <TwoFactorSettings isOwner={isOwner} />
+          <TwoFactorSettings isOwner={isOwner} scope="policy" />
           <SecurityCenterSettings />
         </div>
       ) : null}

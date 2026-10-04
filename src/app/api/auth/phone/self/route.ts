@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession, withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { checkLoginLockout, auditLoginFailure } from "@/lib/employee-service";
+import { isRecentAuth, requireRecentAuth } from "@/lib/recent-auth";
 import {
   canonicalMemberPhone,
   maskPhoneE164,
@@ -52,12 +53,16 @@ export const GET = withTenantScope(async () => {
       state: enforcement.state,
       daysLeft: enforcement.daysLeft,
     },
+    recentAuth: isRecentAuth(session),
   });
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
+  const recentAuthError = requireRecentAuth(session);
+  if (recentAuthError) return recentAuthError;
 
   let body: { action?: string; phone?: string; code?: string };
   try {

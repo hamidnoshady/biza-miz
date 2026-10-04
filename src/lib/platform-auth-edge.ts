@@ -35,6 +35,10 @@ export interface PlatformSessionPayload {
   tokenVersion?: number;
   /** True only when this session was minted after a successful MFA challenge. */
   mfaVerified?: boolean;
+  /** auth_admin_sessions.id — server-side session record for individual revocation. */
+  sessionId?: string | null;
+  /** Epoch seconds of the most recent primary/MFA/step-up authentication. */
+  recentAuthAt?: number;
   /** jose supplies this registered claim when verifying a signed session. */
   iat?: number;
 }

@@ -18,6 +18,8 @@ export interface ReplicatedLoginCredential {
   fullName: string;
   passwordHash: string;
   isActive: boolean;
+  /** Monotonic version incremented on password change or global sign-out. */
+  tokenVersion?: number;
   mfa: Array<{
     method: "totp" | "sms_otp";
     isPrimary: boolean;
@@ -40,6 +42,7 @@ export function loginCredentialsFingerprint(credentials: readonly ReplicatedLogi
     .map((c) => ({
       ...c,
       email: c.email.trim().toLowerCase(),
+      tokenVersion: c.tokenVersion ?? 1,
       mfa: [...c.mfa].sort((a, b) => a.method.localeCompare(b.method)),
       recoveryCodes: [...c.recoveryCodes]
         .sort((a, b) => a.codeHash.localeCompare(b.codeHash))

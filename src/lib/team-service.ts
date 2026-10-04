@@ -36,6 +36,12 @@ import {
   type InvitationStatus,
   type MemberSummary,
 } from "./team";
+import {
+  issuePasswordResetToken,
+  revokeMembershipSessions,
+  revokePlatformUserSessions,
+  validatePasswordStrength,
+} from "./password-reset";
 
 export class TeamError extends Error {
   status: number;
@@ -882,20 +888,29 @@ export async function setMemberPhone(
 }
 
 /**
- * Changes the password on the identity behind a membership.
+ * Changes the password on the identity behind a membership (self-service only).
  *
- * The identity is global, so this affects every business that person belongs
- * to — which is correct (it is one login) but worth being explicit about: an
- * owner force-resetting a member's password is resetting that person's
- * platform password, not just their access here.
+ * Per Issue #809 (Findings 2 & 3):
+ *   1. A tenant administrator in Business A must NEVER directly overwrite the
+ *      global `platform_users` password of another user (`actorId !== userId`),
+ *      because `platform_users` is shared across businesses. Admin recovery for
+ *      another user goes through `requestMemberPasswordReset` instead.
+ *   2. Changing a password atomically increments `platform_users.token_version`
+ *      and revokes existing sessions/impersonations so stolen or stale tokens
+ *      stop working immediately.
  */
 export async function setPassword(
   businessId: string,
   userId: string,
   newPassword: string,
   actorId: string | null,
-): Promise<void> {
-  if (newPassword.length < 8) throw new TeamError("weak_password");
+  options: { keepEmployeeSessionId?: string | null } = {},
+): Promise<{ tokenVersion: number }> {
+  if (!actorId || actorId !== userId) {
+    throw new TeamError("cross_user_password_reset_forbidden", 403);
+  }
+  const strength = validatePasswordStrength(newPassword);
+  if (!strength.ok) throw new TeamError("weak_password", 400);
 
   const { rows } = await query<{ platform_user_id: string | null }>(
     "SELECT platform_user_id FROM users WHERE id = $1 AND business_id = $2",
@@ -906,15 +921,24 @@ export async function setPassword(
   if (!platformUserId) throw new TeamError("no_login", 409);
 
   const hash = await bcrypt.hash(newPassword, BCRYPT_COST);
-  // Not "platform" administration — an owner acting inside their own business
-  // triggered this. The bypass is narrow and already justified by the lookup
-  // above: platformUserId was only ever reached via a users row this business
-  // owns, and platform_users itself carries no business_id to scope by.
+  let tokenVersion = 2;
   await withoutTenantScope("identity", async () => {
-    await query(
-      "UPDATE platform_users SET password_hash = $2, updated_at = now() WHERE id = $1",
+    const updated = await query<{ token_version: number }>(
+      `UPDATE platform_users
+          SET password_hash = $2,
+              token_version = token_version + 1,
+              updated_at = now()
+        WHERE id = $1
+        RETURNING token_version`,
       [platformUserId, hash],
     );
+    tokenVersion = updated.rows[0]?.token_version ?? 2;
+  });
+
+  await revokePlatformUserSessions(platformUserId, {
+    bumpTokenVersion: false,
+    keepEmployeeSessionId: options.keepEmployeeSessionId ?? null,
+    endImpersonation: true,
   });
 
   await auditMembership(getPool(), {
@@ -923,6 +947,96 @@ export async function setPassword(
     action: "team.password_changed",
     targetUserId: userId,
   });
+
+  return { tokenVersion };
+}
+
+/**
+ * Issues a single-use, user-controlled password reset token for a team member
+ * (Issue #809 — Finding 2).
+ *
+ * Replaces direct cross-user password overwrite: the tenant administrator can
+ * trigger recovery, but only the account holder chooses the new password.
+ */
+export async function requestMemberPasswordReset(
+  businessId: string,
+  userId: string,
+  actorId: string | null,
+): Promise<{ token: string; expiresAt: string; email: string }> {
+  const { rows } = await query<{
+    platform_user_id: string | null;
+    email: string | null;
+  }>(
+    `SELECT platform_user_id, email::text AS email
+       FROM users
+      WHERE id = $1 AND business_id = $2`,
+    [userId, businessId],
+  );
+  const member = rows[0];
+  if (!member) throw new TeamError("not_found", 404);
+  if (!member.platform_user_id) throw new TeamError("no_login", 409);
+
+  let email = member.email;
+  if (!email) {
+    email = await withoutTenantScope("identity", async () => {
+      const p = await query<{ email: string }>(
+        `SELECT email::text AS email FROM platform_users WHERE id = $1`,
+        [member.platform_user_id],
+      );
+      return p.rows[0]?.email ?? null;
+    });
+  }
+  if (!email) throw new TeamError("no_login", 409);
+
+  const issued = await issuePasswordResetToken({
+    subjectRealm: "platform_user",
+    subjectId: member.platform_user_id,
+    email,
+    membershipId: userId,
+    createdById: actorId,
+  });
+
+  await auditMembership(getPool(), {
+    businessId,
+    actorId,
+    action: "team.password_reset_requested",
+    targetUserId: userId,
+    after: { email, expiresAt: issued.expiresAt.toISOString() },
+  });
+
+  return {
+    token: issued.token,
+    expiresAt: issued.expiresAt.toISOString(),
+    email,
+  };
+}
+
+/**
+ * Revokes all active tenant sessions (`employee_sessions`) and support
+ * impersonation grants for a member within `businessId`.
+ */
+export async function revokeMemberTenantSessions(
+  businessId: string,
+  userId: string,
+  actorId: string | null,
+): Promise<{ revokedCount: number }> {
+  const { rows } = await query<{ id: string }>(
+    `SELECT id FROM users WHERE id = $1 AND business_id = $2`,
+    [userId, businessId],
+  );
+  if (!rows[0]) throw new TeamError("not_found", 404);
+
+  const revokedCount = await revokeMembershipSessions(businessId, userId);
+
+  await auditMembership(getPool(), {
+    businessId,
+    actorId,
+    action: "team.sessions_revoked",
+    targetUserId: userId,
+    after: { revokedCount },
+  });
+
+  return { revokedCount };
 }
 
 /** Verifies a person's current password — required before they change it themselves. */

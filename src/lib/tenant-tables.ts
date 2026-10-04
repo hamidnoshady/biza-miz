@@ -26,6 +26,8 @@ export const EXEMPT_TABLES = new Set([
   // happens before any business is known, so it has no business_id. It belongs to
   // the login identity across the platform.
   "auth_login_attempts",
+  "auth_password_resets",
+  "auth_admin_sessions",
   "mfa_enrolments",
   "mfa_challenges",
   "mfa_recovery_codes",
