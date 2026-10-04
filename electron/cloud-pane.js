@@ -144,6 +144,20 @@ function stampEmbedAgent(ses, origin, userAgent) {
   });
 }
 
+/**
+ * The last layer, for a cloud image that predates the embed token
+ * altogether: the workspace sidebar is the only `aside[data-slot="sidebar"]`
+ * the cloud draws (src/components/ui/sidebar.tsx), so the pane hides it on
+ * every document it loads. Presentation only, like the token.
+ */
+const HIDE_CLOUD_SIDEBAR_CSS = 'aside[data-slot="sidebar"]{display:none!important}';
+
+function hideCloudSidebar(contents) {
+  contents.on("dom-ready", () => {
+    contents.insertCSS(HIDE_CLOUD_SIDEBAR_CSS).catch(() => {});
+  });
+}
+
 module.exports = {
   CLOUD_PARTITION,
   EMBED_UA_TOKEN,
@@ -154,4 +168,6 @@ module.exports = {
   guardCloudPane,
   embedAgent,
   stampEmbedAgent,
+  HIDE_CLOUD_SIDEBAR_CSS,
+  hideCloudSidebar,
 };

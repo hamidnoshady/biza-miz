@@ -4,8 +4,16 @@ import { describe, expect, it, vi } from "vitest";
 import { CLOUD_EMBED_UA_TOKEN } from "./cloud-embed";
 
 const require = createRequire(import.meta.url);
-const { EMBED_UA_TOKEN, cloudTarget, embedAgent, guardCloudPane, hardenCloudPane, stampEmbedAgent } =
-  require("../../electron/cloud-pane.js");
+const {
+  EMBED_UA_TOKEN,
+  HIDE_CLOUD_SIDEBAR_CSS,
+  cloudTarget,
+  embedAgent,
+  guardCloudPane,
+  hardenCloudPane,
+  hideCloudSidebar,
+  stampEmbedAgent,
+} = require("../../electron/cloud-pane.js");
 
 type Handler = (...args: unknown[]) => void;
 
@@ -162,5 +170,18 @@ describe("stampEmbedAgent", () => {
     const { send } = stamped();
     expect(send("https://video.example.org/embed", { "User-Agent": "Mozilla/5.0" })).toEqual({});
     expect(send("https://cafe.example.com.evil.org/", { "User-Agent": "Mozilla/5.0" })).toEqual({});
+  });
+});
+
+describe("hideCloudSidebar", () => {
+  it("hides the workspace sidebar on every document the pane loads", () => {
+    const contents = new FakeContents() as FakeContents & { insertCSS: ReturnType<typeof vi.fn> };
+    contents.insertCSS = vi.fn(async () => "key");
+    hideCloudSidebar(contents);
+    contents.handlers.get("dom-ready")!();
+    contents.handlers.get("dom-ready")!();
+    expect(contents.insertCSS).toHaveBeenCalledTimes(2);
+    expect(contents.insertCSS).toHaveBeenCalledWith(HIDE_CLOUD_SIDEBAR_CSS);
+    expect(HIDE_CLOUD_SIDEBAR_CSS).toContain('aside[data-slot="sidebar"]');
   });
 });

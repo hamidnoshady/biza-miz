@@ -14,7 +14,7 @@ const nativePrinting = require("./native-printing");
 const localStorageChecks = require("./local-storage");
 const { computePaths, migrateLegacyLayout } = require("./app-paths");
 const { DesktopUpdateEngine } = require("./update-engine");
-const { CLOUD_PARTITION, guardCloudPane, hardenCloudPane, stampEmbedAgent } = require("./cloud-pane");
+const { CLOUD_PARTITION, guardCloudPane, hardenCloudPane, hideCloudSidebar, stampEmbedAgent } = require("./cloud-pane");
 
 // Phase 46: «ورود با حساب ابری» — the cloud hands the browser back to the app
 // with businesssuite://cloud-login?code=…&state=…
@@ -114,7 +114,9 @@ if (!gotSingleInstanceLock) {
       stampEmbedAgent(cloudSession, paneOrigin, params.useragent || cloudSession.getUserAgent());
     });
     mainWindow.webContents.on("did-attach-webview", (_event, contents) => {
-      if (paneOrigin) guardCloudPane(contents, paneOrigin, shell);
+      if (!paneOrigin) return;
+      guardCloudPane(contents, paneOrigin, shell);
+      hideCloudSidebar(contents);
     });
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
