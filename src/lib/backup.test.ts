@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   backupPassphrase,
@@ -249,15 +250,16 @@ describe("scoped artifact names (issue #807)", () => {
     const taken = new Set(["pos-backup-x-20260721-033005-11111111.dump"]);
     let attempt = 0;
     const free = await reserveArtifactName(
-      "/tmp",
+      "somewhere",
       () => ["pos-backup-x-20260721-033005-11111111.dump", "pos-backup-x-20260721-033005-22222222.dump"][
         Math.min(attempt++, 1)
       ],
-      async (filePath) => taken.has(filePath.split("/").at(-1) ?? ""),
+      // `path.basename`, not split("/"): on Windows `path.join` produces `\`.
+      async (filePath) => taken.has(path.basename(filePath)),
     );
     expect(free).toBe("pos-backup-x-20260721-033005-22222222.dump");
     await expect(
-      reserveArtifactName("/tmp", () => "pos-backup-x-20260721-033005-11111111.dump", async () => true),
+      reserveArtifactName("somewhere", () => "pos-backup-x-20260721-033005-11111111.dump", async () => true),
     ).rejects.toThrow("artifact_name_collision");
   });
 });

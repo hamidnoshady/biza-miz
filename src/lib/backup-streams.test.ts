@@ -87,11 +87,10 @@ describe("encryptFileToFile / decryptFileToFile", () => {
     await expect(stat(out)).rejects.toThrow();
   });
 
-  it("writes the artifact 0o600 and refuses to overwrite an existing file", async () => {
+  it("refuses to overwrite an existing file, and does not delete it either", async () => {
     const enc = path.join(dir, "mode.dump.enc");
     await encryptFileToFile(source(), enc, "pass");
     const info = await stat(enc);
-    expect(info.mode & 0o777).toBe(0o600);
     // `wx` — a second run at the same path must not clobber a finished artifact.
     await expect(encryptFileToFile(source(), enc, "pass")).rejects.toThrow();
     // …and the failed second run must not delete the artifact that was already
@@ -100,7 +99,20 @@ describe("encryptFileToFile / decryptFileToFile", () => {
     expect((await stat(enc)).size).toBe(info.size);
   });
 
-  it("does not delete an existing plaintext file when a decrypt fails", async () => {
+  // The envelope is written 0o600 on every platform; only POSIX enforces it
+  // (Windows reports synthetic bits and has no chmod), so it is asserted where
+  // the deployment actually runs.
+  it.skipIf(process.platform === "win32")("writes the artifact 0o600", async () => {
+    const enc = path.join(dir, "owner-only.dump.enc");
+    await encryptFileToFile(source(), enc, "pass");
+    expect((await stat(enc)).mode & 0o777).toBe(0o600);
+  });
+
+  it("never touches a destination that already exists", async () => {
+    // The dangerous shape this guards: a decrypt/copy aimed at a path that is
+    // already somebody's only copy. The destination is opened `wx`, so the
+    // operation fails before a byte is written — and crucially the cleanup path
+    // must not delete the file it did not create.
     const enc = path.join(dir, "decrypt-onto-existing.dump.enc");
     await encryptFileToFile(source(), enc, "pass");
     const existing = path.join(dir, "already-there.dump");

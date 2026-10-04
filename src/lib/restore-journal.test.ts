@@ -84,14 +84,18 @@ describe("appendRestoreJournal", () => {
     expect(after.split("\n").filter(Boolean).length).toBeGreaterThan(before.split("\n").filter(Boolean).length);
   });
 
-  it("restricts the file to the owner, and only calls apply_succeeded a success", async () => {
-    const mode = (await stat(path.join(dir, "restore-journal.jsonl"))).mode & 0o777;
-    expect(mode).toBe(0o600);
-    expect((await stat(dir)).mode & 0o777).toBe(0o700);
-
+  it("only calls apply_succeeded a success", async () => {
     const id = newRestoreJournalId();
     await appendRestoreJournal(entry(id, "apply_rolled_back"), dir);
     expect((await readRestoreJournal(dir)).succeeded.has(id)).toBe(false);
+  });
+
+  // Windows reports synthetic mode bits (0o666/0o777) and has no chmod, so this
+  // is asserted where the deployment actually runs: Linux.
+  it.skipIf(process.platform === "win32")("restricts the journal directory and file to the owner", async () => {
+    await appendRestoreJournal(entry(newRestoreJournalId(), "verify_started"), dir);
+    expect((await stat(path.join(dir, "restore-journal.jsonl"))).mode & 0o777).toBe(0o600);
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
   });
 
   it("throws — rather than silently dropping a line — when it cannot write", async () => {
