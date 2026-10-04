@@ -50,7 +50,8 @@
  * driven end to end against a real database and a real HTTP peer in
  * `integration/platform-system-backup.integration.test.ts`.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { Client } from "pg";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -58,14 +59,13 @@ import { query } from "./db";
 import {
   BACKUP_RUNS_SHOWN,
   CLOUD_RETRY_MS,
-  encryptBackup,
   dumpDatabaseUrl,
   isBackupDue,
-  isEncryptedBackup,
   isFailedRunRetryDue,
   isPlainArtifactName,
   makeArtifactName,
   parseArtifactTimestamp,
+  reserveArtifactName,
   selectPrunable,
   type BackupAlert,
 } from "./backup";
@@ -84,8 +84,9 @@ import {
   peerTokenHint,
   platformBackupPassphrase,
   platformCloudKeyFor,
+  outboundPolicyFor,
+  resolveCloudObjectKey,
   resolveMaxDownloadBytes,
-  sha256Of,
   validatePlatformBackupConfig,
   type MaskedPlatformBackupConfig,
   type PeerManifest,
@@ -96,14 +97,25 @@ import {
 import {
   cleanupStagedDump,
   errText,
+  RestoreApplyError,
   RestoreRefusal,
   restoreDumpFile,
-  stageDumpFile,
+  stageDumpFileFromPath,
+  type RestoreJournalContext,
   type RestoreSummary,
 } from "./restore-engine";
 import { runPgDump } from "./pg-tools";
 import { secureUnlink } from "./secure-temp";
-import { s3Delete, s3Get, s3List, s3Put, sha256Hex, type S3Config } from "./s3-lite";
+import { s3Delete, s3GetToFile, s3List, s3PutFile, type S3Config } from "./s3-lite";
+import { encryptFileToFile, fileHasBackupMagic, sha256File } from "./backup-streams";
+import { LOCK_KEYS, withDistributedLock } from "./db-locks";
+import {
+  newRestoreJournalId,
+  restoreJournalDir,
+  tryAppendRestoreJournal,
+  type RestorePhase,
+} from "./restore-journal";
+import { fetchWithOutboundPolicy, type OutboundPolicy } from "./outbound-policy";
 
 /** The manifest lists at most this many artifacts; retention bounds the real number. */
 const SERVE_ARTIFACT_LIMIT = 100;
@@ -136,6 +148,7 @@ type ConfigRow = {
   cloud_retention: number;
   serving_enabled: boolean;
   allow_insecure_peers: boolean;
+  allow_private_peers: boolean;
 };
 
 function rowToConfig(row: ConfigRow): PlatformBackupConfig {
@@ -161,6 +174,7 @@ function rowToConfig(row: ConfigRow): PlatformBackupConfig {
     },
     servingEnabled: row.serving_enabled,
     allowInsecurePeers: row.allow_insecure_peers,
+    allowPrivatePeers: row.allow_private_peers,
   };
 }
 
@@ -168,7 +182,7 @@ const CONFIG_SELECT = `SELECT enabled, interval_hours, anchor_time, timezone, di
                                local_retention, encrypt_local, passphrase,
                                cloud_enabled, cloud_endpoint, cloud_region, cloud_bucket, cloud_prefix,
                                cloud_access_key_id, cloud_secret_access_key, cloud_retention,
-                               serving_enabled, allow_insecure_peers
+                               serving_enabled, allow_insecure_peers, allow_private_peers
                           FROM platform_backup_config WHERE id = true`;
 
 /** The stored config, or the defaults on an install that has never opened the page. */
@@ -190,7 +204,8 @@ export async function writePlatformBackupConfig(
             cloud_enabled = $10, cloud_endpoint = $11, cloud_region = $12, cloud_bucket = $13,
             cloud_prefix = $14, cloud_access_key_id = $15, cloud_secret_access_key = $16,
             cloud_retention = $17, serving_enabled = $18, allow_insecure_peers = $19,
-            updated_by = $20, updated_at = now()
+            allow_private_peers = $20,
+            updated_by = $21, updated_at = now()
       WHERE id = true`,
     [
       config.enabled,
@@ -212,6 +227,7 @@ export async function writePlatformBackupConfig(
       config.cloud.retention,
       config.servingEnabled,
       config.allowInsecurePeers,
+      config.allowPrivatePeers,
       platformAdminId,
     ],
   );
@@ -395,6 +411,8 @@ export interface PlatformBackupHealth {
   enabled: boolean;
   cloudEnabled: boolean;
   servingEnabled: boolean;
+  /** issue #807 — whether LAN/private restore targets are permitted */
+  allowPrivatePeers: boolean;
   intervalHours: number;
   anchorTime: string;
   timezone: string;
@@ -423,6 +441,7 @@ export async function getPlatformBackupHealth(): Promise<PlatformBackupHealth> {
     enabled: config.enabled,
     cloudEnabled: config.cloud.enabled,
     servingEnabled: config.servingEnabled,
+    allowPrivatePeers: config.allowPrivatePeers,
     intervalHours: config.intervalHours,
     anchorTime: config.anchorTime,
     timezone: config.timezone,
@@ -462,42 +481,81 @@ export async function runPlatformLocalBackup(
   platformAdminId: string | null = null,
 ): Promise<PlatformBackupResult> {
   if (backupInFlight) return { status: "busy" };
+  // Issue #807: a cross-process lock, so two app instances on one database
+  // cannot both be dumping (and pruning) platform artifacts at the same time.
+  const lock = await withDistributedLock(LOCK_KEYS.platformBackup, () =>
+    runPlatformLocalBackupLocked(trigger, platformAdminId),
+  );
+  if (!lock.ok) {
+    if (lock.reason === "busy") return { status: "busy" };
+    return { status: "failed", error: `backup_lock_unavailable:${lock.error ?? "database_unreachable"}` };
+  }
+  return lock.value;
+}
+
+async function runPlatformLocalBackupLocked(
+  trigger: RunTrigger,
+  platformAdminId: string | null,
+): Promise<PlatformBackupResult> {
   backupInFlight = true;
   try {
     const config = await getPlatformBackupConfig();
-    const artifact = makeArtifactName();
     const passphrase = platformBackupPassphrase(config);
     const encrypt = passphrase.length > 0 && config.encryptLocal;
-    const finalName = encrypt ? `${artifact}.enc` : artifact;
+    const dir = platformBackupDir(config.directory);
+    await fs.mkdir(dir, { recursive: true });
+
+    // Issue #807 — the run token is part of the artifact name, so two runs in
+    // the same second (a tick racing a manual click) cannot collide, and the
+    // name is reserved against what is already on disk.
+    const finalName = await reserveArtifactName(
+      dir,
+      () =>
+        makeArtifactName(new Date(), {
+          runId: randomUUID(),
+          format: "dump",
+          encrypted: encrypt,
+        }),
+      async (candidate) => {
+        try {
+          await fs.stat(candidate);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    );
+    const baseName = finalName.replace(/\.enc$/, "");
 
     const runId = await startRun("local", trigger, finalName, null, platformAdminId);
     const transientPaths: string[] = [];
     try {
-      const dir = platformBackupDir(config.directory);
-      await fs.mkdir(dir, { recursive: true });
       const finalPath = path.join(dir, finalName);
-      const plainTmpPath = path.join(dir, `${artifact}.plaintext.tmp`);
-      const artifactTmpPath = encrypt ? path.join(dir, `${artifact}.encrypted.tmp`) : plainTmpPath;
+      const plainTmpPath = path.join(dir, `${baseName}.plaintext.tmp`);
+      const artifactTmpPath = encrypt ? path.join(dir, `${baseName}.encrypted.tmp`) : plainTmpPath;
       transientPaths.push(plainTmpPath);
       if (artifactTmpPath !== plainTmpPath) transientPaths.push(artifactTmpPath);
 
       await runPgDump(plainTmpPath, dumpDatabaseUrl());
-      let data: Buffer = await fs.readFile(plainTmpPath);
+      let sizeBytes: number;
+      let sha256: string;
+      let artifactPath: string;
       if (encrypt) {
-        data = encryptBackup(data, passphrase);
-        await fs.writeFile(artifactTmpPath, data, { mode: 0o600 });
+        // Streamed (issue #807): a multi-GB dump is never held in memory.
+        const streamed = await encryptFileToFile(plainTmpPath, artifactTmpPath, passphrase);
+        sizeBytes = streamed.sizeBytes;
+        sha256 = streamed.sha256;
         await secureUnlink(plainTmpPath);
+        artifactPath = artifactTmpPath;
+      } else {
+        sizeBytes = (await fs.stat(plainTmpPath)).size;
+        sha256 = await sha256File(plainTmpPath);
+        artifactPath = plainTmpPath;
       }
 
       // Same durability contract as the tenant pipeline. Ciphertext is written
       // separately and plaintext is scrubbed rather than rewritten in place.
-      const tmpFh = await fs.open(artifactTmpPath, "r+");
-      try {
-        await tmpFh.sync();
-      } finally {
-        await tmpFh.close();
-      }
-      await fs.rename(artifactTmpPath, finalPath);
+      if (artifactPath !== finalPath) await fs.rename(artifactPath, finalPath);
       try {
         const dirFh = await fs.open(dir, "r");
         try {
@@ -506,13 +564,13 @@ export async function runPlatformLocalBackup(
           await dirFh.close();
         }
       } catch {
-        /* directory fsync unsupported (Windows) — the file sync above already protected the bytes */
+        /* directory fsync unsupported (Windows) — the streaming writer already fsynced the file */
       }
 
       // The manifest is taken from the live database immediately after the dump,
       // so it describes what the artifact contains rather than what the server
       // looks like months later when a peer asks.
-      const manifest = await buildArtifactManifest(data, finalName);
+      const manifest = await buildArtifactManifest({ sizeBytes, sha256 }, finalName);
 
 
       const secondary = platformBackupSecondaryDir(config);
@@ -549,13 +607,8 @@ export async function runPlatformLocalBackup(
       await pruneDirectory(dir, config.localRetention);
       if (secondary) await pruneDirectory(secondary, config.localRetention);
 
-      await finishRun(runId, {
-        status: "success",
-        sizeBytes: data.length,
-        sha256: sha256Hex(data),
-        manifest,
-      });
-      return { status: "ok", runId, artifact: finalName, sizeBytes: data.length };
+      await finishRun(runId, { status: "success", sizeBytes, sha256, manifest });
+      return { status: "ok", runId, artifact: finalName, sizeBytes };
     } catch (err) {
       await finishRun(runId, { status: "failed", error: errText(err) });
       return { status: "failed", error: errText(err) };
@@ -578,12 +631,15 @@ export async function runPlatformLocalBackup(
  * that is the ciphertext, which is what a peer streams, so the download's
  * verification is against exactly what it received.
  */
-async function buildArtifactManifest(data: Buffer, artifactName: string): Promise<Record<string, unknown>> {
+async function buildArtifactManifest(
+  artifact: { sizeBytes: number; sha256: string },
+  artifactName: string,
+): Promise<Record<string, unknown>> {
   const base = {
     artifact: artifactName,
     createdAt: new Date().toISOString(),
-    sizeBytes: data.length,
-    sha256: sha256Of(data),
+    sizeBytes: artifact.sizeBytes,
+    sha256: artifact.sha256,
     encrypted: artifactName.endsWith(".enc"),
     app: "cafe-restaurant-pos",
     version: deploymentVersion(),
@@ -700,17 +756,28 @@ export async function runPlatformCloudUpload(
 
   const key = platformCloudKeyFor(config.cloud.prefix, artifact);
   const runId = await startRun("cloud", trigger, artifact, null, platformAdminId);
+  const transient: string[] = [];
   try {
-    let data: Buffer = await fs.readFile(path.join(platformBackupDir(config.directory), artifact));
-    if (!isEncryptedBackup(data)) {
+    const sourcePath = path.join(platformBackupDir(config.directory), artifact);
+    if (!isPlainArtifactName(artifact)) throw new Error("unsafe_artifact_name");
+    let uploadPath = sourcePath;
+    let payloadHash = await sha256File(sourcePath);
+    let sizeBytes = (await fs.stat(sourcePath)).size;
+    if (!(await fileHasBackupMagic(sourcePath))) {
       const passphrase = platformBackupPassphrase(config);
       // An artifact written in plaintext must never reach the bucket in that
       // state: the provider would hold the whole ledger behind a key of "".
       if (!passphrase) throw new Error("passphrase_required");
-      data = encryptBackup(data, passphrase);
+      const encryptedPath = `${sourcePath}.uploading.tmp`;
+      transient.push(encryptedPath);
+      const streamed = await encryptFileToFile(sourcePath, encryptedPath, passphrase);
+      uploadPath = encryptedPath;
+      payloadHash = streamed.sha256;
+      sizeBytes = streamed.sizeBytes;
     }
     const s3 = s3ConfigOf(config);
-    await s3Put(s3, key, data);
+    // Streamed (issue #807) — a full-database artifact is never buffered.
+    await s3PutFile(s3, key, uploadPath, { payloadHash, sizeBytes });
 
     try {
       const objects = await s3List(s3, config.cloud.prefix);
@@ -721,11 +788,13 @@ export async function runPlatformCloudUpload(
       console.error("platform backup: cloud prune failed:", errText(err));
     }
 
-    await finishRun(runId, { status: "success", sizeBytes: data.length, sha256: sha256Hex(data) });
-    return { status: "ok", key, sizeBytes: data.length };
+    await finishRun(runId, { status: "success", sizeBytes, sha256: payloadHash });
+    return { status: "ok", key, sizeBytes };
   } catch (err) {
     await finishRun(runId, { status: "failed", error: errText(err) });
     return { status: "failed", error: errText(err) };
+  } finally {
+    await Promise.all(transient.map((file) => secureUnlink(file)));
   }
 }
 
@@ -1179,7 +1248,6 @@ export async function knownPeerIds(): Promise<Set<string>> {
   return new Set(rows.map((r) => r.id));
 }
 
-export { knownPeerIds as knownPeerIdSet };
 
 /**
  * The bearer check both `/api/peer/backup/*` endpoints run, before they answer
@@ -1288,7 +1356,8 @@ export async function fetchPeerManifestFor(peerId: string): Promise<PeerFetchRes
   if (!peer.enabled) return { ok: false, error: "peer_disabled" };
   if (!peer.token) return { ok: false, error: "missing_token" };
 
-  const result = await requestPeerJson(peerManifestUrl(peer.base_url), peer.token, PEER_MANIFEST_TIMEOUT_MS);
+  const policy = outboundPolicyFor(await getPlatformBackupConfig());
+  const result = await requestPeerJson(peerManifestUrl(peer.base_url), peer.token, PEER_MANIFEST_TIMEOUT_MS, policy);
   if (!result.ok) {
     await recordPeerCheck(peerId, "failed", result.error);
     return result;
@@ -1302,21 +1371,29 @@ export async function fetchPeerManifestFor(peerId: string): Promise<PeerFetchRes
   return { ok: true, manifest: parsed.manifest };
 }
 
+/**
+ * Ask a peer a JSON question, under the outbound policy (issue #807): manual
+ * redirects (re-validated each hop, credentials never forwarded across
+ * origins), address classification before connecting, and a bounded timeout.
+ */
 async function requestPeerJson(
   url: string,
   token: string,
   timeoutMs: number,
+  policy: OutboundPolicy,
 ): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
-  let res: Response;
-  try {
-    res = await fetch(url, {
+  const fetched = await fetchWithOutboundPolicy(
+    url,
+    {
       headers: { authorization: `Bearer ${token}`, accept: "application/json" },
-      signal: AbortSignal.timeout(timeoutMs),
       cache: "no-store",
-    });
-  } catch (err) {
-    return { ok: false, error: `peer_unreachable:${errText(err).slice(0, 200)}` };
+    },
+    { ...policy, timeoutMs },
+  );
+  if ("error" in fetched) {
+    return { ok: false, error: `peer_unreachable:${fetched.error.slice(0, 200)}` };
   }
+  const res = fetched.response;
   if (res.status === 401 || res.status === 403) return { ok: false, error: "peer_auth_failed" };
   if (!res.ok) return { ok: false, error: `peer_http_${res.status}` };
   try {
@@ -1348,18 +1425,36 @@ export async function downloadPeerArtifact(opts: {
   token: string;
   maxBytes?: number;
   timeoutMs?: number;
+  /**
+   * The outbound-network policy to apply. Defaults to this install's configured
+   * policy (issue #807) — a peer address is not trusted just because somebody
+   * stored it: metadata, link-local and, unless allowed, private targets are
+   * refused, and every redirect hop is re-checked.
+   */
+  policy?: OutboundPolicy;
 }): Promise<{ ok: true; file: StagedDownload } | { ok: false; error: string }> {
   const maxBytes = opts.maxBytes ?? resolveMaxDownloadBytes();
-  let res: Response;
-  try {
-    res = await fetch(opts.url, {
-      headers: { authorization: opts.token ? `Bearer ${opts.token}` : "", accept: "application/octet-stream" },
-      signal: AbortSignal.timeout(opts.timeoutMs ?? PEER_DOWNLOAD_TIMEOUT_MS),
-      cache: "no-store",
-    });
-  } catch (err) {
-    return { ok: false, error: `peer_unreachable:${errText(err).slice(0, 200)}` };
+  let policy = opts.policy;
+  if (!policy) {
+    try {
+      policy = outboundPolicyFor(await getPlatformBackupConfig());
+    } catch {
+      policy = outboundPolicyFor({ allowInsecurePeers: false, allowPrivatePeers: false });
+    }
   }
+  const fetched = await fetchWithOutboundPolicy(
+    opts.url,
+    {
+      headers: {
+        authorization: opts.token ? `Bearer ${opts.token}` : "",
+        accept: "application/octet-stream",
+      },
+      cache: "no-store",
+    },
+    { ...policy, timeoutMs: opts.timeoutMs ?? PEER_DOWNLOAD_TIMEOUT_MS },
+  );
+  if ("error" in fetched) return { ok: false, error: `peer_unreachable:${fetched.error.slice(0, 200)}` };
+  const res = fetched.response;
   if (res.status === 401 || res.status === 403) return { ok: false, error: "peer_auth_failed" };
   if (!res.ok) return { ok: false, error: `peer_http_${res.status}` };
 
@@ -1438,8 +1533,16 @@ export interface PlatformRestoreRunRow {
   source: string;
   peerId: string | null;
   artifact: string;
+  /** issue #807 — the S3 object key, when the source was the cloud */
+  objectKey: string | null;
   mode: "verify" | "apply";
   status: "running" | "success" | "failed";
+  /** the state machine phase this row reached (see restore-journal.ts) */
+  phase: RestorePhase;
+  /** the durable journal entry that recorded this restore end to end */
+  journalId: string | null;
+  /** the operator as a plain label — survives the restored snapshot not having their row */
+  actorLabel: string;
   summary: Record<string, unknown> | null;
   error: string | null;
   startedAt: string;
@@ -1452,14 +1555,20 @@ export async function listPlatformRestoreRuns(limit = 20): Promise<PlatformResto
     source: string;
     peer_id: string | null;
     artifact: string;
+    object_key: string | null;
     mode: "verify" | "apply";
     status: "running" | "success" | "failed";
+    phase: RestorePhase | null;
+    journal_id: string | null;
+    actor_label: string | null;
     summary: unknown;
     error: string | null;
     started_at: Date;
     finished_at: Date | null;
   }>(
-    `SELECT id, source, peer_id, artifact, mode, status, summary, error, started_at, finished_at
+    `SELECT id, source, peer_id, artifact, object_key, mode, status,
+            coalesce(phase, 'verify_started') AS phase, journal_id, actor_label,
+            summary, error, started_at, finished_at
        FROM platform_restore_runs
       ORDER BY started_at DESC
       LIMIT $1`,
@@ -1470,8 +1579,12 @@ export async function listPlatformRestoreRuns(limit = 20): Promise<PlatformResto
     source: r.source,
     peerId: r.peer_id,
     artifact: r.artifact,
+    objectKey: r.object_key,
     mode: r.mode,
     status: r.status,
+    phase: r.phase ?? "verify_started",
+    journalId: r.journal_id,
+    actorLabel: r.actor_label ?? "",
     summary: r.summary && typeof r.summary === "object" ? (r.summary as Record<string, unknown>) : null,
     error: r.error,
     startedAt: r.started_at.toISOString(),
@@ -1482,29 +1595,92 @@ export async function listPlatformRestoreRuns(limit = 20): Promise<PlatformResto
 async function startRestoreRun(
   plan: Extract<RestorePlan, { ok: true }>,
   adminId: string | null,
+  journalId: string,
+  actorLabel: string,
 ): Promise<string> {
   const { rows } = await query<{ id: string }>(
-    `INSERT INTO platform_restore_runs (source, peer_id, artifact, mode, created_by)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [plan.source, plan.peerId, plan.artifact, plan.mode, adminId],
+    `INSERT INTO platform_restore_runs
+       (source, peer_id, artifact, object_key, mode, created_by, journal_id, actor_label, phase)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'verify_started') RETURNING id`,
+    [plan.source, plan.peerId, plan.artifact, plan.objectKey, plan.mode, adminId, journalId, actorLabel],
   );
   return rows[0].id;
 }
 
 async function finishRestoreRun(
   runId: string,
-  outcome: { status: "success" | "failed"; summary?: RestoreSummary; error?: string },
+  outcome: { status: "success" | "failed"; summary?: RestoreSummary; error?: string; phase: RestorePhase },
 ): Promise<void> {
   if (outcome.status === "success") {
     await query(
-      `UPDATE platform_restore_runs SET status = 'success', summary = $2, finished_at = now() WHERE id = $1`,
-      [runId, JSON.stringify(outcome.summary ?? {})],
+      `UPDATE platform_restore_runs
+          SET status = 'success', summary = $2, phase = $3, finished_at = now()
+        WHERE id = $1`,
+      [runId, JSON.stringify(outcome.summary ?? {}), outcome.phase],
     );
   } else {
     await query(
-      `UPDATE platform_restore_runs SET status = 'failed', error = $2, finished_at = now() WHERE id = $1`,
-      [runId, (outcome.error ?? "").slice(0, 1000)],
+      `UPDATE platform_restore_runs
+          SET status = 'failed', error = $2, phase = $3, finished_at = now()
+        WHERE id = $1`,
+      [runId, (outcome.error ?? "").slice(0, 1000), outcome.phase],
     );
+  }
+}
+
+/**
+ * The operator's label as it was *before* the swap. It is stored beside the
+ * restore row so a successful restore's record still names who ran it even when
+ * the restored snapshot no longer contains that admin (issue #807).
+ */
+async function platformAdminLabel(adminId: string | null): Promise<string> {
+  if (!adminId) return "";
+  try {
+    const { rows } = await query<{ full_name: string; email: string }>(
+      `SELECT full_name, email FROM platform_admins WHERE id = $1`,
+      [adminId],
+    );
+    const row = rows[0];
+    if (!row) return "";
+    return `${row.full_name} <${row.email}>`.slice(0, 200);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The **post-restore receipt** (issue #807): after the database has been
+ * replaced and re-connected, write a fresh row describing the restore into the
+ * *restored* database. The pre-swap row may not exist any more (the snapshot
+ * predates it), so this is a new row — never an update — and it deliberately
+ * carries `created_by = NULL`: the restored snapshot may not contain the
+ * pre-restore admin, and a foreign-key failure is exactly the "API fails after
+ * the restore already completed" bug the audit found.
+ */
+async function appendRestoreReceipt(
+  plan: Extract<RestorePlan, { ok: true }>,
+  opts: { journalId: string; actorLabel: string; summary: RestoreSummary },
+): Promise<boolean> {
+  try {
+    await query(
+      `INSERT INTO platform_restore_runs
+         (source, peer_id, artifact, object_key, mode, status, phase, journal_id, actor_label,
+          summary, created_by, finished_at)
+       VALUES ($1, $2, $3, $4, 'apply', 'success', 'apply_succeeded', $5, $6, $7, NULL, now())`,
+      [
+        plan.source,
+        plan.peerId,
+        plan.artifact,
+        plan.objectKey,
+        opts.journalId,
+        opts.actorLabel,
+        JSON.stringify({ ...opts.summary, receipt: true }),
+      ],
+    );
+    return true;
+  } catch (error) {
+    console.error("platform restore: post-restore receipt write failed:", errText(error));
+    return false;
   }
 }
 
@@ -1513,19 +1689,59 @@ async function finishRestoreRun(
  * a bare URL), given an already-resolved plan.
  *
  * The sequence is fixed: resolve the source → check the manifest against this
- * install → download (capped, hashed) → decrypt + stage → **verify into a
- * scratch database** → apply only if the plan says so → re-grant the app role.
- * A failure at any point leaves this install's production database untouched,
- * which is the one property that has to hold absolutely: an operator presses
- * this on a *new* server, where there is nothing to go back to.
+ * install → download (capped, hashed, SSRF-checked) → stream-decrypt + stage →
+ * **verify into a scratch database** → apply only if the plan says so → re-grant
+ * the app role → validate the runtime role → write the receipt. A failure at any
+ * point leaves this install's production database untouched, which is the one
+ * property that has to hold absolutely: an operator presses this on a *new*
+ * server, where there is nothing to go back to.
+ *
+ * Issue #807 additions, all of them audit requirements:
+ *   • one **cross-process** lock, so two app instances can never both restore;
+ *   • every phase written to the **durable journal** outside the target DB,
+ *     with the pre-apply write required to succeed before a destructive step;
+ *   • the post-restore reconnect is *proved* and recorded, and a fresh receipt
+ *     row is appended into the restored database afterwards;
+ *   • outbound fetches go through the explicit network policy (metadata,
+ *     link-local and, unless the operator opted in, private addresses refused);
+ *   • artifacts are staged through files, never a whole-file `Buffer`.
  */
 export async function restorePlatformFromPlan(
   plan: Extract<RestorePlan, { ok: true }>,
   platformAdminId: string | null = null,
 ): Promise<PlatformRestoreOutcome> {
   if (restoreInFlight) return { status: "failed", error: "restore_busy" };
+  // Cross-process first, in-process flag second: the DB lock is the real
+  // boundary, and the flag only short-circuits the common same-process case.
+  const lock = await withDistributedLock(LOCK_KEYS.platformRestore, () =>
+    restorePlatformFromPlanLocked(plan, platformAdminId),
+  );
+  if (!lock.ok) {
+    return {
+      status: "failed",
+      error: lock.reason === "busy" ? "restore_busy" : `restore_lock_unavailable:${lock.error ?? "database_unreachable"}`,
+    };
+  }
+  return lock.value;
+}
+
+async function restorePlatformFromPlanLocked(
+  plan: Extract<RestorePlan, { ok: true }>,
+  platformAdminId: string | null,
+): Promise<PlatformRestoreOutcome> {
   restoreInFlight = true;
-  const runId = await startRestoreRun(plan, platformAdminId).catch(() => "");
+  const journalId = newRestoreJournalId();
+  const actorLabel = await platformAdminLabel(platformAdminId).catch(() => "");
+  const journalBase = {
+    id: journalId,
+    scope: "platform",
+    source: plan.source,
+    artifact: plan.artifact,
+    mode: plan.mode,
+    actorId: platformAdminId,
+    actorLabel,
+  } as const;
+  const runId = await startRestoreRun(plan, platformAdminId, journalId, actorLabel).catch(() => "");
   let downloadDir: string | null = null;
   /**
    * Every refusal on the way down goes through here, because a row was already
@@ -1533,12 +1749,14 @@ export async function restorePlatformFromPlan(
    * lists the run as in progress forever, and it is the one entry that would
    * explain to an operator why nothing changed after they clicked restore.
    */
-  const fail = async (error: string): Promise<PlatformRestoreOutcome> => {
-    if (runId) await finishRestoreRun(runId, { status: "failed", error }).catch(() => {});
+  const fail = async (error: string, phase: RestorePhase = "verify_failed"): Promise<PlatformRestoreOutcome> => {
+    await tryAppendRestoreJournal({ ...journalBase, phase, detail: { error: error.slice(0, 500) } });
+    if (runId) await finishRestoreRun(runId, { status: "failed", error, phase }).catch(() => {});
     return { status: "failed", error };
   };
   try {
     const config = await getPlatformBackupConfig();
+    const policy = outboundPolicyFor(config);
 
     // 1. Where the bytes come from, and what the source says about them.
     let manifest: PeerManifest | null = null;
@@ -1570,19 +1788,23 @@ export async function restorePlatformFromPlan(
       warnings.push(...check.warnings);
     }
 
-    // 3. The bytes.
-    let staged: { workDir: string; dumpPath: string; sourceName: string };
+    // 3. The bytes, always as a file on disk — never a whole-file Buffer.
+    let sourcePath: string;
+    let sourceName = plan.artifact;
     if (plan.source === "peer" || plan.source === "url") {
       // A peer answers the two /api/peer endpoints, so its artifact is named and
       // addressed by that contract. A bare `url` is the file address itself — a
       // link to a share, a NAS, a presigned bucket object — and is fetched
-      // exactly as given, with no token and no path joining.
+      // exactly as given, with no token and no path joining. Both go through the
+      // outbound policy: a peer address is not trusted just because an operator
+      // stored it once (issue #807).
       const url = plan.source === "peer" ? peerDownloadUrl(peer!.base_url, plan.artifact) : plan.url!;
       const token = plan.source === "peer" ? peer!.token : "";
       const expected = manifest?.artifacts.find((a) => a.artifact === plan.artifact) ?? null;
-      const downloaded = await downloadPeerArtifact({ url, token });
+      const downloaded = await downloadPeerArtifact({ url, token, policy });
       if (!downloaded.ok) return await fail(downloaded.error);
       downloadDir = downloaded.file.workDir;
+      sourcePath = downloaded.file.filePath;
       if (expected?.sha256 && downloaded.file.sha256 !== expected.sha256) {
         return await fail("checksum_mismatch");
       }
@@ -1592,30 +1814,35 @@ export async function restorePlatformFromPlan(
       if (expected?.encrypted && !plan.passphrase && !platformBackupPassphrase(config)) {
         return await fail("passphrase_required");
       }
-      const bytes = await fs.readFile(downloaded.file.filePath);
-      try {
-        staged = await stageDumpFile(
-          bytes,
-          plan.passphrase || platformBackupPassphrase(config),
-          plan.artifact,
-        );
-      } catch (err) {
-        if (err instanceof RestoreRefusal) return await fail(err.refusalCode);
-        throw err;
-      }
     } else {
-      // `local` and `cloud` are this server's own artifacts, read the same way
-      // the Owner dashboard reads them — but for the *platform* store.
-      const bytes = await readOwnArtifact(config, plan);
-      try {
-        staged = await stageDumpFile(bytes, plan.passphrase || platformBackupPassphrase(config), plan.artifact);
-      } catch (err) {
-        if (err instanceof RestoreRefusal) return await fail(err.refusalCode);
-        throw err;
-      }
+      // `local` and `cloud` are this server's own artifacts. The cloud branch
+      // uses the plan's server-validated object key, never a raw request value.
+      const own = await readOwnArtifactToFile(config, plan);
+      if (!own.ok) return await fail(own.error);
+      sourcePath = own.filePath;
+      if (own.workDir) downloadDir = downloadDir ?? own.workDir;
+      sourceName = own.sourceName;
     }
 
-    // 4. Verify, then (only if asked) apply.
+    let staged: { workDir: string; dumpPath: string; sourceName: string };
+    try {
+      staged = await stageDumpFileFromPath(sourcePath, plan.passphrase || platformBackupPassphrase(config), sourceName);
+    } catch (err) {
+      if (err instanceof RestoreRefusal) return await fail(err.refusalCode);
+      throw err;
+    }
+
+    // 4. Verify, then (only if asked) apply — every phase journalled.
+    const journal: RestoreJournalContext = {
+      id: journalId,
+      scope: "platform",
+      source: plan.source,
+      artifact: plan.artifact,
+      mode: plan.mode,
+      actorId: platformAdminId,
+      actorLabel,
+      dir: restoreJournalDir(),
+    };
     try {
       const { verified, applied } = await restoreDumpFile({
         databaseUrl: dumpDatabaseUrl(),
@@ -1623,30 +1850,55 @@ export async function restorePlatformFromPlan(
         source: plan.artifact,
         apply: plan.mode === "apply",
         emergencyDir: path.join(platformBackupDir(config.directory), "emergency"),
+        journal,
       });
       const summary = applied ?? verified;
+      if (summary.warnings?.length) warnings.push(...summary.warnings);
       if (applied) {
-        await finishRestoreRun(runId, { status: "success", summary });
+        // The database was replaced. Prove the app can reach the *restored*
+        // database before claiming success, then leave a receipt inside it.
+        const reconnected = await provePostRestoreReconnect();
+        await tryAppendRestoreJournal({
+          ...journalBase,
+          phase: reconnected.ok ? "post_restore_reconnect_succeeded" : "post_restore_reconnect_failed",
+          detail: reconnected.ok ? undefined : { error: reconnected.error.slice(0, 500) },
+        });
+        const receipt = await appendRestoreReceipt(plan, { journalId, actorLabel, summary });
+        if (runId) {
+          await finishRestoreRun(runId, {
+            status: "success",
+            summary,
+            phase: reconnected.ok ? "post_restore_reconnect_succeeded" : "post_restore_reconnect_failed",
+          }).catch(() => {});
+        }
         return {
           status: "applied",
           summary,
           warnings,
           notice:
-            "The restore replaced this database — including the platform's own settings, admins, backup config and peer list, which now come from the restored backup. Restart the app so every connection and cache is rebuilt on the new database.",
+            "The restore replaced this database — including the platform's own settings, admins, backup config and peer list, which now come from the restored backup. " +
+            "Restart the app so every connection and cache is rebuilt on the new database. " +
+            (reconnected.ok
+              ? `Post-restore reconnect verified${receipt ? " and a durable receipt written" : ""}. Journal: ${journalId}.`
+              : `WARNING: the app could not reconnect to the restored database (${reconnected.error}). Journal: ${journalId}.`),
         };
       }
-      await finishRestoreRun(runId, { status: "success", summary });
+      if (runId) {
+        await finishRestoreRun(runId, { status: "success", summary, phase: "verify_succeeded" }).catch(() => {});
+      }
       return { status: "verified", summary, warnings };
     } catch (err) {
       const message = errText(err);
-      await finishRestoreRun(runId, { status: "failed", error: message });
+      const phase: RestorePhase = err instanceof RestoreApplyError ? err.phase : "verify_failed";
+      await tryAppendRestoreJournal({ ...journalBase, phase, detail: { error: message.slice(0, 500) } });
+      if (runId) await finishRestoreRun(runId, { status: "failed", error: message, phase }).catch(() => {});
       return { status: "failed", error: message };
     } finally {
       await cleanupStagedDump(staged.workDir).catch(() => {});
     }
   } catch (err) {
     const message = errText(err);
-    if (runId) await finishRestoreRun(runId, { status: "failed", error: message }).catch(() => {});
+    await fail(message);
     console.error("platform restore failed:", message);
     return { status: "failed", error: message };
   } finally {
@@ -1655,27 +1907,77 @@ export async function restorePlatformFromPlan(
   }
 }
 
-/** Read one of this install's own artifacts, from disk or from the bucket. */
-async function readOwnArtifact(
+/**
+ * Proof that the app can reach the database it just restored. Read-only and
+ * tiny; a failure here is reported to the operator rather than silently
+ * swallowed, because "the restore worked but nothing can connect to it" is the
+ * one outcome that must never be described as success.
+ */
+async function provePostRestoreReconnect(): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const runtimeUrl = process.env.DATABASE_URL;
+    if (!runtimeUrl) return { ok: false, error: "DATABASE_URL is not set" };
+    const client = new Client({ connectionString: runtimeUrl });
+    try {
+      await client.connect();
+      await client.query("SELECT count(*)::text FROM schema_migrations");
+      await client.query("SELECT 1 FROM businesses LIMIT 1");
+    } finally {
+      await client.end().catch(() => {});
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: errText(error) };
+  }
+}
+
+/**
+ * One of this install's own artifacts, streamed to a file (issue #807).
+ *
+ * The cloud branch is where the object-key model lands: the plan carries the
+ * key the *server* resolved and validated against the configured prefix
+ * (`resolveCloudObjectKey`), so a browser cannot name an arbitrary object, and a
+ * prefixed key restores correctly instead of failing the "no `/` allowed"
+ * check. Downloads are size-capped while streaming.
+ */
+async function readOwnArtifactToFile(
   config: PlatformBackupConfig,
   plan: Extract<RestorePlan, { ok: true }>,
-): Promise<Buffer> {
+): Promise<
+  | { ok: true; filePath: string; sourceName: string; workDir: string | null }
+  | { ok: false; error: string }
+> {
   if (plan.source === "local") {
-    if (!isPlainArtifactName(plan.artifact)) throw new RestoreRefusal("artifact_not_found");
+    if (!isPlainArtifactName(plan.artifact)) return { ok: false, error: "artifact_not_found" };
+    const filePath = path.join(platformBackupDir(config.directory), plan.artifact);
     try {
-      return await fs.readFile(path.join(platformBackupDir(config.directory), plan.artifact));
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile()) return { ok: false, error: "artifact_not_found" };
     } catch {
-      throw new RestoreRefusal("artifact_not_found");
+      return { ok: false, error: "artifact_not_found" };
     }
+    return { ok: true, filePath, sourceName: plan.artifact, workDir: null };
   }
   const s3 = s3ConfigOf(config);
   if (!s3.endpoint || !s3.bucket || !s3.accessKeyId || !s3.secretAccessKey) {
-    throw new RestoreRefusal("cloud_not_configured");
+    return { ok: false, error: "cloud_not_configured" };
   }
+  // Re-derive the key here as well: the plan was already validated, but this
+  // function is also reachable from tests and future callers, and the prefix
+  // check is the boundary.
+  const resolved = resolveCloudObjectKey(
+    { objectKey: plan.objectKey, artifact: plan.artifact },
+    config.cloud.prefix,
+  );
+  if (!resolved.ok) return { ok: false, error: resolved.error };
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "pos-platform-cloud-"));
+  const filePath = path.join(workDir, "download.bin");
   try {
-    return await s3Get(s3, plan.artifact);
+    await s3GetToFile(s3, resolved.objectKey, filePath, { maxBytes: resolveMaxDownloadBytes() });
+    return { ok: true, filePath, sourceName: resolved.artifact, workDir };
   } catch (err) {
-    throw new RestoreRefusal(`download_failed:${errText(err)}`);
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    return { ok: false, error: `download_failed:${errText(err)}` };
   }
 }
 

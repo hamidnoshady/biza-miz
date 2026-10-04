@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createAppRole, DEFAULT_APP_ROLE } from "../src/lib/create-app-role";
 
 export { createAppRole, DEFAULT_APP_ROLE };
-export type { AppRoleOptions } from "../src/lib/create-app-role";
+export type { AppRoleOptions, AppRoleResult } from "../src/lib/create-app-role";
 
 export async function main() {
   const databaseUrl = process.env.DATABASE_URL;

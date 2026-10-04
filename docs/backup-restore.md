@@ -7,10 +7,22 @@ scratch database before anything destructive.
 
 ## What a backup is
 
-- A **`pg_dump --format=custom`** of the **whole local PostgreSQL database**
-  (all phases, all tables — orders, ledger, inventory, reservations,
-  settings, …). One artifact per run, named
-  `pos-backup-YYYYMMDD-HHMMSS.dump` (UTC stamp, sorts chronologically).
+- **On a site install** (`DEPLOYMENT_ROLE=site`, i.e. a desktop POS or a
+  single-business server): a **`pg_dump --format=custom`** of the **whole local
+  PostgreSQL database** (all phases, all tables — orders, ledger, inventory,
+  reservations, settings, …).
+- **On central** (`DEPLOYMENT_ROLE=central`, the deployment that hosts several
+  businesses): never a `pg_dump`. One tenant's "backup" there is a **logical,
+  RLS-scoped snapshot of that one business's rows** (`exportTenantData` →
+  `.sql`), because a whole-database dump taken on central would necessarily
+  contain every other tenant. The *deployment-wide* `pg_dump` is the super-admin
+  console's separate feature — see
+  [Whole-system (platform) backup](#whole-system-platform-backup-and-restoring-by-address-migration-0132).
+- One artifact per run, named
+  `pos-backup[-<scope>]-YYYYMMDD-HHMMSS[-<run>].(dump|sql)[.enc]` (UTC stamp,
+  sorts chronologically; `<scope>` names the tenant, `<run>` is that run's short
+  UUID, so two runs in the same second can never collide). Names written before
+  issue #807 parse as legacy names and are still readable.
 - **Local**: written to the destination folder the Owner sets on
   `/dashboard/backup`, falling back to `BACKUP_DIR` (default `./backups` next
   to the app) when that is left empty — which it is on every install that
@@ -46,9 +58,11 @@ scratch database before anything destructive.
   needs configuring; set it by hand only where `DATABASE_URL` itself isn't
   privileged (e.g. managed Postgres with a hand-provisioned `pos_app`). If a
   run fails with that error, this variable is what's wrong.
-- The Phase 9 **central aggregation server is just another deployment of
-  this app**, so it gets the exact same backup system — enable it on the
-  central instance's own dashboard too.
+- The Phase 9 **central aggregation server is a different deployment role**, and
+  since issue #807 it deliberately backs up differently: its tenant scheduler
+  writes the logical per-business snapshots above and its physical
+  `pg_dump` worker is refused at the service layer, not merely hidden in a UI.
+  The whole-deployment copy on central belongs to the super-admin console.
 
 ## Key management (read this before you need it)
 
@@ -195,11 +209,16 @@ plus the two things the console needs to hand that file to another machine:
 | Artifact folder | `BACKUP_DIR` | `PLATFORM_BACKUP_DIR`, default `BACKUP_DIR/platform` |
 | Retention prunes | its own folder only | its own folder only |
 | Can be pulled by another server | no | yes — `/api/peer/backup/*`, off until you switch it on |
-| Who can restore | an Owner, their business | owner-role admin, this whole install |
+| Who can restore | an Owner, their business (site: physical engine; central: `npm run db:restore-tenant`) | owner-role admin, this whole install |
+| On central, a "business backup" | not a dump — a per-business logical snapshot | — (that *is* this row's feature) |
 
-The two folders are separate namespaces **on purpose**: both name artifacts
-`pos-backup-YYYYMMDD-HHMMSS.dump`, so sharing one flat directory would let either
-side's retention delete the other's copies.
+The two folders are separate namespaces **on purpose**: both sides name artifacts
+`pos-backup…`, so sharing one flat directory would let either side's retention
+delete the other's copies. Since issue #807 retention also filters by scope — it
+prunes only artifacts carrying this scope's tag (a tenant's own tag, or the
+platform's) — and tenant artifacts live under `<BACKUP_DIR>/tenants/<scope>` on
+central, so an upload from one tenant can never be selected for pruning by
+another tenant's run.
 
 ### Turning it on
 
@@ -220,9 +239,12 @@ The server also checks that schedule itself — `runPlatformBackupTick()` runs f
 `server.ts` on the same 60-second heartbeat as the per-business tick, taking a copy
 only when the configured interval has elapsed — so a process that stays up needs no
 cron entry. An operator can force one from the page at any time; the two paths share
-one in-flight guard (`backupInFlight` in the service), so a manual click during a
-scheduled run answers 409 `backup_busy` — nothing is queued and the database is
-never dumped twice at once.
+one **cross-process** guard — a PostgreSQL session-level advisory lock
+(`src/lib/db-locks.ts`), not a JavaScript flag — so a manual click on one app
+instance during a scheduled run on another answers 409 `backup_busy`: nothing is
+queued, and the database is never dumped twice at once. The same mechanism guards
+whole-platform restores and per-site physical restores, so two console tabs (or
+two Node processes) can never drop and recreate the same database concurrently.
 
 ### Giving another server the address
 
@@ -232,35 +254,68 @@ Two switches and a key, all in «دسترسی سرور دیگر به این نس
    `/api/peer/backup/download` answer 404, indistinguishable from "no such route".
 2. A **token** — created on that page, shown once, stored only as a sha256. The
    peer sends it as `Authorization: Bearer …`.
-3. `allowInsecurePeers` — off; when off, peer addresses must be `https://`. Private
-   LAN addresses are allowed either way (a NAS/MinIO on the same network is the
-   normal case), but only over TLS unless you say otherwise.
+3. `allowInsecurePeers` — off; when off, peer addresses must be `https://`.
+4. `allowPrivatePeers` — off; peer addresses that resolve to a private LAN
+   address (a NAS/MinIO on the same network, the normal case) are refused until
+   this is switched on. Addresses in the cloud metadata ranges
+   (`169.254.169.254`, `fd00:ec2::254`), link-local, multicast and unspecified
+   addresses are refused **always**, opt-in or not; every redirect is
+   re-validated, and the peer token is never forwarded to a different origin.
 
 That channel serves exactly two things: the manifest, and one artifact by name.
 There is no write path, no listing of anything else, and no path traversal — a
-requested name that isn't `pos-backup-<stamp>.dump[.enc]` is a 404.
+requested name that isn't a `pos-backup…(dump|sql)[.enc]` artifact is a refusal,
+and one whose embedded scope tag belongs to another deployment is refused
+separately.
 
 ### Restoring on the new server
 
-On the *new* install's same page, «بازیابی از آدرس»:
+On the *new* install's same page, «بازیابی کامل سیستم» — one form with four
+sources, so the artifact can come from wherever it happens to be (issue #807):
 
-1. **Add the peer** — a label, the old server's URL, and the token it issued.
-2. **بررسی اتصال** — fetches the manifest and compares it with this install: the
-   old server's migration count and Postgres major versus ours. A newer schema
-   there is a refusal here (`newer_schema`) — restoring it would put a database
-   this build's queries don't have in front of them.
-3. **اعتبارسنجی** — downloads the artifact (capped while streaming by
-   `PLATFORM_BACKUP_MAX_DOWNLOAD_BYTES`, sha256 computed on the bytes actually
-   received), decrypts it if needed, restores it into a scratch database
-   `<name>_restore_verify`, counts the rows, and drops the scratch. **Nothing on
-   this server changes.**
-4. **بازگردانی کامل** — the same file restored over the live database: drop and
-   recreate, `pg_restore`, re-grant `pos_app`. Requires typing a confirmation
-   phrase and the `backup.restore` capability, which the **owner** role alone
-   holds.
+| Source | What you pick | What the server validates |
+|---|---|---|
+| **دیسک این سرور** | an artifact this server itself wrote | the file exists and parses as `pos-backup…` |
+| **فضای ابری (S3)** | an object from the bucket+prefix list | the key must sit inside the configured prefix and match a *known* artifact name |
+| **سرور مقابل** | a registered peer + one of its artifacts | token, manifest (schema/Postgres version) — then the download itself |
+| **آدرس مستقیم** | a plain download URL (NAS, another bucket) | https unless `allowInsecurePeers`; private/LAN needs `allowPrivatePeers`; the artifact name is taken from the URL's last path segment |
 
-Both the verify step and the apply step are recorded in `platform_restore_runs`,
-so a failed attempt is visible in the console with its error.
+Then the two steps are the same for every source:
+
+1. **اعتبارسنجی** — the artifact is downloaded/opened (capped while streaming,
+   sha256 computed on the bytes actually received), decrypted if needed,
+   restored into a scratch database `<name>_restore_verify`, validated by row
+   counts, and the scratch is dropped. **Nothing on this server changes.**
+2. **بازگردانی کامل** — the same file restored over the live database: drop and
+   recreate, `pg_restore`, re-grant `pos_app`, then a connection is opened **as
+   the runtime role** and made to read; if either the re-grant or that read
+   check fails, the emergency copy taken before the swap is rolled back and the
+   operator gets a named error instead of a half-restored install. Requires
+   typing a confirmation phrase and the `backup.restore` capability, which the
+   **owner** role alone holds.
+
+   The re-grant re-applies the lock-down and the grants for the role named by
+   the runtime `DATABASE_URL`. When that role *is* the connection performing the
+   restore — the packaged-desktop acceptance run, or a deployment whose
+   `DATABASE_URL` is the cluster's bootstrap superuser — PostgreSQL refuses to
+   change that role's own `SUPERUSER` attribute ("Only roles with the SUPERUSER
+   attribute may change the SUPERUSER attribute"). Exactly that one clause is
+   skipped then: the restore succeeds, and the operator is told the role kept
+   unrestricted access (the warning is written into the restore journal and
+   returned with the result). Re-granting from a separate admin connection, so
+   the runtime role is a different role, is what clears it.
+
+**The audit trail survives the swap.** Every phase is appended to a durable
+journal *outside* the target database (`RESTORE_JOURNAL_DIR`, default
+`<PLATFORM_BACKUP_DIR>/journal`): verify started/failed/succeeded, apply
+started/failed-before-swap/rolled-back/succeeded, and post-restore reconnect
+succeeded/failed. The apply phase writes its `apply_started` line **before** the
+destructive step and refuses to continue if it cannot. Afterwards a *fresh*
+`platform_restore_runs` row is appended into the restored database (never an
+update of a row the snapshot may not contain), carrying the journal id and the
+pre-restore actor label, so the two halves can be matched even though the
+`platform_admins` row itself may no longer exist. Both the pre-swap run row and
+this receipt are visible in the console's restore history.
 
 Two things to know before step 4:
 
@@ -287,6 +342,12 @@ an Owner can download it from `/dashboard/backup` (**«خروجی اطلاعات
 کسب‌وکار»**), either as a restorable SQL file or a per-table Excel workbook.
 `scripts/restore-tenant.ts` (`npm run db:restore-tenant`) is the SQL file's
 restore tool.
+
+Since issue #807 this export is also the artifact a **central** deployment
+writes as a business's scheduled backup — the tenant dashboard's «نوع نسخه»
+then reads «منطقی (فقط همین کسب‌وکار)». It is deliberately *not* restorable by
+the dashboard's physical restore card, which refuses it with
+`artifact_is_logical_snapshot`; the tool for putting it back is the one below.
 
 Unlike the whole-database restore, this is plain SQL (`INSERT` statements,
 no schema) meant for **an already-migrated, otherwise-empty database** — the

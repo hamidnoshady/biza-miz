@@ -14,7 +14,7 @@ interface Ctx {
  * success, because the caller's intent (it must not work any more) is satisfied.
  */
 export const DELETE = withPlatformScope(async (request: NextRequest, ctx: Ctx) => {
-  const { session, error } = await requirePlatformCapability("backup.manage");
+  const { session, error } = await requirePlatformCapability("backup.share");
   if (error) return error;
 
   const { id } = await ctx.params;
