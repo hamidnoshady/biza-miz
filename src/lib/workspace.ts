@@ -289,6 +289,12 @@ export async function resolveWorkspaceSubject(
                  WHERE id = $1 AND business_id = $2`,
     payment_certificate: `SELECT project_id, created_by FROM aec_payment_certificates
                  WHERE id = $1 AND business_id = $2`,
+    // Wave 9's procurement pair (§18): the request and the commitment carry
+    // their project directly, like the two commercial subjects above.
+    material_request: `SELECT project_id, created_by FROM aec_material_requests
+                 WHERE id = $1 AND business_id = $2`,
+    commitment: `SELECT project_id, created_by FROM aec_commitments
+                 WHERE id = $1 AND business_id = $2`,
   };
   const { rows } = await query<{ project_id: string | null; created_by: string | null }>(
     sql[subjectType],

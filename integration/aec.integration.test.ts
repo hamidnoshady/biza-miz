@@ -285,17 +285,21 @@ describe("every AEC table is tenant-isolated", () => {
     // Listed literally rather than counted: a table added without its policy is
     // exactly the mistake this guard exists for. Wave 4's five arrive from
     // migration 0196, Wave 5's five from 0197, Wave 6's three from 0198,
-    // Wave 7's six from 0199 and Wave 8's five from 0200; their behaviour is
-    // owned by `integration/aec-boq.integration.test.ts`,
+    // Wave 7's six from 0199, Wave 8's five from 0200 and Wave 9's eight from
+    // 0201; their behaviour is owned by
+    // `integration/aec-boq.integration.test.ts`,
     // `integration/aec-document-control.integration.test.ts`,
     // `integration/aec-rfi.integration.test.ts`,
-    // `integration/aec-site.integration.test.ts` and
-    // `integration/aec-commercial.integration.test.ts`.
+    // `integration/aec-site.integration.test.ts`,
+    // `integration/aec-commercial.integration.test.ts` and
+    // `integration/aec-procurement.integration.test.ts`.
     expect(rows.map((r) => r.relname)).toEqual([
       "aec_boq_items",
       "aec_boq_sections",
       "aec_business_profiles",
       "aec_commercial_events",
+      "aec_commitment_deliveries",
+      "aec_commitments",
       "aec_contract_commercials",
       "aec_document_revisions",
       "aec_documents",
@@ -304,17 +308,23 @@ describe("every AEC table is tenant-isolated", () => {
       "aec_estimates",
       "aec_inspection_checklist_items",
       "aec_inspection_checklists",
+      "aec_material_request_lines",
+      "aec_material_requests",
       "aec_payment_certificate_lines",
       "aec_payment_certificates",
+      "aec_procurement_events",
       "aec_project_participants",
       "aec_project_profiles",
       "aec_rfis",
+      "aec_rfq_suppliers",
+      "aec_rfqs",
       "aec_site_issue_checks",
       "aec_site_issues",
       "aec_site_log_lines",
       "aec_site_logs",
       "aec_submittal_revisions",
       "aec_submittals",
+      "aec_supplier_quotations",
       "aec_transmittal_items",
       "aec_transmittal_recipients",
       "aec_transmittals",

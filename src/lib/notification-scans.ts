@@ -43,6 +43,7 @@ import {
   expiringSecurities,
   pendingCertificates,
 } from "./aec-commercial-service";
+import { delayedCommitments } from "./aec-procurement-service";
 import { overdueRegisters } from "./aec-rfi-service";
 import { overdueSiteIssues } from "./aec-site-service";
 import { getBusinessIndustry } from "./industry-guard";
@@ -180,9 +181,15 @@ export async function scanOverdueAecRegisters(businessId: string): Promise<numbe
  *     (`aec.guarantee_expiring`, `aec.insurance_expiring`), which is §22's
  *     «Guarantee/Bond Expiry» widget as a reminder.
  *
+ * Wave 9 adds §29's «procurement delivery delay» to the same sweep: an award
+ * whose expected delivery date has passed and which nobody has recorded as
+ * delivered. It is a *workspace* fact (the supplier is late), not an accounting
+ * one, and the reminder says so — whether the invoice was posted is a different
+ * page.
+ *
  * Each half skips itself when its capability is off, so a trade of any kind can
- * be swept safely: the certificate reads raise `capability_disabled`, which is a
- * switch rather than a failure.
+ * be swept safely: the certificate and commitment reads raise
+ * `capability_disabled`, which is a switch rather than a failure.
  */
 async function scanCommercialControls(
   businessId: string,
@@ -190,6 +197,7 @@ async function scanCommercialControls(
   queue: (entry: Parameters<typeof recordNotification>[0]) => Promise<void>,
   budget: { value: number },
   securityBudget: { guarantee: { value: number }; insurance: { value: number } },
+  deliveryBudget: { value: number },
 ): Promise<void> {
   const certificates = await swallowCapability(() =>
     pendingCertificates(businessId, { limit: MAX_OVERDUE_PER_SCAN }),
@@ -261,6 +269,30 @@ async function scanCommercialControls(
       payload: { contractId: security.contractId, projectId: security.projectId },
     });
     used.value += 1;
+  }
+
+  // §29's procurement delivery delay (Wave 9). The queue already excludes an
+  // award that has been delivered or closed, so a reminder here always means
+  // "the supplier is late", never "somebody forgot to update a field".
+  const delays = await swallowCapability(() =>
+    delayedCommitments(businessId, { limit: MAX_OVERDUE_PER_SCAN }),
+  );
+  for (const delay of delays) {
+    if (deliveryBudget.value >= MAX_OVERDUE_PER_SCAN) break;
+    await queue({
+      businessId,
+      locationId: null,
+      eventKey: "aec.procurement_delivery_delay",
+      severity: "important",
+      title: `${delay.kindLabel} ${delay.commitmentNumber} — ${delay.delayDays} روز تأخیر در تحویل`,
+      body: `${delay.title} — تأمین‌کننده: ${delay.supplierName} — تاریخ تحویل مورد انتظار ${formatJalali(
+        delay.expectedDeliveryDate,
+      )} — مبلغ ${formatRialText(String(delay.valueRial))}`,
+      url: workspaceProjectHref(delay.projectId),
+      dedupeKey: notificationDedupeKey("aec.procurement_delivery_delay", delay.id, today),
+      payload: { commitmentId: delay.id, projectId: delay.projectId },
+    });
+    deliveryBudget.value += 1;
   }
 }
 
@@ -355,6 +387,7 @@ async function scanAecRegisters(businessId: string): Promise<number> {
   // Wave 8's commercial four, through the same per-register budgets: a company
   // with fifty late claims must not silence the bond that expires next week.
   const securityBudget = { guarantee: { value: 0 }, insurance: { value: 0 } };
+  const deliveryBudget = { value: 0 };
   await scanCommercialControls(
     businessId,
     today,
@@ -364,6 +397,7 @@ async function scanAecRegisters(businessId: string): Promise<number> {
     },
     { value: 0 },
     securityBudget,
+    deliveryBudget,
   );
 
   return queued;

@@ -44,12 +44,12 @@ describe("the cockpit catalogue", () => {
     // in Wave 4 (the estimating domain), `documents` in Wave 5 (the drawing
     // register), `rfis`/`submittals` in Wave 6 (the two registers of §10 and
     // §11), `site`/`inspections` in Wave 7 (the daily log and §14's issue
-    // register) and `changes`/`payments`/`financials` in Wave 8 (the change
-    // orders, the payment certificates and §20's commercial cockpit), each when
-    // the service behind it arrived. Procurement is §18's, two waves out.
-    for (const key of ["procurement"]) {
-      expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === key)?.shipped, key).toBe(false);
-    }
+    // register), `changes`/`payments`/`financials` in Wave 8 (the change
+    // orders, the payment certificates and §20's commercial cockpit) and
+    // `procurement` in Wave 9 (§18's requests, tenders, awards and deliveries),
+    // each when the service behind it arrived. Nothing §21 designs is left
+    // unshipped, so the guard is now the boundary itself: a section may only
+    // claim a wave this build has reached.
     for (const key of [
       "boq",
       "documents",
@@ -60,10 +60,11 @@ describe("the cockpit catalogue", () => {
       "changes",
       "payments",
       "financials",
+      "procurement",
     ]) {
       expect(AEC_COCKPIT_SECTIONS.find((s) => s.key === key)?.shipped, key).toBe(true);
     }
-    expect(AEC_SHIPPED_WAVE).toBe(8);
+    expect(AEC_SHIPPED_WAVE).toBe(9);
   });
 
   it("gives an individual fewer sections than a contractor", () => {
@@ -211,6 +212,7 @@ describe("the project tab bar", () => {
       "inspections",
       "changes",
       "payments",
+      "procurement",
     ]);
     // Sections that render inside a tab the generic bar already has: the page's
     // own summary and §21's identity card and phases in «نمای کلی», the

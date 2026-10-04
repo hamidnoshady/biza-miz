@@ -78,7 +78,12 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
   { key: "documents", label: "نقشه‌ها و اسناد", capability: "document_control", wave: 5, shipped: true },
   { key: "boq", label: "متره و برآورد", capability: "boq", wave: 4, shipped: true },
   { key: "contracts", label: "قراردادها", wave: 3, shipped: true },
-  { key: "procurement", label: "تأمین و خرید", capability: "procurement", wave: 9, shipped: false },
+  // Wave 9. §18's register: requests, RFQs, the comparison, the award and its
+  // deliveries. It rides `procurement`, which the design presets turn off — §18's
+  // "small architecture offices should be able to disable/hide this entire
+  // capability" — and a subcontract *award* additionally needs `subcontractors`
+  // inside the register.
+  { key: "procurement", label: "تأمین و خرید", capability: "procurement", wave: 9, shipped: true },
   // Wave 6. An RFI is a question asked of a client or a consultant, so every AEC
   // shape has the register and the section carries no capability. Submittals are
   // a *document* cycle — §11's shop drawings, samples and method statements
@@ -110,7 +115,7 @@ export const AEC_COCKPIT_SECTIONS: readonly AecCockpitSection[] = [
 ];
 
 /** The highest wave this build implements — the boundary between designed and built. */
-export const AEC_SHIPPED_WAVE = 8;
+export const AEC_SHIPPED_WAVE = 9;
 
 /**
  * The cockpit sections a business sees: shipped, and allowed by its capability
@@ -190,7 +195,7 @@ export const TAB_FOR_SECTION: Record<AecCockpitSectionKey, WorkspaceProjectTabKe
   calendar: null, // #761 merged the calendar into «کار»
   team: "team",
   assistant: "assistant",
-  procurement: null, // unshipped (Wave 9); the wave that ships it places it
+  procurement: null, // its own tab, between «مالی» and the change orders
   changes: null, // its own tab, immediately after «مالی» — see aecProjectTabs
   payments: null, // its own tab, after the change orders
   financials: null, // §20's cockpit renders inside «مالی», with the budget card
@@ -252,7 +257,10 @@ export function aecProjectTabs(
   // and a certificate claims against it, so the two registers sit immediately
   // after «مالی» (which holds the contracts and §20's cockpit) rather than at
   // the far end of the bar.
-  const afterFinance = (["changes", "payments"] as const)
+  // §21 puts Procurement after Contracts, and the money tabs read best together
+  // (finance → procurement → changes → payments): a purchase commitment and a
+  // change order are the two things that move a project's committed cost.
+  const afterFinance = (["procurement", "changes", "payments"] as const)
     .map(aecOnly)
     .filter((tab): tab is ProjectTab => tab !== null);
 

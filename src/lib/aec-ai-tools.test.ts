@@ -44,6 +44,7 @@ describe("the AEC read tools", () => {
       "list_change_orders",
       "list_payment_certificates",
       "list_project_commercial_risks",
+      "list_procurement_delays",
     ]);
     expect(isAecAiToolName("get_aec_project_financial_health")).toBe(true);
     expect(isAecAiToolName("get_workspace_project_status")).toBe(false);

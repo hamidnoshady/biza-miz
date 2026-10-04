@@ -102,6 +102,16 @@ interface CommercialSummary {
   remainingCommitmentRial: number;
   actualCostRial: number | null;
   budgetVarianceRial: number | null;
+  /** §18's commitments (Wave 9) — promised money, not posted cost. */
+  committedRial: number;
+  deliveredRial: number;
+  delayedCommitmentCount: number;
+  delayedCommitmentRial: number;
+  /** §20's forecast, `null` when the ledger or the estimate is missing. */
+  costToCompleteRial: number | null;
+  forecastFinalCostRial: number | null;
+  forecastMarginRial: number | null;
+  forecastBasis: string;
   readInAccounting: string[];
   awaitingWaves: Array<{ label: string; reason: string }>;
 }
@@ -257,6 +267,36 @@ export function AecCommercialCard({
           />
         </dl>
 
+        <div className="mt-4 rounded-xl border border-border/80 bg-muted/30 p-3">
+          <p className="text-xs font-medium">پیش‌بینی هزینه و حاشیه (§۲۰)</p>
+          <dl className="mt-2 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
+            <Figure
+              label="تعهدشده (خرید و پیمان جزء)"
+              value={summary.committedRial ? money.format(summary.committedRial) : "—"}
+              hint={
+                summary.delayedCommitmentCount > 0
+                  ? `${n(summary.delayedCommitmentCount)} تعهد با تأخیر تحویل — ${money.format(summary.delayedCommitmentRial)}`
+                  : "مبلغ تعهدشده، نه هزینهٔ ثبت‌شده"
+              }
+            />
+            <Figure label="تحویل‌شده" value={summary.deliveredRial ? money.format(summary.deliveredRial) : "—"} />
+            <Figure label="هزینه تا تکمیل" value={dash(summary.costToCompleteRial)} />
+            <Figure label="هزینهٔ نهایی پیش‌بینی‌شده" value={dash(summary.forecastFinalCostRial)} />
+            <Figure
+              label="حاشیهٔ برآوردی"
+              value={dash(summary.forecastMarginRial)}
+              hint="ارزش اصلاح‌شده منهای هزینهٔ نهایی پیش‌بینی‌شده"
+            />
+          </dl>
+          <p className="mt-2 text-xs text-muted-foreground">{summary.forecastBasis}</p>
+          {summary.costToCompleteRial === null ? (
+            <p className="mt-1 text-xs text-muted-foreground">
+              تا وقتی هزینهٔ ثبت‌شده در حسابداری و برآورد مصوب هر دو موجود نباشند، پیش‌بینی «—»
+              می‌ماند؛ صفر گزارش نمی‌شود.
+            </p>
+          ) : null}
+        </div>
+
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           <div className="rounded-xl border border-border/80 bg-muted/30 p-3">
             <p className="text-xs font-medium">این ارقام در حسابداری است</p>
@@ -266,16 +306,18 @@ export function AecCommercialCard({
               ))}
             </ul>
           </div>
-          <div className="rounded-xl border border-border/80 bg-muted/30 p-3">
-            <p className="text-xs font-medium">هنوز محاسبه نمی‌شود</p>
-            <ul className="mt-1 flex flex-col gap-1 text-xs text-muted-foreground">
-              {summary.awaitingWaves.map((entry) => (
-                <li key={entry.label}>
-                  <span className="text-foreground">{entry.label}:</span> {entry.reason}
-                </li>
-              ))}
-            </ul>
-          </div>
+          {summary.awaitingWaves.length > 0 ? (
+            <div className="rounded-xl border border-border/80 bg-muted/30 p-3">
+              <p className="text-xs font-medium">هنوز محاسبه نمی‌شود</p>
+              <ul className="mt-1 flex flex-col gap-1 text-xs text-muted-foreground">
+                {summary.awaitingWaves.map((entry) => (
+                  <li key={entry.label}>
+                    <span className="text-foreground">{entry.label}:</span> {entry.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       </SectionCard>
 

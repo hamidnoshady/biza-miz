@@ -762,6 +762,62 @@ describe("the AEC module's API guards", () => {
     }
   });
 
+  it("keeps the procurement award separate from ordinary register edits", () => {
+    // §24 again, for Wave 9. Two of §18's register actions are determinations:
+    // granting a material request and obliging the business to a purchase order
+    // or subcontract (plus withdrawing an approved award). Their status routes
+    // ask for one permission per action through the module's own catalogue
+    // predicates — the same rule-not-a-branch shape Wave 8 used — and they are
+    // the only procurement routes that name the approval key.
+    for (const [key, predicate] of [
+      ["aec/requests/[id]/status", "materialRequestActionNeedsApproval"],
+      ["aec/commitments/[id]/status", "commitmentActionNeedsApproval"],
+    ] as const) {
+      const status = sources.get(key);
+      expect(status, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(status as string).toMatch(new RegExp(predicate));
+      expect(status as string).toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(status as string).toMatch(/PERMISSIONS\.workspaceManage/);
+    }
+
+    // Asking suppliers for prices commits nothing and choosing which offers to
+    // compare is not the award, so the RFQ and quotation status routes must not
+    // name the approval key at all.
+    for (const key of ["aec/rfqs/[id]/status", "aec/quotations/[id]/status"]) {
+      const status = sources.get(key);
+      expect(status, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(status as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(status as string).toMatch(/PERMISSIONS\.workspaceManage/);
+    }
+
+    // The registers themselves, their children and the tab's read are ordinary
+    // workspace work: a clerk who may prepare an award must not be able to
+    // approve it, and a member reading the tab needs only the view key.
+    for (const key of [
+      "aec/projects/[id]/requests",
+      "aec/requests/[id]",
+      "aec/projects/[id]/rfqs",
+      "aec/rfqs/[id]",
+      "aec/rfqs/[id]/quotations",
+      "aec/quotations/[id]",
+      "aec/projects/[id]/commitments",
+      "aec/commitments/[id]",
+      "aec/commitments/[id]/deliveries",
+      "aec/deliveries/[id]",
+    ]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
+    }
+    for (const key of ["aec/projects/[id]/procurement"]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).toMatch(/PERMISSIONS\.workspaceView/);
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+    }
+  });
+
   it("keeps the shared helper requirePermission and nothing weaker", () => {
     const guard = readFileSync(join(API_ROOT, "aec", "guard.ts"), "utf8");
     expect(guard).toMatch(/requirePermission\(permission\)/);

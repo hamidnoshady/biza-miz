@@ -298,6 +298,13 @@ export const APPROVAL_SUBJECTS = [
   // without a second framework is to file them where the right key already is.
   "variation",
   "payment_certificate",
+  // Issue #799 §18 (Wave 9) — a material request and a purchase/subcontract
+  // commitment. The requirement is approved before the firm goes to market and
+  // the award is approved before any money is committed, so both are decisions
+  // and both belong where the deciding key already is rather than in a
+  // procurement approval store of their own.
+  "material_request",
+  "commitment",
 ] as const;
 export type WorkspaceApprovalSubject = (typeof APPROVAL_SUBJECTS)[number];
 
@@ -314,6 +321,8 @@ export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> =
   submittal_revision: "بازنگری سابمیتال",
   variation: "تغییر / دستور کار",
   payment_certificate: "صورت‌وضعیت",
+  material_request: "درخواست کالا",
+  commitment: "تعهد خرید / پیمان جزء",
 };
 
 export const APPROVAL_STATUSES = [

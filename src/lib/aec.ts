@@ -89,7 +89,15 @@ export const AEC_CAPABILITY_KEYS = [
    * every issue register carries.
    */
   "hse",
-  /** Material tracking on site. Wave 7/9. */
+  /**
+   * Material tracking on site. **Reserved, and not a promise.** Delivery
+   * *tracking* — what was ordered, what arrived, who signed for it — is §18's
+   * and rides `procurement` (migration 0201's commitments and deliveries); a
+   * materials *ledger* with quantities on hand would need the products/stock
+   * model an AEC tenant deliberately does not have (Wave 1: no `items`, no
+   * `item_stock`). No screen waits on this switch, which is why it is absent from
+   * `AEC_LIVE_CAPABILITIES` with a reason instead of a wave number.
+   */
   "material_tracking",
   /** Supervision cycles and inspection visits. Wave 8. */
   "supervision",
@@ -158,6 +166,13 @@ export const AEC_LIVE_CAPABILITIES: readonly AecCapabilityKey[] = [
   "variations",
   "progress_claims",
   "financials",
+  // Wave 9 — procurement (`aec-procurement-service.ts`, migration 0201): the
+  // material request, the RFQ and its comparison, the purchase/subcontract
+  // commitment and its deliveries. §18 asks for the whole flow to be
+  // switchable — "small architecture offices should be able to disable/hide
+  // this entire capability" — and the design presets already have it off.
+  "procurement",
+  "subcontractors",
 ];
 
 /* ===========================================================================
@@ -646,6 +661,12 @@ export const AEC_AI_TOOL_NAMES = [
   "list_change_orders",
   "list_payment_certificates",
   "list_project_commercial_risks",
+  // Issue #799 Wave 9 — §23's `list_procurement_delays`, which §22's widget and
+  // §29's warning also name: awards that are past the delivery date the supplier
+  // agreed to, and the material requests nobody has picked up. It reads the same
+  // queue functions the procurement tab reads, so the chat answer and the screen
+  // are the same rows.
+  "list_procurement_delays",
 ] as const;
 export type AecAiToolName = (typeof AEC_AI_TOOL_NAMES)[number];
 
@@ -665,6 +686,7 @@ export const AEC_AI_TOOL_LABELS: Record<AecAiToolName, string> = {
   list_change_orders: "تغییرات و دستور کارها",
   list_payment_certificates: "صورت‌وضعیت‌ها و گواهی‌ها",
   list_project_commercial_risks: "ریسک‌های تجاری پروژه",
+  list_procurement_delays: "تأخیر تأمین و تعهدات باز",
 };
 
 export function isAecOperatingProfile(value: string): value is AecOperatingProfile {

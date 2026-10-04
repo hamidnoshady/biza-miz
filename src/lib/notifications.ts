@@ -107,6 +107,12 @@ export const NOTIFICATION_EVENT_KEYS = [
   "aec.client_payment_overdue",
   "aec.guarantee_expiring",
   "aec.insurance_expiring",
+  // Issue #799 §29 (Wave 9) — «procurement delivery delay», the one reminder the
+  // section names for the procurement flow. A delivery becomes late by a date
+  // passing, so it rides the same hourly scan as the rest rather than a
+  // scheduler of its own, and it is one key because it is one thing to switch
+  // off.
+  "aec.procurement_delivery_delay",
   "system.test",
 ] as const;
 export type NotificationEventKey = (typeof NOTIFICATION_EVENT_KEYS)[number];
@@ -387,6 +393,19 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     description:
       "وقتی ضمانت‌نامه یا تضمین قراردادی تا دو ماه آینده منقضی می‌شود. روزی یک بار برای هر قرارداد.",
     defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
+    perLocation: false,
+    hasAmount: true,
+  },
+  "aec.procurement_delivery_delay": {
+    key: "aec.procurement_delivery_delay",
+    group: "projects",
+    label: "تأخیر تحویل سفارش خرید",
+    description:
+      "وقتی سفارش خرید یا پیمان جزئی از تاریخ تحویل مورد انتظار گذشته و هنوز تحویل نشده است. روزی یک بار برای هر تعهد، در روز کاری همان شعبه.",
+    defaultSeverity: "important",
+    // The commitment is a money obligation, so the owner and the manager hear
+    // about it; a site engineer can switch it on for themselves.
     defaultRoles: ["owner", "manager"],
     perLocation: false,
     hasAmount: true,

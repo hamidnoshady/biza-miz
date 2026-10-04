@@ -76,6 +76,7 @@ import { AecRfisTab } from "./rfis-panel";
 import { AecSubmittalsTab } from "./submittals-panel";
 import { AecSiteTab } from "./site-panel";
 import { AecInspectionsTab } from "./inspections-panel";
+import { AecProcurementTab } from "./procurement-panel";
 import { AecVariationsTab } from "./variations-panel";
 import { AecCertificatesTab } from "./certificates-panel";
 import { AecCommercialCard } from "./commercial-panel";
@@ -516,6 +517,23 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             service refuses to let the assignee verify their own fix. */}
         {tab === "inspections" ? (
           <AecInspectionsTab
+            projectId={projectId}
+            canManage={canManageProject}
+            canApprove={canApprove}
+            lookups={lookups}
+          />
+        ) : null}
+
+        {/* Issue #799 §18 — procurement: the material requests, the RFQs with
+            their comparison sheet, the purchase/subcontract commitments and
+            their deliveries. `procurement` is what puts the tab in the bar, so
+            an architecture office that switched the register off never mounts
+            it; a subcontract award additionally needs `subcontractors`, which
+            the API enforces rather than this page. Granting a request and
+            obliging the business to an award are §24 determinations and need
+            `workspace.approve`. */}
+        {tab === "procurement" ? (
+          <AecProcurementTab
             projectId={projectId}
             canManage={canManageProject}
             canApprove={canApprove}

@@ -26,9 +26,10 @@ import type { WorkspaceOwner } from "./workspace";
 /**
  * The AEC registers a `workspace_documents` row can be attached to. Wave 8
  * added the change order and the payment certificate (§15's "linked documents",
- * §16's supporting papers) — the same column-per-register shape migration 0199
- * uses, with the same trigger (`aec_assert_attachment_owned`) refusing a file
- * from another project.
+ * §16's supporting papers) and Wave 9 the commitment (§18's signed order or
+ * subcontract) — the same column-per-register shape migration 0199 uses, with the
+ * same trigger (`aec_assert_attachment_owned`) refusing a file from another
+ * project.
  */
 export type AttachmentColumn =
   | "rfi_id"
@@ -36,7 +37,8 @@ export type AttachmentColumn =
   | "site_log_id"
   | "site_issue_id"
   | "variation_id"
-  | "payment_certificate_id";
+  | "payment_certificate_id"
+  | "commitment_id";
 
 export interface LinkedDocument {
   documentId: string;

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { decideEstimateApproval } from "@/lib/aec-boq-service";
 import { decideCertificateApproval, decideVariationApproval } from "@/lib/aec-commercial-service";
+import { decideCommitmentApproval, decideMaterialRequestApproval } from "@/lib/aec-procurement-service";
 import { decideSubmittalApproval } from "@/lib/aec-rfi-service";
 import { approvalSubjectType, decideApproval } from "@/lib/workspace";
 import type { WorkspaceApprovalDecision } from "@/lib/workspace-shared";
@@ -41,6 +42,12 @@ const DECISIONS: readonly WorkspaceApprovalDecision[] = [
  * and, through migration 0200's trigger, the contract's revised value;
  * certifying a claim fixes the certified figure. Both are `workspace.approve`
  * decisions however they are reached, which is §24's rule for them.
+ *
+ * §18 (Wave 9) adds `material_request` and `commitment`. Only the *award* is an
+ * approval — the request queue is an acknowledgement that the store may issue —
+ * and both are taken on `workspace.approve` exactly as the paragraph above says.
+ * Neither register walks a review step; §18's chains go submit → approved or
+ * rejected, so the service does the whole decision in one call.
  */
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -77,6 +84,20 @@ export const POST = withTenantScope(
           return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
         }
         return NextResponse.json({ approval: null, variationId: result.variationId });
+      }
+      if (subjectType === "material_request") {
+        const result = await decideMaterialRequestApproval(owner, id, decision, note);
+        if (!result.applied) {
+          return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
+        }
+        return NextResponse.json({ approval: null, materialRequestId: result.requestId });
+      }
+      if (subjectType === "commitment") {
+        const result = await decideCommitmentApproval(owner, id, decision, note);
+        if (!result.applied) {
+          return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
+        }
+        return NextResponse.json({ approval: null, commitmentId: result.commitmentId });
       }
       if (subjectType === "payment_certificate") {
         const result = await decideCertificateApproval(owner, id, decision, note);

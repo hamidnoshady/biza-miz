@@ -647,6 +647,60 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "تغییرات در حال تنظیم",
   },
 
+  // -- AEC (issue #799 Wave 9) ----------------------------------------------
+  // §18's three supplier columns. Suppliers stay `parties` — that is the whole
+  // reason these are references to classify rather than a second supplier model.
+  // Migration 0201's `aec_assert_party_live()` refuses an archived or
+  // merged-away party, so a row left pointing at the loser becomes unwritable on
+  // its next edit; each entry moves what may be moved and leaves the frozen rest.
+  {
+    table: "aec_rfq_suppliers",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    // An issued RFQ is frozen (0201's rfq guard), and its invitation rows are
+    // part of what was sent — so only a draft tender's list moves. The unique
+    // key is (rfq_id, party_id): when both records were invited to the same
+    // tender, the loser's duplicate row is dropped rather than aborting the
+    // merge.
+    filterSql:
+      "EXISTS (SELECT 1 FROM aec_rfqs q WHERE q.id = {t}.rfq_id AND q.status = 'draft')",
+    uniqueWithSql: ["rfq_id"],
+    reason:
+      "A supplier invited to a draft RFQ. Drafts follow the surviving record; an issued tender keeps the invitation list it was sent with.",
+    preview: true,
+    previewLabel: "تأمین‌کنندگان دعوت‌شده به استعلام (پیش‌نویس)",
+  },
+  {
+    table: "aec_supplier_quotations",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    // `selected` and `declined` quotations are history and 0201 refuses to
+    // update them at all; received and shortlisted ones are still live rows and
+    // move. Same unique key as the invitation list, so the same collision rule.
+    filterSql: "{t}.status NOT IN ('selected', 'declined')",
+    uniqueWithSql: ["rfq_id"],
+    reason:
+      "The supplier an offer came from. A live offer follows the surviving record; a decided one is the history the award was made against.",
+    preview: true,
+    previewLabel: "پیشنهادهای تأمین‌کنندگان",
+  },
+  {
+    table: "aec_commitments",
+    column: "supplier_party_id",
+    scope: "business",
+    disposition: "move",
+    // A submitted award is frozen (0201's commitment guard), so a draft moves
+    // and the rest keep the supplier they oblige. No unique conflict: a project
+    // may have many awards to one supplier.
+    filterSql: "{t}.status = 'draft'",
+    reason:
+      "The supplier a purchase order or subcontract obliges. A draft moves with the surviving record; a submitted award keeps the supplier the client and the books were told about.",
+    preview: true,
+    previewLabel: "سفارش‌های خرید و پیمان‌های جزئی (پیش‌نویس)",
+  },
+
   // -- Historical / audit: deliberately NOT moved ---------------------------
   {
     table: "crm_merges",

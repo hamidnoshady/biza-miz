@@ -891,7 +891,10 @@ describe("progress measurement and payment certificates (issue #799 §16)", () =
     // The figures the books own are named, not computed here.
     expect(withoutLedger.readInAccounting.length).toBe(3);
     expect(withoutLedger.readInAccounting.join(" ")).toContain("دریافتنی");
-    expect(withoutLedger.awaitingWaves.map((entry) => entry.label).join(" ")).toContain("تعهدشده");
+    // Wave 9 emptied the "not built yet" list — §18's commitments now answer
+    // the three figures §20 was waiting on — so the cockpit carries none.
+    expect(withoutLedger.awaitingWaves).toEqual([]);
+    expect(withoutLedger.committedRial).toBe(0);
 
     const withLedger = await withTenant(businessId, () =>
       commercial.getProjectCommercialSummary(
@@ -902,6 +905,10 @@ describe("progress measurement and payment certificates (issue #799 §16)", () =
     expect(withLedger.actualCostRial).toBe(1_500_000_000);
     expect(withLedger.certifiedRial).toBe(500_000_000);
     expect(withLedger.remainingCommitmentRial).toBe(4_500_000_000);
+    // With the ledger readable and no approved estimate on this fixture, §20's
+    // forecast is still `null` rather than a number built on half the facts.
+    expect(withLedger.costToCompleteRial).toBeNull();
+    expect(withLedger.forecastBasis.trim().length).toBeGreaterThan(0);
   });
 });
 

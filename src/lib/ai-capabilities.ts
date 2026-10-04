@@ -83,6 +83,11 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_change_orders: PERMISSIONS.workspaceView,
   list_payment_certificates: PERMISSIONS.workspaceView,
   list_project_commercial_risks: PERMISSIONS.workspaceView,
+  // Wave 9's procurement read is the «تأمین و خرید» tab's own data (the awards
+  // past their delivery date and the requests nobody has picked up), so like the
+  // commercial three above it adds no reach beyond `workspace.view` — the
+  // service gates it on the `procurement` capability on top.
+  list_procurement_delays: PERMISSIONS.workspaceView,
   list_pending_submittals: PERMISSIONS.workspaceView,
   // The site and quality queue (issue #799 §23, Wave 7) is the register the same
   // member opens on the project page, so this read adds no reach either.

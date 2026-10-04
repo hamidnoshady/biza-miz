@@ -79,6 +79,8 @@ import {
 } from "./aec-commercial";
 import { AecError, assertAecIndustry, loadBusinessAecProfile } from "./aec-service";
 import { businessToday } from "./business-day-service";
+import { nextAecNumber } from "./aec-numbering";
+import { costForecast, forecastMarginRial, FORECAST_BASIS_LABEL } from "./aec-procurement";
 import { query, withTenantTransaction } from "./db";
 import { recordActivity, type WorkspaceOwner } from "./workspace";
 import {
@@ -395,6 +397,29 @@ export interface ProjectCommercialSummary {
   actualCostRial: number | null;
   /** Budget against the ledger's actual cost, when both are known. */
   budgetVarianceRial: number | null;
+  /**
+   * §18's commitments — what the business has promised to pay a supplier or a
+   * subcontractor. Approved awards, read without the `procurement` capability so
+   * an architecture office that switched the register off still gets the honest
+   * answer (nothing is committed) instead of an error. In Accounting's world
+   * these are *not* costs yet; they are the sentence the project budget tells
+   * you about money that has not been invoiced.
+   */
+  committedRial: number;
+  /** The part of the above that has actually arrived (a delivery was recorded). */
+  deliveredRial: number;
+  /** Awards past their expected delivery date, and how much of the money that is. */
+  delayedCommitmentCount: number;
+  delayedCommitmentRial: number;
+  /**
+   * §20's two forecasts, and the sentence that says how they were made. `null`
+   * when the ledger or the approved estimate is missing — the screen prints the
+   * reason, never a zero that looks like a measurement.
+   */
+  costToCompleteRial: number | null;
+  forecastFinalCostRial: number | null;
+  forecastMarginRial: number | null;
+  forecastBasis: string;
   readInAccounting: string[];
   awaitingWaves: Array<{ label: string; reason: string }>;
 }
@@ -876,25 +901,6 @@ async function loadEvents(
  * advisory lock, the same pattern `aec-site-service.ts` uses. The seed differs
  * from the site register's so the two locks never contend with each other.
  */
-async function nextCommercialNumber(
-  table: "aec_variations" | "aec_payment_certificates",
-  column: "variation_number" | "certificate_number",
-  projectId: string,
-  prefix: string,
-): Promise<string> {
-  await query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 7998))`, [
-    `commercial:${table}:${projectId}`,
-  ]);
-  const { rows } = await query<{ max: number | null }>(
-    `SELECT MAX(NULLIF(regexp_replace(${column}, '^.*-', ''), '')::integer) AS max
-       FROM ${table}
-      WHERE project_id = $1 AND ${column} LIKE $2`,
-    [projectId, `${prefix}-%`],
-  );
-  const next = (rows[0]?.max ?? 0) + 1;
-  return `${prefix}-${String(next).padStart(3, "0")}`;
-}
-
 /* ===========================================================================
  * Variations (§15)
  * ======================================================================== */
@@ -1015,9 +1021,8 @@ export async function createVariation(
   const fields = await resolveVariationFields(owner, projectId, input, null);
 
   const variationId = await withTenantTransaction(owner.businessId, async () => {
-    const variationNumber = await nextCommercialNumber(
+    const variationNumber = await nextAecNumber(
       "aec_variations",
-      "variation_number",
       projectId,
       VARIATION_NUMBER_PREFIX,
     );
@@ -1556,9 +1561,8 @@ export async function createCertificate(
   const fields = await resolveCertificateFields(owner, projectId, input, null);
 
   const certificateId = await withTenantTransaction(owner.businessId, async () => {
-    const certificateNumber = await nextCommercialNumber(
+    const certificateNumber = await nextAecNumber(
       "aec_payment_certificates",
-      "certificate_number",
       projectId,
       CERTIFICATE_NUMBER_PREFIX,
     );
@@ -2059,21 +2063,16 @@ export const COMMERCIAL_ACCOUNTING_FIGURES = [
   "حساب‌های دریافتنی و پرداختنی",
 ] as const;
 
-/** §20's figures that need a register this build does not have yet. */
-export const COMMERCIAL_AWAITING_WAVES: ReadonlyArray<{ label: string; reason: string }> = [
-  {
-    label: "هزینهٔ تعهدشده و تأخیر تأمین",
-    reason: "با ثبت سفارش خرید و پیمان‌های جزء (موج ۹ — تأمین و خرید) محاسبه می‌شود.",
-  },
-  {
-    label: "هزینه تا تکمیل و هزینهٔ نهایی پیش‌بینی‌شده",
-    reason: "به تعهدات باز و پیش‌بینی هزینهٔ جاری نیاز دارد؛ تا آن زمان صفر گزارش نمی‌شود.",
-  },
-  {
-    label: "حاشیهٔ برآوردی پروژه",
-    reason: "بدون هزینهٔ نهایی پیش‌بینی‌شده معنا ندارد؛ حاشیه در حسابداری بر پایهٔ درآمد شناسایی‌شده خوانده می‌شود.",
-  },
-];
+/**
+ * §20's figures that need a register this build does not have yet.
+ *
+ * Wave 9 emptied it: the committed cost, the delay, the cost to complete, the
+ * forecast final cost and the forecast margin all have registers behind them now
+ * (migration 0201, `costForecast` in `aec-procurement.ts`). The list stays — it
+ * is how the cockpit says "designed, not built" without inventing a zero — and
+ * the next wave that adds a §20 figure to it will find the shape it needs.
+ */
+export const COMMERCIAL_AWAITING_WAVES: ReadonlyArray<{ label: string; reason: string }> = [];
 
 export async function getProjectCommercialSummary(
   owner: WorkspaceOwner,
@@ -2174,13 +2173,26 @@ export async function getProjectCommercialSummary(
   const budgetVarianceRial =
     budgetRial === null || actualCostRial === null ? null : budgetRial - actualCostRial;
 
+  // Wave 9's half of §20. Read through the *ungated* total on purpose: the
+  // forecast is part of the financial cockpit, and a business running without
+  // the procurement register still gets a forecast made of the two halves it
+  // does have. See `projectCommitmentTotals` for why the gate is not here.
+  const { projectCommitmentTotals } = await import("./aec-procurement-service");
+  const commitments = await projectCommitmentTotals(owner.businessId, projectId);
+  const approvedEstimateRial = estimateRows[0]?.total_rial === undefined
+    ? null
+    : optionalMoney(estimateRows[0]?.total_rial);
+  const forecast = costForecast({
+    actualCostRial,
+    committedRial: commitments.committedRial,
+    approvedEstimateRial,
+  });
+
   return {
     projectId: project.id,
     projectName: project.name,
     budgetRial,
-    approvedEstimateRial: estimateRows[0]?.total_rial === undefined
-      ? null
-      : optionalMoney(estimateRows[0]?.total_rial),
+    approvedEstimateRial,
     originalContractRial,
     approvedVariationsRial,
     revisedContractRial,
@@ -2197,6 +2209,14 @@ export async function getProjectCommercialSummary(
     remainingCommitmentRial: Math.max(0, revisedContractRial - certifiedRial),
     actualCostRial,
     budgetVarianceRial,
+    committedRial: commitments.committedRial,
+    deliveredRial: commitments.deliveredRial,
+    delayedCommitmentCount: commitments.delayedCount,
+    delayedCommitmentRial: commitments.delayedRial,
+    costToCompleteRial: forecast?.costToCompleteRial ?? null,
+    forecastFinalCostRial: forecast?.forecastFinalCostRial ?? null,
+    forecastMarginRial: forecastMarginRial(revisedContractRial, forecast?.forecastFinalCostRial ?? null),
+    forecastBasis: FORECAST_BASIS_LABEL,
     readInAccounting: [...COMMERCIAL_ACCOUNTING_FIGURES],
     awaitingWaves: [...COMMERCIAL_AWAITING_WAVES],
   };

@@ -40,6 +40,12 @@
  *     seen money for, and the bonds approaching expiry into one answer — with
  *     every money figure labelled by who owns it (Workspace or Accounting)
  *     rather than silently mixed.
+ *   - `list_procurement_delays` (Wave 9) — §23's procurement-delay question, and
+ *     the data behind §22's widget of the same name and §29's warning. It names
+ *     both halves honestly: the awards a supplier is late on (with how many days
+ *     and how much money they are worth) and the material requests still waiting
+ *     on an approval. Nothing about Accounting is claimed — a late delivery is a
+ *     Workspace fact, and whether the invoice was posted is a different page.
  *
  * A business of another industry is refused rather than answered: an empty list
  * would read as "nothing is late", which is a claim about a café's construction
@@ -59,6 +65,7 @@ import {
   pendingVariations,
 } from "./aec-commercial-service";
 import { latestDrawingRevisions } from "./aec-doc-service";
+import { delayedCommitments, pendingMaterialRequests } from "./aec-procurement-service";
 import { pendingRfis, pendingSubmittals } from "./aec-rfi-service";
 import { pendingSiteIssues } from "./aec-site-service";
 import { SITE_ISSUE_STATUS_LABELS, type SiteIssueStatus } from "./aec-site";
@@ -641,6 +648,60 @@ async function runTool(
           today,
           note:
             "«مبلغ تأییدشده» یعنی آنچه گواهی شده است، نه آنچه وصول شده؛ دریافتی‌ها و مانده‌ها را از حسابداری بخوان و اگر در دسترس نیست بگو که در دسترس نیست.",
+        },
+      };
+    }
+
+    case "list_procurement_delays": {
+      const resolved = await resolveProject(owner, args);
+      if (resolved.kind === "ambiguous") return ambiguousProject(resolved.candidates);
+      if (resolved.kind === "none") return { ok: false, error: "پروژه پیدا نشد." };
+
+      const afterDays = Math.min(Math.max(Number(args.afterDays) || 0, 0), 365);
+      const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
+      let delays;
+      let waiting;
+      let summary;
+      try {
+        [delays, waiting, summary] = await Promise.all([
+          delayedCommitments(businessId, { projectId: resolved.projectId, afterDays, limit }),
+          pendingMaterialRequests(businessId, { projectId: resolved.projectId, limit }),
+          getProjectCommercialSummary(owner, resolved.projectId),
+        ]);
+      } catch (err) {
+        if (err instanceof AecError && err.code === "capability_disabled") {
+          return {
+            ok: false,
+            error:
+              "تأمین و خرید روی این کسب‌وکار روشن نیست؛ برای دیدن تأخیرها، از «تنظیمات ← کسب‌وکار» قابلیت procurement را روشن کنید.",
+          };
+        }
+        throw err;
+      }
+
+      return {
+        ok: true,
+        data: {
+          project: { id: resolved.projectId, name: summary.projectName },
+          delayedCommitments: delays.map((row) => ({
+            ...row,
+            expectedDeliveryDateJalali: formatJalali(row.expectedDeliveryDate),
+          })),
+          delayedCount: delays.length,
+          delayedRial: delays.reduce((sum, row) => sum + row.valueRial, 0),
+          pendingMaterialRequests: waiting.map((row) => ({
+            ...row,
+            requiredByJalali: row.requiredBy ? formatJalali(row.requiredBy) : null,
+            submittedDateJalali: row.submittedDate ? formatJalali(row.submittedDate) : null,
+          })),
+          committedRial: summary.committedRial,
+          deliveredRial: summary.deliveredRial,
+          costToCompleteRial: summary.costToCompleteRial,
+          forecastFinalCostRial: summary.forecastFinalCostRial,
+          forecastBasis: summary.forecastBasis,
+          today,
+          note:
+            "«تعهد» یعنی مبلغی که به تأمین‌کننده یا پیمان جزء تعهد شده و هنوز در حسابداری هزینهٔ ثبت‌شده نیست؛ پیش‌بینی هزینه هم فقط وقتی عدد دارد که هم هزینهٔ ثبت‌شده و هم برآورد مصوب موجود باشد، وگرنه null است.",
         },
       };
     }
