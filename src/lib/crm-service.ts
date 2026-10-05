@@ -51,6 +51,7 @@ import {
 } from "./crm-shared";
 import { daysBetween, lifetimeValue, scorePopulation, type CustomerRfmInput, type RfmScore } from "./crm-scoring";
 import { customerHealth as healthOf, type CustomerHealth } from "./crm-health";
+import { resolveOwner } from "./crm-ownership";
 import type { LifecycleStage } from "./crm-scoring";
 import {
   movedPartyReferences,
@@ -1648,7 +1649,10 @@ interface CrmDeal extends Record<string, unknown> {
   valueRial: number;
   probability: number | null;
   expectedCloseDate: string | null;
+  /** The owner's display name as stored — the snapshot, kept for history. */
   ownerUser: string;
+  /** The owner as a member id. Null when nobody is assigned, or when a typed name matched no single member. */
+  ownerUserId: string | null;
   source: string;
   closedAt: string | null;
   lostReason: string | null;
@@ -1660,7 +1664,8 @@ interface CrmDeal extends Record<string, unknown> {
 const DEAL_COLUMNS = `d.id, d.customer_id AS "customerId", c.name AS "customerName",
   d.title, d.description, d.stage, d.stage_id AS "stageId", d.pipeline_id AS "pipelineId",
   d.value_rial AS "valueRial", d.probability,
-  d.expected_close_date::text AS "expectedCloseDate", d.owner_user AS "ownerUser",
+  d.expected_close_date::text AS "expectedCloseDate",
+  d.owner_user AS "ownerUser", d.owner_user_id AS "ownerUserId",
   d.source, d.closed_at AS "closedAt", d.lost_reason AS "lostReason",
   d.order_id AS "orderId", d.created_at AS "createdAt", d.updated_at AS "updatedAt"`;
 
@@ -1712,7 +1717,10 @@ interface UpsertDealInput {
   valueRial?: number;
   probability?: number | null;
   expectedCloseDate?: string | null;
+  /** The owner's display name — the snapshot, kept for history. */
   ownerUser?: string;
+  /** The owner as a member id. Preferred wherever the caller has one. */
+  ownerUserId?: string | null;
   source?: string;
   lostReason?: string | null;
   orderId?: string | null;
@@ -1749,11 +1757,22 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
   const stage = resolved ? (legacyStageKey(resolved) as DealStage) : legacyKey;
   const terminal = resolved ? resolved.outcome !== "open" : stage === "won" || stage === "lost";
 
+  /**
+   * The owner, resolved once: an id when the caller gave one (or gave a name
+   * that matches exactly one member), and the display name either way.
+   *
+   * Both columns are written from this single resolution, so the id and the
+   * snapshot can never disagree about who owns the deal — and a name that
+   * matches two members resolves to nobody rather than to the wrong colleague.
+   */
+  const owner = await resolveOwner(businessId, input.ownerUserId ?? input.ownerUser);
+
   if (input.id) {
     await query(
       `UPDATE crm_deals
           SET customer_id = $3, title = $4, description = $5, stage = $6, value_rial = $7,
-              probability = $8, expected_close_date = $9::date, owner_user = $10, source = $11,
+              probability = $8, expected_close_date = $9::date,
+              owner_user = $10, owner_user_id = $17, source = $11,
               lost_reason = $12, order_id = $13,
               stage_id = COALESCE($15, stage_id),
               pipeline_id = COALESCE($16, pipeline_id),
@@ -1772,13 +1791,14 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
         Math.max(0, Math.round(input.valueRial ?? 0)),
         input.probability ?? null,
         input.expectedCloseDate ?? null,
-        input.ownerUser ?? "",
+        owner.name,
         input.source?.trim() ?? "",
         input.lostReason?.trim() || null,
         input.orderId ?? null,
         terminal,
         resolved?.id ?? null,
         resolved?.pipelineId ?? null,
+        owner.userId,
       ],
     );
     return (await getDeal(businessId, input.id))!;
@@ -1788,11 +1808,11 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
     `INSERT INTO crm_deals
        (business_id, customer_id, title, description, stage, value_rial, probability,
         expected_close_date, owner_user, source, lost_reason, order_id, closed_at, created_by,
-        stage_id, pipeline_id, stage_entered_at, last_activity_at)
+        stage_id, pipeline_id, stage_entered_at, last_activity_at, owner_user_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9, $10, $11, $12,
              CASE WHEN $13 THEN now() ELSE NULL END, $14, $15, $16,
-             CASE WHEN $15::uuid IS NOT NULL THEN now() ELSE NULL END,
-             CASE WHEN $15::uuid IS NOT NULL THEN now() ELSE NULL END)
+             CASE WHEN $16::uuid IS NOT NULL THEN now() ELSE NULL END,
+             CASE WHEN $16::uuid IS NOT NULL THEN now() ELSE NULL END, $17)
      RETURNING id`,
     [
       businessId,
@@ -1803,7 +1823,7 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
       Math.max(0, Math.round(input.valueRial ?? 0)),
       input.probability ?? null,
       input.expectedCloseDate ?? null,
-      input.ownerUser ?? "",
+      owner.name,
       input.source?.trim() ?? "",
       input.lostReason?.trim() || null,
       input.orderId ?? null,
@@ -1811,6 +1831,7 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
       input.createdBy ?? "",
       resolved?.id ?? null,
       resolved?.pipelineId ?? null,
+      owner.userId,
     ],
   );
   return (await getDeal(businessId, rows[0].id))!;

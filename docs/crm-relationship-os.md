@@ -132,6 +132,32 @@ handoff has run.
   deals. It sends usage counts alongside the list so the screen can explain the
   refusal *before* somebody presses save.
 
+## Ownership is a member id; the name is a snapshot
+
+**0157** added `owner_user_id` / `assignee_user_id` / `crm_owner_user_id` beside
+the text columns and left the text columns in place as display snapshots — but
+it did not fill the ids, so every "mine" view was unavailable to a business that
+already had data. **0199** backfills them, under two rules:
+
+1. **Only an unambiguous match is written.** A legacy name matching two members
+   stays unassigned, and the row keeps the typed name (`owner_user`,
+   `owner_name`, `assigned_to`) as its snapshot — a wrong owner is worse than an
+   unassigned one, and the unassigned queue is where a human decides.
+2. **Nothing is deleted or rewritten.** The migration only ever fills NULL ids,
+   and is idempotent.
+
+`src/lib/crm-ownership.ts` is the write side: `resolveOwner` turns a member id
+(verified to belong to this business — a foreign id is a leak, not an
+assignment) or a typed name into `{ userId, name }`, and writes go through it, so
+the id and the snapshot can never disagree. `GET /api/crm/members` is the
+assignee picker's own read under `crm.view` — not `/api/team`, which needs a
+team key the pipeline does not, and returns more than a picker needs. Inactive
+members are **included**: reassignment starts by seeing who holds what.
+
+Activities and cases accept the same resolution on their existing `assignedTo`
+field, so a typed name that matches exactly one member starts producing ids
+before their dialogs grow pickers.
+
 ## Permissions: one table, checked against the routes
 
 `src/lib/crm-permissions.ts` is the single source for section read / write /
@@ -170,10 +196,6 @@ These are named here so the seams are visible rather than implied:
   documents per entity, and the segment definition resolver. A translation layer
   may choose *among* those keys; it may not emit SQL, and
   `crm-app-boundaries.test.ts` keeps the assistant away from irreversible acts.
-- **Ownership/assignment as ids.** `assigned_to`, `owner_user` and
-  `assignee_user` are text today (and `crm_cases.assignee_user_id` exists beside
-  them). Making ids canonical needs a migration that backfills by name without
-  losing the rows it cannot match — a data change, not a UI change.
 - **Automations (When → If → Then)** and the **data-quality workspace** that
   groups duplicates, reconciliation and issues into one queue.
 - **Import/export through the platform data-transfer engine** — the CRM entities

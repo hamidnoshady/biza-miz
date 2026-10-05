@@ -23,6 +23,7 @@
  *    to rewrite or delete.
  */
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
@@ -40,6 +41,7 @@ let handoff: typeof import("../src/lib/crm-deal-handoff");
 let pipelines: typeof import("../src/lib/crm-pipeline-service");
 let views: typeof import("../src/lib/crm-saved-views-service");
 let audit: typeof import("../src/lib/crm-audit-service");
+let ownership: typeof import("../src/lib/crm-ownership");
 
 const biz = { id: "", locationId: "", userId: "" };
 const other = { id: "", locationId: "" };
@@ -120,6 +122,7 @@ beforeAll(async () => {
   pipelines = await import("../src/lib/crm-pipeline-service");
   views = await import("../src/lib/crm-saved-views-service");
   audit = await import("../src/lib/crm-audit-service");
+  ownership = await import("../src/lib/crm-ownership");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -551,5 +554,121 @@ describe("the pipeline's own audit trail", () => {
     // recorded under its own id — not folded into the new pipeline's story.
     const stageEvents = await audit.listCrmAuditEvents(biz.id, { kind: "pipeline.stages_changed" });
     expect(stageEvents.events.length).toBeGreaterThan(0);
+  });
+});
+
+describe("ownership is an id, and the snapshot is kept", () => {
+  async function makeMember(name: string, isActive = true): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, email, password_hash, is_active)
+       VALUES ($1, 'manager', $2, $3, 'x', $4) RETURNING id`,
+      [biz.id, name, `member-${randomUUID().slice(0, 8)}@example.test`, isActive],
+    );
+    return rows[0].id;
+  }
+
+  it("assigns a deal to a member by id and keeps the display name", async () => {
+    const memberId = await makeMember("زهرا کریمی");
+    const deal = await crm.upsertDeal(biz.id, {
+      title: "معاملهٔ واگذارشده",
+      valueRial: 2_000_000,
+      ownerUserId: memberId,
+      createdBy: actor.name,
+    });
+    expect(deal.ownerUserId).toBe(memberId);
+    expect(deal.ownerUser).toBe("زهرا کریمی");
+  });
+
+  it("resolves a legacy typed name when exactly one member matches", async () => {
+    const memberId = await makeMember("حسین مرادی");
+    const deal = await crm.upsertDeal(biz.id, {
+      title: "معاملهٔ نام‌دار",
+      valueRial: 1_000_000,
+      // The pre-picker shape: a name, typed. It still lands on a member,
+      // because the name matches exactly one.
+      ownerUser: "حسین مرادی",
+      createdBy: actor.name,
+    });
+    expect(deal.ownerUserId).toBe(memberId);
+  });
+
+  it("refuses to guess between two members with the same name", async () => {
+    await makeMember("مریم رضایی");
+    await makeMember("مریم رضایی");
+    const deal = await crm.upsertDeal(biz.id, {
+      title: "معاملهٔ نام تکراری",
+      valueRial: 1_000_000,
+      ownerUser: "مریم رضایی",
+      createdBy: actor.name,
+    });
+    // Unassigned, with the typed name kept: a wrong owner is worse than none,
+    // and the row still says who was meant.
+    expect(deal.ownerUserId).toBeNull();
+    expect(deal.ownerUser).toBe("مریم رضایی");
+  });
+
+  it("refuses a member of another business", async () => {
+    const foreign = new Client({ connectionString: urlFor(databaseName) });
+    await foreign.connect();
+    const { rows } = await foreign.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, email, password_hash)
+       VALUES ($1, 'manager', 'بیگانه', $2, 'x') RETURNING id`,
+      [other.id, `foreign-${randomUUID().slice(0, 8)}@example.test`],
+    );
+    await foreign.end();
+
+    const deal = await crm.upsertDeal(biz.id, {
+      title: "معاملهٔ بیگانه",
+      valueRial: 1_000_000,
+      ownerUserId: rows[0].id,
+      createdBy: actor.name,
+    });
+    expect(deal.ownerUserId).toBeNull();
+    expect(deal.ownerUser).toBe("");
+  });
+
+  it("offers inactive members for reassignment rather than hiding them", async () => {
+    const departed = await makeMember("رفته از شرکت", false);
+    const members = await ownership.listAssignableMembers(biz.id);
+    const row = members.find((member) => member.id === departed)!;
+    expect(row).toBeTruthy();
+    expect(row.isActive).toBe(false);
+    expect(await ownership.inactiveOwners(biz.id)).toEqual(
+      expect.arrayContaining([{ id: departed, name: "رفته از شرکت" }]),
+    );
+  });
+
+  it("backfills legacy names from migration 0199 without touching ambiguous ones", async () => {
+    // The migration runs at database creation, before these rows existed, so
+    // the backfill is exercised here against rows it has to match — and again
+    // afterwards, to prove it is idempotent.
+    const solo = await makeMember("تنها یک نفر");
+    const { rows: legacy } = await db.query<{ id: string }>(
+      `INSERT INTO crm_deals (business_id, title, stage, value_rial, owner_user)
+       VALUES ($1, 'معاملهٔ قدیمی', 'lead', 0, 'تنها یک نفر') RETURNING id`,
+      [biz.id],
+    );
+    const { rows: ambiguous } = await db.query<{ id: string }>(
+      `INSERT INTO crm_deals (business_id, title, stage, value_rial, owner_user)
+       VALUES ($1, 'معاملهٔ مبهم', 'lead', 0, 'مریم رضایی') RETURNING id`,
+      [biz.id],
+    );
+
+    const sql = readFileSync(
+      new URL("../migrations/0199_crm_owner_ids.sql", import.meta.url),
+      "utf8",
+    );
+    await db.query(sql);
+    await db.query(sql); // idempotent
+
+    const { rows } = await db.query<{ id: string; owner_user_id: string | null; owner_user: string }>(
+      `SELECT id, owner_user_id, owner_user FROM crm_deals WHERE id = ANY($1::uuid[])`,
+      [[legacy[0].id, ambiguous[0].id]],
+    );
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    expect(byId.get(legacy[0].id)!.owner_user_id).toBe(solo);
+    expect(byId.get(ambiguous[0].id)!.owner_user_id).toBeNull();
+    // The text column is untouched in both cases: nothing is lost by tidying.
+    expect(byId.get(ambiguous[0].id)!.owner_user).toBe("مریم رضایی");
   });
 });

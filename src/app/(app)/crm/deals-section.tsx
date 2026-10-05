@@ -86,6 +86,8 @@ interface Deal {
   probability: number | null;
   expectedCloseDate: string | null;
   ownerUser: string;
+  /** The owner as a member id. Null when nobody is assigned. */
+  ownerUserId: string | null;
   source: string;
   lostReason: string | null;
   orderId: string | null;
@@ -595,13 +597,29 @@ function DealDialog({
     deal?.probability === null || deal?.probability === undefined ? "" : String(deal.probability),
   );
   const [expected, setExpected] = useState(deal?.expectedCloseDate?.slice(0, 10) ?? "");
-  const [owner, setOwner] = useState(deal?.ownerUser ?? "");
+  // Assignment is a member, not a typed name: a free-text owner field is how a
+  // deal ends up owned by somebody who cannot sign in, and how «مال من» becomes
+  // unanswerable. The typed name is kept only as the snapshot on the row.
+  const [ownerId, setOwnerId] = useState(deal?.ownerUserId ?? "");
+  const [members, setMembers] = useState<{ id: string; name: string; isActive: boolean }[] | null>(null);
   const [source, setSource] = useState(deal?.source ?? "");
   const [lostReason, setLostReason] = useState(deal?.lostReason ?? "");
   const [customerId, setCustomerId] = useState<string | null>(deal?.customerId ?? null);
   const [customerName, setCustomerName] = useState(deal?.customerName ?? "");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api<{ members: { id: string; name: string; isActive: boolean }[] }>("/api/crm/members").then(
+      ({ ok, data }) => {
+        if (!cancelled && ok) setMembers(data.members ?? []);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const save = async () => {
     if (!title.trim()) {
@@ -640,7 +658,10 @@ function DealDialog({
         valueRial: money.fromInput(Number(toLatinDigits(value).replace(/[^\d]/g, "")) || 0),
         probability: probabilityValue,
         expectedCloseDate: expected || null,
-        ownerUser: owner.trim(),
+        // The member id is the ownership; the name rides along as the
+        // snapshot the row keeps for history.
+        ownerUserId: ownerId || null,
+        ownerUser: members?.find((member) => member.id === ownerId)?.name ?? deal?.ownerUser ?? "",
         source: source.trim(),
         lostReason: stage?.outcome === "lost" ? lostReason.trim() : null,
         orderId: deal?.orderId ?? null,
@@ -754,8 +775,23 @@ function DealDialog({
         <Field label="موعد پیش‌بینی‌شده (اختیاری)">
           <JalaliDatePicker value={expected} onChange={setExpected} placeholder="بدون موعد" />
         </Field>
-        <Field label="مسئول پیگیری (اختیاری)">
-          <input className={inputClass} value={owner} onChange={(e) => setOwner(e.target.value)} />
+        <Field
+          label="مسئول پیگیری (اختیاری)"
+          hint="از میان اعضای کسب‌وکار انتخاب می‌شود تا «کارهای من» همیشه یک معنی داشته باشد."
+        >
+          <select
+            className={inputClass}
+            value={ownerId}
+            onChange={(event) => setOwnerId(event.target.value)}
+          >
+            <option value="">بدون مسئول</option>
+            {(members ?? []).map((member) => (
+              <option key={member.id} value={member.id}>
+                {member.name}
+                {member.isActive ? "" : " (غیرفعال)"}
+              </option>
+            ))}
+          </select>
         </Field>
         <Field label="منبع (اختیاری)" hint="این معامله از کجا شروع شد؛ مثلاً اینستاگرام، معرفی مشتری یا تماس تلفنی.">
           <input

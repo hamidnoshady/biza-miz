@@ -66,6 +66,8 @@ interface DealBody {
   probability?: number | null;
   expectedCloseDate?: string | null;
   ownerUser?: string;
+  /** The owner as a member id. Preferred over `ownerUser`, which stays the snapshot. */
+  ownerUserId?: string | null;
   source?: string;
   lostReason?: string | null;
   orderId?: string | null;
@@ -86,6 +88,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!title) return NextResponse.json({ error: "deal_title_required" }, { status: 400 });
   if (body.stageId !== undefined && !isUuid(body.stageId)) {
     return NextResponse.json({ error: "deal_stage_invalid" }, { status: 400 });
+  }
+  if (body.ownerUserId !== undefined && body.ownerUserId !== null && !isUuid(body.ownerUserId)) {
+    return NextResponse.json({ error: "deal_owner_invalid" }, { status: 400 });
   }
   if (body.stage !== undefined && !isDealStage(body.stage)) {
     return NextResponse.json({ error: "deal_stage_invalid" }, { status: 400 });
@@ -119,6 +124,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     probability: body.probability,
     expectedCloseDate: body.expectedCloseDate ?? null,
     ownerUser: body.ownerUser,
+    ownerUserId: body.ownerUserId ?? null,
     source: body.source,
     lostReason: body.lostReason ?? null,
     orderId: body.orderId ?? null,

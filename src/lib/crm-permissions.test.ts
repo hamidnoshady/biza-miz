@@ -116,6 +116,13 @@ const ROUTES: RouteAccess[] = [
   { route: "customers/merge/route.ts", method: "GET", section: "duplicates", action: "read" },
   { route: "customers/merge/route.ts", method: "POST", section: "duplicates", action: "merge" },
   { route: "deals/route.ts", method: "GET", section: "deals", action: "read" },
+  {
+    route: "members/route.ts",
+    method: "GET",
+    section: "deals",
+    action: "read",
+    note: "The assignee picker. Its own read rather than /api/team, which needs a team key the pipeline does not",
+  },
   { route: "deals/route.ts", method: "POST", section: "deals", action: "write" },
   { route: "deals/[id]/route.ts", method: "PATCH", section: "deals", action: "write" },
   {
