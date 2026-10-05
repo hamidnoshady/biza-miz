@@ -741,6 +741,7 @@ async function clearBusinessDeleteBlockers(client: PoolClient, businessId: strin
     // claims/holds before the sales and units they point at.
     "DELETE FROM serial_returns WHERE business_id = $1",
     "DELETE FROM serial_reservations WHERE business_id = $1",
+    "DELETE FROM serial_preowned_intakes WHERE business_id = $1",
     "DELETE FROM customer_returns WHERE business_id = $1",
     "DELETE FROM supplier_returns WHERE business_id = $1",
     "DELETE FROM inventory_transfers WHERE business_id = $1",

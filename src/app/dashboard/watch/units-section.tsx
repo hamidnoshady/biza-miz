@@ -10,6 +10,8 @@ import { formatJalali } from "@/lib/jalali";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { api, Field, inputClass } from "../ui";
 import { ItemAuditPanel } from "../item-audit-panel";
+import { CustomerPicker, type PickerCustomer } from "../customer-picker";
+import { JalaliDatePicker } from "../jalali-date-picker";
 import {
   CONDITION_GRADE_LABELS,
   SERIAL_STATUS_LABELS,
@@ -234,6 +236,14 @@ const CONDITION_GRADE_OPTIONS = [
   { value: "poor", label: "ضعیف" },
 ] as const;
 
+/** Issue #795 item 18 — where a pre-owned piece came from. */
+const PRE_OWNED_SOURCE_OPTIONS = [
+  { value: "customer_tradein", label: "معاوضه/خرید از مشتری" },
+  { value: "direct_purchase", label: "خرید مستقیم" },
+  { value: "consignment", label: "امانی" },
+  { value: "other", label: "سایر" },
+] as const;
+
 function UnitRow({ unit, busy, run }: { unit: SerialUnit; busy: boolean; run: Runner }) {
   const money = useMoney();
   const [panel, setPanel] = useState<"cost" | "audit" | "preowned" | null>(null);
@@ -351,15 +361,43 @@ function PreOwnedPanel({
   run: Runner;
   onDone: () => void;
 }) {
+  const money = useMoney();
   const [conditionGrade, setConditionGrade] = useState("good");
   const [boxAndPapers, setBoxAndPapers] = useState(false);
+  const [source, setSource] = useState("customer_tradein");
+  const [party, setParty] = useState<PickerCustomer | null>(null);
+  const [documentNo, setDocumentNo] = useState("");
+  const [purchaseValue, setPurchaseValue] = useState("");
+  const [intakeDate, setIntakeDate] = useState("");
+  const [authenticityVerified, setAuthenticityVerified] = useState(false);
+  const [authenticityNotes, setAuthenticityNotes] = useState("");
+  const [serviceHistory, setServiceHistory] = useState("");
+  const [productionYear, setProductionYear] = useState("");
+  const [accessories, setAccessories] = useState("");
+  const [notes, setNotes] = useState("");
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
     const ok = await run(() =>
       api(`/api/watch/units/${unit.id}/pre-owned`, {
         method: "POST",
-        body: JSON.stringify({ conditionGrade, boxAndPapers }),
+        body: JSON.stringify({
+          conditionGrade,
+          boxAndPapers,
+          source,
+          partyId: party?.id ?? null,
+          documentNo: documentNo || null,
+          purchaseValueRial: purchaseValue
+            ? money.fromInput(Math.max(0, Math.round(Number(purchaseValue))))
+            : 0,
+          intakeDate: intakeDate || null,
+          authenticityVerified,
+          authenticityNotes: authenticityNotes || null,
+          serviceHistory: serviceHistory || null,
+          productionYear: productionYear ? Number(productionYear) : null,
+          accessories: accessories || null,
+          notes: notes || null,
+        }),
       }),
     );
     if (ok) onDone();
@@ -367,6 +405,10 @@ function PreOwnedPanel({
 
   return (
     <PanelShell>
+      <p className="mb-3 text-xs leading-5 text-muted-foreground">
+        سند کامل دریافت دست‌دوم: منبع، طرف معامله، سند، ارزش خرید، اصالت، سابقه سرویس و متعلقات ثبت
+        می‌شود. ارزش خرید جنبهٔ سندی دارد — ثبت حسابداری خرید همان لحظهٔ ورود دستگاه به انبار انجام شده است.
+      </p>
       <form onSubmit={save} className="grid min-w-0 gap-3 sm:grid-cols-2">
         <Field label="درجه وضعیت">
           <SearchableSelect
@@ -376,7 +418,60 @@ function PreOwnedPanel({
             options={CONDITION_GRADE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
           />
         </Field>
-        <div className="flex items-end pb-1">
+        <Field label="منبع دریافت">
+          <SearchableSelect
+            className={watchInputClass}
+            value={source}
+            onChange={setSource}
+            options={PRE_OWNED_SOURCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+          />
+        </Field>
+        <Field label="طرف معامله (اختیاری)">
+          <CustomerPicker
+            customer={party}
+            onChange={setParty}
+            disabled={busy}
+            idPrefix={`watch-preowned-party-${unit.id}`}
+          />
+        </Field>
+        <Field label="شماره سند (اختیاری)">
+          <input className={watchInputClass} value={documentNo} onChange={(e) => setDocumentNo(e.target.value)} />
+        </Field>
+        <Field label={`ارزش خرید (${money.unitLabel}، اختیاری)`}>
+          <PersianNumberInput
+            className={watchInputClass}
+            dir="ltr"
+            inputMode="numeric"
+            value={purchaseValue}
+            onChange={(e) => setPurchaseValue(e.target.value)}
+          />
+        </Field>
+        <Field label="تاریخ دریافت (اختیاری؛ پیش‌فرض امروز)">
+          <JalaliDatePicker value={intakeDate} onChange={setIntakeDate} />
+        </Field>
+        <Field label="سال ساخت (اختیاری)">
+          <PersianNumberInput
+            className={watchInputClass}
+            dir="ltr"
+            inputMode="numeric"
+            value={productionYear}
+            onChange={(e) => setProductionYear(e.target.value)}
+          />
+        </Field>
+        <Field label="متعلقات (اختیاری)">
+          <input className={watchInputClass} value={accessories} onChange={(e) => setAccessories(e.target.value)} />
+        </Field>
+        <Field label="سابقه سرویس (اختیاری)">
+          <input
+            className={watchInputClass}
+            value={serviceHistory}
+            onChange={(e) => setServiceHistory(e.target.value)}
+          />
+        </Field>
+        <Field label="یادداشت (اختیاری)">
+          <input className={watchInputClass} value={notes} onChange={(e) => setNotes(e.target.value)} />
+        </Field>
+        <div className="flex items-end gap-4 pb-1 sm:col-span-2">
           <label className="flex cursor-pointer items-center gap-2 text-sm text-foreground/80">
             <input
               type="checkbox"
@@ -386,7 +481,25 @@ function PreOwnedPanel({
             />
             همراه جعبه و مدارک
           </label>
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-foreground/80">
+            <input
+              type="checkbox"
+              className="size-4 rounded border-border text-amber-500 dark:text-amber-400 focus:ring-amber-400/30 dark:focus:ring-amber-400/40"
+              checked={authenticityVerified}
+              onChange={(e) => setAuthenticityVerified(e.target.checked)}
+            />
+            اصالت بررسی و تأیید شد
+          </label>
         </div>
+        {authenticityVerified ? (
+          <Field label="توضیح بررسی اصالت (اختیاری)">
+            <input
+              className={watchInputClass}
+              value={authenticityNotes}
+              onChange={(e) => setAuthenticityNotes(e.target.value)}
+            />
+          </Field>
+        ) : null}
         <div className="sm:col-span-2">
           <Button type="submit" disabled={busy} size="sm" className="min-h-[44px] border border-amber-300 dark:border-amber-500/40 px-5 font-semibold">
             ثبت دست‌دوم

@@ -254,6 +254,16 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "مرجوعی سریالی",
   },
   {
+    table: "serial_preowned_intakes",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "A pre-owned intake (issue #795 item 18) is the provenance document of where a unit came from — it must keep pointing at the surviving file.",
+    preview: true,
+    previewLabel: "دریافت دست‌دوم",
+  },
+  {
     table: "serial_reservations",
     column: "customer_id",
     scope: "business",

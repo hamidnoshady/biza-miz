@@ -122,18 +122,220 @@ export async function serviceReminders(
   return reminders.sort((a, b) => a.referenceDate.localeCompare(b.referenceDate));
 }
 
-export async function recordPreOwnedIntake(
-  serialId: string,
-  input: { conditionGrade: ConditionGrade; boxAndPapers: boolean },
-): Promise<void> {
-  const error = validateConditionGrade(input.conditionGrade);
-  if (error) throw new Error(error);
+export const PRE_OWNED_SOURCES = ["customer_tradein", "direct_purchase", "consignment", "other"] as const;
+export type PreOwnedSource = (typeof PRE_OWNED_SOURCES)[number];
 
-  const { rowCount } = await query(
-    `UPDATE item_serials SET condition_grade = $2, box_and_papers = $3, pre_owned = true WHERE id = $1`,
-    [serialId, input.conditionGrade, input.boxAndPapers],
+export interface PreOwnedIntakeInput {
+  businessId: string;
+  serialId: string;
+  conditionGrade: ConditionGrade;
+  boxAndPapers: boolean;
+  /** Where the piece came from; defaults to 'other' for a bare annotation. */
+  source?: PreOwnedSource;
+  /** The person/dealer it came from, when known. */
+  partyId?: string | null;
+  documentNo?: string | null;
+  /** The agreed acquisition value (Rial, whole) — provenance for the value posted at receive. */
+  purchaseValueRial?: number;
+  /** ISO date; defaults to the branch's business-local today. */
+  intakeDate?: string | null;
+  authenticityVerified?: boolean;
+  authenticityNotes?: string | null;
+  serviceHistory?: string | null;
+  productionYear?: number | null;
+  accessories?: string | null;
+  notes?: string | null;
+  /** Photo/document references (URLs or storage keys). */
+  media?: string[];
+  createdBy?: string | null;
+}
+
+export interface PreOwnedIntakeRecord {
+  id: string;
+  serialId: string;
+  source: PreOwnedSource;
+  partyId: string | null;
+  partyName: string | null;
+  documentNo: string | null;
+  purchaseValueRial: number;
+  intakeDate: string;
+  conditionGrade: string;
+  boxAndPapers: boolean;
+  authenticityVerified: boolean;
+  authenticityNotes: string | null;
+  serviceHistory: string | null;
+  productionYear: number | null;
+  accessories: string | null;
+  notes: string | null;
+  media: string[];
+  createdAt: string;
+}
+
+/**
+ * Issue #795 item 18 — records a pre-owned intake as a full provenance
+ * document (source, party, document, value, date, condition, box & papers,
+ * authenticity, service history, year, accessories, notes, media, creator)
+ * and mirrors the condition/box flags onto the serial for the unit board.
+ *
+ * Lifecycle: only a unit actually IN the shop's hands can be taken in —
+ * a sold or written-off unit is somebody else's property / gone.
+ *
+ * Accounting: deliberately none here. The acquisition's inventory/AP
+ * posting happened when the unit entered stock (receiveItemPurchase, the
+ * single mutation path for new serials); the intake row documents that
+ * value, and a second posting would double-count the same acquisition.
+ */
+export async function recordPreOwnedIntake(input: PreOwnedIntakeInput): Promise<PreOwnedIntakeRecord> {
+  const gradeError = validateConditionGrade(input.conditionGrade);
+  if (gradeError) throw new Error(gradeError);
+  const source = input.source ?? "other";
+  if (!PRE_OWNED_SOURCES.includes(source)) throw new Error("منبع دریافت نامعتبر است.");
+  const purchaseValueRial = input.purchaseValueRial ?? 0;
+  if (!Number.isInteger(purchaseValueRial) || purchaseValueRial < 0) {
+    throw new Error("ارزش خرید باید یک عدد صحیح غیرمنفی (ریال) باشد.");
+  }
+  if (
+    input.productionYear != null &&
+    (!Number.isInteger(input.productionYear) || input.productionYear < 1900 || input.productionYear > 2100)
+  ) {
+    throw new Error("سال ساخت نامعتبر است.");
+  }
+  if (input.intakeDate != null && !/^\d{4}-\d{2}-\d{2}$/.test(input.intakeDate)) {
+    throw new Error("تاریخ دریافت نامعتبر است.");
+  }
+
+  const { rows: serialRows } = await query<{ status: string; location_id: string }>(
+    `SELECT s.status, i.location_id FROM item_serials s JOIN items i ON i.id = s.item_id WHERE s.id = $1`,
+    [input.serialId],
   );
-  if (rowCount === 0) throw new Error("سریال یافت نشد.");
+  if (!serialRows[0]) throw new Error("سریال یافت نشد.");
+  if (serialRows[0].status === "sold" || serialRows[0].status === "written_off") {
+    throw new Error("فقط دستگاهی که در اختیار فروشگاه است قابل ثبت دست‌دوم است.");
+  }
+  const locationId = serialRows[0].location_id;
+
+  let intakeDate = input.intakeDate ?? null;
+  if (!intakeDate) {
+    const { rows: dayRows } = await query<{ today: string }>(
+      `SELECT app_business_date(now(), coalesce(timezone, 'Asia/Tehran'), business_day_start_minutes)::text AS today
+         FROM locations WHERE id = $1`,
+      [locationId],
+    );
+    intakeDate = dayRows[0]?.today ?? new Date().toISOString().slice(0, 10);
+  }
+
+  const { rows } = await query<{ id: string; created_at: string; party_name: string | null }>(
+    `WITH inserted AS (
+       INSERT INTO serial_preowned_intakes
+         (business_id, location_id, serial_id, source, party_id, document_no, purchase_value_rial,
+          intake_date, condition_grade, box_and_papers, authenticity_verified, authenticity_notes,
+          service_history, production_year, accessories, notes, media, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       RETURNING id, party_id, created_at::text AS created_at
+     )
+     SELECT inserted.id, inserted.created_at, p.name AS party_name
+       FROM inserted LEFT JOIN parties p ON p.id = inserted.party_id`,
+    [
+      input.businessId,
+      locationId,
+      input.serialId,
+      source,
+      input.partyId ?? null,
+      input.documentNo?.trim() || null,
+      purchaseValueRial,
+      intakeDate,
+      input.conditionGrade,
+      input.boxAndPapers,
+      input.authenticityVerified ?? false,
+      input.authenticityNotes?.trim() || null,
+      input.serviceHistory?.trim() || null,
+      input.productionYear ?? null,
+      input.accessories?.trim() || null,
+      input.notes?.trim() || null,
+      JSON.stringify(input.media ?? []),
+      input.createdBy ?? null,
+    ],
+  );
+  await query(
+    `UPDATE item_serials SET condition_grade = $2, box_and_papers = $3, pre_owned = true WHERE id = $1`,
+    [input.serialId, input.conditionGrade, input.boxAndPapers],
+  );
+  return {
+    id: rows[0].id,
+    serialId: input.serialId,
+    source,
+    partyId: input.partyId ?? null,
+    partyName: rows[0].party_name,
+    documentNo: input.documentNo?.trim() || null,
+    purchaseValueRial,
+    intakeDate,
+    conditionGrade: input.conditionGrade,
+    boxAndPapers: input.boxAndPapers,
+    authenticityVerified: input.authenticityVerified ?? false,
+    authenticityNotes: input.authenticityNotes?.trim() || null,
+    serviceHistory: input.serviceHistory?.trim() || null,
+    productionYear: input.productionYear ?? null,
+    accessories: input.accessories?.trim() || null,
+    notes: input.notes?.trim() || null,
+    media: input.media ?? [],
+    createdAt: rows[0].created_at,
+  };
+}
+
+/** The latest intake document for a unit — what the provenance panel shows. */
+export async function latestPreOwnedIntake(serialId: string): Promise<PreOwnedIntakeRecord | null> {
+  const { rows } = await query<{
+    id: string;
+    serial_id: string;
+    source: PreOwnedSource;
+    party_id: string | null;
+    party_name: string | null;
+    document_no: string | null;
+    purchase_value_rial: string;
+    intake_date: string;
+    condition_grade: string;
+    box_and_papers: boolean;
+    authenticity_verified: boolean;
+    authenticity_notes: string | null;
+    service_history: string | null;
+    production_year: number | null;
+    accessories: string | null;
+    notes: string | null;
+    media: string[];
+    created_at: string;
+  }>(
+    `SELECT t.id, t.serial_id, t.source, t.party_id, p.name AS party_name, t.document_no,
+            t.purchase_value_rial::text AS purchase_value_rial, t.intake_date::text AS intake_date,
+            t.condition_grade, t.box_and_papers, t.authenticity_verified, t.authenticity_notes,
+            t.service_history, t.production_year, t.accessories, t.notes, t.media,
+            t.created_at::text AS created_at
+       FROM serial_preowned_intakes t LEFT JOIN parties p ON p.id = t.party_id
+      WHERE t.serial_id = $1
+      ORDER BY t.created_at DESC LIMIT 1`,
+    [serialId],
+  );
+  if (!rows[0]) return null;
+  const r = rows[0];
+  return {
+    id: r.id,
+    serialId: r.serial_id,
+    source: r.source,
+    partyId: r.party_id,
+    partyName: r.party_name,
+    documentNo: r.document_no,
+    purchaseValueRial: Number(r.purchase_value_rial),
+    intakeDate: r.intake_date,
+    conditionGrade: r.condition_grade,
+    boxAndPapers: r.box_and_papers,
+    authenticityVerified: r.authenticity_verified,
+    authenticityNotes: r.authenticity_notes,
+    serviceHistory: r.service_history,
+    productionYear: r.production_year,
+    accessories: r.accessories,
+    notes: r.notes,
+    media: Array.isArray(r.media) ? r.media : [],
+    createdAt: r.created_at,
+  };
 }
 
 interface RepairEstimateRecord {

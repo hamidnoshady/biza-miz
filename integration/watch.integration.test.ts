@@ -106,6 +106,7 @@ beforeEach(async () => {
   await db.query("SELECT set_config('app.factory_reset', 'true', true)");
   await db.query("DELETE FROM serial_returns");
   await db.query("DELETE FROM serial_reservations");
+  await db.query("DELETE FROM serial_preowned_intakes");
   await db.query("DELETE FROM commission_accruals");
   await db.query("DELETE FROM customer_points");
   await db.query("DELETE FROM order_amendments");
@@ -637,7 +638,12 @@ describe("Wave 10 — watch flagship", () => {
 
   it("records a pre-owned intake's condition grade and box/papers state on the serial", async () => {
     const { serial } = await makeWatchUnit();
-    await watchCrm.recordPreOwnedIntake(serial.id, { conditionGrade: "good", boxAndPapers: true });
+    await watchCrm.recordPreOwnedIntake({
+      businessId: biz.id,
+      serialId: serial.id,
+      conditionGrade: "good",
+      boxAndPapers: true,
+    });
 
     const stored = await db.query<{ condition_grade: string; box_and_papers: boolean; pre_owned: boolean }>(
       "SELECT condition_grade, box_and_papers, pre_owned FROM item_serials WHERE id = $1",
@@ -2004,5 +2010,111 @@ describe("Issue #795 item 11 — VAT-complete, versioned repair estimates", () =
     expect(text).toContain("تخفیف");
     expect(text).toContain("مالیات بر ارزش افزوده");
     expect(text).toContain("برآورد کل");
+  });
+});
+
+/**
+ * Issue #795 item 18 — the pre-owned intake as a full provenance document:
+ * source, party, document, value, date, condition, box & papers,
+ * authenticity, service history, year, accessories, notes, media, creator —
+ * recorded only while the unit is actually in the shop's hands.
+ */
+describe("Issue #795 item 18 — pre-owned intake provenance", () => {
+  it("records the whole acquisition story, mirrors the board flags, and refuses a sold unit", async () => {
+    const { rows: dealerRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, phone) VALUES ($1, 'گالری تهران', '02122220000') RETURNING id",
+      [biz.id],
+    );
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت کلکسیونی",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-PO" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-PO")!;
+
+    const intake = await watchCrm.recordPreOwnedIntake({
+      businessId: biz.id,
+      serialId: unit.id,
+      conditionGrade: "like_new",
+      boxAndPapers: true,
+      source: "customer_tradein",
+      partyId: dealerRows[0].id,
+      documentNo: "PO-1403-17",
+      purchaseValueRial: 30_000_000,
+      intakeDate: "2026-09-20",
+      authenticityVerified: true,
+      authenticityNotes: "شمارهٔ موومان با برگه مطابقت دارد",
+      serviceHistory: "سرویس کامل ۱۴۰۲ نزد نمایندگی",
+      productionYear: 2019,
+      accessories: "بند یدکی چرمی",
+      notes: "خریداری در معاوضه با مدل جدید",
+      media: ["https://example.com/po-1.jpg"],
+    });
+    expect(intake).toMatchObject({
+      source: "customer_tradein",
+      partyName: "گالری تهران",
+      documentNo: "PO-1403-17",
+      purchaseValueRial: 30_000_000,
+      intakeDate: "2026-09-20",
+      authenticityVerified: true,
+      productionYear: 2019,
+      media: ["https://example.com/po-1.jpg"],
+    });
+
+    // The document is retrievable, and the board flags mirrored.
+    const latest = await watchCrm.latestPreOwnedIntake(unit.id);
+    expect(latest?.id).toBe(intake.id);
+    expect(latest?.serviceHistory).toBe("سرویس کامل ۱۴۰۲ نزد نمایندگی");
+    const board = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.id === unit.id);
+    expect(board).toMatchObject({ preOwned: true, conditionGrade: "like_new", boxAndPapers: true });
+
+    // Garbage in, refused: bad year, negative value.
+    await expect(
+      watchCrm.recordPreOwnedIntake({
+        businessId: biz.id,
+        serialId: unit.id,
+        conditionGrade: "good",
+        boxAndPapers: false,
+        productionYear: 1500,
+      }),
+    ).rejects.toThrow(/سال ساخت/);
+    await expect(
+      watchCrm.recordPreOwnedIntake({
+        businessId: biz.id,
+        serialId: unit.id,
+        conditionGrade: "good",
+        boxAndPapers: false,
+        purchaseValueRial: -1,
+      }),
+    ).rejects.toThrow(/ارزش خرید/);
+
+    // Lifecycle: a sold unit is somebody else's property — no intake.
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        customerId: null,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+    await expect(
+      watchCrm.recordPreOwnedIntake({
+        businessId: biz.id,
+        serialId: unit.id,
+        conditionGrade: "good",
+        boxAndPapers: false,
+      }),
+    ).rejects.toThrow(/در اختیار فروشگاه/);
   });
 });
