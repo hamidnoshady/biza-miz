@@ -36,6 +36,9 @@ const ACTION_LABELS: Record<string, string> = {
   "device.revoked": "لغو ثبت دستگاه",
   "order.amended": "ویرایش سفارش بسته‌شده",
   "order.voided_after_close": "حذف سفارش بسته‌شده",
+  // Issue #844 — the canonical selling-price change, written only by
+  // src/lib/menu-price-service.ts together with its immutable history row.
+  "menu.item.price_changed": "تغییر قیمت آیتم منو",
   "shift.opened": "شروع شیفت",
   "shift.closed": "پایان شیفت",
   "branch.created": "ایجاد شعبه",
@@ -64,6 +67,7 @@ const ENTITY_LABELS: Record<string, string> = {
   location: "شعبه",
   account: "حساب",
   settings: "تنظیمات",
+  menu_item: "آیتم منو",
 };
 
 /** A Persian label for a raw `audit_log.action` value, falling back to the raw string when unrecognised. */

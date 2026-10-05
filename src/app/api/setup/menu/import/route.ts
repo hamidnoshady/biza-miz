@@ -97,6 +97,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     location.id,
     result,
     tax?.defaultRate ?? 0,
+    session.sub,
   );
 
   // The marker follows the imported data: import counts as menu progress only

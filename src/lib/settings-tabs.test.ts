@@ -32,7 +32,6 @@ describe("visibleSettingsTabs", () => {
       "pricing",
       "online-platforms",
       "payment-methods",
-      "menu",
       "printers",
       "cloud-sync",
       "devices",

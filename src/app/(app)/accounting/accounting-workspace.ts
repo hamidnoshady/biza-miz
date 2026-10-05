@@ -111,6 +111,8 @@ const WORKSPACE_GROUP_SLOTS: readonly { key: string; label: string; description?
     slots: [
       { href: "/accounting/orders" },
       { href: ACCOUNTING_WORKSPACE_HREFS.pos },
+      // After «صندوق (فروش)» (issue #844): the menu is what the till sells.
+      { href: ACCOUNTING_WORKSPACE_HREFS.menu },
     ],
   },
   {

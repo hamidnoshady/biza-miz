@@ -157,7 +157,13 @@ const menuItemPatch: AutopilotExecutor = async (ctx) => {
   }
   if (patch.price === undefined && patch.isActive === undefined) return fail("invalid_payload");
 
-  const updated = await updateMenuItem(locationId, menuItemId, patch);
+  // A price inside this patch becomes canonical price history recorded as
+  // `ai` — autopilot and MCP share this executor, and both are the assistant
+  // acting on the owner's authorization (issue #844).
+  const updated = await updateMenuItem(locationId, menuItemId, patch, ctx.businessId, {
+    changedBy: ctx.authorizedByUserId,
+    source: "ai",
+  });
   if (!updated.ok) return fail(updated.error);
   return {
     ok: true,
@@ -605,7 +611,13 @@ const revertMenuItemPatch: AutopilotReverter = async (ctx) => {
   if (typeof prior.isActive === "boolean") patch.isActive = prior.isActive;
   if (patch.price === undefined && patch.isActive === undefined) return fail("no_prior_state");
 
-  const updated = await updateMenuItem(locationId, menuItemId, patch);
+  // The revert writes history too (source `ai`): it IS a real price change
+  // back to the previous value, and history rows are never rewritten.
+  const updated = await updateMenuItem(locationId, menuItemId, patch, ctx.businessId, {
+    changedBy: ctx.authorizedByUserId,
+    source: "ai",
+    sourceRef: "revert",
+  });
   if (!updated.ok) return fail(updated.error);
   return { ok: true, result: { menuItemId, restored: patch } };
 };

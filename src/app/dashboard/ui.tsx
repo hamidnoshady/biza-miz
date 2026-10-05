@@ -162,6 +162,16 @@ const ERROR_MESSAGES: Record<string, string> = {
     item_not_found: "آیتم پیدا نشد.",
     group_not_found: "گروه افزودنی پیدا نشد.",
     modifier_not_found: "افزودنی پیدا نشد.",
+    // Menu manager (issue #844) — canonical menu service codes.
+    sku_exists: "کد کالا (SKU) تکراری است؛ کد دیگری وارد کنید.",
+    group_name_exists: "گروه افزودنی دیگری با این نام وجود دارد.",
+    modifier_exists: "افزودنی دیگری با این نام در این گروه وجود دارد.",
+    reorder_mismatch:
+      "ترتیب ارسال‌شده با فهرست فعلی همخوان ندارد؛ فهرست را تازه کنید و دوباره مرتب کنید.",
+    invalid_media:
+      "تصویر انتخاب‌شده معتبر نیست؛ تصویر را از کتابخانهٔ رسانهٔ همین کسب‌وکار انتخاب کنید.",
+    no_suggestion:
+      "برای این آیتم قیمت پیشنهادی محاسبه نشده است؛ ابتدا دستورعمل یا حاشیهٔ سود را کامل کنید.",
     table_exists: "میزی با این نام وجود دارد.",
     table_not_found: "میز پیدا نشد.",
     table_required: "برای سفارش حضوری انتخاب میز الزامی است.",

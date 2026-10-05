@@ -484,7 +484,9 @@ export const PAGE_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   ["/accounting/reservations", "reservations"],
   ["/accounting/delivery", "delivery"],
   ["/accounting/inventory", "inventory"],
-  ["/settings/menu", "menu"],
+  // The menu manager lives under Accounting → «فروش و درآمد» (issue #844);
+  // `/settings/menu` 308s to it in middleware before this table is consulted.
+  ["/accounting/menu", "menu"],
   ["/accounting/jewelry", "jewelry"],
   ["/accounting/watch", "watch"],
   // The products workspace is the catalogue door every retail trade-goods

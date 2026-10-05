@@ -246,7 +246,7 @@ describe("legacy redirects", () => {
       ["/dashboard/commission", "/growth/commission"],
       ["/dashboard/customers", "/crm/directory"],
       ["/dashboard/persons", "/crm/directory"],
-      ["/dashboard/menu", "/settings/menu"],
+      ["/dashboard/menu", "/accounting/menu"],
       ["/dashboard/team", "/settings/team"],
       ["/dashboard/backup", "/settings/backup"],
     ];

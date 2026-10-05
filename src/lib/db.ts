@@ -189,6 +189,18 @@ function runPinned<T>(client: PoolClient, fn: () => Promise<T>): Promise<T> {
 }
 
 /**
+ * Whether the caller is inside `withTenantTransaction` right now.
+ *
+ * Services that can run either standalone (their own transaction) or as one
+ * step of a caller's transaction ask this instead of taking a second
+ * connection: ambient `query()` is already pinned to that transaction, so the
+ * service's statements join it and the caller's COMMIT covers them too.
+ */
+export function isPinnedToTransaction(): boolean {
+  return pinnedClient.getStore() != null;
+}
+
+/**
  * Run one statement.
  *
  * Inside `withTenantTransaction` this goes to that transaction's pinned
