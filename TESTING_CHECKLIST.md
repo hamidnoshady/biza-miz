@@ -92,6 +92,10 @@ this is the packaged-desktop pass of the same scenario.
       new one must work.
 - [ ] Suspend the waiter on the cloud, sync again; the waiter must disappear
       from the roster and any existing desktop session must be invalidated.
+- [ ] Offboard the kitchen member on the cloud and sync: the member disappears
+      from the roster, any desktop session ends, and their replicated PIN is
+      revoked rather than merely hidden (reactivating them without a cloud PIN
+      must not let the old PIN back in).
 - [ ] Simulate a credential failure (point the desktop at a cloud whose
       `/api/iam/login-credentials` returns 500, or stop it mid-pairing):
       Settings must show «رمز و پین ورود کارکنان: نیازمند بررسی» with the
