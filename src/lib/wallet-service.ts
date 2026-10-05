@@ -680,6 +680,10 @@ export interface AiSettlementInput {
   researchRunId?: string | null;
   /** The prompt layers the resolver composed, in composition order. */
   promptLayers?: unknown;
+  /** The app this turn was focused on, or null when it was not app-focused. */
+  appFocus?: string | null;
+  /** The prompt versions that were live, as `{ scope, version }` in order. */
+  promptVersions?: unknown;
 }
 
 export interface AiSettlementResult {
@@ -910,9 +914,10 @@ export async function settleAiWalletCharge(input: AiSettlementInput): Promise<Ai
             location_id, input_tokens, output_tokens, cache_hit,
             cost_usd, provider_cost_rial, charged_rial, debt_rial, priced_by,
             wallet_ledger_id, created_by_user_id, metadata,
-            runtime_mode, system_agent_id, suggestion_id, research_run_id, prompt_layers)
+            runtime_mode, system_agent_id, suggestion_id, research_run_id, prompt_layers,
+            app_focus, prompt_versions)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb,
-                 $23,$24,$25,$26,$27::jsonb)
+                 $23,$24,$25,$26,$27::jsonb,$28,$29::jsonb)
          RETURNING id`,
         [
           input.businessId,
@@ -949,6 +954,8 @@ export async function settleAiWalletCharge(input: AiSettlementInput): Promise<Ai
           input.suggestionId ?? null,
           input.researchRunId ?? null,
           JSON.stringify(Array.isArray(input.promptLayers) ? input.promptLayers : []),
+          input.appFocus ?? null,
+          JSON.stringify(Array.isArray(input.promptVersions) ? input.promptVersions : []),
         ],
       );
 

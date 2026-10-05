@@ -116,6 +116,7 @@ export const POST = withTenantScope(
           researchRunId: id,
           runtimeMode: "deep_research",
           systemAgentId: existing.systemAgentId,
+          appFocus: existing.appKey,
           metadata: { researchRunId: id, researchStatus: outcome.error },
         },
       });
@@ -144,6 +145,7 @@ export const POST = withTenantScope(
         runtimeMode: "deep_research",
         researchRunId: id,
         systemAgentId: outcome.outcome.run.systemAgentId,
+        appFocus: outcome.outcome.run.appKey,
         metadata: {
           researchRunId: id,
           researchStatus: outcome.outcome.run.status,

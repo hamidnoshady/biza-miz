@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import type { AppKey } from "./apps";
 import { routeTools, isAlwaysOnTool, appForTool } from "./ai-tool-routing";
 
 describe("isAlwaysOnTool", () => {
@@ -187,9 +188,10 @@ describe("issue #812 §11 — App Focus narrows the live catalogue", () => {
     // Each real app routes; «workspace» is not one of them, so the route's own
     // `APP_KEYS.includes(...)` guard is what keeps a project turn from being
     // narrowed against a fifth app that does not exist.
-    for (const app of ["accounting", "growth", "crm", "website"]) {
+    const apps: AppKey[] = ["accounting", "growth", "crm", "website"];
+    for (const app of apps) {
       expect(routeTools(ALL, [app]), app).not.toBeNull();
     }
-    expect(["accounting", "growth", "crm", "website"]).not.toContain("workspace");
+    expect(apps).not.toContain("workspace" as AppKey);
   });
 });

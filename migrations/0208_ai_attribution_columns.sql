@@ -65,6 +65,26 @@ ALTER TABLE ai_wallet_settlements
 ALTER TABLE ai_wallet_settlements
   ADD COLUMN IF NOT EXISTS prompt_layers jsonb NOT NULL DEFAULT '[]'::jsonb;
 
+-- §20 — the app the turn was focused on. Recorded rather than inferred because
+-- the issue is explicit that app focus can change BETWEEN TURNS of the same
+-- conversation: a member asks about CRM, then focuses Accounting, then asks
+-- again. A conversation-level app would be wrong for two of those three turns,
+-- and the whole point of §20 is that mode/agent/app are per-turn facts.
+ALTER TABLE ai_wallet_settlements
+  ADD COLUMN IF NOT EXISTS app_focus text;
+
+-- §20 — the prompt versions that were actually live. `prompt_layers` records
+-- the composition order; this records what each layer's text was, so "why did it
+-- answer like that" is answerable after the fact rather than only while the code
+-- is the version that produced it. An array of `{ scope, version }` in the same
+-- order, so a rollback is visible in the history.
+ALTER TABLE ai_wallet_settlements
+  ADD COLUMN IF NOT EXISTS prompt_versions jsonb NOT NULL DEFAULT '[]'::jsonb;
+
+CREATE INDEX IF NOT EXISTS idx_ai_wallet_settlements_app_focus
+  ON ai_wallet_settlements (business_id, app_focus, created_at DESC)
+  WHERE app_focus IS NOT NULL;
+
 -- The research run's own row already links back here; this closes the loop
 -- from the settlement side and lets the usage report slice a run's total.
 CREATE INDEX IF NOT EXISTS idx_ai_wallet_settlements_research_run

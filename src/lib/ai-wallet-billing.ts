@@ -86,6 +86,10 @@ export interface AiTurnAttribution {
   researchRunId?: string | null;
   /** The prompt layers the resolver composed, in composition order. */
   promptLayers?: readonly string[] | null;
+  /** The app this turn was focused on, or null when it was not app-focused. */
+  appFocus?: string | null;
+  /** The prompt versions that were live, as `{ scope, version }` in order. */
+  promptVersions?: readonly { scope: string; version: number | null }[] | null;
 }
 
 export interface SettledAiTurnResult extends AiSettlementResult {
@@ -195,6 +199,12 @@ export async function settleAiTurn(input: {
     suggestionId: attribution.suggestionId ?? null,
     researchRunId: attribution.researchRunId ?? null,
     promptLayers: attribution.promptLayers ?? [],
+    // §20 — app focus and the live prompt versions. Both are per-turn facts:
+    // the issue is explicit that mode/agent/app can change between turns of the
+    // same conversation, so a conversation-level value would be wrong for two
+    // of every three turns.
+    appFocus: attribution.appFocus ?? null,
+    promptVersions: attribution.promptVersions ?? [],
   });
   if (!settlement.duplicate) {
     try {

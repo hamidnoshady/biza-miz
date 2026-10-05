@@ -147,6 +147,33 @@ export function promptLayerKeys(layers: ResolvedPromptLayers): string[] {
   return keys;
 }
 
+/**
+ * The layers that actually composed this prompt, with the version of each that
+ * was live. `promptLayerKeys` above gives the order a usage row can carry; this
+ * gives the same order with the text's version attached, which is what makes
+ * «چرا این‌طور جواب داد» answerable after the fact.
+ *
+ * A layer with no published override contributes `null`, which is the truth —
+ * it came from the code default — and is recorded rather than skipped so a
+ * reader can tell "no override existed" from "this layer was not consulted".
+ */
+export function promptLayerVersions(
+  layers: ResolvedPromptLayers,
+): { scope: string; version: number | null }[] {
+  const records: { scope: string; version: number | null }[] = [
+    { scope: layers.base.scopeKey, version: layers.base.version },
+    { scope: layers.mode.scopeKey, version: layers.mode.version },
+  ];
+  if (layers.agent) records.push({ scope: layers.agent.scopeKey, version: layers.agent.version });
+  if (layers.businessType) {
+    records.push({ scope: layers.businessType.scopeKey, version: layers.businessType.version });
+  }
+  if (layers.app) records.push({ scope: layers.app.scopeKey, version: layers.app.version });
+  for (const scope of layers.memoryScopes) records.push({ scope: `memory:${scope}`, version: null });
+  if (layers.toolCatalogue) records.push({ scope: "tool_catalogue", version: null });
+  return records;
+}
+
 export interface ResolveSystemPromptInput extends PromptContext {
   /** The tenant. Required: memory and the business-type fragment need it. */
   businessId: string;

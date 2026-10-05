@@ -17,7 +17,7 @@
  *  - A scope with nothing published resolves to the code default. The runtime
  *    can therefore never end up with an empty system prompt.
  */
-import { query } from "./db";
+import { getPool, query } from "./db";
 import {
   BASE_PROMPT_SCOPE,
   agentPromptScope,
@@ -189,10 +189,18 @@ export type PublishPromptResult =
 /**
  * Publishes one version and retires whatever was published for that scope.
  *
- * Both statements are in one transaction: the partial unique index on
- * `scope_key WHERE state = 'published'` means the second cannot land while the
- * first still stands, so the order is forced and there is no window in which a
- * scope has none, or two.
+ * Two statements, in that order, inside one transaction — and the order is not
+ * cosmetic. An earlier revision wrote both as CTEs of a single statement, which
+ * *looks* atomic and is not: every CTE sees the same snapshot, so the
+ * `published` UPDATE runs against a snapshot in which the old row is still
+ * `published`, and the partial unique index on `scope_key WHERE state =
+ * 'published'` rejects it. The index does not force the order — it enforces the
+ * result, and a single statement cannot produce it.
+ *
+ * The consequence was not subtle: **publishing a second version of any scope
+ * failed outright**, so a Superadmin could publish version 1 and nothing after
+ * it. Only a test that publishes twice finds it, which is why
+ * `integration/ai-prompt-resolver-agents.integration.test.ts` does exactly that.
  */
 export async function publishPromptVersion(input: {
   id: string;
@@ -202,30 +210,47 @@ export async function publishPromptVersion(input: {
   if (!version) return { ok: false, error: "prompt_version_not_found" };
   if (version.state === "published") return { ok: false, error: "prompt_already_published" };
 
-  const { rows } = await query<Record<string, unknown>>(
-    `WITH retired AS (
-       UPDATE ai_prompt_versions
+  // `ai_prompt_versions` is platform-scope and in `EXEMPT_TABLES`, so there is
+  // no tenant to scope this to — the scope here is the prompt scope, not a
+  // business. The transaction is what matters: retire, then publish, or neither.
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const retiredResult = await client.query<Record<string, unknown>>(
+      `UPDATE ai_prompt_versions
           SET state = 'retired', updated_at = now()
-        WHERE scope_key = $2 AND state = 'published'
-        RETURNING *
-     ),
-     published AS (
-       UPDATE ai_prompt_versions
-          SET state = 'published', published_by = $3, published_at = now(), updated_at = now()
-        WHERE id = $1
-        RETURNING *
-     )
-     SELECT (SELECT to_jsonb(published) FROM published) AS published,
-            (SELECT to_jsonb(retired) FROM retired)   AS retired`,
-    [input.id, version.scopeKey, input.publishedBy],
-  );
-  const published = rows[0]?.published as Record<string, unknown> | null;
-  if (!published) return { ok: false, error: "prompt_publish_failed" };
-  return {
-    ok: true,
-    published: toRow(published),
-    retired: rows[0]?.retired ? toRow(rows[0].retired as Record<string, unknown>) : null,
-  };
+        WHERE scope_key = $1 AND state = 'published'
+        RETURNING *`,
+      [version.scopeKey],
+    );
+    const publishedResult = await client.query<Record<string, unknown>>(
+      `UPDATE ai_prompt_versions
+          SET state = 'published', published_by = $1, published_at = now(), updated_at = now()
+        WHERE id = $2
+        RETURNING *`,
+      [input.publishedBy, input.id],
+    );
+    const published = publishedResult.rows[0];
+    if (!published) {
+      await client.query("ROLLBACK");
+      return { ok: false, error: "prompt_publish_failed" };
+    }
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      published: toRow(published),
+      retired: retiredResult.rows[0] ? toRow(retiredResult.rows[0]) : null,
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // A failed ROLLBACK must not mask the error that explains the failure.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 /**

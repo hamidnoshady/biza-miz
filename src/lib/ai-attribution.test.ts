@@ -29,6 +29,12 @@ describe("issue #812 §12 — the attribution columns exist", () => {
     // The prompt layers too: a record of what the model was actually told,
     // kept with the cost, so "why did it answer like that" is answerable later.
     expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS prompt_layers jsonb/);
+    // §20 — app focus and the prompt versions that were live. Both are
+    // per-turn facts the issue names explicitly, and app focus in particular
+    // can change BETWEEN turns of one conversation, so a conversation-level
+    // value would be wrong for most turns.
+    expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS app_focus text/);
+    expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS prompt_versions jsonb/);
   });
 
   it("widens the request-type CHECK to admit deep_research", () => {
@@ -110,6 +116,11 @@ describe("issue #812 §12 — every spending surface attributes its spend", () =
       expect(block, "every chat settlement names its system agent").toMatch(/systemAgentId/);
       expect(block, "every chat settlement names its suggestion card").toMatch(/suggestionId/);
       expect(block, "every chat settlement records its prompt layers").toMatch(/promptLayers/);
+      expect(block, "every chat settlement records the live prompt versions").toMatch(/promptVersions/);
+      // §20 — app focus. Recorded even when it is null: "this turn had no app
+      // focus" is a fact worth having, and a missing field is indistinguishable
+      // from a caller that forgot.
+      expect(block, "every chat settlement records its app focus").toMatch(/appFocus/);
     }
   });
 
@@ -139,6 +150,16 @@ describe("issue #812 §12 — every spending surface attributes its spend", () =
     expect(chatRoute, "the chat route uses the flattening helper").toMatch(/promptLayerKeys\(/);
   });
 
+  it("flattens the resolved layers into scope+version records", () => {
+    // The order alone is not enough to reconstruct what the model was told: two
+    // turns can share a composition order and differ entirely because a layer
+    // was rolled back between them. The version is what tells them apart.
+    const resolver = readFileSync("src/lib/ai-prompt-resolver.ts", "utf8");
+    expect(resolver).toMatch(/export function promptLayerVersions/);
+    const chatRoute = readFileSync("src/app/api/ai/chat/route.ts", "utf8");
+    expect(chatRoute, "the chat route uses the version helper").toMatch(/promptLayerVersions\(/);
+  });
+
   it("writes the attribution as columns, not only as metadata keys", () => {
     // The columns are what the usage report groups on. Keeping the same values
     // in `metadata` is fine and useful; relying on `metadata` alone is not,
@@ -149,10 +170,20 @@ describe("issue #812 §12 — every spending surface attributes its spend", () =
       ["wallet-service", wallet],
       ["ai-wallet-billing", billing],
     ] as const) {
-      for (const field of ["runtimeMode", "systemAgentId", "suggestionId", "researchRunId", "promptLayers"]) {
+      for (const field of [
+        "runtimeMode",
+        "systemAgentId",
+        "suggestionId",
+        "researchRunId",
+        "promptLayers",
+        "appFocus",
+        "promptVersions",
+      ]) {
         expect(src, `${name} must carry ${field}`).toMatch(new RegExp(field));
       }
     }
-    expect(wallet).toMatch(/INSERT INTO ai_wallet_settlements[\s\S]*?runtime_mode,\s*system_agent_id,\s*suggestion_id,\s*research_run_id,\s*prompt_layers/);
+    expect(wallet).toMatch(
+      /INSERT INTO ai_wallet_settlements[\s\S]*?runtime_mode,\s*system_agent_id,\s*suggestion_id,\s*research_run_id,\s*prompt_layers,\s*app_focus,\s*prompt_versions/,
+    );
   });
 });

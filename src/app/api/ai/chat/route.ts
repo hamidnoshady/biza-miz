@@ -13,6 +13,7 @@ import { eligibleAgentCards, type EligibleAgentCard } from "@/lib/ai-system-agen
 import {
   BASE_PROMPT_SCOPE,
   promptLayerKeys,
+  promptLayerVersions,
   resolveSystemPrompt,
   type ResolvedPromptLayers,
 } from "@/lib/ai-prompt-resolver";
@@ -578,6 +579,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
               systemAgentId: agentCard?.agentId ?? null,
               suggestionId: agentCard?.assignmentId ?? null,
               promptLayers: promptLayerKeys(promptLayers ?? EMPTY_PROMPT_LAYERS),
+              promptVersions: promptLayerVersions(promptLayers ?? EMPTY_PROMPT_LAYERS),
+              // §20 — app focus is a per-turn fact, recorded as one. It can
+              // change between turns of the same conversation, so a
+              // conversation-level value would be wrong for most turns.
+              appFocus: focusedApp,
               metadata: { mode, runtimeMode },
             },
           });
@@ -668,6 +674,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
                   systemAgentId: agentCard?.agentId ?? null,
                   suggestionId: agentCard?.assignmentId ?? null,
                   promptLayers: promptLayerKeys(promptLayers ?? EMPTY_PROMPT_LAYERS),
+                  promptVersions: promptLayerVersions(promptLayers ?? EMPTY_PROMPT_LAYERS),
+                  // §20 — the same per-turn facts on the failure path. §16 says a
+                  // failed turn still cost money; §20 says it is still a turn, and
+                  // "which app, which prompt version" is what explains it.
+                  appFocus: focusedApp,
                   metadata: { mode, runtimeMode, status: "failed" },
                 },
               });
