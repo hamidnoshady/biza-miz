@@ -51,8 +51,32 @@ All six phases are implemented, committed and gated. Commits: `52247f6`
 `d657229` (phase 3 control plane + phase 4 deletions) → `dd63d8e` (attribution
 columns, permission matrix, retired permissions) → `1f1f402` (docs, dead-code
 record, final sweep) → `aaa6c5a` (runtime-mode aliases, cross-tenant isolation
-proof, secret-shape fix) → `78d2c45` (App Focus narrows the live catalogue) → `64e4dc2` (prompt-resolver
-tests found a publish bug; §20 app focus + prompt versions).
+proof, secret-shape fix) → `78d2c45` (App Focus narrows the live catalogue) →
+`64e4dc2` (prompt-resolver tests found a publish bug; §20 app focus + prompt
+versions) → `c8d8018` → `bb10cd9` (Deep Research tests found a spend-cap
+overshoot and an unreachable TTL branch) → `fcedc59` (client-chat lifecycle
+tests) → `95d8d08` (route-boundary tests; a widget the caller cannot run no
+longer spends) → `e174da6` (§14 stock-count ledger, proven against the bug) →
+`665a24b` (§29 reopening restores valid metadata).
+
+## The §29 gap audit — closed
+
+§29 names 60-odd cases. Auditing each against the tree, rather than assuming the
+issue's own list was covered, found five real gaps and one dead test. Every one
+is now closed, and three of them found product defects:
+
+| Gap | What the audit found | Outcome |
+| --- | --- | --- |
+| Prompt resolver + system agents | **No test file at all.** The resolver is the single source of truth for what the model is told, so a regression there changes every answer and nothing else notices. | `ai-prompt-resolver-agents.integration.test.ts` (14). Found the publish bug above. |
+| Deep Research | Zero behavioural tests. | `ai-deep-research.integration.test.ts` (14). Found a spend-cap overshoot and an unreachable TTL branch. |
+| Client chat lifecycle | `use-ai-chat.ts`, ~780 lines implementing §17/18/19, had no test. Three of §29's five client-chat cases are races, and a race is what a test that awaits one thing at a time cannot see. | `use-ai-chat.test.tsx` (6). Drives a real `ReadableStream` over a stubbed `fetch`, so the hook's own reader/buffering/framing is exercised rather than bypassed. |
+| Route boundaries | `ai-permission-matrix.test.ts` proved each route *names* the right guard; nothing proved the gate behind it fires. A route can call `requirePermission` correctly and still let a crafted body through. | `ai-route-boundaries.test.ts` (15). **Found:** a widget whose `requiredPermissions` the caller holds none of still ran, spending the business's budget on an answer with no data behind it. Now 403. |
+| §14 stock count | The canonical-ledger fix had no test. | `ai-stock-count-ledger.integration.test.ts` (4), **proven against the bug** — with the defect reintroduced the first two cases fail with `expected 1000 to be 9`. |
+| §29 reopening | "Reopening restores valid metadata" was unproven. | 3 cases added to `ai-conversations.integration.test.ts`. |
+
+Each of the five test files was written to fail first, or to fail against a
+reintroduced defect. A green suite that has never been red is a suite that has
+not been shown to test anything.
 
 ## Definition of done
 
@@ -91,10 +115,28 @@ tests found a publish bug; §20 app focus + prompt versions).
 | --- | --- |
 | `npx tsc --noEmit` (`NODE_OPTIONS=--max-old-space-size=2800`) | clean |
 | `npm run lint` | clean |
-| `npx vitest run --config vitest.config.ts` | **569 files / 7441 tests** all pass |
-| `npm run test:db` | **2081 passed / 1 skipped**; the 2 failures (`backup-locks`, `runtime-role-regrant`) are env-only — module-scope `process.env.DATABASE_URL` — and pass with `DATABASE_URL=postgres://pos:pos@localhost:5432/pos` |
-| `npm run test:design` | 38 tests all pass |
+| `npx vitest run --config vitest.config.ts` | **571 files / 7463 tests** all pass |
+| `npm run test:db` | **2118 passed / 1 skipped** (178 files). Run with `DATABASE_URL=postgres://pos:pos@localhost:5432/pos`; without it, `backup-locks` and `runtime-role-regrant` fail on a module-scope `process.env.DATABASE_URL` read, which is an environment artefact and not a test defect |
+| `npm run test:design` | 5 files / 38 tests all pass |
 | `npm run build` | **Not completable in this sandbox** — OOM-killed at ~3.4 GB. Verified pre-existing: the identical failure reproduces on the unmodified `main` commit `0cf81eba` in a separate worktree. An environment memory limit, not a regression. |
+
+### Test files this issue added
+
+| File | Tests | Covers |
+| --- | --- | --- |
+| `src/lib/ai-permission-matrix.test.ts` | 9 | §13 route guard matrix |
+| `src/lib/ai-attribution.test.ts` | 12 | §6 attribution columns |
+| `src/lib/ai-runtime-mode-aliases.test.ts` | 5 | §7 alias resolution, Thinking rejected |
+| `src/lib/ai-812-phase2.test.ts` | 20 | §2/§3/§4 retirements, no local cache or pgvector |
+| `src/lib/ai-knowledge-gateway.test.ts` | 10 | §2/§3 tenant-isolated knowledge |
+| `src/lib/ai-tool-routing.test.ts` | 15 | §20 App Focus narrowing |
+| `src/lib/ai-money-unit.test.ts` | 5 | §15 Rial/Toman per tenant |
+| `src/components/ai/use-ai-chat.test.tsx` | 6 | §17/18/19 chat lifecycle races |
+| `src/app/api/ai/ai-route-boundaries.test.ts` | 15 | §5/§10/§12 gates behind the guards |
+| `integration/ai-tenant-isolation.integration.test.ts` | 6 | §23 cross-tenant isolation |
+| `integration/ai-prompt-resolver-agents.integration.test.ts` | 14 | §8/§9 resolver + system agents |
+| `integration/ai-deep-research.integration.test.ts` | 14 | §5 Deep Research |
+| `integration/ai-stock-count-ledger.integration.test.ts` | 4 | §14 canonical ledger |
 
 ## Migrations added
 
@@ -111,7 +153,7 @@ edited; the control-plane tables (`platform_ai_modes`, `ai_prompt_versions`,
 `ai_system_agents`, `ai_agent_assignments`, `ai_memory`, `ai_research_runs`,
 `ai_research_sources`) are all in `EXEMPT_TABLES` where they are platform-scope.
 
-## A bug the §29 test audit found
+## A bug the §29 test audit found: publishing a second prompt version
 
 Auditing §29's named tests against the tree showed the **prompt resolver and the
 system agents had no test file at all**. For the resolver that is the worst
@@ -137,5 +179,6 @@ transaction. Only a test that publishes twice finds it.
    unfiltered, as before.
 3. **`npm run build` cannot complete in this 3 GB sandbox.** Pre-existing on
    `main`; reported rather than worked around.
-4. **The two `test:db` failures are environmental**, not test defects. Do not
-   "fix" the tests.
+4. **Two `test:db` files fail without an explicit `DATABASE_URL`** — an
+   environment artefact of a module-scope `process.env` read, not a test defect.
+   Do not "fix" the tests; export the variable.
