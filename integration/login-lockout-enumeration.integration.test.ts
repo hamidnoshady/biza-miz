@@ -15,7 +15,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { Client, type Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import bcrypt from "bcryptjs";
 import { NextRequest } from "next/server";
 import { runMigrations } from "../scripts/migrate";
@@ -130,6 +130,30 @@ describe("locked password accounts are not enumerable before the password is pro
     const correct = await directoryRoute.POST(post("http://localhost/api/auth/directory", { email, password: "correct-horse" }));
     expect(correct.status).toBe(423);
     expect(((await correct.json()) as { error?: string }).error).toBe("account_locked");
+  }, 120_000);
+
+  it("still spends a bcrypt comparison on an unknown email instead of returning early", async () => {
+    // The behavioural half of the timing rule is asserted above (identical
+    // status and body); this is the mechanism: an address with no account must
+    // still pay for one hash comparison against the dummy hash, so the answer
+    // cannot be told apart by how fast it comes back.
+    const spy = vi.spyOn(bcrypt, "compare");
+    try {
+      const unknown = await loginRoute.POST(post("http://localhost/api/auth/login", {
+        email: `nobody-${randomUUID()}@example.com`,
+        password: "wrong",
+      }));
+      expect(unknown.status).toBe(401);
+      expect(await unknown.json()).toEqual({ error: "invalid_credentials" });
+      expect(spy).toHaveBeenCalledTimes(1);
+      const [candidate, hash] = spy.mock.calls[0] as [string, string];
+      expect(candidate).toBe("wrong");
+      // The dummy hash is a real bcrypt hash, so the comparison costs what a
+      // real one costs.
+      expect(hash).toMatch(/^\$2[aby]\$\d{2}\$/);
+    } finally {
+      spy.mockRestore();
+    }
   }, 120_000);
 
   it("applies the same ordering to the platform-admin door", async () => {
