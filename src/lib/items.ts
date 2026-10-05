@@ -54,22 +54,33 @@ export function validateSerialNumber(serialNumber: string): string | null {
   return null;
 }
 
-export type SerialStatus = "in_stock" | "reserved" | "sold" | "in_repair" | "supplier_returned";
+export type SerialStatus =
+  | "in_stock"
+  | "reserved"
+  | "sold"
+  | "in_repair"
+  | "supplier_returned"
+  | "written_off";
 export const SERIAL_STATUSES: SerialStatus[] = [
   "in_stock",
   "reserved",
   "sold",
   "in_repair",
   "supplier_returned",
+  "written_off",
 ];
 
 /**
- * Every transition is allowed except out of the two terminal states:
- * `sold` (no flow un-sells a specific unit) and `supplier_returned`
- * (issue #795 — the physical unit left for the supplier; its row stays
- * for provenance but it can never silently reappear on the shelf).
+ * Every transition is allowed except around the terminal states:
+ * `sold` (no GENERIC flow un-sells a specific unit — the only way back is
+ * the dedicated manager-approved serial return workflow in
+ * watch-return-service.ts, which deliberately does not go through this
+ * validator), `supplier_returned` (issue #795 — the physical unit left for
+ * the supplier) and `written_off` (a damaged return the shop ate; its row
+ * stays for provenance but it can never silently reappear on the shelf).
  * Entering `supplier_returned` is only valid from `in_stock` — the exact
- * unit must be on the shelf to hand back.
+ * unit must be on the shelf to hand back — and `written_off` can only be
+ * entered by the return workflow itself.
  */
 export function validateSerialStatusTransition(from: SerialStatus, to: SerialStatus): string | null {
   if (from === to) return null;
@@ -79,8 +90,14 @@ export function validateSerialStatusTransition(from: SerialStatus, to: SerialSta
   if (from === "supplier_returned") {
     return "کالای برگشت‌خورده به تأمین‌کننده را نمی‌توان به وضعیت دیگری بازگرداند.";
   }
+  if (from === "written_off") {
+    return "کالای ازرده‌خارج‌شده را نمی‌توان به وضعیت دیگری بازگرداند.";
+  }
   if (to === "supplier_returned" && from !== "in_stock") {
     return "فقط کالای موجود در انبار را می‌توان به تأمین‌کننده برگرداند.";
+  }
+  if (to === "written_off") {
+    return "ازرده‌خارج‌کردن فقط از مسیر مرجوعی و بازرسی انجام می‌شود.";
   }
   return null;
 }

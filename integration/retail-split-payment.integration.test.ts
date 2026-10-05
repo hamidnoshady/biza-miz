@@ -491,7 +491,19 @@ describe("split payment — watch", () => {
       { method: "cash", amount: 20_000_000 },
     ]);
 
-    const debits = await debitsFor("watch.sale_revenue", "watch_sale", serial.id);
+    // A watch sale's posting identity is per-OCCURRENCE since issue #795
+    // (a returned unit can sell again), so the serial is found through the
+    // event payload rather than source_id.
+    const { rows: debits } = await db.query<DebitRow>(
+      `SELECT jl.account_id AS "accountId", jl.debit::text AS debit
+         FROM domain_events de
+         JOIN journal_entries je ON je.id = de.entry_id
+         JOIN journal_lines jl ON jl.entry_id = je.id
+        WHERE de.business_id = $1 AND de.event_type = 'watch.sale_revenue'
+          AND de.payload ->> 'serialId' = $2
+          AND je.reversed_at IS NULL AND jl.debit::numeric > 0`,
+      [biz.id, serial.id],
+    );
     expect(debits.find((r) => r.accountId === acct.bankClearing)?.debit).toBe("12700000");
     expect(debits.find((r) => r.accountId === acct.cash)?.debit).toBe("20000000");
   });

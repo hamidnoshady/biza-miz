@@ -244,6 +244,16 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "سفارش ساخت",
   },
   {
+    table: "serial_returns",
+    column: "customer_id",
+    scope: "location",
+    disposition: "move",
+    reason:
+      "A serialized return claim (issue #795) is live work owed to the person — a pending refund or exchange must be reachable from the surviving file.",
+    preview: true,
+    previewLabel: "مرجوعی سریالی",
+  },
+  {
     table: "layaway_plans",
     column: "customer_id",
     scope: "business",

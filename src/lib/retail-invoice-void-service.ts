@@ -124,7 +124,13 @@ interface LineRow {
   retail_snapshot: RetailInvoiceLineSnapshotStored | null;
 }
 
-async function reverseLiveEntry(
+/**
+ * Mirrors one still-live journal entry (skips silently if it was already
+ * reversed or never posted). Shared with the serialized return workflow
+ * (watch-return-service.ts), which unwinds a single watch line with the
+ * exact same debit/credit-swap this void uses.
+ */
+export async function reverseLiveEntry(
   client: PoolClient,
   params: {
     businessId: string;

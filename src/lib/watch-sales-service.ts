@@ -12,6 +12,7 @@
  * the pure rules this leans on) it has no direct unit test; covered instead
  * by integration/watch-sales.integration.test.ts.
  */
+import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { query } from "./db";
 import { computeWatchSalePrice, type WatchSalePriceBreakdown } from "./watch-pricing";
@@ -117,6 +118,15 @@ export async function sellSerializedUnit(
   }
   const lineTenders = resolveLineTenders(input, breakdown.total);
 
+  // Each sale OCCURRENCE is its own posting identity. The serial id alone
+  // used to be the source id, on the assumption a unit sells exactly once —
+  // issue #795's return workflow made that false by design (a
+  // returned-sellable unit legitimately sells again), and a second sale
+  // with the same (source_type, source_id, posting_kind) would trip
+  // uq_journal_business_source_posting. The serial stays queryable through
+  // the payload's serialId.
+  const saleId = randomUUID();
+
   const { entryId: revenueEntryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -132,7 +142,7 @@ export async function sellSerializedUnit(
       tenders: lineTenders,
     },
     sourceType: "watch_sale",
-    sourceId: serial.id,
+    sourceId: saleId,
     createdBy: input.createdBy ?? null,
   });
 
@@ -146,7 +156,7 @@ export async function sellSerializedUnit(
       unitCost: rialText(serial.unit_cost),
     },
     sourceType: "watch_sale",
-    sourceId: serial.id,
+    sourceId: saleId,
     createdBy: input.createdBy ?? null,
   });
 

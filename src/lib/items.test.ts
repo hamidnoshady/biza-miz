@@ -82,6 +82,13 @@ describe("validateSerialStatusTransition", () => {
     expect(validateSerialStatusTransition("supplier_returned", "supplier_returned")).toBeNull();
   });
 
+  it("treats written_off as terminal and only enterable by the return workflow (issue #795)", () => {
+    expect(validateSerialStatusTransition("written_off", "in_stock")).not.toBeNull();
+    expect(validateSerialStatusTransition("written_off", "written_off")).toBeNull();
+    expect(validateSerialStatusTransition("in_stock", "written_off")).not.toBeNull();
+    expect(validateSerialStatusTransition("in_repair", "written_off")).not.toBeNull();
+  });
+
   it("only an in-stock unit can go back to the supplier", () => {
     expect(validateSerialStatusTransition("in_stock", "supplier_returned")).toBeNull();
     expect(validateSerialStatusTransition("reserved", "supplier_returned")).not.toBeNull();
