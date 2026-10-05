@@ -30,6 +30,7 @@ let retailStock: typeof import("../src/lib/retail-stock-service");
 let invoiceService: typeof import("../src/lib/retail-invoice-service");
 let watchReturns: typeof import("../src/lib/watch-return-service");
 let watchReservations: typeof import("../src/lib/watch-reservation-service");
+let watchTransfers: typeof import("../src/lib/watch-transfer-service");
 
 const biz = { id: "", locationId: "" };
 const acct = {
@@ -78,6 +79,7 @@ beforeAll(async () => {
   invoiceService = await import("../src/lib/retail-invoice-service");
   watchReturns = await import("../src/lib/watch-return-service");
   watchReservations = await import("../src/lib/watch-reservation-service");
+  watchTransfers = await import("../src/lib/watch-transfer-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -2116,5 +2118,149 @@ describe("Issue #795 item 18 — pre-owned intake provenance", () => {
         boxAndPapers: false,
       }),
     ).rejects.toThrow(/در اختیار فروشگاه/);
+  });
+});
+
+/**
+ * Issue #795 required coverage — two invoices racing for the same physical
+ * unit, and the canonical branch-transfer operation.
+ */
+describe("Issue #795 — concurrent sale and branch transfer", () => {
+  it("lets exactly one of two concurrent sales of the same serial post", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت مسابقه",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-RACE" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-RACE")!;
+
+    const sellOnce = () =>
+      withTransaction((client) =>
+        invoiceService.createRetailInvoice(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          industry: "watch",
+          customerId: null,
+          tenders: [{ method: "cash" }],
+          lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+        }),
+      );
+    const results = await Promise.allSettled([sellOnce(), sellOnce()]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    expect(fulfilled).toHaveLength(1);
+
+    // One sale, one revenue posting, one physical unit sold.
+    const { rows: entries } = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM domain_events WHERE event_type = 'watch.sale_revenue' AND payload->>'serialId' = $1`,
+      [unit.id],
+    );
+    expect(entries[0].n).toBe("1");
+    const { rows: serialRows } = await db.query<{ status: string }>(
+      "SELECT status FROM item_serials WHERE id = $1",
+      [unit.id],
+    );
+    expect(serialRows[0].status).toBe("sold");
+  });
+
+  it("transfers an in-stock unit to a branch that carries the model, refuses one that doesn't, and leaves the audit event", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت سفری",
+      sku: "TRV-1",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-TRF" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-TRF")!;
+
+    const { rows: branchRows } = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'شعبه دو') RETURNING id",
+      [biz.id],
+    );
+    const branch2 = branchRows[0].id;
+
+    // No matching model at the destination yet — refused, nothing moves.
+    await expect(
+      withTransaction((client) =>
+        watchTransfers.transferSerialUnit(client, {
+          businessId: biz.id,
+          fromLocationId: biz.locationId,
+          toLocationId: branch2,
+          serialId: unit.id,
+        }),
+      ),
+    ).rejects.toThrow(/مدل مقصد|تعریف نشده/);
+
+    // The destination catalogues the model (same SKU) — the move succeeds.
+    const destItem = await itemsService.createItem({
+      locationId: branch2,
+      name: "ساعت سفری",
+      sku: "TRV-1",
+      tracking: "serial",
+    });
+    const moved = await withTransaction((client) =>
+      watchTransfers.transferSerialUnit(client, {
+        businessId: biz.id,
+        fromLocationId: biz.locationId,
+        toLocationId: branch2,
+        serialId: unit.id,
+        note: "تقاضای شعبه دو",
+      }),
+    );
+    expect(moved.toItemId).toBe(destItem.id);
+
+    // The unit now lives at branch 2, in stock, same serial — and the move
+    // is on the immutable event log with both endpoints.
+    expect((await watchSales.listSerialUnits(biz.locationId)).find((u) => u.id === unit.id)).toBeUndefined();
+    const atBranch2 = (await watchSales.listSerialUnits(branch2)).find((u) => u.id === unit.id);
+    expect(atBranch2).toMatchObject({ status: "in_stock", serialNumber: "SN-TRF" });
+    const { rows: events } = await db.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM domain_events WHERE event_type = 'watch.serial_transfer' AND payload->>'serialId' = $1`,
+      [unit.id],
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0].payload).toMatchObject({
+      fromLocationId: biz.locationId,
+      toLocationId: branch2,
+      note: "تقاضای شعبه دو",
+    });
+
+    // A sold unit never transfers.
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: branch2,
+        industry: "watch",
+        customerId: null,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+    await expect(
+      withTransaction((client) =>
+        watchTransfers.transferSerialUnit(client, {
+          businessId: biz.id,
+          fromLocationId: branch2,
+          toLocationId: biz.locationId,
+          serialId: unit.id,
+        }),
+      ),
+    ).rejects.toThrow(/قابل انتقال/);
   });
 });

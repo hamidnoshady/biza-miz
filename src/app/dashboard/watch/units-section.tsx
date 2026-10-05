@@ -1,7 +1,7 @@
 "use client";
 
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { toPersianDigits } from "@/lib/digits";
@@ -19,7 +19,7 @@ import {
   type SerialUnit,
   type WatchModel,
 } from "./watch-manager";
-import { cardClass } from "../page-chrome";
+import { cardClass, SectionCardSkeleton } from "../page-chrome";
 
 const watchInputClass = `${inputClass} min-h-[52px] !border-border !bg-card shadow-none placeholder:text-muted-foreground focus-visible:border-amber-500 dark:focus-visible:border-amber-500/60 focus-visible:ring-amber-400/30 dark:focus-visible:ring-amber-400/40`;
 const secondaryActionClass =
@@ -246,8 +246,8 @@ const PRE_OWNED_SOURCE_OPTIONS = [
 
 function UnitRow({ unit, busy, run }: { unit: SerialUnit; busy: boolean; run: Runner }) {
   const money = useMoney();
-  const [panel, setPanel] = useState<"cost" | "audit" | "preowned" | null>(null);
-  const toggle = (next: "cost" | "audit" | "preowned") =>
+  const [panel, setPanel] = useState<"cost" | "audit" | "preowned" | "transfer" | null>(null);
+  const toggle = (next: "cost" | "audit" | "preowned" | "transfer") =>
     setPanel((current) => (current === next ? null : next));
 
   return (
@@ -321,6 +321,18 @@ function UnitRow({ unit, busy, run }: { unit: SerialUnit; busy: boolean; run: Ru
             </Button>
           ) : null}
           {unit.status === "in_stock" ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className={secondaryActionClass}
+              disabled={busy}
+              onClick={() => toggle("transfer")}
+            >
+              انتقال شعبه
+            </Button>
+          ) : null}
+          {unit.status === "in_stock" ? (
             // Selling happens on the invoice screen, the only place a sale
             // becomes a document (Phase 25 Wave 3). This page manages the
             // catalogue; it no longer offers a parallel way to sell one unit
@@ -341,6 +353,9 @@ function UnitRow({ unit, busy, run }: { unit: SerialUnit; busy: boolean; run: Ru
       {panel === "audit" ? <ItemAuditPanel itemId={unit.itemId} /> : null}
       {panel === "preowned" ? (
         <PreOwnedPanel unit={unit} busy={busy} run={run} onDone={() => setPanel(null)} />
+      ) : null}
+      {panel === "transfer" ? (
+        <TransferPanel unit={unit} busy={busy} run={run} onDone={() => setPanel(null)} />
       ) : null}
     </li>
   );
@@ -563,6 +578,98 @@ function CostPanel({
         <div className="sm:col-span-3">
           <Button type="submit" disabled={busy} size="sm" className="min-h-[44px] border border-amber-300 dark:border-amber-500/40 px-5 font-semibold">
             ذخیره
+          </Button>
+        </div>
+      </form>
+    </PanelShell>
+  );
+}
+
+/**
+ * Issue #795 — moving one unit to another branch. The destination must
+ * already carry the same model in its catalogue; the move is
+ * accounting-neutral (business-scoped inventory account) and leaves a
+ * domain-event audit trail.
+ */
+function TransferPanel({
+  unit,
+  busy,
+  run,
+  onDone,
+}: {
+  unit: SerialUnit;
+  busy: boolean;
+  run: Runner;
+  onDone: () => void;
+}) {
+  const [destinations, setDestinations] = useState<{ id: string; name: string }[] | null>(null);
+  const [toLocationId, setToLocationId] = useState("");
+  const [note, setNote] = useState("");
+
+  useEffect(() => {
+    api<{ destinations: { id: string; name: string }[] }>(
+      `/api/watch/units/${unit.id}/transfer`,
+    ).then(({ ok, data }) => {
+      if (ok) setDestinations(data.destinations);
+    });
+  }, [unit.id]);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    if (!toLocationId) return;
+    const ok = await run(() =>
+      api(`/api/watch/units/${unit.id}/transfer`, {
+        method: "POST",
+        body: JSON.stringify({ toLocationId, note: note || null }),
+      }),
+    );
+    if (ok) onDone();
+  }
+
+  if (destinations === null) {
+    return (
+      <PanelShell>
+        <SectionCardSkeleton rows={2} />
+      </PanelShell>
+    );
+  }
+  if (destinations.length === 0) {
+    return (
+      <PanelShell>
+        <p className="text-xs leading-5 text-muted-foreground">شعبهٔ دیگری برای انتقال وجود ندارد.</p>
+      </PanelShell>
+    );
+  }
+
+  return (
+    <PanelShell>
+      <p className="mb-3 text-xs leading-5 text-muted-foreground">
+        دستگاه به کاتالوگ همان مدل در شعبهٔ مقصد منتقل می‌شود؛ اگر مدل در مقصد تعریف نشده باشد، انتقال
+        انجام نمی‌شود.
+      </p>
+      <form onSubmit={save} className="grid min-w-0 gap-3 sm:grid-cols-2">
+        <Field label="شعبهٔ مقصد">
+          <SearchableSelect
+            className={watchInputClass}
+            value={toLocationId}
+            onChange={setToLocationId}
+            options={[
+              { value: "", label: "انتخاب کنید…" },
+              ...destinations.map((d) => ({ value: d.id, label: d.name })),
+            ]}
+          />
+        </Field>
+        <Field label="یادداشت (اختیاری)">
+          <input className={watchInputClass} value={note} onChange={(e) => setNote(e.target.value)} />
+        </Field>
+        <div className="sm:col-span-2">
+          <Button
+            type="submit"
+            disabled={busy || !toLocationId}
+            size="sm"
+            className="min-h-[44px] border border-amber-300 dark:border-amber-500/40 px-5 font-semibold"
+          >
+            انتقال
           </Button>
         </div>
       </form>

@@ -85,10 +85,15 @@ export async function sellSerializedUnit(
   client: PoolClient,
   input: SellSerializedUnitInput,
 ): Promise<SellSerializedUnitResult> {
+  // FOR UPDATE: two invoices racing for the same physical unit must
+  // serialize here — the loser re-reads the committed row, sees it sold,
+  // and refuses, instead of both posting revenue for one watch (issue
+  // #795 required coverage: concurrent sale of the same serial).
   const { rows } = await client.query<SerialLookupRow>(
     `SELECT s.id, s.item_id, s.serial_number, s.status, s.unit_cost, s.warranty_months, i.location_id
        FROM item_serials s JOIN items i ON i.id = s.item_id
-      WHERE s.id = $1`,
+      WHERE s.id = $1
+      FOR UPDATE OF s`,
     [input.serialId],
   );
   const serial = rows[0];
@@ -179,10 +184,17 @@ export async function sellSerializedUnit(
     createdBy: input.createdBy ?? null,
   });
 
-  await client.query(
-    `UPDATE item_serials SET status = 'sold', sold_at = $2, warranty_months = $3 WHERE id = $1`,
+  // Status predicate = belt and braces behind the FOR UPDATE above: if the
+  // row somehow moved since the locked read, the sale aborts rather than
+  // stamping 'sold' over whatever happened in between.
+  const { rowCount: soldCount } = await client.query(
+    `UPDATE item_serials SET status = 'sold', sold_at = $2, warranty_months = $3
+      WHERE id = $1 AND status IN ('in_stock', 'reserved')`,
     [serial.id, saleDate, warrantyMonths],
   );
+  if (soldCount === 0) {
+    throw new Error("این دستگاه در انبار موجود نیست (در تعمیر یا فروخته‌شده است).");
+  }
 
   // A zero-month term is a real answer ("sold with no warranty"), so it
   // records no window rather than a zero-length one the reports would then
