@@ -30,6 +30,7 @@
 import { query } from "./db";
 import { isUuid } from "./uuid";
 import { DEAL_VIEW_FILTER_KEYS, parseDealViewFilters } from "./crm-deal-views";
+import { CASE_VIEW_FILTER_KEYS, parseCaseViewFilters } from "./crm-case-views";
 
 export const SAVED_VIEW_ENTITIES = [
   "customers",
@@ -57,7 +58,10 @@ const ENTITY_FILTER_KEYS: Record<SavedViewEntity, readonly string[]> = {
   // the second opinion that lets a stored view name a filter the screen has
   // never heard of (which is how the board came to apply one key of seven).
   deals: DEAL_VIEW_FILTER_KEYS,
-  cases: ["q", "status", "priority", "assignee", "open", "breached"],
+  // Likewise from `crm-case-views.ts`. The desk's six keys used to be listed
+  // here while the screen honoured two of them, which is precisely the drift
+  // this indirection removes.
+  cases: CASE_VIEW_FILTER_KEYS,
   activities: ["q", "kind", "state", "assignee", "due"],
 };
 
@@ -81,6 +85,7 @@ const ENTITY_FILTER_VALIDATORS: Partial<
   Record<SavedViewEntity, (filters: Record<string, string>) => { error: string | null }>
 > = {
   deals: (filters) => parseDealViewFilters({ get: (key) => filters[key] ?? null }),
+  cases: (filters) => parseCaseViewFilters({ get: (key) => filters[key] ?? null }),
 };
 
 export function isSavedViewEntity(value: unknown): value is SavedViewEntity {

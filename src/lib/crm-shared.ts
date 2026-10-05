@@ -290,22 +290,21 @@ export function isOpenCase(status: CaseStatus): boolean {
   return status === "open" || status === "in_progress" || status === "waiting";
 }
 
-/**
- * Whether a case has missed its priority's target, given how long it has been
- * open. `waiting` deliberately does not breach: the clock belongs to the
- * customer at that point, and marking the shop late for the customer's own
- * silence would make the whole indicator meaningless.
+/*
+ * **`caseBreached` used to live here, and deliberately does not any more.** The
+ * badge on the ticket list, the SLA summary above it and the `cases` filter all
+ * have to answer one question — has this ticket missed its target? — and they
+ * answered it two different ways: this module compared raw age against the
+ * target, while the SLA backend measured the first response and subtracted the
+ * time spent waiting on the customer. The same ticket could read «در زمان هدف»
+ * in the panel and «معوق» a line below it.
+ *
+ * The rule now lives in `crm-case-clock.ts` (`caseIsBreached`), which is pure
+ * and client-safe, and nothing here re-exports it: a caller that still imports
+ * the old name should fail to compile and move, rather than silently keep
+ * calling a second rule. `crm-case-clock.ts` imports *this* module for the case
+ * vocabulary — the dependency runs one way, so there is no import cycle.
  */
-export function caseBreached(
-  input: { status: CaseStatus; priority: CasePriority; openedAt: string; resolvedAt: string | null },
-  now: Date,
-): boolean {
-  if (!isOpenCase(input.status) || input.status === "waiting") return false;
-  const opened = Date.parse(input.openedAt);
-  if (Number.isNaN(opened)) return false;
-  const elapsedHours = (now.getTime() - opened) / 3_600_000;
-  return elapsedHours > CASE_PRIORITY_TARGET_HOURS[input.priority];
-}
 
 // ---------------------------------------------------------------------------
 // The customer timeline

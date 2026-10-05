@@ -22,7 +22,12 @@
 
 import { useRouter } from "next/navigation";
 import type { Permission } from "@/lib/permissions";
-import { canConfigureCrmSection, canDeleteCrmSection, canWriteCrmSection } from "@/lib/crm-permissions";
+import {
+  canConfigureCrmSection,
+  canDeleteCrmSection,
+  canSaveCrmViews,
+  canWriteCrmSection,
+} from "@/lib/crm-permissions";
 import { canViewCrmSection } from "@/lib/crm-permissions";
 import { CrmOverviewSection } from "./overview-section";
 import { DirectorySection } from "./directory-section";
@@ -71,7 +76,14 @@ export function CrmSection({
   if (section === "deals") return <DealsSection canManage={canWriteCrmSection(held, "deals")} />;
   if (section === "activities") return <ActivitiesSection />;
   if (section === "cases")
-    return <CasesSection canDelete={canDeleteCrmSection(held, "cases")} />;
+    return (
+      <CasesSection
+        // The delete gate is `crm.delete`, the key the DELETE route requires —
+        // not the `crm.manage` the button used to be drawn on.
+        canDelete={canDeleteCrmSection(held, "cases")}
+        canSaveViews={canSaveCrmViews(held)}
+      />
+    );
   if (section === "quality")
     return (
       <QualitySection

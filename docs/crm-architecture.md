@@ -435,10 +435,10 @@ gets a real value check (`crm-saved-views-service.ts` refuses `invalid_filters`
 rather than storing a stage id that will fail on the screen for everybody the
 view is shared with), and the screen that owns the keys owns the parser:
 
-- one pure module per entity (`crm-deal-views.ts` for `deals`) parses, serialises
-  and *describes* the same document, and the route imports it — so a view stored
-  from the board, a pasted query string and a colleague's shared view are one
-  interpretation;
+- one pure module per entity (`crm-deal-views.ts` for `deals`,
+  `crm-case-views.ts` for `cases`) parses, serialises and *describes* the same
+  document, and the route imports it — so a view stored from the board, a pasted
+  query string and a colleague's shared view are one interpretation;
 - the service imports that module's key list instead of repeating it, so the
   vocabulary cannot drift from the implementation;
 - an impossible value is refused **by name** (`bad_filter` + the field) and the
@@ -450,8 +450,23 @@ view is shared with), and the screen that owns the keys owns the parser:
   silently nothing.
 
 The rest of the vocabulary goes through the same door as it is built: the
-`deals` parser is the worked example, and an entity without one keeps the
-drop-unknown-keys behaviour rather than pretending to validate values.
+`deals` and `cases` parsers are the worked examples, and an entity without one
+keeps the drop-unknown-keys behaviour rather than pretending to validate values.
+
+**A filter that is a rule, not a column is written twice — and tested for
+agreement.** `cases` can be narrowed by `breached`, which is not a field: it is
+`crm-case-clock.ts`'s rule about priority targets, first response and time spent
+waiting on the customer. The row's badge, the SLA panel and the saved view must
+all answer it identically, and they cannot share an implementation: the badge is
+client-side, the panel reads many rows, and the filter has to narrow in SQL or
+the `LIMIT` will have already broken it. So the rule lives in one pure module and
+the SQL is a translation of it, taking its policy (the target hours, the closed
+statuses) as parameters from the same constants — and
+`integration/crm-case-sla.integration.test.ts` runs both over one set of
+fixtures chosen so that every plausible mistranslation (raw age, one hardcoded
+target, ignoring the customer-wait, blaming a resolved ticket) gives a different
+answer. Two implementations with an agreement test is the only honest way to
+have a filter on a rule.
 
 ## Permissions
 

@@ -49,6 +49,7 @@ import {
   type DealStage,
   type DuplicateReason,
 } from "./crm-shared";
+import { CASE_BREACH_SQL_CASES, caseBreachSql } from "./crm-case-clock";
 import { daysBetween, lifetimeValue, scorePopulation, type CustomerRfmInput, type RfmScore } from "./crm-scoring";
 import { customerHealth as healthOf, type CustomerHealth } from "./crm-health";
 import { resolveOwner } from "./crm-ownership";
@@ -2057,14 +2058,35 @@ const CASE_COLUMNS = `k.id, k.customer_id AS "customerId", c.name AS "customerNa
   k.resolution, k.opened_at AS "openedAt",
   k.resolved_at AS "resolvedAt", k.created_by AS "createdBy"`;
 
+/**
+ * The service desk's read, and the only one — every key of the `cases` filter
+ * vocabulary is answered *here*, in the database, so a saved view cannot be a
+ * filter that narrows the chips and not the rows.
+ *
+ * `breachedOnly` is decided by `caseBreachSql()` from `crm-case-clock.ts`, the
+ * SQL half of the rule the row's badge and the summary panel use; the two are
+ * proven to agree by `integration/crm-case-views.test.ts`. The target hours and
+ * the closed statuses travel as parameters so the policy stays in one place.
+ */
 export async function listCases(
   businessId: string,
   options: {
     customerId?: string;
     status?: CaseStatus;
+    priority?: CasePriority;
+    /** Free text over the subject, the body and the customer's name. */
+    q?: string;
     openOnly?: boolean;
+    /** Only tickets that have missed their priority's target. */
+    breachedOnly?: boolean;
     /** The member handling them («تیکت‌های من») — by id, not by name. */
     assigneeUserId?: string;
+    /**
+     * Deliberately unclaimed tickets. Separate from "not filtering by
+     * assignee", which must not mean "only the unowned ones": an unclaimed
+     * ticket is the one that rots, and it is the reason this option exists.
+     */
+    unowned?: boolean;
     limit?: number;
   } = {},
 ): Promise<CrmCase[]> {
@@ -2077,12 +2099,30 @@ export async function listCases(
   if (options.assigneeUserId && isUuid(options.assigneeUserId)) {
     params.push(options.assigneeUserId);
     where += ` AND k.assignee_user_id = $${params.length}`;
+  } else if (options.unowned) {
+    where += " AND k.assignee_user_id IS NULL";
   }
   if (options.status) {
     params.push(options.status);
     where += ` AND k.status = $${params.length}`;
   }
+  if (options.priority) {
+    params.push(options.priority);
+    where += ` AND k.priority = $${params.length}`;
+  }
+  if (options.q?.trim()) {
+    params.push(`%${options.q.trim()}%`);
+    where += ` AND (k.subject ILIKE $${params.length} OR k.body ILIKE $${params.length}
+              OR c.name ILIKE $${params.length})`;
+  }
   if (options.openOnly) where += " AND k.status IN ('open', 'in_progress', 'waiting')";
+  if (options.breachedOnly) {
+    params.push(JSON.stringify(CASE_BREACH_SQL_CASES.targets));
+    const targets = `$${params.length}`;
+    params.push([...CASE_BREACH_SQL_CASES.closed]);
+    const closed = `$${params.length}`;
+    where += ` AND ${caseBreachSql({ targets, closed })}`;
+  }
   params.push(options.limit ?? 200);
 
   const { rows } = await query<CrmCase>(

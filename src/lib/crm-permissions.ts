@@ -372,6 +372,19 @@ export function canDeleteCrmSection(
   return holds(permissions, crmSectionPermission(key, "delete"));
 }
 
+/**
+ * Whether a member may save or delete a named view — `crm_saved_views`.
+ *
+ * Stated as its own question because the answer is not any one section's write
+ * key: the saved-view routes are shared by every screen and are guarded by
+ * `crm.manage`. Spelling that inline on a screen is how the case delete button
+ * came to be drawn for people whose endpoint required `crm.delete`; the screen
+ * asks this function, which asks the same constant the route does.
+ */
+export function canSaveCrmViews(permissions: ReadonlySet<Permission>): boolean {
+  return permissions.has(crmManage);
+}
+
 /** Whether a member may merge identity records. */
 export function canMergeCrmSection(
   permissions: ReadonlySet<Permission>,

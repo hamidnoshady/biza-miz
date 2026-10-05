@@ -10,6 +10,13 @@ import {
   type CasePriority,
   type CaseStatus,
 } from "@/lib/crm-shared";
+import { listAssignableMembers } from "@/lib/crm-ownership";
+import {
+  caseViewAssigneeUserId,
+  caseViewQuery,
+  caseViewUnownedOnly,
+  parseCaseViewFilters,
+} from "@/lib/crm-case-views";
 
 /**
  * Service cases — complaints and requests (Phase 36).
@@ -35,20 +42,50 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
 
   const search = request.nextUrl.searchParams;
-  const status = search.get("status");
+
+  // The desk's own vocabulary, parsed by the desk's own parser
+  // (`crm-case-views.ts`) and not read a second time here: the filter a saved
+  // view stores, the chips it renders and the rows the server returns are then
+  // three readings of one document rather than three opinions.
+  const { filters, error: filterError } = parseCaseViewFilters(search);
+  if (filterError) {
+    return NextResponse.json({ error: "bad_filter", field: filterError }, { status: 400 });
+  }
+
+  // `mine` becomes the session's member id here, never a query-string value.
+  const assigneeUserId = caseViewAssigneeUserId(filters, session.sub);
   const cases = await listCases(session.businessId, {
     customerId: search.get("customerId") ?? undefined,
-    status: status && isCaseStatus(status) ? (status as CaseStatus) : undefined,
-    openOnly: search.get("open") === "1",
-    // «تیکت‌های من» — from the session, never from the query string.
-    assigneeUserId: search.get("mine") === "1" ? session.sub : undefined,
+    status: filters.status ? (filters.status as CaseStatus) : undefined,
+    priority: filters.priority ? (filters.priority as CasePriority) : undefined,
+    q: filters.q || undefined,
+    openOnly: filters.openOnly,
+    // A caller with no member id who asked for `mine` gets nothing, not
+    // everything: the safe direction for a filter about ownership.
+    assigneeUserId: assigneeUserId ?? undefined,
+    unowned: caseViewUnownedOnly(filters) || (filters.assignee === "mine" && !assigneeUserId),
+    breachedOnly: filters.breachedOnly,
   });
+
+  // The filters actually applied, echoed in the vocabulary the screen sent, so
+  // the chips can be rendered from the answer rather than from local state and
+  // can never name a filter that was dropped on the way.
+  const applied = caseViewQuery(filters);
+  const members = (await listAssignableMembers(session.businessId)).map((member) => ({
+    id: member.id,
+    name: member.name,
+    isActive: member.isActive,
+  }));
+
   return NextResponse.json({
     cases,
     // Alongside the list, because the list alone cannot show it: the SLA
     // position depends on accumulated waiting time, which no single row
-    // renders.
+    // renders. Computed by the same rule the rows and the `breached` filter
+    // use, so the panel and the list cannot disagree.
     sla: await caseSlaSummary(session.businessId),
+    applied,
+    members,
   });
 });
 
