@@ -11,7 +11,6 @@ export const SETTINGS_TAB_KEYS = [
   "payment-methods",
   "accounts",
   "team",
-  "menu",
   "printers",
   "cloud-sync",
   "branch-management",
@@ -131,15 +130,6 @@ export const SETTINGS_TABS: SettingsTab[] = [
     label: "کاربران و دسترسی‌ها",
     description: "اعضا، دعوت‌ها و مجوزهای اختصاصی",
     requiredAnyPermission: [PERMISSIONS.teamManage],
-  },
-  {
-    key: "menu",
-    label: "منو و ورود فایل",
-    description: "مدیریت منو و ورود گروهی از CSV یا Excel",
-    requiredAnyPermission: [PERMISSIONS.settingsManage],
-    // `menu_items` is the F&B catalogue; the retail industries keep theirs on
-    // Phase 21's `items` model, managed from their own dashboard page.
-    module: "menu",
   },
   {
     key: "printers",

@@ -640,6 +640,31 @@ const POS_PRODUCTS: EntityDefinition = {
       exportDefault: true,
     },
     { key: "description", label: "توضیحات", type: "longtext", aliases: ["توضیح"], exportDefault: true },
+    {
+      key: "imageUrl",
+      label: "لینک تصویر",
+      type: "text",
+      aliases: ["تصویر", "عکس", "image", "img"],
+      validation: { maxLength: 2000 },
+      exportDefault: true,
+    },
+    {
+      key: "imageMediaId",
+      label: "شناسهٔ رسانهٔ تصویر",
+      type: "text",
+      aliases: ["رسانه", "media id", "image_media_id"],
+      hint:
+        "شناسهٔ دارایی در کتابخانهٔ رسانه. در ورود، اگر در این کسب‌وکار موجود نباشد با هشدار نادیده گرفته می‌شود.",
+      exportDefault: true,
+    },
+    {
+      key: "targetMarginPercent",
+      label: "حاشیهٔ سود هدف (٪)",
+      type: "number",
+      aliases: ["حاشیه سود", "margin", "حاشیه"],
+      validation: { min: 0, max: 100 },
+      exportDefault: true,
+    },
     { key: "sortOrder", label: "ترتیب", type: "integer" },
     ACTIVE_FIELD,
     CREATED_AT_FIELD,
@@ -648,6 +673,68 @@ const POS_PRODUCTS: EntityDefinition = {
     { key: "sku", label: "کد کالا", fields: ["sku"] },
     { key: "name_category", label: "نام و دسته", fields: ["name", "categoryName"] },
     { key: "name", label: "نام آیتم", fields: ["name"] },
+  ],
+};
+
+/**
+ * Item ↔ modifier-group attachments (issue #844 parity): per-item min/max
+ * overrides, per-item link order and the link's own active state — the facts
+ * a flat items/modifiers export could not represent.
+ */
+const POS_ITEM_MODIFIER_GROUPS: EntityDefinition = {
+  key: "pos.item_modifier_groups",
+  module: "pos",
+  label: "اتصال افزودنی به آیتم",
+  description:
+    "کدام گروه افزودنی به کدام آیتم وصل است، با حداقل/حداکثر اختصاصی، ترتیب نمایش و وضعیت پیوند.",
+  exportPermission: PERMISSIONS.menuView,
+  importPermission: PERMISSIONS.menuEdit,
+  locationScoped: true,
+  requiresModule: "menu",
+  fields: [
+    {
+      key: "itemName",
+      label: "نام آیتم",
+      type: "text",
+      required: true,
+      aliases: ["آیتم", "محصول", "item", "نام محصول"],
+      exportDefault: true,
+    },
+    {
+      key: "itemSku",
+      label: "کد کالا",
+      type: "text",
+      aliases: ["کد", "sku"],
+      exportDefault: true,
+      hint: "در صورت وجود، مرجع اصلی آیتم است؛ در غیر این صورت از نام استفاده می‌شود.",
+    },
+    {
+      key: "groupName",
+      label: "گروه افزودنی",
+      type: "text",
+      required: true,
+      aliases: ["گروه", "افزودنی", "modifier group"],
+      exportDefault: true,
+    },
+    {
+      key: "minSelectOverride",
+      label: "حداقل انتخاب (اختصاصی)",
+      type: "integer",
+      aliases: ["حداقل", "min"],
+      validation: { min: 0 },
+    },
+    {
+      key: "maxSelectOverride",
+      label: "حداکثر انتخاب (اختصاصی)",
+      type: "integer",
+      aliases: ["حداکثر", "max"],
+      validation: { min: 0 },
+    },
+    { key: "sortOrder", label: "ترتیب نمایش در آیتم", type: "integer", exportDefault: true },
+    ACTIVE_FIELD,
+  ],
+  duplicateRules: [
+    { key: "item_group", label: "آیتم و گروه", fields: ["itemName", "groupName"] },
   ],
 };
 
@@ -1563,6 +1650,7 @@ export const DATA_ENTITIES: readonly EntityDefinition[] = [
   // POS
   POS_PRODUCTS,
   POS_CATEGORIES,
+  POS_ITEM_MODIFIER_GROUPS,
   POS_MODIFIERS,
   POS_ORDERS,
   // Inventory

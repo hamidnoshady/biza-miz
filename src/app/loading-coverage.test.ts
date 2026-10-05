@@ -87,6 +87,11 @@ describe("route-level skeleton coverage", () => {
       // action that retires the step, and its effect probes the desktop bridge
       // rather than any API. There is no data region here to reserve (issue #808).
       "setup/hardware/page.tsx",
+      // The menu item Sheet's requests are all mutations (save, attach,
+      // detach) against data the workspace already loaded — menu-workspace.tsx
+      // skeletons the tree before any Sheet can open, so there is no
+      // first-fetch region for the Sheet itself to reserve (issue #844).
+      "(app)/accounting/menu/item-sheet.tsx",
     ]);
     const offenders: string[] = [];
     for (const file of walkTsFiles(APP_DIR)) {

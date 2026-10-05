@@ -77,6 +77,16 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       // revocation for custom/system roles.
       requiredAllPermissions: [...POS_REQUIRED_PERMISSIONS],
     },
+    // The canonical menu manager (issue #844) — «مدیریت منو», right after the
+    // till it stocks. Gated on the canonical read capability; the page and the
+    // workspace composer take their gate from this same entry, and mutations
+    // are separately gated `menu.edit` on every route.
+    {
+      label: "مدیریت منو",
+      module: "menu",
+      href: ACCOUNTING_WORKSPACE_HREFS.menu,
+      requiredAnyPermission: ["menu.view"],
+    },
     // The CRM app's door (Phase 36 — it is its own app, not a section of any
     // other). It is anchored on the `customers` module — core for every trade,
     // so a business that has customers has a CRM — and points at the app's own

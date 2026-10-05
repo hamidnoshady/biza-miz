@@ -17,6 +17,23 @@
 
 import { query } from "../../db";
 import { postgresDateToIso } from "../../jalali";
+import { getSetting, SETTING_KEYS } from "../../settings";
+import {
+  attachModifierGroupToItem,
+  createCategory,
+  createMenuItem,
+  updateCategory,
+  updateItemModifierGroup,
+  updateMenuItem,
+} from "../../menu-service";
+import {
+  validateCategoryCreate,
+  validateCategoryPatch,
+  validateItemModifierGroupAttach,
+  validateItemModifierGroupPatch,
+  validateMenuItemCreate,
+  validateMenuItemPatch,
+} from "../../menu-validation";
 import {
   registerAdapter,
   RowRejection,
@@ -41,6 +58,40 @@ function requireLocation(locationId: string | null): string {
   return locationId;
 }
 
+/**
+ * Translate a menu-domain validation/service error key into the Persian line
+ * the row-level skip report shows. These services answer in keys (the routes
+ * map them for HTTP); an import row needs the operator's own language.
+ */
+function menuErrorText(error: string): string {
+  switch (error) {
+    case "invalid_price":
+      return "قیمت آیتم معتبر نیست.";
+    case "missing_fields":
+      return "اطلاعات آیتم ناقص است.";
+    case "bad_request":
+      return "ساختار دادهٔ آیتم معتبر نیست.";
+    case "sku_exists":
+      return "کد کالا تکراری است.";
+    case "category_exists":
+      return "دستهٔ هم‌نام از قبل وجود دارد.";
+    case "category_not_found":
+      return "دستهٔ انتخاب‌شده وجود ندارد.";
+    case "item_not_found":
+      return "آیتم پیدا نشد.";
+    case "group_not_found":
+      return "گروه افزودنی پیدا نشد.";
+    case "invalid_media":
+      return "تصویر انتخاب‌شده معتبر نیست.";
+    default:
+      return `ثبت آیتم انجام نشد (${error}).`;
+  }
+}
+
+function reject(error: string): never {
+  throw new RowRejection(menuErrorText(error));
+}
+
 async function resolveCategory(
   locationId: string,
   name: string,
@@ -55,14 +106,11 @@ async function resolveCategory(
   );
   if (rows[0]) return { id: rows[0].id, label: rows[0].name };
   if (!create) return null;
-  const { rows: created } = await query<{ id: string; name: string }>(
-    `INSERT INTO menu_categories (location_id, name, sort_order)
-     VALUES ($1, $2, (SELECT coalesce(max(sort_order), 0) + 1
-                        FROM menu_categories WHERE location_id = $1))
-     RETURNING id, name`,
-    [locationId, trimmed],
-  );
-  return created[0] ? { id: created[0].id, label: created[0].name } : null;
+  const parsed = validateCategoryCreate({ name: trimmed });
+  if (!parsed.ok) reject(parsed.error);
+  const created = await createCategory(locationId, parsed.value, 0);
+  if (!created.ok) reject(created.error);
+  return created.id ? { id: created.id, label: trimmed } : null;
 }
 
 const categoriesAdapter: EntityAdapter = {
@@ -90,33 +138,46 @@ const categoriesAdapter: EntityAdapter = {
       return { status: "skipped", id: existing.id, reason: `دستهٔ «${name}» از پیش وجود دارد.` };
     }
     if (existing && options.duplicateStrategy === "update") {
-      await query(
-        `UPDATE menu_categories
-            SET tax_rate = coalesce($3, tax_rate),
-                sort_order = coalesce($4, sort_order),
-                is_active = coalesce($5, is_active)
-          WHERE location_id = $1 AND id = $2`,
-        [
-          locationId,
-          existing.id,
-          values.taxRate ?? null,
-          values.sortOrder ?? null,
-          values.isActive ?? null,
-        ],
-      );
+      // The menu service's own validator — the same one manual CRUD runs —
+      // then the service's UPDATE: import and the category dialog can no
+      // longer disagree about what a legal tax rate or sort order is
+      // (issue #844: import paths reuse the domain validators).
+      // Null/absent means "leave this column alone" (the old coalesce
+      // semantics); only what the file actually carries is patched.
+      const rawPatch: Record<string, unknown> = {};
+      if (values.taxRate !== undefined && values.taxRate !== null) rawPatch.taxRate = values.taxRate;
+      if (values.sortOrder !== undefined && values.sortOrder !== null)
+        rawPatch.sortOrder = values.sortOrder;
+      if (values.isActive !== undefined && values.isActive !== null)
+        rawPatch.isActive = values.isActive;
+      if (Object.keys(rawPatch).length === 0) return { status: "updated", id: existing.id };
+      const patch = validateCategoryPatch(rawPatch);
+      if (!patch.ok) reject(patch.error);
+      const updated = await updateCategory(locationId, existing.id, patch.value);
+      if (!updated.ok) reject(updated.error);
       return { status: "updated", id: existing.id };
     }
 
-    const { rows } = await query<{ id: string }>(
-      `INSERT INTO menu_categories (location_id, name, tax_rate, sort_order, is_active)
-       VALUES ($1, $2, coalesce($3, 0),
-               coalesce($4, (SELECT coalesce(max(sort_order), 0) + 1
-                               FROM menu_categories WHERE location_id = $1)),
-               coalesce($5, true))
-       RETURNING id`,
-      [locationId, name, values.taxRate ?? null, values.sortOrder ?? null, values.isActive ?? null],
-    );
-    return { status: "created", id: rows[0].id };
+    const create = validateCategoryCreate({
+      name,
+      taxRate: values.taxRate,
+      sortOrder: values.sortOrder,
+      isActive: values.isActive,
+    });
+    if (!create.ok) reject(create.error);
+    // A file with no tax column creates the category with the business's
+    // default rate — exactly what the manual create does — not a silent 0.
+    let defaultRate = create.value.taxRate !== undefined ? create.value.taxRate : undefined;
+    if (defaultRate === undefined) {
+      const tax = await getSetting<{ defaultRate?: number }>(
+        context.businessId,
+        SETTING_KEYS.tax,
+      );
+      defaultRate = tax?.defaultRate ?? 0;
+    }
+    const created = await createCategory(locationId, create.value, defaultRate);
+    if (!created.ok) reject(created.error);
+    return { status: "created", id: created.id! };
   },
   async resolveReference(context, lookup, { create }) {
     return resolveCategory(requireLocation(context.locationId), lookup, create);
@@ -145,7 +206,9 @@ const productsAdapter: EntityAdapter = {
     params.push(options.limit);
     const { rows } = await query<Record<string, unknown>>(
       `SELECT mi.id, mi.name, mc.name AS "categoryName", mi.price, mi.sku,
-              mi.description, mi.sort_order AS "sortOrder", mi.is_active AS "isActive",
+              mi.description, mi.image_url AS "imageUrl", mi.image_media_id AS "imageMediaId",
+              mi.target_margin_percent AS "targetMarginPercent",
+              mi.sort_order AS "sortOrder", mi.is_active AS "isActive",
               mi.created_at AS "createdAt"
          FROM menu_items mi
          LEFT JOIN menu_categories mc ON mc.id = mi.category_id
@@ -157,6 +220,10 @@ const productsAdapter: EntityAdapter = {
     return rows.map((row) => ({
       ...row,
       price: Number(row.price ?? 0),
+      targetMarginPercent:
+        row.targetMarginPercent === null || row.targetMarginPercent === undefined
+          ? null
+          : Number(row.targetMarginPercent),
       createdAt: isoDate(row.createdAt),
     }));
   },
@@ -165,6 +232,11 @@ const productsAdapter: EntityAdapter = {
     const name = text(values.name);
     if (!name) throw new RowRejection("نام آیتم الزامی است.");
     const warnings: string[] = [];
+    const writeContext = {
+      changedBy: context.actorUserId,
+      source: "import" as const,
+      sourceRef: "data-transfer",
+    };
 
     let categoryId: string | null = null;
     const categoryName = text(values.categoryName);
@@ -178,14 +250,22 @@ const productsAdapter: EntityAdapter = {
     }
 
     const sku = text(values.sku);
-    let existing: { id: string } | null = null;
-    if (options.duplicateRule === "sku" && sku) {
+    const bySku = async (): Promise<{ id: string } | null> => {
+      if (!sku) return null;
       const { rows } = await query<{ id: string }>(
         `SELECT id FROM menu_items
           WHERE location_id = $1 AND lower(btrim(sku)) = lower(btrim($2)) LIMIT 1`,
         [locationId, sku],
       );
-      existing = rows[0] ?? null;
+      return rows[0] ?? null;
+    };
+
+    // Deterministic duplicate identity (issue #844): an explicit rule the
+    // operator chose wins; otherwise prefer the SKU whenever the row carries
+    // one — it is the item's real identity — and fall back to name+category.
+    let existing: { id: string } | null = null;
+    if (options.duplicateRule === "sku") {
+      existing = await bySku();
     } else if (options.duplicateRule === "name") {
       const { rows } = await query<{ id: string }>(
         `SELECT id FROM menu_items
@@ -194,51 +274,76 @@ const productsAdapter: EntityAdapter = {
       );
       existing = rows[0] ?? null;
     } else {
-      const { rows } = await query<{ id: string }>(
-        `SELECT id FROM menu_items
-          WHERE location_id = $1 AND lower(btrim(name)) = lower(btrim($2))
-            AND category_id IS NOT DISTINCT FROM $3::uuid LIMIT 1`,
-        [locationId, name, categoryId],
-      );
-      existing = rows[0] ?? null;
-      if (!existing && sku) {
-        const bySku = await query<{ id: string }>(
+      existing = await bySku();
+      if (!existing) {
+        const { rows } = await query<{ id: string }>(
           `SELECT id FROM menu_items
-            WHERE location_id = $1 AND lower(btrim(sku)) = lower(btrim($2)) LIMIT 1`,
-          [locationId, sku],
+            WHERE location_id = $1 AND lower(btrim(name)) = lower(btrim($2))
+              AND category_id IS NOT DISTINCT FROM $3::uuid LIMIT 1`,
+          [locationId, name, categoryId],
         );
-        existing = bySku.rows[0] ?? null;
+        existing = rows[0] ?? null;
       }
     }
 
     if (existing && options.duplicateStrategy === "skip") {
       return { status: "skipped", id: existing.id, reason: `آیتم «${name}» از پیش در منو هست.` };
     }
-    if (existing && options.duplicateStrategy === "update") {
-      await query(
-        `UPDATE menu_items
-            SET name = $3,
-                category_id = coalesce($4::uuid, category_id),
-                price = coalesce($5, price),
-                sku = coalesce($6, sku),
-                description = coalesce($7, description),
-                sort_order = coalesce($8, sort_order),
-                is_active = coalesce($9, is_active),
-                updated_at = now()
-          WHERE location_id = $1 AND id = $2`,
-        [
-          locationId,
-          existing.id,
-          name,
-          categoryId,
-          values.price ?? null,
-          sku,
-          text(values.description),
-          values.sortOrder ?? null,
-          values.isActive ?? null,
-        ],
+
+    const imageMediaId = text(values.imageMediaId);
+    const rawDescription = text(values.description);
+    const patchFields: Record<string, unknown> = {
+      name,
+      description: rawDescription ?? undefined,
+      sku: sku ?? undefined,
+      imageUrl: text(values.imageUrl) ?? undefined,
+      imageMediaId: imageMediaId ?? undefined,
+      sortOrder: values.sortOrder ?? undefined,
+      isActive: values.isActive ?? undefined,
+      targetMarginPercent: values.targetMarginPercent ?? undefined,
+    };
+    if (categoryId) patchFields.categoryId = categoryId;
+    if (values.price !== undefined && values.price !== null) {
+      patchFields.price = Number(values.price);
+    }
+
+    /**
+     * Apply a validated patch through the menu service — import's update and
+     * the category dialog now share one code path (validators, SKU races,
+     * category-move re-indexing, and the canonical price-change history for
+     * any price inside the patch). A media id this business doesn't hold is
+     * dropped with a warning instead of failing the whole row: an export
+     * moved to another install carries ids that don't exist there.
+     */
+    const applyPatch = async (id: string, raw: Record<string, unknown>): Promise<{ id: string; warnings: string[] }> => {
+      const localWarnings = [...warnings];
+      const parsed = validateMenuItemPatch(raw);
+      if (!parsed.ok) reject(parsed.error);
+      let updated = await updateMenuItem(
+        locationId,
+        id,
+        parsed.value,
+        context.businessId,
+        writeContext,
       );
-      return { status: "updated", id: existing.id, warnings };
+      if (!updated.ok && updated.error === "invalid_media" && raw.imageMediaId !== undefined) {
+        const { imageMediaId: _dropped, ...rest } = raw;
+        localWarnings.push("تصویر انتخاب‌شده در این کسب‌وکار موجود نیست و نادیده گرفته شد.");
+        const retry = validateMenuItemPatch(rest);
+        if (!retry.ok) reject(retry.error);
+        updated = await updateMenuItem(locationId, id, retry.value, context.businessId, writeContext);
+      }
+      if (!updated.ok) reject(updated.error);
+      return { id, warnings: localWarnings };
+    };
+
+    if (existing && options.duplicateStrategy === "update") {
+      const applied = await applyPatch(existing.id, patchFields);
+      return {
+        status: "updated",
+        id: applied.id,
+        ...(applied.warnings.length > 0 ? { warnings: applied.warnings } : {}),
+      };
     }
 
     if (!categoryId) {
@@ -248,27 +353,192 @@ const productsAdapter: EntityAdapter = {
       categoryId = fallback?.id ?? null;
       warnings.push("آیتم در دستهٔ «دسته‌بندی نشده» ثبت شد.");
     }
+    if (!categoryId) reject("missing_fields");
 
-    const { rows } = await query<{ id: string }>(
-      `INSERT INTO menu_items
-         (location_id, category_id, name, description, sku, price, sort_order, is_active)
-       VALUES ($1, $2::uuid, $3, $4, $5, coalesce($6, 0),
-               coalesce($7, (SELECT coalesce(max(sort_order), 0) + 1
-                               FROM menu_items WHERE location_id = $1)),
-               coalesce($8, true))
-       RETURNING id`,
-      [
-        locationId,
-        categoryId,
-        name,
-        text(values.description),
-        sku,
-        values.price ?? null,
-        values.sortOrder ?? null,
-        values.isActive ?? null,
-      ],
+    const createFields: Record<string, unknown> = {
+      categoryId,
+      name,
+      description: rawDescription ?? undefined,
+      sku: sku ?? undefined,
+      imageUrl: text(values.imageUrl) ?? undefined,
+      imageMediaId: imageMediaId ?? undefined,
+      sortOrder: values.sortOrder ?? undefined,
+      isActive: values.isActive ?? undefined,
+    };
+    if (values.price !== undefined && values.price !== null) {
+      createFields.price = Number(values.price);
+    }
+
+    const createdParsed = validateMenuItemCreate(createFields);
+    if (!createdParsed.ok) reject(createdParsed.error);
+    let created = await createMenuItem(
+      locationId,
+      context.businessId,
+      createdParsed.value,
     );
-    return { status: "created", id: rows[0].id, warnings };
+    if (!created.ok && created.error === "invalid_media" && createFields.imageMediaId !== undefined) {
+      const { imageMediaId: _dropped, ...rest } = createFields;
+      warnings.push("تصویر انتخاب‌شده در این کسب‌وکار موجود نیست و نادیده گرفته شد.");
+      const retry = validateMenuItemCreate(rest);
+      if (!retry.ok) reject(retry.error);
+      created = await createMenuItem(locationId, context.businessId, retry.value);
+    }
+    if (!created.ok) reject(created.error);
+    const newId = created.id!;
+
+    // targetMarginPercent is a patch-level field; carry it over in its own
+    // validated patch when the file provided one.
+    if (values.targetMarginPercent !== undefined && values.targetMarginPercent !== null) {
+      await applyPatch(newId, { targetMarginPercent: values.targetMarginPercent });
+    }
+
+    return {
+      status: "created",
+      id: newId,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
+  },
+};
+
+/**
+ * Item ↔ modifier-group attachments — the parity gap Data Transfer needed
+ * before it could replace the legacy menu importer (issue #844).
+ *
+ * One row per (item, group) link with its per-item min/max overrides, its
+ * per-item sort order and the link's own active state — the four facts the
+ * manual CRUD owns and a flat item/modifier export silently lost. Attachments
+ * never create items or groups: a link to something the file didn't carry is
+ * a row-level skip naming exactly what was missing (import `pos.products` and
+ * `pos.modifiers` first).
+ */
+const itemModifierGroupsAdapter: EntityAdapter = {
+  entity: "pos.item_modifier_groups",
+  async read(context, options) {
+    const locationId = requireLocation(context.locationId);
+    const { rows } = await query<Record<string, unknown>>(
+      `SELECT mi.name AS "itemName", mi.sku AS "itemSku",
+              g.name AS "groupName",
+              mimg.min_select_override AS "minSelectOverride",
+              mimg.max_select_override AS "maxSelectOverride",
+              mimg.sort_order AS "sortOrder", mimg.is_active AS "isActive"
+         FROM menu_item_modifier_groups mimg
+         JOIN menu_items mi ON mi.id = mimg.menu_item_id
+         JOIN modifier_groups g ON g.id = mimg.modifier_group_id
+        WHERE mi.location_id = $1
+        ORDER BY mi.name, mimg.sort_order, g.name
+        LIMIT $2`,
+      [locationId, options.limit],
+    );
+    return rows;
+  },
+  async write(context, values) {
+    const locationId = requireLocation(context.locationId);
+    const itemName = text(values.itemName);
+    const groupName = text(values.groupName);
+    if (!itemName) throw new RowRejection("نام آیتم الزامی است.");
+    if (!groupName) throw new RowRejection("نام گروه افزودنی الزامی است.");
+
+    // Item identity: SKU when the row carries one, then the name (the same
+    // deterministic order the items entity uses).
+    let item: { id: string } | null = null;
+    const sku = text(values.itemSku);
+    if (sku) {
+      const { rows } = await query<{ id: string }>(
+        `SELECT id FROM menu_items WHERE location_id = $1 AND lower(btrim(sku)) = lower(btrim($2)) LIMIT 1`,
+        [locationId, sku],
+      );
+      item = rows[0] ?? null;
+    }
+    if (!item) {
+      const { rows } = await query<{ id: string }>(
+        `SELECT id FROM menu_items WHERE location_id = $1 AND lower(btrim(name)) = lower(btrim($2)) LIMIT 1`,
+        [locationId, itemName],
+      );
+      item = rows[0] ?? null;
+    }
+    if (!item) {
+      return { status: "skipped", reason: `آیتم «${itemName}» در منو پیدا نشد.` };
+    }
+
+    const { rows: groups } = await query<{ id: string }>(
+      `SELECT id FROM modifier_groups WHERE location_id = $1 AND lower(btrim(name)) = lower(btrim($2)) LIMIT 1`,
+      [locationId, groupName],
+    );
+    if (!groups[0]) {
+      return {
+        status: "skipped",
+        reason: `گروه افزودنی «${groupName}» وجود ندارد؛ ابتدا افزودنی‌ها را وارد کنید.`,
+      };
+    }
+    const groupId = groups[0].id;
+
+    const { rows: links } = await query(
+      `SELECT 1 FROM menu_item_modifier_groups
+        WHERE menu_item_id = $1 AND modifier_group_id = $2`,
+      [item.id, groupId],
+    );
+    const minOverride =
+      values.minSelectOverride === undefined || values.minSelectOverride === null
+        ? undefined
+        : Number(values.minSelectOverride);
+    const maxOverride =
+      values.maxSelectOverride === undefined || values.maxSelectOverride === null
+        ? undefined
+        : Number(values.maxSelectOverride);
+    const sortOrder =
+      values.sortOrder === undefined || values.sortOrder === null
+        ? undefined
+        : Number(values.sortOrder);
+
+    if (links.length > 0) {
+      // Null/absent = leave the link's current state alone; only what the
+      // file actually carries is patched. An empty patch is a successful
+      // no-op (the HTTP validators call it bad_request for a different
+      // reason), so emptiness is decided here, before validation.
+      const patchRaw: Record<string, unknown> = {};
+      if (minOverride !== undefined) patchRaw.minSelectOverride = minOverride;
+      if (maxOverride !== undefined) patchRaw.maxSelectOverride = maxOverride;
+      if (sortOrder !== undefined) patchRaw.sortOrder = sortOrder;
+      if (values.isActive !== undefined && values.isActive !== null)
+        patchRaw.isActive = values.isActive;
+      if (Object.keys(patchRaw).length === 0) return { status: "updated", id: item.id };
+      const parsed = validateItemModifierGroupPatch(patchRaw);
+      if (!parsed.ok) reject(parsed.error);
+      const updated = await updateItemModifierGroup(
+        locationId,
+        item.id,
+        groupId,
+        parsed.value,
+      );
+      if (!updated.ok) reject(updated.error);
+      return { status: "updated", id: item.id };
+    }
+
+    const attach = validateItemModifierGroupAttach({
+      menuItemId: item.id,
+      modifierGroupId: groupId,
+      minSelectOverride: minOverride,
+      maxSelectOverride: maxOverride,
+      sortOrder,
+    });
+    if (!attach.ok) reject(attach.error);
+    const attached = await attachModifierGroupToItem(
+      locationId,
+      item.id,
+      groupId,
+      attach.value,
+    );
+    if (!attached.ok) reject(attached.error);
+    // A link whose file row says inactive is switched off right after attach:
+    // attach always creates the link active (it is the "is this offered at
+    // all" default), and `isActive: false` in the file is an explicit state.
+    if (values.isActive === false) {
+      const off = await updateItemModifierGroup(locationId, item.id, groupId, {
+        isActive: false,
+      });
+      if (!off.ok) reject(off.error);
+    }
+    return { status: "created", id: item.id };
   },
 };
 
@@ -422,6 +692,7 @@ const ordersAdapter: EntityAdapter = {
 export function registerPosAdapters(): void {
   registerAdapter(categoriesAdapter);
   registerAdapter(productsAdapter);
+  registerAdapter(itemModifierGroupsAdapter);
   registerAdapter(modifiersAdapter);
   registerAdapter(ordersAdapter);
 }

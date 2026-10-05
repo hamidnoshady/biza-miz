@@ -121,7 +121,12 @@ export const MASTER_SYNC_TABLES: readonly MasterTableConfig[] = [
     table: "menu_items",
     pk: ["id"],
     scope: { kind: "location" },
-    excluded: ["updated_at", "image_media_id"],
+    // `image_media_id` used to be excluded here — media assets live per
+    // deployment, so a Hybrid peer could be handed a dangling id (issue #844
+    // called it out). The canonical photo now travels: media ids are
+    // business-scoped rows, and a missing asset degrades to the placeholder,
+    // never to a broken row.
+    excluded: ["updated_at"],
     optionalRefs: ["category_id"],
     softDeleteColumn: "is_active",
     touchColumn: "updated_at",

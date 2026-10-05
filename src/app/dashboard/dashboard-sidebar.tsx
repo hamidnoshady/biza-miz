@@ -986,8 +986,14 @@ export function DashboardSidebar({
     window.localStorage.setItem(BOTTOM_NAV_STORAGE_KEY, JSON.stringify(hrefs));
   }, []);
 
+  // Medium viewport (issue #844's «no 240px squeeze»): between the mobile
+  // Sheet (<768px) and the full desktop sidebar (≥1280px) the rail collapses
+  // to the compact icon column instead of stealing 240px from the content.
+  // Expanding is a session-local, user-triggered choice — it never rewrites
+  // the wide-desktop preference, so a laptop user's collapsed rail doesn't
+  // follow them onto an external monitor.
   useEffect(() => {
-    const media = window.matchMedia("(min-width: 768px) and (max-width: 1023px)");
+    const media = window.matchMedia("(min-width: 768px) and (max-width: 1279px)");
     const update = () => {
       setTabletMode(media.matches);
       if (media.matches) setTabletExpanded(false);

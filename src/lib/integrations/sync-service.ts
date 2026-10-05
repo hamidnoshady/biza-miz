@@ -28,6 +28,7 @@
  * lose it the way the one-at-a-time version did.
  */
 import { getPool, query } from "../db";
+import { changeMenuItemPrice } from "../menu-price-service";
 import { getBusinessIndustry } from "../industry-guard";
 import { hasSellableCatalogue, isRetailCatalogueIndustry } from "../industries";
 import { getConnection, wooClientFor, type ConnectionRow } from "./connections-service";
@@ -164,11 +165,25 @@ async function upsertFnbProduct(
   const existing = await localIdForRemote(businessId, connection.id, "product", String(product.id));
 
   if (existing) {
+    // name/sku stay a plain update; the price is a canonical price change
+    // (issue #844): locked, validated, written to the current price and to
+    // immutable history + audit together, `source = 'integration'` naming this
+    // WooCommerce connection. An unchanged price writes no history row.
     await query(
-      `UPDATE menu_items SET name = $3, sku = $4, price = $5, updated_at = now()
+      `UPDATE menu_items SET name = $3, sku = $4, updated_at = now()
         WHERE id = $1 AND location_id = $2`,
-      [existing, locationId, name, product.sku || null, price.toString()],
+      [existing, locationId, name, product.sku || null],
     );
+    const change = await changeMenuItemPrice({
+      businessId,
+      locationId,
+      menuItemId: existing,
+      newPrice: Number(price),
+      source: "integration",
+      changedBy: null,
+      sourceRef: `woocommerce:${connection.id}`,
+    });
+    if (!change.ok) throw new Error(change.error);
     await recordProductShape(connection, product);
     return "updated";
   }
