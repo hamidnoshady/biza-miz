@@ -675,12 +675,16 @@ describe("Wave 10 — watch flagship", () => {
     expect(approved.approvedAt).not.toBeNull();
     expect(approved.estimatedTotalRial).toBe(1_500_000);
 
+    // Issue #795 item 11 — a chargeable part added AFTER the signature
+    // changes the bill, so the approval is withdrawn and must be re-obtained.
     await repairs.addRepairPart(ticket.id, {
       description: "بند",
       quantity: "1",
       unitCost: 300_000,
       charge: 500_000,
     });
+    await expect(repairs.setRepairStatus(ticket.id, "in_progress")).rejects.toThrow(/تأیید مشتری/);
+    await watchCrm.approveRepairEstimate(ticket.id);
     await repairs.setRepairStatus(ticket.id, "in_progress");
     await repairs.setRepairStatus(ticket.id, "ready");
     const result = await withTransaction((client) =>
@@ -1895,5 +1899,110 @@ describe("Issue #795 item 20 — serial reservations", () => {
     reservations = await watchReservations.listSerialReservations(biz.id, biz.locationId);
     const expired = reservations.find((r) => r.expiresAt === "2026-01-01");
     expect(expired?.status).toBe("expired");
+  });
+});
+
+/**
+ * Issue #795 item 11 — the estimate is financially complete (labour, parts,
+ * discount, VAT at the ticket's own rate, payable total) and its approval
+ * is versioned: any financial change after the signature withdraws it.
+ */
+describe("Issue #795 item 11 — VAT-complete, versioned repair estimates", () => {
+  it("computes the estimate with the ticket's VAT and discount, and binds approval to the estimate version", async () => {
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "کرنوگراف",
+      laborCharge: 2_000_000,
+      vatPercent: 9,
+    });
+
+    // The signable number IS the payable number: (2M + 0.8M − 0.3M) + 9%.
+    const estimate = await watchCrm.setRepairEstimate(ticket.id, {
+      laborRial: 2_000_000,
+      partsRial: 800_000,
+      discountRial: 300_000,
+    });
+    expect(estimate).toMatchObject({
+      estimatedDiscountRial: 300_000,
+      estimatedVatRial: 225_000,
+      estimatedTotalRial: 2_725_000,
+      version: 1,
+      approvedAt: null,
+    });
+    // A discount larger than the work is refused.
+    await expect(
+      watchCrm.setRepairEstimate(ticket.id, { laborRial: 100, partsRial: 0, discountRial: 101 }),
+    ).rejects.toThrow(/تخفیف/);
+
+    const approved = await watchCrm.approveRepairEstimate(ticket.id);
+    expect(approved.approvedVersion).toBe(1);
+
+    // A labour edit after the signature withdraws the approval…
+    await repairs.updateRepairTicket(ticket.id, { laborCharge: 2_500_000 });
+    let current = await repairs.getRepairTicket(ticket.id);
+    expect(current?.estimateApprovedAt).toBeNull();
+    expect(current?.estimateApprovedVersion).toBeNull();
+
+    // …and so does a chargeable part; a zero-charge (warranty) part does not.
+    await watchCrm.approveRepairEstimate(ticket.id);
+    const part = await repairs.addRepairPart(ticket.id, {
+      description: "شیشه",
+      quantity: "1",
+      unitCost: 400_000,
+      charge: 600_000,
+    });
+    current = await repairs.getRepairTicket(ticket.id);
+    expect(current?.estimateApprovedAt).toBeNull();
+
+    await watchCrm.approveRepairEstimate(ticket.id);
+    await repairs.addRepairPart(ticket.id, {
+      description: "واشر",
+      quantity: "1",
+      unitCost: 50_000,
+      charge: 0,
+    });
+    current = await repairs.getRepairTicket(ticket.id);
+    expect(current?.estimateApprovedAt).not.toBeNull();
+
+    // Removing the charged part moves the number too — withdrawn again.
+    await repairs.removeRepairPart(part.id, ticket.id);
+    current = await repairs.getRepairTicket(ticket.id);
+    expect(current?.estimateApprovedAt).toBeNull();
+
+    // A re-estimate bumps the version; the close demands a signature on the
+    // CURRENT version and succeeds once it has one.
+    const second = await watchCrm.setRepairEstimate(ticket.id, {
+      laborRial: 2_500_000,
+      partsRial: 0,
+    });
+    expect(second.version).toBe(2);
+    await expect(
+      withTransaction((client) =>
+        repairs.closeRepairTicket(client, { businessId: biz.id, ticketId: ticket.id, paymentMethod: "cash" }),
+      ),
+    ).rejects.toThrow(/تأیید مشتری/);
+    const reapproved = await watchCrm.approveRepairEstimate(ticket.id);
+    expect(reapproved.approvedVersion).toBe(2);
+    const result = await withTransaction((client) =>
+      repairs.closeRepairTicket(client, { businessId: biz.id, ticketId: ticket.id, paymentMethod: "cash" }),
+    );
+    // labor 2.5M + 9% VAT — the closed bill matches the approved estimate.
+    expect(result.breakdown.total).toBe("2725000");
+
+    // The printable estimate carries the whole financial picture.
+    const freshTicket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت جیبی",
+      vatPercent: 9,
+    });
+    await watchCrm.setRepairEstimate(freshTicket.id, {
+      laborRial: 900_000,
+      partsRial: 600_000,
+      discountRial: 100_000,
+    });
+    const text = await watchCrm.repairEstimateText(freshTicket.id, "2026-08-01");
+    expect(text).toContain("تخفیف");
+    expect(text).toContain("مالیات بر ارزش افزوده");
+    expect(text).toContain("برآورد کل");
   });
 });

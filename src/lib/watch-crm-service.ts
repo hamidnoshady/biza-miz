@@ -20,6 +20,7 @@ import {
   type ServiceReminderState,
 } from "./watch";
 import { renderRepairEstimate } from "./repair-estimate";
+import { computeRepairCharge } from "./watch-pricing";
 import type { MoneyUnit } from "./money";
 
 interface ServiceReminderRow {
@@ -139,25 +140,30 @@ interface RepairEstimateRecord {
   ticketId: string;
   estimatedLaborRial: number;
   estimatedPartsRial: number;
+  estimatedDiscountRial: number;
+  estimatedVatRial: number;
   estimatedTotalRial: number;
+  version: number;
   approvedAt: string | null;
+  approvedVersion: number | null;
 }
 
 /**
- * Records (or replaces) the estimate on an open ticket — the labour/parts
- * breakdown the customer will be asked to approve. Re-stamping clears any
- * prior approval: a changed number is a new document to approve.
+ * Records (or replaces) the estimate on an open ticket — the full financial
+ * document the customer will be asked to approve: labour, parts, an agreed
+ * discount, VAT at the ticket's own rate (the same engine the close bills
+ * with — issue #795 item 11), and the payable total. Each re-stamp is a new
+ * estimate VERSION and clears any prior approval: a changed number is a new
+ * document to approve.
  */
 export async function setRepairEstimate(
   ticketId: string,
-  input: { laborRial: number; partsRial: number },
+  input: { laborRial: number; partsRial: number; discountRial?: number },
 ): Promise<RepairEstimateRecord> {
   const { laborRial, partsRial } = input;
-  if (!Number.isInteger(laborRial) || laborRial < 0 || !Number.isInteger(partsRial) || partsRial < 0) {
-    throw new Error("اجرت و قطعات برآورد باید اعداد صحیح غیرمنفی (ریال) باشند.");
-  }
-  const { rows } = await query<{ status: string; estimate_approved_at: string | null }>(
-    `SELECT status::text, estimate_approved_at FROM repair_tickets WHERE id = $1`,
+  const discountRial = input.discountRial ?? 0;
+  const { rows } = await query<{ status: string; vat_percent: string }>(
+    `SELECT status::text, vat_percent::text FROM repair_tickets WHERE id = $1`,
     [ticketId],
   );
   if (!rows[0]) throw new Error("تیکت یافت نشد.");
@@ -165,34 +171,56 @@ export async function setRepairEstimate(
     throw new Error("تیکت بسته‌شده یا لغوشده را نمی‌توان برآورد کرد.");
   }
 
-  const estimatedTotalRial = laborRial + partsRial;
-  const { rows: updated } = await query<{ estimate_approved_at: string | null }>(
+  // The estimate's VAT comes from the ticket's own rate, computed by the
+  // exact engine closeRepairTicket bills with — so the number the customer
+  // signs is the number the shop will charge.
+  const breakdown = computeRepairCharge({
+    laborCharge: laborRial,
+    partsCharge: partsRial,
+    discount: discountRial,
+    vatPercent: Number(rows[0].vat_percent),
+  });
+  const { rows: updated } = await query<{ estimate_version: number }>(
     `UPDATE repair_tickets
         SET estimated_total_rial = $2, estimated_labor_rial = $3, estimated_parts_rial = $4,
-            estimated_at = now(), estimate_approved_at = NULL, updated_at = now()
-      WHERE id = $1 RETURNING estimate_approved_at`,
-    [ticketId, estimatedTotalRial, laborRial, partsRial],
+            estimated_discount_rial = $5, estimated_vat_rial = $6,
+            estimate_version = estimate_version + 1,
+            estimated_at = now(), estimate_approved_at = NULL, estimate_approved_version = NULL,
+            updated_at = now()
+      WHERE id = $1 RETURNING estimate_version`,
+    [ticketId, Number(breakdown.total), laborRial, partsRial, discountRial, Number(breakdown.vat)],
   );
   return {
     ticketId,
     estimatedLaborRial: laborRial,
     estimatedPartsRial: partsRial,
-    estimatedTotalRial,
-    approvedAt: updated[0].estimate_approved_at,
+    estimatedDiscountRial: discountRial,
+    estimatedVatRial: Number(breakdown.vat),
+    estimatedTotalRial: Number(breakdown.total),
+    version: updated[0].estimate_version,
+    approvedAt: null,
+    approvedVersion: null,
   };
 }
 
-/** The customer's approval: stamps the ticket, so closeRepairTicket can proceed. */
+/**
+ * The customer's approval: stamps the ticket with the time AND the exact
+ * estimate version being approved, so closeRepairTicket can verify the
+ * signature still covers the current numbers.
+ */
 export async function approveRepairEstimate(ticketId: string): Promise<RepairEstimateRecord> {
   const { rows } = await query<{
     status: string;
     estimated_labor_rial: string;
     estimated_parts_rial: string;
+    estimated_discount_rial: string;
+    estimated_vat_rial: string;
     estimated_total_rial: string;
-    estimate_approved_at: string | null;
+    estimate_version: number;
   }>(
     `SELECT status::text, estimated_labor_rial::text, estimated_parts_rial::text,
-            estimated_total_rial::text, estimate_approved_at
+            estimated_discount_rial::text, estimated_vat_rial::text,
+            estimated_total_rial::text, estimate_version
        FROM repair_tickets WHERE id = $1`,
     [ticketId],
   );
@@ -204,16 +232,25 @@ export async function approveRepairEstimate(ticketId: string): Promise<RepairEst
     throw new Error("این تیکت برآورد هزینه ندارد.");
   }
 
-  const { rows: updated } = await query<{ estimate_approved_at: string | null }>(
-    `UPDATE repair_tickets SET estimate_approved_at = now(), updated_at = now() WHERE id = $1 RETURNING estimate_approved_at`,
+  const { rows: updated } = await query<{
+    estimate_approved_at: string | null;
+    estimate_approved_version: number | null;
+  }>(
+    `UPDATE repair_tickets
+        SET estimate_approved_at = now(), estimate_approved_version = estimate_version, updated_at = now()
+      WHERE id = $1 RETURNING estimate_approved_at, estimate_approved_version`,
     [ticketId],
   );
   return {
     ticketId,
     estimatedLaborRial: Number(rows[0].estimated_labor_rial),
     estimatedPartsRial: Number(rows[0].estimated_parts_rial),
+    estimatedDiscountRial: Number(rows[0].estimated_discount_rial),
+    estimatedVatRial: Number(rows[0].estimated_vat_rial),
     estimatedTotalRial: Number(rows[0].estimated_total_rial),
+    version: rows[0].estimate_version,
     approvedAt: updated[0].estimate_approved_at,
+    approvedVersion: updated[0].estimate_approved_version,
   };
 }
 
@@ -223,6 +260,8 @@ interface EstimateRow extends Record<string, unknown> {
   reported_issue: string | null;
   estimated_labor_rial: string;
   estimated_parts_rial: string;
+  estimated_discount_rial: string;
+  estimated_vat_rial: string;
   estimated_total_rial: string;
   customer_name: string | null;
 }
@@ -237,6 +276,8 @@ export async function repairEstimateText(
     `SELECT t.ticket_number::text AS ticket_number, t.item_description, t.reported_issue,
             t.estimated_labor_rial::text AS estimated_labor_rial,
             t.estimated_parts_rial::text AS estimated_parts_rial,
+            t.estimated_discount_rial::text AS estimated_discount_rial,
+            t.estimated_vat_rial::text AS estimated_vat_rial,
             t.estimated_total_rial::text AS estimated_total_rial, c.name AS customer_name
        FROM repair_tickets t LEFT JOIN parties c ON c.id = t.customer_id
       WHERE t.id = $1`,
@@ -249,6 +290,8 @@ export async function repairEstimateText(
     reportedIssue: rows[0].reported_issue,
     laborCharge: Number(rows[0].estimated_labor_rial),
     partsCharge: Number(rows[0].estimated_parts_rial),
+    discountRial: Number(rows[0].estimated_discount_rial),
+    vatRial: Number(rows[0].estimated_vat_rial),
     estimatedTotalRial: Number(rows[0].estimated_total_rial),
     customerName: rows[0].customer_name,
     todayIso,

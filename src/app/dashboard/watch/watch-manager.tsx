@@ -84,6 +84,11 @@ export interface RepairTicket {
   estimatedTotalRial: number;
   estimatedLaborRial: number;
   estimatedPartsRial: number;
+  /** Issue #795 item 11 — the estimate is financially complete and versioned. */
+  estimatedDiscountRial: number;
+  estimatedVatRial: number;
+  estimateVersion: number;
+  estimateApprovedVersion: number | null;
   estimateApprovedAt: string | null;
   closedAt: string | null;
   createdAt: string;

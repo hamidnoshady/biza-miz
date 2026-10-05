@@ -52,10 +52,35 @@ describe("computeRepairCharge", () => {
     expect(breakdown).toEqual({
       laborCharge: "2000000",
       partsCharge: "800000",
+      discount: "0",
       net: "2800000",
       vat: "252000",
       total: "3052000",
     });
+  });
+
+  it("subtracts an agreed discount before VAT (issue #795 item 11)", () => {
+    const breakdown = computeRepairCharge({
+      laborCharge: 2_000_000,
+      partsCharge: 800_000,
+      discount: 300_000,
+      vatPercent: 9,
+    });
+    expect(breakdown).toEqual({
+      laborCharge: "2000000",
+      partsCharge: "800000",
+      discount: "300000",
+      net: "2500000",
+      vat: "225000",
+      total: "2725000",
+    });
+    // The discount may wipe the bill but never exceed it.
+    expect(
+      validateRepairChargeInput({ laborCharge: 100, partsCharge: 0, discount: 101, vatPercent: 9 }).length,
+    ).toBe(1);
+    expect(
+      validateRepairChargeInput({ laborCharge: 100, partsCharge: 0, discount: 100, vatPercent: 9 }).length,
+    ).toBe(0);
   });
 
   it("computes an all-zero bill for a warranty repair", () => {

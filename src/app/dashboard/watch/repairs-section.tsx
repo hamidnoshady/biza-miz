@@ -452,9 +452,11 @@ function EstimatePanel({ ticket, busy, run }: { ticket: RepairTicket; busy: bool
   const money = useMoney();
   const [labor, setLabor] = useState(String(money.toInput(ticket.estimatedLaborRial)));
   const [parts, setParts] = useState(String(money.toInput(ticket.estimatedPartsRial)));
+  const [discount, setDiscount] = useState(String(money.toInput(ticket.estimatedDiscountRial)));
 
   const hasEstimate = ticket.estimatedTotalRial > 0;
-  const approved = Boolean(ticket.estimateApprovedAt);
+  const approved =
+    Boolean(ticket.estimateApprovedAt) && ticket.estimateApprovedVersion === ticket.estimateVersion;
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
@@ -464,24 +466,30 @@ function EstimatePanel({ ticket, busy, run }: { ticket: RepairTicket; busy: bool
         body: JSON.stringify({
           laborRial: money.fromInput(Math.max(0, Math.round(Number(labor || 0)))),
           partsRial: money.fromInput(Math.max(0, Math.round(Number(parts || 0)))),
+          discountRial: money.fromInput(Math.max(0, Math.round(Number(discount || 0)))),
         }),
       }),
     );
     if (ok) {
       setLabor("");
       setParts("");
+      setDiscount("");
     }
   }
 
   return (
     <PanelShell>
       <p className="mb-3 text-xs leading-5 text-muted-foreground">
-        برآورد هزینه باید پیش از شروع کار (در حال تعمیر) به تأیید مشتری برسد؛ با ثبت برآورد جدید، تأیید قبلی پاک می‌شود.
+        برآورد هزینه باید پیش از شروع کار (در حال تعمیر) به تأیید مشتری برسد. برآورد شامل مالیات با نرخ همین
+        تیکت است تا مبلغ تأییدشده همان مبلغ قابل پرداخت باشد؛ هر تغییر مالی (برآورد جدید، تغییر اجرت یا
+        مالیات، افزودن/حذف قطعهٔ پولی) تأیید قبلی را باطل می‌کند.
       </p>
       {hasEstimate ? (
         <div className="mb-3 rounded-lg bg-white/70 p-3 text-xs text-foreground/80">
           <p>
-            اجرت {money.format(ticket.estimatedLaborRial)} · قطعات {money.format(ticket.estimatedPartsRial)} · کل{" "}
+            اجرت {money.format(ticket.estimatedLaborRial)} · قطعات {money.format(ticket.estimatedPartsRial)}
+            {ticket.estimatedDiscountRial > 0 ? <> · تخفیف {money.format(ticket.estimatedDiscountRial)}−</> : null}
+            {" "}· مالیات {money.format(ticket.estimatedVatRial)} · مبلغ قابل پرداخت{" "}
             {money.format(ticket.estimatedTotalRial)}
           </p>
           <p className="mt-1">
@@ -511,6 +519,15 @@ function EstimatePanel({ ticket, busy, run }: { ticket: RepairTicket; busy: bool
             inputMode="numeric"
             value={parts}
             onChange={(e) => setParts(e.target.value)}
+          />
+        </Field>
+        <Field label={`تخفیف (${money.unitLabel})`}>
+          <PersianNumberInput
+            className={watchInputClass}
+            dir="ltr"
+            inputMode="numeric"
+            value={discount}
+            onChange={(e) => setDiscount(e.target.value)}
           />
         </Field>
         <div className="flex flex-wrap gap-2 sm:col-span-2">

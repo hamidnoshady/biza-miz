@@ -59,6 +59,11 @@ export interface RepairTicket {
   estimatedTotalRial: number;
   estimatedLaborRial: number;
   estimatedPartsRial: number;
+  /** Issue #795 item 11 — the estimate is financially complete and versioned. */
+  estimatedDiscountRial: number;
+  estimatedVatRial: number;
+  estimateVersion: number;
+  estimateApprovedVersion: number | null;
   estimatedAt: string | null;
   estimateApprovedAt: string | null;
   closedAt: string | null;
@@ -93,6 +98,10 @@ interface TicketRow extends Record<string, unknown> {
   estimated_total_rial: string;
   estimated_labor_rial: string;
   estimated_parts_rial: string;
+  estimated_discount_rial: string;
+  estimated_vat_rial: string;
+  estimate_version: number;
+  estimate_approved_version: number | null;
   estimated_at: string | null;
   estimate_approved_at: string | null;
   closed_at: string | null;
@@ -116,6 +125,10 @@ function mapTicket(row: TicketRow): RepairTicket {
     estimatedTotalRial: Number(row.estimated_total_rial),
     estimatedLaborRial: Number(row.estimated_labor_rial),
     estimatedPartsRial: Number(row.estimated_parts_rial),
+    estimatedDiscountRial: Number(row.estimated_discount_rial),
+    estimatedVatRial: Number(row.estimated_vat_rial),
+    estimateVersion: row.estimate_version,
+    estimateApprovedVersion: row.estimate_approved_version,
     estimatedAt: row.estimated_at,
     estimateApprovedAt: row.estimate_approved_at,
     closedAt: row.closed_at,
@@ -401,6 +414,17 @@ export async function addRepairPart(
       input.source ?? "stock",
     ],
   );
+  // Issue #795 item 11 — a chargeable part raises the customer's bill, so a
+  // standing estimate approval no longer covers it. A zero-charge part
+  // (warranty consumption) changes nothing the customer pays for.
+  if (input.charge > 0) {
+    await query(
+      `UPDATE repair_tickets
+          SET estimate_approved_at = NULL, estimate_approved_version = NULL, updated_at = now()
+        WHERE id = $1 AND estimate_approved_at IS NOT NULL`,
+      [ticketId],
+    );
+  }
   return mapPart(rows[0]);
 }
 
@@ -417,8 +441,9 @@ export async function addRepairPart(
  * Returns `false` when the part does not exist under the supplied ticket.
  */
 export async function removeRepairPart(id: string, ticketId: string): Promise<boolean> {
-  const { rows } = await query<{ status: RepairStatus }>(
-    `SELECT t.status FROM repair_ticket_parts p JOIN repair_tickets t ON t.id = p.ticket_id
+  const { rows } = await query<{ status: RepairStatus; charge: string }>(
+    `SELECT t.status, p.charge::text AS charge
+       FROM repair_ticket_parts p JOIN repair_tickets t ON t.id = p.ticket_id
       WHERE p.id = $1 AND p.ticket_id = $2`,
     [id, ticketId],
   );
@@ -427,6 +452,17 @@ export async function removeRepairPart(id: string, ticketId: string): Promise<bo
     throw new Error("تیکت بسته‌شده یا لغوشده را نمی‌توان تغییر داد.");
   }
   await query(`DELETE FROM repair_ticket_parts WHERE id = $1 AND ticket_id = $2`, [id, ticketId]);
+  // Issue #795 item 11 — removing a charged part changes the bill the
+  // customer approved, in their favour or not; either way the number moved,
+  // so the approval no longer matches a signed document.
+  if (Number(rows[0].charge) > 0) {
+    await query(
+      `UPDATE repair_tickets
+          SET estimate_approved_at = NULL, estimate_approved_version = NULL, updated_at = now()
+        WHERE id = $1 AND estimate_approved_at IS NOT NULL`,
+      [ticketId],
+    );
+  }
   return true;
 }
 
@@ -473,12 +509,18 @@ export async function updateRepairTicket(
     }
   }
 
+  // Issue #795 item 11 — a financial edit (labour or VAT rate) changes what
+  // the customer will pay, so any standing estimate approval no longer
+  // covers it: the approval is withdrawn and must be re-obtained.
+  const financialChange = input.laborCharge != null || input.vatPercent != null;
   const { rows } = await query<TicketRow>(
     `UPDATE repair_tickets
         SET labor_charge = COALESCE($2, labor_charge),
             vat_percent = COALESCE($3, vat_percent),
             reported_issue = COALESCE($4, reported_issue),
             non_covered_reason = CASE WHEN $5 THEN $6 ELSE non_covered_reason END,
+            estimate_approved_at = CASE WHEN $7 THEN NULL ELSE estimate_approved_at END,
+            estimate_approved_version = CASE WHEN $7 THEN NULL ELSE estimate_approved_version END,
             updated_at = now()
       WHERE id = $1 RETURNING *`,
     [
@@ -488,6 +530,7 @@ export async function updateRepairTicket(
       input.reportedIssue?.trim() || null,
       input.nonCoveredReason !== undefined,
       nextReason,
+      financialChange,
     ],
   );
   return mapTicket(rows[0]);
@@ -520,7 +563,11 @@ export async function setRepairStatus(id: string, status: RepairStatus): Promise
     // Phase 27 Wave 10 — work must not start (received → in_progress) until the
     // customer has approved the estimate. A ticket with no estimate at all is
     // untouched: pre-estimate behaviour is unchanged (acceptance criterion 6).
-    if (status === "in_progress" && ticket.estimatedTotalRial > 0 && !ticket.estimateApprovedAt) {
+    if (
+      status === "in_progress" &&
+      ticket.estimatedTotalRial > 0 &&
+      (!ticket.estimateApprovedAt || ticket.estimateApprovedVersion !== ticket.estimateVersion)
+    ) {
       throw new Error("این تیکت برآورد هزینه دارد و هنوز تأیید مشتری را نگرفته است.");
     }
 
@@ -582,8 +629,15 @@ export async function closeRepairTicket(
   if (ticket.status === "closed") throw new Error("این تیکت قبلاً بسته شده است.");
   if (ticket.status === "cancelled") throw new Error("تیکت لغوشده را نمی‌توان بست.");
   // Phase 27 Wave 10 — an estimate the customer has not approved means the
-  // shop must not start (and therefore cannot close) the job.
-  if (ticket.estimatedTotalRial > 0 && !ticket.estimateApprovedAt) {
+  // shop must not start (and therefore cannot close) the job. Issue #795
+  // item 11 sharpens it: the approval must cover the CURRENT estimate
+  // version — a signature on last week's numbers does not authorize
+  // today's (re-estimates clear the stamp, and so does every financial
+  // change; the version check is the belt-and-braces behind those).
+  if (
+    ticket.estimatedTotalRial > 0 &&
+    (!ticket.estimateApprovedAt || ticket.estimateApprovedVersion !== ticket.estimateVersion)
+  ) {
     throw new Error("این تیکت برآورد هزینه دارد و هنوز تأیید مشتری را نگرفته است.");
   }
 
