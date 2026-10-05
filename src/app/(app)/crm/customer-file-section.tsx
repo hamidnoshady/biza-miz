@@ -503,6 +503,7 @@ export function CustomerFileSection({ customerId, permissions }: { customerId: s
 
       <CustomerRelationshipsCard
         customerId={customerId}
+        customerName={file.name}
         // A merged file is a tombstone; its links belong to the winner.
         canManage={(permissionSet.has("crm.manage") || permissionSet.has("parties.manage")) && !isMerged}
       />
@@ -628,7 +629,7 @@ function ConsentRow({
       <div className="min-w-0">
         <span className="font-medium text-foreground">{label}</span>
         {granted && !reachable ? (
-          <span className="mr-2 text-xs text-amber-700 dark:text-amber-300">{unreachableHint}</span>
+          <span className="ms-2 text-xs text-amber-700 dark:text-amber-300">{unreachableHint}</span>
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-2">

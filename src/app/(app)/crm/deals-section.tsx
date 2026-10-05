@@ -381,7 +381,7 @@ export function DealsSection() {
                           <button
                             type="button"
                             onClick={() => setEditing(deal)}
-                            className="block min-w-0 flex-1 text-right text-sm font-medium text-foreground hover:underline"
+                            className="block min-w-0 flex-1 text-start text-sm font-medium text-foreground hover:underline"
                           >
                             <span className="block truncate">{deal.title}</span>
                           </button>

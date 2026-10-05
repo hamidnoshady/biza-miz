@@ -30,6 +30,9 @@
  *    the rule's name on them.
  * 9. **An automation moves no money and writes no campaign.** The stage move
  *    that triggers everything here posts no order and no ledger entry.
+ * 10. **An action this version does not carry out is skipped, not guessed.**
+ *    A rule carrying an unknown key — a newer version's, or a hand-edited row —
+ *    is recorded as skipped with a reason, and is *not* read as a Growth signal.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
@@ -643,6 +646,55 @@ describe("Growth is signalled, not sent", () => {
     expect(signals[0].partyId).toBe(biz.customerId);
     expect(signals[0].partyName).toBe("مشتری تست");
     expect(signals[0].ruleName).toBe("خبر دادن معاملهٔ بزرگ");
+  });
+});
+
+describe("a rule this version cannot carry out", () => {
+  it("skips it, says why, and does not read it as a Growth signal", async () => {
+    const biz = await freshBusiness("auto-unknown");
+    const stages = await stageIds(biz.businessId);
+    // The deal exists before the rule does: a new deal is born *on* a stage and
+    // counts as entering it, so writing the rule first would make this test
+    // about creation rather than about the move it is named for.
+    const deal = await makeDeal(biz.businessId, {
+      title: "معاملهٔ آینده",
+      customerId: biz.customerId,
+      valueRial: 5_000_000,
+      stageId: stages.lead.id,
+    });
+    // Written straight into the table: `saveAutomation` refuses a key outside
+    // the vocabulary, so the only way a rule like this exists is a version that
+    // knows a newer action, or somebody editing rows. The engine has to be safe
+    // against what is stored, not against what it would have accepted.
+    const ruleId = randomUUID();
+    await db.query(
+      `INSERT INTO crm_automations
+         (id, business_id, name, trigger_key, conditions, action_key, action_config, is_active)
+       VALUES ($1, $2, 'قاعدهٔ نسخهٔ بعد', 'deal_stage_changed', '[]'::jsonb, 'send_whatsapp', '{}'::jsonb, true)`,
+      [ruleId, biz.businessId],
+    );
+
+    const moved = await pipelines.moveDealToStage(biz.businessId, deal.id, stages.won.id, {
+      name: "مدیر فروش",
+      userId: biz.managerId,
+    });
+    expect(moved.ok).toBe(true);
+
+    const runs = await automations.listAutomationRuns(biz.businessId, { automationId: ruleId });
+    expect(runs).toHaveLength(1);
+    expect(runs[0].outcome).toBe("skipped");
+    expect(runs[0].detail?.reason).toBe("action_unknown");
+    // None of the two things the engine can do happened: no task, no signal.
+    const activities = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM crm_activities WHERE business_id = $1`,
+      [biz.businessId],
+    );
+    expect(activities.rows[0].count).toBe("0");
+    expect(await automations.listCrmGrowthSignals(biz.businessId)).toHaveLength(0);
+    // And the rule was not counted as having done anything.
+    const stored = await automations.getAutomation(biz.businessId, ruleId);
+    expect(stored?.runCount).toBe(0);
+    expect(stored?.lastRunAt).toBeNull();
   });
 });
 

@@ -316,6 +316,21 @@ another place a person can exist.
   collisions before re-pointing. A second copy here is exactly the
   hand-maintained list that registry replaced.
 
+### Drawing the graph is a read, not a second model
+
+`crm-relationship-graph.ts` computes the ring from rows the service has already
+returned; it opens no connection, reads no clock and holds no state. Two
+consequences are load-bearing:
+
+- **The picture cannot disagree with the list.** One read, one shape, one
+  renderer, and the list of the same rows stays on screen. That is also why the
+  figure carries a caption naming the count and the kinds: the accessible copy is
+  generated from the same input, not maintained beside it.
+- **No layout engine.** Positions come from the input order inside a fixed
+  0–100 space, so a file looks the same on every visit and a test can assert the
+  geometry without a DOM. A force-directed layout would be a second, animated
+  source of truth about who is connected to whom.
+
 ## Segment versions make a sent campaign explainable
 
 Editing a segment's rules mints an immutable row in

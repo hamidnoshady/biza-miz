@@ -34,9 +34,10 @@ The sidebar groups the twelve sections into the destinations, in
 If a section is added to `CRM_NAV_ITEMS` but not to a group it disappears from
 the menu silently, so `crm-nav.test.ts` pins coverage both ways.
 
-`duplicates` and `reconciliation` are **sub-sections** — real sections with their
-own routes, gates and bookmarks, reached from inside «کیفیت داده» rather than
-from the rail (`CRM_SUB_SECTIONS` in `crm-nav.ts`). That is an information
+`duplicates`, `reconciliation` and `automations` are **sub-sections** — real
+sections with their own routes, gates and bookmarks, reached from the screen that
+owns them (the data-quality workspace for the first two, CRM settings for the
+rules) rather than from the rail (`CRM_SUB_SECTIONS` in `crm-nav.ts`). That is an information
 decision, not a permission one, which is why it is a declared list: the same
 tests that skip them for the rail also assert they are absent for *everyone*,
 signed-in role or not.
@@ -138,6 +139,32 @@ be able to add a fact, which is why each line is data with a provenance rather
 than a paragraph. `crm-summary.test.ts` pins determinism with the clock moved
 between two calls, and pins that a customer with nothing on file still gets a
 headline and a reason.
+
+## The ring on a customer's file: connections as a picture, and as a list
+
+`crm-relationship-graph.ts` turns one party's `relationshipsFor` rows into a
+ring — this person in the middle, their connections around it, one spoke per
+recorded fact — and `crm-relationship-ring.tsx` draws it above the list that
+already showed the same rows.
+
+Four decisions make it usable rather than decorative:
+
+- **Ego network, not a hairball.** The whole business's graph would need a force
+  layout, a viewport and a reason a shop's CRM does not have. «Who is connected
+  to this person» is a picture of a list, and the list stays the authoritative
+  copy — the ring is optional over authoritative content, which is why it can be
+  small.
+- **Deterministic.** Positions are a pure function of the service's order
+  (`isPrimary` first, newest first) in a fixed 0–100 space, with no clock, no
+  randomness and no layout engine: the same file draws the same picture on every
+  visit. A graph that rearranges itself teaches people not to read it.
+- **Read from *this* file's end.** An edge is directed (`from → to`) and the
+  service flags the reverse leg `inverse`, so the ring's labels match the list's
+  — «تصمیم‌گیرنده» on one file, «تصمیم‌گیرنده دارد» on the other.
+- **Named in words.** The figure's accessible name is the caption
+  (`relationshipGraphCaption`): the count and the kinds, in Persian, in the same
+  vocabulary as the legend-free list. The picture is never the only copy of a
+  fact.
 
 ## The won-deal handoff
 
@@ -363,6 +390,14 @@ These are named here so the seams are visible rather than implied:
 - **The saved-view filter vocabulary the command field will need** for «همهٔ
   مشتریان تهران که پارسال خریدند»: the resolver exists, the phrase vocabulary
   over its fields does not.
+- **A list view of deals that honours the whole saved-view vocabulary.** The
+  service stores seven filter keys for `deals` (`q, stageId, pipelineId, owner,
+  open, minValue, maxValue`) and `listDeals` filters on a subset; the board has
+  no filter controls at all. A view saved against `deals` through the API is
+  therefore stored faithfully and applied partially — which is exactly the shape
+  this document calls a lie. The leads list is the honest model: it declares its
+  controls, hands them to `SavedViewsBar`, and applies back only what it has.
+  Until the deals list exists, treat the extra keys as reserved.
 
 Import and export are **not** on this list, and never appear as a CRM button:
 the platform data-transfer engine owns that door, and the CRM's entities

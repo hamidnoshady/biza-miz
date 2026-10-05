@@ -55,7 +55,7 @@ export function CustomerPicker({ directoryHref }: { directoryHref: string }) {
               <Link href={crmCustomerHref(match.id)} className="hover:underline">
                 <span className="font-medium text-foreground">{match.name}</span>
                 {match.phone ? (
-                  <span className="mr-2 text-xs text-muted-foreground">
+                  <span className="ms-2 text-xs text-muted-foreground">
                     {toPersianDigits(formatPhoneDisplay(match.phone))}
                   </span>
                 ) : null}

@@ -1,45 +1,66 @@
 /**
- * The CRM's automations: rows, runs, and the engine that fires them.
+ * The CRM's automations: When → If → Then.
  *
- * ## What an automation may do, in one place
+ * ## What this is, and what the other automations engine is
  *
- * This file contains **every** write an automation can make, and the list is
- * short on purpose:
+ * The workspace already has `ai_automations` (0155): a business-wide engine
+ * that fires on a *clock* (shift close, day close) over business-wide facts
+ * (A/R, A/P, stock valuation), whose action is an entry in the AI action
+ * catalog executed under an approval mode. It answers "when the day closes and
+ * receivables are over X, propose Y".
  *
- * | action | writes |
- * |---|---|
- * | `create_follow_up` | one row in `crm_activities` (a real follow-up task, so it lands in somebody's day and on the customer's timeline) |
- * | `assign_owner` | the owner columns of `crm_deals`, `crm_cases` or `crm_leads` |
- * | `notify_growth` | one row in `crm_automation_runs` — a *signal*, and the audit entry that says the CRM asked |
+ * A CRM rule answers a different question — "when *this deal* enters this
+ * stage, file the follow-up" — and the differences are not incidental:
  *
- * There is no channel, no template, no recipient and no money here. Growth owns
- * campaigns, consent-checked sends and the outbox; an automation can only tell
- * it that something changed. `crm-app-boundaries.test.ts` reads this file's SQL
- * and refuses any other table, which is what makes that a property rather than a
- * promise.
+ * - **Per record, not per business.** A trigger carries an entity (a deal, a
+ *   lead, a ticket) and a condition reads fields *of that record*: its value,
+ *   its source, its priority, whether anybody owns it. A deal's value is not a
+ *   fact about the business, and pushing it into the business-wide fact
+ *   document would make every other automation carry it too.
+ * - **Deterministic writes, not proposed actions.** Every action here is a SQL
+ *   write inside the CRM that the engine performs itself. Nothing is proposed
+ *   and nothing is approved: a business with no AI entitlement and no AI
+ *   permission gets exactly the same behaviour.
+ * - **Governed by CRM permissions.** Writing a rule is `crm.configure` — the
+ *   capability that already reshapes the pipeline. Routing this through the
+ *   coworker's catalog would mean a CRM manager's rule executes with the
+ *   *catalog's* authority, which is how a CRM gains the ability to send.
  *
- * Transactional, it is not: a run is logged after the write it describes, and
- * `runCrmAutomations` swallows its own failures — the same posture as
- * `recordCrmAudit`, and for the same reason. A rule that fails must not fail the
- * deal move that triggered it, and the failure is visible in the run log rather
- * than in a 500 for somebody who was only dragging a card.
+ * So they are two engines, deliberately, and this header is where that is said
+ * rather than left for a reader to guess from two tables named `*automations*`.
+ * What they share is the posture, not the code: closed vocabularies that refuse
+ * rather than default, an append-only run log, and no capability the module did
+ * not already have.
  *
- * ## Why this is not the AI automations engine
+ * ## The one way out of the app
  *
- * `ai_automations` (0155) is a *business-wide* engine: schedule/event triggers,
- * a fact document over A/R, A/P, inventory, weekday and hour, and actions drawn
- * from the AI action catalog with approval modes, all behind the `ai_assistant`
- * entitlement. A CRM rule is a different animal — it is per-record (this deal,
- * this ticket, this lead), its action is a deterministic CRM write rather than a
- * proposal, and it has to work for a business with no AI entitlement at all,
- * governed by `crm.configure`.
+ * `notify_growth` records a signal — a run row and an audit line naming the
+ * customer, the rule and the signal. It does **not** reach Growth's sending
+ * half: no audience, no segment, no template, no consent check, no campaign, no
+ * outbox row. Growth owns campaigns (and the consent that gates them) and reads
+ * these signals on its own side (`listCrmGrowthSignals`); the CRM's job is to
+ * say "this customer looks at risk" and stop. `crm-app-boundaries.test.ts`
+ * reads every CRM file for the names of that sending half, and pins the write
+ * surface of *this* file at eight statements over seven tables.
  *
- * Folding them together would mean either giving the CRM the catalog (and with
- * it a path to propose a send — the boundary above) or rewriting a working
- * engine's fact model to carry an entity. So there are two engines, and this is
- * the smaller one. What is shared is the *posture*, copied deliberately:
- * a closed vocabulary, a condition document that rejects unknown fields instead
- * of ignoring them, and an append-only run log.
+ * ## Firing is not on the critical path
+ *
+ * The engine runs *after* the write it describes has committed, from each
+ * module's own service (`moveDealToStage`, `upsertDeal`, `upsertCase`,
+ * `saveLead`) — never inside that write's transaction, because a failing rule
+ * must not roll back a salesperson's drag, and never from a route, because the
+ * next write path would silently stop firing. It never throws: a rule that
+ * cannot be evaluated is logged and skipped, and the record keeps moving.
+ *
+ * ## Runs are evidence, not a counter
+ *
+ * Every considered rule writes exactly one run row saying what happened and why
+ * — `applied` (with the changes), `skipped` (with the reason: conditions not
+ * met, member gone, already owned, record deleted) or `failed` (with the
+ * error). The rule's name is denormalised onto the run, so deleting a rule
+ * leaves the history of what it did. The rules themselves are audited where
+ * they *change* (`automation.config_changed`) rather than on every firing,
+ * which would bury the decision log in repetition.
  */
 
 import { query } from "./db";
@@ -47,9 +68,6 @@ import { businessToday } from "./business-day-service";
 import { recordCrmAudit } from "./crm-audit-service";
 import { isUuid } from "./uuid";
 import {
-  CRM_AUTOMATION_ACTION_DEFS,
-  CRM_AUTOMATION_CONDITION_DEFS,
-  CRM_AUTOMATION_TRIGGER_DEFS,
   followUpDueAt,
   followUpSubject,
   matchesAutomationConditions,
@@ -57,29 +75,22 @@ import {
   type CrmAutomationAction,
   type CrmAutomationConditionValue,
   type CrmAutomationConfigError,
+  type CrmAutomationDraft,
   type CrmAutomationEntity,
   type CrmAutomationTrigger,
   type CrmGrowthSignal,
 } from "./crm-automation-rules";
 
-// ---------------------------------------------------------------------------
-// Shapes
-// ---------------------------------------------------------------------------
-
-export interface CrmAutomationActionConfig extends Record<string, unknown> {
-  memberId: string | null;
-  offsetDays: number | null;
-  signal: CrmGrowthSignal | null;
-}
-
+/** What a rule looks like coming back out of the database. */
 export interface CrmAutomationRule extends Record<string, unknown> {
   id: string;
   name: string;
   triggerKey: CrmAutomationTrigger;
   conditions: CrmAutomationConditionValue[];
   actionKey: CrmAutomationAction;
-  actionConfig: CrmAutomationActionConfig;
-  /** The member the action names, resolved for the screen — null when none. */
+  /** The normalized document `validateAutomationDraft` produces. */
+  actionConfig: { memberId: string | null; offsetDays: number | null; signal: CrmGrowthSignal | null };
+  /** That member's name as of now, joined for display; `null` if they are gone. */
   actionMemberName: string | null;
   isActive: boolean;
   createdBy: string;
@@ -103,406 +114,24 @@ export interface CrmAutomationRun extends Record<string, unknown> {
   at: string;
 }
 
-/**
- * The one cross-app read: what the CRM has asked Growth to look at.
- *
- * Growth consumes it; the CRM never writes into Growth's own tables. A signal
- * carries no message text and no audience — it is an observation about a
- * customer, and turning it into a campaign is somebody's decision, with
- * consent checked on Growth's side of the line.
- */
-export interface CrmGrowthSignalEntry extends Record<string, unknown> {
+/** One signal the CRM handed to Growth, with the customer's name attached. */
+export interface CrmGrowthSignalRow extends Record<string, unknown> {
   id: string;
   at: string;
-  signal: string | null;
+  signal: CrmGrowthSignal | null;
   partyId: string | null;
   partyName: string | null;
   ruleName: string;
 }
 
-export type CrmAutomationServiceError =
-  | CrmAutomationConfigError
-  | "automation_member_invalid"
-  | "automation_member_inactive"
-  | "automation_not_found";
-
-export interface CrmAutomationActor {
-  name: string;
-  userId?: string | null;
-}
-
-// ---------------------------------------------------------------------------
-// Reading
-// ---------------------------------------------------------------------------
-
-/**
- * The rule, plus the name of the member its action names.
- *
- * The join is on the id inside the config document, cast through `nullif` so a
- * rule without a member does not raise; the alternative is a second round trip
- * per rule from the screen, which is the shape that ends up with the name on the
- * card disagreeing with the name in the config.
- */
-const RULE_COLUMNS = `a.id, a.name, a.trigger_key AS "triggerKey", a.conditions,
-  a.action_key AS "actionKey", a.action_config AS "actionConfig", a.is_active AS "isActive",
-  a.created_by AS "createdBy", a.run_count AS "runCount", a.last_run_at AS "lastRunAt",
-  a.created_at AS "createdAt", a.updated_at AS "updatedAt",
-  coalesce(nullif(btrim(u.full_name), ''), u.email) AS "actionMemberName"`;
-
-const RULE_FROM = `FROM crm_automations a
-  LEFT JOIN users u
-    ON u.id = nullif(a.action_config->>'memberId', '')::uuid
-   AND u.business_id = a.business_id`;
-
-interface RuleRow extends Record<string, unknown> {
-  id: string;
-  name: string;
-  triggerKey: string;
-  conditions: unknown;
-  actionKey: string;
-  actionConfig: unknown;
-  actionMemberName?: string | null;
-  isActive: boolean;
-  createdBy: string;
-  runCount: number;
-  lastRunAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/**
- * A stored row, read back as the closed vocabulary it was written from.
- *
- * The database is not the validator — `validateAutomationDraft` is — but a row
- * can outlive the vocabulary that wrote it (a trigger removed in a later
- * release), and a rule whose trigger no longer exists must not be handed to the
- * engine as though it were understood. Unknown values are dropped here, at the
- * boundary, so the engine only ever sees keys it has code for.
- */
-function toRule(row: RuleRow): CrmAutomationRule {
-  const conditions = Array.isArray(row.conditions)
-    ? (row.conditions as CrmAutomationConditionValue[]).filter(
-        (condition) => condition && CRM_AUTOMATION_CONDITION_DEFS[condition.key],
-      )
-    : [];
-  const config = (row.actionConfig ?? {}) as Record<string, unknown>;
-  return {
-    id: row.id,
-    name: row.name,
-    triggerKey: row.triggerKey as CrmAutomationTrigger,
-    conditions,
-    actionKey: row.actionKey as CrmAutomationAction,
-    actionConfig: {
-      memberId: (config.memberId as string | null) ?? null,
-      offsetDays: typeof config.offsetDays === "number" ? config.offsetDays : null,
-      signal: (config.signal as CrmGrowthSignal | null) ?? null,
-    },
-    actionMemberName: row.actionMemberName ?? null,
-    isActive: Boolean(row.isActive),
-    createdBy: row.createdBy,
-    runCount: Number(row.runCount ?? 0),
-    lastRunAt: row.lastRunAt,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  };
-}
-
-/** A business's rules, oldest first — the order the engine evaluates them in. */
-export async function listAutomations(businessId: string): Promise<CrmAutomationRule[]> {
-  const { rows } = await query<RuleRow>(
-    `SELECT ${RULE_COLUMNS} ${RULE_FROM} WHERE a.business_id = $1 ORDER BY a.created_at, a.id`,
-    [businessId],
-  );
-  return rows.map(toRule);
-}
-
-export async function getAutomation(
-  businessId: string,
-  automationId: string,
-): Promise<CrmAutomationRule | null> {
-  if (!isUuid(automationId)) return null;
-  const { rows } = await query<RuleRow>(
-    `SELECT ${RULE_COLUMNS} ${RULE_FROM} WHERE a.business_id = $1 AND a.id = $2`,
-    [businessId, automationId],
-  );
-  return rows[0] ? toRule(rows[0]) : null;
-}
-
-/**
- * The runs, newest first — what the rules have actually done lately.
- *
- * `skipped` is kept rather than hidden: "why didn't my rule fire" is the
- * question an automation screen gets asked most, and the answer is usually that
- * its conditions did not hold.
- */
-export async function listAutomationRuns(
-  businessId: string,
-  options: { automationId?: string | null; limit?: number } = {},
-): Promise<CrmAutomationRun[]> {
-  const limit = Math.min(Math.max(options.limit ?? 20, 1), 200);
-  const params: unknown[] = [businessId];
-  let where = "";
-  if (options.automationId && isUuid(options.automationId)) {
-    params.push(options.automationId);
-    where = ` AND automation_id = $${params.length}`;
-  }
-  params.push(limit);
-  const { rows } = await query<CrmAutomationRun>(
-    `SELECT id, automation_id AS "automationId", automation_name AS "automationName",
-            trigger_key AS "triggerKey", entity_type AS "entityType", entity_id AS "entityId",
-            outcome, detail, at
-       FROM crm_automation_runs
-      WHERE business_id = $1${where}
-      ORDER BY at DESC, id DESC
-      LIMIT $${params.length}`,
-    params,
-  );
-  return rows.map((row) => ({ ...row, detail: (row.detail ?? {}) as Record<string, unknown> }));
-}
-
-/** How many rules and runs a business has — the settings screen's summary line. */
-export async function automationCounts(
-  businessId: string,
-): Promise<{ active: number; total: number; appliedLast30: number }> {
-  const { rows } = await query<{ active: string; total: string; applied: string }>(
-    `SELECT count(*) FILTER (WHERE is_active)::text AS active,
-            count(*)::text AS total,
-            (SELECT count(*)::text FROM crm_automation_runs r
-              WHERE r.business_id = $1
-                AND r.outcome IN ('applied', 'triggered_growth')
-                AND r.at > now() - interval '30 days') AS applied
-       FROM crm_automations WHERE business_id = $1`,
-    [businessId],
-  );
-  return {
-    active: Number(rows[0]?.active ?? 0),
-    total: Number(rows[0]?.total ?? 0),
-    appliedLast30: Number(rows[0]?.applied ?? 0),
-  };
-}
-
-/**
- * The signals Growth may read. Served under the CRM's own configuration gate:
- * this is CRM data about CRM customers, and the reader is the marketing app, not
- * a browser.
- */
-export async function listCrmGrowthSignals(
-  businessId: string,
-  options: { limit?: number; since?: string | null } = {},
-): Promise<CrmGrowthSignalEntry[]> {
-  const limit = Math.min(Math.max(options.limit ?? 20, 1), 200);
-  const params: unknown[] = [businessId];
-  let since = "";
-  if (options.since) {
-    params.push(options.since);
-    since = ` AND r.at >= $${params.length}`;
-  }
-  params.push(limit);
-  const { rows } = await query<CrmGrowthSignalEntry>(
-    `SELECT r.id, r.at,
-            r.detail->>'signal' AS signal,
-            nullif(r.detail->>'partyId', '') AS "partyId",
-            p.name AS "partyName",
-            r.automation_name AS "ruleName"
-       FROM crm_automation_runs r
-       LEFT JOIN parties p ON p.id = nullif(r.detail->>'partyId', '')::uuid
-      WHERE r.business_id = $1 AND r.outcome = 'triggered_growth'${since}
-      ORDER BY r.at DESC, r.id DESC
-      LIMIT $${params.length}`,
-    params,
-  );
-  return rows;
-}
-
-// ---------------------------------------------------------------------------
-// Writing
-// ---------------------------------------------------------------------------
-
-export interface SaveAutomationInput {
-  id?: string | null;
-  name: string;
-  triggerKey: string;
-  conditions?: CrmAutomationConditionValue[];
-  actionKey: string;
-  actionConfig?: { memberId?: string | null; offsetDays?: number | null; signal?: string | null };
-  isActive?: boolean;
-}
-
-/**
- * Create or update a rule.
- *
- * The composition is validated by `validateAutomationDraft` (pure, shared with
- * the test suite); the member is validated here, because "is this somebody who
- * can still sign in to this business" is a query. An inactive member is refused
- * rather than accepted-and-greyed: a rule is authored once and fires for months,
- * and writing work into a departed colleague's queue is a promise nobody keeps.
- */
-export async function saveAutomation(
-  businessId: string,
-  input: SaveAutomationInput,
-  actor: CrmAutomationActor,
-): Promise<{ ok: true; rule: CrmAutomationRule } | { ok: false; error: CrmAutomationServiceError }> {
-  const validated = validateAutomationDraft({
-    name: input.name,
-    triggerKey: input.triggerKey,
-    conditions: input.conditions ?? [],
-    actionKey: input.actionKey,
-    actionConfig: input.actionConfig ?? {},
-  });
-  if (!validated.ok) return validated;
-
-  const { value } = validated;
-  if (value.actionConfig.memberId) {
-    const member = await memberState(businessId, value.actionConfig.memberId);
-    if (!member) return { ok: false, error: "automation_member_invalid" };
-    if (!member.isActive) return { ok: false, error: "automation_member_inactive" };
-  }
-
-  const existing = input.id ? await getAutomation(businessId, input.id) : null;
-  if (input.id && !existing) return { ok: false, error: "automation_not_found" };
-
-  const isActive = input.isActive ?? existing?.isActive ?? true;
-  const conditions = JSON.stringify(value.conditions);
-  const actionConfig = JSON.stringify(value.actionConfig);
-
-  let automationId: string;
-  if (existing) {
-    await query(
-      `UPDATE crm_automations
-          SET name = $3, trigger_key = $4, conditions = $5::jsonb, action_key = $6,
-              action_config = $7::jsonb, is_active = $8, updated_at = now()
-        WHERE business_id = $1 AND id = $2`,
-      [
-        businessId,
-        existing.id,
-        value.name,
-        value.triggerKey,
-        conditions,
-        value.actionKey,
-        actionConfig,
-        isActive,
-      ],
-    );
-    automationId = existing.id;
-  } else {
-    const { rows } = await query<{ id: string }>(
-      `INSERT INTO crm_automations
-         (business_id, name, trigger_key, conditions, action_key, action_config, is_active, created_by)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb, $7, $8)
-       RETURNING id`,
-      [
-        businessId,
-        value.name,
-        value.triggerKey,
-        conditions,
-        value.actionKey,
-        actionConfig,
-        isActive,
-        actor.name ?? "",
-      ],
-    );
-    automationId = rows[0].id;
-  }
-
-  const rule = await getAutomation(businessId, automationId);
-  if (!rule) return { ok: false, error: "automation_not_found" };
-
-  await recordCrmAudit({
-    businessId,
-    kind: "automation.config_changed",
-    entityType: "automation",
-    entityId: rule.id,
-    summary: existing ? `اتوماسیون «${rule.name}» ویرایش شد` : `اتوماسیون «${rule.name}» ساخته شد`,
-    detail: {
-      trigger: rule.triggerKey,
-      action: rule.actionKey,
-      conditions: rule.conditions,
-      isActive: rule.isActive,
-    },
-    actorUserId: actor.userId ?? null,
-    actorName: actor.name,
-  });
-
-  return { ok: true, rule };
-}
-
-/** Turn a rule off, or back on. Off means the engine never even reads it. */
-export async function setAutomationActive(
-  businessId: string,
-  automationId: string,
-  isActive: boolean,
-  actor: CrmAutomationActor,
-): Promise<CrmAutomationRule | null> {
-  const existing = await getAutomation(businessId, automationId);
-  if (!existing) return null;
-  if (existing.isActive === isActive) return existing;
-
-  await query(
-    `UPDATE crm_automations SET is_active = $3, updated_at = now()
-      WHERE business_id = $1 AND id = $2`,
-    [businessId, automationId, isActive],
-  );
-
-  await recordCrmAudit({
-    businessId,
-    kind: "automation.config_changed",
-    entityType: "automation",
-    entityId: automationId,
-    summary: isActive
-      ? `اتوماسیون «${existing.name}» روشن شد`
-      : `اتوماسیون «${existing.name}» خاموش شد`,
-    detail: { isActive },
-    actorUserId: actor.userId ?? null,
-    actorName: actor.name,
-  });
-
-  return { ...existing, isActive };
-}
-
-/**
- * Delete a rule.
- *
- * Its runs stay: `automation_name` is denormalised onto them for exactly this
- * moment, because "what did this rule do before we turned it off" is asked
- * *after* somebody deletes it.
- */
-export async function deleteAutomation(
-  businessId: string,
-  automationId: string,
-  actor: CrmAutomationActor,
-): Promise<boolean> {
-  if (!isUuid(automationId)) return false;
-  const existing = await getAutomation(businessId, automationId);
-  if (!existing) return false;
-  const { rowCount } = await query(
-    `DELETE FROM crm_automations WHERE business_id = $1 AND id = $2`,
-    [businessId, automationId],
-  );
-  if ((rowCount ?? 0) === 0) return false;
-  await recordCrmAudit({
-    businessId,
-    kind: "automation.config_changed",
-    entityType: "automation",
-    entityId: automationId,
-    summary: `اتوماسیون «${existing.name}» حذف شد`,
-    detail: { deleted: true, trigger: existing.triggerKey, action: existing.actionKey },
-    actorUserId: actor.userId ?? null,
-    actorName: actor.name,
-  });
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// The engine
-// ---------------------------------------------------------------------------
-
-/** What a trigger hands the engine. */
+/** The snapshot one recorded event carries into the engine. */
 export interface CrmAutomationEvent {
   trigger: CrmAutomationTrigger;
   entity: CrmAutomationEntity;
-  actor: CrmAutomationActor;
+  actor: { name: string; userId?: string | null };
 }
 
+/** What one firing did, for the caller and for a test. */
 export interface CrmAutomationRunSummary {
   considered: number;
   applied: number;
@@ -512,16 +141,363 @@ export interface CrmAutomationRunSummary {
 }
 
 /**
- * Fire the rules for one event.
+ * Every refusal the API can answer with.
  *
- * Called *after* the write that produced the event has committed, and never from
- * inside that write's transaction: an automation's failure must not roll back the
- * salesperson's move, and a failed statement inside a transaction would poison
- * it for everything after.
+ * The validation codes come from `crm-automation-rules.ts`, so the form and the
+ * endpoint refuse the same drafts in the same words; the three below need a
+ * query (a member that is not in this business, a member who has left, a rule
+ * that is not there) and so live here.
+ */
+export type CrmAutomationServiceError =
+  | CrmAutomationConfigError
+  | "automation_not_found"
+  | "automation_member_invalid"
+  | "automation_member_inactive";
+
+const RULE_COLUMNS = `
+  a.id, a.name, a.trigger_key AS "triggerKey", a.conditions,
+  a.action_key AS "actionKey",
+  nullif(a.action_config->>'memberId', '') AS "actionMemberId",
+  nullif(a.action_config->>'offsetDays', '')::int AS "offsetDays",
+  nullif(a.action_config->>'signal', '') AS signal,
+  coalesce(
+    nullif(btrim(u.full_name), ''),
+    nullif(split_part(coalesce(u.email, ''), '@', 1), '')
+  ) AS "actionMemberName",
+  a.is_active AS "isActive", a.created_by AS "createdBy",
+  a.run_count AS "runCount", a.last_run_at AS "lastRunAt",
+  a.created_at AS "createdAt", a.updated_at AS "updatedAt"`;
+
+/**
+ * The rule list's one join.
  *
- * Rules are evaluated in creation order, sequentially, so a business that writes
- * two rules over the same trigger can reason about which one ran — the same
- * determinism the queues and the AI engine use.
+ * The member's name is joined rather than looked up per row or per render,
+ * because every screen that shows a rule shows *who it hands work to* — and a
+ * name that arrives with the row cannot drift from the id beside it. The join
+ * is on the business as well as the id, so a rule can never borrow another
+ * tenant's member name.
+ */
+const RULE_FROM = `
+  FROM crm_automations a
+  LEFT JOIN users u
+    ON u.business_id = a.business_id
+   AND u.id = nullif(a.action_config->>'memberId', '')::uuid`;
+
+const RUN_COLUMNS = `
+  r.id, r.automation_id AS "automationId", r.automation_name AS "automationName",
+  r.trigger_key AS "triggerKey", r.entity_type AS "entityType",
+  r.entity_id AS "entityId", r.outcome, r.detail, r.at`;
+
+function toRule(row: Record<string, unknown>): CrmAutomationRule {
+  const signal = typeof row.signal === "string" && row.signal ? (row.signal as CrmGrowthSignal) : null;
+  return {
+    ...row,
+    conditions: Array.isArray(row.conditions) ? (row.conditions as CrmAutomationConditionValue[]) : [],
+    actionConfig: {
+      memberId: (row.actionMemberId as string | null) ?? null,
+      offsetDays: row.offsetDays === null ? null : Number(row.offsetDays),
+      signal,
+    },
+  } as CrmAutomationRule;
+}
+
+// ---------------------------------------------------------------- reading
+
+export async function listAutomations(businessId: string): Promise<CrmAutomationRule[]> {
+  const { rows } = await query<Record<string, unknown>>(
+    `SELECT ${RULE_COLUMNS} ${RULE_FROM}
+      WHERE a.business_id = $1
+      ORDER BY a.created_at, a.id`,
+    [businessId],
+  );
+  return rows.map(toRule);
+}
+
+export async function getAutomation(
+  businessId: string,
+  id: string,
+): Promise<CrmAutomationRule | null> {
+  if (!isUuid(id)) return null;
+  const { rows } = await query<Record<string, unknown>>(
+    `SELECT ${RULE_COLUMNS} ${RULE_FROM} WHERE a.business_id = $1 AND a.id = $2`,
+    [businessId, id],
+  );
+  return rows[0] ? toRule(rows[0]) : null;
+}
+
+export async function listAutomationRuns(
+  businessId: string,
+  options: { automationId?: string | null; limit?: number } = {},
+): Promise<CrmAutomationRun[]> {
+  const { automationId = null, limit = 20 } = options;
+  const values: unknown[] = [businessId];
+  let filter = "";
+  if (automationId && isUuid(automationId)) {
+    values.push(automationId);
+    filter = ` AND r.automation_id = $${values.length}`;
+  }
+  values.push(Math.min(Math.max(limit, 1), 200));
+  const { rows } = await query<Record<string, unknown>>(
+    `SELECT ${RUN_COLUMNS} FROM crm_automation_runs r
+      WHERE r.business_id = $1${filter}
+      ORDER BY r.at DESC, r.id DESC
+      LIMIT $${values.length}`,
+    values,
+  );
+  return rows as CrmAutomationRun[];
+}
+
+/**
+ * The signals the CRM has handed to Growth, newest first.
+ *
+ * This is the consuming side of `notify_growth`: Growth reads these — with the
+ * customer's name, which it would otherwise have to join for — and decides what
+ * to do, *including* whether the customer's consent allows it. Reading is the
+ * whole interface: there is nothing to acknowledge and the CRM waits for
+ * nothing, because a rule that needed a campaign to run would be a rule that
+ * cannot run in a business that does not do campaigns.
+ */
+export async function listCrmGrowthSignals(
+  businessId: string,
+  options: { limit?: number } = {},
+): Promise<CrmGrowthSignalRow[]> {
+  const { rows } = await query<Record<string, unknown>>(
+    `SELECT r.id, r.at,
+            nullif(r.detail->>'signal', '') AS signal,
+            nullif(r.detail->>'partyId', '') AS "partyId",
+            p.name AS "partyName",
+            r.automation_name AS "ruleName"
+       FROM crm_automation_runs r
+       LEFT JOIN parties p
+         ON p.business_id = r.business_id
+        AND p.id = nullif(r.detail->>'partyId', '')::uuid
+      WHERE r.business_id = $1 AND r.outcome = 'triggered_growth'
+      ORDER BY r.at DESC, r.id DESC
+      LIMIT $2`,
+    [businessId, Math.min(Math.max(options.limit ?? 20, 1), 200)],
+  );
+  return rows as CrmGrowthSignalRow[];
+}
+
+/** Counters for the settings screen: how much this business has automated. */
+export async function automationCounts(businessId: string): Promise<{
+  active: number;
+  total: number;
+  appliedLast30: number;
+}> {
+  const { rows } = await query<{ active: number; total: number; applied: number }>(
+    `SELECT count(*) FILTER (WHERE a.is_active)::int AS active,
+            count(*)::int AS total,
+            (SELECT count(*)::int FROM crm_automation_runs r
+              WHERE r.business_id = $1
+                AND r.outcome IN ('applied', 'triggered_growth')
+                AND r.at > now() - interval '30 days') AS applied
+       FROM crm_automations a
+      WHERE a.business_id = $1`,
+    [businessId],
+  );
+  const row = rows[0];
+  return { active: row?.active ?? 0, total: row?.total ?? 0, appliedLast30: row?.applied ?? 0 };
+}
+
+// ---------------------------------------------------------------- writing
+
+export interface SaveAutomationInput extends CrmAutomationDraft {
+  id?: string | null;
+  isActive?: boolean;
+}
+
+/**
+ * A member who can actually receive work.
+ *
+ * The rule is checked at the door, so one that names somebody who has left is
+ * refused *when it is written* rather than silently filing nothing for a year.
+ * The same check runs when the rule fires, because people leave after a rule was
+ * written.
+ */
+async function activeMemberName(
+  businessId: string,
+  memberId: string,
+): Promise<string | "missing" | "inactive"> {
+  if (!isUuid(memberId)) return "missing";
+  const { rows } = await query<{ name: string | null; isActive: boolean }>(
+    `SELECT coalesce(
+              nullif(btrim(full_name), ''),
+              nullif(split_part(coalesce(email, ''), '@', 1), '')
+            ) AS name,
+            coalesce(is_active, true) AS "isActive"
+       FROM users
+      WHERE business_id = $1 AND id = $2`,
+    [businessId, memberId],
+  );
+  const row = rows[0];
+  if (!row) return "missing";
+  // Active-only, unlike `resolveOwner`: an existing row keeps the owner it has,
+  // but an automation must not *hand work* to somebody who cannot sign in — and
+  // quietly reassigning instead would decide a portfolio for the business.
+  if (!row.isActive) return "inactive";
+  return row.name ?? "missing";
+}
+
+export async function saveAutomation(
+  businessId: string,
+  input: SaveAutomationInput,
+  actor: { name: string; userId?: string | null },
+): Promise<{ ok: true; rule: CrmAutomationRule } | { ok: false; error: CrmAutomationServiceError }> {
+  const draft = validateAutomationDraft(input);
+  if (!draft.ok) return draft;
+
+  const { name, triggerKey, conditions, actionKey, actionConfig } = draft.value;
+  if (actionConfig.memberId) {
+    const member = await activeMemberName(businessId, actionConfig.memberId);
+    if (member === "missing") return { ok: false, error: "automation_member_invalid" };
+    if (member === "inactive") return { ok: false, error: "automation_member_inactive" };
+  }
+
+  const isActive = input.isActive ?? true;
+  const config = JSON.stringify(actionConfig);
+  const conditionJson = JSON.stringify(conditions);
+
+  let id = input.id ?? null;
+  if (id) {
+    if (!isUuid(id)) return { ok: false, error: "automation_not_found" };
+    const existing = await getAutomation(businessId, id);
+    if (!existing) return { ok: false, error: "automation_not_found" };
+    await query(
+      `UPDATE crm_automations
+          SET name = $3, trigger_key = $4, conditions = $5::jsonb, action_key = $6,
+              action_config = $7::jsonb, is_active = $8, updated_at = now()
+        WHERE business_id = $1 AND id = $2`,
+      [businessId, id, name, triggerKey, conditionJson, actionKey, config, isActive],
+    );
+    await auditConfigChange(businessId, id, name, actor, {
+      change: "updated",
+      triggerKey,
+      actionKey,
+      conditionCount: conditions.length,
+    });
+  } else {
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO crm_automations
+         (business_id, name, trigger_key, conditions, action_key, action_config,
+          is_active, created_by, created_by_id)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb, $7, $8, $9)
+       RETURNING id`,
+      [
+        businessId,
+        name,
+        triggerKey,
+        conditionJson,
+        actionKey,
+        config,
+        isActive,
+        actor.name ?? "",
+        actor.userId ?? null,
+      ],
+    );
+    id = rows[0]?.id ?? null;
+    if (!id) return { ok: false, error: "automation_not_found" };
+    await auditConfigChange(businessId, id, name, actor, {
+      change: "created",
+      triggerKey,
+      actionKey,
+      conditionCount: conditions.length,
+    });
+  }
+
+  const rule = await getAutomation(businessId, id);
+  return rule ? { ok: true, rule } : { ok: false, error: "automation_not_found" };
+}
+
+/**
+ * Turn a rule on or off — the ordinary way to stop one, since it keeps the
+ * rule, its counters and its runs.
+ *
+ * Returns the updated rule, or `null` when this business has no such rule: a
+ * missing row is not an error a form has to explain, it is a 404.
+ */
+export async function setAutomationActive(
+  businessId: string,
+  id: string,
+  isActive: boolean,
+  actor: { name: string; userId?: string | null },
+): Promise<CrmAutomationRule | null> {
+  const existing = await getAutomation(businessId, id);
+  if (!existing) return null;
+  await query(
+    `UPDATE crm_automations SET is_active = $3, updated_at = now()
+      WHERE business_id = $1 AND id = $2`,
+    [businessId, id, isActive],
+  );
+  await auditConfigChange(businessId, id, existing.name, actor, {
+    change: isActive ? "activated" : "deactivated",
+    triggerKey: existing.triggerKey,
+    actionKey: existing.actionKey,
+  });
+  return getAutomation(businessId, id);
+}
+
+export async function deleteAutomation(
+  businessId: string,
+  id: string,
+  actor: { name: string; userId?: string | null },
+): Promise<boolean> {
+  const existing = await getAutomation(businessId, id);
+  if (!existing) return false;
+  await query(`DELETE FROM crm_automations WHERE business_id = $1 AND id = $2`, [businessId, id]);
+  await auditConfigChange(businessId, id, existing.name, actor, {
+    change: "deleted",
+    triggerKey: existing.triggerKey,
+    actionKey: existing.actionKey,
+  });
+  return true;
+}
+
+const CHANGE_VERBS: Record<string, string> = {
+  created: "ساخته شد",
+  updated: "ویرایش شد",
+  activated: "فعال شد",
+  deactivated: "غیرفعال شد",
+  deleted: "حذف شد",
+};
+
+/**
+ * One audit line per change to a rule — not per firing.
+ *
+ * The decision log is for the decisions a person has to be able to explain, and
+ * "who made the CRM file tasks on its own" is one of them. The firings
+ * themselves live in the run log, which is where somebody asking "why did
+ * nothing happen yesterday" will actually look.
+ */
+async function auditConfigChange(
+  businessId: string,
+  id: string,
+  name: string,
+  actor: { name: string; userId?: string | null },
+  detail: Record<string, unknown>,
+): Promise<void> {
+  const verb = CHANGE_VERBS[String(detail.change)] ?? "تغییر کرد";
+  await recordCrmAudit({
+    businessId,
+    kind: "automation.config_changed",
+    entityType: "automation",
+    entityId: id,
+    summary: `اتوماسیون «${name}» ${verb}`,
+    detail,
+    actorUserId: actor.userId ?? null,
+    actorName: actor.name,
+  });
+}
+
+// ---------------------------------------------------------------- the engine
+
+/**
+ * Run every active rule that this event concerns.
+ *
+ * The order is the order the rules were written, which is the only order a
+ * person can predict: two rules that both file a follow-up file them in the
+ * order the screen lists them. Each rule's failure is its own — one bad rule
+ * does not stop the next, and no rule can stop the write that called this.
  */
 export async function runCrmAutomations(
   businessId: string,
@@ -537,41 +513,18 @@ export async function runCrmAutomations(
 
   let rules: CrmAutomationRule[];
   try {
-    const { rows } = await query<RuleRow>(
-      `SELECT ${RULE_COLUMNS} ${RULE_FROM}
-        WHERE a.business_id = $1 AND a.trigger_key = $2 AND a.is_active
-        ORDER BY a.created_at, a.id`,
-      [businessId, event.trigger],
-    );
-    rules = rows.map(toRule);
+    rules = await activeRulesForTrigger(businessId, event.trigger);
   } catch (error) {
-    // The engine is not on the critical path: the move happened, and a rule
-    // store that cannot be read is not a reason to fail it.
     console.error("crm automations: rules could not be loaded", errorMessage(error));
     return summary;
   }
   summary.considered = rules.length;
+  if (rules.length === 0) return summary;
 
   for (const rule of rules) {
     if (!matchesAutomationConditions(rule.conditions, event.entity)) {
+      summary.skipped += 1;
       await safeRecordRun(businessId, rule, event, "skipped", { reason: "conditions_not_met" });
-      summary.skipped += 1;
-      continue;
-    }
-
-    // An action this build does not have — a row written by a later release, or
-    // one edited outside the API. It is recorded as not-run rather than falling
-    // through to whichever branch happens to be last, which would silently turn
-    // an unknown action into a Growth signal.
-    const definition = CRM_AUTOMATION_ACTION_DEFS[rule.actionKey];
-    if (!definition) {
-      await safeRecordRun(businessId, rule, event, "skipped", { reason: "action_unknown" });
-      summary.skipped += 1;
-      continue;
-    }
-    if (definition.side !== "crm" && definition.side !== "growth") {
-      await safeRecordRun(businessId, rule, event, "skipped", { reason: "action_unknown" });
-      summary.skipped += 1;
       continue;
     }
 
@@ -581,43 +534,42 @@ export async function runCrmAutomations(
         await safeRecordRun(businessId, rule, event, "applied", detail);
         summary.applied += 1;
       } else if (rule.actionKey === "assign_owner") {
-        const detail = await assignOwner(businessId, rule, event);
-        if (detail.outcome === "skipped") {
-          await safeRecordRun(businessId, rule, event, "skipped", detail);
-          summary.skipped += 1;
-        } else {
-          await safeRecordRun(businessId, rule, event, "applied", detail);
-          summary.applied += 1;
-        }
-      } else if (definition.side === "growth") {
-        const signal = rule.actionConfig.signal;
+        // The outcome is the run row's own column; the rest is what changed.
+        const { outcome, ...detail } = await assignOwner(businessId, rule, event);
+        await safeRecordRun(businessId, rule, event, outcome, detail);
+        if (outcome === "applied") summary.applied += 1;
+        else summary.skipped += 1;
+      } else if (rule.actionKey === "notify_growth") {
         await safeRecordRun(businessId, rule, event, "triggered_growth", {
-          signal,
+          signal: rule.actionConfig.signal,
           partyId: event.entity.partyId,
           title: event.entity.title,
         });
         summary.growthSignals += 1;
-        // The one automation effect that is a *decision about a customer* rather
-        // than an edit to a record: somebody may have to explain, later, why the
-        // marketing app was told this customer was at risk.
+        // The one automation effect that is a *decision about a customer*
+        // rather than an edit to a record: somebody may have to explain, later,
+        // why Growth was told this customer was at risk.
         await recordCrmAudit({
           businessId,
           kind: "automation.signal_growth",
           entityType: "automation",
           entityId: rule.id,
-          partyId: event.entity.partyId,
-          summary: `اتوماسیون «${rule.name}» رشد و بازاریابی را دربارهٔ «${event.entity.title}» خبر کرد`,
-          detail: { signal, trigger: event.trigger },
+          summary: `اتوماسیون «${rule.name}» سیگنال رشد را برای «${event.entity.title}» ثبت کرد`,
+          detail: { signal: rule.actionConfig.signal, trigger: event.trigger, entityId: event.entity.id },
           actorUserId: event.actor.userId ?? null,
           actorName: event.actor.name,
         });
       } else {
-        // Unreachable for a declared action: the two `side`s above cover the
-        // vocabulary, and `toRule` keeps only declared keys. Kept as a refusal
-        // rather than an assumption, because the day it becomes reachable is the
-        // day an unknown key would otherwise fall into a real action.
-        await safeRecordRun(businessId, rule, event, "skipped", { reason: "action_unknown" });
+        // A key this version does not carry out: a rule written by a newer
+        // version of the app, or a row edited by hand — `saveAutomation`
+        // validates the action key, so this is the only way one appears. It is
+        // **not** a Growth signal. A trailing `else` that read anything unknown
+        // as «signal Growth» would hand a customer to another team because of a
+        // typo, and would file an outcome the business cannot explain; so the
+        // rule is skipped, with the reason in the log, and no rule counter is
+        // bumped — this run did nothing.
         summary.skipped += 1;
+        await safeRecordRun(businessId, rule, event, "skipped", { reason: "action_unknown" });
         continue;
       }
       await bumpRule(businessId, rule.id);
@@ -633,30 +585,46 @@ export async function runCrmAutomations(
   return summary;
 }
 
+async function activeRulesForTrigger(
+  businessId: string,
+  trigger: CrmAutomationTrigger,
+): Promise<CrmAutomationRule[]> {
+  const { rows } = await query<Record<string, unknown>>(
+    `SELECT ${RULE_COLUMNS} ${RULE_FROM}
+      WHERE a.business_id = $1 AND a.trigger_key = $2 AND a.is_active
+      ORDER BY a.created_at, a.id`,
+    [businessId, trigger],
+  );
+  return rows.map(toRule);
+}
+
 /**
- * Create the follow-up the rule asked for, as a real activity.
+ * File the follow-up the rule asked for, as a real activity.
  *
  * A generated follow-up is an ordinary row in the CRM's own work list — visible
- * in «کارها و پیگیریها», on the customer's timeline, and on Today like any
- * other task. An automation that kept its output in its own inbox would be a
- * second place to look for work.
+ * in «کارها و پیگیری‌ها», on the customer's timeline and on Today like any
+ * other task. An automation that kept its output in an inbox of its own would
+ * be a second place work lives, and the second place is the one nobody checks.
  */
 async function createFollowUp(
   businessId: string,
   rule: CrmAutomationRule,
   event: CrmAutomationEvent,
 ): Promise<Record<string, unknown>> {
-  const { entity } = event;
-  const assignee = await actionAssignee(businessId, rule, entity);
-  const today = await businessToday(businessId);
-  const offset = rule.actionConfig.offsetDays ?? 0;
-  const dueAt = followUpDueAt(today, offset);
+  const entity = event.entity;
+  const member = await memberFor(businessId, rule, entity);
+  const offsetDays = rule.actionConfig.offsetDays ?? 0;
+  const dueAt = followUpDueAt(await businessToday(businessId), offsetDays);
 
   const { rows } = await query<{ id: string }>(
+    // The same column set `createActivity` writes, including the rule that
+    // `assigned_to` and `created_by` are the *snapshots* and never empty: the id
+    // columns are the ownership, the text is what the row will keep saying after
+    // the member is renamed or deleted.
     `INSERT INTO crm_activities
-       (business_id, customer_id, deal_id, case_id, kind, subject, body, due_at,
-        assigned_to, assignee_user_id, created_by)
-     VALUES ($1, $2, $3, $4, 'task', $5, $6, $7, $8, $9, $10)
+       (business_id, customer_id, deal_id, case_id, kind, subject, body,
+        due_at, assigned_to, assignee_user_id, created_by, created_by_id)
+     VALUES ($1, $2, $3, $4, 'task', $5, $6, $7, $8, $9, $10, $11)
      RETURNING id`,
     [
       businessId,
@@ -664,121 +632,116 @@ async function createFollowUp(
       entity.type === "deal" ? entity.id : null,
       entity.type === "case" ? entity.id : null,
       followUpSubject(event.trigger, entity.title),
+      // The body names the rule, so a task nobody remembers creating explains
+      // itself. The reason it exists is context; the work is the subject.
       `این کار به‌صورت خودکار توسط اتوماسیون «${rule.name}» ساخته شد.`,
       dueAt,
-      assignee.name,
-      assignee.userId,
-      event.actor.name || "اتوماسیون",
+      member.name ?? "",
+      member.userId,
+      event.actor.name ?? "",
+      event.actor.userId ?? null,
     ],
   );
-
   return {
     activityId: rows[0]?.id ?? null,
+    assignedTo: member.name,
     dueAt,
-    offsetDays: offset,
-    assignedTo: assignee.userId,
-    ...(assignee.fallback ? { assigneeFallback: assignee.fallback } : {}),
+    offsetDays,
+    assigneeFallback: member.fallback,
   };
 }
 
 /**
- * Move a record's owner.
+ * Move a record to the rule's member.
  *
- * Refused when the member has been deactivated since the rule was written, and a
- * no-op when the record already belongs to them — both recorded, because "the
- * rule ran and did nothing" is information somebody looks for.
+ * The two owner columns are written from one resolution every time — the id the
+ * system uses and the name a person reads — because a record whose id and name
+ * disagree is worse than one with neither. A record already owned by that same
+ * member is left alone rather than re-stamped, which keeps the run log honest
+ * about what actually changed.
  */
 async function assignOwner(
   businessId: string,
   rule: CrmAutomationRule,
   event: CrmAutomationEvent,
 ): Promise<Record<string, unknown> & { outcome: "applied" | "skipped" }> {
-  const { entity } = event;
   const memberId = rule.actionConfig.memberId;
-  const member = memberId ? await memberState(businessId, memberId) : null;
-  if (!member) return { outcome: "skipped", reason: "member_missing" };
-  if (!member.isActive) return { outcome: "skipped", reason: "member_inactive" };
-  if (entity.ownerUserId === member.id) {
-    return { outcome: "skipped", reason: "already_owned", memberId: member.id };
-  }
+  if (!memberId) return { outcome: "skipped", reason: "member_missing" };
+
+  const member = await activeMemberName(businessId, memberId);
+  if (member === "missing") return { outcome: "skipped", reason: "member_missing" };
+  if (member === "inactive") return { outcome: "skipped", reason: "member_inactive" };
+
+  const entity = event.entity;
+  // "Already owned" means owned by *this* member, and only then is the run a
+  // skip: re-stamping the same owner would make a rule look busy. A row whose
+  // owner is only a legacy name is *not* skipped — writing both columns from
+  // one resolution is exactly what this action is for, and refusing it would
+  // leave the record in the half-normalised state the ownership work exists to
+  // remove.
+  if (entity.ownerUserId === memberId) return { outcome: "skipped", reason: "already_owned" };
 
   const table =
     entity.type === "deal"
-      ? { name: "crm_deals", nameColumn: "owner_user" }
+      ? { name: "crm_deals", idColumn: "owner_user_id", nameColumn: "owner_user" }
       : entity.type === "case"
-        ? { name: "crm_cases", nameColumn: "assigned_to" }
-        : { name: "crm_leads", nameColumn: "owner_name" };
-  const idColumn = entity.type === "deal" ? "owner_user_id" : entity.type === "case" ? "assignee_user_id" : "owner_user_id";
+        ? { name: "crm_cases", idColumn: "assignee_user_id", nameColumn: "assigned_to" }
+        : { name: "crm_leads", idColumn: "owner_user_id", nameColumn: "owner_name" };
 
   const { rowCount } = await query(
     `UPDATE ${table.name}
-        SET ${table.nameColumn} = $3, ${idColumn} = $4, updated_at = now()
+        SET ${table.idColumn} = $3, ${table.nameColumn} = $4, updated_at = now()
       WHERE business_id = $1 AND id = $2`,
-    [businessId, entity.id, member.name, member.id],
+    [businessId, entity.id, memberId, member],
   );
-  if ((rowCount ?? 0) === 0) {
-    // The record was deleted between the event and the rule firing.
-    return { outcome: "skipped", reason: "record_missing" };
-  }
-
-  return {
-    outcome: "applied",
-    memberId: member.id,
-    from: entity.ownerUserId ?? null,
-    fromName: entity.ownerName ?? null,
-  };
+  if (!rowCount) return { outcome: "skipped", reason: "record_missing" };
+  return { outcome: "applied", assignedTo: member, fromUserId: entity.ownerUserId ?? null };
 }
 
 /**
- * Who a generated follow-up lands on.
+ * Who the generated work lands on.
  *
- * The rule's chosen member, unless they have been deactivated since; then the
- * record's own owner, and otherwise nobody — in which case the follow-up still
- * exists and the «بدون مسئول» queue picks it up. Never silently dropped, never
- * handed to a person who has left.
+ * The rule's member if they are still here; otherwise the record's own owner,
+ * because a follow-up about a deal belongs to whoever holds the deal; otherwise
+ * nobody — «بدون مسئول» in the work list, where Today's unassigned queue picks
+ * it up. Never the person who happened to trigger the rule by dragging a card:
+ * that is how a receptionist ends up owning an enterprise deal.
  */
-async function actionAssignee(
+async function memberFor(
   businessId: string,
   rule: CrmAutomationRule,
   entity: CrmAutomationEntity,
-): Promise<{ userId: string | null; name: string; fallback?: string }> {
+): Promise<{ name: string | null; userId: string | null; fallback: string | null }> {
   const memberId = rule.actionConfig.memberId;
-  if (memberId) {
-    const member = await memberState(businessId, memberId);
-    if (member?.isActive) return { userId: member.id, name: member.name };
-    if (entity.ownerUserId) {
-      const owner = await memberState(businessId, entity.ownerUserId);
-      if (owner?.isActive) return { userId: owner.id, name: owner.name, fallback: "rule_owner_inactive" };
-    }
-    return { userId: null, name: "", fallback: "rule_owner_inactive" };
+  const member = memberId ? await activeMemberName(businessId, memberId) : "missing";
+  if (memberId && member !== "missing" && member !== "inactive") {
+    return { name: member, userId: memberId, fallback: null };
   }
-  if (entity.ownerUserId) {
-    const owner = await memberState(businessId, entity.ownerUserId);
-    if (owner?.isActive) return { userId: owner.id, name: owner.name };
-  }
-  return { userId: null, name: "" };
+
+  // The rule's member cannot take it (they left, or the row is gone). The run
+  // says so, whichever happens next: a task that silently changed hands is the
+  // kind of thing somebody has to be able to find later.
+  const fallback = member === "inactive" ? "rule_owner_inactive" : "rule_owner_missing";
+  const owner = await ownerFallback(businessId, entity);
+  if (owner) return { name: owner.name, userId: owner.userId, fallback };
+  return { name: null, userId: null, fallback };
 }
 
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
-
-interface MemberState {
-  id: string;
-  name: string;
-  isActive: boolean;
-}
-
-/** One member of this business, or null. The `business_id` filter is the tenancy check. */
-async function memberState(businessId: string, memberId: string): Promise<MemberState | null> {
-  if (!isUuid(memberId)) return null;
-  const { rows } = await query<{ id: string; name: string; is_active: boolean }>(
-    `SELECT id, coalesce(nullif(btrim(full_name), ''), email) AS name, is_active
-       FROM users WHERE business_id = $1 AND id = $2`,
-    [businessId, memberId],
-  );
-  const row = rows[0];
-  return row ? { id: row.id, name: row.name, isActive: Boolean(row.is_active) } : null;
+/**
+ * The record's own owner, when they can still receive work.
+ *
+ * Second in line behind the rule's member, and the reason a deactivated
+ * colleague does not leave a trail of unowned work: the task moves to whoever
+ * holds the deal, ticket or lead.
+ */
+async function ownerFallback(
+  businessId: string,
+  entity: CrmAutomationEntity,
+): Promise<{ name: string; userId: string } | null> {
+  if (!entity.ownerUserId) return null;
+  const owner = await activeMemberName(businessId, entity.ownerUserId);
+  if (owner === "missing" || owner === "inactive") return null;
+  return { name: owner, userId: entity.ownerUserId };
 }
 
 async function safeRecordRun(
@@ -791,7 +754,8 @@ async function safeRecordRun(
   try {
     await query(
       `INSERT INTO crm_automation_runs
-         (business_id, automation_id, automation_name, trigger_key, entity_type, entity_id, outcome, detail)
+         (business_id, automation_id, automation_name, trigger_key, entity_type,
+          entity_id, outcome, detail)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
       [
         businessId,
@@ -799,24 +763,39 @@ async function safeRecordRun(
         rule.name,
         event.trigger,
         event.entity.type,
-        event.entity.id,
+        isUuid(event.entity.id) ? event.entity.id : null,
         outcome,
-        JSON.stringify(detail),
+        JSON.stringify(pruned(detail)),
       ],
     );
   } catch (error) {
+    // The run log is evidence *about* the action; failing to write it must not
+    // turn a filed follow-up into a failed one.
     console.error("crm automations: run could not be recorded", errorMessage(error));
   }
 }
 
-/** Counters, for the screen's «آخرین اجرا» and run count. Only real effects count. */
-async function bumpRule(businessId: string, automationId: string): Promise<void> {
+/**
+ * Only counters that mean something bump: a run that applied an action or
+ * signalled Growth counts, a skip or a failure does not. A rule whose "last
+ * run" was a skip has not run in the sense the number is read.
+ */
+async function bumpRule(businessId: string, id: string): Promise<void> {
   await query(
     `UPDATE crm_automations
         SET run_count = run_count + 1, last_run_at = now(), updated_at = now()
       WHERE business_id = $1 AND id = $2`,
-    [businessId, automationId],
+    [businessId, id],
   );
+}
+
+/** Run detail is stored as jsonb, and `undefined` is not a JSON value. */
+function pruned(detail: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(detail)) {
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
 }
 
 function errorMessage(error: unknown): string {

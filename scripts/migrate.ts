@@ -55,6 +55,17 @@ export const MIGRATION_ADVISORY_LOCK_ID = "7310318183545164275";
  * deployments had already applied the original wording from PR #516. Only
  * comment lines changed — every statement is byte-for-byte identical — so
  * adopting the checksum is schema-neutral, exactly like 0127.
+ *
+ * 0200_crm_automations.sql is the one case where the *statements* changed, and
+ * it is admissible because a forward migration restores the neutral result:
+ *
+ *   The file first shipped with this branch without `created_by_id` and without
+ *   the three CHECK constraints 0201 adds, and branch environments applied it
+ *   in that form. The revision that added them in place had a different
+ *   checksum. 0201 applies the identical additions idempotently to everyone, so
+ *   a database that ran the earlier revision and one that ran the original end
+ *   up with the same schema once 0201 has run — which is why adopting the
+ *   checksum here cannot mask drift. The file is frozen from now on.
  */
 const CHECKSUM_REPAIRS: ReadonlyMap<string, readonly string[]> = new Map([
   [
@@ -83,6 +94,12 @@ const CHECKSUM_REPAIRS: ReadonlyMap<string, readonly string[]> = new Map([
       "2f7d0533d17b57793c754daa8c503314f4e627f88ed716a592c7b9a73bee6551",
       "3d120a57d143127361cea6ec598993a80e0e4e2e680f94cb20d26788cc29752b",
     ],
+  ],
+  [
+    "0200_crm_automations.sql",
+    // sha256 of the revision this branch's own environments applied before
+    // 0201 carried its additions forward (see the note above).
+    ["9acc7080334deaa16af7b8a66883a89464b3ae7eb07de5d2094219d2f0d3c3c5"],
   ],
 ]);
 

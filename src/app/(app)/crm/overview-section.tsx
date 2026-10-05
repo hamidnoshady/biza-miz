@@ -270,7 +270,7 @@ export function CrmOverviewSection({
                       <div className="min-w-0">
                         <span className="font-medium text-foreground">{meta?.label ?? row.stage}</span>
                         {meta?.action ? (
-                          <span className="mr-2 text-xs text-muted-foreground">{meta.action}</span>
+                          <span className="ms-2 text-xs text-muted-foreground">{meta.action}</span>
                         ) : null}
                       </div>
                       <span className="shrink-0 tabular-nums text-muted-foreground">
@@ -358,7 +358,7 @@ export function CrmOverviewSection({
                     <Link href={crmCustomerHref(row.id)} className="block truncate font-medium text-foreground hover:underline">
                       {row.name}
                     </Link>
-                    <span className="mr-2 text-xs text-muted-foreground">
+                    <span className="ms-2 text-xs text-muted-foreground">
                       {formatPersianNumber(row.orderCount)} خرید
                     </span>
                   </div>
@@ -454,7 +454,7 @@ export function CrmOverviewSection({
             <li className="flex items-center justify-between gap-3 py-2.5">
               <div className="min-w-0">
                 <span className="font-medium text-foreground">اعتبار فروشگاهی مشتریان</span>
-                <span className="mr-2 text-xs text-muted-foreground">حساب ۲۴۱۰</span>
+                <span className="ms-2 text-xs text-muted-foreground">حساب ۲۴۱۰</span>
               </div>
               <span className="shrink-0 font-semibold text-foreground">{money.formatText(value.storeCreditRial)}</span>
             </li>
