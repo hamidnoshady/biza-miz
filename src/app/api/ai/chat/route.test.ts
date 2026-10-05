@@ -44,6 +44,10 @@ vi.mock("@/lib/ai-runtime", () => ({
     temperature: 0.3,
     ready: true,
   })),
+  // Issue #812 §3/§7 — the mode's alias. Passed through unchanged here so the
+  // tests below keep asserting the chat behaviour rather than alias resolution;
+  // `ai-runtime-mode-aliases.test.ts` pins what the real one does.
+  applyRuntimeModeAlias: vi.fn((config: { model: string }) => config),
 }));
 
 vi.mock("@/lib/ai-config", () => ({

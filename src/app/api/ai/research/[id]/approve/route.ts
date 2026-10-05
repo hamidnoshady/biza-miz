@@ -7,7 +7,8 @@ import {
   listResearchSources,
   runResearchRun,
 } from "@/lib/ai-research";
-import { resolveAiConfigFor } from "@/lib/ai-runtime";
+import { applyRuntimeModeAlias, resolveAiConfigFor } from "@/lib/ai-runtime";
+import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
 import { toolDefinitions } from "@/lib/ai";
 import { filterAiToolsByPermissions } from "@/lib/ai-capabilities";
 import { gateAiTurn, settleAiTurn } from "@/lib/ai-wallet-billing";
@@ -42,6 +43,15 @@ export const POST = withTenantScope(
     const effectivePermissions = guard.membership?.permissions ?? new Set();
     const { id } = await params;
 
+    // §6 — approving is refused outright when Superadmin has switched Deep
+    // Research off. The chat route already refuses to *offer* the mode, but a
+    // run created while it was on must not be startable after it was turned off:
+    // the switch has to mean something on the spending side too.
+    const mode = await getPlatformAiMode("deep_research");
+    if (!mode.is_active) {
+      return NextResponse.json({ error: "mode_unavailable", mode: "deep_research" }, { status: 409 });
+    }
+
     const existing = await getResearchRun({ id, businessId: session.businessId });
     if (!existing) return NextResponse.json({ error: "research_not_found" }, { status: 404 });
     if (existing.status !== "awaiting_approval") {
@@ -51,7 +61,14 @@ export const POST = withTenantScope(
     const approved = await approveResearchRun({ id, businessId: session.businessId, userId: session.sub });
     if (!approved.ok) return NextResponse.json({ error: approved.error }, { status: 409 });
 
-    const config = await resolveAiConfigFor(session.businessId, session.locationId ?? null);
+    // §3/§7 — the run's own alias, the same one the mode row names. Deep
+    // Research is a separate workflow with its own spend cap, and it routes on
+    // its own alias for the same reason: a bigger budget must not silently ride
+    // the cheap model the chat mode picked.
+    const config = applyRuntimeModeAlias(
+      await resolveAiConfigFor(session.businessId, session.locationId ?? null),
+      mode,
+    );
     if (!config.enabled) {
       return NextResponse.json({ error: "ai_disabled" }, { status: 503 });
     }

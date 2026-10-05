@@ -23,7 +23,7 @@ import {
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes";
 import { isPlatformAiConfigured, logAiRuntimeUnavailable } from "@/lib/ai-config";
-import { resolveAiConfigFor } from "@/lib/ai-runtime";
+import { applyRuntimeModeAlias, resolveAiConfigFor } from "@/lib/ai-runtime";
 import {
   AiWalletInsufficientError,
   gateAiTurn,
@@ -145,12 +145,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (guard.error) return guard.error;
   const session = guard.session;
   const effectivePermissions = guard.membership?.permissions ?? new Set();
-  // Issue #812 §5/§6 — whether Superadmin has switched Deep Research on for this
-  // platform. Read once per request, before the mode gate below.
-  const deepResearchEnabled = (await getPlatformAiMode("deep_research")).is_active;
   // Issue #812 §7 — the three user-facing runtime modes. A stored `thinking`
   // value normalizes to `auto` rather than silently doing nothing.
   const runtimeMode: AiRuntimeMode = normalizeAiRuntimeMode(body.runtimeMode);
+  // Issue #812 §3/§5/§6 — the mode's own row is read once and used twice: its
+  // `is_active` decides whether the mode is offered at all, and its
+  // `model_alias` decides which LiteLLM deployment the turn routes to. Reading
+  // it once means the offer and the route can never disagree.
+  const modeRow = await getPlatformAiMode(runtimeMode);
+  const deepResearchEnabled = modeRow.is_active;
   if (!isAiRuntimeModeAvailable(runtimeMode, deepResearchEnabled)) {
     return NextResponse.json(
       { error: "mode_unavailable", mode: runtimeMode, message: "پژوهش عمیق روی این سکو فعال نیست." },
@@ -247,7 +250,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const locationId = floorLocation?.id ?? activeLocation?.id ?? null;
   // Phase 37 & 39 — resolved through the gateway: the virtual key and model alias
   // for THIS business and branch are applied here. Routing/fallback stays in LiteLLM.
-  const config = await resolveAiConfigFor(session.businessId, locationId, { ensureVirtualKey: true });
+  const config = applyRuntimeModeAlias(
+    await resolveAiConfigFor(session.businessId, locationId, { ensureVirtualKey: true }),
+    modeRow,
+  );
   if (!isPlatformAiConfigured(config)) {
     const reason = logAiRuntimeUnavailable(config, { businessId: session.businessId, locationId: locationId, surface: "chat" });
     return NextResponse.json(

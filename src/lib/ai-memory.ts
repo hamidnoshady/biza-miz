@@ -236,7 +236,21 @@ export function validateMemoryInput(input: CreateMemoryInput): { ok: true } | { 
     /\bbearer\s+[A-Za-z0-9._\-]{12,}/i.test(content) ||
     // A provider key prefix, which is recognisable enough to be worth refusing
     // even when the member did not label it.
-    /\b(?:sk|pk|rk)_[A-Za-z0-9]{16,}\b/.test(content)
+    //
+    // The separator is `-` or `_` and the body may contain hyphens, because the
+    // real prefixes do: `sk-live-…` (Stripe live), `sk-test-…` (Stripe test),
+    // `sk-proj-…` (OpenAI project). An earlier revision required 16+ bare
+    // alphanumerics and therefore refused `sk_liveAbCd…` while letting
+    // `sk-live-abcdef123456` straight through — the single most likely thing a
+    // member would paste. A false refusal costs one retyped sentence; a false
+    // acceptance costs a rotation.
+    /\b(?:sk|pk|rk)[-_](?:live|test|proj)?[-_]?[A-Za-z0-9]{8,}/i.test(content) ||
+    // The other prefixes a member plausibly has in a clipboard.
+    /\b(?:AKIA|ASIA)[0-9A-Z]{12,}\b/.test(content) ||
+    /\bgh[pousr]_[A-Za-z0-9]{16,}\b/.test(content) ||
+    /\bgithub_pat_[A-Za-z0-9_]{20,}\b/.test(content) ||
+    /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/.test(content) ||
+    /\bAIza[0-9A-Za-z_-]{30,}\b/.test(content)
   ) {
     return { ok: false, error: "memory_looks_like_a_secret" };
   }
