@@ -47,6 +47,7 @@ let segmentsService: typeof import("../src/lib/crm-segments-service");
 let timelineService: typeof import("../src/lib/customer-timeline-service");
 let businessDay: typeof import("../src/lib/business-day-service");
 let views: typeof import("../src/lib/crm-saved-views-service");
+let audienceRequest: typeof import("../src/lib/crm-audience-request");
 
 const biz = { id: "", locationId: "" };
 const other = { id: "", locationId: "" };
@@ -83,6 +84,7 @@ beforeAll(async () => {
   overview = await import("../src/lib/crm-overview");
   segmentsService = await import("../src/lib/crm-segments-service");
   timelineService = await import("../src/lib/customer-timeline-service");
+  audienceRequest = await import("../src/lib/crm-audience-request");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -467,6 +469,46 @@ describe("segments", () => {
     );
     expect(matched.map((row) => row.id)).toContain(customer);
     expect(matched.find((row) => row.id === customer)!.orderCount).toBe(file!.stats.orderCount);
+  });
+
+  it("a spoken audience resolves the people the written document names", async () => {
+    // The spoken and the written document are asserted to be *the same
+    // document*, so the rows below come from the builder's own SQL path — there
+    // is no second query hiding behind the sentence box.
+    const lapsed = await makeCustomer(biz.id, "سمیرا", { smsConsent: true });
+    const recent = await makeCustomer(biz.id, "کیوان", { smsConsent: true });
+    await makeSale(biz.locationId, biz.id, lapsed, 500_000, 100);
+    await makeSale(biz.locationId, biz.id, recent, 500_000, 5);
+
+    const interpretation = audienceRequest.interpretAudienceRequest(
+      "۹۰ روز است خرید نکرده‌اند و رضایت پیامک دارند",
+    );
+    expect(interpretation.unread).toEqual([]);
+    expect(interpretation.ok).toBe(true);
+
+    const written = {
+      all: [
+        { field: "lastPurchaseAt" as const, op: "before" as const, days: 90 },
+        { field: "smsConsent" as const, op: "is" as const, value: true },
+      ],
+    };
+    expect(interpretation.definition).toEqual(written);
+
+    const audience = await segmentsService.resolveDefinition(
+      biz.id,
+      interpretation.definition,
+      { purpose: "view" },
+    );
+    const ids = audience.map((row) => row.id);
+    // Other fixtures in this file have older purchases, so containment is the
+    // claim: the lapsed buyer is in, the one who bought this week is not.
+    expect(ids).toContain(lapsed);
+    expect(ids).not.toContain(recent);
+    expect(ids).toEqual(
+      (
+        await segmentsService.resolveDefinition(biz.id, written, { purpose: "view" })
+      ).map((row) => row.id),
+    );
   });
 });
 

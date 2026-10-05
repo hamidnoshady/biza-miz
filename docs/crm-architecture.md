@@ -331,10 +331,26 @@ consequences are load-bearing:
   geometry without a DOM. A force-directed layout would be a second, animated
   source of truth about who is connected to whom.
 
+## A sentence becomes a document, not a query
+
+`crm-audience-request.ts` reads a Persian sentence into a `SegmentDefinition`.
+The module depends on `segments.ts` and on the phrase normaliser in
+`crm-commands.ts`, and on nothing else — no `db`, no query builder, no model — and the document it returns is re-validated with
+`validateSegmentDefinition` before the screen will offer it, so a phrase can only
+ever choose among fields the audience builder can already express. The refusal is
+as important as the reading: a word with no rule behind it comes back in `unread`
+and the interpretation is `ok: false`, which is what stops «مشتریان وفادار» from
+quietly becoming an invented `orderCount >= 5`.
+
+Values are matched folded (`normalizeCrmPhrase`) and *returned as written*, so a
+tag captured from «برچسب عمده‌فروشی» is the tag the shop stored. Money crosses
+from Toman to Rial exactly once, at the reading.
+
 ## Segment versions make a sent campaign explainable
 
 Editing a segment's rules mints an immutable row in
-`customer_segment_versions`. A rename does not — versions exist to answer «این
+`customer_segment_versions` — whether the rules were typed into the builder or
+poured in from a sentence. A rename does not — versions exist to answer «این
 کمپین به چه کسانی رفت؟», which is a function of the rules, not the label.
 
 ## Automations act only on records that already exist

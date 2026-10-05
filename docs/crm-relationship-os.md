@@ -73,6 +73,47 @@ link. Under the box the field prints what it understood («فهمیدم: …») 
 anything opens, because a search box that guesses silently is one people stop
 trusting.
 
+## یک جمله، یک سند بخش — نه یک کوئری
+
+بخش‌بندی مشتریان (RFM، چرخهٔ عمر، سلامت، گروه‌های پویا) یک واژگان بسته از
+فیلد و عملگر دارد؛ `src/lib/crm-audience-request.ts` نیمهٔ *گفتاری* همان واژگان
+است. جعبهٔ «درخواست بخش با یک جمله» در بخش‌بندی، جمله را می‌خواند و یک
+`SegmentDefinition` می‌سازد — همان سندی که `validateSegmentDefinition` تأیید
+می‌کند و `compileSegment` با پارامترهای bind‌شده اجرا می‌کند. نه مدلی در میان
+است و نه SQLی: بدترین کاری که یک جملهٔ بدفهم می‌تواند بکند این است که
+*شرط اشتباه* را در فرمی بگذارد که کاربر همین حالا جلوی چشمش است، در حالی که
+بندهای فهمیده‌شده زیر همان جعبه و واژه‌های نافهمیده کنارشان چاپ می‌شوند.
+
+سه قاعده این را صادق نگه می‌دارد:
+
+- **هیچ آستانه‌ای از خودش نمی‌سازد.** «مشتریان وفادار» عددی در خود ندارد، پس
+  قاعده‌ای هم ندارد: واژه به‌عنوان نافهمیده برمی‌گردد، نه به‌شکل
+  `orderCount >= 5` — تصمیمی که کاربر نگرفته و نمی‌بیند.
+- **میان دو خوانش، انتخاب نمی‌کند.** «بیش از ۵۰۰ هزار تومان خرید کرده» جمع
+  خرید است و «میانگین هر خرید بیش از …» میانگین؛ تنها واژه‌ها این را می‌گویند.
+  «بیش از ۵۰۰ خرید کرده» هیچ‌کدام نیست — ۵۰۰ چه؟ — و جمله‌ای که واحد پول یا
+  اسم تعداد را نگوید با یادداشت رد می‌شود.
+- **«یا» را رد می‌کند.** گروه «یا» در `SegmentDefinition` واقعاً وجود دارد، اما
+  «الف یا ب و پ» دو خوانش دارد و جمله یکی را انتخاب نکرده؛ فرم بخش جایی است که
+  «یا» را می‌نویسند. ماه تولد هم همین‌طور: `birthdayMonth` عدد میلادی است و
+  «فروردین» ماه شمسی، پس نگاشت خودکار کمپین تولد را به ماه اشتباه می‌فرستد.
+
+پول یک بار تبدیل می‌شود: قاعده‌ها ریال نگه می‌دارند و مردم تومان حرف می‌زنند،
+پس «تومان» یک بار در ده ضرب می‌شود، «ریال» همان‌طور که گفته شده خوانده می‌شود،
+و بندها با `describeRule` — همان واژه‌های کارت بخش — چاپ می‌شوند تا عدد نوشته‌شده
+و عدد ذخیره‌شده هر دو دیده شوند.
+
+ارزش واژه‌ها دست‌نخورده می‌ماند: `normalizeCrmPhrase` برای *تطبیق* است (حذف
+نیم‌فاصله، ی/ک عربی، ارقام فارسی) و برای *مقدار* دقیقاً اشتباه است، چون آن
+مقدار با داده‌های ذخیره‌شده مقایسه می‌شود. پس جمله یک بار توکن می‌شود، هر توکن
+هم شکل نوشته‌شده و هم شکل تاشده‌اش را نگه می‌دارد، و هر مقدار گرفته‌شده —
+برچسب، شهر، واژهٔ نافهمیده — با املای اصلی بازگردانده می‌شود.
+
+دکمهٔ «ریختن در فرم بخش» تنها وقتی دیده می‌شود که **همهٔ** جمله خوانده شده باشد؛
+جملهٔ نیمه‌فهم سندی می‌سازد که شمرده می‌شود و درست به نظر می‌رسد. آن جعبه هیچ
+چیزی ذخیره نمی‌کند: شرط‌ها را به فرم می‌ریزد و شمارش و ذخیره همان‌جا انجام
+می‌شود، پس بخش ساخته‌شده همانی است که کاربر پیش از ذخیره کامل دیده است.
+
 ## Today is a feed of work, not a dashboard
 
 `src/lib/crm-queues.ts` is the attention feed. Thirteen named rules run over the
@@ -449,13 +490,19 @@ These are named here so the seams are visible rather than implied:
   (`crm-commands.ts`, above) over the closed vocabularies — `CRM_QUEUE_KEYS`,
   the section keys, the saved-view filter documents per entity, the segment
   definition resolver. What is *not* built is the model that would let a
-  free-form sentence choose among those keys: the interpreter still matches
+  free-form sentence choose among those keys: the interpreters still match
   words. Whenever it arrives it may choose among the same keys and may not emit
   SQL, and `crm-app-boundaries.test.ts` keeps the assistant away from
-  irreversible acts.
-- **The saved-view filter vocabulary the command field will need** for «همهٔ
-  مشتریان تهران که پارسال خریدند»: the resolver exists, the phrase vocabulary
-  over its fields does not.
+  irreversible acts. The audience half of it is now a worked example of the
+  shape: `crm-audience-request.ts` reads «همهٔ مشتریان تهران که پارسال خریدند»
+  into the segment vocabulary, refuses what it did not understand, and a model
+  would only be choosing among those same fields.
+- **A spoken filter over the directory's own keys.** `customers` declares filter
+  keys (`tag`, `segment`, `lifecycle`, `owner`, `hasBalance`, `consent`,
+  `source`) that nothing reads yet, and the request box writes a *segment*, not a
+  directory view — the two are different documents and the box does not pretend
+  otherwise. A phrase vocabulary over the directory's keys waits for the screen
+  that owns them (see the next bullet).
 - **The same treatment for the directory.** `customers` still declares filter
   keys (`tag`, `segment`, `lifecycle`, `owner`, `hasBalance`, `consent`,
   `source`) that nothing reads: the screen behind it is the shared parties
