@@ -75,6 +75,19 @@ describe("validateSerialStatusTransition", () => {
     expect(validateSerialStatusTransition("reserved", "sold")).toBeNull();
     expect(validateSerialStatusTransition("in_stock", "in_repair")).toBeNull();
   });
+
+  it("treats supplier_returned as terminal (issue #795)", () => {
+    expect(validateSerialStatusTransition("supplier_returned", "in_stock")).not.toBeNull();
+    expect(validateSerialStatusTransition("supplier_returned", "sold")).not.toBeNull();
+    expect(validateSerialStatusTransition("supplier_returned", "supplier_returned")).toBeNull();
+  });
+
+  it("only an in-stock unit can go back to the supplier", () => {
+    expect(validateSerialStatusTransition("in_stock", "supplier_returned")).toBeNull();
+    expect(validateSerialStatusTransition("reserved", "supplier_returned")).not.toBeNull();
+    expect(validateSerialStatusTransition("in_repair", "supplier_returned")).not.toBeNull();
+    expect(validateSerialStatusTransition("sold", "supplier_returned")).not.toBeNull();
+  });
 });
 
 describe("validateWeightItemStatusTransition", () => {

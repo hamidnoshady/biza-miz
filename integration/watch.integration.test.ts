@@ -99,6 +99,8 @@ beforeEach(async () => {
   await db.query("DELETE FROM domain_events");
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
+  await db.query("DELETE FROM item_supplier_return_items");
+  await db.query("DELETE FROM item_supplier_returns");
   await db.query("DELETE FROM item_serials");
   await db.query("DELETE FROM item_purchase_items");
   await db.query("DELETE FROM item_purchases");
@@ -1079,5 +1081,177 @@ describe("Issue #795 Phase 2 — serialized purchase receipt", () => {
       [item.id],
     );
     expect(rows[0].n).toBe("1"); // only SN-EXISTS
+  });
+});
+
+/**
+ * Issue #795 Phase 2 (item 1, second half) — supplier returns of serialized
+ * units. A return names the exact physical serial; the unit moves to the
+ * terminal `supplier_returned` state (never deleted), the posting relieves
+ * watchInventory at that unit's own cost basis against the settlement
+ * account, and the unit can never be sold afterwards.
+ */
+describe("Issue #795 Phase 2 — serialized supplier return", () => {
+  async function receiveTwo() {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت مچی کرنوگراف",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [
+          {
+            itemId: item.id,
+            quantity: "2",
+            unitCost: 30_000_000,
+            serials: [{ serialNumber: "SN-RET-A" }, { serialNumber: "SN-RET-B" }],
+          },
+        ],
+      }),
+    );
+    return item;
+  }
+
+  it("returns the exact serial, posts Debit AP / Credit watchInventory at its cost basis, and the unit is terminally gone", async () => {
+    const item = await receiveTwo();
+
+    const result = await withTransaction((client) =>
+      retailStock.createItemSupplierReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        settlementMethod: "accounts_payable",
+        reason: "خرابی از کارخانه",
+        idempotencyKey: "ret-795-1",
+        lines: [{ itemId: item.id, quantity: "1", serialNumber: "SN-RET-A" }],
+      }),
+    );
+    expect(result.value).toBe("30000000");
+
+    // The return document line records WHICH physical unit went back.
+    const { rows: retLines } = await db.query<{ serial_id: string | null; value_rial: string }>(
+      "SELECT serial_id, value_rial::text FROM item_supplier_return_items WHERE return_id = $1",
+      [result.id],
+    );
+    expect(retLines).toHaveLength(1);
+    expect(retLines[0].serial_id).not.toBeNull();
+    expect(retLines[0].value_rial).toBe("30000000");
+
+    // Posting: Debit AP / Credit watchInventory for the unit's exact cost.
+    const { rows: events } = await db.query<{ entry_id: string | null }>(
+      "SELECT entry_id FROM domain_events WHERE event_type = 'retail.supplier_return' AND source_id = $1",
+      [result.id],
+    );
+    expect(events).toHaveLength(1);
+    expect(await linesOf(events[0].entry_id)).toEqual([
+      { account_id: acct.accountsPayable, debit: "30000000", credit: "0" },
+      { account_id: acct.watchInventory, debit: "0", credit: "30000000" },
+    ]);
+
+    // The unit is terminally `supplier_returned` — still visible (audit),
+    // never sellable again; its sibling is untouched.
+    const units = await watchSales.listSerialUnits(biz.locationId);
+    expect(units.map((u) => [u.serialNumber, u.status])).toEqual([
+      ["SN-RET-A", "supplier_returned"],
+      ["SN-RET-B", "in_stock"],
+    ]);
+    const returned = units[0];
+    await expect(
+      withTransaction((client) =>
+        watchSales.sellSerializedUnit(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          serialId: returned.id,
+          price: 45_000_000,
+          vatPercent: 0,
+          paymentMethod: "cash",
+        }),
+      ),
+    ).rejects.toThrow();
+
+    // Idempotency: replaying the same return changes nothing.
+    const replay = await withTransaction((client) =>
+      retailStock.createItemSupplierReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        settlementMethod: "accounts_payable",
+        reason: "خرابی از کارخانه",
+        idempotencyKey: "ret-795-1",
+        lines: [{ itemId: item.id, quantity: "1", serialNumber: "SN-RET-A" }],
+      }),
+    );
+    expect(replay.duplicate).toBe(true);
+    expect(replay.value).toBe("30000000");
+  });
+
+  it("refuses quantity ≠ 1, a missing/unknown serial, and a unit that is not on the shelf", async () => {
+    const item = await receiveTwo();
+    const base = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      settlementMethod: "accounts_payable" as const,
+      reason: "تست",
+    };
+
+    await expect(
+      withTransaction((client) =>
+        retailStock.createItemSupplierReturn(client, {
+          ...base,
+          idempotencyKey: "ret-795-q",
+          lines: [{ itemId: item.id, quantity: "2", serialNumber: "SN-RET-A" }],
+        }),
+      ),
+    ).rejects.toThrow(/دقیقاً یک دستگاه/);
+
+    await expect(
+      withTransaction((client) =>
+        retailStock.createItemSupplierReturn(client, {
+          ...base,
+          idempotencyKey: "ret-795-m",
+          lines: [{ itemId: item.id, quantity: "1" }],
+        }),
+      ),
+    ).rejects.toThrow(/سریال دقیق/);
+
+    await expect(
+      withTransaction((client) =>
+        retailStock.createItemSupplierReturn(client, {
+          ...base,
+          idempotencyKey: "ret-795-u",
+          lines: [{ itemId: item.id, quantity: "1", serialNumber: "SN-NOPE" }],
+        }),
+      ),
+    ).rejects.toThrow(/سریال یافت نشد/);
+
+    // Sell SN-RET-A, then try to return it — a sold unit never goes back.
+    const units = await watchSales.listSerialUnits(biz.locationId);
+    const unitA = units.find((u) => u.serialNumber === "SN-RET-A")!;
+    await withTransaction((client) =>
+      watchSales.sellSerializedUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: unitA.id,
+        price: 45_000_000,
+        vatPercent: 0,
+        paymentMethod: "cash",
+      }),
+    );
+    await expect(
+      withTransaction((client) =>
+        retailStock.createItemSupplierReturn(client, {
+          ...base,
+          idempotencyKey: "ret-795-s",
+          lines: [{ itemId: item.id, quantity: "1", serialNumber: "SN-RET-A" }],
+        }),
+      ),
+    ).rejects.toThrow(/فروخته‌شده را نمی‌توان/);
+
+    // Nothing partial leaked: no return documents survived the rollbacks.
+    const { rows } = await db.query<{ n: string }>("SELECT count(*)::text AS n FROM item_supplier_returns");
+    expect(rows[0].n).toBe("0");
   });
 });

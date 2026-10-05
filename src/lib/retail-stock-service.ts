@@ -42,6 +42,7 @@ import { roundRial, rialText, type RialText } from "./inventory-exact";
 import { emitDomainEvent } from "./posting-engine";
 import { classifyStockLevel, deadStockCutoff, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 import { validateWarrantyMonths } from "./watch";
+import { validateSerialStatusTransition, type SerialStatus } from "./items";
 // Side-effect import: registers the retail.* stock posting rules.
 import "./retail-stock-posting-rules";
 
@@ -122,6 +123,8 @@ export async function receiveItemPurchase(
     // never a replacement for a real number, which is what this used to be.
     const realLotNumber = line.batchNumber?.trim() || null;
     let batchNumberForReceipt: string | null = realLotNumber;
+    // Serial-tracked, single-unit lines: the exact physical unit received.
+    let receivedSerialId: string | null = null;
     if (item.tracking === "batch") {
       const generated = `P-${purchaseId.slice(0, 8)}-${i + 1}`;
       batchNumberForReceipt = realLotNumber ?? generated;
@@ -168,11 +171,15 @@ export async function receiveItemPurchase(
         const warrantyError = validateWarrantyMonths(warrantyMonths);
         if (warrantyError) throw new RetailStockError(warrantyError);
         try {
-          await client.query(
+          const { rows: created } = await client.query<{ id: string }>(
             `INSERT INTO item_serials (item_id, serial_number, unit_cost, warranty_months)
-             VALUES ($1, $2, $3, $4)`,
+             VALUES ($1, $2, $3, $4) RETURNING id`,
             [line.itemId, serialNumber, line.unitCost, warrantyMonths],
           );
+          // `item_purchase_items.serial_id` (migration 0084) is singular, so
+          // it can only point at THE unit of a one-unit line; multi-unit
+          // lines keep their provenance through the serial rows themselves.
+          if (serials.length === 1) receivedSerialId = created[0].id;
         } catch (err) {
           if ((err as { code?: string }).code === "23505") {
             throw new RetailStockError(`شماره سریال «${serialNumber}» قبلاً برای این کالا ثبت شده است.`);
@@ -189,8 +196,8 @@ export async function receiveItemPurchase(
     await client.query(
       `INSERT INTO item_purchase_items
          (purchase_id, item_id, quantity, unit_cost, batch_number, manufacture_date, expiry_date,
-          supplier_reference, internal_batch_number)
-       VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8, $9)`,
+          supplier_reference, internal_batch_number, serial_id)
+       VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8, $9, $10)`,
       [
         purchaseId,
         line.itemId,
@@ -201,6 +208,7 @@ export async function receiveItemPurchase(
         line.expiryDate ?? null,
         line.supplierReference?.trim() || null,
         item.tracking === "batch" && realLotNumber == null,
+        receivedSerialId,
       ],
     );
     total += BigInt(roundRial(new Decimal(line.quantity).times(line.unitCost)));
@@ -226,6 +234,13 @@ type ReturnLine = {
   quantity: string;
   /** Batch-tracked only — the specific batch being sent back. */
   batchId?: string | null;
+  /**
+   * Serial-tracked only (issue #795) — the exact physical unit being sent
+   * back, by row id or by its serial number (what the operator scans/types).
+   * One line returns exactly one unit.
+   */
+  serialId?: string | null;
+  serialNumber?: string | null;
 };
 
 export interface SupplierReturnResult {
@@ -281,12 +296,48 @@ export async function createItemSupplierReturn(
 
     const item = await getItem(line.itemId);
     if (!item || item.locationId !== input.locationId) throw new RetailStockError("کالا یافت نشد.");
-    if (item.tracking === "weight" || item.tracking === "serial") {
-      throw new RetailStockError("برگشت کالای وزنی/سریالی از مسیر همان کالا ثبت می‌شود.");
+    if (item.tracking === "weight") {
+      throw new RetailStockError("برگشت کالای وزنی از مسیر همان کالا ثبت می‌شود.");
     }
 
     let value: RialText;
-    if (item.tracking === "batch") {
+    let returnedSerialId: string | null = null;
+    if (item.tracking === "serial") {
+      // Issue #795 — a serialized supplier return names the exact physical
+      // unit. The unit must be on this shelf (`in_stock`), it moves to the
+      // terminal `supplier_returned` state (never deleted — provenance), and
+      // the posting relieves inventory at its own recorded cost basis.
+      if (new Decimal(line.quantity).toString() !== "1") {
+        throw new RetailStockError("برگشت کالای سریالی هر ردیف دقیقاً یک دستگاه است.");
+      }
+      const serialNumber = line.serialNumber?.trim();
+      if (!line.serialId && !serialNumber) {
+        throw new RetailStockError("برای برگشت کالای سریالی، سریال دقیق دستگاه را مشخص کنید.");
+      }
+      const { rows: serialRows } = await client.query<{
+        id: string;
+        status: string;
+        unit_cost: string | null;
+      }>(
+        line.serialId
+          ? `SELECT id, status, unit_cost::text FROM item_serials WHERE id = $2 AND item_id = $1 FOR UPDATE`
+          : `SELECT id, status, unit_cost::text FROM item_serials WHERE item_id = $1 AND serial_number = $2 FOR UPDATE`,
+        [line.itemId, line.serialId ?? serialNumber],
+      );
+      const serial = serialRows[0];
+      if (!serial) throw new RetailStockError("سریال یافت نشد.");
+      const transitionError = validateSerialStatusTransition(
+        serial.status as SerialStatus,
+        "supplier_returned",
+      );
+      if (transitionError) throw new RetailStockError(transitionError);
+      if (serial.unit_cost == null) {
+        throw new RetailStockError("بهای تمام‌شده این دستگاه ثبت نشده است؛ برگشت بدون مبنای بها ممکن نیست.");
+      }
+      value = rialText(serial.unit_cost);
+      returnedSerialId = serial.id;
+      await client.query(`UPDATE item_serials SET status = 'supplier_returned' WHERE id = $1`, [serial.id]);
+    } else if (item.tracking === "batch") {
       if (!line.batchId) throw new RetailStockError("برای برگشت کالای بچ‌محور، بچ را مشخص کنید.");
       const { rows: batchRows } = await client.query<{ id: string; quantity: string; unit_cost: string | null }>(
         `SELECT id, quantity::text, unit_cost::text FROM item_batches WHERE id = $1 AND item_id = $2 FOR UPDATE`,
@@ -319,9 +370,9 @@ export async function createItemSupplierReturn(
     }
 
     await client.query(
-      `INSERT INTO item_supplier_return_items (return_id, item_id, batch_id, quantity, value_rial)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [returnId, line.itemId, line.batchId ?? null, line.quantity, value],
+      `INSERT INTO item_supplier_return_items (return_id, item_id, batch_id, serial_id, quantity, value_rial)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [returnId, line.itemId, line.batchId ?? null, returnedSerialId, line.quantity, value],
     );
     total += BigInt(value);
   }

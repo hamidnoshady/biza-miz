@@ -27,6 +27,7 @@ const STATUS_BADGE_CLASS: Record<SerialUnit["status"], string> = {
   reserved: "bg-amber-100 dark:bg-amber-500/20 text-amber-900 dark:text-amber-200",
   in_repair: "bg-sky-100 dark:bg-sky-500/20 text-sky-900 dark:text-sky-100",
   sold: "bg-muted text-muted-foreground",
+  supplier_returned: "bg-rose-100 dark:bg-rose-500/20 text-rose-900 dark:text-rose-100",
 };
 
 export function UnitsSection({

@@ -54,13 +54,33 @@ export function validateSerialNumber(serialNumber: string): string | null {
   return null;
 }
 
-export type SerialStatus = "in_stock" | "reserved" | "sold" | "in_repair";
-export const SERIAL_STATUSES: SerialStatus[] = ["in_stock", "reserved", "sold", "in_repair"];
+export type SerialStatus = "in_stock" | "reserved" | "sold" | "in_repair" | "supplier_returned";
+export const SERIAL_STATUSES: SerialStatus[] = [
+  "in_stock",
+  "reserved",
+  "sold",
+  "in_repair",
+  "supplier_returned",
+];
 
-/** Every transition is allowed except out of a terminal-for-now `sold` unit, which no Wave-1 flow reverses. */
+/**
+ * Every transition is allowed except out of the two terminal states:
+ * `sold` (no flow un-sells a specific unit) and `supplier_returned`
+ * (issue #795 — the physical unit left for the supplier; its row stays
+ * for provenance but it can never silently reappear on the shelf).
+ * Entering `supplier_returned` is only valid from `in_stock` — the exact
+ * unit must be on the shelf to hand back.
+ */
 export function validateSerialStatusTransition(from: SerialStatus, to: SerialStatus): string | null {
-  if (from === "sold" && to !== "sold") {
+  if (from === to) return null;
+  if (from === "sold") {
     return "کالای فروخته‌شده را نمی‌توان به وضعیت دیگری بازگرداند.";
+  }
+  if (from === "supplier_returned") {
+    return "کالای برگشت‌خورده به تأمین‌کننده را نمی‌توان به وضعیت دیگری بازگرداند.";
+  }
+  if (to === "supplier_returned" && from !== "in_stock") {
+    return "فقط کالای موجود در انبار را می‌توان به تأمین‌کننده برگرداند.";
   }
   return null;
 }

@@ -9,7 +9,7 @@ import { RepairsSection } from "./repairs-section";
 import { ReportsSection } from "./reports-section";
 import { RemindersSection } from "./reminders-section";
 
-export type SerialStatus = "in_stock" | "reserved" | "sold" | "in_repair";
+export type SerialStatus = "in_stock" | "reserved" | "sold" | "in_repair" | "supplier_returned";
 export type RepairStatus = "received" | "in_progress" | "ready" | "closed" | "cancelled";
 
 export const SERIAL_STATUS_LABELS: Record<SerialStatus, string> = {
@@ -17,6 +17,7 @@ export const SERIAL_STATUS_LABELS: Record<SerialStatus, string> = {
   reserved: "رزرو شده",
   sold: "فروخته‌شده",
   in_repair: "در تعمیر",
+  supplier_returned: "برگشت به تأمین‌کننده",
 };
 
 export const REPAIR_STATUS_LABELS: Record<RepairStatus, string> = {
