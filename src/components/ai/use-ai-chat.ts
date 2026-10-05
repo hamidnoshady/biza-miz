@@ -529,9 +529,11 @@ export function useAiChat({
         // and must never be presented as one.
         setReply((current) => ({
           ...current,
-          content:
-            current.content || "⚠️ پاسخ دستیار کامل نشد. دوباره تلاش کنید.",
-          status: current.content ? "incomplete" : "incomplete",
+          // §19 — whatever arrived is kept. A reply with no text at all gets a
+          // line saying so, because an empty bubble reads as a rendering bug
+          // rather than as a turn that did not finish.
+          content: current.content || "⚠️ پاسخ دستیار کامل نشد. دوباره تلاش کنید.",
+          status: "incomplete",
         }));
       }
     } catch (error) {
