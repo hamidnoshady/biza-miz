@@ -6,7 +6,7 @@ import { resolveAiConfigFor } from "@/lib/ai-runtime";
 import { isPlatformAiConfigured } from "@/lib/ai-config";
 import { gateAiTurn, newAiRequestId, settleAiTurn, AiWalletInsufficientError } from "@/lib/ai-wallet-billing";
 import { buildSystemPrompt, type PromptContext } from "@/lib/ai";
-import { runAgentTurn } from "@/lib/ai-service";
+import { runAgentTurn, accruedUsageOf } from "@/lib/ai-service";
 import { retrievalReadyForMode } from "@/lib/ai-service";
 
 export const POST = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -72,6 +72,35 @@ export const POST = withTenantScope(async (_request: NextRequest, context: { par
     await markAiWidgetRun(guard.session.businessId, guard.session.sub, widget.id);
     return NextResponse.json({ content: reply.content, costRial: settlement.chargedRial, widgetId: widget.id });
   } catch (error) {
+    // Issue #812 §16 — a widget run that failed after the provider answered
+    // still cost money. Settle what it accrued, against the same request id,
+    // so the ledger is neither short nor double-charged.
+    const accrued = accruedUsageOf(error);
+    if (accrued) {
+      try {
+        await settleAiTurn({
+          businessId: guard.session.businessId,
+          requestId,
+          config,
+          usage: accrued.usage,
+          costUsd: accrued.costUsd,
+          attribution: {
+            requestType: "widget",
+            model: config.model,
+            conversationId: null,
+            locationId,
+            userId: guard.session.sub,
+            note: "failed_turn",
+            metadata: { mode: "widget", widgetId: widget.id, status: "failed" },
+          },
+        });
+      } catch (settleErr) {
+        console.error("ai widget failed-turn settlement failed", {
+          requestId,
+          error: settleErr instanceof Error ? settleErr.message : String(settleErr),
+        });
+      }
+    }
     console.error("ai widget run failed", { requestId, widgetId: widget.id, error: error instanceof Error ? error.message : String(error) });
     return NextResponse.json({ error: "ai_unknown", message: "اجرای ویجت ممکن نشد." }, { status: 502 });
   }

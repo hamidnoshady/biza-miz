@@ -29,6 +29,7 @@ import { agentTurnScope, type AgentTurnScope } from "@/lib/ai-custom-agents";
 import { getCustomAgent } from "@/lib/ai-custom-agents-service";
 import {
   AiError,
+  accruedUsageOf,
   retrievalReadyForMode,
   runAgentTurn,
   type InboundMessage,
@@ -48,6 +49,7 @@ import { requireManager, resolveActiveLocation } from "@/lib/setup-state";
 import { requireFloorAssistant, withTenantScope } from "@/lib/auth";
 import { providerErrorReason } from "@/lib/ai-provider-errors";
 import { PERMISSIONS } from "@/lib/permissions";
+import { resolveBusinessMoneyUnit } from "@/lib/ai-money-unit";
 import {
   AI_MODE_DIRECTIVES,
   isAiReasoningMode,
@@ -247,6 +249,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const promptContext: PromptContext = {
     mode,
     businessName: rows[0]?.name ?? null,
+    // Issue #812 §15 — the tenant's own display unit. Storage stays integer
+    // Rial; only the unit the business chose is spoken and written, so a
+    // «ریال» business is never told «تومان».
+    currencyDisplay: await resolveBusinessMoneyUnit(session.businessId),
     // Issue #808 §8 — wizard turns are scoped to the steps this industry walks,
     // in the prompt and in `propose_action`'s enum (see ai-service.ts).
     industry: mode === "wizard" ? await getBusinessIndustry(session.businessId) : null,
@@ -652,6 +658,37 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             costRial: settlement.chargedRial,
           });
         } catch (err) {
+          // Issue #812 §16 — a turn that failed *after* the provider was
+          // reached still cost money, and that cost is never lost: whatever the
+          // failed turn had already accrued is settled here, against the same
+          // request id the successful path would have used. Settlement is
+          // idempotent per request id, so this can never double-charge.
+          const accrued = accruedUsageOf(err);
+          if (accrued) {
+            try {
+              await settleAiTurn({
+                businessId: session.businessId,
+                requestId,
+                config,
+                usage: accrued.usage,
+                costUsd: accrued.costUsd,
+                attribution: {
+                  requestType: "chat",
+                  model: config.model,
+                  conversationId,
+                  locationId,
+                  userId: session.sub,
+                  note: "failed_turn",
+                  metadata: { mode, status: "failed" },
+                },
+              });
+            } catch (settleErr) {
+              console.error("ai chat failed-turn settlement failed", {
+                requestId,
+                error: settleErr instanceof Error ? settleErr.message : String(settleErr),
+              });
+            }
+          }
           // A turn that failed before the provider answered cost nothing, so
           // nothing is settled.
           if (err instanceof AiError) {

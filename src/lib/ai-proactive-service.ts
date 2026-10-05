@@ -31,7 +31,7 @@ import {
   newAiRequestId,
   settleAiTurn,
 } from "./ai-wallet-billing";
-import { runAgentTurn } from "./ai-service";
+import { runAgentTurn, accruedUsageOf } from "./ai-service";
 import { runSystemReadTool } from "./ai-system-read";
 import { listCustomerBalances, UNKNOWN_CUSTOMER_KEY } from "./ar-service";
 import { query, withTenant, withoutTenantScope } from "./db";
@@ -585,6 +585,33 @@ async function runDigest(input: {
     });
     return true;
   } catch (error) {
+    // Issue #812 §16 — a digest that failed after the provider answered still
+    // cost money. Settle exactly what it accrued against the same request id,
+    // so a partial failure is neither free to the platform nor charged twice.
+    const accrued = accruedUsageOf(error);
+    if (accrued) {
+      try {
+        await settleAiTurn({
+          businessId: input.businessId,
+          requestId,
+          config: input.config,
+          usage: accrued.usage,
+          costUsd: accrued.costUsd,
+          attribution: {
+            requestType: "proactive",
+            model: input.config.model,
+            userId: null,
+            note: "failed_turn",
+            metadata: { source: "proactive", kind: input.kind, periodKey: claim.periodKey, status: "failed" },
+          },
+        });
+      } catch (settleError) {
+        console.error("proactive failed-turn settlement failed", {
+          requestId,
+          error: settleError instanceof Error ? settleError.message : String(settleError),
+        });
+      }
+    }
     // Phase B — no reservation to cancel; a failed digest that never reached
     // the provider settled nothing.
     await finishRun({

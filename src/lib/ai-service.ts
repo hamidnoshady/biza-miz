@@ -504,6 +504,18 @@ function textOf(content: ProviderMessage["content"]): string {
 }
 
 export class AiError extends Error {
+  /**
+   * Phase 6 of issue #812 — provider usage/cost already incurred before this
+   * failure. A multi-round turn pays the provider on every round, so a
+   * timeout, network break or cancellation after round N has already spent
+   * real money. Losing that figure undercharges the business/platform ledger.
+   *
+   * The value is attached by `runAgentTurn` as the failure propagates out of
+   * the loop, so a caller can settle exactly what was incurred and no more.
+   * `settleAiTurn` is idempotent per request id, so settling here and then
+   * settling the same id again can never double-charge.
+   */
+  public accruedUsage?: AiTurnAccrual;
   constructor(
     public code: string,
     message: string,
@@ -514,6 +526,33 @@ export class AiError extends Error {
     super(message);
     this.name = "AiError";
   }
+}
+
+/** Usage/cost a failed turn had already incurred with the provider. */
+export interface AiTurnAccrual {
+  usage: AiTokenUsage;
+  costUsd: number | null;
+}
+
+/**
+ * Reads the accrual off any thrown value. Only `runAgentTurn` writes it, so a
+ * failure raised before the provider was ever reached (validation, an unknown
+ * tool) answers null and the caller settles nothing.
+ */
+export function accruedUsageOf(err: unknown): AiTurnAccrual | null {
+  if (!err || typeof err !== "object") return null;
+  const accrued = (err as { accruedUsage?: unknown }).accruedUsage;
+  if (!accrued || typeof accrued !== "object") return null;
+  const usage = (accrued as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== "object") return null;
+  const inputTokens = Number((usage as { inputTokens?: unknown }).inputTokens);
+  const outputTokens = Number((usage as { outputTokens?: unknown }).outputTokens);
+  if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) return null;
+  const costUsd = (accrued as { costUsd?: unknown }).costUsd;
+  return {
+    usage: { inputTokens, outputTokens },
+    costUsd: typeof costUsd === "number" && Number.isFinite(costUsd) ? costUsd : null,
+  };
 }
 
 function parseArgs(raw: string | undefined): Record<string, unknown> {
@@ -808,7 +847,32 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     ...messages.map((m) => ({ role: m.role, content: m.content })),
   ];
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+  // Issue #812 §16 — every round bills the provider before the next one
+  // starts, so the accruals must survive a failure in any later round. The
+  // loop is wrapped once, here, rather than at each call site: whatever throws
+  // leaves carrying what it cost, and `settleAiTurn`'s per-request-id
+  // idempotency keeps the eventual settlement single.
+  try {
+    return await runToolLoop();
+  } catch (err) {
+    if (usage.inputTokens > 0 || usage.outputTokens > 0 || costUsd !== null) {
+      const accrual: AiTurnAccrual = { usage: { ...usage }, costUsd };
+      if (err instanceof AiError) {
+        err.accruedUsage = accrual;
+      } else {
+        try {
+          (err as { accruedUsage?: AiTurnAccrual }).accruedUsage = accrual;
+        } catch {
+          // A frozen/sealed error object cannot carry the figure; the caller
+          // then settles nothing, exactly as before this change.
+        }
+      }
+    }
+    throw err;
+  }
+
+  async function runToolLoop(): Promise<AgentReply> {
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const result = await callProvider(config, convo, tools, opts.stream, opts.requestId, opts.signal);
     usage.inputTokens += result.usage.inputTokens;
     usage.outputTokens += result.usage.outputTokens;
@@ -944,14 +1008,15 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         content: JSON.stringify(result.data),
       });
     }
-  }
+    }
 
-  return {
-    content: "برای پاسخ به این درخواست به مراحل زیادی نیاز بود. لطفاً سؤال را ساده‌تر بپرسید.",
-    proposedAction: null,
-    inputRequest: null,
-    usage,
-    costUsd,
-    toolCalls: toolTrace,
-  };
+    return {
+      content: "برای پاسخ به این درخواست به مراحل زیادی نیاز بود. لطفاً سؤال را ساده‌تر بپرسید.",
+      proposedAction: null,
+      inputRequest: null,
+      usage,
+      costUsd,
+      toolCalls: toolTrace,
+    };
+  }
 }
