@@ -20,6 +20,7 @@
  * puts those same lots — number, expiry and cost — on the destination shelf.
  * Cosmetics uses this shared workflow; there is no separate transfer module.
  */
+import { queryReportPage } from "./report-page-query";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { getStock, receiveStock, type ItemStock } from "./accessories-service";
@@ -34,7 +35,7 @@ import { getItem } from "./items-service";
 import { query } from "./db";
 import { roundRial, rialText, type RialText } from "./inventory-exact";
 import { emitDomainEvent } from "./posting-engine";
-import { classifyStockLevel, isDeadStock, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
+import { classifyStockLevel, deadStockCutoff, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 // Side-effect import: registers the retail.* stock posting rules.
 import "./retail-stock-posting-rules";
 
@@ -561,24 +562,23 @@ export interface LowStockRow {
 }
 
 /** Variants at or under their reorder point — the «کمبود موجودی» list per branch. */
-export async function lowStockReport(locationId: string): Promise<LowStockRow[]> {
-  const { rows } = await query<{ item_id: string; name: string; sku: string | null; quantity: string; reorder_point: string }>(
+async function readLowStockReport(locationId: string, page?: number) {
+  const result = await queryReportPage<{ item_id: string; name: string; sku: string | null; quantity: string; reorder_point: string }>(
     `SELECT i.id AS item_id, i.name, i.sku, s.quantity::text, s.reorder_point::text
-       FROM item_stock s
-       JOIN items i ON i.id = s.item_id
+       FROM item_stock s JOIN items i ON i.id = s.item_id
       WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND s.reorder_point > 0
-      ORDER BY i.name`,
-    [locationId],
+        AND s.quantity <= s.reorder_point`,
+    [locationId], { page, orderBy: "name, item_id" },
   );
-  const result: LowStockRow[] = [];
-  for (const r of rows) {
-    const level = classifyStockLevel(r.quantity, r.reorder_point);
-    if (level === "out" || level === "low") {
-      result.push({ itemId: r.item_id, itemName: r.name, sku: r.sku, quantity: r.quantity, reorderPoint: r.reorder_point, level });
-    }
-  }
-  return result;
+  return { ...result, rows: result.rows.map((r): LowStockRow => ({
+    itemId: r.item_id, itemName: r.name, sku: r.sku, quantity: r.quantity, reorderPoint: r.reorder_point,
+    level: classifyStockLevel(r.quantity, r.reorder_point) as "low" | "out",
+  })) };
 }
+export async function lowStockReport(locationId: string): Promise<LowStockRow[]> {
+  return (await readLowStockReport(locationId)).rows;
+}
+export const lowStockReportPage = (locationId: string, page: number) => readLowStockReport(locationId, page);
 
 export interface DeadStockRow {
   itemId: string;
@@ -592,35 +592,30 @@ export interface DeadStockRow {
 }
 
 /** Variants that have not sold in `days` days (never sold included) — the dead-stock list per branch. */
-export async function deadStockReport(locationId: string, days: number, todayIso: string): Promise<DeadStockRow[]> {
-  const { rows } = await query<{
-    item_id: string;
-    name: string;
-    sku: string | null;
-    quantity: string;
-    last_sold_at: string | null;
-    unit_cost: string | null;
-  }>(
+async function readDeadStockReport(locationId: string, days: number, todayIso: string, page?: number) {
+  const result = await queryReportPage<{
+    item_id: string; name: string; sku: string | null; quantity: string;
+    last_sold_at: string | null; unit_cost: string | null; value_rial: string;
+  }, { totalValueRial: number }>(
     `SELECT i.id AS item_id, i.name, i.sku, s.quantity::text,
-            s.last_sold_at::text, s.unit_cost::text
-       FROM item_stock s
-       JOIN items i ON i.id = s.item_id
+            s.last_sold_at::text, s.unit_cost::text,
+            floor(s.quantity::double precision * coalesce(s.unit_cost,0)::double precision + 0.5)::text AS value_rial
+       FROM item_stock s JOIN items i ON i.id = s.item_id
       WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND s.quantity > 0
-      ORDER BY i.name`,
-    [locationId],
+        AND $2::timestamptz IS NOT NULL AND (s.last_sold_at IS NULL OR s.last_sold_at <= $2::timestamptz)`,
+    [locationId, deadStockCutoff(todayIso, days)],
+    { page, orderBy: "name, item_id", summary: `jsonb_build_object('totalValueRial', coalesce(sum(value_rial::numeric),0))` },
   );
-  return rows
-    .filter((r) => isDeadStock(r.last_sold_at, todayIso, days))
-    .map((r) => ({
-      itemId: r.item_id,
-      itemName: r.name,
-      sku: r.sku,
-      quantity: r.quantity,
-      lastSoldAt: r.last_sold_at,
-      unitCost: r.unit_cost == null ? null : Number(r.unit_cost),
-      valueRial: Math.round(Number(r.quantity) * Number(r.unit_cost ?? 0)),
-    }));
+  return { ...result, rows: result.rows.map((r): DeadStockRow => ({
+    itemId: r.item_id, itemName: r.name, sku: r.sku, quantity: r.quantity,
+    lastSoldAt: r.last_sold_at, unitCost: r.unit_cost == null ? null : Number(r.unit_cost), valueRial: Number(r.value_rial),
+  })) };
 }
+export async function deadStockReport(locationId: string, days: number, todayIso: string): Promise<DeadStockRow[]> {
+  return (await readDeadStockReport(locationId, days, todayIso)).rows;
+}
+export const deadStockReportPage = (locationId: string, days: number, todayIso: string, page: number) =>
+  readDeadStockReport(locationId, days, todayIso, page);
 
 /** Sets a variant's reorder point (0 = not tracked). */
 export async function setReorderPoint(itemId: string, reorderPoint: number): Promise<ItemStock> {

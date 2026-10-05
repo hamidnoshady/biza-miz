@@ -341,7 +341,7 @@ const SELF_GUARDING_ROUTES: Record<string, string> = {
 
 /** True for the super-admin console's own routes, which use the platform guards. */
 function isPlatformGuarded(src: string): boolean {
-  return /requirePlatformAdmin\(/.test(src) || /requirePlatformCapability\(/.test(src) || /withPlatformCompany\(/.test(src);
+  return /requirePlatformAdmin\(/.test(src) || /requirePlatformCapability\(/.test(src) || /withPlatformCompany\(/.test(src) || /platformReportRoute\(/.test(src);
 }
 
 /**
@@ -452,6 +452,14 @@ const files = collectRouteFiles(API_ROOT);
 const sources = new Map(files.map((f) => [routeKey(f), readFileSync(f, "utf8")]));
 
 describe("every API route is guarded", () => {
+  it("the reporting route factory verifies its own platform capability before tenant reads", () => {
+    const factory = readFileSync(join(process.cwd(), "src/lib/platform-report-route.ts"), "utf8");
+    expect(factory).toMatch(/withPlatformScope\(/);
+    expect(factory).toContain('requirePlatformCapability("business.reports.read")');
+    expect(factory.indexOf('requirePlatformCapability("business.reports.read")')).toBeLessThan(factory.indexOf("await withBusinessReporting"));
+    expect(factory).toMatch(/if \(guard\.error\)/);
+  });
+
   it("found a realistic number of routes", () => {
     expect(files.length).toBeGreaterThan(50);
   });

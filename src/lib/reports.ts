@@ -561,7 +561,7 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** Validates a report config against the view whitelist. Empty array = valid. Persian error strings. */
 export function validateReportConfig(config: ReportConfig): string[] {
   const errors: string[] = [];
-  const view = REPORT_VIEWS[config.view];
+  const view = Object.hasOwn(REPORT_VIEWS, config.view) ? REPORT_VIEWS[config.view] : undefined;
   if (!view) {
     errors.push("منبع داده نامعتبر است.");
     return errors;
@@ -1455,11 +1455,13 @@ export function buildFoodCostVariance(
   items: FoodCostVarianceItemInput[],
   actualCogs: number,
   wasteCost: number,
+  summary?: { theoreticalCost: number },
 ): FoodCostVariance {
   const lines: FoodCostVarianceItemLine[] = items
     .map((item) => ({ ...item, foodCostPct: item.revenue > 0 ? item.theoreticalCost / item.revenue : null }))
     .sort((a, b) => (b.foodCostPct ?? -1) - (a.foodCostPct ?? -1));
-  const theoreticalCost = items.reduce((sum, item) => sum + item.theoreticalCost, 0);
+  // SQL-paged readers supply the full-source total; detail lines still use the same builder.
+  const theoreticalCost = summary?.theoreticalCost ?? items.reduce((sum, item) => sum + item.theoreticalCost, 0);
   const actualTotalCost = actualCogs + wasteCost;
   const variance = actualTotalCost - theoreticalCost;
   return {

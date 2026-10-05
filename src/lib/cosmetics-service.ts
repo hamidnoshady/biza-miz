@@ -15,6 +15,7 @@
  * pure rules this leans on) it has no direct unit test; covered instead by
  * the integration suite.
  */
+import { queryReportPage } from "./report-page-query";
 import { randomUUID } from "node:crypto";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
@@ -594,8 +595,9 @@ export interface NearExpiryBatchRow {
 }
 
 /** The near-expiry report: every batch within 90 days (or already expired), oldest first — the list the trade's home page surfaces. */
-export async function nearExpiryBatches(locationId: string): Promise<NearExpiryBatchRow[]> {
-  const { rows } = await query<{
+async function readNearExpiryBatches(locationId: string, page?: number) {
+  const result = await queryReportPage<{
+    batch_id: string;
     item_id: string;
     item_name: string;
     parent_name: string | null;
@@ -603,7 +605,7 @@ export async function nearExpiryBatches(locationId: string): Promise<NearExpiryB
     expiry_date: string | null;
     quantity: string;
   }>(
-    `SELECT i.id AS item_id, i.name AS item_name, p.name AS parent_name,
+    `SELECT b.id AS batch_id, i.id AS item_id, i.name AS item_name, p.name AS parent_name,
             b.batch_number, b.expiry_date::text AS expiry_date, b.quantity
        FROM item_batches b
        JOIN items i ON i.id = b.item_id
@@ -612,11 +614,13 @@ export async function nearExpiryBatches(locationId: string): Promise<NearExpiryB
         AND b.quantity > 0
         AND b.expiry_date IS NOT NULL
         AND b.expiry_date < CURRENT_DATE + 90
-      ORDER BY b.expiry_date NULLS LAST, b.batch_number`,
+      `,
     [locationId],
+    { page, orderBy: "expiry_date NULLS LAST, batch_number, batch_id" },
   );
+  const { rows } = result;
   const today = todayIso();
-  return rows
+  return { ...result, rows: rows
     .map((r) => {
       const daysLeft = r.expiry_date
         ? Math.floor((Date.parse(`${r.expiry_date}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000)
@@ -636,8 +640,13 @@ export async function nearExpiryBatches(locationId: string): Promise<NearExpiryB
     .sort((a, b) => {
       const order = { expired: 0, under30: 1, under90: 2 } as const;
       return order[a.bucket] - order[b.bucket];
-    });
+    }) };
 }
+
+export async function nearExpiryBatches(locationId: string): Promise<NearExpiryBatchRow[]> {
+  return (await readNearExpiryBatches(locationId)).rows;
+}
+export const nearExpiryBatchesPage = (locationId: string, page: number) => readNearExpiryBatches(locationId, page);
 
 /**
  * Opens a sellable unit as a تستر (tester/sample). The unit leaves stock and
