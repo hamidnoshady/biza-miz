@@ -119,6 +119,10 @@ describe("issue #812 §11 — App Focus narrows the live catalogue", () => {
     "get_ar_aging",
     "get_repurchase_candidates",
     "get_customer_profile",
+    // The website reads — the app whose tools were once absent from the map.
+    "list_website_posts",
+    "list_website_products",
+    "get_website_status",
   ];
 
   it("drops other apps' tools while keeping the always-on set", () => {
@@ -140,21 +144,24 @@ describe("issue #812 §11 — App Focus narrows the live catalogue", () => {
     }
   });
 
-  it("leaves the website app unmapped rather than guessing", () => {
-    // An honest limitation of the map, recorded so nobody mistakes it for the
-    // mechanism working: no tool in the catalogue is mapped to `website`, so
-    // focusing a turn on Website narrows to the always-on set plus every
-    // unmapped tool. The narrowing is therefore weaker for that app than for
-    // the other three. Adding the website tools to `TOOL_APP_MAP` is the fix,
-    // and it is a data fix, not a code one — the mechanism works.
+  it("narrows Website to the manager's own reads, like every other app", () => {
+    // `website` used to be the one app with no mapped tool, so focusing on it
+    // fell back to the whole catalogue — a data gap that read like a mechanism
+    // failure. The three WebsiteAdapter reads are mapped now, so the app narrows
+    // the same way Accounting does.
     const routed = routeTools(ALL, ["website"]);
     expect(routed).not.toBeNull();
+    expect(routed).toContain("list_website_posts");
+    expect(routed).toContain("list_website_products");
+    expect(routed).toContain("get_website_status");
     for (const name of ALL) {
       const owning = appForTool(name);
       if (owning && owning !== "website") {
         expect(routed!, name).not.toContain(name);
       }
     }
+    // And it is genuinely narrower, not just differently shaped.
+    expect(routed!.length).toBeLessThan(ALL.length);
   });
 
   it("returns null for no focus, so an unfocused turn is unchanged", () => {

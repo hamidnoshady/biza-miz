@@ -172,11 +172,19 @@ transaction. Only a test that publishes twice finds it.
 
 ## Known limitations, recorded rather than hidden
 
-1. **`website` has no mapped tools in `TOOL_APP_MAP`.** Focusing on Website
-   narrows to the always-on set plus every unmapped tool — weaker than the other
-   three apps. A data gap, not a mechanism gap.
+1. ~~**`website` has no mapped tools in `TOOL_APP_MAP`.**~~ **Closed.** The
+   Website app did have three read tools (`list_website_posts`,
+   `list_website_products`, `get_website_status`, all Phase 38's
+   WebsiteAdapter reads) — they were simply absent from the map, so focusing a
+   turn on Website fell back to the whole catalogue. The mechanism was fine; the
+   data was missing. All three are now mapped, and the test that had recorded
+   the gap ("leaves the website app unmapped rather than guessing") was
+   rewritten to assert the narrowing instead. `website` now narrows the same way
+   the other three apps do.
 2. **A tool absent from `TOOL_APP_MAP` is general-purpose** and starts life
-   unfiltered, as before.
+   unfiltered, as before. The AEC/project tools sit here by design: a project is
+   a scope, not one of the four standalone apps, so there is no app to narrow
+   them against.
 3. **`npm run build` cannot complete in this 3 GB sandbox.** Pre-existing on
    `main`; reported rather than worked around.
 4. **Two `test:db` files fail without an explicit `DATABASE_URL`** — an
