@@ -39,7 +39,11 @@ import {
   type AiPanelSectionKey,
 } from "@/lib/ai-panel";
 import { useAiChat, type AiAppFocus } from "@/components/ai/use-ai-chat";
-import { AI_REASONING_MODES, AI_MODE_LABELS, isAiReasoningMode, type AiReasoningMode } from "@/lib/ai-reasoning";
+import {
+  isAiRuntimeMode,
+  normalizeAiRuntimeMode,
+  type AiRuntimeMode,
+} from "@/lib/ai-runtime-modes-shared";
 import { AiManagementSheet } from "./ai-management-sheet";
 import { AiConversationsSidebar } from "./ai-conversations-sidebar";
 import { AiWorkspaceWidgets } from "./ai-workspace-widgets";
@@ -59,7 +63,13 @@ export function AiChatHub({
   const router = useRouter();
   const searchParams = useSearchParams();
   const focusFromUrl = searchParams.get("focus");
-  const reasoningFromUrl = searchParams.get("reasoning");
+  // Issue #812 §7 — the runtime mode lives at `?mode=`. The old `?reasoning=`
+  // value named a four-mode picker that no longer exists; a bookmark carrying it
+  // still opens the chat, on the default mode.
+  const modeFromUrl = searchParams.get("mode") ?? searchParams.get("reasoning");
+  // Issue #812 §6 — whether Superadmin has Deep Research switched on for this
+  // platform. It decides whether the mode picker offers it at all.
+  const [deepResearchEnabled, setDeepResearchEnabled] = useState(false);
   const [appFocus, setAppFocus] = useState<AiAppFocus>(() =>
     ["all", "accounting", "growth", "crm", "website", "workspace"].includes(focusFromUrl ?? "")
       ? (focusFromUrl as AiAppFocus)
@@ -72,7 +82,7 @@ export function AiChatHub({
     mode: "dashboard",
     projectId: searchParams.get("project"),
     appFocus,
-    reasoningMode: isAiReasoningMode(reasoningFromUrl) && reasoningFromUrl !== "deep_research" ? reasoningFromUrl : "auto",
+    runtimeMode: normalizeAiRuntimeMode(modeFromUrl),
     onConversationIdChange: (id) => {
       const params = new URLSearchParams(searchParams.toString());
       if (id) params.set("conversation", id);
@@ -152,38 +162,35 @@ export function AiChatHub({
     setTask,
     customTask,
     setCustomTask,
-    reasoningMode,
-    setReasoningMode,
-    agentId,
-    setAgentId,
+    runtimeMode,
+    setRuntimeMode,
     ensureGreeting,
     startNewConversation,
     loadConversation,
     sendMessage,
     cancelGeneration,
-    askAgain,
     applyProposal,
     dismissProposal,
     submitInputRequest,
     dismissInputRequest,
   } = chat;
 
-  const updateReasoningMode = useCallback((value: AiReasoningMode) => {
-    setReasoningMode(value);
+  const updateRuntimeMode = useCallback((value: AiRuntimeMode) => {
+    setRuntimeMode(value);
     replaceParams((params) => {
-      if (value === "auto") params.delete("reasoning");
-      else params.set("reasoning", value);
+      if (value === "auto") params.delete("mode");
+      else params.set("mode", value);
     });
-  }, [replaceParams, setReasoningMode]);
+  }, [replaceParams, setRuntimeMode]);
 
   useEffect(() => {
     if (["all", "accounting", "growth", "crm", "website", "workspace"].includes(focusFromUrl ?? "")) {
       setAppFocus(focusFromUrl as AiAppFocus);
     }
-    if (isAiReasoningMode(reasoningFromUrl) && reasoningFromUrl !== "deep_research") {
-      setReasoningMode(reasoningFromUrl);
+    if (isAiRuntimeMode(modeFromUrl)) {
+      setRuntimeMode(modeFromUrl);
     }
-  }, [focusFromUrl, reasoningFromUrl, setReasoningMode]);
+  }, [focusFromUrl, modeFromUrl, setRuntimeMode]);
 
   const changeProject = useCallback((nextProjectId: string | null) => {
     if (nextProjectId === searchParams.get("project")) return;
@@ -316,10 +323,10 @@ export function AiChatHub({
           <Button
             variant={panelSection ? "secondary" : "outline"}
             size="sm"
-            onClick={() => openPanel(panelSection ?? "agents")}
+            onClick={() => openPanel(panelSection ?? "memory")}
             aria-expanded={panelSection !== null}
             aria-label="مدیریت دستیار"
-            title="مدیریت دستیار: ایجنت‌ها، همکاران، اتوماسیون‌ها، دانش و مصرف"
+            title="مدیریت دستیار: حافظه، همکاران، اتوماسیون‌ها، پژوهش و مصرف"
             className="gap-1.5 px-2.5 sm:px-3"
           >
             <Settings2Icon className="size-4 shrink-0" aria-hidden="true" />
@@ -339,8 +346,9 @@ export function AiChatHub({
       <AiWorkspaceContext
         appFocus={appFocus}
         onAppFocusChange={updateAppFocus}
-        reasoningMode={reasoningMode}
-        onReasoningModeChange={updateReasoningMode}
+        runtimeMode={runtimeMode}
+        onRuntimeModeChange={updateRuntimeMode}
+        deepResearchEnabled={deepResearchEnabled}
         projectId={searchParams.get("project")}
         onProjectChange={changeProject}
       />
@@ -428,17 +436,6 @@ export function AiChatHub({
                   dismissProposal={dismissProposal}
                   submitInputRequest={submitInputRequest}
                   dismissInputRequest={dismissInputRequest}
-                  onAskAgain={
-                    message.cacheNotice
-                      ? () => {
-                          const question = messages
-                            .slice(0, Math.max(0, index))
-                            .reverse()
-                            .find((item) => item.role === "user")?.content;
-                          if (question) void askAgain(question);
-                        }
-                      : undefined
-                  }
                 />
               );
             })}
@@ -479,8 +476,6 @@ export function AiChatHub({
             onTaskChange={setTask}
             customTask={customTask}
             onCustomTaskChange={setCustomTask}
-            agentId={agentId}
-            onAgentChange={setAgentId}
             actionsAllowed={actionsAllowed}
             setActionsAllowed={setActionsAllowed}
             loadConversation={loadConversation}

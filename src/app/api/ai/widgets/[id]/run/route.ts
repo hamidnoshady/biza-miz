@@ -7,7 +7,8 @@ import { isPlatformAiConfigured } from "@/lib/ai-config";
 import { gateAiTurn, newAiRequestId, settleAiTurn, AiWalletInsufficientError } from "@/lib/ai-wallet-billing";
 import { buildSystemPrompt, type PromptContext } from "@/lib/ai";
 import { runAgentTurn, accruedUsageOf } from "@/lib/ai-service";
-import { retrievalReadyForMode } from "@/lib/ai-service";
+import { knowledgeReadyFor, knowledgeSettingsFromConfig } from "@/lib/ai-knowledge-gateway";
+import { resolveBusinessMoneyUnit } from "@/lib/ai-money-unit";
 
 export const POST = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
   const guard = await requirePermission(PERMISSIONS.aiUse);
@@ -31,15 +32,19 @@ export const POST = withTenantScope(async (_request: NextRequest, context: { par
   const permissions = widget.requiredPermissions.length === 0
     ? guard.membership.permissions
     : new Set([...guard.membership.permissions].filter((permission) => widget.requiredPermissions.includes(permission)));
+  // Issue #812 §2/§15 — the widget turn is a tenant dashboard turn like any
+  // other: it gets the business's own money unit and, when the platform has the
+  // managed knowledge integration switched on, the knowledge tool.
+  const knowledgeSettings = knowledgeSettingsFromConfig(config);
   const promptContext: PromptContext = {
     mode: "dashboard",
+    businessName: widget.name,
     userName: guard.session.fullName,
     role: guard.session.role,
+    currencyDisplay: await resolveBusinessMoneyUnit(guard.session.businessId),
+    retrieval: knowledgeReadyFor(knowledgeSettings, guard.session.businessId),
   };
-  const systemPrompt = `${buildSystemPrompt({
-    ...promptContext,
-    retrieval: await retrievalReadyForMode(config, "dashboard", guard.session.businessId),
-  })}\n\nاین نوبت از ویجت «${widget.name}» اجرا می‌شود. فقط دادهٔ مجاز را بخوان و پاسخ را در قالب ${widget.outputFormat} بده.`;
+  const systemPrompt = `${buildSystemPrompt(promptContext)}\n\nاین نوبت از ویجت «${widget.name}» اجرا می‌شود. فقط دادهٔ مجاز را بخوان و پاسخ را در قالب ${widget.outputFormat} بده.`;
   const requestId = newAiRequestId();
   try {
     const reply = await runAgentTurn({

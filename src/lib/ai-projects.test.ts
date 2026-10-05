@@ -130,7 +130,7 @@ describe("buildProjectPromptContext", () => {
 });
 
 describe("buildProjectPromptContext (Phase F — ProjectContext form)", () => {
-  const base: ProjectContext = { name: "کمپین بهار", instructions: "", notes: [], memory: [], openTasks: [], defaultAgentId: null };
+  const base: ProjectContext = { name: "کمپین بهار", instructions: "", notes: [], memory: [], openTasks: [] };
 
   it("names the project when a ProjectContext is passed", () => {
     const result = buildProjectPromptContext({ ...base, instructions: "روی فروش تمرکز کن" });
@@ -158,7 +158,6 @@ describe("buildProjectPromptContext (Phase F — ProjectContext form)", () => {
       notes,
       memory: [memory("هفتهٔ اول تخفیف ندارد")],
       openTasks: [task("تماس با تأمین‌کننده")],
-      defaultAgentId: null,
     });
     expect(result).toContain("پروژهٔ رشد");
     expect(result).toContain("لحن دوستانه");
@@ -181,7 +180,7 @@ describe("buildProjectPromptContext (Phase F — ProjectContext form)", () => {
     // A bare name is still context worth stating, so it is never empty when a
     // project is named. An unnamed, empty context is empty.
     expect(
-      buildProjectPromptContext({ name: "", instructions: "  ", notes: [], memory: [], openTasks: [], defaultAgentId: null }),
+      buildProjectPromptContext({ name: "", instructions: "  ", notes: [], memory: [], openTasks: [] }),
     ).toBe("");
   });
 

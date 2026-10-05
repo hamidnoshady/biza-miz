@@ -1,7 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
-import { ACTION_CATALOG, buildSystemPrompt, type AgentMode, type PromptContext } from "@/lib/ai";
+import {
+  ACTION_CATALOG,
+  buildSystemPrompt,
+  type ActionType,
+  type AgentMode,
+  type PromptContext,
+} from "@/lib/ai";
 import { getBusinessIndustry } from "@/lib/industry-guard";
+import type { AppKey } from "@/lib/apps";
+import { eligibleAgentCards, type EligibleAgentCard } from "@/lib/ai-system-agents";
+import { resolveSystemPrompt, type ResolvedPromptLayers } from "@/lib/ai-prompt-resolver";
+import {
+  getPlatformAiMode,
+  isAiRuntimeModeAvailable,
+  normalizeAiRuntimeMode,
+  type AiRuntimeMode,
+} from "@/lib/ai-runtime-modes";
 import { isPlatformAiConfigured, logAiRuntimeUnavailable } from "@/lib/ai-config";
 import { resolveAiConfigFor } from "@/lib/ai-runtime";
 import {
@@ -25,37 +40,21 @@ import {
   withAttachmentContext,
 } from "@/lib/ai-attachment";
 import { taskDirectiveFor } from "@/lib/ai-tasks";
-import { agentTurnScope, type AgentTurnScope } from "@/lib/ai-custom-agents";
-import { getCustomAgent } from "@/lib/ai-custom-agents-service";
 import {
   AiError,
   accruedUsageOf,
-  retrievalReadyForMode,
   runAgentTurn,
   type InboundMessage,
 } from "@/lib/ai-service";
-import {
-  buildToolSignature,
-  isCacheableTurn,
-  lookupCachedAnswer,
-  normalizeRangeDate,
-  storeCachedAnswer,
-  type CacheHit,
-} from "@/lib/ai-answer-cache";
-import { embedOne, isEmbeddingAvailable } from "@/lib/ai-embeddings";
-import { toolDefinitions } from "@/lib/ai";
-import { businessToday } from "@/lib/business-day-service";
 import { requireManager, resolveActiveLocation } from "@/lib/setup-state";
 import { requireFloorAssistant, withTenantScope } from "@/lib/auth";
 import { providerErrorReason } from "@/lib/ai-provider-errors";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveBusinessMoneyUnit } from "@/lib/ai-money-unit";
 import {
-  AI_MODE_DIRECTIVES,
-  isAiReasoningMode,
-  isAiReasoningModeAvailable,
-  type AiReasoningMode,
-} from "@/lib/ai-reasoning";
+  knowledgeReadyFor,
+  knowledgeSettingsFromConfig,
+} from "@/lib/ai-knowledge-gateway";
 
 const MAX_MESSAGES = 24;
 const MAX_CONTENT = 8_000;
@@ -95,16 +94,19 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     /** Wave 5 extension — one or more attachments (image and/or PDF). */
     attachments?: unknown;
     allowActions?: unknown;
-    /** Phase D — run this dashboard turn as a business-defined custom agent. */
-    agentId?: unknown;
+    /**
+     * Issue #812 §9 — the assignment id of a Superadmin-assigned suggestion
+     * card. A tenant never names an agent directly: the card carries the agent,
+     * its prompt and its requirements, and eligibility is re-checked here.
+     */
+    suggestionId?: unknown;
     /** Phase 36c — the selected task lens (see ai-tasks.ts). */
     task?: unknown;
     /** Phase 36c — a free-form custom task description, wins over `task`. */
     customTask?: unknown;
-    /** Phase 36 Wave 7 — «دوباره بپرس»: build a fresh turn, skip the cache. */
-    bypassCache?: unknown;
     /** Product-facing routing mode; provider aliases never reach the tenant. */
-    reasoningMode?: unknown;
+    /** Issue #812 §7 — one of auto | instant | deep_research. */
+    runtimeMode?: unknown;
     /** Optional app focus, which only narrows prompt/tool context. */
     appFocus?: unknown;
   };
@@ -128,12 +130,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (guard.error) return guard.error;
   const session = guard.session;
   const effectivePermissions = guard.membership?.permissions ?? new Set();
-  const reasoningMode: AiReasoningMode = isAiReasoningMode(body.reasoningMode)
-    ? body.reasoningMode
-    : "auto";
-  if (!isAiReasoningModeAvailable(reasoningMode)) {
+  // Issue #812 §5/§6 — whether Superadmin has switched Deep Research on for this
+  // platform. Read once per request, before the mode gate below.
+  const deepResearchEnabled = (await getPlatformAiMode("deep_research")).is_active;
+  // Issue #812 §7 — the three user-facing runtime modes. A stored `thinking`
+  // value normalizes to `auto` rather than silently doing nothing.
+  const runtimeMode: AiRuntimeMode = normalizeAiRuntimeMode(body.runtimeMode);
+  if (!isAiRuntimeModeAvailable(runtimeMode, deepResearchEnabled)) {
     return NextResponse.json(
-      { error: "mode_unavailable", mode: reasoningMode, message: "حالت پژوهش عمیق هنوز برای دستیار کسب‌وکار فعال نشده است." },
+      { error: "mode_unavailable", mode: runtimeMode, message: "پژوهش عمیق روی این سکو فعال نیست." },
       { status: 409 },
     );
   }
@@ -160,13 +165,20 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // disabled or unknown agent id is refused rather than silently falling back
   // to the full assistant, so the caller can never think it is scoped when it
   // is not.
-  let agentScope: AgentTurnScope | null = null;
-  if (mode === "dashboard" && typeof body.agentId === "string" && body.agentId.trim()) {
-    const agent = await getCustomAgent(session.businessId, body.agentId.trim());
-    if (!agent || !agent.enabled) {
-      return NextResponse.json({ error: "agent_unavailable" }, { status: 404 });
+  let agentCard: EligibleAgentCard | null = null;
+  const suggestionId = typeof body.suggestionId === "string" ? body.suggestionId.trim() : "";
+  if (mode === "dashboard" && suggestionId) {
+    const cards = await eligibleAgentCards({
+      businessId: session.businessId,
+      businessType: await getBusinessIndustry(session.businessId),
+      permissions: [...effectivePermissions],
+      enabledApps: [],
+      enabledFeatures: [],
+    });
+    agentCard = cards.find((card) => card.assignmentId === suggestionId) ?? null;
+    if (!agentCard) {
+      return NextResponse.json({ error: "suggestion_unavailable" }, { status: 404 });
     }
-    agentScope = agentTurnScope(agent);
   }
 
   // Wave 5 (issue #145, extended) — only dashboard mode (owner/manager) may
@@ -206,8 +218,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     appFocus === "all"
       ? ""
       : `تمرکز این نوبت روی بخش «${appFocus}» است؛ فقط ابزارهای مجاز همین عضو را استفاده کن و این انتخاب هرگز مجوز تازه‌ای ایجاد نمی‌کند.`;
+  // Issue #812 §7/§8 — the runtime mode's own directive is layer 2 of the
+  // resolver, not part of the task directive. What is left here is the task
+  // lens and the app focus, both of which narrow rather than widen.
   const taskDirective = [
-    AI_MODE_DIRECTIVES[reasoningMode],
     taskDirectiveFor({ task: body.task, customTask: body.customTask, mode }),
     appFocusDirective,
   ]
@@ -227,10 +241,24 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     );
   }
 
+  // Issue #812 §2 — the managed knowledge integration for this tenant, read
+  // from the platform gateway settings. Resolved once per request, before the
+  // stream starts, so a settings failure degrades to "no knowledge" rather
+  // than a failed turn.
+  const knowledgeSettings = knowledgeSettingsFromConfig(config);
+  // The tool is offered only in dashboard mode and only for a tenant: the floor
+  // and wizard surfaces are their own realms, and a platform support turn has
+  // no tenant namespace to search.
+  const knowledgeReady =
+    mode === "dashboard" && knowledgeReadyFor(knowledgeSettings, session.businessId);
+
   // Phase B — the pre-request affordability gate replaces the credit
   // reservation. It refuses when the business is in AI debt or its wallet is
   // below the per-turn ceiling; it never holds money up front.
   const requestId = newAiRequestId();
+  // Issue #812 §21 — which prompt layer versions shaped this turn, recorded on
+  // the settlement so a change in behaviour is attributable to a publish.
+  let promptLayers: ResolvedPromptLayers | null = null;
   try {
     await gateAiTurn(session.businessId, config);
   } catch (err) {
@@ -259,12 +287,19 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     currentStep: typeof body.currentStep === "string" ? body.currentStep : null,
     userName: session.fullName,
     role: session.role,
-    agent: agentScope
+    // Issue #812 §9 — the system agent's own narrowing allowlists. The tool
+    // intersection in `runAgentTurn` still applies the member's permissions and
+    // the app/location scope on top of these, so this can only narrow.
+    agent: agentCard
       ? {
-          name: agentScope.name,
-          instructions: agentScope.instructions,
-          actionTypes: agentScope.actionTypes,
+          id: agentCard.agentId,
+          name: agentCard.agentName,
+          instructions: agentCard.prompt,
+          actionTypes: [],
         }
+      : undefined,
+    agentAllowlist: agentCard
+      ? { tools: agentCard.allowedTools, actions: agentCard.allowedActions }
       : undefined,
   };
   const latestPrompt = [...messages].reverse().find((message) => message.role === "user")?.content ?? "";
@@ -338,20 +373,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
           // request-level agentId always wins (it is already resolved above);
           // a disabled/deleted pin resolves to null and the turn stays the full
           // assistant. This can only NARROW the turn, never widen it.
-          if (!agentScope && ctx.defaultAgentId) {
-            const pinned = await getCustomAgent(session.businessId, ctx.defaultAgentId);
-            if (pinned && pinned.enabled) {
-              agentScope = agentTurnScope(pinned);
-              promptContext.agent = {
-                name: agentScope.name,
-                instructions: agentScope.instructions,
-                actionTypes: agentScope.actionTypes,
-              };
-            }
-          }
+          // Issue #812 §4 — a project no longer pins an agent. There is no
+          // tenant agent to pin, and a system agent reaches a project through a
+          // Superadmin assignment, never through a project setting.
           // Only when there is no scoped agent — an agent's action list is its
           // own, and a project does not widen it.
-          if (!agentScope) promptContext.projectScoped = true;
+          if (!agentCard) promptContext.projectScoped = true;
         }
       }
     } catch (err) {
@@ -375,38 +402,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     }).catch((err) => console.error("ai chat attachment persistence failed", err));
   }
 
-  // Phase 36 Wave 7 — the question's embedding, over the shared platform
-  // connection, computed once whether this turn is a lookup or a store (a
-  // «دوباره بپرس» turn skips the lookup, but its fresh answer is still worth
-  // caching). Failed embedding turns the cache off for this turn, never the
-  // assistant.
-  const bypassCache = body.bypassCache === true;
-  // An agent turn is a different assistant — narrower tools, its own
-  // instructions — so it never shares the general assistant's answer cache: a
-  // cached full-assistant answer must not surface inside a scoped agent, and a
-  // scoped agent's answer must not be served to the full assistant.
-  // Phase F — a project-scoped turn is shaped by the project's instruction,
-  // notes and memory, so it never shares the general answer cache: a generic
-  // cached answer must not surface inside a project, and a project-shaped
-  // answer must not be served to a project-less turn.
-  const cacheCandidate =
-    !agentScope &&
-    !projectContext &&
-    (mode === "dashboard" || mode === "floor") &&
-    attachments.length === 0 &&
-    latestPrompt.trim();
-  let questionEmbedding: number[] | null = null;
-  let questionEmbeddingTokens = 0;
-  if (cacheCandidate && (await isEmbeddingAvailable(config))) {
-    try {
-      const embedded = await embedOne(config, latestPrompt);
-      questionEmbedding = embedded.vector;
-      questionEmbeddingTokens = embedded.inputTokens;
-    } catch {
-      questionEmbedding = null;
-    }
-  }
-
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const emit = (event: string, data: unknown) => controller.enqueue(sse(event, data));
@@ -417,71 +412,27 @@ export const POST = withTenantScope(async (request: NextRequest) => {
           // with the same attachment/retrieval facts runAgentTurn would use.
           // Phase 36c — the turn's task lens rides on top of it, so no invalid
           // task can leak into the prompt.
-          const resolvedPrompt = buildSystemPrompt({
+          // Issue #812 §8 — the ONE prompt resolver. It composes the platform
+          // base policy, the runtime mode, the system agent, the business-type
+          // and app fragments, this tenant's layered memory, the project
+          // context and this turn's task, and only then the tool catalogue.
+          // A published platform prompt version replaces one layer's text and
+          // nothing else; an unpublished scope falls back to the code default.
+          const resolved = await resolveSystemPrompt({
             ...promptContext,
+            runtimeMode,
+            businessId: session.businessId,
+            agentKey: agentCard?.agentKey ?? null,
+            businessType: promptContext.industry,
+            appKey: appFocus === "all" ? null : (appFocus as AppKey | null),
             hasAttachment: attachments.length > 0,
-            retrieval: await retrievalReadyForMode(config, mode, session.businessId),
+            // Issue #812 §2 — the knowledge tool is offered only when the
+            // managed, tenant-isolated knowledge integration is configured.
+            retrieval: knowledgeReady,
+            taskContext: taskDirective || null,
           });
-          const systemPrompt = taskDirective
-            ? `${resolvedPrompt}\n\n${taskDirective}`
-            : resolvedPrompt;
-
-          // Wave 7 — a repeated read-only question inside this trading day
-          // answers from the cache, labelled, for the price of an embedding.
-          let cachedHit: CacheHit | null = null;
-          if (questionEmbedding && !bypassCache) {
-            try {
-              cachedHit = await lookupCachedAnswer(
-                {
-                  businessId: session.businessId,
-                  locationId: floorLocation?.id ?? null,
-                  businessDate: await businessToday(session.businessId),
-                  toolSignature: null,
-                },
-                questionEmbedding,
-              );
-            } catch {
-              cachedHit = null;
-            }
-          }
-
-          if (cachedHit) {
-            const settlement = await settleAiTurn({
-              businessId: session.businessId,
-              requestId,
-              config,
-              usage: { inputTokens: questionEmbeddingTokens, outputTokens: 0 },
-              costUsd: null,
-              cacheHit: true,
-              attribution: {
-                requestType: "chat",
-                model: config.model,
-                conversationId,
-                locationId,
-                userId: session.sub,
-                metadata: { mode, cached: true },
-              },
-            });
-
-            if (conversationId) {
-              await appendMessage({
-                conversationId,
-                role: "assistant",
-                content: cachedHit.answer,
-              }).catch((err) => console.error("ai conversation persistence failed", err));
-            }
-
-            emit("done", {
-              content: cachedHit.answer,
-              proposedAction: null,
-              auditId: null,
-              conversationId,
-              costRial: settlement.chargedRial,
-              cached: true,
-              cacheNotice: cachedHit.notice,
-            });
-            return;
-          }
+          promptLayers = resolved.layers;
+          const systemPrompt = resolved.systemPrompt;
 
           const reply = await runAgentTurn({
             config,
@@ -508,17 +459,31 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             // tools to its allowlist and the proposable actions to its action
             // list. Both are re-checked in runAgentTurn, so a hand-crafted
             // response naming an out-of-scope action is refused, not applied.
-            toolAllowlist: agentScope ? agentScope.toolAllowlist : undefined,
-            actionTypes: agentScope ? agentScope.actionTypes : undefined,
+            toolAllowlist: agentCard?.allowedTools ?? undefined,
+            actionTypes: (agentCard?.allowedActions ?? undefined) as ActionType[] | undefined,
             // Phase F pt.2 — a non-agent project turn also offers the
             // project-scoped action(s); runAgentTurn re-checks the enum.
-            projectScoped: Boolean(activeProjectId) && !agentScope,
+            projectScoped: Boolean(activeProjectId) && !agentCard,
             stream: {
               onDelta: (content) => emit("delta", { content }),
               onToolCalls: () => emit("reset", {}),
             },
             requestId,
             signal: request.signal,
+            // Issue #812 §2/§3 — the managed knowledge integration and this
+            // turn's tenant scope. The business id comes from the session, so
+            // retrieval can only ever see this tenant's namespace.
+            knowledge: knowledgeReady
+              ? {
+                  settings: knowledgeSettings,
+                  scope: {
+                    businessId: session.businessId,
+                    locationId,
+                    appKey: appFocus === "all" ? null : appFocus,
+                    projectId: activeProjectId,
+                  },
+                }
+              : undefined,
           });
 
           // Phase F pt.2 — a project-scoped proposal is addressed by the AMBIENT
@@ -600,46 +565,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
               });
               inputRequestId = created?.id ?? null;
             }
-          }
-
-          // Wave 7 — cache the answer only when the turn was provably
-          // read-only: no proposal and nothing outside the mode's read tools.
-          // `storeCachedAnswer` re-checks the same gate, so a future edit to
-          // this route cannot forget it. Phase E — an input-request turn is
-          // interactive and per-user, never cached: it is treated like a
-          // proposal for the cache gate.
-          const readToolNames = toolDefinitions(mode, { hasAttachment: false })
-            .filter((tool) => tool.function.name !== "propose_action" && tool.function.name !== "request_input")
-            .map((tool) => tool.function.name);
-          const toolsUsed = reply.toolCalls.map((call) => call.name);
-          const turnShape = {
-            mode,
-            toolsUsed,
-            proposedAction: Boolean(reply.proposedAction) || Boolean(reply.inputRequest),
-            readToolNames,
-          };
-          if (questionEmbedding && isCacheableTurn(turnShape)) {
-            const toolSignature = buildToolSignature(
-              reply.toolCalls.map((call) => ({
-                tool: call.name,
-                from: normalizeRangeDate(call.dateFrom),
-                to: normalizeRangeDate(call.dateTo),
-              })),
-            );
-            await storeCachedAnswer(
-              {
-                businessId: session.businessId,
-                locationId: floorLocation?.id ?? null,
-                businessDate: await businessToday(session.businessId),
-                toolSignature,
-              },
-              {
-                questionText: latestPrompt,
-                questionEmbedding,
-                answer: reply.content,
-                turn: turnShape,
-              },
-            ).catch(() => {});
           }
 
           emit("done", {

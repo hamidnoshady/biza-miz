@@ -23,8 +23,13 @@ import { validateInputRequest, type InputRequestSpec } from "./ai-input-protocol
 import { estimateTokens, type AiTokenUsage } from "./ai-billing";
 import { parseResponseCostHeader } from "./ai-gateway";
 import { normalizeProviderError, tenantProviderErrorMessage, type NormalizedProviderError } from "./ai-provider-errors";
-import { clampRetrievalLimit, formatRetrievalForPrompt, isRetrievalAvailable, retrieveKnowledge } from "./ai-rag";
-import { embedOne, isEmbeddingAvailable } from "./ai-embeddings";
+import {
+  formatKnowledgeForPrompt,
+  knowledgeReadyFor,
+  retrieveTenantKnowledge,
+  type KnowledgeGatewaySettings,
+  type KnowledgeScope,
+} from "./ai-knowledge-gateway";
 import {
   allowedAiActions,
   filterAiToolsByPermissions,
@@ -651,65 +656,6 @@ async function extractReceiptDraft(config: AiConfig, dataUrl: string, signal?: A
   }
 }
 
-/** Both halves of Wave 6 availability, cached per process; never throws. */
-async function isRetrievalEnabledForTurn(config: AiConfig): Promise<boolean> {
-  try {
-    return (await isRetrievalAvailable()) && (await isEmbeddingAvailable(config));
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Whether this mode's turn will declare the retrieval tool — exported so a
- * caller resolving the system prompt through the prompt manager can build the
- * same context `runAgentTurn` would (the fallback prompt's retrieval line
- * depends on it). Probes are cached per process, so the double call is free.
- */
-export async function retrievalReadyForMode(
-  config: AiConfig,
-  mode: AgentMode,
-  businessId?: string,
-): Promise<boolean> {
-  return mode === "dashboard" && Boolean(businessId) && (await isRetrievalEnabledForTurn(config));
-}
-
-/**
- * Phase 36 Wave 6 — the `search_business_knowledge` executor. Embeds the
- * question over the shared platform connection (its tokens are metered into
- * the same turn, exit criterion 5), retrieves the nearest knowledge rows, and
- * hands the model prose whose every line names its source. Any failure —
- * provider, dimensions, SQL — is a missing hint, never a failed answer.
- */
-async function runKnowledgeSearch(
-  config: AiConfig,
-  businessId: string,
-  args: Record<string, unknown>,
-  messages: InboundMessage[],
-  usage: AiTokenUsage,
-): Promise<ToolResult> {
-  const fallbackQuestion = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
-  const query = typeof args.query === "string" && args.query.trim() ? args.query : fallbackQuestion;
-  if (!query.trim()) {
-    return { ok: false, data: { error: "عبارت جست‌وجو خالی است." } };
-  }
-  try {
-    const embedded = await embedOne(config, query);
-    usage.inputTokens += embedded.inputTokens;
-    const limit = clampRetrievalLimit(typeof args.limit === "number" ? args.limit : undefined);
-    const results = await retrieveKnowledge(businessId, embedded.vector, { limit });
-    if (results.length === 0) {
-      return {
-        ok: true,
-        data: { results: [], note: "چیزی نزدیک این عبارت در دانش ثبت‌شدهٔ کسب‌وکار پیدا نشد." },
-      };
-    }
-    return { ok: true, data: { count: results.length, knowledge: formatRetrievalForPrompt(results) } };
-  } catch {
-    return { ok: false, data: { error: "جست‌وجوی دانش کسب‌وکار در دسترس نیست." } };
-  }
-}
-
 /** Wave 7 — the signature-relevant shape of one tool call: name + date range. */
 function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrace {
   const trace: AgentToolCallTrace = { name };
@@ -755,6 +701,16 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
    * (`buildSystemPrompt`) is used.
    */
   systemPrompt?: string;
+  /**
+   * Issue #812 §2 — the managed-knowledge integration settings and this turn's
+   * tenant scope. When absent or unconfigured the knowledge tool is not
+   * declared at all, which is the whole degradation story: no local vector
+   * table, no local fallback.
+   */
+  knowledge?: {
+    settings: KnowledgeGatewaySettings;
+    scope: KnowledgeScope;
+  };
   messages: InboundMessage[];
   /** Wave 5 (issue #145) — a receipt/invoice image attached to this turn only. */
   attachment?: ChatAttachment;
@@ -792,12 +748,14 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   const attachments = normalizeAttachments(opts.attachments, opts.attachment);
   const hasAttachment = attachments.length > 0;
 
-  // Phase 36 Wave 6 — the retrieval tool is declared only when the whole chain
-  // can actually serve it: pgvector + the 0113 table (isRetrievalAvailable)
-  // and a platform connection that answers /embeddings. Both probes cache per
-  // process, and neither ever throws — a probe that fails means "off", and off
-  // is exactly the pre-wave behaviour. Desktop installs keep the assistant.
-  const retrievalReady = await retrievalReadyForMode(config, mode, businessId);
+  // Issue #812 §2 — the knowledge tool is declared only when the configured
+  // AI-infrastructure knowledge integration is switched on and this turn
+  // actually belongs to a tenant. There is no local probe and no local
+  // fallback: "off" means exactly one thing, and it is not an error.
+  const knowledge = opts.knowledge;
+  const retrievalReady = Boolean(
+    knowledge && knowledgeReadyFor(knowledge.settings, knowledge.scope.businessId),
+  );
 
   const permissionActionTypes = opts.permissions
     ? allowedAiActions(
@@ -991,9 +949,38 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         call.function.name === KNOWLEDGE_TOOL_NAME &&
         allowedReadToolNames.has(call.function.name) &&
         retrievalReady &&
-        businessId
+        knowledge
       ) {
-        result = await runKnowledgeSearch(config, businessId, callArgs, messages, usage);
+        // Issue #812 §2/§3 — the tenant is named by the server, never by the
+        // model and never by the request body. Retrieval is confined to this
+        // business's namespace; app/project/source are secondary filters that
+        // can only narrow it.
+        const fallbackQuestion = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+        const searchQuery =
+          typeof callArgs.query === "string" && callArgs.query.trim() ? callArgs.query : fallbackQuestion;
+        if (!searchQuery.trim()) {
+          result = { ok: false, data: { error: "عبارت جست‌وجو خالی است." } };
+        } else {
+          const retrieval = await retrieveTenantKnowledge(
+            knowledge.settings,
+            knowledge.scope,
+            searchQuery,
+            { limit: callArgs.limit, signal: opts.signal },
+          );
+          // The retrieval's own tokens and gateway cost belong to this turn's
+          // settlement, exactly as a provider round's do.
+          usage.inputTokens += retrieval.inputTokens;
+          if (retrieval.costUsd !== null) costUsd = (costUsd ?? 0) + retrieval.costUsd;
+          result = retrieval.hits.length === 0
+            ? {
+                ok: true,
+                data: { results: [], note: "چیزی نزدیک این عبارت در دانش این کسب‌وکار پیدا نشد." },
+              }
+            : {
+                ok: true,
+                data: { count: retrieval.hits.length, knowledge: formatKnowledgeForPrompt(retrieval.hits) },
+              };
+        }
       } else if (allowedReadToolNames.has(call.function.name) && toolRunner) {
         result = await toolRunner(call.function.name, callArgs);
       } else {

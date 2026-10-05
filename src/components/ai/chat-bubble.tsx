@@ -93,11 +93,6 @@ interface ChatBubbleProps {
   /** Phase E — the structured input protocol's answer + dismiss handlers. */
   submitInputRequest?: (message: AiChatMessage, response: InputResponse) => void;
   dismissInputRequest?: (message: AiChatMessage) => void;
-  /**
-   * Phase 36 Wave 7 — «دوباره بپرس» on a cached answer. The parent builds
-   * this from the user question that preceded the reply.
-   */
-  onAskAgain?: () => void;
 }
 
 export function ChatBubble({
@@ -110,7 +105,6 @@ export function ChatBubble({
   dismissProposal,
   submitInputRequest,
   dismissInputRequest,
-  onAskAgain,
 }: ChatBubbleProps) {
   const rowRef = useRef<HTMLDivElement>(null);
   const isUser = message.role === "user";
@@ -245,24 +239,6 @@ export function ChatBubble({
               return <Icon className="size-3" aria-hidden />;
             })()}
             {STATUS_LABELS[message.status]!.text}
-          </p>
-        ) : null}
-
-        {/* Phase 36 Wave 7 — a cached answer is labelled, never passed off
-            as fresh, and always comes with a way to ask for a real one. */}
-        {!isUser && message.cacheNotice ? (
-          <p className="flex flex-wrap items-center gap-1.5 px-1 text-[10px] text-muted-foreground">
-            <span>{message.cacheNotice}</span>
-            {onAskAgain ? (
-              <button
-                type="button"
-                className="rounded-full border border-border/70 px-2 py-0.5 text-[10px] text-foreground/80 transition-colors hover:bg-muted disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50"
-                disabled={busy}
-                onClick={onAskAgain}
-              >
-                دوباره بپرس
-              </button>
-            ) : null}
           </p>
         ) : null}
 

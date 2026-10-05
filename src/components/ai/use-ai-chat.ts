@@ -17,8 +17,11 @@ import {
   MAX_ATTACHMENTS,
 } from "@/lib/ai-attachment-limits";
 import type { AiTaskId } from "@/lib/ai-tasks";
-import { agentIdForTurn } from "@/lib/ai-custom-agents";
-import { AI_REASONING_MODES, type AiReasoningMode } from "@/lib/ai-reasoning";
+import {
+  AI_RUNTIME_MODES,
+  normalizeAiRuntimeMode,
+  type AiRuntimeMode,
+} from "@/lib/ai-runtime-modes-shared";
 import { applyProposalRequest } from "./apply-proposal";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 
@@ -61,12 +64,6 @@ export interface AiChatMessage {
   applied?: boolean;
   /** Actual Rial charged for this turn, shown quietly once it finishes. */
   costRial?: number | null;
-  /**
-   * Phase 36 Wave 7 — set when this answer came from the semantic cache.
-   * Never silent: the notice is shown under the reply, with a «دوباره بپرس»
-   * that rebuilds the turn from scratch.
-   */
-  cacheNotice?: string | null;
   /** Client-side send time, shown as a small clock under the bubble. */
   createdAt?: number;
   /** Snapshot of the attachments this turn carried (rendered in the bubble). */
@@ -158,7 +155,7 @@ export interface UseAiChatOptions {
    */
   projectId?: string | null;
   appFocus?: AiAppFocus;
-  reasoningMode?: AiReasoningMode;
+  runtimeMode?: AiRuntimeMode;
 }
 
 export function useAiChat({
@@ -167,7 +164,7 @@ export function useAiChat({
   onConversationIdChange,
   projectId = null,
   appFocus = "all",
-  reasoningMode: initialReasoningMode = AI_REASONING_MODES[0],
+  runtimeMode: initialRuntimeMode = AI_RUNTIME_MODES[0],
 }: UseAiChatOptions) {
   const router = useRouter();
   const canPropose = mode === "wizard" || mode === "dashboard";
@@ -181,13 +178,7 @@ export function useAiChat({
   const [actionsAllowed, setActionsAllowed] = useState(true);
   const [task, setTask] = useState<AiTaskId>("general");
   const [customTask, setCustomTask] = useState("");
-  const [reasoningMode, setReasoningMode] = useState<AiReasoningMode>(initialReasoningMode);
-  // Phase I — the business-defined custom agent this dashboard turn runs as.
-  // null = the full dashboard assistant (or, inside a project, its pinned
-  // default). The backend resolves a request-level agentId every turn and it
-  // always wins, so the picker can change the lens mid-conversation. Only
-  // dashboard mode runs as an agent; the value is ignored otherwise.
-  const [agentId, setAgentId] = useState<string | null>(null);
+  const [runtimeMode, setRuntimeMode] = useState<AiRuntimeMode>(() => normalizeAiRuntimeMode(initialRuntimeMode));
   const abortControllerRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
   const cancelledRef = useRef(false);
@@ -370,18 +361,14 @@ export function useAiChat({
     await startStream(text);
   }
 
-  /**
-   * Phase 36 Wave 7 — «دوباره بپرس» on a cached answer: the same question,
-   * resent with `bypassCache`, so the turn is built fresh and the cache never
-   * answers its own criticism.
-   */
+  /** Ask the same question again, as a brand-new turn. */
   async function askAgain(text: string) {
     const question = text.trim();
     if (!question || busy) return;
-    await startStream(question, true);
+    await startStream(question);
   }
 
-  async function startStream(text: string, bypassCache = false) {
+  async function startStream(text: string) {
     if (busy) return;
     const userMsg: AiChatMessage = {
       id: uid(),
@@ -456,8 +443,6 @@ export function useAiChat({
           auditId: typeof payload.auditId === "string" ? payload.auditId : null,
           proposalStatus: payload.proposedAction ? "proposed" : null,
           costRial: typeof payload.costRial === "number" ? payload.costRial : null,
-          cacheNotice:
-            typeof payload.cacheNotice === "string" ? payload.cacheNotice : null,
           // §19 — the terminal event, so this reply is genuinely finished.
           status: "complete",
         }));
@@ -502,12 +487,8 @@ export function useAiChat({
           task,
           customTask: customTask.trim() || undefined,
           appFocus,
-          reasoningMode,
-          // Only dashboard mode runs as a custom agent; the backend refuses a
-          // disabled/unknown id rather than silently widening the turn.
-          agentId: agentIdForTurn(mode, agentId),
+          runtimeMode,
           allowActions: actionsAllowed,
-          bypassCache: bypassCache === true,
         }),
       });
       if (!response.ok) {
@@ -747,10 +728,8 @@ export function useAiChat({
     setTask,
     customTask,
     setCustomTask,
-    reasoningMode,
-    setReasoningMode,
-    agentId,
-    setAgentId,
+    runtimeMode,
+    setRuntimeMode,
     ensureGreeting,
     startNewConversation,
     loadConversation,

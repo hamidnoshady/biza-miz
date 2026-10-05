@@ -133,6 +133,21 @@ type GatewayRow = {
   output_cost_rial_per_million: string | number;
   revenue_margin_percent: string | number | null;
   max_turn_rial: string | number | null;
+  // Issue #812 — managed knowledge + Deep Research (migration 0203).
+  knowledge_enabled: boolean;
+  knowledge_base_url: string;
+  knowledge_api_key: string | null;
+  knowledge_api_key_ciphertext: string | null;
+  knowledge_model: string;
+  knowledge_max_results: number;
+  research_enabled: boolean;
+  research_model_alias: string;
+  research_max_rounds: number;
+  research_max_context_bytes: number;
+  research_ttl_hours: number;
+  research_max_spend_rial: number;
+  research_external_web: boolean;
+  research_min_data_readiness: number;
 };
 
 function rowToGateway(row: GatewayRow): AiGatewayConfig {
@@ -150,6 +165,19 @@ function rowToGateway(row: GatewayRow): AiGatewayConfig {
     outputCostRialPerMillion: numberValue(row.output_cost_rial_per_million),
     revenueMarginPercent: Math.max(0, numberValue(row.revenue_margin_percent)),
     maxTurnRial: Math.max(0, numberValue(row.max_turn_rial)),
+    knowledgeEnabled: row.knowledge_enabled === true,
+    knowledgeBaseUrl: textOr(row.knowledge_base_url, ""),
+    knowledgeApiKey: decryptFromStorage(row.knowledge_api_key_ciphertext, row.knowledge_api_key),
+    knowledgeModel: textOr(row.knowledge_model, ""),
+    knowledgeMaxResults: Math.max(1, Math.min(50, numberValue(row.knowledge_max_results) || 8)),
+    researchEnabled: row.research_enabled === true,
+    researchModelAlias: textOr(row.research_model_alias, ""),
+    researchMaxRounds: Math.max(1, Math.min(200, numberValue(row.research_max_rounds) || 12)),
+    researchMaxContextBytes: Math.max(1024, numberValue(row.research_max_context_bytes) || 2_000_000),
+    researchTtlHours: Math.max(1, Math.min(720, numberValue(row.research_ttl_hours) || 24)),
+    researchMaxSpendRial: Math.max(0, numberValue(row.research_max_spend_rial)),
+    researchExternalWeb: row.research_external_web === true,
+    researchMinDataReadiness: Math.max(1, numberValue(row.research_min_data_readiness) || 1),
   };
 }
 
@@ -160,7 +188,12 @@ export async function getAiGatewayConfig(): Promise<AiGatewayConfig> {
             virtual_keys_enabled,
             usd_rial_rate, gateway_costing_enabled,
             input_cost_rial_per_million, output_cost_rial_per_million,
-            revenue_margin_percent, max_turn_rial
+            revenue_margin_percent, max_turn_rial,
+            knowledge_enabled, knowledge_base_url, knowledge_api_key, knowledge_api_key_ciphertext,
+            knowledge_model, knowledge_max_results,
+            research_enabled, research_model_alias, research_max_rounds,
+            research_max_context_bytes, research_ttl_hours, research_max_spend_rial,
+            research_external_web, research_min_data_readiness
        FROM platform_ai_gateway
       WHERE id = true`,
   );
@@ -202,6 +235,23 @@ export function mergeGatewayConfig(draft: AiGatewayInput, current: AiGatewayConf
     outputCostRialPerMillion: current.outputCostRialPerMillion,
     revenueMarginPercent: current.revenueMarginPercent,
     maxTurnRial: current.maxTurnRial,
+    // Issue #812 — the managed-knowledge and research pointers ARE accepted
+    // from `/platform/ai`: they are technical infrastructure settings (where
+    // the integration lives, what its limits are), not product pricing.
+    knowledgeEnabled: draft.knowledgeEnabled ?? current.knowledgeEnabled,
+    knowledgeBaseUrl: (draft.knowledgeBaseUrl ?? current.knowledgeBaseUrl).trim(),
+    // An empty submission means "unchanged", exactly like the master key.
+    knowledgeApiKey: draft.knowledgeApiKey?.trim() || current.knowledgeApiKey,
+    knowledgeModel: (draft.knowledgeModel ?? current.knowledgeModel).trim(),
+    knowledgeMaxResults: draft.knowledgeMaxResults ?? current.knowledgeMaxResults,
+    researchEnabled: draft.researchEnabled ?? current.researchEnabled,
+    researchModelAlias: (draft.researchModelAlias ?? current.researchModelAlias).trim(),
+    researchMaxRounds: draft.researchMaxRounds ?? current.researchMaxRounds,
+    researchMaxContextBytes: draft.researchMaxContextBytes ?? current.researchMaxContextBytes,
+    researchTtlHours: draft.researchTtlHours ?? current.researchTtlHours,
+    researchMaxSpendRial: draft.researchMaxSpendRial ?? current.researchMaxSpendRial,
+    researchExternalWeb: draft.researchExternalWeb ?? current.researchExternalWeb,
+    researchMinDataReadiness: draft.researchMinDataReadiness ?? current.researchMinDataReadiness,
   };
 }
 
@@ -221,15 +271,24 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
   // on — see migration 0183's header for the read-fallback/backfill story.
   const masterKey = input.masterKey?.trim() || current.masterKey || "";
   const masterKeyCiphertext = encryptForStorage(masterKey);
+  const knowledgeApiKey = input.knowledgeApiKey?.trim() || current.knowledgeApiKey || "";
+  const knowledgeApiKeyCiphertext = encryptForStorage(knowledgeApiKey);
   await query(
     `INSERT INTO platform_ai_gateway
        (id, enabled, base_url, master_key, master_key_ciphertext, chat_model, embedding_model,
         virtual_keys_enabled,
         usd_rial_rate, gateway_costing_enabled, input_cost_rial_per_million, output_cost_rial_per_million,
-        revenue_margin_percent, max_turn_rial, updated_at)
+        revenue_margin_percent, max_turn_rial, updated_at,
+        knowledge_enabled, knowledge_base_url, knowledge_api_key, knowledge_api_key_ciphertext,
+        knowledge_model, knowledge_max_results,
+        research_enabled, research_model_alias, research_max_rounds,
+        research_max_context_bytes, research_ttl_hours, research_max_spend_rial,
+        research_external_web, research_min_data_readiness)
      VALUES
        (true, $1, $2, NULL, $3, $4, $5, $6,
-        $7, $8, $9, $10, $11, $12, now())
+        $7, $8, $9, $10, $11, $12, now(),
+        $13, $14, NULL, $15, $16, $17,
+        $18, $19, $20, $21, $22, $23, $24, $25)
      ON CONFLICT (id)
      DO UPDATE SET enabled = EXCLUDED.enabled,
                    base_url = EXCLUDED.base_url,
@@ -244,6 +303,20 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
                    output_cost_rial_per_million = EXCLUDED.output_cost_rial_per_million,
                    revenue_margin_percent = EXCLUDED.revenue_margin_percent,
                    max_turn_rial = EXCLUDED.max_turn_rial,
+                   knowledge_enabled = EXCLUDED.knowledge_enabled,
+                   knowledge_base_url = EXCLUDED.knowledge_base_url,
+                   knowledge_api_key = NULL,
+                   knowledge_api_key_ciphertext = EXCLUDED.knowledge_api_key_ciphertext,
+                   knowledge_model = EXCLUDED.knowledge_model,
+                   knowledge_max_results = EXCLUDED.knowledge_max_results,
+                   research_enabled = EXCLUDED.research_enabled,
+                   research_model_alias = EXCLUDED.research_model_alias,
+                   research_max_rounds = EXCLUDED.research_max_rounds,
+                   research_max_context_bytes = EXCLUDED.research_max_context_bytes,
+                   research_ttl_hours = EXCLUDED.research_ttl_hours,
+                   research_max_spend_rial = EXCLUDED.research_max_spend_rial,
+                   research_external_web = EXCLUDED.research_external_web,
+                   research_min_data_readiness = EXCLUDED.research_min_data_readiness,
                    updated_at = now()`,
     [
       input.enabled ?? current.enabled,
@@ -258,6 +331,19 @@ export async function saveAiGatewayConfig(input: AiGatewayInput): Promise<AiGate
       current.outputCostRialPerMillion,
       current.revenueMarginPercent,
       Math.round(current.maxTurnRial),
+      input.knowledgeEnabled ?? current.knowledgeEnabled,
+      (input.knowledgeBaseUrl ?? current.knowledgeBaseUrl).trim(),
+      knowledgeApiKeyCiphertext,
+      (input.knowledgeModel ?? current.knowledgeModel).trim(),
+      input.knowledgeMaxResults ?? current.knowledgeMaxResults,
+      input.researchEnabled ?? current.researchEnabled,
+      (input.researchModelAlias ?? current.researchModelAlias).trim(),
+      input.researchMaxRounds ?? current.researchMaxRounds,
+      input.researchMaxContextBytes ?? current.researchMaxContextBytes,
+      input.researchTtlHours ?? current.researchTtlHours,
+      input.researchMaxSpendRial ?? current.researchMaxSpendRial,
+      input.researchExternalWeb ?? current.researchExternalWeb,
+      input.researchMinDataReadiness ?? current.researchMinDataReadiness,
     ],
   );
   return getAiGatewayConfig();

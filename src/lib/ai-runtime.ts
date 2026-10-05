@@ -113,7 +113,9 @@ export function decorateAiConfigWithState(
 ): PlatformAiConfig {
   const normalizedGateway = gateway ?? null;
   if (!config.enabled) return { ...config, runtimeUnavailableReason: config.runtimeUnavailableReason ?? "platform_disabled" };
-  if (!isGatewayActive(normalizedGateway)) {
+  // `isGatewayActive` is a value check, not a type guard, so the null case is
+  // spelled out here: everything below reads the row's knowledge columns.
+  if (!normalizedGateway || !isGatewayActive(normalizedGateway)) {
     return { ...config, enabled: false, runtimeUnavailableReason: normalizedGateway?.enabled ? "missing_base_url" : "gateway_disabled" };
   }
 
@@ -133,6 +135,15 @@ export function decorateAiConfigWithState(
     gateway: {
       ...(authKey ? { authKey } : {}),
       body,
+    },
+    // Issue #812 §2 — carry the managed-knowledge pointer with the config, so
+    // no caller has to know the gateway exists to ask for knowledge.
+    knowledge: {
+      enabled: normalizedGateway.knowledgeEnabled,
+      baseUrl: normalizedGateway.knowledgeBaseUrl,
+      apiKey: normalizedGateway.knowledgeApiKey,
+      model: normalizedGateway.knowledgeModel,
+      maxResults: normalizedGateway.knowledgeMaxResults,
     },
   };
   return decorated as PlatformAiConfig;

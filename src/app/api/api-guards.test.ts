@@ -337,6 +337,15 @@ const SELF_GUARDING_ROUTES: Record<string, string> = {
   // Phase F capstone — a project's media files, scoped by project ownership and
   // the tenant-isolated media_assets table.
   "ai/projects/[id]/files": "lists a project's media files — ownership through parent project",
+  // Issue #812 §10 — layered memory. The tenant comes from the session on every
+  // path and the scope is validated against it, so ownership is the
+  // authorization; the write path additionally takes `ai.manage`.
+  "ai/memory": "lists/creates/deletes this business's durable memory — session business is the authorization",
+  // Issue #812 §5 — Deep Research. The run's business id is the session's own
+  // on every path, and approving one re-reads it before the environment opens.
+  "ai/research": "lists/creates Deep Research runs for the caller's business — session business is the authorization",
+  "ai/research/[id]/approve":
+    "approves and runs a Deep Research run — session business is the authorization",
 };
 
 /** True for the super-admin console's own routes, which use the platform guards. */

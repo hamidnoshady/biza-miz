@@ -80,6 +80,17 @@ export const EXEMPT_TABLES = new Set([
   "credit_packages",
   "billing_plans",
   "billing_plan_features",
+  // Issue #812 — the Superadmin AI control plane's global half. `platform_ai_modes`
+  // (runtime mode → LiteLLM alias), `ai_prompt_versions` (the one published
+  // prompt store) and `ai_system_agents` (system-wide agents) are deployment-wide
+  // catalogues with no business_id, exactly like `ai_prompt_templates` above:
+  // a platform admin owns them and every business reads the same published rows.
+  // Their tenant-facing counterparts are deliberately absent from this list —
+  // `ai_agent_assignments` (business-scoped), `ai_memory`, `ai_research_runs`
+  // and `ai_research_sources` are RLS-protected like every other tenant table.
+  "platform_ai_modes",
+  "ai_prompt_versions",
+  "ai_system_agents",
   // Migration 0177 — commercial catalogues with no business_id. Tenant
   // tables (usage events, ratings, rollups, spend policy, vendor cost,
   // adjustments, entitlement projections) are FORCE RLS and stay out of
