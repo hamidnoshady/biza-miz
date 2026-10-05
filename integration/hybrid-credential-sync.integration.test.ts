@@ -828,4 +828,43 @@ describe("hybrid login credential convergence", () => {
     expect(afterBody.credentialSync?.missing).toBe(0);
     expect(await bcrypt.compare(paired.staff.cashier.pin, (await activePinHash(paired.siteBusinessId, paired.staff.cashier.id))!)).toBe(true);
   }, 240_000);
+
+  it("leaves a Local install alone: no cloud identity is required and no warning is shown", async () => {
+    // The non-regression the issue asks for at the end of its test list: the
+    // fixes above are Hybrid-only. A Local business has no cloud to converge
+    // with, so nothing may be reported missing and the staff door must behave
+    // exactly as before.
+    await switchDatabase(siteDb);
+    const local = await provisionBusiness({
+      businessName: `کافه محلی ${randomUUID().slice(0, 6)}`,
+      ownerName: "مالک محلی",
+      email: `local-${randomUUID()}@example.com`,
+      password: "local-password",
+      seedChartOfAccounts: false,
+    });
+    const waiterId = await createMember(local.businessId, "waiter", "گارسون محلی", local.locationId);
+    await withTenant(local.businessId, () => setPin(local.businessId, waiterId, "1122", local.userId));
+
+    // Not configured is not degraded: a business that never joined a cloud is
+    // never asked for credential convergence.
+    const status = await withTenant(local.businessId, () => readHybridIdentityStatus(local.businessId));
+    expect(status).toMatchObject({ configured: false, overall: "not_configured", degradedBy: null });
+    expect(status.credentials).toBeNull();
+
+    // And the login screen is not told about a problem it does not have.
+    const response = await rosterRoute(new NextRequest(
+      `http://localhost/api/auth/pin-login/roster?businessId=${local.businessId}`,
+    ));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      employees: Array<{ id: string }>;
+      credentialSync: unknown;
+    };
+    expect(body.credentialSync).toBeNull();
+    expect(body.employees.map((entry) => entry.id)).toContain(waiterId);
+
+    // The PIN the local owner set works offline, on its own hash.
+    const hash = await activePinHash(local.businessId, waiterId);
+    expect(await bcrypt.compare("1122", hash!)).toBe(true);
+  }, 240_000);
 });
