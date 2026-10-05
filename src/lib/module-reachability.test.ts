@@ -67,16 +67,6 @@ const REACHABLE_BY_OTHER_MEANS: Record<string, string> = {
   "types/mssql.d.ts":
     "ambient .d.ts for the untyped `mssql` driver; tsconfig loads it, the Holoo client needs it",
 
-  // Consumed by a test that reads it as *text*, not as a module:
-  // `crm-app-boundaries.test.ts` greps this source to prove the CRM prepares a
-  // sales document rather than posting revenue itself. That is a real
-  // consumer and a real invariant, so the file is load-bearing even though no
-  // `import` names it. Its two exports have no API route yet — the handoff UI
-  // is unbuilt — but it is a documented integration contract
-  // (docs/crm-architecture.md), not an orphan.
-  "lib/crm-deal-handoff.ts":
-    "read as source by crm-app-boundaries.test.ts, which pins the CRM/Accounting posting boundary",
-
   // The platform-support assistant's two read-only health tools. `ai.ts`
   // already advertises both to the model for `mode: "platform"`, and
   // `ai-service.test.ts` / `ai.test.ts` pin the realm separation. No route

@@ -37,6 +37,7 @@ import { EmptyState, KpiCard, SectionCard, StatusBadge } from "@/app/dashboard/p
 import { api, ErrorBox } from "@/app/dashboard/ui";
 import { crmCustomerHref, type CrmSectionKey } from "./crm-routes";
 import { CrmCardHeading } from "./crm-card-heading";
+import { CrmTodayQueues } from "./today-queues";
 
 /** A labelled proportion bar — lifecycle mix and consent coverage both read better as a shape. */
 function ShareBar({ parts }: { parts: { key: string; label: string; count: number; tone: string }[] }) {
@@ -73,8 +74,17 @@ const STAGE_TONES: Record<string, string> = {
 
 export function CrmOverviewSection({
   onGoToSection,
+  canRecompute = false,
 }: {
   onGoToSection: (key: CrmSectionKey) => void;
+  /**
+   * Whether this member may run the RFM job (`overview.write` in the section
+   * table, `crm.manage` on the route). The button used to be drawn for everyone
+   * who could open the page, so a member holding `crm.export` but not
+   * `crm.manage` saw a control whose request answered 403 — see
+   * `crm-permissions.ts`.
+   */
+  canRecompute?: boolean;
 }) {
   const money = useMoney();
   const [overview, setOverview] = useState<CrmOverview | null>(null);
@@ -168,6 +178,11 @@ export function CrmOverviewSection({
         </SectionCard>
       ) : null}
 
+      {/* The attention feed leads the page — see today-queues.tsx. Totals sit
+          below it, because «چه کسی به توجه نیاز دارد» is the question somebody
+          opens the CRM with. */}
+      <CrmTodayQueues />
+
       <KpiRow className="xl:grid-cols-3">
         <KpiCard
           label="مشتریان فعال"
@@ -223,16 +238,19 @@ export function CrmOverviewSection({
           }
           description="بر پایهٔ تازگی، تکرار و مبلغ خرید (RFM)"
           actions={
-            <Button type="button" variant="ghost" onClick={recompute} disabled={scoring} aria-busy={scoring} className="min-h-11">
-              <RefreshCwIcon aria-hidden="true" className="size-3.5" />
-              {scoring ? "در حال محاسبه…" : "محاسبهٔ دوباره"}
-            </Button>
+            canRecompute ? (
+              <Button type="button" variant="ghost" onClick={recompute} disabled={scoring} aria-busy={scoring} className="min-h-11">
+                <RefreshCwIcon aria-hidden="true" className="size-3.5" />
+                {scoring ? "در حال محاسبه…" : "محاسبهٔ دوباره"}
+              </Button>
+            ) : null
           }
         >
           {overview.lifecycle.length === 0 ? (
             <EmptyState>
-              هنوز امتیازی محاسبه نشده است. «محاسبهٔ دوباره» را بزنید تا مشتریان بر اساس رفتار خریدشان
-              دسته‌بندی شوند.
+              {canRecompute
+                ? "هنوز امتیازی محاسبه نشده است. «محاسبهٔ دوباره» را بزنید تا مشتریان بر اساس رفتار خریدشان دسته‌بندی شوند."
+                : "هنوز امتیاز چرخهٔ عمر محاسبه نشده است. از مالک یا مدیر بخواهید آن را محاسبه کند."}
             </EmptyState>
           ) : (
             <div className="space-y-3">

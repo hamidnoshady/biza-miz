@@ -2,16 +2,22 @@
 
 /** CRM's own settings. Platform-wide settings intentionally stay under `/settings`. */
 
-import Link from "next/link";
-import { CopyCheckIcon, ShieldCheckIcon, TargetIcon, UsersIcon } from "lucide-react";
+import {
+  CopyCheckIcon,
+  HistoryIcon,
+  ListPlusIcon,
+  ShieldCheckIcon,
+  TargetIcon,
+  UsersIcon,
+} from "lucide-react";
 import { AppSettingsPanel, type AppSettingsGroup } from "@/components/app-settings/app-settings-panel";
 import { PLATFORM_SETTINGS_HOME } from "@/lib/app-routes";
-import { DEAL_STAGES, DEAL_STAGE_META } from "@/lib/crm-shared";
-import { cardClass } from "@/app/dashboard/page-chrome";
 import { crmSectionHref } from "./crm-routes";
+import { PipelineConfigurator } from "./pipeline-configurator";
+import { BusinessFields } from "./business-fields";
 import { AppSettingsShortcut } from "@/components/app-settings/app-settings-shortcut";
 
-export function CrmSettingsSection() {
+export function CrmSettingsSection({ canConfigure }: { canConfigure: boolean }) {
   const groups: AppSettingsGroup[] = [
     {
       key: "duplicates",
@@ -41,10 +47,33 @@ export function CrmSettingsSection() {
     },
     {
       key: "pipeline",
-      label: "مراحل قیف فروش",
-      description: "مراحل ثابت قیف برای همهٔ معامله‌ها. احتمال هر مرحله هنگام ساخت معامله قابل ویرایش است.",
+      label: "قیف‌ها و مراحل فروش",
+      description:
+        "قیف‌ها را بسازید، نام‌گذاری کنید، پیش‌فرض تعیین کنید و مراحل هر قیف را با ترتیب، احتمال و معنی (باز/برنده/بازنده) بچینید. مرحله‌ای که معامله دارد حذف نمی‌شود.",
       icon: TargetIcon,
-      body: <PipelineStages />,
+      body: <PipelineConfigurator canConfigure={canConfigure} />,
+    },
+    {
+      key: "fields",
+      label: "فیلدهای کسب‌وکار",
+      description:
+        "سؤال‌های خودتان دربارهٔ مشتری، سرنخ، فرصت و تیکت — با نوع مشخص (متن، عدد، مبلغ، تاریخ، انتخابی). نوع فیلدی که مقدار دارد تغییر نمی‌کند و حذف هم نیست: فقط بایگانی.",
+      icon: ListPlusIcon,
+      body: <BusinessFields canConfigure={canConfigure} />,
+    },
+    {
+      key: "audit",
+      label: "سابقهٔ تصمیم‌ها",
+      description:
+        "چه کسی چه تصمیمی گرفت: ادغام، تبدیل سرنخ، تغییر مرحله، تطبیق هویت و تغییر رضایت. دفتر فقط افزودنی است.",
+      icon: HistoryIcon,
+      body: (
+        <AppSettingsShortcut
+          href={crmSectionHref("audit")}
+          label="باز کردن سابقهٔ تصمیم‌ها"
+          description="با فیلتر تصمیم‌گیرنده، نوع پرونده و بازهٔ تاریخ."
+        />
+      ),
     },
     {
       key: "ownership",
@@ -86,39 +115,5 @@ export function CrmSettingsSection() {
         },
       ]}
     />
-  );
-}
-
-function PipelineStages() {
-  return (
-    <div className="space-y-3">
-      <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-        {DEAL_STAGES.map((stage, index) => {
-          const meta = DEAL_STAGE_META[stage];
-          return (
-            <li key={stage} className={`${cardClass} min-w-0 p-3`}>
-              <div className="flex items-start gap-2">
-                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-amber-100 text-xs font-bold text-amber-800 dark:bg-amber-500/20 dark:text-amber-200">
-                  {index + 1}
-                </span>
-                <div className="min-w-0">
-                  <p className="font-semibold text-foreground">{meta.label}</p>
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">{meta.description}</p>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    احتمال پیش‌فرض: <span className="font-semibold text-foreground">{meta.probability}٪</span>
-                  </p>
-                </div>
-              </div>
-            </li>
-          );
-        })}
-      </ol>
-      <Link
-        href={crmSectionHref("deals")}
-        className="inline-flex min-h-10 items-center rounded-lg px-2 text-sm font-semibold text-amber-800 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50 dark:text-amber-300"
-      >
-        رفتن به قیف فروش
-      </Link>
-    </div>
   );
 }

@@ -26,6 +26,12 @@
 
 import { query, withTenant, withTenantTransaction } from "./db";
 import { customerFinancialSummary } from "./crm-accounting-contract";
+import {
+  defaultPipeline,
+  getStage,
+  legacyStageKey,
+  type PipelineStage,
+} from "./crm-pipeline-service";
 import { businessToday } from "./business-day-service";
 import { getBusinessDek } from "./business-keys";
 import { encryptOptional, phoneBlindIndex, phoneKind, phoneLast4 } from "./field-crypto";
@@ -44,6 +50,7 @@ import {
   type DuplicateReason,
 } from "./crm-shared";
 import { daysBetween, lifetimeValue, scorePopulation, type CustomerRfmInput, type RfmScore } from "./crm-scoring";
+import { customerHealth as healthOf, type CustomerHealth } from "./crm-health";
 import type { LifecycleStage } from "./crm-scoring";
 import {
   movedPartyReferences,
@@ -88,6 +95,15 @@ export interface CustomerFile {
   isActive: boolean;
   mergedIntoId: string | null;
   createdAt: string;
+  /**
+   * The relationship's explainable state — «وضعیت رابطه».
+   *
+   * Computed from the aggregates on this page rather than from a second
+   * scoring pass (see `crm-health.ts`), and it carries its own reasons: the
+   * file shows the state *and* the facts behind it, so nobody has to trust a
+   * colour.
+   */
+  health: CustomerHealth;
   /** Purchase aggregates, derived at read time. */
   stats: {
     orderCount: number;
@@ -212,6 +228,16 @@ export async function getCustomerFile(
   const dayDiff = (from: string, to: string) =>
     Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
 
+  // Computed once and handed to both the stats and the health classifier: two
+  // derivations of the same cadence is how a page ends up quoting «هر ۳۰ روز»
+  // beside a health state that used a different number.
+  const lifetime = lifetimeValue({
+    totalSpentRial,
+    orderCount,
+    activeDays: firstPurchaseDate && lastPurchaseDate ? dayDiff(firstPurchaseDate, lastPurchaseDate) : 0,
+  });
+  const daysSinceLastPurchase = lastPurchaseDate ? dayDiff(lastPurchaseDate, today) : null;
+
   return {
     id: row.id as string,
     name: row.name as string,
@@ -232,16 +258,11 @@ export async function getCustomerFile(
       totalSpentRial,
       firstPurchaseDate,
       lastPurchaseDate,
-      daysSinceLastPurchase: lastPurchaseDate ? dayDiff(lastPurchaseDate, today) : null,
+      daysSinceLastPurchase,
       loyaltyPoints: Number(row.loyaltyPoints ?? 0),
       openCases: Number(row.openCases ?? 0),
       openDeals: Number(row.openDeals ?? 0),
-      lifetime: lifetimeValue({
-        totalSpentRial,
-        orderCount,
-        activeDays:
-          firstPurchaseDate && lastPurchaseDate ? dayDiff(firstPurchaseDate, lastPurchaseDate) : 0,
-      }),
+      lifetime,
     },
     rfm: {
       recency: (row.rfmRecency as number | null) ?? null,
@@ -250,6 +271,15 @@ export async function getCustomerFile(
       stage: (row.lifecycleStage as string | null) ?? null,
       scoredAt: (row.rfmScoredAt as string | null) ?? null,
     },
+    health: healthOf({
+      lifecycleStage: (row.lifecycleStage as string | null) ?? null,
+      orderCount,
+      daysSinceLastPurchase,
+      purchaseIntervalDays: lifetime.purchaseIntervalDays,
+      openCases: Number(row.openCases ?? 0),
+      openDeals: Number(row.openDeals ?? 0),
+      overdueRial: arBalance.overdueRial,
+    }),
     accounting: {
       receivableRial: arBalance.balanceRial,
       hasLedger: arBalance.available,
@@ -1606,7 +1636,15 @@ interface CrmDeal extends Record<string, unknown> {
   customerName: string | null;
   title: string;
   description: string;
+  /**
+   * The legacy six-value key, kept because every pre-0157 query and report
+   * reads it. The canonical identity of a deal's position is `stageId`; this
+   * column is mainained in step by the service and is compatibility-only.
+   */
   stage: DealStage;
+  /** The stage row, when the deal has one. Null only for rows written before migration 0157 or by a caller that did not name a stage. */
+  stageId: string | null;
+  pipelineId: string | null;
   valueRial: number;
   probability: number | null;
   expectedCloseDate: string | null;
@@ -1620,7 +1658,8 @@ interface CrmDeal extends Record<string, unknown> {
 }
 
 const DEAL_COLUMNS = `d.id, d.customer_id AS "customerId", c.name AS "customerName",
-  d.title, d.description, d.stage, d.value_rial AS "valueRial", d.probability,
+  d.title, d.description, d.stage, d.stage_id AS "stageId", d.pipeline_id AS "pipelineId",
+  d.value_rial AS "valueRial", d.probability,
   d.expected_close_date::text AS "expectedCloseDate", d.owner_user AS "ownerUser",
   d.source, d.closed_at AS "closedAt", d.lost_reason AS "lostReason",
   d.order_id AS "orderId", d.created_at AS "createdAt", d.updated_at AS "updatedAt"`;
@@ -1663,6 +1702,12 @@ interface UpsertDealInput {
   customerId?: string | null;
   title: string;
   description?: string;
+  /**
+   * The canonical stage, as a row id. Preferred wherever a caller knows it:
+   * a business with its own stages has no legacy key to name, and resolving
+   * `stage` can only ever reach the six seeded ones.
+   */
+  stageId?: string | null;
   stage?: DealStage;
   valueRial?: number;
   probability?: number | null;
@@ -1686,8 +1731,23 @@ interface UpsertDealInput {
  * migration 0118.
  */
 export async function upsertDeal(businessId: string, input: UpsertDealInput): Promise<CrmDeal> {
-  const stage = input.stage ?? "lead";
-  const terminal = stage === "won" || stage === "lost";
+  /**
+   * The canonical stage, resolved once.
+   *
+   * A caller that names `stageId` gets exactly that stage — including one this
+   * business invented, which no legacy key can express. A caller that names the
+   * legacy `stage` key is resolved onto the default pipeline's stage for that
+   * key, so even the old shape writes `stage_id` and a new deal is never born
+   * stageless on the canonical board. A key that no longer maps to a stage
+   * (renamed away, or removed) falls back to the legacy column alone, exactly
+   * as `PATCH /api/crm/deals/[id]` does for a moved stage.
+   */
+  const explicit = input.stageId ? await resolveStageForWrite(businessId, input.stageId) : null;
+  const legacyKey = input.stage ?? "lead";
+  const resolved =
+    explicit ?? (input.stageId ? null : await resolveLegacyStageForWrite(businessId, legacyKey));
+  const stage = resolved ? (legacyStageKey(resolved) as DealStage) : legacyKey;
+  const terminal = resolved ? resolved.outcome !== "open" : stage === "won" || stage === "lost";
 
   if (input.id) {
     await query(
@@ -1695,6 +1755,10 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
           SET customer_id = $3, title = $4, description = $5, stage = $6, value_rial = $7,
               probability = $8, expected_close_date = $9::date, owner_user = $10, source = $11,
               lost_reason = $12, order_id = $13,
+              stage_id = COALESCE($15, stage_id),
+              pipeline_id = COALESCE($16, pipeline_id),
+              stage_entered_at = CASE WHEN $15::uuid IS NOT NULL AND stage_id IS DISTINCT FROM $15::uuid
+                                      THEN now() ELSE stage_entered_at END,
               closed_at = CASE WHEN $14 THEN coalesce(closed_at, now()) ELSE NULL END,
               updated_at = now()
         WHERE business_id = $1 AND id = $2`,
@@ -1713,6 +1777,8 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
         input.lostReason?.trim() || null,
         input.orderId ?? null,
         terminal,
+        resolved?.id ?? null,
+        resolved?.pipelineId ?? null,
       ],
     );
     return (await getDeal(businessId, input.id))!;
@@ -1721,9 +1787,12 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
   const { rows } = await query<{ id: string }>(
     `INSERT INTO crm_deals
        (business_id, customer_id, title, description, stage, value_rial, probability,
-        expected_close_date, owner_user, source, lost_reason, order_id, closed_at, created_by)
+        expected_close_date, owner_user, source, lost_reason, order_id, closed_at, created_by,
+        stage_id, pipeline_id, stage_entered_at, last_activity_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9, $10, $11, $12,
-             CASE WHEN $13 THEN now() ELSE NULL END, $14)
+             CASE WHEN $13 THEN now() ELSE NULL END, $14, $15, $16,
+             CASE WHEN $15::uuid IS NOT NULL THEN now() ELSE NULL END,
+             CASE WHEN $15::uuid IS NOT NULL THEN now() ELSE NULL END)
      RETURNING id`,
     [
       businessId,
@@ -1740,9 +1809,34 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
       input.orderId ?? null,
       terminal,
       input.createdBy ?? "",
+      resolved?.id ?? null,
+      resolved?.pipelineId ?? null,
     ],
   );
   return (await getDeal(businessId, rows[0].id))!;
+}
+
+/**
+ * The stage row for an id, or null.
+ *
+ * `getStage` is the pipeline service's own read, so a stage id from a browser
+ * is verified against this business before it is written — the tenancy check is
+ * in the query, not in the caller.
+ */
+async function resolveStageForWrite(
+  businessId: string,
+  stageId: string,
+): Promise<PipelineStage | null> {
+  return getStage(businessId, stageId);
+}
+
+/** The default pipeline's stage for a legacy key, or null when nothing matches. */
+async function resolveLegacyStageForWrite(
+  businessId: string,
+  legacyKey: DealStage,
+): Promise<PipelineStage | null> {
+  const pipeline = await defaultPipeline(businessId);
+  return pipeline?.stages.find((stage) => stage.legacyKey === legacyKey) ?? null;
 }
 
 /** One deal by id — the read every write path returns through. */

@@ -634,6 +634,27 @@ const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permission[]>
   [PERMISSIONS.billingManage]: [PERMISSIONS.billingView],
 };
 
+/**
+ * Every permission a member holding `permission` also holds: the transitive
+ * closure of `PERMISSION_DEPENDENCIES`.
+ *
+ * Exported because a *second* reader needs the same answer as the runtime:
+ * `crm-permissions.test.ts` checks each CRM API route against the section
+ * table, and it must model "who holds what" exactly as a request does. A test
+ * with its own idea of the implications would pass while production 403s.
+ */
+export function impliedPermissions(permission: Permission): Set<Permission> {
+  const out = new Set<Permission>();
+  const pending = [...(PERMISSION_DEPENDENCIES[permission] ?? [])];
+  while (pending.length > 0) {
+    const next = pending.pop()!;
+    if (out.has(next)) continue;
+    out.add(next);
+    for (const dependency of PERMISSION_DEPENDENCIES[next] ?? []) pending.push(dependency);
+  }
+  return out;
+}
+
 export function effectivePermissions(
   role: Role,
   overrides: PermissionOverrides | null | undefined,
@@ -652,21 +673,15 @@ export function effectivePermissions(
 
   // Convenience grants include their read prerequisites. Explicit revocation
   // is applied afterwards and therefore remains authoritative.
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const permission of [...base]) {
-      for (const dependency of PERMISSION_DEPENDENCIES[permission] ?? []) {
-        if (!base.has(dependency)) { base.add(dependency); changed = true; }
-      }
-    }
+  for (const permission of [...base]) {
+    for (const dependency of impliedPermissions(permission)) base.add(dependency);
   }
   for (const key of overrides?.revoked ?? []) {
     if (isPermission(key)) base.delete(key);
   }
 
   // A revoked prerequisite also disables dependent mutation capabilities.
-  changed = true;
+  let changed = true;
   while (changed) {
     changed = false;
     for (const permission of [...base]) {

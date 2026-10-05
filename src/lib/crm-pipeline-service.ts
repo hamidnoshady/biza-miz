@@ -266,7 +266,7 @@ export async function savePipelineStages(
   pipelineId: string,
   stages: SaveStageInput[],
   actor: { name: string; userId?: string | null },
-): Promise<{ pipeline: Pipeline | null; error?: string }> {
+): Promise<{ pipeline: Pipeline | null; error?: string; blocking?: string[] }> {
   if (!isUuid(pipelineId)) return { pipeline: null, error: "not_found" };
 
   const cleaned = stages
@@ -379,8 +379,8 @@ export async function savePipelineStages(
 
   await recordCrmAudit({
     businessId,
-    kind: "deal.stage_changed",
-    entityType: "deal",
+    kind: "pipeline.stages_changed",
+    entityType: "pipeline",
     entityId: pipelineId,
     summary: "مراحل قیف فروش تغییر کرد",
     detail: { pipelineId, stages: cleaned.map((stage) => stage.name) },
@@ -552,4 +552,278 @@ export async function dealStageHistory(
     ...row,
     secondsInFromStage: row.secondsInFromStage === null ? null : Number(row.secondsInFromStage),
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline configuration — the rows around the stages
+// ---------------------------------------------------------------------------
+
+export interface PipelineStageUsage {
+  stageId: string;
+  /** Deals currently sitting in the stage — the number that forbids deleting it. */
+  dealCount: number;
+  /** Deals that have ever *left* it, from the history table. */
+  departedCount: number;
+}
+
+/**
+ * How many deals each stage of a pipeline holds.
+ *
+ * Read before a save so the configurator can warn *before* the request fails:
+ * `savePipelineStages` refuses to delete a stage that still holds deals (the
+ * deals would become invisible on every board), and a rule a person only
+ * discovers by being rejected is a rule they will try to work around. The
+ * departed count is what makes "deactivate instead" a real choice rather than
+ * advice — a stage 400 deals have passed through is one whose history matters
+ * even if nothing sits in it today.
+ */
+export async function pipelineStageUsage(
+  businessId: string,
+  pipelineId: string,
+): Promise<PipelineStageUsage[]> {
+  if (!isUuid(pipelineId)) return [];
+  const [{ rows: held }, { rows: departed }] = await Promise.all([
+    query<{ stageId: string; count: string }>(
+      `SELECT stage_id AS "stageId", count(*)::text AS count
+         FROM crm_deals
+        WHERE business_id = $1 AND pipeline_id = $2 AND stage_id IS NOT NULL
+        GROUP BY stage_id`,
+      [businessId, pipelineId],
+    ),
+    query<{ stageId: string; count: string }>(
+      `SELECT to_stage_id AS "stageId", count(*)::text AS count
+         FROM crm_deal_stage_history
+        WHERE business_id = $1 AND to_stage_id IS NOT NULL
+        GROUP BY to_stage_id`,
+      [businessId],
+    ),
+  ]);
+  const heldByStage = new Map(held.map((row) => [row.stageId, Number(row.count)]));
+  const departedByStage = new Map(departed.map((row) => [row.stageId, Number(row.count)]));
+  return [...new Set([...heldByStage.keys(), ...departedByStage.keys()])].map((stageId) => ({
+    stageId,
+    dealCount: heldByStage.get(stageId) ?? 0,
+    departedCount: departedByStage.get(stageId) ?? 0,
+  }));
+}
+
+export type PipelineSaveResult =
+  | { ok: true; pipeline: Pipeline }
+  | {
+      ok: false;
+      error:
+        | "not_found"
+        | "name_required"
+        | "duplicate_name"
+        | "default_pipeline_required"
+        | "pipeline_in_use"
+        | "stages_required"
+        | "open_stage_required"
+        | "won_stage_required"
+        | "duplicate_stage_name"
+        | "stage_in_use";
+      /** The stage names that blocked a delete, when that is the error. */
+      blocking?: string[];
+    };
+
+/**
+ * Create a pipeline, copying the default one's stages.
+ *
+ * A new pipeline is not seeded with a fixed list, because the business has
+ * already told us what its stages are: it is looking at them. Copying the
+ * default means a second board (a tender track, an after-sales track) opens
+ * usable and can be edited, instead of presenting an empty column list the way
+ * a freshly provisioned business's board did before `defaultPipeline`
+ * self-healed.
+ *
+ * Exactly one pipeline is the default. The first pipeline a business creates is
+ * default by definition; a later one is not, whatever the caller asks for —
+ * marking a second pipeline default is done by `updatePipeline`, which also
+ * clears the previous one, so the two cannot both be true.
+ */
+export async function createPipeline(
+  businessId: string,
+  input: { name: string; description?: string; isDefault?: boolean },
+  actor: { name: string; userId?: string | null },
+): Promise<PipelineSaveResult> {
+  const name = input.name.trim().slice(0, 120);
+  if (!name) return { ok: false, error: "name_required" };
+
+  const existing = await listPipelines(businessId, { includeArchived: true });
+  if (existing.some((pipeline) => pipeline.name === name)) {
+    return { ok: false, error: "duplicate_name" };
+  }
+  const wantsDefault = existing.length === 0 || input.isDefault === true;
+
+  const created = await withTenantTransaction(businessId, async () => {
+    if (wantsDefault) {
+      await query(
+        `UPDATE crm_pipelines SET is_default = false, updated_at = now()
+          WHERE business_id = $1 AND is_default`,
+        [businessId],
+      );
+    }
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO crm_pipelines (business_id, name, description, is_default, display_order, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [
+        businessId,
+        name,
+        (input.description ?? "").trim().slice(0, 300),
+        wantsDefault,
+        existing.length,
+        actor.name.slice(0, 120),
+      ],
+    );
+    const pipelineId = rows[0].id;
+
+    // Copy the source pipeline's stages, or the seed list when there is no
+    // source yet (the first pipeline a business ever creates).
+    const source = existing[0];
+    const stages = source?.stages.length
+      ? source.stages.map((stage, index) => ({
+          name: stage.name,
+          displayOrder: index + 1,
+          defaultProbability: stage.defaultProbability,
+          outcome: stage.outcome,
+          requirementNote: stage.requirementNote,
+        }))
+      : SEED_STAGES.map((stage, index) => ({
+          name: stage.name,
+          displayOrder: index + 1,
+          defaultProbability: stage.probability,
+          outcome: stage.outcome,
+          requirementNote: "",
+        }));
+    for (const stage of stages) {
+      await query(
+        `INSERT INTO crm_pipeline_stages
+           (business_id, pipeline_id, name, display_order, default_probability, outcome, requirement_note)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (pipeline_id, name) DO NOTHING`,
+        [
+          businessId,
+          pipelineId,
+          stage.name,
+          stage.displayOrder,
+          stage.defaultProbability,
+          stage.outcome,
+          stage.requirementNote,
+        ],
+      );
+    }
+    return pipelineId;
+  });
+
+  const pipelines = await listPipelines(businessId, { includeArchived: true });
+  const pipeline = pipelines.find((entry) => entry.id === created);
+  if (!pipeline) return { ok: false, error: "not_found" };
+
+  await recordCrmAudit({
+    businessId,
+    kind: "pipeline.created",
+    entityType: "pipeline",
+    entityId: pipeline.id,
+    summary: `قیف فروش «${pipeline.name}» ساخته شد`,
+    detail: { pipelineId: pipeline.id, default: pipeline.isDefault },
+    actorUserId: actor.userId ?? null,
+    actorName: actor.name,
+  });
+  return { ok: true, pipeline };
+}
+
+/**
+ * Rename, redescribe, promote to default, or archive a pipeline.
+ *
+ * Three rules, each of which protects something that cannot be recovered:
+ *
+ * - **The default pipeline cannot be archived.** Every deal created without a
+ *   pipeline lands in it and `defaultPipeline()` restores it on read, so
+ *   archiving it produces a board that exists, an empty menu, and a "new deal"
+ *   button that recreates what was just deleted.
+ * - **A pipeline holding open deals cannot be archived.** Same reasoning as a
+ *   stage that holds deals: its cards would be off every board while still
+ *   being counted nowhere.
+ * - **Promoting to default clears the previous default** in the same
+ *   transaction, because the partial unique index would otherwise reject it and
+ *   the error would be a constraint name rather than a sentence.
+ */
+export async function updatePipeline(
+  businessId: string,
+  pipelineId: string,
+  input: { name?: string; description?: string; isDefault?: boolean; archived?: boolean },
+  actor: { name: string; userId?: string | null },
+): Promise<PipelineSaveResult> {
+  if (!isUuid(pipelineId)) return { ok: false, error: "not_found" };
+  const pipelines = await listPipelines(businessId, { includeArchived: true });
+  const current = pipelines.find((pipeline) => pipeline.id === pipelineId);
+  if (!current) return { ok: false, error: "not_found" };
+
+  const name = input.name === undefined ? current.name : input.name.trim().slice(0, 120);
+  if (!name) return { ok: false, error: "name_required" };
+  if (pipelines.some((pipeline) => pipeline.id !== pipelineId && pipeline.name === name)) {
+    return { ok: false, error: "duplicate_name" };
+  }
+
+  if (input.archived === true) {
+    if (current.isDefault) return { ok: false, error: "default_pipeline_required" };
+    const { rows } = await query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM crm_deals
+        WHERE business_id = $1 AND pipeline_id = $2 AND closed_at IS NULL`,
+      [businessId, pipelineId],
+    );
+    if (Number(rows[0]?.count ?? 0) > 0) return { ok: false, error: "pipeline_in_use" };
+  }
+
+  await withTenantTransaction(businessId, async () => {
+    if (input.isDefault === true && !current.isDefault) {
+      await query(
+        `UPDATE crm_pipelines SET is_default = false, updated_at = now()
+          WHERE business_id = $1 AND is_default`,
+        [businessId],
+      );
+    }
+    await query(
+      `UPDATE crm_pipelines
+          SET name = $3,
+              description = $4,
+              is_default = CASE WHEN $5::boolean THEN true ELSE is_default END,
+              archived_at = CASE WHEN $6::boolean THEN now() ELSE archived_at END,
+              updated_at = now()
+        WHERE business_id = $1 AND id = $2`,
+      [
+        businessId,
+        pipelineId,
+        name,
+        (input.description ?? current.description).trim().slice(0, 300),
+        input.isDefault === true,
+        input.archived === true,
+      ],
+    );
+  });
+
+  const updated = (await listPipelines(businessId, { includeArchived: true })).find(
+    (pipeline) => pipeline.id === pipelineId,
+  );
+  if (!updated) return { ok: false, error: "not_found" };
+
+  await recordCrmAudit({
+    businessId,
+    kind: "pipeline.updated",
+    entityType: "pipeline",
+    entityId: pipelineId,
+    summary: input.archived === true
+      ? `قیف فروش «${updated.name}» بایگانی شد`
+      : `قیف فروش «${updated.name}» ویرایش شد`,
+    detail: {
+      pipelineId,
+      name: updated.name,
+      isDefault: updated.isDefault,
+      archived: updated.archivedAt !== null,
+    },
+    actorUserId: actor.userId ?? null,
+    actorName: actor.name,
+  });
+  return { ok: true, pipeline: updated };
 }

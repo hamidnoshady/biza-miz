@@ -236,6 +236,9 @@ export function CustomerFileSection({ customerId, permissions }: { customerId: s
             <StatusBadge tone={file.isActive ? "positive" : "neutral"}>
               {file.isActive ? "فعال" : "آرشیو"}
             </StatusBadge>
+            {/* The explainable state, beside the lifecycle badge it is derived
+                from. Its reasons are printed under the metrics. */}
+            <StatusBadge tone={file.health.tone}>وضعیت رابطه: {file.health.label}</StatusBadge>
             {stage ? <StatusBadge tone={stage.tone}>{stage.label}</StatusBadge> : null}
           </div>
         }
@@ -293,6 +296,23 @@ export function CustomerFileSection({ customerId, permissions }: { customerId: s
                 : `به‌طور میانگین هر ${toPersianDigits(String(file.stats.lifetime.purchaseIntervalDays))} روز یک خرید`
             }
           />
+        </div>
+
+        <div className="mt-4 rounded-lg border border-border/80 p-3">
+          <p className="text-xs font-semibold text-foreground/80">
+            چرا «{file.health.label}»؟
+          </p>
+          <ul className="mt-1.5 space-y-1 text-xs leading-6 text-muted-foreground">
+            {file.health.reasons.map((reason) => (
+              <li key={reason.code} className="flex gap-1.5">
+                <span aria-hidden="true">•</span>
+                <span>{reason.text}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1.5 text-[11px] leading-5 text-muted-foreground/90">
+            {file.health.description}
+          </p>
         </div>
 
         {stage ? (

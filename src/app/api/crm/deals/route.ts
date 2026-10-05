@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import {withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { listDeals, upsertDeal } from "@/lib/crm-service";
+import { defaultPipeline, listPipelines } from "@/lib/crm-pipeline-service";
 import { isDealStage, type DealStage } from "@/lib/crm-shared";
+import { isUuid } from "@/lib/uuid";
 import { tomanToRial } from "@/lib/money";
 
 /**
@@ -28,7 +30,26 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     stage: stage && isDealStage(stage) ? (stage as DealStage) : undefined,
     openOnly: search.get("open") === "1",
   });
-  return NextResponse.json({ deals });
+
+  // The board's columns come from the database, not from the six-value
+  // constant the UI used to hardcode: a business that renamed «واجد شرایط» to
+  // «ارزیابی» sees its own words, and a business with a second pipeline can
+  // open it. `?pipelineId=` selects one; the default is used otherwise, and
+  // `defaultPipeline` self-heals a tenant that has none.
+  const requestedPipelineId = search.get("pipelineId");
+  const pipeline =
+    requestedPipelineId && isUuid(requestedPipelineId)
+      ? (await listPipelines(session.businessId, { includeArchived: true })).find(
+          (entry) => entry.id === requestedPipelineId,
+        ) ?? (await defaultPipeline(session.businessId))
+      : await defaultPipeline(session.businessId);
+  const pipelines = (await listPipelines(session.businessId)).map((entry) => ({
+    id: entry.id,
+    name: entry.name,
+    isDefault: entry.isDefault,
+  }));
+
+  return NextResponse.json({ deals, pipeline, pipelines });
 });
 
 interface DealBody {
@@ -36,6 +57,8 @@ interface DealBody {
   customerId?: string | null;
   title?: string;
   description?: string;
+  /** The canonical stage row. Preferred over `stage` wherever the caller has it. */
+  stageId?: string;
   stage?: string;
   /** The UI speaks Toman; storage is integer Rial. Converted here, once. */
   valueToman?: number;
@@ -61,6 +84,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const title = body.title?.trim();
   if (!title) return NextResponse.json({ error: "deal_title_required" }, { status: 400 });
+  if (body.stageId !== undefined && !isUuid(body.stageId)) {
+    return NextResponse.json({ error: "deal_stage_invalid" }, { status: 400 });
+  }
   if (body.stage !== undefined && !isDealStage(body.stage)) {
     return NextResponse.json({ error: "deal_stage_invalid" }, { status: 400 });
   }
@@ -87,6 +113,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     customerId: body.customerId ?? null,
     title,
     description: body.description,
+    stageId: body.stageId,
     stage: body.stage as DealStage | undefined,
     valueRial,
     probability: body.probability,

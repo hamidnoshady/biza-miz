@@ -552,3 +552,90 @@ export interface PartyRelationship extends Record<string, unknown> {
 export function isRelationshipKind(value: unknown): value is RelationshipKind {
   return typeof value === "string" && (RELATIONSHIP_KINDS as readonly string[]).includes(value);
 }
+
+// ---------------------------------------------------------------------------
+// The decision log's vocabulary
+// ---------------------------------------------------------------------------
+
+/**
+ * The audit kinds, labelled.
+ *
+ * The *keys* are owned by `crm-audit-service.ts` (the write half). This is the
+ * display vocabulary beside them, and it lives in `crm-shared.ts` for the usual
+ * reason: the audit screen is a client component, and a client component may
+ * not value-import a module that reaches `./db` — `crm-app-boundaries.test.ts`
+ * fails the build on exactly that.
+ *
+ * An unknown kind still renders (the screen falls back to the raw key). A
+ * deployment where the write half knows a kind the read half has not been
+ * taught must show *something* rather than an empty row, and the fallback is
+ * also what makes adding a kind a one-file change instead of two.
+ */
+export const CRM_AUDIT_KIND_LABELS: Record<string, string> = {
+  "lead.created": "ایجاد سرنخ",
+  "lead.status_changed": "تغییر وضعیت سرنخ",
+  "lead.converted": "تبدیل سرنخ به مشتری",
+  "deal.created": "ایجاد فرصت",
+  "deal.stage_changed": "جابه‌جایی در قیف",
+  "deal.owner_changed": "تغییر مالک فرصت",
+  "deal.sales_document_linked": "اتصال سند فروش به فرصت",
+  "case.created": "ایجاد تیکت",
+  "case.status_changed": "تغییر وضعیت تیکت",
+  "case.assigned": "واگذاری تیکت",
+  "case.reopened": "بازگشایی تیکت",
+  "consent.changed": "تغییر رضایت ارتباط",
+  "party.merged": "ادغام پرونده‌ها",
+  "party.owner_changed": "تغییر مالک پرونده",
+  "external.reconciled": "تطبیق هویت بیرونی",
+  "external.conflict_resolved": "رفع تعارض هویت بیرونی",
+  "segment.changed": "تغییر بخش‌بندی",
+  "import.committed": "ورود داده",
+  "export.generated": "خروجی داده",
+  "custom_field.created": "تعریف فیلد کسب‌وکار",
+  "custom_field.archived": "بایگانی فیلد کسب‌وکار",
+  "pipeline.created": "ایجاد قیف فروش",
+  "pipeline.updated": "ویرایش قیف فروش",
+  "pipeline.stages_changed": "تغییر مراحل قیف فروش",
+  "relationship.linked": "ایجاد نسبت بین اشخاص",
+  "relationship.unlinked": "حذف نسبت بین اشخاص",
+};
+
+/** The entity a decision was about, labelled. */
+export const CRM_AUDIT_ENTITY_LABELS: Record<string, string> = {
+  lead: "سرنخ",
+  deal: "فرصت",
+  case: "تیکت",
+  party: "مشتری",
+  segment: "بخش‌بندی",
+  external_profile: "هویت بیرونی",
+  import: "ورود داده",
+  export: "خروجی داده",
+  custom_field: "فیلد کسب‌وکار",
+  pipeline: "قیف فروش",
+  relationship: "نسبت",
+};
+
+/** The entities the log's filter offers, in menu order. */
+export const CRM_AUDIT_ENTITY_TYPES = [
+  "lead",
+  "deal",
+  "case",
+  "party",
+  "segment",
+  "external_profile",
+  "custom_field",
+  "pipeline",
+  "relationship",
+  "import",
+  "export",
+] as const;
+
+/** Human-readable kind, falling back to the raw key for a kind this build has not learned. */
+export function crmAuditKindLabel(kind: string): string {
+  return CRM_AUDIT_KIND_LABELS[kind] ?? kind;
+}
+
+/** Human-readable entity, falling back to the raw value. */
+export function crmAuditEntityLabel(entityType: string): string {
+  return CRM_AUDIT_ENTITY_LABELS[entityType] ?? entityType;
+}
