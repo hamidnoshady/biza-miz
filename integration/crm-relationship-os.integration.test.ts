@@ -205,7 +205,11 @@ describe("smart queues", () => {
 
   it("narrows to a section's own queues", () => {
     expect(queues.queueKeysForSection("activities")).toEqual(["overdue_follow_ups", "due_today"]);
-    expect(queues.queueKeysForSection("deals")).toEqual(["stalled_deals", "high_value_open"]);
+    expect(queues.queueKeysForSection("deals")).toEqual([
+      "stalled_deals",
+      "high_value_open",
+      "departed_owner",
+    ]);
     // An unknown section returns nothing rather than everything: a typo must
     // not turn a section header into a copy of the home page.
     expect(queues.queueKeysForSection("nonsense")).toEqual([]);
@@ -625,6 +629,28 @@ describe("ownership is an id, and the snapshot is kept", () => {
     });
     expect(deal.ownerUserId).toBeNull();
     expect(deal.ownerUser).toBe("");
+  });
+
+  it("surfaces work owned by a departed member, and stops once it is reassigned", async () => {
+    const departed = await makeMember("عضو غیرفعال", false);
+    const active = await makeMember("عضو فعال");
+    const customer = await makeParty(biz.id, "مشتری واگذارشده");
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO crm_cases (business_id, customer_id, subject, status, priority, assigned_to, assignee_user_id, case_number)
+       VALUES ($1, $2, 'تیکت جامانده', 'open', 'normal', 'عضو غیرفعال', $3, 9001) RETURNING id`,
+      [biz.id, customer, departed],
+    );
+
+    const before = (await queues.crmQueues(biz.id)).find((queue) => queue.key === "departed_owner")!;
+    expect(before.count).toBeGreaterThan(0);
+    expect(before.items.map((item) => item.id)).toContain(rows[0].id);
+    expect(before.why.length).toBeGreaterThan(0);
+    for (const item of before.items) expect(item.href.startsWith("/crm/")).toBe(true);
+
+    // Reassignment is what clears it — the queue is the prompt, not the actor.
+    await db.query(`UPDATE crm_cases SET assignee_user_id = $2 WHERE id = $1`, [rows[0].id, active]);
+    const after = (await queues.crmQueues(biz.id)).find((queue) => queue.key === "departed_owner")!;
+    expect(after.items.map((item) => item.id)).not.toContain(rows[0].id);
   });
 
   it("offers inactive members for reassignment rather than hiding them", async () => {

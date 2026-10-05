@@ -42,6 +42,7 @@ import { EmptyState, SectionCard, StatusBadge } from "@/app/dashboard/page-chrom
 import { api, ErrorBox, errorMessage, InfoBox } from "@/app/dashboard/ui";
 import { crmCustomerHref } from "./crm-routes";
 import { CrmCardHeading } from "./crm-card-heading";
+import { CrmTodayQueues } from "./today-queues";
 
 interface Side {
   id: string;
@@ -112,6 +113,10 @@ export function DuplicatesSection() {
 
   return (
     <div className="min-w-0 space-y-4">
+
+      {/* This screen's own queue, above the list: the count is the answer to
+          «چقدر کار روی زمین مانده؟» and each row opens the record it names. */}
+      <CrmTodayQueues section="duplicates" title="پرونده‌های مشکوک به تکرار" />
       <ErrorBox>{error}</ErrorBox>
       {info ? <InfoBox>{info}</InfoBox> : null}
 

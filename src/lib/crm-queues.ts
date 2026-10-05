@@ -67,6 +67,7 @@ export const CRM_QUEUE_KEYS = [
   "stalled_deals",
   "high_value_open",
   "unassigned_cases",
+  "departed_owner",
   "vip_follow_up",
   "at_risk_customers",
   "new_leads",
@@ -106,9 +107,9 @@ export function queueKeysForSection(section: string): CrmQueueKey[] {
     case "activities":
       return ["overdue_follow_ups", "due_today"];
     case "cases":
-      return ["sla_risk", "waiting_on_customer", "unassigned_cases"];
+      return ["sla_risk", "waiting_on_customer", "unassigned_cases", "departed_owner"];
     case "deals":
-      return ["stalled_deals", "high_value_open"];
+      return ["stalled_deals", "high_value_open", "departed_owner"];
     case "directory":
       return ["at_risk_customers", "vip_follow_up"];
     case "leads":
@@ -294,6 +295,51 @@ function queueQueries(
       label: "تیکت‌های بی‌مسئول",
       why: "تیکت‌های بازی که مالکی ندارند، پس کسی خودش را مسئولشان نمی‌داند.",
       action: "به یک عضو تیم واگذار کنید.",
+      ...result,
+    })),
+
+    /*
+     * Work owned by somebody who cannot sign in.
+     *
+     * Not folded into «بی‌مسئول»: a case whose owner left is *claimed*, and
+     * its owner is the reason it is stuck. The queue exists because the id
+     * columns make the question answerable — a free-text name would have left
+     * a departed colleague's work looking perfectly assigned forever.
+     *
+     * Reassignment is manual by design; nothing moves a portfolio of real
+     * customers on a role change.
+     */
+    departed_owner: readQueue(
+      `SELECT count(*) OVER ()::text AS total, w.id, w.title, w.subtitle, w.at, w.href
+         FROM (
+           SELECT d.id, d.title AS title,
+                  coalesce(p.name, 'بدون مشتری') || ' · معامله · مسئول: ' || u.name AS subtitle,
+                  coalesce(d.last_activity_at, d.stage_entered_at, d.updated_at, d.created_at) AS at,
+                  '${DEALS}?deal=' || d.id AS href
+             FROM crm_deals d
+             JOIN (SELECT id, coalesce(nullif(btrim(full_name), ''), email) AS name
+                     FROM users WHERE is_active = false) u ON u.id = d.owner_user_id
+             LEFT JOIN parties p ON p.id = d.customer_id
+            WHERE d.business_id = $1 AND d.closed_at IS NULL
+           UNION ALL
+           SELECT k.id, '#' || k.case_number::text || ' · ' || k.subject AS title,
+                  coalesce(p.name, 'بدون مشتری') || ' · تیکت · مسئول: ' || u.name AS subtitle,
+                  k.opened_at AS at,
+                  '${CASES}?case=' || k.id AS href
+             FROM crm_cases k
+             JOIN (SELECT id, coalesce(nullif(btrim(full_name), ''), email) AS name
+                     FROM users WHERE is_active = false) u ON u.id = k.assignee_user_id
+             LEFT JOIN parties p ON p.id = k.customer_id
+            WHERE k.business_id = $1 AND k.status IN ('open', 'in_progress', 'waiting')
+         ) AS w
+        ORDER BY w.at, w.id
+        LIMIT $2`,
+      [businessId, limit],
+    ).then((result) => ({
+      key: "departed_owner" as const,
+      label: "کارهای عضو غیرفعال",
+      why: "معامله‌ها و تیکت‌هایی که مسئولشان دیگر نمی‌تواند وارد شود، پس کسی پیگیری نمی‌کند.",
+      action: "به یک عضو فعال واگذار کنید یا مسئول را بردارید تا در صف بی‌مسئول‌ها بیاید.",
       ...result,
     })),
 

@@ -146,6 +146,11 @@ already had data. **0199** backfills them, under two rules:
 2. **Nothing is deleted or rewritten.** The migration only ever fills NULL ids,
    and is idempotent.
 
+The attention feed closes the loop: the **«کارهای عضو غیرفعال»** queue lists the
+open deals and tickets whose owner can no longer sign in, and reassigning one
+removes it. Reassignment itself is always manual — nothing moves a portfolio of
+real customers because somebody's role changed.
+
 `src/lib/crm-ownership.ts` is the write side: `resolveOwner` turns a member id
 (verified to belong to this business — a foreign id is a leak, not an
 assignment) or a typed name into `{ userId, name }`, and writes go through it, so
@@ -198,8 +203,13 @@ These are named here so the seams are visible rather than implied:
   `crm-app-boundaries.test.ts` keeps the assistant away from irreversible acts.
 - **Automations (When → If → Then)** and the **data-quality workspace** that
   groups duplicates, reconciliation and issues into one queue.
-- **Import/export through the platform data-transfer engine** — the CRM entities
-  are registered there; no CRM-specific exporter is added.
+
+Import and export are **not** on this list, and never appear as a CRM button:
+the platform data-transfer engine owns that door, and the CRM's entities
+(customers, companies, party categories, leads, deals, activities, pipeline
+stages) are registered as adapters in `src/lib/data-transfer/entities/crm.ts`.
+A pipeline screen that shipped its own CSV export would be a second exporter
+with a second idea of what a customer row is.
 
 Anything in this list that ships gets its rule written into
 `docs/crm-architecture.md` first, as the existing rules were.
