@@ -687,3 +687,242 @@ describe("Wave 10 — watch flagship", () => {
     expect(result.breakdown.total).toBe("1000000");
   });
 });
+
+/**
+ * Issue #795 Phase 1 — accounting-correctness guards on the shared repair
+ * workflow: server-enforced warranty billing, part sourcing (only stock
+ * parts relieve inventory), industry-aware repair COGS, cross-branch serial
+ * rejection, and the one-active-repair-per-serial invariant.
+ */
+describe("Issue #795 Phase 1 — repair lifecycle & accounting guards", () => {
+  async function sellUnderWarranty() {
+    const { serial } = await makeWatchUnit({ warrantyMonths: 24 });
+    await withTransaction((client) =>
+      watchSales.sellSerializedUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: serial.id,
+        price: 50_000_000,
+        vatPercent: 9,
+        paymentMethod: "cash",
+      }),
+    );
+    return serial;
+  }
+
+  it("refuses a labor charge at intake on a warranty job without an out-of-coverage reason, and accepts one with it", async () => {
+    const serial = await sellUnderWarranty();
+
+    await expect(
+      repairs.createRepairTicket({
+        locationId: biz.locationId,
+        itemDescription: "ساعت در گارانتی",
+        serialId: serial.id,
+        laborCharge: 1_000_000,
+      }),
+    ).rejects.toThrow(/خارج از پوشش/);
+
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت در گارانتی",
+      serialId: serial.id,
+      laborCharge: 1_000_000,
+      nonCoveredReason: "آب‌خوردگی — خارج از پوشش، با تأیید مشتری",
+    });
+    expect(ticket.underWarranty).toBe(true);
+    expect(ticket.nonCoveredReason).toContain("آب‌خوردگی");
+  });
+
+  it("refuses to bill a part on a warranty job, and refuses to sneak the bill in through an edit", async () => {
+    const serial = await sellUnderWarranty();
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت در گارانتی",
+      serialId: serial.id,
+    });
+    expect(ticket.underWarranty).toBe(true);
+
+    // Part with a customer charge: refused while no reason is on file; the
+    // zero-charge (covered) part is fine.
+    await expect(
+      repairs.addRepairPart(ticket.id, { description: "شیشه", quantity: "1", unitCost: 400_000, charge: 900_000 }),
+    ).rejects.toThrow(/خارج از پوشش/);
+    await repairs.addRepairPart(ticket.id, { description: "باتری", quantity: "1", unitCost: 300_000, charge: 0 });
+
+    // Editing a labor charge onto the covered job is refused the same way.
+    await expect(repairs.updateRepairTicket(ticket.id, { laborCharge: 2_000_000 })).rejects.toThrow(
+      /خارج از پوشش/,
+    );
+
+    // With the explicit reason recorded, the out-of-coverage work may bill.
+    await repairs.updateRepairTicket(ticket.id, { nonCoveredReason: "بند سفارشی — خارج از پوشش" });
+    await repairs.addRepairPart(ticket.id, { description: "بند", quantity: "1", unitCost: 500_000, charge: 1_200_000 });
+
+    // ...and once billed parts exist, the reason can no longer be cleared.
+    await expect(repairs.updateRepairTicket(ticket.id, { nonCoveredReason: "" })).rejects.toThrow(
+      /نمی‌توان حذف کرد/,
+    );
+  });
+
+  it("re-checks the warranty invariant at close even if the reason was nulled behind the service's back", async () => {
+    const serial = await sellUnderWarranty();
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت در گارانتی",
+      serialId: serial.id,
+      laborCharge: 1_000_000,
+      nonCoveredReason: "کار خارج از پوشش",
+    });
+
+    // Simulate drift (a direct DB edit) that the earlier guards never saw.
+    await db.query("UPDATE repair_tickets SET non_covered_reason = NULL WHERE id = $1", [ticket.id]);
+
+    await expect(
+      withTransaction((client) =>
+        repairs.closeRepairTicket(client, { businessId: biz.id, ticketId: ticket.id, paymentMethod: "cash" }),
+      ),
+    ).rejects.toThrow(/خارج از پوشش/);
+  });
+
+  it("rejects intake for a serial that belongs to another branch", async () => {
+    const otherLoc = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Branch 2') RETURNING id",
+      [biz.id],
+    );
+    const item = await itemsService.createItem({
+      locationId: otherLoc.rows[0].id,
+      name: "ساعت شعبه دو",
+      tracking: "serial",
+    });
+    const serial = await itemsService.addSerial(item.id, `SN-X-${randomUUID().slice(0, 6)}`, {
+      unitCost: 10_000_000,
+    });
+
+    await expect(
+      repairs.createRepairTicket({
+        locationId: biz.locationId,
+        itemDescription: "ساعت شعبهٔ دیگر",
+        serialId: serial.id,
+      }),
+    ).rejects.toThrow(/شعبهٔ فعال نیست/);
+
+    // The foreign unit must be untouched — still on its own branch's shelf.
+    expect((await itemsService.getSerial(serial.id))?.status).toBe("in_stock");
+  });
+
+  it("allows only one active repair per serial; a cancelled ticket frees the unit for a new intake", async () => {
+    const { serial } = await makeWatchUnit();
+    const first = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت انبار",
+      serialId: serial.id,
+    });
+
+    await expect(
+      repairs.createRepairTicket({
+        locationId: biz.locationId,
+        itemDescription: "پذیرش تکراری",
+        serialId: serial.id,
+      }),
+    ).rejects.toThrow(/تیکت تعمیر باز/);
+
+    await repairs.setRepairStatus(first.id, "cancelled");
+    const second = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "پذیرش دوم",
+      serialId: serial.id,
+    });
+    expect(second.ticketNumber).toBe(first.ticketNumber + 1);
+  });
+
+  it("relieves inventory only for stock-sourced parts — an external part's cost never credits watch inventory", async () => {
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت مشتری",
+      laborCharge: 1_000_000,
+      vatPercent: 0,
+    });
+    await repairs.addRepairPart(ticket.id, {
+      description: "باتری از انبار",
+      quantity: "1",
+      unitCost: 300_000,
+      charge: 500_000,
+      source: "stock",
+    });
+    await repairs.addRepairPart(ticket.id, {
+      description: "شیشهٔ سفارشی خرید بیرونی",
+      quantity: "1",
+      unitCost: 2_000_000,
+      charge: 2_500_000,
+      source: "external",
+    });
+
+    const result = await withTransaction((client) =>
+      repairs.closeRepairTicket(client, { businessId: biz.id, ticketId: ticket.id, paymentMethod: "cash" }),
+    );
+
+    // The customer is still billed for both parts…
+    expect(result.breakdown.partsCharge).toBe("3000000");
+    // …but only the stock part's cost leaves watch inventory.
+    expect(await linesOf(result.partsCostEntryId)).toEqual([
+      { account_id: acct.repairPartsExpense, debit: "300000", credit: "0" },
+      { account_id: acct.watchInventory, debit: "0", credit: "300000" },
+    ]);
+  });
+
+  it("credits the jewelry inventory account — not watch inventory — when a jewelry business closes a repair with parts", async () => {
+    // A second, jewelry business with its own branch and chart of accounts.
+    const jbiz = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug, industry) VALUES ('Gold Co', $1, 'jewelry') RETURNING id",
+      [`gold-${randomUUID().slice(0, 8)}`],
+    );
+    const jloc = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Main') RETURNING id",
+      [jbiz.rows[0].id],
+    );
+    const jacct = await db.query<{ id: string; code: string }>(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, '1100', 'Cash', 'asset'),
+              ($1, '2200', 'VAT Payable', 'liability'),
+              ($1, '4800', 'Repair Revenue', 'revenue'),
+              ($1, '5130', 'Repair Parts Expense', 'expense'),
+              ($1, '1320', 'Gold Inventory', 'asset')
+       RETURNING id, code`,
+      [jbiz.rows[0].id],
+    );
+    const byCode = new Map(jacct.rows.map((r) => [r.code, r.id]));
+
+    const ticket = await repairs.createRepairTicket({
+      locationId: jloc.rows[0].id,
+      itemDescription: "گردنبند — تعویض قفل",
+      laborCharge: 1_500_000,
+      vatPercent: 0,
+    });
+    await repairs.addRepairPart(ticket.id, {
+      description: "قفل طلا",
+      quantity: "1",
+      unitCost: 700_000,
+      charge: 1_000_000,
+      source: "stock",
+    });
+
+    const result = await withTransaction((client) =>
+      repairs.closeRepairTicket(client, {
+        businessId: jbiz.rows[0].id,
+        ticketId: ticket.id,
+        paymentMethod: "cash",
+      }),
+    );
+
+    expect(await linesOf(result.partsCostEntryId)).toEqual([
+      { account_id: byCode.get("5130"), debit: "700000", credit: "0" },
+      { account_id: byCode.get("1320"), debit: "0", credit: "700000" },
+    ]);
+    // VAT is 0 here, and the ledger drops all-zero lines — so the revenue
+    // entry is just the cash debit against repair revenue.
+    expect(await linesOf(result.revenueEntryId)).toEqual([
+      { account_id: byCode.get("1100"), debit: "2500000", credit: "0" },
+      { account_id: byCode.get("4800"), debit: "0", credit: "2500000" },
+    ]);
+  });
+});

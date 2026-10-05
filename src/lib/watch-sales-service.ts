@@ -102,7 +102,19 @@ export async function sellSerializedUnit(
     vatPercent: input.vatPercent,
   });
 
-  const saleDate = input.saleDate ?? todayIso();
+  // Issue #795 (item 21) — an omitted sale date defaults to the branch's own
+  // business-local day, not the UTC calendar day: around local midnight the
+  // two disagree, and the warranty window (which starts here) would otherwise
+  // open on the wrong business day.
+  let saleDate = input.saleDate ?? null;
+  if (!saleDate) {
+    const { rows: dayRows } = await client.query<{ today: string }>(
+      `SELECT app_business_date(now(), coalesce(timezone, 'Asia/Tehran'), business_day_start_minutes)::text AS today
+         FROM locations WHERE id = $1`,
+      [input.locationId],
+    );
+    saleDate = dayRows[0]?.today ?? todayIso();
+  }
   const lineTenders = resolveLineTenders(input, breakdown.total);
 
   const { entryId: revenueEntryId } = await emitDomainEvent(client, {
@@ -214,12 +226,12 @@ export async function listSerialUnits(locationId: string): Promise<SerialUnitSum
 }
 
 /** The warranty window running on a unit, if any — what a repair intake checks to decide whether the job is billable. */
-export async function getSerialWarranty(serialId: string): Promise<SerialWarranty | null> {
-  const { rows } = await query<{ serial_id: string; months: number; start_date: string; end_date: string }>(
-    `SELECT serial_id, months, start_date::text AS start_date, end_date::text AS end_date
-       FROM serial_warranties WHERE serial_id = $1`,
-    [serialId],
-  );
+export async function getSerialWarranty(serialId: string, client?: PoolClient): Promise<SerialWarranty | null> {
+  const sql = `SELECT serial_id, months, start_date::text AS start_date, end_date::text AS end_date
+       FROM serial_warranties WHERE serial_id = $1`;
+  const { rows } = client
+    ? await client.query<{ serial_id: string; months: number; start_date: string; end_date: string }>(sql, [serialId])
+    : await query<{ serial_id: string; months: number; start_date: string; end_date: string }>(sql, [serialId]);
   const row = rows[0];
   return row
     ? { serialId: row.serial_id, months: row.months, startDate: row.start_date, endDate: row.end_date }

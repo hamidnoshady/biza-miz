@@ -295,6 +295,7 @@ function PartsPanel({ ticket, busy, run }: { ticket: RepairTicket; busy: boolean
   const [quantity, setQuantity] = useState("1");
   const [unitCost, setUnitCost] = useState("");
   const [charge, setCharge] = useState("");
+  const [source, setSource] = useState("stock");
 
   const load = useCallback(() => {
     setLoading(true);
@@ -318,6 +319,7 @@ function PartsPanel({ ticket, busy, run }: { ticket: RepairTicket; busy: boolean
           quantity: quantity || "1",
           unitCost: money.fromInput(Math.max(0, Math.round(Number(unitCost || 0)))),
           charge: money.fromInput(Math.max(0, Math.round(Number(charge || 0)))),
+          source,
         }),
       }),
     );
@@ -326,6 +328,7 @@ function PartsPanel({ ticket, busy, run }: { ticket: RepairTicket; busy: boolean
       setQuantity("1");
       setUnitCost("");
       setCharge("");
+      setSource("stock");
       load();
     }
   }
@@ -342,6 +345,7 @@ function PartsPanel({ ticket, busy, run }: { ticket: RepairTicket; busy: boolean
             <span className="min-w-0 break-words">
               {part.description} × {formatQuantity(part.quantity)} — بهای تمام‌شده {money.format(part.unitCost)} / دریافتی{" "}
               {money.format(part.charge)}
+              {part.source === "external" ? " · خرید بیرونی" : " · از انبار"}
             </span>
             {isOpen ? (
               <Button
@@ -392,13 +396,27 @@ function PartsPanel({ ticket, busy, run }: { ticket: RepairTicket; busy: boolean
               onChange={(e) => setUnitCost(e.target.value)}
             />
           </Field>
-          <Field label={`دریافتی از مشتری (${money.unitLabel})`} hint="در گارانتی صفر بگذارید.">
+          <Field
+            label={`دریافتی از مشتری (${money.unitLabel})`}
+            hint={ticket.underWarranty ? "در گارانتی فقط با ثبت «علت خارج از پوشش» مبلغ مجاز است." : undefined}
+          >
             <PersianNumberInput
               className={watchInputClass}
               dir="ltr"
               inputMode="numeric"
               value={charge}
               onChange={(e) => setCharge(e.target.value)}
+            />
+          </Field>
+          <Field label="منبع قطعه" hint="«از انبار» هنگام بستن تیکت از موجودی کسر می‌شود.">
+            <SearchableSelect
+              className={watchInputClass}
+              value={source}
+              onChange={setSource}
+              options={[
+                { value: "stock", label: "از انبار" },
+                { value: "external", label: "خرید بیرونی" },
+              ]}
             />
           </Field>
           <div className="sm:col-span-4">
@@ -526,6 +544,7 @@ function ClosePanel({
   const [laborCharge, setLaborCharge] = useState(String(money.toInput(ticket.laborCharge)));
   const [vatPercent, setVatPercent] = useState(String(ticket.vatPercent));
   const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [nonCoveredReason, setNonCoveredReason] = useState(ticket.nonCoveredReason ?? "");
 
   async function close(e: React.FormEvent) {
     e.preventDefault();
@@ -535,6 +554,9 @@ function ClosePanel({
         body: JSON.stringify({
           laborCharge: money.fromInput(Math.max(0, Math.round(Number(laborCharge || 0)))),
           vatPercent: Number(vatPercent || 0),
+          // The server refuses any customer charge on a warranty job without
+          // this explicit out-of-coverage reason (issue #795).
+          ...(ticket.underWarranty ? { nonCoveredReason: nonCoveredReason.trim() || null } : {}),
         }),
       }),
     );
@@ -550,6 +572,12 @@ function ClosePanel({
 
   return (
     <PanelShell>
+      {ticket.underWarranty ? (
+        <p className="mb-3 text-xs leading-5 text-muted-foreground">
+          این تیکت در گارانتی است: اجرت و قطعات تحت پوشش برای مشتری رایگان است. دریافت هر مبلغی فقط با ثبت
+          «علت خارج از پوشش گارانتی» (کار خارج از پوشش که مشتری پذیرفته) مجاز است.
+        </p>
+      ) : null}
       <form onSubmit={close} className="grid min-w-0 gap-3 sm:grid-cols-3">
         <Field label={`اجرت تعمیر (${money.unitLabel})`}>
           <PersianNumberInput
@@ -581,6 +609,18 @@ function ClosePanel({
             ]}
           />
         </Field>
+        {ticket.underWarranty ? (
+          <div className="sm:col-span-3">
+            <Field label="علت خارج از پوشش گارانتی" hint="فقط اگر مبلغی از مشتری دریافت می‌شود.">
+              <input
+                className={watchInputClass}
+                value={nonCoveredReason}
+                onChange={(e) => setNonCoveredReason(e.target.value)}
+                placeholder="مثلاً آب‌خوردگی — خارج از پوشش، با تأیید مشتری"
+              />
+            </Field>
+          </div>
+        ) : null}
         <div className="sm:col-span-3">
           <Button type="submit" disabled={busy} size="sm" className="min-h-[44px] border border-amber-300 dark:border-amber-500/40 px-5 font-semibold">
             تسویه و بستن

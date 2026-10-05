@@ -54,6 +54,8 @@ export interface RepairTicket {
   reportedIssue: string | null;
   status: RepairStatus;
   underWarranty: boolean;
+  /** The explicit out-of-coverage reason that permits billing an under-warranty job (issue #795). */
+  nonCoveredReason: string | null;
   laborCharge: number;
   vatPercent: number;
   /** Phase 27 Wave 10 — the estimate the customer must approve before work starts. */
@@ -71,6 +73,8 @@ export interface RepairPart {
   quantity: string;
   unitCost: number;
   charge: number;
+  /** 'stock' relieves the shop's own inventory at close; 'external' never does. */
+  source: "stock" | "external";
 }
 
 export type ServiceReminderState = "overdue" | "due";
