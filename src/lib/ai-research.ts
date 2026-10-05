@@ -313,7 +313,15 @@ export async function runResearchRun(input: {
 }): Promise<{ ok: true; outcome: RunResearchOutcome } | { ok: false; error: string }> {
   const run = await getResearchRun({ id: input.id, businessId: input.businessId });
   if (!run) return { ok: false, error: "research_not_found" };
-  if (run.status !== "running") return { ok: false, error: "research_not_running" };
+  // Expiry is checked BEFORE the status, and the order is load-bearing.
+  //
+  // `getResearchRun` reports an expired run as `status: "expired"` rather than as
+  // whatever it was, so a status check placed first swallows it: an expired
+  // *running* run answered `research_not_running`, and the branch below was
+  // unreachable. The consequence is a wrong answer on the one question a
+  // caller asks when a run will not start — "was it approved?" versus "did its
+  // environment lapse?" — which is the difference between a support ticket and
+  // a silent give-up.
   if (isExpired(run)) {
     await finishRun(run, "expired", "research_environment_expired", {
       findings: [],
@@ -325,6 +333,7 @@ export async function runResearchRun(input: {
     });
     return { ok: false, error: "research_environment_expired" };
   }
+  if (run.status !== "running") return { ok: false, error: "research_not_running" };
 
   const findings: ResearchFinding[] = [];
   const sources: ResearchSource[] = [];
@@ -332,25 +341,28 @@ export async function runResearchRun(input: {
   let promptTokens = 0;
   let completionTokens = 0;
 
+  // The cost of the round that just finished. Zero until the first one lands,
+  // which is why the projection below only applies from round 2 onward.
+  let lastRoundCostUsd = 0;
+
   for (let round = 1; round <= run.maxRounds; round += 1) {
-    const budgetLeft = run.spendCapUsd - costUsd;
-    if (budgetLeft <= 0) {
-      await finishRun(run, "spend_cap_reached", "research_spend_cap_reached", {
-        findings,
-        sources,
-        costUsd,
-        promptTokens,
-        completionTokens,
-        roundsUsed: round - 1,
-      });
-      return {
-        ok: true,
-        outcome: {
-          run: (await getResearchRun({ id: run.id, businessId: run.businessId })) ?? run,
-          costUsd,
-          usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
-        },
-      };
+    // The cap, checked before the round — and not merely as "is anything left".
+    // A round is not free to attempt just because there was budget when it
+    // started: with a $0.03 cap and a $0.02 round, "budget remaining > 0" lets
+    // round 2 open and settles $0.04, a third over the ceiling the member
+    // actually approved. On the one path in the product that spends money with
+    // nobody watching, that is the number that matters.
+    //
+    // So from round 2 the loop projects forward on the round it has just paid
+    // for and refuses to open one it can predict will breach the cap. The cost
+    // of a round is unknowable in advance; its predecessor is the best estimate
+    // available, and refusing on it is strictly safer than hoping.
+    const projected = costUsd + lastRoundCostUsd;
+    if (costUsd > 0 && projected > run.spendCapUsd) {
+      return await stopAtCap(run, findings, sources, costUsd, promptTokens, completionTokens, round - 1);
+    }
+    if (run.spendCapUsd - costUsd <= 0) {
+      return await stopAtCap(run, findings, sources, costUsd, promptTokens, completionTokens, round - 1);
     }
 
     // Round 1 gathers evidence; later rounds ask for findings on what the
@@ -371,7 +383,9 @@ export async function runResearchRun(input: {
         system: buildResearchRoundPrompt(run, round, context.text),
         user: run.question,
       });
-      costUsd += response.costUsd ?? 0;
+      const roundCost = response.costUsd ?? 0;
+      costUsd += roundCost;
+      lastRoundCostUsd = roundCost;
       promptTokens += response.usage.prompt_tokens;
       completionTokens += response.usage.completion_tokens;
       const parsed = parseFindings(response.content ?? "");
@@ -399,6 +413,8 @@ export async function runResearchRun(input: {
   promptTokens += answer.usage.promptTokens;
   completionTokens += answer.usage.completionTokens;
 
+  // A run that reached its cap on the very last round is a cap-reached run,
+  // not a success — the loop simply had nowhere left to project into.
   const finalStatus: ResearchStatus = costUsd >= run.spendCapUsd ? "spend_cap_reached" : "succeeded";
   await finishRun(run, finalStatus, null, {
     findings,
@@ -408,6 +424,41 @@ export async function runResearchRun(input: {
     completionTokens,
     roundsUsed: run.maxRounds,
     answer: answer.text,
+  });
+  return {
+    ok: true,
+    outcome: {
+      run: (await getResearchRun({ id: run.id, businessId: run.businessId })) ?? run,
+      costUsd,
+      usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens },
+    },
+  };
+}
+
+/**
+ * Stops a run at its spend cap: records what it actually spent, marks the run
+ * `spend_cap_reached`, and returns the outcome for settlement.
+ *
+ * Extracted because the cap is now reachable from two places — before a round
+ * and after one — and both must produce the same record. Duplicating it is how
+ * the two paths drift apart.
+ */
+async function stopAtCap(
+  run: ResearchRun,
+  findings: ResearchFinding[],
+  sources: ResearchSource[],
+  costUsd: number,
+  promptTokens: number,
+  completionTokens: number,
+  roundsUsed: number,
+): Promise<{ ok: true; outcome: RunResearchOutcome }> {
+  await finishRun(run, "spend_cap_reached", "research_spend_cap_reached", {
+    findings,
+    sources,
+    costUsd,
+    promptTokens,
+    completionTokens,
+    roundsUsed,
   });
   return {
     ok: true,
