@@ -92,6 +92,22 @@ export async function applyIamEvents(businessId:string,siteDeviceId:string,lastS
             location_scope=CASE WHEN $3::membership_status='offboarded' THEN 'none'::location_scope ELSE location_scope END,
             membership_revision=GREATEST(membership_revision,$4) WHERE business_id=$1 AND id=$2`,[businessId,event.entityId,status,revision]);
           await client.query(`UPDATE employee_sessions SET revoked_at=now() WHERE business_id=$1 AND employee_id=$2 AND revoked_at IS NULL`,[businessId,event.entityId]);
+          // The cloud revokes a suspended/offboarded staff member's PIN, so the
+          // replica must too: `is_active=false` alone stops the roster and the
+          // PIN door, but the hash would still sit there as an *active*
+          // credential — and would come back to life if the member were later
+          // reactivated while the cloud no longer publishes a PIN for them.
+          // Only the cloud-owned PIN roles (cashier/waiter/kitchen) are
+          // revoked: a password-role member's PIN is this install's own offline
+          // door (see src/lib/iam/login-credentials.ts), and suspension already
+          // blocks them through is_active.
+          await client.query(`UPDATE employee_credentials SET status='revoked',revoked_at=now()
+            WHERE business_id=$1 AND employee_id=$2 AND credential_type='pin' AND status='active'
+              AND EXISTS (SELECT 1 FROM users u WHERE u.id=$2 AND u.business_id=$1 AND u.role IN ('cashier','waiter','kitchen'))`,
+            [businessId,event.entityId]);
+          await client.query(`UPDATE users SET pin_hash=NULL
+            WHERE business_id=$1 AND id=$2 AND pin_hash IS NOT NULL AND role IN ('cashier','waiter','kitchen')`,
+            [businessId,event.entityId]);
         }else if(event.eventType==="membership.permissions_changed") await client.query(`UPDATE users SET permissions=$3,membership_revision=GREATEST(membership_revision,$4) WHERE business_id=$1 AND id=$2`,
           [businessId,event.entityId,JSON.stringify(event.payload.permissions??(event.payload.changes as {overrides?:unknown}|undefined)?.overrides??{}),revision]);
         else if(event.eventType==="membership.system_role_changed") {

@@ -38,7 +38,7 @@ import {
   syncHybridLoginCredentials,
 } from "../src/lib/iam/login-credential-sync";
 import { loginRoster } from "../src/lib/employee-service";
-import { setPin, updateMembership } from "../src/lib/team-service";
+import { removeMembership, setPin, updateMembership } from "../src/lib/team-service";
 import { SESSION_COOKIE, resolveSessionFromToken } from "../src/lib/auth";
 import { GET as cloudLoginCallback } from "../src/app/api/auth/cloud-login/callback/route";
 import { GET as rosterRoute } from "../src/app/api/auth/pin-login/roster/route";
@@ -490,6 +490,24 @@ describe("hybrid login credential convergence", () => {
     expect(member.rows[0]).toMatchObject({ is_active: false, membership_status: "suspended" });
     expect((await withTenant(paired.siteBusinessId, () => loginRoster(paired.siteBusinessId))).map((entry) => entry.id))
       .not.toContain(paired.staff.waiter.id);
+
+    // Offboarding travels the same branch and must clear the member's local
+    // login material, not just hide them from the roster.
+    await switchDatabase(cloudDb);
+    await withoutTenantScope("platform", () => removeMembership(paired.cloudBusinessId, paired.staff.kitchen.id, paired.cloudOwnerId));
+    await switchDatabase(siteDb);
+    await withTenant(paired.siteBusinessId, () => runIamSync(paired.siteBusinessId));
+    const offboarded = await withTenant(paired.siteBusinessId, () => query<{ is_active: boolean; membership_status: string; location_scope: string }>(
+      `SELECT is_active, membership_status, location_scope FROM users WHERE id = $1`,
+      [paired.staff.kitchen.id],
+    ));
+    expect(offboarded.rows[0]).toMatchObject({ is_active: false, membership_status: "offboarded", location_scope: "none" });
+    expect(await activePinHash(paired.siteBusinessId, paired.staff.kitchen.id)).toBeNull();
+    expect((await withTenant(paired.siteBusinessId, () => loginRoster(paired.siteBusinessId))).map((entry) => entry.id))
+      .not.toContain(paired.staff.kitchen.id);
+    // The remaining PIN staff are untouched by the offboarding.
+    expect((await withTenant(paired.siteBusinessId, () => loginRoster(paired.siteBusinessId))).map((entry) => entry.id))
+      .toContain(paired.staff.cashier.id);
   }, 240_000);
 
   it("refuses «ورود با حساب ابری» until the replicated identity has converged, then binds the session", async () => {

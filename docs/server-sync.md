@@ -142,6 +142,12 @@ the offline PIN chosen in the pairing wizard, and the cloud's only fills it in
 when the desktop has none (`planPinReplication`). A member the cloud has no PIN
 for keeps the desktop's.
 
+Suspension and offboarding are the exception to "keeps the desktop's": the
+cloud revokes such a member's PIN when it removes them, so the site's event
+apply does too — for the PIN roles, whose PIN the cloud owns. The member's
+device-local owner/manager PIN is deliberately left alone, since that is this
+install's own offline door, and the membership itself is already inert.
+
 ### Credential convergence is its own plane (issue #843)
 
 The IAM snapshot is metadata-only, so a site can be fully converged on
