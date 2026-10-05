@@ -412,7 +412,8 @@ export function FoodCostVarianceView({ report }: { report: FoodCostVariance }) {
 function useDrillDown(
   dateFrom?: string,
   dateTo?: string,
-): { drill: DrillContext; panel: ReactNode } {
+  readOnly = false,
+): { drill: DrillContext | undefined; panel: ReactNode } {
   const [target, setTarget] = useState<DrillDownTarget | null>(null);
   const drill: DrillContext = {
     dateFrom,
@@ -423,14 +424,16 @@ function useDrillDown(
   const panel = target ? (
     <DrillDownPanel target={target} onClose={() => setTarget(null)} />
   ) : null;
-  return { drill, panel };
+  return readOnly ? { drill: undefined, panel: null } : { drill, panel };
 }
 
 export function ProfitAndLossView({
   report,
   dateFrom,
   dateTo,
+  readOnly = false,
 }: {
+  readOnly?: boolean;
   report: ProfitAndLoss | Comparison<ProfitAndLoss>;
   dateFrom?: string;
   dateTo?: string;
@@ -438,7 +441,7 @@ export function ProfitAndLossView({
   const money = useMoney();
   const current = isComparison(report) ? report.current : report;
   const previous = isComparison(report) ? report.previous : null;
-  const { drill, panel } = useDrillDown(dateFrom, dateTo);
+  const { drill, panel } = useDrillDown(dateFrom, dateTo, readOnly);
 
   return (
     <div>
@@ -518,14 +521,16 @@ export function ProfitAndLossView({
 export function BalanceSheetView({
   report,
   dateTo,
+  readOnly = false,
 }: {
+  readOnly?: boolean;
   report: BalanceSheet | Comparison<BalanceSheet>;
   dateTo?: string;
 }) {
   const money = useMoney();
   const current = isComparison(report) ? report.current : report;
   const previous = isComparison(report) ? report.previous : null;
-  const { drill, panel } = useDrillDown(undefined, dateTo);
+  const { drill, panel } = useDrillDown(undefined, dateTo, readOnly);
 
   const equityLines = [
     ...current.equity,

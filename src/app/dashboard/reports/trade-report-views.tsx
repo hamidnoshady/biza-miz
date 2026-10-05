@@ -50,6 +50,7 @@ export interface WeightReconciliationReport {
 }
 
 export interface ConsignorStatementsReport {
+  summary?: { count: number; balance: number; totalOwed: number; totalPaid: number };
   summaries: {
     consignorId: string;
     name: string;
@@ -83,6 +84,7 @@ export interface LayawayBookReport {
 type WarrantyState = "active" | "expiring" | "expired" | "none";
 
 export interface WarrantyReport {
+  totalCount?: number;
   rows: {
     serialId: string;
     serialNumber: string;
@@ -96,6 +98,7 @@ export interface WarrantyReport {
 }
 
 export interface RepairsReport {
+  totalCount?: number;
   rows: {
     ticketId: string;
     ticketNumber: number;
@@ -156,6 +159,8 @@ export interface LowStockReport {
 }
 
 export interface DeadStockReport {
+  totalCount?: number;
+  totalValueRial?: number;
   rows: {
     itemId: string;
     itemName: string;
@@ -284,22 +289,22 @@ export function WeightReconciliationView({ report }: { report: WeightReconciliat
 export function ConsignorStatementsView({ report }: { report: ConsignorStatementsReport }) {
   const money = useMoney();
   const summaries = report.summaries ?? [];
-  const outstanding = summaries.reduce((sum, row) => sum + row.balance, 0);
+  const outstanding = report.summary?.balance ?? summaries.reduce((sum, row) => sum + row.balance, 0);
 
   return (
     <div className="min-w-0">
       {summaries.length > 0 ? (
         <StatStrip
           stats={[
-            { label: "تعداد امانت‌گذار", value: formatPersianNumber(summaries.length) },
+            { label: "تعداد امانت‌گذار", value: formatPersianNumber(report.summary?.count ?? summaries.length) },
             { label: "مانده کل", value: money.format(outstanding), tone: outstanding > 0 ? "negative" : "default" },
             {
               label: "جمع فروش امانی",
-              value: money.format(summaries.reduce((sum, row) => sum + row.totalOwed, 0)),
+              value: money.format(report.summary?.totalOwed ?? summaries.reduce((sum, row) => sum + row.totalOwed, 0)),
             },
             {
               label: "جمع پرداختی",
-              value: money.format(summaries.reduce((sum, row) => sum + row.totalPaid, 0)),
+              value: money.format(report.summary?.totalPaid ?? summaries.reduce((sum, row) => sum + row.totalPaid, 0)),
             },
           ]}
         />
@@ -410,7 +415,7 @@ export function WarrantyRegisterView({ report }: { report: WarrantyReport }) {
             { label: "معتبر", value: formatPersianNumber(counts.active ?? 0) },
             { label: "رو به پایان", value: formatPersianNumber(counts.expiring ?? 0) },
             { label: "منقضی", value: formatPersianNumber(counts.expired ?? 0) },
-            { label: "جمع گارانتی‌ها", value: formatPersianNumber(rows.length) },
+            { label: "جمع گارانتی‌ها", value: formatPersianNumber(report.totalCount ?? rows.length) },
           ]}
         />
       ) : null}
@@ -470,7 +475,7 @@ export function RepairsView({ report }: { report: RepairsReport }) {
     <div className="min-w-0">
       <StatStrip
         stats={[
-          { label: "تعداد تیکت", value: formatPersianNumber(rows.length) },
+          { label: "تعداد تیکت", value: formatPersianNumber(report.totalCount ?? rows.length) },
           { label: "درآمد تعمیرات", value: money.format(totals.revenue) },
           { label: "بهای قطعات", value: money.format(totals.partsCost) },
           {
@@ -728,14 +733,14 @@ export function LowStockView({ report }: { report: LowStockReport }) {
 export function DeadStockView({ report }: { report: DeadStockReport }) {
   const money = useMoney();
   const rows = report.rows ?? [];
-  const tiedUp = rows.reduce((sum, row) => sum + row.valueRial, 0);
+  const tiedUp = report.totalValueRial ?? rows.reduce((sum, row) => sum + row.valueRial, 0);
 
   return (
     <div className="min-w-0">
       {rows.length > 0 ? (
         <StatStrip
           stats={[
-            { label: "تعداد کالای راکد", value: formatPersianNumber(rows.length) },
+            { label: "تعداد کالای راکد", value: formatPersianNumber(report.totalCount ?? rows.length) },
             { label: "سرمایهٔ خوابیده", value: money.format(tiedUp) },
           ]}
         />

@@ -28,6 +28,7 @@ export const PLATFORM_ADMIN_ROLES: PlatformAdminRole[] = ["support", "engineer",
 export type PlatformCapability =
   // Read surfaces
   | "businesses.read"
+  | "business.reports.read"
   | "audit.read"
   | "system.read"
   | "usage.read"
@@ -140,6 +141,7 @@ export type PlatformCapability =
 
 const READ: PlatformCapability[] = [
   "businesses.read",
+  "business.reports.read",
   "audit.read",
   "system.read",
   "usage.read",

@@ -13,7 +13,7 @@
  * `platform-admin.ts` and are tested there, and the guard/isolation behaviour
  * is exercised by the platform integration test.
  */
-import { getPool, query, withoutTenantScope } from "./db";
+import { getPool, query, withoutTenantScope, withTenant } from "./db";
 import { getPlatformBackupHealth } from "./platform-backup-service";
 import type { PoolClient } from "pg";
 import { disableFeatures, seedChartOfAccounts } from "./business-provisioning";
@@ -1098,10 +1098,11 @@ export interface BusinessUsage {
  * Counts are per business rather than the whole deployment — the console shows
  * one business's numbers on its detail page. `lastActivity` is the most recent
  * of a few high-signal timestamps, which is enough to tell a live business
- * from a dormant one without a heavy scan.
+ * from a dormant one without a heavy scan. This single-business read enters
+ * tenant scope even when called by the platform console (#810).
  */
 export async function businessUsage(businessId: string): Promise<BusinessUsage> {
-  const { rows } = await withoutTenantScope("platform", () =>
+  const { rows } = await withTenant(businessId, () =>
     query<{
       orders: string;
       open_orders: string;

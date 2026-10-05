@@ -33,10 +33,20 @@ export function isDeadStock(
   todayIso: string,
   days: number,
 ): boolean {
-  if (!Number.isFinite(days) || days <= 0) return false;
-  if (!lastSoldAt) return true;
-  const cutoff = Date.parse(`${todayIso}T00:00:00Z`) - days * 86_400_000;
-  return Date.parse(`${lastSoldAt}T00:00:00Z`) <= cutoff;
+  const cutoff = deadStockCutoff(todayIso, days);
+  if (!cutoff) return false;
+  return !lastSoldAt || Date.parse(lastSoldAt) <= Date.parse(cutoff);
+
+}
+
+/** Shared UTC threshold for the pure classifier and database report predicate.
+ * last_sold_at is a timestamptz, not a date to which another T00:00 can be appended.
+ */
+export function deadStockCutoff(todayIso: string, days: number): string | null {
+  if (!Number.isFinite(days) || days <= 0) return null;
+  const time = Date.parse(`${todayIso}T00:00:00Z`) - days * 86_400_000;
+  const cutoff = new Date(time);
+  return Number.isFinite(cutoff.getTime()) ? cutoff.toISOString() : null;
 }
 
 /** Validates a purchase/return/transfer line quantity — positive, parseable. */

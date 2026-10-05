@@ -38,39 +38,8 @@ import { inputClass } from "../ui";
 import { ChartPreview, DataTable } from "./chart-preview";
 import { ExportButtons } from "./export-buttons";
 import { PinToDashboardButton } from "./pin-button";
-import {
-  BalanceSheetView,
-  CashFlowView,
-  FoodCostVarianceView,
-  ProfitAndLossView,
-  type BalanceSheet,
-  type CashFlow,
-  type Comparison,
-  type FoodCostVariance,
-  type ProfitAndLoss,
-} from "./ledger-report-view";
-import {
-  BrandSalesView,
-  ConsignorStatementsView,
-  DeadStockView,
-  LayawayBookView,
-  LowStockView,
-  NearExpiryView,
-  RepairsView,
-  VariantSalesView,
-  WarrantyRegisterView,
-  WeightReconciliationView,
-  type BrandSalesReport,
-  type ConsignorStatementsReport,
-  type DeadStockReport,
-  type LayawayBookReport,
-  type LowStockReport,
-  type NearExpiryReport,
-  type RepairsReport,
-  type VariantSalesReport,
-  type WarrantyReport,
-  type WeightReconciliationReport,
-} from "./trade-report-views";
+import { StructuredReportBody } from "./structured-report-body";
+
 import { rowsToChartData, type ChartType, type ReportRow } from "./report-ui";
 import {
   COMPARABLE_SHAPES,
@@ -886,45 +855,9 @@ function ReportBody({
 
     // The ledger statements keep their own padded card: they are documents with
     // internal sections, not a single table.
-    switch (report.shape) {
-      case "profit_and_loss":
-        return (
-          <SectionCard title="نتیجهٔ گزارش">
-            <ProfitAndLossView
-              report={document as unknown as ProfitAndLoss | Comparison<ProfitAndLoss>}
-              dateFrom={dateFrom || undefined}
-              dateTo={dateTo || undefined}
-            />
-          </SectionCard>
-        );
-      case "balance_sheet":
-        return (
-          <SectionCard title="نتیجهٔ گزارش">
-            <BalanceSheetView
-              report={document as unknown as BalanceSheet | Comparison<BalanceSheet>}
-              dateTo={dateTo || undefined}
-            />
-          </SectionCard>
-        );
-      case "cash_flow":
-        return (
-          <SectionCard title="نتیجهٔ گزارش">
-            <CashFlowView report={document as unknown as CashFlow | Comparison<CashFlow>} />
-          </SectionCard>
-        );
-      case "food_cost_variance":
-        return (
-          <SectionCard title="نتیجهٔ گزارش">
-            <FoodCostVarianceView report={document as unknown as FoodCostVariance} />
-          </SectionCard>
-        );
-    }
-
-    // The trade reports are each one table, so they sit in a flush card that
-    // lets the rows reach its edges (docs/design-system.md §Tables).
     return (
-      <SectionCard title="نتیجهٔ گزارش" flush>
-        <TradeReportBody shape={report.shape} payload={document} />
+      <SectionCard title="نتیجهٔ گزارش">
+        <StructuredReportBody shape={report.shape} payload={document} dateFrom={dateFrom || undefined} dateTo={dateTo || undefined} />
       </SectionCard>
     );
   }
@@ -993,31 +926,4 @@ function ReportBody({
       </SectionCard>
     </div>
   );
-}
-
-function TradeReportBody({ shape, payload }: { shape: ReportShape; payload: ReportPayload }) {
-  switch (shape) {
-    case "weight_reconciliation":
-      return <WeightReconciliationView report={payload as unknown as WeightReconciliationReport} />;
-    case "consignor_statements":
-      return <ConsignorStatementsView report={payload as unknown as ConsignorStatementsReport} />;
-    case "layaway_book":
-      return <LayawayBookView report={payload as unknown as LayawayBookReport} />;
-    case "warranty":
-      return <WarrantyRegisterView report={payload as unknown as WarrantyReport} />;
-    case "repairs":
-      return <RepairsView report={payload as unknown as RepairsReport} />;
-    case "variant_sales":
-      return <VariantSalesView report={payload as unknown as VariantSalesReport} />;
-    case "brand_sales":
-      return <BrandSalesView report={payload as unknown as BrandSalesReport} />;
-    case "near_expiry":
-      return <NearExpiryView report={payload as unknown as NearExpiryReport} />;
-    case "low_stock":
-      return <LowStockView report={payload as unknown as LowStockReport} />;
-    case "dead_stock":
-      return <DeadStockView report={payload as unknown as DeadStockReport} />;
-    default:
-      return <EmptyState>نمایش این گزارش پشتیبانی نمی‌شود.</EmptyState>;
-  }
 }
