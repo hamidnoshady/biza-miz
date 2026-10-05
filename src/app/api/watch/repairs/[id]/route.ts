@@ -44,7 +44,13 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   const ticket = await ownedTicket(session, id);
   if (!ticket) return NextResponse.json({ error: "ticket_not_found" }, { status: 404 });
 
-  let body: { status?: string; laborCharge?: number; vatPercent?: number; reportedIssue?: string | null };
+  let body: {
+    status?: string;
+    laborCharge?: number;
+    vatPercent?: number;
+    reportedIssue?: string | null;
+    nonCoveredReason?: string | null;
+  };
   try {
     body = await request.json();
   } catch {
@@ -52,11 +58,17 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   }
 
   try {
-    if (body.laborCharge != null || body.vatPercent != null || body.reportedIssue != null) {
+    if (
+      body.laborCharge != null ||
+      body.vatPercent != null ||
+      body.reportedIssue != null ||
+      body.nonCoveredReason !== undefined
+    ) {
       await updateRepairTicket(id, {
         laborCharge: body.laborCharge,
         vatPercent: body.vatPercent,
         reportedIssue: body.reportedIssue ?? undefined,
+        nonCoveredReason: body.nonCoveredReason,
       });
     }
     if (body.status) {

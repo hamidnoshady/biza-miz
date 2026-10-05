@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { requireCapabilityForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { createRepairTicket, listRepairTickets } from "@/lib/repairs-service";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import { REPAIR_STATUSES, type RepairStatus } from "@/lib/watch";
 
 // Wave 10: repair_tickets is a shared module — a jewelry business repairing a
@@ -41,6 +42,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     customerId?: string | null;
     laborCharge?: number;
     vatPercent?: number;
+    nonCoveredReason?: string | null;
   };
   try {
     body = await request.json();
@@ -51,6 +53,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
+  // Issue #795 Phase 1 (item 22) — an omitted VAT rate resolves from the
+  // business's one canonical tax configuration (the same `tax.config`
+  // setting the wizard and Settings → Tax maintain), not a route literal:
+  // a repair bill is as VAT-applicable as any other sale of this business.
+  let vatPercent = body.vatPercent;
+  if (vatPercent == null) {
+    const tax = await getSetting<{ defaultRate?: number }>(session.businessId, SETTING_KEYS.tax);
+    vatPercent = Number.isFinite(Number(tax?.defaultRate)) ? Number(tax?.defaultRate) : 0;
+  }
+
   try {
     const ticket = await createRepairTicket({
       locationId: location.id,
@@ -59,7 +71,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       serialId: body.serialId || null,
       customerId: body.customerId || null,
       laborCharge: body.laborCharge ?? 0,
-      vatPercent: body.vatPercent ?? 0,
+      vatPercent,
+      nonCoveredReason: body.nonCoveredReason ?? null,
       createdBy: session.sub,
     });
     return NextResponse.json({ ok: true, ticket });

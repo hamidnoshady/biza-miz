@@ -57,7 +57,26 @@ export function RemindersSection({ reminders }: { reminders: ServiceReminder[] }
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
                   موعد سرویس: {toPersianDigits(formatJalali(reminder.referenceDate, { withMonthName: true }))}
+                  {reminder.lastServiceDate ? (
+                    <>
+                      {" · "}آخرین سرویس:{" "}
+                      {toPersianDigits(formatJalali(reminder.lastServiceDate, { withMonthName: true }))}
+                    </>
+                  ) : null}
                 </p>
+                {reminder.customerName ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    مشتری: {reminder.customerName}
+                    {reminder.customerPhone ? (
+                      <>
+                        {" · "}
+                        <a className="underline-offset-2 hover:underline" href={`tel:${reminder.customerPhone}`} dir="ltr">
+                          {toPersianDigits(reminder.customerPhone)}
+                        </a>
+                      </>
+                    ) : null}
+                  </p>
+                ) : null}
               </div>
             </li>
           ))}

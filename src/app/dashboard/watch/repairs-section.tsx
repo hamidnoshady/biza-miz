@@ -9,6 +9,7 @@ import { formatPersianNumber, formatQuantity, toPersianDigits } from "@/lib/digi
 import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { api, Field, inputClass } from "../ui";
+import { CustomerPicker, type PickerCustomer } from "../customer-picker";
 import {
   REPAIR_STATUS_LABELS,
   type RepairPart,
@@ -55,6 +56,11 @@ export function RepairsSection({
   const [itemDescription, setItemDescription] = useState("");
   const [reportedIssue, setReportedIssue] = useState("");
   const [serialId, setSerialId] = useState("");
+  // Issue #795 item 12 — the intake connects the job to the person. Left
+  // empty for a shop-sold serial, the server resolves the original buyer
+  // from the persisted invoice; picking one here explicitly overrides it
+  // (the current owner may differ from the original buyer).
+  const [customer, setCustomer] = useState<PickerCustomer | null>(null);
   const [laborCharge, setLaborCharge] = useState("0");
   const [vatPercent, setVatPercent] = useState("9");
 
@@ -68,6 +74,7 @@ export function RepairsSection({
           itemDescription,
           reportedIssue: reportedIssue.trim() || null,
           serialId: serialId || null,
+          customerId: customer?.id || null,
           laborCharge: money.fromInput(Math.max(0, Math.round(Number(laborCharge || 0)))),
           vatPercent: Number(vatPercent || 0),
         }),
@@ -77,6 +84,7 @@ export function RepairsSection({
       setItemDescription("");
       setReportedIssue("");
       setSerialId("");
+      setCustomer(null);
       setLaborCharge("0");
     }
   }
@@ -141,6 +149,16 @@ export function RepairsSection({
                   label: `${u.itemName} — ${u.serialNumber}`,
                 }))}
                 placeholder="بدون سریال"
+              />
+            </Field>
+            <Field
+              label="مشتری"
+              hint="خالی بماند، برای دستگاه فروشگاهی خریدار فاکتور به‌صورت خودکار ثبت می‌شود."
+            >
+              <CustomerPicker
+                customer={customer}
+                onChange={setCustomer}
+                idPrefix="watch-repair-customer"
               />
             </Field>
             <Field label={`اجرت تعمیر (${money.unitLabel})`}>
@@ -295,6 +313,7 @@ function PartsPanel({ ticket, busy, run }: { ticket: RepairTicket; busy: boolean
   const [quantity, setQuantity] = useState("1");
   const [unitCost, setUnitCost] = useState("");
   const [charge, setCharge] = useState("");
+  const [source, setSource] = useState("stock");
 
   const load = useCallback(() => {
     setLoading(true);
@@ -318,6 +337,7 @@ function PartsPanel({ ticket, busy, run }: { ticket: RepairTicket; busy: boolean
           quantity: quantity || "1",
           unitCost: money.fromInput(Math.max(0, Math.round(Number(unitCost || 0)))),
           charge: money.fromInput(Math.max(0, Math.round(Number(charge || 0)))),
+          source,
         }),
       }),
     );
@@ -326,6 +346,7 @@ function PartsPanel({ ticket, busy, run }: { ticket: RepairTicket; busy: boolean
       setQuantity("1");
       setUnitCost("");
       setCharge("");
+      setSource("stock");
       load();
     }
   }
@@ -342,6 +363,7 @@ function PartsPanel({ ticket, busy, run }: { ticket: RepairTicket; busy: boolean
             <span className="min-w-0 break-words">
               {part.description} × {formatQuantity(part.quantity)} — بهای تمام‌شده {money.format(part.unitCost)} / دریافتی{" "}
               {money.format(part.charge)}
+              {part.source === "external" ? " · خرید بیرونی" : " · از انبار"}
             </span>
             {isOpen ? (
               <Button
@@ -392,13 +414,27 @@ function PartsPanel({ ticket, busy, run }: { ticket: RepairTicket; busy: boolean
               onChange={(e) => setUnitCost(e.target.value)}
             />
           </Field>
-          <Field label={`دریافتی از مشتری (${money.unitLabel})`} hint="در گارانتی صفر بگذارید.">
+          <Field
+            label={`دریافتی از مشتری (${money.unitLabel})`}
+            hint={ticket.underWarranty ? "در گارانتی فقط با ثبت «علت خارج از پوشش» مبلغ مجاز است." : undefined}
+          >
             <PersianNumberInput
               className={watchInputClass}
               dir="ltr"
               inputMode="numeric"
               value={charge}
               onChange={(e) => setCharge(e.target.value)}
+            />
+          </Field>
+          <Field label="منبع قطعه" hint="«از انبار» هنگام بستن تیکت از موجودی کسر می‌شود.">
+            <SearchableSelect
+              className={watchInputClass}
+              value={source}
+              onChange={setSource}
+              options={[
+                { value: "stock", label: "از انبار" },
+                { value: "external", label: "خرید بیرونی" },
+              ]}
             />
           </Field>
           <div className="sm:col-span-4">
@@ -416,9 +452,11 @@ function EstimatePanel({ ticket, busy, run }: { ticket: RepairTicket; busy: bool
   const money = useMoney();
   const [labor, setLabor] = useState(String(money.toInput(ticket.estimatedLaborRial)));
   const [parts, setParts] = useState(String(money.toInput(ticket.estimatedPartsRial)));
+  const [discount, setDiscount] = useState(String(money.toInput(ticket.estimatedDiscountRial)));
 
   const hasEstimate = ticket.estimatedTotalRial > 0;
-  const approved = Boolean(ticket.estimateApprovedAt);
+  const approved =
+    Boolean(ticket.estimateApprovedAt) && ticket.estimateApprovedVersion === ticket.estimateVersion;
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
@@ -428,24 +466,30 @@ function EstimatePanel({ ticket, busy, run }: { ticket: RepairTicket; busy: bool
         body: JSON.stringify({
           laborRial: money.fromInput(Math.max(0, Math.round(Number(labor || 0)))),
           partsRial: money.fromInput(Math.max(0, Math.round(Number(parts || 0)))),
+          discountRial: money.fromInput(Math.max(0, Math.round(Number(discount || 0)))),
         }),
       }),
     );
     if (ok) {
       setLabor("");
       setParts("");
+      setDiscount("");
     }
   }
 
   return (
     <PanelShell>
       <p className="mb-3 text-xs leading-5 text-muted-foreground">
-        برآورد هزینه باید پیش از شروع کار (در حال تعمیر) به تأیید مشتری برسد؛ با ثبت برآورد جدید، تأیید قبلی پاک می‌شود.
+        برآورد هزینه باید پیش از شروع کار (در حال تعمیر) به تأیید مشتری برسد. برآورد شامل مالیات با نرخ همین
+        تیکت است تا مبلغ تأییدشده همان مبلغ قابل پرداخت باشد؛ هر تغییر مالی (برآورد جدید، تغییر اجرت یا
+        مالیات، افزودن/حذف قطعهٔ پولی) تأیید قبلی را باطل می‌کند.
       </p>
       {hasEstimate ? (
         <div className="mb-3 rounded-lg bg-white/70 p-3 text-xs text-foreground/80">
           <p>
-            اجرت {money.format(ticket.estimatedLaborRial)} · قطعات {money.format(ticket.estimatedPartsRial)} · کل{" "}
+            اجرت {money.format(ticket.estimatedLaborRial)} · قطعات {money.format(ticket.estimatedPartsRial)}
+            {ticket.estimatedDiscountRial > 0 ? <> · تخفیف {money.format(ticket.estimatedDiscountRial)}−</> : null}
+            {" "}· مالیات {money.format(ticket.estimatedVatRial)} · مبلغ قابل پرداخت{" "}
             {money.format(ticket.estimatedTotalRial)}
           </p>
           <p className="mt-1">
@@ -475,6 +519,15 @@ function EstimatePanel({ ticket, busy, run }: { ticket: RepairTicket; busy: bool
             inputMode="numeric"
             value={parts}
             onChange={(e) => setParts(e.target.value)}
+          />
+        </Field>
+        <Field label={`تخفیف (${money.unitLabel})`}>
+          <PersianNumberInput
+            className={watchInputClass}
+            dir="ltr"
+            inputMode="numeric"
+            value={discount}
+            onChange={(e) => setDiscount(e.target.value)}
           />
         </Field>
         <div className="flex flex-wrap gap-2 sm:col-span-2">
@@ -526,6 +579,7 @@ function ClosePanel({
   const [laborCharge, setLaborCharge] = useState(String(money.toInput(ticket.laborCharge)));
   const [vatPercent, setVatPercent] = useState(String(ticket.vatPercent));
   const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [nonCoveredReason, setNonCoveredReason] = useState(ticket.nonCoveredReason ?? "");
 
   async function close(e: React.FormEvent) {
     e.preventDefault();
@@ -535,6 +589,9 @@ function ClosePanel({
         body: JSON.stringify({
           laborCharge: money.fromInput(Math.max(0, Math.round(Number(laborCharge || 0)))),
           vatPercent: Number(vatPercent || 0),
+          // The server refuses any customer charge on a warranty job without
+          // this explicit out-of-coverage reason (issue #795).
+          ...(ticket.underWarranty ? { nonCoveredReason: nonCoveredReason.trim() || null } : {}),
         }),
       }),
     );
@@ -550,6 +607,12 @@ function ClosePanel({
 
   return (
     <PanelShell>
+      {ticket.underWarranty ? (
+        <p className="mb-3 text-xs leading-5 text-muted-foreground">
+          این تیکت در گارانتی است: اجرت و قطعات تحت پوشش برای مشتری رایگان است. دریافت هر مبلغی فقط با ثبت
+          «علت خارج از پوشش گارانتی» (کار خارج از پوشش که مشتری پذیرفته) مجاز است.
+        </p>
+      ) : null}
       <form onSubmit={close} className="grid min-w-0 gap-3 sm:grid-cols-3">
         <Field label={`اجرت تعمیر (${money.unitLabel})`}>
           <PersianNumberInput
@@ -581,6 +644,18 @@ function ClosePanel({
             ]}
           />
         </Field>
+        {ticket.underWarranty ? (
+          <div className="sm:col-span-3">
+            <Field label="علت خارج از پوشش گارانتی" hint="فقط اگر مبلغی از مشتری دریافت می‌شود.">
+              <input
+                className={watchInputClass}
+                value={nonCoveredReason}
+                onChange={(e) => setNonCoveredReason(e.target.value)}
+                placeholder="مثلاً آب‌خوردگی — خارج از پوشش، با تأیید مشتری"
+              />
+            </Field>
+          </div>
+        ) : null}
         <div className="sm:col-span-3">
           <Button type="submit" disabled={busy} size="sm" className="min-h-[44px] border border-amber-300 dark:border-amber-500/40 px-5 font-semibold">
             تسویه و بستن

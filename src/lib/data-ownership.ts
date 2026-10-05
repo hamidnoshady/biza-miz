@@ -300,6 +300,27 @@ export const DATA_OWNERSHIP_REGISTRY = {
       "modifier_ingredients",
     ],
   }),
+  // Issue #795 Phase 7: the serialized-retail catalogue (watch models,
+  // brands, structured attributes — migration 0206). Only the catalogue:
+  // item_serials and everything downstream (sales, warranties, repairs,
+  // reservations) stay under inventory_movements' cloud authority, so a
+  // single side decides a sale and a serial can never sell twice across
+  // devices.
+  retail_catalogue: replicated({
+    domain: "retail_catalogue",
+    authority: "shared_synchronized",
+    direction: "bidirectional",
+    conflictPolicy: "field_merge_with_version",
+    tombstonePolicy: "tombstone",
+    bootstrap: "required",
+    continuousSync: "active",
+    identity: "stable catalogue UUIDs and location scope",
+    retry:
+      "per-field hybrid-logical-clock capture by trigger; commit-safe feed in both directions; serialized units never merge — stock stays cloud-owned",
+    transport: "master_feed",
+    events: [],
+    masterTables: ["item_brands", "items", "watch_item_attributes"],
+  }),
   staff_access: cloudOrBootstrapOnly({
     domain: "staff_access",
     authority: "cloud_authoritative",

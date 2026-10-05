@@ -64,6 +64,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       expiryDate?: string | null;
       manufactureDate?: string | null;
       supplierReference?: string | null;
+      /** Serial-tracked items: the exact physical serials this line receives (issue #795). */
+      serials?: { serialNumber?: string; warrantyMonths?: number }[] | null;
     }[];
   };
   try {

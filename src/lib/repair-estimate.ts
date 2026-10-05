@@ -17,6 +17,10 @@ export interface RepairEstimateInput {
   laborCharge: number;
   /** The parts portion of the estimate (Rial, whole). */
   partsCharge: number;
+  /** Agreed reduction before VAT (Rial, whole) — issue #795 item 11. */
+  discountRial?: number;
+  /** VAT at the ticket's own rate (Rial, whole) — issue #795 item 11. */
+  vatRial?: number;
   estimatedTotalRial: number;
   todayIso: string;
   customerName?: string | null;
@@ -43,6 +47,14 @@ export function renderRepairEstimate(input: RepairEstimateInput): string {
   lines.push("");
   lines.push(`اجرت: ${formatMoney(input.laborCharge, unit)}`);
   lines.push(`قطعات: ${formatMoney(input.partsCharge, unit)}`);
+  // The signable document carries the WHOLE financial picture (issue #795
+  // item 11): what comes off, what tax adds, and the final payable number.
+  if (input.discountRial && input.discountRial > 0) {
+    lines.push(`تخفیف: ${formatMoney(input.discountRial, unit)}−`);
+  }
+  if (input.vatRial != null) {
+    lines.push(`مالیات بر ارزش افزوده: ${formatMoney(input.vatRial, unit)}`);
+  }
   lines.push(`برآورد کل: ${formatMoney(input.estimatedTotalRial, unit)}`);
   lines.push("");
   lines.push("امضای تأیید مشتری: ____________");
