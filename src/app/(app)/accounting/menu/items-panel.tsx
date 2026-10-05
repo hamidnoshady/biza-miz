@@ -82,6 +82,7 @@ export function ItemsPanel({
   run,
   onOpenItem,
   onChangePrice,
+  onNotice,
 }: {
   data: RestaurantMenuData;
   latest: LatestChanges;
@@ -90,6 +91,7 @@ export function ItemsPanel({
   run: Runner;
   onOpenItem: (item: RestaurantMenuItem | null, focusAddons?: boolean) => void;
   onChangePrice: (item: RestaurantMenuItem) => void;
+  onNotice: (message: string) => void;
 }) {
   const { format } = useMoney();
   const [search, setSearch] = useState("");
@@ -436,8 +438,14 @@ export function ItemsPanel({
           const result = await run(() =>
             api(`/api/menu/items/${deleteTarget.id}`, { method: "DELETE" }),
           );
-          if (result.ok) setDeleteTarget(null);
-          else setDialogError(result.error ?? "");
+          if (result.ok) {
+            setDeleteTarget(null);
+            if (result.data.deactivated === true) {
+              onNotice(
+                "این آیتم سفارش یا تاریخچهٔ قیمت دارد؛ به‌جای حذف غیرفعال شد تا سوابق حفظ شود.",
+              );
+            }
+          } else setDialogError(result.error ?? "");
         }}
       />
     </div>
@@ -597,8 +605,9 @@ function DeleteItemDialog({
           <DialogTitle>حذف آیتم «{item?.name}»</DialogTitle>
           <DialogDescription>
             آیتم از منو و فروش حذف می‌شود. سفارش‌های ثبت‌شدهٔ قبلی دست‌نخورده می‌مانند، چون قیمت در
-            خط سفارش هنگام فروش ذخیره شده است. اگر فقط می‌خواهید فروش آن را متوقف کنید،
-            «غیرفعال کردن» بهتر است.
+            خط سفارش هنگام فروش ذخیره شده است. اگر برای آیتم تاریخچهٔ قیمت ثبت شده باشد، حذف به
+            غیرفعال‌کردن تبدیل می‌شود تا تاریخچه از بین نرود. اگر فقط می‌خواهید فروش آن را متوقف
+            کنید، «غیرفعال کردن» بهتر است.
           </DialogDescription>
         </DialogHeader>
         <ErrorBox>{error}</ErrorBox>

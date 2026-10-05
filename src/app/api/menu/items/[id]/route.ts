@@ -99,6 +99,19 @@ export const DELETE = withTenantScope(async (_request: NextRequest, context: { p
     await query("UPDATE menu_items SET is_active = false WHERE id = $1", [id]);
     return NextResponse.json({ ok: true, deactivated: true });
   }
+  // Price history is append-only and must outlive the catalogue row (issue
+  // #844): once a price has ever changed, «حذف» becomes deactivation instead —
+  // otherwise the audit trail of the item would vanish with it. The history
+  // rows for a business teardown still cascade away; the DB trigger tells the
+  // two cases apart.
+  const { rows: history } = await query(
+    "SELECT id FROM menu_item_price_history WHERE menu_item_id = $1 LIMIT 1",
+    [id],
+  );
+  if (history.length > 0) {
+    await query("UPDATE menu_items SET is_active = false WHERE id = $1", [id]);
+    return NextResponse.json({ ok: true, deactivated: true });
+  }
   await query("DELETE FROM menu_items WHERE id = $1", [id]);
   return NextResponse.json({ ok: true, deactivated: false });
 });

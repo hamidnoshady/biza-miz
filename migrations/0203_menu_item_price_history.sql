@@ -67,8 +67,41 @@ CREATE POLICY tenant_isolation ON menu_item_price_history FOR ALL
 
 -- Append-only, enforced by the database rather than by promising every writer
 -- will behave: history that can be updated or deleted is just another mutable
--- table. UPDATE/DELETE/TRUNCATE all raise; INSERT is the only verb.
+-- table. INSERT is the only verb a writer may issue — with one deliberate
+-- exception, because a blanket DELETE trigger would make the row's *parents*
+-- undeletable:
+--
+--   * UPDATE always raises (editing history is rewriting it);
+--   * a direct DELETE raises while its menu item still exists (that is a
+--     writer erasing the audit trail of a live item);
+--   * a DELETE that arrives as part of the parent's own cascade — the menu
+--     item row is already gone, e.g. an unused item's removal or a business
+--     teardown — is allowed through. The trigger runs AFTER the parent row
+--     was deleted, so it can tell the two apart;
+--   * TRUNCATE always raises.
+--
+-- Product code never relies on the cascade for live items: the item DELETE
+-- route deactivates instead once history exists, so history of anything the
+-- operator can still see survives. (Without this carve-out, platform-service
+-- deleting a hosted business, the Holoo import rollback, and every integration
+-- test's scratch cleanup would 500 on the first price change ever made.)
 CREATE OR REPLACE FUNCTION app_menu_item_price_history_append_only()
+RETURNS trigger AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION 'menu_item_price_history is append-only'
+            USING ERRCODE = 'raise_exception';
+    END IF;
+    -- DELETE with the parent still present: direct erasure — forbidden.
+    IF EXISTS (SELECT 1 FROM menu_items WHERE id = OLD.menu_item_id) THEN
+        RAISE EXCEPTION 'menu_item_price_history is append-only'
+            USING ERRCODE = 'raise_exception';
+    END IF;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION app_menu_item_price_history_no_truncate()
 RETURNS trigger AS $$
 BEGIN
     RAISE EXCEPTION 'menu_item_price_history is append-only'
@@ -76,6 +109,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS menu_item_price_history_append_only ON menu_item_price_history;
 CREATE TRIGGER menu_item_price_history_append_only
-    BEFORE UPDATE OR DELETE OR TRUNCATE ON menu_item_price_history
+    BEFORE UPDATE OR DELETE ON menu_item_price_history
     FOR EACH ROW EXECUTE FUNCTION app_menu_item_price_history_append_only();
+CREATE TRIGGER menu_item_price_history_no_truncate
+    BEFORE TRUNCATE ON menu_item_price_history
+    EXECUTE FUNCTION app_menu_item_price_history_no_truncate();

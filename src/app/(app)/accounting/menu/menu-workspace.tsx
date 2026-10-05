@@ -234,6 +234,7 @@ export function MenuWorkspace({ canEdit }: { canEdit: boolean }) {
                 )
               }
               onChangePrice={(item) => setPriceItemId(item.id)}
+              onNotice={setNotice}
             />
           ) : null}
           {tab === "categories" ? (
