@@ -45,7 +45,18 @@ CLAUDE.md. Don't assume the everyday English sense:
   the dashboard for every tenant (the old `workspace` flag is retired; `/overview`,
   `/ai`, `/dashboard/overview` and `/dashboard/ai` are compat redirects, and its
   management sections open at `/dashboard?aiPanel=<key>`). Not MCP, coworker jobs,
-  or autopilot unless those are named.
+  or autopilot unless those are named. Its three **runtime modes** are `auto`,
+  `instant` and `deep_research` — the vocabulary is in
+  `src/lib/ai-runtime-modes-shared.ts`, the one file a `"use client"` component may
+  import (never `ai-runtime-modes.ts`, which reaches `src/lib/db.ts` and fails the
+  client-bundle boundary test). The sections are `memory`, `coworkers`,
+  `automations`, `activity`, `research`, `usage`; the retired `agents` and
+  `knowledge` values degrade to the chat home rather than 404ing.
+- **Agent** = a Superadmin-built, versioned system agent (`ai_system_agents`).
+  Nothing a tenant configures is called an agent. The proactive tick's background
+  jobs are **scheduled jobs** (`src/lib/ai-scheduled-jobs.ts`). If you are about to
+  write "agent" for a tenant-configurable thing, stop — that is the bug this issue
+  existed to remove.
 - **Website management** = **both** website systems inside the single `website` app: Eshobe CMS (`/websites/cms`) and WP / Woo management (`/websites/wp`). They are peer managers behind one app door; never fold one into the other, and don't default “website management” to only the CMS.
 
 ## Accounting is the primary workspace
