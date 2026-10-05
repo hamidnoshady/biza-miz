@@ -102,6 +102,15 @@ export interface PartiesSectionProps {
   /** Opens the create form on mount — an overview quick action that only says "add one". */
   openNewOnMount?: boolean;
   /**
+   * A search the mounting screen already performed — `?q=` on a link.
+   *
+   * Supplied, the box starts filled *and* already applied: a person who
+   * followed «مریم» from the CRM's command field expects the list to be the
+   * answer to that word, not a text box holding it while the whole directory
+   * loads underneath. Omitted, the box starts empty as it always has.
+   */
+  initialQuery?: string;
+  /**
    * The directory view («همه اشخاص» / «مشتریان» / «تأمین‌کنندگان» / …).
    *
    * Supplied by the canonical directory, which keeps it in the URL so a
@@ -128,6 +137,7 @@ export function PartiesSection({
   role,
   editPartyId,
   openNewOnMount,
+  initialQuery,
   view,
   onViewChange,
   permissions,
@@ -187,10 +197,16 @@ export function PartiesSection({
   const [businessId, setBusinessId] = useState("");
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  /** What the box shows — updated on every keystroke so typing stays instant. */
-  const [query, setQuery] = useState("");
+  /**
+   * What the box shows — updated on every keystroke so typing stays instant.
+   *
+   * Initialised from a deep link, and *also* the initial `appliedQuery` below:
+   * a `?q=` search is already deliberate, so it skips the debounce instead of
+   * spending 400 ms looking like it was ignored.
+   */
+  const [query, setQuery] = useState(initialQuery ?? "");
   /** What the server was asked for — the debounced copy of `query`. */
-  const [appliedQuery, setAppliedQuery] = useState("");
+  const [appliedQuery, setAppliedQuery] = useState(initialQuery ?? "");
   const [categoryId, setCategoryId] = useState("");
   const [includeInactive, setIncludeInactive] = useState(false);
   const [categories, setCategories] = useState<CategoryRow[]>([]);

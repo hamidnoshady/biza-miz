@@ -34,9 +34,40 @@ The sidebar groups the twelve sections into the destinations, in
 If a section is added to `CRM_NAV_ITEMS` but not to a group it disappears from
 the menu silently, so `crm-nav.test.ts` pins coverage both ways.
 
+## One box: search, or ask
+
+`crm-command-field.tsx` sits in the app shell, under the header, on every CRM
+screen. It answers a typed phrase with one of exactly three things:
+
+| What was typed | What comes back |
+|---|---|
+| a destination — «تیکت‌ها» | that section |
+| a problem — «معامله‌های راکد» | the queue's screen, scrolled to the queue's own card |
+| anything else — «مریم احمدی» | the directory, opened at `?q=` |
+
+The grammar is `src/lib/crm-commands.ts`: a **closed vocabulary** of section
+keys and queue keys with the words people use for them, folded for the way
+Persian is actually typed (ZWNJ, Arabic yeh/kaf, harakat, Persian digits, a
+trailing «؟»). Nothing typed becomes a query — the interpreter returns keys and
+hrefs the app already has — so the worst a wrong match can do is offer the wrong
+*screen*, and the screen's own gate decides what is on it. That property is why
+this shipped without a model: an LLM may later choose among the same keys, and
+the interface would not change.
+
+Permissions are applied where the answers are built, from `crm-permissions.ts`
+— the same table the sidebar, the route guards and the API use. A member is
+offered exactly the doors they may open; a cashier typing «فرصت‌ها» gets the
+floor's own surfaces and no glimpse of the pipeline.
+
+`Ctrl/⌘+K` focuses the field from anywhere, arrows move between answers, `Enter`
+opens the highlighted one, `Escape` clears, and every answer is also a plain
+link. Under the box the field prints what it understood («فهمیدم: …») before
+anything opens, because a search box that guesses silently is one people stop
+trusting.
+
 ## Today is a feed of work, not a dashboard
 
-`src/lib/crm-queues.ts` is the attention feed. Twelve named rules run over the
+`src/lib/crm-queues.ts` is the attention feed. Thirteen named rules run over the
 tables that already own the facts — activities, cases, deals, parties, leads,
 external profiles — and each one returns:
 
@@ -196,11 +227,17 @@ These are named here so the seams are visible rather than implied:
 - **An LLM narrator over the relationship summary.** The facts are already
   assembled with provenance (`crm-summary.ts`); what is missing is a model call
   and, more importantly, a rule that it may only compose from those lines.
-- **Natural-language command field.** The closed vocabularies it must translate
-  into already exist — `CRM_QUEUE_KEYS` (queues), the saved-view filter
-  documents per entity, and the segment definition resolver. A translation layer
-  may choose *among* those keys; it may not emit SQL, and
-  `crm-app-boundaries.test.ts` keeps the assistant away from irreversible acts.
+- **An LLM in front of the command field.** The field itself shipped
+  (`crm-commands.ts`, above) over the closed vocabularies — `CRM_QUEUE_KEYS`,
+  the section keys, the saved-view filter documents per entity, the segment
+  definition resolver. What is *not* built is the model that would let a
+  free-form sentence choose among those keys: the interpreter still matches
+  words. Whenever it arrives it may choose among the same keys and may not emit
+  SQL, and `crm-app-boundaries.test.ts` keeps the assistant away from
+  irreversible acts.
+- **The saved-view filter vocabulary the command field will need** for «همهٔ
+  مشتریان تهران که پارسال خریدند»: the resolver exists, the phrase vocabulary
+  over its fields does not.
 - **Automations (When → If → Then)** and the **data-quality workspace** that
   groups duplicates, reconciliation and issues into one queue.
 

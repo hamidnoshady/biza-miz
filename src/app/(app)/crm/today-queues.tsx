@@ -151,7 +151,14 @@ export function CrmTodayQueues({
       ) : (
         <div className="grid gap-3 lg:grid-cols-2">
           {waiting.map((queue) => (
-            <div key={queue.key} className="min-w-0 rounded-2xl border border-border/80 p-3">
+            <div
+              // Anchored so a command-field match can open this screen *at*
+              // this queue. `scroll-mt` keeps the heading clear of the sticky
+              // page header after the jump.
+              id={`crm-queue-${queue.key}`}
+              key={queue.key}
+              className="min-w-0 scroll-mt-24 rounded-2xl border border-border/80 p-3"
+            >
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="text-sm font-semibold text-foreground">{queue.label}</p>

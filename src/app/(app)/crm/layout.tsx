@@ -26,5 +26,5 @@ export default async function CrmLayout({ children }: { children: React.ReactNod
   const permissions = access?.permissions ?? new Set();
   if (!canOpenCrm(permissions)) redirect("/dashboard");
 
-  return <CrmAppShell>{children}</CrmAppShell>;
+  return <CrmAppShell permissions={[...permissions]}>{children}</CrmAppShell>;
 }
