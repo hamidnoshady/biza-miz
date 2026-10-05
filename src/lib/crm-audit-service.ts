@@ -81,6 +81,14 @@ const CRM_AUDIT_KINDS = [
   "pipeline.stages_changed",
   "relationship.linked",
   "relationship.unlinked",
+  // An automation is a rule that acts on records without being watched. Writing
+  // one is at least as consequential as reshuffling the pipeline, and telling
+  // Growth that a customer's state changed is a decision made about a person —
+  // both are worth a name and a date against them. The firing of a rule is not
+  // logged here: `crm_automation_runs` is the append-only record of that, and
+  // duplicating every run into the audit trail would bury the judgements.
+  "automation.config_changed",
+  "automation.signal_growth",
 ] as const;
 
 export type CrmAuditKind = (typeof CRM_AUDIT_KINDS)[number];

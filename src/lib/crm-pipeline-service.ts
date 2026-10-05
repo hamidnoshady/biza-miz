@@ -33,6 +33,8 @@
 
 import { query, withTenant, withTenantTransaction } from "./db";
 import { recordCrmAudit } from "./crm-audit-service";
+import { runCrmAutomations } from "./crm-automation-service";
+import type { CrmAutomationEntity } from "./crm-automation-rules";
 import { isUuid } from "./uuid";
 
 export type StageOutcome = "open" | "won" | "lost";
@@ -423,9 +425,19 @@ export async function moveDealToStage(
 ): Promise<StageMoveResult> {
   if (!isUuid(dealId) || !isUuid(stageId)) return { ok: false, error: "not_found" };
 
+  /**
+   * What the move did, handed to the automations that watch stage changes.
+   *
+   * Captured inside the transaction and used **after** it commits, because the
+   * engine writes outside it on purpose: a rule's failure must not roll back
+   * the salesperson's drag, and a failed statement in here would poison the
+   * transaction for everything after it (`crm-automation-service.ts`).
+   */
+  let moved: CrmAutomationEntity | null = null;
+
   // The deal is locked, read, updated and given a history row — all or
   // nothing, and the lock has to survive between those statements.
-  return withTenantTransaction(businessId, async () => {
+  const result = await withTenantTransaction(businessId, async () => {
     const { rows: dealRows } = await query<{
       id: string;
       stage_id: string | null;
@@ -433,8 +445,12 @@ export async function moveDealToStage(
       customer_id: string | null;
       title: string;
       pipeline_id: string | null;
+      value_rial: string;
+      owner_user: string;
+      owner_user_id: string | null;
     }>(
-      `SELECT id, stage_id, stage_entered_at, customer_id, title, pipeline_id
+      `SELECT id, stage_id, stage_entered_at, customer_id, title, pipeline_id,
+              value_rial, owner_user, owner_user_id
          FROM crm_deals WHERE business_id = $1 AND id = $2 FOR UPDATE`,
       [businessId, dealId],
     );
@@ -519,8 +535,26 @@ export async function moveDealToStage(
       actorName: actor.name,
     });
 
+    moved = {
+      type: "deal",
+      id: dealId,
+      title: deal.title,
+      partyId: deal.customer_id,
+      valueRial: Number(deal.value_rial ?? 0),
+      stageLabel: target.name,
+      ownerUserId: deal.owner_user_id,
+      ownerName: deal.owner_user,
+    };
+
     return { ok: true, secondsInPreviousStage: secondsInPrevious };
   });
+
+  // A drag that ended where it started returned before setting `moved` — a
+  // no-op is not an event, and a rule must not fire for it.
+  if (result.ok && moved) {
+    await runCrmAutomations(businessId, { trigger: "deal_stage_changed", entity: moved, actor });
+  }
+  return result;
 }
 
 export interface StageHistoryEntry extends Record<string, unknown> {

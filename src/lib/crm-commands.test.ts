@@ -89,6 +89,9 @@ describe("interpretCrmCommand", () => {
       const queries = [
         "امروز", "مشتریان", "سرنخ‌ها", "فرصت‌ها", "پیگیری‌ها", "تیکت‌ها",
         "بخش‌بندی", "رضایت", "کیفیت داده", "تکراری‌ها", "تطبیق", "سابقه", "تنظیمات",
+        // Reached from the settings screen rather than the rail, but a person
+        // who types «اتوماسیون» must still land on it.
+        "اتوماسیون",
       ];
       for (const query of queries) if (sectionsOf(query).includes(section)) reachable.add(section);
     }

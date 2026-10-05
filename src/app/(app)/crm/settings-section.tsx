@@ -9,6 +9,7 @@ import {
   ShieldCheckIcon,
   TargetIcon,
   UsersIcon,
+  WorkflowIcon,
 } from "lucide-react";
 import { AppSettingsPanel, type AppSettingsGroup } from "@/components/app-settings/app-settings-panel";
 import { PLATFORM_SETTINGS_HOME } from "@/lib/app-routes";
@@ -63,6 +64,20 @@ export function CrmSettingsSection({ canConfigure }: { canConfigure: boolean }) 
         "سؤال‌های خودتان دربارهٔ مشتری، سرنخ، فرصت و تیکت — با نوع مشخص (متن، عدد، مبلغ، تاریخ، انتخابی). نوع فیلدی که مقدار دارد تغییر نمی‌کند و حذف هم نیست: فقط بایگانی.",
       icon: ListPlusIcon,
       body: <BusinessFields canConfigure={canConfigure} />,
+    },
+    {
+      key: "automations",
+      label: "اتوماسیون‌ها",
+      description:
+        "قاعده‌های «وقتی → اگر → آنگاه»: ثبت کار پیگیری، واگذاری مالک، یا خبر دادن به رشد و بازاریابی. هیچ پیامی از CRM ارسال نمی‌شود.",
+      icon: WorkflowIcon,
+      body: (
+        <AppSettingsShortcut
+          href={crmSectionHref("automations")}
+          label="باز کردن اتوماسیون‌ها"
+          description="قاعده‌ها را بسازید، خاموش یا روشن کنید و ببینید هر قاعده در آخرین اجراها واقعاً چه کرده است."
+        />
+      ),
     },
     {
       key: "audit",

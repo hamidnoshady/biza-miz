@@ -61,6 +61,8 @@ import {
   type PartyReference,
 } from "./party-merge-references";
 import { recordCrmAudit } from "./crm-audit-service";
+import { runCrmAutomations, type CrmAutomationRunSummary } from "./crm-automation-service";
+import { dealStageMoved } from "./crm-automation-rules";
 import { isUuid } from "./uuid";
 
 /**
@@ -1758,6 +1760,8 @@ interface UpsertDealInput {
   lostReason?: string | null;
   orderId?: string | null;
   createdBy?: string;
+  /** The author as a member id; the name above stays the snapshot. */
+  createdById?: string | null;
 }
 
 /**
@@ -1800,6 +1804,10 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
    */
   const owner = await resolveOwner(businessId, input.ownerUserId ?? input.ownerUser);
 
+  // The deal as it was, read once for the stage-change trigger below. A primary
+  // key read on the edit path, and the only way to tell a move from a re-save.
+  const before = input.id && isUuid(input.id) ? await getDeal(businessId, input.id) : null;
+
   if (input.id) {
     await query(
       `UPDATE crm_deals
@@ -1834,7 +1842,19 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
         owner.userId,
       ],
     );
-    return (await getDeal(businessId, input.id))!;
+    const updated = (await getDeal(businessId, input.id))!;
+    const summary = await fireDealStageTrigger(businessId, before, updated, {
+      name: input.createdBy ?? "",
+      userId: input.createdById ?? null,
+    });
+    // A rule may have moved the owner or filed work against this deal, so the
+    // caller is handed the row as it stands *now* rather than as it was before
+    // the automations ran. Only when one actually did something: an ordinary
+    // save with no rules fires nothing and pays nothing.
+    if (summary && (summary.applied > 0 || summary.growthSignals > 0)) {
+      return (await getDeal(businessId, input.id))!;
+    }
+    return updated;
   }
 
   const { rows } = await query<{ id: string }>(
@@ -1867,7 +1887,15 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
       owner.userId,
     ],
   );
-  return (await getDeal(businessId, rows[0].id))!;
+  const created = (await getDeal(businessId, rows[0].id))!;
+  const summary = await fireDealStageTrigger(businessId, before, created, {
+    name: input.createdBy ?? "",
+    userId: input.createdById ?? null,
+  });
+  if (summary && (summary.applied > 0 || summary.growthSignals > 0)) {
+    return (await getDeal(businessId, rows[0].id))!;
+  }
+  return created;
 }
 
 /**
@@ -2024,6 +2052,44 @@ interface UpsertCaseInput {
   assignedTo?: string;
   resolution?: string;
   createdBy?: string;
+  /** The author as a member id; the name above stays the snapshot. */
+  createdById?: string | null;
+}
+
+/**
+ * Fire the stage-change trigger, when the save really moved the deal.
+ *
+ * Called after the write, never inside one: the engine's own writes are not
+ * part of this transaction, and a rule failing must not fail the save. A save
+ * that rewrites the stage the deal was already in — an edit to the value, or a
+ * board that re-posts what it rendered — is not a move and fires nothing.
+ *
+ * A brand-new deal has no stage to have left, so its first stage counts as
+ * entering it: that is what «وقتی معامله‌ای وارد مرحلهٔ پیشنهاد می‌شود» means
+ * to the person who wrote the rule.
+ */
+async function fireDealStageTrigger(
+  businessId: string,
+  before: CrmDeal | null,
+  after: CrmDeal,
+  actor: { name: string; userId: string | null },
+): Promise<CrmAutomationRunSummary | null> {
+  if (!dealStageMoved(before, after)) return null;
+  const stage = after.stageId ? await getStage(businessId, after.stageId) : null;
+  return runCrmAutomations(businessId, {
+    trigger: "deal_stage_changed",
+    entity: {
+      type: "deal",
+      id: after.id,
+      title: after.title,
+      partyId: after.customerId,
+      valueRial: after.valueRial,
+      stageLabel: stage?.name ?? null,
+      ownerUserId: after.ownerUserId,
+      ownerName: after.ownerUser,
+    },
+    actor,
+  });
 }
 
 export async function upsertCase(businessId: string, input: UpsertCaseInput): Promise<CrmCase> {
@@ -2089,7 +2155,31 @@ export async function upsertCase(businessId: string, input: UpsertCaseInput): Pr
       input.createdBy ?? "",
     ],
   );
-  return (await getCase(businessId, rows[0].id))!;
+  const opened = (await getCase(businessId, rows[0].id))!;
+  // Only a ticket that arrives *open* is an event somebody promised to act on.
+  // One imported already-resolved, or filed closed by its author, asks nothing
+  // of anybody — a rule that assigned it would be inventing work.
+  if (!resolved) {
+    const summary = await runCrmAutomations(businessId, {
+      trigger: "case_opened",
+      entity: {
+        type: "case",
+        id: opened.id,
+        title: opened.subject,
+        partyId: opened.customerId,
+        priority: opened.priority,
+        ownerUserId: opened.assigneeUserId,
+        ownerName: opened.assignedTo,
+      },
+      actor: { name: input.createdBy ?? "", userId: input.createdById ?? null },
+    });
+    // A rule may have assigned this ticket; the caller must see the ticket it
+    // will find when it reloads, not the one it looked at a moment ago.
+    if (summary.applied > 0 || summary.growthSignals > 0) {
+      return (await getCase(businessId, rows[0].id))!;
+    }
+  }
+  return opened;
 }
 
 /** One case by id — the read every write path returns through. */

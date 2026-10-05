@@ -322,6 +322,58 @@ Editing a segment's rules mints an immutable row in
 `customer_segment_versions`. A rename does not — versions exist to answer «این
 کمپین به چه کسانی رفت؟», which is a function of the rules, not the label.
 
+## Automations act only on records that already exist
+
+`crm_automations` stores a rule a business composed; `crm_automation_runs` is the
+append-only record of every time one was considered. The vocabulary — three
+triggers, four conditions declared per trigger, three actions — lives in
+`crm-automation-rules.ts` and is **code, not rows**: a trigger nobody implements
+would be a rule that silently never fires, and a condition whose query does not
+exist would be a rule that silently fires always. The same file validates a rule
+and is pure, so the API, the form and the tests agree by construction.
+
+- **Rules fire after the write commits, never inside it.** The four write paths
+  that own the events (`moveDealToStage`, `upsertDeal`, `upsertCase`, `saveLead`)
+  call the engine once the row is theirs. A rule's failure must not roll back the
+  salesperson's drag, and a failed statement inside a transaction would poison it
+  for everything after — the same posture as `recordCrmAudit`.
+- **A bulk import fires nothing.** The data-transfer engine writes its own rows
+  (`data-transfer/entities/crm.ts`) rather than calling these services, so
+  loading a thousand leads does not file a thousand follow-ups: an import is a
+  load, not a decision.
+- **A deal born on a stage has entered it**; a save that rewrites the stage the
+  deal is already on is not a move and fires nothing. Creation is a real event
+  for a rule that watches the first stage, and `dealStageMoved` is the single
+  answer to what counts as one.
+- **An action is a CRM write and nothing else.** A follow-up becomes a real
+  `crm_activities` task (so it appears in the list, the queues and the customer's
+  timeline); an assignment writes both owner columns from one `resolveOwner`
+  resolution, and refuses a member who has been deactivated since the rule was
+  written. A generated task whose member is gone falls back to the record's
+  owner and then to «بدون مسئول» — never dropped, never handed to a departed
+  colleague.
+- **One action leaves the CRM, and it carries no message.** `notify_growth`
+  writes a run row and an audit event; Growth (which already reads CRM scoring)
+  consumes it and owns the campaign, the consent check and the outbox. The engine
+  has no channel, no template and no recipient, and
+  `crm-app-boundaries.test.ts` reads both the engine's SQL and every CRM file for
+  the names of Growth's sending half.
+- **A missing member or an unknown value is an error, not a default.**
+  `automation_member_inactive` and `automation_condition_invalid` are refusals at
+  the door; the stored row is the normalized document, with nulls for the config
+  an action does not use.
+
+It is not the AI automations engine (`ai_automations`, 0155): that one is
+business-wide, gated on `ai_assistant`, gated on A/R / A/P / inventory facts, and
+proposes actions from the AI catalog under an approval mode. A CRM rule is
+per-record and deterministic, and must work for a business with no AI
+entitlement. Merging them would mean either giving the CRM the catalog — and a
+path to propose a send — or rebuilding a working engine's fact model.
+
+The section is gated on `crm.configure`, like the pipeline and the business
+fields, and lives off the rail (`CRM_SUB_SECTIONS`) reached from CRM settings and
+the command field.
+
 ## Import and export
 
 `analyseImport` parses, validates and matches every row and **writes nothing**;

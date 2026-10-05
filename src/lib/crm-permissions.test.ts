@@ -179,6 +179,13 @@ const ROUTES: RouteAccess[] = [
   },
   { route: "saved-views/route.ts", method: "POST", section: "overview", action: "write" },
   { route: "saved-views/route.ts", method: "DELETE", section: "overview", action: "write" },
+  // The automations are configuration that acts on real records: writing a rule
+  // and stopping one are the same capability, and it is the same key that may
+  // reshape the pipeline.
+  { route: "automations/route.ts", method: "GET", section: "automations", action: "read" },
+  { route: "automations/route.ts", method: "POST", section: "automations", action: "configure" },
+  { route: "automations/[id]/route.ts", method: "PATCH", section: "automations", action: "configure" },
+  { route: "automations/[id]/route.ts", method: "DELETE", section: "automations", action: "delete" },
 ];
 
 /** The permissions a member is *guaranteed* to hold when a requirement is met. */

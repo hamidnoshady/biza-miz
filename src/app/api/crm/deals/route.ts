@@ -129,6 +129,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     lostReason: body.lostReason ?? null,
     orderId: body.orderId ?? null,
     createdBy: session.fullName,
+    createdById: session.sub,
   });
   return NextResponse.json({ deal }, { status: body.id ? 200 : 201 });
 });

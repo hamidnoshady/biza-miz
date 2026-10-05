@@ -745,6 +745,14 @@ export const CRM_AUDIT_KIND_LABELS: Record<string, string> = {
   "pipeline.stages_changed": "تغییر مراحل قیف فروش",
   "relationship.linked": "ایجاد نسبت بین اشخاص",
   "relationship.unlinked": "حذف نسبت بین اشخاص",
+  // Automations. Two kinds, and deliberately not one per run: a *rule* is a
+  // decision about how the CRM behaves and belongs in this log beside the other
+  // configuration decisions, while the runs themselves have their own
+  // append-only table (`crm_automation_runs`) where every firing is visible. A
+  // growth signal is the exception — it is the moment the CRM asks another app
+  // to do something, and somebody will want to know when and why.
+  "automation.config_changed": "تغییر اتوماسیون",
+  "automation.signal_growth": "اطلاع به رشد و بازاریابی",
 };
 
 /** The entity a decision was about, labelled. */
@@ -758,6 +766,7 @@ export const CRM_AUDIT_ENTITY_LABELS: Record<string, string> = {
   import: "ورود داده",
   export: "خروجی داده",
   custom_field: "فیلد کسب‌وکار",
+  automation: "اتوماسیون",
   pipeline: "قیف فروش",
   relationship: "نسبت",
 };
@@ -775,6 +784,7 @@ export const CRM_AUDIT_ENTITY_TYPES = [
   "relationship",
   "import",
   "export",
+  "automation",
 ] as const;
 
 /** Human-readable kind, falling back to the raw key for a kind this build has not learned. */

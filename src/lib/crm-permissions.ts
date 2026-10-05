@@ -87,6 +87,13 @@ export const CRM_SECTION_KEYS = [
   // stages, business fields) and is a different route with a different
   // component.
   "settings",
+  // The rules that put work in somebody's day without being asked: «وقتی → اگر
+  // → آنگاه». Reached from the CRM's own settings screen rather than the rail
+  // (see `CRM_SUB_SECTIONS`), because writing a rule is configuration — but it
+  // is a *section* with its own route, gate and bookmarks like any other, and
+  // the gate is the strongest CRM capability there is: an automation changes
+  // records with nobody watching.
+  "automations",
 ] as const;
 
 export type CrmSectionKey = (typeof CRM_SECTION_KEYS)[number];
@@ -293,6 +300,15 @@ export const CRM_SECTION_ACCESS: Record<CrmSectionKey, CrmSectionAccess> = {
   settings: {
     read: { all: [crmConfigure] },
     configure: [crmConfigure],
+  },
+  // The same capability that may reshape the pipeline may write a rule that acts
+  // on it, and no wider one may: a rule assigns work to members and files
+  // follow-ups against real customers. Reading the rules is reading the
+  // configuration, so it is held by the same key.
+  automations: {
+    read: { all: [crmConfigure] },
+    configure: [crmConfigure],
+    delete: [crmConfigure],
   },
 };
 

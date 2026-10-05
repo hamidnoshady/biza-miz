@@ -258,6 +258,63 @@ act in the duplicate view, resolving an identity stays a human decision in the
 reconciliation view, and fixing a gap is finished on the screen the gap points
 at, under that screen's own permission. **No AI merges anything.**
 
+## Automations: وقتی → اگر → آنگاه
+
+`/crm/automations` is the last headline of the brief: a rule the business writes
+itself, from three closed vocabularies, that files work or hands a record on
+without anybody watching. It is reached from CRM settings and from the command
+field rather than the rail (`CRM_SUB_SECTIONS`), because writing a rule is
+configuration — but it is a section like any other: its own route, its own gate
+(`crm.configure`) and its own bookmarks.
+
+| part | what it may be |
+|---|---|
+| **وقتی** | a deal changing stage, a ticket being opened, a lead being created |
+| **اگر** | value at least / source is / priority is / no owner — each declared only for the triggers whose records can satisfy it |
+| **آنگاه** | file a follow-up task, assign a member, signal Growth |
+
+Four properties make it safe to leave running, and each is a test rather than a
+promise:
+
+1. **The vocabulary is code, the rules are rows.** A trigger nobody implements
+   would be a rule that silently never fires, and a condition whose query does
+   not exist would be a rule that silently fires always — so a business composes
+   what the product already has (`crm-automation-rules.ts`, pure and
+   client-safe) and nothing a member types ever reaches SQL.
+2. **Exactly one action leaves the CRM.** `notify_growth` writes a signal (a run
+   row and an audit line) and nothing else: no channel, no template, no
+   recipient, no audience. Growth owns campaigns, consent-checked sends and the
+   outbox, and `crm-app-boundaries.test.ts` reads every CRM file for the names of
+   Growth's messaging and fails if one appears. The engine's whole write surface
+   is asserted to be eight statements over seven tables.
+3. **A rule acts like a colleague, not like a robot with a quota.** A follow-up
+   is a real `crm_activities` row — it lands in somebody's day, in the queues and
+   on the customer's timeline. A member who has since been deactivated gets
+   nobody's work: the task falls back to the record's owner, and to the «بدون
+   مسئول» queue when there is none. A legacy owner written as a name counts as
+   an owner, so a rule cannot reassign somebody's customer.
+4. **Everything a rule does is recorded, including doing nothing.** Runs are
+   append-only with the rule's name denormalised onto them, so deleting a rule
+   leaves its history readable; a condition that did not hold is recorded as
+   «اجرا نشد — شرط‌ها برقرار نبود», which is the question the screen exists to
+   answer. The rule's counters only move for real effects.
+
+Rules fire from the write paths that already own the events — `moveDealToStage`
+(the kanban drag), `upsertDeal`, `upsertCase` and `saveLead` — **after** the
+write commits, never inside its transaction: a rule's failure must not roll back
+the salesperson's drag, and a failed statement inside a transaction would poison
+it. A deal born on a stage counts as having entered it; a re-save of the stage a
+deal is already on is not a move and fires nothing.
+
+This is deliberately *not* the AI automations engine (`ai_automations`, 0155).
+That one is business-wide, gated on the `ai_assistant` entitlement, gated on
+facts like A/R and inventory, and proposes actions from the AI catalog under an
+approval mode. A CRM rule is per-record, deterministic and available to a
+business with no AI entitlement at all; folding the two together would mean
+either giving the CRM the catalog — and with it a path to propose a send — or
+rewriting a working engine's fact model. What is shared is the posture: closed
+vocabulary, unknown values refused rather than ignored, append-only runs.
+
 ## Permissions: one table, checked against the routes
 
 `src/lib/crm-permissions.ts` is the single source for section read / write /
@@ -282,7 +339,11 @@ action a section does not declare is **closed**, not open.
 without reaching a server-only service). Shaping a pipeline records
 `pipeline.created` / `pipeline.updated` / `pipeline.stages_changed` under entity
 type `pipeline` — it used to be filed as a deal stage change of a deal that did
-not exist.
+not exist. Automations record two kinds and only two: `automation.config_changed`
+when a rule is written, switched or deleted, and `automation.signal_growth` when
+the CRM asks Growth to look at a customer. The firings themselves are not copied
+here — `crm_automation_runs` is the append-only record of those, and duplicating
+every run would bury the judgements the log is for.
 
 ## Deliberately not built yet
 
@@ -302,12 +363,6 @@ These are named here so the seams are visible rather than implied:
 - **The saved-view filter vocabulary the command field will need** for «همهٔ
   مشتریان تهران که پارسال خریدند»: the resolver exists, the phrase vocabulary
   over its fields does not.
-- **CRM automations (When → If → Then)** — the last unimplemented headline of
-  the Relationship OS brief. The permission-aware conditions it needs already
-  exist as closed vocabularies (queues, saved-view filters, segment definitions);
-  what does not exist is the rule engine, an audit trail for it, and the
-  guarantee that a CRM automation may *trigger* Growth but never send a campaign
-  itself.
 
 Import and export are **not** on this list, and never appear as a CRM button:
 the platform data-transfer engine owns that door, and the CRM's entities

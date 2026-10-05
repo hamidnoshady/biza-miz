@@ -82,6 +82,10 @@ const SECTION_ALIASES: Record<CrmSectionKey, readonly string[]> = {
   reconciliation: ["تطبیق", "فروشگاه آنلاین", "خریدار آنلاین", "سایت", "هویت"],
   audit: ["سابقه", "لاگ", "تصمیم‌ها", "چه کسی", "تاریخچه تصمیم"],
   settings: ["تنظیمات", "پیکربندی", "فیلد کسب‌وکار", "فیلدها", "مراحل قیف"],
+  // The rules that act on their own. Reached from the settings screen, and
+  // findable by the words a person uses when they want one: an automation, a
+  // rule that runs itself, or the plain verb.
+  automations: ["اتوماسیون", "اتوماسیون‌ها", "قاعده خودکار", "خودکارسازی", "کار خودکار"],
 };
 
 /**

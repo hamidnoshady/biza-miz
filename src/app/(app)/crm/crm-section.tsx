@@ -37,6 +37,7 @@ import { ConsentSection } from "./consent-section";
 import { CrmAuditSection } from "./audit-section";
 import { CrmSettingsSection } from "./settings-section";
 import { QualitySection } from "./quality-section";
+import { AutomationsSection } from "./automations-section";
 import { crmSectionHref, type CrmSectionKey } from "./crm-routes";
 
 export function CrmSection({
@@ -86,5 +87,10 @@ export function CrmSection({
   if (section === "reconciliation") return <ReconciliationSection />;
   if (section === "audit") return <CrmAuditSection />;
   if (section === "settings") return <CrmSettingsSection canConfigure={canConfigureCrmSection(held, "settings")} />;
+  if (section === "automations")
+    return <AutomationsSection canConfigure={canConfigureCrmSection(held, "automations")} />;
+  // Reached only for `consent`: every other key returned above, so this is the
+  // last explicit branch rather than a fallthrough that would quietly render the
+  // wrong screen for a section somebody forgot to wire.
   return <ConsentSection />;
 }

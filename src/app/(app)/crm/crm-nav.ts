@@ -157,7 +157,16 @@ export const CRM_NAV_GROUPS: ReadonlyArray<AppSectionNavGroup<CrmSectionKey>> = 
  * statement about permission, which is exactly why it has to be a declared list
  * rather than a silent omission.
  */
-export const CRM_SUB_SECTIONS: readonly CrmSectionKey[] = ["duplicates", "reconciliation"];
+export const CRM_SUB_SECTIONS: readonly CrmSectionKey[] = [
+  "duplicates",
+  "reconciliation",
+  // «اتوماسیون‌ها» is configuration, so it belongs to the settings screen rather
+  // than the rail: the rail answers the six questions a person arrives with, and
+  // "which rules run on their own" is not one of them until somebody wants to
+  // write one. The command field finds it by name, and the settings screen links
+  // to it, so nothing is buried — only ordered.
+  "automations",
+];
 
 /**
  * The entries a member may open — `canViewCrmSection` is the only gate, so a

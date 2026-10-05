@@ -110,6 +110,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     assignedTo: body.assignedTo,
     resolution: body.resolution,
     createdBy: session.fullName,
+    createdById: session.sub,
   });
   return NextResponse.json({ case: record }, { status: body.id ? 200 : 201 });
 });
