@@ -93,6 +93,9 @@ export interface ServiceReminder {
   serialNumber: string;
   itemName: string;
   customerName: string | null;
+  customerPhone: string | null;
+  /** Issue #795 item 14 — the last completed service that rolled the anchor forward. */
+  lastServiceDate: string | null;
   referenceDate: string;
   state: ServiceReminderState;
 }

@@ -255,6 +255,29 @@ export async function createRepairTicket(input: CreateRepairTicketInput): Promis
     const warrantyError = validateWarrantyCharge(underWarranty, laborCharge, nonCoveredReason);
     if (warrantyError) throw new Error(warrantyError);
 
+    // Issue #795 item 12 — a shop-sold unit's repair belongs on the buyer's
+    // CRM timeline. When the intake names a serial but no customer, the
+    // original buyer is resolved from the persisted invoice line that sold
+    // it (latest completed sale wins — a resold unit belongs to its newest
+    // owner). An explicitly passed customerId always wins: the current
+    // owner may differ from the original buyer, and the operator is the
+    // one who knows.
+    let customerId = input.customerId ?? null;
+    if (!customerId && input.serialId) {
+      const { rows: buyers } = await client.query<{ customer_id: string | null }>(
+        `SELECT o.customer_id
+           FROM order_items oi
+           JOIN orders o ON o.id = oi.order_id
+          WHERE o.location_id = $1 AND o.status = 'completed' AND oi.status <> 'voided'
+            AND oi.retail_snapshot ->> 'kind' = 'watch'
+            AND oi.retail_snapshot ->> 'serialId' = $2
+          ORDER BY o.closed_at DESC NULLS LAST
+          LIMIT 1`,
+        [input.locationId, input.serialId],
+      );
+      customerId = buyers[0]?.customer_id ?? null;
+    }
+
     // Same atomic UPDATE ... RETURNING counter Phase 2 uses for order
     // numbers, for the same reason: two people at the counter must never
     // hand out the same ticket number.
@@ -274,7 +297,7 @@ export async function createRepairTicket(input: CreateRepairTicketInput): Promis
       [
         input.locationId,
         ticketNumber,
-        input.customerId ?? null,
+        customerId,
         input.serialId ?? null,
         description,
         input.reportedIssue?.trim() || null,

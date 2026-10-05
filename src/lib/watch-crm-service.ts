@@ -27,16 +27,30 @@ interface ServiceReminderRow {
   serialNumber: string;
   itemName: string;
   customerName: string | null;
-  /** The ISO date the unit comes due for service (sale date + interval). */
+  customerPhone: string | null;
+  /** The ISO date of the last qualifying completed service, if any. */
+  lastServiceDate: string | null;
+  /** The ISO date the unit comes due for service (anchor date + interval). */
   referenceDate: string;
   state: ServiceReminderState;
 }
 
 /**
  * Sold units whose next service is within `leadDays` or past — the
- * due-for-service list the shop's home page surfaces. The reference is the
- * sale date plus the model's service interval; a model without an interval
- * never appears.
+ * due-for-service list the shop's home page surfaces.
+ *
+ * Issue #795 items 13 & 14:
+ * - The anchor rolls forward: `last qualifying completed service ?? sale
+ *   date` plus the model's interval. A *qualifying* service is any CLOSED
+ *   repair ticket linked to the serial (a cancelled intake never serviced
+ *   anything), so an overdue watch stops being overdue the day its service
+ *   ticket closes — the close date becomes the next anchor.
+ * - The reminder knows WHO to call: the buyer on the latest completed
+ *   invoice line that sold this serial (ownership from the persisted sale,
+ *   a resold unit belongs to its newest owner), with the ticket's own
+ *   customer as fallback for units serviced but never sold here.
+ *
+ * A model without an interval never appears.
  */
 export async function serviceReminders(
   locationId: string,
@@ -48,19 +62,48 @@ export async function serviceReminders(
     serial_number: string;
     item_name: string;
     sold_at: string | null;
+    last_service: string | null;
     service_interval_months: number | null;
+    customer_name: string | null;
+    customer_phone: string | null;
   }>(
     `SELECT s.id AS serial_id, s.serial_number, i.name AS item_name,
-            s.sold_at::text AS sold_at, i.service_interval_months
+            s.sold_at::text AS sold_at, i.service_interval_months,
+            svc.last_service::text AS last_service,
+            p.name AS customer_name, p.phone AS customer_phone
        FROM item_serials s
        JOIN items i ON i.id = s.item_id
+       LEFT JOIN LATERAL (
+         SELECT max(rt.closed_at)::date AS last_service
+           FROM repair_tickets rt
+          WHERE rt.serial_id = s.id AND rt.status = 'closed'
+       ) svc ON true
+       LEFT JOIN LATERAL (
+         SELECT o.customer_id
+           FROM order_items oi
+           JOIN orders o ON o.id = oi.order_id
+          WHERE o.location_id = $1 AND o.status = 'completed' AND oi.status <> 'voided'
+            AND oi.retail_snapshot ->> 'kind' = 'watch'
+            AND oi.retail_snapshot ->> 'serialId' = s.id::text
+          ORDER BY o.closed_at DESC NULLS LAST
+          LIMIT 1
+       ) own ON true
+       LEFT JOIN LATERAL (
+         SELECT rt.customer_id
+           FROM repair_tickets rt
+          WHERE rt.serial_id = s.id AND rt.customer_id IS NOT NULL
+          ORDER BY rt.created_at DESC
+          LIMIT 1
+       ) tkt ON true
+       LEFT JOIN parties p ON p.id = coalesce(own.customer_id, tkt.customer_id)
       WHERE i.location_id = $1 AND s.status = 'sold' AND s.sold_at IS NOT NULL`,
     [locationId],
   );
 
-const reminders: ServiceReminderRow[] = [];
+  const reminders: ServiceReminderRow[] = [];
   for (const r of rows) {
-    const reference = serviceDueDate(r.sold_at, r.service_interval_months);
+    const anchor = r.last_service ?? r.sold_at;
+    const reference = serviceDueDate(anchor, r.service_interval_months);
     if (!reference) continue;
     const state = serviceReminderState(reference, todayIso, leadDays);
     if (state === "ok") continue;
@@ -68,7 +111,9 @@ const reminders: ServiceReminderRow[] = [];
       serialId: r.serial_id,
       serialNumber: r.serial_number,
       itemName: r.item_name,
-      customerName: null,
+      customerName: r.customer_name,
+      customerPhone: r.customer_phone,
+      lastServiceDate: r.last_service,
       referenceDate: reference,
       state,
     });

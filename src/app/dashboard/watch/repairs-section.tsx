@@ -9,6 +9,7 @@ import { formatPersianNumber, formatQuantity, toPersianDigits } from "@/lib/digi
 import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { api, Field, inputClass } from "../ui";
+import { CustomerPicker, type PickerCustomer } from "../customer-picker";
 import {
   REPAIR_STATUS_LABELS,
   type RepairPart,
@@ -55,6 +56,11 @@ export function RepairsSection({
   const [itemDescription, setItemDescription] = useState("");
   const [reportedIssue, setReportedIssue] = useState("");
   const [serialId, setSerialId] = useState("");
+  // Issue #795 item 12 — the intake connects the job to the person. Left
+  // empty for a shop-sold serial, the server resolves the original buyer
+  // from the persisted invoice; picking one here explicitly overrides it
+  // (the current owner may differ from the original buyer).
+  const [customer, setCustomer] = useState<PickerCustomer | null>(null);
   const [laborCharge, setLaborCharge] = useState("0");
   const [vatPercent, setVatPercent] = useState("9");
 
@@ -68,6 +74,7 @@ export function RepairsSection({
           itemDescription,
           reportedIssue: reportedIssue.trim() || null,
           serialId: serialId || null,
+          customerId: customer?.id || null,
           laborCharge: money.fromInput(Math.max(0, Math.round(Number(laborCharge || 0)))),
           vatPercent: Number(vatPercent || 0),
         }),
@@ -77,6 +84,7 @@ export function RepairsSection({
       setItemDescription("");
       setReportedIssue("");
       setSerialId("");
+      setCustomer(null);
       setLaborCharge("0");
     }
   }
@@ -141,6 +149,16 @@ export function RepairsSection({
                   label: `${u.itemName} — ${u.serialNumber}`,
                 }))}
                 placeholder="بدون سریال"
+              />
+            </Field>
+            <Field
+              label="مشتری"
+              hint="خالی بماند، برای دستگاه فروشگاهی خریدار فاکتور به‌صورت خودکار ثبت می‌شود."
+            >
+              <CustomerPicker
+                customer={customer}
+                onChange={setCustomer}
+                idPrefix="watch-repair-customer"
               />
             </Field>
             <Field label={`اجرت تعمیر (${money.unitLabel})`}>

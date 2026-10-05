@@ -1596,3 +1596,107 @@ describe("Issue #795 Phase 3 — serialized customer returns", () => {
     await expect(makeRequest()).resolves.toBeTruthy();
   });
 });
+
+/**
+ * Issue #795 Phase 5 (items 12–14) — the CRM side of the serialized
+ * lifecycle: a repair intake on a shop-sold unit links the buyer
+ * automatically, service reminders know who to call (ownership from the
+ * persisted invoice), and a completed service rolls the reminder anchor
+ * forward instead of leaving the unit overdue forever.
+ */
+describe("Issue #795 Phase 5 — customer-aware, roll-forward service reminders", () => {
+  it("resolves the buyer from the persisted invoice, auto-links repair intake, and rolls the anchor to the last completed service", async () => {
+    const { rows: partyRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, phone) VALUES ($1, 'آقای رضایی', '09120000000') RETURNING id",
+      [biz.id],
+    );
+    const customerId = partyRows[0].id;
+
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت اتوماتیک",
+      tracking: "serial",
+      serviceIntervalMonths: 12,
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-SVC" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId))[0];
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        customerId,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+    // The sale happened long ago — the first service window has lapsed.
+    await db.query("UPDATE item_serials SET sold_at = '2020-01-10' WHERE id = $1", [unit.id]);
+
+    const today = "2026-10-05";
+    let reminders = await watchCrm.serviceReminders(biz.locationId, today, 30);
+    expect(reminders).toHaveLength(1);
+    // Item 13: the reminder knows the buyer — resolved from the invoice
+    // line that sold this exact serial, not a hardcoded null.
+    expect(reminders[0]).toMatchObject({
+      serialId: unit.id,
+      state: "overdue",
+      customerName: "آقای رضایی",
+      customerPhone: "09120000000",
+      lastServiceDate: null,
+      referenceDate: "2021-01-10",
+    });
+
+    // Item 12: a repair intake naming the serial but no customer links the
+    // original buyer automatically…
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "سرویس کامل موومان",
+      serialId: unit.id,
+    });
+    expect(ticket.customerId).toBe(customerId);
+    // …while an explicit customer always wins (the current owner may differ).
+    const { rows: otherParty } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name) VALUES ($1, 'مالک جدید') RETURNING id",
+      [biz.id],
+    );
+    await repairs.setRepairStatus(ticket.id, "cancelled");
+    const explicit = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "سرویس کامل موومان",
+      serialId: unit.id,
+      customerId: otherParty[0].id,
+    });
+    expect(explicit.customerId).toBe(otherParty[0].id);
+
+    // Item 14: closing the service rolls the anchor forward — the unit
+    // stops being overdue the day its ticket closes…
+    await withTransaction((client) =>
+      repairs.closeRepairTicket(client, { businessId: biz.id, ticketId: explicit.id, paymentMethod: "cash" }),
+    );
+    reminders = await watchCrm.serviceReminders(biz.locationId, today, 30);
+    expect(reminders).toHaveLength(0);
+
+    // …and the NEXT due date is the service date plus the interval, with
+    // the completed service visible as the new anchor. (A cancelled ticket
+    // never serviced anything — only the closed one counts.)
+    await db.query("UPDATE repair_tickets SET closed_at = '2024-06-01' WHERE id = $1", [explicit.id]);
+    reminders = await watchCrm.serviceReminders(biz.locationId, today, 30);
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0]).toMatchObject({
+      serialId: unit.id,
+      state: "overdue",
+      lastServiceDate: "2024-06-01",
+      referenceDate: "2025-06-01",
+      customerName: "آقای رضایی",
+    });
+  });
+});
