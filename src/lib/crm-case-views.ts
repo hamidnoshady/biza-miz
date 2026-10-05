@@ -35,6 +35,10 @@ import {
   CASE_PRIORITY_LABELS,
   CASE_STATUSES,
   CASE_STATUS_LABELS,
+  isCasePriority,
+  isCaseStatus,
+  type CasePriority,
+  type CaseStatus,
 } from "./crm-shared";
 import { toPersianDigits } from "./digits";
 import { isUuid } from "./uuid";
@@ -150,6 +154,49 @@ export function caseViewAssigneeUserId(
 /** Whether the assignee filter asks for tickets nobody owns. */
 export function caseViewUnownedOnly(filters: CaseViewFilters): boolean {
   return filters.assignee === "none";
+}
+
+/**
+ * The document, translated into the query `listCases` takes.
+ *
+ * This is the one step between «what the reader asked for» and «what the server
+ * runs», so it lives with the vocabulary rather than inside the route: the queue
+ * cards (`crm-queue-views.ts`) emit documents and claim they are the same rows,
+ * and a test can only hold that claim if both sides read the same translation.
+ * The route keeps what is *not* translation — permissions, limits, legacy query
+ * parameters.
+ */
+export interface CaseViewListOptions {
+  q?: string;
+  /** Already narrowed to the vocabulary's own union, so nothing casts later. */
+  status?: CaseStatus;
+  priority?: CasePriority;
+  openOnly: boolean;
+  breachedOnly: boolean;
+  assigneeUserId?: string;
+  unowned: boolean;
+}
+
+export function caseViewListOptions(
+  filters: CaseViewFilters,
+  viewerId: string | null,
+): CaseViewListOptions {
+  // `mine` becomes the session's member id, never a query-string value. A
+  // caller with no member id who asked for `mine` gets nothing, not everything:
+  // the safe direction for a filter about ownership.
+  const assigneeUserId = caseViewAssigneeUserId(filters, viewerId);
+  return {
+    q: filters.q || undefined,
+    // Narrowed, not cast: the parser refused anything outside the vocabulary, so
+    // these guards cannot fail — and if one ever does, the filter is dropped
+    // rather than handed to SQL as an unknown string.
+    status: isCaseStatus(filters.status) ? filters.status : undefined,
+    priority: isCasePriority(filters.priority) ? filters.priority : undefined,
+    openOnly: filters.openOnly,
+    breachedOnly: filters.breachedOnly,
+    assigneeUserId: assigneeUserId ?? undefined,
+    unowned: caseViewUnownedOnly(filters) || (filters.assignee === "mine" && !assigneeUserId),
+  };
 }
 
 export interface CaseViewLookups {

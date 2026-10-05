@@ -49,7 +49,7 @@ import {
   type DealStage,
   type DuplicateReason,
 } from "./crm-shared";
-import { CASE_BREACH_SQL_CASES, caseBreachSql } from "./crm-case-clock";
+import { CASE_BREACH_SQL_CASES, CASE_OPEN_STATUSES, caseBreachSql } from "./crm-case-clock";
 import { daysBetween, lifetimeValue, scorePopulation, type CustomerRfmInput, type RfmScore } from "./crm-scoring";
 import { customerHealth as healthOf, type CustomerHealth } from "./crm-health";
 import { resolveOwner } from "./crm-ownership";
@@ -1501,7 +1501,9 @@ export async function listActivities(
   if (options.assigneeUserId && isUuid(options.assigneeUserId)) {
     add("a.assignee_user_id = $n", options.assigneeUserId);
   } else if (options.unowned) {
-    where += " AND a.assignee_user_id IS NULL";
+    // No id *and* no name — the definition `listCases` argues in full, and the
+    // one the queue cards and `unowned_work` already used.
+    where += " AND a.assignee_user_id IS NULL AND btrim(coalesce(a.assigned_to, '')) = ''";
   }
   const term = options.q?.trim();
   if (term) {
@@ -1791,7 +1793,9 @@ export async function listDeals(
     params.push(options.ownerUserId);
     where += ` AND d.owner_user_id = $${params.length}`;
   } else if (options.unowned) {
-    where += " AND d.owner_user_id IS NULL";
+    // No id *and* no name — the definition `listCases` argues in full, and the
+    // one the queue cards and `unowned_work` already used.
+    where += " AND d.owner_user_id IS NULL AND btrim(coalesce(d.owner_user, '')) = ''";
   }
   if (options.q && options.q.trim()) {
     // One parameter, two columns: `%text%` for either the deal or its customer.
@@ -2127,7 +2131,12 @@ export async function listCases(
     params.push(options.assigneeUserId);
     where += ` AND k.assignee_user_id = $${params.length}`;
   } else if (options.unowned) {
-    where += " AND k.assignee_user_id IS NULL";
+    // «بدون مسئول» means nobody at all. A row carrying a legacy name and no id
+    // is *not* unowned — that name is still a claim — and the queue card
+    // («تیکت‌های بازی که مالکی ندارند») has always read it that way. One
+    // definition, shared with `crm-data-quality.ts`'s `unowned_work` rule.
+    where +=
+      " AND k.assignee_user_id IS NULL AND btrim(coalesce(k.assigned_to, '')) = ''";
   }
   if (options.status) {
     params.push(options.status);
@@ -2142,7 +2151,10 @@ export async function listCases(
     where += ` AND (k.subject ILIKE $${params.length} OR k.body ILIKE $${params.length}
               OR c.name ILIKE $${params.length})`;
   }
-  if (options.openOnly) where += " AND k.status IN ('open', 'in_progress', 'waiting')";
+  if (options.openOnly) {
+    params.push([...CASE_OPEN_STATUSES]);
+    where += ` AND k.status = ANY($${params.length})`;
+  }
   if (options.breachedOnly) {
     params.push(JSON.stringify(CASE_BREACH_SQL_CASES.targets));
     const targets = `$${params.length}`;

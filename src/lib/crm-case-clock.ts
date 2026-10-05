@@ -59,6 +59,23 @@ export const CASE_WAITING_STATUS: CaseStatus = "waiting";
 /** Statuses where the case is finished and no clock runs at all. */
 export const CASE_CLOSED_STATUSES: readonly CaseStatus[] = ["resolved", "closed"];
 
+/**
+ * The desk's word «باز», as a set.
+ *
+ * One list, because three readers ask whether a case is open and each of them
+ * used to answer with its own literal: the list's `openOnly` filter, the queue
+ * card that counts the cases a person has not picked up, and the arrival of
+ * «خطر مهلت». When they disagree, a queue says «۴ مورد» above a list that shows
+ * seven of them — which is how this constant came to exist.
+ *
+ * It is the active statuses plus the one where the customer owes us an answer:
+ * a waiting ticket is not finished work, it is work in somebody else's court.
+ */
+export const CASE_OPEN_STATUSES: readonly CaseStatus[] = [
+  ...CASE_ACTIVE_STATUSES,
+  CASE_WAITING_STATUS,
+];
+
 export interface CaseClock {
   /** Target for this case's priority, in hours. */
   targetHours: number;

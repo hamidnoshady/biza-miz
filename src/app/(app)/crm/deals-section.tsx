@@ -81,6 +81,7 @@ import {
   describeDealView,
   EMPTY_DEAL_VIEW_FILTERS,
   hasDealViewFilters,
+  parseDealViewFilters,
   type DealViewFilters,
 } from "@/lib/crm-deal-views";
 
@@ -184,7 +185,13 @@ export function DealsSection({ canManage = false }: { canManage?: boolean }) {
    * filters this screen honours, and a list can never be labelled with
    * something the server was not asked for (`crm-deal-views.ts`).
    */
-  const [filters, setFilters] = useState<DealViewFilters>(EMPTY_DEAL_VIEW_FILTERS);
+  const [filters, setFilters] = useState<DealViewFilters>(() => {
+    // The same convention the other two lists follow: a link may carry a filter
+    // document, and the board opens showing exactly it. No keys means the board's
+    // own default.
+    const parsed = parseDealViewFilters(searchParams);
+    return parsed.error ? EMPTY_DEAL_VIEW_FILTERS : parsed.filters;
+  });
   /** Whether the board or the list is showing. The board is the default. */
   const [layout, setLayout] = useState<"board" | "list">("board");
   /** The member names the owner filter and the chips can use. */
@@ -223,6 +230,23 @@ export function DealsSection({ canManage = false }: { canManage?: boolean }) {
     });
   }, []);
   useEffect(() => load(filters), [load, filters]);
+
+  /**
+   * Keep the address bar equal to the filter document — see the note in
+   * `cases-section.tsx`: a copied URL reproduces the list, and a link that
+   * arrived carrying a filter stops claiming to be that filter once it changes.
+   * `?deal=` is left alone; it belongs to the deep-link effect below.
+   */
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    for (const key of ["q", "stageId", "pipelineId", "owner", "open", "minValue", "maxValue"]) {
+      url.searchParams.delete(key);
+    }
+    for (const [key, value] of Object.entries(dealViewQuery(filters))) {
+      url.searchParams.set(key, value);
+    }
+    window.history.replaceState(null, "", url.toString());
+  }, [filters]);
 
   // `/crm/deals?deal=<id>` is how the customer timeline and other screens hand
   // a specific deal over (see `customer-timeline-service.ts`). Without this,

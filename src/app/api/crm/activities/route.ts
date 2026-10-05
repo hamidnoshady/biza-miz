@@ -13,9 +13,8 @@ import {
 import { isUuid } from "@/lib/uuid";
 import { listAssignableMembers } from "@/lib/crm-ownership";
 import {
-  activityViewAssigneeUserId,
+  activityViewListOptions,
   activityViewQuery,
-  activityViewUnownedOnly,
   parseActivityViewFilters,
 } from "@/lib/crm-activity-views";
 
@@ -57,26 +56,20 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   // The state vocabulary turns into date bounds here, against the business date
   // the server resolved — the same date the rows are coloured by, so a view
   // named «سررسیدشده» and the red rows below it cannot disagree about today.
-  const assigneeUserId = activityViewAssigneeUserId(filters, session.sub);
+  // The translation from the reader's document to the query lives in
+  // `crm-activity-views.ts` — including that `mine` means the session's own
+  // member id, and that the states are date bounds over the shop's own day. The
+  // rows a queue card links to and the rows this route returns are therefore one
+  // reading of one document. What stays here is what is not translation:
+  // permissions, `limit`, and the legacy `customerId`/`dealId`/`caseId`/
+  // `assignedTo` parameters other screens pass.
+  const options = activityViewListOptions(filters, { viewerId: session.sub, today });
   const activities = await listActivities(session.businessId, {
+    ...options,
     customerId: search.get("customerId") ?? undefined,
     dealId: search.get("dealId") ?? undefined,
     caseId: search.get("caseId") ?? undefined,
-    kind: filters.kind ? (filters.kind as ActivityKind) : undefined,
-    openOnly: filters.state === "open",
-    completedOnly: filters.state === "done",
     assignedTo: search.get("assignedTo") ?? undefined,
-    // «کارهای من»: the caller's own id, taken from the session rather than from
-    // the query string — a `?assignee=<someone-else>` with no member id to be
-    // resolves to nobody, never to everybody.
-    assigneeUserId: assigneeUserId ?? undefined,
-    unowned: activityViewUnownedOnly(filters) || (filters.assignee === "mine" && !assigneeUserId),
-    q: filters.q || undefined,
-    // «فقط سررسیدشده‌ها» — overdue plus today, against the business date the
-    // server just resolved, so the filter and the badges agree.
-    dueOnOrBefore: filters.state === "due" ? today : undefined,
-    dueBefore: filters.state === "overdue" ? today : undefined,
-    dueOnOrAfter: filters.state === "planned" ? nextIsoDate(today) : undefined,
     limit: Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : undefined,
   });
 
@@ -94,19 +87,6 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     })),
   });
 });
-
-/**
- * The day after a business date, so `planned` can mean "due tomorrow or later".
- *
- * Returns `undefined` for a date the server could not parse, which drops the
- * filter rather than sending a nonsense bound: a filter that silently matches
- * nothing is worse than one that is visibly not applied.
- */
-function nextIsoDate(iso: string): string | undefined {
-  const parsed = Date.parse(`${iso}T00:00:00Z`);
-  if (Number.isNaN(parsed)) return undefined;
-  return new Date(parsed + 86_400_000).toISOString().slice(0, 10);
-}
 
 interface ActivityBody {
   customerId?: string | null;

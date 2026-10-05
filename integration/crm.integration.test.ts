@@ -27,11 +27,9 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
-import { isActivityKind } from "../src/lib/crm-shared";
 import {
-  activityViewAssigneeUserId,
+  activityViewListOptions,
   activityViewQuery,
-  activityViewUnownedOnly,
   parseActivityViewFilters,
 } from "../src/lib/crm-activity-views";
 
@@ -841,27 +839,33 @@ describe("the task list's filter", () => {
     });
     const noDueDate = await make({ kind: "note", subject: "یادداشت بدون تاریخ" });
     const done = await make({ kind: "task", subject: "کار انجام‌شده", completed: true });
+    // Two calls that were made — one late, one on time. Finished work is
+    // «انجام‌شده» however old its due date is (`activityState` answers that
+    // before it looks at the date at all), so neither may appear under
+    // «عقب‌افتاده» or «امروز». The queues agree: their SQL has always required
+    // `completed_at IS NULL`, and a «دیدن همه» link that listed them would show
+    // rows the card above it did not count.
+    const doneLate = await make({
+      kind: "call",
+      subject: "تماس دیروزِ انجام‌شده",
+      dueAt: `${yesterday}T09:00:00Z`,
+      completed: true,
+    });
+    const doneToday = await make({
+      kind: "call",
+      subject: "تماس امروزِ انجام‌شده",
+      dueAt: `${today}T09:00:00Z`,
+      completed: true,
+    });
 
-    // The route's own translation: parse the query with the screen's module,
-    // then turn the state into the date bounds the business day implies.
+    // The route's own translation, called rather than re-written: the same
+    // function the API route uses turns the parsed document into the query, so
+    // this block tests the translation the app ships instead of a copy of it.
     const run = async (query: Record<string, string>) => {
       const parsed = parseActivityViewFilters({ get: (key) => query[key] ?? null });
       expect(parsed.error).toBeNull();
-      const state = parsed.filters.state;
-      const rows = await crm.listActivities(own.businessId, {
-        q: parsed.filters.q || undefined,
-        // The parser refused anything outside the vocabulary, so this is a
-        // narrowing for the type system rather than a second check.
-        kind: isActivityKind(parsed.filters.kind) ? parsed.filters.kind : undefined,
-        openOnly: state === "open",
-        completedOnly: state === "done",
-        assigneeUserId:
-          activityViewAssigneeUserId(parsed.filters, viewerId) ?? undefined,
-        unowned: activityViewUnownedOnly(parsed.filters),
-        dueOnOrBefore: state === "due" ? today : undefined,
-        dueBefore: state === "overdue" ? today : undefined,
-        dueOnOrAfter: state === "planned" ? tomorrow : undefined,
-      });
+      const options = activityViewListOptions(parsed.filters, { viewerId, today });
+      const rows = await crm.listActivities(own.businessId, options);
       return rows.map((row) => row.id).sort();
     };
     const sorted = (...ids: string[]) => [...ids].sort();
@@ -873,11 +877,13 @@ describe("the task list's filter", () => {
     // …and so is the customer's name, which is how a shop looks for «what did
     // we promise this person».
     expect(await run({ q: "مشتری پیگیری‌ها" })).toEqual(sorted(overdueCall.id, planned.id));
-    expect(await run({ kind: "call" })).toEqual(sorted(overdueCall.id, dueToday.id));
+    expect(await run({ kind: "call" })).toEqual(
+      sorted(overdueCall.id, dueToday.id, doneLate.id, doneToday.id),
+    );
     expect(await run({ kind: "note" })).toEqual(sorted(noDueDate.id));
     expect(await run({ assignee: "mine" })).toEqual(sorted(overdueCall.id));
     expect(await run({ assignee: "none" })).toEqual(
-      sorted(dueToday.id, planned.id, noDueDate.id, done.id),
+      sorted(dueToday.id, planned.id, noDueDate.id, done.id, doneLate.id, doneToday.id),
     );
     expect(await run({ assignee: viewerId })).toEqual(sorted(overdueCall.id));
 
@@ -889,9 +895,12 @@ describe("the task list's filter", () => {
     expect(await run({ state: "open" })).toEqual(
       sorted(overdueCall.id, dueToday.id, planned.id, noDueDate.id),
     );
-    expect(await run({ state: "done" })).toEqual(sorted(done.id));
+    expect(await run({ state: "done" })).toEqual(sorted(done.id, doneLate.id, doneToday.id));
     expect(await run({ state: "due" })).toEqual(sorted(overdueCall.id, dueToday.id));
+    // The two that were finished are absent from both: the date-bounded states
+    // are the row badges' words, and a badge calls them «انجام‌شده».
     expect(await run({ state: "overdue" })).toEqual(sorted(overdueCall.id));
+    expect(await run({ state: "today" })).toEqual(sorted(dueToday.id));
     expect(await run({ state: "planned" })).toEqual(sorted(planned.id));
 
     // The legacy key, read for links and views already in the wild.
@@ -951,6 +960,23 @@ describe("the task list's filter", () => {
     );
     expect(legacy.ok && legacy.view.filters).toEqual({ kind: "call" });
 
+    // A *new* state joins the vocabulary without a migration: «امروز» is the
+    // word the row badge and the «کارهای امروز» queue already use, so a view may
+    // store it. This is the same key the wave-13 witness used as its example of
+    // an impossible value.
+    const todayView = await views.saveView(
+      business.businessId,
+      {
+        entity: "activities",
+        name: "کارهای امروز",
+        filters: { state: "today" },
+        shared: true,
+      },
+      { name: "مدیر", userId: null },
+    );
+    expect(todayView.ok).toBe(true);
+    expect(todayView.ok && todayView.view.filters).toEqual({ state: "today" });
+
     // An impossible value inside the vocabulary is refused *and named*, so the
     // screen can point at the control instead of showing a mystery.
     const bad = await views.saveView(
@@ -958,7 +984,7 @@ describe("the task list's filter", () => {
       {
         entity: "activities",
         name: "با وضعیت نامعتبر",
-        filters: { state: "today" },
+        filters: { state: "paused" },
         shared: true,
       },
       { name: "مدیر", userId: null },

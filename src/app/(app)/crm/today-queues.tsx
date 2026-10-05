@@ -62,6 +62,12 @@ interface Queue {
   count: number;
   action: string;
   items: QueueItem[];
+  /**
+   * The same rows as a filter its owning screen can open. `null` for a queue
+   * whose rule is not expressible as a stored view — see `crm-queue-views.ts`,
+   * which also says why each of those is what it is.
+   */
+  view?: { href: string; filters: Record<string, string> } | null;
 }
 
 export function CrmTodayQueues({
@@ -188,6 +194,18 @@ export function CrmTodayQueues({
                 <p className="mt-2 text-xs text-muted-foreground">
                   {formatPersianNumber(queue.count - queue.items.length)} مورد دیگر در این صف است.
                 </p>
+              ) : null}
+              {/* The count is a promise about rows; this is the link that keeps
+                  it. Without it «۲ مورد دیگر» is a number a person can only
+                  trust — the section opens unfiltered, so the two rows they
+                  cannot see are unreachable from here. */}
+              {queue.view ? (
+                <Link
+                  href={queue.view.href}
+                  className="mt-2 inline-flex text-xs font-medium text-amber-700 hover:underline dark:text-amber-300"
+                >
+                  دیدن همهٔ {formatPersianNumber(queue.count)} مورد در فهرست
+                </Link>
               ) : null}
               <p className="mt-2 text-xs leading-5 text-muted-foreground">{queue.action}</p>
             </div>

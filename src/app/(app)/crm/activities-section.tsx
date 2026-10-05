@@ -25,6 +25,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { PencilIcon, PlusIcon, RefreshCwIcon, SearchIcon, Trash2Icon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -67,12 +68,14 @@ import { SavedViewsBar } from "./saved-views-bar";
 import {
   ACTIVITY_VIEW_STATE_LABELS,
   ACTIVITY_VIEW_STATES,
+  ACTIVITY_VIEW_FILTER_KEYS,
   EMPTY_ACTIVITY_VIEW_FILTERS,
   activityViewErrorLine,
   activityViewFilterCount,
   activityViewQuery,
   activityViewSearchParams,
   describeActivityView,
+  parseActivityViewFilters,
   type ActivityViewFilters,
 } from "@/lib/crm-activity-views";
 
@@ -122,9 +125,19 @@ export function ActivitiesSection({ canSaveViews = false }: { canSaveViews?: boo
    * starts by showing everything ever done buries the thing somebody has to do
    * today.
    */
-  const [filters, setFilters] = useState<ActivityViewFilters>({
-    ...EMPTY_ACTIVITY_VIEW_FILTERS,
-    state: "open",
+  const searchParams = useSearchParams();
+  const [filters, setFilters] = useState<ActivityViewFilters>(() => {
+    // A queue opens here with its rule as the query string («کارهای امروز» is
+    // `?state=today`), so the list a person lands on *is* the rows the count
+    // promised. A URL with no filters starts on the screen's own default.
+    const parsed = parseActivityViewFilters(searchParams);
+    if (parsed.error) return { ...EMPTY_ACTIVITY_VIEW_FILTERS, state: "open" };
+    // A filter the URL names is honoured exactly; a URL that names none keeps
+    // this screen's own default, because «کارها» opens on the undone ones. A
+    // search-only URL is the second case: `?q=…` still means open work.
+    const asked = ACTIVITY_VIEW_FILTER_KEYS.some((key) => searchParams.has(key));
+    const state = asked ? parsed.filters.state : "open";
+    return { ...parsed.filters, state: state || "open" };
   });
   /** The member names the assignee filter and its chip can use. */
   const [members, setMembers] = useState<{ id: string; name: string; isActive: boolean }[]>([]);
@@ -179,6 +192,24 @@ export function ActivitiesSection({ canSaveViews = false }: { canSaveViews?: boo
   useEffect(() => {
     void load(filters, { quiet: true });
   }, [load, filters]);
+
+  /**
+   * Keep the address bar equal to the filter document.
+   *
+   * `replaceState`, not a navigation: the reader is already here, and a filter
+   * change is not a new page. Two things follow from this being kept up to date
+   * — a URL copied out of the address bar reproduces exactly the list it was
+   * copied from, and the queue link above stops being a one-way door (change a
+   * filter and the URL no longer claims to be the queue).
+   */
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    for (const key of ["q", "kind", "state", "assignee"]) url.searchParams.delete(key);
+    for (const [key, value] of Object.entries(activityViewQuery(filters))) {
+      url.searchParams.set(key, value);
+    }
+    window.history.replaceState(null, "", url.toString());
+  }, [filters]);
 
   const markPending = (id: string, on: boolean) =>
     setPending((current) => {

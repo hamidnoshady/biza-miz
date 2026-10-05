@@ -76,7 +76,24 @@ describe("CRM_QUEUE_PRESENTATION", () => {
     // the SQL can never disagree about what "stalled" means.
     expect(CRM_QUEUE_PRESENTATION.stalled_deals.why).toContain(String(STALLED_DEAL_DAYS));
     expect(CRM_QUEUE_PRESENTATION.new_leads.why).toContain(String(NEW_LEAD_DAYS));
+    expect(CRM_QUEUE_PRESENTATION.vip_follow_up.why).toContain(String(VIP_SILENCE_DAYS));
     expect(VIP_SILENCE_DAYS).toBeGreaterThan(0);
+  });
+
+  it("renders no source code into a heading", () => {
+    // These strings are read by shop staff, not by us. A `why` written as a
+    // double-quoted string containing `${…}` shows the *variable name* on the
+    // screen — «`${VIP_SILENCE_DAYS} روز است…» — which is how the golden-customer
+    // queue shipped until this test existed. Interpolation is fine; the syntax
+    // surviving into the text is not.
+    for (const key of CRM_QUEUE_KEYS) {
+      const queue = CRM_QUEUE_PRESENTATION[key];
+      for (const [field, value] of Object.entries(queue)) {
+        if (typeof value !== "string") continue;
+        expect(value, `${key}.${field}`).not.toContain("${");
+        expect(value, `${key}.${field}`).not.toContain("`");
+      }
+    }
   });
 });
 

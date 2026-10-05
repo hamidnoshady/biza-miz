@@ -43,10 +43,16 @@ describe("parseActivityViewFilters", () => {
   });
 
   it("refuses a state outside the vocabulary", () => {
-    // `today` is what the row badge says; the list vocabulary says `due`, and a
-    // stored view must carry a name the filter can actually apply.
-    expect(parseActivityViewFilters(source({ state: "today" })).error).toBe("state");
+    expect(parseActivityViewFilters(source({ state: "paused" })).error).toBe("state");
     expect(parseActivityViewFilters(source({ state: "done" })).error).toBeNull();
+  });
+
+  it("carries both the row states and the two a list can be in", () => {
+    // `today` is the row badge's «امروز» — and the «کارهای امروز» queue's
+    // filter; `open` and `due` are list-only questions. A queue that opens as
+    // a view needs the first, which is why the two vocabularies share it.
+    expect(parseActivityViewFilters(source({ state: "today" })).filters.state).toBe("today");
+    expect(ACTIVITY_VIEW_STATES).toEqual(["open", "done", "today", "overdue", "planned", "due"]);
   });
 
   it("refuses an assignee by name", () => {
@@ -156,9 +162,10 @@ describe("describeActivityView", () => {
     expect(labels).toEqual([
       "وضعیت: انجام‌نشده",
       "وضعیت: انجام‌شده",
-      "وضعیت: سررسیدشده",
+      "وضعیت: امروز",
       "وضعیت: عقب‌افتاده",
       "وضعیت: برنامه‌ریزی‌شده",
+      "وضعیت: سررسیدشده",
     ]);
   });
 });

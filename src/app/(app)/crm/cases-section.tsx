@@ -54,6 +54,7 @@ import {
 } from "@/lib/crm-shared";
 import { caseIsBreached } from "@/lib/crm-case-clock";
 import {
+  CASE_VIEW_FILTER_KEYS,
   EMPTY_CASE_VIEW_FILTERS,
   caseViewDuration,
   caseViewFilterCount,
@@ -61,6 +62,7 @@ import {
   caseViewSearchParams,
   caseViewErrorLine,
   describeCaseView,
+  parseCaseViewFilters,
   type CaseViewFilters,
 } from "@/lib/crm-case-views";
 import { EmptyState, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
@@ -109,6 +111,7 @@ export function CasesSection({
   /** Mirrors `api/crm/saved-views`'s key, so the bar cannot offer a save that will 403. */
   canSaveViews?: boolean;
 }) {
+  const searchParams = useSearchParams();
   const [cases, setCases] = useState<ServiceCase[] | null>(null);
   const [sla, setSla] = useState<CaseSlaSummary | null>(null);
   /**
@@ -119,9 +122,17 @@ export function CasesSection({
    * starts by showing every ticket ever closed buries the ones that need
    * somebody today.
    */
-  const [filters, setFilters] = useState<CaseViewFilters>({
-    ...EMPTY_CASE_VIEW_FILTERS,
-    openOnly: true,
+  const [filters, setFilters] = useState<CaseViewFilters>(() => {
+    // A queue opens here with its rule as the query string (`?breached=1&open=1`
+    // is «خطر از دست رفتن مهلت»), so the rows a person lands on are the rows the
+    // count promised. A URL with no filters starts on the screen's own default.
+    const parsed = parseCaseViewFilters(searchParams);
+    if (parsed.error) return { ...EMPTY_CASE_VIEW_FILTERS, openOnly: true };
+    // A URL that names no filter key has asked for nothing — `?case=<id>` is a
+    // deep link, not a view — so the desk keeps its own default: the open
+    // tickets, not every ticket ever closed.
+    const asked = CASE_VIEW_FILTER_KEYS.some((key) => searchParams.has(key));
+    return asked ? parsed.filters : { ...EMPTY_CASE_VIEW_FILTERS, openOnly: true };
   });
   /** The member names the assignee filter and its chip can use. */
   const [members, setMembers] = useState<{ id: string; name: string; isActive: boolean }[]>([]);
@@ -129,7 +140,6 @@ export function CasesSection({
   const [info, setInfo] = useState("");
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<ServiceCase | "new" | null>(null);
-  const searchParams = useSearchParams();
   const deepLinkId = searchParams.get("case");
   const [deepLinkHandled, setDeepLinkHandled] = useState(false);
 
@@ -178,6 +188,26 @@ export function CasesSection({
     };
   }, []);
   useEffect(() => load(filters), [load, filters]);
+
+  /**
+   * Keep the address bar equal to the filter document.
+   *
+   * `replaceState`, not a navigation: the reader is already here. A URL copied
+   * out of the address bar then reproduces exactly the list it was copied from,
+   * and a queue's link stops being a one-way door — change a filter and the URL
+   * no longer claims to be the queue. `?case=` is left alone: it belongs to the
+   * deep-link effect below.
+   */
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    for (const key of ["q", "status", "priority", "assignee", "open", "breached"]) {
+      url.searchParams.delete(key);
+    }
+    for (const [key, value] of Object.entries(caseViewQuery(filters))) {
+      url.searchParams.set(key, value);
+    }
+    window.history.replaceState(null, "", url.toString());
+  }, [filters]);
 
   // The customer timeline links here as `/crm/cases?case=<id>`. Honour it:
   // fetch that one ticket (it may be resolved and thus invisible under the

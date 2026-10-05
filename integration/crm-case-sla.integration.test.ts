@@ -24,9 +24,8 @@ import { runMigrations } from "../scripts/migrate";
 import { caseIsBreached } from "../src/lib/crm-case-clock";
 import { isCasePriority, isCaseStatus } from "../src/lib/crm-shared";
 import {
-  caseViewAssigneeUserId,
+  caseViewListOptions,
   caseViewQuery,
-  caseViewUnownedOnly,
   parseCaseViewFilters,
 } from "../src/lib/crm-case-views";
 
@@ -553,23 +552,17 @@ describe("the service desk's filter", () => {
     });
     const otherCustomer = await insert({ subject: "پرده", body: "اندازه اشتباه" });
 
-    // The request is parsed by the screen's own module and handed to the read,
-    // exactly as the route does it — one vocabulary, no second reading.
+    // The request is parsed by the screen's own module and translated by the
+    // same function the API route calls — one vocabulary, one translation, no
+    // second reading. (The parser refuses anything outside the vocabulary, so
+    // the options it returns need no further narrowing.)
     const run = async (query: Record<string, string>) => {
       const parsed = parseCaseViewFilters({ get: (key) => query[key] ?? null });
       expect(parsed.error).toBeNull();
-      const rows = await desk.listCases(businessId, {
-        // The parser refuses anything outside the vocabulary, so this is a
-        // narrowing for the type system rather than a second check.
-        status: isCaseStatus(parsed.filters.status) ? parsed.filters.status : undefined,
-        priority: isCasePriority(parsed.filters.priority) ? parsed.filters.priority : undefined,
-        q: parsed.filters.q || undefined,
-        openOnly: parsed.filters.openOnly,
-        assigneeUserId:
-          caseViewAssigneeUserId(parsed.filters, viewerId) ?? undefined,
-        unowned: caseViewUnownedOnly(parsed.filters),
-        breachedOnly: parsed.filters.breachedOnly,
-      });
+      const rows = await desk.listCases(
+        businessId,
+        caseViewListOptions(parsed.filters, viewerId),
+      );
       return rows.map((row) => row.id).sort();
     };
 

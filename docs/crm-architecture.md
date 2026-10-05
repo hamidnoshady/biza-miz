@@ -480,6 +480,46 @@ target, ignoring the customer-wait, blaming a resolved ticket) gives a different
 answer. Two implementations with an agreement test is the only honest way to
 have a filter on a rule.
 
+## A queue is a view
+
+A smart queue counts rows: «۶ مورد» over a preview of four. The count is a
+promise, and the only way to keep it is for the card to link to *the same rows* —
+which is a stronger requirement than it sounds, because the queue's rule is SQL
+over several tables while the link it renders is a filter document for one
+screen. Three rules keep the two from drifting:
+
+- **The link is built by the screen's own serialiser, never by hand.**
+  `crm-queue-views.ts` is a pure table (`queue key → filter document | null`)
+  whose documents come from `crm-case-views.ts` and `crm-activity-views.ts`, so a
+  document cannot contain a key its parser rejects. `crm-queue-views.test.ts`
+  round-trips every one of them through the owning parser.
+- **The document is translated by the vocabulary, not by the route.**
+  `caseViewListOptions()` and `activityViewListOptions()` turn a parsed document
+  into the query `listCases`/`listActivities` take — including that `mine` means
+  the session's member id and that the date-bounded states are bounds over the
+  *business* day. The API routes call those functions and keep only what is not
+  translation (permissions, limits, legacy parameters), so «the rows a queue
+  links to» and «the rows the list returns» are one reading of one document —
+  and a test can hold the claim.
+- **The queue's SQL reads the same words the vocabulary does.** «باز» is the
+  set `openOnly` means (`CASE_OPEN_STATUSES` in `crm-case-clock.ts`, passed to
+  both the queue and `listCases` as the same array) and «بدون مسئول» means no
+  member id *and* no legacy free-text name, which is exactly what
+  `crm-data-quality.ts`'s `unowned_work` rule has always said. A queue whose
+  status set or ownership test differed from the filter it linked to would be
+  the drift this section exists to prevent.
+- **`null` is an answer.** A rule that is relative to the row set (no activity
+  for seven days), a percentile of current values (the top quintile), a union
+  across two tables (departed owners), a scored population, or a workspace that
+  *is* its own list cannot be reproduced as a filter — and the table says so per
+  key, with the reason. The card renders the link only when a view exists.
+
+`integration/crm-relationship-os.integration.test.ts` closes the loop: for every
+openable queue it asks the service for the rows the document names and demands
+they be the queue's own, with the fixtures chosen so the interesting failure
+(two finished calls whose due dates have passed, a resolved ticket that answered
+late, a ticket owned only by a legacy name) would show up as a difference.
+
 ## Permissions
 
 `src/lib/crm-permissions.ts` is the single source of truth: one row per section

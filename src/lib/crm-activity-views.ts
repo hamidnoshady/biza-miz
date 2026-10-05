@@ -35,7 +35,12 @@
  * understood. Read, never written.
  */
 
-import { ACTIVITY_KINDS, ACTIVITY_KIND_LABELS, type ActivityKind } from "./crm-shared";
+import {
+  ACTIVITY_KINDS,
+  ACTIVITY_KIND_LABELS,
+  isActivityKind,
+  type ActivityKind,
+} from "./crm-shared";
 import { isUuid } from "./uuid";
 
 /** The keys `crm_saved_views` accepts for `activities`. */
@@ -44,21 +49,36 @@ export const ACTIVITY_VIEW_FILTER_KEYS = ["q", "kind", "state", "assignee", "due
 /**
  * The states a *list* can be in.
  *
- * Deliberately not `ACTIVITY_STATES` from `crm-shared`: that vocabulary answers
- * «what is this one row?» (`done / today / overdue / planned`), while a saved
- * view asks «which rows do I want?» — a question that includes «every unfinished
- * one», which is not a state any single row is ever in.
+ * A superset of `ACTIVITY_STATES` from `crm-shared` — the four row states
+ * (`done / today / overdue / planned`) *plus* two a list can be in and a row
+ * cannot: `open` («every unfinished one») and `due` («سررسیدشده» — today *or*
+ * already late, which is the label this screen has always used and the meaning
+ * the declared `due` key has always had).
+ *
+ * The overlap is deliberate rather than sloppy: `ACTIVITY_STATES` answers «what
+ * is this one row?» and is rendered as a badge, while this answers «which rows
+ * do I want?» and becomes a `WHERE` clause. A queue that says «کارهای امروز»
+ * needs `today` exactly, so the two vocabularies share the word and the label.
  */
-export const ACTIVITY_VIEW_STATES = ["open", "done", "due", "overdue", "planned"] as const;
+export const ACTIVITY_VIEW_STATES = [
+  "open",
+  "done",
+  "today",
+  "overdue",
+  "planned",
+  "due",
+] as const;
 export type ActivityViewState = (typeof ACTIVITY_VIEW_STATES)[number];
 
 export const ACTIVITY_VIEW_STATE_LABELS: Record<ActivityViewState, string> = {
   open: "انجام‌نشده",
   done: "انجام‌شده",
-  /** Due today *or* already late — the label this screen has always used. */
-  due: "سررسیدشده",
+  /** Exactly the shop's today — the «کارهای امروز» queue, and the row badge. */
+  today: "امروز",
   overdue: "عقب‌افتاده",
   planned: "برنامه‌ریزی‌شده",
+  /** Today *or* already late — the label this screen has always used. */
+  due: "سررسیدشده",
 };
 
 export interface ActivityViewFilters {
@@ -155,6 +175,87 @@ export function activityViewAssigneeUserId(
 /** Whether the assignee filter asks for work nobody owns. */
 export function activityViewUnownedOnly(filters: ActivityViewFilters): boolean {
   return filters.assignee === "none";
+}
+
+/**
+ * The day after a business date, so `planned` can mean «due tomorrow or later».
+ *
+ * Returns `undefined` for a date the server could not parse, which drops the
+ * filter rather than sending a nonsense bound: a filter that silently matches
+ * nothing is worse than one that is visibly not applied.
+ */
+export function nextIsoDate(iso: string): string | undefined {
+  const parsed = Date.parse(`${iso}T00:00:00Z`);
+  if (Number.isNaN(parsed)) return undefined;
+  return new Date(parsed + 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * The document, translated into the query `listActivities` takes.
+ *
+ * What the reader asked for becomes dates here, and the dates are the *shop's*
+ * day: `due` is today or already late, `today` needs both ends (`>= today` and
+ * `< tomorrow`), `planned` starts tomorrow. No two of these can disagree with
+ * the row badges, because both read the same date — the one `businessToday`
+ * resolved for the branch.
+ *
+ * It lives with the vocabulary rather than in the route because the queue cards
+ * emit documents and claim they are the same rows; a test can hold that claim
+ * only if the link and the list read the same translation.
+ */
+export interface ActivityViewListOptions {
+  /** Already narrowed to the vocabulary's own union, so nothing casts later. */
+  kind?: ActivityKind;
+  q?: string;
+  openOnly: boolean;
+  completedOnly: boolean;
+  assigneeUserId?: string;
+  unowned: boolean;
+  dueOnOrBefore?: string;
+  dueBefore?: string;
+  dueOnOrAfter?: string;
+}
+
+export function activityViewListOptions(
+  filters: ActivityViewFilters,
+  context: { viewerId: string | null; today: string },
+): ActivityViewListOptions {
+  const { viewerId, today } = context;
+  // `mine` becomes the caller's own id, never the query string: a
+  // `?assignee=<someone-else>` with no member id to be resolves to nobody,
+  // never to everybody.
+  const assigneeUserId = activityViewAssigneeUserId(filters, viewerId);
+  // The date-bounded states are the row badges' own words, and a badge never
+  // says «عقب‌افتاده» about finished work: `activityState` answers «انجام‌شده»
+  // the moment there is a `completedAt`. So a date bound also asks for the
+  // undone rows — otherwise a queue card's «دیدن همه» would list completed
+  // calls the card above it does not count. `planned` is the one direction this
+  // cannot fully express: a task with no due date is «برنامه‌ریزی‌شده» on its
+  // row but has no date for this bound to catch, and the vocabulary has no
+  // «undated» key to say so.
+  const bounded =
+    filters.state === "overdue" ||
+    filters.state === "due" ||
+    filters.state === "today" ||
+    filters.state === "planned";
+  return {
+    // Narrowed, not cast: the parser refused anything outside the vocabulary.
+    kind: isActivityKind(filters.kind) ? filters.kind : undefined,
+    q: filters.q || undefined,
+    openOnly: filters.state === "open" || bounded,
+    completedOnly: filters.state === "done",
+    assigneeUserId: assigneeUserId ?? undefined,
+    unowned:
+      activityViewUnownedOnly(filters) || (filters.assignee === "mine" && !assigneeUserId),
+    dueOnOrBefore: filters.state === "due" || filters.state === "today" ? today : undefined,
+    dueBefore: filters.state === "overdue" ? today : undefined,
+    dueOnOrAfter:
+      filters.state === "today"
+        ? today
+        : filters.state === "planned"
+          ? nextIsoDate(today)
+          : undefined,
+  };
 }
 
 export interface ActivityViewLookups {

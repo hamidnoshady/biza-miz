@@ -493,7 +493,7 @@ export const CRM_QUEUE_PRESENTATION: Record<CrmQueueKey, CrmQueuePresentation> =
   },
   vip_follow_up: {
     label: "مشتریان طلایی و وفادار",
-    why: "`${VIP_SILENCE_DAYS} روز است با بهترین مشتریان تماس نگرفته‌ایم.`",
+    why: `${VIP_SILENCE_DAYS} روز است با بهترین مشتریان تماس نگرفته‌ایم.`,
     action: "یک تماس کوتاه؛ نگه‌داشتن این‌ها ارزان‌تر از جذب تازه است.",
     sections: ["directory"],
   },

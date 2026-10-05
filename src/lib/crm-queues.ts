@@ -44,6 +44,8 @@ import { query } from "./db";
 import { phonePairKeySql } from "./parties-service";
 import { businessToday } from "./business-day-service";
 import { caseSla } from "./crm-case-service";
+import { CASE_BREACH_SQL_CASES, CASE_OPEN_STATUSES, caseBreachSql } from "./crm-case-clock";
+import { crmQueueView, type CrmQueueView } from "./crm-queue-views";
 import { LIFECYCLE_STAGES, type LifecycleStage } from "./crm-scoring";
 import {
   CRM_QUEUE_KEYS,
@@ -90,6 +92,11 @@ export interface CrmQueue {
   /** What to do about it, when there is more to it than the list. */
   action: string;
   items: CrmQueueItem[];
+  /**
+   * The same rows as a filter its owning screen can open, when the rule is
+   * expressible in that screen's vocabulary (`crm-queue-views.ts`).
+   */
+  view: CrmQueueView | null;
 }
 
 /**
@@ -104,7 +111,7 @@ function withQueueMeta(
   key: CrmQueueKey,
   result: { count: number; items: CrmQueueItem[] },
 ): CrmQueue {
-  return { key, ...CRM_QUEUE_PRESENTATION[key], ...result };
+  return { key, ...CRM_QUEUE_PRESENTATION[key], ...result, view: crmQueueView(key) };
 }
 
 const CUSTOMER_FILE = (id: string) => `/crm/persons/${id}`;
@@ -244,12 +251,12 @@ function queueQueries(
          FROM crm_cases k
          LEFT JOIN parties p ON p.id = k.customer_id
         WHERE k.business_id = $1
-          AND k.status IN ('open', 'in_progress')
+          AND k.status = ANY($2)
           AND k.assignee_user_id IS NULL
           AND btrim(k.assigned_to) = ''
         ORDER BY k.opened_at, k.id
-        LIMIT $2`,
-      [businessId, limit],
+        LIMIT $3`,
+      [businessId, [...CASE_OPEN_STATUSES], limit],
     ).then((result) => withQueueMeta("unassigned_cases", result)),
 
     /*
@@ -411,23 +418,43 @@ function lifecycleCaseSql(): string {
 }
 
 /**
- * The SLA queue, computed by the case service's own rule.
+ * The SLA queue — the shared breach rule, evaluated in SQL.
  *
- * Deliberately **not** a SQL re-implementation of the response target. The
- * rule is subtle — elapsed time minus everything spent waiting on the customer,
- * paused while the ball is in their court — and a second expression of it in a
- * `WHERE` clause is how a queue comes to contradict the ticket screen beside it.
- * `caseSla` is the same pure function the case list uses.
+ * This used to be the one queue whose answer lived in JavaScript: it fetched
+ * every open case that *might* breach and filtered them with `caseSla`, on the
+ * grounds that a `WHERE` clause would be a second expression of a subtle rule
+ * («elapsed time minus everything spent waiting on the customer, paused while
+ * the ball is in their court») and a queue that contradicts the ticket screen
+ * beside it is worse than a slow queue.
  *
- * The SQL pre-filter exists only to bound the rows fetched: it selects active
- * cases that *could* breach the shortest target (urgent, 4h) plus the priority
- * needed to apply the real rule exactly. A queue of tens of thousands of open
- * cases is not a state a business reaches before it has other problems, and
- * when it does the pre-filter keeps 99% of them out of memory without ever
- * deciding the answer.
+ * That reasoning was right about the danger and wrong about the fix. The rule
+ * now *has* a SQL expression — `caseBreachSql()` in `crm-case-clock.ts`, built
+ * from the same constants and the same waiting expression as the TypeScript —
+ * because the service desk's `breached` filter needed to narrow in the database.
+ * Both implementations are run over the same fixtures by
+ * `integration/crm-case-sla.integration.test.ts`, so using it here does not add
+ * a second opinion; it removes one. The queue's rows, its `count(*)`, the row's
+ * badge, the SLA panel and the filter a view stores are now one rule.
+ *
+ * The JavaScript that remains is presentation: the days-late in a subtitle are
+ * formatted from the same `caseSla` the screen's badge would use.
  */
 async function readSlaRiskQueue(businessId: string): Promise<CrmQueue> {
+  const params: unknown[] = [businessId];
+  // The same open set the desk's `openOnly` filter means, so «خطر از دست رفتن
+  // مهلت» and the link it renders (`?open=1&breached=1`) can only ever name the
+  // same rows — a resolved case that answered late is history, not risk.
+  params.push([...CASE_OPEN_STATUSES]);
+  const open = `$${params.length}`;
+  params.push(JSON.stringify(CASE_BREACH_SQL_CASES.targets));
+  const targets = `$${params.length}`;
+  params.push([...CASE_BREACH_SQL_CASES.closed]);
+  const closed = `$${params.length}`;
+  params.push(PREVIEW_LIMIT);
+  const limit = `$${params.length}`;
+
   const { rows } = await query<{
+    total: string;
     id: string;
     caseNumber: string;
     subject: string;
@@ -440,23 +467,23 @@ async function readSlaRiskQueue(businessId: string): Promise<CrmQueue> {
     waitingSeconds: string;
     waitingSince: string | null;
   }>(
-    `SELECT k.id, k.case_number::text AS "caseNumber", k.subject,
-            p.name AS "customerName", k.priority, k.status,
+    `SELECT count(*) OVER ()::text AS total, k.id, k.case_number::text AS "caseNumber",
+            k.subject, p.name AS "customerName", k.priority, k.status,
             k.opened_at AS "openedAt", k.first_response_at AS "firstResponseAt",
             k.resolved_at AS "resolvedAt", k.waiting_seconds::text AS "waitingSeconds",
             k.waiting_since AS "waitingSince"
        FROM crm_cases k
        LEFT JOIN parties p ON p.id = k.customer_id
       WHERE k.business_id = $1
-        AND k.status IN ('open', 'in_progress')
-        AND EXTRACT(EPOCH FROM (now() - k.opened_at)) - k.waiting_seconds > 4 * 3600
+        AND k.status = ANY(${open})
+        AND ${caseBreachSql({ targets, closed })}
       ORDER BY CASE k.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
                k.opened_at, k.id
-      LIMIT 500`,
-    [businessId],
+      LIMIT ${limit}`,
+    params,
   );
 
-  const breached = rows.flatMap((row) => {
+  const items = rows.flatMap((row) => {
     if (!isCaseStatus(row.status) || !isCasePriority(row.priority)) return [];
     const sla = caseSla({
       priority: row.priority as CasePriority,
@@ -467,6 +494,9 @@ async function readSlaRiskQueue(businessId: string): Promise<CrmQueue> {
       waitingSeconds: Number(row.waitingSeconds),
       waitingSince: row.waitingSince,
     });
+    // The predicate above already decided this; the guard is a refusal to
+    // *show* a row the rule calls fine, so a divergence would hide a row rather
+    // than invent a lateness. Nothing reaches it while the agreement test holds.
     if (!sla.breached) return [];
     const hoursLate = Math.max(1, Math.round(-sla.remainingSeconds / 3600));
     return [
@@ -481,8 +511,8 @@ async function readSlaRiskQueue(businessId: string): Promise<CrmQueue> {
   });
 
   return withQueueMeta("sla_risk", {
-    count: breached.length,
-    items: breached.slice(0, PREVIEW_LIMIT),
+    count: Number(rows[0]?.total ?? 0),
+    items,
   });
 }
 

@@ -21,6 +21,11 @@
  *    refused rather than silently overwritten.
  * 6. **A saved view is private until shared**, and a built-in one is nobody's
  *    to rewrite or delete.
+ * 7. **A queue opens as the rows it counted.** The card says «۶ مورد» and shows
+ *    four; the other two are reachable only if the link it renders is a filter
+ *    that screen's own parser accepts *and* returns the same rows. The last block
+ *    asks the service for the rows each link names and demands they be the
+ *    queue's own — a count a reader cannot open is a number they must trust.
  */
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -34,6 +39,15 @@ import {
   dealViewUnownedOnly,
   parseDealViewFilters,
 } from "../src/lib/crm-deal-views";
+import {
+  caseViewListOptions,
+  caseViewQuery,
+  parseCaseViewFilters,
+} from "../src/lib/crm-case-views";
+import {
+  activityViewListOptions,
+  parseActivityViewFilters,
+} from "../src/lib/crm-activity-views";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -50,6 +64,7 @@ let views: typeof import("../src/lib/crm-saved-views-service");
 let audit: typeof import("../src/lib/crm-audit-service");
 let ownership: typeof import("../src/lib/crm-ownership");
 let leadService: typeof import("../src/lib/crm-lead-service");
+let day: typeof import("../src/lib/business-day-service");
 
 const biz = { id: "", locationId: "", userId: "" };
 const other = { id: "", locationId: "" };
@@ -132,6 +147,7 @@ beforeAll(async () => {
   audit = await import("../src/lib/crm-audit-service");
   ownership = await import("../src/lib/crm-ownership");
   leadService = await import("../src/lib/crm-lead-service");
+  day = await import("../src/lib/business-day-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -998,5 +1014,196 @@ describe("ownership is an id, and the snapshot is kept", () => {
     expect(byId.get(ambiguous[0].id)!.owner_user_id).toBeNull();
     // The text column is untouched in both cases: nothing is lost by tidying.
     expect(byId.get(ambiguous[0].id)!.owner_user).toBe("مریم رضایی");
+  });
+});
+
+describe("queues as views", () => {
+  /**
+   * A business of its own: the file's shared one carries other tests' rows, and
+   * the question here is exactly which rows a queue's link names.
+   */
+  it("opens each openable queue on precisely the rows it counted", async () => {
+    const own = await createBusiness("ros-queue-views");
+    const member = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, email, password_hash)
+       VALUES ($1, 'manager', 'زهرا کریمی', $2, 'x') RETURNING id`,
+      [own.businessId, `queue-${randomUUID().slice(0, 7)}@example.test`],
+    );
+    const viewerId = member.rows[0].id;
+    const customer = await makeParty(own.businessId, "مشتری صف‌ها");
+
+    // The shop's own today — the date the queue's SQL and the list's bounds are
+    // both judged by. Building the timestamps from it (rather than from the
+    // browser's noon) is what makes «امروز» one date in both places.
+    const today = await day.businessToday(own.businessId);
+    const dayOffset = (offset: number) =>
+      new Date(Date.parse(`${today}T00:00:00Z`) + offset * 86_400_000).toISOString().slice(0, 10);
+
+    // Two calls that are open, and two that are finished — the finished pair is
+    // what a naive link would list: their due dates are in the past (and today),
+    // and the card above them counts neither.
+    await makeActivity(own.businessId, {
+      subject: "تماس عقب‌افتاده",
+      dueAt: `${dayOffset(-1)}T09:00:00Z`,
+      customerId: customer,
+    });
+    await makeActivity(own.businessId, {
+      subject: "تماس امروز",
+      dueAt: `${today}T09:00:00Z`,
+    });
+    await makeActivity(own.businessId, {
+      subject: "تماس دیروزِ انجام‌شده",
+      dueAt: `${dayOffset(-1)}T09:00:00Z`,
+      completed: true,
+    });
+    await makeActivity(own.businessId, {
+      subject: "تماس امروزِ انجام‌شده",
+      dueAt: `${today}T09:00:00Z`,
+      completed: true,
+    });
+
+    const insertCase = async (input: {
+      subject: string;
+      status?: string;
+      priority?: string;
+      openedHoursAgo?: number;
+      waitingSinceHoursAgo?: number;
+      /** Hours after opening that the first reply went out. */
+      firstResponseAfterHours?: number;
+      /** Hours after opening that the ticket was resolved. */
+      resolvedAfterHours?: number;
+      assigneeUserId?: string;
+      assignedTo?: string;
+    }) => {
+      const opened = input.openedHoursAgo ?? 0;
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO crm_cases (
+           business_id, customer_id, subject, status, priority,
+           assignee_user_id, assigned_to,
+           opened_at, waiting_since, first_response_at, resolved_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, $7,
+           now() - ($8 || ' hours')::interval,
+           CASE WHEN $9::text IS NULL THEN NULL
+                ELSE now() - ($9 || ' hours')::interval END,
+           CASE WHEN $10::text IS NULL THEN NULL
+                ELSE now() - (($8::numeric - $10::numeric) || ' hours')::interval END,
+           CASE WHEN $11::text IS NULL THEN NULL
+                ELSE now() - (($8::numeric - $11::numeric) || ' hours')::interval END
+         ) RETURNING id`,
+        [
+          own.businessId,
+          customer,
+          input.subject,
+          input.status ?? "open",
+          input.priority ?? "normal",
+          input.assigneeUserId ?? null,
+          input.assignedTo ?? "",
+          String(opened),
+          input.waitingSinceHoursAgo === undefined ? null : String(input.waitingSinceHoursAgo),
+          input.firstResponseAfterHours === undefined
+            ? null
+            : String(input.firstResponseAfterHours),
+          input.resolvedAfterHours === undefined ? null : String(input.resolvedAfterHours),
+        ],
+      );
+      return rows[0].id;
+    };
+
+    const breached = await insertCase({
+      subject: "تیکت معوق",
+      priority: "urgent",
+      openedHoursAgo: 10,
+      assigneeUserId: viewerId,
+    });
+    // Waiting on the customer, and nobody's: it belongs in both queues.
+    const waiting = await insertCase({
+      subject: "تیکت منتظر مشتری",
+      status: "waiting",
+      openedHoursAgo: 8,
+      waitingSinceHoursAgo: 7,
+    });
+    const unowned = await insertCase({ subject: "تیکت بی‌مسئول", openedHoursAgo: 1 });
+    // Answered **late** and then resolved. The response promise was missed, so
+    // the clock still calls it breached — and the queue's own link (`open=1`)
+    // is what keeps it off the list, because «خطر از دست رفتن مهلت» is about
+    // risk that is still ahead and this case is finished.
+    const resolvedLate = await insertCase({
+      subject: "تیکت بستهٔ دیررسیده",
+      status: "resolved",
+      priority: "urgent",
+      openedHoursAgo: 48,
+      firstResponseAfterHours: 6,
+      resolvedAfterHours: 30,
+    });
+    // Owned by a legacy free-text name and no member id. «بی‌مسئول» means
+    // nobody, and that name is still a claim — so it is in neither the queue nor
+    // the link. (`unowned_work` in the data-quality workspace reads it the same.)
+    await insertCase({ subject: "تیکت با نام قدیمی", openedHoursAgo: 3, assignedTo: "حمید" });
+
+    const all = await queues.crmQueues(own.businessId);
+    const queue = (key: string) => all.find((entry) => entry.key === key)!;
+    const ids = (found: string[]) => [...found].sort();
+
+    // The activities queues, through the task list's own translation.
+    const activities = async (document: Record<string, string>) => {
+      const parsed = parseActivityViewFilters({ get: (key) => document[key] ?? null });
+      expect(parsed.error).toBeNull();
+      const rows = await crm.listActivities(
+        own.businessId,
+        activityViewListOptions(parsed.filters, { viewerId, today }),
+      );
+      return rows;
+    };
+    const overdue = queue("overdue_follow_ups");
+    const overdueRows = await activities(overdue.view!.filters);
+    expect(overdue.count).toBe(1);
+    expect(ids(overdueRows.map((row) => row.id))).toEqual(ids(overdue.items.map((item) => item.id)));
+    expect(overdueRows.map((row) => row.subject)).toEqual(["تماس عقب‌افتاده"]);
+
+    const dueToday = queue("due_today");
+    const dueTodayRows = await activities(dueToday.view!.filters);
+    expect(dueToday.count).toBe(1);
+    expect(dueTodayRows.map((row) => row.subject)).toEqual(["تماس امروز"]);
+
+    // The case queues, through the service desk's own translation.
+    const cases = async (document: Record<string, string>) => {
+      const parsed = parseCaseViewFilters({ get: (key) => document[key] ?? null });
+      expect(parsed.error).toBeNull();
+      return crm.listCases(own.businessId, caseViewListOptions(parsed.filters, viewerId));
+    };
+
+    const risk = queue("sla_risk");
+    const riskRows = await cases(risk.view!.filters);
+    expect(risk.count).toBe(1);
+    expect(ids(riskRows.map((row) => row.id))).toEqual(ids([breached]));
+    // The witness for the `open` half: the resolved one *is* breached by the
+    // clock (it answered after its target), and the queue's own link is what
+    // keeps it off the list.
+    const lateOnly = await crm.listCases(own.businessId, { breachedOnly: true });
+    expect(ids(lateOnly.map((row) => row.id))).toEqual(ids([breached, resolvedLate]));
+
+    const waitingQueue = queue("waiting_on_customer");
+    const waitingRows = await cases(waitingQueue.view!.filters);
+    expect(waitingQueue.count).toBe(1);
+    expect(ids(waitingRows.map((row) => row.id))).toEqual(ids([waiting]));
+
+    const unassignedQueue = queue("unassigned_cases");
+    const unassignedRows = await cases(unassignedQueue.view!.filters);
+    // Two, not three: the legacy-named ticket is not «بی‌مسئول», and the waiting
+    // one is — a waiting case nobody owns is still nobody's.
+    expect(unassignedQueue.count).toBe(2);
+    expect(ids(unassignedRows.map((row) => row.id))).toEqual(ids([waiting, unowned]));
+
+    // And the queues that cannot be opened say so, rather than carrying a link
+    // that would open something else.
+    for (const key of ["stalled_deals", "new_leads", "vip_follow_up", "possible_duplicates"]) {
+      expect(queue(key).view, key).toBeNull();
+    }
+    for (const entry of all) {
+      if (!entry.view) continue;
+      expect(entry.view.href.startsWith("/crm/"), entry.key).toBe(true);
+      expect(entry.view.href, entry.key).toContain("?");
+    }
   });
 });

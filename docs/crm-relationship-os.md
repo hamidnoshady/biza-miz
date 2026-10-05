@@ -94,17 +94,40 @@ Design decisions worth keeping:
 - **A failing queue is dropped, never fatal.** Each rule is independently
   correct, and `crmQueues` logs and skips one that throws — the home page is not
   twelve features wide.
-- **`sla_risk` is computed by `caseSla()`, not by SQL.** A second expression of
-  the pause rule would drift from the ticket screen; the query only pre-filters
-  by the *smallest* target so the JS pass stays bounded.
+- **`sla_risk` applies the clock's own predicate in SQL, with the policy as
+  parameters.** `caseBreachSql()` is assembled from `crm-case-clock.ts` and handed
+  the priority targets and the closed statuses from that module's constants, so
+  the ticket screen's badge, the summary panel and this queue cannot disagree
+  about who is late; the TypeScript pass that follows only formats «N ساعت از
+  مهلت گذشته». (It used to pre-filter in SQL and decide in JS, which meant the
+  queue could not say *how many* rows it had — the count is a window function
+  now, and `integration/crm-relationship-os.integration.test.ts` demands the
+  queue's rows be the rows its link names.)
+- **A queue opens as the rows it counted.** The card says «۶ مورد» and previews
+  four; `crm-queue-views.ts` is the table that makes the other two reachable, by
+  emitting the same filter document the owning screen's own parser accepts
+  (`overdue_follow_ups` → `state=overdue`, `sla_risk` → `open=1&breached=1`, …).
+  Seven of the thirteen queues have `null` there — a relative rule, a percentile,
+  a union over two tables, a scored population, or a workspace that *is* its own
+  list — and each one's reason is written beside it, because a link that opens a
+  screen showing something else is worse than no link: it teaches people that the
+  count is approximate.
+- **The queue's SQL reads the same words as the screen.** «باز» is
+  `CASE_OPEN_STATUSES` (the set `openOnly` means) and «بدون مسئول» means no member
+  *and* no legacy name — the definition `unowned_work` in the data-quality
+  workspace already used. Before this, the queue and the filter it linked to
+  described different rows; the integration test compares them per queue.
 - **`possible_duplicates` counts with `phonePairKeySql`**, the same helper the
   duplicates screen uses — a count computed differently from the list it labels
   is the bug this file was written after.
 
 Adding a queue: add the key to `CRM_QUEUE_KEYS`, add its rule and its
-`queueKeysForSection` entry, and add a Persian label and why-line. The
-integration test asserts the key list, the total-versus-preview property and the
-section mapping.
+`queueKeysForSection` entry, add a Persian label and why-line, and decide its
+entry in `crm-queue-views.ts` — either the filter document that reproduces it on
+its owning screen or, explicitly, `null` with the reason. The unit tests keep the
+list of openable queues and the reasons in step; the integration test asserts the
+key list, the total-versus-preview property, the section mapping and the
+rows-the-link-names property.
 
 ## Customer health is explainable, or it is not shipped
 

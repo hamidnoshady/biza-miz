@@ -12,9 +12,8 @@ import {
 } from "@/lib/crm-shared";
 import { listAssignableMembers } from "@/lib/crm-ownership";
 import {
-  caseViewAssigneeUserId,
+  caseViewListOptions,
   caseViewQuery,
-  caseViewUnownedOnly,
   parseCaseViewFilters,
 } from "@/lib/crm-case-views";
 
@@ -52,19 +51,15 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "bad_filter", field: filterError }, { status: 400 });
   }
 
-  // `mine` becomes the session's member id here, never a query-string value.
-  const assigneeUserId = caseViewAssigneeUserId(filters, session.sub);
+  // The translation from the reader's document to the query — including that
+  // `mine` means the session's member id — lives in `crm-case-views.ts`, so the
+  // rows a queue card links to and the rows this route returns are one reading
+  // of one document. What stays here is what is not translation: permissions,
+  // and the legacy `customerId` parameter a timeline link passes.
+  const options = caseViewListOptions(filters, session.sub);
   const cases = await listCases(session.businessId, {
+    ...options,
     customerId: search.get("customerId") ?? undefined,
-    status: filters.status ? (filters.status as CaseStatus) : undefined,
-    priority: filters.priority ? (filters.priority as CasePriority) : undefined,
-    q: filters.q || undefined,
-    openOnly: filters.openOnly,
-    // A caller with no member id who asked for `mine` gets nothing, not
-    // everything: the safe direction for a filter about ownership.
-    assigneeUserId: assigneeUserId ?? undefined,
-    unowned: caseViewUnownedOnly(filters) || (filters.assignee === "mine" && !assigneeUserId),
-    breachedOnly: filters.breachedOnly,
   });
 
   // The filters actually applied, echoed in the vocabulary the screen sent, so
