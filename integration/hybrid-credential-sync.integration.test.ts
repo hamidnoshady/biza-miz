@@ -867,4 +867,93 @@ describe("hybrid login credential convergence", () => {
     const hash = await activePinHash(local.businessId, waiterId);
     expect(await bcrypt.compare("1122", hash!)).toBe(true);
   }, 240_000);
+
+  it("pairs successfully while the credential endpoint is down, without claiming identity sync finished", async () => {
+    // The other half of the pairing contract: the snapshot and its
+    // acknowledgement succeeded, so the install must be usable and the owner
+    // must be able to reach the till — but the credential plane did not
+    // converge, so the wizard says so, the state is durable, and the retry
+    // finishes the job once the cloud answers.
+    const remote = await createCloudBusiness();
+    const routeSiteDb = `pos_cred_partial_${randomUUID().replaceAll("-", "")}`;
+    await maintenance(`CREATE DATABASE "${routeSiteDb}"`);
+    try {
+      await runMigrations({ databaseUrl: urlFor(routeSiteDb), quiet: true });
+      await switchDatabase(routeSiteDb);
+      cloud.businessId = remote.cloudBusinessId;
+      cloud.mode = "http500";
+
+      const response = await pairRoute(new NextRequest("http://localhost/api/setup/pair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ remoteUrl: "https://cloud.example.test", code: remote.code }),
+      }));
+      // Pairing itself succeeded — the owner is signed in and the wizard moves on.
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: boolean;
+        ownerUserId: string;
+        identitySyncPending: boolean;
+        credentialSync: { status: string; error: string | null; pinMembersMissing: number };
+      };
+      expect(body.ok).toBe(true);
+      expect(response.cookies.get(SESSION_COOKIE)?.value).toBeTruthy();
+      expect(body.identitySyncPending).toBe(true);
+      expect(body.credentialSync.status).toBe("degraded");
+      expect(body.credentialSync.error).toContain("login_credentials_http_500");
+
+      const businessId = (await withoutTenantScope("platform", () => query<{ business_id: string }>(
+        `SELECT business_id FROM users WHERE id = $1`,
+        [body.ownerUserId],
+      ))).rows[0].business_id;
+      const siteDeviceId = (await withTenant(businessId, () => query<{ value: { siteDeviceId: string } }>(
+        `SELECT value FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = 'server_sync.config'`,
+        [businessId],
+      ))).rows[0].value.siteDeviceId;
+      cloud.siteDeviceId = siteDeviceId;
+
+      // Durable and honest: the failure is recorded, and the gap is measured
+      // against the memberships the snapshot did bring.
+      const state = await withTenant(businessId, () => readCredentialSyncState(businessId, siteDeviceId));
+      expect(state).toMatchObject({ status: "degraded", pinMembersExpected: 3, pinMembersUsable: 0, pinMembersMissing: 3 });
+      expect(state?.lastError).toContain("login_credentials_http_500");
+
+      // The owner can still work: the device-local offline PIN the wizard asks
+      // for next is the guaranteed door, and the roster route says the list is
+      // incomplete rather than pretending the business has no staff.
+      await withTenant(businessId, () => setPin(businessId, body.ownerUserId, "4321", body.ownerUserId));
+      const rosterWhileDown = await rosterRoute(new NextRequest(
+        `http://localhost/api/auth/pin-login/roster?businessId=${businessId}`,
+      ));
+      const rosterBody = (await rosterWhileDown.json()) as {
+        employees: Array<{ id: string }>;
+        credentialSync: { missing: number; missingMembers: Array<{ id: string }> } | null;
+      };
+      expect(rosterBody.employees.map((entry) => entry.id)).toContain(body.ownerUserId);
+      for (const role of PIN_ROLES) expect(rosterBody.employees.map((entry) => entry.id)).not.toContain(remote.staff[role].id);
+      expect(rosterBody.credentialSync?.missing).toBe(3);
+      expect(rosterBody.credentialSync?.missingMembers.map((member) => member.id).sort())
+        .toEqual(PIN_ROLES.map((role) => remote.staff[role].id).sort());
+
+      // The login screen's retry — the only door while nobody can sign in —
+      // converges once the cloud is healthy again.
+      cloud.mode = "ok";
+      const retried = await rosterSyncRoute(new NextRequest(
+        `http://localhost/api/auth/pin-login/roster/sync?businessId=${businessId}`,
+        { method: "POST" },
+      ));
+      expect(retried.status).toBe(200);
+      const retriedBody = (await retried.json()) as { overall: string; usable: number; missing: number };
+      expect(retriedBody).toMatchObject({ overall: "healthy", usable: 3, missing: 0 });
+      const converged = await withTenant(businessId, () => readCredentialSyncState(businessId, siteDeviceId));
+      expect(converged?.status).toBe("healthy");
+      for (const role of PIN_ROLES) {
+        const hash = await activePinHash(businessId, remote.staff[role].id);
+        expect(await bcrypt.compare(remote.staff[role].pin, hash!)).toBe(true);
+      }
+    } finally {
+      await switchDatabase(siteDb);
+      await maintenance(`DROP DATABASE IF EXISTS "${routeSiteDb}" WITH (FORCE)`);
+    }
+  }, 240_000);
 });
