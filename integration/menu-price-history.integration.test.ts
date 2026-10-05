@@ -56,9 +56,11 @@ function maintenanceUrl(): string {
 }
 
 async function insertItem(locationId: string, name: string, price = 40_000): Promise<string> {
+  // A unique category name per call: `uq_menu_categories_location_name` makes
+  // two items in one test share-less.
   const category = await db.query<{ id: string }>(
-    "INSERT INTO menu_categories (location_id, name) VALUES ($1, 'Drinks') RETURNING id",
-    [locationId],
+    "INSERT INTO menu_categories (location_id, name) VALUES ($1, $2) RETURNING id",
+    [locationId, `Drinks ${randomUUID().slice(0, 8)}`],
   );
   const { rows } = await db.query<{ id: string }>(
     "INSERT INTO menu_items (location_id, category_id, name, price) VALUES ($1, $2, $3, $4) RETURNING id",

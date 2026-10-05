@@ -398,54 +398,77 @@ async function main() {
     // ======================================================================
     // 5. The named permission bug: a menu photo, rendered as a real Cashier
     // ======================================================================
-    await goto(page, "/settings/menu");
-    // /settings/menu renders «دسته‌ها», «آیتم‌ها» and «گروه‌های افزودنی» all at
-    // once (not behind tabs/navigation), and each SectionCard carries its
-    // title as its own aria-label — so an unscoped "افزودن" collides with
-    // the add-on-groups section's identical button. Scope to each section.
-    const categoriesSection = page.getByLabel("دسته‌ها", { exact: true });
-    const itemsSection = page.getByLabel("آیتم‌ها", { exact: true });
-    await categoriesSection.getByLabel("نام دسته", { exact: true }).fill(CATEGORY_NAME);
-    await categoriesSection.getByRole("button", { name: "افزودن", exact: true }).click();
+    // The manager moved from /settings/menu to /accounting/menu (issue #844):
+    // one permission-aware tab strip — «آیتم‌ها» / «دسته‌ها» / «افزودنی‌ها» /
+    // «تاریخچه قیمت» — with add-category as a Dialog and add-item as the
+    // right-hand Sheet. Create the category first, on its own tab.
+    await goto(page, "/accounting/menu");
+    await page.getByRole("tab", { name: "دسته‌ها", exact: true }).click();
+    await waitSettled(page);
+    await page.getByRole("button", { name: "افزودن دسته", exact: true }).click();
+    const categoryDialog = page.getByRole("dialog");
+    await categoryDialog.getByLabel("نام دسته", { exact: true }).fill(CATEGORY_NAME);
+    // The dialog's submit is bare «افزودن»; the header's «افزودن دسته» lives
+    // outside the dialog, so the scope keeps the two apart.
+    await categoryDialog.getByRole("button", { name: "افزودن", exact: true }).click();
     await waitDebounce(page);
-    await categoriesSection.getByText(CATEGORY_NAME).first().waitFor({ timeout: 10_000 });
+    await page.getByText(CATEGORY_NAME).first().waitFor({ timeout: 10_000 });
     log("permission-setup", `category «${CATEGORY_NAME}» created`);
 
+    await page.getByRole("tab", { name: "آیتم‌ها", exact: true }).click();
+    await waitSettled(page);
+    // While the Sheet is closed the header's «افزودن آیتم» is the only one;
+    // once it opens the same name belongs to the Sheet's submit, so every
+    // later click is scoped to the dialog (filtered by a field only it has,
+    // which also keeps the image-picker dialog out of the scope).
+    await page.getByRole("button", { name: "افزودن آیتم", exact: true }).click();
+    const itemSheet = page
+      .getByRole("dialog")
+      .filter({ has: page.getByLabel("نام آیتم", { exact: true }) });
+    await itemSheet.getByLabel("نام آیتم", { exact: true }).fill(ITEM_NAME);
     try {
       // The category SearchableSelect's trigger is a <button> whose
-      // *accessible name* is the Field label «دسته» (label association wins
-      // over content in the accname computation) — the visible
-      // «دسته را انتخاب کنید…» placeholder is only its text content, so a
-      // role+name locator on the placeholder text never matches. Target the
-      // labelled name and keep it scoped to the items section, where «دسته»
-      // names exactly this one trigger.
-      await itemsSection
-        .getByRole("button", { name: "دسته", exact: true })
+      // *accessible name* is its aria-label «دستهٔ آیتم» — the Field's
+      // visible «دسته» label and the «دسته را انتخاب کنید…» placeholder are
+      // not what accname computation picks up for a button.
+      await itemSheet
+        .getByRole("button", { name: "دستهٔ آیتم", exact: true })
         .click({ timeout: 15_000 });
     } catch (err) {
       // Diagnostic-only: this exact step has failed opaquely in CI before
       // (a 30s blind timeout with zero clues) — on any failure here, dump
       // what was actually on the page so the next iteration doesn't have to
       // guess blind again.
-      const itemsSectionCount = await itemsSection.count();
+      const sheetCount = await itemSheet.count();
       const bodyText = await page.locator("body").innerText().catch(() => "<unreadable>");
       console.error(
-        `[e2e-media] DIAGNOSTIC: itemsSection matched ${itemsSectionCount} element(s). ` +
+        `[e2e-media] DIAGNOSTIC: itemSheet matched ${sheetCount} element(s). ` +
           `Page text (first 2000 chars): ${bodyText.slice(0, 2000)}`,
       );
       throw err;
     }
+    // The option list portals outside the Sheet — pick it page-scoped.
     await page.getByRole("option", { name: CATEGORY_NAME, exact: true }).click();
-    await itemsSection.getByLabel("نام آیتم", { exact: true }).fill(ITEM_NAME);
-    await itemsSection.getByLabel(/قیمت/).fill("100000");
-    await itemsSection.getByRole("button", { name: "انتخاب از کتابخانه", exact: true }).click();
+    // The price input's label is «قیمت (<unit>)»; the section wrapping it is
+    // aria-labelled «قیمت فروش» and the name field is also a textbox, so
+    // match by the unit-suffixed name rather than any قیمت-prefix label.
+    await itemSheet.getByRole("textbox", { name: /^قیمت \(/ }).fill("100000");
+    await itemSheet.getByRole("button", { name: "انتخاب از کتابخانه", exact: true }).click();
     const itemPicker = page
       .locator('[role="dialog"]')
       .filter({ has: page.getByPlaceholder("جست‌وجو در تصاویر کتابخانه…") });
     await itemPicker.getByPlaceholder("جست‌وجو در تصاویر کتابخانه…").fill(FILE_NAME);
     await waitDebounce(page);
     await itemPicker.locator(`button[title="${FILE_NAME}"]`).click();
-    await itemsSection.getByRole("button", { name: "افزودن آیتم", exact: true }).click();
+    // Selecting closes the picker; the Sheet now shows «تغییر تصویر».
+    await itemSheet.getByRole("button", { name: "تغییر تصویر", exact: true }).waitFor({
+      timeout: 10_000,
+    });
+    await itemSheet.getByRole("button", { name: "افزودن آیتم", exact: true }).click();
+    // Saving flips the Sheet into edit mode for the new id — close it and
+    // assert on the row that landed in the items table.
+    await page.keyboard.press("Escape");
+    await waitSettled(page);
     await page.getByText(ITEM_NAME).first().waitFor({ timeout: 10_000 });
     log("permission-setup", `menu item «${ITEM_NAME}» created with the Library asset as its photo`);
 

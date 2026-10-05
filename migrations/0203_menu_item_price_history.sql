@@ -72,19 +72,27 @@ CREATE POLICY tenant_isolation ON menu_item_price_history FOR ALL
 -- undeletable:
 --
 --   * UPDATE always raises (editing history is rewriting it);
---   * a direct DELETE raises while its menu item still exists (that is a
---     writer erasing the audit trail of a live item);
---   * a DELETE that arrives as part of the parent's own cascade — the menu
---     item row is already gone, e.g. an unused item's removal or a business
---     teardown — is allowed through. The trigger runs AFTER the parent row
---     was deleted, so it can tell the two apart;
---   * TRUNCATE always raises.
+--   * a direct DELETE raises while the row's full lineage — menu item,
+--     location and business — is still intact: that is a writer erasing the
+--     audit trail of a live item of a live branch;
+--   * a DELETE that arrives as part of ANY ancestor's own cascade (item
+--     removal, branch removal, business teardown) is allowed through. The
+--     predicate tests the three joined tables instead of assuming a cascade
+--     order: PostgreSQL may deliver the history delete through the
+--     menu_item_id, location_id or business_id foreign key, and the row's
+--     parents are not guaranteed to be gone in any particular order — an
+--     earlier "is the menu item still there?" version failed exactly that way
+--     (issue #844's integration suite: DELETE FROM businesses after the first
+--     price change, and the platform tests' TRUNCATE … CASCADE);
+--   * TRUNCATE carries no row context, so it cannot tell a parent teardown
+--     (`TRUNCATE businesses CASCADE` in platform administration) from a wipe
+--     of this table alone, and it previously broke the former. There is no
+--     product path that TRUNCATEs this table; the protection that matters —
+--     no UPDATE, no deleting history of a live item — is the two rules above.
 --
--- Product code never relies on the cascade for live items: the item DELETE
--- route deactivates instead once history exists, so history of anything the
--- operator can still see survives. (Without this carve-out, platform-service
--- deleting a hosted business, the Holoo import rollback, and every integration
--- test's scratch cleanup would 500 on the first price change ever made.)
+-- Product code does not rely on the cascade for live items either: the item
+-- DELETE route deactivates instead once history exists, so the history of
+-- anything the operator can still see survives.
 CREATE OR REPLACE FUNCTION app_menu_item_price_history_append_only()
 RETURNS trigger AS $$
 BEGIN
@@ -92,8 +100,13 @@ BEGIN
         RAISE EXCEPTION 'menu_item_price_history is append-only'
             USING ERRCODE = 'raise_exception';
     END IF;
-    -- DELETE with the parent still present: direct erasure — forbidden.
-    IF EXISTS (SELECT 1 FROM menu_items WHERE id = OLD.menu_item_id) THEN
+    IF EXISTS (
+        SELECT 1
+          FROM menu_items mi
+          JOIN locations l ON l.id = mi.location_id
+          JOIN businesses b ON b.id = l.business_id
+         WHERE mi.id = OLD.menu_item_id
+    ) THEN
         RAISE EXCEPTION 'menu_item_price_history is append-only'
             USING ERRCODE = 'raise_exception';
     END IF;
@@ -101,18 +114,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION app_menu_item_price_history_no_truncate()
-RETURNS trigger AS $$
-BEGIN
-    RAISE EXCEPTION 'menu_item_price_history is append-only'
-        USING ERRCODE = 'raise_exception';
-END;
-$$ LANGUAGE plpgsql;
-
+DROP TRIGGER IF EXISTS menu_item_price_history_no_truncate ON menu_item_price_history;
+DROP FUNCTION IF EXISTS app_menu_item_price_history_no_truncate();
 DROP TRIGGER IF EXISTS menu_item_price_history_append_only ON menu_item_price_history;
 CREATE TRIGGER menu_item_price_history_append_only
     BEFORE UPDATE OR DELETE ON menu_item_price_history
     FOR EACH ROW EXECUTE FUNCTION app_menu_item_price_history_append_only();
-CREATE TRIGGER menu_item_price_history_no_truncate
-    BEFORE TRUNCATE ON menu_item_price_history
-    EXECUTE FUNCTION app_menu_item_price_history_no_truncate();
