@@ -7,6 +7,7 @@ import { SectionCardSkeleton } from "../page-chrome";
 import { UnitsSection } from "./units-section";
 import { RepairsSection } from "./repairs-section";
 import { ReturnsSection, type SerialReturn } from "./returns-section";
+import { ReservationsSection, type SerialReservation } from "./reservations-section";
 import { ReportsSection } from "./reports-section";
 import { RemindersSection } from "./reminders-section";
 
@@ -53,7 +54,19 @@ export interface SerialUnit {
   soldAt: string | null;
   warrantyStart: string | null;
   warrantyEnd: string | null;
+  /** Issue #795 item 19 — pre-owned provenance, shown on the unit board. */
+  preOwned: boolean;
+  conditionGrade: string | null;
+  boxAndPapers: boolean;
 }
+
+export const CONDITION_GRADE_LABELS: Record<string, string> = {
+  new: "نو",
+  like_new: "در حد نو",
+  good: "خوب",
+  fair: "متوسط",
+  poor: "ضعیف",
+};
 
 export interface RepairTicket {
   id: string;
@@ -109,6 +122,7 @@ const TABS = [
   { key: "units", label: "دستگاه‌ها" },
   { key: "repairs", label: "تعمیرات" },
   { key: "returns", label: "مرجوعی‌ها" },
+  { key: "reservations", label: "رزروها" },
   { key: "reminders", label: "یادآوری سرویس" },
   { key: "reports", label: "گزارش‌ها" },
 ] as const;
@@ -132,6 +146,7 @@ export function WatchManager() {
   const [units, setUnits] = useState<SerialUnit[] | null>(null);
   const [tickets, setTickets] = useState<RepairTicket[] | null>(null);
   const [returns, setReturns] = useState<SerialReturn[] | null>(null);
+  const [reservations, setReservations] = useState<SerialReservation[] | null>(null);
   const [reminders, setReminders] = useState<ServiceReminder[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -167,6 +182,13 @@ export function WatchManager() {
   }, []);
   useEffect(loadReturns, [loadReturns]);
 
+  const loadReservations = useCallback(() => {
+    api<{ reservations: SerialReservation[] }>("/api/watch/reservations").then(({ ok, data }) => {
+      if (ok) setReservations(data.reservations);
+    });
+  }, []);
+  useEffect(loadReservations, [loadReservations]);
+
   const loadReminders = useCallback(() => {
     api<{ reminders: ServiceReminder[] }>("/api/watch/reminders").then(({ ok, data }) => {
       if (ok) setReminders(data.reminders);
@@ -187,6 +209,7 @@ export function WatchManager() {
     loadUnits();
     loadTickets();
     loadReturns();
+    loadReservations();
     loadReminders();
     return true;
   };
@@ -219,6 +242,13 @@ export function WatchManager() {
           <SectionCardSkeleton rows={4} />
         ) : (
           <ReturnsSection returns={returns} units={units} busy={busy} run={run} />
+        )
+      ) : null}
+      {tab === "reservations" ? (
+        reservations === null || units === null ? (
+          <SectionCardSkeleton rows={4} />
+        ) : (
+          <ReservationsSection reservations={reservations} units={units} busy={busy} run={run} />
         )
       ) : null}
       {tab === "reminders" ? (

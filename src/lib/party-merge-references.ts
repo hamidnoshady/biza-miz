@@ -254,6 +254,16 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "مرجوعی سریالی",
   },
   {
+    table: "serial_reservations",
+    column: "customer_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "A reservation (issue #795 item 20) is a unit promised to the person — the hold must survive the merge so their invoice can still convert it.",
+    preview: true,
+    previewLabel: "رزرو ساعت",
+  },
+  {
     table: "layaway_plans",
     column: "customer_id",
     scope: "business",

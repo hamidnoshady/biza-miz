@@ -22,6 +22,7 @@ import { emitDomainEvent } from "./posting-engine";
 import { rialText, type RialText } from "./inventory-exact";
 import type { SettlementMethod } from "./ledger";
 import { resolveLineTenders, type RetailTenderQueueEntry } from "./retail-tenders";
+import { resolveReservationForSale } from "./watch-reservation-service";
 // Side-effect import: registers the watch.* posting rules with the engine.
 import "./watch-posting-rules";
 
@@ -41,6 +42,12 @@ export interface SellSerializedUnitInput {
   warrantyMonths?: number;
   /** ISO date (YYYY-MM-DD); defaults to today. The warranty window starts here. */
   saleDate?: string;
+  /**
+   * The invoice's customer — what lets a RESERVED unit sell: only to the
+   * customer the hold names (issue #795 item 20), closing the hold as
+   * converted in the same transaction.
+   */
+  customerId?: string | null;
   createdBy?: string | null;
 }
 
@@ -86,8 +93,8 @@ export async function sellSerializedUnit(
   );
   const serial = rows[0];
   if (!serial) throw new Error("سریال یافت نشد.");
-  if (serial.status !== "in_stock") {
-    throw new Error("این دستگاه در انبار موجود نیست (رزرو، در تعمیر یا فروخته‌شده است).");
+  if (serial.status !== "in_stock" && serial.status !== "reserved") {
+    throw new Error("این دستگاه در انبار موجود نیست (در تعمیر یا فروخته‌شده است).");
   }
   if (!serial.unit_cost) {
     throw new Error("بهای تمام‌شده این دستگاه ثبت نشده است؛ ابتدا آن را ثبت کنید.");
@@ -116,6 +123,18 @@ export async function sellSerializedUnit(
     );
     saleDate = dayRows[0]?.today ?? todayIso();
   }
+
+  // Issue #795 item 20 — a reserved unit sells only to the customer its
+  // hold names (converting the hold), or to anyone once the hold has
+  // expired; otherwise the sale refuses here, before anything posts.
+  if (serial.status === "reserved") {
+    await resolveReservationForSale(client, {
+      serialId: serial.id,
+      customerId: input.customerId ?? null,
+      saleDate,
+    });
+  }
+
   const lineTenders = resolveLineTenders(input, breakdown.total);
 
   // Each sale OCCURRENCE is its own posting identity. The serial id alone
@@ -195,6 +214,10 @@ export interface SerialUnitSummary {
   soldAt: string | null;
   warrantyStart: string | null;
   warrantyEnd: string | null;
+  /** Issue #795 item 19 — recorded at pre-owned intake, surfaced on the board. */
+  preOwned: boolean;
+  conditionGrade: string | null;
+  boxAndPapers: boolean;
 }
 
 /** The watch dashboard's unit board: every serialized unit at this branch with its model, cost basis, and live warranty window, in one round trip. */
@@ -210,10 +233,14 @@ export async function listSerialUnits(locationId: string): Promise<SerialUnitSum
     sold_at: string | null;
     warranty_start: string | null;
     warranty_end: string | null;
+    pre_owned: boolean;
+    condition_grade: string | null;
+    box_and_papers: boolean;
   }>(
     `SELECT s.id, s.item_id, i.name AS item_name, s.serial_number, s.status, s.unit_cost,
             s.warranty_months, s.sold_at::text AS sold_at,
-            w.start_date::text AS warranty_start, w.end_date::text AS warranty_end
+            w.start_date::text AS warranty_start, w.end_date::text AS warranty_end,
+            s.pre_owned, s.condition_grade, s.box_and_papers
        FROM item_serials s
        JOIN items i ON i.id = s.item_id
        LEFT JOIN serial_warranties w ON w.serial_id = s.id
@@ -232,6 +259,9 @@ export async function listSerialUnits(locationId: string): Promise<SerialUnitSum
     soldAt: r.sold_at,
     warrantyStart: r.warranty_start,
     warrantyEnd: r.warranty_end,
+    preOwned: r.pre_owned,
+    conditionGrade: r.condition_grade,
+    boxAndPapers: r.box_and_papers,
   }));
 }
 

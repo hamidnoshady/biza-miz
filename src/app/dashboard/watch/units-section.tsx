@@ -11,6 +11,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { api, Field, inputClass } from "../ui";
 import { ItemAuditPanel } from "../item-audit-panel";
 import {
+  CONDITION_GRADE_LABELS,
   SERIAL_STATUS_LABELS,
   type Runner,
   type SerialUnit,
@@ -251,6 +252,13 @@ function UnitRow({ unit, busy, run }: { unit: SerialUnit; busy: boolean; run: Ru
             <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE_CLASS[unit.status]}`}>
               {SERIAL_STATUS_LABELS[unit.status]}
             </span>
+            {unit.preOwned ? (
+              <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-900 dark:bg-violet-500/20 dark:text-violet-100">
+                دست‌دوم
+                {unit.conditionGrade ? ` · ${CONDITION_GRADE_LABELS[unit.conditionGrade] ?? unit.conditionGrade}` : ""}
+                {unit.boxAndPapers ? " · جعبه و برگه" : ""}
+              </span>
+            ) : null}
           </div>
 
           <dl className="mt-3 grid min-w-0 gap-x-5 gap-y-2 text-xs text-muted-foreground sm:grid-cols-2 xl:grid-cols-4">

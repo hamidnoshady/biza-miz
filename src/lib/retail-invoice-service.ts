@@ -628,6 +628,9 @@ async function settleLine(
       vatPercent: line.vatPercent,
       tenders: tenderQueue,
       warrantyMonths: line.warrantyMonths,
+      // A reserved unit sells only on this customer's invoice (issue #795
+      // item 20) — the sale converts the hold inside the same transaction.
+      customerId: input.customerId ?? null,
       createdBy: input.createdBy ?? null,
     });
     const { breakdown, cost, warranty } = watchSale;

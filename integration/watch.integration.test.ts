@@ -29,6 +29,7 @@ let watchCrm: typeof import("../src/lib/watch-crm-service");
 let retailStock: typeof import("../src/lib/retail-stock-service");
 let invoiceService: typeof import("../src/lib/retail-invoice-service");
 let watchReturns: typeof import("../src/lib/watch-return-service");
+let watchReservations: typeof import("../src/lib/watch-reservation-service");
 
 const biz = { id: "", locationId: "" };
 const acct = {
@@ -76,6 +77,7 @@ beforeAll(async () => {
   retailStock = await import("../src/lib/retail-stock-service");
   invoiceService = await import("../src/lib/retail-invoice-service");
   watchReturns = await import("../src/lib/watch-return-service");
+  watchReservations = await import("../src/lib/watch-reservation-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -103,6 +105,7 @@ beforeEach(async () => {
   await db.query("BEGIN");
   await db.query("SELECT set_config('app.factory_reset', 'true', true)");
   await db.query("DELETE FROM serial_returns");
+  await db.query("DELETE FROM serial_reservations");
   await db.query("DELETE FROM commission_accruals");
   await db.query("DELETE FROM customer_points");
   await db.query("DELETE FROM order_amendments");
@@ -346,6 +349,9 @@ describe("sellSerializedUnit", () => {
         soldAt: "2026-08-12",
         warrantyStart: "2026-08-12",
         warrantyEnd: "2027-08-12",
+        preOwned: false,
+        conditionGrade: null,
+        boxAndPapers: false,
       },
     ]);
   });
@@ -638,6 +644,11 @@ describe("Wave 10 — watch flagship", () => {
       [serial.id],
     );
     expect(stored.rows[0]).toEqual({ condition_grade: "good", box_and_papers: true, pre_owned: true });
+
+    // Issue #795 item 19 — the unit board exposes the provenance, not just
+    // the raw columns: the dashboard can badge the unit without extra trips.
+    const summary = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.id === serial.id);
+    expect(summary).toMatchObject({ preOwned: true, conditionGrade: "good", boxAndPapers: true });
   });
 
   it("refuses to move a ticket to in_progress, or close it, before the estimate is approved", async () => {
@@ -1698,5 +1709,191 @@ describe("Issue #795 Phase 5 — customer-aware, roll-forward service reminders"
       referenceDate: "2025-06-01",
       customerName: "آقای رضایی",
     });
+  });
+});
+
+/**
+ * Issue #795 item 20 — the reservation (hold) workflow: one exact unit
+ * promised to one exact customer. The hold blocks every other buyer,
+ * converts automatically on the reserving customer's own invoice, releases
+ * by hand with the reason recorded, and stops blocking anyone once expired.
+ */
+describe("Issue #795 item 20 — serial reservations", () => {
+  async function reservationFixture() {
+    const { rows: partyRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, phone) VALUES ($1, 'خانم محمدی', '09121111111') RETURNING id",
+      [biz.id],
+    );
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت رزروی",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-RSV" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-RSV")!;
+    return { customerId: partyRows[0].id, unit };
+  }
+
+  it("holds the unit for the named customer, blocks everyone else, and converts on that customer's invoice", async () => {
+    const { customerId, unit } = await reservationFixture();
+
+    const { id: reservationId } = await withTransaction((client) =>
+      watchReservations.reserveSerialUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: unit.id,
+        customerId,
+        note: "پیش‌پرداخت نقدی دریافت شد",
+      }),
+    );
+    const { rows: serialRows } = await db.query<{ status: string }>(
+      "SELECT status FROM item_serials WHERE id = $1",
+      [unit.id],
+    );
+    expect(serialRows[0].status).toBe("reserved");
+
+    // Only one live hold per unit.
+    await expect(
+      withTransaction((client) =>
+        watchReservations.reserveSerialUnit(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          serialId: unit.id,
+          customerId,
+        }),
+      ),
+    ).rejects.toThrow(/قابل رزرو/);
+
+    // A stranger's invoice (or an anonymous one) cannot take the unit.
+    const { rows: strangerRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name) VALUES ($1, 'مشتری دیگر') RETURNING id",
+      [biz.id],
+    );
+    for (const buyerId of [strangerRows[0].id, null]) {
+      await expect(
+        withTransaction((client) =>
+          invoiceService.createRetailInvoice(client, {
+            businessId: biz.id,
+            locationId: biz.locationId,
+            industry: "watch",
+            customerId: buyerId,
+            tenders: [{ method: "cash" }],
+            lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+          }),
+        ),
+      ).rejects.toThrow(/رزرو شده/);
+    }
+
+    // The reserving customer's own invoice sells the unit and closes the
+    // hold as converted — in the same transaction as the sale.
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        customerId,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+    const { rows: afterSale } = await db.query<{ status: string }>(
+      "SELECT status FROM item_serials WHERE id = $1",
+      [unit.id],
+    );
+    expect(afterSale[0].status).toBe("sold");
+    const reservations = await watchReservations.listSerialReservations(biz.id, biz.locationId);
+    expect(reservations).toHaveLength(1);
+    expect(reservations[0]).toMatchObject({
+      id: reservationId,
+      status: "converted",
+      customerName: "خانم محمدی",
+      serialNumber: "SN-RSV",
+    });
+  });
+
+  it("releases a hold with the reason recorded, and an expired hold stops blocking anyone", async () => {
+    const { customerId, unit } = await reservationFixture();
+
+    const { id: reservationId } = await withTransaction((client) =>
+      watchReservations.reserveSerialUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: unit.id,
+        customerId,
+      }),
+    );
+    // Releasing without a reason is refused; with one, the unit returns to
+    // the shelf and the reason survives on the closed hold.
+    await expect(
+      withTransaction((client) =>
+        watchReservations.releaseSerialReservation(client, {
+          businessId: biz.id,
+          reservationId,
+          reason: "  ",
+        }),
+      ),
+    ).rejects.toThrow(/دلیل/);
+    await withTransaction((client) =>
+      watchReservations.releaseSerialReservation(client, {
+        businessId: biz.id,
+        reservationId,
+        reason: "مشتری منصرف شد",
+      }),
+    );
+    let { rows: serialRows } = await db.query<{ status: string }>(
+      "SELECT status FROM item_serials WHERE id = $1",
+      [unit.id],
+    );
+    expect(serialRows[0].status).toBe("in_stock");
+    let reservations = await watchReservations.listSerialReservations(biz.id, biz.locationId);
+    expect(reservations[0]).toMatchObject({ status: "released", releaseReason: "مشتری منصرف شد" });
+    // A closed hold cannot close twice.
+    await expect(
+      withTransaction((client) =>
+        watchReservations.releaseSerialReservation(client, {
+          businessId: biz.id,
+          reservationId,
+          reason: "دوباره",
+        }),
+      ),
+    ).rejects.toThrow(/قبلاً بسته/);
+
+    // A hold that lapsed yesterday no longer blocks a different buyer —
+    // the sale closes it as expired and proceeds.
+    await withTransaction((client) =>
+      watchReservations.reserveSerialUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: unit.id,
+        customerId,
+        expiresAt: "2026-01-01",
+      }),
+    );
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        customerId: null,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+    ({ rows: serialRows } = await db.query<{ status: string }>(
+      "SELECT status FROM item_serials WHERE id = $1",
+      [unit.id],
+    ));
+    expect(serialRows[0].status).toBe("sold");
+    reservations = await watchReservations.listSerialReservations(biz.id, biz.locationId);
+    const expired = reservations.find((r) => r.expiresAt === "2026-01-01");
+    expect(expired?.status).toBe("expired");
   });
 });
