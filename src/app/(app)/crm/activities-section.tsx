@@ -10,6 +10,18 @@
  * browser's clock — a shop whose day starts at 18:00 must not see tomorrow's
  * work turn red at midnight, and a till whose clock is set wrong must not be
  * able to recolour the whole list.
+ *
+ * ## One filter document, and the server applies all of it
+ *
+ * The controls write into a single `ActivityViewFilters` — the document
+ * `crm-activity-views.ts` parses, serialises and describes. Two things this
+ * replaced were *silently* wrong: the search box filtered the rows already
+ * loaded, so a task beyond the page (or one completed a minute ago, when the
+ * screen had asked for the open ones) looked as though it did not exist; and a
+ * saved view stored against `activities` could carry keys no part of this screen
+ * had ever read. Now the query string the server reads and the chips a person
+ * reads are the same document, and the search is a real filter over the whole
+ * table rather than over the twenty rows that happened to arrive.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -44,13 +56,25 @@ import {
   SectionCardSkeleton,
   StatusBadge,
 } from "@/app/dashboard/page-chrome";
-import { api, ErrorBox, errorMessage, Field, inputClass } from "@/app/dashboard/ui";
+import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "@/app/dashboard/ui";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { crmCustomerHref } from "./crm-routes";
 import { CustomerSearchField } from "./customer-search";
 import { CrmAssigneePicker, type CrmAssignee } from "./crm-assignee-picker";
 import { CrmCardHeading } from "./crm-card-heading";
 import { CrmTodayQueues } from "./today-queues";
+import { SavedViewsBar } from "./saved-views-bar";
+import {
+  ACTIVITY_VIEW_STATE_LABELS,
+  ACTIVITY_VIEW_STATES,
+  EMPTY_ACTIVITY_VIEW_FILTERS,
+  activityViewErrorLine,
+  activityViewFilterCount,
+  activityViewQuery,
+  activityViewSearchParams,
+  describeActivityView,
+  type ActivityViewFilters,
+} from "@/lib/crm-activity-views";
 
 interface Activity {
   id: string;
@@ -75,32 +99,37 @@ interface ActivityListPayload {
   activities: Activity[];
   /** The branch's own «امروز» (YYYY-MM-DD) — see the module comment. */
   today: string;
+  /** The member names the assignee filter's chips can use. */
+  members?: { id: string; name: string; isActive: boolean }[];
   error?: string;
+  /** The field that made a filter impossible, when one did. */
+  field?: string;
 }
-
-/** The list's own view filter. The server filters open/due; the rest is local. */
-type ViewFilter = "all" | "open" | "mine" | "due" | "done";
-
-const VIEW_LABELS: Record<ViewFilter, string> = {
-  open: "انجام‌نشده",
-  mine: "کارهای من",
-  due: "سررسیدشده",
-  done: "انجام‌شده",
-  all: "همه",
-};
-
-const VIEW_ORDER: readonly ViewFilter[] = ["open", "mine", "due", "done", "all"];
 
 /** A fallback «امروز» for the first paint, before the server's answer lands. */
 function browserToday(): string {
   return isoDateInTimeZone(new Date()) ?? new Date().toISOString().slice(0, 10);
 }
 
-export function ActivitiesSection() {
+export function ActivitiesSection({ canSaveViews = false }: { canSaveViews?: boolean } = {}) {
   const [activities, setActivities] = useState<Activity[] | null>(null);
   const [today, setToday] = useState<string>(browserToday);
-  const [view, setView] = useState<ViewFilter>("open");
-  const [search, setSearch] = useState("");
+  /**
+   * The one filter document this screen owns — built into the request, handed
+   * to the saved-view bar and described for the chips.
+   *
+   * The list opens on the unfinished work, as it always has: a task list that
+   * starts by showing everything ever done buries the thing somebody has to do
+   * today.
+   */
+  const [filters, setFilters] = useState<ActivityViewFilters>({
+    ...EMPTY_ACTIVITY_VIEW_FILTERS,
+    state: "open",
+  });
+  /** The member names the assignee filter and its chip can use. */
+  const [members, setMembers] = useState<{ id: string; name: string; isActive: boolean }[]>([]);
+  const [filterError, setFilterError] = useState("");
+  const [info, setInfo] = useState("");
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -114,30 +143,28 @@ export function ActivitiesSection() {
   const requestRef = useRef(0);
 
   const load = useCallback(
-    async (opts: { quiet?: boolean } = {}) => {
+    async (next: ActivityViewFilters, opts: { quiet?: boolean } = {}) => {
       const seq = ++requestRef.current;
       if (!opts.quiet) setRefreshing(true);
-      const params = new URLSearchParams();
-      if (view === "open") params.set("open", "1");
-      if (view === "due") {
-        params.set("open", "1");
-        params.set("due", "1");
-      }
-      // «کارهای من» filters on the server by member id: matching the assignee's
-      // *name* here would count a colleague with the same name as mine.
-      if (view === "mine") {
-        params.set("open", "1");
-        params.set("mine", "1");
-      }
-      const query = params.toString();
+      // The document *is* the query string: the same serialiser the saved-view
+      // bar is handed and the chips are described from.
+      const params = activityViewSearchParams(next);
       const { ok, data, aborted } = await api<ActivityListPayload>(
-        `/api/crm/activities${query ? `?${query}` : ""}`,
+        `/api/crm/activities${params.size > 0 ? `?${params.toString()}` : ""}`,
       );
       if (aborted || seq !== requestRef.current) return;
       if (ok) {
         setActivities(data.activities ?? []);
         if (data.today) setToday(data.today);
+        if (Array.isArray(data.members)) setMembers(data.members);
+        setFilterError("");
         setError("");
+      } else if (data?.error === "bad_filter") {
+        // The reader's own control, named beside it — and the last good rows
+        // stay, because blanking the list would read as «کاری نیست» when the
+        // truth is «آن فیلتر معتبر نیست».
+        setFilterError(activityViewErrorLine(data.field ?? ""));
+        setRefreshing(false);
       } else {
         // Keep whatever is on screen rather than blanking the list: a dropped
         // connection should not look like "you have no work".
@@ -146,12 +173,12 @@ export function ActivitiesSection() {
       }
       setRefreshing(false);
     },
-    [view],
+    [],
   );
 
   useEffect(() => {
-    void load({ quiet: true });
-  }, [load]);
+    void load(filters, { quiet: true });
+  }, [load, filters]);
 
   const markPending = (id: string, on: boolean) =>
     setPending((current) => {
@@ -213,23 +240,8 @@ export function ActivitiesSection() {
     setActivities((current) => current?.filter((row) => row.id !== activity.id) ?? current);
   };
 
-  // The search box filters what is already loaded, so typing is instant and
-  // does not put a request on the wire per keystroke.
-  const term = search.trim().toLowerCase();
-  const visible = useMemo(() => {
-    if (!activities) return [];
-    const byView = activities.filter((activity) => {
-      if (view === "done") return Boolean(activity.completedAt);
-      return true;
-    });
-    if (!term) return byView;
-    return byView.filter((activity) =>
-      [activity.subject, activity.body, activity.assignedTo, activity.customerName ?? ""]
-        .join(" ")
-        .toLowerCase()
-        .includes(term),
-    );
-  }, [activities, term, view]);
+  /** The rows the server returned — the filtering happened in SQL, not here. */
+  const visible = activities ?? [];
 
   const counts = useMemo(() => {
     const tally = { done: 0, due: 0, overdue: 0, planned: 0 } as Record<ActivityState, number>;
@@ -251,6 +263,23 @@ export function ActivitiesSection() {
           already counts the overdue ones; the queue names them. */}
       <CrmTodayQueues section="activities" title="پیگیری‌های نیازمند توجه" />
 
+      {/* Named filter sets over this list. The bar hands its filters back here
+          and the screen applies every one of them, so a shared view
+          («تماس‌های عقب‌افتادهٔ من») narrows the rows rather than decorating the
+          header. */}
+      <SavedViewsBar
+        entity="activities"
+        current={activityViewQuery(filters)}
+        onApply={(applied) =>
+          setFilters((current) => ({ ...current, ...normaliseAppliedFilters(applied) }))
+        }
+        canSave={canSaveViews}
+        onNotice={setInfo}
+      />
+
+      {filterError ? <ErrorBox>{filterError}</ErrorBox> : null}
+      {info ? <InfoBox>{info}</InfoBox> : null}
+
       <SectionCard
         title={
           <CrmCardHeading kicker="پیگیری‌ها و وظایف" title="کارها و پیگیری‌ها" />
@@ -266,7 +295,7 @@ export function ActivitiesSection() {
               type="button"
               variant="ghost"
               size="icon-sm"
-              onClick={() => void load()}
+              onClick={() => void load(filters)}
               disabled={refreshing}
               aria-label={refreshing ? "در حال بازخوانی…" : "بازخوانی"}
             >
@@ -282,66 +311,13 @@ export function ActivitiesSection() {
           </div>
         }
       >
-        {/* Filters. A real row of chips instead of one checkbox: «سررسیدشده»
-            (overdue + today) is the question an owner actually opens this page
-            with, and it was not answerable before. */}
-        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div
-            role="group"
-            aria-label="نمای فهرست"
-            className="-mx-1 flex min-w-0 gap-1.5 overflow-x-auto px-1 pb-1"
-          >
-            {VIEW_ORDER.map((key) => (
-              <Button
-                key={key}
-                type="button"
-                size="xs"
-                variant={view === key ? "default" : "outline"}
-                aria-pressed={view === key}
-                className="shrink-0"
-                onClick={() => setView(key)}
-              >
-                {VIEW_LABELS[key]}
-              </Button>
-            ))}
-          </div>
-          <div className="relative w-full sm:w-64">
-            <SearchIcon
-              aria-hidden="true"
-              className="pointer-events-none absolute inset-y-0 start-3 my-auto size-4 text-muted-foreground"
-            />
-            <input
-              type="search"
-              className={`${inputClass} ps-9 pe-9`}
-              placeholder="جستجو در عنوان، مشتری یا مسئول…"
-              aria-label="جستجو در کارها"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-            {search ? (
-              <button
-                type="button"
-                onClick={() => setSearch("")}
-                aria-label="پاک کردن جستجو"
-                className="absolute inset-y-0 end-2 my-auto flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-              >
-                <XIcon aria-hidden="true" className="size-4" />
-              </button>
-            ) : null}
-          </div>
-        </div>
+        <ActivityFilterBar filters={filters} members={members} onChange={setFilters} />
 
         {visible.length === 0 ? (
           <EmptyState>
-            {term
-              ? "هیچ کاری با این جستجو پیدا نشد."
-              : view === "open"
-                ? "کار انجام‌نشده‌ای نمانده است."
-                : view === "due"
-                  ? "هیچ کاری سررسید نشده است."
-                  : view === "done"
-                    ? "هنوز کاری انجام‌شده علامت نخورده است."
-                    : "هنوز کاری ثبت نشده است. یک تماس پیگیری، یک یادآوری تولد، یا جلسه‌ای که باید گرفته شود."}
+            {activityViewFilterCount(filters) > 0
+              ? "با این فیلترها کاری پیدا نشد."
+              : "هنوز کاری ثبت نشده است. یک تماس پیگیری، یک یادآوری تولد، یا جلسه‌ای که باید گرفته شود."}
           </EmptyState>
         ) : (
           <ul className="divide-y divide-border/80 text-sm">
@@ -436,8 +412,7 @@ export function ActivitiesSection() {
         {activities.length > 0 ? (
           <p className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span>
-              نمایش {formatPersianNumber(visible.length)} از {formatPersianNumber(activities.length)}{" "}
-              کار
+              نمایش {formatPersianNumber(visible.length)} کار
             </span>
             {counts.overdue > 0 ? (
               <span className="text-destructive">
@@ -467,7 +442,7 @@ export function ActivitiesSection() {
                 ? current.map((row) => (row.id === saved.id ? saved : row))
                 : [saved, ...(current ?? [])],
             );
-            void load({ quiet: true });
+            void load(filters, { quiet: true });
           }}
         />
       ) : null}
@@ -691,5 +666,205 @@ function ActivityDialog({
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * The filters a saved view applied, as a document.
+ *
+ * Deliberately a *replace* rather than a merge: applying «تماس‌های عقب‌افتادهٔ
+ * من» after having searched for a name must not show one person's calls
+ * filtered by last week's word. What the view stores is what the list shows.
+ */
+function normaliseAppliedFilters(applied: Record<string, string>): ActivityViewFilters {
+  return {
+    q: applied.q ?? "",
+    kind: applied.kind ?? "",
+    state: applied.state ?? "",
+    assignee: applied.assignee ?? "",
+  };
+}
+
+/**
+ * The list's filters, as controls.
+ *
+ * Every control writes into the one document the request is built from, and the
+ * chips under it are described *from* that document — so a filter that is on is
+ * a filter that is visible, and removing it is one click rather than a hunt
+ * through the form. The count is the honest one (`activityViewFilterCount`), so
+ * the reset control can say how much it is about to reset.
+ *
+ * The search box is the one control that is not immediate: this list is the
+ * screen people leave open while working the floor, and it had deliberately
+ * never issued a request per keystroke. The text is typed locally and committed
+ * after a pause, and the pending write always reads the *latest* document —
+ * otherwise choosing a kind while a search was still typing would have written
+ * the kind back out.
+ */
+function ActivityFilterBar({
+  filters,
+  members,
+  onChange,
+}: {
+  filters: ActivityViewFilters;
+  members: { id: string; name: string; isActive: boolean }[];
+  onChange: (next: ActivityViewFilters) => void;
+}) {
+  const chips = describeActivityView(filters, {
+    memberName: (id) => members.find((member) => member.id === id)?.name ?? null,
+  });
+  const count = activityViewFilterCount(filters);
+
+  const [typed, setTyped] = useState(filters.q);
+  const latest = useRef(filters);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    latest.current = filters;
+  }, [filters]);
+  // A document that changed elsewhere — an applied saved view, a reset — wins
+  // over whatever was half-typed.
+  useEffect(() => {
+    setTyped(filters.q);
+  }, [filters.q]);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  const type = (next: string) => {
+    setTyped(next);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => onChange({ ...latest.current, q: next }), 300);
+  };
+
+  return (
+    <div className="mb-4 grid gap-3 rounded-2xl border border-border/80 p-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="min-w-0">
+          <label className="mb-1 block text-xs font-medium text-muted-foreground" htmlFor="activity-search">
+            جست‌وجو
+          </label>
+          <div className="relative">
+            <SearchIcon
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-y-0 start-3 my-auto size-4 text-muted-foreground"
+            />
+            <input
+              id="activity-search"
+              type="search"
+              className={`${inputClass} ps-9 pe-9`}
+              placeholder="عنوان، یادداشت، مشتری یا مسئول…"
+              value={typed}
+              onChange={(event) => type(event.target.value)}
+            />
+            {typed ? (
+              <button
+                type="button"
+                onClick={() => type("")}
+                aria-label="پاک کردن جستجو"
+                className="absolute inset-y-0 end-2 my-auto flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <XIcon aria-hidden="true" className="size-4" />
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="min-w-0">
+          <label className="mb-1 block text-xs font-medium text-muted-foreground" htmlFor="activity-kind">
+            نوع
+          </label>
+          <select
+            id="activity-kind"
+            className={inputClass}
+            value={filters.kind}
+            onChange={(event) => onChange({ ...filters, kind: event.target.value })}
+          >
+            <option value="">همهٔ نوع‌ها</option>
+            {ACTIVITY_KINDS.map((key) => (
+              <option key={key} value={key}>
+                {ACTIVITY_KIND_LABELS[key]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="min-w-0">
+          <label className="mb-1 block text-xs font-medium text-muted-foreground" htmlFor="activity-state">
+            وضعیت
+          </label>
+          <select
+            id="activity-state"
+            className={inputClass}
+            value={filters.state}
+            onChange={(event) => onChange({ ...filters, state: event.target.value })}
+          >
+            <option value="">همهٔ وضعیت‌ها</option>
+            {ACTIVITY_VIEW_STATES.map((key) => (
+              <option key={key} value={key}>
+                {ACTIVITY_VIEW_STATE_LABELS[key]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="min-w-0">
+          <label className="mb-1 block text-xs font-medium text-muted-foreground" htmlFor="activity-assignee">
+            مسئول
+          </label>
+          <select
+            id="activity-assignee"
+            className={inputClass}
+            value={filters.assignee}
+            onChange={(event) => onChange({ ...filters, assignee: event.target.value })}
+          >
+            <option value="">همه</option>
+            <option value="mine">کارهای من</option>
+            {/* Unclaimed work is the kind that quietly disappears, so "nobody"
+                is a first-class answer rather than the absence of a filter. */}
+            <option value="none">بدون مسئول</option>
+            {members.map((member) => (
+              <option key={member.id} value={member.id}>
+                {member.name}
+                {member.isActive ? "" : " (غیرفعال)"}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">
+          {count > 0 ? `${toPersianDigits(String(count))} فیلتر فعال` : "بدون فیلتر"}
+        </span>
+        {count > 0 ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            // Back to how this screen opens — unfinished work — rather than to
+            // every activity ever logged: a reset that left the list showing
+            // the done ones would answer a question nobody asked. The count and
+            // the chips both go to zero, which is what the button promised.
+            onClick={() => onChange({ ...EMPTY_ACTIVITY_VIEW_FILTERS, state: "open" })}
+          >
+            برداشتن فیلترها
+          </Button>
+        ) : null}
+      </div>
+
+      {chips.length > 0 ? (
+        <ul className="flex flex-wrap gap-1.5" aria-label="فیلترهای اعمال‌شده">
+          {chips.map((chip) => (
+            <li key={chip}>
+              <StatusBadge tone="neutral">{chip}</StatusBadge>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }

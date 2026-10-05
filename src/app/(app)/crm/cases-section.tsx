@@ -759,9 +759,9 @@ function CaseFilterBar({
             type="button"
             variant="ghost"
             size="sm"
-            onClick={() =>
-              onChange({ ...EMPTY_CASE_VIEW_FILTERS, openOnly: filters.openOnly })
-            }
+            // Back to how this screen opens — the open tickets — rather than to
+            // every ticket ever closed. Same rule as the task list's reset.
+            onClick={() => onChange({ ...EMPTY_CASE_VIEW_FILTERS, openOnly: true })}
           >
             برداشتن فیلترها
           </Button>

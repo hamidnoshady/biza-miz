@@ -433,13 +433,16 @@ These are named here so the seams are visible rather than implied:
 - **The saved-view filter vocabulary the command field will need** for «همهٔ
   مشتریان تهران که پارسال خریدند»: the resolver exists, the phrase vocabulary
   over its fields does not.
-- **The same treatment for the other two entities.** `customers` and
-  `activities` declare filter keys the same way `deals` and `cases` did, and only
-  some of them are honoured by their screens. The deals board and the service
-  desk are the worked examples — one pure parser per entity, a control for every
-  key, chips described from the applied document, and a saved view that means
-  what its name says — and the next screen that grows a parser is the next one
-  that can say its views do not lie. Until then, treat their extra keys as
+- **The same treatment for the directory.** `customers` still declares filter
+  keys (`tag`, `segment`, `lifecycle`, `owner`, `hasBalance`, `consent`,
+  `source`) that nothing reads: the screen behind it is the shared parties
+  directory, and the CRM's own opinion about a customer — their segment, their
+  lifecycle, their balance — is computed in the CRM's services rather than in
+  the directory's SQL. The deals board, the service desk and the task list are
+  the worked examples — one pure parser per entity, a control for every key,
+  chips described from the applied document, and a saved view that means what
+  its name says — and the directory is the one screen left where a stored view
+  is a name before it is a filter. Until it is built, treat those keys as
   reserved.
 
 Import and export are **not** on this list, and never appear as a CRM button:

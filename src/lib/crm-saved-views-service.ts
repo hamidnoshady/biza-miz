@@ -31,6 +31,7 @@ import { query } from "./db";
 import { isUuid } from "./uuid";
 import { DEAL_VIEW_FILTER_KEYS, parseDealViewFilters } from "./crm-deal-views";
 import { CASE_VIEW_FILTER_KEYS, parseCaseViewFilters } from "./crm-case-views";
+import { ACTIVITY_VIEW_FILTER_KEYS, parseActivityViewFilters } from "./crm-activity-views";
 
 export const SAVED_VIEW_ENTITIES = [
   "customers",
@@ -62,7 +63,9 @@ const ENTITY_FILTER_KEYS: Record<SavedViewEntity, readonly string[]> = {
   // here while the screen honoured two of them, which is precisely the drift
   // this indirection removes.
   cases: CASE_VIEW_FILTER_KEYS,
-  activities: ["q", "kind", "state", "assignee", "due"],
+  // Likewise from `crm-activity-views.ts`, which also reads the legacy `due`
+  // key as `state=due` so a view stored under it keeps filtering.
+  activities: ACTIVITY_VIEW_FILTER_KEYS,
 };
 
 /**
@@ -86,6 +89,7 @@ const ENTITY_FILTER_VALIDATORS: Partial<
 > = {
   deals: (filters) => parseDealViewFilters({ get: (key) => filters[key] ?? null }),
   cases: (filters) => parseCaseViewFilters({ get: (key) => filters[key] ?? null }),
+  activities: (filters) => parseActivityViewFilters({ get: (key) => filters[key] ?? null }),
 };
 
 export function isSavedViewEntity(value: unknown): value is SavedViewEntity {

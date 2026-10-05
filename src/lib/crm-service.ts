@@ -1458,14 +1458,27 @@ export async function listActivities(
     dealId?: string;
     caseId?: string;
     openOnly?: boolean;
+    /** Only rows somebody has ticked off — the `done` half of a saved view. */
+    completedOnly?: boolean;
+    /** An activity kind, so a view can be «تماس‌های عقب‌افتاده». */
+    kind?: ActivityKind;
     /** Exact snapshot match — the legacy text filter. */
     assignedTo?: string;
     /** The member whose work to list («کارهای من»). */
     assigneeUserId?: string;
+    /**
+     * Deliberately unclaimed work. Separate from "not filtering by assignee",
+     * which must not mean "only the unowned ones".
+     */
+    unowned?: boolean;
     /** Free-text over subject/body/assignee — the list's own search box. */
     q?: string;
     /** Only rows whose `dueAt` falls on or before this ISO date (overdue + today). */
     dueOnOrBefore?: string;
+    /** Only rows due strictly *before* this ISO date — the `overdue` state. */
+    dueBefore?: string;
+    /** Only rows due on or after this ISO date — the `planned` state. */
+    dueOnOrAfter?: string;
     limit?: number;
   } = {},
 ): Promise<CrmActivity[]> {
@@ -1482,10 +1495,13 @@ export async function listActivities(
   if (options.dealId && isUuid(options.dealId)) add("a.deal_id = $n", options.dealId);
   if (options.caseId && isUuid(options.caseId)) add("a.case_id = $n", options.caseId);
   if (options.assignedTo) add("a.assigned_to = $n", options.assignedTo);
+  if (options.kind) add("a.kind = $n", options.kind);
   // «کارهای من» — by member id, never by name: two colleagues can share a name,
   // and a name filter would quietly hand one of them the other's list.
   if (options.assigneeUserId && isUuid(options.assigneeUserId)) {
     add("a.assignee_user_id = $n", options.assigneeUserId);
+  } else if (options.unowned) {
+    where += " AND a.assignee_user_id IS NULL";
   }
   const term = options.q?.trim();
   if (term) {
@@ -1497,9 +1513,20 @@ export async function listActivities(
     where += ` OR a.assigned_to ILIKE ${n} ESCAPE '\\' OR c.name ILIKE ${n} ESCAPE '\\')`;
   }
   if (options.openOnly) where += " AND a.completed_at IS NULL";
+  if (options.completedOnly) where += " AND a.completed_at IS NOT NULL";
   if (options.dueOnOrBefore) {
+    // The shop's own day, inclusive: a task due «امروز» is not late until the
+    // business day the server resolved has ended.
     params.push(options.dueOnOrBefore);
     where += ` AND a.due_at IS NOT NULL AND a.due_at < (($${params.length})::date + 1)`;
+  }
+  if (options.dueBefore) {
+    params.push(options.dueBefore);
+    where += ` AND a.due_at IS NOT NULL AND a.due_at < $${params.length}::date`;
+  }
+  if (options.dueOnOrAfter) {
+    params.push(options.dueOnOrAfter);
+    where += ` AND a.due_at IS NOT NULL AND a.due_at >= $${params.length}::date`;
   }
   // A caller-supplied limit is clamped rather than trusted: `limit=999999` on a
   // shared endpoint is a way to make one screen read a whole table.

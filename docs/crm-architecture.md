@@ -436,9 +436,10 @@ rather than storing a stage id that will fail on the screen for everybody the
 view is shared with), and the screen that owns the keys owns the parser:
 
 - one pure module per entity (`crm-deal-views.ts` for `deals`,
-  `crm-case-views.ts` for `cases`) parses, serialises and *describes* the same
-  document, and the route imports it — so a view stored from the board, a pasted
-  query string and a colleague's shared view are one interpretation;
+  `crm-case-views.ts` for `cases`, `crm-activity-views.ts` for `activities`)
+  parses, serialises and *describes* the same document, and the route imports
+  it — so a view stored from the board, a pasted query string and a colleague's
+  shared view are one interpretation;
 - the service imports that module's key list instead of repeating it, so the
   vocabulary cannot drift from the implementation;
 - an impossible value is refused **by name** (`bad_filter` + the field) and the
@@ -450,8 +451,19 @@ view is shared with), and the screen that owns the keys owns the parser:
   silently nothing.
 
 The rest of the vocabulary goes through the same door as it is built: the
-`deals` and `cases` parsers are the worked examples, and an entity without one
-keeps the drop-unknown-keys behaviour rather than pretending to validate values.
+`deals`, `cases` and `activities` parsers are the worked examples, and an entity
+without one keeps the drop-unknown-keys behaviour rather than pretending to
+validate values.
+
+**A key that already means something is read, never dropped.** `activities`
+declared `due` before it had a `state`, and the screen's own preset buttons
+built `open=1` and `mine=1` — none of which is the vocabulary a new view writes.
+The parser reads all three (`due` as `state=due`, `open`/`mine` as the state and
+the assignee) and the serialiser writes only the canonical names, so a view or a
+bookmark stored under an older name still filters exactly as its author meant
+while every re-save normalises it. Dropping them instead would have turned those
+views into names that quietly do nothing — the specific failure this section
+exists to prevent.
 
 **A filter that is a rule, not a column is written twice — and tested for
 agreement.** `cases` can be narrowed by `breached`, which is not a field: it is

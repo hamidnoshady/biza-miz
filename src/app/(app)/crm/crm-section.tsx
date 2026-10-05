@@ -74,7 +74,11 @@ export function CrmSection({
   if (section === "leads") return <LeadsSection canManage={canWriteCrmSection(held, "leads")} />;
   if (section === "segments") return <SegmentsSection />;
   if (section === "deals") return <DealsSection canManage={canWriteCrmSection(held, "deals")} />;
-  if (section === "activities") return <ActivitiesSection />;
+  if (section === "activities")
+    // The saved-view bar's key, like the service desk's: a named view is a
+    // decision about how the business reads its work, and `api/crm/saved-views`
+    // requires `crm.manage` for it.
+    return <ActivitiesSection canSaveViews={canSaveCrmViews(held)} />;
   if (section === "cases")
     return (
       <CasesSection
