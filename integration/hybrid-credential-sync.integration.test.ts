@@ -41,7 +41,12 @@ import { loginRoster } from "../src/lib/employee-service";
 import { setPin, updateMembership } from "../src/lib/team-service";
 import { SESSION_COOKIE, resolveSessionFromToken } from "../src/lib/auth";
 import { GET as cloudLoginCallback } from "../src/app/api/auth/cloud-login/callback/route";
+import { GET as rosterRoute } from "../src/app/api/auth/pin-login/roster/route";
+import { POST as rosterSyncRoute } from "../src/app/api/auth/pin-login/roster/sync/route";
 import { POST as pairRoute } from "../src/app/api/setup/pair/route";
+import { POST as iamStatusRoute } from "../src/app/api/team/iam-status/route";
+import { createSession } from "../src/lib/employee-service";
+import { signSession } from "../src/lib/auth";
 import { NextRequest } from "next/server";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -55,6 +60,18 @@ vi.mock("../src/lib/iam/login-credentials-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/iam/login-credentials-service")>();
   return { ...actual, applyReplicatedPins: vi.fn(actual.applyReplicatedPins) };
 });
+
+// The repair action and the login-screen retry are driven through the real
+// route handlers, so the session cookie has to be readable outside a Next
+// request: only the cookie store is replaced, exactly as the other route-level
+// integration tests do it.
+const jar = new Map<string, string>();
+vi.mock("next/headers", () => ({
+  cookies: async () => ({
+    get: (name: string) => (jar.has(name) ? { name, value: jar.get(name)! } : undefined),
+  }),
+  headers: async () => new Headers(),
+}));
 
 const globalForPg = globalThis as unknown as { pgPool?: Pool };
 function urlFor(database: string): string {
@@ -291,6 +308,22 @@ async function activePinHash(businessId: string, memberId: string): Promise<stri
     [memberId, businessId],
   ));
   return rows[0]?.secret_hash ?? null;
+}
+
+/** Signs the owner into the jar the way the app's own routes see a session. */
+async function signInOwner(paired: PairedBusiness): Promise<void> {
+  const { session } = await withTenant(paired.siteBusinessId, () =>
+    createSession(paired.ownerUserId, paired.siteBusinessId, { deviceLabel: "test" }),
+  );
+  jar.set(SESSION_COOKIE, await signSession({
+    sub: paired.ownerUserId,
+    role: "owner",
+    businessId: paired.siteBusinessId,
+    businessSlug: "site",
+    locationId: null,
+    fullName: "مالک",
+    employeeSessionId: session.id,
+  }));
 }
 
 describe("hybrid login credential convergence", () => {
@@ -683,5 +716,116 @@ describe("hybrid login credential convergence", () => {
       await switchDatabase(siteDb);
       await maintenance(`DROP DATABASE IF EXISTS "${routeSiteDb}" WITH (FORCE)`);
     }
+  }, 240_000);
+
+  it("repairs both planes from the repair action, and refuses to call it done while PIN staff are unready", async () => {
+    const paired = await pairBusiness();
+    // The route resolves the business from the session; sibling businesses
+    // paired by earlier tests would otherwise make host resolution ambiguous.
+    await withoutTenantScope("platform", () => query(`DELETE FROM businesses WHERE id <> $1`, [paired.siteBusinessId]));
+    await signInOwner(paired);
+
+    // Repair with the credential endpoint broken: the membership plane can be
+    // reconciled, but the action must not report success while active PIN
+    // members cannot sign in locally.
+    cloud.mode = "http500";
+    const refused = await iamStatusRoute(new NextRequest("http://localhost/api/team/iam-status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "repair" }),
+    }));
+    expect(refused.status).toBe(503);
+    const refusedBody = (await refused.json()) as {
+      ok: boolean;
+      identitySyncOk: boolean;
+      credentialsConverged: boolean;
+      overall: string;
+      degradedBy: string | null;
+      credentialSync: { status: string; pinMembersMissing: number };
+    };
+    expect(refusedBody.ok).toBe(false);
+    expect(refusedBody.credentialsConverged).toBe(false);
+    expect(refusedBody.degradedBy).toBe("credentials");
+    expect(refusedBody.credentialSync.pinMembersMissing).toBe(3);
+    // The repair did not simply force a snapshot and leave the roster empty —
+    // the memberships are local, they just cannot sign in yet.
+    expect((await withTenant(paired.siteBusinessId, () => loginRoster(paired.siteBusinessId))).length).toBe(0);
+
+    // The cloud answers again: the same action converges both planes and only
+    // then reports success.
+    cloud.mode = "ok";
+    const repaired = await iamStatusRoute(new NextRequest("http://localhost/api/team/iam-status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "repair" }),
+    }));
+    expect(repaired.status).toBe(200);
+    const body = (await repaired.json()) as {
+      ok: boolean;
+      overall: string;
+      credentialSync: { status: string; pinMembersMissing: number; pinsApplied: number };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.overall).toBe("healthy");
+    expect(body.credentialSync).toMatchObject({ status: "healthy", pinMembersMissing: 0 });
+    const roster = await withTenant(paired.siteBusinessId, () => loginRoster(paired.siteBusinessId));
+    for (const role of PIN_ROLES) expect(roster.map((entry) => entry.id)).toContain(paired.staff[role].id);
+
+    jar.delete(SESSION_COOKIE);
+  }, 240_000);
+
+  it("surfaces the missing-credential gap on the staff roster and repairs it from the login screen", async () => {
+    const paired = await pairBusiness();
+    await withoutTenantScope("platform", () => query(`DELETE FROM businesses WHERE id <> $1`, [paired.siteBusinessId]));
+    await withTenant(paired.siteBusinessId, () => runIamSync(paired.siteBusinessId));
+    expect((await withTenant(paired.siteBusinessId, () => readHybridIdentityStatus(paired.siteBusinessId))).overall).toBe("healthy");
+
+    // The owner-only symptom, reproduced: the cashier's membership is here,
+    // the replicated PIN is not. The roster silently omits the member, so the
+    // route has to say the list is incomplete.
+    await withTenant(paired.siteBusinessId, () => query(
+      `DELETE FROM employee_credentials
+        WHERE business_id = $1 AND employee_id = $2 AND credential_type = 'pin'`,
+      [paired.siteBusinessId, paired.staff.cashier.id],
+    ));
+    const notice = await rosterRoute(new NextRequest(
+      `http://localhost/api/auth/pin-login/roster?businessId=${paired.siteBusinessId}`,
+    ));
+    expect(notice.status).toBe(200);
+    const noticeBody = (await notice.json()) as {
+      employees: Array<{ id: string }>;
+      credentialSync: {
+        state: string;
+        overall: string;
+        expected: number;
+        usable: number;
+        missing: number;
+        missingMembers: Array<{ id: string; fullName: string; role: string }>;
+      } | null;
+    };
+    expect(noticeBody.employees.map((entry) => entry.id)).not.toContain(paired.staff.cashier.id);
+    expect(noticeBody.credentialSync).not.toBeNull();
+    expect(noticeBody.credentialSync).toMatchObject({ expected: 3, usable: 2, missing: 1, overall: "degraded" });
+    expect(noticeBody.credentialSync?.missingMembers.map((member) => member.id)).toEqual([paired.staff.cashier.id]);
+    // Names and roles only — the notice never carries credential material.
+    expect(JSON.stringify(noticeBody.credentialSync)).not.toContain("secret_hash");
+
+    // «همگام‌سازی دوباره» on the login screen: no session, so this is the only
+    // door for the person at the till while nobody can sign in.
+    const retried = await rosterSyncRoute(new NextRequest(
+      `http://localhost/api/auth/pin-login/roster/sync?businessId=${paired.siteBusinessId}`,
+      { method: "POST" },
+    ));
+    expect(retried.status).toBe(200);
+    const retriedBody = (await retried.json()) as { overall: string; missing: number; lastError: string | null };
+    expect(retriedBody).toMatchObject({ overall: "healthy", missing: 0, lastError: null });
+
+    const after = await rosterRoute(new NextRequest(
+      `http://localhost/api/auth/pin-login/roster?businessId=${paired.siteBusinessId}`,
+    ));
+    const afterBody = (await after.json()) as { employees: Array<{ id: string }>; credentialSync: { missing: number } | null };
+    expect(afterBody.employees.map((entry) => entry.id)).toContain(paired.staff.cashier.id);
+    expect(afterBody.credentialSync?.missing).toBe(0);
+    expect(await bcrypt.compare(paired.staff.cashier.pin, (await activePinHash(paired.siteBusinessId, paired.staff.cashier.id))!)).toBe(true);
   }, 240_000);
 });

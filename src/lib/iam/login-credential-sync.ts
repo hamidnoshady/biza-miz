@@ -477,13 +477,16 @@ export async function syncHybridLoginCredentials(
     // a local-only PIN-role member. That is exactly the owner-only symptom and
     // it is degraded, not healthy.
     const status: CredentialSyncStatus = gap.missing > 0 ? "degraded" : "healthy";
+    // `last_error` records a *failure*. How many password-role members still
+    // lack a replicated global identity is a diagnostic, reported in its own
+    // column and in `HybridIdentityStatus.missingIdentityBindings` — writing it
+    // into `last_error` made a healthy pass look like it had failed, and the
+    // connection panel cannot tell the two apart from that column alone.
     const error = !reportedSpentCodes
       ? "spent_recovery_codes_not_reported"
       : gap.missing > 0
         ? `pin_credentials_missing:${gap.missing}`
-        : missingIdentityBindings > 0
-          ? `identity_bindings_missing:${missingIdentityBindings}`
-          : null;
+        : null;
     await recordCredentialState(businessId, siteDeviceId, {
       status,
       error,
