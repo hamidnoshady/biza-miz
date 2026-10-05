@@ -243,7 +243,7 @@ BEGIN
       ('modifier_groups',           'id',                              'location',                      ''),
       ('modifiers',                 'id',                              'location',                      ''),
       ('inventory_items',           'id',                              'location',                      'avg_cost,carrying_value_rial,image_media_id'),
-      ('menu_items',                'id',                              'location',                      'updated_at'),
+      ('menu_items',                'id',                              'location',                      'updated_at,image_media_id'),
       ('dining_tables',             'id',                              'location',                      'status,section_id'),
       ('menu_item_modifier_groups', 'menu_item_id,modifier_group_id',  'parent:menu_items:menu_item_id', ''),
       ('menu_item_ingredients',     'menu_item_id,inventory_item_id',  'parent:menu_items:menu_item_id', ''),
