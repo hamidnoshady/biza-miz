@@ -35,6 +35,8 @@ import {
   filterAiToolsByPermissions,
 } from "./ai-capabilities";
 import type { Permission } from "./permissions";
+import type { AppKey } from "./apps";
+import { routeTools } from "./ai-tool-routing";
 import {
   parseReceiptExtractionReply,
   RECEIPT_EXTRACTION_SYSTEM_PROMPT,
@@ -737,6 +739,18 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
    */
   toolAllowlist?: string[];
   /**
+   * Issue #812 §11 — App Focus. When the member has focused the turn on one
+   * app, the live tool catalogue is narrowed to that app's tools plus the
+   * always-on set, through the same `routeTools` the routing module exports.
+   *
+   * This is the narrowing the issue asks for and it has to be real: a prompt
+   * line saying "focus on Accounting" is guidance the model may ignore, while a
+   * catalogue without the CRM tools is a fact it cannot. `undefined`/`null`
+   * means "no focus" and sends everything, which is what a turn with no app
+   * context does today.
+   */
+  appFocus?: AppKey | null;
+  /**
    * Phase F pt.2 — the turn's conversation belongs to a project, so
    * project-scoped actions (project.memory.add) join `propose_action`'s enum.
    * The ambient project id is injected by the caller, never by the model.
@@ -772,12 +786,19 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     // Issue #808 §8 — the wizard surface follows the business's own step list.
     industry: promptContext.industry,
   }).filter((tool) => allowActions || tool.function.name !== "propose_action");
+  // Issue #812 §11 — App Focus narrows the catalogue the model can see, not
+  // just the prompt. `routeTools` returns null for "no focus", so an unfocused
+  // turn is byte-for-byte what it was before.
+  const appRouted = opts.appFocus ? routeTools(catalogue.map((tool) => tool.function.name), [opts.appFocus]) : null;
+  const appNarrowed = appRouted
+    ? catalogue.filter((tool) => appRouted.includes(tool.function.name))
+    : catalogue;
   // Filtering happens before provider serialization and again in the executor.
   // A newly-added tool without a registry entry therefore cannot accidentally
   // become available to a tenant member.
   const tools = opts.permissions
-    ? filterAiToolsByPermissions(catalogue, opts.permissions)
-    : catalogue;
+    ? filterAiToolsByPermissions(appNarrowed, opts.permissions)
+    : appNarrowed;
   const allowedActionTypes = permissionActionTypes ? new Set<string>(permissionActionTypes) : null;
   const canPropose = tools.some((tool) => tool.function.name === "propose_action");
   const canRequestInput = tools.some((tool) => tool.function.name === "request_input");

@@ -8,7 +8,7 @@ import {
   type PromptContext,
 } from "@/lib/ai";
 import { getBusinessIndustry } from "@/lib/industry-guard";
-import type { AppKey } from "@/lib/apps";
+import { APP_KEYS, type AppKey } from "@/lib/apps";
 import { eligibleAgentCards, type EligibleAgentCard } from "@/lib/ai-system-agents";
 import {
   BASE_PROMPT_SCOPE,
@@ -221,6 +221,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // PDF text layers are extracted once, before the turn starts.
   const preparedAttachments = await prepareAttachments(attachments);
   const allowActions = body.allowActions !== false;
+  // The four standalone apps, plus the two values that mean "no app focus".
+  // «workspace» is a work area inside Accounting, not an app of its own
+  // (`apps.ts`), so it deliberately does NOT narrow the tool catalogue to an
+  // app — a project turn is still an Accounting-scoped turn.
   const appFocusValues = new Set([
     "all",
     "accounting",
@@ -232,6 +236,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const appFocus = typeof body.appFocus === "string" && appFocusValues.has(body.appFocus)
     ? body.appFocus
     : "all";
+  /** The AppKey this turn is focused on, or null when it is not app-focused. */
+  const focusedApp: AppKey | null = APP_KEYS.includes(appFocus as AppKey) ? (appFocus as AppKey) : null;
   const appFocusDirective =
     appFocus === "all"
       ? ""
@@ -486,12 +492,20 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             messages: withAttachmentContext(messages, preparedAttachments),
             attachments: preparedAttachments,
             allowActions,
-            // Phase D — when the turn runs as a custom agent, restrict the read
+            // Phase D — when the turn runs as a system agent, restrict the read
             // tools to its allowlist and the proposable actions to its action
             // list. Both are re-checked in runAgentTurn, so a hand-crafted
             // response naming an out-of-scope action is refused, not applied.
             toolAllowlist: agentCard?.allowedTools ?? undefined,
             actionTypes: (agentCard?.allowedActions ?? undefined) as ActionType[] | undefined,
+            // Issue #812 §11 — App Focus narrows the live tool catalogue, not
+            // just the prompt. A prompt line asking the model to focus is
+            // guidance it may ignore; a catalogue without the other apps' tools
+            // is a fact it cannot. The agent's own allowlist wins when both are
+            // present, because `toolAllowlist` is intersected inside
+            // `toolDefinitions` and an agent's narrowing is the narrower of the
+            // two by construction.
+            appFocus: focusedApp,
             // Phase F pt.2 — a non-agent project turn also offers the
             // project-scoped action(s); runAgentTurn re-checks the enum.
             projectScoped: Boolean(activeProjectId) && !agentCard,
