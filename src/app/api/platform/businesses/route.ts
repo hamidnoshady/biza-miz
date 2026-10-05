@@ -121,6 +121,11 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     const provisioned = await provisionBusiness({
       ...input,
       seedChartOfAccounts: true,
+      // The console's contract is a business the owner can log straight into
+      // and sell from. Stamping the canonical completion marker here (issue
+      // #808 §4) is what makes that true for onboarding routing as well:
+      // without it the owner's first login lands in the first-run wizard.
+      completeSetup: true,
       createdBy: session.padmin,
       confirmExistingOwner: body.confirmExistingOwner === true,
     });

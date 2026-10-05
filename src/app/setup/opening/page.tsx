@@ -18,6 +18,8 @@ import {
   StepShell,
 } from "../ui";
 import { useSetupIndustry } from "../industry-context";
+import Link from "next/link";
+import { catalogueHrefFor } from "@/lib/wizard-steps";
 
 interface Account {
   id: string;
@@ -58,6 +60,10 @@ export default function OpeningStep() {
   // "costing_not_set". Jewelry's own stock is entered through
   // /dashboard/jewelry, not here.
   const showInventorySection = industry === "food_service";
+  // Non-F&B trades keep their stock in the products workspace / their trade's
+  // items page (see catalogueHrefFor), reachable from here so the step still
+  // tells the owner where inventory goes instead of silently dropping it.
+  const catalogueHref = showInventorySection ? null : catalogueHrefFor(industry);
   const money = useMoney();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [openingEntry, setOpeningEntry] = useState<OpeningResponse["openingEntry"]>(null);
@@ -109,15 +115,21 @@ export default function OpeningStep() {
     }
     if (items.length === 0) return setError("حداقل یک قلم با نام و مقدار وارد کنید.");
     setBusy(true);
-    const { ok, data } = await api<{ error?: string; totalValue?: number }>("/api/setup/opening", {
-      method: "POST",
-      body: JSON.stringify({ inventory: { items } }),
-    });
-    setBusy(false);
-    if (!ok) return setError(errorMessage(data.error));
-    setNotice(`شمارش ثبت شد — ارزش کل: ${money.format(data.totalValue ?? 0)}.`);
-    setInvRows([{ ...emptyInvRow }]);
-    load();
+    try {
+      const { ok, data, status } = await api<{ error?: string; totalValue?: number }>("/api/setup/opening", {
+        method: "POST",
+        body: JSON.stringify({ inventory: { items } }),
+      });
+      if (!ok) {
+        setError(errorMessage(data.error, undefined, status));
+        return;
+      }
+      setNotice(`شمارش ثبت شد — ارزش کل: ${money.format(data.totalValue ?? 0)}.`);
+      setInvRows([{ ...emptyInvRow }]);
+      load();
+    } finally {
+      setBusy(false);
+    }
   }
 
   const balTotals = balRows.reduce(
@@ -146,14 +158,20 @@ export default function OpeningStep() {
     }
     if (lines.length === 0) return setError("حداقل یک سطر با حساب و مبلغ لازم است.");
     setBusy(true);
-    const { ok, data } = await api<{ error?: string; messages?: string[] }>("/api/setup/opening", {
-      method: "POST",
-      body: JSON.stringify({ balances: { lines, autoOffset } }),
-    });
-    setBusy(false);
-    if (!ok) return setError(errorMessage(data.error, data.messages));
-    setNotice("سند افتتاحیه با موفقیت ثبت شد (بدهکار = بستانکار).");
-    load();
+    try {
+      const { ok, data, status } = await api<{ error?: string; messages?: string[] }>("/api/setup/opening", {
+        method: "POST",
+        body: JSON.stringify({ balances: { lines, autoOffset } }),
+      });
+      if (!ok) {
+        setError(errorMessage(data.error, data.messages, status));
+        return;
+      }
+      setNotice("سند افتتاحیه با موفقیت ثبت شد (بدهکار = بستانکار).");
+      load();
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (!loaded) return <SetupDataSkeleton rows={4} />;
@@ -161,12 +179,26 @@ export default function OpeningStep() {
   return (
     <StepShell
       step="opening"
-      description="اگر موجودی و مانده‌حساب دارید، این‌جا ثبت کنید تا دفترها از روز اول درست باشند؛ اگر از صفر شروع می‌کنید این مرحله را رد کنید."
+      description={
+        showInventorySection
+          ? "اگر موجودی و مانده‌حساب دارید، این‌جا ثبت کنید تا دفترها از روز اول درست باشند؛ اگر از صفر شروع می‌کنید این مرحله را رد کنید."
+          : "اگر مانده‌حساب دارید، این‌جا ثبت کنید تا دفترها از روز اول درست باشند؛ موجودی کالا در پنل کالاهای همین صنف ثبت می‌شود. اگر از صفر شروع می‌کنید این مرحله را رد کنید."
+      }
       showSkip
       showNext
     >
       <ErrorBox>{error}</ErrorBox>
       {notice ? <InfoBox>{notice}</InfoBox> : null}
+
+      {catalogueHref ? (
+        <InfoBox>
+          موجودی کالا این‌جا ثبت نمی‌شود — کالاها و موجودی را از{" "}
+          <Link className="font-semibold underline" href={catalogueHref}>
+            {industry === "jewelry" || industry === "watch" ? "صفحهٔ کالاهای همین صنف" : "پنل محصولات"}
+          </Link>{" "}
+          وارد کنید.
+        </InfoBox>
+      ) : null}
 
       {showInventorySection ? (
         <section className="mb-8 rounded-xl border border-border p-4">

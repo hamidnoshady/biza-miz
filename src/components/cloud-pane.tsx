@@ -15,28 +15,33 @@
  * the right entry), and a link to a till screen opens the local till instead.
  * Offline it says the screen needs the Internet and points back to the till.
  * A browser on the LAN (a phone) has no <webview>, and gets a link instead.
+ * The guest wears this window's light/dark theme, and follows it when the
+ * desktop's toggle changes it: the cloud's own toggle is in the hidden sidebar.
  */
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useTheme } from "next-themes";
 import { useEffect, useRef, useState } from "react";
 import { CloudIcon, CloudOffIcon, RefreshCwIcon } from "lucide-react";
 import { cardClass, PageShell } from "@/app/dashboard/page-chrome";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ACCOUNTING_WORKSPACE_HREFS } from "@/lib/app-routes";
-import { CLOUD_EMBED_UA_TOKEN, cloudPageUrl, mirroredPath } from "@/lib/cloud-embed";
+import { CLOUD_EMBED_UA_TOKEN, cloudPageUrl, cloudThemeScript, mirroredPath } from "@/lib/cloud-embed";
 import { isSiteLocalRoute } from "@/lib/site-routes";
 
 /** The parts of Electron's <webview> element the pane uses. */
 interface WebviewElement extends HTMLElement {
   loadURL(url: string): Promise<void>;
   getURL(): string;
+  executeJavaScript(code: string): Promise<unknown>;
 }
 
 type PaneState = "starting" | "embedded" | "link" | "offline";
 
 export function CloudPane({ pathAndQuery, cloudUrl }: { pathAndQuery: string; cloudUrl: string | null }) {
   const router = useRouter();
+  const { resolvedTheme } = useTheme();
   const target = cloudPageUrl(cloudUrl, pathAndQuery);
   const [state, setState] = useState<PaneState>("starting");
   const [attempt, setAttempt] = useState(0);
@@ -124,6 +129,23 @@ export function CloudPane({ pathAndQuery, cloudUrl }: { pathAndQuery: string; cl
       element.removeEventListener("did-fail-load", onFail);
     };
   }, [state, cloudUrl, router]);
+
+  // The desktop's theme is the one theme: apply it on every load of the guest
+  // and again whenever the desktop's toggle changes it.
+  useEffect(() => {
+    const element = webview.current;
+    const script = cloudThemeScript(resolvedTheme);
+    if (state !== "embedded" || !element || !script) return;
+    const apply = () => void element.executeJavaScript(script).catch(() => {});
+    element.addEventListener("dom-ready", apply);
+    // A guest already showing a page has had its dom-ready: switch it now.
+    try {
+      if (element.getURL()) apply();
+    } catch {
+      // Not attached yet: dom-ready will apply it.
+    }
+    return () => element.removeEventListener("dom-ready", apply);
+  }, [state, resolvedTheme]);
 
   if (state === "starting") {
     return (

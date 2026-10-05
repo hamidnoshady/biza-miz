@@ -13,17 +13,62 @@ import type { WizardStep } from "@/lib/wizard-steps";
 import { useSetupIndustry } from "./industry-context";
 import { isNotableApiFailure, recordApiFailure } from "@/lib/error-report";
 
+export interface ApiResult<T> {
+  ok: boolean;
+  status: number;
+  data: T;
+}
+
+/**
+ * How long a wizard request may stay unanswered before it is treated as a
+ * transport failure. Generous on purpose: the slowest legitimate step (a big
+ * CSV/Excel menu import, a chart of accounts, an inventory count) is well
+ * inside it, while a request that would otherwise hang for ever — a desktop
+ * install whose backend died, a hybrid link to an unreachable server — is
+ * turned into the same recoverable `status: 0` result as a dropped connection.
+ */
+export const SETUP_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * The wizard's one fetch wrapper.
+ *
+ * A rejected `fetch()` — dropped connection, desktop offline, hybrid link
+ * down, or the request timing out — is normalised to status `0` instead of
+ * throwing out of a form handler (issue #808 §5). The error-report layer
+ * already knows that shape ("HTTP (no response)", see error-report.ts), the
+ * busy state below is always released with `finally`, and callers keep testing
+ * `ok` exactly as before. Without this, a transport failure escaped the
+ * handler and left the form stuck on "busy" forever with nothing written to the
+ * exportable log.
+ */
 export async function api<T = Record<string, unknown>>(
   url: string,
   init?: RequestInit,
-): Promise<{ ok: boolean; status: number; data: T }> {
-  const res = await fetch(url, {
-    headers:
-      init?.body instanceof FormData
-        ? undefined
-        : { "Content-Type": "application/json" },
-    ...init,
-  });
+): Promise<ApiResult<T>> {
+  const method = init?.method ?? "GET";
+  // The bounded timeout is added only when the caller brought no signal of its
+  // own, so an explicit cancellation (none does today, but the contract stays
+  // honest) is never overridden by ours.
+  const controller = init?.signal ? null : new AbortController();
+  const timer = controller
+    ? setTimeout(() => controller.abort(), SETUP_REQUEST_TIMEOUT_MS)
+    : null;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers:
+        init?.body instanceof FormData
+          ? undefined
+          : { "Content-Type": "application/json" },
+      ...init,
+      signal: init?.signal ?? controller?.signal,
+    });
+  } catch {
+    recordApiFailure({ method, url, status: 0, code: "network_error" });
+    return { ok: false, status: 0, data: { error: "network_error" } as unknown as T };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   let data: T;
   try {
     data = (await res.json()) as T;
@@ -35,7 +80,7 @@ export async function api<T = Record<string, unknown>>(
   // logged only, the on-screen message this returns is unchanged.
   if (!res.ok && isNotableApiFailure(res.status)) {
     recordApiFailure({
-      method: init?.method ?? "GET",
+      method,
       url,
       status: res.status,
       code: typeof (data as { error?: unknown })?.error === "string" ? (data as { error: string }).error : undefined,
@@ -44,11 +89,20 @@ export async function api<T = Record<string, unknown>>(
   return { ok: res.ok, status: res.status, data };
 }
 
-/** Persian messages for the API's error codes. */
+/**
+ * Persian messages for the API's error codes. `status` is optional for callers
+ * that have it; status `0` is the transport-failure shape `api()` produces and
+ * takes precedence over any code, because "the request never arrived" is never
+ * a validation problem the owner can fix in the form.
+ */
 export function errorMessage(
   code: string | undefined,
   messages?: string[],
+  status?: number,
 ): string {
+  if (status === 0 || code === "network_error") {
+    return "ارتباط با سرور برقرار نشد. اتصال را بررسی و دوباره تلاش کنید.";
+  }
   if (messages?.length) return messages.join(" ");
   const map: Record<string, string> = {
     unauthorized: "وارد نشده‌اید.",
@@ -62,7 +116,8 @@ export function errorMessage(
     pin_taken: "این پین در این شعبه استفاده شده است. پین دیگری انتخاب کنید.",
     already_initialized: "این سیستم قبلاً راه‌اندازی شده است.",
     costing_locked: "روش قیمت‌گذاری قفل شده و از این‌جا قابل تغییر نیست.",
-    costing_not_set: "اول روش قیمت‌گذاری را در مرحلهٔ ۳ انتخاب کنید.",
+    costing_not_set: "اول روش قیمت‌گذاری را در مرحلهٔ «قیمت‌گذاری» انتخاب کنید.",
+    step_not_in_industry: "این مرحله برای نوع کسب‌وکار شما وجود ندارد.",
     accounts_in_use: "حساب‌ها دارای سند هستند و قابل جایگزینی نیستند.",
     invalid_rate: "نرخ مالیات باید بین ۰ و ۱۰۰ باشد.",
     category_exists: "دسته‌ای با این نام وجود دارد.",
@@ -73,8 +128,8 @@ export function errorMessage(
     nothing_to_import: "هیچ سطر معتبری در فایل نبود.",
     printer_not_found: "چاپگر پیدا نشد.",
     no_items: "حداقل یک قلم لازم است.",
+    network_error: "ارتباط با سرور برقرار نشد. اتصال را بررسی و دوباره تلاش کنید.",
     invalid_item: "مقدار یا بهای یکی از اقلام معتبر نیست.",
-    opening_entry_exists: "سند افتتاحیه قبلاً ثبت شده است.",
     not_balanced: "سند تراز نیست: جمع بدهکار و بستانکار برابر نیستند.",
     unknown_account: "حساب ناشناخته در سطرها وجود دارد.",
     offset_account_missing: "حساب «تراز افتتاحیه» (کد ۳۹۰۰) در سرفصل‌ها نیست.",
@@ -234,14 +289,32 @@ export function StepShell({
   const meta = STEPS[stepIndex(step)];
   const back = prevPath(step, steps);
   const [skipping, setSkipping] = useState(false);
+  const [skipError, setSkipError] = useState("");
 
+  /**
+   * Skipping the step is itself a persisted decision: it writes the step's
+   * marker before moving on. Issue #808 §6 — that write used to be fired and
+   * forgotten, so a dropped connection moved the owner forward while the
+   * stored state stayed behind (and `/setup` later sent them straight back).
+   * Now a failure keeps them here with a retry, and the busy flag is released
+   * in `finally` whatever the transport does.
+   */
   async function skip() {
     setSkipping(true);
-    await api("/api/setup/progress", {
-      method: "POST",
-      body: JSON.stringify({ step }),
-    });
-    router.push(nextPath(step, steps));
+    setSkipError("");
+    try {
+      const { ok, data, status } = await api<{ error?: string }>(
+        "/api/setup/progress",
+        { method: "POST", body: JSON.stringify({ step }) },
+      );
+      if (!ok) {
+        setSkipError(errorMessage(data?.error, undefined, status));
+        return;
+      }
+      router.push(nextPath(step, steps));
+    } finally {
+      setSkipping(false);
+    }
   }
 
   const currentIndex = steps.findIndex((item) => item.id === step);
@@ -280,6 +353,8 @@ export function StepShell({
       </header>
 
       {children}
+
+      {skipError ? <ErrorBox>{skipError}</ErrorBox> : null}
 
       <div className="mt-8 flex items-center justify-between border-t pt-4">
         <div>

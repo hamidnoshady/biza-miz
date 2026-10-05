@@ -22,6 +22,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   order_item: "قلم سفارش",
   order_amendment: "اصلاح سفارش",
   retail_invoice: "فاکتور فروش",
+  retail_invoice_void: "ابطال فاکتور فروش",
   sale: "فروش",
   accessory_sale: "فروش لوازم جانبی",
   cosmetic_sale: "فروش آرایشی و بهداشتی",

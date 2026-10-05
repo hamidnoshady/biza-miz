@@ -141,15 +141,28 @@ function PurchaseForm({
   const [quantity, setQuantity] = useState("1");
   const [unitCost, setUnitCost] = useState("");
   const [expiry, setExpiry] = useState("");
+  // Issue #770 — batch-tracked cosmetics: the purchase receipt carries the
+  // REAL manufacturer/supplier lot number (plus manufacture date and the
+  // supplier's own reference when the delivery has them). The server only
+  // generates an internal reference when a lot number is genuinely absent.
+  const [batchNumber, setBatchNumber] = useState("");
+  const [manufactureDate, setManufactureDate] = useState("");
+  const [supplierReference, setSupplierReference] = useState("");
   const [lines, setLines] = useState<
     {
       itemId: string;
       quantity: string;
       unitCost: number;
+      batchNumber: string | null;
+      manufactureDate: string | null;
+      supplierReference: string | null;
       expiryDate: string | null;
     }[]
   >([]);
   const [busy, setBusy] = useState(false);
+
+  const selectedItem = items.find((i) => i.id === itemId) ?? null;
+  const isBatchItem = selectedItem?.tracking === "batch";
 
   function addLine() {
     const qty = Number(quantity);
@@ -170,6 +183,11 @@ function PurchaseForm({
         itemId,
         quantity,
         unitCost: money.fromInput(Math.round(cost)),
+        // Lot fields only mean something for a batch-tracked item; they are
+        // cleared for every other kind so a stale value can never be sent.
+        batchNumber: isBatchItem ? batchNumber.trim() || null : null,
+        manufactureDate: isBatchItem ? manufactureDate || null : null,
+        supplierReference: isBatchItem ? supplierReference.trim() || null : null,
         expiryDate: expiry || null,
       },
     ]);
@@ -177,6 +195,9 @@ function PurchaseForm({
     setQuantity("1");
     setUnitCost("");
     setExpiry("");
+    setBatchNumber("");
+    setManufactureDate("");
+    setSupplierReference("");
   }
 
   function removeLine(index: number) {
@@ -287,6 +308,33 @@ function PurchaseForm({
             </Button>
           </div>
         </div>
+        {isBatchItem ? (
+          <div className="grid min-w-0 gap-3 sm:grid-cols-3">
+            <Field label="شماره بچ/لات (ساخت کارخانه)">
+              <input
+                className={inputClass}
+                dir="ltr"
+                value={batchNumber}
+                onChange={(e) => setBatchNumber(e.target.value)}
+                placeholder="مثلاً LOT-2026-A17"
+              />
+            </Field>
+            <Field label="تاریخ ساخت (اختیاری، شمسی)">
+              <JalaliDatePicker
+                value={manufactureDate}
+                onChange={setManufactureDate}
+              />
+            </Field>
+            <Field label="ارجاع تأمین‌کننده (اختیاری)">
+              <input
+                className={inputClass}
+                dir="ltr"
+                value={supplierReference}
+                onChange={(e) => setSupplierReference(e.target.value)}
+              />
+            </Field>
+          </div>
+        ) : null}
         {lines.length > 0 ? (
           <div className="rounded-xl border border-border">
             <ul className="divide-y divide-border/80 text-sm">
@@ -301,6 +349,7 @@ function PurchaseForm({
                       {item?.name ?? l.itemId}{" "}
                       <span className="text-xs text-muted-foreground">
                         × {formatPersianNumber(Number(l.quantity))}
+                        {l.batchNumber ? ` · بچ ${l.batchNumber}` : ""}
                         {l.expiryDate ? ` · انقضا ${formatJalali(l.expiryDate)}` : ""}
                       </span>
                     </span>

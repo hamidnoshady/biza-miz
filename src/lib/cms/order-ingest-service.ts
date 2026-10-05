@@ -7,15 +7,22 @@ import { NextResponse } from "next/server";
 import type { PoolClient } from "pg";
 import { getPool, query, withoutTenantScope, withTenant } from "../db";
 import { WELL_KNOWN_CODES } from "../coa-template";
+import { RETAIL_ACCOUNT_CODES } from "../retail-account-codes";
 import { accountIdsByCode, postExactCogsEntry, postExactJournalEntry } from "../ledger-service";
 import { deductForOrder } from "../inventory-service";
 import { getPrimaryLocation } from "../setup-state";
 import { reconcileExternalIdentity } from "../crm-external-identity";
 import { getBusinessIndustry } from "../industry-guard";
-import { INDUSTRY_NOT_STOREFRONT, hasSellableCatalogue, isRetailCatalogueIndustry, type Industry } from "../industries";
+import {
+  INDUSTRY_NOT_STOREFRONT,
+  hasSellableCatalogue,
+  isRetailCatalogueIndustry,
+  type Industry,
+} from "../industries";
 import type { RialText } from "../inventory-exact";
 import type { WebsiteConnectionRow } from "../website/connection-service";
 import { cmsMinorToRial } from "./order-money";
+import { sellOnlineRetailLine } from "../retail-online-sale-service";
 import {
   cmsReversalStatusMatches,
   isCmsReversalEvent,
@@ -25,53 +32,6 @@ import type { CmsOrder } from "./types";
 
 const zero = "0" as RialText;
 
-const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, { revenue: string; cogs: string; inventory: string }> = {
-  service_saas: { revenue: "4500", cogs: "5670", inventory: "1400" },
-  jewelry: {
-    revenue: WELL_KNOWN_CODES.goldSalesRevenue,
-    cogs: WELL_KNOWN_CODES.goldCogs,
-    inventory: WELL_KNOWN_CODES.goldInventory,
-  },
-  watch: {
-    revenue: WELL_KNOWN_CODES.watchSalesRevenue,
-    cogs: WELL_KNOWN_CODES.watchCogs,
-    inventory: WELL_KNOWN_CODES.watchInventory,
-  },
-  accessories: {
-    revenue: WELL_KNOWN_CODES.accessorySalesRevenue,
-    cogs: WELL_KNOWN_CODES.accessoryCogs,
-    inventory: WELL_KNOWN_CODES.accessoryInventory,
-  },
-  cosmetics: {
-    revenue: WELL_KNOWN_CODES.cosmeticSalesRevenue,
-    cogs: WELL_KNOWN_CODES.cosmeticCogs,
-    inventory: WELL_KNOWN_CODES.cosmeticInventory,
-  },
-  wholesale: {
-    revenue: WELL_KNOWN_CODES.wholesaleSalesRevenue,
-    cogs: WELL_KNOWN_CODES.wholesaleCogs,
-    inventory: WELL_KNOWN_CODES.wholesaleInventory,
-  },
-  tools_fittings: {
-    revenue: WELL_KNOWN_CODES.toolsSalesRevenue,
-    cogs: WELL_KNOWN_CODES.toolsCogs,
-    inventory: WELL_KNOWN_CODES.toolsInventory,
-  },
-  haberdashery: {
-    revenue: WELL_KNOWN_CODES.haberdasherySalesRevenue,
-    cogs: WELL_KNOWN_CODES.haberdasheryCogs,
-    inventory: WELL_KNOWN_CODES.haberdasheryInventory,
-  },
-  // Issue #799 — an AEC business's website sells services, not stock: the
-  // order lands in the design/engineering revenue account, its direct cost in
-  // project cost, and any material it consumes against the generic inventory
-  // account. Every code exists in the trade's chart (coa-template.ts).
-  architecture_construction: {
-    revenue: WELL_KNOWN_CODES.aecDesignRevenue,
-    cogs: WELL_KNOWN_CODES.aecProjectDirectCost,
-    inventory: WELL_KNOWN_CODES.inventory,
-  },
-};
 
 function cmsProductId(order: CmsOrder): string | null {
   if (typeof order.product === "string") return order.product;
@@ -229,11 +189,13 @@ async function markInboxFailed(inboxId: string, error: string): Promise<void> {
 
 async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOrder): Promise<string> {
   const businessId = connection.business_id;
-  // Issue #799 Wave 11. The site is a shopfront only for a trade that sells
-  // goods: an order from a construction or service business's site has no
-  // catalogue to resolve its lines against, and the two old branches (F&B menu
-  // or retail items) would both write a sale the business never made. Refusing
-  // with a name is what puts it in front of the operator as a failed import.
+  // Issue #799 Wave 11 — a family question, not a negation. A website is a
+  // shopfront only for a trade that sells goods: an order from a construction
+  // or service business's site has no catalogue to resolve its lines against,
+  // and both branches below (F&B menu, retail items) would write a sale the
+  // business never made. Keep the refusal in front of the whole import, so no
+  // store order reaches the ledger or the item model for that trade; the named
+  // error becomes `markInboxFailed`, which is what the operator sees.
   const industry = await getBusinessIndustry(businessId);
   if (!hasSellableCatalogue(industry)) throw new Error(INDUSTRY_NOT_STOREFRONT);
   const remoteId = order.id;
@@ -287,24 +249,33 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
     const orderNumber = Number(counter[0].next_number);
     const note = buyer.note ? `${buyer.name} — ${buyer.note}` : `مشتری: ${buyer.name}`;
 
-    const { rows: orderRows } = await client.query<{ id: string }>(
-      `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, note, customer_id)
-       VALUES ($1, $2, 'delivery', 'open', $3, 0, 0, $4, $5, $6, $7)
-       RETURNING id`,
-      [locationId, orderNumber, net.toString(), tax.toString(), total.toString(), note, customerId],
-    );
-    const orderId = orderRows[0].id;
-
     const title =
       typeof order.product === "object" && order.product && "title" in order.product
         ? String(order.product.title)
         : order.productTitle ?? "محصول فروشگاه";
     const quantity = Math.max(1, order.quantity);
+    // Resolve the mapping BEFORE writing the order header: a store product
+    // mapped to a retail catalogue `item` makes this a *retail* order, not a
+    // delivery order. Getting that wrong was why a CMS reversal later ran
+    // through the F&B closed-order engine: the order it was handed had no
+    // retail shape to recognise (issue #770).
     const mapped = await resolveWebsiteProductMap(client, businessId, cmsProductId(order));
     const industry = await getBusinessIndustry(businessId);
+    const orderType = mapped?.localKind === "item" ? "retail" : "delivery";
+
+    const { rows: orderRows } = await client.query<{ id: string }>(
+      `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, note, customer_id)
+       VALUES ($1, $2, $3, 'open', $4, 0, 0, $5, $6, $7, $8)
+       RETURNING id`,
+      [locationId, orderNumber, orderType, net.toString(), tax.toString(), total.toString(), note, customerId],
+    );
+    const orderId = orderRows[0].id;
 
     let inventoryEventId: string | null = null;
     let cogsRial = "0";
+    // The `order_items` row a retail line wrote, so the canonical sale
+    // service can persist the exact batch allocation against it.
+    let retailOrderItemId: string | null = null;
 
     if (mapped?.localKind === "menu_item") {
       await client.query(
@@ -313,11 +284,13 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
         [locationId, orderId, mapped.localId, title, unit.toString(), quantity],
       );
     } else if (mapped?.localKind === "item") {
-      await client.query(
+      const { rows: lineRows } = await client.query<{ id: string }>(
         `INSERT INTO order_items (location_id, order_id, item_id, name_snapshot, unit_price, quantity, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'served')`,
+         VALUES ($1, $2, $3, $4, $5, $6, 'served')
+         RETURNING id`,
         [locationId, orderId, mapped.localId, title, unit.toString(), quantity],
       );
+      retailOrderItemId = lineRows[0].id;
     } else {
       await client.query(
         `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, status)
@@ -361,18 +334,24 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
       });
     } else if (mapped?.localKind === "item" && isRetailCatalogueIndustry(industry)) {
       const codes = RETAIL_ACCOUNT_CODES[industry];
-      const { rows: stockRows } = await client.query<{ unit_cost: string | null }>(
-        `SELECT unit_cost::text FROM item_stock WHERE item_id = $1 AND unit_cost IS NOT NULL`,
-        [mapped.localId],
-      );
-      const unitCost = stockRows[0]?.unit_cost ? BigInt(stockRows[0].unit_cost) : 0n;
-      if (unitCost > 0n) {
-        cogsRial = (unitCost * BigInt(quantity)).toString();
-        await client.query(
-          `UPDATE item_stock SET quantity = GREATEST(0, quantity - $2), last_sold_at = now(), updated_at = now()
-            WHERE item_id = $1`,
-          [mapped.localId, quantity],
-        );
+      // The canonical online retail sale: FEFO + expired-batch exclusion +
+      // exact batch COGS and a persisted allocation for a `tracking='batch'`
+      // item; the fungible `item_stock` rule otherwise. The adapter must not
+      // decide any of this itself — it used to, and that is exactly how a
+      // cosmetics paid order could bypass the batch engine.
+      const sold = retailOrderItemId
+        ? await sellOnlineRetailLine(client, {
+            locationId,
+            orderId,
+            orderItemId: retailOrderItemId,
+            itemId: mapped.localId,
+            quantity: String(quantity),
+            sourceType: "cms_store_order",
+            sourceId: orderId,
+          })
+        : null;
+      cogsRial = sold ? sold.cogsRial : "0";
+      if (BigInt(cogsRial) > 0n) {
         const cogsAccounts = await accountIdsByCode(client, businessId, [codes.cogs, codes.inventory]);
         await postExactJournalEntry(client, {
           businessId,
@@ -429,10 +408,8 @@ async function postRevenueEntry(
   industry: Industry | null,
   inventoryEventId: string | null,
 ): Promise<void> {
-  // The revenue account follows the family: a goods sale credits the trade's
-  // own sales account, an F&B order credits the channel's delivery revenue.
   const retailRevenue =
-    industry && isRetailCatalogueIndustry(industry)
+    isRetailCatalogueIndustry(industry)
       ? RETAIL_ACCOUNT_CODES[industry]?.revenue ?? WELL_KNOWN_CODES.deliveryRevenue
       : WELL_KNOWN_CODES.deliveryRevenue;
   const accounts = await accountIdsByCode(client, businessId, [

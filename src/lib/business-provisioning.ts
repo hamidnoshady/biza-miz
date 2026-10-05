@@ -23,7 +23,7 @@ import {
   validateSubdomain,
 } from "./slug";
 import { LOCAL_DISABLED_FEATURES, type DeploymentModeName } from "./deployment-mode";
-import { SETTING_KEYS } from "./settings";
+import { SETTING_KEYS, markSetupComplete } from "./settings";
 import { coaTemplateForIndustry, nextAccountLevel, type AccountLevel, type TemplateAccount } from "./coa-template";
 import { ENABLED_INDUSTRIES, INDUSTRIES, type Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
@@ -112,6 +112,18 @@ export interface ProvisionBusinessInput {
    * somebody's account.
    */
   confirmExistingOwner?: boolean;
+  /**
+   * Issue #808 §4 — this call provisions a business that is *finished*:
+   * stamp `setup.progress.completedAt` in the same transaction, the way
+   * pairing does, so the owner is never routed into the first-run wizard.
+   *
+   * Set by the callers that promise a ready-to-use business (the platform
+   * console, which also seeds the chart of accounts, and the platform's own
+   * company workspace). Deliberately NOT set by the first-run bootstrap or
+   * public signup: those *are* the wizard's front doors, and their business
+   * must stay incomplete until the owner reaches Finish.
+   */
+  completeSetup?: boolean;
 }
 
 export interface ProvisionedBusiness {
@@ -594,6 +606,14 @@ export async function provisionBusiness(
           [businessId, SETTING_KEYS.deploymentProfile, JSON.stringify({ profile: "local", pairedAt: null })],
         );
         await disableFeatures(client, businessId, LOCAL_DISABLED_FEATURES);
+      }
+
+      // Issue #808 §4 — a provisioned-ready business is formally finished
+      // before its owner ever logs in. Same canonical transition
+      // /api/setup/complete performs; written inside this transaction so a
+      // rolled-back provision cannot leave a stray completion marker.
+      if (input.completeSetup) {
+        await markSetupComplete(businessId, client);
       }
 
       // Phase 24 Wave 3 — mint the business's data-encryption key inside the

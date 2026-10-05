@@ -14,7 +14,16 @@ import { provisionBusiness } from "../src/lib/business-provisioning";
 import { provisionMfaEnrolment } from "../src/lib/mfa-service";
 import { issueRecoveryCodes } from "../src/lib/mfa-recovery";
 import { verifyMfaCode } from "../src/lib/mfa-verify";
-import { applyLoginCredentials, buildLoginCredentials, recordSpentRecoveryCodes, spentRecoveryCodes } from "../src/lib/iam/login-credentials-service";
+import {
+  applyLoginCredentials,
+  applyReplicatedPins,
+  buildLoginCredentials,
+  buildReplicatedPins,
+  recordSpentRecoveryCodes,
+  spentRecoveryCodes,
+} from "../src/lib/iam/login-credentials-service";
+import { setPin } from "../src/lib/team-service";
+import { loginRoster } from "../src/lib/employee-service";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
@@ -121,5 +130,44 @@ describe("global login replication", () => {
       .resolves.toBe("rejected");
     await expect(verifyMfaCode({ subjectRealm: "platform_user", subjectId: cloud.platformUserId!, method: "totp", code: recovery[1], useRecoveryCode: true }))
       .resolves.toBe("recovery_code");
+  }, 180_000);
+
+  it("brings a cashier's cloud PIN to the desktop so they appear on its quick login", async () => {
+    await useDatabase(cloudDb);
+    const cloud = await provisionBusiness({
+      businessName: "کافه ابر ۲", ownerName: "حمید", email: `owner-${randomUUID()}@example.com`, password: "cloud-password", seedChartOfAccounts: false,
+    });
+    const cashierId = randomUUID();
+    await withTenant(cloud.businessId, () => query(
+      `INSERT INTO users (id, business_id, role, full_name, location_id) VALUES ($1, $2, 'cashier', 'صندوق', $3)`,
+      [cashierId, cloud.businessId, cloud.locationId],
+    ));
+    await withTenant(cloud.businessId, () => setPin(cloud.businessId, cashierId, "4826", cloud.userId));
+    const pins = await buildReplicatedPins(cloud.businessId);
+    expect(pins.map((pin) => pin.membershipId)).toEqual([cashierId]);
+
+    // Site: the IAM snapshot has replicated the membership, but no PIN.
+    await useDatabase(siteDb);
+    const site = await provisionBusiness({
+      businessName: "کافه محلی ۲", ownerName: "حمید", email: `local-${randomUUID()}@example.com`, password: "local-password", seedChartOfAccounts: false,
+    });
+    await withTenant(site.businessId, () => query(
+      `INSERT INTO users (id, business_id, role, full_name, location_id) VALUES ($1, $2, 'cashier', 'صندوق', $3)`,
+      [cashierId, site.businessId, site.locationId],
+    ));
+    const before = await withTenant(site.businessId, () => loginRoster(site.businessId));
+    expect(before.map((entry) => entry.id)).not.toContain(cashierId);
+
+    await expect(withTenant(site.businessId, () => applyReplicatedPins(site.businessId, pins))).resolves.toBe(1);
+    // Unchanged cloud → no rewrite.
+    await expect(withTenant(site.businessId, () => applyReplicatedPins(site.businessId, pins))).resolves.toBe(0);
+
+    const after = await withTenant(site.businessId, () => loginRoster(site.businessId));
+    expect(after.map((entry) => entry.id)).toContain(cashierId);
+    const stored = await withTenant(site.businessId, () => query<{ secret_hash: string }>(
+      `SELECT secret_hash FROM employee_credentials WHERE employee_id = $1 AND credential_type = 'pin' AND status = 'active'`,
+      [cashierId],
+    ));
+    expect(await bcrypt.compare("4826", stored.rows[0].secret_hash)).toBe(true);
   }, 180_000);
 });

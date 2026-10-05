@@ -134,6 +134,14 @@ changes (`login_managed_by_cloud`). A recovery code spent on the site is POSTed
 back to the same endpoint so it is single-use on both replicas; while the site is
 offline, that code still works on the cloud until the next tick reports it.
 
+The same response carries every active member's quick-login **PIN hash**
+(`pins`), so staff created and given a PIN on the cloud appear on the desktop's
+«ورود سریع کارکنان» roster. For cashier/waiter/kitchen the cloud's PIN is
+authoritative and a different local one is put back; an owner or manager keeps
+the offline PIN chosen in the pairing wizard, and the cloud's only fills it in
+when the desktop has none (`planPinReplication`). A member the cloud has no PIN
+for keeps the desktop's.
+
 ## Event transport
 
 On the site, `runServerSyncTick()` (`src/lib/server-sync.ts`, every 30 s):

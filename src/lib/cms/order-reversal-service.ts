@@ -1,10 +1,22 @@
 /**
  * Phase G2 — CMS store `order.refunded` / `order.cancelled` → closed-order void amendment.
  * Only runs after the paid import row has `imported_order_id`.
+ *
+ * Retail (issue #770): a CMS order imported for a non-F&B business is a
+ * *retail* order whose revenue/COGS were posted by the import adapter under
+ * `source_type = 'cms_store_order'`. Reversing it through `amendClosedOrder`
+ * — the F&B closed-order engine (recipe consumption, menu-item modifiers,
+ * online-platform commission) — was wrong by construction. Retail orders now
+ * go through `reverseRetailImportedOrder`, which reverses the entries the
+ * channel actually posted and restores the exact batches each line consumed.
+ * F&B orders keep the amendment engine unchanged.
  */
 import type { PoolClient } from "pg";
 import { getPool, query } from "../db";
 import { amendClosedOrder } from "../order-amendment-service";
+import { getBusinessIndustry } from "../industry-guard";
+import { isRetailCatalogueIndustry } from "../industries";
+import { reverseRetailImportedOrder } from "../retail-order-reversal-service";
 import { validateAmendment } from "../order-amendments";
 import type { WebsiteConnectionRow } from "../website/connection-service";
 import type { CmsOrderEventNotice } from "./order-ingest-service";
@@ -73,16 +85,34 @@ export async function reverseImportedCmsStoreOrder(
     };
   }
 
-  const { rows: orderRows } = await query<{ location_id: string }>(
-    `SELECT location_id FROM orders WHERE id = $1`,
+  const { rows: orderRows } = await query<{ location_id: string; type: string }>(
+    `SELECT location_id, type::text AS type FROM orders WHERE id = $1`,
     [paid.imported_order_id],
   );
   const locationId = orderRows[0]?.location_id;
   if (!locationId) throw new Error("imported_order_missing");
+  const orderType = orderRows[0]?.type ?? "order";
+  const industry = await getBusinessIndustry(connection.business_id);
+  // A retail order is recognised by its type, and — for orders imported
+  // before this was set correctly — by its shape: lines pointing at `items`
+  // (the retail catalogue) and none at `menu_items` (F&B recipes).
+  const { rows: lineKinds } = await query<{ item_lines: string; menu_lines: string }>(
+    `SELECT count(*) FILTER (WHERE item_id IS NOT NULL)::text AS item_lines,
+            count(*) FILTER (WHERE menu_item_id IS NOT NULL)::text AS menu_lines
+       FROM order_items WHERE order_id = $1`,
+    [paid.imported_order_id],
+  );
+  const retailShaped = Number(lineKinds[0]?.item_lines ?? 0) > 0 && Number(lineKinds[0]?.menu_lines ?? 0) === 0;
+  // Issue #799 Wave 11 — the family question, not "not F&B": a trade with no
+  // sellable catalogue has no retail order to reverse (its orders are refused
+  // at ingest), so this stays a retail-shape test rather than a catch-all.
+  const isRetail =
+    isRetailCatalogueIndustry(industry) && (orderType === "retail" || retailShaped);
 
+  const reason = reversalReason(notice.event, notice.order);
   const validated = validateAmendment({
     kind: "void",
-    reason: reversalReason(notice.event, notice.order),
+    reason,
     paymentMethod: "online",
   });
   if (!validated.ok) throw new Error(validated.error);
@@ -114,19 +144,35 @@ export async function reverseImportedCmsStoreOrder(
       };
     }
 
-    const result = await amendClosedOrder(client, {
-      businessId: connection.business_id,
-      locationId,
-      orderId: fresh.imported_order_id,
-      actorId: null,
-      input: validated.value,
-    });
+    const result = isRetail
+      ? await reverseRetailImportedOrder(client, {
+          businessId: connection.business_id,
+          locationId,
+          orderId: fresh.imported_order_id,
+          actorId: null,
+          reason,
+          sourceTypes: ["cms_store_order"],
+          restorationSourceType: "cms_store_order_reversal",
+          // One reversal per CMS order: the batch engine's restoration index
+          // makes a replayed webhook restore nothing twice.
+          restorationSourceId: `cms-order-reversal:${connection.id}:${notice.order.id}`,
+        })
+      : await amendClosedOrder(client, {
+          businessId: connection.business_id,
+          locationId,
+          orderId: fresh.imported_order_id,
+          actorId: null,
+          input: validated.value,
+        });
 
+    // The retail reversal returns `amendmentId`; the F&B amendment engine
+    // returns `id`. They are the same `order_amendments` row either way.
+    const amendmentId = "amendmentId" in result ? result.amendmentId : result.id;
     await client.query(
       `UPDATE cms_store_order_inbox
           SET reversal_amendment_id = $2, processed_at = now()
         WHERE id = $1`,
-      [fresh.id, result.id],
+      [fresh.id, amendmentId],
     );
     await client.query(
       `UPDATE cms_store_order_inbox
@@ -136,7 +182,7 @@ export async function reverseImportedCmsStoreOrder(
     );
 
     await client.query("COMMIT");
-    return { orderId: fresh.imported_order_id, amendmentId: result.id, alreadyReversed: false };
+    return { orderId: fresh.imported_order_id, amendmentId, alreadyReversed: false };
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;

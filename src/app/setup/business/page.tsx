@@ -53,16 +53,21 @@ export default function BusinessStep() {
     e.preventDefault();
     setBusy(true);
     setError("");
-    const { ok, data } = await api<{ error?: string }>("/api/setup/business", {
-      method: "POST",
-      body: JSON.stringify({ businessName, locationName, address, phone, currencyDisplay }),
-    });
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessage(data.error));
-      return;
+    try {
+      const { ok, data, status } = await api<{ error?: string }>("/api/setup/business", {
+        method: "POST",
+        body: JSON.stringify({ businessName, locationName, address, phone, currencyDisplay }),
+      });
+      if (!ok) {
+        setError(errorMessage(data.error, undefined, status));
+        return;
+      }
+      // The industry's own sequence, not the full one: `aec_profile` follows
+      // this step for an AEC business (issue #799 §2) and for nobody else.
+      router.push(nextPath("business", steps));
+    } finally {
+      setBusy(false);
     }
-    router.push(nextPath("business", steps));
   }
 
   if (!loaded) return <SetupDataSkeleton rows={5} />;

@@ -10,6 +10,8 @@
 
 // Type-only, so the value dependency stays one-way: ai-autopilot.ts imports
 // ACTION_CATALOG from here, never the reverse.
+import type { Industry } from "./industries";
+import { catalogueHrefFor, wizardStepsForIndustry } from "./wizard-steps";
 import type { AutopilotCategory } from "./ai-autopilot";
 
 export type AiProvider = "litellm";
@@ -656,6 +658,27 @@ export const PROJECT_ACTION_TYPES = [
   ...ACTION_TYPES.filter((t) => ACTION_CATALOG[t].projectScoped),
 ];
 
+/**
+ * Issue #808 §8 — a wizard turn may only propose setup actions whose step the
+ * business's industry actually walks. `setup.menu.*` and `setup.costing` are
+ * F&B steps (`src/lib/wizard-steps.ts` is the single source of truth), and a
+ * trade-goods owner's wizard never shows them, so offering them here would
+ * route someone into a flow their own wizard does not have. Actions without a
+ * `wizardStep` (reports, sales, menu edits in the normal app) are untouched.
+ * A null/absent industry means no scoping, exactly as before.
+ */
+export function wizardActionTypesForIndustry(
+  types: ActionType[],
+  industry: Industry | null | undefined,
+): ActionType[] {
+  if (!industry) return types;
+  const steps = new Set<string>(wizardStepsForIndustry(industry));
+  return types.filter((type) => {
+    const step = ACTION_CATALOG[type]?.wizardStep;
+    return !step || steps.has(step);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Chat message shapes + prompts + tool definitions
 // ---------------------------------------------------------------------------
@@ -674,6 +697,14 @@ export interface PromptContext {
   mode: AgentMode;
   businessName?: string | null;
   currencyDisplay?: "toman" | "rial";
+  /**
+   * The business's industry. In wizard mode it scopes the turn to the steps
+   * this business actually walks (issue #808 §8): a trade-goods or service
+   * business has no menu/costing step, so its assistant must not be told to
+   * propose `setup.menu.*` or `setup.costing` — see
+   * `wizardActionTypesForIndustry` and the prompt's step-list line below.
+   */
+  industry?: Industry | null;
   currentStep?: string | null;
   userName?: string;
   role?: string;
@@ -718,6 +749,7 @@ const WIZARD_STEP_LABELS: Record<string, string> = {
   users: "نقش‌ها و کاربران",
   menu: "ورود منو",
   hardware: "اتصال سخت‌افزار",
+  backup: "مقصد پشتیبان‌گیری",
   opening: "مانده‌های افتتاحیه",
 };
 
@@ -758,6 +790,22 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       "برای هر تغییر در داده‌ها هرگز مستقیم اقدام نکن؛ فقط ابزار propose_action را با نوع مجاز و payload کامل صدا بزن. کاربر خودش با دکمهٔ تأیید آن را اجرا می‌کند (human-in-the-loop).",
       "قبل از پیشنهاد، اطلاعات لازم را با پرسیدن سؤال از کاربر کامل کن؛ فیلدها را با حدس‌های نامطمئن پر نکن.",
     );
+    // Issue #808 §8 — the assistant is told the same step list the wizard shows,
+    // so it cannot walk a trade-goods owner into F&B's menu/costing flow.
+    if (ctx.industry) {
+      const steps = wizardStepsForIndustry(ctx.industry);
+      lines.push(
+        `این کسب‌وکار مراحل راه‌اندازی زیر را دارد، به همین ترتیب: ${steps
+          .map((id) => WIZARD_STEP_LABELS[id] ?? id)
+          .join("، ")}.`,
+      );
+      const catalogueHref = catalogueHrefFor(ctx.industry);
+      if (catalogueHref) {
+        lines.push(
+          "این کسب‌وکار مرحلهٔ «ورود منو» و «روش قیمت‌گذاری موجودی» ندارد؛ کالاها و موجودی از پنل محصولات خودِ برنامه ثبت می‌شوند. برای این مرحله‌ها هیچ propose_action نساز و کاربر را به همان پنل راهنمایی کن.",
+        );
+      }
+    }
   } else if (ctx.mode === "dashboard") {
     lines.push(
       "در این حالت به کاربر (مالک/مدیر) کمک می‌کنی: نمایش و تحلیل گزارش‌ها (فروش، منو، موجودی، حسابداری)، پاسخ به سؤال دربارهٔ وضعیت راه‌اندازی، و انجام کارهای مجاز از طریق پیشنهادِ قابل‌تأیید.",
@@ -821,8 +869,9 @@ export function buildSystemPrompt(ctx: PromptContext): string {
             ctx.projectScoped && !ctx.agent
             ? PROJECT_ACTION_TYPES
             : BASE_ACTION_TYPES;
-    if (types.length > 0) {
-      const catalog = types
+    const scopedTypes = ctx.mode === "wizard" ? wizardActionTypesForIndustry(types, ctx.industry) : types;
+    if (scopedTypes.length > 0) {
+      const catalog = scopedTypes
         .map((t) => `- ${t}: ${ACTION_CATALOG[t].label} — payload: ${ACTION_CATALOG[t].payloadHint}`)
         .join("\n");
       lines.push("انواع عملیات مجاز برای propose_action و ساختار payload آن‌ها:\n" + catalog);
@@ -891,6 +940,12 @@ export interface ToolDefinitionsOptions {
   actionTypes?: ActionType[];
   retrieval?: boolean;
   /**
+   * The tenant's industry, for wizard turns: setup actions whose step this
+   * industry does not walk are left out of `propose_action`'s enum (issue
+   * #808 §8). Absent (platform, tests, non-tenant callers) means unscoped.
+   */
+  industry?: Industry | null;
+  /**
    * Phase D — a custom agent's read-tool allowlist. When present, the dashboard
    * read tools are intersected with it: the turn keeps only the read tools this
    * agent was granted. `propose_action` is governed separately by `actionTypes`
@@ -930,6 +985,11 @@ function knowledgeTool(): OpenAiTool {
 }
 
 export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = {}): OpenAiTool[] {
+  // Issue #808 §8 — the same industry scoping the system prompt describes is
+  // applied to the enum the model can choose from, so a hand-crafted response
+  // naming a step this business does not walk is not even a legal value.
+  const industryScoped = (types: ActionType[]): ActionType[] =>
+    mode === "wizard" ? wizardActionTypesForIndustry(types, opts.industry) : types;
   const readTools: OpenAiTool[] = [
     {
       type: "function",
@@ -1764,7 +1824,12 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     },
   ];
 
-  if (mode === "wizard") return [readTools[0], proposeTool, requestInputTool];
+  if (mode === "wizard") {
+    // Issue #808 §8 — a wizard turn offers only the setup actions whose step
+    // this business's industry walks. `industryScoped` is a no-op when the
+    // caller gave no industry, so platform/tests keep the full list.
+    return [readTools[0], proposeToolFor(industryScoped(BASE_ACTION_TYPES)), requestInputTool];
+  }
   if (mode === "dashboard") {
     const base = opts.hasAttachment
       ? [...readTools, receiptTool]
@@ -1784,7 +1849,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     if (opts.toolAllowlist) {
       const allowed = new Set(opts.toolAllowlist);
       const scopedReads = base.filter((tool) => allowed.has(tool.function.name));
-      const actionTypes = opts.actionTypes ?? [];
+      const actionTypes = industryScoped(opts.actionTypes ?? []);
       return actionTypes.length === 0
         ? [...scopedReads, requestInputTool]
         : [...scopedReads, proposeToolFor(actionTypes), requestInputTool];
@@ -1792,14 +1857,13 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
 
     // Phase F pt.2 — inside a project the propose enum also carries the
     // project-scoped actions (the model still never names the project id).
+    if (opts.actionTypes?.length === 0) return [...base, requestInputTool];
     const propose = opts.actionTypes
       ? proposeToolFor(opts.actionTypes)
       : opts.projectScoped
         ? projectProposeTool
         : proposeTool;
-    return opts.actionTypes?.length === 0
-      ? [...base, requestInputTool]
-      : [...base, propose, requestInputTool];
+    return [...base, propose, requestInputTool];
   }
   if (mode === "floor") return floorReadTools;
   if (mode === "proactive") return [];

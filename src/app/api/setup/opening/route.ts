@@ -12,7 +12,13 @@ import {
 import { checkBalance, validateOpeningLines, withAutoOffset, type OpeningLine } from "@/lib/opening";
 import { WELL_KNOWN_CODES } from "@/lib/coa-template";
 
-/** Step 8 — opening balances (inventory count + opening journal entry). */
+/**
+ * The wizard's final data step — opening balances: an opening inventory count
+ * (F&B's perpetual stock) and a balanced opening journal entry. Numbered steps
+ * are deliberately not used in this file any more: the sequence is
+ * industry-shaped (see wizard-steps.ts), so "step 8" was only ever true for one
+ * of the three shapes.
+ */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requireManager();
   if (error) return error;
@@ -127,7 +133,16 @@ async function openingInventory(
     await client.query("BEGIN");
     const { rows: prior } = await client.query<{id:string}>(
       "SELECT id FROM inventory_events WHERE business_id=$1 AND event_type='opening' FOR UPDATE",[businessId]);
-    if (prior.length) { await client.query("ROLLBACK"); return NextResponse.json({ok:true,eventId:prior[0].id,idempotent:true}); }
+    if (prior.length) {
+      // Issue #808 §9: this branch used to roll back and return success without
+      // touching the progress marker — so a retry after a failed progress write
+      // reported "done, idempotent" forever while `setup.progress` stayed
+      // behind. The domain state is the truth here, so the marker is repaired
+      // from it, in the same transaction.
+      const progress = await markStepDone(businessId, "opening", client);
+      await client.query("COMMIT");
+      return NextResponse.json({ ok: true, eventId: prior[0].id, idempotent: true, progress });
+    }
     const { rows: eventRows } = await client.query<{id:string}>(
       `INSERT INTO inventory_events(business_id,location_id,event_type,source_type,created_by)
        VALUES($1,$2,'opening','setup_opening',$3) RETURNING id`,[businessId,location.id,userId]);
@@ -177,16 +192,18 @@ async function openingInventory(
     if (!costing.lockedAt) await client.query(
       `UPDATE settings SET value=jsonb_set(value,'{lockedAt}',to_jsonb(now()::text)),updated_at=now()
        WHERE business_id=$1 AND location_id IS NULL AND key=$2`,[businessId,SETTING_KEYS.costing]);
+    // The marker commits with the rows it describes (issue #808 §6): a failure
+    // to write it rolls the whole opening event back, so the two can never
+    // disagree in the direction that silently skips the step.
+    const progress = await markStepDone(businessId, "opening", client);
     await client.query("COMMIT");
+    return NextResponse.json({ ok: true, totalValue: totalValue.toString(), progress });
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
   }
-
-  const progress = await markStepDone(businessId, "opening");
-  return NextResponse.json({ ok: true, totalValue: totalValue.toString(), progress });
 }
 
 /** Opening ledger balances → one balanced journal entry (source_type 'opening'). */
@@ -206,7 +223,17 @@ async function openingBalances(
     [businessId],
   );
   if (existingEntry.length > 0) {
-    return NextResponse.json({ error: "opening_entry_exists" }, { status: 409 });
+    // Same self-healing rule as the inventory branch above (issue #808 §9):
+    // the ledger already holds the opening entry, so this retry's job is to
+    // make sure the progress marker agrees — not to refuse with a 409 that
+    // leaves the wizard stuck one step behind the data.
+    const progress = await markStepDone(businessId, "opening");
+    return NextResponse.json({
+      ok: true,
+      entryId: existingEntry[0].id,
+      alreadyExists: true,
+      progress,
+    });
   }
 
   let lines = rawLines.filter((l) => l.debit !== 0 || l.credit !== 0);
@@ -265,20 +292,20 @@ async function openingBalances(
         [entryId, l.accountId, l.debit, l.credit],
       );
     }
+    // Committed together with the entry it marks (issue #808 §6).
+    const progress = await markStepDone(businessId, "opening", client);
     await client.query("COMMIT");
+    return NextResponse.json({
+      ok: true,
+      entryId,
+      totalDebit: balance.totalDebit,
+      totalCredit: balance.totalCredit,
+      progress,
+    });
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
   }
-
-  const progress = await markStepDone(businessId, "opening");
-  return NextResponse.json({
-    ok: true,
-    entryId,
-    totalDebit: balance.totalDebit,
-    totalCredit: balance.totalCredit,
-    progress,
-  });
 }

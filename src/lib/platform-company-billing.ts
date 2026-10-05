@@ -748,8 +748,8 @@ export async function billingReconciliation(
  * Queue one failed event again.
  *
  * The attempt counter is reset so the exponential backoff restarts: an operator
- * who has just created the missing account should not wait out the eight-step
- * ladder a previous failure built up.
+ * who has just created the missing account should not wait out the whole
+ * backoff ladder a previous failure built up.
  */
 export async function retryBillingEvent(businessId: string, eventId: string): Promise<boolean> {
   const { rows } = await withoutTenantScope("platform", () => query<{ id: string }>(

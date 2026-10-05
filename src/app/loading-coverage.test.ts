@@ -82,6 +82,11 @@ describe("route-level skeleton coverage", () => {
       // end-session action (button, expiry, or the ended-session screen, which
       // is a one-line status rather than a data region) and owns its pending text.
       "dashboard/support-session-banner.tsx",
+      // The wizard's hardware step renders the shared PrintersPanel, which owns
+      // its own loading state; this page's only request is the progress-write
+      // action that retires the step, and its effect probes the desktop bridge
+      // rather than any API. There is no data region here to reserve (issue #808).
+      "setup/hardware/page.tsx",
     ]);
     const offenders: string[] = [];
     for (const file of walkTsFiles(APP_DIR)) {

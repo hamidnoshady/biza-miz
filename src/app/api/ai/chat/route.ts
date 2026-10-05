@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { ACTION_CATALOG, buildSystemPrompt, type AgentMode, type PromptContext } from "@/lib/ai";
+import { getBusinessIndustry } from "@/lib/industry-guard";
 import { isPlatformAiConfigured, logAiRuntimeUnavailable } from "@/lib/ai-config";
 import { resolveAiConfigFor } from "@/lib/ai-runtime";
 import {
@@ -246,6 +247,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const promptContext: PromptContext = {
     mode,
     businessName: rows[0]?.name ?? null,
+    // Issue #808 §8 — wizard turns are scoped to the steps this industry walks,
+    // in the prompt and in `propose_action`'s enum (see ai-service.ts).
+    industry: mode === "wizard" ? await getBusinessIndustry(session.businessId) : null,
     currentStep: typeof body.currentStep === "string" ? body.currentStep : null,
     userName: session.fullName,
     role: session.role,
