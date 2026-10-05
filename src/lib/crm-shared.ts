@@ -392,6 +392,153 @@ export function sortTimeline(events: TimelineEvent[]): TimelineEvent[] {
 }
 
 // ---------------------------------------------------------------------------
+// Smart queues — the attention feed's vocabulary
+// ---------------------------------------------------------------------------
+/**
+ * The queues, their keys and their words.
+ *
+ * This vocabulary lives here — beside the pipeline stages and the timeline
+ * kinds — because **two halves need it**: the server rules in
+ * `crm-queues.ts` that produce a queue, and the command field / section headers
+ * that must name it without importing a module that reaches the database. The
+ * Persian label of a queue is product copy with exactly one home; before this
+ * it was written inline in thirteen SQL builders, which is a copy the client
+ * could not read and could silently drift from.
+ *
+ * `crm-queues.test.ts` pins the agreement in both directions: every key here
+ * has a rule, and every rule returns one of these labels.
+ */
+export const CRM_QUEUE_KEYS = [
+  "overdue_follow_ups",
+  "due_today",
+  "sla_risk",
+  "waiting_on_customer",
+  "stalled_deals",
+  "high_value_open",
+  "unassigned_cases",
+  "departed_owner",
+  "vip_follow_up",
+  "at_risk_customers",
+  "new_leads",
+  "new_identities",
+  "possible_duplicates",
+] as const;
+
+export type CrmQueueKey = (typeof CRM_QUEUE_KEYS)[number];
+
+/** Days without activity after which an open deal counts as stalled. */
+export const STALLED_DEAL_DAYS = 7;
+/** Days since the last interaction after which a VIP counts as needing a call. */
+export const VIP_SILENCE_DAYS = 30;
+/** A new lead is "new" for this long before it becomes a stale enquiry. */
+export const NEW_LEAD_DAYS = 7;
+
+export interface CrmQueuePresentation {
+  label: string;
+  /** Why a row is in this queue. Shown under the heading, always. */
+  why: string;
+  /** What to do about it, when there is more to it than the list. */
+  action: string;
+  /** The sections that own this queue — `queueKeysForSection` reads it. */
+  sections: readonly string[];
+}
+
+export const CRM_QUEUE_PRESENTATION: Record<CrmQueueKey, CrmQueuePresentation> = {
+  overdue_follow_ups: {
+    label: "پیگیری‌های عقب‌افتاده",
+    why: "کارهایی که موعدشان گذشته و هنوز انجام نشده‌اند.",
+    action: "هر کدام را انجام دهید یا موعدش را جابه‌جا کنید.",
+    sections: ["activities"],
+  },
+  due_today: {
+    label: "کارهای امروز",
+    why: "کارهایی که موعدشان امروز است.",
+    action: "امروز تمامشان کنید تا فردا عقب‌افتاده نشوند.",
+    sections: ["activities"],
+  },
+  sla_risk: {
+    label: "خطر از دست رفتن مهلت",
+    why: "تیکت‌های بازی که از مهلت پاسخ‌گویی خودشان گذشته‌اند (زمان انتظار مشتری حساب نمی‌شود).",
+    action: "پاسخ بدهید یا به عضو دیگری بسپارید.",
+    sections: ["cases"],
+  },
+  waiting_on_customer: {
+    label: "منتظر مشتری",
+    why: "کار از سمت ما تمام است و منتظر پاسخ مشتری هستیم.",
+    action: "یک یادآوری بفرستید؛ یا اگر پاسخ نیامد تیکت را ببندید.",
+    sections: ["cases"],
+  },
+  stalled_deals: {
+    label: "فرصت‌های راکد",
+    why: `معامله‌های بازی که ${STALLED_DEAL_DAYS} روز است هیچ فعالیتی نداشته‌اند.`,
+    action: "تماس بگیرید، یا اگر دیگر واقعی نیست ببندیدش.",
+    sections: ["deals"],
+  },
+  high_value_open: {
+    label: "فرصت‌های پرارزش باز",
+    why: "بیست درصد بالای معامله‌های باز از نظر مبلغ — همیشه ارزش یک نگاه دارند.",
+    action: "قدم بعدی هر کدام را مشخص کنید؛ این‌ها بیشترین اثر را دارند.",
+    sections: ["deals"],
+  },
+  unassigned_cases: {
+    label: "تیکت‌های بی‌مسئول",
+    why: "تیکت‌های بازی که مالکی ندارند، پس کسی خودش را مسئولشان نمی‌داند.",
+    action: "به یک عضو تیم واگذار کنید.",
+    sections: ["cases"],
+  },
+  departed_owner: {
+    label: "کارهای عضو غیرفعال",
+    why: "معامله‌ها و تیکت‌هایی که مسئولشان دیگر نمی‌تواند وارد شود، پس کسی پیگیری نمی‌کند.",
+    action: "به یک عضو فعال واگذار کنید یا مسئول را بردارید تا در صف بی‌مسئول‌ها بیاید.",
+    sections: ["deals", "cases"],
+  },
+  vip_follow_up: {
+    label: "مشتریان طلایی و وفادار",
+    why: "`${VIP_SILENCE_DAYS} روز است با بهترین مشتریان تماس نگرفته‌ایم.`",
+    action: "یک تماس کوتاه؛ نگه‌داشتن این‌ها ارزان‌تر از جذب تازه است.",
+    sections: ["directory"],
+  },
+  at_risk_customers: {
+    label: "مشتریان در معرض ریزش",
+    why: "امتیاز رفتاری می‌گوید این‌ها ارزششان را داشته‌اند و حالا دور شده‌اند.",
+    action: "تماس شخصی یا پیشنهاد بازگشت؛ پیش از آن‌که فراموش کنند.",
+    sections: ["directory"],
+  },
+  new_leads: {
+    label: "سرنخ‌های تازه",
+    why: `پرس‌وجوهایی که در ${NEW_LEAD_DAYS} روز گذشته آمده‌اند و هنوز کسی سراغشان نرفته است.`,
+    action: "زود تماس بگیرید؛ سرنخ تازه سرد می‌شود.",
+    sections: ["leads"],
+  },
+  new_identities: {
+    label: "هویت‌های تازهٔ سایت و فروشگاه",
+    why: "خریداران آنلاینی که هنوز به پرونده‌ای وصل نشده‌اند یا تطبیقشان قطعی نیست.",
+    action: "تطبیق را تأیید کنید تا خریدشان روی پروندهٔ درست بنشیند.",
+    sections: ["reconciliation"],
+  },
+  possible_duplicates: {
+    label: "پرونده‌های مشکوک به تکرار",
+    why: "دو پرونده با شمارهٔ تماس یکسان — شاید یک نفر باشند.",
+    action: "پیش از ادغام، پیش‌نمایش را ببینید؛ ادغام برگشت‌پذیر نیست.",
+    sections: ["duplicates"],
+  },
+};
+
+/**
+ * The queues a section owns, in `CRM_QUEUE_KEYS` order.
+ *
+ * Derived from the presentation table rather than written as a second switch:
+ * a queue added without a section would otherwise be invisible on every screen
+ * that should show it, and the section it belongs to would have to be written
+ * in two places.
+ */
+export function queueKeysForSection(section: string): CrmQueueKey[] {
+  return CRM_QUEUE_KEYS.filter((key) =>
+    CRM_QUEUE_PRESENTATION[key].sections.includes(section),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Consent
 // ---------------------------------------------------------------------------
 

@@ -45,37 +45,28 @@ import { phonePairKeySql } from "./parties-service";
 import { businessToday } from "./business-day-service";
 import { caseSla } from "./crm-case-service";
 import { LIFECYCLE_STAGES, type LifecycleStage } from "./crm-scoring";
-import { isCasePriority, isCaseStatus, type CasePriority, type CaseStatus } from "./crm-shared";
+import {
+  CRM_QUEUE_KEYS,
+  CRM_QUEUE_PRESENTATION,
+  NEW_LEAD_DAYS,
+  STALLED_DEAL_DAYS,
+  VIP_SILENCE_DAYS,
+  isCasePriority,
+  isCaseStatus,
+  queueKeysForSection,
+  type CasePriority,
+  type CaseStatus,
+  type CrmQueueKey,
+} from "./crm-shared";
 
 /** How many rows of a queue the home page previews. The count is never this. */
 const PREVIEW_LIMIT = 4;
 
-/** Days without activity after which an open deal counts as stalled. */
-const STALLED_DEAL_DAYS = 7;
-
-/** Days since the last interaction after which a VIP counts as needing a call. */
-const VIP_SILENCE_DAYS = 30;
-
-/** A new lead is "new" for this long before it becomes a stale enquiry. */
-const NEW_LEAD_DAYS = 7;
-
-export const CRM_QUEUE_KEYS = [
-  "overdue_follow_ups",
-  "due_today",
-  "sla_risk",
-  "waiting_on_customer",
-  "stalled_deals",
-  "high_value_open",
-  "unassigned_cases",
-  "departed_owner",
-  "vip_follow_up",
-  "at_risk_customers",
-  "new_leads",
-  "new_identities",
-  "possible_duplicates",
-] as const;
-
-export type CrmQueueKey = (typeof CRM_QUEUE_KEYS)[number];
+// The thresholds and the queue vocabulary live in `crm-shared.ts`: the client
+// half (section headers, the command field) has to name a queue without
+// importing this module, which reaches the database.
+export { CRM_QUEUE_KEYS, queueKeysForSection };
+export type { CrmQueueKey };
 
 export interface CrmQueueItem {
   id: string;
@@ -101,26 +92,19 @@ export interface CrmQueue {
   items: CrmQueueItem[];
 }
 
-/** The queues a section owns, for the section screens' own headers. */
-export function queueKeysForSection(section: string): CrmQueueKey[] {
-  switch (section) {
-    case "activities":
-      return ["overdue_follow_ups", "due_today"];
-    case "cases":
-      return ["sla_risk", "waiting_on_customer", "unassigned_cases", "departed_owner"];
-    case "deals":
-      return ["stalled_deals", "high_value_open", "departed_owner"];
-    case "directory":
-      return ["at_risk_customers", "vip_follow_up"];
-    case "leads":
-      return ["new_leads"];
-    case "reconciliation":
-      return ["new_identities"];
-    case "duplicates":
-      return ["possible_duplicates"];
-    default:
-      return [];
-  }
+/**
+ * Attach a queue's words to its rows.
+ *
+ * Every rule does exactly this, and doing it through one function is what keeps
+ * a queue's label from being written twice — the presentation lives in
+ * `crm-shared.ts`, where a client component can read it without pulling `db`
+ * into the browser bundle.
+ */
+function withQueueMeta(
+  key: CrmQueueKey,
+  result: { count: number; items: CrmQueueItem[] },
+): CrmQueue {
+  return { key, ...CRM_QUEUE_PRESENTATION[key], ...result };
 }
 
 const CUSTOMER_FILE = (id: string) => `/crm/persons/${id}`;
@@ -190,13 +174,7 @@ function queueQueries(
         ORDER BY a.due_at, a.id
         LIMIT $3`,
       [businessId, today, limit],
-    ).then((result) => ({
-      key: "overdue_follow_ups" as const,
-      label: "پیگیری‌های عقب‌افتاده",
-      why: "کارهایی که موعدشان گذشته و هنوز انجام نشده‌اند.",
-      action: "هر کدام را انجام دهید یا موعدش را جابه‌جا کنید.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("overdue_follow_ups", result)),
 
     due_today: readQueue(
       `SELECT count(*) OVER ()::text AS total, a.id,
@@ -212,13 +190,7 @@ function queueQueries(
         ORDER BY a.due_at, a.id
         LIMIT $3`,
       [businessId, today, limit],
-    ).then((result) => ({
-      key: "due_today" as const,
-      label: "کارهای امروز",
-      why: "کارهایی که موعدشان امروز است.",
-      action: "امروز تمامشان کنید تا فردا عقب‌افتاده نشوند.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("due_today", result)),
 
     stalled_deals: readQueue(
       `SELECT count(*) OVER ()::text AS total, d.id,
@@ -236,13 +208,7 @@ function queueQueries(
         ORDER BY coalesce(d.last_activity_at, d.stage_entered_at, d.updated_at, d.created_at), d.id
         LIMIT $3`,
       [businessId, String(STALLED_DEAL_DAYS), limit],
-    ).then((result) => ({
-      key: "stalled_deals" as const,
-      label: "فرصت‌های راکد",
-      why: `معامله‌های بازی که ${STALLED_DEAL_DAYS} روز است هیچ فعالیتی نداشته‌اند.`,
-      action: "تماس بگیرید، یا اگر دیگر واقعی نیست ببندیدش.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("stalled_deals", result)),
 
     high_value_open: readQueue(
       `WITH threshold AS (
@@ -267,13 +233,7 @@ function queueQueries(
         ORDER BY d.value_rial DESC, d.id
         LIMIT $2`,
       [businessId, limit],
-    ).then((result) => ({
-      key: "high_value_open" as const,
-      label: "فرصت‌های پرارزش باز",
-      why: "بیست درصد بالای معامله‌های باز از نظر مبلغ — همیشه ارزش یک نگاه دارند.",
-      action: "قدم بعدی هر کدام را مشخص کنید؛ این‌ها بیشترین اثر را دارند.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("high_value_open", result)),
 
     unassigned_cases: readQueue(
       `SELECT count(*) OVER ()::text AS total, k.id,
@@ -290,13 +250,7 @@ function queueQueries(
         ORDER BY k.opened_at, k.id
         LIMIT $2`,
       [businessId, limit],
-    ).then((result) => ({
-      key: "unassigned_cases" as const,
-      label: "تیکت‌های بی‌مسئول",
-      why: "تیکت‌های بازی که مالکی ندارند، پس کسی خودش را مسئولشان نمی‌داند.",
-      action: "به یک عضو تیم واگذار کنید.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("unassigned_cases", result)),
 
     /*
      * Work owned by somebody who cannot sign in.
@@ -335,13 +289,7 @@ function queueQueries(
         ORDER BY w.at, w.id
         LIMIT $2`,
       [businessId, limit],
-    ).then((result) => ({
-      key: "departed_owner" as const,
-      label: "کارهای عضو غیرفعال",
-      why: "معامله‌ها و تیکت‌هایی که مسئولشان دیگر نمی‌تواند وارد شود، پس کسی پیگیری نمی‌کند.",
-      action: "به یک عضو فعال واگذار کنید یا مسئول را بردارید تا در صف بی‌مسئول‌ها بیاید.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("departed_owner", result)),
 
     waiting_on_customer: readQueue(
       `SELECT count(*) OVER ()::text AS total, k.id,
@@ -356,13 +304,7 @@ function queueQueries(
         ORDER BY coalesce(k.waiting_since, k.updated_at), k.id
         LIMIT $2`,
       [businessId, limit],
-    ).then((result) => ({
-      key: "waiting_on_customer" as const,
-      label: "منتظر مشتری",
-      why: "کار از سمت ما تمام است و منتظر پاسخ مشتری هستیم.",
-      action: "یک یادآوری بفرستید؛ یا اگر پاسخ نیامد تیکت را ببندید.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("waiting_on_customer", result)),
 
     new_leads: readQueue(
       `SELECT count(*) OVER ()::text AS total, l.id,
@@ -378,13 +320,7 @@ function queueQueries(
         ORDER BY l.created_at DESC, l.id
         LIMIT $3`,
       [businessId, String(NEW_LEAD_DAYS), limit],
-    ).then((result) => ({
-      key: "new_leads" as const,
-      label: "سرنخ‌های تازه",
-      why: `پرس‌وجوهایی که در ${NEW_LEAD_DAYS} روز گذشته آمده‌اند و هنوز کسی سراغشان نرفته است.`,
-      action: "زود تماس بگیرید؛ سرنخ تازه سرد می‌شود.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("new_leads", result)),
 
     new_identities: readQueue(
       `SELECT count(*) OVER ()::text AS total, e.id,
@@ -399,13 +335,7 @@ function queueQueries(
         ORDER BY e.created_at DESC, e.id
         LIMIT $2`,
       [businessId, limit],
-    ).then((result) => ({
-      key: "new_identities" as const,
-      label: "هویت‌های تازهٔ سایت و فروشگاه",
-      why: "خریداران آنلاینی که هنوز به پرونده‌ای وصل نشده‌اند یا تطبیقشان قطعی نیست.",
-      action: "تطبیق را تأیید کنید تا خریدشان روی پروندهٔ درست بنشیند.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("new_identities", result)),
 
     at_risk_customers: readQueue(
       `SELECT count(*) OVER ()::text AS total, p.id,
@@ -422,13 +352,7 @@ function queueQueries(
         ORDER BY p.last_interaction_at NULLS FIRST, p.id
         LIMIT $3`,
       [businessId, AT_RISK_STAGES, limit],
-    ).then((result) => ({
-      key: "at_risk_customers" as const,
-      label: "مشتریان در معرض ریزش",
-      why: "امتیاز رفتاری می‌گوید این‌ها ارزششان را داشته‌اند و حالا دور شده‌اند.",
-      action: "تماس شخصی یا پیشنهاد بازگشت؛ پیش از آن‌که فراموش کنند.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("at_risk_customers", result)),
 
     vip_follow_up: readQueue(
       `SELECT count(*) OVER ()::text AS total, p.id,
@@ -446,13 +370,7 @@ function queueQueries(
         ORDER BY p.last_interaction_at NULLS FIRST, p.id
         LIMIT $4`,
       [businessId, VIP_STAGES, String(VIP_SILENCE_DAYS), limit],
-    ).then((result) => ({
-      key: "vip_follow_up" as const,
-      label: "مشتریان طلایی و وفادار",
-      why: `${VIP_SILENCE_DAYS} روز است با بهترین مشتریان تماس نگرفته‌ایم.`,
-      action: "یک تماس کوتاه؛ نگه‌داشتن این‌ها ارزان‌تر از جذب تازه است.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("vip_follow_up", result)),
 
     possible_duplicates: readQueue(
       // The same `coalesce(phone_bidx, phone_e164)` key `duplicateCandidates()`
@@ -475,13 +393,7 @@ function queueQueries(
         ORDER BY a.created_at, a.id
         LIMIT $2`,
       [businessId, limit],
-    ).then((result) => ({
-      key: "possible_duplicates" as const,
-      label: "پرونده‌های مشکوک به تکرار",
-      why: "دو پرونده با شمارهٔ تماس یکسان — شاید یک نفر باشند.",
-      action: "پیش از ادغام، پیش‌نمایش را ببینید؛ ادغام برگشت‌پذیر نیست.",
-      ...result,
-    })),
+    ).then((result) => withQueueMeta("possible_duplicates", result)),
   };
 }
 
@@ -568,14 +480,10 @@ async function readSlaRiskQueue(businessId: string): Promise<CrmQueue> {
     ];
   });
 
-  return {
-    key: "sla_risk",
-    label: "خطر از دست رفتن مهلت",
-    why: "تیکت‌های بازی که از مهلت پاسخ‌گویی خودشان گذشته‌اند (زمان انتظار مشتری حساب نمی‌شود).",
-    action: "پاسخ بدهید یا به عضو دیگری بسپارید.",
+  return withQueueMeta("sla_risk", {
     count: breached.length,
     items: breached.slice(0, PREVIEW_LIMIT),
-  };
+  });
 }
 
 /**
