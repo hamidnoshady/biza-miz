@@ -51,7 +51,8 @@ All six phases are implemented, committed and gated. Commits: `52247f6`
 `d657229` (phase 3 control plane + phase 4 deletions) → `dd63d8e` (attribution
 columns, permission matrix, retired permissions) → `1f1f402` (docs, dead-code
 record, final sweep) → `aaa6c5a` (runtime-mode aliases, cross-tenant isolation
-proof, secret-shape fix) → `78d2c45` (App Focus narrows the live catalogue).
+proof, secret-shape fix) → `78d2c45` (App Focus narrows the live catalogue) → `64e4dc2` (prompt-resolver
+tests found a publish bug; §20 app focus + prompt versions).
 
 ## Definition of done
 
@@ -78,7 +79,7 @@ proof, secret-shape fix) → `78d2c45` (App Focus narrows the live catalogue).
 | 19 | Conversation switching / stream finalizers race-safe | Done — generation-guarded `AbortController` |
 | 20 | Scrolling does not force the user to the bottom | Done — `use-sticky-scroll.ts` |
 | 21 | Partial/cancelled replies visibly marked | Done — `AiMessageStatus` + `chat-bubble.tsx` |
-| 22 | Usage/audit records include project/mode/agent/research attribution | Done — migration `0208` columns |
+| 22 | Usage/audit records include project/mode/agent/research attribution | Done — migration `0208` columns: `runtime_mode`, `system_agent_id`, `suggestion_id`, `research_run_id`, `prompt_layers`, `app_focus`, `prompt_versions` |
 | 23 | No cross-tenant knowledge/memory leak possible in tests | Done — `integration/ai-tenant-isolation.integration.test.ts` |
 | 24 | Old tenant Agent/cache/RAG/Thinking/dead prompt code removed | Done |
 | 25 | Tests, typecheck, lint, migrations, build pass | See below |
@@ -109,6 +110,23 @@ proof, secret-shape fix) → `78d2c45` (App Focus narrows the live catalogue).
 edited; the control-plane tables (`platform_ai_modes`, `ai_prompt_versions`,
 `ai_system_agents`, `ai_agent_assignments`, `ai_memory`, `ai_research_runs`,
 `ai_research_sources`) are all in `EXEMPT_TABLES` where they are platform-scope.
+
+## A bug the §29 test audit found
+
+Auditing §29's named tests against the tree showed the **prompt resolver and the
+system agents had no test file at all**. For the resolver that is the worst
+possible gap: it is the single source of truth for what the model is told, so a
+regression there changes every answer and nothing else would notice.
+
+Writing the test found a real bug. `publishPromptVersion` wrote both statements
+as CTEs of one statement — which looks atomic and is not, because every CTE sees
+the same snapshot. The `published` UPDATE ran against a snapshot in which the old
+row was still `published`, and the partial unique index rejected it.
+
+**Publishing a second version of any scope failed outright.** A Superadmin could
+publish version 1 of a prompt and nothing after it, with no error a user would
+connect to the cause. The fix is two statements — retire, then publish — in one
+transaction. Only a test that publishes twice finds it.
 
 ## Known limitations, recorded rather than hidden
 
