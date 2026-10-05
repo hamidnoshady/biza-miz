@@ -13,8 +13,10 @@
  * to `/api/menu/items/:id/price-change`.
  *
  * The افزودنی‌ها section is the per-item attachment manager: which groups are
- * attached, their effective min/max, each link's active state and its
- * per-item order — the same order the POS and the waiter screen honour.
+ * attached, their effective min/max, each link's active state, its per-item
+ * order, and the per-link min/max overrides (blank = inherit the group's
+ * default; the override editor the retired manager had lives here) — the same
+ * order and bounds the POS and the waiter screen honour.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownIcon, ArrowUpIcon, PlusIcon, TrashIcon } from "lucide-react";
@@ -33,6 +35,7 @@ import {
   PrimaryButton,
   SecondaryButton,
   api,
+  errorMessageOrRaw,
   inputClass,
 } from "@/app/dashboard/ui";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -41,7 +44,13 @@ import { StatusBadge } from "@/app/dashboard/page-chrome";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
-import { effectiveBounds, type RestaurantMenuData, type RestaurantMenuItem } from "@/lib/restaurant-menu";
+import {
+  effectiveBounds,
+  type RestaurantMenuData,
+  type RestaurantMenuItem,
+  type RestaurantItemModifierGroup,
+  type RestaurantModifierGroup,
+} from "@/lib/restaurant-menu";
 import type { Runner } from "./menu-workspace";
 
 export function ItemSheet({
@@ -77,6 +86,8 @@ export function ItemSheet({
   const [isActive, setIsActive] = useState(true);
   const [priceInput, setPriceInput] = useState("");
   const [formError, setFormError] = useState("");
+  /** Which attachment's «محدودیت اختصاصی» editor is open (one at a time). */
+  const [overrideEditorId, setOverrideEditorId] = useState<string | null>(null);
   const addonsRef = useRef<HTMLDivElement>(null);
 
   // (Re)fill the form whenever the sheet switches target — mount, or the
@@ -197,6 +208,25 @@ export function ItemSheet({
     return result.ok;
   }
 
+  /**
+   * The per-link min/max overrides — a patch of just the attachment
+   * configuration, same door as patchLink but reporting the failure to the
+   * editor inline (it sits far from the sheet-level error box).
+   */
+  async function saveOverrides(
+    groupId: string,
+    patch: { minSelectOverride: number | null; maxSelectOverride: number | null },
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (!item) return { ok: false, error: "" };
+    const result = await run(() =>
+      api("/api/menu/item-modifier-groups", {
+        method: "PATCH",
+        body: JSON.stringify({ menuItemId: item.id, modifierGroupId: groupId, ...patch }),
+      }),
+    );
+    return { ok: result.ok, error: result.ok ? undefined : (result.error ?? "") };
+  }
+
   async function attachGroup() {
     if (!item || !attachGroupId) return;
     const result = await run(() =>
@@ -269,7 +299,13 @@ export function ItemSheet({
             </Field>
             <Field
               label="دسته"
-              hint={editing ? undefined : "برای ساخت آیتم، دسته الزامی است."}
+              hint={
+                categories.length === 0
+                  ? "ابتدا در برگهٔ «دسته‌ها» یک دستهٔ فعال بسازید."
+                  : editing
+                    ? undefined
+                    : "برای ساخت آیتم، دسته الزامی است."
+              }
             >
               <SearchableSelect
                 value={categoryId}
@@ -279,7 +315,7 @@ export function ItemSheet({
                 ariaLabel="دستهٔ آیتم"
               />
             </Field>
-            <Field label="کد کالا (SKU)" hint="برای جستجو و ورود اطلاعات؛ اختیاری است.">
+            <Field label="کد کالا (SKU)" hint="در جستجوی صندوق هم پیدا می‌شود؛ اختیاری است.">
               <input
                 className={inputClass}
                 value={sku}
@@ -441,6 +477,32 @@ export function ItemSheet({
                             />
                           </span>
                         </div>
+                        {overrideEditorId === link.modifierGroupId ? (
+                          <LinkOverrideEditor
+                            link={link}
+                            group={group ?? null}
+                            onCancel={() => setOverrideEditorId(null)}
+                            onSave={async (patch) => {
+                              const result = await saveOverrides(link.modifierGroupId, patch);
+                              // Success folds the editor away; failure keeps it
+                              // open with the server's message inline.
+                              if (result.ok) setOverrideEditorId(null);
+                              return result;
+                            }}
+                          />
+                        ) : (
+                          <div className="mt-2 flex justify-end border-t border-border/60 pt-2">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 text-xs text-muted-foreground"
+                              onClick={() => setOverrideEditorId(link.modifierGroupId)}
+                            >
+                              محدودیت اختصاصی (حداقل/حداکثر)
+                            </Button>
+                          </div>
+                        )}
                       </li>
                     );
                   })}
@@ -483,5 +545,128 @@ export function ItemSheet({
         </div>
       </SheetContent>
     </Sheet>
+  );
+}
+
+/**
+ * Per-attachment selection bounds: blank inherits the group default, a number
+ * overrides it for this item only. Validation mirrors the group editor —
+ * effective min ≤ effective max, and the effective max is at least 1 — so a
+ * bad pair can never reach the POS through the server's per-value check.
+ */
+function LinkOverrideEditor({
+  link,
+  group,
+  onSave,
+  onCancel,
+}: {
+  link: RestaurantItemModifierGroup;
+  group: RestaurantModifierGroup | null;
+  onSave: (patch: {
+    minSelectOverride: number | null;
+    maxSelectOverride: number | null;
+  }) => Promise<{ ok: boolean; error?: string }>;
+  onCancel: () => void;
+}) {
+  const seed = (value: number | null) => (value === null ? "" : String(value));
+  const [minOverride, setMinOverride] = useState(() => seed(link.minSelectOverride));
+  const [maxOverride, setMaxOverride] = useState(() => seed(link.maxSelectOverride));
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // Re-seed when the link itself changes (a save that reloads the tree, or
+  // another writer): the editor follows the server, not a stale buffer.
+  const linkKey = `${link.modifierGroupId}:${link.minSelectOverride}:${link.maxSelectOverride}`;
+  const [seenKey, setSeenKey] = useState(linkKey);
+  if (seenKey !== linkKey) {
+    setSeenKey(linkKey);
+    setMinOverride(seed(link.minSelectOverride));
+    setMaxOverride(seed(link.maxSelectOverride));
+    setError("");
+  }
+
+  function parse(raw: string): number | null | undefined {
+    if (raw.trim() === "") return null;
+    const value = Number(raw);
+    return Number.isInteger(value) && value >= 0 ? value : undefined;
+  }
+
+  async function save() {
+    const min = parse(minOverride);
+    const max = parse(maxOverride);
+    if (min === undefined || max === undefined) {
+      setError("مقادیر باید عدد صحیح غیرمنفی باشند.");
+      return;
+    }
+    const effectiveMin = min ?? group?.minSelect ?? 0;
+    const effectiveMax = max ?? group?.maxSelect ?? 1;
+    if (effectiveMax < 1) {
+      setError("«حداکثر انتخاب» باید دست‌کم ۱ باشد.");
+      return;
+    }
+    if (effectiveMin > effectiveMax) {
+      setError("«حداقل انتخاب» نمی‌تواند از «حداکثر انتخاب» بیشتر باشد.");
+      return;
+    }
+    setError("");
+    setSaving(true);
+    try {
+      const result = await onSave({ minSelectOverride: min, maxSelectOverride: max });
+      if (!result.ok) setError(errorMessageOrRaw(result.error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Live view of what would be saved: a number overrides, blank inherits.
+  const currentMin = parse(minOverride);
+  const currentMax = parse(maxOverride);
+  const effectiveMin = currentMin ?? group?.minSelect ?? null;
+  const effectiveMax = currentMax ?? group?.maxSelect ?? null;
+  const hasOverride = currentMin !== null || currentMax !== null;
+
+  return (
+    <div className="mt-2 space-y-2 rounded-xl border border-border/70 bg-muted/40 p-2.5">
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Field label="حداقل انتخاب (اختیاری)">
+          <PersianNumberInput
+            value={minOverride}
+            onChange={(event) => setMinOverride(event.target.value)}
+            inputMode="numeric"
+            grouping={false}
+            className={inputClass}
+            placeholder={`پیش‌فرض: ${group ? toPersianDigits(group.minSelect) : "—"}`}
+            disabled={saving}
+          />
+        </Field>
+        <Field label="حداکثر انتخاب (اختیاری)">
+          <PersianNumberInput
+            value={maxOverride}
+            onChange={(event) => setMaxOverride(event.target.value)}
+            inputMode="numeric"
+            grouping={false}
+            className={inputClass}
+            placeholder={`پیش‌فرض: ${group ? toPersianDigits(group.maxSelect) : "—"}`}
+            disabled={saving}
+          />
+        </Field>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        خالی یعنی پیش‌فرض گروه؛ مقدار ثبت‌شده فقط برای همین آیتم اعمال می‌شود
+        {hasOverride && effectiveMin !== null && effectiveMax !== null
+          ? ` · مؤثر: ${toPersianDigits(effectiveMin)} تا ${toPersianDigits(effectiveMax)}`
+          : ""}
+        .
+      </p>
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="ghost" size="sm" disabled={saving} onClick={onCancel}>
+          انصراف
+        </Button>
+        <SecondaryButton onClick={() => void save()} disabled={saving}>
+          ذخیرهٔ محدودیت‌ها
+        </SecondaryButton>
+      </div>
+    </div>
   );
 }
