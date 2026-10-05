@@ -71,6 +71,18 @@ import { crmCustomerHref, crmDealOrderHref } from "./crm-routes";
 import { CustomerSearchField } from "./customer-search";
 import { CrmCardHeading } from "./crm-card-heading";
 import { CrmTodayQueues } from "./today-queues";
+import { CrmAssigneePicker, UNASSIGNED } from "./crm-assignee-picker";
+import { SavedViewsBar } from "./saved-views-bar";
+import {
+  dealViewErrorLine,
+  dealViewFilterCount,
+  dealViewQuery,
+  dealViewSearchParams,
+  describeDealView,
+  EMPTY_DEAL_VIEW_FILTERS,
+  hasDealViewFilters,
+  type DealViewFilters,
+} from "@/lib/crm-deal-views";
 
 interface Deal {
   id: string;
@@ -146,13 +158,12 @@ const OUTCOME_TONES: Record<PipelineStageOption["outcome"], "active" | "positive
   lost: "danger",
 };
 
-export function DealsSection() {
+export function DealsSection({ canManage = false }: { canManage?: boolean }) {
   const money = useMoney();
   const searchParams = useSearchParams();
   const [deals, setDeals] = useState<Deal[] | null>(null);
   const [pipeline, setPipeline] = useState<PipelineOption["pipeline"]>(null);
   const [pipelines, setPipelines] = useState<PipelineOption["pipelines"]>([]);
-  const [selectedPipelineId, setSelectedPipelineId] = useState<string | null>(null);
   const [handoffDeal, setHandoffDeal] = useState<Deal | null>(null);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Deal | "new" | null>(null);
@@ -165,25 +176,53 @@ export function DealsSection() {
   // confirmation has to move the deal to the one that was actually dropped on.
   const [pendingLostStage, setPendingLostStage] = useState<PipelineStageOption | null>(null);
 
-  const load = useCallback(
-    (pipelineId?: string | null) => {
-      const query = pipelineId ? `?pipelineId=${encodeURIComponent(pipelineId)}` : "";
-      api<{ deals: Deal[]; pipeline?: PipelineOption["pipeline"]; pipelines?: PipelineOption["pipelines"] }>(
-        `/api/crm/deals${query}`,
-      ).then(({ ok, data }) => {
-        if (ok) {
-          setDeals(data.deals);
-          setPipeline(data.pipeline ?? null);
-          setPipelines(data.pipelines ?? []);
-          setError("");
-        } else {
-          setError("بارگذاری قیف فروش ناموفق بود.");
-        }
-      });
-    },
-    [],
-  );
-  useEffect(() => load(selectedPipelineId), [load, selectedPipelineId]);
+  /**
+   * The one filter document this screen owns.
+   *
+   * It is what the request is built from, what the saved-view bar is handed and
+   * what the chips are described from — so a view can only ever be a set of the
+   * filters this screen honours, and a list can never be labelled with
+   * something the server was not asked for (`crm-deal-views.ts`).
+   */
+  const [filters, setFilters] = useState<DealViewFilters>(EMPTY_DEAL_VIEW_FILTERS);
+  /** Whether the board or the list is showing. The board is the default. */
+  const [layout, setLayout] = useState<"board" | "list">("board");
+  /** The member names the owner filter and the chips can use. */
+  const [members, setMembers] = useState<{ id: string; name: string; isActive: boolean }[]>([]);
+  const [filterError, setFilterError] = useState("");
+  const [info, setInfo] = useState("");
+
+  const load = useCallback((next: DealViewFilters) => {
+    const params = dealViewSearchParams(next);
+    api<{
+      deals: Deal[];
+      pipeline?: PipelineOption["pipeline"];
+      pipelines?: PipelineOption["pipelines"];
+      members?: { id: string; name: string; isActive: boolean }[];
+      error?: string;
+      field?: string;
+    }>(`/api/crm/deals${params.size > 0 ? `?${params.toString()}` : ""}`).then(({ ok, data }) => {
+      if (ok) {
+        setDeals(data.deals);
+        setPipeline(data.pipeline ?? null);
+        setPipelines(data.pipelines ?? []);
+        if (Array.isArray(data.members)) setMembers(data.members);
+        setFilterError("");
+        setError("");
+        return;
+      }
+      // A filter the server refused is the reader's own control, so it is named
+      // beside the control rather than swapped for the generic failure line —
+      // and the list keeps whatever it was showing, because blanking it would
+      // read as "no deals match" when the truth is "that filter is not valid".
+      if (data.error === "bad_filter") {
+        setFilterError(dealViewErrorLine(data.field ?? ""));
+        return;
+      }
+      setError("بارگذاری قیف فروش ناموفق بود.");
+    });
+  }, []);
+  useEffect(() => load(filters), [load, filters]);
 
   // `/crm/deals?deal=<id>` is how the customer timeline and other screens hand
   // a specific deal over (see `customer-timeline-service.ts`). Without this,
@@ -223,7 +262,7 @@ export function DealsSection() {
       body: JSON.stringify({ stageId: stage.id, lostReason }),
     });
     if (!ok) setError(errorMessage(data.error));
-    load(selectedPipelineId);
+    load(filters);
   };
 
   /**
@@ -284,6 +323,23 @@ export function DealsSection() {
           «کدام معامله را باید جلو ببرم؟» is the question the fold answers. */}
       <CrmTodayQueues section="deals" title="معامله‌های نیازمند توجه" />
 
+      {/* Named filter sets over this screen. The bar hands its filters back
+          here and this screen applies every one of them — the board and the
+          list are two renderings of the same filtered rows, which is what lets
+          a shared view («مذاکره‌های بزرگ») show what it says. */}
+      <SavedViewsBar
+        entity="deals"
+        current={dealViewQuery(filters)}
+        onApply={(applied) =>
+          setFilters((current) => ({ ...current, ...normaliseAppliedFilters(applied) }))
+        }
+        canSave={canManage}
+        onNotice={setInfo}
+      />
+
+      {filterError ? <ErrorBox>{filterError}</ErrorBox> : null}
+      {info ? <InfoBox>{info}</InfoBox> : null}
+
       <SectionCard
         title={
           <CrmCardHeading kicker="معامله و فروش" title="قیف فروش" />
@@ -295,7 +351,9 @@ export function DealsSection() {
               <select
                 className={`${inputClass} h-9 w-auto`}
                 value={pipeline?.id ?? ""}
-                onChange={(event) => setSelectedPipelineId(event.target.value)}
+                onChange={(event) =>
+                  setFilters((current) => ({ ...current, pipelineId: event.target.value }))
+                }
                 aria-label="انتخاب قیف فروش"
               >
                 {pipelines.map((entry) => (
@@ -306,11 +364,39 @@ export function DealsSection() {
                 ))}
               </select>
             ) : null}
+            {/* Board or list: the same rows, the same filters. The board is
+                where deals are moved; the list is where they are *read*
+                («کدام معامله بزرگ‌تر است؟»), and it is the only layout that
+                scrolls sensibly on a phone. */}
+            <div
+              role="group"
+              aria-label="نمایش"
+              className="flex shrink-0 items-center rounded-xl border border-border/80 p-0.5"
+            >
+              <Button
+                type="button"
+                variant={layout === "board" ? "outline" : "ghost"}
+                size="sm"
+                aria-pressed={layout === "board"}
+                onClick={() => setLayout("board")}
+              >
+                تخته
+              </Button>
+              <Button
+                type="button"
+                variant={layout === "list" ? "outline" : "ghost"}
+                size="sm"
+                aria-pressed={layout === "list"}
+                onClick={() => setLayout("list")}
+              >
+                فهرست
+              </Button>
+            </div>
             <Button
               type="button"
               variant="ghost"
               size="icon-sm"
-              onClick={() => load(selectedPipelineId)}
+              onClick={() => load(filters)}
               aria-label="بازخوانی"
             >
               <RefreshCwIcon aria-hidden="true" className="size-4" />
@@ -322,6 +408,13 @@ export function DealsSection() {
           </div>
         }
       >
+        <DealFilterBar
+          filters={filters}
+          stages={columns}
+          members={members}
+          onChange={setFilters}
+        />
+
         <div className="mb-4 grid gap-3 sm:grid-cols-3">
           <div>
             <p className="text-xs text-muted-foreground">ارزش خام معامله‌های باز</p>
@@ -340,7 +433,20 @@ export function DealsSection() {
         </div>
 
         {deals.length === 0 ? (
-          <EmptyState>هنوز معامله‌ای ثبت نشده است.</EmptyState>
+          <EmptyState
+            title={hasDealViewFilters(filters) ? "چیزی با این فیلترها پیدا نشد" : undefined}
+          >
+            {hasDealViewFilters(filters)
+              ? "فیلترها را بردارید تا همهٔ معامله‌ها را ببینید."
+              : "هنوز معامله‌ای ثبت نشده است."}
+          </EmptyState>
+        ) : layout === "list" ? (
+          <DealList
+            deals={deals}
+            columnFor={columnFor}
+            money={money}
+            onEdit={(deal) => setEditing(deal)}
+          />
         ) : (
           <div className="overflow-x-auto">
             <div className="flex min-w-max gap-3">
@@ -492,7 +598,7 @@ export function DealsSection() {
             setEditing(null);
             // Re-read the pipeline that was on screen, not the default one: a
             // save must not silently move the user to another board.
-            load(selectedPipelineId);
+            load(filters);
           }}
         />
       ) : null}
@@ -503,7 +609,7 @@ export function DealsSection() {
           onClose={() => setHandoffDeal(null)}
           onLinked={() => {
             setHandoffDeal(null);
-            load(selectedPipelineId);
+            load(filters);
           }}
         />
       ) : null}
@@ -968,5 +1074,276 @@ function HandoffDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * A saved view's filters, back in the screen's own document.
+ *
+ * The stored vocabulary and the live one are the same keys, but a stored view
+ * may carry only some of them; anything absent is reset rather than left from
+ * the previous view, because applying «مذاکره‌های بزرگ» after having searched
+ * for a name must not show one person's deals filtered by last week's word.
+ * `open` is stored as `"1"`, and amounts arrive as strings in Toman — exactly
+ * what `PersianNumberInput` shows.
+ */
+function normaliseAppliedFilters(applied: Record<string, string>): DealViewFilters {
+  const toman = (raw: string | undefined) => {
+    if (!raw) return null;
+    const parsed = Number(toLatinDigits(raw).replace(/[^\d]/g, ""));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  };
+  return {
+    q: applied.q ?? "",
+    stageId: applied.stageId ?? "",
+    pipelineId: applied.pipelineId ?? "",
+    owner: applied.owner ?? "",
+    openOnly: applied.open === "1",
+    minToman: toman(applied.minValue),
+    maxToman: toman(applied.maxValue),
+  };
+}
+
+/**
+ * The deals filters, as controls.
+ *
+ * Every control writes into the one document the request is built from, and the
+ * chips under it are described *from* that document — so a filter that is on is
+ * a filter that is visible, and removing it is one click rather than a hunt
+ * through the form. The count is the honest one (`dealViewQuery`), so a chip
+ * that resets everything can say how much it is about to reset.
+ */
+function DealFilterBar({
+  filters,
+  stages,
+  members,
+  onChange,
+}: {
+  filters: DealViewFilters;
+  stages: PipelineStageOption[];
+  members: { id: string; name: string; isActive: boolean }[];
+  onChange: (next: DealViewFilters) => void;
+}) {
+  const chips = describeDealView(filters, {
+    stageName: (id) => stages.find((stage) => stage.id === id)?.name ?? null,
+    memberName: (id) => members.find((member) => member.id === id)?.name ?? null,
+  });
+  const count = dealViewFilterCount(filters);
+
+  return (
+    <div className="mb-4 grid gap-3 rounded-2xl border border-border/80 p-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="min-w-0">
+          <label className="mb-1 block text-xs font-medium text-muted-foreground" htmlFor="deal-search">
+            جست‌وجو
+          </label>
+          <input
+            id="deal-search"
+            className={inputClass}
+            value={filters.q}
+            onChange={(event) => onChange({ ...filters, q: event.target.value })}
+            placeholder="عنوان معامله یا نام مشتری"
+          />
+        </div>
+
+        <div className="min-w-0">
+          <label className="mb-1 block text-xs font-medium text-muted-foreground" htmlFor="deal-stage">
+            مرحله
+          </label>
+          <select
+            id="deal-stage"
+            className={inputClass}
+            value={filters.stageId}
+            onChange={(event) => onChange({ ...filters, stageId: event.target.value })}
+          >
+            <option value="">همهٔ مرحله‌ها</option>
+            {stages.map((stage) => (
+              <option key={stage.id} value={stage.id}>
+                {stage.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="min-w-0">
+          <label className="mb-1 block text-xs font-medium text-muted-foreground" htmlFor="deal-owner">
+            مسئول
+          </label>
+          <select
+            id="deal-owner"
+            className={inputClass}
+            value={filters.owner}
+            onChange={(event) => onChange({ ...filters, owner: event.target.value })}
+          >
+            <option value="">همه</option>
+            <option value="mine">معامله‌های من</option>
+            <option value="none">بدون مسئول</option>
+            {members.map((member) => (
+              <option key={member.id} value={member.id}>
+                {member.name}
+                {member.isActive ? "" : " (غیرفعال)"}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <div className="min-w-0">
+            <label className="mb-1 block text-xs font-medium text-muted-foreground" htmlFor="deal-min">
+              از (تومان)
+            </label>
+            <PersianNumberInput
+              id="deal-min"
+              className={inputClass}
+              dir="ltr"
+              inputMode="numeric"
+              allowNegative={false}
+              grouping
+              value={filters.minToman === null ? "" : String(filters.minToman)}
+              onChange={(event) =>
+                onChange({ ...filters, minToman: readToman(event.target.value) })
+              }
+              placeholder="۰"
+            />
+          </div>
+          <div className="min-w-0">
+            <label className="mb-1 block text-xs font-medium text-muted-foreground" htmlFor="deal-max">
+              تا (تومان)
+            </label>
+            <PersianNumberInput
+              id="deal-max"
+              className={inputClass}
+              dir="ltr"
+              inputMode="numeric"
+              allowNegative={false}
+              grouping
+              value={filters.maxToman === null ? "" : String(filters.maxToman)}
+              onChange={(event) =>
+                onChange({ ...filters, maxToman: readToman(event.target.value) })
+              }
+              placeholder="بی‌نهایت"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex min-h-10 items-center gap-2 text-sm text-foreground">
+          <input
+            type="checkbox"
+            className="size-4 rounded border-input"
+            checked={filters.openOnly}
+            onChange={(event) => onChange({ ...filters, openOnly: event.target.checked })}
+          />
+          فقط معامله‌های باز
+        </label>
+        <span className="text-xs text-muted-foreground">
+          {count > 0
+            ? `${toPersianDigits(count)} فیلتر فعال`
+            : "بدون فیلتر — همهٔ معامله‌ها"}
+        </span>
+        {count > 0 ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => onChange(EMPTY_DEAL_VIEW_FILTERS)}
+          >
+            برداشتن فیلترها
+          </Button>
+        ) : null}
+      </div>
+
+      {chips.length > 0 ? (
+        <ul className="flex flex-wrap gap-1.5" aria-label="فیلترهای اعمال‌شده">
+          {chips.map((chip) => (
+            <li key={chip}>
+              <StatusBadge tone="neutral">{chip}</StatusBadge>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+/** A typed Toman amount, or `null` for "unbounded". */
+function readToman(raw: string): number | null {
+  const parsed = Number(toLatinDigits(raw).replace(/[^\d]/g, ""));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+/**
+ * The list view: the same filtered rows as the board, in the shape a phone can
+ * scroll and a person can sort by eye.
+ *
+ * The board answers «کدام معامله را جلو ببرم؟»; the list answers «کدام معامله
+ * بزرگ‌تر است؟» — sorted by value, with the stage, the owner and the close date
+ * on one line. Rows are buttons that open the same edit dialog the cards do, so
+ * there is one form for a deal whichever layout it was found in.
+ */
+function DealList({
+  deals,
+  columnFor,
+  money,
+  onEdit,
+}: {
+  deals: Deal[];
+  columnFor: (deal: Deal) => PipelineStageOption | undefined;
+  money: { format: (rial: number) => string };
+  onEdit: (deal: Deal) => void;
+}) {
+  const sorted = [...deals].sort((a, b) => b.valueRial - a.valueRial || a.title.localeCompare(b.title, "fa"));
+  const total = sorted.reduce((sum, deal) => sum + deal.valueRial, 0);
+
+  return (
+    <div className="grid gap-2">
+      <p className="text-xs text-muted-foreground">
+        {toPersianDigits(sorted.length)} معامله، به ترتیب ارزش — جمع {money.format(total)}
+      </p>
+      <ul className="grid gap-2">
+        {sorted.map((deal) => {
+          const stage = columnFor(deal);
+          return (
+            <li key={deal.id}>
+              <button
+                type="button"
+                onClick={() => onEdit(deal)}
+                className={`w-full p-3 text-start ${cardClass}`}
+              >
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <span className="min-w-0 truncate text-sm font-medium text-foreground">
+                    {deal.title}
+                  </span>
+                  <span className="shrink-0 text-sm font-semibold text-foreground">
+                    {money.format(deal.valueRial)}
+                  </span>
+                </div>
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                  {stage ? (
+                    <StatusBadge tone={OUTCOME_TONES[stage.outcome]}>{stage.name}</StatusBadge>
+                  ) : (
+                    <StatusBadge tone="neutral">{deal.stage}</StatusBadge>
+                  )}
+                  {deal.customerName ? <span className="truncate">{deal.customerName}</span> : null}
+                  {/* Both halves of ownership, and the id first: a row owned by
+                      a member says who, and a legacy row says the name it kept. */}
+                  <span>
+                    {deal.ownerUserId
+                      ? (deal.ownerUser || "بدون نام")
+                      : deal.ownerUser
+                        ? `${deal.ownerUser} (نام ثبت‌شده)`
+                        : "بدون مسئول"}
+                  </span>
+                  {deal.expectedCloseDate ? (
+                    <span>موعد: {toPersianDigits(formatJalali(deal.expectedCloseDate))}</span>
+                  ) : null}
+                </div>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }

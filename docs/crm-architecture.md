@@ -428,6 +428,31 @@ injection — so the worst a malicious view can do is filter on a field that doe
 not exist. Privacy (`owner_user_id` NULL = shared) is enforced in the SQL,
 including in the `DELETE`, so there is no check-then-act race.
 
+**A saved view is exactly the filters its screen honours, and the screen proves
+it.** The vocabulary is only half the contract: the other half is that the list
+applies every key it declares. So an entity that has grown a real parser also
+gets a real value check (`crm-saved-views-service.ts` refuses `invalid_filters`
+rather than storing a stage id that will fail on the screen for everybody the
+view is shared with), and the screen that owns the keys owns the parser:
+
+- one pure module per entity (`crm-deal-views.ts` for `deals`) parses, serialises
+  and *describes* the same document, and the route imports it — so a view stored
+  from the board, a pasted query string and a colleague's shared view are one
+  interpretation;
+- the service imports that module's key list instead of repeating it, so the
+  vocabulary cannot drift from the implementation;
+- an impossible value is refused **by name** (`bad_filter` + the field) and the
+  list keeps its last rows: blanking it would read as "nothing matches";
+- an unknown *key* is still dropped, because a view saved by a newer build must
+  open on an older tab;
+- amounts are Toman in the vocabulary and Rial in the column, converted once at
+  the boundary (`tomanToRial`), because a threshold in the wrong unit matches
+  silently nothing.
+
+The rest of the vocabulary goes through the same door as it is built: the
+`deals` parser is the worked example, and an entity without one keeps the
+drop-unknown-keys behaviour rather than pretending to validate values.
+
 ## Permissions
 
 `src/lib/crm-permissions.ts` is the single source of truth: one row per section

@@ -197,6 +197,49 @@ handoff has run.
   deals. It sends usage counts alongside the list so the screen can explain the
   refusal *before* somebody presses save.
 
+## The deals screen honours its whole vocabulary
+
+A saved view (`crm_saved_views`) promises one thing: *"exactly a set of the
+filters that screen already supports"*. The leads list kept that promise; the
+deals board did not — `deals` declared seven keys and honoured one, so a view
+named «مذاکره‌های بزرگ» was stored faithfully and applied partially. A shared
+view that lies is worse than no view, because somebody will trust it, so the
+board now carries controls for every key it declares:
+
+| Key | Control | SQL |
+|---|---|---|
+| `q` | جست‌وجو | `ILIKE` over the deal's title **and** its customer's name |
+| `stageId` | مرحله | `d.stage_id = $` — the canonical row, not the legacy key |
+| `pipelineId` | (the pipeline selector) | `d.pipeline_id = $` |
+| `owner` | مسئول (`همه` / `من` / `بدون مسئول` / a member) | `d.owner_user_id = $`, or `IS NULL` |
+| `open` | فقط بازها | not terminal **by outcome**, so a renamed won column still counts |
+| `minValue`, `maxValue` | از/تا (تومان) | `d.value_rial >=` / `<=` |
+
+Three properties make it hold:
+
+- **One parser.** `crm-deal-views.ts` is pure and client-safe: the screen
+  serialises with it, `GET /api/crm/deals` parses with it, and
+  `crm-saved-views-service.ts` imports its key list and its value check. A view
+  stored from the board, a link pasted into the address bar and a shared view
+  opened by a colleague are therefore all one interpretation. It is also the
+  reason the amounts can be trusted: the control types **Toman**, the parser
+  converts once with `tomanToRial`, and the column compares in Rial.
+- **A refused filter is named, never half-applied.** An impossible value (a
+  non-uuid stage, a range that cannot exist) comes back as `bad_filter` with the
+  field, the screen points at that control, and the list keeps its last rows —
+  blanking them would read as "nothing matches". An *unknown key* is still
+  ignored, because a view saved by a newer build must open on an older tab.
+  Saving one through the service is refused the same way (`invalid_filters`),
+  since `deals` is the first entity whose vocabulary can check values and not
+  just keys; entities without a parser keep the old drop-what-you-do-not-know
+  behaviour rather than pretending to validate.
+- **The chips are the applied document.** They are described from the same
+  object the request was built from, so a filter that is on is a filter that is
+  visible and removable in one click. The board and the list are two renderings
+  of the same filtered rows: the board answers «کدام معامله را جلو ببرم؟», the
+  list answers «کدام معامله بزرگ‌تر است؟» (sorted by value, which is the one
+  thing a kanban cannot show), and both open the same edit dialog.
+
 ## Ownership is a member id; the name is a snapshot
 
 **0157** added `owner_user_id` / `assignee_user_id` / `crm_owner_user_id` beside
@@ -390,14 +433,12 @@ These are named here so the seams are visible rather than implied:
 - **The saved-view filter vocabulary the command field will need** for «همهٔ
   مشتریان تهران که پارسال خریدند»: the resolver exists, the phrase vocabulary
   over its fields does not.
-- **A list view of deals that honours the whole saved-view vocabulary.** The
-  service stores seven filter keys for `deals` (`q, stageId, pipelineId, owner,
-  open, minValue, maxValue`) and `listDeals` filters on a subset; the board has
-  no filter controls at all. A view saved against `deals` through the API is
-  therefore stored faithfully and applied partially — which is exactly the shape
-  this document calls a lie. The leads list is the honest model: it declares its
-  controls, hands them to `SavedViewsBar`, and applies back only what it has.
-  Until the deals list exists, treat the extra keys as reserved.
+- **The same treatment for the other three entities.** `customers`, `cases` and
+  `activities` declare filter keys the same way `deals` did, and only some of
+  them are honoured by their screens. The deals screen is the worked example —
+  one pure parser, controls for every key, chips described from the applied
+  document — and the next screen that grows a parser is the next one that can
+  say its views do not lie. Until then, treat their extra keys as reserved.
 
 Import and export are **not** on this list, and never appear as a CRM button:
 the platform data-transfer engine owns that door, and the CRM's entities

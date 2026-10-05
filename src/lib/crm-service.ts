@@ -1704,9 +1704,42 @@ const DEAL_COLUMNS = `d.id, d.customer_id AS "customerId", c.name AS "customerNa
   d.source, d.closed_at AS "closedAt", d.lost_reason AS "lostReason",
   d.order_id AS "orderId", d.created_at AS "createdAt", d.updated_at AS "updatedAt"`;
 
+export interface ListDealsOptions {
+  customerId?: string;
+  /** The compatibility key. The canonical filter is `stageId`. */
+  stage?: DealStage;
+  /** The canonical stage row — what the board and a saved view both hold. */
+  stageId?: string | null;
+  pipelineId?: string | null;
+  /** Free text over the deal's title and its customer's name. */
+  q?: string;
+  /** A member id. `null` with `unowned: true` means "nobody owns it". */
+  ownerUserId?: string | null;
+  unowned?: boolean;
+  /** Bounds in Rial, already converted — see `crm-deal-views.ts`. */
+  minValueRial?: number | null;
+  maxValueRial?: number | null;
+  openOnly?: boolean;
+  limit?: number;
+}
+
+/**
+ * One page of deals, narrowed by whatever the caller asked for.
+ *
+ * Every filter is an equality or a bound on a column — no expression is built
+ * from user text, and the two free-text fields are matched with `ILIKE` against
+ * the title and the customer's name, which is the whole of the "search" a board
+ * needs. The saved-view vocabulary (`crm-deal-views.ts`) maps onto exactly these
+ * options, which is what lets the deals screen promise that a stored view shows
+ * what it says.
+ *
+ * `unowned` and `ownerUserId` are separate on purpose: a caller asking for a
+ * member must not accidentally match every row whose owner is NULL, which is
+ * what a naive `= $n` with a null parameter does.
+ */
 export async function listDeals(
   businessId: string,
-  options: { customerId?: string; stage?: DealStage; openOnly?: boolean; limit?: number } = {},
+  options: ListDealsOptions = {},
 ): Promise<CrmDeal[]> {
   const params: unknown[] = [businessId];
   let where = "d.business_id = $1";
@@ -1718,7 +1751,41 @@ export async function listDeals(
     params.push(options.stage);
     where += ` AND d.stage = $${params.length}`;
   }
-  if (options.openOnly) where += " AND d.stage NOT IN ('won', 'lost')";
+  if (options.stageId) {
+    params.push(options.stageId);
+    where += ` AND d.stage_id = $${params.length}`;
+  }
+  if (options.pipelineId) {
+    params.push(options.pipelineId);
+    where += ` AND d.pipeline_id = $${params.length}`;
+  }
+  if (options.ownerUserId) {
+    params.push(options.ownerUserId);
+    where += ` AND d.owner_user_id = $${params.length}`;
+  } else if (options.unowned) {
+    where += " AND d.owner_user_id IS NULL";
+  }
+  if (options.q && options.q.trim()) {
+    // One parameter, two columns: `%text%` for either the deal or its customer.
+    params.push(`%${options.q.trim()}%`);
+    where += ` AND (d.title ILIKE $${params.length} OR c.name ILIKE $${params.length})`;
+  }
+  if (typeof options.minValueRial === "number") {
+    params.push(options.minValueRial);
+    where += ` AND d.value_rial >= $${params.length}`;
+  }
+  if (typeof options.maxValueRial === "number") {
+    params.push(options.maxValueRial);
+    where += ` AND d.value_rial <= $${params.length}`;
+  }
+  if (options.openOnly) {
+    // Terminal by *outcome*, not by the six legacy keys: a business whose won
+    // column is named something else still has deals that are closed.
+    where += ` AND NOT EXISTS (
+      SELECT 1 FROM crm_pipeline_stages s
+       WHERE s.business_id = d.business_id AND s.id = d.stage_id AND s.outcome <> 'open'
+    ) AND (d.stage_id IS NOT NULL OR d.stage NOT IN ('won', 'lost'))`;
+  }
   params.push(options.limit ?? 200);
 
   const { rows } = await query<CrmDeal>(

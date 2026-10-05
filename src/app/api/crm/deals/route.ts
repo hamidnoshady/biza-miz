@@ -6,6 +6,14 @@ import { defaultPipeline, listPipelines } from "@/lib/crm-pipeline-service";
 import { isDealStage, type DealStage } from "@/lib/crm-shared";
 import { isUuid } from "@/lib/uuid";
 import { tomanToRial } from "@/lib/money";
+import { listAssignableMembers } from "@/lib/crm-ownership";
+import {
+  dealViewOwnerUserId,
+  dealViewQuery,
+  dealViewRialBounds,
+  dealViewUnownedOnly,
+  parseDealViewFilters,
+} from "@/lib/crm-deal-views";
 
 /**
  * The sales pipeline (Phase 36).
@@ -25,10 +33,31 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 
   const search = request.nextUrl.searchParams;
   const stage = search.get("stage");
+
+  // The screen's own parser, not a second reading of the same names: a view
+  // saved from the board and a link pasted into the address bar are interpreted
+  // by exactly one function (`crm-deal-views.ts`), so "the filter the UI shows"
+  // and "the filter the server applies" cannot drift apart.
+  const { filters, error: filterError } = parseDealViewFilters(search);
+  if (filterError) {
+    return NextResponse.json({ error: "bad_filter", field: filterError }, { status: 400 });
+  }
+
+  const ownerUserId = dealViewOwnerUserId(filters, session.sub);
+  const bounds = dealViewRialBounds(filters);
   const deals = await listDeals(session.businessId, {
     customerId: search.get("customerId") ?? undefined,
     stage: stage && isDealStage(stage) ? (stage as DealStage) : undefined,
-    openOnly: search.get("open") === "1",
+    stageId: filters.stageId || undefined,
+    pipelineId: filters.pipelineId || undefined,
+    q: filters.q || undefined,
+    ownerUserId,
+    // `mine` for a caller with no member id, or `none`, means "nobody" rather
+    // than "everybody" — the safe direction for a filter about ownership.
+    unowned: dealViewUnownedOnly(filters) || (filters.owner === "mine" && !ownerUserId),
+    minValueRial: bounds.minValueRial,
+    maxValueRial: bounds.maxValueRial,
+    openOnly: filters.openOnly,
   });
 
   // The board's columns come from the database, not from the six-value
@@ -49,7 +78,21 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     isDefault: entry.isDefault,
   }));
 
-  return NextResponse.json({ deals, pipeline, pipelines });
+  // The filters the server actually applied, echoed back in the vocabulary the
+  // screen sent them in. The client renders its chips from this rather than
+  // from its own state, so a list can never be labelled with a filter that was
+  // dropped on the way (a reserved key, a mixed-version deployment).
+  const applied = dealViewQuery(filters);
+  // The members the owner filter can name, for the chip and the picker. Read
+  // through the same list the assignee picker uses, so an inactive member's
+  // name is available here too — reassignment starts by seeing who holds what.
+  const members = (await listAssignableMembers(session.businessId)).map((member) => ({
+    id: member.id,
+    name: member.name,
+    isActive: member.isActive,
+  }));
+
+  return NextResponse.json({ deals, pipeline, pipelines, applied, members });
 });
 
 interface DealBody {

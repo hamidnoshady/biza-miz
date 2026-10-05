@@ -27,6 +27,13 @@ import { readFileSync } from "node:fs";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import {
+  dealViewOwnerUserId,
+  dealViewQuery,
+  dealViewRialBounds,
+  dealViewUnownedOnly,
+  parseDealViewFilters,
+} from "../src/lib/crm-deal-views";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -533,6 +540,167 @@ describe("saved views", () => {
     const id = saved.ok ? saved.view.id : "";
     expect(await views.deleteSavedView(biz.id, id, { userId: biz.userId })).toBe(true);
     expect(await views.deleteSavedView(biz.id, id, { userId: biz.userId })).toBe(false);
+  });
+});
+
+describe("a saved deal view is the filters the screen honours", () => {
+  /**
+   * The deals board declared seven filter keys and honoured one of them, so a
+   * shared view was stored faithfully and applied partially — the shape
+   * `docs/crm-relationship-os.md` calls a lie. These pin every key end to end:
+   * the vocabulary (`crm-deal-views.ts`) parses the same query the screen sends,
+   * `listDeals` narrows on it in SQL, and a view stored through the service
+   * round-trips into the request the board makes.
+   */
+  it("narrows on every key, in SQL, with the units the screen uses", async () => {
+    // A business of its own: the file's shared one already holds the deals the
+    // stage tests created, so "the filter excluded the other deals" would prove
+    // nothing there.
+    const own = await createBusiness("ros-deal-views");
+    const viewer = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, email, password_hash)
+       VALUES ($1, 'owner', 'بیننده', $2, 'x') RETURNING id`,
+      [own.businessId, `viewer-${randomUUID().slice(0, 7)}@example.test`],
+    );
+    const viewerId = viewer.rows[0].id;
+    const pipeline = await pipelines.defaultPipeline(own.businessId);
+    const openStage = pipeline!.stages.find((stage) => stage.outcome === "open")!;
+    const wonStage = pipeline!.stages.find((stage) => stage.outcome === "won")!;
+    const customer = await makeParty(own.businessId, "مشتری فیلترها");
+    const otherCustomer = await makeParty(own.businessId, "مشتری دیگر");
+
+    const mine = await crm.upsertDeal(own.businessId, {
+      title: "معاملهٔ من",
+      customerId: customer,
+      stageId: openStage.id,
+      valueRial: 50_000_000,
+      ownerUserId: viewerId,
+      createdBy: actor.name,
+    });
+    const theirs = await crm.upsertDeal(own.businessId, {
+      title: "معاملهٔ بی‌صاحب",
+      customerId: otherCustomer,
+      stageId: openStage.id,
+      valueRial: 5_000_000,
+      createdBy: actor.name,
+    });
+    const closed = await crm.upsertDeal(own.businessId, {
+      title: "معاملهٔ بسته",
+      customerId: customer,
+      stageId: wonStage.id,
+      valueRial: 90_000_000,
+      createdBy: actor.name,
+    });
+
+    const run = async (query: Record<string, string>) => {
+      const parsed = parseDealViewFilters({ get: (key) => query[key] ?? null });
+      expect(parsed.error).toBeNull();
+      const bounds = dealViewRialBounds(parsed.filters);
+      const deals = await crm.listDeals(own.businessId, {
+        stageId: parsed.filters.stageId || undefined,
+        pipelineId: parsed.filters.pipelineId || undefined,
+        q: parsed.filters.q || undefined,
+        ownerUserId: dealViewOwnerUserId(parsed.filters, viewerId),
+        unowned: dealViewUnownedOnly(parsed.filters),
+        minValueRial: bounds.minValueRial,
+        maxValueRial: bounds.maxValueRial,
+        openOnly: parsed.filters.openOnly,
+      });
+      return deals.map((deal) => deal.id);
+    };
+
+    // Each key on its own, and the amount converted from Toman exactly once.
+    // Sorted, because the row *set* is what these filters decide; the ordering
+    // (`updated_at DESC, id`) is pinned by the board's own tests.
+    const ids = (found: string[]) => [...found].sort();
+    expect(ids(await run({ owner: "mine" }))).toEqual(ids([mine.id]));
+    expect(ids(await run({ owner: "none" }))).toEqual(ids([theirs.id, closed.id]));
+    expect(ids(await run({ stageId: openStage.id }))).toEqual(ids([mine.id, theirs.id]));
+    expect(await run({ pipelineId: pipeline!.id })).toHaveLength(3);
+    // A pipeline that is not this one excludes them all — the filter is a real
+    // narrowing, not a parameter the query happened to ignore.
+    expect(await run({ pipelineId: randomUUID() })).toEqual([]);
+    expect(ids(await run({ q: "بی‌صاحب" }))).toEqual(ids([theirs.id]));
+    expect(ids(await run({ q: "مشتری فیلترها" }))).toEqual(ids([mine.id, closed.id]));
+    // The typed bound is Toman and the column is Rial: «۱٬۰۰۰٬۰۰۰ تومان» is
+    // 10,000,000 Rial, which keeps the 50,000,000- and 90,000,000-rial deals and
+    // drops the 5,000,000-rial one. A bound converted on the wrong side of that
+    // border would match nothing at all, which is the failure nobody reports.
+    expect(ids(await run({ minValue: "1000000" }))).toEqual(ids([mine.id, closed.id]));
+    expect(ids(await run({ maxValue: "1000000" }))).toEqual(ids([theirs.id]));
+    // Open means "not terminal by outcome", so a business whose won column is
+    // not named `won` still gets the right rows.
+    expect(ids(await run({ open: "1" }))).toEqual(ids([mine.id, theirs.id]));
+    // And the filters compose: mine, open, at least «۱ تومان».
+    expect(ids(await run({ owner: "mine", open: "1", minValue: "1" }))).toEqual(ids([mine.id]));
+    expect(await run({ owner: "mine", open: "1", maxValue: "1" })).toEqual([]);
+
+    // `mine` for a caller with no member id is nobody — never everybody.
+    const asNobody = parseDealViewFilters({ get: () => null });
+    expect(dealViewOwnerUserId(asNobody.filters, null)).toBeNull();
+  });
+
+  it("round-trips a view saved through the service into the request the board sends", async () => {
+    const saved = await views.saveView(
+      biz.id,
+      {
+        entity: "deals",
+        name: "معامله‌های بزرگ من",
+        filters: { owner: "mine", minValue: "1000000", open: "1" },
+        shared: true,
+      },
+      { name: "مدیر", userId: biz.userId },
+    );
+    expect(saved.ok).toBe(true);
+    const view = saved.ok ? saved.view : null;
+    expect(view?.filters).toEqual({ owner: "mine", minValue: "1000000", open: "1" });
+
+    // The screen serialises the stored document into the query, and the server
+    // parses that query with the same module: three readings, one answer.
+    const query = dealViewQuery({
+      q: "",
+      stageId: "",
+      pipelineId: "",
+      owner: view!.filters.owner,
+      openOnly: view!.filters.open === "1",
+      minToman: Number(view!.filters.minValue),
+      maxToman: null,
+    });
+    expect(query).toEqual({ owner: "mine", open: "1", minValue: "1000000" });
+    const parsed = parseDealViewFilters({ get: (key) => query[key] ?? null });
+    expect(parsed.filters.owner).toBe("mine");
+    expect(dealViewRialBounds(parsed.filters).minValueRial).toBe(10_000_000);
+
+    // A key the vocabulary does not carry is dropped rather than stored, so a
+    // view can never promise a filter the board cannot apply.
+    const withUnknown = await views.saveView(
+      biz.id,
+      {
+        entity: "deals",
+        name: "نما با کلید ناشناس",
+        filters: { owner: "mine", forecast: "high" },
+        shared: true,
+      },
+      { name: "مدیر", userId: biz.userId },
+    );
+    expect(withUnknown.ok && withUnknown.view.filters).toEqual({ owner: "mine" });
+
+    // An impossible value inside the vocabulary is refused, not stored.
+    const bad = await views.saveView(
+      biz.id,
+      {
+        entity: "deals",
+        name: "نما با مرحلهٔ نامعتبر",
+        filters: { stageId: "miz" },
+        shared: true,
+      },
+      { name: "مدیر", userId: biz.userId },
+    );
+    // Refused *and named*: the screen can point at the stage control, which is
+    // the difference between a fixable mistake and a mystery.
+    expect(bad.ok).toBe(false);
+    expect(bad.ok === false && bad.error).toBe("invalid_filters");
+    expect(bad.ok === false && bad.field).toBe("stageId");
   });
 });
 

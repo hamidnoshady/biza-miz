@@ -68,7 +68,7 @@ export function CrmSection({
   if (section === "directory") return <DirectorySection role={role} permissions={permissions} />;
   if (section === "leads") return <LeadsSection canManage={canWriteCrmSection(held, "leads")} />;
   if (section === "segments") return <SegmentsSection />;
-  if (section === "deals") return <DealsSection />;
+  if (section === "deals") return <DealsSection canManage={canWriteCrmSection(held, "deals")} />;
   if (section === "activities") return <ActivitiesSection />;
   if (section === "cases")
     return <CasesSection canDelete={canDeleteCrmSection(held, "cases")} />;

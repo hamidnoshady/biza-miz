@@ -86,7 +86,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!result.ok) {
     const status =
       result.error === "not_found" ? 404 : result.error === "forbidden" || result.error === "builtin_readonly" ? 403 : 400;
-    return NextResponse.json({ error: result.error }, { status });
+    return NextResponse.json(
+      { error: result.error, ...(result.field ? { field: result.field } : {}) },
+      { status },
+    );
   }
   return NextResponse.json({ view: result.view }, { status: body.id ? 200 : 201 });
 });
