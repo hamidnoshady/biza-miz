@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  ArrowDownIcon,
   HistoryIcon,
   MessageSquarePlusIcon,
   PanelLeftIcon,
@@ -30,6 +31,7 @@ import { useFeatureLocked } from "@/components/feature-lock";
 import { ChatComposer } from "@/components/ai/chat-composer";
 import { ChatBubble } from "@/components/ai/chat-bubble";
 import { animateFloat, animateStaggerIn } from "@/components/ai/chat-animations";
+import { useStickyScroll } from "@/components/ai/use-sticky-scroll";
 import { SUGGESTED_PROMPTS, taskById, taskSuggestions } from "@/lib/ai-tasks";
 import {
   AI_PANEL_PARAM,
@@ -114,7 +116,11 @@ export function AiChatHub({
     });
   }, [replaceParams]);
   const money = useMoney();
-  const scrollRef = useRef<HTMLDivElement>(null);
+  // Issue #812 §18 — sticky scrolling: the thread follows new content only
+  // while the reader is already at the bottom, and never yanks them down while
+  // they are reading an earlier answer.
+  const { containerRef: scrollRef, atBottom: atThreadBottom, scrollToBottom, jumpToLatest, onScroll: onThreadScroll } =
+    useStickyScroll();
   const heroRef = useRef<HTMLDivElement>(null);
   const orbLeftRef = useRef<HTMLDivElement>(null);
   const orbRightRef = useRef<HTMLDivElement>(null);
@@ -190,6 +196,14 @@ export function AiChatHub({
   }, [replaceParams, searchParams, startNewConversation]);
 
   useEffect(() => {
+    if (!initialized.current) return;
+    // Switching threads (or starting a new one) is an explicit jump, so the
+    // newest message is shown regardless of where the reader had scrolled to.
+    scrollToBottom({ force: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId]);
+
+  useEffect(() => {
     if (initialized.current) return;
     initialized.current = true;
     const requested = locked ? null : searchParams.get("conversation");
@@ -205,9 +219,11 @@ export function AiChatHub({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // §18 — follow new content only when the reader is already pinned to the
+  // bottom. A conversation switch forces the jump (that IS the new content).
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, busy]);
+    scrollToBottom({ smooth: true });
+  }, [messages, scrollToBottom]);
 
   // The history list re-reads when a conversation becomes active (a new thread
   // was just created) and when a turn finishes on one (its thread jumped to
@@ -336,7 +352,11 @@ export function AiChatHub({
         onClose={closePanel}
       />
 
-      <div ref={scrollRef} className="ai-chat-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-4 pt-4 sm:px-6">
+      <div
+        ref={scrollRef}
+        onScroll={onThreadScroll}
+        className="ai-chat-scroll relative min-h-0 flex-1 overflow-y-auto px-2 pb-4 pt-4 sm:px-6"
+      >
         {loadingConversation ? (
           <LoadingSkeleton
             rows={6}
@@ -424,6 +444,24 @@ export function AiChatHub({
             })}
           </div>
         )}
+
+        {/* Issue #812 §18 — «برو به آخرین پیام». Shown only once the reader has
+            scrolled up past the sticky threshold, so the thread stops fighting
+            them without losing the way back. */}
+        {!atThreadBottom && messages.length > 1 ? (
+          <div className="pointer-events-none sticky bottom-2 z-10 flex justify-center">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={jumpToLatest}
+              className="pointer-events-auto gap-1.5 rounded-full border-border bg-card/95 shadow-[0_1px_2px_rgb(41_37_36/0.035)] backdrop-blur"
+            >
+              <ArrowDownIcon className="size-3.5" aria-hidden />
+              برو به آخرین پیام
+            </Button>
+          </div>
+        ) : null}
       </div>
 
       <div className="border-t border-border/80 bg-card/80 px-2 py-2 backdrop-blur sm:px-4 sm:py-3">

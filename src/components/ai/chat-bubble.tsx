@@ -9,7 +9,7 @@
  * filled gradient bubble, and each bubble arrives with a GSAP entrance.
  */
 import { useRef } from "react";
-import { BotIcon, CheckIcon, CopyIcon } from "lucide-react";
+import { AlertTriangleIcon, BotIcon, CheckIcon, CopyIcon, SquareIcon } from "lucide-react";
 import { toast } from "sonner";
 import { useGSAP } from "@gsap/react";
 import { cn } from "@/lib/utils";
@@ -22,7 +22,7 @@ import {
   animateTypingDots,
   reducedMotion,
 } from "./chat-animations";
-import type { AiChatMessage } from "./use-ai-chat";
+import type { AiChatMessage, AiMessageStatus } from "./use-ai-chat";
 
 export function formatAttachmentSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} بایت`;
@@ -56,6 +56,30 @@ export function TypingDots() {
     </span>
   );
 }
+
+/**
+ * Issue #812 §19 — how an unfinished reply is labelled. A stream that ended
+ * without its terminal `done` event, or that the member stopped, keeps whatever
+ * text arrived and is visibly marked rather than being passed off as a normal
+ * complete answer. `undefined` (an older transcript) reads as complete.
+ */
+const STATUS_LABELS: Partial<Record<AiMessageStatus, { text: string; className: string; Icon: typeof AlertTriangleIcon }>> = {
+  incomplete: {
+    text: "پاسخ کامل نشد",
+    className: "text-amber-700 dark:text-amber-300",
+    Icon: AlertTriangleIcon,
+  },
+  cancelled: {
+    text: "پاسخ‌گویی متوقف شد",
+    className: "text-muted-foreground",
+    Icon: SquareIcon,
+  },
+  error: {
+    text: "پاسخ با خطا پایان یافت",
+    className: "text-red-600 dark:text-red-400",
+    Icon: AlertTriangleIcon,
+  },
+};
 
 interface ChatBubbleProps {
   message: AiChatMessage;
@@ -205,6 +229,22 @@ export function ChatBubble({
         message.costRial > 0 ? (
           <p className="px-1 text-[10px] text-muted-foreground">
             هزینهٔ این پاسخ: {cost(message.costRial)}
+          </p>
+        ) : null}
+
+        {/* Issue #812 §19 — an unfinished reply says so, right under the text. */}
+        {!isUser && message.status && STATUS_LABELS[message.status] ? (
+          <p
+            className={cn(
+              "flex items-center gap-1 px-1 text-[10px]",
+              STATUS_LABELS[message.status]!.className,
+            )}
+          >
+            {(() => {
+              const { Icon } = STATUS_LABELS[message.status]!;
+              return <Icon className="size-3" aria-hidden />;
+            })()}
+            {STATUS_LABELS[message.status]!.text}
           </p>
         ) : null}
 
