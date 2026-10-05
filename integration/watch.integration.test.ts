@@ -31,6 +31,8 @@ let invoiceService: typeof import("../src/lib/retail-invoice-service");
 let watchReturns: typeof import("../src/lib/watch-return-service");
 let watchReservations: typeof import("../src/lib/watch-reservation-service");
 let watchTransfers: typeof import("../src/lib/watch-transfer-service");
+let watchAttributes: typeof import("../src/lib/watch-attributes-service");
+let serialDetail: typeof import("../src/lib/watch-serial-detail");
 
 const biz = { id: "", locationId: "" };
 const acct = {
@@ -80,6 +82,8 @@ beforeAll(async () => {
   watchReturns = await import("../src/lib/watch-return-service");
   watchReservations = await import("../src/lib/watch-reservation-service");
   watchTransfers = await import("../src/lib/watch-transfer-service");
+  watchAttributes = await import("../src/lib/watch-attributes-service");
+  serialDetail = await import("../src/lib/watch-serial-detail");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -2262,5 +2266,272 @@ describe("Issue #795 — concurrent sale and branch transfer", () => {
         }),
       ),
     ).rejects.toThrow(/قابل انتقال/);
+  });
+});
+
+describe("Issue #795 Phase 6 — structured model attributes", () => {
+  it("upserts, replaces, and removes a model's attributes; the catalogue list carries them per branch", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت غواصی",
+      tracking: "serial",
+    });
+
+    // First write creates the row…
+    const created = await watchAttributes.upsertWatchAttributes(item.id, {
+      referenceNo: " 126610LN ",
+      movement: "automatic",
+      caseMaterial: "استیل",
+      caseDiameterMm: 41,
+      waterResistanceM: 300,
+      dialColor: "مشکی",
+      braceletMaterial: "استیل",
+      gender: "men",
+    });
+    expect(created).toEqual({
+      referenceNo: "126610LN", // trimmed
+      movement: "automatic",
+      caseMaterial: "استیل",
+      caseDiameterMm: 41,
+      waterResistanceM: 300,
+      dialColor: "مشکی",
+      braceletMaterial: "استیل",
+      gender: "men",
+    });
+
+    // …a second write replaces it in place (still one row).
+    const replaced = await watchAttributes.upsertWatchAttributes(item.id, {
+      movement: "quartz",
+      waterResistanceM: 100,
+    });
+    expect(replaced).toMatchObject({ movement: "quartz", waterResistanceM: 100, referenceNo: null });
+    const { rows: countRows } = await db.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM watch_item_attributes WHERE item_id = $1",
+      [item.id],
+    );
+    expect(countRows[0].n).toBe("1");
+
+    // The branch catalogue list resolves them in one trip.
+    const map = await watchAttributes.listWatchAttributes(biz.locationId);
+    expect(map.get(item.id)?.movement).toBe("quartz");
+
+    // An all-empty submit means "no attributes recorded" — the row goes away.
+    const cleared = await watchAttributes.upsertWatchAttributes(item.id, { referenceNo: "  " });
+    expect(cleared).toBeNull();
+    expect(await watchAttributes.getWatchAttributes(item.id)).toBeNull();
+  });
+
+  it("rejects out-of-range or unknown attribute values with Persian errors", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت نامعتبر",
+      tracking: "serial",
+    });
+    await expect(
+      watchAttributes.upsertWatchAttributes(item.id, { movement: "steam" as never }),
+    ).rejects.toThrow(/نوع موتور نامعتبر/);
+    await expect(
+      watchAttributes.upsertWatchAttributes(item.id, { gender: "kids" as never }),
+    ).rejects.toThrow(/دسته‌بندی جنسیتی نامعتبر/);
+    await expect(watchAttributes.upsertWatchAttributes(item.id, { caseDiameterMm: 0 })).rejects.toThrow(
+      /قطر قاب/,
+    );
+    await expect(watchAttributes.upsertWatchAttributes(item.id, { caseDiameterMm: 120 })).rejects.toThrow(
+      /قطر قاب/,
+    );
+    await expect(
+      watchAttributes.upsertWatchAttributes(item.id, { waterResistanceM: -5 }),
+    ).rejects.toThrow(/مقاومت در برابر آب/);
+    await expect(
+      watchAttributes.upsertWatchAttributes(item.id, { waterResistanceM: 2.5 }),
+    ).rejects.toThrow(/مقاومت در برابر آب/);
+    // Nothing slipped through to the table.
+    expect(await watchAttributes.getWatchAttributes(item.id)).toBeNull();
+  });
+
+  it("drops the attributes row with its model (ON DELETE CASCADE)", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت موقت",
+      tracking: "serial",
+    });
+    await watchAttributes.upsertWatchAttributes(item.id, { movement: "manual" });
+    await db.query("DELETE FROM items WHERE id = $1", [item.id]);
+    const { rows } = await db.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM watch_item_attributes WHERE item_id = $1",
+      [item.id],
+    );
+    expect(rows[0].n).toBe("0");
+  });
+});
+
+describe("Issue #795 Phase 6 — serial unit detail aggregation", () => {
+  it("assembles model attributes, warranty, owner, provenance, repairs, reservation and transfers for one unit", async () => {
+    // A customer who will buy the piece.
+    const { rows: partyRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, phone) VALUES ($1, 'خانم محمدی', '09121112233') RETURNING id",
+      [biz.id],
+    );
+    const customerId = partyRows[0].id;
+
+    // The model, with structured attributes.
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت کلکسیونی",
+      sku: "COL-7",
+      tracking: "serial",
+      serviceIntervalMonths: 36,
+    });
+    await watchAttributes.upsertWatchAttributes(item.id, {
+      referenceNo: "REF-7",
+      movement: "automatic",
+      gender: "unisex",
+    });
+
+    // Received through purchasing so the cost basis exists.
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-DET", warrantyMonths: 24 }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-DET")!;
+
+    // Pre-owned provenance with media references.
+    await db.query("UPDATE item_serials SET pre_owned = true WHERE id = $1", [unit.id]);
+    await watchCrm.recordPreOwnedIntake({
+      businessId: biz.id,
+      serialId: unit.id,
+      conditionGrade: "like_new",
+      boxAndPapers: true,
+      source: "customer_tradein",
+      purchaseValueRial: 25_000_000,
+      intakeDate: "2026-01-15",
+      authenticityVerified: true,
+      media: ["https://files.example/det-1.jpg", "https://files.example/det-2.jpg"],
+    });
+
+    // Sold on an invoice to the customer — warranty opens, owner is recorded.
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        customerId,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+
+    // One repair after the sale.
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "تعویض شیشه",
+      serialId: unit.id,
+    });
+
+    const detail = (await serialDetail.serialUnitDetail(unit.id))!;
+    expect(detail).toMatchObject({
+      serialNumber: "SN-DET",
+      status: "sold",
+      unitCost: 30_000_000,
+      preOwned: true,
+      model: {
+        itemId: item.id,
+        name: "ساعت کلکسیونی",
+        sku: "COL-7",
+        serviceIntervalMonths: 36,
+        attributes: { referenceNo: "REF-7", movement: "automatic", gender: "unisex" },
+      },
+      owner: { customerId, name: "خانم محمدی", phone: "09121112233" },
+      activeReservation: null,
+    });
+    expect(detail.warranty).not.toBeNull();
+    expect(detail.owner?.purchasedAt).toBeTruthy();
+    expect(detail.preOwnedIntake).toMatchObject({
+      source: "customer_tradein",
+      purchaseValueRial: 25_000_000,
+      intakeDate: "2026-01-15",
+      authenticityVerified: true,
+      media: ["https://files.example/det-1.jpg", "https://files.example/det-2.jpg"],
+    });
+    expect(detail.repairs).toHaveLength(1);
+    expect(detail.repairs[0].id).toBe(ticket.id);
+    expect(detail.transfers).toEqual([]);
+  });
+
+  it("shows the live hold and the branch-transfer trail; unknown serials resolve to null", async () => {
+    const { rows: partyRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, phone) VALUES ($1, 'آقای کریمی', '09125556677') RETURNING id",
+      [biz.id],
+    );
+    const customerId = partyRows[0].id;
+
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت دو شعبه",
+      sku: "DUO-1",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-DUO" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-DUO")!;
+
+    // Transfer to a second branch that carries the model.
+    const { rows: branchRows } = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'شعبه مرکزی') RETURNING id",
+      [biz.id],
+    );
+    const branch2 = branchRows[0].id;
+    await itemsService.createItem({ locationId: branch2, name: "ساعت دو شعبه", sku: "DUO-1", tracking: "serial" });
+    await withTransaction((client) =>
+      watchTransfers.transferSerialUnit(client, {
+        businessId: biz.id,
+        fromLocationId: biz.locationId,
+        toLocationId: branch2,
+        serialId: unit.id,
+        note: "برای ویترین",
+      }),
+    );
+
+    // Reserve it for a customer at the destination.
+    await withTransaction((client) =>
+      watchReservations.reserveSerialUnit(client, {
+        businessId: biz.id,
+        locationId: branch2,
+        serialId: unit.id,
+        customerId,
+        expiresAt: "2026-12-01",
+        note: "پیش‌پرداخت شد",
+      }),
+    );
+
+    const detail = (await serialDetail.serialUnitDetail(unit.id))!;
+    expect(detail.status).toBe("reserved");
+    expect(detail.activeReservation).toMatchObject({
+      customerId,
+      customerName: "آقای کریمی",
+      note: "پیش‌پرداخت شد",
+    });
+    expect(detail.transfers).toHaveLength(1);
+    expect(detail.transfers[0]).toMatchObject({
+      fromLocationId: biz.locationId,
+      toLocationId: branch2,
+      fromLocationName: "Main",
+      toLocationName: "شعبه مرکزی",
+      note: "برای ویترین",
+    });
+
+    expect(await serialDetail.serialUnitDetail(randomUUID())).toBeNull();
   });
 });
