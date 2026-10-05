@@ -20,6 +20,25 @@ export const POST = withTenantScope(async (_request: NextRequest, context: { par
   const locationId = guard.session.locationId ?? null;
   const config = await resolveAiConfigFor(guard.session.businessId, locationId, { ensureVirtualKey: true });
   if (!isPlatformAiConfigured(config)) return NextResponse.json({ error: "ai_unavailable" }, { status: 503 });
+  // A widget's required permissions are an upper bound selected at creation;
+  // intersect them with the member's current effective set on every run.
+  const permissions = widget.requiredPermissions.length === 0
+    ? guard.membership.permissions
+    : new Set([...guard.membership.permissions].filter((permission) => widget.requiredPermissions.includes(permission)));
+  // A widget the member can no longer run is not a widget they may run. The
+  // intersection above is what stops it widening anything, but an empty result
+  // is not a run: the turn would proceed with nothing behind it, spend the
+  // business's budget on an answer with no data behind it, and the caller would
+  // have no way to tell the difference from a real one. `ai.use` alone is not
+  // enough — that is the guard for reaching a widget, not for running this one.
+  if (widget.requiredPermissions.length > 0 && permissions.size === 0) {
+    return NextResponse.json(
+      { error: "forbidden", reason: "widget_permissions_required" },
+      { status: 403 },
+    );
+  }
+  // The wallet gate comes after that refusal, not before it: gating first asks
+  // "can this business pay?" about a turn the member was never allowed to run.
   try {
     await gateAiTurn(guard.session.businessId, config);
   } catch (error) {
@@ -27,11 +46,6 @@ export const POST = withTenantScope(async (_request: NextRequest, context: { par
     throw error;
   }
 
-  // A widget's required permissions are an upper bound selected at creation;
-  // intersect them with the member's current effective set on every run.
-  const permissions = widget.requiredPermissions.length === 0
-    ? guard.membership.permissions
-    : new Set([...guard.membership.permissions].filter((permission) => widget.requiredPermissions.includes(permission)));
   // Issue #812 §2/§15 — the widget turn is a tenant dashboard turn like any
   // other: it gets the business's own money unit and, when the platform has the
   // managed knowledge integration switched on, the knowledge tool.
