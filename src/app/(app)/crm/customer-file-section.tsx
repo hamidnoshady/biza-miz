@@ -37,6 +37,7 @@ import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { formatPhoneDisplay, isMobilePhone } from "@/lib/phone";
 import { LIFECYCLE_STAGES, type LifecycleStage } from "@/lib/crm-scoring";
+import { relationshipSummary, SUMMARY_SOURCE_LABELS } from "@/lib/crm-summary";
 import {
   CONSENT_SOURCE_LABELS,
   CUSTOMER_TIMELINE_KINDS,
@@ -203,6 +204,26 @@ export function CustomerFileSection({ customerId, permissions }: { customerId: s
   // top of it.
   const isMerged = Boolean(file.mergedIntoId);
 
+  /*
+   * The relationship summary, built from the three things this screen has
+   * already fetched — the file, the notes and the merged timeline. It runs no
+   * query of its own and states no fact it cannot point at, which is why it is
+   * computed here rather than asked of a model: a summary that can invent
+   * something about a person is worse than none, because it is believed.
+   */
+  const summary = relationshipSummary({
+    name: file.name,
+    health: file.health,
+    stats: file.stats,
+    accounting: file.accounting,
+    consent: { smsConsent: file.smsConsent, marketingConsent: file.marketingConsent },
+    rfm: { stage: file.rfm.stage },
+    // Only the events whose kind the panel can name; the timeline is capped
+    // per source, so the three newest are the three most recent things.
+    timeline: (events ?? []).slice(0, 3),
+    formatMoney: (rial) => money.format(rial),
+  });
+
   return (
     <div className="min-w-0 space-y-4">
       <ErrorBox>{error}</ErrorBox>
@@ -344,6 +365,27 @@ export function CustomerFileSection({ customerId, permissions }: { customerId: s
               </li>
             ))}
           </ul>
+        ) : null}
+      </SectionCard>
+
+      <SectionCard
+        title={<CrmCardHeading kicker="خلاصه" title="این مشتری در یک نگاه" />}
+        description="از همان داده‌هایی که پایین همین صفحه آمده‌اند؛ هر خط می‌گوید از کجا خوانده شده است."
+      >
+        <p className="text-sm font-medium leading-6 text-foreground">{summary.headline}</p>
+        <ul className="mt-3 space-y-2">
+          {summary.lines.map((line, index) => (
+            <li key={`${line.source}-${index}`} className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+              <StatusBadge tone="neutral">{SUMMARY_SOURCE_LABELS[line.source]}</StatusBadge>
+              <span className="min-w-0 flex-1 text-sm leading-6 text-muted-foreground">{line.text}</span>
+            </li>
+          ))}
+        </ul>
+        {summary.nextStep ? (
+          <p className="mt-3 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-sm leading-6">
+            <span className="font-medium">قدم بعدی: </span>
+            {summary.nextStep}
+          </p>
         ) : null}
       </SectionCard>
 

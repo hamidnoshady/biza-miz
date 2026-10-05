@@ -74,6 +74,8 @@ import { formatPersianNumber } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { formatPhoneDisplay } from "@/lib/phone";
 import { crmCustomerHref } from "./crm-routes";
+import { CrmTodayQueues } from "./today-queues";
+import { SavedViewsBar } from "./saved-views-bar";
 
 interface Lead {
   id: string;
@@ -130,7 +132,7 @@ const STATUS_FILTERS = [
 
 const PAGE_SIZE = 25;
 
-export function LeadsSection() {
+export function LeadsSection({ canManage = false }: { canManage?: boolean }) {
   const [leads, setLeads] = useState<Lead[] | null>(null);
   const [total, setTotal] = useState(0);
   const [status, setStatus] = useState<string>("open");
@@ -252,6 +254,29 @@ export function LeadsSection() {
     <div className="min-w-0 space-y-4">
       <ErrorBox>{error}</ErrorBox>
       {info ? <InfoBox>{info}</InfoBox> : null}
+
+      {/* New enquiries nobody has picked up yet — the queue a lead list exists
+          for, so it leads the list rather than hiding in the home page. */}
+      <CrmTodayQueues section="leads" title="سرنخ‌های تازه" />
+
+      {/* Named filter sets over this list. The bar hands its filters back here
+          rather than querying anything itself, so a view can only ever be a set
+          of filters this screen already understands. */}
+      <SavedViewsBar
+        entity="leads"
+        current={{
+          ...(search.trim() ? { q: search.trim() } : {}),
+          ...(status ? { status } : {}),
+          ...(dueOnly ? { due: "1" } : {}),
+        }}
+        onApply={(filters) => {
+          setStatus(filters.status ?? "");
+          setSearch(filters.q ?? "");
+          setDueOnly(filters.due === "1");
+        }}
+        canSave={canManage}
+        onNotice={setInfo}
+      />
 
       <KpiRow>
         <KpiCard label="سرنخ‌های این فهرست" value={formatPersianNumber(total)} />

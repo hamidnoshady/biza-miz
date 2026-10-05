@@ -50,6 +50,7 @@ import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { crmCustomerHref } from "./crm-routes";
 import { CustomerSearchField } from "./customer-search";
 import { CrmCardHeading } from "./crm-card-heading";
+import { CrmTodayQueues } from "./today-queues";
 
 interface Activity {
   id: string;
@@ -235,6 +236,10 @@ export function ActivitiesSection() {
   return (
     <div className="min-w-0 space-y-4">
       <ErrorBox>{error}</ErrorBox>
+
+      {/* Overdue and due-today, above the list they belong to. The section
+          already counts the overdue ones; the queue names them. */}
+      <CrmTodayQueues section="activities" title="پیگیری‌های نیازمند توجه" />
 
       <SectionCard
         title={

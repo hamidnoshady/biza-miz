@@ -187,10 +187,15 @@ function guaranteed(requirement: {
     const option = new Set(base);
     option.add(alternative);
     for (const implied of impliedPermissions(alternative)) option.add(implied);
-    intersection =
-      intersection === null
-        ? option
-        : new Set([...intersection].filter((permission) => option.has(permission)));
+    if (intersection === null) {
+      intersection = option;
+    } else {
+      const kept = new Set<Permission>();
+      for (const permission of intersection) {
+        if (option.has(permission)) kept.add(permission);
+      }
+      intersection = kept;
+    }
   }
   return intersection ?? base;
 }

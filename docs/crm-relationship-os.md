@@ -85,6 +85,22 @@ section mapping.
 The customer file shows the state as a badge and prints the reasons in a
 «چرا؟» panel under the metrics.
 
+## «این مشتری در یک نگاه» is written, not generated
+
+`src/lib/crm-summary.ts` composes the summary from the three things the profile
+screen has already fetched — the file, the notes and the merged timeline — and
+every line carries the source it came from (خریدها، بخش‌بندی، وضعیت رابطه،
+تاریخچه، رضایت ارتباط، حسابداری، کارهای باز). It runs no query of its own,
+reads no clock, and cannot disagree with the metrics printed beside it.
+
+That is deliberate. **A summary that can invent a fact about a person is worse
+than no summary, because it is believed.** A narrator (an LLM, later) may
+rephrase these lines, translate them, or choose what to lead with — it must not
+be able to add a fact, which is why each line is data with a provenance rather
+than a paragraph. `crm-summary.test.ts` pins determinism with the clock moved
+between two calls, and pins that a customer with nothing on file still gets a
+headline and a reason.
+
 ## The won-deal handoff
 
 `src/lib/crm-deal-handoff.ts` + `deals/[id]/handoff`:
@@ -146,6 +162,9 @@ not exist.
 
 These are named here so the seams are visible rather than implied:
 
+- **An LLM narrator over the relationship summary.** The facts are already
+  assembled with provenance (`crm-summary.ts`); what is missing is a model call
+  and, more importantly, a rule that it may only compose from those lines.
 - **Natural-language command field.** The closed vocabularies it must translate
   into already exist — `CRM_QUEUE_KEYS` (queues), the saved-view filter
   documents per entity, and the segment definition resolver. A translation layer

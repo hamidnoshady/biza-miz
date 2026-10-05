@@ -27,6 +27,15 @@
  * - **An empty queue is not a failure.** It says what would have appeared and
  *   disappears from the top: a home page of empty cards teaches people to stop
  *   reading it.
+ *
+ * ## Two places it is used
+ *
+ * The home page shows every queue. A section screen passes its own `section`
+ * key and sees only the queues it owns (`queueKeysForSection`), so the deals
+ * board opens with «معامله‌های راکد» above it and the service desk opens with
+ * «خطر از دست رفتن مهلت». Same component, same rules: the two cannot drift
+ * into disagreeing about what «راکد» means, because there is one expression of
+ * it — `crm-queues.ts`.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -55,15 +64,27 @@ interface Queue {
   items: QueueItem[];
 }
 
-export function CrmTodayQueues() {
+export function CrmTodayQueues({
+  section,
+  title = "امروز",
+}: {
+  /**
+   * The section whose queues to show. Omit on the home page, which shows all of
+   * them; the value is matched against `CRM_QUEUE_KEYS` server-side and an
+   * unknown one returns nothing rather than everything.
+   */
+  section?: string;
+  title?: string;
+}) {
   const [queues, setQueues] = useState<Queue[] | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
+  const query = section ? `?section=${encodeURIComponent(section)}` : "";
   const load = useCallback((signal?: AbortSignal) => {
     setRefreshing(true);
-    return api<{ queues: Queue[] }>("/api/crm/queues", { signal }).then(({ ok, data, aborted }) => {
+    return api<{ queues: Queue[] }>(`/api/crm/queues${query}`, { signal }).then(({ ok, data, aborted }) => {
       // A superseded request must not clobber fresher state, and an unmounted
       // component must not flip its own busy flags.
       if (aborted) return;
@@ -76,7 +97,7 @@ export function CrmTodayQueues() {
       setLoading(false);
       setRefreshing(false);
     });
-  }, []);
+  }, [query]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -93,13 +114,17 @@ export function CrmTodayQueues() {
     <SectionCard
       title={
         <span className="flex flex-wrap items-center gap-2">
-          <span>امروز</span>
+          <span>{title}</span>
           {waiting.length > 0 ? (
             <StatusBadge tone="active">{formatPersianNumber(total)} مورد نیازمند توجه</StatusBadge>
           ) : null}
         </span>
       }
-      description="صف‌هایی بر پایهٔ قاعده، نه فهرست دستی: هر ردیف می‌گوید چرا اینجاست و از کدام صفحه رسیدگی می‌شود."
+      description={
+        section
+          ? "کارهای باز این بخش، بر پایهٔ قاعده: هر ردیف می‌گوید چرا اینجاست و از کدام صفحه رسیدگی می‌شود."
+          : "صف‌هایی بر پایهٔ قاعده، نه فهرست دستی: هر ردیف می‌گوید چرا اینجاست و از کدام صفحه رسیدگی می‌شود."
+      }
       actions={
         <Button
           type="button"
@@ -119,8 +144,9 @@ export function CrmTodayQueues() {
         <EmptyState>صف‌های امروز دریافت نشد.</EmptyState>
       ) : waiting.length === 0 ? (
         <EmptyState>
-          همین حالا کار سرگردانی نیست: نه پیگیری عقب‌افتاده‌ای، نه تیکتی بیرون از مهلت، نه معاملهٔ راکدی.
-          وقتی چیزی به توجه نیاز پیدا کند، همین‌جا بالای صفحه می‌آید.
+          {section
+            ? "در این بخش کاری بیرون از قاعده یا عقب‌افتاده نیست؛ وقتی چیزی به توجه نیاز پیدا کند، همین‌جا بالای صفحه می‌آید."
+            : "همین حالا کار سرگردانی نیست: نه پیگیری عقب‌افتاده‌ای، نه تیکتی بیرون از مهلت، نه معاملهٔ راکدی. وقتی چیزی به توجه نیاز پیدا کند، همین‌جا بالای صفحه می‌آید."}
         </EmptyState>
       ) : (
         <div className="grid gap-3 lg:grid-cols-2">

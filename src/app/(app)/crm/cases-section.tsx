@@ -46,6 +46,7 @@ import { api, ErrorBox, errorMessage, Field, inputClass } from "@/app/dashboard/
 import { crmCustomerHref } from "./crm-routes";
 import { CustomerSearchField } from "./customer-search";
 import { CrmCardHeading } from "./crm-card-heading";
+import { CrmTodayQueues } from "./today-queues";
 
 interface ServiceCase {
   id: string;
@@ -134,6 +135,11 @@ export function CasesSection({ canDelete = false }: { canDelete?: boolean }) {
   return (
     <div className="min-w-0 space-y-4">
       <ErrorBox>{error}</ErrorBox>
+
+      {/* The service desk's own outstanding work, above the list: a queue of
+          tickets about to breach their target is the reason somebody opens
+          this screen, not a report they read afterwards. */}
+      <CrmTodayQueues section="cases" title="تیکت‌های نیازمند توجه" />
 
       <SectionCard
         title={

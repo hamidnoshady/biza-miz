@@ -363,6 +363,31 @@ including in the `DELETE`, so there is no check-then-act race.
 
 ## Permissions
 
+`src/lib/crm-permissions.ts` is the single source of truth: one row per section
+naming who may read it, write it, reshape it, destroy it or merge it. Everything
+else derives from it — the sidebar, the page gate, and the boolean props the
+section components use to draw their controls.
+
+The permission vocabulary is the six keys below plus `parties.view` /
+`parties.manage`, which the floor's sections (directory, customer file,
+activities, cases) genuinely need because their data belongs to the shared
+parties service.
+
+Two shapes worth knowing before editing the table:
+
+- **`read` is a conjunction (`all`) plus alternatives (`anyOf`).** The
+  alternatives exist for the management sections, which require the base read
+  *and* a management capability — so `crm.export` can never substitute for
+  `crm.view` while the cashier, who holds `crm.view` through `crm.manage`, is
+  still kept off the forecast.
+- **`screenOwned` and `routes` are declared exceptions.** `screenOwned` names
+  actions a screen gates with its own prop (the directory's write controls, the
+  case delete button); `routes` names a route whose requirement deliberately
+  differs from its action's default (the relationships endpoints, which need
+  `crm.manage` although they are written from the customer file). Both are
+  read by `crm-permissions.test.ts`, which fails when a route and the table
+  disagree in either direction.
+
 CRM permissions split by **blast radius**, not by screen:
 
 | Permission | What it protects |
@@ -391,6 +416,17 @@ only, matching what the nav already showed them.
 | Database | `npm run test:db` (~8 min) |
 | Design | `npm run test:design` |
 | Build | `npm run build` |
+
+`src/lib/crm-permissions.test.ts` reads every route under `src/app/api/crm/` and
+compares it with `crm-permissions.ts` in both directions: whoever may open a
+section must pass its routes, and whoever the table promises an action must not
+be refused by the route that performs it. It also pins the admitted section set
+per built-in role, so a tweak to the table cannot silently hand the floor the
+pipeline.
+
+The product shape — the six destinations, the smart queues, explainable health,
+the handoff, and the seams deliberately left unbuilt — is in
+`docs/crm-relationship-os.md`.
 
 Boundary rules live in `src/lib/crm-app-boundaries.test.ts` and run in the unit
 suite. They read source rather than behaviour on purpose: a future change that

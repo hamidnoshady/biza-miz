@@ -70,6 +70,7 @@ import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "@/app/d
 import { crmCustomerHref, crmDealOrderHref } from "./crm-routes";
 import { CustomerSearchField } from "./customer-search";
 import { CrmCardHeading } from "./crm-card-heading";
+import { CrmTodayQueues } from "./today-queues";
 
 interface Deal {
   id: string;
@@ -276,6 +277,10 @@ export function DealsSection() {
   return (
     <div className="min-w-0 space-y-4">
       <ErrorBox>{error}</ErrorBox>
+
+      {/* What is stuck and what is worth the most, before the board itself:
+          «کدام معامله را باید جلو ببرم؟» is the question the fold answers. */}
+      <CrmTodayQueues section="deals" title="معامله‌های نیازمند توجه" />
 
       <SectionCard
         title={
