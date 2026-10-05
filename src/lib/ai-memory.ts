@@ -178,10 +178,13 @@ export function renderMemoryForPrompt(layers: {
   const lines: string[] = [];
   let used = 0;
   for (const section of sections) {
-    for (const entry of section.entries) {
+    // A layer may legitimately be absent (an empty app scope, a turn with no
+    // project). Rendering must not turn that into a broken prompt.
+    for (const entry of section.entries ?? []) {
       if (used >= MAX_MEMORY_TOTAL_CHARS) break;
       const remaining = MAX_MEMORY_TOTAL_CHARS - used;
-      const content = entry.content.length > remaining ? entry.content.slice(0, remaining) : entry.content;
+      const text = typeof entry.content === "string" ? entry.content : "";
+      const content = text.length > remaining ? text.slice(0, remaining) : text;
       used += content.length;
       lines.push(`- [${section.label}] ${content}`);
     }
@@ -222,8 +225,19 @@ export function validateMemoryInput(input: CreateMemoryInput): { ok: true } | { 
     return { ok: false, error: "memory_tenant_scope_shape" };
   }
   // A memory row is not a secret store. Refuse anything that looks like a
-  // credential rather than trying to be clever about it after the fact.
-  if (/(?:api[_-]?key|secret|token|password|passphrase|bearer)\s*[:=]/i.test(content)) {
+  // credential rather than trying to be clever about it after the fact. The
+  // check is deliberately a shape test, not a value test: it does not know
+  // whether `sk-…` is live, only that a member is pasting a credential into a
+  // field that every future turn will read.
+  if (
+    /(?:api[_-]?key|secret|token|password|passphrase)\s*[:=]\s*\S/i.test(content) ||
+    // A bearer credential, with or without a separator: `bearer eyJ…` is as
+    // much a secret as `authorization: bearer eyJ…`.
+    /\bbearer\s+[A-Za-z0-9._\-]{12,}/i.test(content) ||
+    // A provider key prefix, which is recognisable enough to be worth refusing
+    // even when the member did not label it.
+    /\b(?:sk|pk|rk)_[A-Za-z0-9]{16,}\b/.test(content)
+  ) {
     return { ok: false, error: "memory_looks_like_a_secret" };
   }
   return { ok: true };

@@ -26,6 +26,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { BadgeCheckIcon, PlusIcon, SparklesIcon } from "lucide-react";
 import { api, Button, Card, EmptyState, ErrorBox, Field, inputClass, selectClass, useCan } from "../../ui";
+import { AiConsoleNav } from "../ai-console-nav";
 
 interface IndustryOption {
   value: string;
@@ -183,8 +184,9 @@ export default function PlatformAiWidgetsPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl">
-      <div className="mb-5 flex items-start gap-3">
+    <div className="mx-auto w-full max-w-6xl space-y-5">
+      <AiConsoleNav />
+      <div className="flex items-start gap-3">
         <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-sky-500/15 text-sky-700 dark:text-sky-300">
           <SparklesIcon className="size-5" aria-hidden="true" />
         </span>

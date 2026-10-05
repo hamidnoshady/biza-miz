@@ -79,9 +79,13 @@ export function estimateResearchMaxCostUsd(input: {
 }): number {
   const rounds = Math.max(1, Math.floor(input.maxRounds || 1));
   const perRound = input.maxOutputTokensPerRound ?? ESTIMATED_OUTPUT_TOKENS_PER_ROUND;
-  // Rounded up to the cent: the number the user approves must never be lower
-  // than the number the loop is allowed to reach.
-  return Math.ceil((rounds * perRound * ESTIMATED_BLENDED_USD_PER_1K_TOKENS) / 100) / 100;
+  // The rate is per 1K tokens, so the token count is divided by 1000 first.
+  const raw = (rounds * perRound * ESTIMATED_BLENDED_USD_PER_1K_TOKENS) / 1000;
+  // Rounded UP to the cent: the number the user approves must never be lower
+  // than the number the loop is allowed to reach. `Math.ceil(x * 100) / 100`,
+  // not `Math.ceil(x / 100) / 100` — the latter rounds 0.012 down to 0.01,
+  // which is exactly the under-report this is here to prevent.
+  return Math.ceil(raw * 100) / 100;
 }
 
 export function clampInt(value: number, min: number, max: number): number {

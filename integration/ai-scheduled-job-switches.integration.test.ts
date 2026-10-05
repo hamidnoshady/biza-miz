@@ -1,13 +1,19 @@
 /**
- * AI Hub Wave 3 (Issue #143) exit criterion, against a real database.
+ * Issue #812 §4 — the scheduled-job switches, against a real database.
  *
  * The generic `tenant-isolation.integration.test.ts` proves ai_agent_settings
- * carries RLS like every other tenant table; this file proves the actual
- * product behavior the new table exists for — a business can turn off
- * `receivables_follow_up` and stop getting customer-debt drafts, while a
- * sibling business with that same agent enabled keeps getting them, and each
- * business's other agents stay independently toggleable regardless of what
+ * carries RLS like every other tenant table; this file proves the actual product
+ * behaviour the table exists for — a business can turn off
+ * `receivables_follow_up` and stop getting customer-debt drafts, while a sibling
+ * business with that same job enabled keeps getting them, and each business's
+ * other jobs stay independently toggleable regardless of what
  * receivables_follow_up is set to.
+ *
+ * "Job", not "agent": these are the background scheduled runs of the proactive
+ * tick. Issue #812 reclaimed the word "Agent" for the Superadmin-built system
+ * agents, so this surface was migrated rather than left to share a name with
+ * them. The table keeps its old name; renaming a tenant table for vocabulary
+ * is a data migration with no product payoff.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
@@ -152,22 +158,22 @@ beforeEach(async () => {
   beta.customerId = seededBeta.customerId;
 });
 
-describe("per-agent settings", () => {
+describe("per-job switches", () => {
   it("default to disabled and stay isolated per business", async () => {
-    const alphaDefaults = await dbLib.withTenant(alpha.businessId, () => proactive.getAiAgentSettings(alpha.businessId));
+    const alphaDefaults = await dbLib.withTenant(alpha.businessId, () => proactive.getScheduledJobSwitches(alpha.businessId));
     expect(alphaDefaults.receivables_follow_up).toEqual({ enabled: false, scheduleHour: 8 });
     expect(alphaDefaults.sales_analyzer.enabled).toBe(false);
 
     await dbLib.withTenant(alpha.businessId, () =>
-      proactive.setAiAgentEnabled(alpha.businessId, "sales_analyzer", true),
+      proactive.setScheduledJobEnabled(alpha.businessId, "sales_analyzer", true),
     );
 
-    const alphaAfter = await dbLib.withTenant(alpha.businessId, () => proactive.getAiAgentSettings(alpha.businessId));
+    const alphaAfter = await dbLib.withTenant(alpha.businessId, () => proactive.getScheduledJobSwitches(alpha.businessId));
     expect(alphaAfter.sales_analyzer.enabled).toBe(true);
     expect(alphaAfter.receivables_follow_up.enabled).toBe(false);
 
     // Beta never opted in, and enabling Alpha's agent must not leak across the tenant boundary.
-    const betaSettings = await dbLib.withTenant(beta.businessId, () => proactive.getAiAgentSettings(beta.businessId));
+    const betaSettings = await dbLib.withTenant(beta.businessId, () => proactive.getScheduledJobSwitches(beta.businessId));
     expect(betaSettings.sales_analyzer.enabled).toBe(false);
   });
 });
@@ -175,11 +181,11 @@ describe("per-agent settings", () => {
 describe("receivables_follow_up gates customer_debt_drafts", () => {
   it("produces a draft for a business with the agent on, none for a sibling with it off, on the same tick", async () => {
     await dbLib.withTenant(alpha.businessId, () =>
-      proactive.setAiAgentEnabled(alpha.businessId, "receivables_follow_up", true),
+      proactive.setScheduledJobEnabled(alpha.businessId, "receivables_follow_up", true),
     );
     // Beta enables a different agent to prove it stays independent of receivables_follow_up.
     await dbLib.withTenant(beta.businessId, () =>
-      proactive.setAiAgentEnabled(beta.businessId, "reconciliation_assistant", true),
+      proactive.setScheduledJobEnabled(beta.businessId, "reconciliation_assistant", true),
     );
 
     await proactive.runAiProactiveTick();
@@ -205,54 +211,65 @@ describe("receivables_follow_up gates customer_debt_drafts", () => {
     expect(betaRuns.rows).toEqual([]);
 
     // Beta's own reconciliation_assistant toggle is untouched by receivables_follow_up staying off.
-    const betaAgents = await dbLib.withTenant(beta.businessId, () => proactive.getAiAgentSettings(beta.businessId));
-    expect(betaAgents.reconciliation_assistant.enabled).toBe(true);
-    expect(betaAgents.receivables_follow_up.enabled).toBe(false);
+    const betaSwitches = await dbLib.withTenant(beta.businessId, () => proactive.getScheduledJobSwitches(beta.businessId));
+    expect(betaSwitches.reconciliation_assistant.enabled).toBe(true);
+    expect(betaSwitches.receivables_follow_up.enabled).toBe(false);
   });
 });
 
-describe("getAiAgentsTodayTasks (Wave 4, issue #144)", () => {
-  // receivables_follow_up (customer_debt_drafts) needs no AI provider call, unlike the
-  // digest agents, so it is the cheapest agent to actually drive to a completed run here.
-  it("marks a business's own completed run as done without leaking into a sibling with the same agent enabled but no run yet", async () => {
-    // Same agent enabled on both sides is the scenario where a missing business_id
-    // filter (or a broken RLS policy) would leak Alpha's "done" run into Beta's read.
+describe("the tick never claims a run a disabled job owes", () => {
+  // receivables_follow_up (customer_debt_drafts) needs no AI provider call, unlike
+  // the digest jobs, so it is the cheapest job to actually drive to a completed
+  // run here.
+  it("claims a run for the business that turned the job on, and none for a sibling that did not", async () => {
+    // Same job enabled on both sides is the scenario where a missing business_id
+    // filter (or a broken RLS policy) would leak Alpha's run into Beta's read.
     await dbLib.withTenant(alpha.businessId, () =>
-      proactive.setAiAgentEnabled(alpha.businessId, "receivables_follow_up", true),
+      proactive.setScheduledJobEnabled(alpha.businessId, "receivables_follow_up", true),
     );
-    await dbLib.withTenant(beta.businessId, () =>
-      proactive.setAiAgentEnabled(beta.businessId, "receivables_follow_up", true),
+
+    await proactive.runAiProactiveTick();
+
+    const alphaRuns = await db.query(
+      `SELECT status FROM ai_proactive_runs WHERE business_id = $1 AND kind = 'customer_debt_drafts'`,
+      [alpha.businessId],
     );
-    // Beta opts out of background work entirely so its tick never claims a run,
-    // leaving its agent enabled but genuinely still pending for today.
-    await db.query(
-      `UPDATE business_features SET enabled = false WHERE business_id = $1 AND flag_key = 'ai_assistant'`,
+    expect(alphaRuns.rows).toEqual([{ status: "completed" }]);
+
+    // Beta never enabled it, so the tick left its period key unclaimed — which is
+    // what lets a business enable the job later the same day and still get that
+    // day's run.
+    const betaRuns = await db.query(
+      `SELECT status FROM ai_proactive_runs WHERE business_id = $1 AND kind = 'customer_debt_drafts'`,
       [beta.businessId],
     );
+    expect(betaRuns.rows).toEqual([]);
 
-    await proactive.runAiProactiveTick();
-
-    const alphaTasks = await dbLib.withTenant(alpha.businessId, () =>
-      proactive.getAiAgentsTodayTasks(alpha.businessId),
-    );
-    const alphaTask = alphaTasks.find((t) => t.agentKey === "receivables_follow_up");
-    expect(alphaTask?.status).toBe("done");
-
-    const betaTasks = await dbLib.withTenant(beta.businessId, () => proactive.getAiAgentsTodayTasks(beta.businessId));
-    const betaTask = betaTasks.find((t) => t.agentKey === "receivables_follow_up");
-    expect(betaTask?.status).toBe("pending");
+    const betaDrafts = await db.query(`SELECT customer_id FROM ai_proactive_drafts WHERE business_id = $1`, [
+      beta.businessId,
+    ]);
+    expect(betaDrafts.rows).toEqual([]);
   });
 
-  it("is empty once a business turns every agent off, even with runs recorded from when they were on", async () => {
+  it("stops claiming once the job is turned off, even with runs recorded from when it was on", async () => {
     await dbLib.withTenant(alpha.businessId, () =>
-      proactive.setAiAgentEnabled(alpha.businessId, "receivables_follow_up", true),
+      proactive.setScheduledJobEnabled(alpha.businessId, "receivables_follow_up", true),
     );
     await proactive.runAiProactiveTick();
     await dbLib.withTenant(alpha.businessId, () =>
-      proactive.setAiAgentEnabled(alpha.businessId, "receivables_follow_up", false),
+      proactive.setScheduledJobEnabled(alpha.businessId, "receivables_follow_up", false),
     );
+    await proactive.runAiProactiveTick();
 
-    const tasks = await dbLib.withTenant(alpha.businessId, () => proactive.getAiAgentsTodayTasks(alpha.businessId));
-    expect(tasks).toEqual([]);
+    const alphaRuns = await db.query(
+      `SELECT status FROM ai_proactive_runs WHERE business_id = $1 AND kind = 'customer_debt_drafts'`,
+      [alpha.businessId],
+    );
+    expect(alphaRuns.rows).toEqual([{ status: "completed" }]);
+
+    const switches = await dbLib.withTenant(alpha.businessId, () =>
+      proactive.getScheduledJobSwitches(alpha.businessId),
+    );
+    expect(switches.receivables_follow_up.enabled).toBe(false);
   });
 });

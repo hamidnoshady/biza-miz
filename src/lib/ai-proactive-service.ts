@@ -40,19 +40,15 @@ import { serviceDueDate } from "./watch";
 import { runCoworkerTick } from "./ai-coworker-service";
 import { runAutomationsTick } from "./ai-automations-service";
 import {
-  AGENT_RUN_KIND,
-  AI_AGENT_KEYS,
-  aiAgentsTodayTasks,
-  aiAgentStatus,
-  defaultAiAgentSettings,
   digestSectionInclusion,
   hasAnyDigestContent,
-  type AiAgentKey,
-  type AiAgentSettingsMap,
-  type AiAgentStatus,
-  type AiAgentTodayTask,
+  isScheduledJobKey,
+  JOB_RUN_KIND,
+  SCHEDULED_JOB_KEYS,
   type DigestSectionInclusion,
-} from "./ai-agents";
+  type ScheduledJobKey,
+  type ScheduledJobSwitches,
+} from "./ai-scheduled-jobs";
 
 export const AI_PROACTIVE_TICK_INTERVAL_MS = PROACTIVE_TICK_INTERVAL_MS;
 
@@ -161,78 +157,57 @@ export async function getAiProactiveOverview(businessId: string): Promise<AiProa
   };
 }
 
-export async function getAiAgentSettings(businessId: string): Promise<AiAgentSettingsMap> {
-  const settings = defaultAiAgentSettings();
+/**
+ * The per-job opt-in switches for this business (issue #812 §4: "scheduled
+ * jobs", not agents — see `ai-scheduled-jobs.ts` for why the word had to move).
+ *
+ * Every key defaults to off, so a business that has never opened the automation
+ * settings does not wake up on a schedule and does not pay for a digest. The
+ * switches are read only by the tick, which uses them to decide whether a run
+ * is worth claiming at all.
+ */
+export async function getScheduledJobSwitches(businessId: string): Promise<ScheduledJobSwitches> {
+  const switches = Object.fromEntries(
+    SCHEDULED_JOB_KEYS.map((key) => [
+      key,
+      { enabled: false, scheduleHour: DEFAULT_AI_PROACTIVE_SETTINGS.dailyDigestHour },
+    ]),
+  ) as ScheduledJobSwitches;
   const { rows } = await query<{ agent_key: string; enabled: boolean; schedule_hour: number }>(
     `SELECT agent_key, enabled, schedule_hour FROM ai_agent_settings WHERE business_id = $1`,
     [businessId],
   );
   for (const row of rows) {
-    if ((AI_AGENT_KEYS as readonly string[]).includes(row.agent_key)) {
-      settings[row.agent_key as AiAgentKey] = { enabled: row.enabled, scheduleHour: row.schedule_hour };
-    }
+    if (!isScheduledJobKey(row.agent_key)) continue;
+    switches[row.agent_key] = { enabled: row.enabled, scheduleHour: row.schedule_hour };
   }
-  return settings;
+  return switches;
 }
 
-export async function setAiAgentEnabled(
+/**
+ * Turns one scheduled job on or off for this business.
+ *
+ * The write is scoped by `business_id` and lands inside the caller's tenant
+ * scope (the routes and the integration tests wrap it in `withTenant`), so the
+ * RLS policy is the boundary — a sibling business's switches are unreachable
+ * from here, which is the isolation this module's database test exists to prove.
+ */
+export async function setScheduledJobEnabled(
   businessId: string,
-  agentKey: AiAgentKey,
+  jobKey: ScheduledJobKey,
   enabled: boolean,
-): Promise<AiAgentSettingsMap> {
-  if (typeof enabled !== "boolean") throw new Error("invalid_agent_enabled");
-  const current = await getAiAgentSettings(businessId);
-  const scheduleHour = current[agentKey]?.scheduleHour ?? DEFAULT_AI_PROACTIVE_SETTINGS.dailyDigestHour;
+): Promise<ScheduledJobSwitches> {
+  if (typeof enabled !== "boolean") throw new Error("invalid_job_enabled");
+  const current = await getScheduledJobSwitches(businessId);
+  const scheduleHour = current[jobKey]?.scheduleHour ?? DEFAULT_AI_PROACTIVE_SETTINGS.dailyDigestHour;
   await query(
     `INSERT INTO ai_agent_settings (business_id, agent_key, enabled, schedule_hour)
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (business_id, agent_key)
      DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now()`,
-    [businessId, agentKey, enabled, scheduleHour],
+    [businessId, jobKey, enabled, scheduleHour],
   );
-  return getAiAgentSettings(businessId);
-}
-
-export interface AiAgentOverviewEntry {
-  agentKey: AiAgentKey;
-  enabled: boolean;
-  scheduleHour: number;
-  status: AiAgentStatus;
-  lastRunAt: string | null;
-  lastRunStatus: Exclude<RunStatus, "running"> | null;
-}
-
-/** Feeds the hub's "ایجنت‌های فعال" cards: one row per agent, independent of the others. */
-export async function getAiAgentsOverview(businessId: string): Promise<AiAgentOverviewEntry[]> {
-  const [proactive, agentSettings, timezone] = await Promise.all([
-    getAiProactiveSettings(businessId),
-    getAiAgentSettings(businessId),
-    businessTimezone(businessId),
-  ]);
-  const currentHour = localBusinessClock(new Date(), timezone).hour;
-
-  const runKinds = [...new Set(Object.values(AGENT_RUN_KIND))];
-  const { rows: lastRuns } = await query<{ kind: AiProactiveRunKind; finished_at: Date | null; status: RunStatus }>(
-    `SELECT DISTINCT ON (kind) kind, finished_at, status
-       FROM ai_proactive_runs
-      WHERE business_id = $1 AND kind = ANY($2::text[]) AND status <> 'running'
-      ORDER BY kind, finished_at DESC NULLS LAST, started_at DESC`,
-    [businessId, runKinds],
-  );
-  const lastRunByKind = new Map(lastRuns.map((row) => [row.kind, row]));
-
-  return AI_AGENT_KEYS.map((agentKey) => {
-    const agent = agentSettings[agentKey];
-    const lastRun = lastRunByKind.get(AGENT_RUN_KIND[agentKey]);
-    return {
-      agentKey,
-      enabled: agent.enabled,
-      scheduleHour: agent.scheduleHour,
-      status: aiAgentStatus({ masterEnabled: proactive.enabled, agent, currentHour }),
-      lastRunAt: lastRun?.finished_at?.toISOString() ?? null,
-      lastRunStatus: lastRun && lastRun.status !== "running" ? lastRun.status : null,
-    };
-  });
+  return getScheduledJobSwitches(businessId);
 }
 
 /**
@@ -241,32 +216,6 @@ export async function getAiAgentsOverview(businessId: string): Promise<AiAgentOv
  * row already exists for today's period key (any terminal or in-progress
  * status counts — the row only appears once the tick has claimed it).
  */
-export async function getAiAgentsTodayTasks(businessId: string): Promise<AiAgentTodayTask[]> {
-  const [proactive, agentSettings, timezone] = await Promise.all([
-    getAiProactiveSettings(businessId),
-    getAiAgentSettings(businessId),
-    businessTimezone(businessId),
-  ]);
-  const clock = localBusinessClock(new Date(), timezone);
-
-  const runKinds = [...new Set(Object.values(AGENT_RUN_KIND))];
-  const periodKeys = runKinds.map((kind) => proactivePeriodKey(kind, clock));
-  const { rows } = await query<{ kind: AiProactiveRunKind; period_key: string }>(
-    `SELECT DISTINCT kind, period_key
-       FROM ai_proactive_runs
-      WHERE business_id = $1 AND kind = ANY($2::text[]) AND period_key = ANY($3::text[])`,
-    [businessId, runKinds, periodKeys],
-  );
-  const runsToday = new Set(rows.map((row) => `${row.kind}:${row.period_key}`));
-
-  return aiAgentsTodayTasks({
-    masterEnabled: proactive.enabled,
-    agentSettings,
-    weeklyDigestWeekday: proactive.weeklyDigestWeekday,
-    currentWeekday: clock.weekday,
-    hasRunForKind: (runKind) => runsToday.has(`${runKind}:${proactivePeriodKey(runKind, clock)}`),
-  });
-}
 
 async function claimRun(
   businessId: string,
@@ -811,8 +760,8 @@ async function runBusinessProactiveJobs(
   } catch (error) {
     console.error(`autopilot run failed for business ${businessId}:`, errorText(error));
   }
-  const agentSettings = await getAiAgentSettings(businessId);
-  const inclusion = digestSectionInclusion(agentSettings);
+  const switches = await getScheduledJobSwitches(businessId);
+  const inclusion = digestSectionInclusion(switches);
   let completed = 0;
 
   for (const kind of due) {
@@ -820,12 +769,12 @@ async function runBusinessProactiveJobs(
       if (kind === "customer_debt_drafts") {
         // A disabled agent must not even claim the run — leave the period
         // key unclaimed so enabling it later the same day can still run.
-        if (!agentSettings.receivables_follow_up.enabled) continue;
+        if (!switches.receivables_follow_up.enabled) continue;
         if (await runDebtDrafts(businessId, clock)) completed += 1;
         continue;
       }
       if (kind === "service_reminder_drafts") {
-        if (!agentSettings.service_reminders.enabled) continue;
+        if (!switches.service_reminders.enabled) continue;
         if (await runServiceReminderDrafts(businessId, clock)) completed += 1;
         continue;
       }
