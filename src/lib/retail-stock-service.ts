@@ -10,10 +10,15 @@
  * engine, and the ledger side rides the `retail.*` domain events in
  * retail-stock-posting-rules.ts.
  *
- * Scope boundaries, deliberately: `weight` items (gold) and `serial` items
- * (watches) keep their existing intake paths (setWeightAttributes / addSerial)
- * and are refused here with a clear message, because those models are
- * one-row-per-unit, not a fungible quantity on `item_stock`. Transfers move
+ * Scope boundaries, deliberately: `weight` items (gold) keep their existing
+ * intake path (setWeightAttributes) and are refused here with a clear
+ * message, because that model is one-row-per-unit with a formula-priced
+ * cost, not a fungible quantity on `item_stock`. `serial` items (watches)
+ * ARE received here since issue #795: a serial purchase line names its
+ * exact physical serials and creates their `item_serials` rows in the same
+ * transaction as the AP posting, which is what gives a serialized unit's
+ * cost basis a real purchase behind it (bare `addSerial` registration
+ * records a cost with no accounting). Transfers move
  * fungible `none`-tracking stock AND `batch`-tracking stock between two branch
  * items: a batch transfer relieves the lots at the source (a named lot when
  * the line names one, FEFO otherwise), records exactly which lots left, and
@@ -36,6 +41,7 @@ import { query } from "./db";
 import { roundRial, rialText, type RialText } from "./inventory-exact";
 import { emitDomainEvent } from "./posting-engine";
 import { classifyStockLevel, deadStockCutoff, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
+import { validateWarrantyMonths } from "./watch";
 // Side-effect import: registers the retail.* stock posting rules.
 import "./retail-stock-posting-rules";
 
@@ -53,6 +59,16 @@ type PurchaseLine = {
   manufactureDate?: string | null;
   /** Batch-tracked only — the supplier's own reference for this delivery. */
   supplierReference?: string | null;
+  /**
+   * Serial-tracked only (issue #795 item 1) — the exact physical units this
+   * line receives. A serial line of quantity N must name exactly N serials;
+   * each becomes an `item_serials` row with this line's unit cost as its
+   * cost basis and opens the model's warranty default. This is what finally
+   * completes the serialized accounting chain: purchase → Debit
+   * {industry}Inventory / Credit AP (retail.purchase_received), so the later
+   * sale's Credit of that same inventory account has a real debit behind it.
+   */
+  serials?: { serialNumber: string; warrantyMonths?: number }[] | null;
 };
 
 export interface ReceivePurchaseResult {
@@ -120,11 +136,53 @@ export async function receiveItemPurchase(
       });
     } else if (item.tracking === "none") {
       await receiveStock(line.itemId, { quantity: line.quantity, unitCost: line.unitCost }, client);
+    } else if (item.tracking === "serial") {
+      // Issue #795 item 1 — a serial-tracked line is received as exact
+      // physical units, inside this same transaction, so the serial rows,
+      // their cost basis, the purchase document and the inventory/AP posting
+      // are one atomic fact. Distinct unit costs belong on distinct lines
+      // (the same way an invoice works), so every serial on this line
+      // carries this line's exact unit cost.
+      const qty = Number(line.quantity);
+      if (!Number.isInteger(qty) || qty <= 0) {
+        throw new RetailStockError("تعداد کالای سریالی باید یک عدد صحیح مثبت باشد.");
+      }
+      if (!Number.isInteger(line.unitCost) || line.unitCost <= 0) {
+        throw new RetailStockError("بهای هر دستگاه سریالی باید یک عدد صحیح مثبت (ریال) باشد.");
+      }
+      const serials = line.serials ?? [];
+      if (serials.length !== qty) {
+        throw new RetailStockError(
+          "دریافت کالای سریالی باید به ازای هر واحد دقیقاً یک شماره سریال داشته باشد.",
+        );
+      }
+      const seen = new Set<string>();
+      for (const s of serials) {
+        const serialNumber = s.serialNumber?.trim();
+        if (!serialNumber) throw new RetailStockError("شماره سریال نمی‌تواند خالی باشد.");
+        if (seen.has(serialNumber)) {
+          throw new RetailStockError(`شماره سریال «${serialNumber}» در این ردیف تکراری است.`);
+        }
+        seen.add(serialNumber);
+        const warrantyMonths = s.warrantyMonths ?? 0;
+        const warrantyError = validateWarrantyMonths(warrantyMonths);
+        if (warrantyError) throw new RetailStockError(warrantyError);
+        try {
+          await client.query(
+            `INSERT INTO item_serials (item_id, serial_number, unit_cost, warranty_months)
+             VALUES ($1, $2, $3, $4)`,
+            [line.itemId, serialNumber, line.unitCost, warrantyMonths],
+          );
+        } catch (err) {
+          if ((err as { code?: string }).code === "23505") {
+            throw new RetailStockError(`شماره سریال «${serialNumber}» قبلاً برای این کالا ثبت شده است.`);
+          }
+          throw err;
+        }
+      }
     } else {
       throw new RetailStockError(
-        item.tracking === "serial"
-          ? "ورود کالای سریالی از مسیر «سریال دستگاه» ثبت می‌شود."
-          : "ورود کالای وزنی از مسیر وزن/عیار ثبت می‌شود.",
+        "ورود کالای وزنی از مسیر وزن/عیار ثبت می‌شود.",
       );
     }
 

@@ -26,6 +26,7 @@ let itemsService: typeof import("../src/lib/items-service");
 let watchSales: typeof import("../src/lib/watch-sales-service");
 let repairs: typeof import("../src/lib/repairs-service");
 let watchCrm: typeof import("../src/lib/watch-crm-service");
+let retailStock: typeof import("../src/lib/retail-stock-service");
 
 const biz = { id: "", locationId: "" };
 const acct = {
@@ -36,6 +37,7 @@ const acct = {
   watchInventory: "",
   repairServiceRevenue: "",
   repairPartsExpense: "",
+  accountsPayable: "",
 };
 
 function urlFor(database: string): string {
@@ -69,6 +71,7 @@ beforeAll(async () => {
   watchSales = await import("../src/lib/watch-sales-service");
   repairs = await import("../src/lib/repairs-service");
   watchCrm = await import("../src/lib/watch-crm-service");
+  retailStock = await import("../src/lib/retail-stock-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -97,6 +100,8 @@ beforeEach(async () => {
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM item_serials");
+  await db.query("DELETE FROM item_purchase_items");
+  await db.query("DELETE FROM item_purchases");
   await db.query("DELETE FROM items");
   await db.query("DELETE FROM accounts");
   await db.query("DELETE FROM businesses");
@@ -121,7 +126,8 @@ beforeEach(async () => {
             ($1, '5120', 'Watch COGS', 'expense'),
             ($1, '1330', 'Watch Inventory', 'asset'),
             ($1, '4800', 'Repair Revenue', 'revenue'),
-            ($1, '5130', 'Repair Parts Expense', 'expense')
+            ($1, '5130', 'Repair Parts Expense', 'expense'),
+            ($1, '2100', 'Accounts Payable', 'liability')
      RETURNING id, code`,
     [biz.id],
   );
@@ -133,6 +139,7 @@ beforeEach(async () => {
     "1330": "watchInventory",
     "4800": "repairServiceRevenue",
     "5130": "repairPartsExpense",
+    "2100": "accountsPayable",
   };
   for (const row of accounts.rows) acct[byCode[row.code]] = row.id;
 });
@@ -924,5 +931,153 @@ describe("Issue #795 Phase 1 — repair lifecycle & accounting guards", () => {
       { account_id: byCode.get("1100"), debit: "2500000", credit: "0" },
       { account_id: byCode.get("4800"), debit: "0", credit: "2500000" },
     ]);
+  });
+});
+
+/**
+ * Issue #795 Phase 2 (item 1) — serialized purchase receipt. Receiving a
+ * serial-tracked purchase line must name exactly N physical serials, create
+ * them with their exact cost basis and warranty default, and post
+ * Debit watchInventory / Credit accounts payable in the same transaction —
+ * which is what gives the later sale's Credit of watchInventory a real
+ * preceding debit.
+ */
+describe("Issue #795 Phase 2 — serialized purchase receipt", () => {
+  it("receives exact serials with cost basis + warranty and posts inventory/AP, completing the chain to sale COGS", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت مچی اتومات",
+      tracking: "serial",
+    });
+
+    const purchase = await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [
+          {
+            itemId: item.id,
+            quantity: "2",
+            unitCost: 30_000_000,
+            serials: [
+              { serialNumber: "SN-795-A", warrantyMonths: 24 },
+              { serialNumber: "SN-795-B", warrantyMonths: 24 },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(purchase.total).toBe("60000000");
+
+    // The receipt posted Debit watchInventory / Credit AP for the exact total.
+    const { rows: events } = await db.query<{ entry_id: string | null }>(
+      "SELECT entry_id FROM domain_events WHERE event_type = 'retail.purchase_received' AND source_id = $1",
+      [purchase.id],
+    );
+    expect(events).toHaveLength(1);
+    expect(await linesOf(events[0].entry_id)).toEqual([
+      { account_id: acct.watchInventory, debit: "60000000", credit: "0" },
+      { account_id: acct.accountsPayable, debit: "0", credit: "60000000" },
+    ]);
+
+    // Both physical units exist, in stock, with their exact cost basis and
+    // the warranty default they will be sold with.
+    const units = await watchSales.listSerialUnits(biz.locationId);
+    expect(units.map((u) => [u.serialNumber, u.status, u.unitCost, u.warrantyMonths])).toEqual([
+      ["SN-795-A", "in_stock", 30_000_000, 24],
+      ["SN-795-B", "in_stock", 30_000_000, 24],
+    ]);
+
+    // Selling one of them now credits the same inventory account the
+    // purchase debited — the chain the audit found broken.
+    const sold = units[0];
+    const sale = await withTransaction((client) =>
+      watchSales.sellSerializedUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: sold.id,
+        price: 45_000_000,
+        vatPercent: 9,
+        paymentMethod: "cash",
+      }),
+    );
+    expect(await linesOf(sale.cogsEntryId)).toEqual([
+      { account_id: acct.watchCogs, debit: "30000000", credit: "0" },
+      { account_id: acct.watchInventory, debit: "0", credit: "30000000" },
+    ]);
+  });
+
+  it("requires exactly one serial per unit, unique serials, and a positive integer cost", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت مچی کوارتز",
+      tracking: "serial",
+    });
+    const base = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: null,
+      createdBy: null,
+    };
+
+    // Quantity 2, one serial — refused.
+    await expect(
+      withTransaction((client) =>
+        retailStock.receiveItemPurchase(client, {
+          ...base,
+          lines: [{ itemId: item.id, quantity: "2", unitCost: 10_000_000, serials: [{ serialNumber: "SN-1" }] }],
+        }),
+      ),
+    ).rejects.toThrow(/دقیقاً یک شماره سریال/);
+
+    // Duplicate serials inside the line — refused.
+    await expect(
+      withTransaction((client) =>
+        retailStock.receiveItemPurchase(client, {
+          ...base,
+          lines: [
+            {
+              itemId: item.id,
+              quantity: "2",
+              unitCost: 10_000_000,
+              serials: [{ serialNumber: "SN-1" }, { serialNumber: "SN-1" }],
+            },
+          ],
+        }),
+      ),
+    ).rejects.toThrow(/تکراری/);
+
+    // A zero/absent cost basis is refused — the whole point of the receipt
+    // is to establish the unit's cost with a matching posting.
+    await expect(
+      withTransaction((client) =>
+        retailStock.receiveItemPurchase(client, {
+          ...base,
+          lines: [{ itemId: item.id, quantity: "1", unitCost: 0, serials: [{ serialNumber: "SN-2" }] }],
+        }),
+      ),
+    ).rejects.toThrow(/عدد صحیح مثبت/);
+
+    // A serial already registered on this model is refused with a clear message.
+    await itemsService.addSerial(item.id, "SN-EXISTS", { unitCost: 10_000_000 });
+    await expect(
+      withTransaction((client) =>
+        retailStock.receiveItemPurchase(client, {
+          ...base,
+          lines: [
+            { itemId: item.id, quantity: "1", unitCost: 10_000_000, serials: [{ serialNumber: "SN-EXISTS" }] },
+          ],
+        }),
+      ),
+    ).rejects.toThrow(/قبلاً برای این کالا ثبت شده/);
+
+    // Nothing partial leaked from any of the refused receipts.
+    const { rows } = await db.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM item_serials WHERE item_id = $1",
+      [item.id],
+    );
+    expect(rows[0].n).toBe("1"); // only SN-EXISTS
   });
 });
