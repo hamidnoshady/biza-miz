@@ -28,11 +28,18 @@ The sidebar groups the twelve sections into the destinations, in
 | فرصت‌ها | deals, leads | What is moving, what is stuck? |
 | ارتباط و پیگیری | activities, cases | What was promised, and what is owed back? |
 | شناخت مشتری | segments, consent | Who are they as a group, and who may we contact? |
-| کیفیت داده | duplicates, reconciliation | Can the directory be trusted? |
+| کیفیت داده | quality (duplicates, reconciliation inside it) | Can the directory be trusted? |
 | تنظیمات | audit, settings | Who decided what, and how does this app behave? |
 
 If a section is added to `CRM_NAV_ITEMS` but not to a group it disappears from
 the menu silently, so `crm-nav.test.ts` pins coverage both ways.
+
+`duplicates` and `reconciliation` are **sub-sections** — real sections with their
+own routes, gates and bookmarks, reached from inside «کیفیت داده» rather than
+from the rail (`CRM_SUB_SECTIONS` in `crm-nav.ts`). That is an information
+decision, not a permission one, which is why it is a declared list: the same
+tests that skip them for the rail also assert they are absent for *everyone*,
+signed-in role or not.
 
 ## One box: search, or ask
 
@@ -214,6 +221,43 @@ by a name, and never by a query parameter naming somebody else. Two colleagues
 can share a name; a name filter would quietly hand one of them the other's work,
 and a `?mine=<id>` would be a filter pretending to be a permission.
 
+## The data-quality workspace
+
+`/crm/quality` answers one question — *can this record be trusted?* — at three
+levels, and they are views of one screen rather than three menu items because
+they are decided by the same person with the same key and end in the same act:
+
+| view | the question | backend |
+|---|---|---|
+| مسائل داده | is this record usable? | `crm-data-quality.ts` |
+| اشخاص تکراری | are these two rows one person? | `crm-service.ts` (detector + merge) |
+| تطبیق فروشگاه آنلاین | who is this anonymous shopper? | `crm-external-identity.ts` |
+
+The issues feed has four rules, each one query that returns `count(*) OVER ()`
+beside a `LIMIT`ed page — so the number and the list come from one statement and
+can never describe different sets:
+
+- **مشتری بدون راه تماس** — a customer with no phone and no email;
+- **فرصت بی‌مشتری** — an open deal attached to nobody's history;
+- **سرنخ بی‌تحرک** — a lead untouched for `STALE_LEAD_DAYS`;
+- **کار بدون مسئول** — open work with neither a member nor a name.
+
+Three rules this screen keeps, and one it refuses to keep:
+
+1. **A real count, a capped preview.** Six unreachable customers report six and
+   show five, and the card says «۱ مورد دیگر».
+2. **Every row goes somewhere that fixes it** — the directory row, the deal, the
+   lead, the ticket — never a dead end.
+3. **Empty rules are not drawn.** A screen of zeroes teaches people to stop
+   reading it; the count stays in the view's chip while it is real.
+4. **No overall quality score.** A percentage is a number nobody can act on, and
+   one that moves when unrelated things change teaches people to ignore it.
+
+Nothing in the workspace writes. Merging two people stays a preview-then-confirm
+act in the duplicate view, resolving an identity stays a human decision in the
+reconciliation view, and fixing a gap is finished on the screen the gap points
+at, under that screen's own permission. **No AI merges anything.**
+
 ## Permissions: one table, checked against the routes
 
 `src/lib/crm-permissions.ts` is the single source for section read / write /
@@ -258,8 +302,12 @@ These are named here so the seams are visible rather than implied:
 - **The saved-view filter vocabulary the command field will need** for «همهٔ
   مشتریان تهران که پارسال خریدند»: the resolver exists, the phrase vocabulary
   over its fields does not.
-- **Automations (When → If → Then)** and the **data-quality workspace** that
-  groups duplicates, reconciliation and issues into one queue.
+- **CRM automations (When → If → Then)** — the last unimplemented headline of
+  the Relationship OS brief. The permission-aware conditions it needs already
+  exist as closed vocabularies (queues, saved-view filters, segment definitions);
+  what does not exist is the rule engine, an audit trail for it, and the
+  guarantee that a CRM automation may *trigger* Growth but never send a campaign
+  itself.
 
 Import and export are **not** on this list, and never appear as a CRM button:
 the platform data-transfer engine owns that door, and the CRM's entities

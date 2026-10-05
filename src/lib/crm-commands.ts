@@ -74,6 +74,10 @@ const SECTION_ALIASES: Record<CrmSectionKey, readonly string[]> = {
   cases: ["تیکت", "تیکت‌ها", "شکایت", "پشتیبانی", "خدمات", "میز خدمت", "درخواست"],
   segments: ["بخش", "بخش‌بندی", "سگمنت", "گروه مشتریان", "تحلیل", "وفاداری", "چرخه عمر"],
   consent: ["رضایت", "اجازه", "پیامک", "ایمیل", "ارتباط"],
+  // The workspace, and the two views inside it. All three phrases are offered
+  // because all three addresses work: «کیفیت داده» opens the workspace, and
+  // «تکراری‌ها» still finds the duplicate screen for whoever saved that link.
+  quality: ["کیفیت داده", "مسائل داده", "اصلاح داده", "بی‌کیفیت"],
   duplicates: ["تکراری", "تکراری‌ها", "دوتایی", "ادغام"],
   reconciliation: ["تطبیق", "فروشگاه آنلاین", "خریدار آنلاین", "سایت", "هویت"],
   audit: ["سابقه", "لاگ", "تصمیم‌ها", "چه کسی", "تاریخچه تصمیم"],

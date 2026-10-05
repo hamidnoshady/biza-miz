@@ -88,7 +88,7 @@ describe("interpretCrmCommand", () => {
     for (const section of CRM_SECTION_KEYS) {
       const queries = [
         "امروز", "مشتریان", "سرنخ‌ها", "فرصت‌ها", "پیگیری‌ها", "تیکت‌ها",
-        "بخش‌بندی", "رضایت", "تکراری‌ها", "تطبیق", "سابقه", "تنظیمات",
+        "بخش‌بندی", "رضایت", "کیفیت داده", "تکراری‌ها", "تطبیق", "سابقه", "تنظیمات",
       ];
       for (const query of queries) if (sectionsOf(query).includes(section)) reachable.add(section);
     }

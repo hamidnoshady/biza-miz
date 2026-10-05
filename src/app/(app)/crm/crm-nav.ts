@@ -36,7 +36,7 @@
  */
 
 import {
-  CopyCheckIcon,
+  DatabaseZapIcon,
   HeadsetIcon,
   HistoryIcon,
   LayoutDashboardIcon,
@@ -44,7 +44,6 @@ import {
   SettingsIcon,
   ShieldCheckIcon,
   SproutIcon,
-  StoreIcon,
   TargetIcon,
   UserSearchIcon,
   UsersIcon,
@@ -112,16 +111,10 @@ export const CRM_NAV_ITEMS: readonly CrmNavItem[] = [
     icon: ShieldCheckIcon,
   },
   {
-    key: "duplicates",
-    label: "اشخاص تکراری",
-    description: "یافتن و ادغام پرونده‌های دوتایی",
-    icon: CopyCheckIcon,
-  },
-  {
-    key: "reconciliation",
-    label: "تطبیق فروشگاه آنلاین",
-    description: "خریدارانی که هنوز به پرونده‌ای وصل نشده‌اند",
-    icon: StoreIcon,
+    key: "quality",
+    label: "کیفیت داده",
+    description: "مسائل داده، پرونده‌های تکراری و خریداران ناشناس",
+    icon: DatabaseZapIcon,
   },
   {
     key: "audit",
@@ -150,9 +143,21 @@ export const CRM_NAV_GROUPS: ReadonlyArray<AppSectionNavGroup<CrmSectionKey>> = 
   { label: "فرصت‌ها", keys: ["deals", "leads"] },
   { label: "ارتباط و پیگیری", keys: ["activities", "cases"] },
   { label: "شناخت مشتری", keys: ["segments", "consent"] },
-  { label: "کیفیت داده", keys: ["duplicates", "reconciliation"] },
+  { label: "کیفیت داده", keys: ["quality"] },
   { label: "حاکمیت و تنظیمات", keys: ["audit", "settings"] },
 ];
+
+/**
+ * Sections that live *inside* a workspace rather than in the rail.
+ *
+ * Each is still a real section: its own route, its own permission gate, its own
+ * bookmarks. What changed is where it is reached from — «کیفیت داده» opens on
+ * the three questions together, and the old addresses keep working for anybody
+ * who saved one. A sub-section absent from the rail is therefore **not** a
+ * statement about permission, which is exactly why it has to be a declared list
+ * rather than a silent omission.
+ */
+export const CRM_SUB_SECTIONS: readonly CrmSectionKey[] = ["duplicates", "reconciliation"];
 
 /**
  * The entries a member may open — `canViewCrmSection` is the only gate, so a

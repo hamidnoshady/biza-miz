@@ -67,6 +67,12 @@ export const CRM_SECTION_KEYS = [
   "deals",
   "activities",
   "cases",
+  // The data-quality *workspace*: which records can be trusted. It hosts the
+  // duplicate pairs, the external identities waiting for a decision and the
+  // list of unusable records, because those three answer one question and
+  // splitting them across the menu made people check three screens to learn
+  // one thing.
+  "quality",
   "duplicates",
   // Deciding who an anonymous online shopper is attaches their whole purchase
   // history to a named person, so it sits with the management sections rather
@@ -256,6 +262,13 @@ export const CRM_SECTION_ACCESS: Record<CrmSectionKey, CrmSectionAccess> = {
     // requires, via `crm-section.tsx`.
     delete: [crmDelete],
     screenOwned: ["delete"],
+  },
+  // Whoever cleans the record owns the workspace. `crm.merge` is the capability
+  // that decides whether two rows are one person; the issues list beside it is
+  // the same judgement about the same data, and the screen hides the two views a
+  // narrower member cannot use rather than promising them.
+  quality: {
+    read: { all: [crmMerge] },
   },
   duplicates: {
     read: { all: [crmMerge] },

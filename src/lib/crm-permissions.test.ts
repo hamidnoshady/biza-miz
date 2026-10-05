@@ -112,6 +112,13 @@ const ROUTES: RouteAccess[] = [
     note: "Declared as a `routes` refinement: the identity graph is management work",
   },
   { route: "customers/[id]/timeline/route.ts", method: "GET", section: "persons", action: "read" },
+  {
+    route: "quality/route.ts",
+    method: "GET",
+    section: "quality",
+    action: "read",
+    note: "The data-quality workspace reads the issues; the pairs and the identities come from their own routes",
+  },
   { route: "customers/duplicates/route.ts", method: "GET", section: "duplicates", action: "read" },
   { route: "customers/merge/route.ts", method: "GET", section: "duplicates", action: "read" },
   { route: "customers/merge/route.ts", method: "POST", section: "duplicates", action: "merge" },

@@ -26,7 +26,10 @@ export function CrmSettingsSection({ canConfigure }: { canConfigure: boolean }) 
       icon: CopyCheckIcon,
       body: (
         <AppSettingsShortcut
-          href={crmSectionHref("duplicates")}
+          // The workspace, not the pairs screen: the setting is what the
+          // detector treats as a duplicate, and the workspace is where the
+          // consequences of that decision are read.
+          href={crmSectionHref("quality")}
           label="باز کردن اشخاص تکراری"
           description="پیش از ادغام، سابقه، رضایت و اطلاعاتی که منتقل می‌شود را می‌بینید."
         />

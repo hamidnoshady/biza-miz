@@ -23,6 +23,7 @@
 import { useRouter } from "next/navigation";
 import type { Permission } from "@/lib/permissions";
 import { canConfigureCrmSection, canDeleteCrmSection, canWriteCrmSection } from "@/lib/crm-permissions";
+import { canViewCrmSection } from "@/lib/crm-permissions";
 import { CrmOverviewSection } from "./overview-section";
 import { DirectorySection } from "./directory-section";
 import { LeadsSection } from "./leads-section";
@@ -35,6 +36,7 @@ import { ReconciliationSection } from "./reconciliation-section";
 import { ConsentSection } from "./consent-section";
 import { CrmAuditSection } from "./audit-section";
 import { CrmSettingsSection } from "./settings-section";
+import { QualitySection } from "./quality-section";
 import { crmSectionHref, type CrmSectionKey } from "./crm-routes";
 
 export function CrmSection({
@@ -69,6 +71,17 @@ export function CrmSection({
   if (section === "activities") return <ActivitiesSection />;
   if (section === "cases")
     return <CasesSection canDelete={canDeleteCrmSection(held, "cases")} />;
+  if (section === "quality")
+    return (
+      <QualitySection
+        // Each view keeps its own gate: the workspace's key is the door, and
+        // these are which rooms behind it are open. Computed here from the same
+        // table the sidebar and the routes use — the screen holds no opinion of
+        // its own about permissions.
+        canSeeDuplicates={canViewCrmSection(held, "duplicates")}
+        canSeeIdentities={canViewCrmSection(held, "reconciliation")}
+      />
+    );
   if (section === "duplicates") return <DuplicatesSection />;
   if (section === "reconciliation") return <ReconciliationSection />;
   if (section === "audit") return <CrmAuditSection />;

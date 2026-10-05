@@ -474,7 +474,7 @@ export function CrmOverviewSection({
           }
           description="پرونده‌هایی که احتمالاً یک نفرند"
           actions={
-            <Button type="button" variant="ghost" onClick={() => onGoToSection("duplicates")} className="min-h-11">
+            <Button type="button" variant="ghost" onClick={() => onGoToSection("quality")} className="min-h-11">
               بررسی و ادغام
               <ArrowLeftIcon aria-hidden="true" className="size-3.5" />
             </Button>

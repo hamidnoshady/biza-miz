@@ -1,7 +1,13 @@
 import { effectivePermissions } from "@/lib/permissions";
 import type { Role } from "@/lib/auth-edge";
 import { describe, expect, it } from "vitest";
-import { CRM_NAV_GROUPS, CRM_NAV_ITEMS, crmNavGroupsForPermissions, crmNavItemsForPermissions } from "./crm-nav";
+import {
+  CRM_NAV_GROUPS,
+  CRM_NAV_ITEMS,
+  CRM_SUB_SECTIONS,
+  crmNavGroupsForPermissions,
+  crmNavItemsForPermissions,
+} from "./crm-nav";
 import {
   canOpenCrm,
   canViewCrmSection,
@@ -48,7 +54,12 @@ describe("CRM_NAV_ITEMS", () => {
 
 describe("crmNavItemsForPermissions", () => {
   it("shows owner and manager every permanent CRM destination", () => {
-    const permanentKeys = CRM_SECTION_KEYS.filter((key) => key !== "persons");
+    // `persons` is one customer's file rather than a destination, and a
+    // sub-section is reached inside its workspace — neither is a rail entry, and
+    // both are still real sections with their own gates.
+    const permanentKeys = CRM_SECTION_KEYS.filter(
+      (key) => key !== "persons" && !CRM_SUB_SECTIONS.includes(key),
+    );
     for (const role of ["owner", "manager"]) {
       const shown = crmNavItemsForPermissions(permissionsFor(role)).map((item) => item.key);
       // As a *set*, not in section-key order: the menu is grouped into the six
@@ -108,10 +119,15 @@ describe("crmNavItemsForPermissions", () => {
   it("is permission-honest while treating person files as a Contacts detail", () => {
     for (const role of ["owner", "manager", "cashier", "accountant"]) {
       const shown = new Set(crmNavItemsForPermissions(permissionsFor(role)).map((item) => item.key));
-      for (const key of CRM_SECTION_KEYS.filter((key) => key !== "persons")) {
+      for (const key of CRM_SECTION_KEYS.filter(
+        (key) => key !== "persons" && !CRM_SUB_SECTIONS.includes(key),
+      )) {
         expect(shown.has(key)).toBe(canViewCrmSection(permissionsFor(role), key));
       }
       expect(shown.has("persons")).toBe(false);
+      // A sub-section is absent from the rail whoever is signed in — that is the
+      // IA decision, not a permission one, which is why the loop above skips it.
+      for (const key of CRM_SUB_SECTIONS) expect(shown.has(key)).toBe(false);
     }
   });
 });
