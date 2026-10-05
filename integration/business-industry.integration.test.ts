@@ -23,6 +23,7 @@ import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { coaTemplateForIndustry } from "../src/lib/coa-template";
+import type { Industry } from "../src/lib/industries";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -86,7 +87,7 @@ afterAll(async () => {
 let seq = 0;
 
 /** Provision the way the console does: a named industry and a seeded chart of accounts. */
-async function provision(industry: "food_service" | "jewelry" | "watch" | "accessories" | "cosmetics") {
+async function provision(industry: Industry) {
   seq += 1;
   return provisioning.provisionBusiness({
     businessName: `کسب‌وکار ${industry} ${seq}`,
@@ -142,6 +143,54 @@ describe("provisioning with an industry", () => {
     expect(codes.sort()).toEqual(
       [...coaTemplateForIndustry("cosmetics")].map((a) => a.code).sort(),
     );
+  });
+
+  it("accepts the AEC industry the check constraint was widened for (issue #799)", async () => {
+    // The failure this pins down is the one that only appears at runtime: a
+    // new industry whose migration did not widen
+    // `businesses_industry_check` typechecks, unit-tests green, and then fails
+    // with a constraint violation the first time an operator provisions one.
+    const { businessId } = await provision("architecture_construction");
+    const { rows } = await db.query<{ industry: string }>(
+      "SELECT industry FROM businesses WHERE id = $1",
+      [businessId],
+    );
+    expect(rows[0].industry).toBe("architecture_construction");
+  });
+
+  it("seeds the AEC chart of accounts — its own lines, and none of the café's", async () => {
+    const { businessId } = await provision("architecture_construction");
+    const codes = await accountCodes(businessId);
+
+    // The trade's own accounts: contract work in progress, retention on both
+    // sides, the three revenues, the subcontractor payable and direct project
+    // cost (coa-template.ts's ARCHITECTURE_CONSTRUCTION_COA_TEMPLATE).
+    for (const code of ["1380", "1250", "2440", "2130", "4610", "4620", "4630", "5191", "5192", "5193"]) {
+      expect(codes, `AEC account ${code}`).toContain(code);
+    }
+    // And the café does not leak in: no food/beverage channels, no recipe
+    // costing, no service charge, no delivery-marketplace commission.
+    for (const code of ["4100", "4200", "4310", "4320", "4330", "4360", "5100", "5150", "5160", "5180", "1310", "5650"]) {
+      expect(codes, `F&B account ${code} must not be seeded for AEC`).not.toContain(code);
+    }
+    expect(codes.sort()).toEqual(
+      [...coaTemplateForIndustry("architecture_construction")].map((a) => a.code).sort(),
+    );
+  });
+
+  it("turns the restaurant-shaped features off when the AEC industry is provisioned", async () => {
+    // The industry's `defaultDisabledFeatures` are seeded as per-business
+    // overrides (business-provisioning.ts), which is how "no café module
+    // leaks into an AEC tenant" is enforced beyond the module set itself.
+    const { businessId } = await provision("architecture_construction");
+    const { rows } = await db.query<{ flag_key: string; enabled: boolean }>(
+      "SELECT flag_key, enabled FROM business_features WHERE business_id = $1",
+      [businessId],
+    );
+    const off = new Set(rows.filter((r) => !r.enabled).map((r) => r.flag_key));
+    for (const flag of ["inventory", "reservations", "delivery"]) {
+      expect(off, flag).toContain(flag);
+    }
   });
 
   it("still defaults to food_service when no industry is named", async () => {

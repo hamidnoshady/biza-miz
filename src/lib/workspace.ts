@@ -13,7 +13,9 @@
  * Framework-free except for `query`, like every other service here: no `next`,
  * no React. Pure constants and rules live in `workspace-shared.ts`.
  */
+import type { AecOperatingProfile } from "./aec";
 import { query, withTenantTransaction } from "./db";
+import { getBusinessIndustry } from "./industry-guard";
 import { isoDateInTimeZone, postgresDateToIso, todayIsoDate } from "./jalali";
 import {
   BUILTIN_TEMPLATES,
@@ -61,6 +63,8 @@ import {
   type WorkspaceRole,
   type WorkspaceTaskStatus,
   type WorkspaceTemplate,
+  type WorkspaceTemplateChoice,
+  templatesForIndustry,
 } from "./workspace-shared";
 
 /**
@@ -268,6 +272,29 @@ export async function resolveWorkspaceSubject(
              JOIN ai_projects p ON p.id = t.project_id WHERE t.id = $1 AND p.business_id = $2`,
     document: `SELECT project_id, created_by FROM workspace_documents WHERE id = $1 AND business_id = $2`,
     contract: `SELECT project_id, created_by FROM workspace_contracts WHERE id = $1 AND business_id = $2`,
+    // Issue #799 — the two AEC subjects reach their project through the register
+    // they belong to, exactly as a task reaches it through its project. Five and
+    // six are subjects of the same engine rather than a second approval store,
+    // so the module has to know where they live and who raised them.
+    estimate_version: `SELECT e.project_id, v.created_by
+             FROM aec_estimate_versions v JOIN aec_estimates e ON e.id = v.estimate_id
+            WHERE v.id = $1 AND v.business_id = $2`,
+    submittal_revision: `SELECT s.project_id, r.created_by
+             FROM aec_submittal_revisions r JOIN aec_submittals s ON s.id = r.submittal_id
+            WHERE r.id = $1 AND r.business_id = $2`,
+    // Wave 8's two commercial subjects (issue #799 §15/§16). A variation and a
+    // certificate ARE the project row, so they carry their project directly —
+    // which is also why a comment on one lands in the right project's feed.
+    variation: `SELECT project_id, created_by FROM aec_variations
+                 WHERE id = $1 AND business_id = $2`,
+    payment_certificate: `SELECT project_id, created_by FROM aec_payment_certificates
+                 WHERE id = $1 AND business_id = $2`,
+    // Wave 9's procurement pair (§18): the request and the commitment carry
+    // their project directly, like the two commercial subjects above.
+    material_request: `SELECT project_id, created_by FROM aec_material_requests
+                 WHERE id = $1 AND business_id = $2`,
+    commitment: `SELECT project_id, created_by FROM aec_commitments
+                 WHERE id = $1 AND business_id = $2`,
   };
   const { rows } = await query<{ project_id: string | null; created_by: string | null }>(
     sql[subjectType],
@@ -771,11 +798,25 @@ export async function deletePhase(projectId: string, phaseId: string): Promise<W
 }
 
 /**
- * The catalogue a business sees: the built-ins from code, plus its own rows.
+ * The catalogue a business sees: the built-ins from code, plus its own rows,
+ * scoped to its industry and ordered for its operating profile (#799 §4).
+ *
  * A business template with the same key as a built-in overrides it, so a
  * business can customise «ساخت‌وساز» without losing the name it already uses.
+ *
+ * The industry scoping is *here* rather than in each caller so there is one
+ * answer: `createProject`'s `resolveTemplate` and the phases route's
+ * "apply template" both go through this, which is what stops a café from being
+ * handed — or applying by a crafted key — a blueprint that belongs to the AEC
+ * industry. `profile` is optional because it only decides the «پیشنهادی»
+ * badge and the ordering; a caller that does not know it still gets a
+ * correctly scoped list.
  */
-export async function listTemplates(businessId: string): Promise<WorkspaceTemplate[]> {
+export async function listTemplates(
+  businessId: string,
+  options: { profile?: AecOperatingProfile | null } = {},
+): Promise<WorkspaceTemplateChoice[]> {
+  const industry = await getBusinessIndustry(businessId);
   const { rows } = await query<{
     key: string; name: string; description: string; project_type: string | null;
     phases: unknown; default_tasks: unknown;
@@ -795,11 +836,18 @@ export async function listTemplates(businessId: string): Promise<WorkspaceTempla
     defaultTasks: Array.isArray(row.default_tasks) ? (row.default_tasks as string[]) : [],
   }));
   const overridden = new Set(custom.map((t) => t.key));
-  return [...BUILTIN_TEMPLATES.filter((t) => !overridden.has(t.key)), ...custom];
+  return templatesForIndustry(
+    [...BUILTIN_TEMPLATES.filter((t) => !overridden.has(t.key)), ...custom],
+    industry,
+    options.profile ?? null,
+  );
 }
 
 async function resolveTemplate(businessId: string, key: string): Promise<WorkspaceTemplate | null> {
   const all = await listTemplates(businessId);
+  // The fallback reaches a built-in the business's industry does not list — a
+  // tenant may always apply its own row, and a built-in key it typed by hand
+  // is a phase list it could equally type phase by phase.
   return all.find((t) => t.key === key) ?? builtinTemplate(key);
 }
 
@@ -2150,6 +2198,18 @@ const APPROVAL_SELECT = `
       WHEN 'task'     THEN (SELECT title FROM ai_project_tasks    WHERE id = a.subject_id)
       WHEN 'document' THEN (SELECT title FROM workspace_documents WHERE id = a.subject_id)
       WHEN 'contract' THEN (SELECT title FROM workspace_contracts WHERE id = a.subject_id)
+      WHEN 'estimate_version' THEN (
+        SELECT e.title || ' — نسخهٔ ' || v.version_no
+          FROM aec_estimate_versions v
+          JOIN aec_estimates e ON e.id = v.estimate_id
+         WHERE v.id = a.subject_id
+      )
+      WHEN 'submittal_revision' THEN (
+        SELECT s.submittal_number || ' — ' || s.title || ' (بازنگری ' || r.revision_no || ')'
+          FROM aec_submittal_revisions r
+          JOIN aec_submittals s ON s.id = r.submittal_id
+         WHERE r.id = a.subject_id
+      )
     END, a.title, '') AS subject_title`;
 
 const APPROVAL_JOINS = `
@@ -2250,6 +2310,23 @@ export async function listApprovals(
 async function getApproval(owner: WorkspaceOwner, id: string): Promise<WorkspaceApproval | null> {
   if (!isUuid(id)) return null;
   return (await listApprovals(owner, { id, limit: 1 }))[0] ?? null;
+}
+
+/**
+ * The subject type behind an approval id, for a route that has to hand the
+ * decision to the module owning that subject (issue #799: a BOQ revision's
+ * decision belongs to the estimating module, a submittal revision's to the
+ * document module). Null when there is no such approval in this business.
+ */
+export async function approvalSubjectType(
+  businessId: string,
+  approvalId: string,
+): Promise<string | null> {
+  const { rows } = await query<{ subject_type: string }>(
+    `SELECT subject_type FROM workspace_approvals WHERE business_id = $1 AND id = $2`,
+    [businessId, approvalId],
+  );
+  return rows[0]?.subject_type ?? null;
 }
 
 /**
@@ -2819,6 +2896,37 @@ export async function listActivity(
  * Dashboard
  * ======================================================================== */
 
+/**
+ * Issue #799 §3 — the construction half of «نمای کلی».
+ *
+ * The issue asks the overview to surface, for this trade, active projects,
+ * projects at risk, delayed milestones, pending approvals, contract expiries,
+ * budget versus actual and committed cost. Most of those are the existing
+ * counters (which every trade gets); the ones here are what the workspace's
+ * own tables can answer and a café's overview has no use for. What is *not*
+ * here — open RFIs, overdue submittals, drawing revisions, site issues,
+ * guarantees, certificates, forecast cost — belongs to Waves 4–9, and a number
+ * for a section with no data would be a fiction rather than a dashboard.
+ */
+export interface AecWorkspaceRollup {
+  /** Active projects with an overdue task or a phase past its end date. */
+  projectsAtRisk: number;
+  /** Overdue open tasks plus phases past their end date — §3's delayed milestones. */
+  lateMilestoneCount: number;
+  /** Sum of the active projects' budgets; null budget rows contribute nothing. */
+  budgetRial: number;
+  /**
+   * Actual cost posted to the ledger against those projects; null when the
+   * caller may not read the ledger — the same rule `projectReport` applies, so
+   * the band and the report can never disagree about whether a number exists.
+   */
+  spentRial: number | null;
+  /** Value of the projects' active and completed execution contracts. */
+  contractValueRial: number;
+  /** Projects whose posted cost has passed their own budget. */
+  overBudgetProjectCount: number;
+}
+
 export interface WorkspaceDashboard {
   activeProjects: number;
   tasksToday: number;
@@ -2831,6 +2939,63 @@ export interface WorkspaceDashboard {
   deadlines: CalendarEntry[];
   approvals: WorkspaceApproval[];
   activity: ActivityEntry[];
+  /** Present only for `architecture_construction` (issue #799 §3). */
+  aec?: AecWorkspaceRollup;
+}
+
+/**
+ * The AEC roll-up, or null for every other trade.
+ *
+ * Non-throwing by design: «نمای کلی» is the first screen after signing in and
+ * must not be the one that fails, so a business whose industry cannot be read
+ * simply gets the overview it has always had. Risk is counted in one query
+ * against the rows that own the fact (an overdue task, a phase past its end
+ * date) and the money half reuses `projectReport`, so the numbers here and the
+ * project report can never disagree.
+ */
+export async function getAecWorkspaceRollup(owner: WorkspaceOwner): Promise<AecWorkspaceRollup | null> {
+  if ((await getBusinessIndustry(owner.businessId)) !== "architecture_construction") return null;
+  const businessId = owner.businessId;
+
+  const [{ rows }, report] = await Promise.all([
+    query<{ projects_at_risk: string; late_tasks: string; late_phases: string }>(
+      `SELECT
+         (SELECT count(*) FROM ai_projects p
+           WHERE p.business_id = $1 AND p.archived_at IS NULL AND p.status = 'active'
+             AND (EXISTS (SELECT 1 FROM ai_project_tasks t
+                           WHERE t.project_id = p.id AND t.status <> 'done' AND t.due_date < CURRENT_DATE)
+               OR EXISTS (SELECT 1 FROM workspace_project_phases ph
+                           WHERE ph.project_id = p.id AND ph.status NOT IN ('done', 'skipped')
+                             AND ph.end_date < CURRENT_DATE))) AS projects_at_risk,
+         (SELECT count(*) FROM ai_project_tasks t JOIN ai_projects p ON p.id = t.project_id
+           WHERE p.business_id = $1 AND p.archived_at IS NULL
+             AND t.status <> 'done' AND t.due_date < CURRENT_DATE) AS late_tasks,
+         (SELECT count(*) FROM workspace_project_phases ph JOIN ai_projects p ON p.id = ph.project_id
+           WHERE p.business_id = $1 AND p.archived_at IS NULL
+             AND ph.status NOT IN ('done', 'skipped') AND ph.end_date < CURRENT_DATE) AS late_phases`,
+      [businessId],
+    ),
+    projectReport(owner),
+  ]);
+
+  const row = rows[0];
+  return {
+    projectsAtRisk: Number(row?.projects_at_risk ?? 0),
+    lateMilestoneCount: Number(row?.late_tasks ?? 0) + Number(row?.late_phases ?? 0),
+    budgetRial: report.reduce((sum, project) => sum + (project.budgetRial ?? 0), 0),
+    spentRial:
+      owner.access?.canViewFinancials === true
+        ? report.reduce((sum, project) => sum + (project.spentRial ?? 0), 0)
+        : null,
+    contractValueRial: report.reduce((sum, project) => sum + project.contractValueRial, 0),
+    overBudgetProjectCount: report.filter(
+      (project) =>
+        project.budgetRial !== null &&
+        project.budgetRial > 0 &&
+        project.spentRial !== null &&
+        project.spentRial > project.budgetRial,
+    ).length,
+  };
 }
 
 /**
@@ -2902,7 +3067,7 @@ export async function getWorkspaceDashboard(
   ]);
 
   const row = counts.rows[0];
-  return {
+  const dashboard: WorkspaceDashboard = {
     activeProjects: Number(row?.active_projects ?? 0),
     tasksToday: Number(row?.tasks_today ?? 0),
     myOpenTasks: Number(row?.my_open_tasks ?? 0),
@@ -2915,6 +3080,9 @@ export async function getWorkspaceDashboard(
     approvals,
     activity,
   };
+  // Issue #799 §3 — the construction roll-up, absent for every other trade.
+  const aec = await getAecWorkspaceRollup(owner);
+  return aec ? { ...dashboard, aec } : dashboard;
 }
 
 /* ===========================================================================

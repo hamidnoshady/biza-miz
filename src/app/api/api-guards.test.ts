@@ -380,6 +380,26 @@ function isDataTransferGuarded(src: string): boolean {
   return /dataOwner\(/.test(src) && /PERMISSIONS\.data(?:Import|Export)/.test(src);
 }
 
+/**
+ * Issue #799 Wave 2 — `aecOwner(PERMISSIONS.<key>)`, the same shape as the
+ * workspace and data helpers above: `src/app/api/aec/guard.ts`'s only body is
+ * `requirePermission(permission)` from `@/lib/auth`, so recognising it narrows
+ * the scan rather than loosening it. The permission keys are named exactly
+ * (the settings key for business-wide AEC configuration, the two workspace
+ * keys for project-scoped reads and writes, and — Wave 5 — the issuing key,
+ * which §24 requires to be separate from ordinary editing) rather than
+ * accepting any string, so a future route cannot satisfy the scanner with a
+ * permission it invented.
+ */
+function isAecGuarded(src: string): boolean {
+  return (
+    /aecOwner\(/.test(src) &&
+    /PERMISSIONS\.(?:settingsManage|workspaceView|workspaceManage|workspaceDocumentsIssue)/.test(
+      src,
+    )
+  );
+}
+
 /** Public API routes are session-less only because api-auth.ts authenticates a scoped key. */
 function isApiKeyGuarded(src: string): boolean {
   return /withApiKeyScope\(/.test(src) && /requireApiScope\(/.test(src);
@@ -507,6 +527,8 @@ describe("every API route is guarded", () => {
       // «ورود و خروج داده» — `dataOwner(PERMISSIONS.data…)`, the same shape.
       // See isDataTransferGuarded.
       if (isDataTransferGuarded(src)) return;
+      // Issue #799 Wave 2 — `aecOwner(PERMISSIONS.…)`. See isAecGuarded.
+      if (isAecGuarded(src)) return;
       // Phase 35 — `requireMember` is the fourth guard: any signed-in member,
       // for endpoints where every member acts only on their own rows and there
       // is therefore no role left to gate (notification devices, rules, inbox).
@@ -599,6 +621,215 @@ describe("capability-based back-office guards", () => {
     expect(src!).toMatch(/deploymentRole\(\)\s*===\s*"central"/);
     const put = src!.slice(src!.indexOf("export const PUT"));
     expect(put.indexOf('deploymentRole() === "central"')).toBeLessThan(put.indexOf("request.json()"));
+  });
+});
+
+/**
+ * Issue #799 Wave 2 — the AEC routes (`/api/aec/**`). They reach
+ * `requirePermission` through `aecOwner`, the same shape as the workspace
+ * module's helper, so the same two things are asserted explicitly: every route
+ * names a real permission key, and none of them uses a role list (which would
+ * bypass per-member overrides).
+ */
+describe("the AEC module's API guards", () => {
+  const aecRoutes = [...sources].filter(([key]) => key === "aec" || key.startsWith("aec/"));
+
+  it("has routes to check", () => {
+    expect(aecRoutes.length).toBeGreaterThan(3);
+  });
+
+  it("guards every AEC route on a named permission and no role list", () => {
+    for (const [key, src] of aecRoutes) {
+      expect(src, `src/app/api/${key}/route.ts`).toMatch(/aecOwner\(/);
+      expect(src, `src/app/api/${key}/route.ts`).toMatch(
+        /PERMISSIONS\.(?:settingsManage|workspaceView|workspaceManage|workspaceDocumentsIssue|workspaceApprove)/,
+      );
+      expect(requireRoleCalls(src), `src/app/api/${key}/route.ts uses requireRole`).toEqual([]);
+    }
+  });
+
+  it("keeps issuing a transmittal separate from editing the register", () => {
+    // §24 — issuing is a high-risk action and must not inherit ordinary edit
+    // rights. The status route is the only place a transmittal is issued, and
+    // it names the issuing permission; the routes that merely draft the
+    // register and its revisions do not, so a member who can prepare a
+    // transmittal still cannot send it.
+    const status = sources.get("aec/transmittals/[id]/status");
+    expect(status, "src/app/api/aec/transmittals/[id]/status/route.ts is missing").toBeTruthy();
+    expect(status as string).toMatch(/PERMISSIONS\.workspaceDocumentsIssue/);
+    for (const key of ["aec/projects/[id]/transmittals", "aec/documents/[id]/revisions"]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceDocumentsIssue/);
+      expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
+    }
+  });
+
+  it("keeps a submittal decision separate from ordinary edit rights", () => {
+    // §24 — reviewing somebody else's submission is a determination, so it must
+    // not inherit `workspace.manage` (which is what drafting the register and
+    // uploading the file ride). The status route is the only place a review is
+    // started, decided or closed, and it names `workspace.approve`; the routes
+    // that merely create and edit a submittal do not.
+    const status = sources.get("aec/submittal-revisions/[id]/status");
+    expect(status, "src/app/api/aec/submittal-revisions/[id]/status/route.ts is missing").toBeTruthy();
+    expect(status as string).toMatch(/PERMISSIONS\.workspaceApprove/);
+    for (const key of [
+      "aec/projects/[id]/submittals",
+      "aec/submittals/[id]",
+      "aec/submittals/[id]/revisions",
+      "aec/submittal-revisions/[id]",
+    ]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
+    }
+    // An RFI's four moves are project work, not a commercial determination:
+    // answering a question must not need the approval key that decides an
+    // estimate, so the RFI status route stays on `workspace.manage`.
+    const rfiStatus = sources.get("aec/rfis/[id]/status");
+    expect(rfiStatus, "src/app/api/aec/rfis/[id]/status/route.ts is missing").toBeTruthy();
+    expect(rfiStatus as string).toMatch(/PERMISSIONS\.workspaceManage/);
+    expect(rfiStatus as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+  });
+
+  it("keeps a closeout verification separate from ordinary site work", () => {
+    // §24 again, for Wave 7 — accepting somebody's fix (§14's "closeout
+    // verification") is a determination, so it must not inherit the key that
+    // raises a snag, starts it and resolves it. The status route asks for one
+    // permission per action through `siteIssueActionNeedsApproval`, which is
+    // asserted to be the rule rather than a hardcoded branch; the routes that
+    // merely write the register do not name the approval key at all.
+    const status = sources.get("aec/site-issues/[id]/status");
+    expect(status, "src/app/api/aec/site-issues/[id]/status/route.ts is missing").toBeTruthy();
+    expect(status as string).toMatch(/siteIssueActionNeedsApproval/);
+    expect(status as string).toMatch(/PERMISSIONS\.workspaceApprove/);
+    for (const key of [
+      "aec/projects/[id]/site-issues",
+      "aec/site-issues/[id]",
+      "aec/projects/[id]/site-logs",
+      "aec/site-logs/[id]",
+      "aec/site-logs/[id]/status",
+      "aec/checklists",
+      "aec/checklists/[id]",
+    ]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
+    }
+  });
+
+  it("keeps a commercial determination separate from writing the register", () => {
+    // §24 for Wave 8 — agreeing a change-order figure with the client and
+    // certifying a claim are the two high-risk commercial acts, so neither may
+    // inherit `workspace.manage` (which is what drafting the register and
+    // editing a claim ride). Each status route asks for one permission per
+    // action through the module's own catalogue predicate, so the split is a
+    // rule the pure module states rather than a branch each route repeats.
+    for (const [key, predicate] of [
+      ["aec/variations/[id]/status", "variationActionNeedsApproval"],
+      ["aec/certificates/[id]/status", "certificateActionNeedsApproval"],
+    ] as const) {
+      const status = sources.get(key);
+      expect(status, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(status as string).toMatch(new RegExp(predicate));
+      expect(status as string).toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(status as string).toMatch(/PERMISSIONS\.workspaceManage/);
+    }
+
+    // The registers themselves and the §17 contract block are ordinary
+    // workspace edits: they must not name the approval key at all, or a clerk
+    // who may prepare a change order would be able to approve it.
+    for (const key of [
+      "aec/projects/[id]/variations",
+      "aec/variations/[id]",
+      "aec/projects/[id]/certificates",
+      "aec/certificates/[id]",
+      "aec/contracts/[id]/commercial",
+    ]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
+    }
+
+    // The cockpit is a read of somebody else's money — the project's own finance
+    // screen, so it needs the view key and nothing more.
+    for (const key of ["aec/projects/[id]/commercial"]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).toMatch(/PERMISSIONS\.workspaceView/);
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+    }
+  });
+
+  it("keeps the procurement award separate from ordinary register edits", () => {
+    // §24 again, for Wave 9. Two of §18's register actions are determinations:
+    // granting a material request and obliging the business to a purchase order
+    // or subcontract (plus withdrawing an approved award). Their status routes
+    // ask for one permission per action through the module's own catalogue
+    // predicates — the same rule-not-a-branch shape Wave 8 used — and they are
+    // the only procurement routes that name the approval key.
+    for (const [key, predicate] of [
+      ["aec/requests/[id]/status", "materialRequestActionNeedsApproval"],
+      ["aec/commitments/[id]/status", "commitmentActionNeedsApproval"],
+    ] as const) {
+      const status = sources.get(key);
+      expect(status, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(status as string).toMatch(new RegExp(predicate));
+      expect(status as string).toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(status as string).toMatch(/PERMISSIONS\.workspaceManage/);
+    }
+
+    // Asking suppliers for prices commits nothing and choosing which offers to
+    // compare is not the award, so the RFQ and quotation status routes must not
+    // name the approval key at all.
+    for (const key of ["aec/rfqs/[id]/status", "aec/quotations/[id]/status"]) {
+      const status = sources.get(key);
+      expect(status, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(status as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(status as string).toMatch(/PERMISSIONS\.workspaceManage/);
+    }
+
+    // The registers themselves, their children and the tab's read are ordinary
+    // workspace work: a clerk who may prepare an award must not be able to
+    // approve it, and a member reading the tab needs only the view key.
+    for (const key of [
+      "aec/projects/[id]/requests",
+      "aec/requests/[id]",
+      "aec/projects/[id]/rfqs",
+      "aec/rfqs/[id]",
+      "aec/rfqs/[id]/quotations",
+      "aec/quotations/[id]",
+      "aec/projects/[id]/commitments",
+      "aec/commitments/[id]",
+      "aec/commitments/[id]/deliveries",
+      "aec/deliveries/[id]",
+    ]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(src as string).toMatch(/PERMISSIONS\.workspace(?:Manage|View)/);
+    }
+    // Wave 10's report bundle is a read of the project the caller may see, and
+    // §30's financial figures stay behind `ledger.view` inside the service — the
+    // route itself is `workspace.view` and never an approval or edit key,
+    // because printing a report approves nothing.
+    for (const key of ["aec/projects/[id]/procurement", "aec/projects/[id]/reports"]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts is missing`).toBeTruthy();
+      expect(src as string).toMatch(/PERMISSIONS\.workspaceView/);
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceApprove/);
+      expect(src as string).not.toMatch(/PERMISSIONS\.workspaceManage/);
+    }
+  });
+
+  it("keeps the shared helper requirePermission and nothing weaker", () => {
+    const guard = readFileSync(join(API_ROOT, "aec", "guard.ts"), "utf8");
+    expect(guard).toMatch(/requirePermission\(permission\)/);
+    expect(guard).toMatch(/from "@\/lib\/auth"/);
   });
 });
 

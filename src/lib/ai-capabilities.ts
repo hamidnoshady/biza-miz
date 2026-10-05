@@ -55,6 +55,44 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   list_workspace_tasks: PERMISSIONS.workspaceView,
   list_expiring_contracts: PERMISSIONS.workspaceView,
   list_workspace_approvals: PERMISSIONS.workspaceView,
+  // Issue #799 §23 (AEC reads). Both sit on the same key the workspace module
+  // and its financial report use — the cost figures they quote are already
+  // visible to `workspace.view` on the project screen, so the assistant adds no
+  // reach. When §24's dedicated commercial keys arrive (project financial view,
+  // payment certificates), these move with them rather than staying broader.
+  get_aec_project_financial_health: PERMISSIONS.workspaceView,
+  list_delayed_project_activities: PERMISSIONS.workspaceView,
+  // The BOQ variance quotes an approved estimate (the project's working budget)
+  // and the ledger's actual cost — both of which `workspace.view` already shows
+  // on the project page, so the assistant adds no reach here either.
+  get_boq_variance: PERMISSIONS.workspaceView,
+  // The drawing register is the documents tab the same member already opens, so
+  // this read adds no reach either — it answers «آخرین رویژن…» from those rows.
+  get_latest_drawing_revision: PERMISSIONS.workspaceView,
+  // The two pending registers (issue #799 §23, Wave 6) are the RFI and submittal
+  // tabs the same member already opens, so these reads add no reach: like the
+  // drawing read above they sit on `workspace.view`.
+  list_pending_rfis: PERMISSIONS.workspaceView,
+  // Issue #799 §23/§24 (Wave 8) — the commercial reads. They quote the same
+  // contract, change-order and certificate rows the «تغییرات» and
+  // «صورت‌وضعیت و پرداخت» tabs show to a member with `workspace.view`, and the
+  // ledger's actual cost exactly as `projectReport` gives it (null without
+  // `ledger.view`), so the assistant adds no reach the screen does not already
+  // have. §24's high-risk split is about *writing* a commercial action, which
+  // these tools never do.
+  list_change_orders: PERMISSIONS.workspaceView,
+  list_payment_certificates: PERMISSIONS.workspaceView,
+  list_project_commercial_risks: PERMISSIONS.workspaceView,
+  // Wave 9's procurement read is the «تأمین و خرید» tab's own data (the awards
+  // past their delivery date and the requests nobody has picked up), so like the
+  // commercial three above it adds no reach beyond `workspace.view` — the
+  // service gates it on the `procurement` capability on top.
+  list_procurement_delays: PERMISSIONS.workspaceView,
+  list_upcoming_milestones: PERMISSIONS.workspaceView,
+  list_pending_submittals: PERMISSIONS.workspaceView,
+  // The site and quality queue (issue #799 §23, Wave 7) is the register the same
+  // member opens on the project page, so this read adds no reach either.
+  list_site_issues: PERMISSIONS.workspaceView,
   draft_expense_from_receipt: PERMISSIONS.financeExpensesManage,
   get_accounting_review: PERMISSIONS.ledgerView,
 };

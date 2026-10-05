@@ -913,11 +913,210 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   is refused at the API guard (`moduleForApiPath` in `withTenantScope`), not merely hidden from the
   nav — the same discipline `features.ts` follows. The retail industries sell through a multi-line
   invoice (`retail-invoice-service.ts`) that is an `orders` row settled by Phase 21's own sell
-  services, so no posting rule is duplicated. There are **five** trades: `food_service` is the original F&B app;
+  services, so no posting rule is duplicated. There are **ten** industries: `food_service` is the original F&B app;
   `jewelry`/`watch`/`accessories`/`cosmetics` build on a
   parallel `items`/`item_serials`/`item_weight_attributes`/`item_stock` model and post through the
   domain-event engine (`src/lib/posting-engine.ts` + each industry's `*-posting-rules.ts`) rather
-  than hand-written ledger functions. Cosmetics adds `item_batches` on top (batch/lot number, expiry,
+  than hand-written ledger functions; `wholesale`/`tools_fittings`/`haberdashery` are trade-goods
+  trades on that same item model, reaching it through the shared `stock` module and the variant
+  board; `service_saas` is a services company whose invoices Billing/Accounting owns; and
+  `architecture_construction` (issue #799 — مهندسی عمران، معماری و پیمانکاری) is the AEC trade:
+  architecture offices, civil/structural firms, contractors, design & build teams, supervision
+  consultants and individual professionals, whose operational centre is **My Workspace**
+  (`ai_projects` plus migration 0167's tables) rather than a fifth app, and whose profile carries
+  only the core modules — no POS, no `orders`, no stock. Since issue #799's Wave 2 that trade also
+  has an **operating profile** (`src/lib/aec.ts`: architecture office, civil engineering,
+  contractor, design & build, consulting/supervision, multidisciplinary, team, individual) plus
+  specialties and twenty capability keys, stored per business in `aec_business_profiles` (migration
+  0194) and resolved with `resolveAecCapabilities`; project-level AEC metadata and external
+  participants live in `aec_project_profiles` / `aec_project_participants` and are served by
+  `src/lib/aec-service.ts` under `/api/aec/**`. Wave 3 makes a project that trade's cockpit —
+  `src/lib/aec-cockpit.ts` maps each issue-§21 section to the capability that gates it and the wave
+  that builds it, so `aecProjectTabs` shows a section only when it is both shipped and allowed (a
+  section whose wave has not landed is absent, never greyed out); the six built-in blueprints live
+  in `src/lib/workspace-aec-templates.ts`, industry-scoped in `listTemplates` and recommended
+  rather than required; migration 0195 seeds three recommended widgets for the industry; and the
+  assistant's AEC reads (§23) are `src/lib/aec-ai-tools.ts`, composed from the same functions
+  the screens read so an answer and the cockpit cannot disagree — refused with a sentence, not an
+  empty list, when the business's industry is not AEC. Ask a capability, never a profile, and
+  remember a participant row is a record — `workspace_members` stays the only source of internal
+  access. Wave 4 (issue #799 §7) is the BOQ: `src/lib/aec-boq.ts` is the client-safe half (statuses,
+  the unit catalogue and `computeBoqItemTotals`, an exact BigInt mirror of migration 0196's trigger,
+  which owns `unit_price_rial`/`total_rial` — never compute a line total with floating point and
+  never let a screen and the database hold different numbers), `src/lib/aec-boq-service.ts` holds
+  every query, and a submitted revision is decided through the *existing* `workspace_approvals`
+  queue as a `subject_type = 'estimate_version'` row on `workspace.approve` — do not add a second
+  approval mechanism; the revision's `status` is the projection of that decision and
+  `aec_estimate_events` is the trail. Approval writes `ai_projects.budget_rial` only when the budget
+  is empty or still holds the total of the revision being superseded, and says so (`budgetSync`),
+  because a hand-typed budget is a decision; actual cost keeps coming from
+  `journal_entries.project_id` — no cost ledger inside the BOQ. Import/export is the existing
+  data-transfer engine (registry entity + adapter, draft revisions only, a row that cannot be placed
+  is a skipped row with a reason), and an entity may declare `requiresIndustry` so
+  `entitiesForIndustry` keeps a trade's catalogue to itself. Wave 5 (§9 and §12) is document control:
+  `aec_documents` → `aec_document_revisions` and `aec_transmittals` → its items and recipients
+  (migration 0197), while the bytes stay in `media_assets` reached through a `workspace_documents`
+  row — never a second document store. The revision and transmittal guards make an issued record
+  immutable in the database, the register's `latest_revision_*` columns are trigger-derived (never
+  sort revisions on read to decide what is current), and a transmittal line snapshots the number,
+  title, revision code and purpose it carried, so renaming a drawing later cannot rewrite the answer
+  to "what was issued, in which revision, to whom". Recipients are `parties` — a receipt, not a user
+  and not a grant — and issuing needs its own `workspace.documents_issue` (high risk, audited)
+  rather than inheriting `workspace.manage`; drafting and acknowledging a receipt stay on
+  `workspace.manage`. `src/lib/aec-docs.ts` is the client-safe half and
+  `get_latest_drawing_revision` is the §23 read over it. Wave 6 (§10, §11) is RFIs and submittals:
+  `aec_rfis` and `aec_submittals` → `aec_submittal_revisions` (migration 0198), with `src/lib/aec-rfi.ts`
+  as the client-safe half (both transition tables, the four review determinations, and the one overdue
+  predicate the tab, the assistant and the reminder scan share). Attachments and a submission file are
+  `workspace_documents` rows — a revision links one, an RFI's attachments carry `rfi_id`/`submittal_id`
+  — so §9's "no second document store" holds for §10 and §11 too. §33 is enforced by triggers, not by
+  the service: a number/subject/question freezes when the RFI is asked, a response when it is given, a
+  revision's file and notes when it is submitted, and a delete is legal only in draft; the register's
+  `latest_revision_*`/`revision_count` are derived by `aec_submittal_revision_totals()` behind a
+  transaction-local marker that lets `aec_submittal_guard()` refuse every other write. Submittal
+  review rides the **existing** `workspace_approvals` queue as a `submittal_revision` subject decided
+  on `workspace.approve` (never a second approval mechanism; the queue's binary approve/reject maps
+  onto `approved`/`rejected` and `decideSubmittalRevision` holds the finer four, «اصلاح و ارسال مجدد»
+  opening revision n+1 in the same transaction). **Wave 6 adds no permission**: reading is
+  `workspace.view`, raising/answering/drafting is `workspace.manage`, deciding is `workspace.approve`;
+  the RFI register needs only the industry, while submittals additionally need `document_control`.
+  `list_pending_rfis`/`list_pending_submittals` are the §23 reads and `aec.rfi_overdue`/
+  `aec.submittal_overdue` are the §29 events, produced by a scan in `notification-scans.ts` because an
+  overdue record changes by a date passing, not by a write.
+  Wave 7 (§13, §14) is site execution: `aec_site_logs` → `aec_site_log_lines`,
+  `aec_inspection_checklists` → their items, and `aec_site_issues` → `aec_site_issue_checks`
+  (migration 0199), with `src/lib/aec-site.ts` as the client-safe half (the day's seven line kinds and
+  the *shapes* that say which inputs each has, the seven issue kinds with their number prefixes, the
+  one transition chain — including `resolved → in_progress`, the failed-verification loop — the four
+  acts, and the one overdue predicate). A submitted day and its lines freeze together in the database
+  (`aec_site_log_guard`, `aec_site_log_line_guard`), one day per project per date is a unique index,
+  and `aec_site_issue_guard` enforces §14's closeout: a result before an inspection or a handover
+  leaves work, a verifier on close, and **the verifier may not be the assignee**. So the register's
+  acts need `workspace.manage` but the closeout needs `workspace.approve` — the one high-risk move of
+  the tab, and again no new permission key. A checklist's items are *snapshotted* onto the issue, so
+  editing or deleting the firm's template cannot rewrite what was inspected; photos and evidence are
+  `workspace_documents` rows via `src/lib/workspace-document-links.ts`, the one attachment
+  implementation all four AEC registers now share. The register and the daily log are separate tabs
+  (`site_operations` and `qa_qc`), `snag`/`hse_observation` need `snagging`/`hse` (and stay
+  `material_tracking`-free: Wave 9's delivery tracking is `procurement`, and a materials ledger
+  would need the stock model an AEC tenant does not have), `list_site_issues` is §23's seventh AEC
+  read, and
+  `aec.inspection_due`/`aec.snag_overdue` ride the same hourly scan as the Wave 6 pair.
+  Wave 8 (§15, §16, §17, §20) is the commercial controls: `aec_contract_commercials` (the §17 block on a
+  `workspace_contracts` contract), `aec_variations` (§15's change orders, `VO`-numbered per project),
+  `aec_payment_certificates` + `aec_payment_certificate_lines` (§16, both directions: `application` for
+  our claim to the client, `certificate` for what we issue to a contractor) and `aec_commercial_events`
+  (migration 0200, five tables, FORCE RLS), with `src/lib/aec-commercial.ts` as the client-safe half
+  (both chains, `certificateTotals` mirroring the CHECK, the two action catalogues, one
+  `*ActionNeedsApproval` each) and `src/lib/aec-commercial-service.ts` doing the writes. Two rules are
+  the reason it is shaped this way: **an approved change moves the revised contract value and never the
+  contract** — `revised_value_rial` is recomputed by trigger from the original plus the approved
+  variations, so the contract, the approved BOQ revision and old estimate versions cannot be rewritten —
+  and **Accounting keeps the money that moved**: no table here has a paid or received column, §20's
+  actual cost comes from the ledger through `projectReport` (and is `null` without `ledger.view`), and
+  A/R, A/P, receipts, payments, committed cost, cost to complete and the forecast margin are named as the
+  books' or as a later wave's rather than recomputed. §15's approvals and §16's certification file one
+  `workspace_approvals` row each (`variation`, `payment_certificate`), the register is `workspace.manage`
+  and every determination (`approve`, `reject`, `implement`, `cancel`, `review`, `certify`) is
+  `workspace.approve` — **no new permission**, §24's rule that a high-risk commercial act must not inherit
+  ordinary edit rights. `changes` and `payments` are their own tabs after «مالی», §20's cockpit rides
+  `financials` inside it, `AEC_LIVE_CAPABILITIES` is 11 with `variations`/`progress_claims`/`financials`
+  independent, §23 adds `list_change_orders`/`list_payment_certificates`/`list_project_commercial_risks`
+  (ten tools in all), and four reminder keys ride the same hourly scan.
+  Wave 9 (§18, §22, §23, §24, §29, §33) is procurement: `aec_material_requests` +
+  `aec_material_request_lines` (the requirement), `aec_rfqs` + `aec_rfq_suppliers` (the enquiry and
+  who was invited), `aec_supplier_quotations` (what came back, with the award link), `aec_commitments`
+  (one register for both §18 endings, `kind IN ('purchase','subcontract')`, `PO`/`SC`-numbered) +
+  `aec_commitment_deliveries` (what arrived) and `aec_procurement_events` (migration 0201, eight
+  tables, FORCE RLS), numbered per project per kind by `nextAecNumber` in
+  `src/lib/aec-numbering.ts` under an advisory lock — unique but never gapless, so a deleted draft
+  returns its number. `src/lib/aec-procurement.ts` is the client-safe half and the *only* place the
+  domain's definitions live: the four chains with their deliberate `rejected → draft` reopening,
+  `commitmentTotals`, `commitmentDelayDays`/`isCommitmentDelayed` (one delay predicate for the tab,
+  the widget, the scan and the assistant), `costForecast`/`forecastMarginRial`/
+  `FORECAST_BASIS_LABEL`, and both `*ActionNeedsApproval` predicates;
+  `src/lib/aec-procurement-service.ts` does the writes. §18's boundaries are load-bearing: **a
+  supplier is a CRM `parties` row** (the wave adds only three columns to
+  `party-merge-references.ts`), the F&B `purchases`/`suppliers`/`items` stock model is never touched
+  (an AEC tenant has no products workspace and no `location_id`), and **no table here stores a paid
+  or invoiced balance** — the last status is `closed`, the moment the invoice becomes Accounting's.
+  A submitted request, an issued RFQ, a decided quotation and a submitted award are frozen by trigger
+  guards, and a delivered award has exactly one move left (close it out); `recordDelivery` is a fact
+  about a box and never moves the award's status (`deliver` does), which is why `deliveredRial` only
+  counts delivered awards and a receipt does not clear the delay warning. Approval rides the existing
+  `workspace_approvals` queue as `material_request`/`commitment` subjects — the register is
+  `workspace.manage`, every determination is `workspace.approve`, **no new permission key**.
+  `procurement` and `subcontractors` join `AEC_LIVE_CAPABILITIES` (twelve live keys, `material_tracking`
+  still reserved with its reason), the «تأمین کالا» tab sits between «مالی» and «تغییرات», §20's roll-up
+  now prints committed/delivered cost, cost to complete, forecast final cost and a **forecast** margin
+  with `FORECAST_BASIS_LABEL` under it (`COMMERCIAL_AWAITING_WAVES` is empty; the margin widget stays
+  unseeded until that basis is on screen, which it now is), `list_procurement_delays` is §23's
+  eleventh AEC read across all six AI surfaces, and `aec.procurement_delivery_delay` is the wave's
+  reminder key on the same hourly scan. When a future shared trigger branches between tables, declare
+  `payload jsonb := to_jsonb(NEW)` and compare `payload ->> 'col'` in the *conditions*: PL/pgSQL
+  resolves `NEW.col` when it executes the expression, so reading a column a sibling table lacks raises
+  42703 before the branch is chosen (that is the bug migration 0201 records).
+  Wave 10 (§30, §34) is the report set: `src/lib/aec-reports.ts` is the pure catalogue of §30's
+  seventeen reports in the issue's order, each with the capability that has to be on (`null` for the
+  three every profile has), the kind of each column, its empty message and note, and the §23 read that
+  answers the same question (`AEC_REPORT_AI_TOOL`; `reportsForCapabilities` is the gate and
+  `agingBucket`/`reportAgeDays`/`reportPercent` the one aging vocabulary the RFI, submittal, snag,
+  change-order and delay reports share). `src/lib/aec-reports-service.ts` answers them without
+  recomputing anything: the actual cost is `projectReport`'s ledger read (`null`, never `0`, without
+  `ledger.view`), the estimate/revised contract/forecast are §20's (`costForecast`, with
+  `forecastBasis` printed), and the register figures come from the same reads and predicates the tabs
+  use — one shared read per group, `AEC_REPORT_ROW_LIMIT = 25`, and `omittedRows` naming the register
+  where the rest lives. The project is asserted once up front (`project_not_found`, not a page of empty
+  reports), a switched-off capability is **absent rather than empty** (the filter runs before the first
+  query, §21's rule), and `GET /api/aec/projects/[id]/reports` is `workspace.view` + the project's
+  `view` capability with **no new permission key** — a report prints approvals, it does not grant them.
+  The «گزارش‌ها» tab (`reports-panel.tsx`, `AEC_SHIPPED_WAVE = 10`) renders each report by column kind
+  through `useMoney()`/`DateCell`, and `integration/aec-reports.integration.test.ts` asserts every
+  figure against the register that owns it, the absent-not-empty rule, the ledger boundary,
+  cross-tenant `project_not_found`, `industry_mismatch` and the row cap.
+  Wave 10's §22 half is the recommended widgets: migration 0202 seeds «نقاط عطف پیش رو»,
+  «سررسید ضمانت‌نامه‌ها» and «حاشیهٔ پروژه» (each prompt naming the read that answers it — the margin
+  widget was deliberately unseeded until §20's basis was on screen), `list_upcoming_milestones` is
+  §23's twelfth read, and `src/lib/ai-widget-admin.ts` + `GET/POST /api/platform/ai/widgets` +
+  `PATCH /api/platform/ai/widgets/[id]` + the console page «ویجت‌های پیشنهادی» are §22's last
+  sentence: recommendations are platform rows (`business_id IS NULL`) that any admin reads
+  (`ai.read`) and only `ai.config.manage` writes, a member's own `ai_widgets` are never touched, and
+  retiring a template keeps the row so `ai_widgets.template_id` provenance survives. §26's
+  classification lives in `src/lib/aec-sync-classification.ts` — every AEC table in one of §26's two
+  buckets with the write model that put it there, the boundary that may ever travel (a draft, never
+  a frozen row) and the protocol it would need first; nothing AEC replicates today, `data-ownership.ts`
+  carries `aec_field_capture`/`aec_commercial_registers` as `not_replicated`, and the database suite
+  proves no AEC table carries `trg_sync_capture` and that a paired desktop database holds zero rows
+  in every one of them. Never add an AEC table to `MASTER_SYNC_TABLES` to "fix" a missing sync.
+  §25's field mode is `/workspace/projects/<id>/field` («حالت کارگاه»): a single API
+  (`/api/aec/projects/<id>/field`), a queue board capped at `AEC_FIELD_QUEUE_LIMIT` composed from the
+  registers' own list functions, and `src/lib/aec-field.ts`'s `AEC_FIELD_ACTIONS` — eleven entries, one
+  per §25 bullet, each naming its capability, whether a draft is *safe* (a capture is; an approval
+  never is) and the project tab that owns the long form. Photos go through the narrow upload route
+  (`/api/aec/projects/<id>/field/photo`, project write capability, same `storeMediaAsset` rules as the
+  library) and upload progress is a real XHR percentage. The project page reads and writes `?tab=` so
+  those hand-offs are links, and an update from the phone must carry the attachments the desk already
+  wrote rather than replacing the day's lines — see Decision 37.
+  The screen's catalogue (`AEC_FIELD_ACTIONS`, `AEC_FIELD_RULES`, the queue shapes, the Shamsi
+  helpers) lives in `src/lib/aec-field-catalogue.ts`, which imports nothing but types, because a
+  client component that imports a *runtime* value from `aec-field.ts` drags `pg` into the browser
+  bundle and fails `next build` with "Can't resolve 'fs'" — the failure Wave 11 chased through CI.
+  `src/lib/client-bundle-boundary.test.ts` fails the build if any `"use client"` file reaches
+  `src/lib/db.ts` or a module importing a `node:` builtin through value imports — see Decision 39.
+  **A shared engine branches on the industry *family*, never on "not F&B".** `src/lib/industries.ts`
+  owns `industryFamily()` (food_service / retail / project_based / service),
+  `hasSellableCatalogue()` (F&B and retail only) and `RETAIL_CATALOGUE_INDUSTRIES`; the WooCommerce
+  sync/outbox, the CMS order ingest and the WooCommerce webhook ingest ask those instead of testing
+  `industry !== "food_service"`, and a trade with no sellable catalogue is refused *by name*
+  (`industry_not_storefront`, surfacing as a failed CMS inbox row / webhook event) rather than written
+  as a retail sale. `industry-coverage.test.ts` scans for the old shape and fails the build if a new
+  one appears. Register numbers are formatted in one place too: `formatAecNumber` (and
+  `nextNumberInSeries` for the field board's RFI suggestion) in `src/lib/aec-numbering.ts` — never a
+  second `padStart(3, "0")`.
+  Adding an industry means the registry entry, a
+  migration that widens `businesses_industry_check`, its chart template and its profile entry;
+  `src/lib/industry-coverage.test.ts` fails the build when any of those is missed, and refuses a
+  restated industry list anywhere else in `src/`. Cosmetics adds `item_batches` on top (batch/lot number, expiry,
   sold first-expired-first-out via `src/lib/fefo.ts`); every trade shares one promotion engine
   (`src/lib/promotions.ts`) and one loyalty engine (`src/lib/loyalty-service.ts`). **F&B's
   `menu_items`/`inventory_items`/recipes are never

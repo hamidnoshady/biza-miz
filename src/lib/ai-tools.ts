@@ -44,6 +44,7 @@ import { listWebsitePostsTool, listWebsiteProductsTool, websiteStatusTool } from
 import { listMessageCampaigns, listMessageTemplates } from "./message-campaigns-service";
 import { CAMPAIGN_CHANNELS, type CampaignChannel } from "./campaign-channels";
 import { isWorkspaceToolName, runWorkspaceReadTool, WORKSPACE_TOOL_NAMES } from "./ai-workspace-tools";
+import { AEC_AI_TOOL_NAMES, isAecAiToolName, runAecReadTool } from "./aec-ai-tools";
 import { workspaceAccessFlags } from "./workspace-shared";
 import { WEBSITE_ERROR_LABELS } from "./website/adapter";
 import {
@@ -423,7 +424,7 @@ async function wasteHistory(businessId: string, args: Record<string, unknown>) {
 /**
  * What this business's copy of the product actually is.
  *
- * The assistant is embedded in an app with five industries, per-trade modules,
+ * The assistant is embedded in an app with ten industries, per-trade modules,
  * per-business feature flags and several branches — and it knew none of that.
  * It would offer to do things this business cannot do, and fail to mention
  * things it can. This is the orientation it was missing.
@@ -1273,6 +1274,29 @@ export async function runReadTool(
   if (permissions && !canUseAiTool(name, permissions)) {
     return { ok: false, data: { error: "دسترسی لازم برای این ابزار را ندارید." } };
   }
+  // Issue #799 §23 — the AEC read tools. Kept out of the switch below for the
+  // same reason the workspace tools are: they share one executor, and that
+  // executor needs the business's industry (an AEC question from a café must
+  // be refused with a sentence, not answered with an empty list).
+  if (isAecAiToolName(name)) {
+    // The AEC reads go through the workspace services, which are scoped to the
+    // signed-in member (#761), so they need the same owner the workspace tools
+    // build below — and the same refusal when there is none.
+    if (!actorUserId) {
+      return { ok: false, data: { error: "این ابزار به کاربر وارد‌شده نیاز دارد." } };
+    }
+    const industry = await getBusinessIndustry(businessId);
+    const result = await runAecReadTool(
+      name,
+      args,
+      { businessId, actorUserId, access: workspaceAccessFlags(permissions ?? new Set()) },
+      industry,
+    );
+    return result.ok
+      ? { ok: true, data: result.data }
+      : { ok: false, data: { error: result.error ?? "خطا در خواندن داده‌های پروژه" } };
+  }
+
   // Phase G — «میز کار من». Kept out of the switch below because the four
   // tools share one executor and one extra gate (a caller identity).
   if (isWorkspaceToolName(name)) {
@@ -1649,4 +1673,6 @@ export const READ_TOOL_NAMES = new Set([
   "list_message_campaigns",
   // Phase G — «میز کار من».
   ...WORKSPACE_TOOL_NAMES,
+  // Issue #799 §23 — the AEC reads.
+  ...AEC_AI_TOOL_NAMES,
 ]);

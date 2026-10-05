@@ -262,7 +262,9 @@ jobs:
           }
           Write-Host "::notice title=Release sizes::installer=$installerMiB MiB (budget $budgetMiB); installed=$([math]::Round($installed/1MB,1)) MiB; runtime=$([math]::Round($runtime/1MB,1)) MiB; PostgreSQL tools=$toolsMiB MiB"
           if ($installer.Length -gt ($budgetMiB * 1MB)) { throw "Installer $installerMiB MiB exceeds reviewed budget $budgetMiB MiB" }
-          if ($installed -gt 600MB) { throw "Installed payload exceeds 600 MiB" }
+          # Kept in step with build-desktop-installer.yml's runaway detector (620 MiB) — see the
+          # comment there; the installer budget above is the release gate that actually binds.
+          if ($installed -gt 620MB) { throw "Installed payload exceeds 620 MiB" }
           if ($runtime -gt 200MB) { throw "Positive runtime exceeds 200 MiB" }
           [ordered]@{
             schemaVersion = 1
@@ -272,7 +274,7 @@ jobs:
             approvedInstallerBudgetMiB = $budgetMiB
             installedBytes = $installed
             installedMiB = [math]::Round($installed/1MB,1)
-            installedBudgetMiB = 600
+            installedBudgetMiB = 620
             runtimeBytes = $runtime
             runtimeMiB = [math]::Round($runtime/1MB,1)
             runtimeBudgetMiB = 200

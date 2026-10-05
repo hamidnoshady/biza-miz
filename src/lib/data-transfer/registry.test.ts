@@ -14,6 +14,7 @@ import { ALL_PERMISSIONS, roleBasePermissions } from "../permissions";
 import {
   DATA_ENTITIES,
   defaultExportFields,
+  entitiesForIndustry,
   entitiesForModule,
   findEntity,
   findField,
@@ -232,6 +233,49 @@ describe("export defaults", () => {
     // nothing — the engine matches on the duplicate rules, not on our id.
     for (const entity of DATA_ENTITIES) {
       expect(defaultExportFields(entity)).not.toContain("id");
+    }
+  });
+});
+
+describe("the industry filter (issue #799 §7)", () => {
+  it("hides an entity from a trade it does not belong to", () => {
+    // The BOQ import is the first entity that belongs to one industry only.
+    // A restaurant opening «ورود و خروج داده» must not find it, and neither
+    // may a tenant whose industry is unknown.
+    const construction = entitiesForIndustry("architecture_construction");
+    const cafe = entitiesForIndustry("food_service");
+    expect(construction.map((entity) => entity.key)).toContain("workspace.boq_items");
+    expect(cafe.map((entity) => entity.key)).not.toContain("workspace.boq_items");
+    expect(entitiesForIndustry(null).map((entity) => entity.key)).not.toContain("workspace.boq_items");
+    // Everything else is for everybody: the filter is a trade gate, not a
+    // rewrite of the catalogue.
+    expect(cafe.map((entity) => entity.key)).toEqual(
+      DATA_ENTITIES.filter((entity) => entity.requiresIndustry !== "architecture_construction").map(
+        (entity) => entity.key,
+      ),
+    );
+  });
+
+  it("keeps the database's own two columns out of an import", () => {
+    // The unit price and the line total are computed by the BOQ trigger. An
+    // importer that accepted them would be offering to store a number the row
+    // is about to overwrite — so they are exported (a round trip is checkable)
+    // and never importable.
+    const entity = requireEntity("workspace.boq_items");
+    const keys = importableFields(entity).map((field) => field.key);
+    expect(keys).not.toContain("unitPriceRial");
+    expect(keys).not.toContain("totalRial");
+    expect(defaultExportFields(entity)).toEqual(
+      expect.arrayContaining(["unitPriceRial", "totalRial"]),
+    );
+  });
+
+  it("keeps the flag meaningful — module is not trade", () => {
+    for (const entity of DATA_ENTITIES) {
+      // An entity that declares a trade must have no import/export permission
+      // outside it, or a business would be offered an action it cannot finish.
+      if (!entity.requiresIndustry) continue;
+      expect(entity.requiresIndustry, entity.key).toBe("architecture_construction");
     }
   });
 });

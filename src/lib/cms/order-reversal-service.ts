@@ -15,6 +15,7 @@ import type { PoolClient } from "pg";
 import { getPool, query } from "../db";
 import { amendClosedOrder } from "../order-amendment-service";
 import { getBusinessIndustry } from "../industry-guard";
+import { isRetailCatalogueIndustry } from "../industries";
 import { reverseRetailImportedOrder } from "../retail-order-reversal-service";
 import { validateAmendment } from "../order-amendments";
 import type { WebsiteConnectionRow } from "../website/connection-service";
@@ -102,7 +103,11 @@ export async function reverseImportedCmsStoreOrder(
     [paid.imported_order_id],
   );
   const retailShaped = Number(lineKinds[0]?.item_lines ?? 0) > 0 && Number(lineKinds[0]?.menu_lines ?? 0) === 0;
-  const isRetail = industry != null && industry !== "food_service" && (orderType === "retail" || retailShaped);
+  // Issue #799 Wave 11 — the family question, not "not F&B": a trade with no
+  // sellable catalogue has no retail order to reverse (its orders are refused
+  // at ingest), so this stays a retail-shape test rather than a catch-all.
+  const isRetail =
+    isRetailCatalogueIndustry(industry) && (orderType === "retail" || retailShaped);
 
   const reason = reversalReason(notice.event, notice.order);
   const validated = validateAmendment({

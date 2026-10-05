@@ -13,7 +13,12 @@ import { deductForOrder } from "../inventory-service";
 import { getPrimaryLocation } from "../setup-state";
 import { reconcileExternalIdentity } from "../crm-external-identity";
 import { getBusinessIndustry } from "../industry-guard";
-import type { Industry } from "../industries";
+import {
+  INDUSTRY_NOT_STOREFRONT,
+  hasSellableCatalogue,
+  isRetailCatalogueIndustry,
+  type Industry,
+} from "../industries";
 import type { RialText } from "../inventory-exact";
 import type { WebsiteConnectionRow } from "../website/connection-service";
 import { cmsMinorToRial } from "./order-money";
@@ -184,6 +189,15 @@ async function markInboxFailed(inboxId: string, error: string): Promise<void> {
 
 async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOrder): Promise<string> {
   const businessId = connection.business_id;
+  // Issue #799 Wave 11 — a family question, not a negation. A website is a
+  // shopfront only for a trade that sells goods: an order from a construction
+  // or service business's site has no catalogue to resolve its lines against,
+  // and both branches below (F&B menu, retail items) would write a sale the
+  // business never made. Keep the refusal in front of the whole import, so no
+  // store order reaches the ledger or the item model for that trade; the named
+  // error becomes `markInboxFailed`, which is what the operator sees.
+  const industry = await getBusinessIndustry(businessId);
+  if (!hasSellableCatalogue(industry)) throw new Error(INDUSTRY_NOT_STOREFRONT);
   const remoteId = order.id;
   const total = cmsMinorToRial(order.total, order.currency);
   const unit = cmsMinorToRial(order.unitPrice, order.currency);
@@ -318,7 +332,7 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
         totalCost,
         inventoryEventId,
       });
-    } else if (mapped?.localKind === "item" && industry && industry !== "food_service") {
+    } else if (mapped?.localKind === "item" && isRetailCatalogueIndustry(industry)) {
       const codes = RETAIL_ACCOUNT_CODES[industry];
       // The canonical online retail sale: FEFO + expired-batch exclusion +
       // exact batch COGS and a persisted allocation for a `tracking='batch'`
@@ -395,7 +409,9 @@ async function postRevenueEntry(
   inventoryEventId: string | null,
 ): Promise<void> {
   const retailRevenue =
-    industry && industry !== "food_service" ? RETAIL_ACCOUNT_CODES[industry].revenue : WELL_KNOWN_CODES.deliveryRevenue;
+    isRetailCatalogueIndustry(industry)
+      ? RETAIL_ACCOUNT_CODES[industry]?.revenue ?? WELL_KNOWN_CODES.deliveryRevenue
+      : WELL_KNOWN_CODES.deliveryRevenue;
   const accounts = await accountIdsByCode(client, businessId, [
     WELL_KNOWN_CODES.bankClearing,
     retailRevenue,

@@ -31,6 +31,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { computeBoqItemTotals } from "../src/lib/aec-boq";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -48,6 +49,8 @@ let registry: typeof import("../src/lib/data-transfer/registry");
 let adapters: typeof import("../src/lib/data-transfer/adapters");
 let entitiesModule: typeof import("../src/lib/data-transfer/entities");
 let codecs: typeof import("../src/lib/data-transfer/codecs");
+let provisioning: typeof import("../src/lib/business-provisioning");
+let aec: typeof import("../src/lib/aec-service");
 
 const biz = { id: "", locationId: "" };
 const other = { id: "", locationId: "" };
@@ -91,6 +94,8 @@ beforeAll(async () => {
   adapters = await import("../src/lib/data-transfer/adapters");
   entitiesModule = await import("../src/lib/data-transfer/entities");
   codecs = await import("../src/lib/data-transfer/codecs");
+  provisioning = await import("../src/lib/business-provisioning");
+  aec = await import("../src/lib/aec-service");
   entitiesModule.ensureAdaptersRegistered();
 
   db = new Client({ connectionString: urlFor(databaseName) });
@@ -613,6 +618,191 @@ describe("money", () => {
       [biz.locationId],
     );
     expect(Number(rows[0].price)).toBe(85_000);
+  });
+});
+
+describe("the BOQ entity (issue #799 §7)", () => {
+  /**
+   * The BOQ is the first entity that belongs to one trade, and the first whose
+   * rows are routed rather than inserted: a line names a project, and lands in
+   * that project's estimate, in a *draft* revision, inside a chapter. §7 asks
+   * for it through this engine — preview, mapping, validation, row errors and a
+   * safe re-run — and this is that path end to end.
+   */
+  it("imports a priced spreadsheet into the right draft revision, and reports what it cannot place", async () => {
+    const provisioned = await provisioning.provisionBusiness({
+      businessName: "شرکت عمرانی آزمون",
+      ownerName: "مالک",
+      email: `boq-import-${randomUUID().slice(0, 8)}@example.com`,
+      password: "correct-horse",
+      subdomain: `boqimp-${randomUUID().slice(0, 6)}`,
+      industry: "architecture_construction",
+      seedChartOfAccounts: false,
+    });
+    const owner = {
+      businessId: provisioned.businessId,
+      actorUserId: provisioned.userId,
+      actorName: "مالک",
+    };
+    // The default profile is the design office; the contractor preset is the
+    // one that estimates, exactly as a real business would choose it.
+    await asBusiness(provisioned.businessId, () =>
+      aec.saveBusinessAecProfile(owner, { operatingProfile: "contractor" }),
+    );
+
+    const project = await db.query<{ id: string }>(
+      `INSERT INTO ai_projects (business_id, name, created_by, owner_user_id)
+       VALUES ($1, 'پروژهٔ متره', $2::text, $2::uuid) RETURNING id`,
+      [provisioned.businessId, provisioned.userId],
+    );
+    await db.query(
+      `INSERT INTO parties (business_id, name, role) VALUES ($1, 'آجرچین البرز', 'supplier')`,
+      [provisioned.businessId],
+    );
+
+    // Headers as an estimator's own sheet would carry them: the chapter is
+    // named by its title, which is what the routing keys a section on.
+    const csv =
+      "پروژه,برآورد,کد فصل,شرح فصل,شرح ردیف,کد ردیف,واحد,مقدار,نرخ مصالح,نرخ دستمزد,پرت,سود,تأمین‌کننده\n" +
+      "پروژهٔ متره,برآورد اصلی,04,سفت‌کاری,دیوار چینی آجر فشاری,04-10,متر مربع,312.5,1500000,700000,3,12,آجرچین البرز\n" +
+      "پروژهٔ ناموجود,برآورد اصلی,04,سفت‌کاری,ردیف بی‌پروژه,04-20,متر مربع,10,100000,0,0,0,\n";
+
+    const { job } = await asBusiness(provisioned.businessId, () =>
+      importService.createImportJob({
+        businessId: provisioned.businessId,
+        locationId: provisioned.locationId,
+        entityKey: "workspace.boq_items",
+        fileName: "boq.csv",
+        format: "csv",
+        buffer: new TextEncoder().encode(csv).buffer as ArrayBuffer,
+        actorUserId: provisioned.userId,
+        actorName: owner.actorName,
+        options: { moneyUnit: "rial" },
+      }),
+    );
+    expect(job.status).toBe("ready");
+    // Both rows are syntactically sound, so the file is approved as it stands:
+    // the one that cannot be placed is refused at write time, with a reason.
+    expect(job.validRows).toBe(2);
+
+    // The preview is inert — §7's "safe import" starts here.
+    const before = await db.query<{ n: string }>(
+      `SELECT count(*) n FROM aec_boq_items WHERE business_id = $1`,
+      [provisioned.businessId],
+    );
+    expect(Number(before.rows[0].n)).toBe(0);
+
+    const result = await asBusiness(provisioned.businessId, () =>
+      importService.runImportJob(provisioned.businessId, job.id, {
+        locationId: provisioned.locationId,
+        actorUserId: provisioned.userId,
+        actorName: owner.actorName,
+      }),
+    );
+    expect(result).toMatchObject({ created: 1, updated: 0, skipped: 1, failed: 0 });
+
+    // The row is where it belongs: a draft revision of «برآورد اصلی», in the
+    // chapter the file named, priced by the database and not by the file.
+    const { rows } = await db.query<{
+      item_code: string; unit: string; quantity: string; material_rate_rial: string;
+      total_rial: string; status: string; title: string; estimate_title: string;
+      section_title: string; party_name: string;
+    }>(
+      `SELECT i.item_code, i.unit, i.quantity::text AS quantity,
+              i.material_rate_rial, i.total_rial, v.status, v.title, e.title AS estimate_title,
+              s.title AS section_title, p.name AS party_name
+         FROM aec_boq_items i
+         JOIN aec_estimate_versions v ON v.id = i.version_id
+         JOIN aec_estimates e ON e.id = v.estimate_id
+         LEFT JOIN aec_boq_sections s ON s.id = i.section_id
+         LEFT JOIN parties p ON p.id = i.party_id
+        WHERE i.business_id = $1`,
+      [provisioned.businessId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("draft");
+    // The estimate came into being because the file named it; the revision it
+    // wrote into is the one the engine created for the import.
+    expect(rows[0].estimate_title).toBe("برآورد اصلی");
+    expect(rows[0].title).toBe("ورود از فایل");
+    expect(rows[0].section_title).toBe("سفت‌کاری");
+    expect(rows[0].item_code).toBe("04-10");
+    expect(rows[0].unit).toBe("m2");
+    expect(rows[0].quantity).toBe("312.5000");
+    expect(Number(rows[0].material_rate_rial)).toBe(1_500_000);
+    expect(rows[0].party_name).toBe("آجرچین البرز");
+    expect(Number(rows[0].total_rial)).toBe(
+      computeBoqItemTotals({
+        quantity: "312.5",
+        materialRateRial: 1_500_000,
+        laborRateRial: 700_000,
+        equipmentRateRial: 0,
+        subcontractRateRial: 0,
+        wastePercent: 3,
+        overheadPercent: 0,
+        markupPercent: 12,
+      }).totalRial,
+    );
+
+    // The skipped row is reportable, in Persian, the way the operator needs it.
+    const report = await asBusiness(provisioned.businessId, () =>
+      importService.listImportRows(provisioned.businessId, job.id),
+    );
+    const skipped = report.rows.find((row) => row.status === "skipped");
+    expect(skipped?.messages.some((message) => message.message.includes("پیدا نشد"))).toBe(true);
+
+    // Re-running the same file with the update rule is safe: it corrects the
+    // line instead of adding a second one.
+    const { job: second } = await asBusiness(provisioned.businessId, () =>
+      importService.createImportJob({
+        businessId: provisioned.businessId,
+        locationId: provisioned.locationId,
+        entityKey: "workspace.boq_items",
+        fileName: "boq.csv",
+        format: "csv",
+        buffer: new TextEncoder().encode(csv).buffer as ArrayBuffer,
+        actorUserId: provisioned.userId,
+        actorName: owner.actorName,
+        options: { moneyUnit: "rial", duplicateStrategy: "update" },
+      }),
+    );
+    const secondResult = await asBusiness(provisioned.businessId, () =>
+      importService.runImportJob(provisioned.businessId, second.id, {
+        locationId: provisioned.locationId,
+        actorUserId: provisioned.userId,
+        actorName: owner.actorName,
+      }),
+    );
+    expect(secondResult).toMatchObject({ created: 0, updated: 1, skipped: 1, failed: 0 });
+    const after = await db.query<{ n: string }>(
+      `SELECT count(*) n FROM aec_boq_items WHERE business_id = $1`,
+      [provisioned.businessId],
+    );
+    expect(Number(after.rows[0].n)).toBe(1);
+
+    // And the same rows come back out through the export half of the engine,
+    // with the computed total included and the unit price not importable.
+    const built = await asBusiness(provisioned.businessId, () =>
+      exportService.buildExport({
+        businessId: provisioned.businessId,
+        locationId: provisioned.locationId,
+        entityKey: "workspace.boq_items",
+        format: "csv",
+        actorUserId: provisioned.userId,
+        actorName: owner.actorName,
+      }),
+    );
+    const sheet = codecs.parseCsv(built.body.toString("utf8"));
+    expect(sheet).toHaveLength(2);
+    // The money headers say which unit they are in, and the database's own two
+    // columns come back out so a round trip can be checked.
+    const totalColumn = sheet[0].findIndex((cell) => cell.startsWith("جمع ردیف"));
+    expect(totalColumn).toBeGreaterThanOrEqual(0);
+    expect(sheet[0][totalColumn]).toMatch(/\((ریال|تومان)\)$/);
+    expect(sheet[0].some((cell) => cell.startsWith("قیمت واحد"))).toBe(true);
+    expect(Number(sheet[1][sheet[0].indexOf("مقدار")])).toBe(312.5);
+    expect(sheet[1]).toContain("دیوار چینی آجر فشاری");
+    expect(sheet[1][totalColumn].trim().length).toBeGreaterThan(0);
   });
 });
 

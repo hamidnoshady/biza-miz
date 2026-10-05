@@ -818,6 +818,8 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       "«میز کار من» جایی است که پروژه‌ها، وظایف، اسناد، قراردادهای اجرایی و تأییدها نگهداری می‌شوند. برای «وضعیت پروژهٔ فلان چیست» از get_workspace_project_status، برای «کارهای امروزِ من» از list_workspace_tasks با mine=true، برای «چه قراردادهایی ماه آینده منقضی می‌شوند» از list_expiring_contracts با withinDays=۳۰ و برای «چه چیزی منتظر تأیید من است» از list_workspace_approvals با mine=true استفاده کن. اگر چند پروژه هم‌نام بودند، ابزار فهرست نامزدها را برمی‌گرداند؛ حدس نزن و از کاربر بپرس کدام را می‌خواهد.",
       "تقسیم مسئولیت قراردادها را رعایت کن: قراردادهای اجرایی پروژه (پیمانکار، تأمین‌کننده، مشاور، پیمانکار جزء) در میز کار هستند و با list_expiring_contracts خوانده می‌شوند؛ قراردادهای رابطه‌ای با مشتری در پروندهٔ همان مشتری در CRM هستند. اگر کاربر دنبال قرارداد فروش یا خدماتِ یک مشتری بود، او را به پروندهٔ مشتری در CRM راهنمایی کن و نگو چنین قراردادی وجود ندارد.",
       "عدد هزینهٔ پروژه که get_workspace_project_status می‌دهد از اسناد حسابداری همان پروژه خوانده می‌شود، نه از برآورد؛ آن را به‌عنوان رقم قطعی دفتر گزارش کن و با بودجه مقایسه کن.",
+      "در کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری دوازده ابزار ویژه هم داری: برای «وضعیت مالی/تجاری پروژه» و «چقدر جلو یا عقب است» از get_aec_project_financial_health، برای «چه کاری عقب افتاده است» از list_delayed_project_activities، برای «برآورد در برابر هزینهٔ واقعی» یا «مغایرت متره» از get_boq_variance، برای «آخرین بازنگری نقشهٔ فلان رشته» یا «چه نقشه‌هایی پیش‌نویس مانده‌اند» از get_latest_drawing_revision، برای «RFIهای بی‌پاسخ این هفته» از list_pending_rfis با dueWithinDays، برای «چه سابمیتال‌هایی منتظر تأیید هستند» از list_pending_submittals، برای «چه چیزی در کارگاه باز است»، «نقص‌های عقب‌افتاده» یا «بازرسی‌های سررسیدشده» از list_site_issues (با kind یا severity یا overdueOnly)، برای «چه تغییرات و دستور کارهایی داریم» یا «چقدر تغییرات تأیید شده است» از list_change_orders (با status)، برای «صورت‌وضعیت‌ها چطور است» یا «چقدر گواهی شده است» از list_payment_certificates (با status) و برای «حاشیهٔ پروژه چقدر است»، «ریسک تجاری چیست» یا «چقدر از قرارداد مانده است» از list_project_commercial_risks استفاده کن؛ برای «چه تحویلی دیر شده»، «تأخیر تأمین» یا «چه سفارش خریدی معطل مانده» از list_procurement_delays استفاده کن؛ و برای «چه چیزی تا ماه بعد موعد دارد»، «نقاط عطف پیش رو» یا «چه فازی نزدیک پایان است» از list_upcoming_milestones (با withinDays). پیشرفت فیزیکی در این کسب‌وکارها دو عدد است — برنامه‌ای و گزارش‌شده — و اختلاف همین دو، عقب‌ماندگی واقعی را نشان می‌دهد؛ هر دو را بگو.",
+      "در همین کسب‌وکارها هزینهٔ واقعی همیشه از حسابداری می‌آید. مبلغ برآورد یک عدد برنامه‌ای است و رقم واقعی یک سند مالی؛ آن دو را با هم مقایسه کن اما هرگز جای هم نگذار، و اگر برآوردی تأیید نشده باشد صریح بگو که عدد برآورد در دست نیست.",
       "برای افزودن مشتری یا تأمین‌کننده از party.customer.create یا party.supplier.create استفاده کن و فقط نام و اطلاعات تماس را پر کن؛ کد حسابداری، درصد مالیات و اطلاعات بانکی را نگذار. برای ثبت دریافت وجه از مشتری، اول با find_customers شناسهٔ مشتری را پیدا کن و سپس ar.receipt.record را با مبلغ ریالی و روش (نقد/بانک) پیشنهاد بده.",
       "برای هر تغییر در داده‌ها هرگز مستقیم اقدام نکن؛ فقط ابزار propose_action را با نوع مجاز و payload کامل صدا بزن. کاربر خودش با دکمهٔ تأیید آن را اجرا می‌کند (human-in-the-loop).",
       "قبل از پیشنهاد، اطلاعات لازم را با پرسیدن سؤال از کاربر کامل کن؛ فیلدها را با حدس‌های نامطمئن پر نکن.",
@@ -1388,6 +1390,259 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
               description: "پیش‌فرض pending",
             },
             limit: { type: "number", description: "تعداد، پیش‌فرض ۵۰ و حداکثر ۱۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    // Issue #799 §23 — the AEC reads. Offered to every business because the
+    // catalogue is trade-neutral (the same reason a jeweller sees «فروش امروز»),
+    // and refused with a sentence by the executor when the business's industry
+    // is not architecture/engineering/construction.
+    {
+      type: "function",
+      function: {
+        name: "get_aec_project_financial_health",
+        description:
+          "سلامت مالی و اجرایی یک پروژهٔ عمرانی/ساختمانی: بودجه، هزینهٔ ثبت‌شده در دفتر، ارزش قراردادها، تعداد کارهای عقب‌افتاده و فازهای دیرکرددار، و پیشرفت فیزیکی برنامه‌ای در برابر گزارش‌شده. پروژه را با نام یا شناسه بده؛ اگر چند پروژه هم‌نام باشند فهرست نامزدها برمی‌گردد و باید از کاربر بپرسی. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "نام پروژه، همان‌طور که کاربر گفت" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اگر از ابزار دیگری داری" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_boq_variance",
+        description:
+          "مغایرت برآورد و هزینهٔ واقعی یک پروژهٔ عمرانی: مبلغ برآورد تأییدشده، رقم واقعی ثبت‌شده در حسابداری، باقی‌مانده و تفکیک فصل‌ها. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری که متره و برآورد دارند. هزینهٔ واقعی از اسناد حسابداری خوانده می‌شود، نه از برآورد.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "نام پروژه، همان‌طور که کاربر گفت" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اگر از ابزار دیگری داری" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_latest_drawing_revision",
+        description:
+          "آخرین بازنگری نقشه‌ها و اسناد یک پروژه یا کل کسب‌وکار: شمارهٔ سند، عنوان، کد بازنگری، وضعیت (پیش‌نویس/صادرشده/منسوخ)، جهت صدور و تاریخ. می‌توانی پروژه، رشته (discipline) و عبارت جست‌وجو را بدهی. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری که کنترل نقشه دارند. بازنگری جاری، بالاترین شمارهٔ بازنگری هر سند است.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "نام پروژه، همان‌طور که کاربر گفت" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اگر از ابزار دیگری داری" },
+            discipline: {
+              type: "string",
+              description:
+                "رشته، اگر کاربر گفته باشد (مثلاً architecture، structural_engineering، mep)",
+            },
+            search: { type: "string", description: "بخشی از شماره یا عنوان سند" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_pending_rfis",
+        description:
+          "استعلام‌های بدون پاسخ (RFI) یک کسب‌وکار عمرانی یا یک پروژهٔ مشخص: شماره، موضوع، رشته، مسئول پاسخ، طرف مسئول، مهلت و مدت تأخیر. برای پرسش‌هایی مثل «RFIهای بدون پاسخ این هفته چیست؟» پارامتر dueWithinDays (مثلاً ۷) را بده. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "محدود به یک پروژه، اختیاری" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اختیاری" },
+            dueWithinDays: {
+              type: "number",
+              description: "فقط مواردی که مهلتشان تا این تعداد روز آینده است، اختیاری",
+            },
+            limit: { type: "number", description: "تعداد، پیش‌فرض ۲۵ و حداکثر ۱۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_change_orders",
+        description:
+          "تغییرات و دستور کارهای یک پروژه عمرانی: شماره، شرح، منشأ، وضعیت، مبلغ برآوردی، اثر هزینه‌ای، مبلغ پیشنهادی، مبلغ توافق‌شده، اثر زمانی و تاریخ‌ها. با status می‌توان به یک وضعیت محدود کرد (draft، priced، submitted، under_review، approved، rejected، implemented، cancelled). مبالغ «توافق‌شده» است نه پرداخت‌شده؛ پرداخت در حسابداری است. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "نام پروژه" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اختیاری" },
+            status: {
+              type: "string",
+              description:
+                "وضعیت، اختیاری: draft، priced، submitted، under_review، approved، rejected، implemented یا cancelled",
+            },
+            limit: { type: "number", description: "تعداد، پیش‌فرض ۲۵ و حداکثر ۱۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_payment_certificates",
+        description:
+          "صورت‌وضعیت‌ها و گواهی‌های پیشرفت یک پروژه عمرانی: شماره، نوع (صورت‌وضعیت پیمانکار یا گواهی کارفرما/مشاور)، دورهٔ اندازه‌گیری، درصد پیشرفت، مبلغ ناخالص، کسورات، خالص، مبلغ تأییدشده، تاریخ تأیید، مبلغ تأییدشدهٔ قبلی و ماندهٔ قرارداد. با status می‌توان به یک وضعیت محدود کرد. مبلغ تأییدشده یعنی گواهی‌شده، نه وصول‌شده. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "نام پروژه" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اختیاری" },
+            status: {
+              type: "string",
+              description:
+                "وضعیت، اختیاری: draft، submitted، under_review، certified، rejected یا cancelled",
+            },
+            limit: { type: "number", description: "تعداد، پیش‌فرض ۲۵ و حداکثر ۱۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_procurement_delays",
+        description:
+          "تأخیر تأمین و تعهدات باز یک پروژه عمرانی: سفارش‌های خرید و پیمان‌های جزئی که از تاریخ تحویل مورد انتظار گذشته‌اند (با تعداد روز تأخیر و مبلغ)، به‌همراه درخواست‌های کالای در انتظار تأیید. هزینهٔ تعهدشده، هزینهٔ تحویل‌شده و پیش‌بینی هزینهٔ نهایی هم برمی‌گردد؛ مبلغ تعهد‌شده یعنی پولی که وعده داده شده، نه هزینهٔ ثبت‌شده در حسابداری. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری که تأمین و خرید دارند.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "نام پروژه" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اختیاری" },
+            afterDays: {
+              type: "number",
+              description: "فقط تأخیرهای بیش از این تعداد روز، پیش‌فرض ۰",
+            },
+            limit: { type: "number", description: "تعداد، پیش‌فرض ۲۵ و حداکثر ۱۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_upcoming_milestones",
+        description:
+          "نقاط عطف پیش رو در کسب‌وکار عمرانی: تاریخ پایان فازها، موعد وظایف باز و تاریخ پایان پروژه‌ها در بازهٔ پیش رو (پیش‌فرض ۳۰ روز)، نزدیک‌ترین اول — با نام پروژه، تعداد روز باقی‌مانده و برای فازها تعداد کار و کار انجام‌شده. مکمل list_delayed_project_activities است: آن یکی می‌گوید چه چیزی عقب افتاده، این یکی می‌گوید چه چیزی نزدیک است. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "نام پروژه" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اختیاری" },
+            withinDays: {
+              type: "number",
+              description: "افق پیش رو به روز، پیش‌فرض ۳۰ و حداکثر ۳۶۵",
+            },
+            limit: { type: "number", description: "تعداد، پیش‌فرض ۲۵ و حداکثر ۱۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_project_commercial_risks",
+        description:
+          "چشم‌انداز تجاری و ریسک‌های یک پروژه عمرانی در یک پاسخ: ارزش اصلی و اصلاح‌شدهٔ قرارداد، تغییرات تأییدشده، مبالغ گواهی‌شده، ماندهٔ قرارداد، حسن انجام کار دریافتنی و پرداختنی، پیش‌پرداخت و بازیافت آن، بودجه، برآورد تأییدشده، هزینهٔ واقعی از حسابداری، تغییرات باز، صورت‌وضعیت‌های تأییدنشده، موارد تأییدشده‌ای که وصولشان باید در حسابداری بررسی شود، و ضمانت‌نامه/بیمه‌نامه‌های نزدیک به انقضا. ارقام حسابداری جدا اعلام می‌شوند و حاشیهٔ سود ساخته نمی‌شود. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "نام پروژه" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اختیاری" },
+            withinDays: {
+              type: "number",
+              description: "افق انقضای ضمانت‌نامه و بیمه‌نامه به روز، پیش‌فرض ۶۰",
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_pending_submittals",
+        description:
+          "سابمیتال‌های منتظر تأیید: شماره، عنوان، نوع ارسال، شمارهٔ بازنگری، بازبین، مهلت و مدت تأخیر. «منتظر تأیید» یعنی ارسال‌شده یا در حال بررسی؛ تأییدشده‌ها و ردشده‌ها اینجا نیستند. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری که کنترل نقشه دارند.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "محدود به یک پروژه، اختیاری" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اختیاری" },
+            dueWithinDays: {
+              type: "number",
+              description: "فقط مواردی که مهلتشان تا این تعداد روز آینده است، اختیاری",
+            },
+            limit: { type: "number", description: "تعداد، پیش‌فرض ۲۵ و حداکثر ۱۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_site_issues",
+        description:
+          "موارد باز کارگاه و کنترل کیفیت: بازرسی‌ها، عدم‌انطباق‌ها (NCR)، اقدام‌های اصلاحی، نقص‌ها (پانچ) و مشاهدات ایمنی که بسته نشده‌اند — با شماره، نوع، عنوان، شدت، وضعیت، مسئول، مهلت و مدت تأخیر. شدیدترین‌ها اول می‌آیند. «باز» یعنی باز، در دست اقدام یا اصلاح‌شده و منتظر تأیید؛ موارد بسته اینجا نیستند. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری که کنترل کیفیت دارند.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "محدود به یک پروژه، اختیاری" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اختیاری" },
+            kind: {
+              type: "string",
+              description:
+                "نوع مورد، اختیاری: inspection_request، inspection، ncr، corrective_action، snag، handover یا hse_observation",
+            },
+            severity: {
+              type: "string",
+              description: "شدت، اختیاری: low، medium، high یا critical",
+            },
+            overdueOnly: {
+              type: "boolean",
+              description: "فقط مواردی که مهلتشان گذشته است، اختیاری",
+            },
+            limit: { type: "number", description: "تعداد، پیش‌فرض ۲۵ و حداکثر ۱۰۰" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_delayed_project_activities",
+        description:
+          "فعالیت‌های عقب‌افتادهٔ میز کار: وظایف باز با مهلت گذشته و فازهای دیرکرددار، با پروژه، مسئول، اولویت و مدت تأخیر. برای پرسش «چه چیزی عقب است؟» بدون نام پروژه، همهٔ کسب‌وکار بررسی می‌شود. فقط برای کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری.",
+        parameters: {
+          type: "object",
+          properties: {
+            projectName: { type: "string", description: "محدود به یک پروژه، اختیاری" },
+            projectId: { type: "string", description: "شناسهٔ پروژه، اختیاری" },
+            limit: { type: "number", description: "تعداد هر فهرست، پیش‌فرض ۵۰ و حداکثر ۲۰۰" },
           },
           additionalProperties: false,
         },

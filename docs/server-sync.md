@@ -236,6 +236,24 @@ key). A change that cannot merge — two rows created independently with the
 same unique name, a delete the other side's history blocks — is recorded as a
 master conflict and listed on the sync panel.
 
+**AEC (issue #799 §26)** — the architecture/engineering/construction registers
+are classified rather than assumed. `src/lib/aec-sync-classification.ts` puts
+every AEC table in one of §26's buckets — the field-capture candidates (tasks,
+checklists, site logs, inspections, snags, daily progress, photo and drawing
+metadata, RFI and submittal drafts) and the financial/high-risk registers (BOQ
+and estimates, variations, payment certificates, procurement, transmittals) —
+and records for each the reason, the conflict rule and the protocol it would
+need before it could travel. **Nothing there replicates today**, in either
+direction: a pair is a till, an AEC business has no till modules, and a paired
+AEC desktop opens on the cloud pane rather than a half-copy of a register.
+`data-ownership.ts` carries the matching `aec_field_capture` and
+`aec_commercial_registers` domains as `not_replicated`, which is what the
+pairing disclosure prints, and two tests keep it honest: the unit suite refuses
+a classification that leaves a table out, and
+`integration/aec-sync-classification.integration.test.ts` proves against
+PostgreSQL that no AEC table carries the master-data capture trigger and that a
+paired desktop database holds zero rows in every one of them.
+
 This is still **not** full-database replication. Staff access follows its own
 IAM control plane; retail invoices and the retail catalogue are not part of
 hybrid sync (pairing never copies them); website and imported sales are

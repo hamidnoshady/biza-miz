@@ -62,6 +62,10 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   growth: keys("growth.loyalty"),
   dashboard: keys("operations.shared"),
   workspace: keys("operations.shared"),
+  // Issue #799 Wave 2 — the AEC project profile and participant routes. They
+  // are My Workspace's project-metadata endpoints, so they classify exactly as
+  // `workspace` does rather than as a capability of their own.
+  aec: keys("operations.shared"),
   knowledge: keys("operations.shared"),
   support: keys("operations.shared"),
   "support-access": keys("operations.shared"),

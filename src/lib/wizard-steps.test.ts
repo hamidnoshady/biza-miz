@@ -1,5 +1,5 @@
 /**
- * Issue #808 §8 — the industry setup matrix.
+ * Issue #808 §8 — the industry setup matrix (extended by issue #799 §2).
  *
  * The old rule was "F&B gets everything, every other industry loses costing and
  * menu", which left the multi-industry question answered by a filter rather
@@ -31,7 +31,19 @@ const FNB_ORDER = [
   "hardware",
   "backup",
   "opening",
-];
+] as const;
+
+/**
+ * AEC's ordering: the same sequence, with F&B's counter steps gone and its own
+ * «پروفایل کسب‌وکار» step right after `business` (issue #799 §2 — the profile
+ * is chosen once the industry is known).
+ */
+const AEC_ORDER = ["business", "aec_profile", ...FNB_ORDER.slice(1)].filter(
+  (step) => step !== "costing" && step !== "menu",
+);
+
+/** Every step id, in wizard order (the F&B pair plus AEC's own). */
+const ALL_STEPS = ["business", "aec_profile", ...FNB_ORDER.slice(1)];
 
 describe("wizardStepsForIndustry", () => {
   it("is defined for every industry this build can create", () => {
@@ -48,8 +60,22 @@ describe("wizardStepsForIndustry", () => {
   });
 
   it("walks F&B through every step in the documented order", () => {
-    expect(wizardStepsForIndustry("food_service")).toEqual(FNB_ORDER);
-    expect(wizardStepsForIndustry("food_service")).toEqual([...WIZARD_STEPS]);
+    expect(wizardStepsForIndustry("food_service")).toEqual([...FNB_ORDER]);
+    // F&B does not walk AEC's operating-profile step: the two shapes differ by
+    // exactly that one step in this direction.
+    expect(wizardStepsForIndustry("food_service")).toEqual(
+      WIZARD_STEPS.filter((step) => step !== "aec_profile"),
+    );
+  });
+
+  it("walks AEC through its own profile step and neither of F&B's counter steps", () => {
+    expect(setupShapeForIndustry("architecture_construction")).toBe("aec");
+    expect(wizardStepsForIndustry("architecture_construction")).toEqual(AEC_ORDER);
+    expect(wizardStepsForIndustry("architecture_construction")).not.toContain("costing");
+    expect(wizardStepsForIndustry("architecture_construction")).not.toContain("menu");
+    // §2's ordering: the profile question follows the business details.
+    const steps = wizardStepsForIndustry("architecture_construction");
+    expect(steps.indexOf("aec_profile")).toBe(steps.indexOf("business") + 1);
   });
 
   it("gives every industry a non-empty, in-order subsequence of WIZARD_STEPS", () => {
@@ -65,6 +91,12 @@ describe("wizardStepsForIndustry", () => {
     for (const industry of INDUSTRIES) {
       const steps = new Set(wizardStepsForIndustry(industry));
       for (const optional of OPTIONAL_STEPS) {
+        // `aec_profile` is optional *for AEC* and absent for every other trade
+        // by decision — the one optional step a shape may own exclusively.
+        if (optional === "aec_profile") {
+          expect(steps.has(optional)).toBe(setupShapeForIndustry(industry) === "aec");
+          continue;
+        }
         expect(steps.has(optional)).toBe(true);
       }
     }
@@ -90,14 +122,14 @@ describe("wizardStepsForIndustry", () => {
       expect(wizardStepsForIndustry(industry)).not.toContain("menu");
     }
     expect(wizardStepsForIndustry("jewelry")).toEqual(
-      FNB_ORDER.filter((s) => s !== "costing" && s !== "menu"),
+      ALL_STEPS.filter((s) => s !== "costing" && s !== "menu" && s !== "aec_profile"),
     );
   });
 
   it("keeps a service company at the accounting/admin skeleton", () => {
     expect(setupShapeForIndustry("service_saas")).toBe("service");
     expect(wizardStepsForIndustry("service_saas")).toEqual(
-      FNB_ORDER.filter((s) => s !== "costing" && s !== "menu"),
+      ALL_STEPS.filter((s) => s !== "costing" && s !== "menu" && s !== "aec_profile"),
     );
   });
 
@@ -116,6 +148,13 @@ describe("wizardStepsForIndustry", () => {
       "menu",
     ]);
     expect(requiredStepsForIndustry("jewelry")).toEqual(["business", "accounts", "tax"]);
+    // AEC's own step is optional too: skipping it keeps the default operating
+    // profile, which is a working state (issue #799 §2).
+    expect(requiredStepsForIndustry("architecture_construction")).toEqual([
+      "business",
+      "accounts",
+      "tax",
+    ]);
   });
 
   it("points every trade with a catalogue door at it, and none at a door that does not exist", () => {
@@ -128,12 +167,15 @@ describe("wizardStepsForIndustry", () => {
     // from Billing, so neither gets a pointer card.
     expect(catalogueHrefFor("food_service")).toBeNull();
     expect(catalogueHrefFor("service_saas")).toBeNull();
+    // AEC sells no catalogue at all: its products workspace is gated off, so
+    // the finish page gets no pointer card.
+    expect(catalogueHrefFor("architecture_construction")).toBeNull();
   });
 });
 
 describe("WIZARD_STEPS", () => {
   it("stays in one canonical order with no duplicates", () => {
-    expect(WIZARD_STEPS).toEqual(FNB_ORDER);
+    expect(WIZARD_STEPS).toEqual(ALL_STEPS);
     expect(new Set(WIZARD_STEPS).size).toBe(WIZARD_STEPS.length);
   });
 });

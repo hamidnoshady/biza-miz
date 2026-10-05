@@ -68,7 +68,8 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "محصول",
     items: [
       { label: "برنامه‌ها", href: "/platform/apps" },
-      { label: "هوش مصنوعی", href: "/platform/ai", cap: "ai.read" },
+      { label: "هوش مصنوعی", href: "/platform/ai", cap: "ai.read", alsoActive: ["/platform/ai/"] },
+      { label: "ویجت‌های پیشنهادی", href: "/platform/ai/widgets", cap: "ai.read" },
       { label: "پلتفرم وب‌سایت", href: "/platform/cms" },
       { label: "پیام‌رسانی", href: "/platform/messaging" },
       { label: "پایگاه دانش", href: "/platform/knowledge" },

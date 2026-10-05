@@ -156,9 +156,13 @@ describe("skipToPath — direct links and stale tabs", () => {
     // Not a shape any enabled industry produces, but a row written by a newer
     // build (or hand-edited) must not crash a page: an unknown industry falls
     // back to the F&B sequence rather than to "no steps", and an empty list
-    // still terminates at Finish, which validates readiness.
+    // still terminates at Finish, which validates readiness. The F&B sequence
+    // is the fallback *shape*, so it excludes AEC's own `aec_profile` step
+    // (issue #799) the same way `food_service` does.
     const steps = stepsFor("unknown_trade" as Industry);
-    expect(steps.map((s) => s.id)).toEqual([...WIZARD_STEPS]);
+    expect(steps.map((s) => s.id)).toEqual(
+      WIZARD_STEPS.filter((step) => step !== "aec_profile"),
+    );
     expect(skipToPath("business", [])).toBe("/setup/finish");
   });
 });

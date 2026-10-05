@@ -8,6 +8,10 @@
  * below unit-testable without a database.
  */
 
+import type { AecOperatingProfile } from "./aec";
+import type { Industry } from "./industries";
+import { AEC_BUILTIN_TEMPLATES } from "./workspace-aec-templates";
+
 /* ---------------------------------------------------------------------------
  * Sections
  * ------------------------------------------------------------------------- */
@@ -275,7 +279,33 @@ export const DOCUMENT_STATUS_LABELS: Record<WorkspaceDocumentStatus, string> = {
  * Approvals
  * ------------------------------------------------------------------------- */
 
-export const APPROVAL_SUBJECTS = ["project", "task", "document", "contract"] as const;
+export const APPROVAL_SUBJECTS = [
+  "project",
+  "task",
+  "document",
+  "contract",
+  "estimate_version",
+  // Issue #799 §11 — a submittal revision is reviewed through the same engine
+  // under the same `workspace.approve` key. A sixth subject rather than a second
+  // approval store, for the reason given below for the fifth: the queue, the
+  // dashboard counters and the reminder job learn about submittals for free.
+  "submittal_revision",
+  // Issue #799 §15 and §16 (Wave 8) — an approved change order and a certified
+  // claim are the two commercial determinations, and both go through this same
+  // engine under the same `workspace.approve` key. Two more subjects rather than
+  // a commercial approval store of their own: §24 says high-risk commercial
+  // actions must not inherit ordinary edit rights, and the way to achieve that
+  // without a second framework is to file them where the right key already is.
+  "variation",
+  "payment_certificate",
+  // Issue #799 §18 (Wave 9) — a material request and a purchase/subcontract
+  // commitment. The requirement is approved before the firm goes to market and
+  // the award is approved before any money is committed, so both are decisions
+  // and both belong where the deciding key already is rather than in a
+  // procurement approval store of their own.
+  "material_request",
+  "commitment",
+] as const;
 export type WorkspaceApprovalSubject = (typeof APPROVAL_SUBJECTS)[number];
 
 export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> = {
@@ -283,6 +313,16 @@ export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> =
   task: "وظیفه",
   document: "سند",
   contract: "قرارداد",
+  // Issue #799 §7 — a BOQ revision is approved through the same engine as a
+  // contract, under the same `workspace.approve` key. It is a fifth subject
+  // rather than a second approval table, which is why a submission appears in
+  // the approvals queue, the dashboard counters and the widgets for free.
+  estimate_version: "نسخهٔ برآورد",
+  submittal_revision: "بازنگری سابمیتال",
+  variation: "تغییر / دستور کار",
+  payment_certificate: "صورت‌وضعیت",
+  material_request: "درخواست کالا",
+  commitment: "تعهد خرید / پیمان جزء",
 };
 
 export const APPROVAL_STATUSES = [
@@ -364,6 +404,13 @@ export interface WorkspaceAccessFlags {
   canManage: boolean;
   /** Holds `workspace.approve`. */
   canApprove: boolean;
+  /**
+   * Holds `workspace.documents_issue` — may issue a document revision to an
+   * outside party (issue #799 §9). Separate from `canApprove` because issuing
+   * is not approving: it is the moment a drawing becomes a record that names
+   * what went to whom, and the register freezes it (migration 0197).
+   */
+  canIssueDocuments: boolean;
   /** Holds `media.view` — may open a document's file (the media route's own rule). */
   canViewMedia: boolean;
 }
@@ -381,6 +428,7 @@ export interface WorkspaceProjectCapabilities {
   canAdminister: boolean;
   canManageContracts: boolean;
   canApprove: boolean;
+  canIssueDocuments: boolean;
   canViewFinancials: boolean;
 }
 
@@ -400,6 +448,11 @@ export function projectCapabilities(
     canAdminister: writes && can("administer"),
     canManageContracts: flags.canManageContracts && can("edit"),
     canApprove: flags.canApprove && can("view"),
+    // Issuing is a platform permission like the contract register's: it is the
+    // *act* that is restricted, and any project member the business trusts with
+    // it may do it — an external party never holds it, because it is not a
+    // project role.
+    canIssueDocuments: flags.canIssueDocuments && can("view"),
     canViewFinancials: flags.canViewFinancials && can("view"),
   };
 }
@@ -416,6 +469,7 @@ export function workspaceAccessFlags(permissions: ReadonlySet<string>): Workspac
     canManageContracts: permissions.has("workspace.contracts_manage"),
     canManage: permissions.has("workspace.manage"),
     canApprove: permissions.has("workspace.approve"),
+    canIssueDocuments: permissions.has("workspace.documents_issue"),
     canViewMedia: permissions.has("media.view"),
   };
 }
@@ -519,6 +573,23 @@ export interface WorkspaceTemplate {
   projectType: string;
   phases: WorkspaceTemplatePhase[];
   defaultTasks: string[];
+  /**
+   * The industry this blueprint belongs to, or nothing for the generic
+   * catalogue every trade sees. (#799 §4's six AEC templates are the first
+   * industry-scoped ones: a café must not be offered «پیمانکاری عمومی».)
+   */
+  industry?: Industry | null;
+  /**
+   * AEC operating profiles this template is *recommended* for. Ordering and a
+   * badge only — never a gate: a contractor renovating an office still gets
+   * the fit-out template, it is simply not the one marked «پیشنهادی».
+   */
+  recommendedProfiles?: readonly AecOperatingProfile[];
+}
+
+/** A template plus the answer to "should this business see it first". */
+export interface WorkspaceTemplateChoice extends WorkspaceTemplate {
+  recommended: boolean;
 }
 
 /**
@@ -533,6 +604,12 @@ export interface WorkspaceTemplate {
  * software, marketing, event, consulting, and a bare generic — because the
  * brief's requirement is a workspace that fits ANY business, and a
  * restaurant-shaped phase list would have made it fit exactly one.
+ *
+ * Industry-scoped templates (`industry` set) are appended from their own
+ * module — `workspace-aec-templates.ts` holds issue #799 §4's six AEC
+ * blueprints — and are only offered to that industry. Keeping them out of this
+ * literal is what stops the generic catalogue from growing a trade-specific
+ * branch every time an industry is added.
  */
 export const BUILTIN_TEMPLATES: WorkspaceTemplate[] = [
   {
@@ -632,11 +709,39 @@ export const BUILTIN_TEMPLATES: WorkspaceTemplate[] = [
     ],
     defaultTasks: ["جلسهٔ آغازین", "جمع‌آوری داده"],
   },
+  ...AEC_BUILTIN_TEMPLATES,
 ];
 
 /** Pure: looks a built-in template up by key. */
 export function builtinTemplate(key: string): WorkspaceTemplate | null {
   return BUILTIN_TEMPLATES.find((t) => t.key === key) ?? null;
+}
+
+/**
+ * Pure: the templates a business of `industry` may choose, with the ones
+ * recommended for its operating profile first and flagged.
+ *
+ * `industry: null` means the caller could not resolve one (an unprovisioned or
+ * missing row) and keeps only the generic catalogue — an unknown tenant must
+ * never be *offered* a trade it may not be. Sorting is stable, so the built-in
+ * order (generic families, then the industry's own set) survives inside each
+ * group and the catalogue stays authored rather than incidental.
+ */
+export function templatesForIndustry(
+  templates: WorkspaceTemplate[],
+  industry: Industry | null,
+  profile: AecOperatingProfile | null = null,
+): WorkspaceTemplateChoice[] {
+  const eligible = templates
+    .filter((template) => !template.industry || template.industry === industry)
+    .map((template) => ({
+      ...template,
+      recommended: Boolean(profile && template.recommendedProfiles?.includes(profile)),
+    }));
+  return [
+    ...eligible.filter((template) => template.recommended),
+    ...eligible.filter((template) => !template.recommended),
+  ];
 }
 
 /* ---------------------------------------------------------------------------

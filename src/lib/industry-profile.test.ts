@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { INDUSTRIES, type Industry } from "./industries";
+import { ENABLED_INDUSTRIES, INDUSTRIES, INDUSTRY_LABELS, isIndustry, type Industry } from "./industries";
 import {
   defaultGoldMakingChargePercent,
   defaultGoldProfitPercent,
@@ -120,22 +120,95 @@ describe("module sets", () => {
     }
   });
 
-  it("gives trading industries a selling screen, but keeps service/SaaS out of POS", () => {
-    for (const industry of INDUSTRIES.filter((value) => value !== "service_saas")) {
+  it("gives every counter-selling trade a selling screen, and keeps the service trades out of POS", () => {
+    // Two trades deliberately have no counter: `service_saas` bills through
+    // Billing/Accounting, and issue #799's AEC trade writes statements and
+    // progress certificates rather than ringing up a cart. Everything else
+    // sells from `/accounting/pos`.
+    const POS_LESS: Industry[] = ["service_saas", "architecture_construction"];
+    for (const industry of INDUSTRIES.filter((value) => !POS_LESS.includes(value))) {
       expect(hasModule(industry, "pos"), industry).toBe(true);
     }
-    expect(hasModule("service_saas", "pos")).toBe(false);
+    for (const industry of POS_LESS) {
+      expect(hasModule(industry, "pos"), industry).toBe(false);
+    }
+  });
+
+  it("gives no non-F&B industry a restaurant module", () => {
+    // Issue #799's "no restaurant-specific module leaks into the AEC tenant"
+    // rule, stated for every trade at once: these modules exist because a café
+    // has tables, a kitchen and a menu, and no other business type inherits
+    // them. A future industry that genuinely needs one adds itself here with a
+    // note, rather than getting it by accident.
+    const RESTAURANT_MODULES: ModuleKey[] = [
+      "tables", "waiter", "kitchen", "reservations", "delivery", "inventory", "menu", "orders",
+    ];
+    for (const industry of INDUSTRIES.filter((value) => value !== "food_service")) {
+      for (const module of RESTAURANT_MODULES) {
+        expect(hasModule(industry, module), `${industry}/${module}`).toBe(false);
+      }
+    }
   });
 
   it("keeps the open-orders board to F&B", () => {
     // /dashboard/orders is a board of open tickets with kitchen statuses and a
     // realtime feed. A retail invoice is settled the moment it is written, so
     // it would never appear there; the shop's history lives on its selling
-    // screen instead.
+    // screen instead. AEC is further still from it — no tickets at all.
     expect(hasModule("food_service", "orders")).toBe(true);
-    for (const industry of RETAIL_INDUSTRIES) {
+    for (const industry of INDUSTRIES.filter((value) => value !== "food_service")) {
       expect(hasModule(industry, "orders"), industry).toBe(false);
     }
+  });
+});
+
+describe("architecture_construction (issue #799)", () => {
+  const AEC = industryProfile("architecture_construction");
+
+  it("brands itself as the AEC trade and not as a café or a shop", () => {
+    expect(AEC.brandTitle).toBe("عمران، معماری و پیمانکاری");
+    expect(AEC.brandSubtitle).not.toContain("کافه");
+    expect(AEC.brandTitle).not.toBe(industryProfile("food_service").brandTitle);
+  });
+
+  it("gets exactly the core platform modules — no café, no retail counter", () => {
+    const forbidden: ModuleKey[] = [
+      "orders", "pos", "tables", "waiter", "kitchen", "reservations", "delivery",
+      "inventory", "menu", "stock", "jewelry", "watch", "accessories", "cosmetics",
+      "wholesale", "tools_fittings", "haberdashery",
+    ];
+    for (const module of forbidden) {
+      expect(hasModule("architecture_construction", module), module).toBe(false);
+    }
+    // The operational centre (projects, tasks, documents) has no module key of
+    // its own — see the MODULE_KEYS note in industry-profile.ts — so the trade
+    // reaches My Workspace through the shell, exactly like every other trade.
+    for (const module of ["dashboard", "customers", "crm", "ledger", "reports", "media", "ai", "settings"] as ModuleKey[]) {
+      expect(hasModule("architecture_construction", module), module).toBe(true);
+    }
+  });
+
+  it("calls its commercial document a صورتحساب, never a فاکتور or a سفارش", () => {
+    expect(labelFor("architecture_construction", "saleDocument")).toBe("صورتحساب");
+    expect(labelFor("architecture_construction", "saleDocumentPlural")).toBe("صورتحساب‌ها");
+    for (const key of LABEL_KEYS) {
+      expect(labelFor("architecture_construction", key), key).not.toContain("منو");
+      expect(labelFor("architecture_construction", key), key).not.toContain("سفارش");
+    }
+  });
+
+  it("seeds the restaurant-shaped features off at provision time", () => {
+    expect(AEC.defaultDisabledFeatures).toEqual(
+      expect.arrayContaining(["inventory", "reservations", "delivery"]),
+    );
+    expect(AEC.capabilities).toEqual([]);
+    expect(AEC.salesModel).toBe("retail_invoice");
+  });
+
+  it("is registered everywhere the app offers an industry", () => {
+    expect(ENABLED_INDUSTRIES).toContain("architecture_construction");
+    expect(INDUSTRY_LABELS.architecture_construction).toBe("مهندسی عمران، معماری و پیمانکاری");
+    expect(isIndustry("architecture_construction")).toBe(true);
   });
 });
 

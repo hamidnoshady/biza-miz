@@ -29,6 +29,7 @@ import {
 // From the pure module, not from the executor: this file is reachable from a
 // client component, and `ai-workspace-tools` imports the database layer.
 import { WORKSPACE_TOOL_LABELS } from "./workspace-shared";
+import { AEC_AI_TOOL_LABELS } from "./aec";
 
 export const MAX_AGENT_NAME = 80;
 export const MAX_AGENT_INSTRUCTIONS = 4000;
@@ -145,6 +146,9 @@ export const AGENT_TOOL_LABELS: Record<string, string> = {
   // Phase G — «میز کار من». Spread from the module's own table so an agent
   // builder cannot offer a workspace tool the executor does not implement.
   ...WORKSPACE_TOOL_LABELS,
+  // Issue #799 §23 — the AEC reads, spread the same way from `aec.ts` (which
+  // stays free of `pg` so this builder can import it).
+  ...AEC_AI_TOOL_LABELS,
 };
 
 /** The Persian label for a tool name, or the raw name if none is registered. */

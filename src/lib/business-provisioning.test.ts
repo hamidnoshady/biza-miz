@@ -159,7 +159,7 @@ describe("validateProvisionBody", () => {
     expect(validateProvisionBody(VALID).input?.subdomain).toBeUndefined();
   });
 
-  it("offers every industry the platform names, now that all eight trades have shipped", () => {
+  it("offers every industry the platform names, now that every trade has shipped", () => {
     // Until Wave 6 this asserted the opposite for watch/accessories — that a
     // real-but-not-yet-built industry is rejected with industry_not_available.
     // The gate itself is unchanged (the validator still checks
