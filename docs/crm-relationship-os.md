@@ -190,9 +190,29 @@ assignee picker's own read under `crm.view` — not `/api/team`, which needs a
 team key the pipeline does not, and returns more than a picker needs. Inactive
 members are **included**: reassignment starts by seeing who holds what.
 
-Activities and cases accept the same resolution on their existing `assignedTo`
-field, so a typed name that matches exactly one member starts producing ids
-before their dialogs grow pickers.
+Every screen that can assign now assigns a **member**:
+
+| Surface | Control | Field it writes |
+|---|---|---|
+| معامله‌ها | `CrmAssigneePicker` in the deal dialog | `owner_user_id` + `owner_user` |
+| کارها و پیگیری‌ها | the same picker in the task dialog, plus a **«کارهای من»** chip | `assignee_user_id` + `assigned_to` |
+| تیکت‌های خدمات | the same picker, plus a **«تیکت‌های من»** chip | `assignee_user_id` + `assigned_to` |
+| سرنخ‌ها | the same picker in the lead dialog — the «مسئول» column existed and had no way to be filled | `owner_user_id` + `owner_name` |
+
+`src/app/(app)/crm/crm-assignee-picker.tsx` is that one control. It writes the id
+and the name together (one decision, two columns), shows inactive members marked
+rather than hiding them, and — the part that matters for old data — offers a
+row's recorded name as its own option («نام ثبت‌شدهٔ قبلی») and keeps it
+selected, so opening a pre-0157 row to fix a typo cannot silently erase who had
+it. The *name* is still accepted by the API on the legacy `assignedTo` /
+`ownerName` fields, because integrations write those: it goes through the same
+`resolveOwner`, which resolves an unambiguous name and leaves anything else
+unassigned with the name kept.
+
+«کارهای من» and «تیکت‌های من» filter by **member id, from the session** — never
+by a name, and never by a query parameter naming somebody else. Two colleagues
+can share a name; a name filter would quietly hand one of them the other's work,
+and a `?mine=<id>` would be a filter pretending to be a permission.
 
 ## Permissions: one table, checked against the routes
 

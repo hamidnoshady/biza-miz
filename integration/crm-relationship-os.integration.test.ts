@@ -42,6 +42,7 @@ let pipelines: typeof import("../src/lib/crm-pipeline-service");
 let views: typeof import("../src/lib/crm-saved-views-service");
 let audit: typeof import("../src/lib/crm-audit-service");
 let ownership: typeof import("../src/lib/crm-ownership");
+let leadService: typeof import("../src/lib/crm-lead-service");
 
 const biz = { id: "", locationId: "", userId: "" };
 const other = { id: "", locationId: "" };
@@ -123,6 +124,7 @@ beforeAll(async () => {
   views = await import("../src/lib/crm-saved-views-service");
   audit = await import("../src/lib/crm-audit-service");
   ownership = await import("../src/lib/crm-ownership");
+  leadService = await import("../src/lib/crm-lead-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -558,6 +560,138 @@ describe("the pipeline's own audit trail", () => {
     // recorded under its own id — not folded into the new pipeline's story.
     const stageEvents = await audit.listCrmAuditEvents(biz.id, { kind: "pipeline.stages_changed" });
     expect(stageEvents.events.length).toBeGreaterThan(0);
+  });
+});
+
+
+describe("every floor surface assigns a member, not a name", () => {
+  /**
+   * The deals board got a member picker first; activities, tickets and leads
+   * kept a free-text field. These pin the same contract on all four, because
+   * "who owns this?" has to mean one thing: an id that resolves to somebody who
+   * can sign in, with the name kept beside it as the row's snapshot.
+   */
+  async function makeMember(name: string, isActive = true): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, email, password_hash, is_active)
+       VALUES ($1, 'manager', $2, $3, 'x', $4) RETURNING id`,
+      [biz.id, name, `floor-${randomUUID().slice(0, 8)}@example.test`, isActive],
+    );
+    return rows[0].id;
+  }
+
+  it("writes the id and the name together on a task", async () => {
+    const memberId = await makeMember("سارا نوری");
+    const activity = await crm.createActivity(biz.id, {
+      kind: "call",
+      subject: "تماس پیگیری",
+      assigneeUserId: memberId,
+      createdBy: actor.name,
+    });
+    expect(activity.assigneeUserId).toBe(memberId);
+    expect(activity.assignedTo).toBe("سارا نوری");
+  });
+
+  it("resolves a typed name for a task, and declines to guess between two", async () => {
+    const memberId = await makeMember("کاظم احمدی");
+    const resolved = await crm.createActivity(biz.id, {
+      kind: "call",
+      subject: "کار با نام",
+      assignedTo: "کاظم احمدی",
+    });
+    expect(resolved.assigneeUserId).toBe(memberId);
+
+    await makeMember("نگار سلطانی");
+    await makeMember("نگار سلطانی");
+    const ambiguous = await crm.createActivity(biz.id, {
+      kind: "call",
+      subject: "کار نام تکراری",
+      assignedTo: "نگار سلطانی",
+    });
+    // Unassigned, name kept: the row still says who was meant, and the
+    // unassigned list is where a human decides.
+    expect(ambiguous.assigneeUserId).toBeNull();
+    expect(ambiguous.assignedTo).toBe("نگار سلطانی");
+  });
+
+  it("refuses a member of another business on a task", async () => {
+    const foreign = new Client({ connectionString: urlFor(databaseName) });
+    await foreign.connect();
+    const { rows } = await foreign.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, email, password_hash)
+       VALUES ($1, 'manager', 'بیگانهٔ کار', $2, 'x') RETURNING id`,
+      [other.id, `foreign-task-${randomUUID().slice(0, 8)}@example.test`],
+    );
+    await foreign.end();
+
+    const activity = await crm.createActivity(biz.id, {
+      kind: "call",
+      subject: "کار بیگانه",
+      assigneeUserId: rows[0].id,
+    });
+    expect(activity.assigneeUserId).toBeNull();
+    expect(activity.assignedTo).toBe("");
+  });
+
+  it("clears both columns when a task is unassigned", async () => {
+    const memberId = await makeMember("بهنام رستمی");
+    const activity = await crm.createActivity(biz.id, {
+      kind: "call",
+      subject: "کار واگذارشده",
+      assigneeUserId: memberId,
+    });
+    const cleared = await crm.updateActivity(biz.id, activity.id, { assigneeUserId: "" });
+    expect(cleared?.assigneeUserId).toBeNull();
+    expect(cleared?.assignedTo).toBe("");
+  });
+
+  it("assigns a ticket on create and again on update", async () => {
+    const first = await makeMember("حمید کاظمی");
+    const second = await makeMember("لیلا شریفی");
+    const created = await crm.upsertCase(biz.id, {
+      subject: "تیکت واگذارشده",
+      assigneeUserId: first,
+      createdBy: actor.name,
+    });
+    expect(created.assigneeUserId).toBe(first);
+    expect(created.assignedTo).toBe("حمید کاظمی");
+
+    const moved = await crm.upsertCase(biz.id, {
+      id: created.id,
+      subject: "تیکت واگذارشده",
+      assigneeUserId: second,
+      createdBy: actor.name,
+    });
+    expect(moved.assigneeUserId).toBe(second);
+    expect(moved.assignedTo).toBe("لیلا شریفی");
+  });
+
+  it("assigns a lead by id, which the list column could never be filled with before", async () => {
+    const memberId = await makeMember("پویا مقدم");
+    const lead = await leadService.saveLead(
+      biz.id,
+      { name: "سرنخ واگذارشده", ownerUserId: memberId },
+      { name: actor.name, userId: actor.userId },
+    );
+    expect(lead?.ownerUserId).toBe(memberId);
+    expect(lead?.ownerName).toBe("پویا مقدم");
+  });
+
+  it("lists my work by member id, not by a name two people can share", async () => {
+    const mine = await makeMember("منِ کاربر");
+    const namesake = await makeMember("منِ کاربر");
+    await crm.createActivity(biz.id, { kind: "call", subject: "کار من", assigneeUserId: mine });
+    await crm.createActivity(biz.id, { kind: "call", subject: "کار همنام", assigneeUserId: namesake });
+
+    const listed = await crm.listActivities(biz.id, { assigneeUserId: mine, openOnly: true });
+    const subjects = listed.map((row) => row.subject);
+    expect(subjects).toContain("کار من");
+    expect(subjects).not.toContain("کار همنام");
+
+    const cases = await crm.listCases(biz.id, { assigneeUserId: mine });
+    await crm.upsertCase(biz.id, { subject: "تیکت من", assigneeUserId: mine, createdBy: actor.name });
+    const again = await crm.listCases(biz.id, { assigneeUserId: mine });
+    expect(again.length).toBe(cases.length + 1);
   });
 });
 

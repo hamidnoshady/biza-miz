@@ -44,6 +44,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     caseId: search.get("caseId") ?? undefined,
     openOnly: search.get("open") === "1",
     assignedTo: search.get("assignedTo") ?? undefined,
+    // «کارهای من»: the caller's own id, taken from the session rather than from
+    // the query string — a `?mine=<someone-else>` would be a filter pretending
+    // to be a permission.
+    assigneeUserId: search.get("mine") === "1" ? session.sub : undefined,
     q: search.get("q") ?? undefined,
     // «فقط سررسیدشده‌ها» — overdue plus today, against the business date the
     // server just resolved, so the filter and the badges agree.
@@ -61,6 +65,9 @@ interface ActivityBody {
   subject?: string;
   body?: string;
   dueAt?: string | null;
+  /** The assignee as a member id (`/api/crm/members`); preferred. */
+  assigneeUserId?: string | null;
+  /** A name, for legacy clients — resolved server-side, never trusted. */
   assignedTo?: string;
   completed?: boolean;
 }
@@ -95,6 +102,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (assignedTo.length > ACTIVITY_ASSIGNEE_MAX) {
     return NextResponse.json({ error: "activity_assignee_too_long" }, { status: 400 });
   }
+  // An id that is not a uuid cannot name a member; a 400 here rather than a
+  // cast error from the database (or, worse, a silently unassigned row).
+  if (body.assigneeUserId != null && body.assigneeUserId !== "" && !isUuid(body.assigneeUserId)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
 
   // An id that is not a uuid cannot name a row; checked here so the answer is a
   // 400 rather than a Postgres cast error surfacing as «خطای غیرمنتظره».
@@ -127,6 +139,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     subject,
     body: note,
     dueAt,
+    assigneeUserId: body.assigneeUserId ?? null,
     assignedTo,
     createdBy: session.fullName,
     completed: body.completed === true,

@@ -3,6 +3,7 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { listCases, upsertCase } from "@/lib/crm-service";
 import { caseSlaSummary } from "@/lib/crm-case-service";
+import { isUuid } from "@/lib/uuid";
 import {
   isCasePriority,
   isCaseStatus,
@@ -39,6 +40,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     customerId: search.get("customerId") ?? undefined,
     status: status && isCaseStatus(status) ? (status as CaseStatus) : undefined,
     openOnly: search.get("open") === "1",
+    // «تیکت‌های من» — from the session, never from the query string.
+    assigneeUserId: search.get("mine") === "1" ? session.sub : undefined,
   });
   return NextResponse.json({
     cases,
@@ -58,6 +61,9 @@ interface CaseBody {
   priority?: string;
   category?: string;
   orderId?: string | null;
+  /** The handler as a member id; `""` unassigns. */
+  assigneeUserId?: string | null;
+  /** A name, for legacy clients — resolved server-side, never trusted. */
   assignedTo?: string;
   resolution?: string;
 }
@@ -81,6 +87,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (body.priority !== undefined && !isCasePriority(body.priority)) {
     return NextResponse.json({ error: "case_priority_invalid" }, { status: 400 });
   }
+  // A handler is a member of this business or nobody: a non-uuid cannot name
+  // one, and asking Postgres would answer with a cast error instead.
+  if (body.assigneeUserId != null && body.assigneeUserId !== "" && !isUuid(body.assigneeUserId)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
 
   const record = await upsertCase(session.businessId, {
     id: body.id,
@@ -95,6 +106,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     // every edit from a client that doesn't know about orders unlink the
     // ticket from the order the complaint was about.
     orderId: body.orderId,
+    assigneeUserId: body.assigneeUserId ?? null,
     assignedTo: body.assignedTo,
     resolution: body.resolution,
     createdBy: session.fullName,

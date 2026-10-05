@@ -46,6 +46,7 @@ import { api, ErrorBox, errorMessage, Field, inputClass } from "@/app/dashboard/
 import { crmCustomerHref } from "./crm-routes";
 import { CustomerSearchField } from "./customer-search";
 import { CrmCardHeading } from "./crm-card-heading";
+import { CrmAssigneePicker, type CrmAssignee } from "./crm-assignee-picker";
 import { CrmTodayQueues } from "./today-queues";
 
 interface ServiceCase {
@@ -58,7 +59,10 @@ interface ServiceCase {
   priority: CasePriority;
   category: string;
   orderId: string | null;
+  /** The display snapshot of the handler (see `crm-ownership.ts`). */
   assignedTo: string;
+  /** The member handling it, when the handler is one. */
+  assigneeUserId: string | null;
   resolution: string;
   openedAt: string;
   resolvedAt: string | null;
@@ -67,6 +71,10 @@ interface ServiceCase {
 export function CasesSection({ canDelete = false }: { canDelete?: boolean }) {
   const [cases, setCases] = useState<ServiceCase[] | null>(null);
   const [openOnly, setOpenOnly] = useState(true);
+  // «تیکت‌های من» — a member-id filter on the server, not a name match on the
+  // rows already loaded: `assigned_to` is a display snapshot, and two
+  // colleagues can share a name.
+  const [mineOnly, setMineOnly] = useState(false);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<ServiceCase | "new" | null>(null);
   const searchParams = useSearchParams();
@@ -80,7 +88,11 @@ export function CasesSection({ canDelete = false }: { canDelete?: boolean }) {
   // instead of letting two in-flight responses race each other into the list.
   const load = useCallback(() => {
     let cancelled = false;
-    api<{ cases: ServiceCase[] }>(`/api/crm/cases${openOnly ? "?open=1" : ""}`).then(
+    const params = new URLSearchParams();
+    if (openOnly) params.set("open", "1");
+    if (mineOnly) params.set("mine", "1");
+    const query = params.toString();
+    api<{ cases: ServiceCase[] }>(`/api/crm/cases${query ? `?${query}` : ""}`).then(
       ({ ok, data }) => {
         if (cancelled) return;
         if (ok) {
@@ -92,7 +104,7 @@ export function CasesSection({ canDelete = false }: { canDelete?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [openOnly]);
+  }, [openOnly, mineOnly]);
   useEffect(load, [load]);
 
   // The customer timeline links here as `/crm/cases?case=<id>`. Honour it:
@@ -154,6 +166,13 @@ export function CasesSection({ canDelete = false }: { canDelete?: boolean }) {
                 onCheckedChange={(checked) => setOpenOnly(checked === true)}
               />
               فقط بازها
+            </label>
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Checkbox
+                checked={mineOnly}
+                onCheckedChange={(checked) => setMineOnly(checked === true)}
+              />
+              تیکت‌های من
             </label>
             <Button type="button" variant="ghost" size="icon-sm" onClick={load} aria-label="بازخوانی">
               <RefreshCwIcon aria-hidden="true" className="size-4" />
@@ -255,7 +274,13 @@ function CaseDialog({
   const [status, setStatus] = useState<CaseStatus>(record?.status ?? "open");
   const [priority, setPriority] = useState<CasePriority>(record?.priority ?? "normal");
   const [category, setCategory] = useState(record?.category ?? "");
-  const [assignedTo, setAssignedTo] = useState(record?.assignedTo ?? "");
+  // A handler is a member, not a typed name — same rule as the deals board and
+  // the activity dialog, and the same control (`CrmAssigneePicker`), so
+  // «تیکت‌های بی‌مسئول» cannot be answered by a name that resolves to nobody.
+  const [assignee, setAssignee] = useState<CrmAssignee>({
+    userId: record?.assigneeUserId ?? "",
+    name: record?.assignedTo ?? "",
+  });
   const [resolution, setResolution] = useState(record?.resolution ?? "");
   // Scoped to the customer slice — a ticket belongs to a customer, and an
   // unscoped search would offer suppliers and employees as matches.
@@ -281,7 +306,8 @@ function CaseDialog({
         status,
         priority,
         category: category.trim(),
-        assignedTo: assignedTo.trim(),
+        assigneeUserId: assignee.userId || null,
+        assignedTo: assignee.name.trim(),
         resolution: resolution.trim(),
         customerId,
         // Threaded back unchanged so an edit never silently unlinks the ticket
@@ -383,13 +409,11 @@ function CaseDialog({
         <Field label="دسته (اختیاری)">
           <input className={inputClass} value={category} onChange={(e) => setCategory(e.target.value)} />
         </Field>
-        <Field label="مسئول رسیدگی (اختیاری)">
-          <input
-            className={inputClass}
-            value={assignedTo}
-            onChange={(e) => setAssignedTo(e.target.value)}
-          />
-        </Field>
+        <CrmAssigneePicker
+          label="مسئول رسیدگی (اختیاری)"
+          value={assignee}
+          onChange={setAssignee}
+        />
         {resolved ? (
           <Field label="شرح رسیدگی" hint="چه کاری برای مشتری انجام شد.">
             <textarea

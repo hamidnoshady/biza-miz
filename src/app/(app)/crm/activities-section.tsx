@@ -28,7 +28,6 @@ import {
 import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
 import { formatJalali, isoDateInTimeZone } from "@/lib/jalali";
 import {
-  ACTIVITY_ASSIGNEE_MAX,
   ACTIVITY_BODY_MAX,
   ACTIVITY_KINDS,
   ACTIVITY_KIND_LABELS,
@@ -49,6 +48,7 @@ import { api, ErrorBox, errorMessage, Field, inputClass } from "@/app/dashboard/
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { crmCustomerHref } from "./crm-routes";
 import { CustomerSearchField } from "./customer-search";
+import { CrmAssigneePicker, type CrmAssignee } from "./crm-assignee-picker";
 import { CrmCardHeading } from "./crm-card-heading";
 import { CrmTodayQueues } from "./today-queues";
 
@@ -63,7 +63,10 @@ interface Activity {
   body: string;
   dueAt: string | null;
   completedAt: string | null;
+  /** The display snapshot of the assignee (see `crm-ownership.ts`). */
   assignedTo: string;
+  /** The member it belongs to, when the assignee is one. */
+  assigneeUserId: string | null;
   createdBy: string;
   createdAt: string;
 }
@@ -76,16 +79,17 @@ interface ActivityListPayload {
 }
 
 /** The list's own view filter. The server filters open/due; the rest is local. */
-type ViewFilter = "all" | "open" | "due" | "done";
+type ViewFilter = "all" | "open" | "mine" | "due" | "done";
 
 const VIEW_LABELS: Record<ViewFilter, string> = {
   open: "انجام‌نشده",
+  mine: "کارهای من",
   due: "سررسیدشده",
   done: "انجام‌شده",
   all: "همه",
 };
 
-const VIEW_ORDER: readonly ViewFilter[] = ["open", "due", "done", "all"];
+const VIEW_ORDER: readonly ViewFilter[] = ["open", "mine", "due", "done", "all"];
 
 /** A fallback «امروز» for the first paint, before the server's answer lands. */
 function browserToday(): string {
@@ -118,6 +122,12 @@ export function ActivitiesSection() {
       if (view === "due") {
         params.set("open", "1");
         params.set("due", "1");
+      }
+      // «کارهای من» filters on the server by member id: matching the assignee's
+      // *name* here would count a colleague with the same name as mine.
+      if (view === "mine") {
+        params.set("open", "1");
+        params.set("mine", "1");
       }
       const query = params.toString();
       const { ok, data, aborted } = await api<ActivityListPayload>(
@@ -516,7 +526,14 @@ function ActivityDialog({
     activity?.dueAt ? (isoDateInTimeZone(activity.dueAt) ?? "") : "",
   );
   const [dueTime, setDueTime] = useState(activity?.dueAt ? timeInTehran(activity.dueAt) : "");
-  const [assignedTo, setAssignedTo] = useState(activity?.assignedTo ?? "");
+  // Assignment is a member, not a typed name: a free-text field is how a
+  // callback ends up owned by somebody who cannot sign in, and how «کارهای من»
+  // becomes unanswerable. The legacy name rides along so opening an old row and
+  // saving something else does not erase it — see `CrmAssigneePicker`.
+  const [assignee, setAssignee] = useState<CrmAssignee>({
+    userId: activity?.assigneeUserId ?? "",
+    name: activity?.assignedTo ?? "",
+  });
   // Attaching an activity to a customer is what makes it show on their file, so
   // the picker searches the live directory rather than asking for an id.
   const [customerName, setCustomerName] = useState(activity?.customerName ?? "");
@@ -549,7 +566,8 @@ function ActivityDialog({
       subject: trimmed,
       body: body.trim(),
       dueAt,
-      assignedTo: assignedTo.trim(),
+      assigneeUserId: assignee.userId || null,
+      assignedTo: assignee.name.trim(),
       customerId,
     };
     const { ok, data } = await api<{ activity?: Activity; error?: string }>(
@@ -647,14 +665,11 @@ function ActivityDialog({
               />
             </div>
           </Field>
-          <Field label="مسئول (اختیاری)">
-            <input
-              className={inputClass}
-              value={assignedTo}
-              maxLength={ACTIVITY_ASSIGNEE_MAX}
-              onChange={(e) => setAssignedTo(e.target.value)}
-            />
-          </Field>
+          <CrmAssigneePicker
+            label="مسئول (اختیاری)"
+            value={assignee}
+            onChange={setAssignee}
+          />
           <Field label="توضیح (اختیاری)">
             <textarea
               className={`${inputClass} h-auto min-h-20 py-2`}

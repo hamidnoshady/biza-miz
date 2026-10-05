@@ -36,6 +36,7 @@ import { query, withTenantTransaction } from "./db";
 import { phoneE164 } from "./phone";
 import { phoneMatchKeys, phoneMatchSql, createParty } from "./parties-service";
 import { recordCrmAudit } from "./crm-audit-service";
+import { resolveOwner } from "./crm-ownership";
 import { normaliseSource, type CrmSource } from "./crm-sources";
 import { defaultPipeline } from "./crm-pipeline-service";
 import { isUuid } from "./uuid";
@@ -209,7 +210,9 @@ interface SaveLeadInput {
   sourceDetail?: string;
   status?: LeadStatus;
   rating?: LeadRating;
+  /** The owner as a **member id**; preferred over the name below. */
   ownerUserId?: string | null;
+  /** A name, for integrations and legacy callers. Resolved, never trusted. */
   ownerName?: string;
   notes?: string;
   nextAction?: string;
@@ -248,6 +251,12 @@ export async function saveLead(
     ? (input.rating as LeadRating)
     : "warm";
 
+  // Ownership is a member id, with the name kept beside it as the row's
+  // snapshot (see `crm-ownership.ts`). Resolved here rather than trusted from
+  // the body so an integration that sends a name — or a stale id from another
+  // business — cannot assign a lead to somebody who does not exist here.
+  const owner = await resolveOwner(businessId, input.ownerUserId ?? input.ownerName);
+
   if (input.id) {
     if (!isUuid(input.id)) return null;
     // A converted lead is history. Editing it would let somebody rewrite what
@@ -278,8 +287,8 @@ export async function saveLead(
         input.sourceDetail?.trim() ?? "",
         status,
         rating,
-        input.ownerUserId ?? null,
-        input.ownerName?.trim() ?? "",
+        owner.userId,
+        owner.name,
         input.notes?.trim() ?? "",
         input.nextAction?.trim() ?? "",
         input.nextActionAt ?? null,
@@ -325,8 +334,8 @@ export async function saveLead(
       input.sourceDetail?.trim() ?? "",
       status,
       rating,
-      input.ownerUserId ?? null,
-      input.ownerName?.trim() ?? "",
+      owner.userId,
+      owner.name,
       input.notes?.trim() ?? "",
       input.nextAction?.trim() ?? "",
       input.nextActionAt ?? null,

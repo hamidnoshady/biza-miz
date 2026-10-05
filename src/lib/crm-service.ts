@@ -1434,7 +1434,10 @@ interface CrmActivity extends Record<string, unknown> {
   body: string;
   dueAt: string | null;
   completedAt: string | null;
+  /** The display snapshot — what the row says the assignee was. */
   assignedTo: string;
+  /** The member, when the assignee is one. Null for legacy rows and unassigned work. */
+  assigneeUserId: string | null;
   createdBy: string;
   createdAt: string;
 }
@@ -1442,6 +1445,7 @@ interface CrmActivity extends Record<string, unknown> {
 const ACTIVITY_COLUMNS = `a.id, a.customer_id AS "customerId", c.name AS "customerName",
   a.deal_id AS "dealId", a.case_id AS "caseId", a.kind, a.subject, a.body,
   a.due_at AS "dueAt", a.completed_at AS "completedAt", a.assigned_to AS "assignedTo",
+  a.assignee_user_id AS "assigneeUserId",
   a.created_by AS "createdBy", a.created_at AS "createdAt"`;
 
 export async function listActivities(
@@ -1451,7 +1455,10 @@ export async function listActivities(
     dealId?: string;
     caseId?: string;
     openOnly?: boolean;
+    /** Exact snapshot match — the legacy text filter. */
     assignedTo?: string;
+    /** The member whose work to list («کارهای من»). */
+    assigneeUserId?: string;
     /** Free-text over subject/body/assignee — the list's own search box. */
     q?: string;
     /** Only rows whose `dueAt` falls on or before this ISO date (overdue + today). */
@@ -1472,6 +1479,11 @@ export async function listActivities(
   if (options.dealId && isUuid(options.dealId)) add("a.deal_id = $n", options.dealId);
   if (options.caseId && isUuid(options.caseId)) add("a.case_id = $n", options.caseId);
   if (options.assignedTo) add("a.assigned_to = $n", options.assignedTo);
+  // «کارهای من» — by member id, never by name: two colleagues can share a name,
+  // and a name filter would quietly hand one of them the other's list.
+  if (options.assigneeUserId && isUuid(options.assigneeUserId)) {
+    add("a.assignee_user_id = $n", options.assigneeUserId);
+  }
   const term = options.q?.trim();
   if (term) {
     // `%` and `_` in a user's search string are literals, not wildcards.
@@ -1523,6 +1535,9 @@ interface CreateActivityInput {
   subject: string;
   body?: string;
   dueAt?: string | null;
+  /** The assignee as a **member id**; preferred over the name below. */
+  assigneeUserId?: string | null;
+  /** A name, for legacy callers and pre-0157 rows. Resolved, never trusted. */
   assignedTo?: string;
   createdBy?: string;
   completed?: boolean;
@@ -1532,10 +1547,16 @@ export async function createActivity(
   businessId: string,
   input: CreateActivityInput,
 ): Promise<CrmActivity> {
+  // Whoever is named is a member of *this* business, verified here rather than
+  // trusted from the body: the id column is the ownership, the text is the
+  // snapshot, and a foreign or misspelled name leaves the row unassigned
+  // instead of misattributed (`crm-ownership.ts`).
+  const owner = await resolveOwner(businessId, input.assigneeUserId ?? input.assignedTo);
   const { rows } = await query<{ id: string }>(
     `INSERT INTO crm_activities
-       (business_id, customer_id, deal_id, case_id, kind, subject, body, due_at, assigned_to, created_by, completed_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+       (business_id, customer_id, deal_id, case_id, kind, subject, body, due_at,
+        assigned_to, assignee_user_id, created_by, completed_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
     [
       businessId,
       input.customerId ?? null,
@@ -1545,7 +1566,8 @@ export async function createActivity(
       input.subject.trim(),
       input.body?.trim() ?? "",
       input.dueAt ?? null,
-      input.assignedTo ?? "",
+      owner.name,
+      owner.userId,
       input.createdBy ?? "",
       input.completed ? new Date().toISOString() : null,
     ],
@@ -1573,6 +1595,9 @@ interface UpdateActivityInput {
   subject?: string;
   body?: string;
   dueAt?: string | null;
+  /** The assignee as a member id; `""` unassigns. */
+  assigneeUserId?: string | null;
+  /** A name, for legacy callers. Resolved to a member when it is unambiguous. */
   assignedTo?: string;
   customerId?: string | null;
   completed?: boolean;
@@ -1602,7 +1627,15 @@ export async function updateActivity(
   if (input.subject !== undefined) set("subject", input.subject.trim());
   if (input.body !== undefined) set("body", input.body.trim());
   if (input.dueAt !== undefined) set("due_at", input.dueAt);
-  if (input.assignedTo !== undefined) set("assigned_to", input.assignedTo.trim());
+  // Assignment is one decision, so it writes both columns together: the id when
+  // the caller named a member (or a name only one member answers to), and the
+  // snapshot either way. Two separate writes are how a row ends up with an id
+  // and a stale name beside it.
+  if (input.assigneeUserId !== undefined || input.assignedTo !== undefined) {
+    const owner = await resolveOwner(businessId, input.assigneeUserId ?? input.assignedTo);
+    set("assignee_user_id", owner.userId);
+    set("assigned_to", owner.name);
+  }
   if (input.customerId !== undefined) set("customer_id", input.customerId);
   if (input.completed !== undefined) {
     set("completed_at", input.completed ? new Date().toISOString() : null);
@@ -1913,7 +1946,10 @@ interface CrmCase extends Record<string, unknown> {
   priority: CasePriority;
   category: string;
   orderId: string | null;
+  /** The display snapshot — see `crm-ownership.ts`. */
   assignedTo: string;
+  /** The member handling it, or null for legacy/unassigned rows. */
+  assigneeUserId: string | null;
   resolution: string;
   openedAt: string;
   resolvedAt: string | null;
@@ -1922,18 +1958,30 @@ interface CrmCase extends Record<string, unknown> {
 
 const CASE_COLUMNS = `k.id, k.customer_id AS "customerId", c.name AS "customerName",
   k.subject, k.body, k.status, k.priority, k.category, k.order_id AS "orderId",
-  k.assigned_to AS "assignedTo", k.resolution, k.opened_at AS "openedAt",
+  k.assigned_to AS "assignedTo", k.assignee_user_id AS "assigneeUserId",
+  k.resolution, k.opened_at AS "openedAt",
   k.resolved_at AS "resolvedAt", k.created_by AS "createdBy"`;
 
 export async function listCases(
   businessId: string,
-  options: { customerId?: string; status?: CaseStatus; openOnly?: boolean; limit?: number } = {},
+  options: {
+    customerId?: string;
+    status?: CaseStatus;
+    openOnly?: boolean;
+    /** The member handling them («تیکت‌های من») — by id, not by name. */
+    assigneeUserId?: string;
+    limit?: number;
+  } = {},
 ): Promise<CrmCase[]> {
   const params: unknown[] = [businessId];
   let where = "k.business_id = $1";
   if (options.customerId) {
     params.push(options.customerId);
     where += ` AND k.customer_id = $${params.length}`;
+  }
+  if (options.assigneeUserId && isUuid(options.assigneeUserId)) {
+    params.push(options.assigneeUserId);
+    where += ` AND k.assignee_user_id = $${params.length}`;
   }
   if (options.status) {
     params.push(options.status);
@@ -1970,6 +2018,9 @@ interface UpsertCaseInput {
    * mention the order must not silently unlink the ticket from it.
    */
   orderId?: string | null;
+  /** The handler as a member id; `""` unassigns. */
+  assigneeUserId?: string | null;
+  /** A name, for legacy callers. Resolved to a member when it is unambiguous. */
   assignedTo?: string;
   resolution?: string;
   createdBy?: string;
@@ -1979,6 +2030,11 @@ export async function upsertCase(businessId: string, input: UpsertCaseInput): Pr
   const status = input.status ?? "open";
   const resolved = status === "resolved" || status === "closed";
 
+  // Resolved before the write, for the same reason as an activity's: a handler
+  // is a member of this business or nobody, and the name beside the id is a
+  // snapshot of that decision rather than a second, weaker one.
+  const owner = await resolveOwner(businessId, input.assigneeUserId ?? input.assignedTo);
+
   if (input.id) {
     const orderIdProvided = input.orderId !== undefined;
     await query(
@@ -1986,7 +2042,7 @@ export async function upsertCase(businessId: string, input: UpsertCaseInput): Pr
           SET customer_id = $3, subject = $4, body = $5, status = $6, priority = $7,
               category = $8,
               order_id = CASE WHEN $13 THEN $9::uuid ELSE order_id END,
-              assigned_to = $10, resolution = $11,
+              assigned_to = $10, assignee_user_id = $14, resolution = $11,
               resolved_at = CASE WHEN $12 THEN coalesce(resolved_at, now()) ELSE NULL END,
               updated_at = now()
         WHERE business_id = $1 AND id = $2`,
@@ -2000,10 +2056,11 @@ export async function upsertCase(businessId: string, input: UpsertCaseInput): Pr
         input.priority ?? "normal",
         input.category?.trim() ?? "",
         input.orderId ?? null,
-        input.assignedTo ?? "",
+        owner.name,
         input.resolution?.trim() ?? "",
         resolved,
         orderIdProvided,
+        owner.userId,
       ],
     );
     return (await getCase(businessId, input.id))!;
@@ -2012,9 +2069,9 @@ export async function upsertCase(businessId: string, input: UpsertCaseInput): Pr
   const { rows } = await query<{ id: string }>(
     `INSERT INTO crm_cases
        (business_id, customer_id, subject, body, status, priority, category, order_id,
-        assigned_to, resolution, resolved_at, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-             CASE WHEN $11 THEN now() ELSE NULL END, $12)
+        assigned_to, assignee_user_id, resolution, resolved_at, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+             CASE WHEN $12 THEN now() ELSE NULL END, $13)
      RETURNING id`,
     [
       businessId,
@@ -2025,7 +2082,8 @@ export async function upsertCase(businessId: string, input: UpsertCaseInput): Pr
       input.priority ?? "normal",
       input.category?.trim() ?? "",
       input.orderId ?? null,
-      input.assignedTo ?? "",
+      owner.name,
+      owner.userId,
       input.resolution?.trim() ?? "",
       resolved,
       input.createdBy ?? "",
