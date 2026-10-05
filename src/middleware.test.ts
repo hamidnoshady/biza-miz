@@ -221,6 +221,12 @@ describe("the staff picker's roster read — bucketed apart from the credentials
     expect(isAuthRateLimitedPath("/api/auth/pin-login")).toBe(true);
     expect(isAuthRateLimitedPath("/api/auth/login")).toBe(true);
     expect(isAuthRateLimitedPath("/api/auth/webauthn/login/verify")).toBe(true);
+    // Issue #843 — the login screen's «همگام‌سازی دوباره»: session-less by
+    // necessity (nobody can sign in while the credentials it fetches are
+    // missing) and it makes the site call the cloud, so it belongs in this
+    // bucket and *not* in the roster's read budget.
+    expect(isAuthRateLimitedPath("/api/auth/pin-login/roster/sync")).toBe(true);
+    expect(isStaffRosterPath("/api/auth/pin-login/roster/sync")).toBe(false);
     // ...and the roster is not smuggled in as a near-miss of either name.
     expect(isStaffRosterPath("/api/auth/pin-login")).toBe(false);
     expect(isStaffRosterPath("/api/auth/pin-login/rosters")).toBe(false);
