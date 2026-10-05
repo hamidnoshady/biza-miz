@@ -58,6 +58,63 @@ export interface SpentRecoveryCode {
   usedAt: string;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isCredentialRecord(value: unknown): value is ReplicatedLoginCredential {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.membershipId !== "string" || !UUID.test(record.membershipId)) return false;
+  if (typeof record.email !== "string" || typeof record.fullName !== "string") return false;
+  if (typeof record.passwordHash !== "string" || record.passwordHash.length === 0) return false;
+  if (typeof record.isActive !== "boolean") return false;
+  if (record.tokenVersion !== undefined && (typeof record.tokenVersion !== "number" || !Number.isFinite(record.tokenVersion))) return false;
+  if (!Array.isArray(record.mfa) || !record.mfa.every((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const m = entry as Record<string, unknown>;
+    return (m.method === "totp" || m.method === "sms_otp")
+      && typeof m.isPrimary === "boolean"
+      && (m.phoneE164 === null || typeof m.phoneE164 === "string")
+      && (m.totpSecret === null || typeof m.totpSecret === "string");
+  })) return false;
+  if (!Array.isArray(record.recoveryCodes) || !record.recoveryCodes.every((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const c = entry as Record<string, unknown>;
+    return typeof c.codeHash === "string" && (c.usedAt === null || typeof c.usedAt === "string");
+  })) return false;
+  return true;
+}
+
+function isPinRecord(value: unknown): value is ReplicatedPin {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.membershipId === "string" && UUID.test(record.membershipId)
+    && typeof record.pinHash === "string" && record.pinHash.length > 0;
+}
+
+/**
+ * The site's gate on `/api/iam/login-credentials`. A payload that is shaped
+ * like garbage must be a *visible* credential-stage failure, never something
+ * that half-applies: applyReplicatedPins() and applyLoginCredentials() each
+ * write rows, so the response is validated in full before either runs.
+ */
+export function validateLoginCredentialPayload(raw: unknown): {
+  ok: true;
+  credentials: ReplicatedLoginCredential[];
+  pins: ReplicatedPin[];
+} | { ok: false; code: string } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, code: "payload_not_object" };
+  const body = raw as { credentials?: unknown; pins?: unknown };
+  const credentials = body.credentials ?? [];
+  const pins = body.pins ?? [];
+  if (!Array.isArray(credentials)) return { ok: false, code: "credentials_not_array" };
+  if (!Array.isArray(pins)) return { ok: false, code: "pins_not_array" };
+  // An old cloud may legitimately omit `pins`; once the list exists its
+  // entries must be usable.
+  if (!pins.every(isPinRecord)) return { ok: false, code: "invalid_pin_record" };
+  if (!credentials.every(isCredentialRecord)) return { ok: false, code: "invalid_credential_record" };
+  return { ok: true, credentials: credentials as ReplicatedLoginCredential[], pins: pins as ReplicatedPin[] };
+}
+
 /**
  * A member's quick-login PIN as the cloud holds it. The bcrypt hash is as
  * portable as a password hash, and the cloud is where staff are created and

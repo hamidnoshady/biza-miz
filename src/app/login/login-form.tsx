@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { cardClass } from "@/app/dashboard/page-chrome";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -148,6 +149,25 @@ interface RosterPolicy {
   enforcedAt: string | null;
 }
 
+/**
+ * Hybrid credential convergence, as the roster route reports it.
+ *
+ * The roster itself lists only members a PIN can sign in, so a replicated
+ * membership whose credential has not arrived is simply absent. Without this
+ * block the till would look like the business has one employee. Counts and
+ * names only — the server never sends credential material here.
+ */
+interface CredentialSyncNotice {
+  state: string;
+  overall: string;
+  expected: number;
+  usable: number;
+  missing: number;
+  missingMembers: { id: string; fullName: string; role: string }[];
+  lastSuccessAt: string | null;
+  lastError: string | null;
+}
+
 /** Device-local "who signed in here recently" — never synced, just a UI shortcut. */
 const RECENTS_KEY = "pos:lastEmployees";
 const MAX_RECENTS = 5;
@@ -225,6 +245,9 @@ function PinLogin() {
   const next = useNextPath("/dashboard");
   const [employees, setEmployees] = useState<RosterEmployee[] | null>(null);
   const [policy, setPolicy] = useState<RosterPolicy | null>(null);
+  /** Hybrid only: set when active PIN staff exist locally but cannot sign in yet. */
+  const [credentialSync, setCredentialSync] = useState<CredentialSyncNotice | null>(null);
+  const [credentialRetrying, setCredentialRetrying] = useState(false);
   const [rosterFailure, setRosterFailure] = useState<RosterFailure | null>(null);
   /** Bumped by the retry button; the roster effect keys off it. */
   const [rosterReloadKey, setRosterReloadKey] = useState(0);
@@ -290,11 +313,14 @@ function PinLogin() {
         const data = (await res.json().catch(() => null)) as {
           employees?: RosterEmployee[];
           policy?: RosterPolicy;
+          credentialSync?: CredentialSyncNotice | null;
         } | null;
         if (cancelled) return;
         setRosterFailure(null);
         setEmployees(data?.employees ?? []);
         setPolicy(data?.policy ?? null);
+        const notice = data?.credentialSync ?? null;
+        setCredentialSync(notice && notice.missing > 0 ? notice : null);
         return;
       }
 
@@ -354,7 +380,27 @@ function PinLogin() {
     setEmployees(null);
     setPolicy(null);
     setRosterFailure(null);
+    setCredentialSync(null);
     setRosterReloadKey((key) => key + 1);
+  }
+
+  /**
+   * «همگام‌سازی دوباره» under the missing-credentials notice: ask the site to
+   * reconcile the login-credential plane with the cloud, then re-read the
+   * roster. Pre-session by necessity (the missing staff are the reason nobody
+   * here can open Settings), and rate-limited by the middleware bucket.
+   */
+  async function retryCredentialSync() {
+    setCredentialRetrying(true);
+    try {
+      await fetch("/api/auth/pin-login/roster/sync", { method: "POST" });
+    } catch {
+      // Offline or the local server briefly unavailable: the reload below
+      // still shows the honest, unchanged state.
+    } finally {
+      setCredentialRetrying(false);
+    }
+    retryRoster();
   }
 
   function pick(employee: RosterEmployee) {
@@ -715,6 +761,39 @@ function PinLogin() {
           <p className="text-center text-sm text-muted-foreground">
             کارمندی برای ورود سریع یافت نشد.
           </p>
+        )}
+        {!rosterFailure && credentialSync && (
+          // The roster is incomplete, not the business. A Hybrid site holding
+          // a replicated membership whose PIN/login credential has not arrived
+          // yet omits that member from the list above; saying so beats letting
+          // the owner conclude their staff were never configured. No secret is
+          // involved — names and a count only.
+          <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs">
+            <p className="font-semibold text-foreground">
+              برخی حساب‌های کارکنان هنوز برای ورود آفلاین همگام نشده‌اند.
+            </p>
+            <p className="mt-1 text-muted-foreground">
+              {`${toPersianDigits(String(credentialSync.missing))} حساب از ${toPersianDigits(String(credentialSync.expected))} حساب پین‌دار هنوز روی این دستگاه آماده نیست.`}
+            </p>
+            {credentialSync.missingMembers.length > 0 && (
+              <p className="mt-1 text-muted-foreground">
+                {credentialSync.missingMembers.map((member) => member.fullName).join("، ")}
+              </p>
+            )}
+            <div className="mt-2 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void retryCredentialSync()}
+                disabled={credentialRetrying}
+                className="rounded-lg border border-input px-3 py-1.5 font-semibold transition hover:bg-primary/10 disabled:opacity-60 outline-none focus-visible:ring focus-visible:ring-ring/50"
+              >
+                {credentialRetrying ? "در حال همگام‌سازی…" : "همگام‌سازی دوباره"}
+              </button>
+              <Link href="/settings/cloud-sync" className="text-primary underline-offset-4 hover:underline">
+                تنظیمات اتصال و همگام‌سازی
+              </Link>
+            </div>
+          </div>
         )}
         <div className="grid grid-cols-3 gap-2">
           {ordered.map((employee) => (

@@ -107,7 +107,18 @@ export async function POST(request: NextRequest) {
 
     const identity = rows[0];
     const usableIdentity = identity?.is_active ? identity : null;
+    // The dummy-hash comparison keeps an unknown email as expensive as a known
+    // one, so timing is not the oracle. The lockout verdict is disclosed only
+    // below, and only once the password has been proven: a wrong password on a
+    // locked account must answer exactly like a wrong password anywhere else
+    // (401 invalid_credentials), or the 423 status itself enumerates locked
+    // accounts to a caller who never had the password.
     const passwordOk = await bcrypt.compare(password, usableIdentity?.password_hash ?? DUMMY_HASH);
+
+    if (!usableIdentity || !passwordOk) {
+      await recordAuthFailure("tenant_password", normalizedEmail);
+      return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
+    }
 
     const lockout = await checkAuthLockout(
       "tenant_password",
@@ -115,15 +126,12 @@ export async function POST(request: NextRequest) {
       PASSWORD_LOCKOUT_POLICY,
     );
     if (lockout.locked) {
+      // Password proven, so telling this caller the account is locked is
+      // actionable rather than a leak.
       return NextResponse.json(
         { error: "account_locked", lockedUntil: lockout.lockedUntil },
         { status: 423 },
       );
-    }
-
-    if (!usableIdentity || !passwordOk) {
-      await recordAuthFailure("tenant_password", normalizedEmail);
-      return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
     }
 
     await recordAuthSuccess("tenant_password", normalizedEmail);

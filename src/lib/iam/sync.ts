@@ -5,8 +5,7 @@ import type { IamEvent, IamSnapshot } from "./model";
 import { iamStateHash, sequenceDecision } from "./reconciliation";
 import { validateIamEvent } from "./events";
 import { buildIamSnapshot } from "./service";
-import type { ReplicatedLoginCredential, ReplicatedPin } from "./login-credentials";
-import { applyLoginCredentials, applyReplicatedPins, spentRecoveryCodes } from "./login-credentials-service";
+import { syncHybridLoginCredentials } from "./login-credential-sync";
 
 function baseUrl(value:string){return value.trim().replace(/\/+$/,"");}
 
@@ -84,7 +83,13 @@ export async function applyIamEvents(businessId:string,siteDeviceId:string,lastS
           if(member.locationIds.length) await client.query(`INSERT INTO user_locations(user_id,location_id) SELECT $1,unnest($2::uuid[]) ON CONFLICT DO NOTHING`,[member.id,member.locationIds]);
         } else if(event.eventType==="membership.suspended"||event.eventType==="membership.offboarded"){
           const status=event.eventType==="membership.suspended"?"suspended":"offboarded";
-          await client.query(`UPDATE users SET is_active=false,membership_status=$3,location_scope=CASE WHEN $3='offboarded' THEN 'none'::location_scope ELSE location_scope END,
+          // `$3::membership_status` matters: without the cast Postgres cannot
+          // pick one type for a parameter used both as the enum column value
+          // and against a text literal, and every suspension/offboarding event
+          // failed with "inconsistent types deduced for parameter $3" — so a
+          // member suspended on the cloud kept local login access.
+          await client.query(`UPDATE users SET is_active=false,membership_status=$3::membership_status,
+            location_scope=CASE WHEN $3::membership_status='offboarded' THEN 'none'::location_scope ELSE location_scope END,
             membership_revision=GREATEST(membership_revision,$4) WHERE business_id=$1 AND id=$2`,[businessId,event.entityId,status,revision]);
           await client.query(`UPDATE employee_sessions SET revoked_at=now() WHERE business_id=$1 AND employee_id=$2 AND revoked_at IS NULL`,[businessId,event.entityId]);
         }else if(event.eventType==="membership.permissions_changed") await client.query(`UPDATE users SET permissions=$3,membership_revision=GREATEST(membership_revision,$4) WHERE business_id=$1 AND id=$2`,
@@ -159,25 +164,17 @@ export async function runIamSync(businessId:string):Promise<boolean>{
       await mark(businessId,config.siteDeviceId,"snapshot_required","iam_drift_detected");
       await applySnapshot(businessId,config.siteDeviceId,cloud);
     }
-    // Global login (password + 2FA). Best-effort: an older cloud without the
-    // endpoint must not hold back ordinary sync.
-    try{
-      // Spent recovery codes first, so the payload fetched next already
-      // carries them spent and the two replicas compare equal.
-      const spent=await spentRecoveryCodes(businessId);
-      if(spent.length) await fetch(`${baseUrl(config.remoteUrl)}/api/iam/login-credentials`,{method:"POST",
-        headers:{Authorization:`Bearer ${config.token}`,"Content-Type":"application/json"},body:JSON.stringify({spent}),signal:AbortSignal.timeout(30_000)});
-      const credentials=await fetch(`${baseUrl(config.remoteUrl)}/api/iam/login-credentials`,{headers:{Authorization:`Bearer ${config.token}`},signal:AbortSignal.timeout(30_000)});
-      if(credentials.ok){
-        const payload=(await credentials.json()) as {credentials?:ReplicatedLoginCredential[];pins?:ReplicatedPin[]};
-        // Staff PINs set on the cloud, so cloud-made staff appear on the desktop's
-        // quick login. Independent of the identities below: one must not hold back the other.
-        try{await applyReplicatedPins(businessId,payload.pins??[]);}
-        catch(error){console.error("PIN sync failed:",error instanceof Error?error.message:error);}
-        await applyLoginCredentials(businessId,payload.credentials??[]);
-      }
-      else if(credentials.status!==404) console.error(`login credential sync: HTTP ${credentials.status}`);
-    }catch(error){console.error("login credential sync failed:",error instanceof Error?error.message:error);}
+    // Login credentials are their own plane, not a best-effort appendix to the
+    // membership one: a site can be perfectly converged on memberships while
+    // every cloud-created PIN is still missing locally. The reconciliation
+    // records its own durable status (healthy/degraded/…), which the login
+    // screen, the connection panel and the repair action all read — so a
+    // failure here is visible instead of a console line. It deliberately does
+    // not flip this function's return value: ordinary business sync keeps
+    // running (the product decision that predates this), but the installation
+    // is no longer reported as fully healthy.
+    const credentialSync=await syncHybridLoginCredentials(businessId,{config});
+    if(credentialSync.status==="degraded") console.error(`login credential sync degraded: ${credentialSync.error}`);
     return true;
   }catch(error){const message=error instanceof Error?error.message:String(error);await mark(businessId,config.siteDeviceId,message.startsWith("sequence_gap")?"snapshot_required":"degraded",message);return false;}
 }

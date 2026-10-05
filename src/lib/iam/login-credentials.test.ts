@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { loginCredentialsFingerprint, planPinReplication, type ReplicatedLoginCredential } from "./login-credentials";
+import {
+  loginCredentialsFingerprint,
+  planPinReplication,
+  validateLoginCredentialPayload,
+  type ReplicatedLoginCredential,
+} from "./login-credentials";
 
 const owner: ReplicatedLoginCredential = {
   membershipId: "b",
@@ -60,5 +65,41 @@ describe("planPinReplication", () => {
   it("writes nothing when equal, and skips members not replicated yet", () => {
     expect(planPinReplication(cloud, [{ membershipId: "cashier", role: "cashier", pinHash: "$cloud-cashier" }])).toEqual([]);
     expect(planPinReplication(cloud, [])).toEqual([]);
+  });
+});
+
+describe("validateLoginCredentialPayload", () => {
+  const id = "11111111-1111-1111-1111-111111111111";
+  const credential = { ...owner, membershipId: id };
+
+  it("accepts a well-formed payload", () => {
+    const result = validateLoginCredentialPayload({ credentials: [credential], pins: [{ membershipId: id, pinHash: "$2b$pin" }] });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.credentials).toHaveLength(1);
+      expect(result.pins).toHaveLength(1);
+    }
+  });
+
+  it("treats missing lists as empty — an older cloud may omit `pins`", () => {
+    expect(validateLoginCredentialPayload({ credentials: [] })).toMatchObject({ ok: true, pins: [] });
+  });
+
+  it("refuses anything that is not a payload object", () => {
+    expect(validateLoginCredentialPayload(null)).toEqual({ ok: false, code: "payload_not_object" });
+    expect(validateLoginCredentialPayload("[]")).toEqual({ ok: false, code: "payload_not_object" });
+  });
+
+  it("refuses malformed records instead of applying half of them", () => {
+    expect(validateLoginCredentialPayload({ credentials: {}, pins: [] })).toEqual({ ok: false, code: "credentials_not_array" });
+    expect(validateLoginCredentialPayload({ credentials: [] })).toEqual({ ok: true, credentials: [], pins: [] });
+    expect(validateLoginCredentialPayload({ pins: [{ membershipId: "not-a-uuid", pinHash: "h" }] }))
+      .toEqual({ ok: false, code: "invalid_pin_record" });
+    expect(validateLoginCredentialPayload({ pins: [{ membershipId: id, pinHash: "" }] }))
+      .toEqual({ ok: false, code: "invalid_pin_record" });
+    expect(validateLoginCredentialPayload({ credentials: [{ ...credential, mfa: "totp" }] }))
+      .toEqual({ ok: false, code: "invalid_credential_record" });
+    expect(validateLoginCredentialPayload({ credentials: [{ ...credential, membershipId: "nope" }] }))
+      .toEqual({ ok: false, code: "invalid_credential_record" });
   });
 });

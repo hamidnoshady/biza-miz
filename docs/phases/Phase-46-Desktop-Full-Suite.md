@@ -50,6 +50,14 @@ install (2026-10-01) it did not feel like one product:
       two-minute httpOnly cookie, which the cloud pane spends once on the business's origin
       (`GET /api/auth/desktop-session`). Codes are stored as SHA-256 only and claimed with a
       conditional `UPDATE`; `desktop_login_codes` is tenant-scoped with RLS.
+   5. **Issue #843 — identity convergence, not just membership convergence.** A replicated
+      membership whose credentials have not arrived (`users.platform_user_id` still NULL) must
+      not produce a session outside the cloud's token-version revocation chain. The cloud's
+      redemption therefore reports the member's `platformUserId`/`tokenVersion`, and the
+      desktop verifies its local replica against them (`src/lib/iam/identity-readiness.ts`)
+      before minting the session: one credential reconciliation is attempted, then the
+      hand-back fails closed with `identity_not_synced` rather than signing the member in
+      unbound. A PIN-only membership with no cloud identity keeps working unchanged.
 
 ## Not in this phase
 

@@ -4,6 +4,7 @@ import {
   classifyConnectionCode,
   normalizeServerAddress,
 } from "@/lib/connection-code";
+import { syncHybridLoginCredentials } from "@/lib/iam/login-credential-sync";
 import { applyPairingSnapshot, localInstallationId } from "@/lib/pairing-apply";
 import { validateSnapshot } from "@/lib/pairing-snapshot";
 import { hasAnyUser } from "@/lib/setup-state";
@@ -170,6 +171,29 @@ export async function POST(request: NextRequest) {
   const activationPending =
     pairingSessionId !== undefined && acknowledgement.status !== "ok";
 
+  // First-run credential convergence, before pairing is considered complete.
+  //
+  // The pairing snapshot carries membership metadata only; staff PINs and the
+  // replicated password/MFA identities travel on `/api/iam/login-credentials`.
+  // Without this call the first login after pairing could show only the owner
+  // created during setup while cloud PIN staff sit credential-less locally,
+  // waiting for a background tick. So the credential stage runs here, inside
+  // the pairing request, and its outcome is returned to the wizard and stored
+  // durably. If the cloud is momentarily unavailable the owner stays usable
+  // and the state is `degraded`/`pending` with a retry (manual sync), never a
+  // silent claim that pairing fully converged.
+  const credentialSync = await syncHybridLoginCredentials(applied.businessId).catch(
+    (error: unknown) => ({
+      status: "degraded" as const,
+      pinMembersExpected: 0,
+      pinMembersUsable: 0,
+      pinMembersMissing: 0,
+      missingIdentityBindings: 0,
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  );
+  const identitySyncPending = credentialSync.status !== "healthy";
+
   const token = await signSession({
     sub: applied.ownerUserId,
     role: "owner",
@@ -185,9 +209,25 @@ export async function POST(request: NextRequest) {
     slug: applied.businessSlug,
     ownerUserId: applied.ownerUserId,
     activationPending,
-    // Cloud credentials are never copied. The wizard must establish a PIN,
-    // local password or passkey for this site before ending this session.
+    // Hybrid replicates supported cloud login material on purpose
+    // (`/api/iam/login-credentials`: password hashes, TOTP/recovery codes and
+    // staff PIN hashes), so the wizard must not tell the owner Cloud
+    // credentials stay in the cloud. What it must still ask for is a
+    // *device-local* owner PIN: the guaranteed offline door for this install,
+    // which a later credential sync never overwrites. See
+    // src/lib/iam/login-credentials.ts for the ownership rules.
     requiresOfflineCredential: true,
+    // The first-run convergence outcome, so the wizard can distinguish
+    // "paired and ready" from "paired, identity sync still pending".
+    identitySyncPending,
+    credentialSync: {
+      status: credentialSync.status,
+      pinMembersExpected: credentialSync.pinMembersExpected,
+      pinMembersUsable: credentialSync.pinMembersUsable,
+      pinMembersMissing: credentialSync.pinMembersMissing,
+      missingIdentityBindings: credentialSync.missingIdentityBindings,
+      error: credentialSync.error ?? null,
+    },
   });
   response.cookies.set(SESSION_COOKIE, token, sessionCookieOptions());
   return response;

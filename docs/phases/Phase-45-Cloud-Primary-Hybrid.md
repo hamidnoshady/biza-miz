@@ -153,6 +153,21 @@ Hybrid desktop the link is always hidden, because the assistant is a cloud scree
   same business days on both sides. The site profile is fetched at most once per sync interval
   (30 s), however often a wake-up runs the tick, so it does not spend the sync token's rate limit.
 
+### 5. Login-credential plane is first-class (issue #843)
+
+The IAM snapshot is metadata-only; passwords, TOTP/recovery codes and staff PIN hashes travel on
+`/api/iam/login-credentials`. That plane has its own durable state
+(`iam_login_credential_sync_state`, migration 0203) so a site whose memberships all arrived but
+whose PIN staff cannot sign in is *visible* as degraded instead of looking healthy:
+`syncHybridLoginCredentials()` (`src/lib/iam/login-credential-sync.ts`) is the one reconciliation
+used by the sync tick, pairing completion, manual sync and repair, and `hybridIdentityHealth()`
+refuses to call the combination healthy while required PIN credentials are missing. Pairing runs
+the credential pass before first-run login, the staff roster reports the missing-credential
+count with a retry action, and Settings shows identity, login-credential and operational rows
+separately. Ownership stays as documented in `docs/server-sync.md`: the cloud is authoritative
+for staff PINs, replicated password/MFA material is for offline auth, and the owner's
+device-local PIN is preserved deliberately.
+
 ## Not in this phase
 
 - Stock work offline (purchases, waste, counts): cloud only.

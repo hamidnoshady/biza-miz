@@ -142,6 +142,66 @@ the offline PIN chosen in the pairing wizard, and the cloud's only fills it in
 when the desktop has none (`planPinReplication`). A member the cloud has no PIN
 for keeps the desktop's.
 
+### Credential convergence is its own plane (issue #843)
+
+The IAM snapshot is metadata-only, so a site can be fully converged on
+memberships while every replicated PIN is still missing: cloud-made cashiers
+then exist locally but are silently absent from `loginRoster()`, and the
+operator sees an owner-only login screen while ordinary sync looks healthy.
+That partial state is no longer invisible:
+
+- **Durable state.** `iam_login_credential_sync_state` (migration 0203) stores
+  one row per `(business_id, site_device_id)`: `status` (`healthy` / `pending` /
+  `syncing` / `degraded` / `unsupported_legacy_cloud` / `snapshot_required` /
+  `repair_required`), attempt/success timestamps, `last_error`, how many
+  credential and PIN records arrived and were applied, and what is still
+  missing — `pin_members_expected`, `pin_members_usable`,
+  `pin_members_missing`, `missing_identity_bindings`. Membership health stays in
+  `iam_sync_state`; the two are read separately and only together do they mean
+  "identity converged".
+- **One reconciliation function.** `syncHybridLoginCredentials(businessId)`
+  (`src/lib/iam/login-credential-sync.ts`) reports spent recovery codes, fetches
+  and validates the payload in full before applying anything, applies PINs and
+  password/MFA identities, measures the remaining PIN gap and records the
+  outcome. The sync tick, pairing completion, the manual sync/repair action and
+  the login screen's retry all call this one function.
+- **Failures are visible, not console-only.** A non-404 HTTP error, an invalid
+  payload, a failed apply, a failed spent-code report, or a remaining roster
+  gap records `degraded` with the reason. A cloud that genuinely lacks the
+  endpoint (404/405) records `unsupported_legacy_cloud` — supported, but never
+  reported as fully healthy. Operational sync keeps running either way; the
+  installation is simply no longer green.
+- **Pairing does not finish before convergence.** `/api/setup/pair` runs the
+  credential reconciliation right after the snapshot is committed and the site
+  is acknowledged, so the first login after pairing already sees cloud PIN
+  staff. If the cloud is momentarily unavailable, the local owner stays usable,
+  the state is `pending`/`degraded` and the wizard says identity sync is still
+  pending rather than claiming success.
+- **The login screen and the connection panel read it.** The staff roster
+  response carries the credential summary; when active PIN-role members cannot
+  sign in yet the door shows «برخی حساب‌های کارکنان هنوز برای ورود آفلاین همگام
+  نشده‌اند» with a retry (`POST /api/auth/pin-login/roster/sync`, rate-limited)
+  and a link to Settings → اتصال. Settings shows identity/membership,
+  login-credential and operational rows separately; `hybridIdentityHealth()`
+  (`src/lib/iam/credential-health.ts`) refuses to call the combination healthy
+  while required PIN credentials are missing.
+- **Repair reconciles both planes.** `POST /api/team/iam-status
+  { action: "repair" }` forces the canonical snapshot, reconciles events and
+  then reconciles login credentials, verifying that active PIN-role members are
+  locally sign-in capable before it reports success.
+- **Cloud sign-in requires identity convergence.** «ورود با حساب ابری» on a
+  paired desktop (`/api/auth/cloud-login/callback`) verifies that the member the
+  cloud handed back is bound locally to the expected `platformUserId` and
+  `tokenVersion` before minting a session. Membership-only convergence answers
+  `identity_not_synced` (after one credential reconciliation attempt) instead of
+  creating a session outside the cloud's token-version revocation chain; a
+  PIN-only membership with no cloud identity is unaffected.
+- **A tenant password lockout is disclosed only after the password is proven**
+  (`/api/auth/login`, `/api/auth/directory`, `/api/platform/auth/login`): a
+  wrong password on a locked account answers `401 invalid_credentials`, exactly
+  like any other wrong password, and `423 account_locked` follows only a correct
+  one.
+
 ## Event transport
 
 On the site, `runServerSyncTick()` (`src/lib/server-sync.ts`, every 30 s):

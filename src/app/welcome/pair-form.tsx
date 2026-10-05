@@ -72,6 +72,8 @@ export function PairForm({ onBack }: { onBack: () => void }) {
   const [probing, setProbing] = useState(false);
   const [probe, setProbe] = useState<ProbeState>({ kind: "idle" });
   const [pairedOwnerId, setPairedOwnerId] = useState("");
+  /** Pairing snapshot committed, but the login-credential plane not fully converged yet. */
+  const [identitySyncPending, setIdentitySyncPending] = useState(false);
   const [offlinePin, setOfflinePin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
 
@@ -122,10 +124,20 @@ export function PairForm({ onBack }: { onBack: () => void }) {
       body: JSON.stringify({ remoteUrl, code }),
     });
 
-    const data = (await res.json().catch(() => ({}))) as { error?: string; ownerUserId?: string; requiresOfflineCredential?: boolean };
+    const data = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      ownerUserId?: string;
+      requiresOfflineCredential?: boolean;
+      identitySyncPending?: boolean;
+    };
     if (res.ok) {
       if (data.requiresOfflineCredential && data.ownerUserId) {
         setPairedOwnerId(data.ownerUserId);
+        // The pairing request now reconciles the credential/PIN plane itself;
+        // this flag is set when that pass did not fully converge (cloud
+        // briefly unavailable, or a PIN still missing), so the wizard can say
+        // so instead of implying everything is done.
+        setIdentitySyncPending(Boolean(data.identitySyncPending));
         setBusy(false);
       } else router.replace("/dashboard");
       return;
@@ -144,7 +156,18 @@ export function PairForm({ onBack }: { onBack: () => void }) {
   if (pairedOwnerId) return (
     <div className={`w-full max-w-md ${cardClass} p-8`}>
       <h1 className="text-2xl font-bold">رمز ورود آفلاین این دستگاه</h1>
-      <p className="mt-2 text-sm text-muted-foreground">رمز حساب ابری شما روی این رایانه کپی نشده است. یک رمز عددی مخصوص همین سایت بسازید تا هنگام قطع اینترنت نیز بتوانید وارد شوید.</p>
+      {/* The old copy claimed the cloud password was never copied. Since the
+          credential endpoint replicates supported global login material (the
+          password hash, TOTP and recovery codes, plus staff PINs), that claim
+          is wrong; what this step genuinely adds is a device-local Owner PIN
+          that stays valid offline and that a later credential sync never
+          overwrites. */}
+      <p className="mt-2 text-sm text-muted-foreground">برای ورود هنگام قطع اینترنت، یک رمز عددی مخصوص همین دستگاه بسازید. اطلاعات ورود پشتیبانی‌شدهٔ حساب ابری نیز پس از همگام‌سازی هویت در حالت Hybrid روی این دستگاه قابل استفاده خواهد بود.</p>
+      {identitySyncPending ? (
+        <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-muted-foreground">
+          اطلاعات ورود کارکنان هنوز کامل دریافت نشده است. پس از پایان راه‌اندازی، در «تنظیمات ← اتصال و همگام‌سازی» گزینهٔ «همگام‌سازی دوباره» را بزنید.
+        </div>
+      ) : null}
       {error ? <div className="mt-4 rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{error}</div> : null}
       <form className="mt-5 space-y-4" onSubmit={async(e)=>{e.preventDefault();if(!/^\d{4,12}$/.test(offlinePin)){setError("رمز عددی باید ۴ تا ۱۲ رقم باشد.");return;}if(offlinePin!==confirmPin){setError("تکرار رمز با رمز اصلی یکسان نیست.");return;}setBusy(true);const response=await fetch(`/api/team/${pairedOwnerId}/credentials`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({pin:offlinePin})});if(response.ok){router.replace("/dashboard");return;}const result=await response.json().catch(()=>({}));setError(ERROR_MESSAGES[result.error]??"ثبت رمز آفلاین ناموفق بود.");setBusy(false);}}>
         <label className="block"><span className="mb-1 block text-sm font-medium">رمز عددی جدید</span><input autoFocus required dir="ltr" inputMode="numeric" maxLength={12} className="w-full rounded-lg border border-input px-3 py-2 text-center text-xl tracking-[.3em]" value={offlinePin} onChange={e=>setOfflinePin(e.target.value.replace(/\D/g,""))}/></label>

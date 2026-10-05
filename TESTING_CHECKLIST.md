@@ -68,6 +68,42 @@ real-world verification yet — prioritize these first.
 - [ ] Attempt pairing against an unreachable remote URL; confirm
       "server unreachable" is shown, not a stack trace or infinite spinner.
 
+### 2b. Hybrid login credentials at pairing **[NEW — issue #843]**
+
+The regression: a paired desktop reached login showing only the owner created
+during setup, even though cloud staff with PINs existed — because membership
+metadata had synced while the credential/PIN plane had not. The automated
+coverage lives in `integration/hybrid-credential-sync.integration.test.ts`;
+this is the packaged-desktop pass of the same scenario.
+
+- [ ] On the cloud, create a business with an owner, a manager and three PIN
+      staff (cashier, waiter, kitchen), each with a PIN.
+- [ ] Pair a **fresh** Windows desktop (empty database) with that business and
+      finish the owner's device-local offline PIN step.
+- [ ] Reach `/login` **immediately**: the quick-login roster must already show
+      all three PIN staff — not just the owner — and each cloud PIN must sign
+      its member in on the desktop.
+- [ ] Confirm the manager (password role, no PIN) is **not** forced into the
+      staff roster, and that the owner's offline PIN still works.
+- [ ] Restart the app; the roster still shows all three staff. Then disable the
+      network and sign in with the same cloud PIN — offline login must work.
+- [ ] Change the cashier's PIN on the cloud, run Settings → اتصال و
+      همگام‌سازی → «همگام‌سازی دوباره»; the old PIN must fail locally and the
+      new one must work.
+- [ ] Suspend the waiter on the cloud, sync again; the waiter must disappear
+      from the roster and any existing desktop session must be invalidated.
+- [ ] Simulate a credential failure (point the desktop at a cloud whose
+      `/api/iam/login-credentials` returns 500, or stop it mid-pairing):
+      Settings must show «رمز و پین ورود کارکنان: نیازمند بررسی» with the
+      count of unready PIN accounts, the login screen must show
+      «برخی حساب‌های کارکنان هنوز برای ورود آفلاین همگام نشده‌اند», and neither
+      may claim the installation is fully healthy. «همگام‌سازی دوباره» must
+      repair it once the cloud answers again.
+- [ ] With the cashier's credential deliberately not yet converged, try
+      «ورود با حساب ابری» for a password-role member: the desktop must refuse
+      with the identity-sync-pending message rather than signing them in
+      (that session would sit outside the cloud's token-version revocation).
+
 ## 3. Authentication flow — Choose Login Type **[NEW]**
 
 - [ ] On first visit to `/login` on a fresh browser profile, confirm the
