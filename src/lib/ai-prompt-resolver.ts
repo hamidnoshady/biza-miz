@@ -127,6 +127,26 @@ export interface ResolvedPromptLayers {
   toolCatalogue: boolean;
 }
 
+/**
+ * The layers that actually composed this prompt, in composition order, as the
+ * short scope keys a usage row can carry.
+ *
+ * The order is the resolver's order and is the point: it is the sequence the
+ * issue specifies, and reading a settlement's `prompt_layers` tells you which
+ * layer was responsible for what the model was told — including which layer was
+ * absent. A `null` layer is skipped rather than recorded as `null`, so the list
+ * holds only layers that contributed.
+ */
+export function promptLayerKeys(layers: ResolvedPromptLayers): string[] {
+  const keys: string[] = [layers.base.scopeKey, layers.mode.scopeKey];
+  if (layers.agent) keys.push(layers.agent.scopeKey);
+  if (layers.businessType) keys.push(layers.businessType.scopeKey);
+  if (layers.app) keys.push(layers.app.scopeKey);
+  for (const scope of layers.memoryScopes) keys.push(`memory:${scope}`);
+  if (layers.toolCatalogue) keys.push("tool_catalogue");
+  return keys;
+}
+
 export interface ResolveSystemPromptInput extends PromptContext {
   /** The tenant. Required: memory and the business-type fragment need it. */
   businessId: string;

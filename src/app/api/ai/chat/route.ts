@@ -10,7 +10,12 @@ import {
 import { getBusinessIndustry } from "@/lib/industry-guard";
 import type { AppKey } from "@/lib/apps";
 import { eligibleAgentCards, type EligibleAgentCard } from "@/lib/ai-system-agents";
-import { resolveSystemPrompt, type ResolvedPromptLayers } from "@/lib/ai-prompt-resolver";
+import {
+  BASE_PROMPT_SCOPE,
+  promptLayerKeys,
+  resolveSystemPrompt,
+  type ResolvedPromptLayers,
+} from "@/lib/ai-prompt-resolver";
 import {
   getPlatformAiMode,
   isAiRuntimeModeAvailable,
@@ -118,14 +123,24 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const mode: AgentMode =
     body.mode === "wizard" ? "wizard" : body.mode === "floor" ? "floor" : "dashboard";
-  // Dashboard access is a capability, not a manager role. This makes the
-  // universal home usable by cashiers/accountants while the effective tool
-  // intersection below keeps their data surface narrow.
+  // Issue #812 §11 — every path names its capability explicitly, and none of
+  // them is widened. `requireManager(permission)` is `requirePermission(permission)`
+  // under a compatibility name, so writing the capability out is what stops the
+  // next edit from silently re-defaulting this route to `settings.manage`.
+  //
+  //   floor    — `floorAssistant`, the till's own assistant permission.
+  //   dashboard — `ai.use`: using the assistant is not administering it, so the
+  //               universal home is reachable by cashiers and accountants while
+  //               the effective-tool intersection below keeps their data
+  //               surface narrow.
+  //   wizard    — still `settings.manage`. The setup wizard edits the business's
+  //               own configuration, which is a management act; dropping it to
+  //               `ai.use` here would hand every assistant user a wizard.
   const guard =
     mode === "floor"
       ? await requireFloorAssistant()
       : mode === "wizard"
-        ? await requireManager()
+        ? await requireManager(PERMISSIONS.settingsManage)
         : await requireManager(PERMISSIONS.aiUse);
   if (guard.error) return guard.error;
   const session = guard.session;
@@ -259,6 +274,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // Issue #812 §21 — which prompt layer versions shaped this turn, recorded on
   // the settlement so a change in behaviour is attributable to a publish.
   let promptLayers: ResolvedPromptLayers | null = null;
+  /** The empty layer set, so the attribution call needs no null branch. */
+  const EMPTY_PROMPT_LAYERS: ResolvedPromptLayers = {
+    base: { version: null, scopeKey: BASE_PROMPT_SCOPE },
+    mode: { version: null, scopeKey: "mode:auto" },
+    agent: null,
+    businessType: null,
+    app: null,
+    memoryScopes: [],
+    toolCatalogue: false,
+  };
   try {
     await gateAiTurn(session.businessId, config);
   } catch (err) {
@@ -523,7 +548,17 @@ export const POST = withTenantScope(async (request: NextRequest) => {
               conversationId,
               locationId,
               userId: session.sub,
-              metadata: { mode },
+              // §12 — the issue's named attribution, as columns. A mode is not
+              // decoration: `auto`, `instant` and `deep_research` resolve
+              // different LiteLLM aliases and therefore different prices, so a
+              // usage report that cannot slice by mode cannot explain its own
+              // numbers. The same holds for the system agent and the suggestion
+              // card that invoked it.
+              runtimeMode,
+              systemAgentId: agentCard?.agentId ?? null,
+              suggestionId: agentCard?.assignmentId ?? null,
+              promptLayers: promptLayerKeys(promptLayers ?? EMPTY_PROMPT_LAYERS),
+              metadata: { mode, runtimeMode },
             },
           });
 
@@ -604,7 +639,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
                   locationId,
                   userId: session.sub,
                   note: "failed_turn",
-                  metadata: { mode, status: "failed" },
+                  // §12 — a failed turn carries the same attribution as a
+                  // successful one. §16's whole point is that a partial or
+                  // failed call still costs money and still has to be
+                  // attributable, so the dimensions are filled in here too
+                  // rather than only on the happy path.
+                  runtimeMode,
+                  systemAgentId: agentCard?.agentId ?? null,
+                  suggestionId: agentCard?.assignmentId ?? null,
+                  promptLayers: promptLayerKeys(promptLayers ?? EMPTY_PROMPT_LAYERS),
+                  metadata: { mode, runtimeMode, status: "failed" },
                 },
               });
             } catch (settleErr) {

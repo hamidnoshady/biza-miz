@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession, withTenantScope } from "@/lib/auth";
+import { requirePermission, withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import {
   approveResearchRun,
   getResearchRun,
@@ -8,6 +9,7 @@ import {
 } from "@/lib/ai-research";
 import { resolveAiConfigFor } from "@/lib/ai-runtime";
 import { toolDefinitions } from "@/lib/ai";
+import { filterAiToolsByPermissions } from "@/lib/ai-capabilities";
 import { gateAiTurn, settleAiTurn } from "@/lib/ai-wallet-billing";
 
 /**
@@ -29,8 +31,15 @@ import { gateAiTurn, settleAiTurn } from "@/lib/ai-wallet-billing";
  */
 export const POST = withTenantScope(
   async (_request: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    // §12 — the caller's own authority is the boundary here too, and it is
+    // checked BEFORE the run's business id is read. `getSession()` only proves
+    // the caller belongs to this business; without this line every member —
+    // including roles whose whole permission set is `ai.use` — could approve a
+    // run that spends the business's AI budget and reads the tools below.
+    const guard = await requirePermission(PERMISSIONS.aiUse);
+    if (guard.error) return guard.error;
+    const session = guard.session;
+    const effectivePermissions = guard.membership?.permissions ?? new Set();
     const { id } = await params;
 
     const existing = await getResearchRun({ id, businessId: session.businessId });
@@ -47,11 +56,15 @@ export const POST = withTenantScope(
       return NextResponse.json({ error: "ai_disabled" }, { status: 503 });
     }
 
-    // The run may only use the tools this member could already call in chat —
-    // §12's intersection is not re-opened for research.
-    const toolNames = toolDefinitions("dashboard", { retrieval: config.knowledge?.enabled === true }).map(
-      (tool) => tool.function.name,
-    );
+    // §12's intersection is NOT re-opened for research, and this is where that
+    // is enforced rather than merely claimed. The catalogue is filtered by the
+    // caller's effective permissions through the same helper chat uses, so a
+    // research run cannot read a surface its approver could not have read
+    // themselves — Deep Research is a bigger budget, not a wider permission.
+    const toolNames = filterAiToolsByPermissions(
+      toolDefinitions("dashboard", { retrieval: config.knowledge?.enabled === true }),
+      effectivePermissions,
+    ).map((tool) => tool.function.name);
 
     // Pre-request wallet gate, the same one chat uses, so a research run cannot
     // be started by a business that is already in AI debt. The run's own spend
@@ -79,6 +92,13 @@ export const POST = withTenantScope(
           userId: session.sub,
           locationId: session.locationId ?? null,
           projectId: existing.projectId,
+          // §12 — the run's own identity, as a column, so the usage report can
+          // total a run in one query instead of scanning metadata. A failed run
+          // keeps it: §16 says a failed environment is not a free one, and the
+          // same rule applies to its attribution.
+          researchRunId: id,
+          runtimeMode: "deep_research",
+          systemAgentId: existing.systemAgentId,
           metadata: { researchRunId: id, researchStatus: outcome.error },
         },
       });
@@ -100,6 +120,13 @@ export const POST = withTenantScope(
         userId: session.sub,
         locationId: session.locationId ?? null,
         projectId: outcome.outcome.run.projectId,
+        // §12 — the dimensions the issue names, as columns. `runtimeMode` is
+        // `deep_research` for the whole run regardless of which mode the chat
+        // that spawned it was in, because that is the mode whose alias and
+        // caps the money was actually spent under.
+        runtimeMode: "deep_research",
+        researchRunId: id,
+        systemAgentId: outcome.outcome.run.systemAgentId,
         metadata: {
           researchRunId: id,
           researchStatus: outcome.outcome.run.status,

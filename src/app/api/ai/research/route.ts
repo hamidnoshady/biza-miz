@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession, withTenantScope } from "@/lib/auth";
+import { requirePermission, withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import {
   createResearchRun,
   listResearchRuns,
@@ -24,18 +25,25 @@ import { getPlatformAiMode, isAiRuntimeModeAvailable } from "@/lib/ai-runtime-mo
  * §6 gives Superadmin an on/off switch, and it has to mean something.
  */
 export const GET = withTenantScope(async () => {
-  const session = await getSession();
-  if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  // §11 — reading a run history is an assistant capability, not a management
+  // one: the runs listed are this member's own, and the read is scoped by
+  // `userId` below. `withTenantScope` establishes the business; this is what
+  // establishes that the caller may spend its budget at all.
+  const guard = await requirePermission(PERMISSIONS.aiUse);
+  if (guard.error) return guard.error;
+  const session = guard.session;
   const runs = await listResearchRuns({ businessId: session.businessId, userId: session.sub });
   return NextResponse.json({ runs });
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {
   // Deep research spends real money on a model call, so it is a chat capability
-  // (`ai.use`) rather than a management one — but it still requires a signed-in
-  // member of this business, which `withTenantScope` already established.
-  const session = await getSession();
-  if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  // (`ai.use`) rather than a management one. `withTenantScope` establishes the
+  // business; this establishes the capability. `getSession()` alone proved only
+  // that the caller belongs to the business, which is not the same question.
+  const guard = await requirePermission(PERMISSIONS.aiUse);
+  if (guard.error) return guard.error;
+  const session = guard.session;
 
   const mode = await getPlatformAiMode("deep_research");
   if (!isAiRuntimeModeAvailable("deep_research", mode.is_active)) {

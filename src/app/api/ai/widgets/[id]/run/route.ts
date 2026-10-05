@@ -71,6 +71,12 @@ export const POST = withTenantScope(async (_request: NextRequest, context: { par
         conversationId: null,
         locationId,
         userId: guard.session.sub,
+        // §12 — a widget run is a chat turn with a saved prompt, so it is typed
+        // `chat` and told apart by `metadata.mode`. Typing it `widget` would put
+        // it in a slice of its own, and — since `widget` is not one of the
+        // settlement table's request types — would have been rejected by the
+        // CHECK constraint the first time a real run settled.
+        runtimeMode: "instant",
         metadata: { mode: "widget", widgetId: widget.id, sourceApp: widget.sourceApp },
       },
     });
@@ -90,12 +96,17 @@ export const POST = withTenantScope(async (_request: NextRequest, context: { par
           usage: accrued.usage,
           costUsd: accrued.costUsd,
           attribution: {
-            requestType: "widget",
+            // Same request type as the success path above. A failed turn is not
+            // a different kind of turn — §16 exists precisely so it settles the
+            // same way, and a different type would have split the run's cost
+            // across two slices of the usage report.
+            requestType: "chat",
             model: config.model,
             conversationId: null,
             locationId,
             userId: guard.session.sub,
             note: "failed_turn",
+            runtimeMode: "instant",
             metadata: { mode: "widget", widgetId: widget.id, status: "failed" },
           },
         });

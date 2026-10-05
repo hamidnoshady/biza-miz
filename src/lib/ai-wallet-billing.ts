@@ -74,6 +74,18 @@ export interface AiTurnAttribution {
   userId?: string | null;
   note?: string | null;
   metadata?: Record<string, unknown>;
+  // Issue #812 §12 — per-turn attribution, carried as columns on the
+  // settlement row so usage can be sliced by them. See `AiSettlementInput`.
+  /** The runtime mode in force: `auto`, `instant` or `deep_research`. */
+  runtimeMode?: string | null;
+  /** The Superadmin system agent invoked, if the turn ran as one. */
+  systemAgentId?: string | null;
+  /** The assignment (suggestion card) that surfaced the agent. */
+  suggestionId?: string | null;
+  /** The Deep Research run this settlement belongs to. */
+  researchRunId?: string | null;
+  /** The prompt layers the resolver composed, in composition order. */
+  promptLayers?: readonly string[] | null;
 }
 
 export interface SettledAiTurnResult extends AiSettlementResult {
@@ -173,6 +185,16 @@ export async function settleAiTurn(input: {
       ...attribution.metadata,
       ...(configuredMaxTurnRial > 0 ? { configuredMaxTurnRial, ceilingExceeded } : {}),
     },
+    // §12 — the issue's named dimensions, as first-class columns. They also
+    // stay in `metadata` so the JSON is self-describing when a row is read on
+    // its own, but the columns are what the report groups on. `runtimeMode`
+    // stays NULL when the surface has no mode, so the report never claims an
+    // OCR turn ran on the `auto` alias.
+    runtimeMode: attribution.runtimeMode ?? null,
+    systemAgentId: attribution.systemAgentId ?? null,
+    suggestionId: attribution.suggestionId ?? null,
+    researchRunId: attribution.researchRunId ?? null,
+    promptLayers: attribution.promptLayers ?? [],
   });
   if (!settlement.duplicate) {
     try {

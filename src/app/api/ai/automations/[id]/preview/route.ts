@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
-import { requireManager } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
+import { requirePermission } from "@/lib/auth";
 import { previewAutomation } from "@/lib/ai-automations-service";
 
 /**
@@ -10,7 +11,7 @@ import { previewAutomation } from "@/lib/ai-automations-service";
  */
 export const GET = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const guard = await requireManager();
+    const guard = await requirePermission(PERMISSIONS.aiAutomationsManage);
     if (guard.error) return guard.error;
     const { id } = await context.params;
     const preview = await previewAutomation(guard.session.businessId, id);

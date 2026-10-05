@@ -667,6 +667,19 @@ export interface AiSettlementInput {
   userId?: string | null;
   note?: string | null;
   metadata?: Record<string, unknown>;
+  // Issue #812 §12 — per-turn attribution. Columns, not metadata keys, because
+  // the usage report groups on them and a typo in a jsonb key is a silent NULL
+  // group forever.
+  /** The runtime mode in force: `auto`, `instant` or `deep_research`. */
+  runtimeMode?: string | null;
+  /** The Superadmin system agent invoked, if the turn ran as one. */
+  systemAgentId?: string | null;
+  /** The assignment (suggestion card) that surfaced the agent. */
+  suggestionId?: string | null;
+  /** The Deep Research run this settlement belongs to. */
+  researchRunId?: string | null;
+  /** The prompt layers the resolver composed, in composition order. */
+  promptLayers?: unknown;
 }
 
 export interface AiSettlementResult {
@@ -896,8 +909,10 @@ export async function settleAiWalletCharge(input: AiSettlementInput): Promise<Ai
             conversation_id, project_id, agent_id, automation_id, coworker_id,
             location_id, input_tokens, output_tokens, cache_hit,
             cost_usd, provider_cost_rial, charged_rial, debt_rial, priced_by,
-            wallet_ledger_id, created_by_user_id, metadata)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb)
+            wallet_ledger_id, created_by_user_id, metadata,
+            runtime_mode, system_agent_id, suggestion_id, research_run_id, prompt_layers)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb,
+                 $23,$24,$25,$26,$27::jsonb)
          RETURNING id`,
         [
           input.businessId,
@@ -925,6 +940,15 @@ export async function settleAiWalletCharge(input: AiSettlementInput): Promise<Ai
             ...(input.metadata ?? {}),
             ...(allowanceAppliedRial > 0 ? { allowanceAppliedRial } : {}),
           }),
+          // §12 — the attribution columns. `runtimeMode` stays NULL when the
+          // surface has no mode: an OCR call or a vision count never touched a
+          // mode alias, and writing `auto` on it would invent one. The chat path
+          // always writes a mode explicitly.
+          input.runtimeMode ?? null,
+          input.systemAgentId ?? null,
+          input.suggestionId ?? null,
+          input.researchRunId ?? null,
+          JSON.stringify(Array.isArray(input.promptLayers) ? input.promptLayers : []),
         ],
       );
 

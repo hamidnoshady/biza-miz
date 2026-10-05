@@ -183,10 +183,7 @@ export function aiCapabilitySnapshot(permissions: ReadonlySet<Permission>) {
   return {
     canUse: permissions.has(PERMISSIONS.aiUse),
     canManage: permissions.has(PERMISSIONS.aiManage),
-    canManageAgents: permissions.has(PERMISSIONS.aiAgentsManage),
     canManageAutomations: permissions.has(PERMISSIONS.aiAutomationsManage),
-    canManageKnowledge: permissions.has(PERMISSIONS.aiKnowledgeManage),
     canViewUsage: permissions.has(PERMISSIONS.aiUsageView),
-    canManageWidgets: permissions.has(PERMISSIONS.aiWidgetsManage),
   };
 }

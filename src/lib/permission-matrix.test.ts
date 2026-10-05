@@ -57,7 +57,7 @@ describe("built-in role presets", () => {
 
   it("holds the manager preset exactly", () => {
     expect(effective("manager")).toEqual([
-      "ai.agents.manage", "ai.automations.manage", "ai.knowledge.manage", "ai.manage", "ai.usage.view", "ai.use", "ai.widgets.manage",
+      "ai.automations.manage", "ai.manage", "ai.usage.view", "ai.use",
       "backup.manage",
       "billing.manage", "billing.view",
       "campaigns.manage", "campaigns.view",
