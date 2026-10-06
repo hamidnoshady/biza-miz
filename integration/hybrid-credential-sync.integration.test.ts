@@ -28,6 +28,7 @@ import {
   applyReplicatedPins,
   buildLoginCredentials,
   buildReplicatedPins,
+  buildStaffPinMemberships,
   recordSpentRecoveryCodes,
 } from "../src/lib/iam/login-credentials-service";
 import { runIamSync } from "../src/lib/iam/sync";
@@ -121,7 +122,7 @@ afterAll(async () => {
 // The desktop's view of the cloud: real payloads, stubbed transport
 // ---------------------------------------------------------------------------
 
-type CloudMode = "ok" | "http500" | "invalid" | "legacy" | "offline";
+type CloudMode = "ok" | "http500" | "invalid" | "legacy" | "legacy_payload" | "invalid_staff_pins" | "offline";
 const cloud = { mode: "ok" as CloudMode, businessId: "", siteDeviceId: "" };
 
 function json(body: unknown, status = 200): Response {
@@ -160,8 +161,21 @@ vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const payload = await onCloud(async () => ({
       credentials: await buildLoginCredentials(cloud.businessId),
       pins: await buildReplicatedPins(cloud.businessId),
+      staffPins: { authoritative: true, memberships: await buildStaffPinMemberships(cloud.businessId) },
     }));
     if (cloud.mode === "invalid") return json({ credentials: "not-an-array" });
+    if (cloud.mode === "invalid_staff_pins") {
+      // A block that claims nothing: neither authoritative nor a roster. The
+      // site must refuse the payload rather than read it as "remove".
+      return json({ ...payload, staffPins: { authoritative: false } });
+    }
+    if (cloud.mode === "legacy_payload") {
+      // A cloud from before #850: it has no staff-PIN block, so absence from
+      // `pins` must keep meaning "leave the site's PIN alone".
+      const { staffPins: _omitted, ...legacy } = payload;
+      void _omitted;
+      return json(legacy);
+    }
     return json(payload);
   }
   if (url.pathname === "/api/pairing/redeem" || url.pathname === "/api/platform/pairing/redeem") {
@@ -973,5 +987,88 @@ describe("hybrid login credential convergence", () => {
       await switchDatabase(siteDb);
       await maintenance(`DROP DATABASE IF EXISTS "${routeSiteDb}" WITH (FORCE)`);
     }
+  }, 240_000);
+
+  it("removes a staff PIN the cloud deleted, and leaves the owner's offline PIN alone", async () => {
+    const paired = await pairBusiness();
+    // The owner's device-local door, and a converged site to start from.
+    await withTenant(paired.siteBusinessId, () => setPin(paired.siteBusinessId, paired.ownerUserId, "4321", paired.ownerUserId));
+    await withTenant(paired.siteBusinessId, () => runIamSync(paired.siteBusinessId));
+    const before = await withTenant(paired.siteBusinessId, () => readHybridIdentityStatus(paired.siteBusinessId));
+    expect(before.overall).toBe("healthy");
+
+    // The cloud deletes the cashier's PIN — the membership stays active. The
+    // roster lists only members a PIN can sign in, so before #850 the desktop
+    // kept the deleted PIN working indefinitely.
+    await switchDatabase(cloudDb);
+    await withTenant(paired.cloudBusinessId, () => query(
+      `UPDATE employee_credentials SET status = 'revoked', revoked_at = now()
+        WHERE employee_id = $1 AND credential_type = 'pin' AND status = 'active'`,
+      [paired.staff.cashier.id],
+    ));
+    await switchDatabase(siteDb);
+
+    const synced = await withTenant(paired.siteBusinessId, () => syncHybridLoginCredentials(paired.siteBusinessId));
+    expect(synced.pinsRevoked).toBe(1);
+    // Recorded where the connection panel reads it.
+    const state = await withTenant(paired.siteBusinessId, () => readCredentialSyncState(paired.siteBusinessId, paired.siteDeviceId));
+    expect(state?.pinsRevoked).toBe(1);
+
+    // The member is still a member; their PIN simply no longer works.
+    expect(await activePinHash(paired.siteBusinessId, paired.staff.cashier.id)).toBeNull();
+    const member = await withTenant(paired.siteBusinessId, () => query<{ is_active: boolean; membership_status: string }>(
+      `SELECT is_active, membership_status FROM users WHERE id = $1`,
+      [paired.staff.cashier.id],
+    ));
+    expect(member.rows[0]).toMatchObject({ is_active: true, membership_status: "active" });
+    const roster = await withTenant(paired.siteBusinessId, () => loginRoster(paired.siteBusinessId));
+    expect(roster.map((entry) => entry.id)).not.toContain(paired.staff.cashier.id);
+    // ...and the other two staff are untouched.
+    for (const role of ["waiter", "kitchen"] as const) {
+      expect(roster.map((entry) => entry.id)).toContain(paired.staff[role].id);
+    }
+
+    // The owner's device-local PIN is not a cloud staff PIN: it survives, and
+    // the removal counter never counted it.
+    const ownerHash = await activePinHash(paired.siteBusinessId, paired.ownerUserId);
+    expect(ownerHash).not.toBeNull();
+    expect(await bcrypt.compare("4321", ownerHash!)).toBe(true);
+
+    // Idempotent: nothing left to remove on the next pass.
+    const again = await withTenant(paired.siteBusinessId, () => syncHybridLoginCredentials(paired.siteBusinessId));
+    expect(again.pinsRevoked).toBe(0);
+  }, 240_000);
+
+  it("keeps a local PIN when the cloud does not claim authority over staff PINs", async () => {
+    // The pre-#850 contract, preserved for a cloud that does not send the
+    // staff-PIN block: absence from `pins` still means "this is not yours to
+    // remove", so a site's own PIN survives an older cloud.
+    const paired = await pairBusiness();
+    await withTenant(paired.siteBusinessId, () => runIamSync(paired.siteBusinessId));
+    cloud.mode = "legacy_payload";
+    const result = await withTenant(paired.siteBusinessId, () => syncHybridLoginCredentials(paired.siteBusinessId));
+    expect(result.pinsRevoked).toBe(0);
+    for (const role of PIN_ROLES) {
+      expect(await activePinHash(paired.siteBusinessId, paired.staff[role].id)).not.toBeNull();
+    }
+    const roster = await withTenant(paired.siteBusinessId, () => loginRoster(paired.siteBusinessId));
+    for (const role of PIN_ROLES) expect(roster.map((entry) => entry.id)).toContain(paired.staff[role].id);
+    cloud.mode = "ok";
+  }, 240_000);
+
+  it("refuses a half-sent staff-PIN block instead of deleting PINs on it", async () => {
+    // The dangerous failure mode: a malformed block must be an invalid payload
+    // (visible, retryable) and never a licence to remove.
+    const paired = await pairBusiness();
+    await withTenant(paired.siteBusinessId, () => runIamSync(paired.siteBusinessId));
+    cloud.mode = "invalid_staff_pins";
+    const result = await withTenant(paired.siteBusinessId, () => syncHybridLoginCredentials(paired.siteBusinessId));
+    expect(result.status).toBe("degraded");
+    expect(result.error).toContain("staff_pins_not_authoritative");
+    expect(result.pinsRevoked).toBe(0);
+    for (const role of PIN_ROLES) {
+      expect(await activePinHash(paired.siteBusinessId, paired.staff[role].id)).not.toBeNull();
+    }
+    cloud.mode = "ok";
   }, 240_000);
 });

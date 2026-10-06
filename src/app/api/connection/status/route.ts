@@ -249,6 +249,8 @@ export const GET = withTenantScope(async () => {
           credentialsReceived: identityStatus.credentials?.credentialsReceived ?? 0,
           pinsReceived: identityStatus.credentials?.pinsReceived ?? 0,
           pinsApplied: identityStatus.credentials?.pinsApplied ?? 0,
+          // Issue #850: PINs the cloud removed and this site revoked.
+          pinsRevoked: identityStatus.credentials?.pinsRevoked ?? 0,
           identitiesApplied: identityStatus.credentials?.identitiesApplied ?? 0,
           pinMembersExpected: identityStatus.pinGap.expected,
           pinMembersUsable: identityStatus.pinGap.usable,

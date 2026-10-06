@@ -77,6 +77,8 @@ export interface CredentialSyncResult {
   credentialsReceived: number;
   pinsReceived: number;
   pinsApplied: number;
+  /** Issue #850: staff PINs the cloud removed; this pass revoked them locally. */
+  pinsRevoked: number;
   identitiesApplied: number;
   pinMembersExpected: number;
   pinMembersUsable: number;
@@ -214,10 +216,11 @@ export async function readCredentialSyncState(
     pin_members_expected: number;
     pin_members_usable: number;
     pin_members_missing: number;
+    pins_revoked: number;
     missing_identity_bindings: number;
     converged_at: Date | null;
   }>(
-    `SELECT status,last_attempt_at,last_success_at,last_error,credentials_received,pins_received,pins_applied,
+    `SELECT status,last_attempt_at,last_success_at,last_error,credentials_received,pins_received,pins_applied,pins_revoked,
             identities_applied,pin_members_expected,pin_members_usable,pin_members_missing,missing_identity_bindings,converged_at
        FROM iam_login_credential_sync_state
       WHERE business_id=$1 AND site_device_id=$2`,
@@ -233,6 +236,7 @@ export async function readCredentialSyncState(
     credentialsReceived: row.credentials_received,
     pinsReceived: row.pins_received,
     pinsApplied: row.pins_applied,
+    pinsRevoked: row.pins_revoked,
     identitiesApplied: row.identities_applied,
     pinMembersExpected: row.pin_members_expected,
     pinMembersUsable: row.pin_members_usable,
@@ -270,6 +274,8 @@ interface CredentialStateWrite {
   credentialsReceived?: number;
   pinsReceived?: number;
   pinsApplied?: number;
+  /** Issue #850: staff PINs the cloud removed and this pass revoked locally. */
+  pinsRevoked?: number;
   identitiesApplied?: number;
   gap: PinCredentialGap;
   missingIdentityBindings: number;
@@ -280,19 +286,20 @@ async function recordCredentialState(businessId: string, siteDeviceId: string, w
   await query(
     `INSERT INTO iam_login_credential_sync_state
        (business_id,site_device_id,status,last_attempt_at,last_success_at,last_error,credentials_received,pins_received,
-        pins_applied,identities_applied,pin_members_expected,pin_members_usable,pin_members_missing,
+        pins_applied,pins_revoked,identities_applied,pin_members_expected,pin_members_usable,pin_members_missing,
         missing_identity_bindings,converged_at)
-     VALUES ($1,$2,$3,now(),CASE WHEN $3='healthy' THEN now() END,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+     VALUES ($1,$2,$3,now(),CASE WHEN $3='healthy' THEN now() END,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
              CASE WHEN $3='healthy' THEN now() END)
      ON CONFLICT (business_id,site_device_id) DO UPDATE SET
        status=$3,last_attempt_at=now(),last_error=$4,
        last_success_at=CASE WHEN $3='healthy' THEN now() ELSE iam_login_credential_sync_state.last_success_at END,
-       credentials_received=$5,pins_received=$6,pins_applied=$7,identities_applied=$8,
-       pin_members_expected=$9,pin_members_usable=$10,pin_members_missing=$11,missing_identity_bindings=$12,
+       credentials_received=$5,pins_received=$6,pins_applied=$7,pins_revoked=$8,identities_applied=$9,
+       pin_members_expected=$10,pin_members_usable=$11,pin_members_missing=$12,missing_identity_bindings=$13,
        converged_at=CASE WHEN $3='healthy' THEN now() ELSE iam_login_credential_sync_state.converged_at END`,
     [
       businessId, siteDeviceId, write.status, write.error,
-      write.credentialsReceived ?? 0, write.pinsReceived ?? 0, write.pinsApplied ?? 0, write.identitiesApplied ?? 0,
+      write.credentialsReceived ?? 0, write.pinsReceived ?? 0, write.pinsApplied ?? 0, write.pinsRevoked ?? 0,
+      write.identitiesApplied ?? 0,
       write.gap.expected, write.gap.usable, write.gap.missing, write.missingIdentityBindings,
     ],
   );
@@ -305,6 +312,7 @@ interface FailureContext {
   credentialsReceived: number;
   pinsReceived: number;
   pinsApplied: number;
+  pinsRevoked: number;
   identitiesApplied: number;
 }
 
@@ -321,6 +329,7 @@ async function fail(
     credentialsReceived: context.credentialsReceived,
     pinsReceived: context.pinsReceived,
     pinsApplied: context.pinsApplied,
+    pinsRevoked: context.pinsRevoked,
     identitiesApplied: context.identitiesApplied,
     gap,
     missingIdentityBindings,
@@ -334,6 +343,7 @@ async function fail(
     credentialsReceived: context.credentialsReceived,
     pinsReceived: context.pinsReceived,
     pinsApplied: context.pinsApplied,
+    pinsRevoked: context.pinsRevoked,
     identitiesApplied: context.identitiesApplied,
     pinMembersExpected: gap.expected,
     pinMembersUsable: gap.usable,
@@ -377,6 +387,7 @@ export async function syncHybridLoginCredentials(
         credentialsReceived: 0,
         pinsReceived: 0,
         pinsApplied: 0,
+        pinsRevoked: 0,
         identitiesApplied: 0,
         pinMembersExpected: 0,
         pinMembersUsable: 0,
@@ -397,7 +408,7 @@ export async function syncHybridLoginCredentials(
 
     const context: FailureContext = {
       businessId, siteDeviceId, httpStatus: null,
-      credentialsReceived: 0, pinsReceived: 0, pinsApplied: 0, identitiesApplied: 0,
+      credentialsReceived: 0, pinsReceived: 0, pinsApplied: 0, pinsRevoked: 0, identitiesApplied: 0,
     };
     const headers = { Authorization: `Bearer ${token}` };
     let reportedSpentCodes = true;
@@ -454,9 +465,16 @@ export async function syncHybridLoginCredentials(
     // PINs and passwords are independent planes on purpose: one failing must
     // not silently hold back the other, but either failure is visible.
     let pinsApplied = 0;
+    let pinsRevoked = 0;
     try {
-      pinsApplied = await applyReplicatedPins(businessId, pins);
+      const outcome = await applyReplicatedPins(businessId, pins, {
+        staffPinMemberships: validated.staffPinMemberships,
+        staffPinsAuthoritative: validated.staffPinsAuthoritative,
+      });
+      pinsApplied = outcome.applied;
+      pinsRevoked = outcome.removed;
       context.pinsApplied = pinsApplied;
+      context.pinsRevoked = pinsRevoked;
     } catch (error) {
       return fail(context, "degraded", `pin_apply_failed: ${errorText(error)}`);
     }
@@ -493,6 +511,7 @@ export async function syncHybridLoginCredentials(
       credentialsReceived: credentials.length,
       pinsReceived: pins.length,
       pinsApplied,
+      pinsRevoked,
       identitiesApplied,
       gap,
       missingIdentityBindings,
@@ -506,12 +525,13 @@ export async function syncHybridLoginCredentials(
       credentialsReceived: credentials.length,
       pinsReceived: pins.length,
       pinsApplied,
+      pinsRevoked,
       identitiesApplied,
       pinMembersExpected: gap.expected,
       pinMembersUsable: gap.usable,
       pinMembersMissing: gap.missing,
       missingIdentityBindings,
-      changed: pinsApplied > 0 || identitiesApplied > 0,
+      changed: pinsApplied > 0 || pinsRevoked > 0 || identitiesApplied > 0,
       gap,
     };
   });

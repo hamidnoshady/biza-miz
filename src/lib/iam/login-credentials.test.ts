@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   loginCredentialsFingerprint,
+  planPinRemoval,
   planPinReplication,
   validateLoginCredentialPayload,
   type ReplicatedLoginCredential,
@@ -92,7 +93,13 @@ describe("validateLoginCredentialPayload", () => {
 
   it("refuses malformed records instead of applying half of them", () => {
     expect(validateLoginCredentialPayload({ credentials: {}, pins: [] })).toEqual({ ok: false, code: "credentials_not_array" });
-    expect(validateLoginCredentialPayload({ credentials: [] })).toEqual({ ok: true, credentials: [], pins: [] });
+    expect(validateLoginCredentialPayload({ credentials: [] })).toEqual({
+      ok: true,
+      credentials: [],
+      pins: [],
+      staffPinMemberships: [],
+      staffPinsAuthoritative: false,
+    });
     expect(validateLoginCredentialPayload({ pins: [{ membershipId: "not-a-uuid", pinHash: "h" }] }))
       .toEqual({ ok: false, code: "invalid_pin_record" });
     expect(validateLoginCredentialPayload({ pins: [{ membershipId: id, pinHash: "" }] }))
@@ -101,5 +108,48 @@ describe("validateLoginCredentialPayload", () => {
       .toEqual({ ok: false, code: "invalid_credential_record" });
     expect(validateLoginCredentialPayload({ credentials: [{ ...credential, membershipId: "nope" }] }))
       .toEqual({ ok: false, code: "invalid_credential_record" });
+  });
+
+  it("accepts the staff-PIN block only whole, and refuses a half-sent one", () => {
+    const cashierId = "11111111-1111-4111-8111-111111111111";
+    // Issue #850: the block is what licenses removing a PIN, so a malformed
+    // one must be an invalid payload rather than a silent permission.
+    expect(validateLoginCredentialPayload({ pins: [], staffPins: { authoritative: true, memberships: [cashierId] } }))
+      .toMatchObject({ ok: true, staffPinMemberships: [cashierId], staffPinsAuthoritative: true });
+    expect(validateLoginCredentialPayload({ pins: [], staffPins: { authoritative: false, memberships: [cashierId] } }))
+      .toEqual({ ok: false, code: "staff_pins_not_authoritative" });
+    expect(validateLoginCredentialPayload({ pins: [], staffPins: { authoritative: true } }))
+      .toEqual({ ok: false, code: "staff_pins_memberships_not_array" });
+    expect(validateLoginCredentialPayload({ pins: [], staffPins: { authoritative: true, memberships: ["not-a-uuid"] } }))
+      .toEqual({ ok: false, code: "invalid_staff_pin_membership" });
+    expect(validateLoginCredentialPayload({ pins: [], staffPins: [] }))
+      .toEqual({ ok: false, code: "staff_pins_not_object" });
+  });
+
+  it("removes only staff PINs the authoritative cloud says it has none for", () => {
+    const cashierId = "11111111-1111-4111-8111-111111111111";
+    const waiterId = "22222222-2222-4222-8222-222222222222";
+    const kitchenId = "33333333-3333-4333-8333-333333333333";
+    const ownerId = "44444444-4444-4444-8444-444444444444";
+    const strangerId = "55555555-5555-4555-8555-555555555555";
+    const local = [
+      { membershipId: cashierId, role: "cashier", pinHash: "hash" },
+      { membershipId: waiterId, role: "waiter", pinHash: "hash" },
+      { membershipId: ownerId, role: "owner", pinHash: "hash" },      // device-local door
+      { membershipId: strangerId, role: "cashier", pinHash: "hash" }, // cloud has never seen them
+      { membershipId: kitchenId, role: "kitchen", pinHash: null },    // nothing to remove
+    ];
+    // Not authoritative → no removals at all, whatever is missing.
+    expect(planPinRemoval({ pins: [], memberships: [cashierId, waiterId, ownerId, strangerId, kitchenId], authoritative: false }, local))
+      .toEqual([]);
+    // Authoritative: the cashier was listed and has no PIN in the payload.
+    expect(planPinRemoval({ pins: [{ membershipId: waiterId, pinHash: "hash" }], memberships: [cashierId, waiterId, ownerId], authoritative: true }, local))
+      .toEqual([cashierId]);
+    // A password-role member is never removed, whatever the cloud lists...
+    expect(planPinRemoval({ pins: [], memberships: [ownerId], authoritative: true }, local)).toEqual([]);
+    // ...and only what the cloud *lists* is removable: the unlisted cashier
+    // (strangerId) keeps their PIN, and a listed member that already has no
+    // PIN (kitchenId) has nothing to remove.
+    expect(planPinRemoval({ pins: [], memberships: [cashierId, kitchenId], authoritative: true }, local)).toEqual([cashierId]);
   });
 });

@@ -1,17 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateIamSite } from "@/lib/iam/site-auth";
-import { buildLoginCredentials, buildReplicatedPins, recordSpentRecoveryCodes } from "@/lib/iam/login-credentials-service";
+import {
+  buildLoginCredentials,
+  buildReplicatedPins,
+  buildStaffPinMemberships,
+  recordSpentRecoveryCodes,
+} from "@/lib/iam/login-credentials-service";
 import type { SpentRecoveryCode } from "@/lib/iam/login-credentials";
 
 /**
  * Global login: the password + second factor a paired site replicates, plus
  * every member's quick-login PIN hash (src/lib/iam/login-credentials.ts).
+ *
+ * `staffPins` (issue #850) is what makes a *deletion* travel: `pins` only ever
+ * lists members the cloud has a PIN for, so without the companion roster a site
+ * cannot tell "the cloud removed this staff member's PIN" from "this member is
+ * not the cloud's to speak for". The block is authoritative and complete by
+ * construction — it is only ever sent whole — and lists just the PIN roles,
+ * whose PINs the cloud owns.
  */
 export async function GET(request: NextRequest) {
   const site = await authenticateIamSite(request);
   if (!site) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const [credentials, pins] = await Promise.all([buildLoginCredentials(site.businessId), buildReplicatedPins(site.businessId)]);
-  const response = NextResponse.json({ credentials, pins });
+  const [credentials, pins, staffPinMemberships] = await Promise.all([
+    buildLoginCredentials(site.businessId),
+    buildReplicatedPins(site.businessId),
+    buildStaffPinMemberships(site.businessId),
+  ]);
+  const response = NextResponse.json({
+    credentials,
+    pins,
+    staffPins: { authoritative: true, memberships: staffPinMemberships },
+  });
   response.headers.set("Cache-Control", "no-store");
   return response;
 }

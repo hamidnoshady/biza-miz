@@ -148,6 +148,18 @@ apply does too — for the PIN roles, whose PIN the cloud owns. The member's
 device-local owner/manager PIN is deliberately left alone, since that is this
 install's own offline door, and the membership itself is already inert.
 
+Deleting a staff PIN without touching the membership is the other exception,
+and it needs the cloud to say so explicitly (issue #850). `pins` only ever lists
+members the cloud *has* a PIN for, so absence from it cannot mean "removed": it
+also covers a member the cloud has never seen, a legacy cloud, and every
+password-role member. The payload therefore carries a companion block —
+`staffPins: { authoritative: true, memberships: [...] }` — naming the PIN-role
+memberships the cloud speaks for. When it is present and complete, a listed
+staff member with no entry in `pins` has their local PIN revoked, exactly as a
+suspension would, and `pins_revoked` records how many. Without the block the
+pre-#850 rule stands (the site keeps its own PIN); a half-sent block is an
+invalid payload rather than a licence to delete.
+
 ### Credential convergence is its own plane (issue #843)
 
 The IAM snapshot is metadata-only, so a site can be fully converged on

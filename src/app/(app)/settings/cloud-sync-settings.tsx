@@ -51,6 +51,8 @@ export function CloudSyncSettings() {
       pinMembersUsable: number;
       pinMembersMissing: number;
       missingIdentityBindings: number;
+      /** Issue #850: staff PINs the cloud removed; the last pass revoked them here. */
+      pinsRevoked?: number;
     } | null;
     overallIdentity?: string;
   };
@@ -141,7 +143,10 @@ export function CloudSyncSettings() {
               value={credentials ? credentialSyncLabel(credentials.state as never) : "در انتظار"}
               detail={
                 credentials
-                  ? `${credentials.pinMembersUsable.toLocaleString("fa-IR")} از ${credentials.pinMembersExpected.toLocaleString("fa-IR")} حساب پین‌دار آماده است`
+                  ? `${credentials.pinMembersUsable.toLocaleString("fa-IR")} از ${credentials.pinMembersExpected.toLocaleString("fa-IR")} حساب پین‌دار آماده است` +
+                    ((credentials.pinsRevoked ?? 0) > 0
+                      ? ` — ${(credentials.pinsRevoked ?? 0).toLocaleString("fa-IR")} پین حذف‌شده در ابر روی این دستگاه هم باطل شد`
+                      : "")
                   : "وضعیت رمز کارکنان دریافت نشده"
               }
               healthy={credentials?.state === "healthy" && credentials.pinMembersMissing === 0}

@@ -96,6 +96,9 @@ this is the packaged-desktop pass of the same scenario.
       from the roster, any desktop session ends, and their replicated PIN is
       revoked rather than merely hidden (reactivating them without a cloud PIN
       must not let the old PIN back in).
+- [ ] Delete a PIN on the cloud while the membership stays active, then sync:
+      that member's old PIN must stop working on the desktop and the settings
+      row must report the revoked count.
 - [ ] Simulate a credential failure (point the desktop at a cloud whose
       `/api/iam/login-credentials` returns 500, or stop it mid-pairing):
       Settings must show «رمز و پین ورود کارکنان: نیازمند بررسی» with the

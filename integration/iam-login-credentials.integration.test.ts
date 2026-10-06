@@ -158,9 +158,9 @@ describe("global login replication", () => {
     const before = await withTenant(site.businessId, () => loginRoster(site.businessId));
     expect(before.map((entry) => entry.id)).not.toContain(cashierId);
 
-    await expect(withTenant(site.businessId, () => applyReplicatedPins(site.businessId, pins))).resolves.toBe(1);
+    await expect(withTenant(site.businessId, () => applyReplicatedPins(site.businessId, pins))).resolves.toEqual({ applied: 1, removed: 0 });
     // Unchanged cloud → no rewrite.
-    await expect(withTenant(site.businessId, () => applyReplicatedPins(site.businessId, pins))).resolves.toBe(0);
+    await expect(withTenant(site.businessId, () => applyReplicatedPins(site.businessId, pins))).resolves.toEqual({ applied: 0, removed: 0 });
 
     const after = await withTenant(site.businessId, () => loginRoster(site.businessId));
     expect(after.map((entry) => entry.id)).toContain(cashierId);

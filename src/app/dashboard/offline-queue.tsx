@@ -262,6 +262,8 @@ export interface ConnectionStatusSnapshot {
     credentialsReceived: number;
     pinsReceived: number;
     pinsApplied: number;
+    /** Issue #850: staff PINs the cloud removed; the last pass revoked them here. */
+    pinsRevoked: number;
     identitiesApplied: number;
     pinMembersExpected: number;
     pinMembersUsable: number;
