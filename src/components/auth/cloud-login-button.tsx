@@ -15,6 +15,12 @@ const REASONS: Record<string, string> = {
   refused: "نسخهٔ ابری این ورود را نپذیرفت. دوباره تلاش کنید.",
   offline: "اتصال به نسخهٔ ابری برقرار نشد. اینترنت را بررسی کنید یا با پین وارد شوید.",
   not_synced: "حساب شما هنوز به این دستگاه نرسیده است. چند لحظهٔ دیگر دوباره تلاش کنید.",
+  // The membership exists locally but its replicated cloud identity (password
+  // /token version) has not converged, so the desktop refuses to mint a
+  // session outside the cloud's revocation chain rather than signing the
+  // member in with a weaker one.
+  identity_not_synced:
+    "اطلاعات ورود حساب ابری شما هنوز روی این دستگاه همگام نشده است. چند لحظهٔ دیگر دوباره تلاش کنید یا با پین وارد شوید.",
   unavailable: "این دستگاه به نسخهٔ ابری متصل نیست.",
   invalid: "پیوند ورود معتبر نبود. دوباره تلاش کنید.",
 };

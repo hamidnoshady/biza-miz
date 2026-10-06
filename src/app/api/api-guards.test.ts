@@ -36,6 +36,16 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "auth/pin-login/roster":
     "the name-then-PIN picker's first step (Phase 20 Wave 2) — lists a business's PIN-role " +
     "employees (name/role/photo only, no PIN) before any credential has been presented",
+  // Issue #843 — the login screen's «همگام‌سازی دوباره» for cloud staff whose
+  // replicated credentials have not converged. Necessarily session-less (the
+  // missing staff are why nobody can sign in yet), resolves its business from
+  // the origin's host exactly like the roster above, is a no-op unless the
+  // Hybrid identity planes are actually not healthy, writes only this
+  // business's sync state, returns counts/names and no credential, and shares
+  // the middleware's per-IP credential bucket.
+  "auth/pin-login/roster/sync":
+    "pre-session retry for missing replicated staff credentials (issue #843) — " +
+    "host-resolved, no-op unless Hybrid identity is unhealthy, rate-limited with the login door",
   // Phase 42 — the phone-OTP door. `request` dispatches the code and is the
   // same shape as pin-login: a credential exchange that necessarily runs
   // before any session exists (its three addressing modes — a PIN-verified

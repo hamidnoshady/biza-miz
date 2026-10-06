@@ -67,20 +67,20 @@ export async function POST(request: NextRequest) {
     const identity = rows[0]?.is_active ? rows[0] : null;
     const passwordOk = await bcrypt.compare(password, identity?.password_hash ?? DUMMY_HASH);
 
-    // Gate on the lockout before the credential verdict — see the same
-    // ordering in /api/auth/login. A locked account answers 423 whatever the
-    // password was, so the status code leaks nothing about it.
+    // A wrong password answers 401 whether or not the account is locked; the
+    // lockout is disclosed only after the password proves the caller owns the
+    // account. Same ordering as /api/auth/login and /api/platform/auth/login.
+    if (!identity || !passwordOk) {
+      await recordAuthFailure("directory", email.trim().toLowerCase());
+      return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
+    }
+
     const lockout = await checkAuthLockout("directory", email.trim().toLowerCase(), PASSWORD_LOCKOUT_POLICY);
     if (lockout.locked) {
       return NextResponse.json(
         { error: "account_locked", lockedUntil: lockout.lockedUntil },
         { status: 423 },
       );
-    }
-
-    if (!identity || !passwordOk) {
-      await recordAuthFailure("directory", email.trim().toLowerCase());
-      return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
     }
 
     await recordAuthSuccess("directory", email.trim().toLowerCase());

@@ -519,6 +519,10 @@ function rateLimited(retryAfterMs: number): NextResponse {
 const AUTH_RATE_LIMITED_PATHS = [
   "/api/auth/login",
   "/api/auth/pin-login",
+  // The login screen's «همگام‌سازی دوباره» for missing replicated credentials
+  // is a pre-session action that makes the site call the cloud, so it shares
+  // this per-IP bucket instead of being an unbounded outbound trigger.
+  "/api/auth/pin-login/roster/sync",
   // Phase 46: both redeem a single-use sign-in code.
   "/api/auth/desktop-session",
   "/api/auth/cloud-login/callback",

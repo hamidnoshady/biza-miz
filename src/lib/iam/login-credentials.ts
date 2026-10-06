@@ -58,6 +58,87 @@ export interface SpentRecoveryCode {
   usedAt: string;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isCredentialRecord(value: unknown): value is ReplicatedLoginCredential {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.membershipId !== "string" || !UUID.test(record.membershipId)) return false;
+  if (typeof record.email !== "string" || typeof record.fullName !== "string") return false;
+  if (typeof record.passwordHash !== "string" || record.passwordHash.length === 0) return false;
+  if (typeof record.isActive !== "boolean") return false;
+  if (record.tokenVersion !== undefined && (typeof record.tokenVersion !== "number" || !Number.isFinite(record.tokenVersion))) return false;
+  if (!Array.isArray(record.mfa) || !record.mfa.every((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const m = entry as Record<string, unknown>;
+    return (m.method === "totp" || m.method === "sms_otp")
+      && typeof m.isPrimary === "boolean"
+      && (m.phoneE164 === null || typeof m.phoneE164 === "string")
+      && (m.totpSecret === null || typeof m.totpSecret === "string");
+  })) return false;
+  if (!Array.isArray(record.recoveryCodes) || !record.recoveryCodes.every((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const c = entry as Record<string, unknown>;
+    return typeof c.codeHash === "string" && (c.usedAt === null || typeof c.usedAt === "string");
+  })) return false;
+  return true;
+}
+
+function isPinRecord(value: unknown): value is ReplicatedPin {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.membershipId === "string" && UUID.test(record.membershipId)
+    && typeof record.pinHash === "string" && record.pinHash.length > 0;
+}
+
+/**
+ * The site's gate on `/api/iam/login-credentials`. A payload that is shaped
+ * like garbage must be a *visible* credential-stage failure, never something
+ * that half-applies: applyReplicatedPins() and applyLoginCredentials() each
+ * write rows, so the response is validated in full before either runs.
+ */
+export function validateLoginCredentialPayload(raw: unknown): {
+  ok: true;
+  credentials: ReplicatedLoginCredential[];
+  pins: ReplicatedPin[];
+  /** Issue #850: the cloud's staff-PIN roster, when it advertises authority. */
+  staffPinMemberships: string[];
+  staffPinsAuthoritative: boolean;
+} | { ok: false; code: string } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, code: "payload_not_object" };
+  const body = raw as { credentials?: unknown; pins?: unknown; staffPins?: unknown };
+  const credentials = body.credentials ?? [];
+  const pins = body.pins ?? [];
+  if (!Array.isArray(credentials)) return { ok: false, code: "credentials_not_array" };
+  if (!Array.isArray(pins)) return { ok: false, code: "pins_not_array" };
+  // An old cloud may legitimately omit `pins`; once the list exists its
+  // entries must be usable.
+  if (!pins.every(isPinRecord)) return { ok: false, code: "invalid_pin_record" };
+  if (!credentials.every(isCredentialRecord)) return { ok: false, code: "invalid_credential_record" };
+
+  // Issue #850 — the optional authoritative staff-PIN block. A cloud that does
+  // not send it keeps the pre-#850 behaviour: a member the cloud has no PIN for
+  // retains the site's own. It is accepted only as a complete, well-formed
+  // pair (the flag and the roster): a half-sent block is an invalid payload
+  // rather than a licence to delete PINs.
+  const staffPins = body.staffPins;
+  if (staffPins === undefined || staffPins === null) {
+    return { ok: true, credentials: credentials as ReplicatedLoginCredential[], pins: pins as ReplicatedPin[], staffPinMemberships: [], staffPinsAuthoritative: false };
+  }
+  if (typeof staffPins !== "object" || Array.isArray(staffPins)) return { ok: false, code: "staff_pins_not_object" };
+  const block = staffPins as { authoritative?: unknown; memberships?: unknown };
+  if (block.authoritative !== true) return { ok: false, code: "staff_pins_not_authoritative" };
+  if (!Array.isArray(block.memberships)) return { ok: false, code: "staff_pins_memberships_not_array" };
+  if (!block.memberships.every((id) => typeof id === "string" && UUID.test(id))) return { ok: false, code: "invalid_staff_pin_membership" };
+  return {
+    ok: true,
+    credentials: credentials as ReplicatedLoginCredential[],
+    pins: pins as ReplicatedPin[],
+    staffPinMemberships: block.memberships as string[],
+    staffPinsAuthoritative: true,
+  };
+}
+
 /**
  * A member's quick-login PIN as the cloud holds it. The bcrypt hash is as
  * portable as a password hash, and the cloud is where staff are created and
@@ -101,4 +182,32 @@ export function planPinReplication(
     if (here.pinHash === pin.pinHash) return false;
     return STAFF_PIN_ROLES.has(here.role) || here.pinHash === null;
   });
+}
+
+/**
+ * Issue #850 — whose site PIN the cloud's *absence* may remove. Pure.
+ *
+ * A staff PIN deleted on the cloud has to stop working here, but absence from
+ * `pins` cannot mean that on its own: it also covers a member the cloud has
+ * never seen (created after the last snapshot), a legacy cloud, and every
+ * password-role member, whose PIN is this device's own offline door. So the
+ * cloud must say two things explicitly — that it owns staff PINs
+ * (`staffPinsAuthoritative`) and which memberships it means (`memberships`) —
+ * and only then does "a listed staff member with no PIN in the payload" mean
+ * "remove the local one".
+ *
+ * Still restricted to the PIN roles (cashier/waiter/kitchen): a password-role
+ * member is never removed by this path, whatever the cloud lists, because the
+ * owner/manager PIN belongs to the device and not to the cloud.
+ */
+export function planPinRemoval(
+  cloud: { pins: readonly ReplicatedPin[]; memberships: readonly string[]; authoritative: boolean },
+  local: readonly LocalPinState[],
+): string[] {
+  if (!cloud.authoritative) return [];
+  const hasPin = new Set(cloud.pins.map((pin) => pin.membershipId));
+  return local
+    .filter((row) => STAFF_PIN_ROLES.has(row.role) && row.pinHash !== null
+      && cloud.memberships.includes(row.membershipId) && !hasPin.has(row.membershipId))
+    .map((row) => row.membershipId);
 }

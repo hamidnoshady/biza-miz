@@ -7,7 +7,9 @@ import { getPool, query, withTenant, withoutTenantScope } from "../db";
 import { decryptTotpSecret, encryptTotpSecret } from "../mfa-service";
 import {
   loginCredentialsFingerprint,
+  planPinRemoval,
   planPinReplication,
+  type LocalPinState,
   type ReplicatedLoginCredential,
   type ReplicatedPin,
   type SpentRecoveryCode,
@@ -212,6 +214,30 @@ const ACTIVE_PIN = `LEFT JOIN LATERAL (
             ORDER BY created_at DESC LIMIT 1
          ) ec ON true`;
 
+/** Roles whose PIN the cloud owns; the site never writes one for them. */
+const STAFF_PIN_ROLES_SQL = `('cashier','waiter','kitchen')`;
+
+/**
+ * Cloud: the staff PIN roles the cloud knows about (issue #850).
+ *
+ * Sent next to `pins` so the site can tell "this staff member has no PIN"
+ * apart from "this staff member is not the cloud's to speak for". Only the
+ * PIN roles are listed; a password-role member's PIN is the desktop's own and
+ * is never removed by a credential sync, whatever the cloud reports.
+ */
+export async function buildStaffPinMemberships(businessId: string): Promise<string[]> {
+  return withTenant(businessId, async () => {
+    const { rows } = await query<{ id: string }>(
+      `SELECT id FROM users
+        WHERE business_id = $1 AND is_active AND membership_status = 'active'
+          AND role IN ${STAFF_PIN_ROLES_SQL}
+        ORDER BY id`,
+      [businessId],
+    );
+    return rows.map((row) => row.id);
+  });
+}
+
 /** Cloud: the active quick-login PIN of every active member that has one. */
 export async function buildReplicatedPins(businessId: string): Promise<ReplicatedPin[]> {
   return withTenant(businessId, async () => {
@@ -228,25 +254,56 @@ export async function buildReplicatedPins(businessId: string): Promise<Replicate
 }
 
 /**
- * Site: give each replicated member the cloud's PIN (see planPinReplication
- * for whose PIN the cloud may replace). Without this a cashier created on the
- * cloud reaches the desktop as a membership with no PIN, and the quick-login
- * roster — which lists only members a PIN can sign in — never shows them.
- * Returns how many members' PINs were written.
+ * Site: make each replicated member's PIN equal the cloud's — written when the
+ * cloud has one (see planPinReplication), removed when the cloud owns staff
+ * PINs and says it has none (see planPinRemoval, issue #850).
+ *
+ * Both decisions are computed against the members this call is told about, so
+ * a member the site has not replicated yet is never touched, and a
+ * password-role member's device-local PIN is never removed.
  */
-export async function applyReplicatedPins(businessId: string, pins: readonly ReplicatedPin[]): Promise<number> {
-  if (pins.length === 0) return 0;
+export async function applyReplicatedPins(
+  businessId: string,
+  pins: readonly ReplicatedPin[],
+  options: { staffPinMemberships?: readonly string[]; staffPinsAuthoritative?: boolean } = {},
+): Promise<{ applied: number; removed: number }> {
+  const authoritative = options.staffPinsAuthoritative === true;
+  const memberships = options.staffPinMemberships ?? [];
+  if (pins.length === 0 && !authoritative) return { applied: 0, removed: 0 };
+
+  // Everything either rule could decide about: the members the payload carries
+  // a PIN for, plus (when the cloud is authoritative) the staff memberships it
+  // listed, so absence from `pins` can be resolved here in one pass.
+  const ids = Array.from(new Set([...pins.map((pin) => pin.membershipId), ...(authoritative ? memberships : [])]));
+  if (ids.length === 0) return { applied: 0, removed: 0 };
   const local = await query<{ id: string; role: string; pin_hash: string | null }>(
     `SELECT u.id, u.role::text AS role, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash
        FROM users u ${ACTIVE_PIN}
       WHERE u.business_id = $1 AND u.id = ANY($2::uuid[])`,
-    [businessId, pins.map((pin) => pin.membershipId)],
+    [businessId, ids],
   );
-  const plan = planPinReplication(pins, local.rows.map((row) => ({ membershipId: row.id, role: row.role, pinHash: row.pin_hash })));
-  if (plan.length === 0) return 0;
+  const localStates: LocalPinState[] = local.rows.map((row) => ({ membershipId: row.id, role: row.role, pinHash: row.pin_hash }));
+  const plan = planPinReplication(pins, localStates);
+  const removals = planPinRemoval({ pins, memberships, authoritative }, localStates);
+  if (plan.length === 0 && removals.length === 0) return { applied: 0, removed: 0 };
+
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    for (const membershipId of removals) {
+      // Same effect a suspension/offboarding has: the credential stops being
+      // active and the legacy compatibility copy goes with it. The member
+      // stays a member — only the PIN the cloud removed disappears.
+      await client.query(
+        `UPDATE employee_credentials SET status = 'revoked', revoked_at = now()
+          WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin' AND status = 'active'`,
+        [membershipId, businessId],
+      );
+      await client.query(
+        `UPDATE users SET pin_hash = NULL WHERE id = $1 AND business_id = $2 AND pin_hash IS NOT NULL`,
+        [membershipId, businessId],
+      );
+    }
     for (const pin of plan) {
       await client.query(`INSERT INTO employees (id, business_id) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [pin.membershipId, businessId]);
       await client.query(
@@ -267,5 +324,5 @@ export async function applyReplicatedPins(businessId: string, pins: readonly Rep
   } finally {
     client.release();
   }
-  return plan.length;
+  return { applied: plan.length, removed: removals.length };
 }

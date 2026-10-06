@@ -65,17 +65,21 @@ export async function POST(request: NextRequest) {
     const usable = admin?.is_active ? admin : null;
     const ok = await bcrypt.compare(password, usable?.password_hash ?? DUMMY_HASH);
 
+    // Anti-enumeration: while the password is unproven, a locked admin account
+    // answers exactly like a wrong password. The lockout verdict is only
+    // actionable once the password itself checked out. Same ordering as the
+    // tenant and directory doors.
+    if (!usable || !ok) {
+      await recordAuthFailure("platform_admin", email);
+      return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
+    }
+
     const lockout = await checkAuthLockout("platform_admin", email, PLATFORM_LOCKOUT_POLICY);
     if (lockout.locked) {
       return NextResponse.json(
         { error: "account_locked", lockedUntil: lockout.lockedUntil },
         { status: 423 },
       );
-    }
-
-    if (!usable || !ok) {
-      await recordAuthFailure("platform_admin", email);
-      return NextResponse.json({ error: "invalid_credentials" }, { status: 401 });
     }
 
     await recordAuthSuccess("platform_admin", email);
