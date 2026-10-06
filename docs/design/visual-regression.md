@@ -19,6 +19,33 @@ npm run test:visual
 It also runs on every pull request (`.github/workflows/test.yml`, job
 `visual-regression`) and is one of the jobs the `required` status check fans in.
 
+### Running it from a sandbox that cannot reach Playwright's CDN
+
+CI installs the browser pinned by `playwright@1.56.0` — Chromium 141. A sandbox
+whose egress blocks `cdn.playwright.dev` and
+`playwright.download.prss.microsoft.com` cannot do that, and pointing the harness
+at *whatever* Chromium is lying around is not an option: it refuses a mismatched
+major on purpose, because text rasterises differently between majors (that was
+the first all-red CI run). The recipe that works is a **matching** build from an
+npm package:
+
+```bash
+npm i --no-save --no-package-lock @sparticuz/chromium@141.0.0
+# extract the browser and the shared libraries it links against
+node -e 'import("@sparticuz/chromium").then(async (m) => console.log(await m.default.executablePath()))'
+node -e 'const {brotliDecompressSync}=require("node:zlib");const {readFileSync,writeFileSync}=require("node:fs");writeFileSync("/tmp/al2023.tar",brotliDecompressSync(readFileSync("node_modules/@sparticuz/chromium/bin/al2023.tar.br")))'
+mkdir -p /tmp/chromium-libs && tar -xf /tmp/al2023.tar -C /tmp/chromium-libs
+LD_LIBRARY_PATH=/tmp/chromium-libs/lib VISUAL_CHROMIUM_PATH=/tmp/chromium npm run test:visual
+```
+
+That build calls itself `141.0.7390.0` (the package strips the last version
+component), which satisfies the major check. What it does **not** change is
+anything else on this page: seed the fixture, build for production, and serve the
+seeded database — the two CRM baselines re-recorded through this recipe came out
+at 2.9% and 3.3% against the old ones for exactly the reason the diff images
+showed, and the other twelve screens matched to the pixel, which is the evidence
+that the environment was not the variable.
+
 ## What is covered
 
 | Baseline | App | What it establishes |
