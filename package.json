@@ -118,7 +118,8 @@
     "next": {
       "postcss": "^8.5.23",
       "sharp": "^0.35.3"
-    }
+    },
+    "source-map-js": "^1.2.2"
   },
   "description": "Persian-first (RTL, Jalali calendar, Toman display) point-of-sale system for cafes and restaurants. Built with Next.js + PostgreSQL.",
   "main": "index.js",
