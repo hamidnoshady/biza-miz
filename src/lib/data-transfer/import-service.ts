@@ -55,7 +55,9 @@ import { recordDataTransferAudit } from "./audit";
 import type {
   EntityDefinition,
   ImportFormat,
+  ImportJobFormat,
   ImportJobStatus,
+  ProviderJobMetadata,
   ImportMapping,
   ImportOptions,
   ParsedSheet,
@@ -82,8 +84,9 @@ export interface ImportJob {
   entityLabel: string;
   status: ImportJobStatus;
   fileName: string;
-  fileFormat: ImportFormat;
+  fileFormat: ImportJobFormat;
   fileSizeBytes: number;
+  providerMetadata: ProviderJobMetadata | null;
   sourceColumns: string[];
   mapping: ImportMapping;
   options: ImportOptions;
@@ -107,8 +110,9 @@ interface JobRow extends Record<string, unknown> {
   entity_key: string;
   status: ImportJobStatus;
   file_name: string;
-  file_format: ImportFormat;
+  file_format: ImportJobFormat;
   file_size_bytes: string | number;
+  provider_metadata: unknown;
   source_columns: unknown;
   mapping: unknown;
   options: unknown;
@@ -127,15 +131,35 @@ interface JobRow extends Record<string, unknown> {
   finished_at: Date | null;
 }
 
+function normaliseProviderMetadata(value: unknown): ProviderJobMetadata | null {
+  let candidate = value;
+  if (typeof candidate === "string") {
+    try { candidate = JSON.parse(candidate); } catch { return null; }
+  }
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  const metadata = candidate as Record<string, unknown>;
+  if (
+    typeof metadata.provider !== "string" ||
+    typeof metadata.sourceFormat !== "string" ||
+    typeof metadata.connectionId !== "string" ||
+    typeof metadata.profileKey !== "string" ||
+    typeof metadata.profileVersion !== "number" ||
+    !Array.isArray(metadata.selectedScopes)
+  ) return null;
+  return metadata as unknown as ProviderJobMetadata;
+}
+
 function toJob(row: JobRow): ImportJob {
+  const providerMetadata = normaliseProviderMetadata(row.provider_metadata);
   return {
     id: row.id,
     entityKey: row.entity_key,
-    entityLabel: findEntity(row.entity_key)?.label ?? row.entity_key,
+    entityLabel: providerMetadata?.provider === "holoo" ? "انتقال هلو" : findEntity(row.entity_key)?.label ?? row.entity_key,
     status: row.status,
     fileName: row.file_name,
     fileFormat: row.file_format,
     fileSizeBytes: Number(row.file_size_bytes ?? 0),
+    providerMetadata,
     sourceColumns: Array.isArray(row.source_columns) ? (row.source_columns as string[]) : [],
     mapping: normaliseMapping(row.mapping),
     options: (row.options ?? {}) as ImportOptions,
@@ -169,7 +193,7 @@ function normaliseMapping(value: unknown): ImportMapping {
   };
 }
 
-const JOB_COLUMNS = `id, entity_key, status, file_name, file_format, file_size_bytes,
+const JOB_COLUMNS = `id, entity_key, status, file_name, file_format, file_size_bytes, provider_metadata,
   source_columns, mapping, options, total_rows, valid_rows, warning_rows, error_rows,
   created_rows, updated_rows, skipped_rows, failed_rows, error, created_by_name,
   created_at, started_at, finished_at`;

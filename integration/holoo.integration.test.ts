@@ -5,7 +5,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { WELL_KNOWN_CODES } from "../src/lib/coa-template";
 import { closeDatabasePool, withTenant } from "../src/lib/db";
-import { importOpeningBalance } from "../src/lib/integrations/holoo/journal-import-service";
+import { importJournalVouchers, importOpeningBalance, previewJournalVouchers } from "../src/lib/integrations/holoo/journal-import-service";
+import { applyBaseImport, previewableHolooAccountCodes } from "../src/lib/integrations/holoo/import-service";
+import { completeImportRun, beginImportRun } from "../src/lib/integrations/holoo/migration-run-service";
+import { rollbackImportRun } from "../src/lib/integrations/holoo/rollback-service";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl)
@@ -175,5 +178,139 @@ describe("Holoo integration schema", () => {
       debit: "0",
       credit: exactRial.toString(),
     });
+  });
+
+  it("imports journal vouchers exactly once through ledger services and rolls back only the run-owned entry", async () => {
+    const debitCode = "2891";
+    const creditCode = "2892";
+    const remoteVoucherId = `J-${randomUUID()}`;
+    const exactRial = 9007199254740993n;
+    await client.query(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, $2, 'Voucher debit', 'asset'), ($1, $3, 'Voucher credit', 'liability')`,
+      [businessId, debitCode, creditCode],
+    );
+
+    const runId = await withTenant(businessId, () => beginImportRun(businessId, connectionId, null));
+    const vouchers = [{
+      remoteId: remoteVoucherId,
+      entryDate: "2025-02-03",
+      memo: "Workbook voucher",
+      lines: [
+        { accountCode: debitCode, debitRial: exactRial.toString() },
+        { accountCode: creditCode, creditRial: exactRial.toString() },
+      ],
+    }];
+    const preview = await withTenant(businessId, () => previewJournalVouchers(businessId, connectionId, vouchers));
+    expect(preview).toMatchObject({ importable: 1, alreadyMapped: 0, unbalanced: [], unmappedAccounts: [], skippedEmpty: [] });
+    const first = await withTenant(businessId, () =>
+      importJournalVouchers(businessId, connectionId, vouchers, null, runId, locationId),
+    );
+    expect(first.imported).toBe(1);
+    expect(first.alreadyMapped).toBe(0);
+    const retry = await withTenant(businessId, () =>
+      importJournalVouchers(businessId, connectionId, vouchers, null, runId, locationId),
+    );
+    expect(retry.imported).toBe(0);
+    expect(retry.alreadyMapped).toBe(1);
+
+    const { rows: entries } = await client.query<{ id: string; location_id: string; source_type: string }>(
+      `SELECT je.id, je.location_id, je.source_type
+         FROM integration_mappings m
+         JOIN journal_entries je ON je.id = m.local_id
+        WHERE m.business_id = $1 AND m.connection_id = $2
+          AND m.entity_type = 'holoo_journal' AND m.remote_id = $3`,
+      [businessId, connectionId, remoteVoucherId],
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ location_id: locationId, source_type: "holoo_import" });
+    const { rows: lineRows } = await client.query<{ code: string; debit: string; credit: string }>(
+      `SELECT a.code, jl.debit::text AS debit, jl.credit::text AS credit
+         FROM journal_lines jl JOIN accounts a ON a.id = jl.account_id
+        WHERE jl.entry_id = $1 ORDER BY a.code`,
+      [entries[0].id],
+    );
+    expect(lineRows).toEqual([
+      { code: debitCode, debit: exactRial.toString(), credit: "0" },
+      { code: creditCode, debit: "0", credit: exactRial.toString() },
+    ]);
+
+    await withTenant(businessId, () => completeImportRun(businessId, runId, {
+      provider: "holoo",
+      selectedScopes: ["accounts", "journal", "journalLines"],
+      rollbackState: "available",
+    }));
+    const rolledBack = await withTenant(businessId, () => rollbackImportRun(businessId, runId, connectionId));
+    expect(rolledBack.reverted.holoo_journal).toBe(1);
+    const remaining = await client.query(
+      `SELECT id FROM journal_entries WHERE id = $1`,
+      [entries[0].id],
+    );
+    expect(remaining.rowCount).toBe(0);
+    const mapping = await client.query(
+      `SELECT remote_id FROM integration_mappings
+        WHERE connection_id = $1 AND entity_type = 'holoo_journal' AND remote_id = $2`,
+      [connectionId, remoteVoucherId],
+    );
+    expect(mapping.rowCount).toBe(0);
+  });
+
+  it("previews newly selected account rows as provisional, then imports and rolls back their journal references", async () => {
+    const newAccountCode = "4899";
+    const existingAccountCode = "2999";
+    const remoteVoucherId = `J-${randomUUID()}`;
+    await client.query(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, $2, 'Existing voucher offset', 'liability')`,
+      [businessId, existingAccountCode],
+    );
+    const account = {
+      remoteId: newAccountCode,
+      code: newAccountCode,
+      name: "Workbook account",
+      nature: "debit",
+      parentCode: null,
+    };
+    const vouchers = [{
+      remoteId: remoteVoucherId,
+      entryDate: "2025-03-04",
+      memo: null,
+      lines: [
+        { accountCode: newAccountCode, debitRial: "2500" },
+        { accountCode: existingAccountCode, creditRial: "2500" },
+      ],
+    }];
+    const provisionalCodes = await withTenant(businessId, () =>
+      previewableHolooAccountCodes(businessId, connectionId, [account]),
+    );
+    expect(provisionalCodes).toEqual([newAccountCode]);
+    const preview = await withTenant(businessId, () =>
+      previewJournalVouchers(businessId, connectionId, vouchers, provisionalCodes),
+    );
+    expect(preview.importable).toBe(1);
+    expect(preview.unmappedAccounts).toEqual([]);
+
+    const runId = await withTenant(businessId, () => beginImportRun(businessId, connectionId, null));
+    await withTenant(businessId, () => applyBaseImport(
+      businessId,
+      connectionId,
+      { goods: [], persons: [], accounts: [account] },
+      runId,
+      locationId,
+    ));
+    const applied = await withTenant(businessId, () =>
+      importJournalVouchers(businessId, connectionId, vouchers, null, runId, locationId),
+    );
+    expect(applied.imported).toBe(1);
+    await withTenant(businessId, () => completeImportRun(businessId, runId, {
+      provider: "holoo",
+      selectedScopes: ["accounts", "journal", "journalLines"],
+      rollbackState: "available",
+    }));
+    const rolledBack = await withTenant(businessId, () => rollbackImportRun(businessId, runId, connectionId));
+    expect(rolledBack.reverted.holoo_journal).toBe(1);
+    expect(rolledBack.reverted.holoo_account).toBe(1);
+    const accountRow = await client.query(`SELECT id FROM accounts WHERE business_id = $1 AND code = $2`, [businessId, newAccountCode]);
+    expect(accountRow.rowCount).toBe(0);
   });
 });

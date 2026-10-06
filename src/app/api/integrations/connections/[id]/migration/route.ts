@@ -52,7 +52,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     if (body.manifest.transactions) summary.transactions = await previewTransactions(session.businessId, id, body.manifest.transactions);
     if (body.manifest.journals) {
       const plan = planJournalImport(body.manifest.journals);
-      summary.journals = { importable: plan.balanced.length, unbalanced: plan.unbalanced.map((v) => ({ remoteId: v.remoteId, difference: v.difference })) };
+      summary.journals = { importable: plan.balanced.length, unbalanced: plan.unbalanced.map((v) => ({ remoteId: v.remoteId, difference: v.difference.toString() })) };
     }
     if (body.manifest.openingBalance) summary.openingBalance = { lines: body.manifest.openingBalance.length };
     const discrepancies = await buildMigrationDiscrepancyReport(session.businessId, id, body.manifest);
@@ -61,7 +61,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
 
   if (body.action === "rollback") {
     if (!body.runId) return NextResponse.json({ error: "missing_run_id" }, { status: 400 });
-    const result = await rollbackImportRun(session.businessId, body.runId);
+    const result = await rollbackImportRun(session.businessId, body.runId, id);
     return NextResponse.json({ ok: true, ...result });
   }
 
