@@ -10,8 +10,9 @@ import {
 } from "@/lib/ai-wallet-billing";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 import { InvoiceOcrError, runInvoiceOcr } from "@/lib/ai-invoice-ocr-service";
-import { requireManager, resolveActiveLocation } from "@/lib/setup-state";
-import { withTenantScope } from "@/lib/auth";
+import { resolveActiveLocation } from "@/lib/setup-state";
+import { requirePermission, withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { hasMatchingMediaSignature } from "@/lib/media";
 import {
   findMediaAssetByHash,
@@ -36,7 +37,7 @@ import {
  * the extraction/matching logic underneath is unchanged.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const guard = await requireManager();
+  const guard = await requirePermission(PERMISSIONS.aiManage);
   if (guard.error) return guard.error;
   const session = guard.session;
 

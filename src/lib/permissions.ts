@@ -26,11 +26,8 @@ export const PERMISSIONS = {
   // without receiving any of the data tools below.
   aiUse: "ai.use",
   aiManage: "ai.manage",
-  aiAgentsManage: "ai.agents.manage",
   aiAutomationsManage: "ai.automations.manage",
-  aiKnowledgeManage: "ai.knowledge.manage",
   aiUsageView: "ai.usage.view",
-  aiWidgetsManage: "ai.widgets.manage",
 
   // Point of sale
   ordersView: "orders.view",
@@ -408,7 +405,7 @@ export function isOwnerOnlyPermission(permission: Permission): boolean {
 }
 
 const {
-  aiUse, aiManage, aiAgentsManage, aiAutomationsManage, aiKnowledgeManage, aiUsageView, aiWidgetsManage,
+  aiUse, aiManage, aiAutomationsManage, aiUsageView,
   ordersView, ordersCreate, ordersVoid, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
   tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
   menuView, menuEdit,
@@ -445,7 +442,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
   // ownership, destructive recovery, master API or cross-location trust keys.
   admin: ALL_PERMISSIONS.filter((permission) => !isOwnerOnlyPermission(permission)),
   manager: [
-    aiUse, aiManage, aiAgentsManage, aiAutomationsManage, aiKnowledgeManage, aiUsageView, aiWidgetsManage,
+    aiUse, aiManage, aiAutomationsManage, aiUsageView,
     ordersView, ordersCreate, ordersVoid, ordersAmendClosed, ordersDiscount, paymentsTake, paymentsRefund,
     tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
     menuView, menuEdit,

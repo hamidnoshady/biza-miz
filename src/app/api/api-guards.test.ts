@@ -337,6 +337,15 @@ const SELF_GUARDING_ROUTES: Record<string, string> = {
   // Phase F capstone — a project's media files, scoped by project ownership and
   // the tenant-isolated media_assets table.
   "ai/projects/[id]/files": "lists a project's media files — ownership through parent project",
+  // Issue #812 §10 — layered memory. The tenant comes from the session on every
+  // path and the scope is validated against it, so ownership is the
+  // authorization; the write path additionally takes `ai.manage`.
+  "ai/memory": "lists/creates/deletes this business's durable memory — session business is the authorization",
+  // Issue #812 §5 — Deep Research. The run's business id is the session's own
+  // on every path, and approving one re-reads it before the environment opens.
+  "ai/research": "lists/creates Deep Research runs for the caller's business — session business is the authorization",
+  "ai/research/[id]/approve":
+    "approves and runs a Deep Research run — session business is the authorization",
 };
 
 /** True for the super-admin console's own routes, which use the platform guards. */
@@ -620,6 +629,39 @@ describe("capability-based back-office guards", () => {
     for (const [key, src] of sources) {
       if (!key.startsWith("rollup") || key === "rollup/ingest") continue;
       expect(src).toMatch(/PERMISSIONS\.rollupManage/);
+    }
+  });
+
+  it("guards the platform AI control plane on a platform capability, never a tenant permission (issue #812 §3)", () => {
+    // The control plane changes what EVERY business's assistant does: which
+    // LiteLLM alias a mode routes to, which prompt layers are live, which
+    // system agents exist and what Deep Research is allowed to cost. A tenant
+    // `settings.manage` must therefore never be the gate on it — that is the
+    // one permission a business owner holds, and handing them model routing
+    // would let one business re-point every other business's traffic.
+    for (const key of [
+      "platform/ai/modes",
+      "platform/ai/prompts",
+      "platform/ai/agents",
+      "platform/ai/research",
+    ]) {
+      const src = sources.get(key);
+      expect(src, `src/app/api/${key}/route.ts`).toBeTruthy();
+      expect(src!, `src/app/api/${key}/route.ts must take a platform capability`).toMatch(
+        /requirePlatformCapability\("/,
+      );
+      expect(src!, `src/app/api/${key}/route.ts must not be reachable on a tenant permission`).not.toMatch(
+        /requirePermission|PERMISSIONS\.|requireRole/,
+      );
+      // Reads take `ai.read`; writes take `ai.config.manage`. Both are platform
+      // capabilities, so a GET never needs the write capability and a write
+      // never rides on the read one.
+      expect(src!, `src/app/api/${key}/route.ts reads with ai.read`).toMatch(
+        /requirePlatformCapability\("ai\.read"\)/,
+      );
+      expect(src!, `src/app/api/${key}/route.ts writes with ai.config.manage`).toMatch(
+        /requirePlatformCapability\("ai\.config\.manage"\)/,
+      );
     }
   });
 

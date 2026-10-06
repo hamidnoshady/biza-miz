@@ -20,6 +20,7 @@ import {
 } from "./ai-gateway-service";
 import { buildGatewayRuntime, isGatewayActive, type AiGatewayConfig, type BusinessGateway } from "./ai-gateway";
 import type { AiConfig } from "./ai";
+import { getPlatformAiMode, type AiRuntimeMode } from "./ai-runtime-modes";
 
 /**
  * The config for a tenant call.
@@ -34,10 +35,37 @@ import type { AiConfig } from "./ai";
 export async function resolveAiConfigFor(
   businessId: string | null,
   locationId?: string | null,
-  options: { ensureVirtualKey?: boolean } = {},
+  options: { ensureVirtualKey?: boolean; runtimeMode?: AiRuntimeMode | null } = {},
 ): Promise<PlatformAiConfig> {
   const config = await getPlatformAiConfig();
   return decorate(config, businessId, locationId, options);
+}
+
+/**
+ * Issue #812 §3/§7 — apply the runtime mode's own LiteLLM alias.
+ *
+ * A mode names an alias; the alias picks the deployment. So `auto` and `instant`
+ * really can land on different models with different prices, and the app's only
+ * part in that is naming the alias — deployments, fallbacks, retries and budgets
+ * stay in LiteLLM.
+ *
+ * A blank alias means "the gateway's default chat model", which is what a
+ * deployment that has not set aliases up yet keeps doing. That is a supported
+ * state, not an error, so this is additive: configuring aliases changes which
+ * model a mode uses, and leaving them blank changes nothing.
+ *
+ * Applied AFTER decoration, so it also overrides a branch-level model override.
+ * That is deliberate: a branch override is a per-branch *model* choice, and the
+ * mode is a per-turn *routing* choice made by the member in front of the screen.
+ * Letting a branch override silently win would mean the mode picker lies.
+ */
+export function applyRuntimeModeAlias<T extends { model: string }>(
+  config: T,
+  mode: { model_alias?: string | null } | null | undefined,
+): T {
+  const alias = mode?.model_alias?.trim();
+  if (!alias) return config;
+  return { ...config, model: alias };
 }
 
 /**
@@ -113,7 +141,9 @@ export function decorateAiConfigWithState(
 ): PlatformAiConfig {
   const normalizedGateway = gateway ?? null;
   if (!config.enabled) return { ...config, runtimeUnavailableReason: config.runtimeUnavailableReason ?? "platform_disabled" };
-  if (!isGatewayActive(normalizedGateway)) {
+  // `isGatewayActive` is a value check, not a type guard, so the null case is
+  // spelled out here: everything below reads the row's knowledge columns.
+  if (!normalizedGateway || !isGatewayActive(normalizedGateway)) {
     return { ...config, enabled: false, runtimeUnavailableReason: normalizedGateway?.enabled ? "missing_base_url" : "gateway_disabled" };
   }
 
@@ -133,6 +163,15 @@ export function decorateAiConfigWithState(
     gateway: {
       ...(authKey ? { authKey } : {}),
       body,
+    },
+    // Issue #812 §2 — carry the managed-knowledge pointer with the config, so
+    // no caller has to know the gateway exists to ask for knowledge.
+    knowledge: {
+      enabled: normalizedGateway.knowledgeEnabled,
+      baseUrl: normalizedGateway.knowledgeBaseUrl,
+      apiKey: normalizedGateway.knowledgeApiKey,
+      model: normalizedGateway.knowledgeModel,
+      maxResults: normalizedGateway.knowledgeMaxResults,
     },
   };
   return decorated as PlatformAiConfig;

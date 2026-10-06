@@ -162,24 +162,33 @@ plain VPS, Komodo, managed-Postgres PaaS, on-site machine):
 
 ### AI assistant (دستیار هوشمند)
 
-A floating assistant (bottom-left launcher) built with the shadcn UI kit, in two
-modes:
+The assistant **is** the dashboard: `/dashboard` is a full-page chat home for every
+member who holds `ai.use`, with a floating launcher, and the management sections
+(memory, coworkers, automations, activity, research, usage) open in its
+«مدیریت دستیار» panel at `/dashboard?aiPanel=<key>`. There are three **runtime
+modes**, and only three: `auto`, `instant` and `deep_research`.
 
 - **Wizard mode** — mounted on every `/setup/*` step. You describe the
-  cafe/restaurant in chat and the agent gathers the missing details, then
+  cafe/restaurant in chat and the assistant gathers the missing details, then
   proposes a fully-filled payload for that step. Nothing is written until you
   press **«تأیید و اجرا»** (human-in-the-loop); on apply it POSTs to the existing
   `/api/setup/*` endpoint and jumps to the next incomplete step. The wizard pages
   themselves are unchanged — the assistant sits on top of them.
-- **Dashboard mode** — mounted for Owner/Manager. It runs the standard reports
+- **Chat on the dashboard home** — it runs the standard reports
   (`run_report`/`list_reports`), inspects setup state, answers questions, and can
   perform allowed "jobs" (e.g. add a menu category/item) — again only through the
-  same confirmed-action gate.
+  same confirmed-action gate. Which tools it may actually call is the intersection
+  of the platform catalogue, the invoked agent's allowlist, the business's enabled
+  apps and **the member's own effective permissions**, so a cashier and an owner
+  ask the same question and get differently-scoped answers.
 
-The agent's mutations are restricted to a fixed allowlist (`ACTION_CATALOG` in
-`src/lib/ai.ts`) that maps each proposed action to an already role-guarded
-endpoint, so it can never call an arbitrary URL. Read tools run server-side and
-never mutate data.
+Every mutation is restricted to an allowlist (`ACTION_CATALOG` in
+`src/lib/ai.ts`) that maps each proposed action to an already permission-guarded
+endpoint, so it can never call an arbitrary URL, and an unknown action ID is
+refused rather than ignored. Read tools run server-side and never mutate data.
+Unattended writes — an `auto` automation, a scheduled job — re-check the acting
+member's **current** authority immediately before executing, not the state
+captured when the job was queued.
 
 **Wave 5 interaction safeguards.** Before an assistant request reaches a provider,
 the chat panel asks for confirmation against a conservative, visible credit-cost
@@ -204,14 +213,19 @@ LiteLLM console. Deployment-level env variables remain bootstrap fallbacks; see
 `.env.example`.
 
 **What the console does and does not own.** `/platform/ai` configures the gateway
-address, master key, chat/embedding model **aliases**, the virtual-keys toggle, and
-per-business **and per-branch** virtual-key lifecycle (provision, verify, rotate,
+address, master key, the per-mode model **aliases**, the published prompt layers,
+the system agents and their assignments, the Deep Research caps, the virtual-keys
+toggle, and per-business **and per-branch** virtual-key lifecycle (provision, verify, rotate,
 revoke) plus fleet-wide readiness monitoring — searchable, filterable
 (ready / missing key / key sync error / entitlement disabled / branch override /
 gateway unavailable) and paginated so it stays usable with many tenants. It never
 becomes a billing, routing or model-policy surface: failover between upstream
 vendors, per-model rate limits/budgets, retries and MCP tool policy live entirely in
-LiteLLM's own config (`docker/litellm/config.yaml`), never in the app. Selecting a
+LiteLLM's own config (`docker/litellm/config.yaml`), never in the app. It also never
+runs the app's own semantic cache or its own pgvector RAG stack — both are
+infrastructure the LiteLLM layer owns, and the app's local copies were removed
+(migration 0204). A **system agent** is built and versioned only here; a business
+meets one through an assigned suggestion card, and never builds one. Selecting a
 specific business/branch shows a scope-aware readiness view for that exact pair —
 entitlement, credential source (its own key vs. inherited from the business), model
 alias, last verification time and any technical sync error — not just the
@@ -235,7 +249,10 @@ bound to the compose network only, never published to the host, because it holds
 every upstream vendor key and its management API can mint keys and read spend. There
 is no user-level AI settings page — a business's model alias is set by the platform.
 See [Phase 37](docs/phases/Phase-37-LiteLLM-Gateway.md) and
-[Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md).
+[Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md). The ownership
+boundary between the app and the LiteLLM layer, the prompt layer order, the
+layered memory hierarchy and the Deep Research workflow are in
+[docs/ai-subsystem-architecture.md](docs/ai-subsystem-architecture.md).
 
 ## On-site deployment (café laptop / mini PC)
 

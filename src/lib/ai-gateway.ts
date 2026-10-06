@@ -48,6 +48,38 @@ export interface AiGatewayConfig {
    * released back down to LiteLLM's actual reported cost at settlement.
    */
   maxTurnRial: number;
+
+  // ── Issue #812: managed knowledge + Deep Research ────────────────────────
+  // Both are *pointers* into the configured AI infrastructure. The app owns no
+  // vector table, no embedding model choice and no research runtime of its own;
+  // these settings only say where the managed one lives and what its limits are.
+  /** Whether the managed knowledge integration is switched on. */
+  knowledgeEnabled: boolean;
+  /** The knowledge endpoint on the configured AI infrastructure. */
+  knowledgeBaseUrl: string;
+  /** Credential for that endpoint. Server-side only. */
+  knowledgeApiKey: string;
+  /** Model/alias the infrastructure embeds with; empty = its own default. */
+  knowledgeModel: string;
+  /** Upper bound on rows one retrieval may return. */
+  knowledgeMaxResults: number;
+
+  /** Whether Deep Research is available to tenants at all. */
+  researchEnabled: boolean;
+  /** LiteLLM alias the research runtime asks for. */
+  researchModelAlias: string;
+  /** Maximum retrieval/analysis rounds one research run may take. */
+  researchMaxRounds: number;
+  /** Hard ceiling on the research corpus size, bytes. */
+  researchMaxContextBytes: number;
+  /** Hours a research environment lives before it expires. */
+  researchTtlHours: number;
+  /** Per-run spend cap in Rial; 0 = no cap configured. */
+  researchMaxSpendRial: number;
+  /** Whether a research run may reach the public web. Off by default. */
+  researchExternalWeb: boolean;
+  /** Minimum usable source rows a tenant needs before research is offered. */
+  researchMinDataReadiness: number;
 }
 
 /**
@@ -78,6 +110,21 @@ export interface PublicAiGatewayConfig {
   embeddingModel: string;
   virtualKeysEnabled: boolean;
   hasMasterKey: boolean;
+  /** Issue #812 — managed knowledge, safe to render (the key is masked). */
+  knowledgeEnabled: boolean;
+  knowledgeBaseUrl: string;
+  knowledgeModel: string;
+  knowledgeMaxResults: number;
+  hasKnowledgeApiKey: boolean;
+  /** Issue #812 — Deep Research limits, safe to render. */
+  researchEnabled: boolean;
+  researchModelAlias: string;
+  researchMaxRounds: number;
+  researchMaxContextBytes: number;
+  researchTtlHours: number;
+  researchMaxSpendRial: number;
+  researchExternalWeb: boolean;
+  researchMinDataReadiness: number;
 }
 
 export interface AiGatewayInput {
@@ -87,6 +134,23 @@ export interface AiGatewayInput {
   chatModel?: string;
   embeddingModel?: string;
   virtualKeysEnabled?: boolean;
+  // Issue #812 — managed knowledge + Deep Research pointers. Billing-owned
+  // settings (token rates, margin, per-turn ceiling, FX) are deliberately NOT
+  // accepted here: product pricing stays in Plans/Billing and joins the
+  // runtime through usage settlement.
+  knowledgeEnabled?: boolean;
+  knowledgeBaseUrl?: string;
+  knowledgeApiKey?: string;
+  knowledgeModel?: string;
+  knowledgeMaxResults?: number;
+  researchEnabled?: boolean;
+  researchModelAlias?: string;
+  researchMaxRounds?: number;
+  researchMaxContextBytes?: number;
+  researchTtlHours?: number;
+  researchMaxSpendRial?: number;
+  researchExternalWeb?: boolean;
+  researchMinDataReadiness?: number;
 }
 
 /** One business or branch's slice of the gateway: its key and its sync state. */
@@ -163,6 +227,19 @@ export function defaultGatewayConfig(): AiGatewayConfig {
     outputCostRialPerMillion: 0,
     revenueMarginPercent: 0,
     maxTurnRial: 0,
+    knowledgeEnabled: false,
+    knowledgeBaseUrl: "",
+    knowledgeApiKey: "",
+    knowledgeModel: "",
+    knowledgeMaxResults: 8,
+    researchEnabled: false,
+    researchModelAlias: "",
+    researchMaxRounds: 12,
+    researchMaxContextBytes: 2_000_000,
+    researchTtlHours: 24,
+    researchMaxSpendRial: 0,
+    researchExternalWeb: false,
+    researchMinDataReadiness: 1,
   };
 }
 
@@ -222,6 +299,19 @@ export function toPublicGatewayConfig(config: AiGatewayConfig): PublicAiGatewayC
     embeddingModel: config.embeddingModel,
     virtualKeysEnabled: config.virtualKeysEnabled,
     hasMasterKey: config.masterKey.length > 0,
+    knowledgeEnabled: config.knowledgeEnabled,
+    knowledgeBaseUrl: config.knowledgeBaseUrl,
+    knowledgeModel: config.knowledgeModel,
+    knowledgeMaxResults: config.knowledgeMaxResults,
+    hasKnowledgeApiKey: config.knowledgeApiKey.length > 0,
+    researchEnabled: config.researchEnabled,
+    researchModelAlias: config.researchModelAlias,
+    researchMaxRounds: config.researchMaxRounds,
+    researchMaxContextBytes: config.researchMaxContextBytes,
+    researchTtlHours: config.researchTtlHours,
+    researchMaxSpendRial: config.researchMaxSpendRial,
+    researchExternalWeb: config.researchExternalWeb,
+    researchMinDataReadiness: config.researchMinDataReadiness,
   };
 }
 
@@ -487,6 +577,33 @@ export function validateGatewayInput(input: AiGatewayInput): string[] {
 
   if (input.enabled === true) {
     if (!trimmed(input.chatModel)) errors.push("ai_gateway_missing_chat_model");
+  }
+
+  // Issue #812 — an enabled managed-knowledge integration must actually point
+  // somewhere, or every retrieval silently returns nothing and the operator has
+  // no way to tell that from "no matching knowledge".
+  if (input.knowledgeEnabled === true) {
+    if (!/^https?:\/\/.+/i.test(trimmed(input.knowledgeBaseUrl))) {
+      errors.push("ai_gateway_bad_knowledge_base_url");
+    }
+    if (!trimmed(input.knowledgeApiKey)) errors.push("ai_gateway_missing_knowledge_api_key");
+  }
+
+  if (input.researchEnabled === true && !input.knowledgeEnabled) {
+    errors.push("ai_gateway_research_requires_knowledge");
+  }
+
+  if (input.researchMaxRounds !== undefined && (!Number.isInteger(input.researchMaxRounds) || input.researchMaxRounds < 1 || input.researchMaxRounds > 200)) {
+    errors.push("ai_gateway_bad_research_max_rounds");
+  }
+  if (input.researchMaxContextBytes !== undefined && (!Number.isInteger(input.researchMaxContextBytes) || input.researchMaxContextBytes < 1024)) {
+    errors.push("ai_gateway_bad_research_max_context_bytes");
+  }
+  if (input.researchTtlHours !== undefined && (!Number.isInteger(input.researchTtlHours) || input.researchTtlHours < 1 || input.researchTtlHours > 720)) {
+    errors.push("ai_gateway_bad_research_ttl_hours");
+  }
+  if (input.knowledgeMaxResults !== undefined && (!Number.isInteger(input.knowledgeMaxResults) || input.knowledgeMaxResults < 1 || input.knowledgeMaxResults > 50)) {
+    errors.push("ai_gateway_bad_knowledge_max_results");
   }
   return errors;
 }

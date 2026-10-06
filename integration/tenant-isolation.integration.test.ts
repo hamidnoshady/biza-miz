@@ -243,6 +243,12 @@ describe("every tenant table is protected", () => {
     expect([...EXEMPT_TABLES].filter((t) => t.startsWith("platform_")).sort()).toEqual([
       "platform_admins",
       "platform_ai_gateway",
+      // Issue #812 — the Superadmin AI control plane's global half. The runtime
+      // mode → LiteLLM alias map is a platform catalogue every business reads the
+      // same published rows of, so it carries no business_id. Its tenant-facing
+      // counterparts (ai_agent_assignments, ai_memory, ai_research_runs,
+      // ai_research_sources) are RLS-protected and absent from this list.
+      "platform_ai_modes",
       "platform_audit_log",
       // Migration 0132 — the console's whole-system backup. Its config, run
       // history, hashed peer tokens, the peers this install may restore from, and

@@ -182,8 +182,18 @@ const stockCount: AutopilotExecutor = async (ctx) => {
   if (locationId === "mixed") return fail("autopilot_mixed_location");
   if (!locationId) return fail("not_found");
 
+  // On hand is derived from the append-only stock ledger, which is the only
+  // place a quantity lives: `inventory_items` carries cost and settings, never
+  // a quantity column. Reading a stale/nonexistent `inventory_items.quantity`
+  // here would snapshot the wrong "before" figure for the count.
   const { rows: before } = await query<{ id: string; name: string; quantity: string }>(
-    `SELECT id, name, quantity::text AS quantity FROM inventory_items WHERE id = ANY($1::uuid[])`,
+    `SELECT i.id, i.name,
+            trim_scale(COALESCE(sm.total, 0))::text AS quantity
+       FROM inventory_items i
+       LEFT JOIN LATERAL (
+         SELECT sum(quantity) AS total FROM stock_movements WHERE inventory_item_id = i.id
+       ) sm ON true
+      WHERE i.id = ANY($1::uuid[])`,
     [itemIds],
   );
 
@@ -572,6 +582,53 @@ const triggeredMessageCampaign: AutopilotExecutor = async (ctx) => {
     return fail(error instanceof Error ? error.message : "message_queue_failed");
   }
 };
+
+/**
+ * Issue #812 §13 — the branch an executor will write into, resolved from the
+ * payload BEFORE the write runs, so the central authority gate can check the
+ * authorizing member's CURRENT branch scope against it.
+ *
+ * Returns null when the executor's target is business-wide rather than
+ * branch-local (a website draft, a customer note), in which case there is no
+ * branch scope to check. Never throws: an unresolvable target is a
+ * business-wide write as far as scope is concerned, and the executor's own
+ * resolution is still the authority on whether the row exists.
+ */
+export async function executorTargetLocation(
+  executorKey: AutopilotExecutorKey | undefined,
+  payload: Record<string, unknown>,
+): Promise<string | null> {
+  if (!executorKey) return null;
+  const menuItemId = str(payload.menuItemId);
+  const orderId = str(payload.orderId);
+  const inventoryItemId = str(payload.inventoryItemId);
+  try {
+    switch (executorKey) {
+      case "menuItemPatch":
+        return menuItemId ? await locationOfMenuItem(menuItemId) : null;
+      case "orderDiscount":
+        return orderId ? await locationOfOrder(orderId) : null;
+      case "stockCount":
+      case "draftPurchase":
+      case "wasteLog":
+      case "productionRun": {
+        const ids = Array.isArray(payload.lines)
+          ? (payload.lines as Record<string, unknown>[])
+              .map((line) => str(line.inventoryItemId))
+              .filter((id): id is string => Boolean(id))
+          : [];
+        if (ids.length === 0 && inventoryItemId) ids.push(inventoryItemId);
+        if (ids.length === 0) return null;
+        const location = await locationOfInventoryItems(ids);
+        return location === "mixed" ? null : location;
+      }
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
+}
 
 export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor> = {
   menuItemPatch,

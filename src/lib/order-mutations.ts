@@ -7,7 +7,6 @@
  * created while offline must behave identically to one created online.
  */
 import { getPool, query } from "./db";
-import { invalidateTodayForBusiness } from "./ai-answer-cache";
 import { createDeliveryForOrder } from "./delivery-service";
 import { isFeatureEnabled } from "./features";
 import {
@@ -482,7 +481,6 @@ export async function createOrder(
     // current trading day are dropped. After COMMIT, never throws: a cached
     // answer is not worth a failed sale.
     if (businessId) {
-      await invalidateTodayForBusiness(businessId).catch(() => {});
     }
     return {
       ok: true,

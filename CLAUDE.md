@@ -64,9 +64,10 @@ comment happens to use, until you have checked this list.
   **main page**: the full-page chat home at `/dashboard` — the assistant IS the
   dashboard for every tenant, unconditionally (the old `workspace` flag and the
   quick-report dashboard are retired; `/overview`, `/ai`, `/dashboard/overview` and
-  `/dashboard/ai` are compat redirects). Its management sections (agents, coworkers,
-  automations, activity, knowledge, usage) open in the chat home's «مدیریت دستیار»
-  panel, addressed by `/dashboard?aiPanel=<key>` (`src/lib/ai-panel.ts`). It is the
+  `/dashboard/ai` are compat redirects). Its management sections (memory, coworkers,
+  automations, activity, research, usage) open in the chat home's «مدیریت دستیار»
+  panel, addressed by `/dashboard?aiPanel=<key>` (`src/lib/ai-panel.ts`); the retired
+  `agents` and `knowledge` values degrade to the chat home rather than 404ing. It is the
   workspace home, not a rail app — `apps.ts` leaves `ai` unassigned on purpose. A
   prompt about the AI assistant is about that home surface (chat, tools, replies),
   not about MCP, coworker jobs, or autopilot unless those are named.
@@ -552,6 +553,42 @@ has kept.
 - **A posted count is corrected by reversal, never edited**, like a production run. A reversal
   applies the inverse delta (so sales made after the count survive it) and is refused once a
   counted surplus has been sold.
+
+## The AI subsystem — read before touching anything under `src/lib/ai-*`
+
+Issue #812 rebuilt this subsystem, and the boundary it drew decides where every
+later change belongs. The short version:
+
+- **LiteLLM/AI-infra owns** model and provider deployments, routing, fallbacks,
+  retries, the shared semantic cache, embeddings/RAG infrastructure, model
+  aliases (`pos-auto`, `pos-instant`, `pos-deep-research`), provider cost
+  reporting and virtual tenant keys. **The application owns** tenant identity and
+  isolation, app/project/business context, user authorization, business tools and
+  action execution, the prompt/agent config exposed from Superadmin, tenant
+  memory, Deep Research orchestration, usage/audit attribution, business billing
+  and credit settlement, and human confirmation for writes.
+- **The application runs no semantic answer cache of its own and no pgvector RAG
+  stack of its own.** Both were deleted (migration 0204). A second cache the app
+  owns is a second source of truth about what a tenant was told.
+- **There is exactly one prompt resolver** — `src/lib/ai-prompt-resolver.ts`.
+  The fragment engine is deleted. Its composition order is fixed and is not
+  negotiable.
+- **Three runtime modes only**: `auto`, `instant`, `deep_research`. The
+  vocabulary is in `ai-runtime-modes-shared.ts`, which is **database-free on
+  purpose** — a `"use client"` file must import that one, never
+  `ai-runtime-modes.ts`.
+- **A system Agent is built and versioned only by Superadmin.** There is no
+  tenant agent builder. Every allowlist only narrows, the member's own effective
+  permissions are the last term of the intersection, and unknown tool/action IDs
+  fail closed.
+- **Superadmin AI endpoints use platform-admin authorization, never a tenant
+  `settings.manage`.**
+- **`agent` means one thing only.** The proactive tick's background jobs are
+  *scheduled jobs* (`ai-scheduled-jobs.ts`). If you find yourself writing "agent"
+  for anything a tenant configures, you have found a bug.
+
+Full map, ownership table and the layer order:
+[docs/ai-subsystem-architecture.md](docs/ai-subsystem-architecture.md).
 
 ## The AI coworker — read before touching a recurring AI job
 

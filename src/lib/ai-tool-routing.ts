@@ -75,6 +75,14 @@ const TOOL_APP_MAP: Record<string, AppKey> = {
   "get_vat_liability": "accounting",
   "get_branch_comparison": "accounting",
   "forecast_demand": "accounting",
+
+  // Website app (Phase 38) — the manager's three reads. All go through the
+  // business's WebsiteAdapter, so they are website-owned rather than
+  // general-purpose: focusing on Website now narrows to these instead of
+  // falling back to the whole catalogue.
+  "list_website_posts": "website",
+  "list_website_products": "website",
+  "get_website_status": "website",
 };
 
 /**

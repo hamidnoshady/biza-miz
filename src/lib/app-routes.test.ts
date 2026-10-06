@@ -192,11 +192,20 @@ describe("legacy redirects", () => {
     // every one of their addresses lands on the chat home. Section suffixes
     // of the retired `/dashboard/ai` tree name the management panel's key
     // instead, and an unknown suffix falls back to the home rather than 404.
+    //
+    // Issue #812 §4/§11 — `agents` and `knowledge` are now in that second
+    // group. They were real panel sections once, and the tenant Agent Builder
+    // and the tenant knowledge/reindex controls are retired; the promise this
+    // table keeps is that a URL which used to work never becomes a dead end,
+    // not that every old suffix keeps its own panel.
     const cases: readonly (readonly [string, string])[] = [
       ["/dashboard/overview", "/dashboard"],
       ["/dashboard/ai", "/dashboard"],
-      ["/dashboard/ai/agents", "/dashboard?aiPanel=agents"],
+      ["/dashboard/ai/agents", "/dashboard"],
+      ["/dashboard/ai/knowledge", "/dashboard"],
       ["/dashboard/ai/coworkers", "/dashboard?aiPanel=coworkers"],
+      ["/dashboard/ai/memory", "/dashboard?aiPanel=memory"],
+      ["/dashboard/ai/research", "/dashboard?aiPanel=research"],
       ["/dashboard/ai/usage", "/dashboard?aiPanel=usage"],
       ["/dashboard/ai/not-a-section", "/dashboard"],
     ];

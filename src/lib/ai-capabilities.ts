@@ -50,7 +50,6 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   get_website_status: PERMISSIONS.websiteView,
   list_message_templates: PERMISSIONS.campaignsView,
   list_message_campaigns: PERMISSIONS.campaignsView,
-  search_business_knowledge: PERMISSIONS.workspaceView,
   get_workspace_project_status: PERMISSIONS.workspaceView,
   list_workspace_tasks: PERMISSIONS.workspaceView,
   list_expiring_contracts: PERMISSIONS.workspaceView,
@@ -184,10 +183,7 @@ export function aiCapabilitySnapshot(permissions: ReadonlySet<Permission>) {
   return {
     canUse: permissions.has(PERMISSIONS.aiUse),
     canManage: permissions.has(PERMISSIONS.aiManage),
-    canManageAgents: permissions.has(PERMISSIONS.aiAgentsManage),
     canManageAutomations: permissions.has(PERMISSIONS.aiAutomationsManage),
-    canManageKnowledge: permissions.has(PERMISSIONS.aiKnowledgeManage),
     canViewUsage: permissions.has(PERMISSIONS.aiUsageView),
-    canManageWidgets: permissions.has(PERMISSIONS.aiWidgetsManage),
   };
 }

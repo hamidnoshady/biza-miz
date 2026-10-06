@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
-import { requireManager } from "@/lib/setup-state";
+import { PERMISSIONS } from "@/lib/permissions";
+import { requirePermission } from "@/lib/auth";
 import { coworkerErrorMessage } from "@/lib/ai-coworker";
 import { decideCoworkerRun, getCoworkerRun } from "@/lib/ai-coworker-service";
 
 export const GET = withTenantScope(
   async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const guard = await requireManager();
+    const guard = await requirePermission(PERMISSIONS.aiManage);
     if (guard.error) return guard.error;
     const { id } = await context.params;
     const run = await getCoworkerRun(guard.session.businessId, id);
@@ -22,7 +23,7 @@ export const GET = withTenantScope(
  */
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const guard = await requireManager();
+    const guard = await requirePermission(PERMISSIONS.aiManage);
     if (guard.error) return guard.error;
     const { id } = await context.params;
 
