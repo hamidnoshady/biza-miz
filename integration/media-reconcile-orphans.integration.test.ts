@@ -4,12 +4,13 @@
  * in media-library.integration.test.ts which never needs to list).
  *
  * The script is invoked as a child process through the repository-local
- * `tsx` executable rather than by importing its internals, because its value
- * is the CLI contract (dry run vs. --apply --backup-confirmed, exit codes,
- * stdout) that a human or a cron job actually depends on.
+ * `tsx` CLI rather than by importing its internals, because its value is the
+ * CLI contract (dry run vs. --apply --backup-confirmed, exit codes, stdout)
+ * that a human or a cron job actually depends on.
  */
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { promisify } from "node:util";
@@ -18,6 +19,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
+const tsxCliPath = require.resolve("tsx/cli");
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
@@ -131,21 +134,23 @@ beforeEach(async () => {
 });
 
 async function runScript(...args: string[]): Promise<{ stdout: string; code: number }> {
-  // Use the installed executable directly: `npx` can consume script flags
-  // such as `--apply` as npm options, and its parsing differs across npm
-  // versions. Windows exposes package executables as `.cmd` files, which
-  // require a shell for `execFile` to resolve them.
-  const tsxBin = process.platform === "win32" ? "node_modules/.bin/tsx.cmd" : "node_modules/.bin/tsx";
+  // Invoke the installed TSX entry point through Node directly. This avoids
+  // npm consuming forwarded flags and avoids platform-specific `.cmd` shell
+  // quoting on Windows CI.
   try {
-    const { stdout } = await execFileAsync(tsxBin, ["scripts/media-reconcile-orphans.ts", ...args], {
-      cwd: process.cwd(),
-      env: { ...process.env, DATABASE_URL: databaseUrl },
-      shell: process.platform === "win32",
-    });
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [tsxCliPath, "scripts/media-reconcile-orphans.ts", ...args],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, DATABASE_URL: databaseUrl },
+      },
+    );
     return { stdout, code: 0 };
   } catch (error) {
-    const err = error as { stdout?: string; code?: number };
-    return { stdout: err.stdout ?? "", code: err.code ?? 1 };
+    const err = error as { stdout?: string; stderr?: string; code?: number };
+    const output = [err.stdout, err.stderr].filter(Boolean).join("\n");
+    return { stdout: output, code: err.code ?? 1 };
   }
 }
 
@@ -157,7 +162,7 @@ describe("scripts/media-reconcile-orphans.ts", () => {
     await db.query(`UPDATE platform_media_config SET enabled = false WHERE id = true`);
     try {
       const { stdout, code } = await runScript();
-      expect(code).toBe(0);
+      expect(code, stdout).toBe(0);
       expect(stdout).toContain("not configured/enabled");
     } finally {
       await db.query(`UPDATE platform_media_config SET enabled = true WHERE id = true`);
@@ -180,7 +185,7 @@ describe("scripts/media-reconcile-orphans.ts", () => {
     bucketObjects.set(freshOrphanKey, { bytes: Buffer.from("orphan"), lastModified: FRESH });
 
     const { stdout, code } = await runScript();
-    expect(code).toBe(0);
+    expect(code, stdout).toBe(0);
     expect(stdout).toContain("Orphaned objects (no row claims them, older than the grace period): 1");
     expect(stdout).toContain(oldOrphanKey);
     expect(stdout).not.toContain(freshOrphanKey);
@@ -192,8 +197,8 @@ describe("scripts/media-reconcile-orphans.ts", () => {
   it("refuses --apply without --backup-confirmed and deletes nothing", async () => {
     const key = `media/${BID}/${randomUUID()}/orphan.png`;
     bucketObjects.set(key, { bytes: Buffer.from("x"), lastModified: OLD });
-    const { code } = await runScript("--apply");
-    expect(code).toBe(2);
+    const { stdout, code } = await runScript("--apply");
+    expect(code, stdout).toBe(2);
     expect(bucketObjects.has(key)).toBe(true);
   });
 
@@ -209,7 +214,7 @@ describe("scripts/media-reconcile-orphans.ts", () => {
     bucketObjects.set(orphanKey, { bytes: Buffer.from("orphan"), lastModified: OLD });
 
     const { stdout, code } = await runScript("--apply", "--backup-confirmed");
-    expect(code).toBe(0);
+    expect(code, stdout).toBe(0);
     expect(stdout).toContain("Deleted 1/1 orphaned object(s)");
     expect(bucketObjects.has(orphanKey)).toBe(false);
     expect(bucketObjects.has(claimedKey)).toBe(true);
@@ -223,7 +228,7 @@ describe("scripts/media-reconcile-orphans.ts", () => {
       [BID, missingKey],
     );
     const { stdout, code } = await runScript();
-    expect(code).toBe(0);
+    expect(code, stdout).toBe(0);
     expect(stdout).toContain("Broken references (row exists, object missing");
     expect(stdout).toContain(missingKey);
     const { rows } = await db.query(`SELECT count(*)::int AS n FROM media_assets WHERE storage_key = $1`, [missingKey]);
@@ -239,7 +244,7 @@ describe("scripts/media-reconcile-orphans.ts", () => {
       [BID, key],
     );
     const { stdout, code } = await runScript();
-    expect(code).toBe(0);
+    expect(code, stdout).toBe(0);
     expect(stdout).toContain("Orphaned objects (no row claims them, older than the grace period): 0");
     expect(bucketObjects.has(key)).toBe(true);
   });
