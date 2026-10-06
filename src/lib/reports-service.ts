@@ -2,6 +2,7 @@
  * DB-touching reporting orchestration (not unit-tested directly, per repo
  * convention — pure logic lives in reports.ts and is what *.test.ts covers).
  */
+import { queryReportPage } from "./report-page-query";
 import { query, getPool } from "./db";
 import {
   buildFoodCostVariance,
@@ -237,11 +238,12 @@ export async function getProfitAndLoss(
  * COGS/waste come straight from the ledger (v_ledger_by_account), matching
  * the P&L's own figures exactly.
  */
-export async function getFoodCostVariance(
+async function readFoodCostVariance(
   businessId: string,
   filters: DateRangeFilters = {},
   locationId?: string,
-): Promise<FoodCostVariance> {
+  page?: number,
+) {
   const params: unknown[] = [];
   const where = ["o.status = 'completed'", "oi.status != 'voided'"];
   if (locationId) {
@@ -257,41 +259,35 @@ export async function getFoodCostVariance(
     where.push(`o.closed_at::date <= $${params.length}`);
   }
 
-  const { rows: salesRows } = await query<{
-    menu_item_id: string | null;
-    menu_item_name: string | null;
-    units_sold: string;
-    revenue: string;
-  }>(
-    `SELECT oi.menu_item_id, COALESCE(mi.name, MAX(oi.name_snapshot)) AS menu_item_name,
+  const result = await queryReportPage<{
+    menu_item_id: string | null; menu_item_name: string | null; units_sold: string;
+    revenue: string; theoretical_cost: string;
+  }, { theoreticalCost: number }>(
+    `WITH sales AS (SELECT oi.menu_item_id, COALESCE(mi.name, MAX(oi.name_snapshot)) AS menu_item_name,
             SUM(oi.quantity)::text AS units_sold, SUM(oi.unit_price * oi.quantity)::text AS revenue
        FROM order_items oi
        JOIN orders o ON o.id = oi.order_id
        LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
       WHERE ${where.join(" AND ")}
-      GROUP BY oi.menu_item_id, mi.name`,
-    params,
-  );
-
-  const { rows: theoreticalRows } = await query<{ menu_item_id: string | null; theoretical_cost: string }>(
-    `SELECT s.source_menu_item_id AS menu_item_id,
+      GROUP BY oi.menu_item_id, mi.name), theoretical AS (SELECT s.source_menu_item_id AS menu_item_id,
             ROUND(SUM(s.required_quantity * oi.quantity * ii.avg_cost))::text AS theoretical_cost
        FROM order_item_inventory_snapshots s
        JOIN order_items oi ON oi.id = s.order_item_id
        JOIN orders o ON o.id = oi.order_id
        JOIN inventory_items ii ON ii.id = s.inventory_item_id
       WHERE ${where.join(" AND ")}
-      GROUP BY s.source_menu_item_id`,
+      GROUP BY s.source_menu_item_id)
+     SELECT sales.*, coalesce(theoretical.theoretical_cost,'0') AS theoretical_cost
+       FROM sales LEFT JOIN theoretical ON theoretical.menu_item_id IS NOT DISTINCT FROM sales.menu_item_id`,
     params,
+    { page,
+      orderBy: "(CASE WHEN revenue::numeric > 0 THEN theoretical_cost::double precision / revenue::double precision ELSE -1 END) DESC, menu_item_id NULLS LAST",
+      summary: `jsonb_build_object('theoreticalCost', coalesce(sum(theoretical_cost::numeric),0))`,
+    },
   );
-  const theoreticalByItem = new Map(theoreticalRows.map((r) => [r.menu_item_id, Number(r.theoretical_cost)]));
-
-  const items: FoodCostVarianceItemInput[] = salesRows.map((r) => ({
-    menuItemId: r.menu_item_id,
-    menuItemName: r.menu_item_name ?? "قلم حذف‌شده",
-    unitsSold: Number(r.units_sold),
-    theoreticalCost: theoreticalByItem.get(r.menu_item_id) ?? 0,
-    revenue: Number(r.revenue),
+  const items: FoodCostVarianceItemInput[] = result.rows.map((r) => ({
+    menuItemId: r.menu_item_id, menuItemName: r.menu_item_name ?? "قلم حذف‌شده",
+    unitsSold: Number(r.units_sold), theoreticalCost: Number(r.theoretical_cost), revenue: Number(r.revenue),
   }));
 
   const codeTotals = await ledgerAccountCodeTotals(
@@ -302,12 +298,19 @@ export async function getFoodCostVariance(
     locationId,
   );
 
-  return buildFoodCostVariance(
+  return { pagination: result.pagination, report: buildFoodCostVariance(
     items,
     codeTotals.get(WELL_KNOWN_CODES.cogs) ?? 0,
     codeTotals.get(WELL_KNOWN_CODES.wasteExpense) ?? 0,
-  );
+    result.summary,
+  ) };
 }
+
+export async function getFoodCostVariance(businessId: string, filters: DateRangeFilters = {}, locationId?: string): Promise<FoodCostVariance> {
+  return (await readFoodCostVariance(businessId, filters, locationId)).report;
+}
+export const getFoodCostVariancePage = (businessId: string, filters: DateRangeFilters, locationId: string | undefined, page: number) =>
+  readFoodCostVariance(businessId, filters, locationId, page);
 
 export interface BalanceSheet {
   assets: PnlLine[];

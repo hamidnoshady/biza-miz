@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
-import { DATA_ENTITIES, defaultExportFields, isImportable } from "@/lib/data-transfer/registry";
+import { defaultExportFields, entitiesForIndustry, isImportable } from "@/lib/data-transfer/registry";
 import { DATA_MODULE_LABELS } from "@/lib/data-transfer/types";
+import { getBusinessIndustry } from "@/lib/industry-guard";
 import { dataOwner, handleDataError, PERMISSIONS } from "../guard";
 
 /**
@@ -26,8 +27,13 @@ export const GET = withTenantScope(async () => {
     const granted = access?.permissions ?? new Set<string>();
     const mayImport = granted.has(PERMISSIONS.dataImport);
 
-    const entities = DATA_ENTITIES.filter((entity) => granted.has(entity.exportPermission)).map(
-      (entity) => ({
+    // The business's own trade decides which entities exist at all (the BOQ's
+    // rows belong to construction and to no other trade); the member's
+    // permissions then decide which of those they may move.
+    const industry = await getBusinessIndustry(owner.session.businessId);
+    const entities = entitiesForIndustry(industry)
+      .filter((entity) => granted.has(entity.exportPermission))
+      .map((entity) => ({
         key: entity.key,
         module: entity.module,
         moduleLabel: DATA_MODULE_LABELS[entity.module],
@@ -54,8 +60,7 @@ export const GET = withTenantScope(async () => {
             ? { entity: field.relation.entity, label: field.relation.label, onMissing: field.relation.onMissing }
             : null,
         })),
-      }),
-    );
+      }));
 
     return NextResponse.json({ entities, canImport: mayImport });
   } catch (err) {

@@ -21,18 +21,18 @@
  * report reaching this function has already been proven to belong to the
  * caller's trade.
  */
-import { getConsignorStatement, listConsignors } from "./consignment-service";
-import { nearExpiryBatches } from "./cosmetics-service";
+import { getConsignorSummaries, getConsignorSummaryPage } from "./consignment-service";
+import { nearExpiryBatches, nearExpiryBatchesPage } from "./cosmetics-service";
 import type { Industry } from "./industries";
 import {
-  brandSalesAnalysis,
-  repairReport,
-  variantSalesAnalysis,
-  warrantyReport,
+  brandSalesAnalysis, brandSalesAnalysisPage,
+  repairReport, repairReportPage,
+  variantSalesAnalysis, variantSalesAnalysisPage,
+  warrantyReport, warrantyReportPage,
   weightReconciliation,
 } from "./industry-reports-service";
-import { listLayaways } from "./jewelry-flagship-service";
-import { deadStockReport, lowStockReport } from "./retail-stock-service";
+import { listLayaways, listLayawaysPage } from "./jewelry-flagship-service";
+import { deadStockReport, lowStockReport, deadStockReportPage, lowStockReportPage } from "./retail-stock-service";
 import type { DateRangeFilters } from "./reports-service";
 
 /**
@@ -83,22 +83,13 @@ export async function runTradeReport(
       return { reconciliation: await weightReconciliation(locationId) };
 
     case "consignor_statements": {
-      const consignors = await listConsignors(businessId);
-      const statements = await Promise.all(
-        consignors.map((consignor) => getConsignorStatement(businessId, consignor.id)),
-      );
-      return {
-        summaries: statements
-          .filter((statement) => statement !== null)
-          .map((statement) => ({
-            consignorId: statement!.consignor.id,
-            name: statement!.consignor.name,
-            itemsOnHand: statement!.itemsOnHand.length,
-            totalOwed: statement!.totalOwed,
-            totalPaid: statement!.totalPaid,
-            balance: statement!.balance,
-          })),
-      };
+      const summaries = await getConsignorSummaries(businessId);
+      return { summaries, summary: {
+        count: summaries.length,
+        balance: summaries.reduce((sum, r) => sum + r.balance, 0),
+        totalOwed: summaries.reduce((sum, r) => sum + r.totalOwed, 0),
+        totalPaid: summaries.reduce((sum, r) => sum + r.totalPaid, 0),
+      } };
     }
 
     case "layaway_book": {
@@ -109,11 +100,11 @@ export async function runTradeReport(
 
     case "warranty_register":
       if (!locationId) return { rows: [], counts: {} };
-      return warrantyReport(locationId, { asOfDate: to });
+      return warrantyReport(locationId, { asOfDate: to }).then((report) => ({ ...report, totalCount: report.rows.length }));
 
     case "repair_profitability":
       if (!locationId) return { rows: [], byStatus: {}, totals: { revenue: 0, partsCost: 0, margin: 0 } };
-      return repairReport(locationId, { from, to });
+      return repairReport(locationId, { from, to }).then((report) => ({ ...report, totalCount: report.rows.length }));
 
     case "variant_sales": {
       if (!locationId) return { rows: [] };
@@ -140,10 +131,62 @@ export async function runTradeReport(
     case "dead_stock": {
       if (!locationId) return { rows: [] };
       const today = context.todayIso ?? new Date().toISOString().slice(0, 10);
-      return { rows: await deadStockReport(locationId, DEAD_STOCK_DAYS, today) };
+      const rows = await deadStockReport(locationId, DEAD_STOCK_DAYS, today);
+      return { rows, totalCount: rows.length, totalValueRial: rows.reduce((sum, r) => sum + r.valueRial, 0) };
     }
 
     default:
       return null;
+  }
+}
+
+/** Same authoritative services, with SQL-bounded detail reads and full rollups.
+ * The caller has already validated industry/app/branch access. Weight
+ * reconciliation is a fixed purity summary, not an unbounded detail list.
+ */
+export async function runTradeReportPage(key: string, context: TradeReportContext, page: number) {
+  const { businessId, locationId, industry, filters } = context;
+  const options = { from: filters?.dateFrom, to: filters?.dateTo, eventPrefix: SALE_EVENT_PREFIX[industry] };
+  if (key === "consignor_statements") {
+    const r = await getConsignorSummaryPage(businessId, page);
+    return { report: { summaries: r.rows, summary: r.summary }, pagination: r.pagination };
+  }
+  if (!locationId) return null;
+  switch (key) {
+    case "layaway_book": {
+      const r = await listLayawaysPage(businessId, locationId, page);
+      return { report: { rows: r.rows, book: r.summary }, pagination: r.pagination };
+    }
+    case "warranty_register": {
+      const r = await warrantyReportPage(locationId, { asOfDate: filters?.dateTo }, page);
+      return { report: { rows: r.rows, counts: r.summary, totalCount: r.total }, pagination: r.pagination };
+    }
+    case "repair_profitability": {
+      const r = await repairReportPage(locationId, options, page);
+      return { report: { rows: r.rows, ...r.summary, totalCount: r.total }, pagination: r.pagination };
+    }
+    case "dead_stock": {
+      const r = await deadStockReportPage(locationId, DEAD_STOCK_DAYS, context.todayIso ?? new Date().toISOString().slice(0, 10), page);
+      return { report: { rows: r.rows, totalCount: r.total, ...r.summary }, pagination: r.pagination };
+    }
+    case "variant_sales": {
+      if (!options.eventPrefix) return null;
+      const r = await variantSalesAnalysisPage(businessId, locationId, options, page);
+      return { report: { rows: r.rows }, pagination: r.pagination };
+    }
+    case "brand_sales": {
+      if (!options.eventPrefix) return null;
+      const r = await brandSalesAnalysisPage(businessId, locationId, options, page);
+      return { report: { rows: r.rows }, pagination: r.pagination };
+    }
+    case "near_expiry_batches": {
+      const r = await nearExpiryBatchesPage(locationId, page);
+      return { report: { rows: r.rows }, pagination: r.pagination };
+    }
+    case "low_stock": {
+      const r = await lowStockReportPage(locationId, page);
+      return { report: { rows: r.rows }, pagination: r.pagination };
+    }
+    default: return null;
   }
 }

@@ -22,6 +22,7 @@ const SLUGS: {
   requires?: PlatformCapability[];
 }[] = [
   { slug: "", label: "نمای کلی", hint: "خلاصهٔ وضعیت، مصرف و میان‌بُرهای بخش‌ها" },
+  { slug: "reports", label: "گزارش‌ها و تحلیل", hint: "گزارش‌های کسب‌وکار، عملکرد، مشتریان، برنامه‌ها و مشاوره", requires: ["business.reports.read"] },
   // Owner & managers (issue #755 §1). A list, not a single-owner card, because
   // a business can have more than one login-holding member. Reads ride
   // `businesses.read` (every admin); only `business.edit` holders can change a

@@ -68,6 +68,11 @@ export interface RepairChargeInput {
   laborCharge: number;
   /** Sum of what the customer pays for the parts used (Rial, whole). */
   partsCharge: number;
+  /**
+   * An agreed reduction off labor+parts (Rial, whole), before VAT — issue
+   * #795 item 11; omit for the plain bill. May not exceed labor+parts.
+   */
+  discount?: number;
   /** 0-100. */
   vatPercent: number;
 }
@@ -75,6 +80,7 @@ export interface RepairChargeInput {
 export interface RepairChargeBreakdown {
   laborCharge: RialText;
   partsCharge: RialText;
+  discount: RialText;
   net: RialText;
   vat: RialText;
   total: RialText;
@@ -87,6 +93,18 @@ export function validateRepairChargeInput(input: RepairChargeInput): string[] {
   }
   if (!Number.isInteger(input.partsCharge) || input.partsCharge < 0) {
     errors.push("مبلغ قطعات باید یک عدد صحیح غیرمنفی (ریال) باشد.");
+  }
+  const discount = input.discount ?? 0;
+  if (!Number.isInteger(discount) || discount < 0) {
+    errors.push("تخفیف باید یک عدد صحیح غیرمنفی (ریال) باشد.");
+  } else if (
+    Number.isInteger(input.laborCharge) &&
+    input.laborCharge >= 0 &&
+    Number.isInteger(input.partsCharge) &&
+    input.partsCharge >= 0 &&
+    discount > input.laborCharge + input.partsCharge
+  ) {
+    errors.push("تخفیف نمی‌تواند از مجموع اجرت و قطعات بیشتر باشد.");
   }
   if (!Number.isFinite(input.vatPercent) || input.vatPercent < 0 || input.vatPercent > 100) {
     errors.push("درصد مالیات باید بین ۰ تا ۱۰۰ باشد.");
@@ -107,9 +125,12 @@ export function computeRepairCharge(input: RepairChargeInput): RepairChargeBreak
 
   const laborCharge = rialText(String(input.laborCharge));
   const partsCharge = rialText(String(input.partsCharge));
-  const net = rialText((rialBigInt(laborCharge) + rialBigInt(partsCharge)).toString());
+  const discount = rialText(String(input.discount ?? 0));
+  const net = rialText(
+    (rialBigInt(laborCharge) + rialBigInt(partsCharge) - rialBigInt(discount)).toString(),
+  );
   const vat = roundRial(new Decimal(net).times(input.vatPercent).div(100));
   const total = rialText((rialBigInt(net) + rialBigInt(vat)).toString());
 
-  return { laborCharge, partsCharge, net, vat, total };
+  return { laborCharge, partsCharge, discount, net, vat, total };
 }

@@ -300,6 +300,27 @@ export const DATA_OWNERSHIP_REGISTRY = {
       "modifier_ingredients",
     ],
   }),
+  // Issue #795 Phase 7: the serialized-retail catalogue (watch models,
+  // brands, structured attributes — migration 0206). Only the catalogue:
+  // item_serials and everything downstream (sales, warranties, repairs,
+  // reservations) stay under inventory_movements' cloud authority, so a
+  // single side decides a sale and a serial can never sell twice across
+  // devices.
+  retail_catalogue: replicated({
+    domain: "retail_catalogue",
+    authority: "shared_synchronized",
+    direction: "bidirectional",
+    conflictPolicy: "field_merge_with_version",
+    tombstonePolicy: "tombstone",
+    bootstrap: "required",
+    continuousSync: "active",
+    identity: "stable catalogue UUIDs and location scope",
+    retry:
+      "per-field hybrid-logical-clock capture by trigger; commit-safe feed in both directions; serialized units never merge — stock stays cloud-owned",
+    transport: "master_feed",
+    events: [],
+    masterTables: ["item_brands", "items", "watch_item_attributes"],
+  }),
   staff_access: cloudOrBootstrapOnly({
     domain: "staff_access",
     authority: "cloud_authoritative",
@@ -402,6 +423,43 @@ export const DATA_OWNERSHIP_REGISTRY = {
     continuousSync: "not_replicated",
     identity: "installation identity plus opaque relay event ID",
     retry: "separate bounded cloud-exception outbox, never operational sync",
+    transport: "none",
+    events: [],
+  }),
+  // Issue #799 §26 — the AEC registers, classified rather than assumed. The
+  // per-table audit (bucket, reason, the protocol each would need first, and the
+  // guard that keeps every table in one bucket) lives in
+  // `aec-sync-classification.ts`; these two domains are what this contract, the
+  // pairing disclosure and the docs read. Nothing here replicates today: a pair
+  // is a till, and an AEC business has no till modules, so a paired AEC desktop
+  // opens on the cloud pane instead of a half-copy of a register. `not_replicated`
+  // is therefore a statement of fact, and `replicationContractProblems()` refuses
+  // any of these that starts advertising continuous sync without a protocol.
+  aec_field_capture: cloudOrBootstrapOnly({
+    domain: "aec_field_capture",
+    authority: "cloud_authoritative",
+    direction: "none",
+    conflictPolicy: "never_sync",
+    tombstonePolicy: "archive",
+    bootstrap: "none",
+    continuousSync: "not_replicated",
+    identity: "server-issued register number per project, plus the record's own UUID",
+    retry:
+      "never transported today. §26's candidates (site logs, inspections, snags, daily progress, RFI and submittal drafts, photo and drawing metadata) each require an explicit event with a repeatable key, server-side numbering and the register's own freeze boundary before any of them may travel",
+    transport: "none",
+    events: [],
+  }),
+  aec_commercial_registers: cloudOrBootstrapOnly({
+    domain: "aec_commercial_registers",
+    authority: "cloud_authoritative",
+    direction: "none",
+    conflictPolicy: "never_sync",
+    tombstonePolicy: "archive",
+    bootstrap: "none",
+    continuousSync: "not_replicated",
+    identity: "server-issued register number (VO-, PC-, MR-, RFQ-, PO-, SC-) per project",
+    retry:
+      "never transported, by §26's explicit rule: these are status machines whose terminal states move money and feed Accounting, and a field-by-field merge could produce the very states their trigger guards refuse. Any future transport must be an explicit event carrying a decision",
     transport: "none",
     events: [],
   }),

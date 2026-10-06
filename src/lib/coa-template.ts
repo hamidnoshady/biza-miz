@@ -277,6 +277,41 @@ export const WELL_KNOWN_CODES = {
   // platform for message credits actually consumed. A liability every trade
   // carries, because metered messaging is cross-industry.
   platformMessageCreditPayable: "2455",
+  // Issue #799 — AEC (مهندسی عمران، معماری و پیمانکاری). The trade does not
+  // sell goods, so it has no single «فروش» account: an engineering office's
+  // income, a supervision contract's fee and a contractor's progress billing
+  // are three different revenues an owner reads separately, exactly the way
+  // F&B splits its channels and jewellery splits metal from اجرت. 4610 is the
+  // *default* account a statement posts to (see accounting-posting-rules.ts);
+  // the other two exist so the split is available from day one rather than
+  // being a later migration.
+  aecDesignRevenue: "4610",
+  aecSupervisionRevenue: "4620",
+  aecConstructionRevenue: "4630",
+  // Retention (حسن انجام کار): a client withholds a percentage of every
+  // certificate until the defects-liability period ends. It is the AEC
+  // business's single most-asked "where is my money" question, so it gets its
+  // own receivable per project rather than hiding in 1200 — and its payable
+  // twin, because a contractor withholds the same from its subcontractors.
+  aecRetentionReceivable: "1250",
+  aecRetentionPayable: "2440",
+  // Work performed on uncompleted contracts, carried as an asset until the
+  // contract is billed. Wave 8's progress certificates are what will post
+  // here; the account is seeded now so the chart a business is *given* is the
+  // chart its trade actually uses.
+  aecContractWorkInProgress: "1380",
+  // Subcontractors and consultants are settled separately from material
+  // suppliers: an engineer reconciling a site wants "what do we owe the
+  // pیمانکاران" apart from "what do we owe the merchants".
+  aecSubcontractorPayable: "2130",
+  // Cost of sales for a contractor is direct project cost. The three accounts
+  // split it the way a project manager does — what was built with, what was
+  // subcontracted, what was hired — while `costOfSalesCodesForIndustry` lists
+  // them together so gross profit stays a project margin and not an
+  // accounting artefact.
+  aecProjectDirectCost: "5191",
+  aecSubcontractorExpense: "5192",
+  aecEquipmentExpense: "5193",
 } as const;
 
 /**
@@ -307,6 +342,17 @@ const COST_OF_SALES_CODES_BY_INDUSTRY: Record<Industry, readonly string[]> = {
     WELL_KNOWN_CODES.cogs,
     WELL_KNOWN_CODES.periodicPurchases,
     WELL_KNOWN_CODES.inventoryWriteDownExpense,
+  ],
+  // Issue #799 — a contractor's cost of sales is *direct project cost*, not
+  // goods bought for resale. The three accounts are its material/execution,
+  // subcontracting and plant-hire sides; listing them together is what keeps
+  // gross profit meaning "project margin" instead of collapsing every project
+  // cost into overhead.
+  architecture_construction: [
+    WELL_KNOWN_CODES.aecProjectDirectCost,
+    WELL_KNOWN_CODES.aecSubcontractorExpense,
+    WELL_KNOWN_CODES.aecEquipmentExpense,
+    WELL_KNOWN_CODES.periodicPurchases,
   ],
   food_service: [
     WELL_KNOWN_CODES.cogs,
@@ -976,8 +1022,61 @@ export const SERVICE_SAAS_COA_TEMPLATE: TemplateAccount[] = [
   { code: "5670", name: "هزینه میزبانی، ذخیره‌سازی و پیام", type: "expense", parentCode: "5000" },
 ];
 
-export const ACCOUNT_TYPES: AccountType[] = ["asset", "liability", "equity", "revenue", "expense"];
+/**
+ * Issue #799 — AEC (مهندسی عمران، معماری و پیمانکاری) chart of accounts.
+ *
+ * Built by *subtracting* from the F&B chart, exactly as `SERVICE_SAAS_COA_TEMPLATE`
+ * is, and for the same two reasons: every shared Iranian accounting control
+ * (cheques, payroll, VAT, penalties, fixed assets, marketing) stays present by
+ * construction, while the café's own lines are removed by an explicit list
+ * rather than by copying 60 rows and hoping nothing drifts. The list below is
+ * therefore the "no restaurant concept leaks into this trade" rule made
+ * executable — and `coa-template.test.ts` asserts it, so re-adding a
+ * hospitality account to the F&B template cannot silently reappear here.
+ *
+ * Removed: the three food/beverage revenue channels and the service charge, the
+ * channel-specific online-platform commission (an AEC business is not on
+ * delivery marketplaces), the recipe/inventory machinery that only makes sense
+ * for a kitchen (بهای تمام‌شده مواد، ضایعات مواد، کسری شمارش، هزینهٔ تبدیل
+ * جذب‌شده، کالای در جریان ساخت). What replaces them is the trade's own
+ * vocabulary: three revenues, retention on both sides, contract work in
+ * progress, subcontractor payable, and direct project cost.
+ *
+ * There is deliberately no `pos`/`stock` module in this industry's profile
+ * (industry-profile.ts), so nothing here is a "selling counter" chart: the
+ * accounts exist for Accounting's own documents — a manual journal, a receipt,
+ * a supplier invoice, and Wave 8's progress certificates.
+ */
+export const ARCHITECTURE_CONSTRUCTION_COA_TEMPLATE: TemplateAccount[] = [
+  ...FNB_COA_TEMPLATE.filter(
+    (account) =>
+      ![
+        // Hospitality revenue channels and the service charge.
+        "4100", "4200", "4310", "4320", "4330", "4360",
+        // Delivery-marketplace commission: a café's channel, not a project's cost.
+        "5650",
+        // Kitchen inventory machinery — recipe costing, waste, count variance
+        // and the production conversion account.
+        "5100", "5150", "5160", "5180", "1310",
+      ].includes(account.code),
+  ),
+  // --- the trade's own assets and liabilities -------------------------------
+  { code: "1250", name: "حسن انجام کار (نگهداشت وجه‌الضمان)", type: "asset", parentCode: "1000" },
+  { code: "1380", name: "کار در جریان قراردادهای پیمانکاری", type: "asset", parentCode: "1000" },
+  { code: "2130", name: "حساب‌های پرداختنی پیمانکاران و مشاوران", type: "liability", parentCode: "2000" },
+  { code: "2440", name: "حسن انجام کار پرداختنی", type: "liability", parentCode: "2000" },
+  // --- the trade's own revenues --------------------------------------------
+  { code: "4610", name: "درآمد خدمات طراحی و مهندسی", type: "revenue", parentCode: "4000" },
+  { code: "4620", name: "درآمد نظارت و مشاوره", type: "revenue", parentCode: "4000" },
+  { code: "4630", name: "درآمد پیمانکاری و اجرا", type: "revenue", parentCode: "4000" },
+  // --- direct project cost (the trade's cost of sales) ---------------------
+  { code: "5191", name: "بهای تمام‌شدهٔ پروژه‌ها (مصالح، دستمزد و اجرا)", type: "expense", parentCode: "5000" },
+  { code: "5192", name: "هزینهٔ پیمانکاران جزء و مشاوران", type: "expense", parentCode: "5000" },
+  { code: "5193", name: "اجاره و هزینهٔ ماشین‌آلات و تجهیزات اجرایی", type: "expense", parentCode: "5000" },
+];
 
+
+export const ACCOUNT_TYPES: AccountType[] = ["asset", "liability", "equity", "revenue", "expense"];
 /**
  * The seed chart of accounts an industry starts from. One place, because
  * three call sites need the same answer: `seedChartOfAccounts`
@@ -990,6 +1089,8 @@ export function coaTemplateForIndustry(industry: Industry): readonly TemplateAcc
   switch (industry) {
     case "service_saas":
       return SERVICE_SAAS_COA_TEMPLATE;
+    case "architecture_construction":
+      return ARCHITECTURE_CONSTRUCTION_COA_TEMPLATE;
     case "jewelry":
       return JEWELRY_COA_TEMPLATE;
     case "watch":

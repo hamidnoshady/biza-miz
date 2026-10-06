@@ -28,7 +28,9 @@
  * lose it the way the one-at-a-time version did.
  */
 import { getPool, query } from "../db";
+import { changeMenuItemPrice } from "../menu-price-service";
 import { getBusinessIndustry } from "../industry-guard";
+import { hasSellableCatalogue, isRetailCatalogueIndustry } from "../industries";
 import { getConnection, wooClientFor, type ConnectionRow } from "./connections-service";
 import { listMappings, localIdForRemote, mergeMappingMeta, upsertMapping } from "./mapping-service";
 import { wooAmountToRial } from "./woo-money";
@@ -125,10 +127,18 @@ export async function upsertProductFromWoo(
   product: WooProduct,
 ): Promise<"created" | "updated" | "skipped"> {
   const industry = await getBusinessIndustry(connection.business_id);
-  if (industry !== "food_service") {
+  // Issue #799 Wave 11: the branch is the industry *family*, not "not F&B". A
+  // business with no sellable catalogue (the architecture/construction trade
+  // today, a service trade tomorrow) has nowhere for a web-store product to
+  // land — `items` and `menu_items` are both the wrong shape — so the product
+  // is skipped rather than written as a retail row.
+  if (isRetailCatalogueIndustry(industry)) {
     return upsertRetailProduct(connection, locationId, product);
   }
-  return upsertFnbProduct(connection, locationId, product);
+  if (industry === "food_service") {
+    return upsertFnbProduct(connection, locationId, product);
+  }
+  return "skipped";
 }
 
 /**
@@ -155,11 +165,25 @@ async function upsertFnbProduct(
   const existing = await localIdForRemote(businessId, connection.id, "product", String(product.id));
 
   if (existing) {
+    // name/sku stay a plain update; the price is a canonical price change
+    // (issue #844): locked, validated, written to the current price and to
+    // immutable history + audit together, `source = 'integration'` naming this
+    // WooCommerce connection. An unchanged price writes no history row.
     await query(
-      `UPDATE menu_items SET name = $3, sku = $4, price = $5, updated_at = now()
+      `UPDATE menu_items SET name = $3, sku = $4, updated_at = now()
         WHERE id = $1 AND location_id = $2`,
-      [existing, locationId, name, product.sku || null, price.toString()],
+      [existing, locationId, name, product.sku || null],
     );
+    const change = await changeMenuItemPrice({
+      businessId,
+      locationId,
+      menuItemId: existing,
+      newPrice: Number(price),
+      source: "integration",
+      changedBy: null,
+      sourceRef: `woocommerce:${connection.id}`,
+    });
+    if (!change.ok) throw new Error(change.error);
     await recordProductShape(connection, product);
     return "updated";
   }
@@ -800,6 +824,8 @@ export async function mappedProducts(
   const ids = mappings.map((m) => m.localId);
   const industry = await getBusinessIndustry(businessId);
 
+  if (!hasSellableCatalogue(industry)) return [];
+
   if (industry === "food_service") {
     const { rows } = await query<{ id: string; name: string; price: string }>(
       `SELECT id, name, price FROM menu_items WHERE id = ANY($1::uuid[])`,
@@ -861,6 +887,9 @@ export async function catalogueFor(
   const mappings = await listMappings(businessId, connectionId, "product");
   const industry = await getBusinessIndustry(businessId);
   if (mappings.length === 0) return { industry: industry ?? "", rows: [] };
+  // No sellable catalogue: an empty register is the truthful answer, not a
+  // query against a table this trade does not fill.
+  if (!hasSellableCatalogue(industry)) return { industry: industry ?? "", rows: [] };
   const remoteIds = mappings.map((m) => m.remoteId);
   const categories = await termsByRemoteId(businessId, connectionId, remoteIds, "product_cat");
 

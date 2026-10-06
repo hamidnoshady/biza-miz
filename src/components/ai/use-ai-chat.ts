@@ -17,8 +17,11 @@ import {
   MAX_ATTACHMENTS,
 } from "@/lib/ai-attachment-limits";
 import type { AiTaskId } from "@/lib/ai-tasks";
-import { agentIdForTurn } from "@/lib/ai-custom-agents";
-import { AI_REASONING_MODES, type AiReasoningMode } from "@/lib/ai-reasoning";
+import {
+  AI_RUNTIME_MODES,
+  normalizeAiRuntimeMode,
+  type AiRuntimeMode,
+} from "@/lib/ai-runtime-modes-shared";
 import { applyProposalRequest } from "./apply-proposal";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 
@@ -36,10 +39,23 @@ interface AiInputRequestState {
   dismissed?: boolean;
 }
 
+/**
+ * Issue #812 §19 — the explicit lifecycle of an assistant reply. A stream that
+ * ends without its terminal `done` event used to leave partial text on screen
+ * looking like a finished answer. Every reply now carries one of these, and a
+ * partial one is visibly marked instead of silently passed off as complete.
+ */
+export type AiMessageStatus = "streaming" | "complete" | "cancelled" | "incomplete" | "error";
+
 export interface AiChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /**
+   * Set for assistant replies only. `undefined` on a message restored from an
+   * older transcript that predates the field — the UI treats that as complete.
+   */
+  status?: AiMessageStatus;
   proposal?: ProposedAction | null;
   /** Phase E — a structured input request the assistant raised this turn. */
   inputRequest?: AiInputRequestState | null;
@@ -48,12 +64,6 @@ export interface AiChatMessage {
   applied?: boolean;
   /** Actual Rial charged for this turn, shown quietly once it finishes. */
   costRial?: number | null;
-  /**
-   * Phase 36 Wave 7 — set when this answer came from the semantic cache.
-   * Never silent: the notice is shown under the reply, with a «دوباره بپرس»
-   * that rebuilds the turn from scratch.
-   */
-  cacheNotice?: string | null;
   /** Client-side send time, shown as a small clock under the bubble. */
   createdAt?: number;
   /** Snapshot of the attachments this turn carried (rendered in the bubble). */
@@ -145,7 +155,7 @@ export interface UseAiChatOptions {
    */
   projectId?: string | null;
   appFocus?: AiAppFocus;
-  reasoningMode?: AiReasoningMode;
+  runtimeMode?: AiRuntimeMode;
 }
 
 export function useAiChat({
@@ -154,7 +164,7 @@ export function useAiChat({
   onConversationIdChange,
   projectId = null,
   appFocus = "all",
-  reasoningMode: initialReasoningMode = AI_REASONING_MODES[0],
+  runtimeMode: initialRuntimeMode = AI_RUNTIME_MODES[0],
 }: UseAiChatOptions) {
   const router = useRouter();
   const canPropose = mode === "wizard" || mode === "dashboard";
@@ -168,13 +178,7 @@ export function useAiChat({
   const [actionsAllowed, setActionsAllowed] = useState(true);
   const [task, setTask] = useState<AiTaskId>("general");
   const [customTask, setCustomTask] = useState("");
-  const [reasoningMode, setReasoningMode] = useState<AiReasoningMode>(initialReasoningMode);
-  // Phase I — the business-defined custom agent this dashboard turn runs as.
-  // null = the full dashboard assistant (or, inside a project, its pinned
-  // default). The backend resolves a request-level agentId every turn and it
-  // always wins, so the picker can change the lens mid-conversation. Only
-  // dashboard mode runs as an agent; the value is ignored otherwise.
-  const [agentId, setAgentId] = useState<string | null>(null);
+  const [runtimeMode, setRuntimeMode] = useState<AiRuntimeMode>(() => normalizeAiRuntimeMode(initialRuntimeMode));
   const abortControllerRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
   const cancelledRef = useRef(false);
@@ -271,7 +275,7 @@ export function useAiChat({
   function ensureGreeting() {
     setMessages((current) =>
       current.length === 0
-        ? [{ id: uid(), role: "assistant", content: greeting(mode) }]
+        ? [{ id: uid(), role: "assistant", content: greeting(mode), status: "complete" }]
         : current,
     );
   }
@@ -284,14 +288,22 @@ export function useAiChat({
     setConversation(null);
     setInput("");
     clearAttachment();
-    setMessages([{ id: uid(), role: "assistant", content: greeting(mode) }]);
+    setMessages([{ id: uid(), role: "assistant", content: greeting(mode), status: "complete" }]);
   }
 
+  /**
+   * Issue #812 §17 — a conversation load is generation-guarded. Rapid
+   * A → B → C clicks used to let a slow A response land last and overwrite the
+   * conversation the member is actually looking at, because nothing checked
+   * which load was still the current one. The load now claims the generation
+   * up front and abandons its result if a newer load (or a fresh stream) has
+   * since claimed it.
+   */
   async function loadConversation(id: string) {
     if (abortControllerRef.current) {
       cancelGeneration();
-      generationRef.current += 1;
     }
+    const generation = ++generationRef.current;
     setLoadingConversation(true);
     clearAttachment();
     try {
@@ -300,13 +312,18 @@ export function useAiChat({
         messages?: ConversationMessagePayload[];
         error?: string;
       };
-      if (!response.ok || !data.messages)
-        throw new Error(data.error ?? "not_found");
+      if (!response.ok || !data.messages) throw new Error(data.error ?? "not_found");
+      // A newer load or a new turn claimed the thread while this one was in
+      // flight: drop the stale result entirely rather than overwriting it.
+      if (generationRef.current !== generation) return;
       setMessages(
         data.messages.map((message) => ({
           id: message.id,
           role: message.role,
           content: message.content,
+          // A transcript written before the status field existed is a finished
+          // turn; only the live stream marks its own states.
+          status: (message.role === "assistant" ? "complete" : undefined) as AiMessageStatus | undefined,
           proposal: canPropose ? message.proposal : null,
           auditId: message.auditId ?? null,
           proposalStatus: message.proposalStatus ?? (message.proposal ? "proposed" : null),
@@ -316,9 +333,10 @@ export function useAiChat({
       );
       setConversation(id);
     } catch {
-      toast.error("بازکردن این مکالمه ممکن نشد.");
+      // Only the load the member is still waiting on may report a failure.
+      if (generationRef.current === generation) toast.error("بازکردن این مکالمه ممکن نشد.");
     } finally {
-      setLoadingConversation(false);
+      if (generationRef.current === generation) setLoadingConversation(false);
     }
   }
 
@@ -343,18 +361,14 @@ export function useAiChat({
     await startStream(text);
   }
 
-  /**
-   * Phase 36 Wave 7 — «دوباره بپرس» on a cached answer: the same question,
-   * resent with `bypassCache`, so the turn is built fresh and the cache never
-   * answers its own criticism.
-   */
+  /** Ask the same question again, as a brand-new turn. */
   async function askAgain(text: string) {
     const question = text.trim();
     if (!question || busy) return;
-    await startStream(question, true);
+    await startStream(question);
   }
 
-  async function startStream(text: string, bypassCache = false) {
+  async function startStream(text: string) {
     if (busy) return;
     const userMsg: AiChatMessage = {
       id: uid(),
@@ -367,7 +381,14 @@ export function useAiChat({
     const history = [...messages, userMsg];
     setMessages([
       ...history,
-      { id: replyId, role: "assistant", content: "", createdAt: Date.now() },
+      {
+        id: replyId,
+        role: "assistant",
+        content: "",
+        createdAt: Date.now(),
+        // §19 — the reply exists but is not finished until `done` arrives.
+        status: "streaming",
+      },
     ]);
     setBusy(true);
     const generation = ++generationRef.current;
@@ -399,11 +420,12 @@ export function useAiChat({
         setReply((current) => ({
           ...current,
           content: current.content + payload.content,
+          status: "streaming",
         }));
         return false;
       }
       if (event === "reset") {
-        setReply((current) => ({ ...current, content: "" }));
+        setReply((current) => ({ ...current, content: "", status: "streaming" }));
         return false;
       }
       if (event === "done") {
@@ -421,8 +443,8 @@ export function useAiChat({
           auditId: typeof payload.auditId === "string" ? payload.auditId : null,
           proposalStatus: payload.proposedAction ? "proposed" : null,
           costRial: typeof payload.costRial === "number" ? payload.costRial : null,
-          cacheNotice:
-            typeof payload.cacheNotice === "string" ? payload.cacheNotice : null,
+          // §19 — the terminal event, so this reply is genuinely finished.
+          status: "complete",
         }));
         if (typeof payload.conversationId === "string")
           setConversation(payload.conversationId);
@@ -431,7 +453,8 @@ export function useAiChat({
       if (event === "error") {
         setReply((current) => ({
           ...current,
-          content: "⚠️ " + errorMessage(payload),
+          content: current.content ? `${current.content}\n\n⚠️ ${errorMessage(payload)}` : "⚠️ " + errorMessage(payload),
+          status: "error",
         }));
         return true;
       }
@@ -464,12 +487,8 @@ export function useAiChat({
           task,
           customTask: customTask.trim() || undefined,
           appFocus,
-          reasoningMode,
-          // Only dashboard mode runs as a custom agent; the backend refuses a
-          // disabled/unknown id rather than silently widening the turn.
-          agentId: agentIdForTurn(mode, agentId),
+          runtimeMode,
           allowActions: actionsAllowed,
-          bypassCache: bypassCache === true,
         }),
       });
       if (!response.ok) {
@@ -505,30 +524,50 @@ export function useAiChat({
         reader.releaseLock();
       }
       if (!complete) {
+        // §19 — the stream ended without its terminal `done` event. Whatever
+        // arrived is real and worth keeping, but it is NOT a finished answer
+        // and must never be presented as one.
         setReply((current) => ({
           ...current,
-          content:
-            current.content || "⚠️ پاسخ دستیار کامل نشد. دوباره تلاش کنید.",
+          // §19 — whatever arrived is kept. A reply with no text at all gets a
+          // line saying so, because an empty bubble reads as a rendering bug
+          // rather than as a turn that did not finish.
+          content: current.content || "⚠️ پاسخ دستیار کامل نشد. دوباره تلاش کنید.",
+          status: "incomplete",
         }));
       }
     } catch (error) {
       if (cancelledRef.current || (error instanceof DOMException && error.name === "AbortError")) {
-        setReply((current) => ({ ...current, content: current.content || "پاسخ‌گویی متوقف شد." }));
+        // §19 — the member stopped it. Partial text is kept and labelled
+        // «cancelled» rather than being replaced or made to look complete.
+        setReply((current) => ({
+          ...current,
+          content: current.content || "پاسخ‌گویی متوقف شد.",
+          status: "cancelled",
+        }));
       } else {
-        setReply(() => ({
-          id: replyId,
-          role: "assistant",
+        setReply((current) => ({
+          ...current,
           content:
             "⚠️ " +
             (error instanceof Error
               ? error.message
               : "اتصال برقرار نشد. دوباره تلاش کنید."),
+          status: "error",
         }));
       }
     } finally {
-      if (abortControllerRef.current === controller) abortControllerRef.current = null;
-      setBusy(false);
-      clearAttachment();
+      // §17 — an OLD stream must never clear state belonging to a newer one.
+      // `setBusy(false)` and `clearAttachment()` used to run unconditionally,
+      // so a stale stream finishing after the member had already started a new
+      // turn would un-busy the new turn and wipe its attachments. Both are now
+      // gated on this stream still being the active generation.
+      const stillActive = generationRef.current === generation;
+      if (stillActive) {
+        if (abortControllerRef.current === controller) abortControllerRef.current = null;
+        setBusy(false);
+        clearAttachment();
+      }
     }
   }
 
@@ -691,10 +730,8 @@ export function useAiChat({
     setTask,
     customTask,
     setCustomTask,
-    reasoningMode,
-    setReasoningMode,
-    agentId,
-    setAgentId,
+    runtimeMode,
+    setRuntimeMode,
     ensureGreeting,
     startNewConversation,
     loadConversation,

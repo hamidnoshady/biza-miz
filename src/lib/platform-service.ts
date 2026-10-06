@@ -13,7 +13,7 @@
  * `platform-admin.ts` and are tested there, and the guard/isolation behaviour
  * is exercised by the platform integration test.
  */
-import { getPool, query, withoutTenantScope } from "./db";
+import { getPool, query, withoutTenantScope, withTenant } from "./db";
 import { getPlatformBackupHealth } from "./platform-backup-service";
 import type { PoolClient } from "pg";
 import { disableFeatures, seedChartOfAccounts } from "./business-provisioning";
@@ -736,6 +736,12 @@ async function clearBusinessDeleteBlockers(client: PoolClient, businessId: strin
     "DELETE FROM expenses WHERE business_id = $1",
     "UPDATE inventory_write_downs SET reversal_of = NULL WHERE business_id = $1",
     "UPDATE inventory_events SET reversal_of = NULL WHERE business_id = $1",
+    // Issue #795 — the serialized watch workflows pin their provenance with
+    // RESTRICT onto orders and item_serials; a confirmed reset removes the
+    // claims/holds before the sales and units they point at.
+    "DELETE FROM serial_returns WHERE business_id = $1",
+    "DELETE FROM serial_reservations WHERE business_id = $1",
+    "DELETE FROM serial_preowned_intakes WHERE business_id = $1",
     "DELETE FROM customer_returns WHERE business_id = $1",
     "DELETE FROM supplier_returns WHERE business_id = $1",
     "DELETE FROM inventory_transfers WHERE business_id = $1",
@@ -1098,10 +1104,11 @@ export interface BusinessUsage {
  * Counts are per business rather than the whole deployment — the console shows
  * one business's numbers on its detail page. `lastActivity` is the most recent
  * of a few high-signal timestamps, which is enough to tell a live business
- * from a dormant one without a heavy scan.
+ * from a dormant one without a heavy scan. This single-business read enters
+ * tenant scope even when called by the platform console (#810).
  */
 export async function businessUsage(businessId: string): Promise<BusinessUsage> {
-  const { rows } = await withoutTenantScope("platform", () =>
+  const { rows } = await withTenant(businessId, () =>
     query<{
       orders: string;
       open_orders: string;

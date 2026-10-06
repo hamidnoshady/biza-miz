@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   BellIcon,
-  BookOpenIcon,
   Building2Icon,
   CalendarClockIcon,
   CalculatorIcon,
@@ -35,9 +34,9 @@ import { TeamManager } from "@/app/dashboard/team/team-manager";
 import { AccountsSettings } from "./accounts-settings";
 import { AuditLogSettings } from "./audit-log-settings";
 import { BusinessSettings } from "./business-settings";
+import { AecProfileForm } from "@/components/aec/aec-profile-form";
 import { DeviceSettings } from "./device-settings";
 import { LogsPanel } from "./logs-panel";
-import { MenuSettings } from "./menu-settings";
 import { NotificationSettings } from "./notification-settings";
 import { OnlinePlatformsSettings } from "./online-platforms-settings";
 import { PaymentMethodsSettings } from "./payment-methods-settings";
@@ -83,7 +82,6 @@ const TAB_ICONS: Record<SettingsTabKey, LucideIcon> = {
   "payment-methods": CreditCardIcon,
   accounts: CalculatorIcon,
   team: UsersRoundIcon,
-  menu: BookOpenIcon,
   printers: PrinterIcon,
   "cloud-sync": CloudCogIcon,
   "branch-management": StoreIcon,
@@ -107,7 +105,7 @@ const SETTINGS_GROUPS: Array<{ label: string; keys: SettingsTabKey[] }> = [
   // Keep the platform contract beside payment settings instead of making
   // owners scan past management and security sections to find it.
   { label: "فروش آنلاین", keys: ["online-platforms"] },
-  { label: "مدیریت", keys: ["team", "menu", "printers", "devices", "notifications", "shifts"] },
+  { label: "مدیریت", keys: ["team", "printers", "devices", "notifications", "shifts"] },
   { label: "امنیت و اتصال", keys: ["audit-log", "security-center", "backup", "logs"] },
   // «ورود و خروج داده» reaches every app's records, so it is its own group
   // rather than a line inside «مدیریت»: it is neither a business setting nor a
@@ -220,7 +218,19 @@ export function SettingsManager({
         </div>
       ) : null}
 
-      {activeTab === "business" ? <BusinessSettings /> : null}
+      {activeTab === "business" ? (
+        <div className="space-y-4">
+          <BusinessSettings />
+          {/*
+            Issue #799 Wave 2 — an AEC business's operating profile lives in
+            the business section rather than a tab of its own: it is business
+            configuration, it is meaningless for the other nine industries
+            (whose API refuses it outright), and a tab that only ever appears
+            for one industry would be a rail entry nobody else can explain.
+          */}
+          {industry === "architecture_construction" ? <AecProfileForm /> : null}
+        </div>
+      ) : null}
       {activeTab === "tax" ? <TaxSettings industry={industry} /> : null}
       {activeTab === "pricing" ? <PricingSettings /> : null}
       {activeTab === "online-platforms" ? <OnlinePlatformsSettings /> : null}
@@ -229,7 +239,6 @@ export function SettingsManager({
       {activeTab === "team" ? (
         <TeamManager currentUserId={currentUserId} role={role} permissions={permissions} />
       ) : null}
-      {activeTab === "menu" ? <MenuSettings /> : null}
       {activeTab === "printers" ? <PrintingManager /> : null}
       {activeTab === "cloud-sync" ? <CloudSyncSettings /> : null}
       {activeTab === "branch-management" ? <BranchManagementSettings features={features} /> : null}

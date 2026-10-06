@@ -1,6 +1,7 @@
 import { query } from "./db";
 import type { PoolClient } from "pg";
 import { businessIdForLocation } from "./plan-limits";
+import { changeMenuItemPrice, type PriceChangeSource } from "./menu-price-service";
 import {
   assertAttachmentSatisfiable,
   assertGroupBoundsSatisfiable,
@@ -59,6 +60,22 @@ export async function getMenuTree(locationId: string) {
 // ---------------------------------------------------------------------------
 
 export type ServiceResult = { ok: true } | { ok: false; error: string; status: number };
+
+/**
+ * Who/why a caller is patching an item — carried into the canonical price
+ * service when the patch contains a price, so the history row and the audit
+ * event name the real path (manual / ai / integration / …) instead of
+ * guessing. Source is chosen by the calling route/service, never by the
+ * request body (issue #844).
+ */
+export interface MenuItemWriteContext {
+  /** The acting member (uuid), or null for a background writer. */
+  changedBy?: string | null;
+  source?: PriceChangeSource;
+  sourceRef?: string | null;
+  reason?: string | null;
+  note?: string | null;
+}
 
 function isUniqueViolation(err: unknown, constraint: string): boolean {
   return (
@@ -254,10 +271,11 @@ export async function updateMenuItem(
   id: string,
   body: MenuItemPatchInput,
   businessId?: string,
+  context?: MenuItemWriteContext,
 ): Promise<ServiceResult> {
   const resolvedBusinessId = businessId ?? (await businessIdForLocation(locationId));
-  const { rows: existing } = await query<{ id: string }>(
-    "SELECT id FROM menu_items WHERE id = $1 AND location_id = $2",
+  const { rows: existing } = await query<{ id: string; category_id: string | null }>(
+    "SELECT id, category_id FROM menu_items WHERE id = $1 AND location_id = $2",
     [id, locationId],
   );
   if (!existing[0]) return { ok: false, error: "item_not_found", status: 404 };
@@ -289,7 +307,6 @@ export async function updateMenuItem(
 
   if (body.categoryId !== undefined) set("category_id", body.categoryId);
   if (body.name !== undefined) set("name", body.name);
-  if (body.price !== undefined) set("price", body.price);
   if (body.description !== undefined) set("description", body.description);
   if (body.sku !== undefined) set("sku", body.sku);
   if (body.imageUrl !== undefined) set("image_url", body.imageUrl);
@@ -300,22 +317,66 @@ export async function updateMenuItem(
     set("target_margin_percent", body.targetMarginPercent);
   }
 
-  if (fields.length === 0) return { ok: false, error: "bad_request", status: 400 };
-
-  set("updated_at", new Date());
-  try {
-    const result = await query(
-      "UPDATE menu_items SET " + fields.join(", ") + " WHERE id = $1 AND location_id = $2",
-      values,
+  // A move to a *different* category re-indexes the item at the end of the
+  // destination (unless the caller said where it goes): keeping the source's
+  // sort_order left the item wedged mid-list in the destination, silently
+  // displacing or colliding with the rows already there (issue #844).
+  if (
+    body.categoryId !== undefined &&
+    body.categoryId !== existing[0].category_id &&
+    body.sortOrder === undefined
+  ) {
+    const { rows: tail } = await query<{ next: number }>(
+      "SELECT COALESCE(MAX(sort_order) + 1, 0) AS next FROM menu_items WHERE location_id = $1 AND category_id = $2",
+      [locationId, body.categoryId],
     );
-    if (result.rowCount !== 1) return { ok: false, error: "item_not_found", status: 404 };
-    return { ok: true };
-  } catch (err) {
-    if (isUniqueViolation(err, "uq_menu_items_location_sku")) {
-      return { ok: false, error: "sku_exists", status: 409 };
-    }
-    throw err;
+    set("sort_order", tail[0]?.next ?? 0);
   }
+
+  // A price is no longer an ordinary patch field: it is a domain operation
+  // with its own immutable history (issue #844), applied below through the
+  // canonical service. A price-only patch therefore has no generic fields —
+  // which is expected, not a bad request.
+  if (fields.length === 0 && body.price === undefined) {
+    return { ok: false, error: "bad_request", status: 400 };
+  }
+
+  if (fields.length > 0) {
+    set("updated_at", new Date());
+    try {
+      const result = await query(
+        "UPDATE menu_items SET " + fields.join(", ") + " WHERE id = $1 AND location_id = $2",
+        values,
+      );
+      if (result.rowCount !== 1) return { ok: false, error: "item_not_found", status: 404 };
+    } catch (err) {
+      if (isUniqueViolation(err, "uq_menu_items_location_sku")) {
+        return { ok: false, error: "sku_exists", status: 409 };
+      }
+      throw err;
+    }
+  }
+
+  if (body.price !== undefined) {
+    if (!resolvedBusinessId) {
+      // Without a business there is no history row and no audit event — and
+      // a price change with no history is exactly the bug this replaces.
+      return { ok: false, error: "missing_fields", status: 400 };
+    }
+    const change = await changeMenuItemPrice({
+      businessId: resolvedBusinessId,
+      locationId,
+      menuItemId: id,
+      newPrice: body.price,
+      source: context?.source ?? "manual",
+      changedBy: context?.changedBy ?? null,
+      sourceRef: context?.sourceRef ?? null,
+      reason: context?.reason ?? null,
+      note: context?.note ?? null,
+    });
+    if (!change.ok) return { ok: false, error: change.error, status: change.status };
+  }
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -332,13 +393,21 @@ export async function createModifierGroup(
   try {
     const { rows } = await query<{ id: string }>(
       `INSERT INTO modifier_groups (location_id, name, min_select, max_select, sort_order, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+       SELECT $1, $2, $3, $4,
+              COALESCE($5::int, (SELECT COALESCE(MAX(g.sort_order) + 1, 0)
+                                   FROM modifier_groups g WHERE g.location_id = $1)),
+              $6
+       RETURNING id`,
       [
         locationId,
         input.name,
         bounds.min,
         bounds.max,
-        input.sortOrder ?? 0,
+        // Absent → appended after this branch's existing groups. It used to
+        // default to 0, so every group created without an explicit order
+        // piled onto the same slot and the POS's group order came down to
+        // name-tiebreak luck (issue #844).
+        input.sortOrder ?? null,
         input.isActive ?? true,
       ],
     );
@@ -791,6 +860,77 @@ export async function attachGroupInTransaction(
            max_select_override = EXCLUDED.max_select_override,
            is_active = true`,
     [menuItemId, modifierGroupId, overrides.minSelectOverride, overrides.maxSelectOverride],
+  );
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Reordering — one atomic statement (issue #844)
+// ---------------------------------------------------------------------------
+
+export const MENU_REORDER_ENTITIES = [
+  "categories",
+  "items",
+  "modifierGroups",
+  "modifiers",
+] as const;
+
+export type MenuReorderEntity = (typeof MENU_REORDER_ENTITIES)[number];
+
+const REORDER_TABLES: Record<MenuReorderEntity, string> = {
+  categories: "menu_categories",
+  items: "menu_items",
+  modifierGroups: "modifier_groups",
+  modifiers: "modifiers",
+};
+
+export function isMenuReorderEntity(value: unknown): value is MenuReorderEntity {
+  return (
+    typeof value === "string" &&
+    (MENU_REORDER_ENTITIES as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Persist a complete ordering in ONE statement — and therefore one
+ * transaction, automatically.
+ *
+ * The menu editor used to swap two rows with two sequential PATCH requests
+ * (write A's order to B's slot, then B's order to A's slot). A failure after
+ * the first write left two rows claiming the same slot, and the next reorder
+ * swapped based on that corrupted order — the exact duplicate-sort_order state
+ * the issue calls out. One set-based UPDATE assigns every position at once:
+ * either the whole ordering lands or none of it does, and a partial failure
+ * cannot exist to leave duplicates behind.
+ *
+ * The caller passes the ids in their new display order; positions are
+ * reassigned 0..n-1 over exactly those rows, all verified to belong to this
+ * branch first (an id from another branch fails the whole operation rather
+ * than silently renumbering someone else's rows).
+ */
+export async function reorderMenuCollection(
+  locationId: string,
+  entity: MenuReorderEntity,
+  orderedIds: readonly string[],
+): Promise<ServiceResult> {
+  if (orderedIds.length === 0) return { ok: true };
+  if (new Set(orderedIds).size !== orderedIds.length) {
+    return { ok: false, error: "bad_request", status: 400 };
+  }
+  const table = REORDER_TABLES[entity];
+  const { rows } = await query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM ${table}
+      WHERE location_id = $1 AND id = ANY($2::uuid[])`,
+    [locationId, [...orderedIds]],
+  );
+  if (Number(rows[0]?.count ?? 0) !== orderedIds.length) {
+    return { ok: false, error: "reorder_mismatch", status: 400 };
+  }
+  await query(
+    `UPDATE ${table} AS t SET sort_order = u.position - 1
+       FROM unnest($2::uuid[]) WITH ORDINALITY AS u(id, position)
+      WHERE t.id = u.id AND t.location_id = $1`,
+    [locationId, [...orderedIds]],
   );
   return { ok: true };
 }

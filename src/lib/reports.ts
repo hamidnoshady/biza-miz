@@ -15,6 +15,7 @@
 import { WELL_KNOWN_CODES } from "./coa-template";
 import type { Industry } from "./industries";
 import { hasCapability, hasModule, type CapabilityKey, type ModuleKey } from "./industry-profile";
+import { PRODUCT_WORKSPACE_INDUSTRIES } from "./product-workspace";
 import { addDays } from "./rollup";
 
 export type Aggregation = "sum" | "avg" | "count" | "count_distinct";
@@ -561,7 +562,7 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** Validates a report config against the view whitelist. Empty array = valid. Persian error strings. */
 export function validateReportConfig(config: ReportConfig): string[] {
   const errors: string[] = [];
-  const view = REPORT_VIEWS[config.view];
+  const view = Object.hasOwn(REPORT_VIEWS, config.view) ? REPORT_VIEWS[config.view] : undefined;
   if (!view) {
     errors.push("منبع داده نامعتبر است.");
     return errors;
@@ -1317,10 +1318,12 @@ export const STANDARD_REPORTS: StandardReportDef[] = [
     label: "تحلیل فروش تنوع‌ها",
     description: "کدام تنوع‌ها می‌فروشند: تعداد، درآمد، بهای تمام‌شده و حاشیهٔ هر تنوع.",
     group: "sales",
-    // The five trade-goods industries, not `stock`: jewellery and watch carry
-    // that module too but sell weighted pieces and serialised units, which
-    // write no variant sale event for this to read.
-    requires: { industries: ["accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery"] },
+    // The variant-board trades, not `stock`: jewellery and watch carry that
+    // module too but sell weighted pieces and serialised units, which write no
+    // variant sale event for this to read. Taken from the one place that set
+    // is declared rather than restated — issue #799's coverage guard fails the
+    // build on a hard-coded industry list (industry-coverage.test.ts).
+    requires: { industries: PRODUCT_WORKSPACE_INDUSTRIES },
     shape: "variant_sales",
     view: null,
     defaultChart: null,
@@ -1455,11 +1458,13 @@ export function buildFoodCostVariance(
   items: FoodCostVarianceItemInput[],
   actualCogs: number,
   wasteCost: number,
+  summary?: { theoreticalCost: number },
 ): FoodCostVariance {
   const lines: FoodCostVarianceItemLine[] = items
     .map((item) => ({ ...item, foodCostPct: item.revenue > 0 ? item.theoreticalCost / item.revenue : null }))
     .sort((a, b) => (b.foodCostPct ?? -1) - (a.foodCostPct ?? -1));
-  const theoreticalCost = items.reduce((sum, item) => sum + item.theoreticalCost, 0);
+  // SQL-paged readers supply the full-source total; detail lines still use the same builder.
+  const theoreticalCost = summary?.theoreticalCost ?? items.reduce((sum, item) => sum + item.theoreticalCost, 0);
   const actualTotalCost = actualCogs + wasteCost;
   const variance = actualTotalCost - theoreticalCost;
   return {

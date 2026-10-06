@@ -107,6 +107,10 @@ export function workspaceProjectHref(projectId: string): string {
  */
 export const ACCOUNTING_WORKSPACE_HREFS = {
   pos: "/accounting/pos",
+  // The canonical café/restaurant menu manager (issue #844) — under
+  // «فروش و درآمد», after the till. The old `/settings/menu` address is a
+  // compatibility redirect only.
+  menu: "/accounting/menu",
   inventory: "/accounting/inventory",
   products: "/accounting/products",
   cosmetics: "/accounting/cosmetics",
@@ -241,7 +245,11 @@ const LEGACY_PREFIX_MAP: readonly (readonly [string, string])[] = [
   ["/dashboard/customers", "/crm/directory"],
   ["/dashboard/persons", "/crm/directory"],
   // Platform-owned pages that live in the settings area.
-  ["/dashboard/menu", "/settings/menu"],
+  // The menu manager moved into Accounting (issue #844): both the old
+  // dashboard address and the settings address are one 308 away from the
+  // canonical `/accounting/menu`.
+  ["/dashboard/menu", ACCOUNTING_WORKSPACE_HREFS.menu],
+  ["/settings/menu", ACCOUNTING_WORKSPACE_HREFS.menu],
   ["/dashboard/team", "/settings/team"],
   ["/dashboard/backup", "/settings/backup"],
   ["/dashboard/branches", "/settings/branch-management?branchTab=branches"],

@@ -4,7 +4,7 @@
  * calculates whether a device is current.
  */
 import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
-import { query, withoutTenantScope } from "./db";
+import { query, withoutTenantScope, withTenant } from "./db";
 import { isUuid } from "./uuid";
 import {
   canonicalDesktopManifestPayload,
@@ -388,116 +388,129 @@ export interface FleetUpdateSummary {
   problems: number;
 }
 
-export async function desktopFleetCompliance(now: Date = new Date()): Promise<{
+async function readDesktopFleetCompliance(now: Date, businessId?: string): Promise<{
   devices: FleetDeviceStatus[];
   releases: PlatformDesktopRelease[];
   summary: FleetUpdateSummary;
 }> {
-  return withoutTenantScope("platform", async () => {
-    const [runtime, releases] = await Promise.all([
-      query<FleetRow>(
-        `SELECT d.id AS site_device_id,d.public_id,d.business_id,b.name AS business_name,
-                d.location_id,l.name AS location_name,d.display_name,d.status AS device_status,
-                d.revoked_at,d.last_seen_at,rs.app_version,rs.commit_sha,rs.build_id,
-                rs.schema_version,rs.electron_version,rs.platform,rs.release_channel,
-                rs.client_checked_at,rs.reported_at,rs.update_state,rs.update_target_version,
-                rs.last_error_code,rs.last_error_message,
-                runs.last_push_at,runs.last_pull_at,COALESCE(events.update_events,'[]'::jsonb) AS update_events
-           FROM site_devices d
-           JOIN businesses b ON b.id=d.business_id
-           JOIN locations l ON l.id=d.location_id AND l.business_id=d.business_id
-           LEFT JOIN site_device_runtime_status rs ON rs.site_device_id=d.id
-           LEFT JOIN LATERAL (
-             SELECT max(started_at) FILTER (WHERE direction='push' AND status='ok') AS last_push_at,
-                    max(started_at) FILTER (WHERE direction='pull' AND status='ok') AS last_pull_at
-               FROM sync_runs sr
-              WHERE sr.site_device_id=d.id AND sr.business_id=d.business_id
-           ) runs ON true
-           LEFT JOIN LATERAL (
-             SELECT jsonb_agg(jsonb_build_object(
-                      'state',event.state,
-                      'installedVersion',event.installed_version,
-                      'targetVersion',event.target_version,
-                      'errorCode',event.error_code,
-                      'clientOccurredAt',event.client_occurred_at,
-                      'reportedAt',event.reported_at
-                    ) ORDER BY event.reported_at DESC) AS update_events
-               FROM (
-                 SELECT state,installed_version,target_version,error_code,client_occurred_at,reported_at
-                   FROM site_device_update_events due
-                  WHERE due.site_device_id=d.id AND due.business_id=d.business_id
-                  ORDER BY reported_at DESC
-                  LIMIT 12
-               ) event
-           ) events ON true
-          ORDER BY b.name,l.name,d.display_name`,
-      ),
-      releaseRows().then((rows) => rows.map(rowToRelease)),
-    ]);
-    const devices = runtime.rows.map((row): FleetDeviceStatus => {
-      const channel = row.release_channel ?? "stable";
-      const targetRelease = selectTargetRelease(releases, channel, row.public_id);
-      const connectivity = classifyDeviceConnectivity(row.reported_at, now);
-      let compliance = classifyDesktopVersion(
-        row.app_version,
-        targetRelease?.version,
-        targetRelease?.minimumSupportedVersion,
-      );
-      if (targetRelease && row.schema_version !== null) {
-        if (
-          (targetRelease.database.minimumSchemaVersion !== null && row.schema_version < targetRelease.database.minimumSchemaVersion) ||
-          (targetRelease.database.maximumSchemaVersion !== null && row.schema_version > targetRelease.database.maximumSchemaVersion)
-        ) compliance = "incompatible";
-      }
-      const hasError = Boolean(row.last_error_code) || row.device_status !== "active" || Boolean(row.revoked_at);
-      compliance = complianceWithFreshness(compliance, connectivity, hasError);
-      return {
-        siteDeviceId: row.site_device_id,
-        publicId: row.public_id,
-        businessId: row.business_id,
-        businessName: row.business_name,
-        locationId: row.location_id,
-        locationName: row.location_name,
-        deviceName: row.display_name,
-        deviceStatus: row.device_status,
-        revoked: Boolean(row.revoked_at),
-        installedVersion: row.app_version,
-        buildCommit: row.commit_sha,
-        buildId: row.build_id,
-        schemaVersion: row.schema_version,
-        electronVersion: row.electron_version,
-        platform: row.platform,
-        channel,
-        targetRelease,
-        compliance,
-        connectivity,
-        lastSeenAt: maybeIso(row.last_seen_at),
-        lastReportAt: maybeIso(row.reported_at),
-        clientCheckedAt: maybeIso(row.client_checked_at),
-        lastSuccessfulPushAt: maybeIso(row.last_push_at),
-        lastSuccessfulPullAt: maybeIso(row.last_pull_at),
-        updateState: row.update_state,
-        updateTargetVersion: row.update_target_version,
-        error: row.last_error_code ? { code: row.last_error_code, message: row.last_error_message } : null,
-        updateEvents: row.update_events.map((event) => ({
-          ...event,
-          clientOccurredAt: event.clientOccurredAt ? iso(event.clientOccurredAt) : null,
-          reportedAt: iso(event.reportedAt),
-        })),
-      };
-    });
+  const [runtime, releases] = await Promise.all([
+    query<FleetRow>(
+      `SELECT d.id AS site_device_id,d.public_id,d.business_id,b.name AS business_name,
+              d.location_id,l.name AS location_name,d.display_name,d.status AS device_status,
+              d.revoked_at,d.last_seen_at,rs.app_version,rs.commit_sha,rs.build_id,
+              rs.schema_version,rs.electron_version,rs.platform,rs.release_channel,
+              rs.client_checked_at,rs.reported_at,rs.update_state,rs.update_target_version,
+              rs.last_error_code,rs.last_error_message,
+              runs.last_push_at,runs.last_pull_at,COALESCE(events.update_events,'[]'::jsonb) AS update_events
+         FROM site_devices d
+         JOIN businesses b ON b.id=d.business_id
+         JOIN locations l ON l.id=d.location_id AND l.business_id=d.business_id
+         LEFT JOIN site_device_runtime_status rs ON rs.site_device_id=d.id
+         LEFT JOIN LATERAL (
+           SELECT max(started_at) FILTER (WHERE direction='push' AND status='ok') AS last_push_at,
+                  max(started_at) FILTER (WHERE direction='pull' AND status='ok') AS last_pull_at
+             FROM sync_runs sr
+            WHERE sr.site_device_id=d.id AND sr.business_id=d.business_id
+         ) runs ON true
+         LEFT JOIN LATERAL (
+           SELECT jsonb_agg(jsonb_build_object(
+                    'state',event.state,
+                    'installedVersion',event.installed_version,
+                    'targetVersion',event.target_version,
+                    'errorCode',event.error_code,
+                    'clientOccurredAt',event.client_occurred_at,
+                    'reportedAt',event.reported_at
+                  ) ORDER BY event.reported_at DESC) AS update_events
+             FROM (
+               SELECT state,installed_version,target_version,error_code,client_occurred_at,reported_at
+                 FROM site_device_update_events due
+                WHERE due.site_device_id=d.id AND due.business_id=d.business_id
+                ORDER BY reported_at DESC
+                LIMIT 12
+             ) event
+         ) events ON true
+        ${businessId ? "WHERE d.business_id = $1" : ""}
+        ORDER BY b.name,l.name,d.display_name`,
+      businessId ? [businessId] : [],
+    ),
+    releaseRows().then((rows) => rows.map(rowToRelease)),
+  ]);
+  const devices = runtime.rows.map((row): FleetDeviceStatus => {
+    const channel = row.release_channel ?? "stable";
+    const targetRelease = selectTargetRelease(releases, channel, row.public_id);
+    const connectivity = classifyDeviceConnectivity(row.reported_at, now);
+    let compliance = classifyDesktopVersion(
+      row.app_version,
+      targetRelease?.version,
+      targetRelease?.minimumSupportedVersion,
+    );
+    if (targetRelease && row.schema_version !== null) {
+      if (
+        (targetRelease.database.minimumSchemaVersion !== null && row.schema_version < targetRelease.database.minimumSchemaVersion) ||
+        (targetRelease.database.maximumSchemaVersion !== null && row.schema_version > targetRelease.database.maximumSchemaVersion)
+      ) compliance = "incompatible";
+    }
+    const hasError = Boolean(row.last_error_code) || row.device_status !== "active" || Boolean(row.revoked_at);
+    compliance = complianceWithFreshness(compliance, connectivity, hasError);
     return {
-      devices,
-      releases,
-      summary: {
-        installations: devices.length,
-        upToDate: devices.filter((device) => device.compliance === "up_to_date").length,
-        updateAvailable: devices.filter((device) => device.compliance === "update_available").length,
-        offline: devices.filter((device) => device.compliance === "offline").length,
-        problems: devices.filter((device) => ["error", "unsupported", "incompatible", "version_mismatch", "stale"].includes(device.compliance)).length,
-      },
+      siteDeviceId: row.site_device_id,
+      publicId: row.public_id,
+      businessId: row.business_id,
+      businessName: row.business_name,
+      locationId: row.location_id,
+      locationName: row.location_name,
+      deviceName: row.display_name,
+      deviceStatus: row.device_status,
+      revoked: Boolean(row.revoked_at),
+      installedVersion: row.app_version,
+      buildCommit: row.commit_sha,
+      buildId: row.build_id,
+      schemaVersion: row.schema_version,
+      electronVersion: row.electron_version,
+      platform: row.platform,
+      channel,
+      targetRelease,
+      compliance,
+      connectivity,
+      lastSeenAt: maybeIso(row.last_seen_at),
+      lastReportAt: maybeIso(row.reported_at),
+      clientCheckedAt: maybeIso(row.client_checked_at),
+      lastSuccessfulPushAt: maybeIso(row.last_push_at),
+      lastSuccessfulPullAt: maybeIso(row.last_pull_at),
+      updateState: row.update_state,
+      updateTargetVersion: row.update_target_version,
+      error: row.last_error_code ? { code: row.last_error_code, message: row.last_error_message } : null,
+      updateEvents: row.update_events.map((event) => ({
+        ...event,
+        clientOccurredAt: event.clientOccurredAt ? iso(event.clientOccurredAt) : null,
+        reportedAt: iso(event.reportedAt),
+      })),
     };
   });
+  return {
+    devices,
+    releases,
+    summary: {
+      installations: devices.length,
+      upToDate: devices.filter((device) => device.compliance === "up_to_date").length,
+      updateAvailable: devices.filter((device) => device.compliance === "update_available").length,
+      offline: devices.filter((device) => device.compliance === "offline").length,
+      problems: devices.filter((device) => ["error", "unsupported", "incompatible", "version_mismatch", "stale"].includes(device.compliance)).length,
+    },
+  };
+}
+
+/** Platform fleet administration intentionally spans tenants. */
+export async function desktopFleetCompliance(now: Date = new Date()) {
+  return withoutTenantScope("platform", () => readDesktopFleetCompliance(now));
+}
+
+/** Same release selection, telemetry and compliance contract, without a bypass.
+ * Selected-business reporting must never call the fleet-wide wrapper and filter
+ * afterwards: the tenant boundary encloses both the reads and their assessment.
+ */
+export async function businessDesktopCompliance(businessId: string, now: Date = new Date()) {
+  return withTenant(businessId, () => readDesktopFleetCompliance(now, businessId));
 }
 
 export interface SaveDesktopReleaseInput {

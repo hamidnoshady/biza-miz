@@ -596,6 +596,16 @@ describe("reportViewsFor", () => {
 });
 
 describe("buildFoodCostVariance", () => {
+  it("uses full-source theoretical cost for a SQL detail page without changing line ratios", () => {
+    const items = [
+      { menuItemId: "a", menuItemName: "A", unitsSold: 1, theoreticalCost: 100, revenue: 500 },
+      { menuItemId: "b", menuItemName: "B", unitsSold: 1, theoreticalCost: 900, revenue: 1000 },
+    ];
+    const full = buildFoodCostVariance(items, 1200, 50);
+    const page = buildFoodCostVariance(items.slice(0, 1), 1200, 50, { theoreticalCost: 1000 });
+    expect(page).toEqual({ ...full, items: [full.items.find((i) => i.menuItemId === "a")] });
+  });
+
   it("computes each item's food-cost % and sorts worst (highest %) first", () => {
     const result = buildFoodCostVariance(
       [

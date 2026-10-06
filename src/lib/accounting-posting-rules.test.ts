@@ -31,6 +31,7 @@ import { INDUSTRIES, type Industry } from "./industries";
 const POSTING_ENGINE_INVENTORY_CODES: Record<Industry, string> = {
   service_saas: WELL_KNOWN_CODES.inventory,
   food_service: WELL_KNOWN_CODES.inventory,
+  architecture_construction: WELL_KNOWN_CODES.inventory,
   jewelry: WELL_KNOWN_CODES.goldInventory,
   watch: WELL_KNOWN_CODES.watchInventory,
   accessories: WELL_KNOWN_CODES.accessoryInventory,

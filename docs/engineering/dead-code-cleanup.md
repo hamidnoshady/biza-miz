@@ -268,3 +268,70 @@ build's reported chunk sizes. No claim is made about desktop installer size.
 4. **Schema retirement review.** Not attempted here, per the brief's rule that
    source cleanup must not drop data. Any retirement needs its own deliberate,
    backward-compatible migration plan.
+
+---
+
+# Addendum — issue #812, the AI subsystem rebuild (2026-10)
+
+Same governing principle: remove what can be **demonstrated** unused, preserve
+what may still be legitimately consumed. The difference this time is that most of
+what was removed was not unreachable — it was reachable and wrong, because it put
+a tenant-configurable surface on something the issue makes Superadmin-only.
+
+## Removed, with the evidence
+
+| What | Why it could go |
+| --- | --- |
+| `src/lib/ai-answer-cache.ts`, `ai_answer_cache` | A semantic answer cache the application owned. A second cache the app runs is a second source of truth about what a tenant was told, and it is the one nobody invalidates. The shared semantic cache is LiteLLM's. |
+| `src/lib/ai-rag.ts`, `ai-rag-indexer.ts`, `ai-embeddings.ts`, `ai_embeddings`, `api/ai/rag/reindex` | The application's own pgvector RAG stack. Embeddings and RAG infrastructure are the LiteLLM layer's; a tenant reindex control is a tenant operating infrastructure. |
+| `src/lib/ai-knowledge-service.ts`, `ai-knowledge-shared.ts`, `api/ai/knowledge`, `(app)/ai/knowledge/knowledge-manager.tsx` | The tenant knowledge manager. Knowledge is tenant-**isolated** and infrastructure-owned; there is no tenant surface for feeding it. |
+| `src/lib/ai-custom-agents.ts`, `ai-custom-agents-service.ts`, `api/ai/agents/**`, `components/ai/ai-agent-selector.tsx`, `(app)/ai/**` (agents, automations, usage), `ai_custom_agents`, `ai_projects.default_agent_id` | The tenant agent builder. Two things called "Agent", one of them switchable by a business, is how a control-plane boundary gets argued away. |
+| `src/lib/ai-reasoning.ts` (`AI_REASONING_MODES`, `AI_MODE_DIRECTIVES`, `AiReasoningMode`) | Superseded by the three runtime modes. A "thinking" mode alongside auto/instant is a fourth mode nobody configured. |
+| `src/lib/ai-prompts.ts` + its test (`PROMPT_FRAGMENTS`, `fragmentsForTurn`, `assembleFromFragments`) | The dead fragment engine — only its own test imported it. Two prompt builders is a prompt you cannot predict. |
+| `src/lib/ai-agents.ts` → `ai-scheduled-jobs.ts` | Migrated, not just deleted. The Persian job definitions, the status pill, the "today's tasks" list and the three service functions that fed them had **no caller outside the module**. The per-job opt-in switches survive, because they are what stops a tenant paying for an empty digest. The table keeps its old name: renaming a tenant table for vocabulary is a data migration with no product payoff. |
+
+## Retired permissions
+
+`ai.agents.manage` and `ai.knowledge.manage` guarded surfaces deleted above.
+`ai.widgets.manage` is retired for a different reason: **its surface still
+exists**, but a workspace widget is a saved prompt that runs with its creator's
+own permissions, and `ai-widgets.ts` refuses any widget whose
+`requiredPermissions` the caller does not already hold
+(`widget_permission_widening`). That intersection holds per widget rather than
+per member and fails closed on an unknown permission — a stronger boundary than
+a dedicated key, so the key was guarding nothing while the registry advertised
+it as delegatable.
+
+An advertised capability that gates nothing is a permission a reviewer stops
+trusting, so all three keys are gone from `PERMISSIONS`, the role presets and
+the Superadmin catalogue. Migration 0207 strips them from stored role and
+override rows; `parseOverrides` already filters through `isPermission`, so a
+stale grant degraded to "no override" at parse time even before the data was
+cleaned.
+
+## Two bugs the sweep found by writing assertions
+
+Neither is reachable from a unit test of the route, which is why both survived:
+
+1. **`deep_research` was not in `ai_wallet_settlements.request_type`'s CHECK
+   list.** The approve route had always written it. The first real run to settle
+   would have been rejected at INSERT, losing the run's cost entirely.
+   Migration 0208 widens the constraint with the original list preserved.
+2. **The widget run route typed its failure settlement `widget`** — also not in
+   the list. Both paths now type it `chat` and distinguish it by
+   `metadata.mode`, which also puts a run's cost in one slice of the usage
+   report instead of two.
+
+And one that a comment was actively concealing: the Deep Research approve route
+claimed §12's tool intersection was "not re-opened for research" while its tool
+list came from the **unfiltered** catalogue. It also called `getSession()`, which
+proves only that the caller belongs to the business — so any member, including
+roles whose whole permission set is `ai.use`, could approve a run that spends the
+business's AI budget. Both fixed; `ai-permission-matrix.test.ts` now pins it.
+
+## Still retained (unchanged from §9 above)
+
+`dashboard-grid.tsx`, `ai-platform-tools.ts` + the `platform` agent mode, and
+`crm-deal-handoff.ts` remain documented deliberate retentions in
+`module-reachability.test.ts`. Issue #812 did not touch them and did not make
+them reachable.

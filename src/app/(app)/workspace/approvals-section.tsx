@@ -55,7 +55,55 @@ import {
   stackedTableClass,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
-import { WorkspaceEntityDrawer, type WorkspaceEntityRef } from "./workspace-entity-drawer";
+import {
+  WorkspaceEntityDrawer,
+  type WorkspaceEntityKind,
+  type WorkspaceEntityRef,
+} from "./workspace-entity-drawer";
+
+/**
+ * The approval subjects the shared entity drawer can open. §7's estimate
+ * revision and §11's submittal revision are decided through this same queue —
+ * one approval engine, as the issue requires — but they are not entities of
+ * `/api/workspace/**`, so the queue shows them as text and their own register
+ * (`متره و برآورد`, `ارسال مدارک`) is where they are read.
+ */
+function openableSubject(type: WorkspaceApprovalSubject): type is WorkspaceEntityKind {
+  return type === "project" || type === "task" || type === "document" || type === "contract";
+}
+
+/**
+ * The subject cell: a link into the shared entity drawer for the four subjects
+ * that drawer can open, and plain text for the two it cannot.
+ *
+ * Issue #799 — §7's estimate revision and §11's submittal revision are decided
+ * through this same queue (one approval engine, as the issue requires) but are
+ * not entities of `/api/workspace/**`; their own registers — «متره و برآورد»
+ * and «ارسال مدارک» — are where they are read, so the queue names the subject
+ * rather than offering a link that would 404.
+ */
+function SubjectLabel({
+  row,
+  onOpen,
+}: {
+  row: ApprovalRow;
+  onOpen: (ref: WorkspaceEntityRef) => void;
+}) {
+  const label = row.subjectTitle || row.title;
+  const kind = row.subjectType;
+  // An explicit button, not a row click: this row also holds the decision
+  // buttons, and one press must do one thing (#761 §23).
+  if (!openableSubject(kind)) return <span className="font-medium">{label}</span>;
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen({ kind, id: row.subjectId })}
+      className="text-start font-medium underline-offset-4 hover:underline"
+    >
+      {label}
+    </button>
+  );
+}
 
 interface ApprovalSummary {
   total: number;
@@ -204,13 +252,7 @@ export function ApprovalsSection({
                   <Td data-label="موضوع">
                     {/* An explicit button, not a row click: this row also holds the
                         decision buttons, and one press must do one thing (#761 §23). */}
-                    <button
-                      type="button"
-                      onClick={() => setViewing({ kind: row.subjectType, id: row.subjectId })}
-                      className="text-start font-medium underline-offset-4 hover:underline"
-                    >
-                      {row.subjectTitle || row.title}
-                    </button>
+                    <SubjectLabel row={row} onOpen={setViewing} />
                     {row.note ? (
                       <div className="text-xs text-muted-foreground">{row.note}</div>
                     ) : null}

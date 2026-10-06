@@ -15,6 +15,7 @@ import { Loader2Icon } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { PlatformConfirmDialog } from "@/components/platform/dialogs";
 import { api, Button, Card, ErrorBox, Field, InfoBox, inputClass, errorMessage, useCan, PlatformPageSkeleton } from "../ui";
+import { AiConsoleNav } from "./ai-console-nav";
 
 const FLEET_STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: "all", label: "همه" },
@@ -347,6 +348,7 @@ export default function PlatformAiPage() {
 
   return (
     <div className="mx-auto w-full max-w-6xl space-y-4 sm:space-y-6">
+      <AiConsoleNav />
       <header>
         <h1 className="text-xl font-bold">تنظیمات هوش مصنوعی (LiteLLM)</h1>
         <p className="mt-1 text-sm text-muted-foreground">

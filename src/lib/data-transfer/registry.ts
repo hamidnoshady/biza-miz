@@ -25,6 +25,7 @@
  * UI needs the field list, and it must not drag `pg` in with it.
  */
 
+import type { Industry } from "../industries";
 import { PERMISSIONS } from "../permissions";
 import type { DataModuleKey, EntityDefinition, EntityField } from "./types";
 
@@ -639,6 +640,31 @@ const POS_PRODUCTS: EntityDefinition = {
       exportDefault: true,
     },
     { key: "description", label: "توضیحات", type: "longtext", aliases: ["توضیح"], exportDefault: true },
+    {
+      key: "imageUrl",
+      label: "لینک تصویر",
+      type: "text",
+      aliases: ["تصویر", "عکس", "image", "img"],
+      validation: { maxLength: 2000 },
+      exportDefault: true,
+    },
+    {
+      key: "imageMediaId",
+      label: "شناسهٔ رسانهٔ تصویر",
+      type: "text",
+      aliases: ["رسانه", "media id", "image_media_id"],
+      hint:
+        "شناسهٔ دارایی در کتابخانهٔ رسانه. در ورود، اگر در این کسب‌وکار موجود نباشد با هشدار نادیده گرفته می‌شود.",
+      exportDefault: true,
+    },
+    {
+      key: "targetMarginPercent",
+      label: "حاشیهٔ سود هدف (٪)",
+      type: "number",
+      aliases: ["حاشیه سود", "margin", "حاشیه"],
+      validation: { min: 0, max: 100 },
+      exportDefault: true,
+    },
     { key: "sortOrder", label: "ترتیب", type: "integer" },
     ACTIVE_FIELD,
     CREATED_AT_FIELD,
@@ -647,6 +673,68 @@ const POS_PRODUCTS: EntityDefinition = {
     { key: "sku", label: "کد کالا", fields: ["sku"] },
     { key: "name_category", label: "نام و دسته", fields: ["name", "categoryName"] },
     { key: "name", label: "نام آیتم", fields: ["name"] },
+  ],
+};
+
+/**
+ * Item ↔ modifier-group attachments (issue #844 parity): per-item min/max
+ * overrides, per-item link order and the link's own active state — the facts
+ * a flat items/modifiers export could not represent.
+ */
+const POS_ITEM_MODIFIER_GROUPS: EntityDefinition = {
+  key: "pos.item_modifier_groups",
+  module: "pos",
+  label: "اتصال افزودنی به آیتم",
+  description:
+    "کدام گروه افزودنی به کدام آیتم وصل است، با حداقل/حداکثر اختصاصی، ترتیب نمایش و وضعیت پیوند.",
+  exportPermission: PERMISSIONS.menuView,
+  importPermission: PERMISSIONS.menuEdit,
+  locationScoped: true,
+  requiresModule: "menu",
+  fields: [
+    {
+      key: "itemName",
+      label: "نام آیتم",
+      type: "text",
+      required: true,
+      aliases: ["آیتم", "محصول", "item", "نام محصول"],
+      exportDefault: true,
+    },
+    {
+      key: "itemSku",
+      label: "کد کالا",
+      type: "text",
+      aliases: ["کد", "sku"],
+      exportDefault: true,
+      hint: "در صورت وجود، مرجع اصلی آیتم است؛ در غیر این صورت از نام استفاده می‌شود.",
+    },
+    {
+      key: "groupName",
+      label: "گروه افزودنی",
+      type: "text",
+      required: true,
+      aliases: ["گروه", "افزودنی", "modifier group"],
+      exportDefault: true,
+    },
+    {
+      key: "minSelectOverride",
+      label: "حداقل انتخاب (اختصاصی)",
+      type: "integer",
+      aliases: ["حداقل", "min"],
+      validation: { min: 0 },
+    },
+    {
+      key: "maxSelectOverride",
+      label: "حداکثر انتخاب (اختصاصی)",
+      type: "integer",
+      aliases: ["حداکثر", "max"],
+      validation: { min: 0 },
+    },
+    { key: "sortOrder", label: "ترتیب نمایش در آیتم", type: "integer", exportDefault: true },
+    ACTIVE_FIELD,
+  ],
+  duplicateRules: [
+    { key: "item_group", label: "آیتم و گروه", fields: ["itemName", "groupName"] },
   ],
 };
 
@@ -1397,6 +1485,148 @@ const WORKSPACE_DOCUMENTS: EntityDefinition = {
   ],
 };
 
+/**
+ * Issue #799 §7 — the BOQ's measured rows, importable through this engine
+ * rather than a parser of its own ("do not create an isolated BOQ CSV parser").
+ *
+ * The flat shape a spreadsheet actually has: one row per measured item, with
+ * its chapter, its project and — optionally — the revision it belongs to. A
+ * row that names a revision which is no longer a draft is refused rather than
+ * written, because an approved revision is a historical record; a row that
+ * names no revision lands in the project's current draft, and one is created
+ * the first time somebody imports into a project that has no estimate yet.
+ */
+const WORKSPACE_BOQ_ITEMS: EntityDefinition = {
+  key: "workspace.boq_items",
+  module: "workspace",
+  label: "ردیف‌های متره و برآورد",
+  description:
+    "متره و برآورد پروژه‌های عمرانی: فصل، شرح، واحد، مقدار و نرخ‌های تشکیل‌دهندهٔ قیمت. نرخ‌ها به ریال خوانده می‌شوند.",
+  exportPermission: PERMISSIONS.workspaceView,
+  importPermission: PERMISSIONS.workspaceManage,
+  fields: [
+    ID_FIELD,
+    {
+      key: "projectName",
+      label: "پروژه",
+      type: "reference",
+      required: true,
+      aliases: ["پروژه", "project"],
+      relation: {
+        entity: "workspace.projects",
+        lookupFields: ["name"],
+        // A BOQ row for a project that does not exist is a mistake in the file,
+        // not an instruction to create a project: the row is skipped with the
+        // reason, and the operator fixes the sheet.
+        onMissing: "skip",
+        label: "پروژه",
+      },
+      exportDefault: true,
+    },
+    {
+      key: "estimateTitle",
+      label: "برآورد",
+      type: "text",
+      aliases: ["برآورد", "متره", "BOQ", "عنوان برآورد"],
+      hint: "خالی بماند، «برآورد اصلی» استفاده می‌شود.",
+      validation: { maxLength: 200 },
+      exportDefault: true,
+    },
+    {
+      key: "versionNo",
+      label: "شمارهٔ نسخه",
+      type: "integer",
+      aliases: ["نسخه", "ورژن", "revision"],
+      hint: "فقط نسخهٔ پیش‌نویس قابل ورود است؛ خالی بماند، نسخهٔ پیش‌نویس جاری انتخاب می‌شود.",
+      exportDefault: true,
+    },
+    {
+      key: "sectionCode",
+      label: "کد فصل",
+      type: "text",
+      aliases: ["فصل", "کد فصل", "بخش"],
+      validation: { maxLength: 40 },
+      exportDefault: true,
+    },
+    {
+      key: "sectionTitle",
+      label: "عنوان فصل",
+      type: "text",
+      aliases: ["شرح فصل", "عنوان بخش"],
+      validation: { maxLength: 200 },
+      exportDefault: true,
+    },
+    {
+      key: "itemCode",
+      label: "کد ردیف",
+      type: "text",
+      aliases: ["کد", "ردیف", "کد آیتم", "item"],
+      validation: { maxLength: 40 },
+      exportDefault: true,
+    },
+    {
+      key: "description",
+      label: "شرح ردیف",
+      type: "text",
+      required: true,
+      aliases: ["شرح", "شرح آیتم", "description"],
+      validation: { maxLength: 500 },
+      exportDefault: true,
+    },
+    {
+      key: "unit",
+      label: "واحد",
+      type: "text",
+      aliases: ["واحد اندازه‌گیری", "unit"],
+      validation: { maxLength: 20 },
+      exportDefault: true,
+    },
+    { key: "quantity", label: "مقدار", type: "number", aliases: ["مقدار", "متره"], exportDefault: true },
+    { key: "materialRateRial", label: "نرخ مصالح", type: "money", exportDefault: true },
+    { key: "laborRateRial", label: "نرخ دستمزد", type: "money", exportDefault: true },
+    { key: "equipmentRateRial", label: "نرخ ماشین‌آلات", type: "money", exportDefault: true },
+    { key: "subcontractRateRial", label: "نرخ پیمانکار جزء", type: "money", exportDefault: true },
+    { key: "wastePercent", label: "ضریب پرت (٪)", type: "number", aliases: ["پرت", "ضایعات"], exportDefault: true },
+    { key: "overheadPercent", label: "سربار (٪)", type: "number", exportDefault: true },
+    { key: "markupPercent", label: "سود (٪)", type: "number", aliases: ["سود", "markup"], exportDefault: true },
+    {
+      key: "workPackage",
+      label: "بستهٔ کاری",
+      type: "text",
+      aliases: ["رشته", "دیسیپلین", "work package"],
+      validation: { maxLength: 120 },
+      exportDefault: true,
+    },
+    {
+      key: "partyName",
+      label: "تأمین‌کننده/پیمانکار",
+      type: "reference",
+      aliases: ["تأمین‌کننده", "پیمانکار", "supplier"],
+      relation: {
+        entity: "crm.customers",
+        lookupFields: ["name", "phone"],
+        onMissing: "warn",
+        label: "تأمین‌کننده/پیمانکار",
+      },
+      exportDefault: true,
+    },
+    { key: "notes", label: "توضیحات", type: "longtext" },
+    // Computed by the database, exported so a round trip is checkable and never
+    // importable: the two columns a wrong file would otherwise be able to fake.
+    { key: "unitPriceRial", label: "قیمت واحد", type: "money", readOnly: true, exportDefault: true },
+    { key: "totalRial", label: "جمع ردیف", type: "money", readOnly: true, exportDefault: true },
+    CREATED_AT_FIELD,
+  ],
+  duplicateRules: [
+    {
+      key: "item",
+      label: "کد/شرح ردیف در همان پروژه",
+      fields: ["projectName", "estimateTitle", "versionNo", "itemCode", "description"],
+    },
+  ],
+  requiresIndustry: "architecture_construction",
+};
+
 // ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
@@ -1420,6 +1650,7 @@ export const DATA_ENTITIES: readonly EntityDefinition[] = [
   // POS
   POS_PRODUCTS,
   POS_CATEGORIES,
+  POS_ITEM_MODIFIER_GROUPS,
   POS_MODIFIERS,
   POS_ORDERS,
   // Inventory
@@ -1440,9 +1671,23 @@ export const DATA_ENTITIES: readonly EntityDefinition[] = [
   WORKSPACE_TASKS,
   WORKSPACE_CONTRACTS,
   WORKSPACE_DOCUMENTS,
+  WORKSPACE_BOQ_ITEMS,
 ];
 
 const BY_KEY = new Map(DATA_ENTITIES.map((entity) => [entity.key, entity]));
+
+/**
+ * The entities a business may even see, before permissions narrow them further.
+ *
+ * One function so the catalogue route and any future caller cannot disagree
+ * about which trade an entity belongs to — and so the answer is unit-testable
+ * without a database.
+ */
+export function entitiesForIndustry(industry: Industry | null | undefined): EntityDefinition[] {
+  return DATA_ENTITIES.filter(
+    (entity) => !entity.requiresIndustry || entity.requiresIndustry === industry,
+  );
+}
 
 /** The entity a key names, or null. Never throws — a key comes from a URL. */
 export function findEntity(key: string | null | undefined): EntityDefinition | null {

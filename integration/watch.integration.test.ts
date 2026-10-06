@@ -26,6 +26,13 @@ let itemsService: typeof import("../src/lib/items-service");
 let watchSales: typeof import("../src/lib/watch-sales-service");
 let repairs: typeof import("../src/lib/repairs-service");
 let watchCrm: typeof import("../src/lib/watch-crm-service");
+let retailStock: typeof import("../src/lib/retail-stock-service");
+let invoiceService: typeof import("../src/lib/retail-invoice-service");
+let watchReturns: typeof import("../src/lib/watch-return-service");
+let watchReservations: typeof import("../src/lib/watch-reservation-service");
+let watchTransfers: typeof import("../src/lib/watch-transfer-service");
+let watchAttributes: typeof import("../src/lib/watch-attributes-service");
+let serialDetail: typeof import("../src/lib/watch-serial-detail");
 
 const biz = { id: "", locationId: "" };
 const acct = {
@@ -36,6 +43,7 @@ const acct = {
   watchInventory: "",
   repairServiceRevenue: "",
   repairPartsExpense: "",
+  accountsPayable: "",
 };
 
 function urlFor(database: string): string {
@@ -69,6 +77,13 @@ beforeAll(async () => {
   watchSales = await import("../src/lib/watch-sales-service");
   repairs = await import("../src/lib/repairs-service");
   watchCrm = await import("../src/lib/watch-crm-service");
+  retailStock = await import("../src/lib/retail-stock-service");
+  invoiceService = await import("../src/lib/retail-invoice-service");
+  watchReturns = await import("../src/lib/watch-return-service");
+  watchReservations = await import("../src/lib/watch-reservation-service");
+  watchTransfers = await import("../src/lib/watch-transfer-service");
+  watchAttributes = await import("../src/lib/watch-attributes-service");
+  serialDetail = await import("../src/lib/watch-serial-detail");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -89,6 +104,24 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  // Completed orders guard their own lines (migration 0014/0075 triggers), so
+  // the invoice-backed tables reset under the same factory_reset escape hatch
+  // the retail invoice suites use.
+  await db.query("ROLLBACK").catch(() => {});
+  await db.query("BEGIN");
+  await db.query("SELECT set_config('app.factory_reset', 'true', true)");
+  await db.query("DELETE FROM serial_returns");
+  await db.query("DELETE FROM serial_reservations");
+  await db.query("DELETE FROM serial_preowned_intakes");
+  await db.query("DELETE FROM commission_accruals");
+  await db.query("DELETE FROM customer_points");
+  await db.query("DELETE FROM order_amendments");
+  await db.query("DELETE FROM payments");
+  await db.query("DELETE FROM order_items");
+  await db.query("DELETE FROM orders");
+  await db.query("DELETE FROM order_number_counters");
+  await db.query("DELETE FROM audit_log");
+  await db.query("COMMIT");
   await db.query("DELETE FROM repair_ticket_parts");
   await db.query("DELETE FROM repair_tickets");
   await db.query("DELETE FROM repair_ticket_counters");
@@ -96,7 +129,11 @@ beforeEach(async () => {
   await db.query("DELETE FROM domain_events");
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
+  await db.query("DELETE FROM item_supplier_return_items");
+  await db.query("DELETE FROM item_supplier_returns");
   await db.query("DELETE FROM item_serials");
+  await db.query("DELETE FROM item_purchase_items");
+  await db.query("DELETE FROM item_purchases");
   await db.query("DELETE FROM items");
   await db.query("DELETE FROM accounts");
   await db.query("DELETE FROM businesses");
@@ -121,7 +158,8 @@ beforeEach(async () => {
             ($1, '5120', 'Watch COGS', 'expense'),
             ($1, '1330', 'Watch Inventory', 'asset'),
             ($1, '4800', 'Repair Revenue', 'revenue'),
-            ($1, '5130', 'Repair Parts Expense', 'expense')
+            ($1, '5130', 'Repair Parts Expense', 'expense'),
+            ($1, '2100', 'Accounts Payable', 'liability')
      RETURNING id, code`,
     [biz.id],
   );
@@ -133,6 +171,7 @@ beforeEach(async () => {
     "1330": "watchInventory",
     "4800": "repairServiceRevenue",
     "5130": "repairPartsExpense",
+    "2100": "accountsPayable",
   };
   for (const row of accounts.rows) acct[byCode[row.code]] = row.id;
 });
@@ -317,6 +356,9 @@ describe("sellSerializedUnit", () => {
         soldAt: "2026-08-12",
         warrantyStart: "2026-08-12",
         warrantyEnd: "2027-08-12",
+        preOwned: false,
+        conditionGrade: null,
+        boxAndPapers: false,
       },
     ]);
   });
@@ -602,13 +644,23 @@ describe("Wave 10 — watch flagship", () => {
 
   it("records a pre-owned intake's condition grade and box/papers state on the serial", async () => {
     const { serial } = await makeWatchUnit();
-    await watchCrm.recordPreOwnedIntake(serial.id, { conditionGrade: "good", boxAndPapers: true });
+    await watchCrm.recordPreOwnedIntake({
+      businessId: biz.id,
+      serialId: serial.id,
+      conditionGrade: "good",
+      boxAndPapers: true,
+    });
 
     const stored = await db.query<{ condition_grade: string; box_and_papers: boolean; pre_owned: boolean }>(
       "SELECT condition_grade, box_and_papers, pre_owned FROM item_serials WHERE id = $1",
       [serial.id],
     );
     expect(stored.rows[0]).toEqual({ condition_grade: "good", box_and_papers: true, pre_owned: true });
+
+    // Issue #795 item 19 — the unit board exposes the provenance, not just
+    // the raw columns: the dashboard can badge the unit without extra trips.
+    const summary = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.id === serial.id);
+    expect(summary).toMatchObject({ preOwned: true, conditionGrade: "good", boxAndPapers: true });
   });
 
   it("refuses to move a ticket to in_progress, or close it, before the estimate is approved", async () => {
@@ -635,12 +687,16 @@ describe("Wave 10 — watch flagship", () => {
     expect(approved.approvedAt).not.toBeNull();
     expect(approved.estimatedTotalRial).toBe(1_500_000);
 
+    // Issue #795 item 11 — a chargeable part added AFTER the signature
+    // changes the bill, so the approval is withdrawn and must be re-obtained.
     await repairs.addRepairPart(ticket.id, {
       description: "بند",
       quantity: "1",
       unitCost: 300_000,
       charge: 500_000,
     });
+    await expect(repairs.setRepairStatus(ticket.id, "in_progress")).rejects.toThrow(/تأیید مشتری/);
+    await watchCrm.approveRepairEstimate(ticket.id);
     await repairs.setRepairStatus(ticket.id, "in_progress");
     await repairs.setRepairStatus(ticket.id, "ready");
     const result = await withTransaction((client) =>
@@ -685,5 +741,1797 @@ describe("Wave 10 — watch flagship", () => {
       }),
     );
     expect(result.breakdown.total).toBe("1000000");
+  });
+});
+
+/**
+ * Issue #795 Phase 1 — accounting-correctness guards on the shared repair
+ * workflow: server-enforced warranty billing, part sourcing (only stock
+ * parts relieve inventory), industry-aware repair COGS, cross-branch serial
+ * rejection, and the one-active-repair-per-serial invariant.
+ */
+describe("Issue #795 Phase 1 — repair lifecycle & accounting guards", () => {
+  async function sellUnderWarranty() {
+    const { serial } = await makeWatchUnit({ warrantyMonths: 24 });
+    await withTransaction((client) =>
+      watchSales.sellSerializedUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: serial.id,
+        price: 50_000_000,
+        vatPercent: 9,
+        paymentMethod: "cash",
+      }),
+    );
+    return serial;
+  }
+
+  it("refuses a labor charge at intake on a warranty job without an out-of-coverage reason, and accepts one with it", async () => {
+    const serial = await sellUnderWarranty();
+
+    await expect(
+      repairs.createRepairTicket({
+        locationId: biz.locationId,
+        itemDescription: "ساعت در گارانتی",
+        serialId: serial.id,
+        laborCharge: 1_000_000,
+      }),
+    ).rejects.toThrow(/خارج از پوشش/);
+
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت در گارانتی",
+      serialId: serial.id,
+      laborCharge: 1_000_000,
+      nonCoveredReason: "آب‌خوردگی — خارج از پوشش، با تأیید مشتری",
+    });
+    expect(ticket.underWarranty).toBe(true);
+    expect(ticket.nonCoveredReason).toContain("آب‌خوردگی");
+  });
+
+  it("refuses to bill a part on a warranty job, and refuses to sneak the bill in through an edit", async () => {
+    const serial = await sellUnderWarranty();
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت در گارانتی",
+      serialId: serial.id,
+    });
+    expect(ticket.underWarranty).toBe(true);
+
+    // Part with a customer charge: refused while no reason is on file; the
+    // zero-charge (covered) part is fine.
+    await expect(
+      repairs.addRepairPart(ticket.id, { description: "شیشه", quantity: "1", unitCost: 400_000, charge: 900_000 }),
+    ).rejects.toThrow(/خارج از پوشش/);
+    await repairs.addRepairPart(ticket.id, { description: "باتری", quantity: "1", unitCost: 300_000, charge: 0 });
+
+    // Editing a labor charge onto the covered job is refused the same way.
+    await expect(repairs.updateRepairTicket(ticket.id, { laborCharge: 2_000_000 })).rejects.toThrow(
+      /خارج از پوشش/,
+    );
+
+    // With the explicit reason recorded, the out-of-coverage work may bill.
+    await repairs.updateRepairTicket(ticket.id, { nonCoveredReason: "بند سفارشی — خارج از پوشش" });
+    await repairs.addRepairPart(ticket.id, { description: "بند", quantity: "1", unitCost: 500_000, charge: 1_200_000 });
+
+    // ...and once billed parts exist, the reason can no longer be cleared.
+    await expect(repairs.updateRepairTicket(ticket.id, { nonCoveredReason: "" })).rejects.toThrow(
+      /نمی‌توان حذف کرد/,
+    );
+  });
+
+  it("re-checks the warranty invariant at close even if the reason was nulled behind the service's back", async () => {
+    const serial = await sellUnderWarranty();
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت در گارانتی",
+      serialId: serial.id,
+      laborCharge: 1_000_000,
+      nonCoveredReason: "کار خارج از پوشش",
+    });
+
+    // Simulate drift (a direct DB edit) that the earlier guards never saw.
+    await db.query("UPDATE repair_tickets SET non_covered_reason = NULL WHERE id = $1", [ticket.id]);
+
+    await expect(
+      withTransaction((client) =>
+        repairs.closeRepairTicket(client, { businessId: biz.id, ticketId: ticket.id, paymentMethod: "cash" }),
+      ),
+    ).rejects.toThrow(/خارج از پوشش/);
+  });
+
+  it("rejects intake for a serial that belongs to another branch", async () => {
+    const otherLoc = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Branch 2') RETURNING id",
+      [biz.id],
+    );
+    const item = await itemsService.createItem({
+      locationId: otherLoc.rows[0].id,
+      name: "ساعت شعبه دو",
+      tracking: "serial",
+    });
+    const serial = await itemsService.addSerial(item.id, `SN-X-${randomUUID().slice(0, 6)}`, {
+      unitCost: 10_000_000,
+    });
+
+    await expect(
+      repairs.createRepairTicket({
+        locationId: biz.locationId,
+        itemDescription: "ساعت شعبهٔ دیگر",
+        serialId: serial.id,
+      }),
+    ).rejects.toThrow(/شعبهٔ فعال نیست/);
+
+    // The foreign unit must be untouched — still on its own branch's shelf.
+    expect((await itemsService.getSerial(serial.id))?.status).toBe("in_stock");
+  });
+
+  it("allows only one active repair per serial; a cancelled ticket frees the unit for a new intake", async () => {
+    const { serial } = await makeWatchUnit();
+    const first = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت انبار",
+      serialId: serial.id,
+    });
+
+    await expect(
+      repairs.createRepairTicket({
+        locationId: biz.locationId,
+        itemDescription: "پذیرش تکراری",
+        serialId: serial.id,
+      }),
+    ).rejects.toThrow(/تیکت تعمیر باز/);
+
+    await repairs.setRepairStatus(first.id, "cancelled");
+    const second = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "پذیرش دوم",
+      serialId: serial.id,
+    });
+    expect(second.ticketNumber).toBe(first.ticketNumber + 1);
+  });
+
+  it("relieves inventory only for stock-sourced parts — an external part's cost never credits watch inventory", async () => {
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت مشتری",
+      laborCharge: 1_000_000,
+      vatPercent: 0,
+    });
+    await repairs.addRepairPart(ticket.id, {
+      description: "باتری از انبار",
+      quantity: "1",
+      unitCost: 300_000,
+      charge: 500_000,
+      source: "stock",
+    });
+    await repairs.addRepairPart(ticket.id, {
+      description: "شیشهٔ سفارشی خرید بیرونی",
+      quantity: "1",
+      unitCost: 2_000_000,
+      charge: 2_500_000,
+      source: "external",
+    });
+
+    const result = await withTransaction((client) =>
+      repairs.closeRepairTicket(client, { businessId: biz.id, ticketId: ticket.id, paymentMethod: "cash" }),
+    );
+
+    // The customer is still billed for both parts…
+    expect(result.breakdown.partsCharge).toBe("3000000");
+    // …but only the stock part's cost leaves watch inventory.
+    expect(await linesOf(result.partsCostEntryId)).toEqual([
+      { account_id: acct.repairPartsExpense, debit: "300000", credit: "0" },
+      { account_id: acct.watchInventory, debit: "0", credit: "300000" },
+    ]);
+  });
+
+  it("credits the jewelry inventory account — not watch inventory — when a jewelry business closes a repair with parts", async () => {
+    // A second, jewelry business with its own branch and chart of accounts.
+    const jbiz = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug, industry) VALUES ('Gold Co', $1, 'jewelry') RETURNING id",
+      [`gold-${randomUUID().slice(0, 8)}`],
+    );
+    const jloc = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Main') RETURNING id",
+      [jbiz.rows[0].id],
+    );
+    const jacct = await db.query<{ id: string; code: string }>(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, '1100', 'Cash', 'asset'),
+              ($1, '2200', 'VAT Payable', 'liability'),
+              ($1, '4800', 'Repair Revenue', 'revenue'),
+              ($1, '5130', 'Repair Parts Expense', 'expense'),
+              ($1, '1320', 'Gold Inventory', 'asset')
+       RETURNING id, code`,
+      [jbiz.rows[0].id],
+    );
+    const byCode = new Map(jacct.rows.map((r) => [r.code, r.id]));
+
+    const ticket = await repairs.createRepairTicket({
+      locationId: jloc.rows[0].id,
+      itemDescription: "گردنبند — تعویض قفل",
+      laborCharge: 1_500_000,
+      vatPercent: 0,
+    });
+    await repairs.addRepairPart(ticket.id, {
+      description: "قفل طلا",
+      quantity: "1",
+      unitCost: 700_000,
+      charge: 1_000_000,
+      source: "stock",
+    });
+
+    const result = await withTransaction((client) =>
+      repairs.closeRepairTicket(client, {
+        businessId: jbiz.rows[0].id,
+        ticketId: ticket.id,
+        paymentMethod: "cash",
+      }),
+    );
+
+    expect(await linesOf(result.partsCostEntryId)).toEqual([
+      { account_id: byCode.get("5130"), debit: "700000", credit: "0" },
+      { account_id: byCode.get("1320"), debit: "0", credit: "700000" },
+    ]);
+    // VAT is 0 here, and the ledger drops all-zero lines — so the revenue
+    // entry is just the cash debit against repair revenue.
+    expect(await linesOf(result.revenueEntryId)).toEqual([
+      { account_id: byCode.get("1100"), debit: "2500000", credit: "0" },
+      { account_id: byCode.get("4800"), debit: "0", credit: "2500000" },
+    ]);
+  });
+});
+
+/**
+ * Issue #795 Phase 2 (item 1) — serialized purchase receipt. Receiving a
+ * serial-tracked purchase line must name exactly N physical serials, create
+ * them with their exact cost basis and warranty default, and post
+ * Debit watchInventory / Credit accounts payable in the same transaction —
+ * which is what gives the later sale's Credit of watchInventory a real
+ * preceding debit.
+ */
+describe("Issue #795 Phase 2 — serialized purchase receipt", () => {
+  it("receives exact serials with cost basis + warranty and posts inventory/AP, completing the chain to sale COGS", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت مچی اتومات",
+      tracking: "serial",
+    });
+
+    const purchase = await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [
+          {
+            itemId: item.id,
+            quantity: "2",
+            unitCost: 30_000_000,
+            serials: [
+              { serialNumber: "SN-795-A", warrantyMonths: 24 },
+              { serialNumber: "SN-795-B", warrantyMonths: 24 },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(purchase.total).toBe("60000000");
+
+    // The receipt posted Debit watchInventory / Credit AP for the exact total.
+    const { rows: events } = await db.query<{ entry_id: string | null }>(
+      "SELECT entry_id FROM domain_events WHERE event_type = 'retail.purchase_received' AND source_id = $1",
+      [purchase.id],
+    );
+    expect(events).toHaveLength(1);
+    expect(await linesOf(events[0].entry_id)).toEqual([
+      { account_id: acct.watchInventory, debit: "60000000", credit: "0" },
+      { account_id: acct.accountsPayable, debit: "0", credit: "60000000" },
+    ]);
+
+    // Both physical units exist, in stock, with their exact cost basis and
+    // the warranty default they will be sold with.
+    const units = await watchSales.listSerialUnits(biz.locationId);
+    expect(units.map((u) => [u.serialNumber, u.status, u.unitCost, u.warrantyMonths])).toEqual([
+      ["SN-795-A", "in_stock", 30_000_000, 24],
+      ["SN-795-B", "in_stock", 30_000_000, 24],
+    ]);
+
+    // Selling one of them now credits the same inventory account the
+    // purchase debited — the chain the audit found broken.
+    const sold = units[0];
+    const sale = await withTransaction((client) =>
+      watchSales.sellSerializedUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: sold.id,
+        price: 45_000_000,
+        vatPercent: 9,
+        paymentMethod: "cash",
+      }),
+    );
+    expect(await linesOf(sale.cogsEntryId)).toEqual([
+      { account_id: acct.watchCogs, debit: "30000000", credit: "0" },
+      { account_id: acct.watchInventory, debit: "0", credit: "30000000" },
+    ]);
+  });
+
+  it("requires exactly one serial per unit, unique serials, and a positive integer cost", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت مچی کوارتز",
+      tracking: "serial",
+    });
+    const base = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: null,
+      createdBy: null,
+    };
+
+    // Quantity 2, one serial — refused.
+    await expect(
+      withTransaction((client) =>
+        retailStock.receiveItemPurchase(client, {
+          ...base,
+          lines: [{ itemId: item.id, quantity: "2", unitCost: 10_000_000, serials: [{ serialNumber: "SN-1" }] }],
+        }),
+      ),
+    ).rejects.toThrow(/دقیقاً یک شماره سریال/);
+
+    // Duplicate serials inside the line — refused.
+    await expect(
+      withTransaction((client) =>
+        retailStock.receiveItemPurchase(client, {
+          ...base,
+          lines: [
+            {
+              itemId: item.id,
+              quantity: "2",
+              unitCost: 10_000_000,
+              serials: [{ serialNumber: "SN-1" }, { serialNumber: "SN-1" }],
+            },
+          ],
+        }),
+      ),
+    ).rejects.toThrow(/تکراری/);
+
+    // A zero/absent cost basis is refused — the whole point of the receipt
+    // is to establish the unit's cost with a matching posting.
+    await expect(
+      withTransaction((client) =>
+        retailStock.receiveItemPurchase(client, {
+          ...base,
+          lines: [{ itemId: item.id, quantity: "1", unitCost: 0, serials: [{ serialNumber: "SN-2" }] }],
+        }),
+      ),
+    ).rejects.toThrow(/عدد صحیح مثبت/);
+
+    // A serial already registered on this model is refused with a clear message.
+    await itemsService.addSerial(item.id, "SN-EXISTS", { unitCost: 10_000_000 });
+    await expect(
+      withTransaction((client) =>
+        retailStock.receiveItemPurchase(client, {
+          ...base,
+          lines: [
+            { itemId: item.id, quantity: "1", unitCost: 10_000_000, serials: [{ serialNumber: "SN-EXISTS" }] },
+          ],
+        }),
+      ),
+    ).rejects.toThrow(/قبلاً برای این کالا ثبت شده/);
+
+    // Nothing partial leaked from any of the refused receipts.
+    const { rows } = await db.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM item_serials WHERE item_id = $1",
+      [item.id],
+    );
+    expect(rows[0].n).toBe("1"); // only SN-EXISTS
+  });
+});
+
+/**
+ * Issue #795 Phase 2 (item 1, second half) — supplier returns of serialized
+ * units. A return names the exact physical serial; the unit moves to the
+ * terminal `supplier_returned` state (never deleted), the posting relieves
+ * watchInventory at that unit's own cost basis against the settlement
+ * account, and the unit can never be sold afterwards.
+ */
+describe("Issue #795 Phase 2 — serialized supplier return", () => {
+  async function receiveTwo() {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت مچی کرنوگراف",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [
+          {
+            itemId: item.id,
+            quantity: "2",
+            unitCost: 30_000_000,
+            serials: [{ serialNumber: "SN-RET-A" }, { serialNumber: "SN-RET-B" }],
+          },
+        ],
+      }),
+    );
+    return item;
+  }
+
+  it("returns the exact serial, posts Debit AP / Credit watchInventory at its cost basis, and the unit is terminally gone", async () => {
+    const item = await receiveTwo();
+
+    const result = await withTransaction((client) =>
+      retailStock.createItemSupplierReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        settlementMethod: "accounts_payable",
+        reason: "خرابی از کارخانه",
+        idempotencyKey: "ret-795-1",
+        lines: [{ itemId: item.id, quantity: "1", serialNumber: "SN-RET-A" }],
+      }),
+    );
+    expect(result.value).toBe("30000000");
+
+    // The return document line records WHICH physical unit went back.
+    const { rows: retLines } = await db.query<{ serial_id: string | null; value_rial: string }>(
+      "SELECT serial_id, value_rial::text FROM item_supplier_return_items WHERE return_id = $1",
+      [result.id],
+    );
+    expect(retLines).toHaveLength(1);
+    expect(retLines[0].serial_id).not.toBeNull();
+    expect(retLines[0].value_rial).toBe("30000000");
+
+    // Posting: Debit AP / Credit watchInventory for the unit's exact cost.
+    const { rows: events } = await db.query<{ entry_id: string | null }>(
+      "SELECT entry_id FROM domain_events WHERE event_type = 'retail.supplier_return' AND source_id = $1",
+      [result.id],
+    );
+    expect(events).toHaveLength(1);
+    expect(await linesOf(events[0].entry_id)).toEqual([
+      { account_id: acct.accountsPayable, debit: "30000000", credit: "0" },
+      { account_id: acct.watchInventory, debit: "0", credit: "30000000" },
+    ]);
+
+    // The unit is terminally `supplier_returned` — still visible (audit),
+    // never sellable again; its sibling is untouched.
+    const units = await watchSales.listSerialUnits(biz.locationId);
+    expect(units.map((u) => [u.serialNumber, u.status])).toEqual([
+      ["SN-RET-A", "supplier_returned"],
+      ["SN-RET-B", "in_stock"],
+    ]);
+    const returned = units[0];
+    await expect(
+      withTransaction((client) =>
+        watchSales.sellSerializedUnit(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          serialId: returned.id,
+          price: 45_000_000,
+          vatPercent: 0,
+          paymentMethod: "cash",
+        }),
+      ),
+    ).rejects.toThrow();
+
+    // Idempotency: replaying the same return changes nothing.
+    const replay = await withTransaction((client) =>
+      retailStock.createItemSupplierReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        settlementMethod: "accounts_payable",
+        reason: "خرابی از کارخانه",
+        idempotencyKey: "ret-795-1",
+        lines: [{ itemId: item.id, quantity: "1", serialNumber: "SN-RET-A" }],
+      }),
+    );
+    expect(replay.duplicate).toBe(true);
+    expect(replay.value).toBe("30000000");
+  });
+
+  it("refuses quantity ≠ 1, a missing/unknown serial, and a unit that is not on the shelf", async () => {
+    const item = await receiveTwo();
+    const base = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      settlementMethod: "accounts_payable" as const,
+      reason: "تست",
+    };
+
+    await expect(
+      withTransaction((client) =>
+        retailStock.createItemSupplierReturn(client, {
+          ...base,
+          idempotencyKey: "ret-795-q",
+          lines: [{ itemId: item.id, quantity: "2", serialNumber: "SN-RET-A" }],
+        }),
+      ),
+    ).rejects.toThrow(/دقیقاً یک دستگاه/);
+
+    await expect(
+      withTransaction((client) =>
+        retailStock.createItemSupplierReturn(client, {
+          ...base,
+          idempotencyKey: "ret-795-m",
+          lines: [{ itemId: item.id, quantity: "1" }],
+        }),
+      ),
+    ).rejects.toThrow(/سریال دقیق/);
+
+    await expect(
+      withTransaction((client) =>
+        retailStock.createItemSupplierReturn(client, {
+          ...base,
+          idempotencyKey: "ret-795-u",
+          lines: [{ itemId: item.id, quantity: "1", serialNumber: "SN-NOPE" }],
+        }),
+      ),
+    ).rejects.toThrow(/سریال یافت نشد/);
+
+    // Sell SN-RET-A, then try to return it — a sold unit never goes back.
+    const units = await watchSales.listSerialUnits(biz.locationId);
+    const unitA = units.find((u) => u.serialNumber === "SN-RET-A")!;
+    await withTransaction((client) =>
+      watchSales.sellSerializedUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: unitA.id,
+        price: 45_000_000,
+        vatPercent: 0,
+        paymentMethod: "cash",
+      }),
+    );
+    await expect(
+      withTransaction((client) =>
+        retailStock.createItemSupplierReturn(client, {
+          ...base,
+          idempotencyKey: "ret-795-s",
+          lines: [{ itemId: item.id, quantity: "1", serialNumber: "SN-RET-A" }],
+        }),
+      ),
+    ).rejects.toThrow(/فروخته‌شده را نمی‌توان/);
+
+    // Nothing partial leaked: no return documents survived the rollbacks.
+    const { rows } = await db.query<{ n: string }>("SELECT count(*)::text AS n FROM item_supplier_returns");
+    expect(rows[0].n).toBe("0");
+  });
+});
+
+/**
+ * Issue #795 Phase 3 — the manager-approved customer return / exchange
+ * workflow for serialized units: requested → received_for_inspection →
+ * dispositioned, with the explicit disposition driving both the unit's next
+ * state and the exact financial reversal of the original invoice line.
+ */
+describe("Issue #795 Phase 3 — serialized customer returns", () => {
+  async function soldUnit(serialNumber = "SN-CR-1") {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت غواصی",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [
+          {
+            itemId: item.id,
+            quantity: "1",
+            unitCost: 30_000_000,
+            serials: [{ serialNumber, warrantyMonths: 24 }],
+          },
+        ],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find(
+      (u) => u.serialNumber === serialNumber,
+    )!;
+    // price 45,000,000 + 9% VAT → total 49,050,000 — through the real
+    // invoice engine, so the line snapshot carries its own ledgerEntryIds.
+    const inv = await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+    return { item, unit, inv };
+  }
+
+  async function runReturn(
+    serialId: string,
+    disposition:
+      | "returned_sellable"
+      | "returned_service_required"
+      | "returned_damaged"
+      | "supplier_claim"
+      | "write_off"
+      | "exchange",
+  ) {
+    const req = await withTransaction((client) =>
+      watchReturns.requestSerialReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId,
+        reason: "خرابی در هفته اول",
+        createdBy: null,
+      }),
+    );
+    await withTransaction((client) =>
+      watchReturns.receiveSerialReturn(client, {
+        businessId: biz.id,
+        returnId: req.id,
+        inspectionNotes: "بازرسی شد",
+        actorId: null,
+      }),
+    );
+    const result = await withTransaction((client) =>
+      watchReturns.dispositionSerialReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        returnId: req.id,
+        disposition,
+        refundMethod: "cash",
+        approvedBy: null,
+      }),
+    );
+    return { req, result };
+  }
+
+  it("returned_sellable: reverses revenue/VAT and COGS exactly, refunds the payment, puts the exact unit back on the shelf with no running warranty, and the unit can sell again", async () => {
+    const { unit, inv } = await soldUnit();
+
+    const req = await withTransaction((client) =>
+      watchReturns.requestSerialReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: unit.id,
+        reason: "انصراف مشتری",
+        createdBy: null,
+      }),
+    );
+    // The sale invoice was found from the serial itself.
+    expect(req.orderId).toBe(inv.orderId);
+
+    await withTransaction((client) =>
+      watchReturns.receiveSerialReturn(client, {
+        businessId: biz.id,
+        returnId: req.id,
+        inspectionNotes: "سالم و کامل",
+        actorId: null,
+      }),
+    );
+    const result = await withTransaction((client) =>
+      watchReturns.dispositionSerialReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        returnId: req.id,
+        disposition: "returned_sellable",
+        refundMethod: "cash",
+        approvedBy: null,
+      }),
+    );
+    expect(result.refundAmount).toBe("49050000");
+    expect(result.serialStatus).toBe("in_stock");
+    expect(result.reversedEntryIds).toHaveLength(2);
+
+    // One mirror unwinds the sale (Debit revenue+VAT / Credit cash), the
+    // other unwinds COGS (Debit inventory / Credit COGS) — exact amounts.
+    const mirrors = await Promise.all(result.reversedEntryIds.map((id) => linesOf(id)));
+    expect(mirrors).toContainEqual([
+      { account_id: acct.watchSalesRevenue, debit: "45000000", credit: "0" },
+      { account_id: acct.vatPayable, debit: "4050000", credit: "0" },
+      { account_id: acct.cash, debit: "0", credit: "49050000" },
+    ]);
+    expect(mirrors).toContainEqual([
+      { account_id: acct.watchInventory, debit: "30000000", credit: "0" },
+      { account_id: acct.watchCogs, debit: "0", credit: "30000000" },
+    ]);
+
+    // Refund footprint: a negative payments row («negative = refund»).
+    const { rows: refunds } = await db.query<{ method: string; amount: string }>(
+      "SELECT method::text AS method, amount::text AS amount FROM payments WHERE order_id = $1 AND amount < 0",
+      [inv.orderId],
+    );
+    expect(refunds).toEqual([{ method: "cash", amount: "-49050000" }]);
+
+    // The exact unit is back, cost basis intact, warranty window gone.
+    const after = (await watchSales.listSerialUnits(biz.locationId))[0];
+    expect([after.status, after.unitCost, after.soldAt, after.warrantyStart]).toEqual([
+      "in_stock",
+      30_000_000,
+      null,
+      null,
+    ]);
+
+    // The original invoice stayed immutable history.
+    const { rows: orderRows } = await db.query<{ status: string }>(
+      "SELECT status::text AS status FROM orders WHERE id = $1",
+      [inv.orderId],
+    );
+    expect(orderRows[0].status).toBe("completed");
+
+    // Full circle: the unit sells again through the normal engine…
+    const resale = await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 40_000_000, vatPercent: 9 }],
+      }),
+    );
+    expect(resale.total).toBe("43600000");
+    // …and the NEW sale line can open its own return (the live-return
+    // uniqueness is per sold line, not forever per physical unit).
+    const again = await withTransaction((client) =>
+      watchReturns.requestSerialReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: unit.id,
+        reason: "بار دوم",
+        createdBy: null,
+      }),
+    );
+    expect(again.orderId).toBe(resale.orderId);
+  });
+
+  it("write_off: refunds revenue/VAT but keeps the cost expensed as the loss; the unit is terminally written off", async () => {
+    const { unit } = await soldUnit("SN-CR-WO");
+    const { result } = await runReturn(unit.id, "write_off");
+
+    // Only the revenue/VAT side reversed — COGS deliberately stands.
+    expect(result.serialStatus).toBe("written_off");
+    expect(result.reversedEntryIds).toHaveLength(1);
+    expect(await linesOf(result.reversedEntryIds[0])).toEqual([
+      { account_id: acct.watchSalesRevenue, debit: "45000000", credit: "0" },
+      { account_id: acct.vatPayable, debit: "4050000", credit: "0" },
+      { account_id: acct.cash, debit: "0", credit: "49050000" },
+    ]);
+    // Nothing came back into the inventory account.
+    const { rows: invDebits } = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM journal_lines l
+        JOIN journal_entries e ON e.id = l.entry_id
+       WHERE l.account_id = $1 AND l.debit > 0 AND e.posting_kind LIKE '%reversal%'`,
+      [acct.watchInventory],
+    );
+    expect(invDebits[0].n).toBe("0");
+
+    // Terminal: the written-off unit can never sell.
+    await expect(
+      withTransaction((client) =>
+        watchSales.sellSerializedUnit(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          serialId: unit.id,
+          price: 10_000_000,
+          vatPercent: 0,
+          paymentMethod: "cash",
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("supplier_claim: the value returns to inventory and immediately leaves for the supplier — Debit AP / Credit inventory, terminal supplier_returned, exact serial on the claim document", async () => {
+    const { unit } = await soldUnit("SN-CR-SC");
+    const { req, result } = await runReturn(unit.id, "supplier_claim");
+
+    expect(result.serialStatus).toBe("supplier_returned");
+    expect(result.reversedEntryIds).toHaveLength(2); // revenue + COGS mirrors
+
+    // The claim is a real supplier-return document naming the exact unit…
+    const { rows: claims } = await db.query<{ id: string; serial_id: string | null; value_rial: string }>(
+      `SELECT r.id, i.serial_id, i.value_rial::text
+         FROM item_supplier_returns r JOIN item_supplier_return_items i ON i.return_id = r.id
+        WHERE r.idempotency_key = $1`,
+      [`serial-return:${req.id}`],
+    );
+    expect(claims).toHaveLength(1);
+    expect(claims[0].serial_id).toBe(unit.id);
+    expect(claims[0].value_rial).toBe("30000000");
+
+    // …with its own Debit AP / Credit inventory posting at the cost basis.
+    const { rows: events } = await db.query<{ entry_id: string | null }>(
+      "SELECT entry_id FROM domain_events WHERE event_type = 'retail.supplier_return' AND source_id = $1",
+      [claims[0].id],
+    );
+    expect(events).toHaveLength(1);
+    expect(await linesOf(events[0].entry_id)).toEqual([
+      { account_id: acct.accountsPayable, debit: "30000000", credit: "0" },
+      { account_id: acct.watchInventory, debit: "0", credit: "30000000" },
+    ]);
+  });
+
+  it("guards the lifecycle: no invoice → no return; one live return per sold line; disposition only after inspection; a cancelled claim frees the line", async () => {
+    // A unit that was never sold has no invoice to unwind.
+    const freshItem = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت جیبی",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: freshItem.id, quantity: "1", unitCost: 5_000_000, serials: [{ serialNumber: "SN-NEVER" }] }],
+      }),
+    );
+    const fresh = (await watchSales.listSerialUnits(biz.locationId)).find(
+      (u) => u.serialNumber === "SN-NEVER",
+    )!;
+    await expect(
+      withTransaction((client) =>
+        watchReturns.requestSerialReturn(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          serialId: fresh.id,
+          reason: "تست",
+          createdBy: null,
+        }),
+      ),
+    ).rejects.toThrow(/فاکتور فروش این دستگاه یافت نشد/);
+
+    const { unit } = await soldUnit("SN-CR-G");
+    const makeRequest = () =>
+      withTransaction((client) =>
+        watchReturns.requestSerialReturn(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          serialId: unit.id,
+          reason: "تست",
+          createdBy: null,
+        }),
+      );
+    const req = await makeRequest();
+
+    // The same sold line cannot grow a second live claim.
+    await expect(makeRequest()).rejects.toThrow(/قبلاً مرجوعی ثبت شده/);
+
+    // No disposition before the unit is physically received and inspected.
+    await expect(
+      withTransaction((client) =>
+        watchReturns.dispositionSerialReturn(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          returnId: req.id,
+          disposition: "returned_sellable",
+          refundMethod: "cash",
+          approvedBy: null,
+        }),
+      ),
+    ).rejects.toThrow(/دریافت‌شده و بازرسی‌شده/);
+
+    // Cancelling frees the line for a fresh claim; the sale stays untouched.
+    await withTransaction((client) =>
+      watchReturns.cancelSerialReturn(client, { businessId: biz.id, returnId: req.id, actorId: null }),
+    );
+    const unitAfter = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.id === unit.id)!;
+    expect(unitAfter.status).toBe("sold");
+    await expect(makeRequest()).resolves.toBeTruthy();
+  });
+});
+
+/**
+ * Issue #795 Phase 5 (items 12–14) — the CRM side of the serialized
+ * lifecycle: a repair intake on a shop-sold unit links the buyer
+ * automatically, service reminders know who to call (ownership from the
+ * persisted invoice), and a completed service rolls the reminder anchor
+ * forward instead of leaving the unit overdue forever.
+ */
+describe("Issue #795 Phase 5 — customer-aware, roll-forward service reminders", () => {
+  it("resolves the buyer from the persisted invoice, auto-links repair intake, and rolls the anchor to the last completed service", async () => {
+    const { rows: partyRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, phone) VALUES ($1, 'آقای رضایی', '09120000000') RETURNING id",
+      [biz.id],
+    );
+    const customerId = partyRows[0].id;
+
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت اتوماتیک",
+      tracking: "serial",
+      serviceIntervalMonths: 12,
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-SVC" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId))[0];
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        customerId,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+    // The sale happened long ago — the first service window has lapsed.
+    await db.query("UPDATE item_serials SET sold_at = '2020-01-10' WHERE id = $1", [unit.id]);
+
+    const today = "2026-10-05";
+    let reminders = await watchCrm.serviceReminders(biz.locationId, today, 30);
+    expect(reminders).toHaveLength(1);
+    // Item 13: the reminder knows the buyer — resolved from the invoice
+    // line that sold this exact serial, not a hardcoded null.
+    expect(reminders[0]).toMatchObject({
+      serialId: unit.id,
+      state: "overdue",
+      customerName: "آقای رضایی",
+      customerPhone: "09120000000",
+      lastServiceDate: null,
+      referenceDate: "2021-01-10",
+    });
+
+    // Item 12: a repair intake naming the serial but no customer links the
+    // original buyer automatically…
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "سرویس کامل موومان",
+      serialId: unit.id,
+    });
+    expect(ticket.customerId).toBe(customerId);
+    // …while an explicit customer always wins (the current owner may differ).
+    const { rows: otherParty } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name) VALUES ($1, 'مالک جدید') RETURNING id",
+      [biz.id],
+    );
+    await repairs.setRepairStatus(ticket.id, "cancelled");
+    const explicit = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "سرویس کامل موومان",
+      serialId: unit.id,
+      customerId: otherParty[0].id,
+    });
+    expect(explicit.customerId).toBe(otherParty[0].id);
+
+    // Item 14: closing the service rolls the anchor forward — the unit
+    // stops being overdue the day its ticket closes…
+    await withTransaction((client) =>
+      repairs.closeRepairTicket(client, { businessId: biz.id, ticketId: explicit.id, paymentMethod: "cash" }),
+    );
+    reminders = await watchCrm.serviceReminders(biz.locationId, today, 30);
+    expect(reminders).toHaveLength(0);
+
+    // …and the NEXT due date is the service date plus the interval, with
+    // the completed service visible as the new anchor. (A cancelled ticket
+    // never serviced anything — only the closed one counts.)
+    await db.query("UPDATE repair_tickets SET closed_at = '2024-06-01' WHERE id = $1", [explicit.id]);
+    reminders = await watchCrm.serviceReminders(biz.locationId, today, 30);
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0]).toMatchObject({
+      serialId: unit.id,
+      state: "overdue",
+      lastServiceDate: "2024-06-01",
+      referenceDate: "2025-06-01",
+      customerName: "آقای رضایی",
+    });
+  });
+});
+
+/**
+ * Issue #795 item 20 — the reservation (hold) workflow: one exact unit
+ * promised to one exact customer. The hold blocks every other buyer,
+ * converts automatically on the reserving customer's own invoice, releases
+ * by hand with the reason recorded, and stops blocking anyone once expired.
+ */
+describe("Issue #795 item 20 — serial reservations", () => {
+  async function reservationFixture() {
+    const { rows: partyRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, phone) VALUES ($1, 'خانم محمدی', '09121111111') RETURNING id",
+      [biz.id],
+    );
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت رزروی",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-RSV" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-RSV")!;
+    return { customerId: partyRows[0].id, unit };
+  }
+
+  it("holds the unit for the named customer, blocks everyone else, and converts on that customer's invoice", async () => {
+    const { customerId, unit } = await reservationFixture();
+
+    const { id: reservationId } = await withTransaction((client) =>
+      watchReservations.reserveSerialUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: unit.id,
+        customerId,
+        note: "پیش‌پرداخت نقدی دریافت شد",
+      }),
+    );
+    const { rows: serialRows } = await db.query<{ status: string }>(
+      "SELECT status FROM item_serials WHERE id = $1",
+      [unit.id],
+    );
+    expect(serialRows[0].status).toBe("reserved");
+
+    // Only one live hold per unit.
+    await expect(
+      withTransaction((client) =>
+        watchReservations.reserveSerialUnit(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          serialId: unit.id,
+          customerId,
+        }),
+      ),
+    ).rejects.toThrow(/قابل رزرو/);
+
+    // A stranger's invoice (or an anonymous one) cannot take the unit.
+    const { rows: strangerRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name) VALUES ($1, 'مشتری دیگر') RETURNING id",
+      [biz.id],
+    );
+    for (const buyerId of [strangerRows[0].id, null]) {
+      await expect(
+        withTransaction((client) =>
+          invoiceService.createRetailInvoice(client, {
+            businessId: biz.id,
+            locationId: biz.locationId,
+            industry: "watch",
+            customerId: buyerId,
+            tenders: [{ method: "cash" }],
+            lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+          }),
+        ),
+      ).rejects.toThrow(/رزرو شده/);
+    }
+
+    // The reserving customer's own invoice sells the unit and closes the
+    // hold as converted — in the same transaction as the sale.
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        customerId,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+    const { rows: afterSale } = await db.query<{ status: string }>(
+      "SELECT status FROM item_serials WHERE id = $1",
+      [unit.id],
+    );
+    expect(afterSale[0].status).toBe("sold");
+    const reservations = await watchReservations.listSerialReservations(biz.id, biz.locationId);
+    expect(reservations).toHaveLength(1);
+    expect(reservations[0]).toMatchObject({
+      id: reservationId,
+      status: "converted",
+      customerName: "خانم محمدی",
+      serialNumber: "SN-RSV",
+    });
+  });
+
+  it("releases a hold with the reason recorded, and an expired hold stops blocking anyone", async () => {
+    const { customerId, unit } = await reservationFixture();
+
+    const { id: reservationId } = await withTransaction((client) =>
+      watchReservations.reserveSerialUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: unit.id,
+        customerId,
+      }),
+    );
+    // Releasing without a reason is refused; with one, the unit returns to
+    // the shelf and the reason survives on the closed hold.
+    await expect(
+      withTransaction((client) =>
+        watchReservations.releaseSerialReservation(client, {
+          businessId: biz.id,
+          reservationId,
+          reason: "  ",
+        }),
+      ),
+    ).rejects.toThrow(/دلیل/);
+    await withTransaction((client) =>
+      watchReservations.releaseSerialReservation(client, {
+        businessId: biz.id,
+        reservationId,
+        reason: "مشتری منصرف شد",
+      }),
+    );
+    let { rows: serialRows } = await db.query<{ status: string }>(
+      "SELECT status FROM item_serials WHERE id = $1",
+      [unit.id],
+    );
+    expect(serialRows[0].status).toBe("in_stock");
+    let reservations = await watchReservations.listSerialReservations(biz.id, biz.locationId);
+    expect(reservations[0]).toMatchObject({ status: "released", releaseReason: "مشتری منصرف شد" });
+    // A closed hold cannot close twice.
+    await expect(
+      withTransaction((client) =>
+        watchReservations.releaseSerialReservation(client, {
+          businessId: biz.id,
+          reservationId,
+          reason: "دوباره",
+        }),
+      ),
+    ).rejects.toThrow(/قبلاً بسته/);
+
+    // A hold that lapsed yesterday no longer blocks a different buyer —
+    // the sale closes it as expired and proceeds.
+    await withTransaction((client) =>
+      watchReservations.reserveSerialUnit(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: unit.id,
+        customerId,
+        expiresAt: "2026-01-01",
+      }),
+    );
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        customerId: null,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+    ({ rows: serialRows } = await db.query<{ status: string }>(
+      "SELECT status FROM item_serials WHERE id = $1",
+      [unit.id],
+    ));
+    expect(serialRows[0].status).toBe("sold");
+    reservations = await watchReservations.listSerialReservations(biz.id, biz.locationId);
+    const expired = reservations.find((r) => r.expiresAt === "2026-01-01");
+    expect(expired?.status).toBe("expired");
+  });
+});
+
+/**
+ * Issue #795 item 11 — the estimate is financially complete (labour, parts,
+ * discount, VAT at the ticket's own rate, payable total) and its approval
+ * is versioned: any financial change after the signature withdraws it.
+ */
+describe("Issue #795 item 11 — VAT-complete, versioned repair estimates", () => {
+  it("computes the estimate with the ticket's VAT and discount, and binds approval to the estimate version", async () => {
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "کرنوگراف",
+      laborCharge: 2_000_000,
+      vatPercent: 9,
+    });
+
+    // The signable number IS the payable number: (2M + 0.8M − 0.3M) + 9%.
+    const estimate = await watchCrm.setRepairEstimate(ticket.id, {
+      laborRial: 2_000_000,
+      partsRial: 800_000,
+      discountRial: 300_000,
+    });
+    expect(estimate).toMatchObject({
+      estimatedDiscountRial: 300_000,
+      estimatedVatRial: 225_000,
+      estimatedTotalRial: 2_725_000,
+      version: 1,
+      approvedAt: null,
+    });
+    // A discount larger than the work is refused.
+    await expect(
+      watchCrm.setRepairEstimate(ticket.id, { laborRial: 100, partsRial: 0, discountRial: 101 }),
+    ).rejects.toThrow(/تخفیف/);
+
+    const approved = await watchCrm.approveRepairEstimate(ticket.id);
+    expect(approved.approvedVersion).toBe(1);
+
+    // A labour edit after the signature withdraws the approval…
+    await repairs.updateRepairTicket(ticket.id, { laborCharge: 2_500_000 });
+    let current = await repairs.getRepairTicket(ticket.id);
+    expect(current?.estimateApprovedAt).toBeNull();
+    expect(current?.estimateApprovedVersion).toBeNull();
+
+    // …and so does a chargeable part; a zero-charge (warranty) part does not.
+    await watchCrm.approveRepairEstimate(ticket.id);
+    const part = await repairs.addRepairPart(ticket.id, {
+      description: "شیشه",
+      quantity: "1",
+      unitCost: 400_000,
+      charge: 600_000,
+    });
+    current = await repairs.getRepairTicket(ticket.id);
+    expect(current?.estimateApprovedAt).toBeNull();
+
+    await watchCrm.approveRepairEstimate(ticket.id);
+    await repairs.addRepairPart(ticket.id, {
+      description: "واشر",
+      quantity: "1",
+      unitCost: 50_000,
+      charge: 0,
+    });
+    current = await repairs.getRepairTicket(ticket.id);
+    expect(current?.estimateApprovedAt).not.toBeNull();
+
+    // Removing the charged part moves the number too — withdrawn again.
+    await repairs.removeRepairPart(part.id, ticket.id);
+    current = await repairs.getRepairTicket(ticket.id);
+    expect(current?.estimateApprovedAt).toBeNull();
+
+    // A re-estimate bumps the version; the close demands a signature on the
+    // CURRENT version and succeeds once it has one.
+    const second = await watchCrm.setRepairEstimate(ticket.id, {
+      laborRial: 2_500_000,
+      partsRial: 0,
+    });
+    expect(second.version).toBe(2);
+    await expect(
+      withTransaction((client) =>
+        repairs.closeRepairTicket(client, { businessId: biz.id, ticketId: ticket.id, paymentMethod: "cash" }),
+      ),
+    ).rejects.toThrow(/تأیید مشتری/);
+    const reapproved = await watchCrm.approveRepairEstimate(ticket.id);
+    expect(reapproved.approvedVersion).toBe(2);
+    const result = await withTransaction((client) =>
+      repairs.closeRepairTicket(client, { businessId: biz.id, ticketId: ticket.id, paymentMethod: "cash" }),
+    );
+    // labor 2.5M + 9% VAT — the closed bill matches the approved estimate.
+    expect(result.breakdown.total).toBe("2725000");
+
+    // The printable estimate carries the whole financial picture.
+    const freshTicket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "ساعت جیبی",
+      vatPercent: 9,
+    });
+    await watchCrm.setRepairEstimate(freshTicket.id, {
+      laborRial: 900_000,
+      partsRial: 600_000,
+      discountRial: 100_000,
+    });
+    const text = await watchCrm.repairEstimateText(freshTicket.id, "2026-08-01");
+    expect(text).toContain("تخفیف");
+    expect(text).toContain("مالیات بر ارزش افزوده");
+    expect(text).toContain("برآورد کل");
+  });
+});
+
+/**
+ * Issue #795 item 18 — the pre-owned intake as a full provenance document:
+ * source, party, document, value, date, condition, box & papers,
+ * authenticity, service history, year, accessories, notes, media, creator —
+ * recorded only while the unit is actually in the shop's hands.
+ */
+describe("Issue #795 item 18 — pre-owned intake provenance", () => {
+  it("records the whole acquisition story, mirrors the board flags, and refuses a sold unit", async () => {
+    const { rows: dealerRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, phone) VALUES ($1, 'گالری تهران', '02122220000') RETURNING id",
+      [biz.id],
+    );
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت کلکسیونی",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-PO" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-PO")!;
+
+    const intake = await watchCrm.recordPreOwnedIntake({
+      businessId: biz.id,
+      serialId: unit.id,
+      conditionGrade: "like_new",
+      boxAndPapers: true,
+      source: "customer_tradein",
+      partyId: dealerRows[0].id,
+      documentNo: "PO-1403-17",
+      purchaseValueRial: 30_000_000,
+      intakeDate: "2026-09-20",
+      authenticityVerified: true,
+      authenticityNotes: "شمارهٔ موومان با برگه مطابقت دارد",
+      serviceHistory: "سرویس کامل ۱۴۰۲ نزد نمایندگی",
+      productionYear: 2019,
+      accessories: "بند یدکی چرمی",
+      notes: "خریداری در معاوضه با مدل جدید",
+      media: ["https://example.com/po-1.jpg"],
+    });
+    expect(intake).toMatchObject({
+      source: "customer_tradein",
+      partyName: "گالری تهران",
+      documentNo: "PO-1403-17",
+      purchaseValueRial: 30_000_000,
+      intakeDate: "2026-09-20",
+      authenticityVerified: true,
+      productionYear: 2019,
+      media: ["https://example.com/po-1.jpg"],
+    });
+
+    // The document is retrievable, and the board flags mirrored.
+    const latest = await watchCrm.latestPreOwnedIntake(unit.id);
+    expect(latest?.id).toBe(intake.id);
+    expect(latest?.serviceHistory).toBe("سرویس کامل ۱۴۰۲ نزد نمایندگی");
+    const board = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.id === unit.id);
+    expect(board).toMatchObject({ preOwned: true, conditionGrade: "like_new", boxAndPapers: true });
+
+    // Garbage in, refused: bad year, negative value.
+    await expect(
+      watchCrm.recordPreOwnedIntake({
+        businessId: biz.id,
+        serialId: unit.id,
+        conditionGrade: "good",
+        boxAndPapers: false,
+        productionYear: 1500,
+      }),
+    ).rejects.toThrow(/سال ساخت/);
+    await expect(
+      watchCrm.recordPreOwnedIntake({
+        businessId: biz.id,
+        serialId: unit.id,
+        conditionGrade: "good",
+        boxAndPapers: false,
+        purchaseValueRial: -1,
+      }),
+    ).rejects.toThrow(/ارزش خرید/);
+
+    // Lifecycle: a sold unit is somebody else's property — no intake.
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        customerId: null,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+    await expect(
+      watchCrm.recordPreOwnedIntake({
+        businessId: biz.id,
+        serialId: unit.id,
+        conditionGrade: "good",
+        boxAndPapers: false,
+      }),
+    ).rejects.toThrow(/در اختیار فروشگاه/);
+  });
+});
+
+/**
+ * Issue #795 required coverage — two invoices racing for the same physical
+ * unit, and the canonical branch-transfer operation.
+ */
+describe("Issue #795 — concurrent sale and branch transfer", () => {
+  it("lets exactly one of two concurrent sales of the same serial post", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت مسابقه",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-RACE" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-RACE")!;
+
+    const sellOnce = () =>
+      withTransaction((client) =>
+        invoiceService.createRetailInvoice(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          industry: "watch",
+          customerId: null,
+          tenders: [{ method: "cash" }],
+          lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+        }),
+      );
+    const results = await Promise.allSettled([sellOnce(), sellOnce()]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    expect(fulfilled).toHaveLength(1);
+
+    // One sale, one revenue posting, one physical unit sold.
+    const { rows: entries } = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM domain_events WHERE event_type = 'watch.sale_revenue' AND payload->>'serialId' = $1`,
+      [unit.id],
+    );
+    expect(entries[0].n).toBe("1");
+    const { rows: serialRows } = await db.query<{ status: string }>(
+      "SELECT status FROM item_serials WHERE id = $1",
+      [unit.id],
+    );
+    expect(serialRows[0].status).toBe("sold");
+  });
+
+  it("transfers an in-stock unit to a branch that carries the model, refuses one that doesn't, and leaves the audit event", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت سفری",
+      sku: "TRV-1",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-TRF" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-TRF")!;
+
+    const { rows: branchRows } = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'شعبه دو') RETURNING id",
+      [biz.id],
+    );
+    const branch2 = branchRows[0].id;
+
+    // No matching model at the destination yet — refused, nothing moves.
+    await expect(
+      withTransaction((client) =>
+        watchTransfers.transferSerialUnit(client, {
+          businessId: biz.id,
+          fromLocationId: biz.locationId,
+          toLocationId: branch2,
+          serialId: unit.id,
+        }),
+      ),
+    ).rejects.toThrow(/مدل مقصد|تعریف نشده/);
+
+    // The destination catalogues the model (same SKU) — the move succeeds.
+    const destItem = await itemsService.createItem({
+      locationId: branch2,
+      name: "ساعت سفری",
+      sku: "TRV-1",
+      tracking: "serial",
+    });
+    const moved = await withTransaction((client) =>
+      watchTransfers.transferSerialUnit(client, {
+        businessId: biz.id,
+        fromLocationId: biz.locationId,
+        toLocationId: branch2,
+        serialId: unit.id,
+        note: "تقاضای شعبه دو",
+      }),
+    );
+    expect(moved.toItemId).toBe(destItem.id);
+
+    // The unit now lives at branch 2, in stock, same serial — and the move
+    // is on the immutable event log with both endpoints.
+    expect((await watchSales.listSerialUnits(biz.locationId)).find((u) => u.id === unit.id)).toBeUndefined();
+    const atBranch2 = (await watchSales.listSerialUnits(branch2)).find((u) => u.id === unit.id);
+    expect(atBranch2).toMatchObject({ status: "in_stock", serialNumber: "SN-TRF" });
+    const { rows: events } = await db.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM domain_events WHERE event_type = 'watch.serial_transfer' AND payload->>'serialId' = $1`,
+      [unit.id],
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0].payload).toMatchObject({
+      fromLocationId: biz.locationId,
+      toLocationId: branch2,
+      note: "تقاضای شعبه دو",
+    });
+
+    // A sold unit never transfers.
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: branch2,
+        industry: "watch",
+        customerId: null,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+    await expect(
+      withTransaction((client) =>
+        watchTransfers.transferSerialUnit(client, {
+          businessId: biz.id,
+          fromLocationId: branch2,
+          toLocationId: biz.locationId,
+          serialId: unit.id,
+        }),
+      ),
+    ).rejects.toThrow(/قابل انتقال/);
+  });
+});
+
+describe("Issue #795 Phase 6 — structured model attributes", () => {
+  it("upserts, replaces, and removes a model's attributes; the catalogue list carries them per branch", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت غواصی",
+      tracking: "serial",
+    });
+
+    // First write creates the row…
+    const created = await watchAttributes.upsertWatchAttributes(item.id, {
+      referenceNo: " 126610LN ",
+      movement: "automatic",
+      caseMaterial: "استیل",
+      caseDiameterMm: 41,
+      waterResistanceM: 300,
+      dialColor: "مشکی",
+      braceletMaterial: "استیل",
+      gender: "men",
+    });
+    expect(created).toEqual({
+      referenceNo: "126610LN", // trimmed
+      movement: "automatic",
+      caseMaterial: "استیل",
+      caseDiameterMm: 41,
+      waterResistanceM: 300,
+      dialColor: "مشکی",
+      braceletMaterial: "استیل",
+      gender: "men",
+    });
+
+    // …a second write replaces it in place (still one row).
+    const replaced = await watchAttributes.upsertWatchAttributes(item.id, {
+      movement: "quartz",
+      waterResistanceM: 100,
+    });
+    expect(replaced).toMatchObject({ movement: "quartz", waterResistanceM: 100, referenceNo: null });
+    const { rows: countRows } = await db.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM watch_item_attributes WHERE item_id = $1",
+      [item.id],
+    );
+    expect(countRows[0].n).toBe("1");
+
+    // The branch catalogue list resolves them in one trip.
+    const map = await watchAttributes.listWatchAttributes(biz.locationId);
+    expect(map.get(item.id)?.movement).toBe("quartz");
+
+    // An all-empty submit means "no attributes recorded" — the row goes away.
+    const cleared = await watchAttributes.upsertWatchAttributes(item.id, { referenceNo: "  " });
+    expect(cleared).toBeNull();
+    expect(await watchAttributes.getWatchAttributes(item.id)).toBeNull();
+  });
+
+  it("rejects out-of-range or unknown attribute values with Persian errors", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت نامعتبر",
+      tracking: "serial",
+    });
+    await expect(
+      watchAttributes.upsertWatchAttributes(item.id, { movement: "steam" as never }),
+    ).rejects.toThrow(/نوع موتور نامعتبر/);
+    await expect(
+      watchAttributes.upsertWatchAttributes(item.id, { gender: "kids" as never }),
+    ).rejects.toThrow(/دسته‌بندی جنسیتی نامعتبر/);
+    await expect(watchAttributes.upsertWatchAttributes(item.id, { caseDiameterMm: 0 })).rejects.toThrow(
+      /قطر قاب/,
+    );
+    await expect(watchAttributes.upsertWatchAttributes(item.id, { caseDiameterMm: 120 })).rejects.toThrow(
+      /قطر قاب/,
+    );
+    await expect(
+      watchAttributes.upsertWatchAttributes(item.id, { waterResistanceM: -5 }),
+    ).rejects.toThrow(/مقاومت در برابر آب/);
+    await expect(
+      watchAttributes.upsertWatchAttributes(item.id, { waterResistanceM: 2.5 }),
+    ).rejects.toThrow(/مقاومت در برابر آب/);
+    // Nothing slipped through to the table.
+    expect(await watchAttributes.getWatchAttributes(item.id)).toBeNull();
+  });
+
+  it("drops the attributes row with its model (ON DELETE CASCADE)", async () => {
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت موقت",
+      tracking: "serial",
+    });
+    await watchAttributes.upsertWatchAttributes(item.id, { movement: "manual" });
+    await db.query("DELETE FROM items WHERE id = $1", [item.id]);
+    const { rows } = await db.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM watch_item_attributes WHERE item_id = $1",
+      [item.id],
+    );
+    expect(rows[0].n).toBe("0");
+  });
+});
+
+describe("Issue #795 Phase 6 — serial unit detail aggregation", () => {
+  it("assembles model attributes, warranty, owner, provenance, repairs, reservation and transfers for one unit", async () => {
+    // A customer who will buy the piece.
+    const { rows: partyRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, phone) VALUES ($1, 'خانم محمدی', '09121112233') RETURNING id",
+      [biz.id],
+    );
+    const customerId = partyRows[0].id;
+
+    // The model, with structured attributes.
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت کلکسیونی",
+      sku: "COL-7",
+      tracking: "serial",
+      serviceIntervalMonths: 36,
+    });
+    await watchAttributes.upsertWatchAttributes(item.id, {
+      referenceNo: "REF-7",
+      movement: "automatic",
+      gender: "unisex",
+    });
+
+    // Received through purchasing so the cost basis exists.
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-DET", warrantyMonths: 24 }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-DET")!;
+
+    // Pre-owned provenance with media references.
+    await db.query("UPDATE item_serials SET pre_owned = true WHERE id = $1", [unit.id]);
+    await watchCrm.recordPreOwnedIntake({
+      businessId: biz.id,
+      serialId: unit.id,
+      conditionGrade: "like_new",
+      boxAndPapers: true,
+      source: "customer_tradein",
+      purchaseValueRial: 25_000_000,
+      intakeDate: "2026-01-15",
+      authenticityVerified: true,
+      media: ["https://files.example/det-1.jpg", "https://files.example/det-2.jpg"],
+    });
+
+    // Sold on an invoice to the customer — warranty opens, owner is recorded.
+    await withTransaction((client) =>
+      invoiceService.createRetailInvoice(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "watch",
+        customerId,
+        tenders: [{ method: "cash" }],
+        lines: [{ kind: "watch", serialId: unit.id, price: 45_000_000, vatPercent: 9 }],
+      }),
+    );
+
+    // One repair after the sale.
+    const ticket = await repairs.createRepairTicket({
+      locationId: biz.locationId,
+      itemDescription: "تعویض شیشه",
+      serialId: unit.id,
+    });
+
+    const detail = (await serialDetail.serialUnitDetail(unit.id))!;
+    expect(detail).toMatchObject({
+      serialNumber: "SN-DET",
+      status: "sold",
+      unitCost: 30_000_000,
+      preOwned: true,
+      model: {
+        itemId: item.id,
+        name: "ساعت کلکسیونی",
+        sku: "COL-7",
+        serviceIntervalMonths: 36,
+        attributes: { referenceNo: "REF-7", movement: "automatic", gender: "unisex" },
+      },
+      owner: { customerId, name: "خانم محمدی", phone: "09121112233" },
+      activeReservation: null,
+    });
+    expect(detail.warranty).not.toBeNull();
+    expect(detail.owner?.purchasedAt).toBeTruthy();
+    expect(detail.preOwnedIntake).toMatchObject({
+      source: "customer_tradein",
+      purchaseValueRial: 25_000_000,
+      intakeDate: "2026-01-15",
+      authenticityVerified: true,
+      media: ["https://files.example/det-1.jpg", "https://files.example/det-2.jpg"],
+    });
+    expect(detail.repairs).toHaveLength(1);
+    expect(detail.repairs[0].id).toBe(ticket.id);
+    expect(detail.transfers).toEqual([]);
+  });
+
+  it("shows the live hold and the branch-transfer trail; unknown serials resolve to null", async () => {
+    const { rows: partyRows } = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, phone) VALUES ($1, 'آقای کریمی', '09125556677') RETURNING id",
+      [biz.id],
+    );
+    const customerId = partyRows[0].id;
+
+    const item = await itemsService.createItem({
+      locationId: biz.locationId,
+      name: "ساعت دو شعبه",
+      sku: "DUO-1",
+      tracking: "serial",
+    });
+    await withTransaction((client) =>
+      retailStock.receiveItemPurchase(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: null,
+        createdBy: null,
+        lines: [{ itemId: item.id, quantity: "1", unitCost: 30_000_000, serials: [{ serialNumber: "SN-DUO" }] }],
+      }),
+    );
+    const unit = (await watchSales.listSerialUnits(biz.locationId)).find((u) => u.serialNumber === "SN-DUO")!;
+
+    // Transfer to a second branch that carries the model.
+    const { rows: branchRows } = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'شعبه مرکزی') RETURNING id",
+      [biz.id],
+    );
+    const branch2 = branchRows[0].id;
+    await itemsService.createItem({ locationId: branch2, name: "ساعت دو شعبه", sku: "DUO-1", tracking: "serial" });
+    await withTransaction((client) =>
+      watchTransfers.transferSerialUnit(client, {
+        businessId: biz.id,
+        fromLocationId: biz.locationId,
+        toLocationId: branch2,
+        serialId: unit.id,
+        note: "برای ویترین",
+      }),
+    );
+
+    // Reserve it for a customer at the destination.
+    await withTransaction((client) =>
+      watchReservations.reserveSerialUnit(client, {
+        businessId: biz.id,
+        locationId: branch2,
+        serialId: unit.id,
+        customerId,
+        expiresAt: "2026-12-01",
+        note: "پیش‌پرداخت شد",
+      }),
+    );
+
+    const detail = (await serialDetail.serialUnitDetail(unit.id))!;
+    expect(detail.status).toBe("reserved");
+    expect(detail.activeReservation).toMatchObject({
+      customerId,
+      customerName: "آقای کریمی",
+      note: "پیش‌پرداخت شد",
+    });
+    expect(detail.transfers).toHaveLength(1);
+    expect(detail.transfers[0]).toMatchObject({
+      fromLocationId: biz.locationId,
+      toLocationId: branch2,
+      fromLocationName: "Main",
+      toLocationName: "شعبه مرکزی",
+      note: "برای ویترین",
+    });
+
+    expect(await serialDetail.serialUnitDetail(randomUUID())).toBeNull();
   });
 });

@@ -33,6 +33,14 @@ describe("isDeadStock", () => {
     expect(isDeadStock("2026-05-01", today, 90)).toBe(true);
   });
 
+  it("accepts stored timestamps and includes exactly the UTC cutoff", () => {
+    expect(isDeadStock("2026-05-18 00:00:00+00", today, 90)).toBe(true);
+    expect(isDeadStock("2026-05-18T00:00:00.001Z", today, 90)).toBe(false);
+    expect(isDeadStock("2026-05-17T23:59:59Z", today, 90)).toBe(true);
+    expect(isDeadStock("bad-timestamp", today, 90)).toBe(false);
+    expect(isDeadStock(null, today, Number.MAX_VALUE)).toBe(false);
+  });
+
   it("is alive within the threshold", () => {
     expect(isDeadStock("2026-08-01", today, 90)).toBe(false);
   });

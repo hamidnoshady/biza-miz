@@ -507,6 +507,22 @@ async function applyOne(
   const fields: Record<string, unknown> = { ...plan.fields };
   if (config.table === "parties") await addPartyDerivedColumns(client, fields, pkValues[0], dek);
 
+  // Issue #844 — a merge whose plan actually rewrites the selling price
+  // remembers the current one first (the row was already locked above, so
+  // this read cannot race the write), so canonical history + the shared audit
+  // event can be appended once the new value lands. An `insert` is a first
+  // sighting of the row, not a change — it writes no history.
+  const previousMenuPrice =
+    config.table === "menu_items" && plan.action === "update" && "price" in fields
+      ? await (async () => {
+          const { rows } = await client.query<{ price: string }>(
+            `SELECT price::text AS price FROM ${quoteIdent(config.table)} WHERE ${pkWhere(config, 1)}`,
+            pkValues,
+          );
+          return rows[0] ? Number(rows[0].price) : null;
+        })()
+      : null;
+
   const metaByName = new Map(meta.map((column) => [column.name, column]));
   const writeRow = async (values: Record<string, unknown>) => {
     const entries = Object.entries(values);
@@ -564,6 +580,49 @@ async function applyOne(
   }
 
   const locationId = await rowLocation(client, config, pk, change.locationId);
+
+  // Issue #844 — the merge changed today's selling price: append the
+  // immutable history row and the `menu.item.price_changed` audit event with
+  // `source = 'sync'`, in this same transaction as the row write. The peer
+  // node's HLC is the source ref: it says exactly which incoming edit moved
+  // the price. No actor user — this is the synchroniser, not a person.
+  if (
+    locationId &&
+    previousMenuPrice != null &&
+    "price" in fields &&
+    Number(fields.price) !== previousMenuPrice
+  ) {
+    await client.query(
+      `INSERT INTO menu_item_price_history
+         (business_id, location_id, menu_item_id, old_price_rial, new_price_rial,
+          effective_from, changed_at, changed_by, source, source_ref, reason, note)
+       VALUES ($1, $2, $3, $4, $5, now(), now(), null, 'sync', $6, null, null)`,
+      [
+        businessId,
+        locationId,
+        pkValues[0],
+        previousMenuPrice,
+        Number(fields.price),
+        `hlc:${change.rowHlc}`,
+      ],
+    );
+    await client.query(
+      `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
+       VALUES ($1, $2, null, 'menu.item.price_changed', 'menu_item', $3, $4)`,
+      [
+        businessId,
+        locationId,
+        pkValues[0],
+        JSON.stringify({
+          oldPrice: previousMenuPrice,
+          newPrice: Number(fields.price),
+          source: "sync",
+          sourceRef: `hlc:${change.rowHlc}`,
+        }),
+      ],
+    );
+  }
+
   const clocks = plan.clocks;
   await writeClocks(
     client,

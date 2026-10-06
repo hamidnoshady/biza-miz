@@ -51,7 +51,10 @@ interface WidgetRow extends Record<string, unknown> {
 }
 
 const VALID_PERMISSIONS = new Set<string>(ALL_PERMISSIONS);
-const OUTPUT_FORMATS = new Set<AiWidgetOutputFormat>(["summary", "bullets", "metric"]);
+/** The three renderings a widget may ask for — exported so the platform
+ * catalogue validates a recommendation exactly as a user's own widget does. */
+export const AI_WIDGET_OUTPUT_FORMATS = ["summary", "bullets", "metric"] as const;
+const OUTPUT_FORMATS = new Set<AiWidgetOutputFormat>(AI_WIDGET_OUTPUT_FORMATS);
 
 function safePermissions(value: unknown): Permission[] {
   if (!Array.isArray(value)) return [];

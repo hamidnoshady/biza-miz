@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { withTenantScope } from "@/lib/auth";
+import { requirePermission, withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
-import { requireManager, resolveActiveLocation } from "@/lib/setup-state";
+import { resolveActiveLocation } from "@/lib/setup-state";
 import { isModuleEnabled } from "@/lib/industry-guard";
 import type { ModuleKey } from "@/lib/industry-profile";
 import { COWORKER_TEMPLATE_LIST, WASTE_REASON_OPTIONS } from "@/lib/ai-coworker-templates";
@@ -18,7 +19,7 @@ import {
  * anyway — which it does not, `createCoworkerJob` runs the same check.
  */
 export const GET = withTenantScope(async () => {
-  const guard = await requireManager();
+  const guard = await requirePermission(PERMISSIONS.aiManage);
   if (guard.error) return guard.error;
 
   const templates = [];

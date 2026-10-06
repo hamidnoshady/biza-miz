@@ -4,17 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 import { reportShape, standardReportsFor } from "@/lib/reports";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import {
-  getBalanceSheet,
-  getBalanceSheetComparison,
-  getCashFlow,
-  getCashFlowComparison,
-  getFoodCostVariance,
-  getProfitAndLoss,
-  getProfitAndLossComparison,
-  runStandardReportRows,
-} from "@/lib/reports-service";
-import { runTradeReport } from "@/lib/trade-reports-service";
+import { runStandardReport } from "@/lib/standard-report-service";
 
 /**
  * Runs one pre-built report. P&L/Balance Sheet/Cash Flow/Food-Cost-Variance
@@ -47,49 +37,11 @@ export const GET = withTenantScope(async (request: NextRequest, context: { param
   const dateTo = searchParams.get("dateTo") ?? undefined;
   const compare = searchParams.get("compare") === "1";
 
-  if (key === "profit_and_loss") {
-    if (compare) {
-      return NextResponse.json({
-        comparison: await getProfitAndLossComparison(session.businessId, { dateFrom, dateTo }),
-      });
-    }
-    return NextResponse.json({ report: await getProfitAndLoss(session.businessId, { dateFrom, dateTo }) });
-  }
-  if (key === "cash_flow") {
-    if (compare) {
-      return NextResponse.json({
-        comparison: await getCashFlowComparison(session.businessId, { dateFrom, dateTo }),
-      });
-    }
-    return NextResponse.json({ report: await getCashFlow(session.businessId, { dateFrom, dateTo }) });
-  }
-  if (key === "balance_sheet") {
-    if (compare) {
-      const previousAsOfDate = searchParams.get("previousAsOfDate") ?? undefined;
-      return NextResponse.json({
-        comparison: await getBalanceSheetComparison(session.businessId, dateTo, previousAsOfDate),
-      });
-    }
-    return NextResponse.json({ report: await getBalanceSheet(session.businessId, dateTo) });
-  }
-  if (key === "food_cost_variance") {
-    return NextResponse.json({ report: await getFoodCostVariance(session.businessId, { dateFrom, dateTo }) });
-  }
-
-  // The retail trades' own reports. Branch-scoped like the manager tabs they
-  // came from — each reads one branch's stock, serials or weights, not the
-  // business's whole book.
-  if (reportShape(def) !== "rows") {
-    const location = await resolveActiveLocation(session);
-    const report = await runTradeReport(key, {
-      businessId: session.businessId,
-      locationId: location?.id ?? null,
-      industry: industry ?? "food_service",
-      filters: { dateFrom, dateTo },
-    });
-    if (report) return NextResponse.json({ report });
-  }
-
-  const rows = await runStandardReportRows(key, session.businessId, { dateFrom, dateTo });
-  return NextResponse.json({ rows });
+  const location = reportShape(def) !== "rows" && !["profit_and_loss", "cash_flow", "balance_sheet", "food_cost_variance"].includes(key)
+    ? await resolveActiveLocation(session) : null;
+  return NextResponse.json(await runStandardReport(session.businessId, industry, def, {
+    dateFrom, dateTo, compare,
+    previousAsOfDate: searchParams.get("previousAsOfDate") ?? undefined,
+    locationId: location?.id,
+  }));
 });

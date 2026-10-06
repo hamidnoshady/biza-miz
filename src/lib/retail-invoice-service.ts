@@ -160,6 +160,13 @@ export interface RetailInvoice {
 const LINE_KINDS_BY_INDUSTRY: Record<Industry, readonly RetailInvoiceLineInput["kind"][]> = {
   service_saas: [],
   food_service: [],
+  // Issue #799 — an AEC business writes statements for professional work, not
+  // invoices for stock lines, so it has no line kinds here. Its commercial
+  // documents are Accounting's (and, from Wave 8, project progress
+  // certificates), exactly like the service-company profile above; the
+  // counter's retail-invoice path is never reachable because the trade has no
+  // `pos` module (industry-profile.ts).
+  architecture_construction: [],
   jewelry: ["gold"],
   watch: ["watch"],
   accessories: ["accessory"],
@@ -621,6 +628,9 @@ async function settleLine(
       vatPercent: line.vatPercent,
       tenders: tenderQueue,
       warrantyMonths: line.warrantyMonths,
+      // A reserved unit sells only on this customer's invoice (issue #795
+      // item 20) — the sale converts the hold inside the same transaction.
+      customerId: input.customerId ?? null,
       createdBy: input.createdBy ?? null,
     });
     const { breakdown, cost, warranty } = watchSale;

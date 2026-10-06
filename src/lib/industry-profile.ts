@@ -182,6 +182,21 @@ const RETAIL_LABELS: Partial<Record<LabelKey, string>> = {
 };
 
 /**
+ * Issue #799 — AEC's nouns. A design office or a contractor does not sell a
+ * menu (F&B) and does not have a «فاکتور فروش» counter (retail): what leaves
+ * the business is a statement of professional work — a study, a drawing set,
+ * a supervision period, a progress certificate. The words follow that, and
+ * the *screen* those words land on is Accounting's, never a new one.
+ */
+const AEC_LABELS: Partial<Record<LabelKey, string>> = {
+  saleDocument: "صورتحساب",
+  saleDocumentPlural: "صورتحساب‌ها",
+  sellScreen: "صورتحساب و دریافت",
+  catalogue: "خدمات مهندسی",
+  catalogueItem: "خدمت مهندسی",
+};
+
+/**
  * The F&B-only modules. Named rather than inlined three times so that adding a
  * fifth industry is one line, and so the list reads as the answer to "what
  * makes a café a café": table service, a kitchen to send tickets to, bookings,
@@ -356,6 +371,49 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: [],
   },
+  /**
+   * Issue #799 — Architecture, Civil Engineering & Construction.
+   *
+   * Deliberately the *core* module set and nothing else, exactly as the issue
+   * specifies: no restaurant operations (`orders`, `tables`, `waiter`,
+   * `kitchen`, `reservations`, `delivery`, `menu`), no retail selling (`pos`,
+   * `stock`) and none of the trade-goods catalogs. An AEC tenant's operational
+   * centre is **My Workspace** — projects, phases, tasks, documents,
+   * approvals, events and project financials, all of which already exist and
+   * are gated by the workspace shell rather than by a module key (there is
+   * intentionally no `workspace`/`projects` key; see the MODULE_KEYS note).
+   *
+   * The trade still gets the whole commercial platform it needs: Accounting
+   * (ledger, reports, journal, cheques, payroll, fixed assets), CRM and its
+   * parties — a client company, a consultant and a subcontractor are all
+   * `parties` — Growth & Marketing, Website, the media library and the
+   * assistant. That is the issue's architecture line exactly:
+   *
+   *    architecture_construction → operating profile → enabled capabilities
+   *    → My Workspace + Accounting + CRM + Growth + Website + AI
+   *
+   * `salesModel` stays `retail_invoice` because this trade bills from the
+   * accounting suite's statement screen, never from a counter: progress
+   * certificates and service invoices arrive as Accounting documents in a
+   * later wave, not as a POS with a cart.
+   *
+   * Restaurant-only feature flags are seeded off at provision time
+   * (`defaultDisabledFeatures`), the same industry-default-not-prohibition
+   * mechanism every other non-F&B profile uses. `inventory` here is F&B's
+   * recipe-costed raw-material store; AEC material tracking is a later wave's
+   * project-scoped capability, not the café warehouse. `multi_location` and
+   * friends stay at their catalogue default — several branches of an
+   * engineering firm are perfectly ordinary.
+   */
+  architecture_construction: {
+    brandTitle: "عمران، معماری و پیمانکاری",
+    brandSubtitle: "مدیریت پروژه، طراحی، اجرا و امور مالی",
+    modules: [...CORE_MODULES],
+    labels: AEC_LABELS,
+    salesModel: "retail_invoice",
+    defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
+    capabilities: [],
+  },
 };
 
 export function industryProfile(industry: Industry): IndustryProfile {
@@ -426,7 +484,9 @@ export const PAGE_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   ["/accounting/reservations", "reservations"],
   ["/accounting/delivery", "delivery"],
   ["/accounting/inventory", "inventory"],
-  ["/settings/menu", "menu"],
+  // The menu manager lives under Accounting → «فروش و درآمد» (issue #844);
+  // `/settings/menu` 308s to it in middleware before this table is consulted.
+  ["/accounting/menu", "menu"],
   ["/accounting/jewelry", "jewelry"],
   ["/accounting/watch", "watch"],
   // The products workspace is the catalogue door every retail trade-goods

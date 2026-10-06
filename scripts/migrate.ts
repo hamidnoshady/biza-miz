@@ -56,6 +56,23 @@ export const MIGRATION_ADVISORY_LOCK_ID = "7310318183545164275";
  * comment lines changed — every statement is byte-for-byte identical — so
  * adopting the checksum is schema-neutral, exactly like 0127.
  *
+ * 0190_hybrid_sync_completeness.sql is deliberately NOT in this map. Commit
+ * 8824b59 (PR #844) edited it in place: menu_items' `trg_sync_capture`
+ * argument lost `image_media_id`, so the trigger's excluded-columns list
+ * changed. That is not a schema-neutral edit — a database holding the
+ * original keeps excluding the column — so adopting its checksum would have
+ * silently frozen production's old trigger definition. It was restored to the
+ * bytes production applied instead, which is what the immutability rule
+ * already required; migrations/0204_menu_item_image_media_sync.sql is the
+ * forward migration that drops and recreates that trigger without
+ * `image_media_id`, for fresh and existing databases alike.
+ *
+ * Note the second-order trap that restoration avoids: 0204 is itself applied
+ * by any database created fresh from a tree at or after 8824b59, so editing
+ * 0204 — even its comments — would raise the same mismatch on those
+ * databases. That is exactly how 0127 and 0140 ended up in this map. Once a
+ * migration file exists in a published image, its bytes are frozen: put the
+ * change in a new migration.
  * 0200_crm_automations.sql is the one case where the *statements* changed, and
  * it is admissible because a forward migration restores the neutral result:
  *

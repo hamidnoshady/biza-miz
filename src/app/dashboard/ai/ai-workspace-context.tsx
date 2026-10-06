@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDownIcon, FolderKanbanIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { AI_MODE_LABELS, AI_REASONING_MODES, type AiReasoningMode } from "@/lib/ai-reasoning";
+import { AI_MODE_LABELS, AI_RUNTIME_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
 import type { AiAppFocus } from "@/components/ai/use-ai-chat";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -12,15 +12,18 @@ interface Project { id: string; name: string; }
 export function AiWorkspaceContext({
   appFocus,
   onAppFocusChange,
-  reasoningMode,
-  onReasoningModeChange,
+  runtimeMode,
+  onRuntimeModeChange,
+  deepResearchEnabled,
   projectId,
   onProjectChange,
 }: {
   appFocus: AiAppFocus;
   onAppFocusChange: (value: AiAppFocus) => void;
-  reasoningMode: AiReasoningMode;
-  onReasoningModeChange: (value: AiReasoningMode) => void;
+  runtimeMode: AiRuntimeMode;
+  onRuntimeModeChange: (value: AiRuntimeMode) => void;
+  /** Issue #812 §6 — whether Superadmin has Deep Research switched on. */
+  deepResearchEnabled: boolean;
   projectId: string | null;
   onProjectChange: (value: string | null) => void;
 }) {
@@ -46,8 +49,12 @@ export function AiWorkspaceContext({
       </label>
       <label className="relative flex min-w-0 items-center gap-2">
         <span className="sr-only">حالت پاسخ‌گویی</span>
-        <select value={reasoningMode} onChange={(event) => onReasoningModeChange(event.target.value as AiReasoningMode)} className={selectClass} aria-label="حالت پاسخ‌گویی">
-          {AI_REASONING_MODES.map((mode) => <option key={mode} value={mode} disabled={mode === "deep_research"}>{AI_MODE_LABELS[mode]}{mode === "deep_research" ? " (به‌زودی)" : ""}</option>)}
+        {/* Issue #812 §7 — exactly the three user-facing modes. «پژوهش عمیق»
+            is offered when Superadmin has switched the platform flag on, and it
+            is not offered otherwise: a disabled option that still looks
+            selectable is a lie the UI should not tell. */}
+        <select value={runtimeMode} onChange={(event) => onRuntimeModeChange(event.target.value as AiRuntimeMode)} className={selectClass} aria-label="حالت پاسخ‌گویی">
+          {AI_RUNTIME_MODES.filter((mode) => mode !== "deep_research" || deepResearchEnabled).map((mode) => <option key={mode} value={mode}>{AI_MODE_LABELS[mode]}</option>)}
         </select><ChevronDownIcon className="pointer-events-none absolute end-2 size-3.5 text-muted-foreground" />
       </label>
       {projectsLoading ? <Skeleton className="h-10 w-40 rounded-xl" aria-label="در حال خواندن پروژه‌ها" /> : <label className="relative flex min-w-0 flex-1 items-center gap-2 sm:flex-none">

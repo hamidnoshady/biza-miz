@@ -21,7 +21,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     settlementMethod?: string;
     reason?: string;
     idempotencyKey?: string;
-    lines?: { itemId?: string; quantity?: string; batchId?: string | null }[];
+    lines?: {
+      itemId?: string;
+      quantity?: string;
+      batchId?: string | null;
+      /** Serial-tracked items: the exact unit going back (issue #795). */
+      serialId?: string | null;
+      serialNumber?: string | null;
+    }[];
   };
   try {
     body = await request.json();

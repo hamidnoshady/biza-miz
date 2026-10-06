@@ -33,6 +33,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   watch_sale: "فروش ساعت",
   custom_order_ticket: "سفارش ساخت",
   repair_ticket: "تعمیرات",
+  serial_transfer: "انتقال دستگاه بین شعب",
   layaway_plan: "پیش‌فروش (رزرو کالا)",
   layaway_payment: "قسط پیش‌فروش",
   consignment_payout: "تسویهٔ امانی",

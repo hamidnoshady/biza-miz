@@ -123,12 +123,21 @@ type Draft = Omit<PermissionMetadata, "ownerOnly" | "delegatable"> &
 const DRAFTS: Draft[] = [
   // --- AI workspace --------------------------------------------------------
   { key: P.aiUse, group: "ai", label: "استفاده از دستیار هوشمند", description: "باز کردن فضای کار هوش مصنوعی و پرسیدن سؤال با داده‌های مجاز.", risk: "low", audit: false },
-  { key: P.aiManage, group: "ai", label: "مدیریت دستیار هوشمند", description: "مدیریت ایجنت‌ها، همکارها و تنظیمات اصلی دستیار.", risk: "high", audit: true, implies: [P.aiUse] },
-  { key: P.aiAgentsManage, group: "ai", label: "مدیریت ایجنت‌ها", description: "ساخت و تنظیم ایجنت‌های سفارشی دستیار.", risk: "medium", audit: true, implies: [P.aiUse] },
+  // Issue #812 §4/§9 — the two AI management keys the issue retired are gone
+  // from this catalogue entirely: a system agent is built and versioned only by
+  // Superadmin, so a tenant never manages one; and knowledge is infrastructure
+  // owned by the configured LiteLLM layer, not something a tenant feeds or
+  // reindexes. An advertised capability that gates nothing is a permission a
+  // reviewer stops trusting, so they were removed rather than left dangling.
+  { key: P.aiManage, group: "ai", label: "مدیریت دستیار هوشمند", description: "مدیریت حافظه، همکارها و تنظیمات اصلی دستیار.", risk: "high", audit: true, implies: [P.aiUse] },
   { key: P.aiAutomationsManage, group: "ai", label: "مدیریت اتوماسیون‌های هوشمند", description: "ساخت، بررسی و اجرای گردش‌کارهای هوشمند.", risk: "high", audit: true, implies: [P.aiUse] },
-  { key: P.aiKnowledgeManage, group: "ai", label: "مدیریت دانش دستیار", description: "افزودن و بازسازی اسناد دانشی که دستیار از آن‌ها استفاده می‌کند.", risk: "medium", audit: true, implies: [P.aiUse] },
   { key: P.aiUsageView, group: "ai", label: "مشاهده مصرف هوش مصنوعی", description: "دیدن مصرف، هزینه و سابقهٔ استفاده از دستیار.", risk: "low", audit: false, implies: [P.aiUse] },
-  { key: P.aiWidgetsManage, group: "ai", label: "مدیریت ویجت‌های هوشمند", description: "ساخت، ویرایش و حذف خلاصه‌های ویجتی فضای کار.", risk: "medium", audit: true, implies: [P.aiUse] },
+  // Issue #812 §11 — the widget-management key is gone. A workspace widget is a
+  // saved prompt that runs with its creator's OWN permissions, and
+  // `ai-widgets.ts` refuses any widget whose `requiredPermissions` the caller
+  // does not already hold (`widget_permission_widening`). That intersection is
+  // a stronger boundary than a dedicated key would be: it holds per widget
+  // rather than per member, and it fails closed on an unknown permission.
 
   // --- Sales & orders ------------------------------------------------------
   { key: P.ordersView, group: "orders", label: "مشاهده سفارش‌ها", description: "دیدن سفارش‌های باز و بسته‌شده بدون تغییر آن‌ها.", risk: "low", audit: false },
@@ -178,6 +187,7 @@ const DRAFTS: Draft[] = [
   { key: P.workspaceContractsManage, group: "workspace", label: "مدیریت قراردادها", description: "ثبت و اصلاح قرارداد اجرا؛ یک تعهد مالی به شخص ثالث است.", risk: "high", audit: true, implies: [P.workspaceView] },
   { key: P.workspaceAdmin, group: "workspace", label: "مدیریت همهٔ پروژه‌ها", description: "دسترسی مدیر به همهٔ پروژه‌ها، حتی بدون عضویت.", risk: "high", audit: true, implies: [P.workspaceView, P.workspaceManage] },
   { key: P.workspaceApprove, group: "workspace", label: "تأیید درخواست‌ها", description: "تصمیم‌گیری درباره درخواست‌های نیازمند تأیید.", risk: "high", audit: true, implies: [P.workspaceView] },
+  { key: P.workspaceDocumentsIssue, group: "workspace", label: "صدور نقشه و سند", description: "صدور بازنگری نقشه یا سند برای طرف‌های بیرونی با برگهٔ ارسال. پس از صدور، سابقه تغییرناپذیر می‌شود.", risk: "high", audit: true, implies: [P.workspaceView] },
 
   // --- Accounting ----------------------------------------------------------
   { key: P.ledgerView, group: "accounting", label: "مشاهده دفاتر", description: "دیدن اسناد حسابداری، دفتر کل و صورت‌های مالی.", risk: "low", audit: false },

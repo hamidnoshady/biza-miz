@@ -17,6 +17,7 @@ import { accountIdsByCode, postExactCogsEntry, postExactJournalEntry } from "../
 import { deductForOrder } from "../inventory-service";
 import { createCustomerReturn, type ReturnLine } from "../customer-return-service";
 import { RETAIL_ACCOUNT_CODES } from "../retail-account-codes";
+import { INDUSTRY_NOT_STOREFRONT, hasSellableCatalogue, isRetailCatalogueIndustry } from "../industries";
 import { quantityText, type RialText } from "../inventory-exact";
 import { sellOnlineRetailLine } from "../retail-online-sale-service";
 import { restoreOrderItemBatchStock } from "../retail-batch-inventory";
@@ -573,7 +574,13 @@ function relievesStock(line: ResolvedOrderLine): boolean {
 
 async function ingestOrder(connection: ConnectionRow, order: WooOrder): Promise<void> {
   const industry = await getBusinessIndustry(connection.business_id);
-  if (industry && industry !== "food_service") {
+  // Issue #799 Wave 11 — "not F&B" is not "retail". A trade with no sellable
+  // catalogue (the architecture/construction trade today) gets the order
+  // refused by name: the caller records the delivery as failed with this
+  // message, which the connection's own screen shows, rather than a retail sale
+  // appearing in books that only ever sell services.
+  if (!hasSellableCatalogue(industry)) throw new Error(INDUSTRY_NOT_STOREFRONT);
+  if (isRetailCatalogueIndustry(industry)) {
     await ingestRetailOrder(connection, order, industry);
     return;
   }
@@ -1104,7 +1111,10 @@ async function ingestRefund(connection: ConnectionRow, refund: WooRefund, inboxI
     }
 
     const industry = await getBusinessIndustry(businessId);
-    if (industry && industry !== "food_service") {
+    // Same refusal as ingestOrder, for the same reason: a reversal must never be
+    // the door a storefront-less business acquires a sale row through.
+    if (!hasSellableCatalogue(industry)) throw new Error(INDUSTRY_NOT_STOREFRONT);
+    if (isRetailCatalogueIndustry(industry)) {
       await ingestRetailRefund(client, connection, refund, { businessId, locationId, amount, tax, net, remoteId, inboxId, industry });
     } else {
       await ingestFnBRefund(client, connection, refund, { businessId, locationId, amount, tax, net, remoteId, inboxId });

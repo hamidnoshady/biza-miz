@@ -57,7 +57,7 @@ describe("built-in role presets", () => {
 
   it("holds the manager preset exactly", () => {
     expect(effective("manager")).toEqual([
-      "ai.agents.manage", "ai.automations.manage", "ai.knowledge.manage", "ai.manage", "ai.usage.view", "ai.use", "ai.widgets.manage",
+      "ai.automations.manage", "ai.manage", "ai.usage.view", "ai.use",
       "backup.manage",
       "billing.manage", "billing.view",
       "campaigns.manage", "campaigns.view",
@@ -91,7 +91,7 @@ describe("built-in role presets", () => {
       "tables.edit", "tables.manage",
       "website.manage", "website.settings_manage", "website.view",
       "woocommerce.configure", "woocommerce.manage", "woocommerce.sync", "woocommerce.view",
-      "workspace.admin", "workspace.approve", "workspace.contracts_manage", "workspace.manage", "workspace.view",
+      "workspace.admin", "workspace.approve", "workspace.contracts_manage", "workspace.documents_issue", "workspace.manage", "workspace.view",
     ]);
   });
 

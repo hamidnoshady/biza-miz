@@ -14,6 +14,7 @@
  * DB-touching, so per repo convention it has no direct unit test; covered
  * instead by integration/consignment.integration.test.ts.
  */
+import { queryReportPage } from "./report-page-query";
 import { randomUUID } from "node:crypto";
 import { query, type PoolClient } from "./db";
 import { getItem } from "./items-service";
@@ -250,6 +251,53 @@ export async function getConsignorStatement(
     balance: consignorBalance({ owed: totalOwed, paid: totalPaid }),
   };
 }
+
+/** The statement directory in one aggregate query, instead of four reads per consignor.
+ * Uses precisely the statement's sale-event and payout contracts above. No item
+ * or sale details are loaded just to count/sum them for a reporting headline.
+ */
+async function readConsignorSummaries(businessId: string, page?: number) {
+  const result = await queryReportPage<{
+    id: string; name: string; on_hand: string; owed: string; paid: string;
+  }, { count: number; totalOwed: number; totalPaid: number; balance: number }>(`
+    WITH held AS (
+      SELECT c.consignor_id, count(*) AS n
+        FROM item_consignments c JOIN items i ON i.id = c.item_id
+        JOIN item_weight_attributes w ON w.item_id = c.item_id
+        JOIN consignors owner ON owner.id = c.consignor_id
+       WHERE owner.business_id = $1 AND w.status <> 'sold' GROUP BY c.consignor_id
+    ), sales AS (
+      SELECT c.consignor_id,
+             sum(coalesce((e.payload->>'metalValue')::numeric, 0) + coalesce((e.payload->>'makingCharge')::numeric, 0)) AS owed
+        FROM domain_events e JOIN item_consignments c ON c.item_id = e.source_id
+        JOIN items i ON i.id = e.source_id
+       WHERE e.business_id = $1 AND e.event_type = 'gold.consignment_sale_revenue'
+       GROUP BY c.consignor_id
+    ), paid AS (
+      SELECT payload->>'consignorId' AS consignor_id, sum(coalesce((payload->>'amount')::numeric, 0)) AS paid
+        FROM domain_events WHERE business_id = $1 AND event_type = 'consignment.payout'
+       GROUP BY payload->>'consignorId'
+    )
+    SELECT c.id, c.name, coalesce(h.n, 0)::text AS on_hand,
+           coalesce(s.owed, 0)::text AS owed, coalesce(p.paid, 0)::text AS paid
+      FROM consignors c LEFT JOIN held h ON h.consignor_id = c.id
+      LEFT JOIN sales s ON s.consignor_id = c.id LEFT JOIN paid p ON p.consignor_id = c.id::text
+     WHERE c.business_id = $1 `,
+    [businessId],
+    { page, orderBy: "name, id", summary: `jsonb_build_object('count', count(*), 'totalOwed', coalesce(sum(owed::numeric),0), 'totalPaid', coalesce(sum(paid::numeric),0), 'balance', coalesce(sum(owed::numeric - paid::numeric),0))` },
+  );
+  const { rows } = result;
+  return { ...result, rows: rows.map((r) => ({
+    consignorId: r.id, name: r.name, itemsOnHand: Number(r.on_hand),
+    totalOwed: Number(r.owed), totalPaid: Number(r.paid),
+    balance: consignorBalance({ owed: Number(r.owed), paid: Number(r.paid) }),
+  })) };
+}
+
+export async function getConsignorSummaries(businessId: string) {
+  return (await readConsignorSummaries(businessId)).rows;
+}
+export const getConsignorSummaryPage = (businessId: string, page: number) => readConsignorSummaries(businessId, page);
 
 export interface PayConsignorInput {
   businessId: string;

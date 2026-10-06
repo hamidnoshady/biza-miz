@@ -136,25 +136,49 @@ interface RepairCogsPayload {
   ticketId: string;
 }
 
+/**
+ * Issue #795 Phase 1 (items 4 & 5) — the repair engine is shared between the
+ * watch and jewelry trades, but the inventory a consumed part leaves is not:
+ * a jewelry repair must relieve the jewelry inventory account, never the
+ * watch one. The industry is read live from the business row inside the same
+ * transaction, so the rule stays a single registration for both trades.
+ */
+const REPAIR_INVENTORY_CODE_BY_INDUSTRY: Record<string, string> = {
+  watch: WELL_KNOWN_CODES.watchInventory,
+  jewelry: WELL_KNOWN_CODES.goldInventory,
+};
+
 registerPostingRule("watch.repair_cogs", async (event, client): Promise<PostingResult | null> => {
   const payload = event.payload as unknown as RepairCogsPayload;
 
+  // Only parts sourced from the shop's own stock relieve inventory here
+  // (issue #795 item 4). An `external` part was bought for this one job —
+  // its cost is recorded by the purchase/expense that acquired it, and
+  // crediting inventory for it would show stock leaving that was never in.
   const { rows } = await client.query<{ total: string | null }>(
-    `SELECT SUM(quantity * unit_cost)::text AS total FROM repair_ticket_parts WHERE ticket_id = $1`,
+    `SELECT SUM(quantity * unit_cost)::text AS total
+       FROM repair_ticket_parts WHERE ticket_id = $1 AND source = 'stock'`,
     [payload.ticketId],
   );
   const cost = roundRial(new Decimal(rows[0]?.total ?? 0));
   if (rialBigInt(cost) === 0n) return null;
 
+  const { rows: bizRows } = await client.query<{ industry: string | null }>(
+    `SELECT industry FROM businesses WHERE id = $1`,
+    [event.businessId],
+  );
+  const inventoryCode =
+    REPAIR_INVENTORY_CODE_BY_INDUSTRY[bizRows[0]?.industry ?? ""] ?? WELL_KNOWN_CODES.watchInventory;
+
   const accounts = await accountIdsByCode(client, event.businessId, [
     WELL_KNOWN_CODES.repairPartsExpense,
-    WELL_KNOWN_CODES.watchInventory,
+    inventoryCode,
   ]);
 
   return {
     lines: [
       { accountId: accounts.get(WELL_KNOWN_CODES.repairPartsExpense)!, debit: cost, credit: ZERO },
-      { accountId: accounts.get(WELL_KNOWN_CODES.watchInventory)!, debit: ZERO, credit: cost },
+      { accountId: accounts.get(inventoryCode)!, debit: ZERO, credit: cost },
     ],
     memo: "بهای قطعات مصرفی تعمیرات",
     postingKind: "watch_repair_cogs",

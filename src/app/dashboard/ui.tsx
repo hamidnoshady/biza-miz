@@ -162,6 +162,16 @@ const ERROR_MESSAGES: Record<string, string> = {
     item_not_found: "آیتم پیدا نشد.",
     group_not_found: "گروه افزودنی پیدا نشد.",
     modifier_not_found: "افزودنی پیدا نشد.",
+    // Menu manager (issue #844) — canonical menu service codes.
+    sku_exists: "کد کالا (SKU) تکراری است؛ کد دیگری وارد کنید.",
+    group_name_exists: "گروه افزودنی دیگری با این نام وجود دارد.",
+    modifier_exists: "افزودنی دیگری با این نام در این گروه وجود دارد.",
+    reorder_mismatch:
+      "ترتیب ارسال‌شده با فهرست فعلی همخوان ندارد؛ فهرست را تازه کنید و دوباره مرتب کنید.",
+    invalid_media:
+      "تصویر انتخاب‌شده معتبر نیست؛ تصویر را از کتابخانهٔ رسانهٔ همین کسب‌وکار انتخاب کنید.",
+    no_suggestion:
+      "برای این آیتم قیمت پیشنهادی محاسبه نشده است؛ ابتدا دستورعمل یا حاشیهٔ سود را کامل کنید.",
     table_exists: "میزی با این نام وجود دارد.",
     table_not_found: "میز پیدا نشد.",
     table_required: "برای سفارش حضوری انتخاب میز الزامی است.",
@@ -365,6 +375,124 @@ const ERROR_MESSAGES: Record<string, string> = {
     // Not a usable YYYY-MM-DD calendar date — what the ledger's aging and
     // voucher routes answer a malformed date parameter with.
     invalid_date: "تاریخ واردشده معتبر نیست.",
+    // پروفایل کسب‌وکار و پروژه‌های AEC (issue #799، موج ۲)
+    industry_mismatch: "این بخش فقط برای کسب‌وکارهای عمران، معماری و پیمانکاری است.",
+    invalid_operating_profile: "پروفایل کسب‌وکار انتخابی معتبر نیست.",
+    invalid_coordinate: "مختصات جغرافیایی معتبر نیست.",
+    invalid_area: "متراژ باید عددی نامنفی باشد.",
+    invalid_floor_count: "تعداد طبقات باید عددی بین ۰ و ۵۰۰ باشد.",
+    invalid_progress: "درصد پیشرفت باید عددی بین ۰ و ۱۰۰ باشد.",
+    invalid_reference: "یکی از موارد انتخاب‌شده معتبر نیست.",
+    role_not_allowed:
+      "این نقش با پروفایل کسب‌وکار شما سازگار نیست؛ برای فعال‌کردن آن، قابلیت مربوط را در تنظیمات روشن کنید.",
+    participant_exists: "این طرف با همین نقش از قبل برای این پروژه ثبت شده است.",
+    participant_not_found: "طرف پروژه پیدا نشد یا قبلاً حذف شده است.",
+    project_not_found: "پروژه پیدا نشد.",
+    end_before_start: "تاریخ پایان نمی‌تواند پیش از تاریخ شروع باشد.",
+    // AEC registers — registration, document control, RFIs, submittals and the
+    // site (issue #799, waves 4–7). The API answers these codes and the AEC
+    // panels render them through `workspaceError`, so a code with no sentence
+    // here reached the user as `submittal_revision_not_editable`. The Wave 7
+    // entries are the bottom block.
+    capability_disabled:
+      "این قابلیت برای کسب‌وکار شما روشن نیست؛ از «تنظیمات ← کسب‌وکار» می‌توانید آن را روشن کنید.",
+    estimate_not_found: "برآورد پیدا نشد.",
+    estimate_version_not_found: "نسخهٔ برآورد پیدا نشد.",
+    version_not_editable: "این نسخه دیگر قابل ویرایش نیست.",
+    invalid_estimate_transition: "این تغییر وضعیت برای نسخهٔ برآورد مجاز نیست.",
+    estimate_has_approved_version: "این برآورد نسخهٔ تأییدشده دارد و قابل حذف نیست.",
+    estimate_empty: "برآورد خالی است؛ ابتدا ردیف‌های متره را ثبت کنید.",
+    boq_total_out_of_range: "مبلغ برآورد از سقف مجاز بیشتر است.",
+    drawing_not_found: "نقشه یا سند پیدا نشد.",
+    revision_not_found: "بازنگری پیدا نشد.",
+    transmittal_not_found: "برگهٔ ارسال پیدا نشد.",
+    document_number_taken: "این شمارهٔ سند قبلاً ثبت شده است.",
+    revision_code_taken: "این کد بازنگری قبلاً ثبت شده است.",
+    transmittal_number_taken: "این شمارهٔ برگهٔ ارسال قبلاً ثبت شده است.",
+    revision_not_editable: "این بازنگری دیگر قابل تغییر نیست.",
+    transmittal_not_editable: "این برگهٔ ارسال دیگر قابل تغییر نیست.",
+    drawing_has_issued_revisions: "این سند بازنگری صادرشده دارد و قابل حذف نیست.",
+    transmittal_empty: "برگهٔ ارسال بدون ردیف قابل صدور نیست.",
+    transmittal_has_no_recipients: "برگهٔ ارسال بدون گیرنده قابل صدور نیست.",
+    transmittal_not_issued: "این برگهٔ ارسال هنوز صادر نشده است.",
+    recipient_already_acknowledged: "این دریافت قبلاً ثبت شده است.",
+    rfi_not_found: "استعلام پیدا نشد.",
+    submittal_not_found: "سابمیتال پیدا نشد.",
+    submittal_revision_not_found: "بازنگری سابمیتال پیدا نشد.",
+    media_not_found: "فایل انتخاب‌شده در کتابخانهٔ رسانه پیدا نشد.",
+    rfi_number_taken: "این شمارهٔ استعلام قبلاً ثبت شده است.",
+    submittal_number_taken: "این شمارهٔ سابمیتال قبلاً ثبت شده است.",
+    rfi_not_editable: "این استعلام در این وضعیت قابل ویرایش نیست.",
+    submittal_not_editable: "این سابمیتال در این وضعیت قابل ویرایش نیست.",
+    submittal_revision_not_editable: "این بازنگری دیگر قابل تغییر نیست.",
+    submittal_has_submitted_revisions: "این سابمیتال بازنگری ارسال‌شده دارد و قابل حذف نیست.",
+    submittal_first_revision_required: "سابمیتال باید دست‌کم یک بازنگری داشته باشد.",
+    invalid_rfi_transition: "این تغییر وضعیت برای استعلام مجاز نیست.",
+    invalid_submittal_transition: "این تغییر وضعیت برای سابمیتال مجاز نیست.",
+    // Issue #799 Wave 7 — the daily log and §14's register.
+    site_log_not_found: "گزارش روزانه پیدا نشد.",
+    site_issue_not_found: "مورد کارگاه پیدا نشد.",
+    checklist_not_found: "چک‌لیست پیدا نشد.",
+    site_log_exists: "برای این تاریخ قبلاً گزارش روزانه ثبت شده است؛ همان را ویرایش کنید.",
+    site_issue_number_taken: "این شمارهٔ مورد قبلاً در پروژه ثبت شده است.",
+    checklist_name_taken: "چک‌لیستی با همین نام قبلاً ثبت شده است.",
+    site_log_not_editable: "این گزارش در این وضعیت قابل ویرایش نیست.",
+    site_issue_not_editable: "این مورد در این وضعیت قابل تغییر نیست.",
+    invalid_site_log_transition: "این تغییر وضعیت برای گزارش روزانه مجاز نیست.",
+    invalid_site_issue_transition: "این تغییر وضعیت برای مورد کارگاه مجاز نیست.",
+    site_log_work_required: "شرح کارهای انجام‌شده را بنویسید؛ گزارش خالی ثبت نمی‌شود.",
+    site_issue_title_required: "عنوان مورد الزامی است.",
+    site_issue_resolution_required: "شرح اقدام انجام‌شده را بنویسید.",
+    site_issue_result_required: "برای بستن بازرسی، نتیجهٔ آن (قبول/قبول با تذکر/رد) را ثبت کنید.",
+    site_issue_verifier_is_assignee:
+      "تأیید نهایی را نمی‌تواند کسی ثبت کند که خودش مسئول رفع نقص بوده است؛ فرد دیگری آن را تأیید کند.",
+    checklist_not_for_kind: "چک‌لیست فقط برای بازرسی و تحویل به‌کار می‌رود.",
+    invalid_site_log_line: "یکی از ردیف‌های گزارش روزانه کامل یا معتبر نیست.",
+    invalid_site_issue_kind: "نوع مورد کارگاه نامعتبر است.",
+    invalid_site_check: "یکی از ردیف‌های چک‌لیست معتبر نیست.",
+    invalid_site_issue_result: "نتیجهٔ بازرسی نامعتبر است.",
+    invalid_category: "دستهٔ انتخاب‌شده معتبر نیست.",
+    invalid_severity: "شدت انتخاب‌شده معتبر نیست.",
+    invalid_checklist_kind: "نوع چک‌لیست نامعتبر است.",
+    // Wave 5's drawing register raises this too; it had no sentence because only
+    // the picker could reach it, and the picker is built from the catalogue.
+    invalid_discipline: "رشتهٔ انتخاب‌شده معتبر نیست.",
+    checklist_name_required: "نام چک‌لیست الزامی است.",
+    checklist_item_required: "عنوان هر ردیف چک‌لیست الزامی است.",
+    // Issue #799 Wave 8 — the commercial controls: change orders, payment
+    // certificates and the contract's commercial block. Every sentence is a
+    // refusal an accountant has to act on, so each says what to do next rather
+    // than only what went wrong.
+    variation_not_found: "تغییر پیدا نشد.",
+    certificate_not_found: "صورت‌وضعیت پیدا نشد.",
+    contract_not_found: "قرارداد پیدا نشد.",
+    contract_project_mismatch: "قرارداد انتخاب‌شده به این پروژه تعلق ندارد.",
+    rfi_project_mismatch: "استعلام انتخاب‌شده به این پروژه تعلق ندارد.",
+    boq_item_not_found: "ردیف متره انتخاب‌شده پیدا نشد.",
+    boq_item_project_mismatch: "ردیف متره انتخاب‌شده به این پروژه تعلق ندارد.",
+    invalid_variation_source: "منشأ تغییر نامعتبر است.",
+    invalid_certificate_kind: "نوع صورت‌وضعیت نامعتبر است.",
+    variation_description_required: "شرح تغییر الزامی است.",
+    variation_not_editable:
+      "این تغییر در این وضعیت قابل ویرایش نیست؛ برای اصلاح، ابتدا آن را بازگشایی کنید.",
+    certificate_not_editable:
+      "این صورت‌وضعیت در این وضعیت قابل ویرایش نیست؛ برای اصلاح، ابتدا آن را به پیش‌نویس برگردانید.",
+    invalid_variation_transition: "این تغییر وضعیت برای تغییر مجاز نیست.",
+    invalid_certificate_transition: "این تغییر وضعیت برای صورت‌وضعیت مجاز نیست.",
+    variation_estimate_required:
+      "برای قیمت‌گذاری تغییر، ابتدا برآورد داخلی آن را ثبت کنید.",
+    variation_submitted_amount_required: "برای ارسال تغییر، مبلغ پیشنهادی را ثبت کنید.",
+    variation_approved_amount_required: "برای تأیید تغییر، مبلغ توافق‌شده را ثبت کنید.",
+    certificate_period_required: "دورهٔ اندازه‌گیری (شروع و پایان) الزامی است.",
+    invalid_certificate_period: "تاریخ پایان دوره نباید پیش از شروع آن باشد.",
+    certificate_line_label_required: "برای هر ردیف اندازه‌گیری، شرح الزامی است.",
+    certificate_deductions_exceed_gross:
+      "جمع کسورات از مبلغ کار انجام‌شده بیشتر است؛ ارقام را بازبینی کنید.",
+    certificate_lines_mismatch:
+      "جمع ردیف‌های اندازه‌گیری با مبلغ ناخالص صورت‌وضعیت برابر نیست؛ یکی را اصلاح کنید.",
+    approved_amount_exceeds_net: "مبلغ تأییدشده نمی‌تواند از مبلغ خالص صورت‌وضعیت بیشتر باشد.",
+    advance_over_recovery:
+      "بازیافت پیش‌پرداخت از ماندهٔ پیش‌پرداخت قرارداد بیشتر است؛ پیش‌پرداخت پرداخت‌شده را بررسی کنید.",
     supplier_required: "انتخاب تأمین‌کننده الزامی است.",
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
     // Phase 22 — fixed assets & depreciation

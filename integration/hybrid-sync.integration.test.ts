@@ -338,6 +338,149 @@ describe("master data", () => {
   });
 });
 
+describe("watch catalogue (issue #795 Phase 7)", () => {
+  it("carries brand, model and structured attributes both ways — but never the serial units", async () => {
+    // ---- central: a brand, a serialized model, its attributes, one unit --
+    const ids = await onCentral(() =>
+      withTenant(biz.businessId, async () => {
+        const brand = await query<{ id: string }>(
+          `INSERT INTO item_brands (location_id, name, country) VALUES ($1, 'رولکس', 'سوئیس') RETURNING id`,
+          [biz.locationId],
+        );
+        const item = await query<{ id: string }>(
+          `INSERT INTO items (location_id, name, sku, tracking, brand_id, service_interval_months)
+           VALUES ($1, 'سابمارینر', 'SUB-1', 'serial', $2, 36) RETURNING id`,
+          [biz.locationId, brand.rows[0].id],
+        );
+        await query(
+          `INSERT INTO watch_item_attributes (item_id, reference_no, movement, water_resistance_m, gender)
+           VALUES ($1, '126610LN', 'automatic', 300, 'men')`,
+          [item.rows[0].id],
+        );
+        const serial = await query<{ id: string }>(
+          `INSERT INTO item_serials (item_id, serial_number, unit_cost) VALUES ($1, 'SN-HYB-1', 30000000) RETURNING id`,
+          [item.rows[0].id],
+        );
+        return { brandId: brand.rows[0].id, itemId: item.rows[0].id, serialId: serial.rows[0].id };
+      }),
+    );
+
+    await syncRound();
+
+    // The catalogue arrived whole: brand, model (with its brand reference
+    // intact — brands rank before items in the feed), and attributes.
+    const onDesktop = await withTenant(biz.businessId, async () => ({
+      brand: (await query<{ name: string; country: string }>("SELECT name, country FROM item_brands WHERE id = $1", [ids.brandId])).rows[0],
+      item: (
+        await query<{ name: string; sku: string; tracking: string; brand_id: string; service_interval_months: number }>(
+          "SELECT name, sku, tracking, brand_id, service_interval_months FROM items WHERE id = $1",
+          [ids.itemId],
+        )
+      ).rows[0],
+      attrs: (
+        await query<{ reference_no: string; movement: string; water_resistance_m: number; gender: string }>(
+          "SELECT reference_no, movement, water_resistance_m, gender FROM watch_item_attributes WHERE item_id = $1",
+          [ids.itemId],
+        )
+      ).rows[0],
+      serials: (await query<{ n: string }>("SELECT count(*)::text AS n FROM item_serials WHERE item_id = $1", [ids.itemId])).rows[0].n,
+    }));
+    expect(onDesktop.brand).toEqual({ name: "رولکس", country: "سوئیس" });
+    expect(onDesktop.item).toEqual({
+      name: "سابمارینر",
+      sku: "SUB-1",
+      tracking: "serial",
+      brand_id: ids.brandId,
+      service_interval_months: 36,
+    });
+    expect(onDesktop.attrs).toEqual({
+      reference_no: "126610LN",
+      movement: "automatic",
+      water_resistance_m: 300,
+      gender: "men",
+    });
+    // The physical unit did NOT travel: serialized stock is cloud-owned, so
+    // exactly one side can ever move it to sold — a serial cannot sell twice
+    // across devices because only the cloud sells it at all.
+    expect(onDesktop.serials).toBe("0");
+    const clockTables = await withTenant(biz.businessId, () =>
+      query<{ table_name: string }>(
+        "SELECT DISTINCT table_name FROM sync_row_clocks WHERE business_id = $1 AND table_name LIKE '%serial%'",
+        [biz.businessId],
+      ),
+    );
+    expect(clockTables.rows).toEqual([]);
+
+    // ---- concurrent edits to DIFFERENT fields both survive ---------------
+    await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query("UPDATE watch_item_attributes SET movement = 'quartz' WHERE item_id = $1", [ids.itemId]),
+      ),
+    );
+    await withTenant(biz.businessId, () =>
+      query("UPDATE watch_item_attributes SET dial_color = 'مشکی' WHERE item_id = $1", [ids.itemId]),
+    );
+    await syncRound();
+    await syncRound();
+    const readAttrs = () =>
+      withTenant(biz.businessId, () =>
+        query<{ movement: string; dial_color: string }>(
+          "SELECT movement, dial_color FROM watch_item_attributes WHERE item_id = $1",
+          [ids.itemId],
+        ),
+      );
+    const desktopAttrs = (await readAttrs()).rows[0];
+    const cloudAttrs = (await onCentral(readAttrs)).rows[0];
+    expect(desktopAttrs).toEqual({ movement: "quartz", dial_color: "مشکی" });
+    expect(cloudAttrs).toEqual(desktopAttrs);
+
+    // The serial in the cloud sells meanwhile; nothing about the unit leaks
+    // into the desktop through the feed, and the settled feed moves nothing.
+    await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query("UPDATE item_serials SET status = 'sold', sold_at = now() WHERE id = $1", [ids.serialId]),
+      ),
+    );
+    await syncRound();
+    const stillNone = await withTenant(biz.businessId, () =>
+      query<{ n: string }>("SELECT count(*)::text AS n FROM item_serials WHERE item_id = $1", [ids.itemId]),
+    );
+    expect(stillNone.rows[0].n).toBe("0");
+    const quiet = await syncRound();
+    expect(quiet.master).toEqual({ status: "ok", pushed: 0, pulled: 0 });
+  });
+
+  it("removes attributes everywhere when one side clears them (all-empty upsert deletes the row)", async () => {
+    const itemId = await onCentral(() =>
+      withTenant(biz.businessId, async () => {
+        const item = await query<{ id: string }>(
+          `INSERT INTO items (location_id, name, tracking) VALUES ($1, 'دیت‌جاست', 'serial') RETURNING id`,
+          [biz.locationId],
+        );
+        await query(`INSERT INTO watch_item_attributes (item_id, movement) VALUES ($1, 'manual')`, [item.rows[0].id]);
+        return item.rows[0].id;
+      }),
+    );
+    await syncRound();
+    const arrived = await withTenant(biz.businessId, () =>
+      query<{ movement: string }>("SELECT movement FROM watch_item_attributes WHERE item_id = $1", [itemId]),
+    );
+    expect(arrived.rows[0]?.movement).toBe("manual");
+
+    // The desktop clears the attributes; the tombstone travels back.
+    await withTenant(biz.businessId, () =>
+      query("DELETE FROM watch_item_attributes WHERE item_id = $1", [itemId]),
+    );
+    await syncRound();
+    const onCloud = await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query<{ n: string }>("SELECT count(*)::text AS n FROM watch_item_attributes WHERE item_id = $1", [itemId]),
+      ),
+    );
+    expect(onCloud.rows[0].n).toBe("0");
+  });
+});
+
 describe("orders", () => {
   it("brings every change to an open bill to the cloud, not only its creation", async () => {
     const created = await withTenant(biz.businessId, () =>
