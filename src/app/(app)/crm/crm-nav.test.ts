@@ -1,7 +1,13 @@
 import { effectivePermissions } from "@/lib/permissions";
 import type { Role } from "@/lib/auth-edge";
 import { describe, expect, it } from "vitest";
-import { CRM_NAV_ITEMS, crmNavItemsForPermissions } from "./crm-nav";
+import {
+  CRM_NAV_GROUPS,
+  CRM_NAV_ITEMS,
+  CRM_SUB_SECTIONS,
+  crmNavGroupsForPermissions,
+  crmNavItemsForPermissions,
+} from "./crm-nav";
 import {
   canOpenCrm,
   canViewCrmSection,
@@ -48,9 +54,43 @@ describe("CRM_NAV_ITEMS", () => {
 
 describe("crmNavItemsForPermissions", () => {
   it("shows owner and manager every permanent CRM destination", () => {
-    const permanentKeys = CRM_SECTION_KEYS.filter((key) => key !== "persons");
+    // `persons` is one customer's file rather than a destination, and a
+    // sub-section is reached inside its workspace — neither is a rail entry, and
+    // both are still real sections with their own gates.
+    const permanentKeys = CRM_SECTION_KEYS.filter(
+      (key) => key !== "persons" && !CRM_SUB_SECTIONS.includes(key),
+    );
     for (const role of ["owner", "manager"]) {
-      expect(crmNavItemsForPermissions(permissionsFor(role)).map((item) => item.key)).toEqual(permanentKeys);
+      const shown = crmNavItemsForPermissions(permissionsFor(role)).map((item) => item.key);
+      // As a *set*, not in section-key order: the menu is grouped into the six
+      // Relationship OS destinations, so its order is the product's reading
+      // order and deliberately not the order the keys happen to be declared in.
+      expect([...shown].sort()).toEqual([...permanentKeys].sort());
+      expect(new Set(shown).size).toBe(shown.length);
+    }
+  });
+
+  it("groups every visible entry exactly once", () => {
+    // The sidebar renders groups, and `AppSectionNav` silently ignores a key it
+    // was not given. A section added to the nav but to no group would vanish
+    // from the menu with nothing failing, so pin coverage in both directions.
+    for (const role of ["owner", "manager", "cashier"]) {
+      const items = crmNavItemsForPermissions(permissionsFor(role));
+      const groups = crmNavGroupsForPermissions(items);
+      const grouped = groups.flatMap((group) => [...group.keys]);
+      expect([...grouped].sort()).toEqual(items.map((item) => item.key).sort());
+      expect(new Set(grouped).size).toBe(grouped.length);
+      for (const group of groups) {
+        expect(group.label.trim().length).toBeGreaterThan(0);
+        expect(group.keys.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("names every section in exactly one group", () => {
+    for (const key of CRM_NAV_ITEMS.map((item) => item.key)) {
+      const homes = CRM_NAV_GROUPS.filter((group) => group.keys.includes(key));
+      expect(homes.length, `${key} should have one group`).toBe(1);
     }
   });
 
@@ -79,10 +119,15 @@ describe("crmNavItemsForPermissions", () => {
   it("is permission-honest while treating person files as a Contacts detail", () => {
     for (const role of ["owner", "manager", "cashier", "accountant"]) {
       const shown = new Set(crmNavItemsForPermissions(permissionsFor(role)).map((item) => item.key));
-      for (const key of CRM_SECTION_KEYS.filter((key) => key !== "persons")) {
+      for (const key of CRM_SECTION_KEYS.filter(
+        (key) => key !== "persons" && !CRM_SUB_SECTIONS.includes(key),
+      )) {
         expect(shown.has(key)).toBe(canViewCrmSection(permissionsFor(role), key));
       }
       expect(shown.has("persons")).toBe(false);
+      // A sub-section is absent from the rail whoever is signed in — that is the
+      // IA decision, not a permission one, which is why the loop above skips it.
+      for (const key of CRM_SUB_SECTIONS) expect(shown.has(key)).toBe(false);
     }
   });
 });

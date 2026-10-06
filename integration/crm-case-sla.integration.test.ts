@@ -1,17 +1,33 @@
 /**
  * Case status transitions and the waiting accumulator.
  *
- * The pure SLA arithmetic is covered in `crm-case-sla.test.ts`. What needs a
+ * The pure SLA arithmetic is covered in `crm-case-clock.test.ts`. What needs a
  * database is the **accumulator**: `waiting_seconds` is a running total that
  * must be closed out every time a case leaves `waiting`, and the failure mode
  * is invisible from a single status column — a case that bounces between
  * waiting and active silently loses each earlier stretch and its SLA improves
  * every time it bounces.
+ *
+ * The second thing a database is needed for is the **agreement** between the
+ * service desk's filter and the clock. `listCases({ breachedOnly: true })` is
+ * SQL — it has to be, because a filter applied after the read is a filter the
+ * `LIMIT` already broke — while the row's badge and the summary panel call
+ * `caseClock` in TypeScript, so the rule exists twice. The block at the end of
+ * this file runs both over the same rows and demands the same answer, because
+ * the day they disagree is the day the screen shows «از مهلت گذشته» above a
+ * panel that says nothing is late.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { caseIsBreached } from "../src/lib/crm-case-clock";
+import { isCasePriority, isCaseStatus } from "../src/lib/crm-shared";
+import {
+  caseViewListOptions,
+  caseViewQuery,
+  parseCaseViewFilters,
+} from "../src/lib/crm-case-views";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -21,6 +37,8 @@ if (!rootDatabaseUrl) {
 let databaseName: string;
 let db: Client;
 let cases: typeof import("../src/lib/crm-case-service");
+let desk: typeof import("../src/lib/crm-service");
+let views: typeof import("../src/lib/crm-saved-views-service");
 
 const biz = { id: "" };
 const actor = { name: "مسئول پشتیبانی" };
@@ -50,6 +68,8 @@ beforeAll(async () => {
 
   process.env.DATABASE_URL = urlFor(databaseName);
   cases = await import("../src/lib/crm-case-service");
+  desk = await import("../src/lib/crm-service");
+  views = await import("../src/lib/crm-saved-views-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -287,5 +307,390 @@ describe("case numbers", () => {
 
     await db.query(`DELETE FROM crm_case_counters WHERE business_id = $1`, [otherId]);
     await db.query(`DELETE FROM businesses WHERE id = $1`, [otherId]);
+  });
+});
+
+/**
+ * The desk's filter, against the clock it has to agree with.
+ *
+ * Every ticket below is built so that a *plausible wrong* predicate gives a
+ * different answer: judging on raw age flags the case that was answered in an
+ * hour, ignoring the per-priority targets flags the `high` ticket at the age
+ * the `urgent` one is genuinely late, and forgetting the customer-wait flags the
+ * case that spent its month waiting for a reply that finally came.
+ */
+describe("the service desk's filter", () => {
+  async function makeMember(name: string): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, email, password_hash)
+       VALUES ($1, 'manager', $2, $3, 'x') RETURNING id`,
+      [biz.id, name, `desk-${randomUUID().slice(0, 8)}@example.test`],
+    );
+    return rows[0].id;
+  }
+
+  async function makeCustomer(name: string): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, roles)
+       VALUES ($1, $2, ARRAY['customer']::text[]) RETURNING id`,
+      [biz.id, name],
+    );
+    return rows[0].id;
+  }
+
+  /** A ticket with every clock the SLA reads under the test's control. */
+  async function makeTicket(input: {
+    subject: string;
+    body?: string;
+    status?: string;
+    priority?: string;
+    openedHoursAgo?: number;
+    /** Hours after opening that somebody replied; `null` = nobody has. */
+    firstResponseAfterHours?: number | null;
+    waitingSeconds?: number;
+    /** Hours ago the current wait began; `null` = not waiting. */
+    waitingSinceHoursAgo?: number | null;
+    /** Hours after opening that it was resolved. */
+    resolvedAfterHours?: number | null;
+    customerId?: string | null;
+    assigneeUserId?: string | null;
+  }): Promise<string> {
+    const opened = input.openedHoursAgo ?? 0;
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO crm_cases (
+         business_id, customer_id, subject, body, status, priority, assignee_user_id,
+         opened_at, first_response_at, waiting_seconds, waiting_since, resolved_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7,
+         now() - ($8 || ' hours')::interval,
+         CASE WHEN $9::text IS NULL THEN NULL
+              ELSE now() - (($8::numeric - $9::numeric) || ' hours')::interval END,
+         $10,
+         CASE WHEN $11::text IS NULL THEN NULL
+              ELSE now() - ($11 || ' hours')::interval END,
+         CASE WHEN $12::text IS NULL THEN NULL
+              ELSE now() - (($8::numeric - $12::numeric) || ' hours')::interval END
+       ) RETURNING id`,
+      [
+        biz.id,
+        input.customerId ?? null,
+        input.subject,
+        input.body ?? "",
+        input.status ?? "open",
+        input.priority ?? "normal",
+        input.assigneeUserId ?? null,
+        String(opened),
+        input.firstResponseAfterHours === null || input.firstResponseAfterHours === undefined
+          ? null
+          : String(input.firstResponseAfterHours),
+        input.waitingSeconds ?? 0,
+        input.waitingSinceHoursAgo === null || input.waitingSinceHoursAgo === undefined
+          ? null
+          : String(input.waitingSinceHoursAgo),
+        input.resolvedAfterHours === null || input.resolvedAfterHours === undefined
+          ? null
+          : String(input.resolvedAfterHours),
+      ],
+    );
+    return rows[0].id;
+  }
+
+  /** The rows themselves, as the clock reads them — the honest expectation. */
+  async function breachedByTheClock(): Promise<string[]> {
+    const { rows } = await db.query<{
+      id: string;
+      status: string;
+      priority: string;
+      opened_at: Date;
+      first_response_at: Date | null;
+      resolved_at: Date | null;
+      waiting_seconds: string;
+      waiting_since: Date | null;
+    }>(
+      `SELECT id, status, priority, opened_at, first_response_at, resolved_at,
+              waiting_seconds, waiting_since
+         FROM crm_cases WHERE business_id = $1`,
+      [biz.id],
+    );
+    return rows
+      .filter((row) =>
+        caseIsBreached(
+          {
+            status: row.status as Parameters<typeof caseIsBreached>[0]["status"],
+            priority: row.priority as Parameters<typeof caseIsBreached>[0]["priority"],
+            openedAt: row.opened_at.toISOString(),
+            resolvedAt: row.resolved_at?.toISOString() ?? null,
+            firstResponseAt: row.first_response_at?.toISOString() ?? null,
+            waitingSeconds: Number(row.waiting_seconds),
+            waitingSince: row.waiting_since?.toISOString() ?? null,
+          },
+          new Date(),
+        ),
+      )
+      .map((row) => row.id);
+  }
+
+  const ids = (found: { id: string }[]) => found.map((row) => row.id).sort();
+
+  it("gives the SQL filter and the TypeScript clock the same answer", async () => {
+    // Late: nobody has touched it.
+    const urgentLate = await makeTicket({ subject: "فوری رهاشده", priority: "urgent", openedHoursAgo: 10 });
+    // The same age, a longer target: not late. A hardcoded four hours in SQL
+    // would call this one breached.
+    await makeTicket({ subject: "زیاد در مهلت", priority: "high", openedHoursAgo: 10 });
+    // Answered within the hour and still open ten hours later: the promise the
+    // target measures — «someone acknowledged me» — was kept.
+    await makeTicket({
+      subject: "پاسخ‌داده‌شده",
+      priority: "urgent",
+      openedHoursAgo: 10,
+      firstResponseAfterHours: 1,
+    });
+    // Waiting on the customer for eight of its ten hours: the clock is theirs.
+    await makeTicket({
+      subject: "منتظر مشتری",
+      priority: "urgent",
+      status: "waiting",
+      openedHoursAgo: 10,
+      waitingSinceHoursAgo: 8,
+    });
+    // Waited 27 hours for an answer, then replied an hour later: measured from
+    // the end of the wait, not from the opening.
+    const waitedThenAnswered = await makeTicket({
+      subject: "پس از انتظار",
+      priority: "urgent",
+      status: "in_progress",
+      openedHoursAgo: 30,
+      firstResponseAfterHours: 28,
+      waitingSeconds: 27 * 3600,
+    });
+    // Resolved five hours in, left to rot as a row: nobody was late.
+    const resolvedLate = await makeTicket({
+      subject: "حل‌شدهٔ قدیمی",
+      priority: "urgent",
+      status: "resolved",
+      openedHoursAgo: 48,
+      resolvedAfterHours: 5,
+    });
+    // Inside its target in every sense.
+    await makeTicket({ subject: "تازه", priority: "normal", openedHoursAgo: 1 });
+
+    const byTheClock = await breachedByTheClock();
+    // The expectation is not empty and not everything — otherwise the two
+    // answers could agree by both being wrong.
+    expect(byTheClock).toEqual([urgentLate]);
+
+    const bySql = await desk.listCases(biz.id, { breachedOnly: true });
+    expect(ids(bySql)).toEqual([...byTheClock].sort());
+
+    // And the other three cases really are fine by the clock, so their absence
+    // from the filter is the rule and not an accident of the fixture.
+    const all = await desk.listCases(biz.id, {});
+    expect(all).toHaveLength(7);
+    expect(ids(all)).toContain(waitedThenAnswered);
+    expect(ids(all)).toContain(resolvedLate);
+  });
+
+  it("narrows on every key of the vocabulary, in the database", async () => {
+    // A business of its own: the file's shared one now holds the clock fixtures
+    // above, and "the filter excluded the others" would prove nothing there.
+    const own = await db.query<{ id: string }>(
+      `INSERT INTO businesses (name, slug, industry)
+       VALUES ('میز خدمت تست', $1, 'food_service') RETURNING id`,
+      [`desk-${randomUUID().slice(0, 8)}`],
+    );
+    const businessId = own.rows[0].id;
+    const member = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, email, password_hash)
+       VALUES ($1, 'manager', 'زهرا کریمی', $2, 'x') RETURNING id`,
+      [businessId, `viewer-${randomUUID().slice(0, 8)}@example.test`],
+    );
+    const viewerId = member.rows[0].id;
+    const customer = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, roles)
+       VALUES ($1, 'مشتری فیلترها', ARRAY['customer']::text[]) RETURNING id`,
+      [businessId],
+    );
+    const customerId = customer.rows[0].id;
+
+    const insert = async (input: Record<string, unknown>) => {
+      const opened = (input.openedHoursAgo as number) ?? 0;
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO crm_cases (
+           business_id, customer_id, subject, body, status, priority, assignee_user_id, opened_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, now() - ($8 || ' hours')::interval)
+         RETURNING id`,
+        [
+          businessId,
+          (input.customerId as string | null) ?? null,
+          input.subject,
+          (input.body as string | undefined) ?? "",
+          (input.status as string | undefined) ?? "open",
+          (input.priority as string | undefined) ?? "normal",
+          (input.assigneeUserId as string | null) ?? null,
+          String(opened),
+        ],
+      );
+      return rows[0].id;
+    };
+
+    const mine = await insert({
+      subject: "یخچال خراب",
+      body: "نشتی آب دارد",
+      priority: "urgent",
+      customerId,
+      assigneeUserId: viewerId,
+      openedHoursAgo: 10,
+    });
+    const unowned = await insert({ subject: "لباسشویی", priority: "high", openedHoursAgo: 2 });
+    const resolved = await insert({
+      subject: "سفارش دیررسیده",
+      status: "resolved",
+      priority: "urgent",
+      customerId,
+      openedHoursAgo: 30,
+    });
+    const otherCustomer = await insert({ subject: "پرده", body: "اندازه اشتباه" });
+
+    // The request is parsed by the screen's own module and translated by the
+    // same function the API route calls — one vocabulary, one translation, no
+    // second reading. (The parser refuses anything outside the vocabulary, so
+    // the options it returns need no further narrowing.)
+    const run = async (query: Record<string, string>) => {
+      const parsed = parseCaseViewFilters({ get: (key) => query[key] ?? null });
+      expect(parsed.error).toBeNull();
+      const rows = await desk.listCases(
+        businessId,
+        caseViewListOptions(parsed.filters, viewerId),
+      );
+      return rows.map((row) => row.id).sort();
+    };
+
+    const sorted = (...found: string[]) => [...found].sort();
+    expect(await run({ assignee: "mine" })).toEqual(sorted(mine));
+    // Nobody owns three of them — including the resolved one, which is exactly
+    // why «بدون مسئول» is a filter somebody would save.
+    expect(await run({ assignee: "none" })).toEqual(sorted(unowned, otherCustomer, resolved));
+    expect(await run({ assignee: viewerId })).toEqual(sorted(mine));
+    expect(await run({ status: "resolved" })).toEqual(sorted(resolved));
+    expect(await run({ priority: "high" })).toEqual(sorted(unowned));
+    expect(await run({ q: "یخچال" })).toEqual(sorted(mine));
+    // The body is searched too — people describe the problem before they name
+    // the thing — and so is the customer's name.
+    expect(await run({ q: "نشتی" })).toEqual(sorted(mine));
+    expect(await run({ q: "پرده" })).toEqual(sorted(otherCustomer));
+    expect(await run({ q: "مشتری فیلترها" })).toEqual(sorted(mine, resolved));
+    // Open is a status question, so the resolved ticket drops out.
+    expect(await run({ open: "1" })).toEqual(sorted(mine, unowned, otherCustomer));
+    // And the keys compose.
+    expect(await run({ open: "1", priority: "urgent", assignee: "mine" })).toEqual(sorted(mine));
+    expect(await run({ open: "1", breached: "1" })).toEqual(sorted(mine));
+    // A resolved ticket is late for nothing: 30 hours old, four-hour target,
+    // and not in this list, because the clock stopped when it was resolved and
+    // nobody was blamed for the tab that stayed open.
+    expect(await run({ breached: "1" })).toEqual(sorted(mine));
+
+    // A key the vocabulary does not carry is ignored rather than guessed at.
+    expect(await run({ search: "یخچال" })).toEqual(
+      sorted(mine, unowned, resolved, otherCustomer),
+    );
+
+    // The rows the filter returned are the rows the clock agrees about: the
+    // descriptor each row renders is the same rule the `breached` key applied.
+    const flagged = await desk.listCases(businessId, { breachedOnly: true });
+    for (const row of flagged) expect(caseIsBreached(row, new Date())).toBe(true);
+  });
+
+  it("round-trips a view saved through the service into the request the desk sends", async () => {
+    const saved = await views.saveView(
+      biz.id,
+      {
+        entity: "cases",
+        name: "فوری‌های بی‌مسئول",
+        filters: { priority: "urgent", assignee: "none", open: "1", breached: "1" },
+        shared: true,
+      },
+      { name: actor.name, userId: null },
+    );
+    expect(saved.ok).toBe(true);
+    const view = saved.ok ? saved.view : null;
+    expect(view?.filters).toEqual({
+      priority: "urgent",
+      assignee: "none",
+      open: "1",
+      breached: "1",
+    });
+
+    // The screen serialises the stored document into a query and the server
+    // parses that query with the same module: three readings, one answer.
+    const query = caseViewQuery({
+      q: "",
+      status: "",
+      priority: view!.filters.priority,
+      assignee: view!.filters.assignee,
+      openOnly: view!.filters.open === "1",
+      breachedOnly: view!.filters.breached === "1",
+    });
+    expect(query).toEqual({
+      priority: "urgent",
+      assignee: "none",
+      open: "1",
+      breached: "1",
+    });
+    const parsed = parseCaseViewFilters({ get: (key) => query[key] ?? null });
+    expect(parsed.error).toBeNull();
+    expect(parsed.filters).toEqual({
+      q: "",
+      status: "",
+      priority: "urgent",
+      assignee: "none",
+      openOnly: true,
+      breachedOnly: true,
+    });
+
+    // A key the vocabulary does not carry is dropped rather than stored — the
+    // desk's old `mine` is the case that matters: it is exactly a filter the
+    // screen would never apply.
+    const legacy = await views.saveView(
+      biz.id,
+      {
+        entity: "cases",
+        name: "با کلید قدیمی",
+        filters: { assignee: "mine", mine: "1", breached: "1" },
+        shared: true,
+      },
+      { name: actor.name, userId: null },
+    );
+    expect(legacy.ok && legacy.view.filters).toEqual({ assignee: "mine", breached: "1" });
+
+    // An impossible value inside the vocabulary is refused *and named*, so the
+    // screen can point at the control instead of showing a mystery.
+    const bad = await views.saveView(
+      biz.id,
+      {
+        entity: "cases",
+        name: "با وضعیت نامعتبر",
+        filters: { status: "pending" },
+        shared: true,
+      },
+      { name: actor.name, userId: null },
+    );
+    expect(bad.ok).toBe(false);
+    expect(bad.ok === false && bad.error).toBe("invalid_filters");
+    expect(bad.ok === false && bad.field).toBe("status");
+
+    // A saved view whose assignee is a name is refused too: `assigned_to` is a
+    // display snapshot and two colleagues can share one.
+    const byName = await views.saveView(
+      biz.id,
+      {
+        entity: "cases",
+        name: "با نام مسئول",
+        filters: { assignee: "زهرا" },
+        shared: true,
+      },
+      { name: actor.name, userId: null },
+    );
+    expect(byName.ok === false && byName.field).toBe("assignee");
   });
 });

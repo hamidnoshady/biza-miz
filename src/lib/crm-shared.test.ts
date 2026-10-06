@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+// The breach rule moved to its own pure module — see the note in `crm-shared.ts`
+// about why it is not re-exported from there.
+import { caseIsBreached } from "./crm-case-clock";
 import {
   ACTIVITY_KINDS,
   ACTIVITY_KIND_LABELS,
@@ -16,7 +19,6 @@ import {
   CASE_STATUSES,
   CASE_STATUS_LABELS,
   CASE_STATUS_TONES,
-  caseBreached,
   CONSENT_CHANNELS,
   CONSENT_CHANNEL_LABELS,
   CONSENT_SOURCES,
@@ -182,7 +184,7 @@ describe("cases", () => {
 
   it("breaches an urgent case left open past its target", () => {
     expect(
-      caseBreached(
+      caseIsBreached(
         { status: "open", priority: "urgent", openedAt: "2026-03-10T00:00:00Z", resolvedAt: null },
         now,
       ),
@@ -191,7 +193,7 @@ describe("cases", () => {
 
   it("does not breach a case that is still inside its target", () => {
     expect(
-      caseBreached(
+      caseIsBreached(
         { status: "open", priority: "normal", openedAt: "2026-03-10T00:00:00Z", resolvedAt: null },
         now,
       ),
@@ -202,7 +204,7 @@ describe("cases", () => {
     // `waiting` means we asked the customer something. Marking the shop late
     // for the customer's silence would make the indicator meaningless.
     expect(
-      caseBreached(
+      caseIsBreached(
         { status: "waiting", priority: "urgent", openedAt: "2020-01-01T00:00:00Z", resolvedAt: null },
         now,
       ),
@@ -212,7 +214,7 @@ describe("cases", () => {
   it("never breaches a finished case", () => {
     for (const status of ["resolved", "closed"] as const) {
       expect(
-        caseBreached(
+        caseIsBreached(
           { status, priority: "urgent", openedAt: "2020-01-01T00:00:00Z", resolvedAt: "2020-01-02T00:00:00Z" },
           now,
         ),
@@ -222,7 +224,7 @@ describe("cases", () => {
 
   it("survives an unparsable opened_at instead of reporting a false breach", () => {
     expect(
-      caseBreached({ status: "open", priority: "urgent", openedAt: "not a date", resolvedAt: null }, now),
+      caseIsBreached({ status: "open", priority: "urgent", openedAt: "not a date", resolvedAt: null }, now),
     ).toBe(false);
   });
 

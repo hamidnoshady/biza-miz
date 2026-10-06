@@ -70,10 +70,13 @@ import {
 } from "@/app/dashboard/data-table";
 import { FilterChip, FilterChipRow, SearchField } from "@/app/dashboard/filters";
 import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass } from "@/app/dashboard/ui";
+import { CrmAssigneePicker, type CrmAssignee } from "./crm-assignee-picker";
 import { formatPersianNumber } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { formatPhoneDisplay } from "@/lib/phone";
 import { crmCustomerHref } from "./crm-routes";
+import { CrmTodayQueues } from "./today-queues";
+import { SavedViewsBar } from "./saved-views-bar";
 
 interface Lead {
   id: string;
@@ -85,6 +88,9 @@ interface Lead {
   sourceDetail: string;
   status: string;
   rating: string;
+  /** The member who owns the lead, when it is one — see `crm-ownership.ts`. */
+  ownerUserId: string | null;
+  /** The display snapshot beside it, which is all a legacy row has. */
   ownerName: string;
   nextAction: string;
   nextActionAt: string | null;
@@ -130,7 +136,7 @@ const STATUS_FILTERS = [
 
 const PAGE_SIZE = 25;
 
-export function LeadsSection() {
+export function LeadsSection({ canManage = false }: { canManage?: boolean }) {
   const [leads, setLeads] = useState<Lead[] | null>(null);
   const [total, setTotal] = useState(0);
   const [status, setStatus] = useState<string>("open");
@@ -252,6 +258,29 @@ export function LeadsSection() {
     <div className="min-w-0 space-y-4">
       <ErrorBox>{error}</ErrorBox>
       {info ? <InfoBox>{info}</InfoBox> : null}
+
+      {/* New enquiries nobody has picked up yet — the queue a lead list exists
+          for, so it leads the list rather than hiding in the home page. */}
+      <CrmTodayQueues section="leads" title="سرنخ‌های تازه" />
+
+      {/* Named filter sets over this list. The bar hands its filters back here
+          rather than querying anything itself, so a view can only ever be a set
+          of filters this screen already understands. */}
+      <SavedViewsBar
+        entity="leads"
+        current={{
+          ...(search.trim() ? { q: search.trim() } : {}),
+          ...(status ? { status } : {}),
+          ...(dueOnly ? { due: "1" } : {}),
+        }}
+        onApply={(filters) => {
+          setStatus(filters.status ?? "");
+          setSearch(filters.q ?? "");
+          setDueOnly(filters.due === "1");
+        }}
+        canSave={canManage}
+        onNotice={setInfo}
+      />
 
       <KpiRow>
         <KpiCard label="سرنخ‌های این فهرست" value={formatPersianNumber(total)} />
@@ -515,6 +544,10 @@ function LeadDialog({
   const [rating, setRating] = useState("warm");
   const [nextAction, setNextAction] = useState("");
   const [notes, setNotes] = useState("");
+  // A lead the list shows as «—» under «مسئول» used to be unassignable from
+  // this dialog: the column existed and nothing could fill it. Same member
+  // picker as deals, activities and tickets.
+  const [owner, setOwner] = useState<CrmAssignee>({ userId: "", name: "" });
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -528,6 +561,7 @@ function LeadDialog({
     setRating(lead?.rating ?? "warm");
     setNextAction(lead?.nextAction ?? "");
     setNotes("");
+    setOwner({ userId: lead?.ownerUserId ?? "", name: lead?.ownerName ?? "" });
   }, [open, lead]);
 
   const submit = async () => {
@@ -549,6 +583,10 @@ function LeadDialog({
         rating,
         nextAction: nextAction.trim(),
         notes: notes.trim(),
+        // The id is the ownership; the name is the snapshot the row keeps for
+        // history, and the server resolves one into the other.
+        ownerUserId: owner.userId || null,
+        ownerName: owner.name.trim(),
       }),
     });
     setBusy(false);
@@ -599,6 +637,11 @@ function LeadDialog({
               onChange={(e) => setEmail(e.target.value)}
             />
           </Field>
+          <CrmAssigneePicker
+            label="مسئول پیگیری (اختیاری)"
+            value={owner}
+            onChange={setOwner}
+          />
           <Field label="وضعیت">
             <select
               className={inputClass}

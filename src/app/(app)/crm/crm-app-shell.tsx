@@ -14,6 +14,7 @@
 import { usePathname } from "next/navigation";
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { CRM_SETTINGS_HREF } from "./crm-routes";
+import { CrmCommandField } from "./crm-command-field";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { AskAssistant } from "@/components/ai/ask-assistant";
 
@@ -21,16 +22,29 @@ import { AskAssistant } from "@/components/ai/ask-assistant";
 const APP_HEADING = {
   title: "ارتباط با مشتری",
   description:
-    "پروندهٔ کامل مشتری، بخش‌بندی رفتاری، قیف فروش، کارها و پیگیری‌ها، تیکت‌های خدمات و سابقهٔ رضایت ارتباط.",
+    "امروز چه کسی به توجه نیاز دارد، با این مشتری چه گذشته، قدم بعدی چیست، و کدام فرصت‌ها حرکت می‌کنند یا متوقف مانده‌اند.",
 };
 
 const SETTINGS_HEADING = {
   title: "تنظیمات ارتباط با مشتری",
   description:
-    "تنظیمات مخصوص همین برنامه — تشخیص تکراری‌ها، رضایت ارتباط و قیف فروش. تنظیمات کسب‌وکار و پلتفرم جای دیگری است.",
+    "تنظیمات مخصوص همین برنامه — قیف‌ها و مراحل، فیلدهای کسب‌وکار، تشخیص تکراری‌ها و رضایت ارتباط. تنظیمات کسب‌وکار و پلتفرم جای دیگری است.",
 };
 
-export function CrmAppShell({ children }: { children: React.ReactNode }) {
+export function CrmAppShell({
+  children,
+  permissions,
+}: {
+  children: React.ReactNode;
+  /**
+   * The member's effective permission keys, threaded from the layout.
+   *
+   * The command field is drawn from these: a destination the member may not
+   * open is not offered, in the field exactly as in the menu. Strings rather
+   * than a `Set`, because this crosses the server/client boundary as a prop.
+   */
+  permissions?: readonly string[];
+}) {
   const pathname = usePathname();
   const heading = pathname === CRM_SETTINGS_HREF ? SETTINGS_HEADING : APP_HEADING;
 
@@ -51,6 +65,11 @@ export function CrmAppShell({ children }: { children: React.ReactNode }) {
           </>
         }
       />
+      {/* The command field belongs to the app, not to a screen: «چه چیزی عقب
+          افتاده؟» is a question you arrive with, not a question one page asks.
+          It is the same field on every CRM screen, which is also why it can
+          carry the ⌘K shortcut without any screen having to know about it. */}
+      <CrmCommandField permissions={permissions} />
       <div className="min-w-0">{children}</div>
     </PageShell>
   );

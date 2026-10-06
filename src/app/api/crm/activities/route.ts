@@ -11,6 +11,12 @@ import {
   type ActivityKind,
 } from "@/lib/crm-shared";
 import { isUuid } from "@/lib/uuid";
+import { listAssignableMembers } from "@/lib/crm-ownership";
+import {
+  activityViewListOptions,
+  activityViewQuery,
+  parseActivityViewFilters,
+} from "@/lib/crm-activity-views";
 
 /**
  * Activities — calls, visits, messages and tasks (Phase 36).
@@ -38,19 +44,48 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const today = await businessToday(session.businessId);
   const rawLimit = Number(search.get("limit"));
 
+  // The list's own vocabulary, parsed by the list's own module
+  // (`crm-activity-views.ts`) rather than read here name by name: the filter a
+  // saved view stores, the chips it renders and the rows the server returns are
+  // three readings of one document rather than three opinions.
+  const { filters, error: filterError } = parseActivityViewFilters(search);
+  if (filterError) {
+    return NextResponse.json({ error: "bad_filter", field: filterError }, { status: 400 });
+  }
+
+  // The state vocabulary turns into date bounds here, against the business date
+  // the server resolved — the same date the rows are coloured by, so a view
+  // named «سررسیدشده» and the red rows below it cannot disagree about today.
+  // The translation from the reader's document to the query lives in
+  // `crm-activity-views.ts` — including that `mine` means the session's own
+  // member id, and that the states are date bounds over the shop's own day. The
+  // rows a queue card links to and the rows this route returns are therefore one
+  // reading of one document. What stays here is what is not translation:
+  // permissions, `limit`, and the legacy `customerId`/`dealId`/`caseId`/
+  // `assignedTo` parameters other screens pass.
+  const options = activityViewListOptions(filters, { viewerId: session.sub, today });
   const activities = await listActivities(session.businessId, {
+    ...options,
     customerId: search.get("customerId") ?? undefined,
     dealId: search.get("dealId") ?? undefined,
     caseId: search.get("caseId") ?? undefined,
-    openOnly: search.get("open") === "1",
     assignedTo: search.get("assignedTo") ?? undefined,
-    q: search.get("q") ?? undefined,
-    // «فقط سررسیدشده‌ها» — overdue plus today, against the business date the
-    // server just resolved, so the filter and the badges agree.
-    dueOnOrBefore: search.get("due") === "1" ? today : undefined,
     limit: Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : undefined,
   });
-  return NextResponse.json({ activities, today });
+
+  return NextResponse.json({
+    activities,
+    today,
+    // The filters actually applied, echoed in the vocabulary the screen sent
+    // them in, so the chips render from the answer rather than from local state
+    // and can never name a filter that was dropped on the way.
+    applied: activityViewQuery(filters),
+    members: (await listAssignableMembers(session.businessId)).map((member) => ({
+      id: member.id,
+      name: member.name,
+      isActive: member.isActive,
+    })),
+  });
 });
 
 interface ActivityBody {
@@ -61,6 +96,9 @@ interface ActivityBody {
   subject?: string;
   body?: string;
   dueAt?: string | null;
+  /** The assignee as a member id (`/api/crm/members`); preferred. */
+  assigneeUserId?: string | null;
+  /** A name, for legacy clients — resolved server-side, never trusted. */
   assignedTo?: string;
   completed?: boolean;
 }
@@ -95,6 +133,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (assignedTo.length > ACTIVITY_ASSIGNEE_MAX) {
     return NextResponse.json({ error: "activity_assignee_too_long" }, { status: 400 });
   }
+  // An id that is not a uuid cannot name a member; a 400 here rather than a
+  // cast error from the database (or, worse, a silently unassigned row).
+  if (body.assigneeUserId != null && body.assigneeUserId !== "" && !isUuid(body.assigneeUserId)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
 
   // An id that is not a uuid cannot name a row; checked here so the answer is a
   // 400 rather than a Postgres cast error surfacing as «خطای غیرمنتظره».
@@ -127,6 +170,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     subject,
     body: note,
     dueAt,
+    assigneeUserId: body.assigneeUserId ?? null,
     assignedTo,
     createdBy: session.fullName,
     completed: body.completed === true,

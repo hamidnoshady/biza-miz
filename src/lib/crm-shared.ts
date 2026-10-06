@@ -290,22 +290,21 @@ export function isOpenCase(status: CaseStatus): boolean {
   return status === "open" || status === "in_progress" || status === "waiting";
 }
 
-/**
- * Whether a case has missed its priority's target, given how long it has been
- * open. `waiting` deliberately does not breach: the clock belongs to the
- * customer at that point, and marking the shop late for the customer's own
- * silence would make the whole indicator meaningless.
+/*
+ * **`caseBreached` used to live here, and deliberately does not any more.** The
+ * badge on the ticket list, the SLA summary above it and the `cases` filter all
+ * have to answer one question — has this ticket missed its target? — and they
+ * answered it two different ways: this module compared raw age against the
+ * target, while the SLA backend measured the first response and subtracted the
+ * time spent waiting on the customer. The same ticket could read «در زمان هدف»
+ * in the panel and «معوق» a line below it.
+ *
+ * The rule now lives in `crm-case-clock.ts` (`caseIsBreached`), which is pure
+ * and client-safe, and nothing here re-exports it: a caller that still imports
+ * the old name should fail to compile and move, rather than silently keep
+ * calling a second rule. `crm-case-clock.ts` imports *this* module for the case
+ * vocabulary — the dependency runs one way, so there is no import cycle.
  */
-export function caseBreached(
-  input: { status: CaseStatus; priority: CasePriority; openedAt: string; resolvedAt: string | null },
-  now: Date,
-): boolean {
-  if (!isOpenCase(input.status) || input.status === "waiting") return false;
-  const opened = Date.parse(input.openedAt);
-  if (Number.isNaN(opened)) return false;
-  const elapsedHours = (now.getTime() - opened) / 3_600_000;
-  return elapsedHours > CASE_PRIORITY_TARGET_HOURS[input.priority];
-}
 
 // ---------------------------------------------------------------------------
 // The customer timeline
@@ -389,6 +388,153 @@ export interface TimelineEvent {
 /** Newest first — the order a person reads a history in. */
 export function sortTimeline(events: TimelineEvent[]): TimelineEvent[] {
   return [...events].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+}
+
+// ---------------------------------------------------------------------------
+// Smart queues — the attention feed's vocabulary
+// ---------------------------------------------------------------------------
+/**
+ * The queues, their keys and their words.
+ *
+ * This vocabulary lives here — beside the pipeline stages and the timeline
+ * kinds — because **two halves need it**: the server rules in
+ * `crm-queues.ts` that produce a queue, and the command field / section headers
+ * that must name it without importing a module that reaches the database. The
+ * Persian label of a queue is product copy with exactly one home; before this
+ * it was written inline in thirteen SQL builders, which is a copy the client
+ * could not read and could silently drift from.
+ *
+ * `crm-queues.test.ts` pins the agreement in both directions: every key here
+ * has a rule, and every rule returns one of these labels.
+ */
+export const CRM_QUEUE_KEYS = [
+  "overdue_follow_ups",
+  "due_today",
+  "sla_risk",
+  "waiting_on_customer",
+  "stalled_deals",
+  "high_value_open",
+  "unassigned_cases",
+  "departed_owner",
+  "vip_follow_up",
+  "at_risk_customers",
+  "new_leads",
+  "new_identities",
+  "possible_duplicates",
+] as const;
+
+export type CrmQueueKey = (typeof CRM_QUEUE_KEYS)[number];
+
+/** Days without activity after which an open deal counts as stalled. */
+export const STALLED_DEAL_DAYS = 7;
+/** Days since the last interaction after which a VIP counts as needing a call. */
+export const VIP_SILENCE_DAYS = 30;
+/** A new lead is "new" for this long before it becomes a stale enquiry. */
+export const NEW_LEAD_DAYS = 7;
+
+export interface CrmQueuePresentation {
+  label: string;
+  /** Why a row is in this queue. Shown under the heading, always. */
+  why: string;
+  /** What to do about it, when there is more to it than the list. */
+  action: string;
+  /** The sections that own this queue — `queueKeysForSection` reads it. */
+  sections: readonly string[];
+}
+
+export const CRM_QUEUE_PRESENTATION: Record<CrmQueueKey, CrmQueuePresentation> = {
+  overdue_follow_ups: {
+    label: "پیگیری‌های عقب‌افتاده",
+    why: "کارهایی که موعدشان گذشته و هنوز انجام نشده‌اند.",
+    action: "هر کدام را انجام دهید یا موعدش را جابه‌جا کنید.",
+    sections: ["activities"],
+  },
+  due_today: {
+    label: "کارهای امروز",
+    why: "کارهایی که موعدشان امروز است.",
+    action: "امروز تمامشان کنید تا فردا عقب‌افتاده نشوند.",
+    sections: ["activities"],
+  },
+  sla_risk: {
+    label: "خطر از دست رفتن مهلت",
+    why: "تیکت‌های بازی که از مهلت پاسخ‌گویی خودشان گذشته‌اند (زمان انتظار مشتری حساب نمی‌شود).",
+    action: "پاسخ بدهید یا به عضو دیگری بسپارید.",
+    sections: ["cases"],
+  },
+  waiting_on_customer: {
+    label: "منتظر مشتری",
+    why: "کار از سمت ما تمام است و منتظر پاسخ مشتری هستیم.",
+    action: "یک یادآوری بفرستید؛ یا اگر پاسخ نیامد تیکت را ببندید.",
+    sections: ["cases"],
+  },
+  stalled_deals: {
+    label: "فرصت‌های راکد",
+    why: `معامله‌های بازی که ${STALLED_DEAL_DAYS} روز است هیچ فعالیتی نداشته‌اند.`,
+    action: "تماس بگیرید، یا اگر دیگر واقعی نیست ببندیدش.",
+    sections: ["deals"],
+  },
+  high_value_open: {
+    label: "فرصت‌های پرارزش باز",
+    why: "بیست درصد بالای معامله‌های باز از نظر مبلغ — همیشه ارزش یک نگاه دارند.",
+    action: "قدم بعدی هر کدام را مشخص کنید؛ این‌ها بیشترین اثر را دارند.",
+    sections: ["deals"],
+  },
+  unassigned_cases: {
+    label: "تیکت‌های بی‌مسئول",
+    why: "تیکت‌های بازی که مالکی ندارند، پس کسی خودش را مسئولشان نمی‌داند.",
+    action: "به یک عضو تیم واگذار کنید.",
+    sections: ["cases"],
+  },
+  departed_owner: {
+    label: "کارهای عضو غیرفعال",
+    why: "معامله‌ها و تیکت‌هایی که مسئولشان دیگر نمی‌تواند وارد شود، پس کسی پیگیری نمی‌کند.",
+    action: "به یک عضو فعال واگذار کنید یا مسئول را بردارید تا در صف بی‌مسئول‌ها بیاید.",
+    sections: ["deals", "cases"],
+  },
+  vip_follow_up: {
+    label: "مشتریان طلایی و وفادار",
+    why: `${VIP_SILENCE_DAYS} روز است با بهترین مشتریان تماس نگرفته‌ایم.`,
+    action: "یک تماس کوتاه؛ نگه‌داشتن این‌ها ارزان‌تر از جذب تازه است.",
+    sections: ["directory"],
+  },
+  at_risk_customers: {
+    label: "مشتریان در معرض ریزش",
+    why: "امتیاز رفتاری می‌گوید این‌ها ارزششان را داشته‌اند و حالا دور شده‌اند.",
+    action: "تماس شخصی یا پیشنهاد بازگشت؛ پیش از آن‌که فراموش کنند.",
+    sections: ["directory"],
+  },
+  new_leads: {
+    label: "سرنخ‌های تازه",
+    why: `پرس‌وجوهایی که در ${NEW_LEAD_DAYS} روز گذشته آمده‌اند و هنوز کسی سراغشان نرفته است.`,
+    action: "زود تماس بگیرید؛ سرنخ تازه سرد می‌شود.",
+    sections: ["leads"],
+  },
+  new_identities: {
+    label: "هویت‌های تازهٔ سایت و فروشگاه",
+    why: "خریداران آنلاینی که هنوز به پرونده‌ای وصل نشده‌اند یا تطبیقشان قطعی نیست.",
+    action: "تطبیق را تأیید کنید تا خریدشان روی پروندهٔ درست بنشیند.",
+    sections: ["reconciliation"],
+  },
+  possible_duplicates: {
+    label: "پرونده‌های مشکوک به تکرار",
+    why: "دو پرونده با شمارهٔ تماس یکسان — شاید یک نفر باشند.",
+    action: "پیش از ادغام، پیش‌نمایش را ببینید؛ ادغام برگشت‌پذیر نیست.",
+    sections: ["duplicates"],
+  },
+};
+
+/**
+ * The queues a section owns, in `CRM_QUEUE_KEYS` order.
+ *
+ * Derived from the presentation table rather than written as a second switch:
+ * a queue added without a section would otherwise be invisible on every screen
+ * that should show it, and the section it belongs to would have to be written
+ * in two places.
+ */
+export function queueKeysForSection(section: string): CrmQueueKey[] {
+  return CRM_QUEUE_KEYS.filter((key) =>
+    CRM_QUEUE_PRESENTATION[key].sections.includes(section),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -551,4 +697,101 @@ export interface PartyRelationship extends Record<string, unknown> {
 
 export function isRelationshipKind(value: unknown): value is RelationshipKind {
   return typeof value === "string" && (RELATIONSHIP_KINDS as readonly string[]).includes(value);
+}
+
+// ---------------------------------------------------------------------------
+// The decision log's vocabulary
+// ---------------------------------------------------------------------------
+
+/**
+ * The audit kinds, labelled.
+ *
+ * The *keys* are owned by `crm-audit-service.ts` (the write half). This is the
+ * display vocabulary beside them, and it lives in `crm-shared.ts` for the usual
+ * reason: the audit screen is a client component, and a client component may
+ * not value-import a module that reaches `./db` — `crm-app-boundaries.test.ts`
+ * fails the build on exactly that.
+ *
+ * An unknown kind still renders (the screen falls back to the raw key). A
+ * deployment where the write half knows a kind the read half has not been
+ * taught must show *something* rather than an empty row, and the fallback is
+ * also what makes adding a kind a one-file change instead of two.
+ */
+export const CRM_AUDIT_KIND_LABELS: Record<string, string> = {
+  "lead.created": "ایجاد سرنخ",
+  "lead.status_changed": "تغییر وضعیت سرنخ",
+  "lead.converted": "تبدیل سرنخ به مشتری",
+  "deal.created": "ایجاد فرصت",
+  "deal.stage_changed": "جابه‌جایی در قیف",
+  "deal.owner_changed": "تغییر مالک فرصت",
+  "deal.sales_document_linked": "اتصال سند فروش به فرصت",
+  "case.created": "ایجاد تیکت",
+  "case.status_changed": "تغییر وضعیت تیکت",
+  "case.assigned": "واگذاری تیکت",
+  "case.reopened": "بازگشایی تیکت",
+  "consent.changed": "تغییر رضایت ارتباط",
+  "party.merged": "ادغام پرونده‌ها",
+  "party.owner_changed": "تغییر مالک پرونده",
+  "external.reconciled": "تطبیق هویت بیرونی",
+  "external.conflict_resolved": "رفع تعارض هویت بیرونی",
+  "segment.changed": "تغییر بخش‌بندی",
+  "import.committed": "ورود داده",
+  "export.generated": "خروجی داده",
+  "custom_field.created": "تعریف فیلد کسب‌وکار",
+  "custom_field.archived": "بایگانی فیلد کسب‌وکار",
+  "pipeline.created": "ایجاد قیف فروش",
+  "pipeline.updated": "ویرایش قیف فروش",
+  "pipeline.stages_changed": "تغییر مراحل قیف فروش",
+  "relationship.linked": "ایجاد نسبت بین اشخاص",
+  "relationship.unlinked": "حذف نسبت بین اشخاص",
+  // Automations. Two kinds, and deliberately not one per run: a *rule* is a
+  // decision about how the CRM behaves and belongs in this log beside the other
+  // configuration decisions, while the runs themselves have their own
+  // append-only table (`crm_automation_runs`) where every firing is visible. A
+  // growth signal is the exception — it is the moment the CRM asks another app
+  // to do something, and somebody will want to know when and why.
+  "automation.config_changed": "تغییر اتوماسیون",
+  "automation.signal_growth": "اطلاع به رشد و بازاریابی",
+};
+
+/** The entity a decision was about, labelled. */
+export const CRM_AUDIT_ENTITY_LABELS: Record<string, string> = {
+  lead: "سرنخ",
+  deal: "فرصت",
+  case: "تیکت",
+  party: "مشتری",
+  segment: "بخش‌بندی",
+  external_profile: "هویت بیرونی",
+  import: "ورود داده",
+  export: "خروجی داده",
+  custom_field: "فیلد کسب‌وکار",
+  automation: "اتوماسیون",
+  pipeline: "قیف فروش",
+  relationship: "نسبت",
+};
+
+/** The entities the log's filter offers, in menu order. */
+export const CRM_AUDIT_ENTITY_TYPES = [
+  "lead",
+  "deal",
+  "case",
+  "party",
+  "segment",
+  "external_profile",
+  "custom_field",
+  "pipeline",
+  "relationship",
+  "import",
+  "export",
+  "automation",
+] as const;
+
+/** Human-readable kind, falling back to the raw key for a kind this build has not learned. */
+export function crmAuditKindLabel(kind: string): string {
+  return CRM_AUDIT_KIND_LABELS[kind] ?? kind;
+}
+
+/** Human-readable entity, falling back to the raw value. */
+export function crmAuditEntityLabel(entityType: string): string {
+  return CRM_AUDIT_ENTITY_LABELS[entityType] ?? entityType;
 }

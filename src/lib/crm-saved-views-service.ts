@@ -29,6 +29,9 @@
 
 import { query } from "./db";
 import { isUuid } from "./uuid";
+import { DEAL_VIEW_FILTER_KEYS, parseDealViewFilters } from "./crm-deal-views";
+import { CASE_VIEW_FILTER_KEYS, parseCaseViewFilters } from "./crm-case-views";
+import { ACTIVITY_VIEW_FILTER_KEYS, parseActivityViewFilters } from "./crm-activity-views";
 
 export const SAVED_VIEW_ENTITIES = [
   "customers",
@@ -51,9 +54,42 @@ export type SavedViewEntity = (typeof SAVED_VIEW_ENTITIES)[number];
 const ENTITY_FILTER_KEYS: Record<SavedViewEntity, readonly string[]> = {
   customers: ["q", "tag", "segment", "lifecycle", "owner", "hasBalance", "consent", "source"],
   leads: ["q", "status", "rating", "owner", "source", "due"],
-  deals: ["q", "stageId", "pipelineId", "owner", "open", "minValue", "maxValue"],
-  cases: ["q", "status", "priority", "assignee", "open", "breached"],
-  activities: ["q", "kind", "state", "assignee", "due"],
+  // From `crm-deal-views.ts`, not repeated here: the deals screen parses,
+  // serialises and labels exactly these keys, and a copy in this file would be
+  // the second opinion that lets a stored view name a filter the screen has
+  // never heard of (which is how the board came to apply one key of seven).
+  deals: DEAL_VIEW_FILTER_KEYS,
+  // Likewise from `crm-case-views.ts`. The desk's six keys used to be listed
+  // here while the screen honoured two of them, which is precisely the drift
+  // this indirection removes.
+  cases: CASE_VIEW_FILTER_KEYS,
+  // Likewise from `crm-activity-views.ts`, which also reads the legacy `due`
+  // key as `state=due` so a view stored under it keeps filtering.
+  activities: ACTIVITY_VIEW_FILTER_KEYS,
+};
+
+/**
+ * The entities whose filter *values* can be checked, not just their keys.
+ *
+ * `sanitiseFilters` drops what it does not recognise, which keeps a view from a
+ * newer build opening on an older one. That is the right shape for *unknown*
+ * keys and the wrong shape for a **known key with an impossible value**: a view
+ * named «مذاکره‌های بزرگ» whose `stageId` is a typo would be stored happily and
+ * then fail on the screen, for everybody it is shared with.
+ *
+ * So an entity that has grown a real parser offers it here, and `saveView`
+ * refuses a document the parser rejects. `deals` is the first: the board now
+ * honours the whole vocabulary (`crm-deal-views.ts`), so it is the first screen
+ * able to say what a value must look like. Entities without an entry keep the
+ * old behaviour — nothing pretends to validate a vocabulary no screen has
+ * defined.
+ */
+const ENTITY_FILTER_VALIDATORS: Partial<
+  Record<SavedViewEntity, (filters: Record<string, string>) => { error: string | null }>
+> = {
+  deals: (filters) => parseDealViewFilters({ get: (key) => filters[key] ?? null }),
+  cases: (filters) => parseCaseViewFilters({ get: (key) => filters[key] ?? null }),
+  activities: (filters) => parseActivityViewFilters({ get: (key) => filters[key] ?? null }),
 };
 
 export function isSavedViewEntity(value: unknown): value is SavedViewEntity {
@@ -130,7 +166,12 @@ export async function listSavedViews(
 
 export type SaveViewResult =
   | { ok: true; view: SavedView }
-  | { ok: false; error: "not_found" | "name_required" | "builtin_readonly" | "forbidden" };
+  | {
+      ok: false;
+      error: "not_found" | "name_required" | "builtin_readonly" | "forbidden" | "invalid_filters";
+      /** The field that made the view impossible, when one did. */
+      field?: string;
+    };
 
 export async function saveView(
   businessId: string,
@@ -146,6 +187,13 @@ export async function saveView(
   const name = input.name?.trim().slice(0, 80);
   if (!name) return { ok: false, error: "name_required" };
   const filters = sanitiseFilters(input.entity, input.filters);
+  const validator = ENTITY_FILTER_VALIDATORS[input.entity];
+  if (validator) {
+    const checked = validator(filters);
+    // Named, so the screen can point at the control that holds the bad value
+    // rather than showing a generic refusal next to a whole form.
+    if (checked.error) return { ok: false, error: "invalid_filters", field: checked.error };
+  }
 
   if (input.id) {
     if (!isUuid(input.id)) return { ok: false, error: "not_found" };

@@ -43,6 +43,7 @@ import { api, ErrorBox, errorMessage, inputClass } from "@/app/dashboard/ui";
 import { crmCustomerHref } from "./crm-routes";
 import { useCustomerSearch, type CustomerSearchMatch } from "./customer-search";
 import { CrmCardHeading } from "./crm-card-heading";
+import { CrmRelationshipRing } from "./crm-relationship-ring";
 
 type Match = CustomerSearchMatch;
 
@@ -55,9 +56,12 @@ const ERROR_TEXT: Record<string, string> = {
 
 export function CustomerRelationshipsCard({
   customerId,
+  customerName,
   canManage,
 }: {
   customerId: string;
+  /** The name at the centre of the ring — the file's own name, already loaded. */
+  customerName: string;
   canManage: boolean;
 }) {
   const [links, setLinks] = useState<PartyRelationship[] | null>(null);
@@ -221,42 +225,47 @@ export function CustomerRelationshipsCard({
       ) : links.length === 0 ? (
         <EmptyState>ارتباطی ثبت نشده است.</EmptyState>
       ) : (
-        <ul className="divide-y divide-border/80 text-sm">
-          {links.map((link) => {
-            // Read the edge from this file's end: on the far party's file the
-            // same row has to say the opposite thing.
-            const otherId = link.inverse ? link.fromPartyId : link.toPartyId;
-            const otherName = link.inverse ? link.fromName : link.toName;
-            const label = link.inverse
-              ? RELATIONSHIP_INVERSE_LABELS[link.kind]
-              : RELATIONSHIP_LABELS[link.kind];
-            return (
-              <li key={link.id} className="flex items-center justify-between gap-3 py-2.5">
-                <div className="min-w-0">
-                  <Link href={crmCustomerHref(otherId)} className="text-foreground hover:underline">
-                    {otherName}
-                  </Link>
-                  <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <StatusBadge tone="neutral">{label}</StatusBadge>
-                    {link.roleTitle ? <span>{link.roleTitle}</span> : null}
-                    {link.isPrimary ? <StatusBadge tone="active">اصلی</StatusBadge> : null}
-                  </p>
-                </div>
-                {canManage ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label={`حذف ارتباط با ${otherName}`}
-                    onClick={() => remove(link.id)}
-                  >
-                    <Trash2Icon aria-hidden="true" className="size-4" />
-                  </Button>
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
+        <>
+          <div className="mb-3 border-b border-border/60 pb-3">
+            <CrmRelationshipRing centre={{ id: customerId, name: customerName }} links={links} />
+          </div>
+          <ul className="divide-y divide-border/80 text-sm">
+            {links.map((link) => {
+              // Read the edge from this file's end: on the far party's file the
+              // same row has to say the opposite thing.
+              const otherId = link.inverse ? link.fromPartyId : link.toPartyId;
+              const otherName = link.inverse ? link.fromName : link.toName;
+              const label = link.inverse
+                ? RELATIONSHIP_INVERSE_LABELS[link.kind]
+                : RELATIONSHIP_LABELS[link.kind];
+              return (
+                <li key={link.id} className="flex items-center justify-between gap-3 py-2.5">
+                  <div className="min-w-0">
+                    <Link href={crmCustomerHref(otherId)} className="text-foreground hover:underline">
+                      {otherName}
+                    </Link>
+                    <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <StatusBadge tone="neutral">{label}</StatusBadge>
+                      {link.roleTitle ? <span>{link.roleTitle}</span> : null}
+                      {link.isPrimary ? <StatusBadge tone="active">اصلی</StatusBadge> : null}
+                    </p>
+                  </div>
+                  {canManage ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`حذف ارتباط با ${otherName}`}
+                      onClick={() => remove(link.id)}
+                    >
+                      <Trash2Icon aria-hidden="true" className="size-4" />
+                    </Button>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </>
       )}
     </SectionCard>
   );

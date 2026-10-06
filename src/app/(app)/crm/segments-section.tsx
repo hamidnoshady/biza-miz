@@ -61,6 +61,7 @@ import {
   InfoBox,
 } from "@/app/dashboard/ui";
 import { CrmCardHeading } from "./crm-card-heading";
+import { AudienceRequestBox } from "./audience-request-box";
 
 interface Segment {
   id: string;
@@ -252,6 +253,9 @@ export function SegmentsSection() {
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [editing, setEditing] = useState<Segment | "new" | null>(null);
+  // Rules read from a sentence, waiting for the builder to open with them. The
+  // box seeds the form and nothing else — the form is still the only writer.
+  const [seed, setSeed] = useState<SegmentDefinition | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -382,11 +386,23 @@ export function SegmentsSection() {
         )}
       </SectionCard>
 
+      <AudienceRequestBox
+        onSeed={(definition) => {
+          setSeed(definition);
+          setEditing("new");
+        }}
+      />
+
       {editing ? (
         <SegmentDialog
           segment={editing === "new" ? null : editing}
-          onClose={() => setEditing(null)}
+          seed={editing === "new" ? seed : null}
+          onClose={() => {
+            setSeed(null);
+            setEditing(null);
+          }}
           onSaved={() => {
+            setSeed(null);
             setEditing(null);
             void load();
           }}
@@ -398,10 +414,13 @@ export function SegmentsSection() {
 
 function SegmentDialog({
   segment,
+  seed,
   onClose,
   onSaved,
 }: {
   segment: Segment | null;
+  /** Rules read from a sentence, used only when there is no existing segment. */
+  seed: SegmentDefinition | null;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -409,10 +428,10 @@ function SegmentDialog({
   const [name, setName] = useState(segment?.name ?? "");
   const [description, setDescription] = useState(segment?.description ?? "");
   const [allRules, setAllRules] = useState<SegmentRule[]>(() =>
-    rulesForBuilder(segment?.definition, "all"),
+    rulesForBuilder(seed ?? segment?.definition, "all"),
   );
   const [anyRules, setAnyRules] = useState<SegmentRule[]>(() =>
-    rulesForBuilder(segment?.definition, "any"),
+    rulesForBuilder(seed ?? segment?.definition, "any"),
   );
   const [purpose, setPurpose] = useState<SegmentPurpose>("view");
   const [preview, setPreview] = useState<Preview | null>(null);

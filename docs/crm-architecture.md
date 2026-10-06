@@ -316,11 +316,94 @@ another place a person can exist.
   collisions before re-pointing. A second copy here is exactly the
   hand-maintained list that registry replaced.
 
+### Drawing the graph is a read, not a second model
+
+`crm-relationship-graph.ts` computes the ring from rows the service has already
+returned; it opens no connection, reads no clock and holds no state. Two
+consequences are load-bearing:
+
+- **The picture cannot disagree with the list.** One read, one shape, one
+  renderer, and the list of the same rows stays on screen. That is also why the
+  figure carries a caption naming the count and the kinds: the accessible copy is
+  generated from the same input, not maintained beside it.
+- **No layout engine.** Positions come from the input order inside a fixed
+  0–100 space, so a file looks the same on every visit and a test can assert the
+  geometry without a DOM. A force-directed layout would be a second, animated
+  source of truth about who is connected to whom.
+
+## A sentence becomes a document, not a query
+
+`crm-audience-request.ts` reads a Persian sentence into a `SegmentDefinition`.
+The module depends on `segments.ts` and on the phrase normaliser in
+`crm-commands.ts`, and on nothing else — no `db`, no query builder, no model — and the document it returns is re-validated with
+`validateSegmentDefinition` before the screen will offer it, so a phrase can only
+ever choose among fields the audience builder can already express. The refusal is
+as important as the reading: a word with no rule behind it comes back in `unread`
+and the interpretation is `ok: false`, which is what stops «مشتریان وفادار» from
+quietly becoming an invented `orderCount >= 5`.
+
+Values are matched folded (`normalizeCrmPhrase`) and *returned as written*, so a
+tag captured from «برچسب عمده‌فروشی» is the tag the shop stored. Money crosses
+from Toman to Rial exactly once, at the reading.
+
 ## Segment versions make a sent campaign explainable
 
 Editing a segment's rules mints an immutable row in
-`customer_segment_versions`. A rename does not — versions exist to answer «این
+`customer_segment_versions` — whether the rules were typed into the builder or
+poured in from a sentence. A rename does not — versions exist to answer «این
 کمپین به چه کسانی رفت؟», which is a function of the rules, not the label.
+
+## Automations act only on records that already exist
+
+`crm_automations` stores a rule a business composed; `crm_automation_runs` is the
+append-only record of every time one was considered. The vocabulary — three
+triggers, four conditions declared per trigger, three actions — lives in
+`crm-automation-rules.ts` and is **code, not rows**: a trigger nobody implements
+would be a rule that silently never fires, and a condition whose query does not
+exist would be a rule that silently fires always. The same file validates a rule
+and is pure, so the API, the form and the tests agree by construction.
+
+- **Rules fire after the write commits, never inside it.** The four write paths
+  that own the events (`moveDealToStage`, `upsertDeal`, `upsertCase`, `saveLead`)
+  call the engine once the row is theirs. A rule's failure must not roll back the
+  salesperson's drag, and a failed statement inside a transaction would poison it
+  for everything after — the same posture as `recordCrmAudit`.
+- **A bulk import fires nothing.** The data-transfer engine writes its own rows
+  (`data-transfer/entities/crm.ts`) rather than calling these services, so
+  loading a thousand leads does not file a thousand follow-ups: an import is a
+  load, not a decision.
+- **A deal born on a stage has entered it**; a save that rewrites the stage the
+  deal is already on is not a move and fires nothing. Creation is a real event
+  for a rule that watches the first stage, and `dealStageMoved` is the single
+  answer to what counts as one.
+- **An action is a CRM write and nothing else.** A follow-up becomes a real
+  `crm_activities` task (so it appears in the list, the queues and the customer's
+  timeline); an assignment writes both owner columns from one `resolveOwner`
+  resolution, and refuses a member who has been deactivated since the rule was
+  written. A generated task whose member is gone falls back to the record's
+  owner and then to «بدون مسئول» — never dropped, never handed to a departed
+  colleague.
+- **One action leaves the CRM, and it carries no message.** `notify_growth`
+  writes a run row and an audit event; Growth (which already reads CRM scoring)
+  consumes it and owns the campaign, the consent check and the outbox. The engine
+  has no channel, no template and no recipient, and
+  `crm-app-boundaries.test.ts` reads both the engine's SQL and every CRM file for
+  the names of Growth's sending half.
+- **A missing member or an unknown value is an error, not a default.**
+  `automation_member_inactive` and `automation_condition_invalid` are refusals at
+  the door; the stored row is the normalized document, with nulls for the config
+  an action does not use.
+
+It is not the AI automations engine (`ai_automations`, 0155): that one is
+business-wide, gated on `ai_assistant`, gated on A/R / A/P / inventory facts, and
+proposes actions from the AI catalog under an approval mode. A CRM rule is
+per-record and deterministic, and must work for a business with no AI
+entitlement. Merging them would mean either giving the CRM the catalog — and a
+path to propose a send — or rebuilding a working engine's fact model.
+
+The section is gated on `crm.configure`, like the pipeline and the business
+fields, and lives off the rail (`CRM_SUB_SECTIONS`) reached from CRM settings and
+the command field.
 
 ## Import and export
 
@@ -361,7 +444,124 @@ injection — so the worst a malicious view can do is filter on a field that doe
 not exist. Privacy (`owner_user_id` NULL = shared) is enforced in the SQL,
 including in the `DELETE`, so there is no check-then-act race.
 
+**A saved view is exactly the filters its screen honours, and the screen proves
+it.** The vocabulary is only half the contract: the other half is that the list
+applies every key it declares. So an entity that has grown a real parser also
+gets a real value check (`crm-saved-views-service.ts` refuses `invalid_filters`
+rather than storing a stage id that will fail on the screen for everybody the
+view is shared with), and the screen that owns the keys owns the parser:
+
+- one pure module per entity (`crm-deal-views.ts` for `deals`,
+  `crm-case-views.ts` for `cases`, `crm-activity-views.ts` for `activities`)
+  parses, serialises and *describes* the same document, and the route imports
+  it — so a view stored from the board, a pasted query string and a colleague's
+  shared view are one interpretation;
+- the service imports that module's key list instead of repeating it, so the
+  vocabulary cannot drift from the implementation;
+- an impossible value is refused **by name** (`bad_filter` + the field) and the
+  list keeps its last rows: blanking it would read as "nothing matches";
+- an unknown *key* is still dropped, because a view saved by a newer build must
+  open on an older tab;
+- amounts are Toman in the vocabulary and Rial in the column, converted once at
+  the boundary (`tomanToRial`), because a threshold in the wrong unit matches
+  silently nothing.
+
+The rest of the vocabulary goes through the same door as it is built: the
+`deals`, `cases` and `activities` parsers are the worked examples, and an entity
+without one keeps the drop-unknown-keys behaviour rather than pretending to
+validate values.
+
+**A key that already means something is read, never dropped.** `activities`
+declared `due` before it had a `state`, and the screen's own preset buttons
+built `open=1` and `mine=1` — none of which is the vocabulary a new view writes.
+The parser reads all three (`due` as `state=due`, `open`/`mine` as the state and
+the assignee) and the serialiser writes only the canonical names, so a view or a
+bookmark stored under an older name still filters exactly as its author meant
+while every re-save normalises it. Dropping them instead would have turned those
+views into names that quietly do nothing — the specific failure this section
+exists to prevent.
+
+**A filter that is a rule, not a column is written twice — and tested for
+agreement.** `cases` can be narrowed by `breached`, which is not a field: it is
+`crm-case-clock.ts`'s rule about priority targets, first response and time spent
+waiting on the customer. The row's badge, the SLA panel and the saved view must
+all answer it identically, and they cannot share an implementation: the badge is
+client-side, the panel reads many rows, and the filter has to narrow in SQL or
+the `LIMIT` will have already broken it. So the rule lives in one pure module and
+the SQL is a translation of it, taking its policy (the target hours, the closed
+statuses) as parameters from the same constants — and
+`integration/crm-case-sla.integration.test.ts` runs both over one set of
+fixtures chosen so that every plausible mistranslation (raw age, one hardcoded
+target, ignoring the customer-wait, blaming a resolved ticket) gives a different
+answer. Two implementations with an agreement test is the only honest way to
+have a filter on a rule.
+
+## A queue is a view
+
+A smart queue counts rows: «۶ مورد» over a preview of four. The count is a
+promise, and the only way to keep it is for the card to link to *the same rows* —
+which is a stronger requirement than it sounds, because the queue's rule is SQL
+over several tables while the link it renders is a filter document for one
+screen. Three rules keep the two from drifting:
+
+- **The link is built by the screen's own serialiser, never by hand.**
+  `crm-queue-views.ts` is a pure table (`queue key → filter document | null`)
+  whose documents come from `crm-case-views.ts` and `crm-activity-views.ts`, so a
+  document cannot contain a key its parser rejects. `crm-queue-views.test.ts`
+  round-trips every one of them through the owning parser.
+- **The document is translated by the vocabulary, not by the route.**
+  `caseViewListOptions()` and `activityViewListOptions()` turn a parsed document
+  into the query `listCases`/`listActivities` take — including that `mine` means
+  the session's member id and that the date-bounded states are bounds over the
+  *business* day. The API routes call those functions and keep only what is not
+  translation (permissions, limits, legacy parameters), so «the rows a queue
+  links to» and «the rows the list returns» are one reading of one document —
+  and a test can hold the claim.
+- **The queue's SQL reads the same words the vocabulary does.** «باز» is the
+  set `openOnly` means (`CASE_OPEN_STATUSES` in `crm-case-clock.ts`, passed to
+  both the queue and `listCases` as the same array) and «بدون مسئول» means no
+  member id *and* no legacy free-text name, which is exactly what
+  `crm-data-quality.ts`'s `unowned_work` rule has always said. A queue whose
+  status set or ownership test differed from the filter it linked to would be
+  the drift this section exists to prevent.
+- **`null` is an answer.** A rule that is relative to the row set (no activity
+  for seven days), a percentile of current values (the top quintile), a union
+  across two tables (departed owners), a scored population, or a workspace that
+  *is* its own list cannot be reproduced as a filter — and the table says so per
+  key, with the reason. The card renders the link only when a view exists.
+
+`integration/crm-relationship-os.integration.test.ts` closes the loop: for every
+openable queue it asks the service for the rows the document names and demands
+they be the queue's own, with the fixtures chosen so the interesting failure
+(two finished calls whose due dates have passed, a resolved ticket that answered
+late, a ticket owned only by a legacy name) would show up as a difference.
+
 ## Permissions
+
+`src/lib/crm-permissions.ts` is the single source of truth: one row per section
+naming who may read it, write it, reshape it, destroy it or merge it. Everything
+else derives from it — the sidebar, the page gate, and the boolean props the
+section components use to draw their controls.
+
+The permission vocabulary is the six keys below plus `parties.view` /
+`parties.manage`, which the floor's sections (directory, customer file,
+activities, cases) genuinely need because their data belongs to the shared
+parties service.
+
+Two shapes worth knowing before editing the table:
+
+- **`read` is a conjunction (`all`) plus alternatives (`anyOf`).** The
+  alternatives exist for the management sections, which require the base read
+  *and* a management capability — so `crm.export` can never substitute for
+  `crm.view` while the cashier, who holds `crm.view` through `crm.manage`, is
+  still kept off the forecast.
+- **`screenOwned` and `routes` are declared exceptions.** `screenOwned` names
+  actions a screen gates with its own prop (the directory's write controls, the
+  case delete button); `routes` names a route whose requirement deliberately
+  differs from its action's default (the relationships endpoints, which need
+  `crm.manage` although they are written from the customer file). Both are
+  read by `crm-permissions.test.ts`, which fails when a route and the table
+  disagree in either direction.
 
 CRM permissions split by **blast radius**, not by screen:
 
@@ -391,6 +591,17 @@ only, matching what the nav already showed them.
 | Database | `npm run test:db` (~8 min) |
 | Design | `npm run test:design` |
 | Build | `npm run build` |
+
+`src/lib/crm-permissions.test.ts` reads every route under `src/app/api/crm/` and
+compares it with `crm-permissions.ts` in both directions: whoever may open a
+section must pass its routes, and whoever the table promises an action must not
+be refused by the route that performs it. It also pins the admitted section set
+per built-in role, so a tweak to the table cannot silently hand the floor the
+pipeline.
+
+The product shape — the six destinations, the smart queues, explainable health,
+the handoff, and the seams deliberately left unbuilt — is in
+`docs/crm-relationship-os.md`.
 
 Boundary rules live in `src/lib/crm-app-boundaries.test.ts` and run in the unit
 suite. They read source rather than behaviour on purpose: a future change that

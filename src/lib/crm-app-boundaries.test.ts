@@ -280,3 +280,98 @@ describe("merge stays human-only and irreversible-safe", () => {
     expect(source).not.toMatch(/for \(const table of \[\s*"customer_points"/);
   });
 });
+
+describe("the CRM triggers Growth but never sends", () => {
+  /**
+   * Every file the CRM owns: its library, its API, and its screens.
+   *
+   * Wider than `crmLibFiles()` on purpose. The rule is about a *capability*
+   * rather than a module: a screen that fetched Growth's campaign endpoint, or a
+   * route that inserted a recipient row, would break it exactly as a service
+   * would.
+   */
+  function crmSurfaceFiles(): { name: string; source: string }[] {
+    const files: { name: string; source: string }[] = crmLibFiles();
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!/\.(?:ts|tsx)$/.test(entry.name)) continue;
+        if (entry.name.endsWith(".test.ts") || entry.name.endsWith(".test.tsx")) continue;
+        files.push({ name: full.slice(full.indexOf("src/")), source: code(readFileSync(full, "utf8")) });
+      }
+    };
+    walk(fileURLToPath(new URL("../app/api/crm", import.meta.url)).replace(/\/$/, ""));
+    walk(fileURLToPath(new URL("../app/(app)/crm", import.meta.url)).replace(/\/$/, ""));
+    return files;
+  }
+
+  it("names nothing in Growth's sending half, anywhere in the CRM", () => {
+    // The issue's line: the CRM may *trigger* Growth but must not send a
+    // campaign itself. Growth builds audiences from segments, checks consent and
+    // writes the outbox; a CRM file naming any of those tables or the service
+    // that owns them is either sending or reading something it has no business
+    // reading. Growth reading *the CRM* is the direction that keeps this
+    // acyclic, and it is the direction that already exists.
+    const forbidden = [
+      "message-campaigns-service",
+      "message_campaigns",
+      "message_recipients",
+      "message_outbox",
+      "message_templates",
+      "growth-settings",
+      "growth_settings",
+    ];
+    const offenders: string[] = [];
+    for (const file of crmSurfaceFiles()) {
+      for (const name of forbidden) {
+        if (file.source.includes(name)) offenders.push(`${file.name} → ${name}`);
+      }
+    }
+    expect(
+      offenders,
+      offenders.length === 0
+        ? ""
+        : `The CRM must signal Growth rather than reach into it:\n  ${offenders.join("\n  ")}`,
+    ).toEqual([]);
+  });
+
+  it("gives the automations engine no table to write but its own records", () => {
+    // An automation is the one part of the CRM that acts with nobody watching,
+    // so its write surface is one file and is asserted here. A new INSERT in
+    // this file is a new capability — it has to be added to this list
+    // deliberately, which is the point.
+    const source = code(readFileSync(`${LIB_DIR}crm-automation-service.ts`, "utf8"));
+    const statements = [...source.matchAll(/`([^`]*)`/g)]
+      .map((match) => match[1])
+      .filter((statement) => /\b(INSERT INTO|UPDATE|DELETE FROM)\b/i.test(statement));
+
+    expect(statements).toHaveLength(8);
+    for (const statement of statements) {
+      expect(statement).toMatch(
+        /INSERT INTO crm_activities|INSERT INTO crm_automations\b|INSERT INTO crm_automation_runs|UPDATE crm_automations|UPDATE \$\{table\.name\}|DELETE FROM crm_automations/,
+      );
+    }
+
+    // The three record tables its one owner-update reaches are named literally
+    // in the same file — never built from a caller's input, and never a fourth.
+    for (const literal of [
+      "crm_deals",
+      "crm_cases",
+      "crm_leads",
+      "owner_user",
+      "owner_user_id",
+      "assigned_to",
+      "assignee_user_id",
+      "owner_name",
+    ]) {
+      expect(source).toContain(literal);
+    }
+
+    // And no money, no message, no consent register.
+    expect(source).not.toMatch(/journal|ledger|invoice|campaign|outbox|consent/i);
+  });
+});

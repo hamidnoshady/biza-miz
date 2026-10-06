@@ -18,11 +18,20 @@
  *    lying on one of its screens and nobody can tell which.
  * 4. **RLS holds on every new table.** The CRM's six tables are new tenant
  *    surfaces; a business must not see another's deals, cases or notes.
+ * 5. **The task list's saved-view vocabulary reaches SQL.** Every key a view can
+ *    store — `q`, `kind`, `state`, `assignee` — must narrow the rows, and the
+ *    date-bounded states must be judged against the *business* day rather than
+ *    the browser's, because that is the date the rows are coloured by.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import {
+  activityViewListOptions,
+  activityViewQuery,
+  parseActivityViewFilters,
+} from "../src/lib/crm-activity-views";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -36,6 +45,9 @@ let crm: typeof import("../src/lib/crm-service");
 let overview: typeof import("../src/lib/crm-overview");
 let segmentsService: typeof import("../src/lib/crm-segments-service");
 let timelineService: typeof import("../src/lib/customer-timeline-service");
+let businessDay: typeof import("../src/lib/business-day-service");
+let views: typeof import("../src/lib/crm-saved-views-service");
+let audienceRequest: typeof import("../src/lib/crm-audience-request");
 
 const biz = { id: "", locationId: "" };
 const other = { id: "", locationId: "" };
@@ -72,6 +84,7 @@ beforeAll(async () => {
   overview = await import("../src/lib/crm-overview");
   segmentsService = await import("../src/lib/crm-segments-service");
   timelineService = await import("../src/lib/customer-timeline-service");
+  audienceRequest = await import("../src/lib/crm-audience-request");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -457,6 +470,46 @@ describe("segments", () => {
     expect(matched.map((row) => row.id)).toContain(customer);
     expect(matched.find((row) => row.id === customer)!.orderCount).toBe(file!.stats.orderCount);
   });
+
+  it("a spoken audience resolves the people the written document names", async () => {
+    // The spoken and the written document are asserted to be *the same
+    // document*, so the rows below come from the builder's own SQL path — there
+    // is no second query hiding behind the sentence box.
+    const lapsed = await makeCustomer(biz.id, "سمیرا", { smsConsent: true });
+    const recent = await makeCustomer(biz.id, "کیوان", { smsConsent: true });
+    await makeSale(biz.locationId, biz.id, lapsed, 500_000, 100);
+    await makeSale(biz.locationId, biz.id, recent, 500_000, 5);
+
+    const interpretation = audienceRequest.interpretAudienceRequest(
+      "۹۰ روز است خرید نکرده‌اند و رضایت پیامک دارند",
+    );
+    expect(interpretation.unread).toEqual([]);
+    expect(interpretation.ok).toBe(true);
+
+    const written = {
+      all: [
+        { field: "lastPurchaseAt" as const, op: "before" as const, days: 90 },
+        { field: "smsConsent" as const, op: "is" as const, value: true },
+      ],
+    };
+    expect(interpretation.definition).toEqual(written);
+
+    const audience = await segmentsService.resolveDefinition(
+      biz.id,
+      interpretation.definition,
+      { purpose: "view" },
+    );
+    const ids = audience.map((row) => row.id);
+    // Other fixtures in this file have older purchases, so containment is the
+    // claim: the lapsed buyer is in, the one who bought this week is not.
+    expect(ids).toContain(lapsed);
+    expect(ids).not.toContain(recent);
+    expect(ids).toEqual(
+      (
+        await segmentsService.resolveDefinition(biz.id, written, { purpose: "view" })
+      ).map((row) => row.id),
+    );
+  });
 });
 
 describe("the consent register", () => {
@@ -752,5 +805,234 @@ describe("cross-app bridges", () => {
       expect(audience.excludedByConsent).toBe(audience.matched - audience.reachable);
       expect(audience.excludedByConsent).toBeGreaterThan(0);
     });
+  });
+});
+
+/**
+ * The task list's filter, against a real database.
+ *
+ * The screen used to narrow `q` in the browser over the rows it had already
+ * loaded and hardcode `open`/`mine`/`due` from five preset buttons, so a saved
+ * view could carry keys nothing read. This block runs the *route's* own path —
+ * parse with the screen's module, derive the date bounds from the business day,
+ * hand the result to `listActivities` — and asks whether each key really
+ * narrows.
+ */
+describe("the task list's filter", () => {
+  /** A business of its own: the file's shared one holds other tests' rows. */
+  async function ownBusiness(prefix: string) {
+    const created = await db.query<{ id: string }>(
+      `INSERT INTO businesses (name, slug, industry)
+       VALUES ('کارهای تست', $1, 'food_service') RETURNING id`,
+      [`${prefix}-${randomUUID().slice(0, 8)}`],
+    );
+    const location = await db.query<{ id: string }>(
+      `INSERT INTO locations (business_id, name) VALUES ($1, 'شعبهٔ اصلی') RETURNING id`,
+      [created.rows[0].id],
+    );
+    return { businessId: created.rows[0].id, locationId: location.rows[0].id };
+  }
+
+  async function makeMember(businessId: string, name: string): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, email, password_hash)
+       VALUES ($1, 'manager', $2, $3, 'x') RETURNING id`,
+      [businessId, name, `tasks-${randomUUID().slice(0, 8)}@example.test`],
+    );
+    return rows[0].id;
+  }
+
+  it("narrows on every key, and judges the states against the business day", async () => {
+    const own = await ownBusiness("ros-task-views");
+    const viewerId = await makeMember(own.businessId, "زهرا کریمی");
+    const customerId = await makeCustomer(own.businessId, "مشتری پیگیری‌ها");
+
+    // The shop's own today, which is what the route bounds the states by.
+    businessDay = await import("../src/lib/business-day-service");
+    const today = await businessDay.businessToday(own.businessId);
+    const tomorrow = new Date(Date.parse(`${today}T00:00:00Z`) + 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+
+    const make = async (input: Parameters<typeof crm.createActivity>[1]) =>
+      crm.createActivity(own.businessId, { createdBy: "مدیر", ...input });
+
+    const overdueCall = await make({
+      kind: "call",
+      subject: "تماس عقب‌افتاده",
+      body: "دربارهٔ یخچال",
+      dueAt: `${yesterday}T09:00:00Z`,
+      assigneeUserId: viewerId,
+      customerId,
+    });
+    const dueToday = await make({
+      kind: "call",
+      subject: "تماس امروز",
+      dueAt: `${today}T09:00:00Z`,
+    });
+    const planned = await make({
+      kind: "visit",
+      subject: "مراجعهٔ هفتهٔ بعد",
+      dueAt: `${tomorrow}T09:00:00Z`,
+      customerId,
+    });
+    const noDueDate = await make({ kind: "note", subject: "یادداشت بدون تاریخ" });
+    const done = await make({ kind: "task", subject: "کار انجام‌شده", completed: true });
+    // Two calls that were made — one late, one on time. Finished work is
+    // «انجام‌شده» however old its due date is (`activityState` answers that
+    // before it looks at the date at all), so neither may appear under
+    // «عقب‌افتاده» or «امروز». The queues agree: their SQL has always required
+    // `completed_at IS NULL`, and a «دیدن همه» link that listed them would show
+    // rows the card above it did not count.
+    const doneLate = await make({
+      kind: "call",
+      subject: "تماس دیروزِ انجام‌شده",
+      dueAt: `${yesterday}T09:00:00Z`,
+      completed: true,
+    });
+    const doneToday = await make({
+      kind: "call",
+      subject: "تماس امروزِ انجام‌شده",
+      dueAt: `${today}T09:00:00Z`,
+      completed: true,
+    });
+
+    // The route's own translation, called rather than re-written: the same
+    // function the API route uses turns the parsed document into the query, so
+    // this block tests the translation the app ships instead of a copy of it.
+    const run = async (query: Record<string, string>) => {
+      const parsed = parseActivityViewFilters({ get: (key) => query[key] ?? null });
+      expect(parsed.error).toBeNull();
+      const options = activityViewListOptions(parsed.filters, { viewerId, today });
+      const rows = await crm.listActivities(own.businessId, options);
+      return rows.map((row) => row.id).sort();
+    };
+    const sorted = (...ids: string[]) => [...ids].sort();
+
+    // Every key on its own.
+    expect(await run({ q: "عقب‌افتاده" })).toEqual(sorted(overdueCall.id));
+    // The body is searched, too — people type what the task is about.
+    expect(await run({ q: "یخچال" })).toEqual(sorted(overdueCall.id));
+    // …and so is the customer's name, which is how a shop looks for «what did
+    // we promise this person».
+    expect(await run({ q: "مشتری پیگیری‌ها" })).toEqual(sorted(overdueCall.id, planned.id));
+    expect(await run({ kind: "call" })).toEqual(
+      sorted(overdueCall.id, dueToday.id, doneLate.id, doneToday.id),
+    );
+    expect(await run({ kind: "note" })).toEqual(sorted(noDueDate.id));
+    expect(await run({ assignee: "mine" })).toEqual(sorted(overdueCall.id));
+    expect(await run({ assignee: "none" })).toEqual(
+      sorted(dueToday.id, planned.id, noDueDate.id, done.id, doneLate.id, doneToday.id),
+    );
+    expect(await run({ assignee: viewerId })).toEqual(sorted(overdueCall.id));
+
+    // The states. `due` is «today or already late» — the label the screen has
+    // always used — while `overdue` is strictly before the shop's today, and
+    // `planned` is a due date still in the future. None of the three can be
+    // answered from the browser's clock: a business day that starts at 18:00
+    // would put «امروز» on a different date here.
+    expect(await run({ state: "open" })).toEqual(
+      sorted(overdueCall.id, dueToday.id, planned.id, noDueDate.id),
+    );
+    expect(await run({ state: "done" })).toEqual(sorted(done.id, doneLate.id, doneToday.id));
+    expect(await run({ state: "due" })).toEqual(sorted(overdueCall.id, dueToday.id));
+    // The two that were finished are absent from both: the date-bounded states
+    // are the row badges' words, and a badge calls them «انجام‌شده».
+    expect(await run({ state: "overdue" })).toEqual(sorted(overdueCall.id));
+    expect(await run({ state: "today" })).toEqual(sorted(dueToday.id));
+    expect(await run({ state: "planned" })).toEqual(sorted(planned.id));
+
+    // The legacy key, read for links and views already in the wild.
+    expect(await run({ due: "1" })).toEqual(sorted(overdueCall.id, dueToday.id));
+
+    // And the keys compose, which is what a saved view is.
+    expect(
+      await run({ kind: "call", state: "overdue", assignee: "mine" }),
+    ).toEqual(sorted(overdueCall.id));
+    expect(await run({ kind: "visit", state: "overdue" })).toEqual([]);
+  });
+
+  it("round-trips a view saved through the service into the request the list sends", async () => {
+    const business = await ownBusiness("ros-task-view-save");
+    views = await import("../src/lib/crm-saved-views-service");
+
+    const saved = await views.saveView(
+      business.businessId,
+      {
+        entity: "activities",
+        name: "تماس‌های عقب‌افتادهٔ من",
+        filters: { kind: "call", state: "overdue", assignee: "mine" },
+        shared: true,
+      },
+      { name: "مدیر", userId: null },
+    );
+    expect(saved.ok).toBe(true);
+    const document = saved.ok ? saved.view.filters : {};
+
+    // The screen serialises the stored document into a query and the server
+    // parses that query with the same module: one interpretation.
+    const query = activityViewQuery({
+      q: "",
+      kind: document.kind,
+      state: document.state,
+      assignee: document.assignee,
+    });
+    expect(query).toEqual({ kind: "call", state: "overdue", assignee: "mine" });
+    expect(parseActivityViewFilters({ get: (key) => query[key] ?? null }).filters).toEqual({
+      q: "",
+      kind: "call",
+      state: "overdue",
+      assignee: "mine",
+    });
+
+    // A key the vocabulary does not carry is dropped rather than stored — the
+    // preset buttons' own `mine`/`open` are exactly that case.
+    const legacy = await views.saveView(
+      business.businessId,
+      {
+        entity: "activities",
+        name: "با کلیدهای قدیمی",
+        filters: { mine: "1", open: "1", kind: "call" },
+        shared: true,
+      },
+      { name: "مدیر", userId: null },
+    );
+    expect(legacy.ok && legacy.view.filters).toEqual({ kind: "call" });
+
+    // A *new* state joins the vocabulary without a migration: «امروز» is the
+    // word the row badge and the «کارهای امروز» queue already use, so a view may
+    // store it. This is the same key the wave-13 witness used as its example of
+    // an impossible value.
+    const todayView = await views.saveView(
+      business.businessId,
+      {
+        entity: "activities",
+        name: "کارهای امروز",
+        filters: { state: "today" },
+        shared: true,
+      },
+      { name: "مدیر", userId: null },
+    );
+    expect(todayView.ok).toBe(true);
+    expect(todayView.ok && todayView.view.filters).toEqual({ state: "today" });
+
+    // An impossible value inside the vocabulary is refused *and named*, so the
+    // screen can point at the control instead of showing a mystery.
+    const bad = await views.saveView(
+      business.businessId,
+      {
+        entity: "activities",
+        name: "با وضعیت نامعتبر",
+        filters: { state: "paused" },
+        shared: true,
+      },
+      { name: "مدیر", userId: null },
+    );
+    expect(bad.ok).toBe(false);
+    expect(bad.ok === false && bad.error).toBe("invalid_filters");
+    expect(bad.ok === false && bad.field).toBe("state");
   });
 });

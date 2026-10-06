@@ -26,6 +26,12 @@
 
 import { query, withTenant, withTenantTransaction } from "./db";
 import { customerFinancialSummary } from "./crm-accounting-contract";
+import {
+  defaultPipeline,
+  getStage,
+  legacyStageKey,
+  type PipelineStage,
+} from "./crm-pipeline-service";
 import { businessToday } from "./business-day-service";
 import { getBusinessDek } from "./business-keys";
 import { encryptOptional, phoneBlindIndex, phoneKind, phoneLast4 } from "./field-crypto";
@@ -43,7 +49,10 @@ import {
   type DealStage,
   type DuplicateReason,
 } from "./crm-shared";
+import { CASE_BREACH_SQL_CASES, CASE_OPEN_STATUSES, caseBreachSql } from "./crm-case-clock";
 import { daysBetween, lifetimeValue, scorePopulation, type CustomerRfmInput, type RfmScore } from "./crm-scoring";
+import { customerHealth as healthOf, type CustomerHealth } from "./crm-health";
+import { resolveOwner } from "./crm-ownership";
 import type { LifecycleStage } from "./crm-scoring";
 import {
   movedPartyReferences,
@@ -53,6 +62,8 @@ import {
   type PartyReference,
 } from "./party-merge-references";
 import { recordCrmAudit } from "./crm-audit-service";
+import { runCrmAutomations, type CrmAutomationRunSummary } from "./crm-automation-service";
+import { dealStageMoved } from "./crm-automation-rules";
 import { isUuid } from "./uuid";
 
 /**
@@ -88,6 +99,15 @@ export interface CustomerFile {
   isActive: boolean;
   mergedIntoId: string | null;
   createdAt: string;
+  /**
+   * The relationship's explainable state — «وضعیت رابطه».
+   *
+   * Computed from the aggregates on this page rather than from a second
+   * scoring pass (see `crm-health.ts`), and it carries its own reasons: the
+   * file shows the state *and* the facts behind it, so nobody has to trust a
+   * colour.
+   */
+  health: CustomerHealth;
   /** Purchase aggregates, derived at read time. */
   stats: {
     orderCount: number;
@@ -212,6 +232,16 @@ export async function getCustomerFile(
   const dayDiff = (from: string, to: string) =>
     Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
 
+  // Computed once and handed to both the stats and the health classifier: two
+  // derivations of the same cadence is how a page ends up quoting «هر ۳۰ روز»
+  // beside a health state that used a different number.
+  const lifetime = lifetimeValue({
+    totalSpentRial,
+    orderCount,
+    activeDays: firstPurchaseDate && lastPurchaseDate ? dayDiff(firstPurchaseDate, lastPurchaseDate) : 0,
+  });
+  const daysSinceLastPurchase = lastPurchaseDate ? dayDiff(lastPurchaseDate, today) : null;
+
   return {
     id: row.id as string,
     name: row.name as string,
@@ -232,16 +262,11 @@ export async function getCustomerFile(
       totalSpentRial,
       firstPurchaseDate,
       lastPurchaseDate,
-      daysSinceLastPurchase: lastPurchaseDate ? dayDiff(lastPurchaseDate, today) : null,
+      daysSinceLastPurchase,
       loyaltyPoints: Number(row.loyaltyPoints ?? 0),
       openCases: Number(row.openCases ?? 0),
       openDeals: Number(row.openDeals ?? 0),
-      lifetime: lifetimeValue({
-        totalSpentRial,
-        orderCount,
-        activeDays:
-          firstPurchaseDate && lastPurchaseDate ? dayDiff(firstPurchaseDate, lastPurchaseDate) : 0,
-      }),
+      lifetime,
     },
     rfm: {
       recency: (row.rfmRecency as number | null) ?? null,
@@ -250,6 +275,15 @@ export async function getCustomerFile(
       stage: (row.lifecycleStage as string | null) ?? null,
       scoredAt: (row.rfmScoredAt as string | null) ?? null,
     },
+    health: healthOf({
+      lifecycleStage: (row.lifecycleStage as string | null) ?? null,
+      orderCount,
+      daysSinceLastPurchase,
+      purchaseIntervalDays: lifetime.purchaseIntervalDays,
+      openCases: Number(row.openCases ?? 0),
+      openDeals: Number(row.openDeals ?? 0),
+      overdueRial: arBalance.overdueRial,
+    }),
     accounting: {
       receivableRial: arBalance.balanceRial,
       hasLedger: arBalance.available,
@@ -1403,7 +1437,10 @@ interface CrmActivity extends Record<string, unknown> {
   body: string;
   dueAt: string | null;
   completedAt: string | null;
+  /** The display snapshot — what the row says the assignee was. */
   assignedTo: string;
+  /** The member, when the assignee is one. Null for legacy rows and unassigned work. */
+  assigneeUserId: string | null;
   createdBy: string;
   createdAt: string;
 }
@@ -1411,6 +1448,7 @@ interface CrmActivity extends Record<string, unknown> {
 const ACTIVITY_COLUMNS = `a.id, a.customer_id AS "customerId", c.name AS "customerName",
   a.deal_id AS "dealId", a.case_id AS "caseId", a.kind, a.subject, a.body,
   a.due_at AS "dueAt", a.completed_at AS "completedAt", a.assigned_to AS "assignedTo",
+  a.assignee_user_id AS "assigneeUserId",
   a.created_by AS "createdBy", a.created_at AS "createdAt"`;
 
 export async function listActivities(
@@ -1420,11 +1458,27 @@ export async function listActivities(
     dealId?: string;
     caseId?: string;
     openOnly?: boolean;
+    /** Only rows somebody has ticked off — the `done` half of a saved view. */
+    completedOnly?: boolean;
+    /** An activity kind, so a view can be «تماس‌های عقب‌افتاده». */
+    kind?: ActivityKind;
+    /** Exact snapshot match — the legacy text filter. */
     assignedTo?: string;
+    /** The member whose work to list («کارهای من»). */
+    assigneeUserId?: string;
+    /**
+     * Deliberately unclaimed work. Separate from "not filtering by assignee",
+     * which must not mean "only the unowned ones".
+     */
+    unowned?: boolean;
     /** Free-text over subject/body/assignee — the list's own search box. */
     q?: string;
     /** Only rows whose `dueAt` falls on or before this ISO date (overdue + today). */
     dueOnOrBefore?: string;
+    /** Only rows due strictly *before* this ISO date — the `overdue` state. */
+    dueBefore?: string;
+    /** Only rows due on or after this ISO date — the `planned` state. */
+    dueOnOrAfter?: string;
     limit?: number;
   } = {},
 ): Promise<CrmActivity[]> {
@@ -1441,6 +1495,16 @@ export async function listActivities(
   if (options.dealId && isUuid(options.dealId)) add("a.deal_id = $n", options.dealId);
   if (options.caseId && isUuid(options.caseId)) add("a.case_id = $n", options.caseId);
   if (options.assignedTo) add("a.assigned_to = $n", options.assignedTo);
+  if (options.kind) add("a.kind = $n", options.kind);
+  // «کارهای من» — by member id, never by name: two colleagues can share a name,
+  // and a name filter would quietly hand one of them the other's list.
+  if (options.assigneeUserId && isUuid(options.assigneeUserId)) {
+    add("a.assignee_user_id = $n", options.assigneeUserId);
+  } else if (options.unowned) {
+    // No id *and* no name — the definition `listCases` argues in full, and the
+    // one the queue cards and `unowned_work` already used.
+    where += " AND a.assignee_user_id IS NULL AND btrim(coalesce(a.assigned_to, '')) = ''";
+  }
   const term = options.q?.trim();
   if (term) {
     // `%` and `_` in a user's search string are literals, not wildcards.
@@ -1451,9 +1515,20 @@ export async function listActivities(
     where += ` OR a.assigned_to ILIKE ${n} ESCAPE '\\' OR c.name ILIKE ${n} ESCAPE '\\')`;
   }
   if (options.openOnly) where += " AND a.completed_at IS NULL";
+  if (options.completedOnly) where += " AND a.completed_at IS NOT NULL";
   if (options.dueOnOrBefore) {
+    // The shop's own day, inclusive: a task due «امروز» is not late until the
+    // business day the server resolved has ended.
     params.push(options.dueOnOrBefore);
     where += ` AND a.due_at IS NOT NULL AND a.due_at < (($${params.length})::date + 1)`;
+  }
+  if (options.dueBefore) {
+    params.push(options.dueBefore);
+    where += ` AND a.due_at IS NOT NULL AND a.due_at < $${params.length}::date`;
+  }
+  if (options.dueOnOrAfter) {
+    params.push(options.dueOnOrAfter);
+    where += ` AND a.due_at IS NOT NULL AND a.due_at >= $${params.length}::date`;
   }
   // A caller-supplied limit is clamped rather than trusted: `limit=999999` on a
   // shared endpoint is a way to make one screen read a whole table.
@@ -1492,6 +1567,9 @@ interface CreateActivityInput {
   subject: string;
   body?: string;
   dueAt?: string | null;
+  /** The assignee as a **member id**; preferred over the name below. */
+  assigneeUserId?: string | null;
+  /** A name, for legacy callers and pre-0157 rows. Resolved, never trusted. */
   assignedTo?: string;
   createdBy?: string;
   completed?: boolean;
@@ -1501,10 +1579,16 @@ export async function createActivity(
   businessId: string,
   input: CreateActivityInput,
 ): Promise<CrmActivity> {
+  // Whoever is named is a member of *this* business, verified here rather than
+  // trusted from the body: the id column is the ownership, the text is the
+  // snapshot, and a foreign or misspelled name leaves the row unassigned
+  // instead of misattributed (`crm-ownership.ts`).
+  const owner = await resolveOwner(businessId, input.assigneeUserId ?? input.assignedTo);
   const { rows } = await query<{ id: string }>(
     `INSERT INTO crm_activities
-       (business_id, customer_id, deal_id, case_id, kind, subject, body, due_at, assigned_to, created_by, completed_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+       (business_id, customer_id, deal_id, case_id, kind, subject, body, due_at,
+        assigned_to, assignee_user_id, created_by, completed_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
     [
       businessId,
       input.customerId ?? null,
@@ -1514,7 +1598,8 @@ export async function createActivity(
       input.subject.trim(),
       input.body?.trim() ?? "",
       input.dueAt ?? null,
-      input.assignedTo ?? "",
+      owner.name,
+      owner.userId,
       input.createdBy ?? "",
       input.completed ? new Date().toISOString() : null,
     ],
@@ -1542,6 +1627,9 @@ interface UpdateActivityInput {
   subject?: string;
   body?: string;
   dueAt?: string | null;
+  /** The assignee as a member id; `""` unassigns. */
+  assigneeUserId?: string | null;
+  /** A name, for legacy callers. Resolved to a member when it is unambiguous. */
   assignedTo?: string;
   customerId?: string | null;
   completed?: boolean;
@@ -1571,7 +1659,15 @@ export async function updateActivity(
   if (input.subject !== undefined) set("subject", input.subject.trim());
   if (input.body !== undefined) set("body", input.body.trim());
   if (input.dueAt !== undefined) set("due_at", input.dueAt);
-  if (input.assignedTo !== undefined) set("assigned_to", input.assignedTo.trim());
+  // Assignment is one decision, so it writes both columns together: the id when
+  // the caller named a member (or a name only one member answers to), and the
+  // snapshot either way. Two separate writes are how a row ends up with an id
+  // and a stale name beside it.
+  if (input.assigneeUserId !== undefined || input.assignedTo !== undefined) {
+    const owner = await resolveOwner(businessId, input.assigneeUserId ?? input.assignedTo);
+    set("assignee_user_id", owner.userId);
+    set("assigned_to", owner.name);
+  }
   if (input.customerId !== undefined) set("customer_id", input.customerId);
   if (input.completed !== undefined) {
     set("completed_at", input.completed ? new Date().toISOString() : null);
@@ -1606,11 +1702,22 @@ interface CrmDeal extends Record<string, unknown> {
   customerName: string | null;
   title: string;
   description: string;
+  /**
+   * The legacy six-value key, kept because every pre-0157 query and report
+   * reads it. The canonical identity of a deal's position is `stageId`; this
+   * column is mainained in step by the service and is compatibility-only.
+   */
   stage: DealStage;
+  /** The stage row, when the deal has one. Null only for rows written before migration 0157 or by a caller that did not name a stage. */
+  stageId: string | null;
+  pipelineId: string | null;
   valueRial: number;
   probability: number | null;
   expectedCloseDate: string | null;
+  /** The owner's display name as stored — the snapshot, kept for history. */
   ownerUser: string;
+  /** The owner as a member id. Null when nobody is assigned, or when a typed name matched no single member. */
+  ownerUserId: string | null;
   source: string;
   closedAt: string | null;
   lostReason: string | null;
@@ -1620,14 +1727,49 @@ interface CrmDeal extends Record<string, unknown> {
 }
 
 const DEAL_COLUMNS = `d.id, d.customer_id AS "customerId", c.name AS "customerName",
-  d.title, d.description, d.stage, d.value_rial AS "valueRial", d.probability,
-  d.expected_close_date::text AS "expectedCloseDate", d.owner_user AS "ownerUser",
+  d.title, d.description, d.stage, d.stage_id AS "stageId", d.pipeline_id AS "pipelineId",
+  d.value_rial AS "valueRial", d.probability,
+  d.expected_close_date::text AS "expectedCloseDate",
+  d.owner_user AS "ownerUser", d.owner_user_id AS "ownerUserId",
   d.source, d.closed_at AS "closedAt", d.lost_reason AS "lostReason",
   d.order_id AS "orderId", d.created_at AS "createdAt", d.updated_at AS "updatedAt"`;
 
+export interface ListDealsOptions {
+  customerId?: string;
+  /** The compatibility key. The canonical filter is `stageId`. */
+  stage?: DealStage;
+  /** The canonical stage row — what the board and a saved view both hold. */
+  stageId?: string | null;
+  pipelineId?: string | null;
+  /** Free text over the deal's title and its customer's name. */
+  q?: string;
+  /** A member id. `null` with `unowned: true` means "nobody owns it". */
+  ownerUserId?: string | null;
+  unowned?: boolean;
+  /** Bounds in Rial, already converted — see `crm-deal-views.ts`. */
+  minValueRial?: number | null;
+  maxValueRial?: number | null;
+  openOnly?: boolean;
+  limit?: number;
+}
+
+/**
+ * One page of deals, narrowed by whatever the caller asked for.
+ *
+ * Every filter is an equality or a bound on a column — no expression is built
+ * from user text, and the two free-text fields are matched with `ILIKE` against
+ * the title and the customer's name, which is the whole of the "search" a board
+ * needs. The saved-view vocabulary (`crm-deal-views.ts`) maps onto exactly these
+ * options, which is what lets the deals screen promise that a stored view shows
+ * what it says.
+ *
+ * `unowned` and `ownerUserId` are separate on purpose: a caller asking for a
+ * member must not accidentally match every row whose owner is NULL, which is
+ * what a naive `= $n` with a null parameter does.
+ */
 export async function listDeals(
   businessId: string,
-  options: { customerId?: string; stage?: DealStage; openOnly?: boolean; limit?: number } = {},
+  options: ListDealsOptions = {},
 ): Promise<CrmDeal[]> {
   const params: unknown[] = [businessId];
   let where = "d.business_id = $1";
@@ -1639,7 +1781,43 @@ export async function listDeals(
     params.push(options.stage);
     where += ` AND d.stage = $${params.length}`;
   }
-  if (options.openOnly) where += " AND d.stage NOT IN ('won', 'lost')";
+  if (options.stageId) {
+    params.push(options.stageId);
+    where += ` AND d.stage_id = $${params.length}`;
+  }
+  if (options.pipelineId) {
+    params.push(options.pipelineId);
+    where += ` AND d.pipeline_id = $${params.length}`;
+  }
+  if (options.ownerUserId) {
+    params.push(options.ownerUserId);
+    where += ` AND d.owner_user_id = $${params.length}`;
+  } else if (options.unowned) {
+    // No id *and* no name — the definition `listCases` argues in full, and the
+    // one the queue cards and `unowned_work` already used.
+    where += " AND d.owner_user_id IS NULL AND btrim(coalesce(d.owner_user, '')) = ''";
+  }
+  if (options.q && options.q.trim()) {
+    // One parameter, two columns: `%text%` for either the deal or its customer.
+    params.push(`%${options.q.trim()}%`);
+    where += ` AND (d.title ILIKE $${params.length} OR c.name ILIKE $${params.length})`;
+  }
+  if (typeof options.minValueRial === "number") {
+    params.push(options.minValueRial);
+    where += ` AND d.value_rial >= $${params.length}`;
+  }
+  if (typeof options.maxValueRial === "number") {
+    params.push(options.maxValueRial);
+    where += ` AND d.value_rial <= $${params.length}`;
+  }
+  if (options.openOnly) {
+    // Terminal by *outcome*, not by the six legacy keys: a business whose won
+    // column is named something else still has deals that are closed.
+    where += ` AND NOT EXISTS (
+      SELECT 1 FROM crm_pipeline_stages s
+       WHERE s.business_id = d.business_id AND s.id = d.stage_id AND s.outcome <> 'open'
+    ) AND (d.stage_id IS NOT NULL OR d.stage NOT IN ('won', 'lost'))`;
+  }
   params.push(options.limit ?? 200);
 
   const { rows } = await query<CrmDeal>(
@@ -1663,15 +1841,26 @@ interface UpsertDealInput {
   customerId?: string | null;
   title: string;
   description?: string;
+  /**
+   * The canonical stage, as a row id. Preferred wherever a caller knows it:
+   * a business with its own stages has no legacy key to name, and resolving
+   * `stage` can only ever reach the six seeded ones.
+   */
+  stageId?: string | null;
   stage?: DealStage;
   valueRial?: number;
   probability?: number | null;
   expectedCloseDate?: string | null;
+  /** The owner's display name — the snapshot, kept for history. */
   ownerUser?: string;
+  /** The owner as a member id. Preferred wherever the caller has one. */
+  ownerUserId?: string | null;
   source?: string;
   lostReason?: string | null;
   orderId?: string | null;
   createdBy?: string;
+  /** The author as a member id; the name above stays the snapshot. */
+  createdById?: string | null;
 }
 
 /**
@@ -1686,15 +1875,49 @@ interface UpsertDealInput {
  * migration 0118.
  */
 export async function upsertDeal(businessId: string, input: UpsertDealInput): Promise<CrmDeal> {
-  const stage = input.stage ?? "lead";
-  const terminal = stage === "won" || stage === "lost";
+  /**
+   * The canonical stage, resolved once.
+   *
+   * A caller that names `stageId` gets exactly that stage — including one this
+   * business invented, which no legacy key can express. A caller that names the
+   * legacy `stage` key is resolved onto the default pipeline's stage for that
+   * key, so even the old shape writes `stage_id` and a new deal is never born
+   * stageless on the canonical board. A key that no longer maps to a stage
+   * (renamed away, or removed) falls back to the legacy column alone, exactly
+   * as `PATCH /api/crm/deals/[id]` does for a moved stage.
+   */
+  const explicit = input.stageId ? await resolveStageForWrite(businessId, input.stageId) : null;
+  const legacyKey = input.stage ?? "lead";
+  const resolved =
+    explicit ?? (input.stageId ? null : await resolveLegacyStageForWrite(businessId, legacyKey));
+  const stage = resolved ? (legacyStageKey(resolved) as DealStage) : legacyKey;
+  const terminal = resolved ? resolved.outcome !== "open" : stage === "won" || stage === "lost";
+
+  /**
+   * The owner, resolved once: an id when the caller gave one (or gave a name
+   * that matches exactly one member), and the display name either way.
+   *
+   * Both columns are written from this single resolution, so the id and the
+   * snapshot can never disagree about who owns the deal — and a name that
+   * matches two members resolves to nobody rather than to the wrong colleague.
+   */
+  const owner = await resolveOwner(businessId, input.ownerUserId ?? input.ownerUser);
+
+  // The deal as it was, read once for the stage-change trigger below. A primary
+  // key read on the edit path, and the only way to tell a move from a re-save.
+  const before = input.id && isUuid(input.id) ? await getDeal(businessId, input.id) : null;
 
   if (input.id) {
     await query(
       `UPDATE crm_deals
           SET customer_id = $3, title = $4, description = $5, stage = $6, value_rial = $7,
-              probability = $8, expected_close_date = $9::date, owner_user = $10, source = $11,
+              probability = $8, expected_close_date = $9::date,
+              owner_user = $10, owner_user_id = $17, source = $11,
               lost_reason = $12, order_id = $13,
+              stage_id = COALESCE($15, stage_id),
+              pipeline_id = COALESCE($16, pipeline_id),
+              stage_entered_at = CASE WHEN $15::uuid IS NOT NULL AND stage_id IS DISTINCT FROM $15::uuid
+                                      THEN now() ELSE stage_entered_at END,
               closed_at = CASE WHEN $14 THEN coalesce(closed_at, now()) ELSE NULL END,
               updated_at = now()
         WHERE business_id = $1 AND id = $2`,
@@ -1708,22 +1931,40 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
         Math.max(0, Math.round(input.valueRial ?? 0)),
         input.probability ?? null,
         input.expectedCloseDate ?? null,
-        input.ownerUser ?? "",
+        owner.name,
         input.source?.trim() ?? "",
         input.lostReason?.trim() || null,
         input.orderId ?? null,
         terminal,
+        resolved?.id ?? null,
+        resolved?.pipelineId ?? null,
+        owner.userId,
       ],
     );
-    return (await getDeal(businessId, input.id))!;
+    const updated = (await getDeal(businessId, input.id))!;
+    const summary = await fireDealStageTrigger(businessId, before, updated, {
+      name: input.createdBy ?? "",
+      userId: input.createdById ?? null,
+    });
+    // A rule may have moved the owner or filed work against this deal, so the
+    // caller is handed the row as it stands *now* rather than as it was before
+    // the automations ran. Only when one actually did something: an ordinary
+    // save with no rules fires nothing and pays nothing.
+    if (summary && (summary.applied > 0 || summary.growthSignals > 0)) {
+      return (await getDeal(businessId, input.id))!;
+    }
+    return updated;
   }
 
   const { rows } = await query<{ id: string }>(
     `INSERT INTO crm_deals
        (business_id, customer_id, title, description, stage, value_rial, probability,
-        expected_close_date, owner_user, source, lost_reason, order_id, closed_at, created_by)
+        expected_close_date, owner_user, source, lost_reason, order_id, closed_at, created_by,
+        stage_id, pipeline_id, stage_entered_at, last_activity_at, owner_user_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9, $10, $11, $12,
-             CASE WHEN $13 THEN now() ELSE NULL END, $14)
+             CASE WHEN $13 THEN now() ELSE NULL END, $14, $15, $16,
+             CASE WHEN $16::uuid IS NOT NULL THEN now() ELSE NULL END,
+             CASE WHEN $16::uuid IS NOT NULL THEN now() ELSE NULL END, $17)
      RETURNING id`,
     [
       businessId,
@@ -1734,15 +1975,49 @@ export async function upsertDeal(businessId: string, input: UpsertDealInput): Pr
       Math.max(0, Math.round(input.valueRial ?? 0)),
       input.probability ?? null,
       input.expectedCloseDate ?? null,
-      input.ownerUser ?? "",
+      owner.name,
       input.source?.trim() ?? "",
       input.lostReason?.trim() || null,
       input.orderId ?? null,
       terminal,
       input.createdBy ?? "",
+      resolved?.id ?? null,
+      resolved?.pipelineId ?? null,
+      owner.userId,
     ],
   );
-  return (await getDeal(businessId, rows[0].id))!;
+  const created = (await getDeal(businessId, rows[0].id))!;
+  const summary = await fireDealStageTrigger(businessId, before, created, {
+    name: input.createdBy ?? "",
+    userId: input.createdById ?? null,
+  });
+  if (summary && (summary.applied > 0 || summary.growthSignals > 0)) {
+    return (await getDeal(businessId, rows[0].id))!;
+  }
+  return created;
+}
+
+/**
+ * The stage row for an id, or null.
+ *
+ * `getStage` is the pipeline service's own read, so a stage id from a browser
+ * is verified against this business before it is written — the tenancy check is
+ * in the query, not in the caller.
+ */
+async function resolveStageForWrite(
+  businessId: string,
+  stageId: string,
+): Promise<PipelineStage | null> {
+  return getStage(businessId, stageId);
+}
+
+/** The default pipeline's stage for a legacy key, or null when nothing matches. */
+async function resolveLegacyStageForWrite(
+  businessId: string,
+  legacyKey: DealStage,
+): Promise<PipelineStage | null> {
+  const pipeline = await defaultPipeline(businessId);
+  return pipeline?.stages.find((stage) => stage.legacyKey === legacyKey) ?? null;
 }
 
 /** One deal by id — the read every write path returns through. */
@@ -1798,7 +2073,10 @@ interface CrmCase extends Record<string, unknown> {
   priority: CasePriority;
   category: string;
   orderId: string | null;
+  /** The display snapshot — see `crm-ownership.ts`. */
   assignedTo: string;
+  /** The member handling it, or null for legacy/unassigned rows. */
+  assigneeUserId: string | null;
   resolution: string;
   openedAt: string;
   resolvedAt: string | null;
@@ -1807,12 +2085,41 @@ interface CrmCase extends Record<string, unknown> {
 
 const CASE_COLUMNS = `k.id, k.customer_id AS "customerId", c.name AS "customerName",
   k.subject, k.body, k.status, k.priority, k.category, k.order_id AS "orderId",
-  k.assigned_to AS "assignedTo", k.resolution, k.opened_at AS "openedAt",
+  k.assigned_to AS "assignedTo", k.assignee_user_id AS "assigneeUserId",
+  k.resolution, k.opened_at AS "openedAt",
   k.resolved_at AS "resolvedAt", k.created_by AS "createdBy"`;
 
+/**
+ * The service desk's read, and the only one — every key of the `cases` filter
+ * vocabulary is answered *here*, in the database, so a saved view cannot be a
+ * filter that narrows the chips and not the rows.
+ *
+ * `breachedOnly` is decided by `caseBreachSql()` from `crm-case-clock.ts`, the
+ * SQL half of the rule the row's badge and the summary panel use; the two are
+ * proven to agree by `integration/crm-case-views.test.ts`. The target hours and
+ * the closed statuses travel as parameters so the policy stays in one place.
+ */
 export async function listCases(
   businessId: string,
-  options: { customerId?: string; status?: CaseStatus; openOnly?: boolean; limit?: number } = {},
+  options: {
+    customerId?: string;
+    status?: CaseStatus;
+    priority?: CasePriority;
+    /** Free text over the subject, the body and the customer's name. */
+    q?: string;
+    openOnly?: boolean;
+    /** Only tickets that have missed their priority's target. */
+    breachedOnly?: boolean;
+    /** The member handling them («تیکت‌های من») — by id, not by name. */
+    assigneeUserId?: string;
+    /**
+     * Deliberately unclaimed tickets. Separate from "not filtering by
+     * assignee", which must not mean "only the unowned ones": an unclaimed
+     * ticket is the one that rots, and it is the reason this option exists.
+     */
+    unowned?: boolean;
+    limit?: number;
+  } = {},
 ): Promise<CrmCase[]> {
   const params: unknown[] = [businessId];
   let where = "k.business_id = $1";
@@ -1820,11 +2127,41 @@ export async function listCases(
     params.push(options.customerId);
     where += ` AND k.customer_id = $${params.length}`;
   }
+  if (options.assigneeUserId && isUuid(options.assigneeUserId)) {
+    params.push(options.assigneeUserId);
+    where += ` AND k.assignee_user_id = $${params.length}`;
+  } else if (options.unowned) {
+    // «بدون مسئول» means nobody at all. A row carrying a legacy name and no id
+    // is *not* unowned — that name is still a claim — and the queue card
+    // («تیکت‌های بازی که مالکی ندارند») has always read it that way. One
+    // definition, shared with `crm-data-quality.ts`'s `unowned_work` rule.
+    where +=
+      " AND k.assignee_user_id IS NULL AND btrim(coalesce(k.assigned_to, '')) = ''";
+  }
   if (options.status) {
     params.push(options.status);
     where += ` AND k.status = $${params.length}`;
   }
-  if (options.openOnly) where += " AND k.status IN ('open', 'in_progress', 'waiting')";
+  if (options.priority) {
+    params.push(options.priority);
+    where += ` AND k.priority = $${params.length}`;
+  }
+  if (options.q?.trim()) {
+    params.push(`%${options.q.trim()}%`);
+    where += ` AND (k.subject ILIKE $${params.length} OR k.body ILIKE $${params.length}
+              OR c.name ILIKE $${params.length})`;
+  }
+  if (options.openOnly) {
+    params.push([...CASE_OPEN_STATUSES]);
+    where += ` AND k.status = ANY($${params.length})`;
+  }
+  if (options.breachedOnly) {
+    params.push(JSON.stringify(CASE_BREACH_SQL_CASES.targets));
+    const targets = `$${params.length}`;
+    params.push([...CASE_BREACH_SQL_CASES.closed]);
+    const closed = `$${params.length}`;
+    where += ` AND ${caseBreachSql({ targets, closed })}`;
+  }
   params.push(options.limit ?? 200);
 
   const { rows } = await query<CrmCase>(
@@ -1855,14 +2192,60 @@ interface UpsertCaseInput {
    * mention the order must not silently unlink the ticket from it.
    */
   orderId?: string | null;
+  /** The handler as a member id; `""` unassigns. */
+  assigneeUserId?: string | null;
+  /** A name, for legacy callers. Resolved to a member when it is unambiguous. */
   assignedTo?: string;
   resolution?: string;
   createdBy?: string;
+  /** The author as a member id; the name above stays the snapshot. */
+  createdById?: string | null;
+}
+
+/**
+ * Fire the stage-change trigger, when the save really moved the deal.
+ *
+ * Called after the write, never inside one: the engine's own writes are not
+ * part of this transaction, and a rule failing must not fail the save. A save
+ * that rewrites the stage the deal was already in — an edit to the value, or a
+ * board that re-posts what it rendered — is not a move and fires nothing.
+ *
+ * A brand-new deal has no stage to have left, so its first stage counts as
+ * entering it: that is what «وقتی معامله‌ای وارد مرحلهٔ پیشنهاد می‌شود» means
+ * to the person who wrote the rule.
+ */
+async function fireDealStageTrigger(
+  businessId: string,
+  before: CrmDeal | null,
+  after: CrmDeal,
+  actor: { name: string; userId: string | null },
+): Promise<CrmAutomationRunSummary | null> {
+  if (!dealStageMoved(before, after)) return null;
+  const stage = after.stageId ? await getStage(businessId, after.stageId) : null;
+  return runCrmAutomations(businessId, {
+    trigger: "deal_stage_changed",
+    entity: {
+      type: "deal",
+      id: after.id,
+      title: after.title,
+      partyId: after.customerId,
+      valueRial: after.valueRial,
+      stageLabel: stage?.name ?? null,
+      ownerUserId: after.ownerUserId,
+      ownerName: after.ownerUser,
+    },
+    actor,
+  });
 }
 
 export async function upsertCase(businessId: string, input: UpsertCaseInput): Promise<CrmCase> {
   const status = input.status ?? "open";
   const resolved = status === "resolved" || status === "closed";
+
+  // Resolved before the write, for the same reason as an activity's: a handler
+  // is a member of this business or nobody, and the name beside the id is a
+  // snapshot of that decision rather than a second, weaker one.
+  const owner = await resolveOwner(businessId, input.assigneeUserId ?? input.assignedTo);
 
   if (input.id) {
     const orderIdProvided = input.orderId !== undefined;
@@ -1871,7 +2254,7 @@ export async function upsertCase(businessId: string, input: UpsertCaseInput): Pr
           SET customer_id = $3, subject = $4, body = $5, status = $6, priority = $7,
               category = $8,
               order_id = CASE WHEN $13 THEN $9::uuid ELSE order_id END,
-              assigned_to = $10, resolution = $11,
+              assigned_to = $10, assignee_user_id = $14, resolution = $11,
               resolved_at = CASE WHEN $12 THEN coalesce(resolved_at, now()) ELSE NULL END,
               updated_at = now()
         WHERE business_id = $1 AND id = $2`,
@@ -1885,10 +2268,11 @@ export async function upsertCase(businessId: string, input: UpsertCaseInput): Pr
         input.priority ?? "normal",
         input.category?.trim() ?? "",
         input.orderId ?? null,
-        input.assignedTo ?? "",
+        owner.name,
         input.resolution?.trim() ?? "",
         resolved,
         orderIdProvided,
+        owner.userId,
       ],
     );
     return (await getCase(businessId, input.id))!;
@@ -1897,9 +2281,9 @@ export async function upsertCase(businessId: string, input: UpsertCaseInput): Pr
   const { rows } = await query<{ id: string }>(
     `INSERT INTO crm_cases
        (business_id, customer_id, subject, body, status, priority, category, order_id,
-        assigned_to, resolution, resolved_at, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-             CASE WHEN $11 THEN now() ELSE NULL END, $12)
+        assigned_to, assignee_user_id, resolution, resolved_at, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+             CASE WHEN $12 THEN now() ELSE NULL END, $13)
      RETURNING id`,
     [
       businessId,
@@ -1910,13 +2294,38 @@ export async function upsertCase(businessId: string, input: UpsertCaseInput): Pr
       input.priority ?? "normal",
       input.category?.trim() ?? "",
       input.orderId ?? null,
-      input.assignedTo ?? "",
+      owner.name,
+      owner.userId,
       input.resolution?.trim() ?? "",
       resolved,
       input.createdBy ?? "",
     ],
   );
-  return (await getCase(businessId, rows[0].id))!;
+  const opened = (await getCase(businessId, rows[0].id))!;
+  // Only a ticket that arrives *open* is an event somebody promised to act on.
+  // One imported already-resolved, or filed closed by its author, asks nothing
+  // of anybody — a rule that assigned it would be inventing work.
+  if (!resolved) {
+    const summary = await runCrmAutomations(businessId, {
+      trigger: "case_opened",
+      entity: {
+        type: "case",
+        id: opened.id,
+        title: opened.subject,
+        partyId: opened.customerId,
+        priority: opened.priority,
+        ownerUserId: opened.assigneeUserId,
+        ownerName: opened.assignedTo,
+      },
+      actor: { name: input.createdBy ?? "", userId: input.createdById ?? null },
+    });
+    // A rule may have assigned this ticket; the caller must see the ticket it
+    // will find when it reloads, not the one it looked at a moment ago.
+    if (summary.applied > 0 || summary.growthSignals > 0) {
+      return (await getCase(businessId, rows[0].id))!;
+    }
+  }
+  return opened;
 }
 
 /** One case by id — the read every write path returns through. */
