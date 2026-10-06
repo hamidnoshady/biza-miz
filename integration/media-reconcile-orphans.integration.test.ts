@@ -3,8 +3,8 @@
  * in-memory S3 server (PUT/GET/DELETE *and* ListObjectsV2, unlike the mock
  * in media-library.integration.test.ts which never needs to list).
  *
- * The script is invoked exactly as an operator would — as a child process
- * via `npx tsx` — rather than by importing its internals, because its value
+ * The script is invoked as a child process through the repository-local
+ * `tsx` executable rather than by importing its internals, because its value
  * is the CLI contract (dry run vs. --apply --backup-confirmed, exit codes,
  * stdout) that a human or a cron job actually depends on.
  */
@@ -131,15 +131,13 @@ beforeEach(async () => {
 });
 
 async function runScript(...args: string[]): Promise<{ stdout: string; code: number }> {
-  // `npx` resolves to `npx.cmd` on Windows, not `npx.exe` — `execFile` refuses
-  // to launch a `.cmd` directly (spawn fails with `code: "ENOENT"`, not a
-  // process exit code) unless a shell is asked to resolve it, exactly the
-  // `shell: isBatch` convention `src/lib/pg-tools.ts` already uses for the
-  // same reason. CI's `test.yml` runs every job on `windows-latest` — see
-  // that file's own header comment — so this is not a hypothetical platform.
-  const npxBin = process.platform === "win32" ? "npx.cmd" : "npx";
+  // Use the installed executable directly: `npx` can consume script flags
+  // such as `--apply` as npm options, and its parsing differs across npm
+  // versions. Windows exposes package executables as `.cmd` files, which
+  // require a shell for `execFile` to resolve them.
+  const tsxBin = process.platform === "win32" ? "node_modules/.bin/tsx.cmd" : "node_modules/.bin/tsx";
   try {
-    const { stdout } = await execFileAsync(npxBin, ["tsx", "scripts/media-reconcile-orphans.ts", ...args], {
+    const { stdout } = await execFileAsync(tsxBin, ["scripts/media-reconcile-orphans.ts", ...args], {
       cwd: process.cwd(),
       env: { ...process.env, DATABASE_URL: databaseUrl },
       shell: process.platform === "win32",

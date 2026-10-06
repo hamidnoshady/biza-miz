@@ -377,7 +377,11 @@ function isWorkspaceGuarded(src: string): boolean {
  * key alone is never enough to move another app's data.
  */
 function isDataTransferGuarded(src: string): boolean {
-  return /dataOwner\(/.test(src) && /PERMISSIONS\.data(?:Import|Export)/.test(src);
+  const genericDataGuard = /dataOwner\(/.test(src) && /PERMISSIONS\.data(?:Import|Export)/.test(src);
+  const holooProviderGuard =
+    /holoo(?:ProviderRead|Transfer)Owner\(/.test(src) &&
+    /checkHoloo(?:ExportScope|ConnectedSend|Scope)Permissions\(/.test(src);
+  return genericDataGuard || holooProviderGuard;
 }
 
 /**
@@ -906,6 +910,18 @@ describe("the workspace module's API guards", () => {
  */
 describe("the data transfer module's API guards", () => {
   const dataRoutes = [...sources].filter(([key]) => key === "data" || key.startsWith("data/"));
+  const providerRouteGuards = new Map<string, RegExp>([
+    ["data/providers/holoo", /holooProviderReadOwner\(|holooTransferOwner\(/],
+    ["data/providers/holoo/export", /holooTransferOwner\(/],
+    ["data/providers/holoo/send", /holooTransferOwner\(/],
+    ["data/providers/holoo/workbook", /holooTransferOwner\(/],
+  ]);
+  const providerScopeGuards = new Map<string, RegExp>([
+    ["data/providers/holoo", /checkHolooScopePermissions\(/],
+    ["data/providers/holoo/export", /checkHolooExportScopePermissions\(/],
+    ["data/providers/holoo/send", /checkHolooConnectedSendPermissions\(/],
+    ["data/providers/holoo/workbook", /checkHolooScopePermissions\(/],
+  ]);
 
   it("has routes to check", () => {
     expect(dataRoutes.length).toBeGreaterThan(5);
@@ -913,8 +929,16 @@ describe("the data transfer module's API guards", () => {
 
   it("guards every data route on a data.* engine permission", () => {
     for (const [key, src] of dataRoutes) {
-      expect(src, `src/app/api/${key}/route.ts`).toMatch(/dataOwner\(/);
-      expect(src, `src/app/api/${key}/route.ts`).toMatch(/PERMISSIONS\.data(?:Import|Export)/);
+      const providerOwnerGuard = providerRouteGuards.get(key);
+      if (providerOwnerGuard) {
+        // Provider adapters use their shared owner helper, which delegates to
+        // dataOwner(), then apply the profile's domain-specific permissions.
+        expect(src, `src/app/api/${key}/route.ts`).toMatch(providerOwnerGuard);
+        expect(src, `src/app/api/${key}/route.ts`).toMatch(providerScopeGuards.get(key)!);
+      } else {
+        expect(src, `src/app/api/${key}/route.ts`).toMatch(/dataOwner\(/);
+        expect(src, `src/app/api/${key}/route.ts`).toMatch(/PERMISSIONS\.data(?:Import|Export)/);
+      }
       // A role list would bypass the per-member overrides entirely — the same
       // rule team/*, branches/* and workspace/* are held to.
       expect(requireRoleCalls(src), `src/app/api/${key}/route.ts uses requireRole`).toEqual([]);
@@ -941,6 +965,11 @@ describe("the data transfer module's API guards", () => {
         expect(src, `src/app/api/${key}/route.ts`).toMatch(/memberAccessFor\(/);
         continue;
       }
+      const providerScopeGuard = providerScopeGuards.get(key);
+      if (providerScopeGuard) {
+        expect(src, `src/app/api/${key}/route.ts`).toMatch(providerScopeGuard);
+        continue;
+      }
       expect(src, `src/app/api/${key}/route.ts must call entityAccess()`).toMatch(
         /entityAccess\(/,
       );
@@ -951,6 +980,16 @@ describe("the data transfer module's API guards", () => {
     expect(guard).toMatch(/entity\.importPermission/);
     expect(guard).toMatch(/entity\.exportPermission/);
     expect(guard).toMatch(/memberAccessFor\(/);
+
+    // Holoo is a provider-level adapter rather than a generic entity route:
+    // its shared guard delegates to the data engine and also checks integration
+    // access plus per-scope permissions before each operation.
+    const holooGuard = readFileSync(join(API_ROOT, "data", "providers", "holoo", "guard.ts"), "utf8");
+    expect(holooGuard).toMatch(/dataOwner\(permission\)/);
+    expect(holooGuard).toMatch(/PERMISSIONS\.integrationsView/);
+    expect(holooGuard).toMatch(/requirementsFor/);
+    expect(holooGuard).toMatch(/exportRequirementsFor/);
+    expect(holooGuard).toMatch(/CONNECTED_SEND_PERMISSIONS/);
   });
 
   it("separates the import direction from the export direction", () => {

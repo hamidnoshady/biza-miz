@@ -62,6 +62,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+  if (body.locationId && body.locationId !== location.id) {
+    return NextResponse.json({ error: "location_mismatch" }, { status: 403 });
+  }
 
   if (body.provider === "holoo") {
     const result = await createHolooConnection(session.businessId, session.sub, body.name ?? "", {
@@ -75,7 +78,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       wsPassword: body.wsPassword,
       currencyUnit: (body.currencyUnit as HolooCurrencyUnit) ?? "rial",
       writeMode: body.writeMode ?? "none",
-      locationId: body.locationId ?? location.id,
+      locationId: location.id,
     });
     if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 });
     return NextResponse.json({ connectionId: result.connectionId, provider: "holoo" }, { status: 201 });
@@ -90,7 +93,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     wpUsername: body.wpUsername,
     wpApplicationPassword: body.wpApplicationPassword,
     currencyUnit: body.currencyUnit ?? "toman",
-    locationId: body.locationId ?? location.id,
+    locationId: location.id,
     syncOrders: body.syncOrders,
     syncProducts: body.syncProducts,
     syncCustomers: body.syncCustomers,

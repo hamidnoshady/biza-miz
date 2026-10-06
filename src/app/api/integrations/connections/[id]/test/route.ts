@@ -16,7 +16,14 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
   if (isHoloo(connection)) {
     const result = await testHolooConnection(session.businessId, id);
     if (!result.ok) return NextResponse.json({ ok: false, error: result.error }, { status: result.error === "not_found" ? 404 : 502 });
-    return NextResponse.json({ ok: true, version: result.version, profile: result.profile ?? null });
+    return NextResponse.json({
+      ok: true,
+      version: result.version,
+      fingerprint: result.fingerprint,
+      profile: result.profile ?? null,
+      diagnostics: result.diagnostics ?? [],
+      migrationReady: Boolean(result.profile),
+    });
   }
 
   const result = await testConnection(session.businessId, id);

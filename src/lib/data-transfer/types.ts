@@ -201,6 +201,64 @@ export interface EntityDefinition {
 }
 
 /** A parsed file, before any mapping has been applied. */
+/**
+ * A versioned external-system contract. Provider files may be relational and
+ * document-oriented, so they sit beside (rather than masquerade as) generic
+ * one-row/one-entity imports. Adapters declare data and closed transforms;
+ * they never execute profile-provided code.
+ */
+export type ProviderDirection = "import" | "export" | "both";
+export type ProviderSourceFormat = "csv" | "xlsx" | "json" | "pdf" | "connected_sql" | "web_service";
+
+export interface ProviderProfileColumn {
+  key: string;
+  externalName: string;
+  label: string;
+  type: FieldType;
+  required: boolean;
+  identity?: boolean;
+  aliases?: readonly string[];
+  /** Exact provider-safe fallback emitted for an absent export value. */
+  exportDefaultValue?: string;
+  transform?: TransformRule;
+}
+
+export interface ProviderProfileSheet {
+  scope: string;
+  sheetName: string;
+  tableName: string;
+  dependencies: readonly string[];
+  identityFields: readonly string[];
+  columns: readonly ProviderProfileColumn[];
+  /** A declared capability, not a promise that a generic row import is safe. */
+  importSupported: boolean;
+  exportSupported: boolean;
+}
+
+export interface DataTransferProviderProfile {
+  provider: string;
+  profileKey: string;
+  profileVersion: number;
+  label: string;
+  directions: readonly ProviderDirection[];
+  sourceFormats: readonly ProviderSourceFormat[];
+  dateRepresentation: "native_sql_date" | "gregorian_iso" | "jalali_text";
+  moneyRepresentation: "connection_setting" | "rial" | "toman";
+  sheets: readonly ProviderProfileSheet[];
+  capabilities: {
+    /** Scopes the connected SQL reader supports. */
+    readScopes: readonly string[];
+    /** Versioned XLSX import scopes (may exceed the connected SQL reader). */
+    workbookImportScopes: readonly string[];
+    exportScopes: readonly string[];
+    connectedWriteScopes: readonly string[];
+    directSqlWrite: boolean;
+    rollback: boolean;
+  };
+  /** Existing integration service responsible for domain writes. */
+  applyService: string;
+}
+
 export interface ParsedSheet {
   /** The header row, trimmed. */
   columns: string[];
@@ -317,6 +375,8 @@ export interface ExportColumn {
 }
 
 export type ExportFormat = "csv" | "xlsx" | "pdf" | "json";
+/** A connected provider send is a job, not a downloadable codec file. */
+export type ExportJobFormat = ExportFormat | "provider";
 
 export const EXPORT_FORMAT_LABELS: Record<ExportFormat, string> = {
   csv: "CSV",
@@ -325,7 +385,28 @@ export const EXPORT_FORMAT_LABELS: Record<ExportFormat, string> = {
   json: "JSON",
 };
 
+export interface ProviderJobMetadata {
+  provider: string;
+  direction?: "import" | "export";
+  sourceFormat: string;
+  connectionId: string;
+  connectionName?: string;
+  locationId?: string | null;
+  profileKey: string;
+  profileVersion: number;
+  selectedScopes: string[];
+  outcome?: "completed" | "partial_failure" | "failed";
+  migrationRunId?: string | null;
+  rollbackState?: string | null;
+  discrepancyCount?: number | null;
+  trialBalanceDiscrepancyCount?: number | null;
+  journalSummary?: unknown;
+  counts?: unknown;
+}
+
 export type ImportFormat = "csv" | "xlsx" | "json" | "pdf";
+/** Jobs created by a provider adapter share generic history, without pretending a connection is a user-uploaded codec format. */
+export type ImportJobFormat = ImportFormat | "provider";
 
 export const IMPORT_FORMAT_LABELS: Record<ImportFormat, string> = {
   csv: "CSV",

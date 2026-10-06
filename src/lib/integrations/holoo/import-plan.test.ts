@@ -51,15 +51,26 @@ describe("planAccountImport", () => {
     expect(plan.orphaned).toEqual([]);
   });
 
-  it("lets a created account serve as a parent for a later one", () => {
-    const plan = planAccountImport([account("8100"), account("8101", "8100")], seed);
+  it("orders a created parent before its child regardless of workbook row order", () => {
+    const plan = planAccountImport([account("8101", "8100"), account("8100")], seed);
     expect(plan.toCreate.map((a) => a.code)).toEqual(["8100", "8101"]);
     expect(plan.orphaned).toEqual([]);
   });
 
-  it("flags an account whose parent is neither in the seed nor created", () => {
-    const plan = planAccountImport([account("8101", "8100")], seed);
+  it("skips remote identities already mapped by a previous import run", () => {
+    const plan = planAccountImport([account("1101"), account("9999")], seed, new Set(["a-9999"]));
+    expect(plan.mappedToSeed.map((a) => a.code)).toEqual(["1101"]);
     expect(plan.toCreate).toEqual([]);
-    expect(plan.orphaned.map((a) => a.code)).toEqual(["8101"]);
+    expect(plan.skipped).toBe(1);
+  });
+
+  it("flags missing parents and cyclic account graphs instead of detaching them", () => {
+    const missing = planAccountImport([account("8101", "8100")], seed);
+    expect(missing.toCreate).toEqual([]);
+    expect(missing.orphaned.map((a) => a.code)).toEqual(["8101"]);
+
+    const cyclic = planAccountImport([account("8101", "8100"), account("8100", "8101")], seed);
+    expect(cyclic.toCreate).toEqual([]);
+    expect(cyclic.orphaned.map((a) => a.code)).toEqual(["8101", "8100"]);
   });
 });

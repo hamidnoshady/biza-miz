@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { memberAccessFor } from "@/lib/member-access";
+import { PERMISSIONS as MEMBER_PERMISSIONS } from "@/lib/permissions";
+import { checkHolooScopePermissions } from "../providers/holoo/guard";
 import {
   createImportJob,
   formatForFileName,
@@ -31,7 +34,18 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       if (entityError) return entityError;
     }
     const jobs = await listImportJobs(owner.businessId, { entityKey });
-    return NextResponse.json({ jobs });
+    const member = await memberAccessFor(owner.session);
+    const visibleJobs = [];
+    for (const job of jobs) {
+      if (job.providerMetadata?.provider === "holoo") {
+        if (job.providerMetadata.locationId && owner.locationId && job.providerMetadata.locationId !== owner.locationId) continue;
+        if (!member?.permissions.has(MEMBER_PERMISSIONS.integrationsView)) continue;
+        const scopeAccess = await checkHolooScopePermissions(owner, job.providerMetadata.selectedScopes);
+        if (!scopeAccess.ok) continue;
+      }
+      visibleJobs.push(job);
+    }
+    return NextResponse.json({ jobs: visibleJobs });
   } catch (err) {
     return handleDataError(err);
   }

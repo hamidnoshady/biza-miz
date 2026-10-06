@@ -30,7 +30,7 @@ import {
 } from "@/app/dashboard/data-table";
 import { ErrorBox, SecondaryButton, api } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
-import { EXPORT_FORMAT_LABELS } from "@/lib/data-transfer/types";
+import { EXPORT_FORMAT_LABELS, IMPORT_FORMAT_LABELS } from "@/lib/data-transfer/types";
 import {
   Count,
   ExportStatusBadge,
@@ -145,18 +145,35 @@ export function HistorySection({
                     <Td>{job.entityLabel}</Td>
                     <Td>
                       <span className="break-all">{job.fileName}</span>
-                      <span className="mt-0.5 block text-xs text-muted-foreground">
-                        <Count value={job.totalRows} /> سطر
-                      </span>
+                      {job.providerMetadata ? (
+                        <span className="mt-0.5 block text-xs text-muted-foreground">
+                          هلو · {job.providerMetadata.sourceFormat === "connected_sql" ? "اتصال" : "فایل XLSX"} · {job.providerMetadata.profileKey} v{job.providerMetadata.profileVersion}
+                          {job.providerMetadata.connectionName ? ` · ${job.providerMetadata.connectionName}` : ""}
+                        </span>
+                      ) : (
+                        <span className="mt-0.5 block text-xs text-muted-foreground">
+                          {IMPORT_FORMAT_LABELS[job.fileFormat as keyof typeof IMPORT_FORMAT_LABELS] ?? (job.fileFormat === "provider" ? "اتصال متصل" : job.fileFormat.toUpperCase())} · <Count value={job.totalRows} /> سطر
+                        </span>
+                      )}
                     </Td>
                     <Td>
                       <ImportStatusBadge status={job.status} />
                       {job.error ? (
-                        <span className="mt-0.5 block text-xs text-destructive">{job.error}</span>
+                        <span className="mt-0.5 block text-xs text-destructive">
+                          {job.providerMetadata?.outcome === "partial_failure"
+                            ? "مهاجرت بخشی از داده‌ها را ثبت کرد؛ اجرای هلو را بررسی یا rollback کنید."
+                            : job.error}
+                        </span>
                       ) : null}
                     </Td>
                     <Td>
-                      {job.status === "completed" ? (
+                      {job.providerMetadata ? (
+                        <span className="text-xs leading-5">
+                          {toPersianDigits(job.createdRows)} ساخته‌شده، {toPersianDigits(job.updatedRows)} نگاشت‌شده، {toPersianDigits(job.skippedRows)} تکراری/ردشده
+                          {job.providerMetadata.discrepancyCount != null ? ` · مغایرت: ${toPersianDigits(job.providerMetadata.discrepancyCount)}` : ""}
+                          {job.providerMetadata.rollbackState === "rolled_back" ? " · برگشت‌خورده" : ""}
+                        </span>
+                      ) : job.status === "completed" ? (
                         <span className="text-xs leading-5">
                           {toPersianDigits(job.createdRows)} ساخته‌شده،{" "}
                           {toPersianDigits(job.updatedRows)} به‌روز،{" "}
@@ -173,7 +190,7 @@ export function HistorySection({
                     <Td>{job.createdByName || "—"}</Td>
                     <Td>
                       <div className="flex flex-wrap gap-2">
-                        {job.errorRows + job.failedRows > 0 ? (
+                        {!job.providerMetadata && job.errorRows + job.failedRows > 0 ? (
                           <SecondaryButton
                             onClick={() => {
                               window.location.href = `/api/data/imports/${job.id}/errors`;
@@ -182,7 +199,7 @@ export function HistorySection({
                             گزارش خطا
                           </SecondaryButton>
                         ) : null}
-                        {job.failedRows > 0 && job.status === "completed" ? (
+                        {!job.providerMetadata && job.failedRows > 0 && job.status === "completed" ? (
                           <SecondaryButton
                             onClick={() => retry(job.id)}
                             disabled={busy === job.id}
@@ -230,8 +247,20 @@ export function HistorySection({
                   <Td>
                     <JalaliCell value={job.createdAt} />
                   </Td>
-                  <Td>{job.entityLabel}</Td>
-                  <Td>{EXPORT_FORMAT_LABELS[job.format]}</Td>
+                  <Td>
+                    {job.entityLabel}
+                    {job.providerMetadata ? (
+                      <span className="mt-0.5 block text-xs text-muted-foreground">
+                        هلو · {job.providerMetadata.profileKey} v{job.providerMetadata.profileVersion}
+                        {job.providerMetadata.connectionName ? ` · ${job.providerMetadata.connectionName}` : ""}
+                      </span>
+                    ) : null}
+                  </Td>
+                  <Td>
+                    {job.providerMetadata
+                      ? job.providerMetadata.sourceFormat === "connected_outbox" ? "ارسال متصل" : "Excel پروفایل هلو"
+                      : job.format === "provider" ? "ارسال متصل" : EXPORT_FORMAT_LABELS[job.format]}
+                  </Td>
                   <Td>
                     <Count value={job.rowCount} />
                   </Td>
@@ -255,7 +284,9 @@ export function HistorySection({
                         دانلود دوباره
                       </SecondaryButton>
                     ) : (
-                      <span className="text-xs text-muted-foreground">فایل نگه‌داری نمی‌شود</span>
+                      <span className="text-xs text-muted-foreground">
+                        {job.providerMetadata?.sourceFormat === "connected_outbox" ? "بدون فایل؛ وضعیت ارسال ثبت است" : "فایل نگه‌داری نمی‌شود"}
+                      </span>
                     )}
                   </Td>
                 </DataTableRow>

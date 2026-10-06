@@ -952,6 +952,8 @@ export interface PartyListOptions {
   roles?: PartyRole[];
   includeInactive?: boolean;
   categoryId?: string | null;
+  /** Include business-global parties plus parties assigned to this branch. */
+  locationId?: string | null;
   page?: number;
   pageSize?: number;
 }
@@ -972,6 +974,10 @@ export async function listParties(businessId: string, options: PartyListOptions 
   const conditions = ["p.business_id = $1"];
   const params: unknown[] = [businessId];
   if (!options.includeInactive) conditions.push("p.is_active");
+  if (options.locationId) {
+    params.push(options.locationId);
+    conditions.push(`(p.location_id IS NULL OR p.location_id = $${params.length}::uuid)`);
+  }
   if (options.roles?.length) {
     params.push(options.roles.map((role) => PARTY_ROLE_STORAGE[role]));
     // Overlap, not equality — one record, several roles (0148).

@@ -21,6 +21,9 @@ import {
   textTableToRows,
   toCsv,
   westernDigits,
+  sheetsToXlsxBuffer,
+  xlsxToRows,
+  xlsxToWorkbook,
 } from "./codecs";
 
 describe("parseCsv", () => {
@@ -229,6 +232,50 @@ describe("jsonToRows", () => {
 
   it("throws a named error on malformed JSON", () => {
     expect(() => jsonToRows("{not json")).toThrow("json_parse_failed");
+  });
+});
+
+describe("XLSX workbook parsing", () => {
+  async function sampleWorkbook(): Promise<ArrayBuffer> {
+    const bytes = await sheetsToXlsxBuffer([
+      {
+        name: "Goods",
+        columns: [{ key: "code", label: "Code" }, { key: "name", label: "Name" }],
+        rows: [{ code: "A-1", name: "چای" }],
+      },
+      {
+        name: "Persons",
+        columns: [{ key: "code", label: "Code" }, { key: "name", label: "Name" }],
+        rows: [{ code: "P-1", name: "علی" }],
+      },
+    ]);
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  }
+
+  it("exposes every sheet, its exact name, header columns, and body rows", async () => {
+    const workbook = await xlsxToWorkbook(await sampleWorkbook());
+    expect(workbook).toEqual([
+      { name: "Goods", columns: ["Code", "Name"], rows: [["A-1", "چای"]] },
+      { name: "Persons", columns: ["Code", "Name"], rows: [["P-1", "علی"]] },
+    ]);
+  });
+
+  it("keeps the generic first-sheet reader backward compatible", async () => {
+    expect(await xlsxToRows(await sampleWorkbook())).toEqual([
+      ["Code", "Name"],
+      ["A-1", "چای"],
+    ]);
+  });
+
+  it("rejects unsafe large numeric cells only on the provider workbook path", async () => {
+    const bytes = await sheetsToXlsxBuffer([{
+      name: "Journal",
+      columns: [{ key: "code", label: "Code" }, { key: "amount", label: "Amount", type: "money" }],
+      rows: [{ code: "J-1", amount: Number.MAX_SAFE_INTEGER + 1 }],
+    }]);
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    await expect(xlsxToWorkbook(buffer)).rejects.toThrow("xlsx_unsafe_numeric_value");
+    expect(await xlsxToRows(buffer)).toHaveLength(2);
   });
 });
 

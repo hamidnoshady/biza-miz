@@ -22,9 +22,11 @@ import { formatJalali } from "@/lib/jalali";
 import type {
   DataModuleKey,
   ExportFormat,
+  ExportJobFormat,
   FieldType,
   ImportJobStatus,
   ExportJobStatus,
+  ProviderJobMetadata,
 } from "@/lib/data-transfer/types";
 
 /** One field of a registered entity, as the catalogue route serialises it. */
@@ -61,6 +63,7 @@ export interface ImportJobView {
   status: ImportJobStatus;
   fileName: string;
   fileFormat: string;
+  providerMetadata?: ProviderJobMetadata | null;
   totalRows: number;
   validRows: number;
   warningRows: number;
@@ -88,8 +91,9 @@ export interface MappingColumn {
 export interface ExportJobView {
   id: string;
   entityKey: string;
+  providerMetadata?: ProviderJobMetadata | null;
   entityLabel: string;
-  format: ExportFormat;
+  format: ExportJobFormat;
   status: ExportJobStatus;
   rowCount: number;
   fileName: string;

@@ -16,7 +16,7 @@ import { getPool, query } from "../../db";
 import { getBusinessIndustry } from "../../industry-guard";
 import { industryProfile } from "../../industry-profile";
 import { getConnection } from "../connections-service";
-import { localIdForRemote, upsertMapping } from "../mapping-service";
+import { localIdForRemote, upsertMapping, upsertMappingOnClient } from "../mapping-service";
 import { coaTemplateForIndustry, WELL_KNOWN_CODES } from "../../coa-template";
 import { getSetting, SETTING_KEYS } from "../../settings";
 import { planAccountImport, planGoods, planPersons, holooAccountType } from "./import-plan";
@@ -41,6 +41,16 @@ async function alreadyMapped(businessId: string, connectionId: string, entityTyp
   return mapped;
 }
 
+async function hasOpeningInventoryEvent(businessId: string): Promise<boolean> {
+  const { rows } = await query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM inventory_events WHERE business_id = $1 AND event_type = 'opening'
+     ) AS exists`,
+    [businessId],
+  );
+  return Boolean(rows[0]?.exists);
+}
+
 function openingValueRial(quantity: string, unitCostRial: bigint): string {
   return new Decimal(quantity).times(unitCostRial.toString()).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toFixed(0);
 }
@@ -52,11 +62,15 @@ async function applyOpeningInventory(
   rows: MappedOpeningInventory[],
   createdBy: string | null,
   importRunId?: string | null,
-): Promise<number> {
-  if (rows.length === 0) return 0;
+): Promise<{ created: number; skipped: number }> {
+  if (rows.length === 0) return { created: 0, skipped: 0 };
   const stockMapped = await alreadyMapped(businessId, connectionId, "holoo_stock", rows.map((row) => row.remoteId));
   const toImport = rows.filter((row) => !stockMapped.has(row.remoteId));
-  if (toImport.length === 0) return 0;
+  const importableRows = toImport.filter((row) => {
+    const quantity = new Decimal(row.quantity);
+    return quantity.isFinite() && quantity.gt(0);
+  });
+  if (importableRows.length === 0) return { created: 0, skipped: rows.length };
 
   const costing = await getSetting<{ method?: "fifo" | "lifo" | "weighted_average"; system?: "perpetual" | "periodic"; lockedAt?: string | null }>(businessId, SETTING_KEYS.costing);
   // ادواری: opening stock is the first period-end count, not a priced
@@ -65,7 +79,15 @@ async function applyOpeningInventory(
   const method = costing?.method ?? "fifo";
   const client = await getPool().connect();
   let eventId: string | null = null;
-  let imported = 0;
+  const importedRows: MappedOpeningInventory[] = [];
+  const itemMappings: Array<{ remoteId: string; localId: string; localCreated: boolean }> = [];
+  const createdInventoryItemIds = new Set<string>();
+  const weightedAverageSnapshots = new Map<string, {
+    previousAvgCost: string | null;
+    previousCarryingValueRial: string | null;
+    expectedAvgCost: string | null;
+    expectedCarryingValueRial: string | null;
+  }>();
   let totalValue = 0n;
   try {
     await client.query("BEGIN");
@@ -80,7 +102,7 @@ async function applyOpeningInventory(
       // If any opening event already exists (manual setup or Holoo), the run is
       // idempotent and no second opening layer is created.
       await client.query("ROLLBACK");
-      return 0;
+      return { created: 0, skipped: rows.length };
     }
 
     const { rows: eventRows } = await client.query<{ id: string }>(
@@ -92,13 +114,18 @@ async function applyOpeningInventory(
     );
     eventId = eventRows[0].id;
 
-    for (const row of toImport) {
+    for (const row of importableRows) {
       const quantity = new Decimal(row.quantity);
-      if (!quantity.isFinite() || quantity.lte(0)) continue;
       const costValue = openingValueRial(row.quantity, row.unitCostRial);
       totalValue += BigInt(costValue);
-      const { rows: existing } = await client.query<{ id: string }>(
-        `SELECT id FROM inventory_items WHERE location_id = $1 AND name = $2 ORDER BY created_at LIMIT 1 FOR UPDATE`,
+      const { rows: existing } = await client.query<{
+        id: string;
+        avg_cost: string | null;
+        carrying_value_rial: string | null;
+      }>(
+        `SELECT id, avg_cost::text, carrying_value_rial::text
+           FROM inventory_items WHERE location_id = $1 AND name = $2
+          ORDER BY created_at LIMIT 1 FOR UPDATE`,
         [locationId, row.name],
       );
       let itemId = existing[0]?.id;
@@ -110,12 +137,36 @@ async function applyOpeningInventory(
           [locationId, row.name, row.unit ?? "unit", row.unitCostRial.toString(), costValue, method],
         );
         itemId = itemRows[0].id;
+        createdInventoryItemIds.add(itemId);
       } else if (method === "weighted_average") {
+        if (!createdInventoryItemIds.has(itemId) && !weightedAverageSnapshots.has(itemId)) {
+          weightedAverageSnapshots.set(itemId, {
+            previousAvgCost: existing[0].avg_cost,
+            previousCarryingValueRial: existing[0].carrying_value_rial,
+            expectedAvgCost: existing[0].avg_cost,
+            expectedCarryingValueRial: existing[0].carrying_value_rial,
+          });
+        }
         await client.query(
           `UPDATE inventory_items SET avg_cost = $2, carrying_value_rial = COALESCE(carrying_value_rial, 0) + $3::bigint WHERE id = $1`,
           [itemId, row.unitCostRial.toString(), costValue],
         );
+        if (!createdInventoryItemIds.has(itemId)) {
+          const { rows: updatedItems } = await client.query<{
+            avg_cost: string | null;
+            carrying_value_rial: string | null;
+          }>("SELECT avg_cost::text, carrying_value_rial::text FROM inventory_items WHERE id = $1", [itemId]);
+          const snapshot = weightedAverageSnapshots.get(itemId);
+          if (snapshot && updatedItems[0]) {
+            weightedAverageSnapshots.set(itemId, {
+              ...snapshot,
+              expectedAvgCost: updatedItems[0].avg_cost,
+              expectedCarryingValueRial: updatedItems[0].carrying_value_rial,
+            });
+          }
+        }
       }
+      itemMappings.push({ remoteId: row.remoteId, localId: itemId, localCreated: createdInventoryItemIds.has(itemId) });
 
       await client.query(
         `INSERT INTO stock_movements
@@ -133,7 +184,7 @@ async function applyOpeningInventory(
           [locationId, itemId, row.quantity, row.unitCostRial.toString(), eventId, costValue],
         );
       }
-      imported += 1;
+      importedRows.push(row);
     }
 
     if (totalValue > 0n) {
@@ -166,7 +217,43 @@ async function applyOpeningInventory(
           [entryId, inventoryAccount, totalValue.toString(), openingEquity],
         );
       }
-      await client.query("UPDATE inventory_events SET posting_status = 'posted' WHERE id = $1", [eventId]);
+    }
+    // A zero-value opening event has no journal lines to post, but the stock
+    // cutover itself completed and must not remain in a pending state.
+    await client.query("UPDATE inventory_events SET posting_status = 'posted' WHERE id = $1", [eventId]);
+
+    if (weightedAverageSnapshots.size > 0) {
+      await client.query(
+        `UPDATE inventory_events
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+          WHERE id = $1`,
+        [
+          eventId,
+          JSON.stringify({
+            rollback: {
+              weightedAverageItems: [...weightedAverageSnapshots.entries()].map(([inventoryItemId, snapshot]) => ({
+                inventoryItemId,
+                ...snapshot,
+              })),
+            },
+          }),
+        ],
+      );
+    }
+    for (const row of importedRows) {
+      await upsertMappingOnClient(client, businessId, connectionId, "holoo_stock", row.remoteId, eventId, importRunId);
+    }
+    for (const mapping of itemMappings) {
+      await upsertMappingOnClient(
+        client,
+        businessId,
+        connectionId,
+        "holoo_inventory_item",
+        mapping.remoteId,
+        mapping.localId,
+        importRunId,
+        mapping.localCreated,
+      );
     }
 
     await client.query("COMMIT");
@@ -177,11 +264,8 @@ async function applyOpeningInventory(
     client.release();
   }
 
-  if (!eventId) return 0;
-  for (const row of toImport.slice(0, imported)) {
-    await upsertMapping(businessId, connectionId, "holoo_stock", row.remoteId, eventId, importRunId);
-  }
-  return imported;
+  if (!eventId) return { created: 0, skipped: rows.length };
+  return { created: importedRows.length, skipped: rows.length - importedRows.length };
 }
 
 export interface BaseImportInput {
@@ -195,12 +279,30 @@ export interface BaseImportInput {
 export interface BaseImportPreview {
   goods: { toCreate: number; skipped: number };
   persons: { toCreate: number; skipped: number };
-  accounts: { mappedToSeed: number; toCreate: number; orphaned: number };
+  accounts: { mappedToSeed: number; toCreate: number; orphaned: number; skipped: number };
   openingInventory: { toImport: number; skipped: number };
 }
 
 export interface BaseImportSummary extends BaseImportPreview {
   created: { goods: number; persons: number; accounts: number; openingInventory: number };
+}
+
+/** Account codes that the read-only account plan can link or create. */
+export async function previewableHolooAccountCodes(
+  businessId: string,
+  connectionId: string,
+  accounts: MappedAccount[],
+): Promise<string[]> {
+  const alreadyLinked = await alreadyMapped(businessId, connectionId, "holoo_account", accounts.map((account) => account.remoteId));
+  const industry = (await getBusinessIndustry(businessId)) ?? "food_service";
+  const seedCodes = new Set(coaTemplateForIndustry(industry).map((account) => account.code));
+  const plan = planAccountImport(accounts, seedCodes, alreadyLinked);
+  const eligibleRemoteIds = new Set([
+    ...plan.mappedToSeed.map((account) => account.remoteId),
+    ...plan.toCreate.map((account) => account.remoteId),
+    ...accounts.filter((account) => alreadyLinked.has(account.remoteId)).map((account) => account.remoteId),
+  ]);
+  return accounts.filter((account) => eligibleRemoteIds.has(account.remoteId)).map((account) => account.code);
 }
 
 /** The plan, with no writes — what `apply` will do. */
@@ -211,21 +313,30 @@ export async function previewBaseImport(
 ): Promise<BaseImportPreview> {
   const goodsMapped = await alreadyMapped(businessId, connectionId, "holoo_goods", input.goods.map((g) => g.remoteId));
   const personsMapped = await alreadyMapped(businessId, connectionId, "holoo_customer", input.persons.map((p) => p.remoteId));
+  const accountsMapped = await alreadyMapped(businessId, connectionId, "holoo_account", input.accounts.map((account) => account.remoteId));
   const inventoryRows = input.openingInventory ?? [];
   const stockMapped = await alreadyMapped(businessId, connectionId, "holoo_stock", inventoryRows.map((row) => row.remoteId));
+  const openingEventExists = inventoryRows.length > 0 ? await hasOpeningInventoryEvent(businessId) : false;
 
   const goods = planGoods(input.goods, goodsMapped);
   const persons = planPersons(input.persons, personsMapped);
 
   const industry = (await getBusinessIndustry(businessId)) ?? "food_service";
   const seedCodes = new Set(coaTemplateForIndustry(industry).map((a) => a.code));
-  const accounts = planAccountImport(input.accounts, seedCodes);
+  const accounts = planAccountImport(input.accounts, seedCodes, accountsMapped);
 
   return {
     goods: { toCreate: goods.toCreate.length, skipped: goods.skipped },
     persons: { toCreate: persons.toCreate.length, skipped: persons.skipped },
-    accounts: { mappedToSeed: accounts.mappedToSeed.length, toCreate: accounts.toCreate.length, orphaned: accounts.orphaned.length },
-    openingInventory: { toImport: inventoryRows.filter((row) => !stockMapped.has(row.remoteId)).length, skipped: stockMapped.size },
+    accounts: {
+      mappedToSeed: accounts.mappedToSeed.length,
+      toCreate: accounts.toCreate.length,
+      orphaned: accounts.orphaned.length,
+      skipped: accounts.skipped,
+    },
+    openingInventory: openingEventExists
+      ? { toImport: 0, skipped: inventoryRows.length }
+      : { toImport: inventoryRows.filter((row) => !stockMapped.has(row.remoteId)).length, skipped: stockMapped.size },
   };
 }
 
@@ -235,17 +346,17 @@ export async function applyBaseImport(
   connectionId: string,
   input: BaseImportInput,
   importRunId?: string | null,
+  locationIdOverride?: string | null,
 ): Promise<BaseImportSummary> {
   const connection = await getConnection(businessId, connectionId);
   if (!connection) throw new Error("not_found");
-  const locationId = await resolveLocationId(businessId, connection.location_id);
+  const locationId = await resolveLocationId(businessId, locationIdOverride ?? connection.location_id);
   const industry = (await getBusinessIndustry(businessId)) ?? "food_service";
   const isFoodService = industryProfile(industry).salesModel === "order_ticket";
 
   let createdGoods = 0;
   let createdPersons = 0;
   let createdAccounts = 0;
-  let createdOpeningInventory = 0;
 
   const goodsMapped = await alreadyMapped(businessId, connectionId, "holoo_goods", input.goods.map((g) => g.remoteId));
   const goodsPlan = planGoods(input.goods, goodsMapped);
@@ -300,27 +411,37 @@ export async function applyBaseImport(
         displayName: person.name,
         phone: person.phone ?? null,
         address: person.address ?? null,
-      })).id;
+      }, { locationId })).id;
     }
     await upsertMapping(businessId, connectionId, "holoo_customer", person.remoteId, localId, importRunId);
     createdPersons += 1;
   }
 
   const seedCodes = new Set(coaTemplateForIndustry(industry).map((a) => a.code));
-  const accountsPlan = planAccountImport(input.accounts, seedCodes);
-  // Map accounts whose code already exists in the seed chart (don't recreate).
+  const accountsMapped = await alreadyMapped(businessId, connectionId, "holoo_account", input.accounts.map((account) => account.remoteId));
+  const accountsPlan = planAccountImport(input.accounts, seedCodes, accountsMapped);
+  // Link seed accounts without claiming ownership of their pre-existing local rows.
   for (const account of accountsPlan.mappedToSeed) {
     const { rows } = await query<{ id: string }>(
       `SELECT id FROM accounts WHERE business_id = $1 AND code = $2`,
       [businessId, account.code],
     );
-    if (rows[0]) await upsertMapping(businessId, connectionId, "holoo_account", account.remoteId, rows[0].id, importRunId);
+    if (!rows[0]) throw new Error("seed_account_missing");
+    await upsertMapping(businessId, connectionId, "holoo_account", account.remoteId, rows[0].id, importRunId, false);
   }
-  // Create accounts with codes absent from the seed chart.
+  // Create accounts with codes absent from the seed chart, parents first.
   for (const account of accountsPlan.toCreate) {
-    const parentId = account.parentCode
+    let parentId = account.parentCode
       ? await localIdForRemote(businessId, connectionId, "holoo_account", account.parentCode)
       : null;
+    if (account.parentCode && !parentId) {
+      const { rows } = await query<{ id: string }>(
+        `SELECT id FROM accounts WHERE business_id = $1 AND code = $2 AND is_active`,
+        [businessId, account.parentCode],
+      );
+      parentId = rows[0]?.id ?? null;
+    }
+    if (account.parentCode && !parentId) throw new Error("unresolved_account_parent");
     const { rows } = await query<{ id: string }>(
       `INSERT INTO accounts (business_id, parent_id, code, name, type)
        VALUES ($1, $2, $3, $4, $5) RETURNING id`,
@@ -331,7 +452,7 @@ export async function applyBaseImport(
   }
 
   const openingInventoryRows = input.openingInventory ?? [];
-  createdOpeningInventory = await applyOpeningInventory(
+  const openingResult = await applyOpeningInventory(
     businessId,
     connectionId,
     locationId,
@@ -339,13 +460,18 @@ export async function applyBaseImport(
     null,
     importRunId,
   );
-  const openingMapped = await alreadyMapped(businessId, connectionId, "holoo_stock", openingInventoryRows.map((row) => row.remoteId));
+  const createdOpeningInventory = openingResult.created;
 
   return {
     goods: { toCreate: goodsPlan.toCreate.length, skipped: goodsPlan.skipped },
     persons: { toCreate: personsPlan.toCreate.length, skipped: personsPlan.skipped },
-    accounts: { mappedToSeed: accountsPlan.mappedToSeed.length, toCreate: accountsPlan.toCreate.length, orphaned: accountsPlan.orphaned.length },
-    openingInventory: { toImport: openingInventoryRows.filter((row) => !openingMapped.has(row.remoteId)).length + createdOpeningInventory, skipped: Math.max(0, openingMapped.size - createdOpeningInventory) },
+    accounts: {
+      mappedToSeed: accountsPlan.mappedToSeed.length,
+      toCreate: accountsPlan.toCreate.length,
+      orphaned: accountsPlan.orphaned.length,
+      skipped: accountsPlan.skipped,
+    },
+    openingInventory: { toImport: createdOpeningInventory, skipped: openingResult.skipped },
     created: { goods: createdGoods, persons: createdPersons, accounts: createdAccounts, openingInventory: createdOpeningInventory },
   };
 }

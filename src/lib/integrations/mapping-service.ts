@@ -4,6 +4,7 @@
  * is the idempotency backbone for order import and the lookup used to diff
  * stock/price pushes against the last-pushed value.
  */
+import type { PoolClient } from "pg";
 import { query } from "../db";
 
 export type MappingEntityType =
@@ -21,8 +22,34 @@ export type MappingEntityType =
   | "holoo_purchase"
   | "holoo_receipt"
   | "holoo_stock"
+  | "holoo_inventory_item"
   | "holoo_journal"
   | "holoo_document";
+
+const UPSERT_MAPPING_SQL = `INSERT INTO integration_mappings
+   (business_id, connection_id, entity_type, remote_id, local_id, import_run_id, local_created_by_import_run)
+ VALUES ($1, $2, $3, $4, $5, $6, $7)
+ ON CONFLICT (connection_id, entity_type, remote_id)
+ DO UPDATE SET local_id = EXCLUDED.local_id,
+               import_run_id = COALESCE(EXCLUDED.import_run_id, integration_mappings.import_run_id),
+               local_created_by_import_run = CASE
+                 WHEN EXCLUDED.import_run_id IS NULL THEN integration_mappings.local_created_by_import_run
+                 ELSE EXCLUDED.local_created_by_import_run
+               END,
+               updated_at = now()`;
+
+function mappingParams(
+  businessId: string,
+  connectionId: string,
+  entityType: MappingEntityType,
+  remoteId: string,
+  localId: string,
+  importRunId: string | null | undefined,
+  localCreatedByImportRun: boolean,
+): unknown[] {
+  const runId = importRunId ?? null;
+  return [businessId, connectionId, entityType, remoteId, localId, runId, Boolean(runId && localCreatedByImportRun)];
+}
 
 export async function upsertMapping(
   businessId: string,
@@ -30,15 +57,31 @@ export async function upsertMapping(
   entityType: MappingEntityType,
   remoteId: string,
   localId: string,
-  /** Phase 26 Wave 6 — the import run that created this mapping, for rollback. */
+  /** Phase 26 Wave 6 — the import run that associated this mapping. */
   importRunId?: string | null,
+  /** False for links to an existing local row (for example a seed account). */
+  localCreatedByImportRun = Boolean(importRunId),
 ): Promise<void> {
   await query(
-    `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id, import_run_id)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (connection_id, entity_type, remote_id)
-     DO UPDATE SET local_id = EXCLUDED.local_id, import_run_id = EXCLUDED.import_run_id, updated_at = now()`,
-    [businessId, connectionId, entityType, remoteId, localId, importRunId ?? null],
+    UPSERT_MAPPING_SQL,
+    mappingParams(businessId, connectionId, entityType, remoteId, localId, importRunId, localCreatedByImportRun),
+  );
+}
+
+/** Write an identity mapping on the caller's open transaction. */
+export async function upsertMappingOnClient(
+  client: PoolClient,
+  businessId: string,
+  connectionId: string,
+  entityType: MappingEntityType,
+  remoteId: string,
+  localId: string,
+  importRunId?: string | null,
+  localCreatedByImportRun = Boolean(importRunId),
+): Promise<void> {
+  await client.query(
+    UPSERT_MAPPING_SQL,
+    mappingParams(businessId, connectionId, entityType, remoteId, localId, importRunId, localCreatedByImportRun),
   );
 }
 

@@ -32,6 +32,7 @@
 
 import { toPersianDigits } from "../digits";
 import { formatJalali } from "../jalali";
+import type { FieldType } from "./types";
 
 // ---------------------------------------------------------------------------
 // Digits
@@ -248,29 +249,67 @@ export function normaliseHeader(value: string): string {
 /** One sheet of an Excel export. */
 export interface SheetData {
   name: string;
-  columns: { key: string; label: string }[];
+  columns: { key: string; label: string; type?: FieldType }[];
   rows: Record<string, unknown>[];
+}
+
+/** One parsed worksheet from a provider workbook. */
+export interface ParsedWorkbookSheet {
+  name: string;
+  columns: string[];
+  rows: string[][];
 }
 
 /**
  * Excel (.xlsx) → string rows. First worksheet, first row = header.
  *
- * Short rows are *not* padded here: the caller pads against the header width,
- * because only it knows how wide the sheet is meant to be.
+ * Kept as the backward-compatible generic convenience API. In particular,
+ * it keeps the original worksheet and row shape; provider adapters that need
+ * the relational workbook should use `xlsxToWorkbook` instead.
  */
 export async function xlsxToRows(buffer: ArrayBuffer): Promise<string[][]> {
   const ExcelJS = (await import("exceljs")).default;
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
   const sheet = workbook.worksheets[0];
-  if (!sheet) return [];
+  return sheet ? worksheetToRows(sheet) : [];
+}
 
+/**
+ * Parse every worksheet in an Excel workbook. The first non-empty row is the
+ * header; body rows are padded to the workbook sheet's widest row so provider
+ * validation never silently shifts or drops a trailing cell.
+ */
+export async function xlsxToWorkbook(buffer: ArrayBuffer): Promise<ParsedWorkbookSheet[]> {
+  const ExcelJS = (await import("exceljs")).default;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  return workbook.worksheets.map((sheet) => {
+    const parsed = worksheetToRows(sheet, true);
+    if (parsed.length === 0) return { name: sheet.name, columns: [], rows: [] };
+    const width = parsed.reduce((max, row) => Math.max(max, row.length), parsed[0].length);
+    const columns = Array.from({ length: width }, (_, index) => (parsed[0][index] ?? "").trim());
+    const rows = parsed.slice(1).map((row) =>
+      Array.from({ length: width }, (_, index) => row[index] ?? ""),
+    );
+    return { name: sheet.name, columns, rows };
+  });
+}
+
+function worksheetToRows(sheet: import("exceljs").Worksheet, rejectUnsafeNumbers = false): string[][] {
   const rows: string[][] = [];
   sheet.eachRow((row) => {
     const cells: string[] = [];
-    // row.values is 1-based; index 0 is always empty.
+    // row.values is 1-based; index 0 is always empty. Keep this behavior for
+    // xlsxToRows so generic one-sheet imports remain compatible.
     const values = row.values as unknown[];
-    for (let i = 1; i < values.length; i += 1) cells.push(xlsxCellToString(values[i]));
+    for (let i = 1; i < values.length; i += 1) {
+      const value = values[i];
+      if (rejectUnsafeNumbers && typeof value === "number" && Math.abs(value) > Number.MAX_SAFE_INTEGER) {
+        throw new Error("xlsx_unsafe_numeric_value");
+      }
+      cells.push(xlsxCellToString(value));
+    }
     rows.push(cells);
   });
   return rows;
@@ -312,6 +351,11 @@ export async function sheetsToXlsxBuffer(sheets: readonly SheetData[]): Promise<
       header: column.label,
       key: column.key,
       width: Math.min(Math.max(column.label.length + 4, 14), 60),
+      style: column.type === "date"
+        ? { numFmt: "yyyy-mm-dd" }
+        : column.type === "money" || column.type === "number" || column.type === "integer"
+          ? { numFmt: "#,##0.########" }
+          : undefined,
     }));
     worksheet.getRow(1).font = { bold: true };
     for (const row of sheet.rows) {

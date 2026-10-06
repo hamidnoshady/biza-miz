@@ -2,26 +2,22 @@
  * Phase 26 (issue #125) Wave 5 — accounting import (vouchers, general ledger,
  * opening balance, debit/credit tie-out).
  *
- * The tie-out tools already exist — the `journal_lines_debit_xor_credit` DB
- * constraint and `checkBalance`/`validateJournalLines` in src/lib/ledger.ts —
- * and this phase *uses* them unchanged. Every balanced voucher is posted
- * through `postJournalEntry` (which re-validates balance), with a
- * `source_type` marking it imported; an unbalanced voucher is reported as a
- * discrepancy, never balanced with a synthetic adjustment line. The opening
+ * The ledger's exact writer and debit/credit constraint remain authoritative.
+ * Every balanced voucher is posted through `postExactJournalEntry` (which
+ * re-validates balance), with a `source_type` marking it imported; an
+ * unbalanced voucher is reported as a discrepancy, never balanced with a
+ * synthetic adjustment line. The opening
  * balance uses the app's own opening-equity offset, but posts through the exact
  * RialText path so large imported balances are not rounded by JavaScript numbers.
  */
+import type { PoolClient } from "pg";
 import { getPool, query } from "../../db";
 import { getConnection } from "../connections-service";
-import {
-  accountIdsByCode,
-  postExactJournalEntry,
-  postJournalEntry,
-} from "../../ledger-service";
+import { accountIdsByCode, postExactJournalEntry } from "../../ledger-service";
 import { WELL_KNOWN_CODES } from "../../coa-template";
 import { rialText, type RialText } from "../../inventory-exact";
-import { upsertMapping } from "../mapping-service";
-import { planJournalImport, type HolooVoucher } from "./journal-plan";
+import { upsertMappingOnClient } from "../mapping-service";
+import { planJournalImport, type HolooVoucher, type NormalizedVoucher } from "./journal-plan";
 import { writeIntegrationAudit } from "../audit";
 
 export const HOLOO_IMPORT_SOURCE_TYPE = "holoo_import";
@@ -31,7 +27,7 @@ async function accountIdForCode(
   code: string,
 ): Promise<string | null> {
   const { rows } = await query<{ id: string }>(
-    `SELECT id FROM accounts WHERE business_id = $1 AND code = $2`,
+    `SELECT id FROM accounts WHERE business_id = $1 AND code = $2 AND is_active`,
     [businessId, code],
   );
   return rows[0]?.id ?? null;
@@ -39,50 +35,196 @@ async function accountIdForCode(
 
 export interface JournalImportSummary {
   imported: number;
-  unbalanced: { remoteId: string; difference: number }[];
+  alreadyMapped: number;
+  unbalanced: { remoteId: string; difference: string }[];
   unmappedAccounts: { remoteId: string; accountCode: string }[];
+  skippedEmpty: string[];
 }
 
+export interface JournalImportPreview {
+  importable: number;
+  alreadyMapped: number;
+  unbalanced: { remoteId: string; difference: string }[];
+  unmappedAccounts: { remoteId: string; accountCode: string }[];
+  skippedEmpty: string[];
+}
+
+async function accountIdForHolooCode(
+  client: PoolClient,
+  businessId: string,
+  connectionId: string,
+  remoteCode: string,
+): Promise<string | null> {
+  const mapped = await client.query<{ local_id: string }>(
+    `SELECT m.local_id
+       FROM integration_mappings m
+       JOIN accounts a ON a.id = m.local_id AND a.business_id = m.business_id
+      WHERE m.business_id = $1 AND m.connection_id = $2
+        AND m.entity_type = 'holoo_account' AND m.remote_id = $3
+        AND a.is_active
+      LIMIT 1`,
+    [businessId, connectionId, remoteCode],
+  );
+  if (mapped.rows[0]) return mapped.rows[0].local_id;
+  const fallback = await client.query<{ id: string }>(
+    `SELECT id FROM accounts WHERE business_id = $1 AND code = $2 AND is_active LIMIT 1`,
+    [businessId, remoteCode],
+  );
+  return fallback.rows[0]?.id ?? null;
+}
+
+async function resolveVoucherLines(
+  client: PoolClient,
+  businessId: string,
+  connectionId: string,
+  voucher: NormalizedVoucher,
+  unmappedAccounts: JournalImportPreview["unmappedAccounts"],
+  provisionalAccountCodes: ReadonlySet<string> = new Set(),
+  allowProvisional = false,
+): Promise<{ accountId: string; debit: RialText; credit: RialText }[]> {
+  const lines: { accountId: string; debit: RialText; credit: RialText }[] = [];
+  let hasUnmapped = false;
+  for (const line of voucher.lines) {
+    if (line.debit === 0n && line.credit === 0n) continue;
+    const localAccountId = await accountIdForHolooCode(client, businessId, connectionId, line.accountCode);
+    const accountId = localAccountId ?? (allowProvisional && provisionalAccountCodes.has(line.accountCode) ? "__preview_only__" : null);
+    if (!accountId) {
+      unmappedAccounts.push({ remoteId: voucher.remoteId, accountCode: line.accountCode });
+      hasUnmapped = true;
+      continue;
+    }
+    lines.push({
+      accountId,
+      debit: rialText(line.debit.toString()),
+      credit: rialText(line.credit.toString()),
+    });
+  }
+  return hasUnmapped ? [] : lines;
+}
+
+async function existingJournalIds(
+  client: PoolClient,
+  businessId: string,
+  connectionId: string,
+  remoteIds: string[],
+): Promise<Set<string>> {
+  if (remoteIds.length === 0) return new Set();
+  const { rows } = await client.query<{ remote_id: string }>(
+    `SELECT remote_id FROM integration_mappings
+      WHERE business_id = $1 AND connection_id = $2
+        AND entity_type = 'holoo_journal' AND remote_id = ANY($3::text[])`,
+    [businessId, connectionId, remoteIds],
+  );
+  return new Set(rows.map((row) => row.remote_id));
+}
+
+/** Validate a workbook before opening the provider import run. */
+export async function previewJournalVouchers(
+  businessId: string,
+  connectionId: string,
+  vouchers: HolooVoucher[],
+  provisionalAccountCodes: readonly string[] = [],
+): Promise<JournalImportPreview> {
+  const connection = await getConnection(businessId, connectionId);
+  if (!connection) throw new Error("not_found");
+  const { balanced, unbalanced } = planJournalImport(vouchers);
+  const client = await getPool().connect();
+  try {
+    const mapped = await existingJournalIds(client, businessId, connectionId, vouchers.map((v) => v.remoteId));
+    const result: JournalImportPreview = {
+      importable: 0,
+      alreadyMapped: 0,
+      unbalanced: unbalanced.map((voucher) => ({
+        remoteId: voucher.remoteId,
+        difference: voucher.difference.toString(),
+      })),
+      unmappedAccounts: [],
+      skippedEmpty: [],
+    };
+    for (const voucher of balanced) {
+      if (mapped.has(voucher.remoteId)) {
+        result.alreadyMapped += 1;
+        continue;
+      }
+      const lines = await resolveVoucherLines(
+        client,
+        businessId,
+        connectionId,
+        voucher,
+        result.unmappedAccounts,
+        new Set(provisionalAccountCodes),
+        true,
+      );
+      if (lines.length === 0) {
+        if (!result.unmappedAccounts.some((row) => row.remoteId === voucher.remoteId)) {
+          result.skippedEmpty.push(voucher.remoteId);
+        }
+        continue;
+      }
+      result.importable += 1;
+    }
+    return result;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Apply balanced vouchers one document per database transaction. The journal
+ * and its stable Holoo mapping are committed atomically, with a transaction
+ * advisory lock and a run-scoped mapping so retries cannot duplicate entries.
+ */
 export async function importJournalVouchers(
   businessId: string,
   connectionId: string,
   vouchers: HolooVoucher[],
   createdBy: string | null,
   importRunId?: string | null,
+  locationId?: string | null,
 ): Promise<JournalImportSummary> {
   const connection = await getConnection(businessId, connectionId);
   if (!connection) throw new Error("not_found");
 
   const { balanced, unbalanced } = planJournalImport(vouchers);
-  const unmappedAccounts: JournalImportSummary["unmappedAccounts"] = [];
-
+  const result: JournalImportSummary = {
+    imported: 0,
+    alreadyMapped: 0,
+    unbalanced: unbalanced.map((voucher) => ({
+      remoteId: voucher.remoteId,
+      difference: voucher.difference.toString(),
+    })),
+    unmappedAccounts: [],
+    skippedEmpty: [],
+  };
   const client = await getPool().connect();
   try {
-    let imported = 0;
     for (const voucher of balanced) {
-      const lines = [];
-      let hasUnmapped = false;
-      for (const line of voucher.lines) {
-        if (line.debit === 0 && line.credit === 0) continue;
-        const accountId = await accountIdForCode(businessId, line.accountCode);
-        if (!accountId) {
-          unmappedAccounts.push({
-            remoteId: voucher.remoteId,
-            accountCode: line.accountCode,
-          });
-          hasUnmapped = true;
-          break;
-        }
-        lines.push({ accountId, debit: line.debit, credit: line.credit });
-      }
-      if (hasUnmapped || lines.length === 0) continue;
-
       await client.query("BEGIN");
       try {
-        const entryId = await postJournalEntry(client, {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+          connectionId,
+          `holoo_journal:${voucher.remoteId}`,
+        ]);
+        const mapped = await existingJournalIds(client, businessId, connectionId, [voucher.remoteId]);
+        if (mapped.has(voucher.remoteId)) {
+          result.alreadyMapped += 1;
+          await client.query("COMMIT");
+          continue;
+        }
+
+        const lines = await resolveVoucherLines(client, businessId, connectionId, voucher, result.unmappedAccounts);
+        if (lines.length === 0) {
+          if (!result.unmappedAccounts.some((row) => row.remoteId === voucher.remoteId)) {
+            result.skippedEmpty.push(voucher.remoteId);
+          }
+          await client.query("ROLLBACK");
+          continue;
+        }
+
+        const entryId = await postExactJournalEntry(client, {
           businessId,
-          locationId: connection.location_id,
-          entryDate: voucher.entryDate.slice(0, 10),
+          locationId: locationId ?? connection.location_id,
+          entryDate: voucher.entryDate,
           memo: voucher.memo,
           sourceType: HOLOO_IMPORT_SOURCE_TYPE,
           sourceId: null,
@@ -90,7 +232,8 @@ export async function importJournalVouchers(
           createdBy,
         });
         if (entryId) {
-          await upsertMapping(
+          await upsertMappingOnClient(
+            client,
             businessId,
             connectionId,
             "holoo_journal",
@@ -98,7 +241,7 @@ export async function importJournalVouchers(
             entryId,
             importRunId,
           );
-          imported += 1;
+          result.imported += 1;
         }
         await client.query("COMMIT");
       } catch (err) {
@@ -111,16 +254,14 @@ export async function importJournalVouchers(
       businessId,
       connectionId,
       action: "journal.imported",
-      payload: { imported, unbalanced: unbalanced.length },
+      payload: {
+        imported: result.imported,
+        alreadyMapped: result.alreadyMapped,
+        unbalanced: result.unbalanced.length,
+        unmapped: result.unmappedAccounts.length,
+      },
     });
-    return {
-      imported,
-      unbalanced: unbalanced.map((v) => ({
-        remoteId: v.remoteId,
-        difference: v.difference,
-      })),
-      unmappedAccounts,
-    };
+    return result;
   } finally {
     client.release();
   }
