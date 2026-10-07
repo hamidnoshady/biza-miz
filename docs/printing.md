@@ -428,13 +428,23 @@ otherwise the machine's own Chrome/Edge/Chromium is auto-detected
 
 ## Testing
 
-`src/lib/printing/plan.test.ts` pins the resolver — precedence, refusals
+`printing/chromium.test.ts` pins the rasteriser's sandbox (JS off, offline,
+`data:`-only requests, document size and image height ceilings);
+`printing/plan.test.ts` pins the resolver — precedence, refusals
 (`printer_not_found` / `printer_inactive` / `reconnect_required` /
 `incompatible_printer` / `template_invalid` / `printer_unavailable`), the
 fallback route and the template that actually renders.
 `src/lib/printing/render-service.test.ts` pins the render pipeline, including
 the regression that matters most: **production HTML is byte-identical to the
 template preview's** for the same template and document, branding included.
+`print-templates-service.test.ts` pins the saved-template write boundary
+(paper/doc-type matrix, version bump, exactly-one default);
+`api/settings/print-rules/route.test.ts` pins the rule validation
+(saved-vs-built-in, cross-location refusal, incompatible printer, duplicate
+fallback); `api/printing/jobs/route.test.ts` pins the terminal states and the
+stale-`sending` sweep; `settings/printing/printing-ui.test.tsx` drives the
+rules screen and the pair-printer wizard as a user does (saved templates
+listed, incompatible choices absent, four purposes, A4-over-network blocked).
 `src/lib/print-template.test.ts` renders every built-in and asserts on the
 output string: Persian digits, Toman amounts, no Gregorian dates, escaped item
 names, the ruled table's columns, two-copy pages on a sheet but never on a

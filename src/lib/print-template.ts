@@ -600,9 +600,10 @@ export interface RenderOptions {
 
 /**
  * Render `template` filled with `data` into a complete, standalone HTML
- * document — the single output every print path shares. The print agent
- * screenshots it for thermal rolls; the browser hands the same string to
- * `window.print()` for A4/A5; the designer drops it into a preview iframe.
+ * document — the single output every print path shares. The server hands it
+ * to its Chromium rasteriser for thermal rolls and for A4/A5 page images
+ * alike, and the designer drops the very same string into a preview iframe.
+ * Nothing calls `window.print()` any more: there is no browser-dialog path.
  */
 export function renderPrintTemplate(
   template: PrintTemplate,

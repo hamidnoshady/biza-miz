@@ -191,20 +191,3 @@ export async function deletePrintTemplate(locationId: string, id: string): Promi
   return (rowCount ?? 0) > 0;
 }
 
-/**
- * The saved template a document type defaults to. This is not a UI
- * convenience: `resolvePrintPlan` uses the same `isDefault` row as the
- * runtime default when a print rule does not name a template, which is what
- * makes the gallery's «پیش‌فرض» badge a promise about the till.
- */
-export function defaultTemplateFor(
-  templates: SavedPrintTemplate[],
-  docType: DocType,
-  paper?: PaperKey,
-): SavedPrintTemplate | null {
-  return (
-    templates.find((t) => t.docType === docType && t.isDefault) ??
-    templates.find((t) => t.docType === docType && (!paper || t.paper === paper)) ??
-    null
-  );
-}

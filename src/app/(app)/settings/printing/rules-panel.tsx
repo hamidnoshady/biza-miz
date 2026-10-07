@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { LoadingSkeleton, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
 import { ErrorBox, InfoBox, api, errorMessage, inputClass } from "@/app/dashboard/ui";
 import { BUILT_IN_TEMPLATES, DOC_TYPE_LABELS, PAPERS, type DocType, type PrintTemplate } from "@/lib/print-template";
+import { toPersianDigits } from "@/lib/digits";
 import { printerErrorMessage } from "@/lib/printing/errors";
 import { printTemplateSample } from "@/lib/printing/client";
 import { printerAcceptsDocument, printerAcceptsPaper, type RoutingPrinter } from "@/lib/printing/routing";
@@ -329,7 +330,7 @@ export function RulesPanel() {
               {plan?.ok ? (
                 <>
                   اکنون: قالب «{plan.templateName}»
-                  {plan.templateVersion ? ` (نسخهٔ ${plan.templateVersion})` : ""} روی «{plan.printerName}» — مسیر:{" "}
+                  {plan.templateVersion ? ` (نسخهٔ ${toPersianDigits(plan.templateVersion)})` : ""} روی «{plan.printerName}» — مسیر:{" "}
                   {ROUTE_LABEL[plan.route ?? ""] ?? plan.route}
                   {plan.fallbackPrinterName ? ` (جانشین «${plan.fallbackPrinterName}»)` : ""}
                 </>
@@ -354,7 +355,7 @@ export function RulesPanel() {
                 <span>{DOC_TYPE_LABELS[job.documentType as DocType] ?? job.documentType}</span>
                 <span dir="auto">{job.printerName ?? "—"}</span>
                 <span className="text-xs text-muted-foreground">
-                  {job.templateKey ? `${job.templateKey}${job.templateVersion ? ` · v${job.templateVersion}` : ""}` : "—"}
+                  {job.templateKey ? `${job.templateKey}${job.templateVersion ? ` · v${toPersianDigits(job.templateVersion)}` : ""}` : "—"}
                 </span>
                 <StatusBadge tone={job.status === "handed_off" ? "active" : job.status === "failed" ? "danger" : "neutral"}>
                   {STATUS_LABEL[job.status] ?? job.status}
