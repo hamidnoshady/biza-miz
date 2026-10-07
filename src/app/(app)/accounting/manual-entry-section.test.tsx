@@ -254,7 +254,11 @@ describe("ManualEntrySection — the create form", () => {
     expect((screen.getByRole("button", { name: /ثبت پیش‌نویس/ }) as HTMLButtonElement).disabled).toBe(
       false,
     );
-  });
+    // Typing four sixteen-digit amounts through `userEvent` costs ~2.5s on a
+    // quiet machine, which left nothing under the 5s default: the same commit
+    // passed on one CI runner and timed out on another. The work is the same
+    // either way, so the budget is the thing to state.
+  }, 30_000);
 
   it("never offers an account the server has marked not postable", async () => {
     const user = userEvent.setup();
