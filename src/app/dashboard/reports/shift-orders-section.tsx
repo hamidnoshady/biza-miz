@@ -30,6 +30,7 @@ interface ShiftOption {
 
 interface ShiftOrdersReport {
   shift: ShiftOption | null;
+  scope: "shift" | "all_shifts" | "unassigned" | "no_shift_recorded";
   shifts: ShiftOption[];
   orders: ShiftOrder[];
   totalCount: number;
@@ -50,7 +51,22 @@ const TYPE_LABELS: Record<ShiftOrder["type"], string> = {
   dine_in: "حضوری",
   takeaway: "بیرون‌بر",
   delivery: "ارسالی",
+  retail: "فاکتور فروش",
 };
+
+/** One sentence saying what the list covers — the scope is never left to be guessed (audit F18). */
+function scopeLine(report: ShiftOrdersReport): string {
+  switch (report.scope) {
+    case "shift":
+      return "سفارش‌هایی که در این شیفت باز شده‌اند. فروش آنلاین و فروش خارج از شیفت را با گزینهٔ «خارج از شیفت» ببینید.";
+    case "unassigned":
+      return "سفارش‌هایی که بیرون از همهٔ شیفت‌های این شعبه باز شده‌اند — مثل سفارش‌های وب‌سایت یا فروش بدون ورود صندوق‌دار.";
+    case "no_shift_recorded":
+      return "این شعبه هنوز شیفتی ثبت نکرده است؛ همهٔ سفارش‌های شعبه، از جمله سفارش‌های وب‌سایت، نمایش داده می‌شود.";
+    default:
+      return "همهٔ سفارش‌های این شعبه، در هر شیفت یا بیرون از شیفت.";
+  }
+}
 
 function timeLabel(value: string): string {
   const date = new Date(value);
@@ -250,8 +266,13 @@ function OrderCard({ order }: { order: ShiftOrder }) {
                 {toPersianDigits(formatQueueLabel(order.type, order.orderNumber))}
               </span>
               <span className="inline-flex min-h-6 items-center rounded-lg bg-amber-100 dark:bg-amber-500/20 px-2 text-[11px] font-bold text-amber-700 dark:text-amber-300">
-                {STATUS_LABELS[order.status] ?? order.status}
+                {STATUS_LABELS[order.status] ?? "وضعیت نامشخص"}
               </span>
+              {order.channel === "online" ? (
+                <span className="inline-flex min-h-6 items-center rounded-lg border border-border/80 px-2 text-[11px] font-bold text-muted-foreground">
+                  سفارش وب‌سایت
+                </span>
+              ) : null}
             </div>
             <p className="mt-1 truncate text-xs text-muted-foreground">
               {TYPE_LABELS[order.type]}
@@ -356,6 +377,7 @@ function FilterFields({ filters, setFilters, shifts, disabled }: {
           options={[
             { value: "latest", label: "آخرین شیفت" },
             { value: "all", label: "همه شیفت‌ها" },
+            { value: "unassigned", label: "خارج از شیفت (مانند فروش آنلاین)" },
             ...shifts.map((option) => ({ value: option.id, label: shiftLabel(option) })),
           ]}
         />
@@ -380,7 +402,7 @@ function FilterFields({ filters, setFilters, shifts, disabled }: {
       <label className="min-w-0">
         <span className="mb-1 block text-xs font-medium text-muted-foreground">نوع سفارش</span>
         <select className={`${inputClass} w-full`} value={filters.type} onChange={(event) => patch({ type: event.target.value })}>
-          <option value="">همه انواع</option><option value="dine_in">حضوری</option><option value="takeaway">بیرون‌بر</option><option value="delivery">ارسالی</option>
+          <option value="">همه انواع</option><option value="dine_in">حضوری</option><option value="takeaway">بیرون‌بر</option><option value="delivery">ارسالی</option><option value="retail">فاکتور فروش</option>
         </select>
       </label>
       <label className="min-w-0">
@@ -417,6 +439,7 @@ export function ShiftOrdersSection() {
   const query = useMemo(() => {
     const p = new URLSearchParams();
     if (filters.shift === "all") p.set("allShifts", "1");
+    else if (filters.shift === "unassigned") p.set("shiftId", "unassigned");
     else if (filters.shift !== "latest") p.set("shiftId", filters.shift);
     if (filters.from) p.set("from", filters.from); if (filters.to) p.set("to", filters.to);
     if (filters.orderNumber.trim()) p.set("orderNumber", filters.orderNumber.trim());
@@ -454,7 +477,7 @@ export function ShiftOrdersSection() {
   const reset = () => setFilters(DEFAULT_FILTERS);
   const subtitle = report ? `${toPersianDigits(report.totalCount)} سفارش · جمع ${money.format(report.totalAmount)}` : "هر سفارش، قلم‌به‌قلم و در تمام تاریخچهٔ شعبه";
   const chips: { key: keyof FilterState; label: string }[] = [
-    ...(filters.shift !== "latest" ? [{ key: "shift" as const, label: filters.shift === "all" ? "همه شیفت‌ها" : "شیفت انتخاب‌شده" }] : []),
+    ...(filters.shift !== "latest" ? [{ key: "shift" as const, label: filters.shift === "all" ? "همه شیفت‌ها" : filters.shift === "unassigned" ? "خارج از شیفت" : "شیفت انتخاب‌شده" }] : []),
     ...(filters.from ? [{ key: "from" as const, label: `از ${formatJalali(filters.from)}` }] : []),
     ...(filters.to ? [{ key: "to" as const, label: `تا ${formatJalali(filters.to)}` }] : []),
     ...(filters.orderNumber ? [{ key: "orderNumber" as const, label: `سفارش: ${toPersianDigits(filters.orderNumber)}` }] : []),
@@ -499,6 +522,7 @@ export function ShiftOrdersSection() {
         </button>)}
         <button type="button" onClick={reset} className="min-h-8 px-2 text-xs font-semibold text-muted-foreground hover:text-foreground">پاک کردن همه</button>
       </div> : null}
+      {report ? <p className="border-b border-border px-4 py-2 text-xs leading-5 text-muted-foreground">{scopeLine(report)}</p> : null}
       {error ? <p role="status" className="border-b border-border bg-amber-50 px-4 py-2 text-xs text-muted-foreground dark:bg-amber-500/15">{error}</p> : null}
       {!report ? (
         <div className="flex min-h-48 flex-col items-center justify-center p-6 text-center"><ShoppingBagIcon className="size-8 text-amber-700 dark:text-amber-300" /><p className="mt-4 text-sm font-semibold">شیفت انتخاب‌شده در این شعبه پیدا نشد</p><Button className="mt-3" variant="outline" onClick={reset}>پاک کردن فیلترها</Button></div>

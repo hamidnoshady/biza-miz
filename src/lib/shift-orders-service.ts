@@ -65,8 +65,17 @@ async function listReportShiftOptions(locationId: string, filters: ReportOrderFi
   return selected && !options.some((s) => s.id === selected.id) ? [selected, ...options] : options;
 }
 
+/**
+ * What the list actually covers (audit F18), so the screen can say it:
+ * one shift; every order; only orders outside every shift; or every order
+ * because the branch has never recorded a shift — the case that used to
+ * answer «شیفت پیدا نشد» to a shop that sells only online.
+ */
+export type ShiftOrdersScope = "shift" | "all_shifts" | "unassigned" | "no_shift_recorded";
+
 export interface ShiftOrdersReport {
   shift: ShiftOption | null;
+  scope: ShiftOrdersScope;
   shifts: ShiftOption[];
   orders: ShiftOrder[];
   totalCount: number;
@@ -103,8 +112,14 @@ function escapedLike(value: string): string {
  */
 type ShiftSpecificOrdersReport = Omit<ShiftOrdersReport, "shift"> & { shift: ShiftOption };
 
-export async function getShiftOrdersReport(locationId: string, shiftId?: string): Promise<ShiftSpecificOrdersReport | null>;
-export async function getShiftOrdersReport(locationId: string, filters: ReportOrderFilters): Promise<ShiftOrdersReport | null>;
+/** Orders opened outside every shift window of the branch. */
+const OPENED_OUTSIDE_EVERY_SHIFT = `NOT EXISTS (
+  SELECT 1 FROM employee_shifts s
+   WHERE (s.location_id = o.location_id OR s.location_id IS NULL)
+     AND o.opened_at >= s.started_at AND (s.ended_at IS NULL OR o.opened_at <= s.ended_at))`;
+
+export async function getShiftOrdersReport(locationId: string, shiftId: string): Promise<ShiftSpecificOrdersReport | null>;
+export async function getShiftOrdersReport(locationId: string, filters?: ReportOrderFilters): Promise<ShiftOrdersReport | null>;
 export async function getShiftOrdersReport(
   locationId: string,
   shiftIdOrFilters?: string | ReportOrderFilters,
@@ -112,9 +127,19 @@ export async function getShiftOrdersReport(
   const filters: ReportOrderFilters = typeof shiftIdOrFilters === "string" ? { shiftId: shiftIdOrFilters } : (shiftIdOrFilters ?? {});
   const page = Math.max(1, Math.floor(filters.page ?? 1));
   const pageSize = Math.min(100, Math.max(1, Math.floor(filters.pageSize ?? 25)));
-  // undefined means the existing newest-shift behaviour; null explicitly means all shifts.
+  // undefined means the newest shift; null explicitly means all shifts. A
+  // branch that has never recorded a shift has no newest one, so the default
+  // falls back to every order and says so, rather than reporting the absent
+  // shift as missing.
   const selected = filters.shiftId === null ? null : await resolveShift(locationId, filters.shiftId);
-  if (filters.shiftId !== null && !selected) return null;
+  if (typeof filters.shiftId === "string" && !selected) return null;
+  const scope: ShiftOrdersScope = selected
+    ? "shift"
+    : filters.unassigned
+      ? "unassigned"
+      : filters.shiftId === undefined
+        ? "no_shift_recorded"
+        : "all_shifts";
   const shifts = await listReportShiftOptions(locationId, filters, selected);
 
   const params: unknown[] = [locationId];
@@ -127,6 +152,7 @@ export async function getShiftOrdersReport(
     add(selected.endedAt);
     where.push(ORDER_OPENED_IN_WINDOW);
   }
+  if (scope === "unassigned") where.push(OPENED_OUTSIDE_EVERY_SHIFT);
   const zone = filters.timeZone ?? "Asia/Tehran";
   if (filters.dateFrom) {
     const value = add(filters.dateFrom); const tz = add(zone);
@@ -153,9 +179,9 @@ export async function getShiftOrdersReport(
   const ids = idRows.map((row) => row.id);
   const totalCount = Number(totals[0]?.total_count ?? 0);
   const totalAmount = Number(totals[0]?.total_amount ?? 0);
-  if (ids.length === 0) return { shift: selected, shifts, orders: [], totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
+  if (ids.length === 0) return { shift: selected, scope, shifts, orders: [], totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
 
-  const [{ rows }, { rows: paymentRows }] = await Promise.all([
+  const [{ rows }, { rows: paymentRows }, { rows: onlineRows }] = await Promise.all([
     query<ShiftOrderItemRow>(
       `SELECT o.id AS order_id, o.order_number, o.type, o.status, dt.name AS table_name, o.guest_count,
               c.name AS customer_name, o.opened_at, o.closed_at, ou.full_name AS opened_by_name,
@@ -174,7 +200,11 @@ export async function getShiftOrdersReport(
          FROM payments p JOIN orders o ON o.id=p.order_id LEFT JOIN users u ON u.id=p.received_by
          LEFT JOIN payment_methods pm ON pm.id=p.payment_method_id
         WHERE o.location_id=$1 AND o.id=ANY($2::uuid[]) ORDER BY p.received_at,p.id`, [locationId, ids]),
+    query<{ order_id: string }>(
+      `SELECT order_id FROM online_order_documents WHERE location_id=$1 AND order_id=ANY($2::uuid[])
+       UNION SELECT order_id FROM online_sale_lines WHERE location_id=$1 AND order_id=ANY($2::uuid[])`, [locationId, ids]),
   ]);
+  const online = new Set(onlineRows.map((row) => row.order_id));
 
   const inputs: ShiftOrderItemInput[] = rows.map((row) => ({
     orderId: row.order_id,
@@ -194,5 +224,9 @@ export async function getShiftOrdersReport(
   const payments: ShiftOrderPaymentInput[] = paymentRows.map((row) => ({ orderId: row.order_id, method: row.method,
     methodName: row.method_name, amount: Number(row.amount), reference: row.reference,
     receivedAt: row.received_at.toISOString(), receivedByName: row.received_by_name }));
-  return { shift: selected, shifts, orders: groupShiftOrders(inputs, payments), totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
+  const orders = groupShiftOrders(inputs, payments).map((order) => ({
+    ...order,
+    channel: online.has(order.id) ? ("online" as const) : ("in_store" as const),
+  }));
+  return { shift: selected, scope, shifts, orders, totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
 }

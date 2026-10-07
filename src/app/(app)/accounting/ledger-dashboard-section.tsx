@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
 import { formatPersianNumber } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
-import { accountingProductsHref } from "@/lib/app-routes";
+import { ACCOUNTING_WORKSPACE_HREFS, accountingProductsHref } from "@/lib/app-routes";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
 import { EmptyState, KpiCard, KpiRow, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, InfoBox } from "@/app/dashboard/ui";
@@ -168,6 +168,11 @@ function ShiftSalesQuickReport({ refreshKey }: { refreshKey: number }) {
   }
 
   const { summary } = sales;
+  // A branch that has never clocked anybody in (a website-only shop, a
+  // branch that skips shifts) has no "current shift": the window is the
+  // business day, and saying «شیفت جاری» there is what audit F18 flagged.
+  const usesShifts = sales.hasOpenShift || sales.lastShiftEndedAt !== null;
+  const ordersHref = `${ACCOUNTING_WORKSPACE_HREFS.reports}?tab=shift-orders&shift=${usesShifts ? "latest" : "all"}`;
   const methods = [
     { label: "نقدی", value: summary.cashTotal },
     { label: "کارت", value: summary.cardTotal },
@@ -183,15 +188,15 @@ function ShiftSalesQuickReport({ refreshKey }: { refreshKey: number }) {
             گزارش سریع
           </p>
           <h2 className="mt-1 text-base font-semibold text-foreground">
-            فروش شیفت جاری
+            {usesShifts ? "فروش شیفت جاری" : "فروش روز کاری جاری"}
           </h2>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            از {formatJalali(sales.since, { withTime: true })} — با هر بستن شیفت
-            صفر می‌شود.
+            از {formatJalali(sales.since, { withTime: true })} — این شعبه، همهٔ کانال‌ها (صندوق و وب‌سایت)؛{" "}
+            {usesShifts ? "با هر بستن شیفت صفر می‌شود." : "این شعبه شیفت ثبت نمی‌کند، پس بازه همان روز کاری است."}
           </p>
         </div>
         <StatusBadge tone={sales.hasOpenShift ? "active" : "neutral"}>
-          {sales.hasOpenShift ? "شیفت باز است" : "شیفت بازی ثبت نشده"}
+          {sales.hasOpenShift ? "شیفت باز است" : usesShifts ? "شیفت بازی نیست" : "بدون شیفت"}
         </StatusBadge>
       </div>
 
@@ -199,7 +204,10 @@ function ShiftSalesQuickReport({ refreshKey }: { refreshKey: number }) {
         {money.format(summary.grossTotal)}
       </p>
       <p className="mt-1 text-xs leading-5 text-muted-foreground">
-        {formatPersianNumber(summary.orderCount)} سفارش تکمیل‌شده در این شیفت
+        {formatPersianNumber(summary.orderCount)} سفارش تکمیل‌شده {usesShifts ? "در این شیفت" : "در این روز کاری"} ·{" "}
+        <Link href={ordersHref} className="font-semibold text-amber-800 underline-offset-4 hover:underline dark:text-amber-300">
+          دیدن سفارش‌ها
+        </Link>
       </p>
 
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-border/80 pt-3 sm:grid-cols-4">
