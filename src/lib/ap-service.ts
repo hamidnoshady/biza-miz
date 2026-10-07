@@ -23,6 +23,7 @@ import { getPool, query } from "./db";
 import { businessToday } from "./business-day-service";
 import { isUuid } from "./uuid";
 import { WELL_KNOWN_CODES } from "./coa-template";
+import { isValidIsoDate } from "./iso-date";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_SUPPLIER_KEY, type AgingSummary } from "./aging";
 import { enqueueHolooReceiptForApPayment } from "./integrations/holoo/outbox-producer";
@@ -47,9 +48,7 @@ export class ApError extends Error {
 }
 
 /** An actual calendar date in ISO form — see `ar-service.ts` for why the regex alone is not enough. */
-function isIsoDateOnly(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value));
-}
+const isIsoDateOnly = isValidIsoDate;
 
 async function apAccountId(businessId: string): Promise<string | null> {
   const { rows } = await query<{ id: string }>(

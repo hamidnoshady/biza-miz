@@ -15,6 +15,7 @@
  * the rules worth asserting have to live somewhere a unit test can reach. Its
  * tests are `bank-reconciliation.test.ts`.
  */
+import { isValidIsoDate } from "./iso-date";
 
 /**
  * A ledger line's signed effect on a settlement account's balance.
@@ -74,12 +75,6 @@ export function canComplete(params: { status: string; difference: number }): boo
   return params.status === "in_progress" && params.difference === 0;
 }
 
-const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
-
-function isGregorianLeapYear(year: number): boolean {
-  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-}
-
 /**
  * Is this a real Gregorian calendar date, spelled `YYYY-MM-DD`?
  *
@@ -91,20 +86,13 @@ function isGregorianLeapYear(year: number): boolean {
  * `"1404-04-09"` was accepted as a *Gregorian* year 1404 — a reconciliation
  * six centuries in the past that could never match a single posting.
  *
- * Mirrors `normalizeEntryDate` in `manual-journal-service.ts`; kept here so
- * the reconciliation path doesn't import a manual-journal internal.
+ * The rule itself is `iso-date.ts` now — the repo already had that module,
+ * and A/R aging, A/P aging and this one each still carried a private copy;
+ * the A/R and A/P copies accepted whatever `Date.parse` accepted, which reads
+ * `2026-02-31` as March. Re-exported under the name the reconciliation
+ * service and its tests already import.
  */
-export function isValidIsoDate(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const match = ISO_DATE_RE.exec(value.trim());
-  if (!match) return false;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  if (month < 1 || month > 12 || day < 1) return false;
-  const daysByMonth = [31, isGregorianLeapYear(year) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  return day <= daysByMonth[month - 1];
-}
+export { isValidIsoDate };
 
 /**
  * The Gregorian years a statement date may fall in.
