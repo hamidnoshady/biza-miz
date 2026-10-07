@@ -190,7 +190,12 @@ export function JournalReversalDialog({
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block">
             <span className="mb-1.5 block text-xs text-muted-foreground">تاریخ سند برگشتی</span>
-            <JalaliDatePicker value={entryDate} onChange={setEntryDate} placeholder="امروز" />
+            <JalaliDatePicker
+              value={entryDate}
+              onChange={setEntryDate}
+              placeholder="امروز"
+              ariaLabel="تاریخ سند برگشتی"
+            />
             <span className="mt-1 block text-xs text-muted-foreground">
               خالی بگذارید تا سند با تاریخ امروز ثبت شود؛ سند برگشتی به دورهٔ سند اصلی برنمی‌گردد.
             </span>

@@ -401,6 +401,7 @@ export function EntriesSection({
                 value={filters.dateFrom}
                 onChange={(iso) => setFilter("dateFrom", iso)}
                 placeholder="از ابتدا"
+                ariaLabel="از تاریخ"
               />
             </label>
             <label className="block">
@@ -409,6 +410,7 @@ export function EntriesSection({
                 value={filters.dateTo}
                 onChange={(iso) => setFilter("dateTo", iso)}
                 placeholder="تا امروز"
+                ariaLabel="تا تاریخ"
               />
             </label>
             <label className="block">
