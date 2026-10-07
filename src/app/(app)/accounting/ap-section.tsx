@@ -13,6 +13,10 @@
  * link has to travel as the separate `supplierPartyId` the balances payload
  * carries. The aging payload names no party at all, so its rows open the
  * statement without the directory link rather than linking by a guess.
+ *
+ * A/P lines have no destination of their own: a purchase has no screen at the
+ * alias id, so `orderHrefFor` is deliberately absent and every line drills
+ * into its journal entry instead.
  */
 
 import { UNKNOWN_SUPPLIER_KEY } from "@/lib/aging";
@@ -43,6 +47,21 @@ interface AgingReport {
   totals: Omit<AgingRow, "supplierId" | "supplierName">;
 }
 
+interface ReconciliationSummaryPayload {
+  payableTotal: number;
+  advanceTotal: number;
+  netTotal: number;
+  controlBalance: number;
+  difference: number;
+  reconciles: boolean;
+}
+
+interface BalancesPayload {
+  suppliers?: SupplierBalance[];
+  total?: number;
+  summary?: ReconciliationSummaryPayload | null;
+}
+
 /** The payables side — shared with the directory's statement overlay (`ap-statement-panel.tsx`). */
 export const PAYABLES_SIDE: SubledgerSide = {
   eyebrow: "تعهدات تأمین‌کنندگان",
@@ -53,22 +72,38 @@ export const PAYABLES_SIDE: SubledgerSide = {
   agingCaption: "نمای سنی بدهی به تأمین‌کنندگان",
   emptyBalances: "هیچ حساب پرداختنی بازی وجود ندارد.",
   loadBalancesFailed: "بارگذاری مانده‌های پرداختنی ناموفق بود.",
+  noSearchMatches: "تأمین‌کننده‌ای با این جست‌وجو پیدا نشد.",
   agingTotalLabel: "جمع کل حساب‌های پرداختنی",
   directoryHref: accountingSuppliersHref(),
   directoryLinkLabel: "تأمین‌کنندگان در حسابداری",
+  searchLabel: "جست‌وجوی تأمین‌کننده",
 
   unknownKey: UNKNOWN_SUPPLIER_KEY,
   listEndpoint: "/api/ledger/ap/suppliers",
   agingEndpoint: "/api/ledger/ap/aging",
-  readParties: (raw) => {
-    const data = raw as { suppliers?: SupplierBalance[] };
-    return (data.suppliers ?? []).map((s) => ({
-      id: s.supplierId,
-      name: s.supplierName,
-      phone: s.supplierPhone,
-      balance: s.balance,
-      partyId: s.supplierPartyId,
-    }));
+  readBalances: (raw) => {
+    const data = raw as BalancesPayload;
+    const rows = data.suppliers ?? [];
+    return {
+      rows: rows.map((s) => ({
+        id: s.supplierId,
+        name: s.supplierName,
+        phone: s.supplierPhone,
+        balance: s.balance,
+        partyId: s.supplierPartyId,
+      })),
+      total: data.total ?? rows.length,
+      summary: data.summary
+        ? {
+            primaryTotal: data.summary.payableTotal,
+            advanceTotal: data.summary.advanceTotal,
+            netTotal: data.summary.netTotal,
+            controlBalance: data.summary.controlBalance,
+            difference: data.summary.difference,
+            reconciles: data.summary.reconciles,
+          }
+        : null,
+    };
   },
   readAging: (raw) => {
     const data = raw as AgingReport;
@@ -91,6 +126,15 @@ export const PAYABLES_SIDE: SubledgerSide = {
   },
 
   marksCreditBalances: false,
+
+  summary: {
+    primaryLabel: "جمع بدهی به تأمین‌کنندگان",
+    advanceLabel: "پیش‌پرداخت به تأمین‌کنندگان",
+    netLabel: "خالص بدهی",
+    controlLabel: "مانده حساب کنترل پرداختنی",
+    reconciled: "با حساب کنترل مطابقت دارد",
+    difference: "تفاوت با حساب کنترل",
+  },
 
   settle: {
     actionLabel: "ثبت پرداخت",
@@ -116,13 +160,21 @@ export const PAYABLES_SIDE: SubledgerSide = {
     },
     caption: "گردش حساب این تأمین‌کننده",
     empty: "هنوز فعالیتی برای این تأمین‌کننده ثبت نشده است.",
-    failed: "بارگذاری صورتحساب این تأمین‌کننده ناموفق بود.",
+    failed: "بارگذاری صورت‌حساب این تأمین‌کننده ناموفق بود.",
     directoryLabel: "تأمین‌کنندگان در حسابداری",
     directoryHrefFor: (id, partyId) =>
       id !== UNKNOWN_SUPPLIER_KEY && partyId ? accountingSupplierHref(partyId) : null,
+    sourceColumnLabel: "منبع",
+    entryLinkLabel: "نمایش سند",
+    entryFailed: "بارگذاری سند حسابداری این ردیف ناموفق بود.",
   },
 };
 
-export function ApSection() {
-  return <SubledgerSection side={PAYABLES_SIDE} />;
+/**
+ * The payables screen — `canSettle` is the member's effective
+ * `finance.payables_manage`, the permission `ap/payments` enforces. See
+ * `ar-section.tsx` for why it is a configuration value and not a check here.
+ */
+export function ApSection({ canSettle }: { canSettle: boolean }) {
+  return <SubledgerSection side={PAYABLES_SIDE} canSettle={canSettle} />;
 }

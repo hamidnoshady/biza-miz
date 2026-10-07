@@ -193,6 +193,18 @@ export function AccountingManager({
    * «خطای غیرمنتظره». One definition, shared with the tests: `coa-tree.ts`.
    */
   const canEditAccounts = canEditChartOfAccounts(role, permissions);
+  /*
+   * The two subledger screens are readable on `ledger.view` — a read-only
+   * viewer or an auditor reaches /accounting/receivables legitimately — but
+   * settling a balance is `finance.receivables_manage` / `finance.payables_manage`,
+   * the permissions the receipts and payments endpoints enforce. Handing the
+   * sections their own capability (rather than letting them guess) is what
+   * keeps a live «دریافت وجه» button off an auditor's screen: the shared
+   * subledger component takes one boolean per side, exactly as
+   * `ChartOfAccountsSection` takes `canEdit`.
+   */
+  const canManageReceivables = permissions.includes(PERMISSIONS.financeReceivablesManage);
+  const canManagePayables = permissions.includes(PERMISSIONS.financePayablesManage);
   const sections = LEDGER_WORKSPACE_SECTION_KEYS.flatMap((key) => {
     const def = allowed.find((candidate) => candidate.key === key);
     return def ? [def] : [];
@@ -282,8 +294,8 @@ export function AccountingManager({
               permissions={permissions}
             />
           ) : null}
-          {section === "receivables" ? <ArSection /> : null}
-          {section === "payables" ? <ApSection /> : null}
+          {section === "receivables" ? <ArSection canSettle={canManageReceivables} /> : null}
+          {section === "payables" ? <ApSection canSettle={canManagePayables} /> : null}
           {section === "receipts" ? <ReceiptsPaymentsSection /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}

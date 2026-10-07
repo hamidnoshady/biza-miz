@@ -364,3 +364,77 @@ describe("getApAging", () => {
     expect(aging.totals.over90).toBe(500_000);
   });
 });
+
+describe("listSupplierBalancePage", () => {
+  it("pages in SQL and summarises the subledger against its control account", async () => {
+    const other = await db.query<{ id: string }>(
+      "INSERT INTO suppliers (location_id, name) VALUES ($1, 'Beta') RETURNING id",
+      [biz.locationId],
+    );
+    await postCreditPurchase("2025-04-01", supplier.id, 500_000);
+    await postCreditPurchase("2025-04-02", other.rows[0].id, 300_000);
+
+    const first = await apService.listSupplierBalancePage(biz.id, { limit: 1, offset: 0 });
+    expect(first.suppliers).toHaveLength(1);
+    expect(first.total).toBe(2);
+    expect(first.summary.payableTotal).toBe(800_000);
+    expect(first.summary.advanceTotal).toBe(0);
+    expect(first.summary.netTotal).toBe(800_000);
+    // The liability's own sign: the control account reads credit-positive.
+    expect(first.summary.controlBalance).toBe(800_000);
+    expect(first.summary.reconciles).toBe(true);
+
+    const second = await apService.listSupplierBalancePage(biz.id, { limit: 1, offset: 1 });
+    expect(second.suppliers).toHaveLength(1);
+    expect(second.summary).toEqual(first.summary);
+  });
+
+  it("folds the typed search in SQL, the same way the A/R list does", async () => {
+    const jafar = await db.query<{ id: string }>(
+      `INSERT INTO suppliers (location_id, name) VALUES ($1, 'جعفر') RETURNING id`,
+      [biz.locationId],
+    );
+    await postCreditPurchase("2025-04-01", jafar.rows[0].id, 150_000);
+    const found = await apService.listSupplierBalancePage(biz.id, { q: "جعفر", limit: 25, offset: 0 });
+    expect(found.suppliers.map((row) => row.supplierId)).toEqual([jafar.rows[0].id]);
+    expect(found.total).toBe(1);
+  });
+});
+
+describe("date integrity", () => {
+  it("rejects impossible calendar dates on the payment and on the aging report", async () => {
+    for (const impossible of ["2026-02-29", "2025-02-30", "2026-04-31", "2026-13-01"]) {
+      await expect(
+        apService.payBill({
+          businessId: biz.id,
+          locationId: biz.locationId,
+          supplierId: supplier.id,
+          method: "cash",
+          amount: 10_000,
+          paymentDate: impossible,
+          createdBy: user.id,
+        }),
+      ).rejects.toThrow("invalid_date");
+      await expect(apService.getApAging(biz.id, impossible)).rejects.toThrow("invalid_date");
+    }
+    const { rows } = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM ap_payments");
+    expect(rows[0].n).toBe(0);
+  });
+
+  it("accepts a real leap day", async () => {
+    await postCreditPurchase("2024-02-01", supplier.id, 100_000);
+    const payment = await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "bank",
+      amount: 40_000,
+      paymentDate: "2024-02-29",
+      createdBy: user.id,
+    });
+    expect(payment.paymentDate).toBe("2024-02-29");
+    const aging = await apService.getApAging(biz.id, "2024-02-29");
+    expect(aging.asOfDate).toBe("2024-02-29");
+    expect(aging.rows[0].total).toBe(60_000);
+  });
+});

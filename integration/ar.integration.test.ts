@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { toPersianDigits } from "../src/lib/digits";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -140,6 +141,25 @@ async function postCreditOrder(entryDate: string, customerId: string | null, amo
   return orderId;
 }
 
+/**
+ * A party row with an explicit role set — the shapes `createCustomer` cannot
+ * make, and the ones a crafted API request could name: a supplier, an
+ * employee, a person who is both, a deactivated record, a merged duplicate.
+ */
+async function insertParty(
+  businessId: string,
+  name: string,
+  roles: ("customer" | "supplier" | "employee")[],
+  options: { isActive?: boolean; mergedIntoId?: string | null } = {},
+): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO parties (business_id, name, role, roles, is_active, merged_into_id)
+     VALUES ($1, $2, $3, $4::text[], $5, $6) RETURNING id`,
+    [businessId, name, roles[0], roles, options.isActive ?? true, options.mergedIntoId ?? null],
+  );
+  return rows[0].id;
+}
+
 describe("listCustomerBalances", () => {
   it("attributes a credit order's AR debit to its customer", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali", phone: "0912" });
@@ -174,6 +194,83 @@ describe("listCustomerBalances", () => {
 
     const balances = await arService.listCustomerBalances(biz.id);
     expect(balances).toEqual([]);
+  });
+});
+
+describe("attribution through the document that caused the line", () => {
+  it("attributes a cheque's A/R line to the cheque's customer and names the cheque on the statement", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Cheque payer" });
+    const { rows: chequeRows } = await db.query<{ id: string }>(
+      `INSERT INTO cheques (business_id, location_id, direction, status, serial_number, bank_name,
+                            amount, issue_date, due_date, counterparty_name, customer_id)
+       VALUES ($1, $2, 'receivable', 'on_hand', '123456', 'بانک ملت', 400000, '2025-05-01', '2025-06-01', 'Cheque payer', $3)
+       RETURNING id`,
+      [biz.id, biz.locationId, customer.id],
+    );
+    const chequeId = chequeRows[0].id;
+    const { rows: entryRows } = await db.query<{ id: string }>(
+      `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, source_id)
+       VALUES ($1, '2025-05-01', 'چک دریافتی', 'cheque', $2) RETURNING id`,
+      [biz.id, chequeId],
+    );
+    await db.query(
+      `INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, 400000, 0), ($1, $3, 0, 400000)`,
+      [entryRows[0].id, acct.accountsReceivable, acct.revenue],
+    );
+
+    const balances = await arService.listCustomerBalances(biz.id);
+    expect(balances).toEqual([
+      { customerId: customer.id, customerName: "Cheque payer", customerPhone: null, balance: 400_000 },
+    ]);
+
+    const lines = await arService.getCustomerStatement(biz.id, customer.id);
+    expect(lines).toHaveLength(1);
+    // The cheque's own identifiers, not the memo's words.
+    expect(lines[0].source).toMatchObject({ type: "cheque", id: chequeId, label: "چک 123456 — بانک ملت" });
+    expect(lines[0].source?.orderId).toBeNull();
+  });
+
+  it("keeps a closed-order amendment attributed to the original order and its customer", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Amended" });
+    const orderId = await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const { rows: orderRows } = await db.query<{ order_number: string }>(
+      "SELECT order_number::text AS order_number FROM orders WHERE id = $1",
+      [orderId],
+    );
+
+    // An amendment voids the sale: the correction posts against the amendment,
+    // which points back at the order the customer was billed for.
+    const { rows: amendmentRows } = await db.query<{ id: string }>(
+      `INSERT INTO order_amendments (business_id, location_id, order_id, kind, reason,
+                                     before_snapshot, after_snapshot, previous_total, new_total, entry_date)
+       VALUES ($1, $2, $3, 'void', 'فاکتور اشتباه بود', '{}'::jsonb, '{}'::jsonb, 500000, 0, '2025-04-01')
+       RETURNING id`,
+      [biz.id, biz.locationId, orderId],
+    );
+    const { rows: entryRows } = await db.query<{ id: string }>(
+      `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, source_id)
+       VALUES ($1, '2025-04-01', 'ابطال سفارش', 'order_amendment', $2) RETURNING id`,
+      [biz.id, amendmentRows[0].id],
+    );
+    await db.query(
+      `INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, 0, 500000), ($1, $3, 500000, 0)`,
+      [entryRows[0].id, acct.accountsReceivable, acct.revenue],
+    );
+
+    // The balance nets to zero, so the list drops the party entirely…
+    expect(await arService.listCustomerBalances(biz.id)).toEqual([]);
+
+    // …and the statement still shows both halves, each on the original order.
+    const lines = await arService.getCustomerStatement(biz.id, customer.id);
+    expect(lines.map((line) => line.type)).toEqual(["invoice", "invoice"]);
+    expect(lines.map((line) => line.balance)).toEqual([500_000, 0]);
+    expect(lines[1].source).toMatchObject({
+      type: "order_amendment",
+      id: amendmentRows[0].id,
+      orderId,
+    });
+    expect(String(lines[1].source?.orderNumber)).toBe(orderRows[0].order_number);
+    expect(lines[0].description).toBe(`سفارش #${toPersianDigits(orderRows[0].order_number)}`);
   });
 });
 
@@ -359,6 +456,269 @@ describe("getArAging", () => {
     // The phase-16 exit criterion, checked directly: «جمع کل» IS the control account.
     const { rows } = await db.query<{ balance: string }>(
       `SELECT (COALESCE(SUM(debit),0) - COALESCE(SUM(credit),0))::text AS balance FROM journal_lines WHERE account_id = $1`,
+      [acct.accountsReceivable],
+    );
+    expect(aging.totals.total).toBe(Number(rows[0].balance));
+  });
+});
+
+describe("receivePayment party integrity", () => {
+  const payment = (customerId: string, amount = 10_000) => ({
+    businessId: biz.id,
+    locationId: biz.locationId,
+    customerId,
+    method: "cash" as const,
+    amount,
+    createdBy: user.id,
+  });
+
+  it("rejects a supplier-only party", async () => {
+    // The FK on ar_receipts.customer_id points at `parties`, which since 0137
+    // holds suppliers and employees too — so the database cannot say what the
+    // id means and the service has to.
+    const supplier = await insertParty(biz.id, "Supplier only", ["supplier"]);
+    await expect(arService.receivePayment(payment(supplier))).rejects.toThrow("customer_not_found");
+  });
+
+  it("rejects an employee-only party", async () => {
+    const employee = await insertParty(biz.id, "Employee only", ["employee"]);
+    await expect(arService.receivePayment(payment(employee))).rejects.toThrow("customer_not_found");
+  });
+
+  it("rejects an inactive customer", async () => {
+    const retired = await insertParty(biz.id, "Retired customer", ["customer"], { isActive: false });
+    await expect(arService.receivePayment(payment(retired))).rejects.toThrow("customer_not_found");
+  });
+
+  it("rejects a customer merged into another party", async () => {
+    const survivor = await customersService.createCustomer(biz.id, { name: "Survivor" });
+    const duplicate = await insertParty(biz.id, "Duplicate", ["customer"], { mergedIntoId: survivor.id });
+    await expect(arService.receivePayment(payment(duplicate))).rejects.toThrow("customer_not_found");
+  });
+
+  it("accepts a party holding the Customer role alongside another, and posts the receipt", async () => {
+    const both = await insertParty(biz.id, "Buyer and supplier", ["customer", "supplier"]);
+    const receipt = await arService.receivePayment(payment(both));
+    expect(receipt.customerId).toBe(both);
+    const balances = await arService.listCustomerBalances(biz.id);
+    expect(balances).toEqual([
+      expect.objectContaining({ customerId: both, balance: -10_000 }),
+    ]);
+  });
+
+  it("writes nothing when it refuses a party", async () => {
+    const supplier = await insertParty(biz.id, "Supplier only", ["supplier"]);
+    await expect(arService.receivePayment(payment(supplier))).rejects.toThrow("customer_not_found");
+    const { rows } = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM ar_receipts");
+    expect(rows[0].n).toBe(0);
+    const { rows: entries } = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM journal_entries");
+    expect(entries[0].n).toBe(0);
+  });
+});
+
+describe("date integrity", () => {
+  const paymentOn = (customerId: string, receiptDate: string) => ({
+    businessId: biz.id,
+    locationId: biz.locationId,
+    customerId,
+    method: "cash" as const,
+    amount: 10_000,
+    receiptDate,
+    createdBy: user.id,
+  });
+
+  it("rejects impossible calendar dates on the receipt and on the aging report", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    for (const impossible of ["2026-02-29", "2025-02-30", "2026-04-31", "2026-13-01"]) {
+      await expect(arService.receivePayment(paymentOn(customer.id, impossible))).rejects.toThrow("invalid_date");
+      await expect(arService.getArAging(biz.id, impossible)).rejects.toThrow("invalid_date");
+    }
+    const { rows } = await db.query<{ n: number }>("SELECT count(*)::int AS n FROM ar_receipts");
+    expect(rows[0].n).toBe(0);
+  });
+
+  it("accepts a real leap day and files the receipt on it", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const receipt = await arService.receivePayment(paymentOn(customer.id, "2024-02-29"));
+    expect(receipt.receiptDate).toBe("2024-02-29");
+    const aging = await arService.getArAging(biz.id, "2024-02-29");
+    expect(aging.asOfDate).toBe("2024-02-29");
+    expect(aging.rows[0].current).toBe(-10_000);
+  });
+});
+
+describe("listCustomerBalancePage", () => {
+  it("pages, counts and searches in SQL, and the summary does not move with the window", async () => {
+    const ali = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const sara = await customersService.createCustomer(biz.id, { name: "Sara" });
+    const mina = await customersService.createCustomer(biz.id, { name: "Mina" });
+    await postCreditOrder("2025-04-01", ali.id, 500_000);
+    await postCreditOrder("2025-04-02", sara.id, 300_000);
+    await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: mina.id,
+      method: "cash",
+      amount: 250_000,
+      receiptDate: "2025-04-03",
+      createdBy: user.id,
+    });
+
+    const first = await arService.listCustomerBalancePage(biz.id, { limit: 2, offset: 0 });
+    expect(first.customers).toHaveLength(2);
+    expect(first.total).toBe(3);
+    expect(first.summary.receivableTotal).toBe(800_000);
+    expect(first.summary.advanceTotal).toBe(250_000);
+    expect(first.summary.netTotal).toBe(550_000);
+    // The whole point of showing both numbers: the subledger IS the control
+    // account, and the screen can prove it rather than assume it.
+    expect(first.summary.controlBalance).toBe(550_000);
+    expect(first.summary.reconciles).toBe(true);
+    expect(first.summary.parties).toBe(3);
+
+    const second = await arService.listCustomerBalancePage(biz.id, { limit: 2, offset: 2 });
+    expect(second.customers).toHaveLength(1);
+    // Paginating changed the window, never the totals.
+    expect(second.summary).toEqual(first.summary);
+
+    const searched = await arService.listCustomerBalancePage(biz.id, { q: "Sar", limit: 25, offset: 0 });
+    expect(searched.customers.map((c) => c.customerId)).toEqual([sara.id]);
+    expect(searched.total).toBe(1);
+  });
+
+  it("folds the search the way the app's pickers fold a typed needle", async () => {
+    // Stored with a Persian ی/ک; searched with the Arabic spelling a phone
+    // keyboard produces. The fold has to happen on the column, in SQL.
+    const ali = await insertParty(biz.id, "علی رضایی", ["customer"]);
+    await postCreditOrder("2025-04-01", ali, 100_000);
+    const found = await arService.listCustomerBalancePage(biz.id, { q: "علي", limit: 25, offset: 0 });
+    expect(found.customers.map((c) => c.customerId)).toEqual([ali]);
+    const withDigits = await arService.listCustomerBalancePage(biz.id, { q: "۱۲۳", limit: 25, offset: 0 });
+    expect(withDigits.total).toBe(0);
+  });
+
+  it("keeps the unattributed bucket in the page and in the summary", async () => {
+    await postCreditOrder("2025-04-01", null, 300_000);
+    const page = await arService.listCustomerBalancePage(biz.id, { limit: 25, offset: 0 });
+    expect(page.customers).toEqual([
+      expect.objectContaining({ customerId: "unknown", balance: 300_000 }),
+    ]);
+    expect(page.summary.unattributedBalance).toBe(300_000);
+  });
+
+  it("answers an empty page for a business whose chart has no A/R account", async () => {
+    const other = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Other Co', $1) RETURNING id",
+      [`other-${randomUUID().slice(0, 8)}`],
+    );
+    const page = await arService.listCustomerBalancePage(other.rows[0].id, { limit: 25, offset: 0 });
+    expect(page).toEqual({
+      customers: [],
+      total: 0,
+      summary: expect.objectContaining({ netTotal: 0, reconciles: true, parties: 0 }),
+    });
+  });
+});
+
+describe("getCustomerStatement isolation", () => {
+  it("returns only the requested customer's lines, however much the other customer has", async () => {
+    const ali = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const sara = await customersService.createCustomer(biz.id, { name: "Sara" });
+    await postCreditOrder("2025-04-01", ali.id, 500_000);
+    for (let i = 0; i < 5; i += 1) await postCreditOrder("2025-04-02", sara.id, 10_000);
+
+    const aliLines = await arService.getCustomerStatement(biz.id, ali.id);
+    expect(aliLines).toHaveLength(1);
+    expect(aliLines[0].debit).toBe(500_000);
+    // The statement's cost is the statement's own length: B's five rows were
+    // never read to answer a question about A.
+    const saraLines = await arService.getCustomerStatement(biz.id, sara.id);
+    expect(saraLines).toHaveLength(5);
+    expect(saraLines.every((line) => line.credit === 0 && line.debit === 10_000)).toBe(true);
+  });
+
+  it("answers an id that matches nothing with an empty statement, not the whole book", async () => {
+    await postCreditOrder("2025-04-01", null, 300_000);
+    expect(await arService.getCustomerStatement(biz.id, randomUUID())).toEqual([]);
+    // A malformed id is not a uuid — asking Postgres would raise 22P02 — and
+    // it is not the unknown sentinel either, so it is simply empty.
+    expect(await arService.getCustomerStatement(biz.id, "not-a-uuid")).toEqual([]);
+  });
+
+  it("still serves the unattributed bucket under its own key", async () => {
+    await postCreditOrder("2025-04-01", null, 300_000);
+    const lines = await arService.getCustomerStatement(biz.id, "unknown");
+    expect(lines).toHaveLength(1);
+    expect(lines[0].debit).toBe(300_000);
+    expect(lines[0].source.type).toBe("order");
+  });
+
+  it("carries the source record's own identifiers, never a description to reverse-engineer", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const receipt = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "bank",
+      amount: 200_000,
+      receiptDate: "2025-04-10",
+      createdBy: user.id,
+    });
+
+    const lines = await arService.getCustomerStatement(biz.id, customer.id);
+    const receiptLine = lines.find((line) => line.type === "receipt")!;
+    expect(receiptLine.entryId).toBeTruthy();
+    expect(receiptLine.source).toEqual({
+      type: "ar_receipt",
+      id: receipt.id,
+      label: "دریافت بانکی",
+      orderId: null,
+      orderNumber: null,
+    });
+
+    const order = await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const invoiceLine = (await arService.getCustomerStatement(biz.id, customer.id)).find((line) => line.type === "invoice")!;
+    expect(invoiceLine.source.type).toBe("order");
+    expect(invoiceLine.source.id).toBe(order);
+    expect(invoiceLine.source.orderId).toBe(order);
+    const { rows: orderRows } = await db.query<{ order_number: string }>(
+      "SELECT order_number::text AS order_number FROM orders WHERE id = $1",
+      [order],
+    );
+    expect(String(invoiceLine.source.orderNumber)).toBe(orderRows[0].order_number);
+  });
+});
+
+describe("getArAging scope and buckets", () => {
+  it("ignores activity dated after the as-of date", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-05-01", customer.id, 100_000);
+    expect((await arService.getArAging(biz.id, "2025-04-15")).rows).toEqual([]);
+    expect((await arService.getArAging(biz.id, "2025-05-15")).rows).toHaveLength(1);
+  });
+
+  it("places each open invoice in its own bucket, at the 30/60/90 boundaries", async () => {
+    const asOf = "2025-04-15";
+    const current = await customersService.createCustomer(biz.id, { name: "Current" });
+    const thirty = await customersService.createCustomer(biz.id, { name: "Thirty" });
+    const sixty = await customersService.createCustomer(biz.id, { name: "Sixty" });
+    const ninety = await customersService.createCustomer(biz.id, { name: "Ninety" });
+    await postCreditOrder("2025-04-01", current.id, 100_000); // 14 days
+    await postCreditOrder("2025-03-01", thirty.id, 200_000); // 45 days
+    await postCreditOrder("2025-01-30", sixty.id, 300_000); // 75 days
+    await postCreditOrder("2024-12-01", ninety.id, 400_000); // 135 days
+
+    const aging = await arService.getArAging(biz.id, asOf);
+    const byName = new Map(aging.rows.map((row) => [row.customerName, row]));
+    expect(byName.get("Current")?.current).toBe(100_000);
+    expect(byName.get("Thirty")?.d31_60).toBe(200_000);
+    expect(byName.get("Sixty")?.d61_90).toBe(300_000);
+    expect(byName.get("Ninety")?.over90).toBe(400_000);
+    expect(aging.totals.total).toBe(1_000_000);
+
+    const { rows } = await db.query<{ balance: string }>(
+      `SELECT (COALESCE(SUM(debit),0) - COALESCE(SUM(credit),0))::text AS balance
+         FROM journal_lines WHERE account_id = $1`,
       [acct.accountsReceivable],
     );
     expect(aging.totals.total).toBe(Number(rows[0].balance));
