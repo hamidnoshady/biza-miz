@@ -23,6 +23,7 @@ import {
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
+import { todayJalali } from "@/lib/jalali";
 import { normalizePosSearchText } from "@/lib/pos-selection";
 import type { VariantSummary } from "@/lib/accessories-service";
 import type { PriceEntry, PriceList } from "@/lib/price-lists-service";
@@ -439,7 +440,10 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `price-lists-${new Date().toISOString().slice(0, 10)}.csv`;
+    // The file name carries the Shamsi date — it is shown to the user in the
+    // downloads bar and the file manager, so it is a date a user sees.
+    const { jy, jm, jd } = todayJalali();
+    anchor.download = `price-lists-${jy}-${String(jm).padStart(2, "0")}-${String(jd).padStart(2, "0")}.csv`;
     document.body.append(anchor);
     anchor.click();
     anchor.remove();

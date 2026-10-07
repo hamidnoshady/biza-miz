@@ -66,6 +66,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
   const [panelFor, setPanelFor] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const money = useMoney();
 
   const load = useCallback(() => {
     setLoadError(false);
@@ -123,7 +124,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
 
   function downloadCsv() {
     if (!filtered) return;
-    const blob = new Blob([buildProductsCsv(filtered)], { type: "text/csv;charset=utf-8" });
+    const blob = new Blob([buildProductsCsv(filtered, money.unit)], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;

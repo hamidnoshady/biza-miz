@@ -130,7 +130,8 @@ export function ReceiptsPaymentsSection() {
       r.bankReference ?? "",
       String(money.toInput(r.amount)),
     ]);
-    const csv = [head, ...body].map((line) => line.map((cell) => `"${cell.replaceAll('"', '""')}"`).join(",")).join("\n");
+    // CRLF rows, like every other export: Excel on Windows mis-reads a bare LF.
+    const csv = `${[head, ...body].map((line) => line.map((cell) => `"${cell.replaceAll('"', '""')}"`).join(",")).join("\r\n")}\r\n`;
     const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
