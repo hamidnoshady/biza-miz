@@ -277,7 +277,13 @@ const RULES: Rule[] = [
       detail: `${fa(rows.length)} پیش‌نویس سند بیش از ${fa(s.staleDraftAfterDays)} روز است که منتظر تأیید مانده (قدیمی‌ترین: ${fa(oldest)} روز، جمع: ${money(total)}). تا تأیید نشوند در هیچ گزارشی دیده نمی‌شوند.`,
       count: rows.length,
       amountRial: total,
-      suggestion: "پیش‌نویس‌ها را در صف تأیید اسناد بررسی و تعیین‌تکلیف کنید: تأیید، اصلاح یا حذف.",
+      // «تأیید یا رد» — deliberately not «اصلاح». There is no draft-edit
+      // workflow: the API can list, get, create, approve and reject a draft,
+      // and nothing else. Recommending an action the screen does not have sent
+      // an owner looking for an edit button that was never built, and the
+      // honest alternative (reject it and type the corrected document again)
+      // is what the route actually supports.
+      suggestion: "پیش‌نویس‌ها را در صف تأیید اسناد بررسی و تعیین‌تکلیف کنید: تأیید یا رد (و در صورت نیاز، ثبت دوبارهٔ سند اصلاح‌شده).",
       href: "/accounting/manual",
       samples: firstSamples(rows, (row) => sample(`${row.memo} — ${fa(row.ageDays)} روز`, row.id)),
     };

@@ -17,7 +17,7 @@ What exists after Phase 7: a double-entry ledger, a Persian F&B chart of account
 - **Bank & cash reconciliation** — import or enter a statement, match against `cash` / `bankClearing` postings, carry unreconciled items, lock a reconciled period.
 - **Expense management** — categorised operating expenses with attachments, recurring expenses, and their postings.
 - **Payroll entries** — staff cost accrual and payment postings (journal-level, not a payroll engine).
-- **Manual journals, properly** — draft → review → post workflow, reversal rather than deletion, recurring templates, and an approval permission distinct from posting.
+- **Manual journals, properly** — draft → review → post workflow, reversal rather than deletion, and an approval permission distinct from posting. (Recurring templates were listed in the original scope bullet but are **deferred** — see decision 14 — and are not implemented.)
 - **Per-business chart of accounts** — customisation, sub-accounts, and account archival that respects existing postings.
 - **VAT / tax reporting** — output vs input VAT, payable position, and a return-shaped report.
 
