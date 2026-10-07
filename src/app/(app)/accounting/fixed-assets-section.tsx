@@ -10,10 +10,10 @@ import {
 } from "@/app/dashboard/page-chrome";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { toPersianDigits } from "@/lib/digits";
-import { formatJalali, todayJalali } from "@/lib/jalali";
+import { formatJalali, isoDateToJalali, JALALI_MONTHS, todayJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
-import { api, ErrorBox, errorMessageOrRaw, Field, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
+import { api, ErrorBox, errorMessageOrRaw, Field, InfoBox, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { Button } from "@/components/ui/button";
 import { OverlayDialog } from "./ledger-ui";
 import {
@@ -33,6 +33,9 @@ export interface FixedAssetRow {
   id: string;
   name: string;
   acquisitionDate: string;
+  inServiceDate?: string;
+  acquisitionSource?: "journal" | "opening_balance" | "unlinked";
+  acquisitionEntryId?: string | null;
   cost: number;
   salvageValue: number;
   usefulLifeMonths: number;
@@ -47,6 +50,7 @@ export interface FixedAssetRow {
 export interface DepreciationHistoryItem {
   id: string;
   fixedAssetId: string;
+  periodKey?: string | null;
   periodLabel: string;
   entryDate: string;
   amount: number;
@@ -65,6 +69,44 @@ const ERROR_TRANSLATIONS: Record<string, string> = {
   fiscal_period_locked: "دوره مالی این تاریخ قفل است و امکان ثبت سند وجود ندارد.",
   fiscal_period_soft_closed: "دوره مالی این تاریخ بسته‌ی موقت است؛ فقط مالک یا حسابدار می‌تواند سند ثبت کند.",
   ledger_account_missing: "سرفصل حساب‌های استهلاک (۵۷۰۰ یا ۱۵۱۰) در سیستم تعریف نشده است.",
+  period_label_too_long: "یادداشت دوره بیش از حد طولانی است.",
+  invalid_period: "ماه استهلاک معتبر نیست.",
+  invalid_entry_date: "تاریخ سند معتبر نیست.",
+  entry_date_outside_period: "تاریخ سند باید داخل همان ماه استهلاک باشد.",
+  period_before_in_service: "این ماه پیش از تاریخ بهره‌برداری دارایی است؛ استهلاک از ماه بهره‌برداری شروع می‌شود.",
+  period_in_future: "این ماه هنوز شروع نشده است؛ استهلاک ماه آینده را نمی‌توان از پیش ثبت کرد.",
+  invalid_acquisition_source: "منشأ ثبت بهای دارایی معتبر نیست.",
+  acquisition_entry_required: "برای اتصال به سند خرید، یک سند را انتخاب کنید.",
+  acquisition_entry_not_found: "سند خرید انتخاب‌شده پیدا نشد.",
+  acquisition_entry_reversed: "سند انتخاب‌شده برگشت خورده است و نمی‌تواند سند خرید دارایی باشد.",
+  acquisition_entry_insufficient: "مبلغ ثبت‌شده در حساب دارایی‌های ثابت این سند، کمتر از بهای این دارایی (پس از کسر دارایی‌های دیگرِ متصل) است.",
+};
+
+export interface FixedAssetReconciliationView {
+  registerCost: string;
+  ledgerCost: string;
+  costDifference: string;
+  registerAccumulated: string;
+  ledgerAccumulated: string;
+  accumulatedDifference: string;
+  unlinkedCount: number;
+  unlinkedCost: string;
+  status: "reconciled" | "difference";
+}
+
+interface AcquisitionCandidate {
+  entryId: string;
+  entryDate: string;
+  memo: string | null;
+  sourceType: string | null;
+  debitedRial: string;
+  availableRial: string;
+}
+
+const ACQUISITION_SOURCE_LABELS: Record<NonNullable<FixedAssetRow["acquisitionSource"]>, string> = {
+  journal: "متصل به سند خرید",
+  opening_balance: "در سند افتتاحیه",
+  unlinked: "بدون سند مرتبط",
 };
 
 function resolveErrorMessage(code: string | undefined): string {
@@ -94,6 +136,11 @@ export function FixedAssetsSection({ busy, refreshKey }: { busy: boolean; refres
   const [cost, setCost] = useState("");
   const [salvageValue, setSalvageValue] = useState("");
   const [usefulLifeMonths, setUsefulLifeMonths] = useState("");
+  const [inServiceDate, setInServiceDate] = useState("");
+  const [acquisitionSource, setAcquisitionSource] = useState<NonNullable<FixedAssetRow["acquisitionSource"]>>("unlinked");
+  const [acquisitionEntryId, setAcquisitionEntryId] = useState("");
+  const [candidates, setCandidates] = useState<AcquisitionCandidate[] | null>(null);
+  const [reconciliation, setReconciliation] = useState<FixedAssetReconciliationView | null>(null);
 
   // Search & Filter state
   const [searchTerm, setSearchTerm] = useState("");
@@ -106,9 +153,10 @@ export function FixedAssetsSection({ busy, refreshKey }: { busy: boolean; refres
   const [deleteTarget, setDeleteTarget] = useState<FixedAssetRow | null>(null);
 
   function refresh() {
-    api<{ fixedAssets: FixedAssetRow[] }>("/api/ledger/fixed-assets").then(({ ok, data }) => {
+    api<{ fixedAssets: FixedAssetRow[]; reconciliation?: FixedAssetReconciliationView }>("/api/ledger/fixed-assets").then(({ ok, data }) => {
       if (ok) {
         setAssets(data.fixedAssets);
+        setReconciliation(data.reconciliation ?? null);
       } else {
         setAssets([]);
         setLocalError("بارگذاری فهرست دارایی‌های ثابت ناموفق بود.");
@@ -117,6 +165,13 @@ export function FixedAssetsSection({ busy, refreshKey }: { busy: boolean; refres
   }
 
   useEffect(refresh, [refreshKey]);
+
+  useEffect(() => {
+    if (acquisitionSource !== "journal" || candidates) return;
+    api<{ candidates: AcquisitionCandidate[] }>("/api/ledger/fixed-assets/acquisition-candidates").then(({ ok, data }) => {
+      setCandidates(ok ? data.candidates : []);
+    });
+  }, [acquisitionSource, candidates]);
 
   // Live calculation preview for new asset form
   const parsedCost = useMemo(() => {
@@ -259,6 +314,14 @@ export function FixedAssetsSection({ busy, refreshKey }: { busy: boolean; refres
       setLocalError("عمر مفید باید یک عدد صحیح مثبت (حداقل ۱ ماه) باشد.");
       return;
     }
+    if (inServiceDate && inServiceDate < acquisitionDate) {
+      setLocalError("تاریخ بهره‌برداری نمی‌تواند پیش از تاریخ خرید باشد.");
+      return;
+    }
+    if (acquisitionSource === "journal" && !acquisitionEntryId) {
+      setLocalError("برای اتصال به سند خرید، یک سند را انتخاب کنید.");
+      return;
+    }
 
     setIsSubmitting(true);
     const { ok, data } = await api<{ fixedAsset?: FixedAssetRow; error?: string }>("/api/ledger/fixed-assets", {
@@ -266,6 +329,9 @@ export function FixedAssetsSection({ busy, refreshKey }: { busy: boolean; refres
       body: JSON.stringify({
         name: trimmedName,
         acquisitionDate,
+        inServiceDate: inServiceDate || null,
+        acquisitionSource,
+        acquisitionEntryId: acquisitionSource === "journal" ? acquisitionEntryId : null,
         cost: costRial,
         salvageValue: salvageRial,
         usefulLifeMonths: monthsNum,
@@ -282,6 +348,10 @@ export function FixedAssetsSection({ busy, refreshKey }: { busy: boolean; refres
     setCost("");
     setSalvageValue("");
     setUsefulLifeMonths("");
+    setInServiceDate("");
+    setAcquisitionSource("unlinked");
+    setAcquisitionEntryId("");
+    setCandidates(null);
     setLocalNotice("دارایی ثابت جدید با موفقیت در دفتر ثبت شد.");
     refresh();
   }
@@ -369,6 +439,8 @@ export function FixedAssetsSection({ busy, refreshKey }: { busy: boolean; refres
         </div>
       </div>
 
+      <FixedAssetReconciliationNotice reconciliation={reconciliation} />
+
       {/* Global error & notice messages */}
       <ErrorBox>{localError}</ErrorBox>
       {localNotice ? (
@@ -413,7 +485,7 @@ export function FixedAssetsSection({ busy, refreshKey }: { busy: boolean; refres
               />
             </Field>
 
-            <Field label="تاریخ خرید / بهره‌برداری" hint="تاریخ آغاز استهلاک‌پذیری">
+            <Field label="تاریخ خرید" hint="تاریخ تحصیل دارایی">
               <JalaliDatePicker
                 value={acquisitionDate}
                 onChange={setAcquisitionDate}
@@ -421,6 +493,54 @@ export function FixedAssetsSection({ busy, refreshKey }: { busy: boolean; refres
                 disabled={busy || isSubmitting}
               />
             </Field>
+
+            <Field label="تاریخ بهره‌برداری" hint="استهلاک از ماه بهره‌برداری شروع می‌شود (اختیاری — پیش‌فرض: تاریخ خرید)">
+              <JalaliDatePicker
+                value={inServiceDate}
+                onChange={setInServiceDate}
+                placeholder="همان تاریخ خرید"
+                disabled={busy || isSubmitting}
+              />
+            </Field>
+
+            <Field label="بهای دارایی در دفاتر" hint="ثبت دارایی سندی صادر نمی‌کند؛ مشخص کنید بهای آن کجا در دفاتر آمده است">
+              <select
+                className={inputClass}
+                value={acquisitionSource}
+                onChange={(e) => setAcquisitionSource(e.target.value as typeof acquisitionSource)}
+                disabled={busy || isSubmitting}
+              >
+                <option value="unlinked">{ACQUISITION_SOURCE_LABELS.unlinked}</option>
+                <option value="journal">{ACQUISITION_SOURCE_LABELS.journal}</option>
+                <option value="opening_balance">{ACQUISITION_SOURCE_LABELS.opening_balance}</option>
+              </select>
+            </Field>
+
+            {acquisitionSource === "journal" ? (
+              <Field label="سند خرید" hint="اسنادی که حساب دارایی‌های ثابت (۱۵۰۰) را بدهکار کرده‌اند">
+                {candidates === null ? (
+                  <LoadingSkeleton rows={1} />
+                ) : candidates.length === 0 ? (
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    سندی با بدهکار دارایی ثابت که هنوز به دارایی دیگری متصل نشده باشد پیدا نشد.
+                  </p>
+                ) : (
+                  <select
+                    className={inputClass}
+                    value={acquisitionEntryId}
+                    onChange={(e) => setAcquisitionEntryId(e.target.value)}
+                    disabled={busy || isSubmitting}
+                  >
+                    <option value="">انتخاب سند…</option>
+                    {candidates.map((c) => (
+                      <option key={c.entryId} value={c.entryId}>
+                        {formatJalali(c.entryDate)} — {c.memo ?? "بدون شرح"} — قابل اتصال: {money.format(Number(c.availableRial))}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </Field>
+            ) : null}
 
             <Field label="عمر مفید (ماه)" hint="تعداد ماه‌های استهلاک (مثلاً ۶۰ برای ۵ سال)">
               <PersianNumberInput
@@ -735,8 +855,16 @@ export function FixedAssetsSection({ busy, refreshKey }: { busy: boolean; refres
                           <h3 className="truncate text-base font-semibold text-foreground">{a.name}</h3>
                           <p className="mt-1 text-xs text-muted-foreground">
                             خرید: {toPersianDigits(formatJalali(a.acquisitionDate))}
+                            {a.inServiceDate && a.inServiceDate !== a.acquisitionDate
+                              ? ` — بهره‌برداری: ${toPersianDigits(formatJalali(a.inServiceDate))}`
+                              : ""}
                             {a.locationName ? ` — شعبه: ${a.locationName}` : ""}
                           </p>
+                          {a.acquisitionSource ? (
+                            <p className="mt-0.5 text-xs text-muted-foreground">
+                              بهای دارایی: {ACQUISITION_SOURCE_LABELS[a.acquisitionSource]}
+                            </p>
+                          ) : null}
                         </div>
                         <div>
                           {isFullyDepreciated ? (
@@ -880,13 +1008,18 @@ function DepreciateDialog({
 }) {
   const money = useMoney();
   const today = todayJalali();
-  const defaultPeriod = `${today.jy}/${String(today.jm).padStart(2, "0")}`;
+  const inService = isoDateToJalali(asset.inServiceDate ?? asset.acquisitionDate);
+  const firstYear = inService?.jy ?? today.jy;
+  const years = Array.from({ length: Math.max(1, today.jy - firstYear + 1) }, (_, i) => today.jy - i);
 
-  const [periodLabel, setPeriodLabel] = useState(defaultPeriod);
+  const [periodYear, setPeriodYear] = useState(today.jy);
+  const [periodMonth, setPeriodMonth] = useState(today.jm);
   const [entryDate, setEntryDate] = useState("");
   const [localError, setLocalError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-
+  const periodKey = `${periodYear}-${String(periodMonth).padStart(2, "0")}`;
+  const monthDisabled = (jy: number, jm: number) =>
+    (jy === today.jy && jm > today.jm) || (inService != null && (jy < inService.jy || (jy === inService.jy && jm < inService.jm)));
 
   const depreciableBase = Math.max(0, asset.cost - asset.salvageValue);
   const remaining = Math.max(0, depreciableBase - asset.accumulatedDepreciation);
@@ -899,8 +1032,8 @@ function DepreciateDialog({
     e.preventDefault();
     setLocalError("");
 
-    if (!periodLabel.trim()) {
-      setLocalError("عنوان دوره الزامی است.");
+    if (monthDisabled(periodYear, periodMonth)) {
+      setLocalError("این ماه پیش از بهره‌برداری دارایی یا در آینده است.");
       return;
     }
 
@@ -910,7 +1043,7 @@ function DepreciateDialog({
       {
         method: "POST",
         body: JSON.stringify({
-          periodLabel: periodLabel.trim(),
+          periodKey,
           entryDate: entryDate || undefined,
         }),
       },
@@ -970,22 +1103,42 @@ function DepreciateDialog({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <Field label="عنوان دوره" hint="مثلاً ۱۴۰۳/۰۶ یا شهریور ۱۴۰۳">
-            <input
-              className={inputClass}
-              value={periodLabel}
-              onChange={(e) => setPeriodLabel(e.target.value)}
-              placeholder="مثلاً ۱۴۰۳/۰۶"
-              required
-              disabled={busy || submitting}
-            />
+          <Field label="ماه استهلاک" hint="هر ماه فقط یک‌بار برای هر دارایی ثبت می‌شود">
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                className={inputClass}
+                aria-label="ماه"
+                value={periodMonth}
+                onChange={(e) => setPeriodMonth(Number(e.target.value))}
+                disabled={busy || submitting}
+              >
+                {JALALI_MONTHS.map((month, i) => (
+                  <option key={month} value={i + 1} disabled={monthDisabled(periodYear, i + 1)}>
+                    {month}
+                  </option>
+                ))}
+              </select>
+              <select
+                className={inputClass}
+                aria-label="سال"
+                value={periodYear}
+                onChange={(e) => setPeriodYear(Number(e.target.value))}
+                disabled={busy || submitting}
+              >
+                {years.map((y) => (
+                  <option key={y} value={y}>
+                    {toPersianDigits(y)}
+                  </option>
+                ))}
+              </select>
+            </div>
           </Field>
 
-          <Field label="تاریخ سند حسابداری" hint="پیش‌فرض: امروز">
+          <Field label="تاریخ سند حسابداری" hint="باید داخل همان ماه باشد — پیش‌فرض: آخر ماه، یا امروز برای ماه جاری">
             <JalaliDatePicker
               value={entryDate}
               onChange={setEntryDate}
-              placeholder="امروز"
+              placeholder="آخر ماه"
               disabled={busy || submitting}
             />
           </Field>
@@ -1007,7 +1160,7 @@ function DepreciateDialog({
             <SecondaryButton onClick={onClose} disabled={busy || submitting}>
               انصراف
             </SecondaryButton>
-            <PrimaryButton disabled={busy || submitting || !periodLabel.trim() || calculatedPeriodAmount <= 0}>
+            <PrimaryButton disabled={busy || submitting || monthDisabled(periodYear, periodMonth) || calculatedPeriodAmount <= 0}>
               {submitting ? "در حال ثبت سند…" : "ثبت و صدور سند"}
             </PrimaryButton>
           </div>
@@ -1078,7 +1231,7 @@ function DepreciationHistoryModal({
           <div className="space-y-3">
             <DataTable caption="تاریخچه استهلاک این دارایی">
               <DataTableHead>
-                <Th>عنوان دوره</Th>
+                <Th>ماه استهلاک</Th>
                 <Th>تاریخ سند</Th>
                 <Th>مبلغ استهلاک</Th>
                 <Th>ثبت‌کننده</Th>
@@ -1086,7 +1239,9 @@ function DepreciationHistoryModal({
               <DataTableBody>
                 {entries.map((entry) => (
                   <DataTableRow key={entry.id}>
-                    <Td className="font-semibold">{entry.periodLabel}</Td>
+                    <Td className="font-semibold">
+                      {entry.periodKey ? toPersianDigits(periodKeyLabel(entry.periodKey)) : entry.periodLabel}
+                    </Td>
                     <Td nowrap muted>
                       {toPersianDigits(formatJalali(entry.entryDate))}
                     </Td>
@@ -1164,5 +1319,48 @@ function DeleteConfirmModal({
           </Button>
         </div>
       </OverlayDialog>
+  );
+}
+
+function periodKeyLabel(key: string): string {
+  const [y, m] = key.split("-").map(Number);
+  return JALALI_MONTHS[m - 1] ? `${JALALI_MONTHS[m - 1]} ${y}` : key;
+}
+
+/**
+ * Register ↔ general ledger (audit F09): says plainly when the register's
+ * cost or accumulated depreciation disagrees with the 1500 accounts, and how
+ * much of the register is not tied to any document.
+ */
+function FixedAssetReconciliationNotice({ reconciliation }: { reconciliation: FixedAssetReconciliationView | null }) {
+  const money = useMoney();
+  if (!reconciliation) return null;
+  const costDiff = Number(reconciliation.costDifference);
+  const accDiff = Number(reconciliation.accumulatedDifference);
+  if (reconciliation.status === "reconciled" && reconciliation.unlinkedCount === 0) return null;
+  return (
+    <InfoBox>
+      <p className="font-semibold">تطبیق دفتر اموال با دفتر کل</p>
+      <ul className="mt-1 list-disc space-y-0.5 ps-5 text-xs leading-6">
+        {costDiff !== 0 ? (
+          <li>
+            بهای دارایی‌ها در دفتر اموال {money.format(Number(reconciliation.registerCost))} و در حساب‌های دارایی ثابت دفتر کل{" "}
+            {money.format(Number(reconciliation.ledgerCost))} است (اختلاف {money.format(Math.abs(costDiff))}).
+          </li>
+        ) : null}
+        {accDiff !== 0 ? (
+          <li>
+            استهلاک انباشته در دفتر اموال {money.format(Number(reconciliation.registerAccumulated))} و در دفتر کل{" "}
+            {money.format(Number(reconciliation.ledgerAccumulated))} است (اختلاف {money.format(Math.abs(accDiff))}).
+          </li>
+        ) : null}
+        {reconciliation.unlinkedCount > 0 ? (
+          <li>
+            {toPersianDigits(reconciliation.unlinkedCount)} دارایی به ارزش {money.format(Number(reconciliation.unlinkedCost))} به هیچ سند
+            خرید یا افتتاحیه‌ای متصل نیست؛ تا مشخص نشود، بهای آن‌ها در دفاتر تأیید نشده است.
+          </li>
+        ) : null}
+      </ul>
+    </InfoBox>
   );
 }

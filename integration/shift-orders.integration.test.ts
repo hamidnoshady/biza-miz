@@ -281,9 +281,39 @@ function asBusiness<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 describe("getShiftOrdersReport", () => {
-  it("returns null for a branch that has never had a shift", async () => {
+  it("shows every order, and says why, for a branch that has never had a shift (audit F18)", async () => {
+    await insertOrder(mainId, "2026-08-10T08:00:00Z", { orderNumber: 1, total: 500_000, itemName: "رژ لب" });
     const report = await asBusiness(() => shiftOrders.getShiftOrdersReport(mainId));
-    expect(report).toBeNull();
+    expect(report).toMatchObject({ shift: null, scope: "no_shift_recorded", totalCount: 1 });
+    expect(report!.orders.map((o) => o.orderNumber)).toEqual([1]);
+  });
+
+  it("lists orders opened outside every shift, and marks website orders", async () => {
+    await insertShift(mainId, "2026-08-10T06:00:00Z", "2026-08-10T14:00:00Z");
+    await insertOrder(mainId, "2026-08-10T09:00:00Z", { orderNumber: 1, total: 100_000, itemName: "در شیفت" });
+    const web = await insertOrder(mainId, "2026-08-10T22:00:00Z", { orderNumber: 2, total: 200_000, itemName: "سفارش سایت" });
+    await db.query(
+      `INSERT INTO online_order_documents
+         (order_id, location_id, source_type, remote_id, occurred_at, occurred_at_source, imported_at,
+          lines_subtotal_rial, discount_rial, shipping_rial, fees_rial, tax_rial, total_rial,
+          unexplained_difference_rial, breakdown_status)
+       VALUES ($1, $2, 'woocommerce_order', '77', '2026-08-10T22:00:00Z', 'remote_paid', now(),
+               200000, 0, 0, 0, 0, 200000, 0, 'reconciled')`,
+      [web, mainId],
+    );
+
+    const unassigned = await asBusiness(() =>
+      shiftOrders.getShiftOrdersReport(mainId, { shiftId: null, unassigned: true }),
+    );
+    expect(unassigned).toMatchObject({ scope: "unassigned", totalCount: 1 });
+    expect(unassigned!.orders.map((o) => [o.orderNumber, o.channel])).toEqual([[2, "online"]]);
+
+    const all = await asBusiness(() => shiftOrders.getShiftOrdersReport(mainId, { shiftId: null }));
+    expect(all!.scope).toBe("all_shifts");
+    expect(all!.orders.map((o) => [o.orderNumber, o.channel])).toEqual([
+      [2, "online"],
+      [1, "in_store"],
+    ]);
   });
 
   it("defaults to the branch's current (newest) shift", async () => {
@@ -302,7 +332,8 @@ describe("getShiftOrdersReport", () => {
     });
 
     const report = await asBusiness(() => shiftOrders.getShiftOrdersReport(mainId));
-    expect(report!.shift.id).toBe(current);
+    expect(report!.scope).toBe("shift");
+    expect(report!.shift!.id).toBe(current);
     expect(report!.orders.map((o) => o.orderNumber)).toEqual([2]);
     expect(report!.orders[0]!.lines.map((l) => l.name)).toEqual(["اسپرسو"]);
   });

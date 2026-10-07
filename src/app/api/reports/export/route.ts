@@ -7,7 +7,7 @@ import { getPrimaryLocation } from "@/lib/setup-state";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { reportConfigLabels, validateReportConfig, type ReportConfig } from "@/lib/reports";
-import { getBalanceSheet, getCashFlow, getProfitAndLoss, getBusinessOverview, runCustomReportQuery } from "@/lib/reports-service";
+import { CASH_FLOW_ACTIVITY_LABELS, getBalanceSheet, getCashFlow, getProfitAndLoss, getBusinessOverview, runCustomReportQuery } from "@/lib/reports-service";
 import { formatMoney, moneyToInput, type MoneyUnit } from "@/lib/money";
 import { rowsToCsv, rowsToXlsxBuffer, type ReportTable } from "@/lib/report-export";
 import { renderReportLedgerHtml, renderReportTableHtml, type ReportPdfBusinessInfo } from "@/lib/report-pdf-template";
@@ -152,7 +152,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (kind === "cash_flow") {
     const report = await getCashFlow(session.businessId, { dateFrom: body.dateFrom, dateTo: body.dateTo });
     const title = body.title?.trim() || "صورت گردش وجوه نقد";
-    const lineRows = report.lines.map((l) => ({ code: "", name: l.label, amount: l.amount }));
+    const activities = (["operating", "investing", "financing"] as const).map((activity) => ({
+      activity,
+      heading: CASH_FLOW_ACTIVITY_LABELS[activity],
+      lines: report.lines.filter((l) => l.activity === activity),
+      total: report.activities[activity],
+    }));
     if (format === "pdf") {
       const html = renderReportLedgerHtml({
         business: await getBusinessInfo(session.businessId),
@@ -160,7 +165,21 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         generatedAt: new Date(),
         periodLabel: periodLabel(body.dateFrom, body.dateTo),
         sections: [
-          { heading: "بر اساس نوع رویداد", rows: lineRows, totalLabel: "موجودی ابتدای دوره", totalAmount: report.openingCash },
+          ...activities.map((a) => ({
+            heading: a.heading,
+            rows: a.lines.map((l) => ({ code: "", name: l.label, amount: l.amount })),
+            totalLabel: `جمع ${a.heading}`,
+            totalAmount: a.total,
+          })),
+          {
+            heading: "مانده و افشا",
+            rows: [
+              { code: "", name: "موجودی ابتدای دوره", amount: report.openingCash },
+              { code: "", name: "تغییر وجوه در راه (جزو نقد نیست)", amount: report.clearingChange },
+            ],
+            totalLabel: "تغییر خالص وجه نقد",
+            totalAmount: report.netChange,
+          },
         ],
         grandTotalLabel: "موجودی پایان دوره",
         grandTotalAmount: report.closingCash,
@@ -169,11 +188,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       return fileResponse(await renderHtmlToPdf(html), "application/pdf", `${title}.pdf`);
     }
     const table = ledgerTable(
-      [["بر اساس نوع رویداد", report.lines.map((l) => ({ accountCode: "", accountName: l.label, amount: l.amount }))]],
+      activities.map((a) => [a.heading, a.lines.map((l) => ({ accountCode: "", accountName: l.label, amount: l.amount }))] as [string, { accountCode: string; accountName: string; amount: number }[]]),
       [
         ["موجودی ابتدای دوره", "", report.openingCash],
         ["موجودی پایان دوره", "", report.closingCash],
         ["تغییر خالص", "", report.netChange],
+        ["تغییر وجوه در راه (جزو نقد نیست)", "", report.clearingChange],
       ],
       unit,
     );

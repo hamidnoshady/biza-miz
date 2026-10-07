@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PAPER_WIDTH_PRESETS, renderReceiptHtml, type ReceiptData } from "./receipt-template";
+import { PAPER_WIDTH_PRESETS, paymentMethodLabel, renderReceiptHtml, type ReceiptData } from "./receipt-template";
 
 const baseData: ReceiptData = {
   business: { name: "کافه نمونه", address: "تهران، خیابان ولیعصر", phone: "02112345678", footerMessage: "با تشکر از خرید شما" },
@@ -196,5 +196,14 @@ describe("retail invoice fields (Phase 25)", () => {
     expect(html).not.toContain("مشتری");
     expect(html).not.toContain("بچ");
     expect(html).not.toContain("دست‌دوم");
+  });
+});
+
+describe("paymentMethodLabel", () => {
+  it("names every settlement in Persian and never leaks a code", () => {
+    expect(paymentMethodLabel("online")).toBe("پرداخت آنلاین");
+    expect(paymentMethodLabel("card_to_card")).toBe("کارت‌به‌کارت");
+    expect(paymentMethodLabel("something_new")).toBe("روش پرداخت نامشخص");
+    expect(paymentMethodLabel(null)).toBe("روش پرداخت نامشخص");
   });
 });

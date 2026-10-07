@@ -11,16 +11,36 @@ export type StockLevel = "out" | "low" | "ok";
 
 /**
  * Classify a sellable variant's on-hand quantity against its reorder point.
- * Zero reorder point = the shop does not track this item, so it is never
- * "low" (a report that flags every unpriced/untracked row is noise).
+ *
+ * Physical availability comes first: a variant with nothing on hand is
+ * "out" whatever its reorder point says. A zero/unset reorder point only
+ * switches the *reminder* off — such a row is never "low" (a report that
+ * flags every untracked row is noise), but it is not "ok" either when the
+ * shelf is empty. Use `isReorderTracked` for the separate reminder state.
  */
 export function classifyStockLevel(quantity: string | number, reorderPoint: string | number | null | undefined): StockLevel {
   const qty = Number(quantity);
-  const point = Number(reorderPoint ?? 0);
-  if (!Number.isFinite(qty) || !Number.isFinite(point) || point <= 0) return "ok";
+  if (!Number.isFinite(qty)) return "ok";
   if (qty <= 0) return "out";
-  if (qty <= point) return "low";
+  if (!isReorderTracked(reorderPoint)) return "ok";
+  if (qty <= Number(reorderPoint)) return "low";
   return "ok";
+}
+
+/** Whether the variant has a reorder reminder at all (a positive reorder point). */
+export function isReorderTracked(reorderPoint: string | number | null | undefined): boolean {
+  const point = Number(reorderPoint ?? 0);
+  return Number.isFinite(point) && point > 0;
+}
+
+/**
+ * SQL twin of `classifyStockLevel`'s "needs attention" half — out of stock, or
+ * at/under a positive reorder point. `q`/`r` are the quantity and reorder-point
+ * expressions. Every count (warehouse list, low-stock report, stock levels)
+ * uses this so the screens reconcile.
+ */
+export function stockNeedsAttentionSql(q: string, r: string): string {
+  return `(${q} <= 0 OR (${r} > 0 AND ${q} <= ${r}))`;
 }
 
 /**

@@ -40,7 +40,7 @@ import { getItem } from "./items-service";
 import { query } from "./db";
 import { roundRial, rialText, type RialText } from "./inventory-exact";
 import { emitDomainEvent } from "./posting-engine";
-import { classifyStockLevel, deadStockCutoff, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
+import { classifyStockLevel, deadStockCutoff, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 import { validateWarrantyMonths } from "./watch";
 import { validateSerialStatusTransition, type SerialStatus } from "./items";
 // Side-effect import: registers the retail.* stock posting rules.
@@ -670,13 +670,13 @@ export interface LowStockRow {
   level: "out" | "low";
 }
 
-/** Variants at or under their reorder point — the «کمبود موجودی» list per branch. */
+/** Variants out of stock or at/under a positive reorder point — the «کمبود موجودی» list per branch. */
 async function readLowStockReport(locationId: string, page?: number) {
   const result = await queryReportPage<{ item_id: string; name: string; sku: string | null; quantity: string; reorder_point: string }>(
     `SELECT i.id AS item_id, i.name, i.sku, s.quantity::text, s.reorder_point::text
        FROM item_stock s JOIN items i ON i.id = s.item_id
-      WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND s.reorder_point > 0
-        AND s.quantity <= s.reorder_point`,
+      WHERE i.location_id = $1 AND i.kind <> 'variant_parent' AND i.is_active
+        AND ${stockNeedsAttentionSql("s.quantity", "s.reorder_point")}`,
     [locationId], { page, orderBy: "name, item_id" },
   );
   return { ...result, rows: result.rows.map((r): LowStockRow => ({

@@ -26,7 +26,8 @@ import { computeLineSubtotal } from "./orders";
 import { sumModifierDeltas } from "./modifier-display";
 import type { Rial } from "./money";
 
-export type OrderKind = "dine_in" | "takeaway" | "delivery";
+/** `retail` is a multi-line sales invoice — every website order is one (migration 0071). */
+export type OrderKind = "dine_in" | "takeaway" | "delivery" | "retail";
 
 /** One order_item_modifiers snapshot — the add-on as it was sold, name and money. */
 export interface ShiftOrderModifier {
@@ -138,6 +139,8 @@ export interface ShiftOrder {
   /** How much of the subtotal came from add-ons, across live lines — the number a customer disputes most often. */
   addOnTotal: Rial;
   lines: ShiftOrderLine[];
+  /** «online» when the order came from a website (it has an online sale fact or document), else «in_store». */
+  channel?: "online" | "in_store";
   /** Units across non-voided lines. */
   itemCount: number;
   payments: ShiftOrderPayment[];

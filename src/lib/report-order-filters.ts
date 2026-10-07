@@ -6,11 +6,17 @@ import type { OrderKind } from "./shift-orders";
 import type { OrderStatus } from "./order-read-service";
 
 export const REPORT_ORDER_STATUSES = ["open", "held", "completed", "voided"] as const;
-export const REPORT_ORDER_TYPES = ["dine_in", "takeaway", "delivery"] as const;
+export const REPORT_ORDER_TYPES = ["dine_in", "takeaway", "delivery", "retail"] as const;
 
 export interface ReportOrderFilters {
   /** null means all shifts; undefined preserves the legacy newest-shift default. */
   shiftId?: string | null;
+  /**
+   * Only orders opened outside every shift window of the branch — website
+   * orders, and sales at a branch that does not clock in (audit F18).
+   * Implies `shiftId: null`.
+   */
+  unassigned?: boolean;
   dateFrom?: string;
   dateTo?: string;
   orderNumber?: string;
@@ -50,8 +56,9 @@ export function parseReportOrderFilters(params: URLSearchParams):
   }
 
   const rawShift = params.get("shiftId");
-  const allShifts = params.get("allShifts") === "1" || rawShift === "all";
-  if (rawShift && rawShift !== "all" && !isUuid(rawShift)) return { ok: false, error: "invalid_shift" };
+  const unassigned = rawShift === "unassigned";
+  const allShifts = params.get("allShifts") === "1" || rawShift === "all" || unassigned;
+  if (rawShift && rawShift !== "all" && !unassigned && !isUuid(rawShift)) return { ok: false, error: "invalid_shift" };
 
   const rawOrder = params.get("orderNumber");
   const orderNumber = normalizeReportOrderNumber(rawOrder);
@@ -78,6 +85,7 @@ export function parseReportOrderFilters(params: URLSearchParams):
     ok: true,
     filters: {
       shiftId: allShifts ? null : rawShift || undefined,
+      ...(unassigned ? { unassigned: true } : {}),
       dateFrom: from,
       dateTo: to,
       orderNumber,

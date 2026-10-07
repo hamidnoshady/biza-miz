@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyStockLevel, isDeadStock, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
+import { classifyStockLevel, isDeadStock, isReorderTracked, stockNeedsAttentionSql, validateItemQuantity, validateItemUnitCost } from "./retail-stock";
 
 describe("classifyStockLevel", () => {
   it("is ok above the reorder point", () => {
@@ -15,10 +15,29 @@ describe("classifyStockLevel", () => {
     expect(classifyStockLevel("0", "5")).toBe("out");
   });
 
-  it("never flags an item with no reorder point", () => {
-    expect(classifyStockLevel("0", null)).toBe("ok");
-    expect(classifyStockLevel("0", "0")).toBe("ok");
+  it("never flags an in-stock item with no reorder point as low", () => {
     expect(classifyStockLevel("3", undefined)).toBe("ok");
+    expect(classifyStockLevel("1", "0")).toBe("ok");
+  });
+
+  it("shows zero stock as out even when the reorder reminder is off", () => {
+    expect(classifyStockLevel("0", null)).toBe("out");
+    expect(classifyStockLevel("0", "0")).toBe("out");
+    expect(classifyStockLevel("-2", undefined)).toBe("out");
+  });
+});
+
+describe("isReorderTracked", () => {
+  it("is a separate reminder state from availability", () => {
+    expect(isReorderTracked(null)).toBe(false);
+    expect(isReorderTracked("0")).toBe(false);
+    expect(isReorderTracked("4")).toBe(true);
+  });
+});
+
+describe("stockNeedsAttentionSql", () => {
+  it("covers out-of-stock rows regardless of the reorder point", () => {
+    expect(stockNeedsAttentionSql("q", "r")).toBe("(q <= 0 OR (r > 0 AND q <= r))");
   });
 });
 

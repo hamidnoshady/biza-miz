@@ -28,7 +28,7 @@ export default async function ReportsPage() {
             <KnowledgeHelpButton section="reports" />
             {features.ai_assistant ? (
               <AskAssistant
-                app="growth"
+                app="accounting"
                 context="گزارش‌های این صفحه را بررسی کن و تفاوت فروش هفتهٔ جاری را با هفتهٔ قبل بگو."
               />
             ) : null}

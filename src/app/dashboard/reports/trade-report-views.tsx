@@ -554,8 +554,8 @@ export function VariantSalesView({ report }: { report: VariantSalesReport }) {
   return (
     <div className="min-w-0">
       <p className="border-b border-border/80 px-4 py-3 text-xs leading-5 text-muted-foreground sm:px-5">
-        مستقیماً از رویدادهای فروش خوانده می‌شود — همان رویدادهایی که اسناد حسابداری از آن‌ها ساخته شده، پس هیچ‌گاه با
-        دفاتر اختلاف پیدا نمی‌کند.
+        شامل فروش صندوق و فروش وب‌سایت (ووکامرس و فروشگاه سایت) است. فروشی که بهای تمام‌شده‌اش ثبت
+        نشده، با بهای صفر در حاشیه آمده و سود آن موقت است.
       </p>
       <ReportTable
         caption="تحلیل فروش تنوع‌ها"

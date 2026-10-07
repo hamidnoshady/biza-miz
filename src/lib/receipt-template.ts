@@ -88,6 +88,16 @@ export const PAYMENT_METHOD_LABELS: Record<string, string> = {
   snappfood: "اسنپ‌فود",
 };
 
+/**
+ * The Persian name of a payment settlement, for every surface that has no
+ * business-named payment way to show (dashboard audit F19). Never the raw
+ * code: an unknown one reads «روش پرداخت نامشخص» rather than leaking
+ * `online` into a financial screen.
+ */
+export function paymentMethodLabel(method: string | null | undefined): string {
+  return (method && PAYMENT_METHOD_LABELS[method]) || "روش پرداخت نامشخص";
+}
+
 /** Exported so the retail invoice detail modal reads the same labels the printed receipt does. */
 export const CONDITION_GRADE_LABELS: Record<string, string> = {
   new: "نو",
@@ -204,7 +214,7 @@ export function renderReceiptHtml(data: ReceiptData, opts: { paperWidthMm?: Pape
         )
         .join("")
     : data.paymentMethod
-      ? `<div class="totals-row"><span>روش پرداخت</span><span>${escapeHtml(PAYMENT_METHOD_LABELS[data.paymentMethod] ?? data.paymentMethod)}</span></div>`
+      ? `<div class="totals-row"><span>روش پرداخت</span><span>${escapeHtml(paymentMethodLabel(data.paymentMethod))}</span></div>`
       : "";
   const tipRow =
     data.tip && data.tip > 0

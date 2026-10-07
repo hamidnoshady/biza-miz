@@ -2,14 +2,23 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { FixedAssetError, createFixedAsset, listFixedAssets } from "@/lib/fixed-assets-service";
+import {
+  FixedAssetError,
+  createFixedAsset,
+  getFixedAssetReconciliation,
+  listFixedAssets,
+  type FixedAssetAcquisitionSource,
+} from "@/lib/fixed-assets-service";
 
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
   if (error) return error;
 
-  const fixedAssets = await listFixedAssets(session.businessId);
-  return NextResponse.json({ fixedAssets });
+  const [fixedAssets, reconciliation] = await Promise.all([
+    listFixedAssets(session.businessId),
+    getFixedAssetReconciliation(session.businessId),
+  ]);
+  return NextResponse.json({ fixedAssets, reconciliation });
 });
 
 /** Registers a fixed asset — no posting yet; depreciation is posted separately, per period, via .../[id]/depreciate. */
@@ -20,6 +29,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   let body: {
     name?: string;
     acquisitionDate?: string;
+    inServiceDate?: string | null;
+    acquisitionSource?: string;
+    acquisitionEntryId?: string | null;
     cost?: number;
     salvageValue?: number;
     usefulLifeMonths?: number;
@@ -38,6 +50,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       locationId: location?.id ?? null,
       name: String(body.name ?? ""),
       acquisitionDate: String(body.acquisitionDate ?? ""),
+      inServiceDate: typeof body.inServiceDate === "string" ? body.inServiceDate : null,
+      acquisitionSource: body.acquisitionSource as FixedAssetAcquisitionSource | undefined,
+      acquisitionEntryId: typeof body.acquisitionEntryId === "string" ? body.acquisitionEntryId : null,
       cost: Number(body.cost),
       salvageValue: Number(body.salvageValue ?? 0),
       usefulLifeMonths: Number(body.usefulLifeMonths),

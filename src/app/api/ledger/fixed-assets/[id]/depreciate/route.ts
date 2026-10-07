@@ -10,13 +10,13 @@ interface Ctx {
   params: Promise<{ id: string }>;
 }
 
-/** Posts one period's straight-line depreciation for this asset. */
+/** Posts one Jalali month's straight-line depreciation for this asset (`periodKey` = `YYYY-MM`). */
 export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   const { session, error } = await requirePermission(PERMISSIONS.financeAssetsManage);
   if (error) return error;
 
   const { id } = await ctx.params;
-  let body: { periodLabel?: string; entryDate?: string };
+  let body: { periodKey?: string; periodLabel?: string; entryDate?: string };
   try {
     body = await request.json();
   } catch {
@@ -30,7 +30,8 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
       businessId: session.businessId,
       locationId: location?.id ?? null,
       fixedAssetId: id,
-      periodLabel: String(body.periodLabel ?? ""),
+      periodKey: typeof body.periodKey === "string" ? body.periodKey : null,
+      periodLabel: typeof body.periodLabel === "string" ? body.periodLabel : null,
       entryDate: body.entryDate,
       createdBy: session.sub,
     });

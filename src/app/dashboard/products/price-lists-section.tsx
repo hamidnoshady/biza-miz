@@ -8,6 +8,7 @@
  * amount with an optional round, and the lists modal adds/renames/deletes the
  * named lists themselves.
  */
+import { tablePageWindow } from "@/lib/table-page";
 import { useCallback, useEffect, useMemo, useRef, useState, useDeferredValue } from "react";
 import { FileSpreadsheetIcon, PencilIcon, PlusIcon, RefreshCwIcon, SaveIcon, Trash2Icon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -34,6 +35,9 @@ type ColumnKey = string; // "sale" | "purchase" | <price list id>
 type Row = Record<ColumnKey, string>;
 type Cells = Record<string, Row>;
 
+/** Rows per page of the price matrix; each row carries two inputs plus one per price list. */
+const PRICE_PAGE_SIZE = 50;
+
 /**
  * A cell holds what the user typed, so it must be compared and validated as
  * text. Empty means "no price on this column"; anything that is not a
@@ -55,6 +59,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
   const [cells, setCells] = useState<Cells>({});
   const [initial, setInitial] = useState<Cells>({});
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
   const deferredSearch = useDeferredValue(search);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -154,6 +159,12 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
     return searchIndex.filter(({ haystack }) => haystack.includes(needle)).map(({ item }) => item);
   }, [items, searchIndex, deferredSearch]);
 
+  // One bounded page of the filtered list (audit F14). Edits are keyed by item
+  // in `cells`, never by row position, so paging and filtering keep them.
+  const pageWindow = tablePageWindow(filtered?.length ?? 0, page, PRICE_PAGE_SIZE);
+  const pageItems = filtered ? filtered.slice(pageWindow.start, pageWindow.end) : null;
+  useEffect(() => setPage(1), [deferredSearch]);
+
   const setCell = useCallback((itemId: string, column: ColumnKey, value: string) => {
     setCells((current) => ({
       ...current,
@@ -183,6 +194,10 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
   }, [cells, initial]);
 
   const invalid = useMemo(() => dirty.filter((update) => cellError(update.value)), [dirty]);
+  const editedElsewhere = useMemo(() => {
+    const onPage = new Set((pageItems ?? []).map((item) => item.id));
+    return new Set(dirty.filter((update) => !onPage.has(update.itemId)).map((update) => update.itemId)).size;
+  }, [dirty, pageItems]);
 
   // Leaving the page with unsaved prices in the grid is a real loss: there is
   // no draft anywhere, and the matrix is the only place the typing exists.
@@ -439,9 +454,9 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
               ))}
             </DataTableHead>
             <DataTableBody>
-              {filtered.map((item, index) => (
+              {(pageItems ?? []).map((item, index) => (
                 <DataTableRow key={item.id}>
-                  <Td muted className="text-xs">{toPersianDigits(index + 1)}</Td>
+                  <Td muted className="text-xs">{toPersianDigits(pageWindow.start + index + 1)}</Td>
                   <Td dir="ltr" muted className="text-xs">
                     {item.sku ?? "—"}
                   </Td>
@@ -475,6 +490,41 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
             </DataTableBody>
           </DataTable>
         )}
+        {filtered && filtered.length > 0 && (pageWindow.pageCount > 1 || editedElsewhere > 0) ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/80 p-4 text-xs text-muted-foreground">
+            <span>
+              {`کالای ${toPersianDigits(pageWindow.start + 1)} تا ${toPersianDigits(pageWindow.end)} از ${toPersianDigits(filtered.length)}`}
+              {editedElsewhere > 0
+                ? ` — ${toPersianDigits(editedElsewhere)} کالای دیگر هم تغییر ذخیره‌نشده دارد و با «ذخیره» ثبت می‌شود.`
+                : ""}
+            </span>
+            {pageWindow.pageCount > 1 ? (
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={pageWindow.page <= 1}
+                  onClick={() => setPage(pageWindow.page - 1)}
+                >
+                  قبلی
+                </Button>
+                <span aria-live="polite">
+                  {`صفحهٔ ${toPersianDigits(pageWindow.page)} از ${toPersianDigits(pageWindow.pageCount)}`}
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={pageWindow.page >= pageWindow.pageCount}
+                  onClick={() => setPage(pageWindow.page + 1)}
+                >
+                  بعدی
+                </Button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </SectionCard>
 
       <ListsModal

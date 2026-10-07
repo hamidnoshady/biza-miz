@@ -268,6 +268,57 @@ export const repairReportPage = (locationId: string, options: { from?: string; t
  * Accessories — variant-level sales analysis
  * ------------------------------------------------------------------ */
 
+/**
+ * The channel-neutral sale facts both trade reports read (dashboard audit F04).
+ *
+ * The counter writes `{trade}.sale_revenue` / `{trade}.sale_cogs` domain events;
+ * a website sale (WooCommerce / Eshobe CMS) writes one `online_sale_lines` row
+ * (migration 0209) instead, because its revenue is posted by the adapter, not
+ * by a posting rule. Neither path writes the other, so the union below counts
+ * every sale exactly once. A voided online line (a reversed order) drops out,
+ * and an online line is dated by its own `occurred_at`, not the import's.
+ * `$1` business, `$2` branch, `$3`/`$4` from/to dates, `$5` trade prefix.
+ */
+const SALE_FACTS_CTE = `revenue AS (
+        SELECT item_id, SUM(quantity_sold) AS quantity_sold, SUM(net_revenue) AS net_revenue
+          FROM (
+            SELECT e.source_id AS item_id,
+                   (e.payload->>'quantity')::numeric AS quantity_sold,
+                   (e.payload->>'net')::numeric      AS net_revenue
+              FROM domain_events e
+             WHERE e.business_id = $1 AND e.location_id = $2
+               AND e.event_type = $5 || '.sale_revenue'
+               AND ($3::date IS NULL OR e.created_at >= $3::date)
+               AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
+            UNION ALL
+            SELECT f.item_id, f.quantity, f.net_rial::numeric
+              FROM online_sale_lines f
+              JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
+             WHERE f.location_id = $2 AND f.item_id IS NOT NULL
+               AND ($3::date IS NULL OR f.occurred_at >= $3::date)
+               AND ($4::date IS NULL OR f.occurred_at < ($4::date + 1))
+          ) facts
+         GROUP BY item_id
+      ), cost AS (
+        SELECT item_id, SUM(cogs) AS cogs
+          FROM (
+            SELECT e.source_id AS item_id, (e.payload->>'cost')::numeric AS cogs
+              FROM domain_events e
+             WHERE e.business_id = $1 AND e.location_id = $2
+               AND e.event_type = $5 || '.sale_cogs'
+               AND ($3::date IS NULL OR e.created_at >= $3::date)
+               AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
+            UNION ALL
+            SELECT f.item_id, (f.cogs_rial - f.restored_cogs_rial)::numeric
+              FROM online_sale_lines f
+              JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
+             WHERE f.location_id = $2 AND f.item_id IS NOT NULL
+               AND ($3::date IS NULL OR f.occurred_at >= $3::date)
+               AND ($4::date IS NULL OR f.occurred_at < ($4::date + 1))
+          ) facts
+         GROUP BY item_id
+      )`;
+
 export interface VariantSalesRow {
   itemId: string;
   itemName: string;
@@ -280,9 +331,9 @@ export interface VariantSalesRow {
 }
 
 /**
- * Which variants actually sell, read straight off the sale events rather
- * than off any per-item counter — so it can never disagree with the
- * postings those same events produced. `eventPrefix` names which trade's
+ * Which variants actually sell, read straight off the sale facts (the
+ * counter's domain events plus the website's `online_sale_lines`, see
+ * SALE_FACTS_CTE) rather than off any per-item counter. `eventPrefix` names which trade's
  * sale events to read (`accessory.*` or `cosmetic.*`) — one implementation,
  * because a variant sale is a variant sale whichever fungible trade wrote it.
  */
@@ -302,25 +353,7 @@ async function readVariantSalesAnalysis(
     net_revenue: string;
     cogs: string;
   }>(
-    `WITH revenue AS (
-        SELECT e.source_id AS item_id,
-               SUM((e.payload->>'quantity')::numeric) AS quantity_sold,
-               SUM((e.payload->>'net')::numeric)      AS net_revenue
-          FROM domain_events e
-         WHERE e.business_id = $1 AND e.location_id = $2
-           AND e.event_type = $5 || '.sale_revenue'
-           AND ($3::date IS NULL OR e.created_at >= $3::date)
-           AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
-         GROUP BY e.source_id
-      ), cost AS (
-        SELECT e.source_id AS item_id, SUM((e.payload->>'cost')::numeric) AS cogs
-          FROM domain_events e
-         WHERE e.business_id = $1 AND e.location_id = $2
-           AND e.event_type = $5 || '.sale_cogs'
-           AND ($3::date IS NULL OR e.created_at >= $3::date)
-           AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
-         GROUP BY e.source_id
-      )
+    `WITH ${SALE_FACTS_CTE}
       SELECT i.id AS item_id, i.name AS item_name, p.name AS parent_name,
              COALESCE(
                (SELECT json_agg(json_build_object('name', a.name, 'value', a.value) ORDER BY a.name)
@@ -390,25 +423,7 @@ async function readBrandSalesAnalysis(
     net_revenue: string;
     cogs: string;
   }>(
-    `WITH revenue AS (
-        SELECT e.source_id AS item_id,
-               SUM((e.payload->>'quantity')::numeric) AS quantity_sold,
-               SUM((e.payload->>'net')::numeric)      AS net_revenue
-          FROM domain_events e
-         WHERE e.business_id = $1 AND e.location_id = $2
-           AND e.event_type = $5 || '.sale_revenue'
-           AND ($3::date IS NULL OR e.created_at >= $3::date)
-           AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
-         GROUP BY e.source_id
-      ), cost AS (
-        SELECT e.source_id AS item_id, SUM((e.payload->>'cost')::numeric) AS cogs
-          FROM domain_events e
-         WHERE e.business_id = $1 AND e.location_id = $2
-           AND e.event_type = $5 || '.sale_cogs'
-           AND ($3::date IS NULL OR e.created_at >= $3::date)
-           AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
-         GROUP BY e.source_id
-      )
+    `WITH ${SALE_FACTS_CTE}
       SELECT i.brand_id, br.name AS brand_name,
              COALESCE(SUM(r.quantity_sold), 0)::text AS quantity_sold,
              COALESCE(SUM(r.net_revenue), 0)::text   AS net_revenue,
