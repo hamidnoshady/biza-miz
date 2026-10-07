@@ -189,10 +189,14 @@ describe("smart queues", () => {
     }
     // Due today is a different queue: an activity whose due date is today must
     // not appear in «عقب‌افتاده», or the two headings say the same thing.
-    const today = new Date();
+    // "Today" is the business's today (what the queues compare against), not
+    // the test machine's: between Tehran's midnight and UTC's, a runner-local
+    // 23:00 already falls on the business's yesterday.
+    const { businessToday } = await import("../src/lib/business-day-service");
+    const today = await businessToday(biz.id);
     await makeActivity(biz.id, {
       subject: "تماس امروز",
-      dueAt: new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 0, 0).toISOString(),
+      dueAt: `${today}T12:00:00Z`,
     });
     // A completed one is not outstanding work at all.
     await makeActivity(biz.id, {
