@@ -25,7 +25,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
-import { PAYMENT_METHOD_LABELS, CONDITION_GRADE_LABELS } from "@/lib/receipt-template";
+import { paymentMethodLabel, CONDITION_GRADE_LABELS } from "@/lib/receipt-template";
 import { printReceipt } from "@/lib/printing/client";
 import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes";
 import { api, ErrorBox, errorMessageOrRaw } from "../ui";
@@ -333,7 +333,7 @@ export function RetailInvoiceDetailModal({
                   {invoice.payments.map((payment) => (
                     <div key={payment.id} className="flex items-center justify-between rounded-xl border border-border/80 bg-card p-3">
                       <div>
-                        <p className="text-sm font-semibold">{payment.methodLabel || PAYMENT_METHOD_LABELS[payment.method] || payment.method}</p>
+                        <p className="text-sm font-semibold">{payment.methodLabel || paymentMethodLabel(payment.method)}</p>
                         {payment.reference ? <p className="mt-0.5 text-xs text-muted-foreground">مرجع: {payment.reference}</p> : null}
                         <p className="mt-0.5 text-xs text-muted-foreground">
                           {toPersianDigits(formatJalali(payment.receivedAt, { withTime: true }))}

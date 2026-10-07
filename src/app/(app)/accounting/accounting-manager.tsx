@@ -4,7 +4,7 @@ import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 
 import { useCallback, useEffect, useState, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { SectionNav } from "@/app/dashboard/section-nav";
+import { FilterChip, FilterChipRow } from "@/app/dashboard/filters";
 import { api, ErrorBox, SecondaryButton } from "@/app/dashboard/ui";
 import { PERMISSIONS } from "@/lib/permissions";
 import { partyScopeFor } from "@/lib/parties-scopes";
@@ -20,13 +20,7 @@ import {
   type AccountingSectionKey,
 } from "./accounting-routes";
 import { accountingSectionsFor } from "./accounting-nav";
-import {
-  LEDGER_WORKSPACE_DESCRIPTION,
-  LEDGER_WORKSPACE_LABEL,
-  LEDGER_WORKSPACE_SECTION_KEYS,
-  LEDGER_WORKSPACE_SUBGROUPS,
-} from "./accounting-workspace";
-import { ACCOUNTING_SECTION_ICONS as SECTION_ICONS } from "./accounting-icons";
+import { LEDGER_WORKSPACE_SECTION_KEYS, LEDGER_WORKSPACE_SUBGROUPS } from "./accounting-workspace";
 import { TrialBalanceSection } from "./trial-balance-section";
 import { EntriesSection } from "./entries-section";
 import { ManualEntrySection } from "./manual-entry-section";
@@ -136,19 +130,15 @@ export function AccountingManager({
   );
 
   /**
-   * The in-page rail is «فضای کار حسابداری» — *only* that group.
+   * The app's menu is the sidebar (`accounting-app-nav.tsx`) — the one
+   * navigation definition. This page used to draw a second copy of the ledger
+   * group as a rail beside the content (dashboard audit F15), and on a phone
+   * that rail filled the first screen before the form a person came for.
    *
-   * It used to list every section in the app, which made it a second copy of
-   * the whole menu sitting inside the page: two navigations, one of them
-   * looking like the app's real one. The app's menu is the sidebar now
-   * (`accounting-app-nav.tsx`, the complete workspace), and this rail is the
-   * ledger group's own sub-navigation — the same keys the sidebar group holds.
-   * Accounting settings is intentionally outside this rail, in the app menu's
-   * final Settings group, so a configuration screen is not buried under daily
-   * ledger tools.
-   *
-   * Wages stay owner + accountant: the keys are filtered through
-   * `accountingSectionsFor`, the same gate the pages use.
+   * What stays is contextual: the few sections of the *current* sub-group
+   * («دفتر و اسناد»، «وجوه و هزینه»…) as one compact row, drawn after the
+   * section's own content on a phone and above it from `sm` up. Keys are
+   * filtered through `accountingSectionsFor`, the same gate the pages use.
    */
   const permissionSet = useMemo(() => new Set(permissions), [permissions]);
   const allowed = accountingSectionsFor(permissionSet);
@@ -165,18 +155,12 @@ export function AccountingManager({
   const canEditAccounts = canEditChartOfAccounts(role, permissions);
   const sections = LEDGER_WORKSPACE_SECTION_KEYS.flatMap((key) => {
     const def = allowed.find((candidate) => candidate.key === key);
-    return def ? [{ ...def, icon: SECTION_ICONS[def.key] }] : [];
+    return def ? [def] : [];
   });
-  // The rail's headings are the sidebar group's own sub-groups, from the same
-  // list: sixteen rows in one undivided column is what the sidebar group used
-  // to be, and the rail should not be the place that keeps it.
-  const sectionGroups = LEDGER_WORKSPACE_SUBGROUPS.flatMap((subGroup) => {
-    const keys = subGroup.keys.filter((key) => sections.some((candidate) => candidate.key === key));
-    return keys.length > 0 ? [{ label: subGroup.label, keys }] : [];
-  });
-  // Outside the ledger group the rail has nothing to say: people, reports and
-  // app settings are top-level entries of the Accounting menu.
-  const inLedgerWorkspace = sections.some((candidate) => candidate.key === section);
+  const currentSubGroup = LEDGER_WORKSPACE_SUBGROUPS.find((subGroup) => subGroup.keys.includes(section));
+  const siblings = currentSubGroup
+    ? sections.filter((candidate) => currentSubGroup.keys.includes(candidate.key))
+    : [];
 
   const [loadFailed, setLoadFailed] = useState(false);
   const loadAccounts = useCallback(() => {
@@ -279,23 +263,25 @@ export function AccountingManager({
     <div className="min-w-0 space-y-4 sm:space-y-5">
       <ErrorBox>{error}</ErrorBox>
 
-      {inLedgerWorkspace ? (
-        <SectionNav
-          idPrefix="accounting-ledger"
-          label={LEDGER_WORKSPACE_LABEL}
-          title={LEDGER_WORKSPACE_LABEL}
-          description={LEDGER_WORKSPACE_DESCRIPTION}
-          variant="rail"
-          sections={sections}
-          groups={sectionGroups}
-          active={section}
-          onChange={goToSection}
-        >
-          <div className={`${styles.content} min-w-0`}>{body}</div>
-        </SectionNav>
-      ) : (
-        <div className={`${styles.content} min-w-0`}>{body}</div>
-      )}
+      <div className="flex min-w-0 flex-col gap-4">
+        {currentSubGroup && siblings.length > 1 ? (
+          <nav aria-label={currentSubGroup.label} className="order-2 sm:order-1">
+            <FilterChipRow label={currentSubGroup.label} className="flex-nowrap overflow-x-auto pb-1">
+              {siblings.map((candidate) => (
+                <FilterChip
+                  key={candidate.key}
+                  selected={candidate.key === section}
+                  aria-current={candidate.key === section ? "page" : undefined}
+                  onClick={() => goToSection(candidate.key)}
+                >
+                  {candidate.label}
+                </FilterChip>
+              ))}
+            </FilterChipRow>
+          </nav>
+        ) : null}
+        <div className={`${styles.content} order-1 min-w-0 sm:order-2`}>{body}</div>
+      </div>
     </div>
   );
 }

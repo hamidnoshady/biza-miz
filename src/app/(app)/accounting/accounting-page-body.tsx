@@ -9,6 +9,7 @@ import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { AskAssistant } from "@/components/ai/ask-assistant";
 import { AccountingManager } from "./accounting-manager";
 import { canOpenLedger, canViewAccountingSection } from "./accounting-nav";
+import { accountingAssistantContext, accountingSectionHeading } from "./accounting-headings";
 import {
   accountingFallbackHref,
   type AccountingSectionKey,
@@ -23,42 +24,6 @@ import {
  * one place: signed in, admitted to the app, admitted to *this* section
  * (payroll is the shorter list), entitled to the ledger.
  */
-/**
- * The page title and one-line description per section.
- *
- * Only the sections whose subject is *not* «حسابداری» in general need an entry;
- * everything else keeps the app's own heading. «تنظیمات حسابداری» has one for
- * the reason the whole settings split exists: an app settings page must be
- * visibly the app's, with its own title and description, and never read as the
- * platform settings page.
- */
-const DEFAULT_ACCOUNTING_HEADING = {
-  title: "فضای کار حسابداری",
-  description: "تراز آزمایشی، دفتر روزنامه، اسناد دستی و عملیات مالی کسب‌وکار.",
-};
-
-const ACCOUNTING_HEADINGS: Partial<Record<AccountingSectionKey, { title: string; description: string }>> = {
-  settings: {
-    title: "تنظیمات حسابداری",
-    description:
-      "تنظیمات مخصوص برنامهٔ حسابداری — سرفصل حساب‌ها، دوره‌های مالی و قواعد سندزنی. تنظیمات کسب‌وکار و پلتفرم جای دیگری است.",
-  },
-  "financial-reports": {
-    title: "گزارش‌های مالی",
-    description: "گزارش‌های حسابداری و راه رسیدن به گزارش‌های کسب‌وکار.",
-  },
-  dashboard: {
-    title: "حسابداری",
-    description:
-      "میز کار حسابداری — نمای مالی کسب‌وکار، اشخاص و دسترسی به همهٔ بخش‌های کاری از منوی کناری.",
-  },
-  directory: {
-    title: "اشخاص",
-    description:
-      "یک فهرست برای همهٔ طرف‌حساب‌ها — مشتریان، تأمین‌کنندگان، فروشندگان و کارکنان. یک پرونده برای هر نفر، حتی وقتی چند نقش دارد.",
-  },
-};
-
 export async function AccountingPageBody({ section }: { section: AccountingSectionKey }) {
   const session = await getSession();
   if (!session) redirect("/login");
@@ -71,7 +36,7 @@ export async function AccountingPageBody({ section }: { section: AccountingSecti
   await requireFeatureForPage(session.businessId, "ledger");
   const holooCompanion = await withTenant(session.businessId, () => hasActiveHolooCompanion(session.businessId));
   const features = await effectiveFeatures(session.businessId);
-  const heading = ACCOUNTING_HEADINGS[section] ?? DEFAULT_ACCOUNTING_HEADING;
+  const heading = accountingSectionHeading(section);
 
   return (
     <PageShell>
@@ -87,10 +52,7 @@ export async function AccountingPageBody({ section }: { section: AccountingSecti
           <>
             <KnowledgeHelpButton section="ledger" />
             {features.ai_assistant ? (
-              <AskAssistant
-                app="growth"
-                context="وضعیت حسابداری را بررسی کن: تراز آزمایشی، دفتر روزنامه و اسناد ثبت‌شده."
-              />
+              <AskAssistant app="accounting" context={accountingAssistantContext(section)} />
             ) : null}
           </>
         }

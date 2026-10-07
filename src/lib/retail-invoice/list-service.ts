@@ -6,6 +6,7 @@
  * The route stays responsible for auth, parameter parsing/validation and the
  * HTTP response shape; this owns only the query and the row mapping.
  */
+import { paymentMethodLabel } from "../receipt-template";
 import { query } from "../db";
 
 /** One settlement method an invoice was actually paid with, for display. */
@@ -56,19 +57,6 @@ export interface ListRetailInvoicesInput {
 }
 
 /** The Persian fallback name for a payment enum value with no named way on the row (legacy data). */
-function fallbackMethodName(method: string): string {
-  switch (method) {
-    case "cash":
-      return "نقدی";
-    case "card":
-      return "کارت‌خوان";
-    case "credit":
-      return "نسیه";
-    default:
-      return method;
-  }
-}
-
 export async function listRetailInvoices(
   input: ListRetailInvoicesInput,
 ): Promise<{ invoices: RetailInvoiceListRow[]; count: number }> {
@@ -162,7 +150,7 @@ export async function listRetailInvoices(
         // underlying payment enum (`card` is what a retail bank payment
         // stores) — same public contract the singular field used to keep.
         method: m.method === "card" ? "bank" : m.method,
-        name: m.name ?? fallbackMethodName(m.method),
+        name: m.name ?? paymentMethodLabel(m.method),
       })),
     creditTotal: Number(r.credit_total),
     hasInstallmentPlan: r.has_installment_plan,
