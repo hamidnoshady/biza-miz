@@ -7,6 +7,7 @@ import {
   PayablesInputError,
   purchasePayableRial,
   resolvePaymentDueDate,
+  supplierReturnVatReversal,
   vatAmountForRate,
   voucherAccountChoices,
   voucherMethodForRole,
@@ -160,5 +161,33 @@ describe("voucher accounts", () => {
     expect(normalizeBankReference(undefined)).toBeNull();
     expect(codeOf(() => normalizeBankReference("9".repeat(65)))).toBe("invalid_bank_reference");
     expect(codeOf(() => normalizeBankReference(42))).toBe("invalid_bank_reference");
+  });
+});
+
+describe("supplierReturnVatReversal", () => {
+  const base = { purchaseVat: 100_000, purchaseGoods: 1_000_000, priorReturnedGoods: 0, priorReversedVat: 0 };
+
+  it("reverses nothing for a purchase without VAT", () => {
+    expect(supplierReturnVatReversal({ ...base, purchaseVat: 0, returnedGoods: 400_000 })).toBe(0n);
+  });
+
+  it("reverses the proportional share, rounded half-up to the Rial", () => {
+    expect(supplierReturnVatReversal({ ...base, returnedGoods: 300_000 })).toBe(30_000n);
+    expect(supplierReturnVatReversal({ ...base, purchaseVat: 1, returnedGoods: 500_000 })).toBe(1n);
+    expect(supplierReturnVatReversal({ ...base, purchaseVat: 1, returnedGoods: 499_999 })).toBe(0n);
+  });
+
+  it("partials that add up to the whole purchase reverse exactly the whole VAT", () => {
+    const thirds = { purchaseVat: 100, purchaseGoods: 3 };
+    const first = supplierReturnVatReversal({ ...thirds, priorReturnedGoods: 0, returnedGoods: 1, priorReversedVat: 0 });
+    const second = supplierReturnVatReversal({ ...thirds, priorReturnedGoods: 1, returnedGoods: 1, priorReversedVat: first });
+    const third = supplierReturnVatReversal({ ...thirds, priorReturnedGoods: 2, returnedGoods: 1, priorReversedVat: first + second });
+    expect([first, second, third]).toEqual([33n, 34n, 33n]);
+    expect(first + second + third).toBe(100n);
+  });
+
+  it("a full return reverses the whole VAT, and never more than is left", () => {
+    expect(supplierReturnVatReversal({ ...base, returnedGoods: 1_000_000 })).toBe(100_000n);
+    expect(supplierReturnVatReversal({ ...base, priorReturnedGoods: 1_000_000, priorReversedVat: 100_000, returnedGoods: 0 })).toBe(0n);
   });
 });

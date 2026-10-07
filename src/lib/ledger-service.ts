@@ -824,6 +824,66 @@ export async function postExactOperationalInventoryEntry(
   });
 }
 
+/**
+ * A supplier return: Debit the settlement side / Credit inventory for the goods
+ * — exactly `postExactOperationalInventoryEntry` when the purchase carried no
+ * VAT — and, when it did (audit F11), Credit input VAT (1220) for the share of
+ * the invoice's VAT this return reverses, in the same entry, with the
+ * settlement side debited goods + VAT so A/P and 1220 both come back down.
+ */
+export async function postExactSupplierReturnEntry(
+  client: PoolClient,
+  params: {
+    businessId: string;
+    locationId: string;
+    supplierReturnId: string;
+    createdBy: string | null;
+    inventoryEventId: string;
+    debitCode: string;
+    goods: RialText;
+    vat: RialText;
+  },
+): Promise<string | null> {
+  const common = {
+    businessId: params.businessId,
+    locationId: params.locationId,
+    sourceType: "supplier_return",
+    sourceId: params.supplierReturnId,
+    postingKind: "supplier_return",
+    memo: "Supplier return",
+    createdBy: params.createdBy,
+    inventoryEventId: params.inventoryEventId,
+  };
+  const vat = rialBigInt(params.vat);
+  if (vat < 0n) throw new Error("invalid_supplier_return_vat");
+  if (vat === 0n) {
+    return postExactOperationalInventoryEntry(client, {
+      ...common,
+      debitCode: params.debitCode,
+      creditCode: WELL_KNOWN_CODES.inventory,
+      amount: params.goods,
+    });
+  }
+  const accounts = await accountIdsByCode(client, params.businessId, [
+    params.debitCode,
+    WELL_KNOWN_CODES.inventory,
+    WELL_KNOWN_CODES.vatReceivable,
+  ]);
+  const zero = "0" as RialText;
+  return postExactJournalEntry(client, {
+    ...common,
+    lines: [
+      {
+        accountId: accounts.get(params.debitCode)!,
+        debit: (rialBigInt(params.goods) + vat).toString() as RialText,
+        credit: zero,
+      },
+      { accountId: accounts.get(WELL_KNOWN_CODES.inventory)!, debit: zero, credit: params.goods },
+      { accountId: accounts.get(WELL_KNOWN_CODES.vatReceivable)!, debit: zero, credit: params.vat },
+    ],
+  });
+}
+
 export async function postExactCustomerRefundEntry(
   client: PoolClient,
   params: {

@@ -53,6 +53,7 @@ let purchaseService: typeof import("../src/lib/purchase-service");
 let receiveService: typeof import("../src/lib/purchase-receive-service");
 let reportsService: typeof import("../src/lib/reports-service");
 let installments: typeof import("../src/lib/installments-service");
+let returnService: typeof import("../src/lib/supplier-return-service");
 let purchaseRoute: typeof import("../src/app/api/inventory/purchases/[id]/route");
 let purchasesRoute: typeof import("../src/app/api/inventory/purchases/route");
 
@@ -95,6 +96,7 @@ beforeAll(async () => {
   receiveService = await import("../src/lib/purchase-receive-service");
   reportsService = await import("../src/lib/reports-service");
   installments = await import("../src/lib/installments-service");
+  returnService = await import("../src/lib/supplier-return-service");
   purchaseRoute = await import("../src/app/api/inventory/purchases/[id]/route");
   purchasesRoute = await import("../src/app/api/inventory/purchases/route");
 
@@ -448,6 +450,109 @@ describe("purchase supplier invoice and VAT", () => {
     await expect(draft({ vatAmount: -5 })).rejects.toMatchObject({ code: "invalid_vat_amount", status: 400 });
     await expect(draft({ invoiceDate: "2026-02-30" })).rejects.toMatchObject({ code: "invalid_invoice_date" });
     expect((await db.query("SELECT 1 FROM purchases")).rows).toHaveLength(0);
+  });
+});
+
+describe("supplier return of a purchase that carried input VAT", () => {
+  /** A received credit purchase of `qty` kg for `goods` Rial with `vat` on its invoice; returns its purchase item and lot. */
+  async function receivedPurchase(qty: string, goods: string, vat: number) {
+    const { id } = await purchaseService.createDraftPurchase({
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      purchaseDate: "2026-10-03",
+      items: [{ inventoryItemId: item.id, purchaseQty: qty, totalCost: goods }],
+      createdBy: user.id,
+      invoice: { vatAmount: vat },
+    });
+    await withClient((client) =>
+      receiveService.receivePurchaseInTransaction(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        purchaseId: id,
+        settlementMethod: "credit",
+        createdBy: user.id,
+      }),
+    );
+    const { rows } = await db.query<{ item_id: string; lot_id: string }>(
+      `SELECT pi.id AS item_id, lot.id AS lot_id
+         FROM purchase_items pi JOIN inventory_lots lot ON lot.source_type = 'purchase' AND lot.source_id = pi.purchase_id
+        WHERE pi.purchase_id = $1`,
+      [id],
+    );
+    return { purchaseId: id, purchaseItemId: rows[0].item_id, lotId: rows[0].lot_id };
+  }
+
+  async function giveBack(p: { purchaseId: string; purchaseItemId: string; lotId: string }, quantity: string) {
+    return withClient((client) =>
+      returnService.createSupplierReturn(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        purchaseId: p.purchaseId,
+        settlementMethod: "accounts_payable",
+        reason: "معیوب",
+        idempotencyKey: randomUUID(),
+        createdBy: user.id,
+        lines: [{ purchaseItemId: p.purchaseItemId, inventoryLotId: p.lotId, quantity: quantity as never }],
+      }),
+    );
+  }
+
+  async function balances() {
+    const ap = (await apService.listSupplierBalances(biz.id)).find((s) => s.supplierId === supplier.id)?.balance ?? 0;
+    const vat = await reportsService.getVatReport(biz.id, {});
+    return { ap, inputVat: vat.inputVat, vatReceivable: vat.vatReceivableBalance };
+  }
+
+  it("a partial return reverses its proportional share of the VAT in the same entry", async () => {
+    const p = await receivedPurchase("10", "1000000", 100_000);
+    const ret = await giveBack(p, "3");
+    expect(ret.value).toBe("300000");
+    expect(await entryLines("supplier_return", ret.id)).toEqual([
+      { code: "1220", debit: 0, credit: 30_000 },
+      { code: "1300", debit: 0, credit: 300_000 },
+      { code: "2100", debit: 330_000, credit: 0 },
+    ]);
+    expect(await balances()).toEqual({ ap: 770_000, inputVat: 70_000, vatReceivable: 70_000 });
+  });
+
+  it("two partials that add up to the whole purchase reverse exactly the whole VAT, remainder included", async () => {
+    // 1,000,000 over 3 kg with 99,999 VAT: a third does not divide evenly in either figure.
+    const p = await receivedPurchase("3", "1000000", 99_999);
+    const first = await giveBack(p, "1");
+    const second = await giveBack(p, "2");
+    expect(BigInt(first.value) + BigInt(second.value)).toBe(1_000_000n);
+
+    const firstLines = await entryLines("supplier_return", first.id);
+    const secondLines = await entryLines("supplier_return", second.id);
+    const vatOf = (lines: { code: string; credit: number }[]) => lines.find((l) => l.code === "1220")!.credit;
+    // The first return's share, rounded half-up to the Rial; the second takes exactly what is left.
+    const expectedFirst = Number((99_999n * BigInt(first.value) * 2n + 1_000_000n) / 2_000_000n);
+    expect(vatOf(firstLines)).toBe(expectedFirst);
+    expect(vatOf(secondLines)).toBe(99_999 - expectedFirst);
+    expect(firstLines.find((l) => l.code === "2100")!.debit).toBe(Number(first.value) + expectedFirst);
+    expect(secondLines.find((l) => l.code === "2100")!.debit).toBe(Number(second.value) + 99_999 - expectedFirst);
+    expect(await balances()).toEqual({ ap: 0, inputVat: 0, vatReceivable: 0 });
+  });
+
+  it("a full return reverses the whole VAT and clears the payable", async () => {
+    const p = await receivedPurchase("10", "1000000", 100_000);
+    const ret = await giveBack(p, "10");
+    expect(await entryLines("supplier_return", ret.id)).toEqual([
+      { code: "1220", debit: 0, credit: 100_000 },
+      { code: "1300", debit: 0, credit: 1_000_000 },
+      { code: "2100", debit: 1_100_000, credit: 0 },
+    ]);
+    expect(await balances()).toEqual({ ap: 0, inputVat: 0, vatReceivable: 0 });
+  });
+
+  it("a purchase without VAT is returned exactly as before: two lines, 1220 untouched", async () => {
+    const p = await receivedPurchase("10", "1000000", 0);
+    const ret = await giveBack(p, "4");
+    expect(await entryLines("supplier_return", ret.id)).toEqual([
+      { code: "1300", debit: 0, credit: 400_000 },
+      { code: "2100", debit: 400_000, credit: 0 },
+    ]);
+    expect(await balances()).toEqual({ ap: 600_000, inputVat: 0, vatReceivable: 0 });
   });
 });
 

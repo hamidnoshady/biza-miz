@@ -239,3 +239,37 @@ export function normalizeBankReference(raw: unknown): string | null {
   if (value.length > MAX_BANK_REFERENCE_LENGTH) throw new PayablesInputError("invalid_bank_reference");
   return value;
 }
+
+// ---------------------------------------------------------------------------
+// Supplier return of a purchase that carried input VAT
+// ---------------------------------------------------------------------------
+
+/**
+ * How much of a purchase's input VAT one supplier return reverses, in integer
+ * Rial. Allocated *cumulatively*: the VAT reversed by all returns so far is
+ * `vat × returned goods ÷ purchase goods` rounded half-up (the whole VAT once
+ * every Rial of goods is back), and this return takes the difference from
+ * what earlier returns already reversed. So any sequence of partial returns
+ * that adds up to the whole purchase reverses exactly the whole VAT — no Rial
+ * stranded in 1220 or on the supplier's payable by rounding — and a purchase
+ * without VAT reverses nothing.
+ */
+export function supplierReturnVatReversal(params: {
+  purchaseVat: string | number | bigint;
+  purchaseGoods: string | number | bigint;
+  /** Goods value returned by earlier returns of this purchase. */
+  priorReturnedGoods: string | number | bigint;
+  /** Goods value this return gives back. */
+  returnedGoods: string | number | bigint;
+  /** Input VAT earlier returns already reversed. */
+  priorReversedVat: string | number | bigint;
+}): bigint {
+  const vat = BigInt(params.purchaseVat);
+  const goods = BigInt(params.purchaseGoods);
+  if (vat <= 0n || goods <= 0n) return 0n;
+  const cumulativeGoods = BigInt(params.priorReturnedGoods) + BigInt(params.returnedGoods);
+  const cumulativeVat = cumulativeGoods >= goods ? vat : (vat * cumulativeGoods * 2n + goods) / (2n * goods);
+  const thisReturn = cumulativeVat - BigInt(params.priorReversedVat);
+  if (thisReturn <= 0n) return 0n;
+  return thisReturn > vat ? vat : thisReturn;
+}
