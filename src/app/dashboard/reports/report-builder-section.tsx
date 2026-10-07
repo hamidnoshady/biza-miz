@@ -23,6 +23,7 @@ import type { ReportConfig } from "@/lib/reports";
 import {
   builderConfigFromState,
   builderStateFromConfig,
+  previewIsStale,
   type SortBy,
   type SortDir,
 } from "./report-builder-config";
@@ -91,7 +92,21 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const [rows, setRows] = useState<ReportRow[] | null>(null);
+  /**
+   * The config that produced `rows`. Export, pin and the stale notice all read
+   * this rather than the live draft: what is downloaded must be what is on
+   * screen (issue #819 — the file used to be built from controls the reader had
+   * changed but never previewed).
+   */
+  const [loadedConfig, setLoadedConfig] = useState<ReportConfig | null>(null);
   const [error, setError] = useState("");
+  /** Success/confirmation feedback for the saved-report list, announced politely. */
+  const [notice, setNotice] = useState("");
+  /** Which mutation is running, so one entry is busy without freezing the list. */
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  /** The entry awaiting delete confirmation — deleting cascades to dashboard widgets. */
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  const [listError, setListError] = useState("");
   const [busy, setBusy] = useState(false);
   // Monotonic request id + the in-flight request: a slow first preview must
   // never overwrite a newer one, and a preview superseded by a filter change
@@ -209,13 +224,16 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
     const controller = new AbortController();
     inFlight.current = controller;
     const seq = ++previewSeq.current;
+    // The exact object that goes on the wire is remembered with the rows, so
+    // "what produced this result" is a fact rather than a reconstruction.
+    const config = currentConfig();
     setBusy(true);
     setError("");
     try {
       const response = await fetch("/api/reports/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(currentConfig()),
+        body: JSON.stringify(config),
         signal: controller.signal,
       });
       const data = await response.json().catch(() => ({}));
@@ -225,6 +243,7 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
         return;
       }
       setRows(data.rows ?? []);
+      setLoadedConfig(config);
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
       if (seq !== previewSeq.current) return;
@@ -290,9 +309,62 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
     setError("");
   }
 
+  /**
+   * Deletes a saved report, with the failure handling the old one-liner did not
+   * have (issue #819): it ignored `response.ok`, so a 403 or 404 looked exactly
+   * like success and the row simply stayed. Deleting a report also removes every
+   * dashboard widget pinned to it — `dashboard_widgets.saved_report_id` is
+   * `ON DELETE CASCADE` (migration 0008) — so the confirmation says so.
+   */
   async function remove(id: string) {
-    await fetch("/api/reports/saved/" + id, { method: "DELETE" });
-    loadSaved();
+    setPendingId(id);
+    setListError("");
+    setNotice("");
+    try {
+      const response = await fetch("/api/reports/saved/" + id, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        setListError("حذف گزارش انجام نشد. دسترسی یا اتصال را بررسی کنید.");
+        return;
+      }
+      setConfirmingDelete(null);
+      setNotice("گزارش حذف شد؛ ویجت‌های سنجاق‌شدهٔ آن هم از داشبورد برداشته شدند.");
+      if (editingId === id) {
+        setEditingId(null);
+        setName("");
+      }
+      void loadSaved();
+    } catch {
+      setListError("حذف گزارش انجام نشد. اتصال شبکه را بررسی کنید.");
+    } finally {
+      setPendingId(null);
+    }
+  }
+
+  /** A copy of a saved report under a new name — the same config, a new row. */
+  async function duplicate(report: SavedReportRow) {
+    setPendingId(report.id);
+    setListError("");
+    setNotice("");
+    try {
+      const response = await fetch("/api/reports/saved", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: `${report.name} (کپی)`, config: report.config }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        setListError(data.details?.join(" ") ?? "ساخت نسخهٔ کپی انجام نشد.");
+        return;
+      }
+      setNotice("نسخهٔ کپی ساخته شد.");
+      void loadSaved();
+    } catch {
+      setListError("ساخت نسخهٔ کپی انجام نشد. اتصال شبکه را بررسی کنید.");
+    } finally {
+      setPendingId(null);
+    }
   }
 
   if (!views) {
@@ -305,6 +377,14 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
   // preview must render them through the business's display unit, or a business
   // showing «تومان» reads its own sales ten times too high (issue #819).
   const formatValue = currentMetric?.money ? money.format : undefined;
+
+  /**
+   * True when the controls no longer describe the result on screen (issue
+   * #819). Compared as JSON over the config the form would submit — the same
+   * object the preview sent — so "dirty" means exactly "the next Preview
+   * would send something different".
+   */
+  const isDirty = previewIsStale(currentConfig(), loadedConfig);
 
   return (
     <div className="space-y-4 sm:space-y-5">
@@ -540,6 +620,15 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
             ) : null}
           </div>
 
+          {rows !== null && isDirty ? (
+            <p
+              role="status"
+              className="mt-4 rounded-lg border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-100"
+            >
+              تنظیمات تغییر کرده‌اند — برای به‌روزرسانی نتیجه، پیش‌نمایش را اجرا کنید.
+            </p>
+          ) : null}
+
           {rows !== null ? (
             <section
               aria-label="خروجی پیش‌نمایش گزارش"
@@ -558,13 +647,27 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
               />
               {capabilities.canExportReports ? (
                 <div className="border-t border-border pt-4">
+                  {/*
+                    The file is built from `loadedConfig` — the config that
+                    produced the rows above — never from the live draft, so it
+                    cannot disagree with what the reader is looking at. While the
+                    draft is dirty the buttons are disabled anyway; that is the
+                    "optionally disable export until Preview runs again" half of
+                    the issue's fix, and belt-and-braces with the config above.
+                  */}
                   <ExportButtons
+                    disabled={isDirty}
                     request={{
                       title: name || currentView?.label || "گزارش",
                       kind: "chart",
-                      config: currentConfig(),
+                      config: loadedConfig ?? undefined,
                     }}
                   />
+                  {isDirty ? (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      خروجی از نتیجهٔ فعلی ساخته می‌شود؛ ابتدا پیش‌نمایش را اجرا کنید.
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
             </section>
@@ -577,6 +680,20 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
         description="گزارش‌هایی که خودتان ساخته‌اید — قابل ویرایش، سنجاق به داشبورد یا حذف."
         flush
       >
+        {/* Feedback for the list's mutations: announced, and never a message
+            about one report drawn on another one. */}
+        <div className="px-4 pt-3 sm:px-5">
+          {listError ? (
+            <p role="alert" className="text-xs text-destructive">
+              {listError}
+            </p>
+          ) : null}
+          {notice ? (
+            <p role="status" className="text-xs text-muted-foreground">
+              {notice}
+            </p>
+          ) : null}
+        </div>
         <ul className="divide-y divide-border px-4 sm:px-5">
           {saved === null ? (
             <li className="py-3">
@@ -584,43 +701,90 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
             </li>
           ) : null}
 
-          {customReports.map((report) => (
-            <li
-              key={report.id}
-              className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"
-            >
-              <span className="min-w-0 break-words font-semibold text-foreground">
-                {report.name}
-              </span>
-              <div className="grid shrink-0 gap-2 sm:flex sm:flex-wrap">
-                {capabilities.canManageSavedReports ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="lg"
-                    onClick={() => loadIntoBuilder(report)}
-                  >
-                    ویرایش
-                  </Button>
-                ) : null}
-                <PinToDashboardButton
-                  savedReportId={report.id}
-                  chartType={report.config.visualization ?? "bar"}
-                  title={report.name}
-                />
-                {capabilities.canManageSavedReports ? (
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    size="lg"
-                    onClick={() => remove(report.id)}
-                  >
-                    حذف
-                  </Button>
-                ) : null}
-              </div>
-            </li>
-          ))}
+          {customReports.map((report) => {
+            const pending = pendingId === report.id;
+            const confirming = confirmingDelete === report.id;
+            return (
+              <li
+                key={report.id}
+                className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <span className="min-w-0 break-words font-semibold text-foreground">
+                  {report.name}
+                </span>
+                {confirming ? (
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    <span className="text-xs leading-5 text-muted-foreground">
+                      این گزارش و ویجت‌های سنجاق‌شدهٔ آن حذف می‌شوند. مطمئنید؟
+                    </span>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="lg"
+                      disabled={pending}
+                      onClick={() => remove(report.id)}
+                    >
+                      {pending ? "در حال حذف…" : "تأیید حذف"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="lg"
+                      disabled={pending}
+                      onClick={() => setConfirmingDelete(null)}
+                    >
+                      انصراف
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="grid shrink-0 gap-2 sm:flex sm:flex-wrap">
+                    {capabilities.canManageSavedReports ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="lg"
+                        disabled={pending}
+                        onClick={() => loadIntoBuilder(report)}
+                      >
+                        ویرایش / تغییر نام
+                      </Button>
+                    ) : null}
+                    <PinToDashboardButton
+                      savedReportId={report.id}
+                      chartType={report.config.visualization ?? "bar"}
+                      title={report.name}
+                    />
+                    {capabilities.canManageSavedReports ? (
+                      <>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="lg"
+                          disabled={pending}
+                          onClick={() => duplicate(report)}
+                        >
+                          {pending ? "در حال کپی…" : "کپی"}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="lg"
+                          disabled={pending}
+                          onClick={() => {
+                            setListError("");
+                            setNotice("");
+                            setConfirmingDelete(report.id);
+                          }}
+                        >
+                          حذف
+                        </Button>
+                      </>
+                    ) : null}
+                  </div>
+                )}
+              </li>
+            );
+          })}
 
           {saved !== null && customReports.length === 0 ? (
             <li className="py-4">

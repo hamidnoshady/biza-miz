@@ -52,6 +52,30 @@ export function builderStateFromConfig(config: ReportConfig): BuilderState {
 }
 
 /**
+ * True when the form no longer describes the previewed result (issue #819).
+ *
+ * The builder used to keep whatever result was on screen while the controls
+ * moved on, so Export produced a file for a report the reader had never seen.
+ * Comparing the config the form *would* submit against the config the rows were
+ * produced from is exact, and needs no per-control bookkeeping: any query
+ * affecting change — metric, aggregation, dimension, dates, filters, sort,
+ * limit — makes the two objects differ.
+ */
+export function previewIsStale(draft: ReportConfig, loaded: ReportConfig | null): boolean {
+  return loaded !== null && queryShape(draft) !== queryShape(loaded);
+}
+
+/**
+ * The part of a config that decides what the database returns. The chosen
+ * visualization is a rendering preference — switching a bar to a pie cannot
+ * make the numbers on screen wrong — so it is deliberately excluded, and
+ * `JSON.stringify` drops the `undefined` it is replaced with.
+ */
+function queryShape(config: ReportConfig): string {
+  return JSON.stringify({ ...config, visualization: undefined });
+}
+
+/**
  * The form state as a report config — the same object feeds the preview, the
  * save/update body, the export and the pin.
  *
