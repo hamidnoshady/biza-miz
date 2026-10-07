@@ -391,6 +391,35 @@ export async function businessToday(businessId: string): Promise<string> {
 }
 
 /**
+ * The zone `businessToday` reads the calendar in for this business's primary
+ * branch — the same coalesced column value, exposed so callers that bucket
+ * *stored* timestamps by calendar day can cast in the zone that produced the
+ * day they compare against.
+ *
+ * Why that matters: `due_at::date` casts in the SESSION zone, while the day it
+ * is compared to comes from here. Tehran is UTC+3:30 with no DST, so for the
+ * 20:30–24:00 UTC slice of every day the two dates disagree, and a follow-up
+ * due at tonight's 23:00 satisfies `due_at::date < today` — «عقب‌افتاده»
+ * gaining a row that «امروز» simultaneously loses. Casts that must agree with
+ * the business date take their zone from this function, not from the session.
+ */
+export async function businessTimeZone(businessId: string): Promise<string> {
+  const { rows } = await query<{ tz: string }>(
+    `SELECT coalesce(l.timezone, 'Asia/Tehran') AS tz
+       FROM (SELECT 1) one
+       LEFT JOIN LATERAL (
+         SELECT timezone
+           FROM locations
+          WHERE business_id = $1 AND is_active
+          ORDER BY created_at
+          LIMIT 1
+       ) l ON true`,
+    [businessId],
+  );
+  return rows[0].tz;
+}
+
+/**
  * «امروز» for one specific branch — the business date *that* branch's own
  * timezone and day-start produce, not the primary branch's.
  *
