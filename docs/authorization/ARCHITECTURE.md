@@ -180,11 +180,25 @@ and `/api/ledger/entries/drafts/[id]/approve` is gated on `ledger.approve`.
 Folding `ledger.propose` into `ledger.post` would make the review queue
 decorative.
 
+**`ledger.propose` gates entry to the queue, not decisions inside it.** Both
+draft-discard routes — `DELETE /api/ledger/entries/drafts/[id]` and
+`POST /api/ledger/entries/drafts/[id]/reject` — used to require it up front,
+which read as the natural pairing (the permission that puts a draft there is the
+permission that takes it away) and was wrong twice over: an approve-only custom
+role could not reject the drafts its whole job is deciding, and a drafter whose
+`ledger.propose` was later revoked was left holding a draft they could no longer
+withdraw. They now require `ledger.view` to reach the draft at all, then allow
+the action to **its author or to `ledger.approve`** — one rule,
+`canDecideOnDraft` in `src/lib/manual-journal.ts`, shared by both routes and by
+the review screen so the three cannot disagree about what a person may click.
+
 The corollary for sweeps: a verb-aware migration is not audience-aware. Mapping
 "every GET in this tree" onto one read key is only safe if every one of those
 GETs had the same audience to begin with. Here two payroll reads were narrower
-than the ledger around them, and the sweep leaked salary data to the manager and
-viewer presets before the contract test caught it.
+than the ledger around them, and the sweep leaked salary data to presets that
+should not have held it before the contract test caught it. (This paragraph used
+to name a `viewer` preset among them; `viewer` is a `workspace-shared.ts`
+project role, not a member `Role`, so no preset could have held it.)
 
 ## Delegating team administration
 

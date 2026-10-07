@@ -548,8 +548,14 @@ const ERROR_MESSAGES: Record<string, string> = {
     negative_statement_balance:
       "مانده صورتحساب صندوق یا کارت‌خوان نمی‌تواند منفی باشد؛ مانده پایانی را وارد کنید، نه گردش دوره.",
     journal_line_not_found: "سند انتخاب‌شده معتبر نیست.",
+    journal_line_required: "هیچ سندی انتخاب نشده است.",
     journal_line_already_reconciled: "این سند در یک تطبیق قفل‌شدهٔ دیگر ثبت شده و دوباره قابل تطبیق نیست.",
     balance_mismatch: "مانده محاسبه‌شده با مانده صورتحساب برابر نیست.",
+    // A future statement would lock the account against every real statement
+    // after it, so the server refuses it rather than warning about it.
+    statement_date_in_future:
+      "تاریخ صورتحساب نمی‌تواند در آینده باشد؛ تاریخ پایان صورتحسابی را وارد کنید که دریافت کرده‌اید.",
+    invalid_cursor: "نشانی صفحهٔ درخواستی معتبر نیست؛ فهرست را از نو بارگذاری کنید.",
     // Phase 17 — plan limits / feature gating
     feature_disabled: "این امکان برای کسب‌وکار شما فعال نیست.",
     branch_limit_exceeded: "به سقف تعداد شعبه در پلن فعلی رسیده‌اید. برای افزودن شعبهٔ بیشتر، پلن را ارتقا دهید.",
@@ -858,19 +864,29 @@ export function PrimaryButton({
   );
 }
 
+/**
+ * The default is `type="button"` — and it is a default rather than an
+ * afterthought because every `<button>` inside a `<form>` submits that form
+ * unless something says otherwise. A secondary control («افزودن ردیف»,
+ * «انصراف», a pager) that a person reaches for while filling a form must never
+ * be the thing that files it; `type` is exposed so a caller can still ask for
+ * `submit` explicitly instead of relying on the browser's default.
+ */
 export function SecondaryButton({
   children,
   onClick,
   disabled,
   className,
+  type = "button",
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   disabled?: boolean;
   className?: string;
+  type?: "submit" | "button";
 }) {
   return (
-    <Button type="button" variant="outline" onClick={onClick} disabled={disabled} className={`px-4 ${className ?? ""}`}>
+    <Button type={type} variant="outline" onClick={onClick} disabled={disabled} className={`px-4 ${className ?? ""}`}>
       {children}
     </Button>
   );

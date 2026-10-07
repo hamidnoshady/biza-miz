@@ -1,5 +1,5 @@
 -- ---------------------------------------------------------------------------
--- 0211_fixed_asset_lifecycle.sql — issue #833: the fixed-asset register grows
+-- 0212_fixed_asset_lifecycle.sql — issue #833: the fixed-asset register grows
 -- a real lifecycle and the accounting-integrity backstops the audit asked for.
 --
 --   1. Reversal, not deletion: a posted depreciation entry can be reversed
