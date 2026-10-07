@@ -59,12 +59,12 @@ import {
   partyPersonType,
   partyRole,
   taxPercentageOf,
-  DEFAULT_TAX_PERCENTAGE,
   type AccountingCodeMode,
   type PartyAddressInfo,
   type PartyContactInfo,
   type PartyFinancialInfo,
   type PartyGeneralInfo,
+  type PartyTaxPercentage,
   type PartyPersonType,
   type PartyRole,
 } from "./parties";
@@ -233,8 +233,8 @@ function toParty(row: PartyRow, dek: Buffer | null): Party {
       // Handed over raw: `taxPercentageOf` already distinguishes «unset» from
       // «zero» and parses localized text. Wrapping it in `Number()` first threw
       // that away — `Number("۹٫۵")` is `NaN`, which the coercion could then only
-      // read as «not a rate» and replace with the default, so a stored
-      // fractional rate came back as 9% on every read.
+      // read as «not a rate» and replace it, so a stored fractional rate
+      // came back wrong on every read.
       taxPercentage: taxPercentageOf({ generalInfo: { taxPercentage: general.taxPercentage } }),
     },
     addressInfo: typeof addressInfo === "object" && addressInfo ? addressInfo : {},
@@ -329,7 +329,7 @@ interface NormalizedWrite {
   accountingCode: string | null;
   nationalId: string | null;
   economicCode: string | null;
-  taxPercentage: number;
+  taxPercentage: PartyTaxPercentage;
   extraGeneral: Record<string, unknown>;
   phone: string | null;
   email: string | null;
@@ -488,9 +488,14 @@ function normalizePartyWrite(input: PartyInput, existing?: Party | null): Normal
   }
 
   const { nationalId: _n, economicCode: _e, taxPercentage: _t, ...extraGeneral } = general ?? {};
-  const taxPercentage = general
-    ? taxPercentageOf({ generalInfo: { taxPercentage: general.taxPercentage } })
-    : (existing?.generalInfo?.taxPercentage as number | undefined) ?? DEFAULT_TAX_PERCENTAGE;
+  // The rate is an override: `null` follows the business rate (`vat-policy.ts`).
+  // A tab sent *without* the key — what a member without `ledger.view` sends,
+  // since `buildNonAccountingPayload` strips it — keeps the stored rate rather
+  // than resetting it.
+  const taxPercentage =
+    general && general.taxPercentage !== undefined
+      ? taxPercentageOf({ generalInfo: { taxPercentage: general.taxPercentage } })
+      : taxPercentageOf({ generalInfo: { taxPercentage: existing?.generalInfo?.taxPercentage } });
 
   const phone =
     input.phone !== undefined
