@@ -8,10 +8,11 @@ multi-business tenancy, the business day, payment ways, dashboard UI rules, phas
 prompt vocabulary) and applies to you whatever tool you run in. Two things cause the most
 damage when missed:
 
-- **The only quality gate is the local checklist** in CLAUDE.md — `npx tsc --noEmit`,
-  `npm test`, `npm run test:db` (needs the Docker Postgres), `npm run build` — run in full
-  before a change is "done". There is no CI; nobody else runs it for you. Say which steps
-  you actually ran.
+- **Run the local checklist** in CLAUDE.md — `npx tsc --noEmit`, `npm test`,
+  `npm run test:db` (needs a Postgres), `npm run build` — in full before a change is
+  "done". `test.yml` also runs on every pull request (CLAUDE.md lists each workflow's
+  triggers), but it is an independent check, not a substitute. Say which steps you
+  actually ran.
 - **Tenancy**: a new tenant-scoped table needs an RLS policy in the same migration, and
   `withoutTenantScope()` is a documented, countable hole — never add one without matching an
   already-justified shape in `src/lib/db.ts`.

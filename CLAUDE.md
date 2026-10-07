@@ -86,9 +86,9 @@ comment happens to use, until you have checked this list.
 
 ## Test and build, locally — before every commit
 
-Run these from the repo root before considering any change done. CI (see below) only runs
-when someone starts it by hand, so it is never a substitute for running the checklist
-yourself first:
+Run these from the repo root before considering any change done. CI (see below) runs on
+pull requests too, but it is an independent check, never a substitute for running the
+checklist yourself first:
 
 ```bash
 npm install               # first time, or after a dependency change
@@ -114,14 +114,28 @@ never edit an already-applied migration.
 
 ## CI — `.github/workflows/test.yml`
 
-Every workflow in `.github/workflows/` is **manual only** (`workflow_dispatch`) — nothing
-runs automatically on a push or a pull request. Start a run from the Actions tab, choosing
-the ref to run it on.
+Every workflow can be started by hand (`workflow_dispatch`), and these also start on their
+own — the triggers are in each file's `on:` block, which is the source of truth if this
+list ever disagrees with it:
+
+| Workflow | Automatic triggers |
+|---|---|
+| `test.yml` | every `pull_request`; `push` to `main` and `arena/**` |
+| `verify-shippables.yml` | `pull_request` and `push` to `main`/`arena/**`, path-filtered to shipped sources |
+| `build-desktop-installer.yml` | `pull_request` and `push` to `main`/`arena/**`, path-filtered to shipped sources |
+| `build-plugin-zip.yml` | `push` to `main` touching `wordpress-plugin/**` |
+| `postgresql-tools-artifact.yml` | `pull_request` touching its own workflow and PostgreSQL-tools scripts |
+| `mobile-emulator-acceptance.yml` | `pull_request` touching the gateway/certificate files it accepts |
+| `publish.yml` | `push` to `main` and to `v*` tags |
+
+`release-readiness`, `release-acceptance-aggregate`, `physical-printer-acceptance`,
+`mobile-real-device-acceptance`, `windows-11-release`, `windows-signed-candidate` and
+`windows-production-release` are manual only.
 
 `test.yml` runs the checklist above — type check, unit tests, integration tests, and
 production build — as four independent jobs in parallel (each GitHub-hosted job gets its
-own VM), then fans them into one `required` status check. A newer manual run on the same
-ref cancels one still in flight.
+own VM), then fans them into one `required` status check. A newer run on the same ref
+cancels one still in flight.
 
 ### Every workflow runs on **GitHub-hosted** runners
 
@@ -157,16 +171,15 @@ What follows from that:
   `npm run test:db` was never started is not a green checklist; say which steps you actually ran.
 - Keep `.github/workflows/test.yml` in sync with the checklist above — if a step is added, removed
   or renamed here, update the workflow (and vice versa) in the same change.
-- Keep every workflow manual-only (`workflow_dispatch`); do not add `push` or
-  `pull_request` triggers back.
+- Treat a trigger change as a decision: add, remove or narrow an `on:` block only on
+  purpose, and update the table above in the same change.
 
 ### Production publishing and deployment: `publish.yml` (GHCR + Coolify)
 
-`.github/workflows/publish.yml` is the only image-publishing workflow. It is manual like
-every other workflow: dispatch it from the `main` branch to publish `sha-<short>` +
-`latest` and trigger the Coolify redeploy, or from a `v*` tag to publish the immutable
-release tag without restarting production. A merge to `main` produces no image — and
-production keeps running the previous one — until someone starts this workflow.
+`.github/workflows/publish.yml` is the only image-publishing workflow. A push to `main`
+(including a merged pull request) or a manual run from `main` publishes `sha-<short>` +
+`latest` and triggers the Coolify redeploy; a `v*` tag publishes the immutable release tag
+without restarting production. Merging to `main` therefore deploys — treat it that way.
 
 It is not ungated: its `gates` job re-runs type checking, unit tests, and the production
 build on the exact commit before publishing, so a manual run from any ref is gated the
@@ -193,8 +206,10 @@ reported as unverified.
 
 ### The release workflows
 
-All `workflow_dispatch`-only, like everything else in `.github/workflows/` — producing a
-release is a decision rather than a check on a commit. None of them gate a PR.
+Producing a release is a decision rather than a check on a commit, but two of these also
+start on their own (see the table above): the desktop installer builds on pull requests and
+`main`/`arena/**` pushes that touch shipped sources, and the plugin zip on `main` pushes
+that touch the plugin.
 
 - **`build-desktop-installer.yml`** — packages the standalone Windows `.exe`
   (electron-builder → NSIS) and uploads it as a run artifact. Order matters: it runs
@@ -351,12 +366,10 @@ and left:
    events. Schedule a periodic check-in (roughly hourly is reasonable) on any PR still open,
    to catch state that webhooks missed — re-check status, mergeability and checks, act on
    anything actionable, and re-arm silently if nothing changed.
-4. A PR isn't done at "opened", and there is no CI to be green (see above) — the local
-   checklist is what stands in for it, and review may still be pending. Keep checking in
-   until it's actually merged or closed. Stop immediately if asked to.
-
-The only check that still reports here is an external security review app, which is not a
-workflow in this repo and does not run the tests.
+4. A PR isn't done at "opened": `test.yml` (and the path-filtered workflows above) run on
+   it and must be green, the local checklist must have passed first, and review may still
+   be pending. Keep checking in until it's actually merged or closed. Stop immediately if
+   asked to.
 
 ## Payment ways — read before touching how money is taken
 
