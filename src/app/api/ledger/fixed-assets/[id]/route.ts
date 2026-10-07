@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { FixedAssetError, deleteFixedAsset, getFixedAssetWithDepreciation } from "@/lib/fixed-assets-service";
+import {
+  FixedAssetError,
+  deleteFixedAsset,
+  getFixedAssetWithDepreciation,
+  setFixedAssetAcquisition,
+} from "@/lib/fixed-assets-service";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -31,6 +36,32 @@ export const DELETE = withTenantScope(async (_request: NextRequest, ctx: Ctx) =>
   try {
     await deleteFixedAsset(session.businessId, id);
     return NextResponse.json({ ok: true });
+  } catch (err) {
+    if (err instanceof FixedAssetError) return NextResponse.json({ error: err.message }, { status: err.status });
+    throw err;
+  }
+});
+
+/** Records where the asset's cost sits in the books (a posted entry, the opening balance, or not yet known). Posts nothing. */
+export const PATCH = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
+  const { session, error } = await requirePermission(PERMISSIONS.financeAssetsManage);
+  if (error) return error;
+
+  const { id } = await ctx.params;
+  let body: { acquisitionSource?: string; acquisitionEntryId?: string | null };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  try {
+    const fixedAsset = await setFixedAssetAcquisition({
+      businessId: session.businessId,
+      fixedAssetId: id,
+      acquisitionSource: String(body.acquisitionSource ?? ""),
+      acquisitionEntryId: body.acquisitionEntryId ?? null,
+    });
+    return NextResponse.json({ fixedAsset });
   } catch (err) {
     if (err instanceof FixedAssetError) return NextResponse.json({ error: err.message }, { status: err.status });
     throw err;
