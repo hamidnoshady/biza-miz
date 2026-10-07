@@ -619,6 +619,9 @@ describe("returned cheques are resolved, not stranded (issue #828)", () => {
     expect(await balanceOf("2122")).toBe(0);
     expect(await balanceOf("1110")).toBe(-3_000_000);
 
+    // 2100 carries the first cheque's extinguished liability, so measure this
+    // one's effect as a delta rather than against an empty ledger.
+    const payableBefore = await balanceOf("2100");
     const restored = await payable();
     await cheques.transitionCheque({
       businessId: biz.id,
@@ -636,8 +639,12 @@ describe("returned cheques are resolved, not stranded (issue #828)", () => {
     });
     expect(resolved.status).toBe("resolved");
     expect(await balanceOf("2122")).toBe(0);
-    // The supplier is owed again — the liability is neither lost nor doubled.
-    expect(await balanceOf("2100")).toBe(0);
+    // The supplier is owed again — the liability is neither lost nor doubled:
+    // the issue debited 2100 and the restoration credited it straight back.
+    expect(await balanceOf("2100")).toBe(payableBefore);
+    expect(await ap.listSupplierBalances(biz.id)).toContainEqual(
+      expect.objectContaining({ supplierId: party.supplierId, balance: -3_000_000 }),
+    );
   });
 });
 
