@@ -164,3 +164,50 @@ describe("ExpenseSection — receipt photo upload", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/ledger/expenses", expect.objectContaining({ method: "POST" }));
   });
 });
+
+describe("ExpenseSection — «پرداخت بعدی» (audit F11)", () => {
+  it("posts an owed expense against a supplier instead of a payment account", async () => {
+    const user = userEvent.setup();
+    let posted: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/ledger/ap/suppliers?scope=directory") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ suppliers: [{ supplierId: "sup-1", supplierName: "پخش البرز", supplierPhone: null, balance: 0 }] }),
+        };
+      }
+      if (url.startsWith("/api/ledger/expenses")) {
+        if (init?.method === "POST") {
+          posted = JSON.parse(String(init.body));
+          return { ok: true, status: 201, json: async () => ({ expense: { id: "exp-1" } }) };
+        }
+        return { ok: true, status: 200, json: async () => EMPTY_LIST };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const run: Runner = async (fn) => (await fn()).ok;
+    renderSection(run);
+
+    await user.click(screen.getByRole("button", { name: "دسته هزینه" }));
+    await user.click(await screen.findByRole("option", { name: "5001 — خرید ملزومات" }));
+    await user.click(screen.getByRole("button", { name: "پرداخت بعدی" }));
+    // The payment-account picker gives way to the supplier the payable is owed to.
+    expect(screen.queryByRole("button", { name: "حساب پرداخت" })).toBeNull();
+    await user.click(await screen.findByRole("button", { name: "تأمین‌کننده" }));
+    await user.click(await screen.findByRole("option", { name: "پخش البرز" }));
+    fireEvent.change(screen.getByPlaceholderText("۰"), { target: { value: "۲۵۰۰۰" } });
+    fireEvent.change(screen.getByPlaceholderText("شرح و دلیل ثبت هزینه"), { target: { value: "تعمیر یخچال" } });
+
+    const form = document.querySelector("form") as HTMLFormElement;
+    await act(async () => {
+      fireEvent.submit(form);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    await waitFor(() => expect(posted).not.toBeNull());
+    expect(posted).toMatchObject({ accountId: "acc-expense-1", settlement: "credit", supplierId: "sup-1", memo: "تعمیر یخچال" });
+    expect(posted).not.toHaveProperty("paymentAccountId");
+  });
+});

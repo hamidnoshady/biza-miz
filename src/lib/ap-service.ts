@@ -26,6 +26,8 @@ import { WELL_KNOWN_CODES } from "./coa-template";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_SUPPLIER_KEY, type AgingSummary } from "./aging";
 import { enqueueHolooReceiptForApPayment } from "./integrations/holoo/outbox-producer";
+import { normalizeBankReference } from "./payables-input";
+import { resolveVoucherCashAccount } from "./voucher-cash-account";
 
 export { MissingLedgerAccountError };
 
@@ -90,7 +92,7 @@ async function apLines(businessId: string, accountId: string): Promise<ApLineRow
             COALESCE(pa.phone, s.phone) AS supplier_phone,
             s.party_id AS party_id,
             je.entry_date::text AS entry_date, je.source_type,
-            COALESCE(p.note, p2.note) AS note, je.memo,
+            COALESCE(p.note, p2.note, ex.memo) AS note, je.memo,
             jl.debit, jl.credit
        FROM journal_lines jl
        JOIN journal_entries je ON je.id = jl.entry_id
@@ -99,6 +101,9 @@ async function apLines(businessId: string, accountId: string): Promise<ApLineRow
        LEFT JOIN purchases p2 ON sr.purchase_id = p2.id
        LEFT JOIN ap_payments ap ON je.source_type = 'ap_payment' AND ap.id = je.source_id
        LEFT JOIN cheques ch ON je.source_type = 'cheque' AND ch.id = je.source_id
+       -- Audit F11: an expense recorded «پرداخت بعدی» credits A/P for the
+       -- supplier it names, so it is that supplier's bill like a purchase.
+       LEFT JOIN expenses ex ON je.source_type = 'expense' AND ex.id = je.source_id
        -- An endorsed received cheque has no supplier_id on its original row:
        -- the supplier is the one recorded by the endorsement event. Reuse it
        -- for a later bounce too, so that debit and reversing credit stay in
@@ -114,6 +119,7 @@ async function apLines(businessId: string, accountId: string): Promise<ApLineRow
          p.supplier_id,
          p2.supplier_id,
          ap.supplier_id,
+         ex.supplier_id,
          ch.supplier_id,
          endorsed.endorsed_to_supplier_id
        )
@@ -215,10 +221,10 @@ export async function getSupplierStatement(businessId: string, supplierId: strin
     const credit = Number(l.credit);
     balance += credit - debit;
     const type: ApStatementLine["type"] =
-      l.source_type === "purchase" ? "bill" : l.source_type === "ap_payment" ? "payment" : l.source_type === "supplier_return" ? "return" : "other";
+      l.source_type === "purchase" || l.source_type === "expense" ? "bill" : l.source_type === "ap_payment" ? "payment" : l.source_type === "supplier_return" ? "return" : "other";
     const description =
       type === "bill"
-        ? (l.note ?? "فاکتور خرید")
+        ? (l.note ?? (l.source_type === "expense" ? "هزینه" : "فاکتور خرید"))
         : type === "payment"
           ? (l.memo ?? "پرداخت به تأمین‌کننده")
           : type === "return"
@@ -294,6 +300,8 @@ export interface ApPayment {
   method: "cash" | "bank";
   amount: number;
   memo: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
 }
 
 /**
@@ -313,6 +321,10 @@ export async function payBill(params: {
   createdBy: string | null;
   /** Holoo imports create local payments but must not push them back to Holoo. */
   skipHolooPush?: boolean;
+  /** Audit F11 — the cash/bank account the money left from; null = the method's default account. */
+  cashAccountId?: string | null;
+  /** Audit F11 — the bank's tracking/reference number. */
+  bankReference?: string | null;
 }): Promise<ApPayment> {
   if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
     throw new ApError("invalid_amount");
@@ -325,6 +337,8 @@ export async function payBill(params: {
   // The business's «امروز», not the DB server's UTC date — the same argument
   // `receivePayment` in ar-service.ts makes for receipts.
   const paymentDate = params.paymentDate ?? (await businessToday(params.businessId));
+  // Throws PayablesInputError («invalid_bank_reference»), which the route answers as a 400.
+  const bankReference = normalizeBankReference(params.bankReference);
 
   const client = await getPool().connect();
   try {
@@ -339,12 +353,10 @@ export async function payBill(params: {
     );
     if (!supplierRows[0]) throw new ApError("supplier_not_found", 404);
 
-    const accounts = await accountIdsByCode(client, params.businessId, [
-      WELL_KNOWN_CODES.accountsPayable,
-      params.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bankClearing,
-    ]);
+    const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsPayable]);
     const apAccount = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
-    const cashAccount = accounts.get(params.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bankClearing)!;
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId);
+    const cashAccount = cash.accountId;
 
     const { rows } = await client.query<{
       id: string;
@@ -353,10 +365,12 @@ export async function payBill(params: {
       method: "cash" | "bank";
       amount: string;
       memo: string | null;
+      cash_account_id: string | null;
+      bank_reference: string | null;
     }>(
-      `INSERT INTO ap_payments (business_id, location_id, supplier_id, payment_date, method, amount, memo, created_by)
-       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8)
-       RETURNING id, supplier_id, payment_date::text AS payment_date, method, amount::text AS amount, memo`,
+      `INSERT INTO ap_payments (business_id, location_id, supplier_id, payment_date, method, amount, memo, created_by, cash_account_id, bank_reference)
+       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10)
+       RETURNING id, supplier_id, payment_date::text AS payment_date, method, amount::text AS amount, memo, cash_account_id, bank_reference`,
       [
         params.businessId,
         params.locationId,
@@ -366,6 +380,8 @@ export async function payBill(params: {
         params.amount,
         params.memo?.trim() || null,
         params.createdBy,
+        cash.chosen ? cash.accountId : null,
+        bankReference,
       ],
     );
     const payment = rows[0];
@@ -397,6 +413,8 @@ export async function payBill(params: {
       method: payment.method,
       amount: Number(payment.amount),
       memo: payment.memo,
+      cashAccountId: payment.cash_account_id,
+      bankReference: payment.bank_reference,
     };
   } catch (err) {
     await client.query("ROLLBACK");

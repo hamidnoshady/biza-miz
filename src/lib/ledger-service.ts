@@ -116,6 +116,46 @@ export async function postExactJournalEntry(
   return rows[0].id;
 }
 
+/**
+ * Audit F11 — the credit side and input-VAT leg shared by both purchase
+ * receipt postings. The supplier's invoice may carry VAT on top of the goods
+ * value: it is debited to input VAT (`vatReceivable`, 1220 — the account the
+ * VAT report reads) and the settlement account is credited goods + VAT, so a
+ * credit purchase's payable is what the supplier actually billed. With no VAT
+ * the entry is exactly what it always was (and 1220 is not even looked up).
+ */
+async function purchaseSettlementLines(
+  client: PoolClient,
+  businessId: string,
+  settlementMethod: SettlementMethod,
+  goods: RialText,
+  vat: RialText | undefined,
+): Promise<ExactJournalLine[]> {
+  const creditCode =
+    settlementMethod === "cash"
+      ? WELL_KNOWN_CODES.cash
+      : settlementMethod === "bank"
+        ? WELL_KNOWN_CODES.bankClearing
+        : WELL_KNOWN_CODES.accountsPayable;
+  const vatValue = vat ? rialBigInt(vat) : 0n;
+  if (vatValue < 0n) throw new Error("invalid_purchase_vat");
+  const accounts = await accountIdsByCode(
+    client,
+    businessId,
+    vatValue > 0n ? [creditCode, WELL_KNOWN_CODES.vatReceivable] : [creditCode],
+  );
+  const lines: ExactJournalLine[] = [];
+  if (vatValue > 0n) {
+    lines.push({ accountId: accounts.get(WELL_KNOWN_CODES.vatReceivable)!, debit: vat!, credit: "0" as RialText });
+  }
+  lines.push({
+    accountId: accounts.get(creditCode)!,
+    debit: "0" as RialText,
+    credit: (rialBigInt(goods) + vatValue).toString() as RialText,
+  });
+  return lines;
+}
+
 export async function postExactPurchaseEntry(
   client: PoolClient,
   params: {
@@ -126,6 +166,8 @@ export async function postExactPurchaseEntry(
     total: RialText;
     settlementMethod: SettlementMethod;
     inventoryEventId: string;
+    /** Audit F11 — the supplier invoice's VAT (input VAT), on top of `total`. */
+    vat?: RialText;
   },
 ): Promise<string | null> {
   const accounts = await accountIdsByCode(client, params.businessId, [
@@ -134,12 +176,7 @@ export async function postExactPurchaseEntry(
     WELL_KNOWN_CODES.cash,
     WELL_KNOWN_CODES.bankClearing,
   ]);
-  const creditCode =
-    params.settlementMethod === "cash"
-      ? WELL_KNOWN_CODES.cash
-      : params.settlementMethod === "bank"
-        ? WELL_KNOWN_CODES.bankClearing
-        : WELL_KNOWN_CODES.accountsPayable;
+  const settlementLines = await purchaseSettlementLines(client, params.businessId, params.settlementMethod, params.total, params.vat);
   return postExactJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
@@ -151,7 +188,7 @@ export async function postExactPurchaseEntry(
     inventoryEventId: params.inventoryEventId,
     lines: [
       { accountId: accounts.get(WELL_KNOWN_CODES.inventory)!, debit: params.total, credit: "0" as RialText },
-      { accountId: accounts.get(creditCode)!, debit: "0" as RialText, credit: params.total },
+      ...settlementLines,
     ],
   });
 }
@@ -172,6 +209,8 @@ export async function postPeriodicPurchaseEntry(
     createdBy: string | null;
     total: RialText;
     settlementMethod: SettlementMethod;
+    /** Audit F11 — the supplier invoice's VAT (input VAT), on top of `total`. */
+    vat?: RialText;
   },
 ): Promise<string | null> {
   const accounts = await accountIdsByCode(client, params.businessId, [
@@ -180,12 +219,7 @@ export async function postPeriodicPurchaseEntry(
     WELL_KNOWN_CODES.cash,
     WELL_KNOWN_CODES.bankClearing,
   ]);
-  const creditCode =
-    params.settlementMethod === "cash"
-      ? WELL_KNOWN_CODES.cash
-      : params.settlementMethod === "bank"
-        ? WELL_KNOWN_CODES.bankClearing
-        : WELL_KNOWN_CODES.accountsPayable;
+  const settlementLines = await purchaseSettlementLines(client, params.businessId, params.settlementMethod, params.total, params.vat);
   return postExactJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
@@ -196,7 +230,7 @@ export async function postPeriodicPurchaseEntry(
     postingKind: "periodic_purchase",
     lines: [
       { accountId: accounts.get(WELL_KNOWN_CODES.periodicPurchases)!, debit: params.total, credit: "0" as RialText },
-      { accountId: accounts.get(creditCode)!, debit: "0" as RialText, credit: params.total },
+      ...settlementLines,
     ],
   });
 }
