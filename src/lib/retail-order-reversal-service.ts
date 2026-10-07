@@ -41,6 +41,7 @@ import { postExactMirrorEntry } from "./ledger-service";
 import { snapshotOrder } from "./order-amendment-service";
 import { planPaymentRows, type AmendmentPaymentMethod, type PaymentRow } from "./order-amendments";
 import { restoreOrderItemBatchStock } from "./retail-batch-inventory";
+import { planOnlineLineReturn } from "./online-sale-policy";
 import { rialText, roundRial, type RialText } from "./inventory-exact";
 
 export class RetailOrderReversalError extends Error {
@@ -230,6 +231,50 @@ export async function reverseRetailImportedOrder(
       });
       if (restored) restockedValue += BigInt(restored.restockedValue);
     } else if (line.item_id) {
+      // An online line recorded what it actually took off the shelf
+      // (`online_sale_lines`, migration 0209): put back exactly that, so a
+      // reversal of a sale a remote snapshot already reflected — or one the
+      // shelf could not cover — does not invent stock.
+      const { rows: factRows } = await client.query<{
+        quantity: string; short_quantity: string; relieved_quantity: string;
+        restored_quantity: string; cogs_rial: string; restored_cogs_rial: string;
+      }>(
+        `SELECT quantity::text, short_quantity::text, relieved_quantity::text,
+                restored_quantity::text, cogs_rial::text, restored_cogs_rial::text
+           FROM online_sale_lines WHERE order_item_id = $1 FOR UPDATE`,
+        [line.id],
+      );
+      const fact = factRows[0];
+      if (fact) {
+        const plan = planOnlineLineReturn({
+          quantity: fact.quantity,
+          shortQuantity: fact.short_quantity,
+          relievedQuantity: fact.relieved_quantity,
+          restoredQuantity: fact.restored_quantity,
+          cogsRial: fact.cogs_rial,
+          restoredCogsRial: fact.restored_cogs_rial,
+        }, String(line.quantity));
+        if (new Decimal(plan.restock).gt(0)) {
+          await client.query(
+            `UPDATE item_stock SET quantity = quantity + $2::numeric, updated_at = now() WHERE item_id = $1`,
+            [line.item_id, plan.restock],
+          );
+        }
+        await client.query(
+          `UPDATE online_sale_lines
+              SET returned_quantity = quantity,
+                  restored_quantity = restored_quantity + $2::numeric,
+                  restored_cogs_rial = restored_cogs_rial + $3::bigint
+            WHERE order_item_id = $1`,
+          [line.id, plan.restock, plan.cogsReversalRial],
+        );
+        restockedValue += BigInt(plan.cogsReversalRial);
+        await client.query(`UPDATE order_items SET status = 'voided', void_reason = $2 WHERE id = $1`, [
+          line.id,
+          input.reason,
+        ]);
+        continue;
+      }
       await client.query(
         `UPDATE item_stock SET quantity = quantity + $2, updated_at = now() WHERE item_id = $1`,
         [line.item_id, line.quantity],

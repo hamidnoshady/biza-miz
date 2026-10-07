@@ -19,7 +19,9 @@ import { createCustomerReturn, type ReturnLine } from "../customer-return-servic
 import { RETAIL_ACCOUNT_CODES } from "../retail-account-codes";
 import { INDUSTRY_NOT_STOREFRONT, hasSellableCatalogue, isRetailCatalogueIndustry } from "../industries";
 import { quantityText, type RialText } from "../inventory-exact";
-import { sellOnlineRetailLine } from "../retail-online-sale-service";
+import { recordUntrackedOnlineLine, sellOnlineRetailLine } from "../retail-online-sale-service";
+import { isProvisionalCost, parseRemoteInstant, planOnlineLineReturn } from "../online-sale-policy";
+import { recordOnlineOrderDocument, resolveOnlineChronology } from "../online-order-document-service";
 import { restoreOrderItemBatchStock } from "../retail-batch-inventory";
 import { getPrimaryLocation } from "../setup-state";
 import {
@@ -572,6 +574,21 @@ function relievesStock(line: ResolvedOrderLine): boolean {
   return line.via === "variation" || line.via === "product";
 }
 
+/**
+ * A Woo order instant: the `*_gmt` field (UTC by Woo's convention), else the
+ * store-local field only if it carries an explicit offset — never a guessed
+ * store timezone.
+ */
+function wooOrderInstant(gmt: string | null | undefined, local: string | null | undefined): string | null {
+  return parseRemoteInstant(gmt, { assumeUtc: true }) ?? parseRemoteInstant(local, { assumeUtc: false });
+}
+
+/** A component the payload may omit: null (unknown) rather than zero. */
+function optionalWooAmount(value: string | null | undefined, unit: ConnectionRow["currency_unit"]): bigint | null {
+  if (value == null || value === "") return null;
+  return wooAmountToRial(value, unit);
+}
+
 async function ingestOrder(connection: ConnectionRow, order: WooOrder): Promise<void> {
   const industry = await getBusinessIndustry(connection.business_id);
   // Issue #799 Wave 11 — "not F&B" is not "retail". A trade with no sellable
@@ -833,11 +850,19 @@ async function ingestRetailOrder(
     );
     const orderNumber = Number(counter[0].next_number);
 
+    // The sale's own instant, not the import's — see online-order-document-service.ts.
+    const remoteCreatedAt = wooOrderInstant(order.date_created_gmt, order.date_created);
+    const chronology = await resolveOnlineChronology(client, locationId, {
+      createdAt: remoteCreatedAt,
+      paidAt: wooOrderInstant(order.date_paid_gmt, order.date_paid),
+      completedAt: wooOrderInstant(order.date_completed_gmt, order.date_completed),
+    });
+
     const { rows: orderRows } = await client.query<{ id: string }>(
-      `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, note, customer_id)
-       VALUES ($1, $2, 'retail', 'open', $3, 0, 0, $4, $5, $6, $7)
+      `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, note, customer_id, opened_at)
+       VALUES ($1, $2, 'retail', 'open', $3, 0, 0, $4, $5, $6, $7, $8)
        RETURNING id`,
-      [locationId, orderNumber, net.toString(), tax.toString(), total.toString(), note, customerId],
+      [locationId, orderNumber, net.toString(), tax.toString(), total.toString(), note, customerId, chronology.openedAt],
     );
     const orderId = orderRows[0].id;
 
@@ -867,6 +892,8 @@ async function ingestRetailOrder(
     let cogsRial = "0";
     let stubbedVariations = 0;
     let batchLines = 0;
+    let uncostedLines = 0;
+    let linesSubtotal = 0n;
     for (const [index, line] of (order.line_items ?? []).entries()) {
       const unitPrice = wooAmountToRial(line.price ?? "0", connection.currency_unit);
       const quantity = Math.max(1, Math.round(line.quantity ?? 1));
@@ -893,6 +920,16 @@ async function ingestRetailOrder(
          RETURNING id`,
         [locationId, orderId, itemId, line.name, unitPrice.toString(), quantity],
       );
+      // The line's net (after its own discount, before tax) — what the
+      // variant/brand reports attribute to it. `total` is Woo's exact figure;
+      // price × quantity is the fallback for a payload that omits it.
+      const lineNet = line.total != null && line.total !== ""
+        ? wooAmountToRial(line.total, connection.currency_unit)
+        : unitPrice * BigInt(quantity);
+      const lineGross = line.subtotal != null && line.subtotal !== ""
+        ? wooAmountToRial(line.subtotal, connection.currency_unit)
+        : lineNet;
+      linesSubtotal += lineGross;
 
       // The sale itself — FEFO + expired-batch exclusion + exact batch COGS
       // for a `tracking='batch'` item, or the fungible item_stock rule for
@@ -906,27 +943,43 @@ async function ingestRetailOrder(
           orderItemId: itemRows[0].id,
           itemId,
           quantity: String(quantity),
+          netRial: (lineNet < 0n ? 0n : lineNet).toString(),
           sourceType: "woocommerce_order",
           sourceId: orderId,
+          occurredAt: chronology.occurredAt,
+          remoteOccurredAt: remoteCreatedAt,
         });
         if (sold.tracking === "batch") batchLines += 1;
+        if (isProvisionalCost(sold.costStatus)) uncostedLines += 1;
         cogsRial = (BigInt(cogsRial) + BigInt(sold.cogsRial)).toString();
+      } else {
+        await recordUntrackedOnlineLine(client, {
+          locationId,
+          orderId,
+          orderItemId: itemRows[0].id,
+          itemId,
+          quantity: String(quantity),
+          netRial: (lineNet < 0n ? 0n : lineNet).toString(),
+          sourceType: "woocommerce_order",
+          sourceId: orderId,
+          occurredAt: chronology.occurredAt,
+        });
       }
     }
 
     if (total > 0n) {
       await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, reference)
-         VALUES ($1, $2, 'online', $3, $4)`,
-        [locationId, orderId, total.toString(), order.number ?? remoteId],
+        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_at)
+         VALUES ($1, $2, 'online', $3, $4, $5)`,
+        [locationId, orderId, total.toString(), order.number ?? remoteId, chronology.occurredAt],
       );
     }
 
     const { rowCount: closed } = await client.query(
-      `UPDATE orders SET status = 'completed', closed_at = now()
+      `UPDATE orders SET status = 'completed', closed_at = $2
         WHERE id = $1 AND status = 'open'
         RETURNING id`,
-      [orderId],
+      [orderId, chronology.occurredAt],
     );
     if (closed !== 1) {
       throw new Error("order_close_failed");
@@ -943,6 +996,7 @@ async function ingestRetailOrder(
         sourceType: "woocommerce_order",
         sourceId: orderId,
         createdBy: null,
+        entryDate: chronology.entryDate,
         postingKind: "cogs",
         lines: [
           { accountId: cogsAccounts.get(codes.cogs)!, debit: cogsRial as RialText, credit: zero },
@@ -963,6 +1017,7 @@ async function ingestRetailOrder(
       sourceType: "woocommerce_order",
       sourceId: orderId,
       createdBy: null,
+      entryDate: chronology.entryDate,
       postingKind: "revenue",
       lines: [
         { accountId: accounts.get(WELL_KNOWN_CODES.bankClearing)!, debit: total.toString() as RialText, credit: zero },
@@ -971,6 +1026,26 @@ async function ingestRetailOrder(
           ? [{ accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!, debit: zero, credit: tax.toString() as RialText }]
           : []),
       ],
+    });
+
+    const breakdown = await recordOnlineOrderDocument(client, {
+      orderId,
+      locationId,
+      sourceType: "woocommerce_order",
+      remoteId,
+      remoteNumber: order.number ?? null,
+      currency: order.currency ?? null,
+      chronology,
+      components: {
+        linesSubtotalRial: linesSubtotal,
+        discountRial: optionalWooAmount(order.discount_total, connection.currency_unit),
+        shippingRial: optionalWooAmount(order.shipping_total, connection.currency_unit),
+        feesRial: order.fee_lines
+          ? order.fee_lines.reduce((sum, fee) => sum + wooAmountToRial(fee.total ?? "0", connection.currency_unit), 0n)
+          : null,
+        taxRial: tax,
+        totalRial: total,
+      },
     });
 
     await client.query(
@@ -994,6 +1069,11 @@ async function ingestRetailOrder(
         cogsRial,
         stubbedVariations,
         batchLines,
+        uncostedLines,
+        occurredAt: chronology.occurredAt,
+        occurredAtSource: chronology.occurredAtSource,
+        breakdownStatus: breakdown.status,
+        unexplainedDifferenceRial: breakdown.unexplainedDifferenceRial.toString(),
       },
     });
   } catch (err) {
@@ -1296,11 +1376,60 @@ async function ingestRetailRefund(
           sourceType: "woocommerce_refund",
           sourceId: `${connection.id}:${meta.remoteId}`,
         });
+        // The sale fact (migration 0209) says what this line actually took
+        // off the shelf and what COGS it posted; a refund restores exactly
+        // that — never a unit the sale did not relieve, never COGS it did not
+        // post. A pre-0209 line has no fact and keeps the legacy rule.
+        const { rows: factRows } = await client.query<{
+          quantity: string; short_quantity: string; relieved_quantity: string;
+          restored_quantity: string; cogs_rial: string; restored_cogs_rial: string;
+        }>(
+          `SELECT quantity::text, short_quantity::text, relieved_quantity::text,
+                  restored_quantity::text, cogs_rial::text, restored_cogs_rial::text
+             FROM online_sale_lines WHERE order_item_id = $1 FOR UPDATE`,
+          [item.id],
+        );
+        const fact = factRows[0] ?? null;
+
         if (batchRestore) {
           recoveredCogsRial = (BigInt(recoveredCogsRial) + BigInt(batchRestore.restockedValue)).toString();
+          if (fact) {
+            await client.query(
+              `UPDATE online_sale_lines
+                  SET returned_quantity = LEAST(quantity, returned_quantity + $2::numeric),
+                      restored_quantity = LEAST(relieved_quantity, restored_quantity + $2::numeric),
+                      restored_cogs_rial = LEAST(cogs_rial, restored_cogs_rial + $3::bigint)
+                WHERE order_item_id = $1`,
+              [item.id, String(take), batchRestore.restockedValue],
+            );
+          }
+        } else if (fact) {
+          const plan = planOnlineLineReturn({
+            quantity: fact.quantity,
+            shortQuantity: fact.short_quantity,
+            relievedQuantity: fact.relieved_quantity,
+            restoredQuantity: fact.restored_quantity,
+            cogsRial: fact.cogs_rial,
+            restoredCogsRial: fact.restored_cogs_rial,
+          }, String(take));
+          if (Number(plan.restock) > 0) {
+            await client.query(
+              `UPDATE item_stock SET quantity = quantity + $2::numeric, updated_at = now() WHERE item_id = $1`,
+              [itemId, plan.restock],
+            );
+          }
+          await client.query(
+            `UPDATE online_sale_lines
+                SET returned_quantity = LEAST(quantity, returned_quantity + $2::numeric),
+                    restored_quantity = restored_quantity + $3::numeric,
+                    restored_cogs_rial = restored_cogs_rial + $4::bigint
+              WHERE order_item_id = $1`,
+            [item.id, String(take), plan.restock, plan.cogsReversalRial],
+          );
+          recoveredCogsRial = (BigInt(recoveredCogsRial) + BigInt(plan.cogsReversalRial)).toString();
         } else {
-          // Fungible stock: add the returned quantity back and reverse COGS
-          // at the running weighted-average cost the sale posted.
+          // Legacy (pre-0209) fungible line: add the returned quantity back and
+          // reverse COGS at the running weighted-average cost.
           await client.query(
             `UPDATE item_stock SET quantity = quantity + $2, updated_at = now()
               WHERE item_id = $1`,

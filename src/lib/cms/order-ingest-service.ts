@@ -23,6 +23,8 @@ import type { RialText } from "../inventory-exact";
 import type { WebsiteConnectionRow } from "../website/connection-service";
 import { cmsMinorToRial } from "./order-money";
 import { sellOnlineRetailLine } from "../retail-online-sale-service";
+import { parseRemoteInstant } from "../online-sale-policy";
+import { recordOnlineOrderDocument, resolveOnlineChronology } from "../online-order-document-service";
 import {
   cmsReversalStatusMatches,
   isCmsReversalEvent,
@@ -263,11 +265,21 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
     const industry = await getBusinessIndustry(businessId);
     const orderType = mapped?.localKind === "item" ? "retail" : "delivery";
 
+    // The sale's own instant (paid, else placed), not the import's — so a
+    // replayed or late delivery lands on the day the customer paid. See
+    // online-order-document-service.ts.
+    const remoteCreatedAt = parseRemoteInstant(order.createdAt, { assumeUtc: false });
+    const chronology = await resolveOnlineChronology(client, locationId, {
+      createdAt: remoteCreatedAt,
+      paidAt: order.status === "paid" ? parseRemoteInstant(order.updatedAt, { assumeUtc: false }) : null,
+      completedAt: null,
+    });
+
     const { rows: orderRows } = await client.query<{ id: string }>(
-      `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, note, customer_id)
-       VALUES ($1, $2, $3, 'open', $4, 0, 0, $5, $6, $7, $8)
+      `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, note, customer_id, opened_at)
+       VALUES ($1, $2, $3, 'open', $4, 0, 0, $5, $6, $7, $8, $9)
        RETURNING id`,
-      [locationId, orderNumber, orderType, net.toString(), tax.toString(), total.toString(), note, customerId],
+      [locationId, orderNumber, orderType, net.toString(), tax.toString(), total.toString(), note, customerId, chronology.openedAt],
     );
     const orderId = orderRows[0].id;
 
@@ -301,15 +313,15 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
 
     if (total > 0n) {
       await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, reference)
-         VALUES ($1, $2, 'online', $3, $4)`,
-        [locationId, orderId, total.toString(), order.reference],
+        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_at)
+         VALUES ($1, $2, 'online', $3, $4, $5)`,
+        [locationId, orderId, total.toString(), order.reference, chronology.occurredAt],
       );
     }
 
     const { rowCount: closed } = await client.query(
-      `UPDATE orders SET status = 'completed', closed_at = now() WHERE id = $1 AND status = 'open' RETURNING id`,
-      [orderId],
+      `UPDATE orders SET status = 'completed', closed_at = $2 WHERE id = $1 AND status = 'open' RETURNING id`,
+      [orderId, chronology.occurredAt],
     );
     if (closed !== 1) throw new Error("order_close_failed");
 
@@ -322,7 +334,9 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
         [businessId, locationId, orderId, `cms-order:${orderId}`],
       );
       inventoryEventId = eventRows[0].id;
-      const { totalCost } = await deductForOrder(client, businessId, locationId, orderId, null, inventoryEventId);
+      const { totalCost } = await deductForOrder(
+        client, businessId, locationId, orderId, null, inventoryEventId, chronology.occurredAt,
+      );
       cogsRial = totalCost;
       await postExactCogsEntry(client, {
         businessId,
@@ -331,6 +345,7 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
         createdBy: null,
         totalCost,
         inventoryEventId,
+        entryDate: chronology.entryDate,
       });
     } else if (mapped?.localKind === "item" && isRetailCatalogueIndustry(industry)) {
       const codes = RETAIL_ACCOUNT_CODES[industry];
@@ -346,8 +361,13 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
             orderItemId: retailOrderItemId,
             itemId: mapped.localId,
             quantity: String(quantity),
+            netRial: (unit * BigInt(quantity)).toString(),
             sourceType: "cms_store_order",
             sourceId: orderId,
+            occurredAt: chronology.occurredAt,
+            // The CMS never pushes stock back (the site is a shop window), so
+            // there is no remote snapshot to compare against.
+            remoteOccurredAt: null,
           })
         : null;
       cogsRial = sold ? sold.cogsRial : "0";
@@ -360,6 +380,7 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
           sourceType: "cms_store_order",
           sourceId: orderId,
           createdBy: null,
+          entryDate: chronology.entryDate,
           postingKind: "cogs",
           lines: [
             { accountId: cogsAccounts.get(codes.cogs)!, debit: cogsRial as RialText, credit: zero },
@@ -380,7 +401,30 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
       tax,
       industry,
       inventoryEventId,
+      chronology.entryDate,
     );
+
+    if (mapped?.localKind === "item" || orderType === "retail") {
+      await recordOnlineOrderDocument(client, {
+        orderId,
+        locationId,
+        sourceType: "cms_store_order",
+        remoteId,
+        remoteNumber: order.reference,
+        currency: order.currency,
+        chronology,
+        components: {
+          linesSubtotalRial: unit * BigInt(quantity),
+          // The CMS order is one product line with no discount/shipping/fee
+          // fields: they are reported as absent, not as zero.
+          discountRial: null,
+          shippingRial: null,
+          feesRial: null,
+          taxRial: tax,
+          totalRial: total,
+        },
+      });
+    }
 
     if (inventoryEventId) {
       await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1", [inventoryEventId]);
@@ -407,6 +451,7 @@ async function postRevenueEntry(
   tax: bigint,
   industry: Industry | null,
   inventoryEventId: string | null,
+  entryDate: string,
 ): Promise<void> {
   const retailRevenue =
     isRetailCatalogueIndustry(industry)
@@ -424,6 +469,7 @@ async function postRevenueEntry(
     sourceType: "cms_store_order",
     sourceId: orderId,
     createdBy: null,
+    entryDate,
     postingKind: "revenue",
     inventoryEventId,
     lines: [

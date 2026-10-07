@@ -231,7 +231,7 @@ async function upsertRetailProduct(
     );
     // A container is not sellable — it carries no stock/price of its own.
     if (!shape.container) {
-      await upsertItemStock(existing, stockQuantity, price);
+      await upsertItemStock(existing, remoteManagesStock(shape, product) ? stockQuantity : null, price);
     }
     if (attributes.length) {
       await replaceVariantAttributes(existing, attributes);
@@ -274,9 +274,9 @@ async function upsertRetailProduct(
     );
     const itemId = rows[0].id;
     await client.query(
-      `INSERT INTO item_stock (item_id, quantity, unit_price)
-       VALUES ($1, $2, $3)`,
-      [itemId, stockQuantity, price > 0n ? Number(price) : null],
+      `INSERT INTO item_stock (item_id, quantity, unit_price, remote_snapshot_at)
+       VALUES ($1, $2, $3, $4)`,
+      [itemId, stockQuantity, price > 0n ? Number(price) : null, remoteManagesStock(shape, product) ? new Date().toISOString() : null],
     );
     for (const attr of attributes) {
       await client.query(
@@ -356,14 +356,43 @@ async function categoryForProduct(
   }
 }
 
-/** Upsert a retail item's on-hand quantity and shelf price (Rial). */
-async function upsertItemStock(itemId: string, quantity: number, price: bigint): Promise<void> {
+/**
+ * Whether the store is the authority for this product's quantity. A product
+ * that does not manage stock (or an `external` one) reports no quantity, so
+ * the local shelf — counted up by receipts in this app — must not be reset
+ * to zero by every product sync, as it used to be.
+ */
+function remoteManagesStock(shape: ReturnType<typeof wooProductShape>, product: WooProduct): boolean {
+  return Boolean(shape.stockTracked && product.manage_stock && product.stock_quantity != null);
+}
+
+/**
+ * Upsert a retail item's shelf price (Rial) and — when the store manages the
+ * product's stock — its on-hand quantity as an absolute snapshot.
+ *
+ * A snapshot stamps `remote_snapshot_at` with the moment it was applied: the
+ * online sale service compares a remote order's instant against it so a sale
+ * the store already deducted is not relieved a second time (dashboard audit
+ * F03; `decideOnlineStockRelief`). `quantity = null` updates the price only.
+ */
+async function upsertItemStock(itemId: string, quantity: number | null, price: bigint): Promise<void> {
+  const unitPrice = price > 0n ? Number(price) : null;
+  if (quantity == null) {
+    await query(
+      `INSERT INTO item_stock (item_id, quantity, unit_price)
+       VALUES ($1, 0, $2)
+       ON CONFLICT (item_id) DO UPDATE SET unit_price = EXCLUDED.unit_price, updated_at = now()`,
+      [itemId, unitPrice],
+    );
+    return;
+  }
   await query(
-    `INSERT INTO item_stock (item_id, quantity, unit_price)
-     VALUES ($1, $2, $3)
+    `INSERT INTO item_stock (item_id, quantity, unit_price, remote_snapshot_at)
+     VALUES ($1, $2, $3, now())
      ON CONFLICT (item_id) DO UPDATE
-       SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price, updated_at = now()`,
-    [itemId, quantity, price > 0n ? Number(price) : null],
+       SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price,
+           remote_snapshot_at = now(), updated_at = now()`,
+    [itemId, quantity, unitPrice],
   );
 }
 
