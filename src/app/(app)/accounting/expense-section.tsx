@@ -680,7 +680,7 @@ export function ExpenseSection({
                   <Th>دسته</Th>
                   <Th>شرح</Th>
                   <Th>طرف حساب</Th>
-                  <Th>پرداخت از / تسویه</Th>
+                  <Th>پرداخت از</Th>
                   <Th>ثبت‌کننده</Th>
                   <Th numeric>مبلغ</Th>
                 </DataTableHead>
