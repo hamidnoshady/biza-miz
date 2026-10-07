@@ -254,7 +254,9 @@ describe("ManualEntrySection — the create form", () => {
     expect((screen.getByRole("button", { name: /ثبت پیش‌نویس/ }) as HTMLButtonElement).disabled).toBe(
       false,
     );
-  });
+    // Typing four fifteen-digit amounts with real keystrokes is slow on a loaded
+    // Windows runner; the default 5s limit is what failed, not the arithmetic.
+  }, 30_000);
 
   it("never offers an account the server has marked not postable", async () => {
     const user = userEvent.setup();
