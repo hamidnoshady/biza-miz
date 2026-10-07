@@ -76,6 +76,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   payroll_accrual: "تعهد حقوق",
   payroll_payment: "پرداخت حقوق",
   fixed_asset_depreciation: "استهلاک دارایی ثابت",
+  fixed_asset_disposal: "واگذاری دارایی ثابت",
 
   // Marketing and loyalty
   gift_card: "کارت هدیه",

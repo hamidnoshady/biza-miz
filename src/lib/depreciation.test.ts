@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   depreciableBase,
   depreciationForPeriod,
+  depreciationForPeriodUnderRevision,
   depreciationPeriodOfDate,
+  disposalOutcome,
   monthlyDepreciation,
   parseDepreciationPeriodKey,
   planDepreciation,
@@ -207,5 +209,84 @@ describe("reconcileFixedAssetRegister", () => {
     expect(reconcileFixedAssetRegister(input).status).toBe("reconciled");
     const off = reconcileFixedAssetRegister({ ...input, ledgerCost: 0n });
     expect(off).toMatchObject({ status: "difference", costDifference: "-100" });
+  });
+});
+
+describe("depreciationForPeriodUnderRevision (issue #833)", () => {
+  // A 120,000,000 asset, 24 of 60 months posted at 2,000,000 (48,000,000),
+  // then the life revised to 48 months: 72,000,000 over the 24 months left.
+  const revision = {
+    periodsPostedAtChange: 24,
+    accumulatedAtChange: 48_000_000,
+    remainingBase: 72_000_000,
+    remainingLifeMonths: 24,
+  };
+
+  it("spreads the remaining base over the revised remaining life", () => {
+    expect(depreciationForPeriodUnderRevision(revision, 48_000_000, 24)).toBe(3_000_000);
+    expect(depreciationForPeriodUnderRevision(revision, 51_000_000, 25)).toBe(3_000_000);
+  });
+
+  it("lands on the exact remaining base on the final scheduled period", () => {
+    // 23 periods since the change at 3,000,000 each = 69,000,000; the 24th
+    // (final) period absorbs the last 3,000,000.
+    expect(depreciationForPeriodUnderRevision(revision, 48_000_000 + 69_000_000, 47)).toBe(3_000_000);
+    // A rounding-heavy revision: 10,000,000 left over 3 months = 3,333,333.33;
+    // the final period takes whatever is left.
+    const ragged = { periodsPostedAtChange: 0, accumulatedAtChange: 0, remainingBase: 10_000_000, remainingLifeMonths: 3 };
+    expect(depreciationForPeriodUnderRevision(ragged, 3_333_333, 1)).toBe(3_333_333);
+    expect(depreciationForPeriodUnderRevision(ragged, 6_666_666, 2)).toBe(3_333_334);
+  });
+
+  it("falls due in full on the next period when the revised life is already consumed", () => {
+    const dueNow = { ...revision, remainingLifeMonths: 0 };
+    expect(depreciationForPeriodUnderRevision(dueNow, 48_000_000, 24)).toBe(72_000_000);
+  });
+
+  it("is zero once the revised remaining base is exhausted", () => {
+    expect(depreciationForPeriodUnderRevision(revision, 120_000_000, 48)).toBe(0);
+    expect(depreciationForPeriodUnderRevision(revision, 125_000_000, 50)).toBe(0);
+  });
+});
+
+describe("disposalOutcome (issue #833)", () => {
+  it("realises a gain when the proceeds exceed net book value", () => {
+    expect(disposalOutcome({ cost: 100, accumulatedDepreciation: 24, proceeds: 80 })).toEqual({
+      netBookValue: 76,
+      gain: 4,
+      loss: 0,
+    });
+  });
+
+  it("realises a loss when the proceeds fall short of net book value", () => {
+    expect(disposalOutcome({ cost: 100, accumulatedDepreciation: 24, proceeds: 70 })).toEqual({
+      netBookValue: 76,
+      gain: 0,
+      loss: 6,
+    });
+  });
+
+  it("breaks even when the proceeds equal net book value exactly", () => {
+    expect(disposalOutcome({ cost: 100, accumulatedDepreciation: 24, proceeds: 76 })).toEqual({
+      netBookValue: 76,
+      gain: 0,
+      loss: 0,
+    });
+  });
+
+  it("expenses the whole un-depreciated cost on a zero-proceeds write-off", () => {
+    expect(disposalOutcome({ cost: 50, accumulatedDepreciation: 10, proceeds: 0 })).toEqual({
+      netBookValue: 40,
+      gain: 0,
+      loss: 40,
+    });
+  });
+
+  it("treats over-depreciation defensively: net book value floors at zero", () => {
+    expect(disposalOutcome({ cost: 50, accumulatedDepreciation: 60, proceeds: 5 })).toEqual({
+      netBookValue: 0,
+      gain: 5,
+      loss: 0,
+    });
   });
 });

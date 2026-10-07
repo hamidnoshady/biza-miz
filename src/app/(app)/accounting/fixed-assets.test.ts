@@ -4,11 +4,31 @@ import { errorMessageOrRaw } from "@/app/dashboard/ui";
 describe("Fixed assets error translation and resolution", () => {
   it("translates all fixed asset specific error codes correctly", () => {
     expect(errorMessageOrRaw("fixed_asset_not_found")).toBe("دارایی ثابت پیدا نشد.");
-    expect(errorMessageOrRaw("fixed_asset_has_depreciation")).toBe("برای این دارایی استهلاک ثبت شده و قابل حذف نیست.");
+    expect(errorMessageOrRaw("fixed_asset_has_depreciation")).toBe(
+      "برای این دارایی سابقه حسابداری ثبت شده و حذف آن ممکن نیست؛ می‌توانید آن را بایگانی کنید.",
+    );
+    expect(errorMessageOrRaw("fixed_asset_has_history")).toBe(
+      "برای این دارایی سابقه ثبت شده (خرید، انتقال یا تغییر برآورد) و حذف آن ممکن نیست؛ می‌توانید آن را بایگانی کنید.",
+    );
     expect(errorMessageOrRaw("period_already_depreciated")).toBe("استهلاک این دوره قبلاً برای این دارایی ثبت شده است.");
     expect(errorMessageOrRaw("fully_depreciated")).toBe("این دارایی به‌طور کامل مستهلک شده است.");
     expect(errorMessageOrRaw("salvage_value_invalid")).toBe("ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.");
     expect(errorMessageOrRaw("period_label_required")).toBe("عنوان دوره الزامی است.");
+  });
+
+  it("translates the fixed-asset lifecycle error codes of issue #833", () => {
+    expect(errorMessageOrRaw("asset_disposed")).toBe("این دارایی واگذار/اسقاط شده و دیگر عملیاتی روی آن انجام نمی‌شود.");
+    expect(errorMessageOrRaw("asset_archived")).toBe("این دارایی بایگانی شده است.");
+    expect(errorMessageOrRaw("depreciation_already_reversed")).toBe("این استهلاک قبلاً برگشت خورده است.");
+    expect(errorMessageOrRaw("depreciation_entry_not_found")).toBe("سند استهلاک انتخاب‌شده پیدا نشد.");
+    expect(errorMessageOrRaw("disposal_proceeds_required")).toBe("برای فروش، مبلغ واگذاری (بزرگ‌تر از صفر) الزامی است.");
+    expect(errorMessageOrRaw("disposal_proceeds_not_allowed")).toBe("برای اسقاط یا حذف، مبلغ واگذاری نباید وارد شود.");
+    expect(errorMessageOrRaw("proceeds_account_required")).toBe("حساب وصول مبلغ فروش را انتخاب کنید.");
+    expect(errorMessageOrRaw("estimate_unchanged")).toBe("مقدار جدید با مقدار فعلی یکسان است.");
+    expect(errorMessageOrRaw("transfer_same_location")).toBe("دارایی هم‌اکنون در همین شعبه است.");
+    expect(errorMessageOrRaw("invalid_asset_account")).toBe(
+      "حساب دارایی انتخاب‌شده باید یک حساب دارایی ثابت (۱۵۰۰ تا ۱۵۹۹) باشد.",
+    );
   });
 
   it("passes through raw Persian strings if already formatted", () => {

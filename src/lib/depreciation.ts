@@ -16,6 +16,11 @@ export interface DepreciableAsset {
   usefulLifeMonths: number;
 }
 
+/** Field limits shared by the service, the routes and the UI forms (issue #833). */
+export const FIXED_ASSET_NAME_MAX_LENGTH = 200;
+export const FIXED_ASSET_SERIAL_MAX_LENGTH = 120;
+export const FIXED_ASSET_USEFUL_LIFE_MAX_MONTHS = 1200; // 100 years — anything longer is a typo, not a schedule
+
 /** Persian validation errors for a new fixed asset; empty = valid. */
 export function validateFixedAsset(input: {
   name: string;
@@ -28,7 +33,12 @@ export function validateFixedAsset(input: {
 }): string[] {
   const errors: string[] = [];
   if (!input.name?.trim()) errors.push("نام دارایی الزامی است.");
-  if (!input.acquisitionDate?.trim() || Number.isNaN(Date.parse(input.acquisitionDate))) {
+  else if (input.name.trim().length > FIXED_ASSET_NAME_MAX_LENGTH) {
+    errors.push("نام دارایی بیش از حد طولانی است.");
+  }
+  // Strict `YYYY-MM-DD` — `Date.parse` accepts «March 5, 2025» and «2025/01/02»,
+  // which would then fail (or worse, shift) once Postgres parsed the date.
+  if (!isValidIsoDate(input.acquisitionDate?.trim() ?? "")) {
     errors.push("تاریخ خرید معتبر نیست.");
   }
   if (!Number.isSafeInteger(input.cost) || input.cost <= 0) {
@@ -44,13 +54,17 @@ export function validateFixedAsset(input: {
   ) {
     errors.push("ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.");
   }
-  if (!Number.isInteger(input.usefulLifeMonths) || input.usefulLifeMonths <= 0) {
-    errors.push("عمر مفید باید عدد صحیح مثبت (به ماه) باشد.");
+  if (
+    !Number.isInteger(input.usefulLifeMonths) ||
+    input.usefulLifeMonths <= 0 ||
+    input.usefulLifeMonths > FIXED_ASSET_USEFUL_LIFE_MAX_MONTHS
+  ) {
+    errors.push(`عمر مفید باید عدد صحیح بین ۱ تا ${FIXED_ASSET_USEFUL_LIFE_MAX_MONTHS} ماه باشد.`);
   }
   const inService = input.inServiceDate?.trim();
   if (inService) {
     if (!isValidIsoDate(inService)) errors.push("تاریخ بهره‌برداری معتبر نیست.");
-    else if (isValidIsoDate(input.acquisitionDate?.trim()) && inService < input.acquisitionDate.trim()) {
+    else if (isValidIsoDate(input.acquisitionDate?.trim() ?? "") && inService < input.acquisitionDate.trim()) {
       errors.push("تاریخ بهره‌برداری نمی‌تواند پیش از تاریخ خرید باشد.");
     }
   }
@@ -162,11 +176,61 @@ export interface DepreciationPlanInput {
   entryDate?: string | null;
   /** The business's today (ISO). */
   today: string;
+  /**
+   * The latest estimate change still in force, when there is one. Once an
+   * asset's useful life or salvage value has been revised, every later period
+   * spreads *what was left when the estimate changed* over *the life that was
+   * left*, prospectively — the historical postings are never recomputed.
+   */
+  revision?: DepreciationRevision | null;
 }
 
 export type DepreciationPlan =
   | { ok: true; period: DepreciationPeriod; entryDate: string; amount: number }
   | { ok: false; error: DepreciationRefusal };
+
+/**
+ * What a change of estimate froze (issue #833): the schedule a revised asset
+ * runs on from the change forward. All three counts are snapshots taken when
+ * the change was recorded — under the asset's row lock — so the amounts are
+ * facts, never re-derived folklore.
+ */
+export interface DepreciationRevision {
+  /** Live depreciation periods already posted when the estimate changed. */
+  periodsPostedAtChange: number;
+  /** Live accumulated depreciation when the estimate changed. */
+  accumulatedAtChange: number;
+  /** Depreciable amount left when the estimate changed (new salvage applied). */
+  remainingBase: number;
+  /** Months that remaining amount now has to fit into; 0 = due in full on the next period. */
+  remainingLifeMonths: number;
+}
+
+/**
+ * The amount for one period under a revised estimate: the remaining base
+ * spread over the revised remaining life, with the same final-period
+ * rounding correction `depreciationForPeriod` applies to a virgin schedule —
+ * the last scheduled period absorbs whatever is left, so a revised schedule
+ * also lands on the exact depreciable amount.
+ *
+ * `remainingLifeMonths` of 0 means the revision left no scheduled months (the
+ * life was shortened to what had already been consumed): the whole remaining
+ * base falls due on the next period.
+ */
+export function depreciationForPeriodUnderRevision(
+  revision: DepreciationRevision,
+  accumulatedSoFar: number,
+  periodsPostedSoFar: number,
+): number {
+  const accumulatedSinceChange = accumulatedSoFar - revision.accumulatedAtChange;
+  const remaining = revision.remainingBase - accumulatedSinceChange;
+  if (remaining <= 0) return 0;
+  const periodsSinceChange = periodsPostedSoFar - revision.periodsPostedAtChange;
+  const isFinalScheduledPeriod =
+    revision.remainingLifeMonths <= 0 || periodsSinceChange + 1 >= revision.remainingLifeMonths;
+  if (isFinalScheduledPeriod) return remaining;
+  return Math.min(Math.round(revision.remainingBase / revision.remainingLifeMonths), remaining);
+}
 
 /**
  * Decides one depreciation posting from facts read under the asset's lock:
@@ -193,9 +257,35 @@ export function planDepreciation(input: DepreciationPlanInput): DepreciationPlan
 
   if (input.postedPeriodKeys.includes(period.key)) return { ok: false, error: "period_already_depreciated" };
 
-  const amount = depreciationForPeriod(input.asset, input.accumulatedSoFar, input.postedPeriodKeys.length);
+  const amount = input.revision
+    ? depreciationForPeriodUnderRevision(input.revision, input.accumulatedSoFar, input.postedPeriodKeys.length)
+    : depreciationForPeriod(input.asset, input.accumulatedSoFar, input.postedPeriodKeys.length);
   if (amount <= 0) return { ok: false, error: "fully_depreciated" };
   return { ok: true, period, entryDate, amount };
+}
+
+// ---------------------------------------------------------------------------
+// Disposal — issue #833. The gain/loss a sale, retirement or write-off realises,
+// from the same reconstructed numbers the register shows everywhere else.
+// ---------------------------------------------------------------------------
+
+export interface FixedAssetDisposalOutcome {
+  /** Cost less live accumulated depreciation at the moment of disposal. */
+  netBookValue: number;
+  /** Proceeds above net book value — credited to 4920 «سود فروش دارایی ثابت». */
+  gain: number;
+  /** Proceeds below net book value — debited to 5750 «زیان فروش دارایی ثابت». */
+  loss: number;
+}
+
+export function disposalOutcome(input: {
+  cost: number;
+  accumulatedDepreciation: number;
+  proceeds: number;
+}): FixedAssetDisposalOutcome {
+  const netBookValue = Math.max(0, input.cost - input.accumulatedDepreciation);
+  const delta = input.proceeds - netBookValue;
+  return { netBookValue, gain: Math.max(0, delta), loss: Math.max(0, -delta) };
 }
 
 // ---------------------------------------------------------------------------
