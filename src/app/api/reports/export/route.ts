@@ -260,10 +260,18 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     } while (page <= pageCount);
 
     const title = body.title?.trim() || "سفارش‌های شیفت";
-    return respondWithTable(shiftOrdersExportTable(orders, unit), title, format, session.businessId, {
-      dateFrom: parsed.filters.dateFrom,
-      dateTo: parsed.filters.dateTo,
-    });
+    // A printed page cannot hold 21 columns legibly; the PDF drops the free-text
+    // context columns the spreadsheets keep (issue #819).
+    return respondWithTable(
+      shiftOrdersExportTable(orders, unit, { layout: format === "pdf" ? "pdf" : "full" }),
+      title,
+      format,
+      session.businessId,
+      {
+        dateFrom: parsed.filters.dateFrom,
+        dateTo: parsed.filters.dateTo,
+      },
+    );
   }
 
   if (kind === "business_overview") {

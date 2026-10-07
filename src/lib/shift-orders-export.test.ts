@@ -64,6 +64,20 @@ describe("shiftOrdersExportTable", () => {
     expect(table.rows[0].payments).toBe("نقدی: 100000؛ پوز ملت: 105000");
   });
 
+  it("drops the free-text context columns from the PDF layout, keeping the money audit", () => {
+    // 21 columns do not fit a printed page legibly; the PDF keeps what an
+    // auditor reads down the sheet (issue #819) and the spreadsheets keep all.
+    const pdf = shiftOrdersExportTable([order()], "toman", { layout: "pdf" });
+    const keys = pdf.columns.map((column) => column.key);
+    expect(keys).not.toContain("note");
+    expect(keys).not.toContain("voidedReason");
+    expect(keys).not.toContain("customer");
+    expect(keys).toContain("total");
+    expect(keys).toContain("payments");
+    expect(keys.length).toBeLessThan(shiftOrdersExportTable([order()], "toman").columns.length);
+    expect(pdf.rows[0].total).toBe(205_000);
+  });
+
   it("carries the void reason so a cancelled bill is legible in the file", () => {
     const table = shiftOrdersExportTable(
       [order({ status: "voided", voidedReason: "مشتری رفت" })],

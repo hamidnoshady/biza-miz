@@ -33,40 +33,71 @@ const STATUS_LABELS: Record<string, string> = {
   voided: "باطل‌شده",
 };
 
-/** Money columns carry the unit; every amount cell is converted to it. */
+/** The columns a printed page can still read; CSV/Excel carry all of them. */
+const PDF_COLUMNS = new Set([
+  "orderNumber",
+  "type",
+  "status",
+  "table",
+  "openedAt",
+  "closedAt",
+  "closedBy",
+  "itemCount",
+  "subtotal",
+  "discount",
+  "tax",
+  "total",
+  "payments",
+]);
+
+/**
+ * Money columns carry the unit; every amount cell is converted to it.
+ *
+ * `layout: "pdf"` keeps only the columns a printed page can still read
+ * (issue #819: "provide a readable audit report rather than dumping every
+ * nested item into an unusably wide table"). The spreadsheet formats keep
+ * every field, including the note and void-reason columns and the customer /
+ * guest / channel context.
+ */
 export function shiftOrdersExportTable(
   orders: readonly ShiftOrder[],
   unit: MoneyUnit,
+  options: { layout?: "full" | "pdf" } = {},
 ): ReportTable {
   const unitLabel = unit === "rial" ? "ریال" : "تومان";
   const money = (value: number) => moneyToInput(value, unit);
   const stamp = (iso: string | null) =>
     iso === null ? "" : formatJalali(iso, { withTime: true });
 
+  const allColumns = [
+    { key: "orderNumber", label: "شمارهٔ سفارش" },
+    { key: "type", label: "نوع" },
+    { key: "status", label: "وضعیت" },
+    { key: "table", label: "میز" },
+    { key: "customer", label: "مشتری" },
+    { key: "guests", label: "مهمان" },
+    { key: "openedAt", label: "باز شده" },
+    { key: "closedAt", label: "بسته شده" },
+    { key: "openedBy", label: "بازکننده" },
+    { key: "closedBy", label: "بستن‌دهنده" },
+    { key: "itemCount", label: "تعداد اقلام" },
+    { key: "subtotal", label: `جمع جزء (${unitLabel})` },
+    { key: "discount", label: `تخفیف (${unitLabel})` },
+    { key: "serviceCharge", label: `خدمات (${unitLabel})` },
+    { key: "tax", label: `مالیات (${unitLabel})` },
+    { key: "tip", label: `انعام (${unitLabel})` },
+    { key: "total", label: `مبلغ کل (${unitLabel})` },
+    { key: "payments", label: `پرداخت‌ها (${unitLabel})` },
+    { key: "channel", label: "کانال" },
+    { key: "note", label: "یادداشت سفارش" },
+    { key: "voidedReason", label: "دلیل ابطال" },
+  ];
+
   return {
-    columns: [
-      { key: "orderNumber", label: "شمارهٔ سفارش" },
-      { key: "type", label: "نوع" },
-      { key: "status", label: "وضعیت" },
-      { key: "table", label: "میز" },
-      { key: "customer", label: "مشتری" },
-      { key: "guests", label: "مهمان" },
-      { key: "openedAt", label: "باز شده" },
-      { key: "closedAt", label: "بسته شده" },
-      { key: "openedBy", label: "بازکننده" },
-      { key: "closedBy", label: "بستن‌دهنده" },
-      { key: "itemCount", label: "تعداد اقلام" },
-      { key: "subtotal", label: `جمع جزء (${unitLabel})` },
-      { key: "discount", label: `تخفیف (${unitLabel})` },
-      { key: "serviceCharge", label: `خدمات (${unitLabel})` },
-      { key: "tax", label: `مالیات (${unitLabel})` },
-      { key: "tip", label: `انعام (${unitLabel})` },
-      { key: "total", label: `مبلغ کل (${unitLabel})` },
-      { key: "payments", label: `پرداخت‌ها (${unitLabel})` },
-      { key: "channel", label: "کانال" },
-      { key: "note", label: "یادداشت سفارش" },
-      { key: "voidedReason", label: "دلیل ابطال" },
-    ],
+    columns:
+      options.layout === "pdf"
+        ? allColumns.filter((column) => PDF_COLUMNS.has(column.key))
+        : allColumns,
     rows: orders.map((order) => ({
       orderNumber: order.orderNumber,
       type: TYPE_LABELS[order.type] ?? order.type,
