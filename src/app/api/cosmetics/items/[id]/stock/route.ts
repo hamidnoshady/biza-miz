@@ -34,6 +34,11 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   }
 
   try {
+    // Cosmetics cost comes from each received batch, so a bare purchase price
+    // (the price-list editor's «قیمت خرید» column) has nothing to update.
+    if (body.quantity == null && body.unitCost != null) {
+      throw new Error("قیمت خرید آرایشی از هر بچ دریافتی می‌آید؛ آن را هنگام دریافت بچ ثبت کنید.");
+    }
     if (body.unitPrice != null) {
       await setUnitPrice(id, Number(body.unitPrice));
       await recordItemEvent({

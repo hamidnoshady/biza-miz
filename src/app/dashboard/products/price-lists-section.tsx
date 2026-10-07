@@ -313,8 +313,8 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
           const price = priceOf(update.value);
           // Clearing a sale/purchase cell is not a stock write: `item_stock`
           // has no "unset the price" operation, so the field is left alone.
-          if (price == null) return { ok: true, cleared: true, data: {} as { error?: string } };
-          const { ok, data } = await api<{ error?: string }>(
+          if (price == null) return { ok: true, cleared: true, data: {} as { error?: string; message?: string } };
+          const { ok, data } = await api<{ error?: string; message?: string }>(
             `${apiBase}/items/${update.itemId}/stock`,
             {
               method: "POST",
@@ -327,7 +327,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         }),
       );
       for (const result of results) {
-        if (!result.ok) failures.push(errorMessage(result.data.error));
+        if (!result.ok) failures.push(result.data.message ?? errorMessage(result.data.error));
       }
     }
 
