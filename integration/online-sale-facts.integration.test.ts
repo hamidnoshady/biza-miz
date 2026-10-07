@@ -447,6 +447,25 @@ describe("online sale facts — CMS and affinity", () => {
   });
 });
 
+describe("online sale facts — trade reports", () => {
+  it("counts website sales in the variant and brand reports, once, at their own date", async () => {
+    const reports = await import("../src/lib/industry-reports-service");
+    const itemId = await item("کانسیلر", "710", { quantity: "6", unitCost: 15_000 });
+    await deliver(wooOrder(7010, 710, 2, "50000", undefined, { date_created_gmt: "2026-05-10T09:00:00" }));
+    await deliver(wooOrder(7010, 710, 2, "50000", undefined, { date_created_gmt: "2026-05-10T09:00:00" }), "order.updated");
+
+    const variants = await reports.variantSalesAnalysis(biz.id, biz.locationId, { from: "2026-05-10", to: "2026-05-10", eventPrefix: "cosmetic" });
+    expect(variants).toEqual([expect.objectContaining({ itemId, quantitySold: "2.000000000", netRevenue: 1_000_000, cogs: 30_000, margin: 970_000 })]);
+
+    const brands = await reports.brandSalesAnalysis(biz.id, biz.locationId, { from: "2026-05-10", to: "2026-05-10", eventPrefix: "cosmetic" });
+    expect(brands).toEqual([expect.objectContaining({ brandId: null, netRevenue: 1_000_000, cogs: 30_000 })]);
+
+    // Outside the sale's own day it is absent, whatever day it was imported.
+    const today = await reports.variantSalesAnalysis(biz.id, biz.locationId, { from: "2026-05-11", to: "2026-05-11", eventPrefix: "cosmetic" });
+    expect(today.find((r) => r.itemId === itemId)).toBeUndefined();
+  });
+});
+
 describe("legacy backfill script", () => {
   it("dry-runs without writing, then reconstructs facts idempotently with --apply", async () => {
     const { execFileSync } = await import("node:child_process");
