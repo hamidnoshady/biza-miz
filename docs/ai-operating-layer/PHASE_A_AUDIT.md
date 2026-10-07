@@ -1,8 +1,13 @@
-# Phase A — AI Operating Layer: Real Codebase Audit & Migration Map
+# Phase A — AI Operating Layer: Real Codebase Audit & Migration Map (historical snapshot)
 
-> Source of truth: the code and migrations in this repository as of branch
-> `arena/01a0b6ab-cafe-restaurant-pos` (base `6ba5931`). This document is
-> grounded in the actual files, not the README or phase docs.
+> **Historical design audit, not current architecture or a source of truth.** This document was
+> written against branch `arena/01a0b6ab-cafe-restaurant-pos` (base `6ba5931`) before the
+> LiteLLM-only consolidation. It contains obsolete direct-provider, model/fallback, prompt/MCP
+> and route assumptions. Use [Phase 39](../phases/Phase-39-LiteLLM-Only-AI-Platform.md) and
+> [the current AI subsystem architecture](../ai-subsystem-architecture.md) for implementation.
+>
+> The inventory below records the files and state that existed at the time of that audit; later
+> migrations and code may have removed or changed them.
 
 ## 0. Executive reality check
 
