@@ -10,7 +10,7 @@
  * the adapters to be registered (which needs the database module).
  */
 import { describe, expect, it } from "vitest";
-import { ALL_PERMISSIONS, roleBasePermissions } from "../permissions";
+import { ALL_PERMISSIONS, PERMISSIONS, roleBasePermissions } from "../permissions";
 import {
   DATA_ENTITIES,
   defaultExportFields,
@@ -160,6 +160,24 @@ describe("permissions", () => {
         expect(ALL_PERMISSIONS, `${entity.key} import`).toContain(entity.importPermission);
       }
     }
+  });
+
+  it("asks the owning app for permission to import, not a neighbouring right", () => {
+    // Issue #832 §4. Importing expenses used to be gated on `ledger.post` — the
+    // right to post journal entries — so a custom role holding `data.import` +
+    // `ledger.post` but refused by `POST /api/ledger/expenses` could nevertheless
+    // create paid expenses in bulk through a spreadsheet. One business act, one
+    // capability, whichever door it comes through (route, importer, assistant).
+    const expenses = requireEntity("accounting.expenses");
+    expect(expenses.importPermission).toBe(PERMISSIONS.financeExpensesManage);
+    expect(expenses.importPermission).not.toBe(PERMISSIONS.ledgerPost);
+    // Reading the register is the accounting read right, not the manage one.
+    expect(expenses.exportPermission).toBe(PERMISSIONS.ledgerView);
+
+    // And the entity key still has to be held on top of the engine key: a cashier
+    // may be given `data.import` for stock counts and must not gain expenses.
+    const cashier = new Set(roleBasePermissions("cashier"));
+    expect(cashier.has(PERMISSIONS.financeExpensesManage)).toBe(false);
   });
 
   it("never lets a floor role reach another app's data through the engine", () => {

@@ -442,11 +442,18 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     endpoint: "/api/ledger/expenses",
     method: "POST",
     label: "ثبت و دسته‌بندی هزینه",
+    // No account codes and no "صندوق یا بانک" list invented here: the model is
+    // pointed at the tenant's own chart (the read tools that list accounts are
+    // how it finds a valid id), and the payment-source rule that decides the
+    // answer lives in `expense-accounts.ts` and is enforced by the service
+    // whatever channel a proposal came from (issue #832 §13, §15).
     payloadHint:
-      "{ accountId: string /* حساب هزینه، کد ۵۲۰۰-۵۹۰۰ */, paymentAccountId: string /* حساب پرداخت: صندوق یا بانک */, amount: number, expenseDate?: string, vendor?: string, memo: string }",
+      "{ accountId: string /* id یک حساب هزینهٔ فعال از سرفصل همین کسب‌وکار */, paymentAccountId: string /* id حساب پرداخت: صندوق/بانک/تنخواه/تسویه کارت‌خوان — هر حساب دارایی دیگری رد می‌شود */, amount: number /* مبلغ کل به ریال */, vatAmount?: number /* بخش مالیات قابل استرداد از همین مبلغ، در صورت وجود */, expenseDate?: string /* YYYY-MM-DD، نمی‌تواند در آینده باشد */, vendor?: string, partyId?: string /* id شخص در فهرست اشخاص، اختیاری */, memo: string }",
     autopilotCategory: "money",
     executor: "expense",
-    revertible: false,
+    // Issue #832 §1: an expense now has an honest one-click undo — a mirrored
+    // reversal, not a deletion — so the action is reversible like a manual journal.
+    revertible: "always",
   },
 
   "inventory.waste.log": {

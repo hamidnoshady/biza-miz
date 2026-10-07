@@ -34,6 +34,7 @@ import { ReconciliationSection } from "./reconciliation-section";
 import { ChartOfAccountsSection } from "./chart-of-accounts-section";
 import { canEditChartOfAccounts } from "@/lib/coa-tree";
 import { ExpenseSection } from "./expense-section";
+import { EXPENSE_UI_ERROR_MESSAGES } from "@/lib/expense-errors";
 import { PayrollSection } from "./payroll-section";
 import { VatReportSection } from "./vat-report-section";
 import { FixedAssetsSection } from "./fixed-assets-section";
@@ -48,6 +49,13 @@ export interface AccountRow {
   name: string;
   type: "asset" | "liability" | "equity" | "revenue" | "expense";
   parent_code: string | null;
+  /**
+   * Present on the picker response (`GET /api/ledger/accounts` without `?all`),
+   * which is what the Expenses screen's payment-source rule needs — account
+   * meaning is inherited through the parent (issue #832 §2). Optional because
+   * the `?all=1` management rows carry their own tree shape instead.
+   */
+  parent_id?: string | null;
 }
 
 
@@ -119,6 +127,26 @@ export function AccountingManager({
    * the gate, matching how `partiesSectionAbilities` treats the same gap.
    */
   const canApproveLedger = permissions ? permissions.includes(PERMISSIONS.ledgerApprove) : undefined;
+
+  /**
+   * Whether this member may *write* in the expense register (issue #832 §3).
+   *
+   * «هزینه‌ها» opens with `ledger.view`, which is right: a read-only accountant,
+   * an auditor and a viewer all came to read a book. What was wrong is that the
+   * screen then drew «ثبت هزینه», the receipt upload and every other mutating
+   * control for them too, so the only honest answer they could get was a 403
+   * after a form they were not entitled to fill. Same three-state convention as
+   * `canApproveLedger`: `undefined` when the member's effective permissions could
+   * not be read, and then the controls are drawn and the API stays the gate.
+   *
+   * `canBrowseMedia` is narrower than it looks. A receipt photo lives in the
+   * canonical Media Library, and its bytes are readable by anyone who may read
+   * the expense they belong to (`/api/media/[id]/file`) — but the library
+   * *page* is `media.view`, so «باز کردن در کتابخانهٔ رسانه» is offered only to
+   * the members for whom it is a door rather than a redirect.
+   */
+  const canManageExpenses = permissions ? permissions.includes(PERMISSIONS.financeExpensesManage) : undefined;
+  const canBrowseMedia = permissions ? permissions.includes(PERMISSIONS.mediaView) : undefined;
 
   // Every section is a route now, so the rail navigates rather than switching
   // local state — a section a person lands on is a URL they can keep.
@@ -229,7 +257,16 @@ export function AccountingManager({
               currentUserId={currentUserId}
             />
           ) : null}
-          {section === "expenses" ? <ExpenseSection accounts={accounts} busy={busy} run={run} refreshKey={refreshKey} /> : null}
+          {section === "expenses" ? (
+            <ExpenseSection
+              accounts={accounts}
+              busy={busy}
+              run={run}
+              refreshKey={refreshKey}
+              canManageExpenses={canManageExpenses}
+              canBrowseMedia={canBrowseMedia}
+            />
+          ) : null}
           {section === "fiscal-periods" ? <FiscalPeriodsSection /> : null}
           {section === "directory" ? (
             <PartiesSection
@@ -362,11 +399,18 @@ function errorMessage(code: string | undefined): string {
     // Phase 16 — chart of accounts customisation
     well_known_account: "این حساب برای عملکرد سیستم لازم است و قابل غیرفعال یا حذف نیست.",
     account_not_found: "حساب پیدا نشد.",
-    // Phase 16 — expense management
-    invalid_expense_account: "دسته هزینه انتخاب‌شده یک حساب هزینه معتبر نیست.",
-    invalid_payment_account: "حساب پرداخت انتخاب‌شده معتبر نیست.",
-    same_account: "دسته هزینه و حساب پرداخت نمی‌توانند یکسان باشند.",
-    invalid_expense_date: "تاریخ هزینه معتبر نیست.",
+    /*
+     * Phase 16 — expense management, and every code issue #832 added to it
+     * (reversal, payment-source, VAT, branch, party). The text lives once, in
+     * `expense-errors.ts`, next to the codes the service throws and the map the
+     * import adapter reads; spreading it here is what keeps a code from being
+     * translated in one channel and left as «خطای غیرمنتظره» in another. The
+     * three codes the register shares with the journal (`invalid_amount`,
+     * `memo_required`, `unknown_account`) are deliberately not in this spread —
+     * their wording above is deliberately about a *document*, not only an
+     * expense.
+     */
+    ...EXPENSE_UI_ERROR_MESSAGES,
     // Chart of accounts (accounts-service.ts) — these reach here whenever a
     // section routes an accounts error through `run` rather than its own map.
     code_required: "کد حساب الزامی است.",

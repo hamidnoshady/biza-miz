@@ -27,6 +27,7 @@
 
 import type { Industry } from "../industries";
 import { PERMISSIONS } from "../permissions";
+import { EXPENSE_DUPLICATE_RULES } from "../expense-import";
 import type { DataModuleKey, EntityDefinition, EntityField } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -1108,7 +1109,17 @@ const ACCOUNTING_EXPENSES: EntityDefinition = {
   label: "هزینه‌ها",
   description: "هزینه‌های ثبت‌شده: سرفصل، مبلغ، تاریخ و طرف حساب.",
   exportPermission: PERMISSIONS.ledgerView,
-  importPermission: PERMISSIONS.ledgerPost,
+  /*
+   * `ledger.post` was a second, unintended door to the same business act: a
+   * custom role holding `data.import` + `ledger.post` but *not*
+   * `finance.expenses_manage` could create paid expenses in bulk while being
+   * refused by `POST /api/ledger/expenses` (issue #832 §4). One capability now
+   * means "may create paid operating expenses", wherever the row comes from —
+   * the route, the importer, the assistant. (`data.import` is still required on
+   * top of it by every `/api/data/**` route; `importPermission` decides which
+   * entities a member may write through that door.)
+   */
+  importPermission: PERMISSIONS.financeExpensesManage,
   fields: [
     ID_FIELD,
     {
@@ -1159,13 +1170,9 @@ const ACCOUNTING_EXPENSES: EntityDefinition = {
     { key: "vendor", label: "طرف حساب", type: "text", aliases: ["فروشنده", "تأمین‌کننده"], exportDefault: true },
     { key: "memo", label: "شرح", type: "longtext", aliases: ["توضیحات", "بابت"], exportDefault: true },
   ],
-  duplicateRules: [
-    {
-      key: "date_amount_account",
-      label: "تاریخ، مبلغ و سرفصل",
-      fields: ["expenseDate", "amount", "accountCode"],
-    },
-  ],
+  // Defined once, in `src/lib/expense-import.ts`, because the database-side
+  // lookup the adapter runs has to match the in-file rule the preview promises.
+  duplicateRules: EXPENSE_DUPLICATE_RULES,
 };
 
 // ---------------------------------------------------------------------------

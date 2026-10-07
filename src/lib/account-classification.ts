@@ -46,6 +46,35 @@ export const USABLE_LIQUIDITY_ROLES: ReadonlySet<AccountRole> = new Set(["cash",
 /** Roles that are settlement in transit: real money, not yet usable. */
 export const CLEARING_ROLES: ReadonlySet<AccountRole> = new Set(["payment_clearing", "provider_receivable"]);
 
+/**
+ * The accounts an operating expense may be credited from — the one definition
+ * of «پرداخت از» (issue #832 §2).
+ *
+ * «any active `type='asset'` account» is not a payment source: it let an
+ * expense post `Dr expense / Cr inventory` or `Cr accounts receivable` through
+ * a field that promises cash out of a till or a bank account, silently
+ * capitalising spending into stock or collecting a customer's debt for it.
+ * What *is* a payment source is the money a business actually pays people
+ * with: its till, its banks, a petty-cash float, and the card/PSP settlement
+ * account a terminal pays out of. Money owed *to* the business — receivables,
+ * recoverable VAT, a platform's settlement due to us — never is, so
+ * `provider_receivable` is deliberately absent from this set even though
+ * `CLEARING_ROLES` counts it as money in transit.
+ *
+ * Roles, not codes and not names: a business that renamed 1100, added a second
+ * bank under 1110 or imported its own chart keeps working, because what decides
+ * eligibility is the account's place in the classification above. A custom
+ * liquid account with no recognisable ancestor is *not* guessed into this set —
+ * the operator picks the well-known parent, exactly as every other screen that
+ * asks "is this cash?" does.
+ */
+export const EXPENSE_PAYMENT_SOURCE_ROLES: ReadonlySet<AccountRole> = new Set([
+  "cash",
+  "bank",
+  "petty_cash",
+  "payment_clearing",
+]);
+
 export const ACCOUNT_ROLE_LABELS: Record<AccountRole, string> = {
   cash: "صندوق",
   bank: "بانک",
@@ -157,4 +186,9 @@ export function isUsableLiquidity(role: AccountRole | null | undefined): boolean
 
 export function isClearing(role: AccountRole | null | undefined): boolean {
   return role != null && CLEARING_ROLES.has(role);
+}
+
+/** May an expense be paid out of an account with this role? (issue #832 §2) */
+export function isExpensePaymentSource(role: AccountRole | null | undefined): boolean {
+  return role != null && EXPENSE_PAYMENT_SOURCE_ROLES.has(role);
 }

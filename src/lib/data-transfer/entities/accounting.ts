@@ -22,6 +22,9 @@
 import { query } from "../../db";
 import { AccountsError, createAccount, setAccountActive } from "../../accounts-service";
 import { recordExpense } from "../../expense-service";
+import { expenseErrorMessage } from "../../expense-errors";
+import { expenseDuplicatePredicate, expenseDuplicateRule } from "../../expense-import";
+import { fiscalPeriodLockErrorCode } from "../../fiscal-periods";
 import { postgresDateToIso } from "../../jalali";
 import {
   registerAdapter,
@@ -350,22 +353,40 @@ const expensesAdapter: EntityAdapter = {
 
     const amount = typeof values.amount === "number" ? values.amount : 0;
     const expenseDate = typeof values.expenseDate === "string" ? values.expenseDate : null;
+    const memo = text(values.memo) ?? "ورود از فایل";
+    const vendor = text(values.vendor);
 
-    // An expense is identified by its date, amount and account: the same three
-    // things that make re-importing last month's spreadsheet a double-count.
+    /*
+     * Duplicates are matched on the rule the operator chose — by default date +
+     * amount + category + payment account + vendor + memo — and the clause comes
+     * from `expense-import.ts`, the same table the in-file preview compares on
+     * (issue #832 §16). The old three-field match made two legitimate, separate
+     * expenses on one day (two taxis, same fare, same category) look like a
+     * re-import, and a silently skipped row is a row nobody can find afterwards.
+     */
+    const rule = expenseDuplicateRule(options.duplicateRule);
+    const duplicate = expenseDuplicatePredicate(
+      rule,
+      {
+        expenseDate,
+        amount,
+        accountId: account.id,
+        paymentAccountId: paymentAccount.id,
+        vendor,
+        memo,
+      },
+      2,
+    );
     const { rows: existingRows } = await query<{ id: string }>(
-      `SELECT id FROM expenses
-        WHERE business_id = $1 AND account_id = $2 AND amount = $3
-          AND expense_date = coalesce($4::date, CURRENT_DATE)
-        LIMIT 1`,
-      [context.businessId, account.id, amount, expenseDate],
+      `SELECT id FROM expenses WHERE business_id = $1 AND ${duplicate.sql} LIMIT 1`,
+      [context.businessId, ...duplicate.params],
     );
     const existing = existingRows[0];
     if (existing && options.duplicateStrategy !== "create") {
       return {
         status: "skipped",
         id: existing.id,
-        reason: "هزینه‌ای با همین تاریخ، مبلغ و سرفصل از پیش ثبت شده است.",
+        reason: `هزینه‌ای با همین ${rule.label} از پیش ثبت شده است. اگر واقعاً دو هزینهٔ جداست، با استراتژی «ایجاد» واردش کنید.`,
       };
     }
 
@@ -378,37 +399,29 @@ const expensesAdapter: EntityAdapter = {
         amount,
         expenseDate,
         vendor: text(values.vendor),
-        memo: text(values.memo) ?? "ورود از فایل",
+        memo,
         createdBy: context.actorUserId,
       });
       return { status: "created", id: String(expense.id) };
     } catch (error) {
       const code = error instanceof Error ? error.message : "unknown";
-      throw new RowRejection(expenseErrorMessage(code));
+      const lockCode = fiscalPeriodLockErrorCode(error);
+      // Every code the service can throw, translated by the one map the screen
+      // also uses (issue #832 §17). This used to hand-translate a private switch
+      // that still mentioned `wrong_account_type` and `period_closed` — codes the
+      // expense service stopped emitting years ago — so a real failure such as
+      // «this is not a payment account» reached the operator as raw technical
+      // text, and the fiscal lock was mistaken for a closed period.
+      throw new RowRejection(
+        lockCode === "fiscal_period_locked"
+          ? "دورهٔ مالی این تاریخ قفل است و امکان ثبت سند وجود ندارد."
+          : lockCode === "fiscal_period_soft_closed"
+            ? "دورهٔ مالی این تاریخ بستهٔ موقت است؛ فقط مالک یا حسابدار می‌تواند سند ثبت کند."
+            : (expenseErrorMessage(code) ?? `ثبت هزینه ممکن نشد (${code}).`),
+      );
     }
   },
 };
-
-function expenseErrorMessage(code: string): string {
-  switch (code) {
-    case "invalid_amount":
-      return "مبلغ هزینه معتبر نیست.";
-    case "memo_required":
-      return "شرح هزینه الزامی است.";
-    case "unknown_account":
-      return "حساب انتخاب‌شده یافت نشد.";
-    case "same_account":
-      return "سرفصل هزینه و حساب پرداخت نمی‌توانند یکی باشند.";
-    case "invalid_expense_date":
-      return "تاریخ هزینه معتبر نیست.";
-    case "wrong_account_type":
-      return "نوع حساب انتخاب‌شده برای هزینه مناسب نیست.";
-    case "period_closed":
-      return "دورهٔ مالی این تاریخ بسته شده است.";
-    default:
-      return `ثبت هزینه ممکن نشد (${code}).`;
-  }
-}
 
 export function registerAccountingAdapters(): void {
   registerAdapter(accountsAdapter);

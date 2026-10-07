@@ -1052,10 +1052,13 @@ waste, trial balance) becomes a suite an accountant can actually close a year on
   canonical record remain CRM-owned: `/dashboard/customers` is a compatibility redirect to the
   CRM directory (Owner/Manager/Cashier/Accountant, gated by the `customers.view`/`customers.manage`
   permissions), independent of the `ledger` feature flag.
-- **Bank & cash reconciliation**, **expense management** (categorised, with attachments and
-  recurring expenses), and **payroll entries** (accrual/payment postings, not a payroll engine).
-- **Manual journals** — draft → review → post, reversal rather than deletion, recurring
-  templates, and an approval permission distinct from posting.
+- **Bank & cash reconciliation**, **expense management** (categorised, with a receipt photo held
+  in the Media Library, input-VAT splitting and reversals — *no recurring/scheduled expenses*: the
+  phase that scoped them deferred them, and no schema for them exists), and **payroll entries**
+  (accrual/payment postings, not a payroll engine).
+- **Manual journals** — draft → review → post, reversal rather than deletion, and an approval
+  permission distinct from posting. Recurring templates were deferred with expense scheduling and
+  are likewise not implemented.
 - **Chart-of-accounts customisation** and **VAT/tax reporting** (output vs. input VAT, net
   payable position).
 

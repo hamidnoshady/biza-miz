@@ -9,6 +9,13 @@ import { createAccount, listAccounts, AccountsError } from "@/lib/accounts-servi
  * (manual entries, …) — unchanged from before this phase. ?all=1 returns
  * every account, active or archived, with the postings/children flags the
  * management UI needs to decide what's safe to archive or delete.
+ *
+ * `parent_id` travels with the picker rows because an account's *meaning* is
+ * inherited: `src/lib/account-classification.ts` resolves a custom sub-account
+ * through its parent, and the Expenses payment-source picker applies that rule in
+ * the browser (issue #832 §2). A code alone would not be enough — and shipping
+ * the same ids the server classifies is what makes the two lists unable to
+ * disagree about what «پرداخت از» may offer.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
@@ -21,7 +28,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   }
 
   const { rows } = await query(
-    `SELECT a.id, a.code, a.name, a.type, p.code AS parent_code
+    `SELECT a.id, a.code, a.name, a.type, a.parent_id, p.code AS parent_code
        FROM accounts a LEFT JOIN accounts p ON p.id = a.parent_id
       WHERE a.business_id = $1 AND a.is_active ORDER BY a.code`,
     [session.businessId],

@@ -21,7 +21,7 @@ import { updateMenuItem } from "./menu-service";
 import { createStockCount, reverseStockCount } from "./stock-count-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
-import { recordExpense, ExpenseError } from "./expense-service";
+import { recordExpense, reverseExpense, ExpenseError } from "./expense-service";
 import { createDraft, deleteDraft, ManualJournalError } from "./manual-journal-service";
 import { updateCustomer } from "./parties-service";
 import { addCustomerNote, deleteCustomerNote, setCustomerTag } from "./crm-service";
@@ -292,6 +292,8 @@ const expense: AutopilotExecutor = async (ctx) => {
       amount,
       expenseDate: str(ctx.payload.expenseDate),
       vendor: str(ctx.payload.vendor),
+      partyId: str(ctx.payload.partyId),
+      vatAmount: ctx.payload.vatAmount === undefined ? null : Number(ctx.payload.vatAmount),
       memo: `${AUTOPILOT_NOTE_PREFIX}${memo}`,
       createdBy: ctx.authorizedByUserId,
     });
@@ -299,6 +301,32 @@ const expense: AutopilotExecutor = async (ctx) => {
   } catch (err) {
     if (err instanceof ExpenseError) return fail(err.message);
     return fail(err instanceof Error ? err.message : "expense_failed");
+  }
+};
+
+/**
+ * Undo an automated expense the way the register undoes any other: a mirrored
+ * reversal, never a deletion (issue #832 §1, §15). Before 0211 there was no
+ * honest one-click undo to offer for `expense.categorize` — `reverseEntry`
+ * accepts only `source_type='manual'` — which is why the action advertised
+ * itself as irreversible; it now shares the accountant's own correction path
+ * rather than an automation-only one.
+ */
+const revertExpense: AutopilotReverter = async (ctx) => {
+  const expenseId = str(ctx.result?.expenseId) ?? str(ctx.payload.expenseId);
+  if (!expenseId) return fail("no_prior_state");
+  if (!ctx.authorizedByUserId) return fail("no_authorizing_user");
+  try {
+    await reverseExpense({
+      businessId: ctx.businessId,
+      expenseId,
+      actorId: ctx.authorizedByUserId,
+      memo: `${AUTOPILOT_NOTE_PREFIX}ابطال هزینهٔ خودکار`,
+    });
+    return { ok: true, result: { expenseId, reversed: true } };
+  } catch (err) {
+    if (err instanceof ExpenseError) return fail(err.message);
+    throw err;
   }
 };
 
@@ -815,4 +843,5 @@ export const AUTOPILOT_REVERTERS: Partial<Record<AutopilotExecutorKey, Autopilot
   customerTag: revertCustomerTag,
   crmCustomerNote: revertCrmCustomerNote,
   productionRun: revertProductionRun,
+  expense: revertExpense,
 };
