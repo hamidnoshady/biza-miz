@@ -824,19 +824,29 @@ export function PrimaryButton({
   );
 }
 
+/**
+ * The default is `type="button"` — and it is a default rather than an
+ * afterthought because every `<button>` inside a `<form>` submits that form
+ * unless something says otherwise. A secondary control («افزودن ردیف»,
+ * «انصراف», a pager) that a person reaches for while filling a form must never
+ * be the thing that files it; `type` is exposed so a caller can still ask for
+ * `submit` explicitly instead of relying on the browser's default.
+ */
 export function SecondaryButton({
   children,
   onClick,
   disabled,
   className,
+  type = "button",
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   disabled?: boolean;
   className?: string;
+  type?: "submit" | "button";
 }) {
   return (
-    <Button type="button" variant="outline" onClick={onClick} disabled={disabled} className={`px-4 ${className ?? ""}`}>
+    <Button type={type} variant="outline" onClick={onClick} disabled={disabled} className={`px-4 ${className ?? ""}`}>
       {children}
     </Button>
   );

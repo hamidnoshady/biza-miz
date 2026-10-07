@@ -7,6 +7,12 @@ import {
   replicationContractProblems,
   unclaimedMasterTables,
 } from "./data-ownership";
+// The ledger's authority used to be declared twice, in opposite ways: this
+// module called it site-authoritative and bidirectional while
+// replication-catalogue.ts and sync-event-registry.ts both called the cloud the
+// system of record. One answer, asserted against both contracts.
+import { replicationCatalogue } from "./replication-catalogue";
+import { SYNC_EVENT_REGISTRY, siteSkipsPulledEvent } from "./sync-event-registry";
 
 describe("replication-domain contract", () => {
   it("never gives financial or inventory events timestamp overwrite semantics", () => {
@@ -75,6 +81,39 @@ describe("replication-domain contract", () => {
       transport: "none",
       events: [],
     });
+  });
+
+  it("declares one authority for the ledger, agreed by all three contracts", () => {
+    // The cloud owns the books: fiscal periods, the chart, the draft → review →
+    // approve workflow and the entries themselves. A site's one ledger effect
+    // is reversing a manual entry, which travels *up* as a request, never as a
+    // second authoritative copy.
+    expect(ownershipFor("accounting_journals")).toMatchObject({
+      authority: "cloud_authoritative",
+      ownership: "cloud_authoritative",
+      direction: "site_to_cloud",
+      conflictPolicy: "append_or_reverse",
+    });
+
+    const catalogue = replicationCatalogue().find((d) => d.key === "journals");
+    expect(catalogue?.authority).toBe("cloud_authoritative");
+    expect(catalogue?.eventTypes).toContain("accounting.manual_journal.reversed");
+
+    // The registry's own rule: a desktop acknowledges a pulled ledger effect
+    // instead of applying it, because the cloud already owns it.
+    const reversal = SYNC_EVENT_REGISTRY.find((e) => e.type === "accounting.manual_journal.reversed");
+    expect(reversal?.effectClass).toBe("journal_reversal");
+    expect(siteSkipsPulledEvent(reversal!)).toBe(true);
+  });
+
+  it("never records an accounting authority that contradicts another contract", () => {
+    // Guards the fix rather than its current value: whichever authority is
+    // chosen, data-ownership and the replication catalogue must agree, so two
+    // "single sources of truth" cannot be published side by side again.
+    const accounting = ownershipFor("accounting_journals");
+    const catalogue = replicationCatalogue().find((d) => d.key === "journals");
+    expect(catalogue?.authority).toBe(accounting.authority);
+    expect(accounting.direction).not.toBe("bidirectional");
   });
 
   it("carries open-order state and closed-order amendments as order events", () => {

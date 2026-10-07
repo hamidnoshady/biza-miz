@@ -1054,8 +1054,11 @@ waste, trial balance) becomes a suite an accountant can actually close a year on
   permissions), independent of the `ledger` feature flag.
 - **Bank & cash reconciliation**, **expense management** (categorised, with attachments and
   recurring expenses), and **payroll entries** (accrual/payment postings, not a payroll engine).
-- **Manual journals** — draft → review → post, reversal rather than deletion, recurring
-  templates, and an approval permission distinct from posting.
+- **Manual journals** — draft → review → post, reversal rather than deletion, and an approval
+  permission (`ledger.approve`) distinct from proposing one (`ledger.propose`). Each draft keeps
+  its proposer, its branch, its business-local accounting date and — once decided — its
+  approver or the reviewer who rejected it and why. Recurring journal templates were
+  deliberately deferred by Phase 16 and are **not** implemented.
 - **Chart-of-accounts customisation** and **VAT/tax reporting** (output vs. input VAT, net
   payable position).
 
