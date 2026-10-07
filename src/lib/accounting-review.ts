@@ -107,6 +107,12 @@ export interface AccountingReviewSnapshot {
   /** Fiscal periods that ended but were never soft-closed or locked. */
   unlockedPastPeriods: { id: string; label: string; endsOn: string }[];
   /**
+   * Journal entries dated outside every configured fiscal period (audit F08),
+   * and how many fiscal years exist at all. Reported, never rejected: the
+   * database permits an uncovered date on purpose.
+   */
+  uncoveredFiscalEntries: { count: number; earliest: string | null; latest: string | null; fiscalYearCount: number };
+  /**
    * Codes of findings whose row list hit the service's row cap, so their count
    * is a floor rather than a total. An audit tool that prints «۵۰ مورد» when
    * there are six hundred is lying in the same way one that finds nothing
@@ -136,6 +142,7 @@ export function emptyAccountingSnapshot(asOfDate: string, windowDays = 30): Acco
     staleDraftPurchases: [],
     staleDraftPurchaseAfterDays: 14,
     unlockedPastPeriods: [],
+    uncoveredFiscalEntries: { count: 0, earliest: null, latest: null, fiscalYearCount: 0 },
     truncatedChecks: [],
   };
 }
@@ -433,6 +440,25 @@ const RULES: Rule[] = [
       suggestion: "پس از اطمینان از کامل‌بودن اسناد، دوره را در «دوره‌های مالی» ببندید و سپس قفل کنید.",
       href: "/accounting/fiscal-periods",
       samples: firstSamples(rows, (row) => sample(`${row.label} — پایان ${day(row.endsOn)}`, row.id)),
+    };
+  },
+
+  (s) => {
+    const u = s.uncoveredFiscalEntries;
+    if (u.count === 0 || !u.earliest || !u.latest) return null;
+    const noYear = u.fiscalYearCount === 0;
+    return {
+      code: "uncovered_fiscal_dates",
+      severity: "medium",
+      title: noYear ? "سال مالی تعریف نشده" : "سند بیرون از دوره‌های مالی",
+      detail: `${fa(u.count)} سند حسابداری از ${day(u.earliest)} تا ${day(u.latest)} در هیچ دورهٔ مالی تعریف‌شده‌ای نیست${
+        noYear ? "؛ هنوز هیچ سال مالی‌ای تعریف نشده است" : ""
+      }. این اسناد رد یا جابه‌جا نمی‌شوند، اما تا زیر پوشش دوره نروند قابل قفل نیستند و بستن حساب‌های سال ممکن نیست.`,
+      count: u.count,
+      amountRial: null,
+      suggestion: "سال مالیِ تاریخ‌های این اسناد را در «دوره‌های مالی» تعریف کنید؛ تعریف سال، سندی را تغییر نمی‌دهد.",
+      href: "/accounting/fiscal-periods",
+      samples: [],
     };
   },
 ];
