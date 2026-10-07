@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { FilterChip } from "@/app/dashboard/filters";
 import { api, Field, inputClass } from "@/app/dashboard/ui";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
@@ -141,16 +142,25 @@ export function SettlementAccountPicker({
     [accounts],
   );
 
+  const loading = accounts === null && !failed;
   return (
     <Field label="حساب تسویه (اختیاری)">
-      <SearchableSelect
-        value={value}
-        onChange={onChange}
-        ariaLabel="انتخاب حساب تسویه"
-        loading={accounts === null && !failed}
-        disabled={failed}
-        options={options}
-      />
+      {/*
+       * While the chart is in flight the field keeps its shape with a
+       * skeleton rather than an empty select — the loading-coverage contract
+       * (a fetching client component must reserve its region).
+       */}
+      {loading ? (
+        <Skeleton aria-label="در حال بارگذاری حساب‌ها" className="h-10 w-full" />
+      ) : (
+        <SearchableSelect
+          value={value}
+          onChange={onChange}
+          ariaLabel="انتخاب حساب تسویه"
+          disabled={failed}
+          options={options}
+        />
+      )}
       {failed ? <p className="mt-1 text-xs text-destructive">لیست حساب‌ها بارگذاری نشد؛ از پیش‌فرض روش استفاده می‌شود.</p> : null}
     </Field>
   );

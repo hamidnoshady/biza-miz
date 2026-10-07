@@ -825,7 +825,7 @@ export async function listReceiptsPage(
             r.customer_id, p.name AS party_name,
             r.voucher_number::text AS voucher_number,
             r.location_id, l.name AS location_name,
-            r.created_at::text AS created_at, u.name AS created_by_name,
+            r.created_at::text AS created_at, u.full_name AS created_by_name,
             r.settlement_account_id, a.code AS settlement_account_code, a.name AS settlement_account_name,
             je.id AS entry_id,
             r.reversed_at::text AS reversed_at, r.reversal_entry_id
@@ -942,7 +942,7 @@ export async function listPaymentsPage(
             COALESCE(pa.name, s.name) AS party_name,
             p.voucher_number::text AS voucher_number,
             p.location_id, l.name AS location_name,
-            p.created_at::text AS created_at, u.name AS created_by_name,
+            p.created_at::text AS created_at, u.full_name AS created_by_name,
             p.settlement_account_id, a.code AS settlement_account_code, a.name AS settlement_account_name,
             je.id AS entry_id,
             p.reversed_at::text AS reversed_at, p.reversal_entry_id

@@ -50,14 +50,13 @@ ALTER TABLE ap_payments
     ADD COLUMN reversal_entry_id uuid REFERENCES journal_entries(id) ON DELETE SET NULL,
     ADD COLUMN voucher_number bigint CHECK (voucher_number IS NULL OR voucher_number > 0);
 
--- A reversed voucher always names its reversal entry, and an unreversed one
--- never does — the two columns cannot drift.
-ALTER TABLE ar_receipts
-    ADD CONSTRAINT ar_receipts_reversal_link_check
-    CHECK ((reversed_at IS NULL) = (reversal_entry_id IS NULL));
-ALTER TABLE ap_payments
-    ADD CONSTRAINT ap_payments_reversal_link_check
-    CHECK ((reversed_at IS NULL) = (reversal_entry_id IS NULL));
+-- No CHECK links reversed_at to reversal_entry_id, deliberately: the FK is
+-- ON DELETE SET NULL (matching journal_entries.reverses_entry_id from 0029),
+-- and a link check would contradict it — deleting the entry nulls one column
+-- while the timestamp stands, failing the check. The service is the only
+-- writer and always sets/clears the three reversal columns atomically; the
+-- journal itself (0029) and payroll voids (0150) keep the same discipline
+-- without a link check.
 
 -- ---------------------------------------------------------------------------
 -- 2. `method` gains the clearing settlement (1120 stays reachable explicitly)

@@ -220,8 +220,15 @@ describe("listReceiptsPage (issue #829: cursor pagination + filters)", () => {
     await db.query(`UPDATE ar_receipts SET method = 'bank' WHERE id = $1`, [cashId]);
     await addReceipt(a, 500, "2026-09-20", null);
     const reversedId = await addReceipt(a, 900, "2026-09-25", null);
-    await db.query(`UPDATE ar_receipts SET reversed_at = now(), reversal_entry_id = gen_random_uuid() WHERE id = $1`, [
+    // reversal_entry_id is a real FK: point it at a real (stub) journal entry.
+    const { rows: entryRows } = await db.query<{ id: string }>(
+      `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, source_id)
+       VALUES ($1, '2026-09-26', 'stub reversal', 'ar_receipt', $2) RETURNING id`,
+      [biz.id, reversedId],
+    );
+    await db.query(`UPDATE ar_receipts SET reversed_at = now(), reversal_entry_id = $2 WHERE id = $1`, [
       reversedId,
+      entryRows[0].id,
     ]);
 
     const byDate = await installments.listReceiptsPage(biz.id, { dateFrom: "2026-09-15", dateTo: "2026-09-30" });
