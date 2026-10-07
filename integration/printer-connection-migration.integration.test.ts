@@ -1,16 +1,28 @@
 /**
- * Migration 0155 — the printer connection model. Real-database coverage of
- * the legacy → canonical mapping, on the actual upgrade path: a database at
- * the pre-printer state with legacy printer rows, then 0155 applied on top.
+ * Printer connection model — real-database coverage of the whole upgrade path,
+ * on an actual pre-0155 database holding legacy rows:
  *
- *   system     → {type: 'windows', systemName}   (behaviour fields kept)
+ *   system     → {type: 'windows', systemName}
  *   network    → {type: 'network', ip, port}
  *   ip-only    → {type: 'network', ...}          (pre-transport rows)
  *   usb/webusb/browser/stub → needsReconnect + legacyTransport, identity kept
  *
- * Nothing is destroyed: a `webusb` row keeps its product name, a `usb` row
- * keeps its device path, so the settings screen can say WHICH printer needs
- * re-pairing.
+ * Two migrations share this story and the test asserts the state after BOTH:
+ *
+ *   * 0155 maps the connection, keeping the row's identity (a `webusb` row
+ *     keeps its product name, a `usb` row its device path) so the settings
+ *     screen can say WHICH printer needs re-pairing;
+ *   * 0212 makes the relational columns the only behavioural truth — `paper`,
+ *     `paper_width_mm`, `printer_class`, `supports_drawer`, `supports_cut`,
+ *     `is_default` — strips those keys out of the `connection` jsonb, promotes
+ *     a printer-held `templateKey` into the branch's print rule, and installs
+ *     the one-default-per-purpose index.
+ *
+ * So the jsonb must end up holding the **hardware target and nothing else**,
+ * and behaviour must be readable from the columns. The runner applies the full
+ * directory, so the expectation about how many files land is derived from the
+ * directory itself rather than hard-coded — a later forward migration must not
+ * break this test.
  */
 import { randomUUID } from "node:crypto";
 import { readdirSync } from "node:fs";
@@ -55,14 +67,6 @@ async function preMigrationDir(): Promise<string> {
   for (const file of all.filter((name) => name < "0155_printer_connection_model.sql")) {
     await copyFile(join(process.cwd(), "migrations", file), join(dir, file));
   }
-  return dir;
-}
-
-/** A directory holding only 0155 — the upgrade step under test. */
-async function upgradeDir(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "pos-printer-upg-"));
-  // The runner needs migration 0001 too (it drives the baseline when the
-  // schema_migrations table is seeded); reuse the full history minus nothing.
   return dir;
 }
 
@@ -119,12 +123,28 @@ async function connectionOf(name: string): Promise<Record<string, unknown>> {
   return rows[0].connection as Record<string, unknown>;
 }
 
-describe("migration 0155 — printer connection model", () => {
-  it("applies the upgrade step on top of a 0153 database", async () => {
-    // Running the FULL history is idempotent — schema_migrations skips every
-    // applied file — so every migration from 0155 onward lands here. Keeping
-    // the expectation derived from the migration directory prevents a later
-    // forward migration from breaking this 0155-specific data-shape test.
+/** The row's behaviour — relational columns only, per the unified model. */
+interface PrinterBehaviour {
+  paper: string | null;
+  paper_width_mm: number | null;
+  printer_class: string;
+  supports_drawer: boolean;
+  supports_cut: boolean;
+  is_default: boolean;
+  is_active: boolean;
+}
+
+async function behaviourOf(name: string): Promise<PrinterBehaviour> {
+  const { rows } = await ownerClient.query(
+    `SELECT paper, paper_width_mm, printer_class, supports_drawer, supports_cut, is_default, is_active
+       FROM printers WHERE name = $1`,
+    [name],
+  );
+  return rows[0] as PrinterBehaviour;
+}
+
+describe("the printer connection model — after the full migration history", () => {
+  it("applies every pending file on top of the pre-0155 database", async () => {
     const result = await runMigrations({ databaseUrl: urlFor(databaseName), quiet: true });
     const expectedApplied = readdirSync(join(process.cwd(), "migrations"))
       .filter((name) => /^\d{4}_.+\.sql$/.test(name) && name >= "0155_printer_connection_model.sql")
@@ -132,30 +152,45 @@ describe("migration 0155 — printer connection model", () => {
     expect(result.applied).toBe(expectedApplied);
   });
 
-  it("maps system → windows, keeping the queue name and every behavioural field", async () => {
+  it("maps system → windows: the jsonb keeps the queue name and nothing behavioural", async () => {
     const connection = await connectionOf("رسید سیستم");
     expect(connection.type).toBe("windows");
     expect(connection.systemName).toBe("EPSON TM-T20III");
-    expect(connection.openDrawer).toBe(true);
-    expect(connection.isDefault).toBe(true);
-    expect(connection.paper).toBe("thermal80");
     expect(connection.transport).toBeUndefined();
     expect(connection.ip).toBeUndefined();
     expect(connection.driverMode).toBeUndefined();
+    // Behaviour is no longer answered by the blob…
+    expect(connection.openDrawer).toBeUndefined();
+    expect(connection.paper).toBeUndefined();
+    expect(connection.isDefault).toBeUndefined();
+
+    // …the columns answer it, and the backfill moved the legacy values there.
+    const behaviour = await behaviourOf("رسید سیستم");
+    expect(behaviour.paper).toBe("thermal80");
+    expect(behaviour.paper_width_mm).toBe(80);
+    expect(behaviour.printer_class).toBe("thermal");
+    expect(behaviour.supports_drawer).toBe(true);
   });
 
-  it("maps network (and pre-transport ip-only rows) → network, port intact", async () => {
+  it("maps network (and pre-transport ip-only rows) → network, and moves the width to the column", async () => {
     const network = await connectionOf("آشپزخانه شبکه");
     expect(network.type).toBe("network");
     expect(network.ip).toBe("192.168.1.45");
     expect(network.port).toBe(9100);
-    expect(network.paperWidthMm).toBe(58);
     expect(network.systemName).toBeUndefined();
+    expect(network.paperWidthMm).toBeUndefined();
+    expect(network.paper).toBeUndefined();
+
+    const kitchen = await behaviourOf("آشپزخانه شبکه");
+    expect(kitchen.paper).toBe("thermal58");
+    expect(kitchen.paper_width_mm).toBe(58);
 
     const legacy = await connectionOf("قدیمی بدون transport");
     expect(legacy.type).toBe("network");
     expect(legacy.ip).toBe("192.168.1.50");
     expect(legacy.port).toBe(9101);
+    // A row that named no paper gets the purpose's own default.
+    expect((await behaviourOf("قدیمی بدون transport")).paper).toBe("thermal80");
 
     const noPort = await connectionOf("شبکه بدون پورت");
     expect(noPort.type).toBe("network");
@@ -167,6 +202,9 @@ describe("migration 0155 — printer connection model", () => {
     expect(usb.needsReconnect).toBe(true);
     expect(usb.legacyTransport).toBe("usb");
     expect(usb.devicePath).toBe("USB001");
+    // Identity (how to find the device again) is not behaviour: it stays.
+    expect(usb.paperWidthMm).toBeUndefined();
+    expect((await behaviourOf("USB قدیمی")).paper_width_mm).toBe(80);
 
     const webusb = await connectionOf("WebUSB قدیمی");
     expect(webusb.needsReconnect).toBe(true);
@@ -176,8 +214,7 @@ describe("migration 0155 — printer connection model", () => {
     const browser = await connectionOf("مرورگر قدیمی");
     expect(browser.needsReconnect).toBe(true);
     expect(browser.legacyTransport).toBe("browser");
-    // Behavioural fields survive so a re-pair can keep them.
-    expect(browser.isDefault).toBe(true);
+    expect(browser.isDefault).toBeUndefined();
 
     const stub = await connectionOf("استاب نصب اولیه");
     expect(stub.needsReconnect).toBe(true);
@@ -192,5 +229,39 @@ describe("migration 0155 — printer connection model", () => {
     expect(rows.map((r: { name: string }) => r.name).sort()).toEqual(
       ["USB قدیمی", "WebUSB قدیمی", "استاب نصب اولیه", "مرورگر قدیمی"].sort(),
     );
+  });
+
+  it("leaves at most one default printer per purpose, with the index enforcing it", async () => {
+    // Two legacy receipt rows claimed to be the default («رسید سیستم» and
+    // «مرورگر قدیمی»); the migration keeps one, and this is the index that
+    // stops a second from ever appearing again.
+    const { rows: defaults } = await ownerClient.query(
+      `SELECT kind, count(*)::int AS count FROM printers WHERE is_default GROUP BY kind`,
+    );
+    for (const row of defaults as { kind: string; count: number }[]) {
+      expect(row.count, row.kind).toBe(1);
+    }
+    const { rows: indexes } = await ownerClient.query(
+      `SELECT indexdef FROM pg_indexes WHERE tablename = 'printers' AND indexname = 'idx_printers_one_default_per_purpose'`,
+    );
+    expect(indexes).toHaveLength(1);
+    expect(String(indexes[0].indexdef)).toContain("UNIQUE");
+  });
+
+  it("keeps every converted row readable by the runtime model", async () => {
+    // The settings screen and the resolver read a printer through the row +
+    // `connection`; a row that says `type` and a target must be usable, and a
+    // legacy one must be refused with `needsReconnect`.
+    const { rows } = await ownerClient.query(`SELECT name, connection, is_active FROM printers ORDER BY name`);
+    for (const row of rows as { name: string; connection: Record<string, unknown>; is_active: boolean }[]) {
+      const connection = row.connection;
+      if (connection.needsReconnect === true) continue;
+      if (connection.type === "windows") {
+        expect(typeof connection.systemName, row.name).toBe("string");
+      } else {
+        expect(connection.type, row.name).toBe("network");
+        expect(typeof connection.ip, row.name).toBe("string");
+      }
+    }
   });
 });
