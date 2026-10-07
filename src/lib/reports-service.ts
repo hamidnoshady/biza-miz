@@ -728,22 +728,36 @@ export async function getBalanceSheetComparison(
 // ---------------------------------------------------------------------------
 
 export interface DrillDownLine {
+  lineId: string;
   entryId: string;
   entryDate: string;
   memo: string | null;
   sourceType: string | null;
-  debit: number;
-  credit: number;
+  sourceId: string | null;
+  debit: string;
+  credit: string;
 }
 
-/** Every journal line posted to `accountCode` in the given range, newest first — what a statement figure is made of. */
+export interface AccountDrillDownPage {
+  lines: DrillDownLine[];
+  totals: { debit: string; credit: string; signedBalance: string };
+  totalLines: number;
+  hasMore: boolean;
+  nextOffset: number | null;
+}
+
+/**
+ * Exact, paginated journal lines behind one account figure. Window aggregates
+ * carry the full debit/credit sum on each fetched row, so even a large account
+ * ledger can prove its displayed amount without loading every posting at once.
+ */
 export async function getAccountDrillDown(
   businessId: string,
   accountCode: string,
-  filters: DateRangeFilters = {},
-): Promise<DrillDownLine[]> {
+  filters: DateRangeFilters & { offset?: number; limit?: number } = {},
+): Promise<AccountDrillDownPage> {
   const params: unknown[] = [businessId, accountCode];
-  const where = ["je.business_id = $1", "a.code = $2"];
+  const where = ["je.business_id = $1", "a.business_id = $1", "a.code = $2"];
   if (filters.dateFrom) {
     params.push(filters.dateFrom);
     where.push(`je.entry_date >= $${params.length}`);
@@ -752,31 +766,74 @@ export async function getAccountDrillDown(
     params.push(filters.dateTo);
     where.push(`je.entry_date <= $${params.length}`);
   }
+  const whereSql = where.join(" AND ");
+  const { rows: summaryRows } = await query<{
+    debit: string;
+    credit: string;
+    total_lines: string;
+  }>(
+    `SELECT COALESCE(SUM(jl.debit), 0)::text AS debit,
+            COALESCE(SUM(jl.credit), 0)::text AS credit,
+            COUNT(jl.id)::text AS total_lines
+       FROM journal_lines jl
+       JOIN journal_entries je ON je.id = jl.entry_id
+       JOIN accounts a ON a.id = jl.account_id
+      WHERE ${whereSql}`,
+    params,
+  );
+  const summary = summaryRows[0];
+  const totalDebit = summary?.debit ?? "0";
+  const totalCredit = summary?.credit ?? "0";
+  const totalLines = Number(summary?.total_lines ?? 0);
+  const offset = Number.isSafeInteger(filters.offset) && (filters.offset ?? 0) >= 0
+    ? filters.offset!
+    : 0;
+  const limit = Number.isSafeInteger(filters.limit) && (filters.limit ?? 0) > 0
+    ? Math.min(filters.limit!, 200)
+    : 200;
+  const pageParams = [...params, limit + 1, offset];
   const { rows } = await query<{
+    line_id: string;
     entry_id: string;
     entry_date: string;
     memo: string | null;
     source_type: string | null;
+    source_id: string | null;
     debit: string;
     credit: string;
   }>(
-    `SELECT je.id AS entry_id, je.entry_date::text AS entry_date, je.memo, je.source_type, jl.debit, jl.credit
+    `SELECT jl.id::text AS line_id, je.id AS entry_id, je.entry_date::text AS entry_date,
+            je.memo, je.source_type, je.source_id, jl.debit::text, jl.credit::text
        FROM journal_lines jl
        JOIN journal_entries je ON je.id = jl.entry_id
        JOIN accounts a ON a.id = jl.account_id
-      WHERE ${where.join(" AND ")}
-      ORDER BY je.entry_date DESC, je.posted_at DESC
-      LIMIT 500`,
-    params,
+      WHERE ${whereSql}
+      ORDER BY je.entry_date DESC, je.posted_at DESC, jl.id DESC
+      LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+    pageParams,
   );
-  return rows.map((r) => ({
-    entryId: r.entry_id,
-    entryDate: r.entry_date,
-    memo: r.memo,
-    sourceType: r.source_type,
-    debit: Number(r.debit),
-    credit: Number(r.credit),
-  }));
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  return {
+    lines: page.map((row) => ({
+      lineId: row.line_id,
+      entryId: row.entry_id,
+      entryDate: row.entry_date,
+      memo: row.memo,
+      sourceType: row.source_type,
+      sourceId: row.source_id,
+      debit: row.debit,
+      credit: row.credit,
+    })),
+    totals: {
+      debit: totalDebit,
+      credit: totalCredit,
+      signedBalance: (BigInt(totalDebit) - BigInt(totalCredit)).toString(),
+    },
+    totalLines,
+    hasMore,
+    nextOffset: hasMore ? offset + limit : null,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ import {
   type AccountingSectionKey,
 } from "./accounting-routes";
 import { accountingSectionsFor } from "./accounting-nav";
+import { accountingSectionNeedsAccountList } from "./accounting-manager-policy";
 import { LEDGER_WORKSPACE_SECTION_KEYS, LEDGER_WORKSPACE_SUBGROUPS } from "./accounting-workspace";
 import { TrialBalanceSection } from "./trial-balance-section";
 import { EntriesSection } from "./entries-section";
@@ -119,6 +120,7 @@ export function AccountingManager({
    * the gate, matching how `partiesSectionAbilities` treats the same gap.
    */
   const canApproveLedger = permissions ? permissions.includes(PERMISSIONS.ledgerApprove) : undefined;
+  const canExportReports = permissions?.includes(PERMISSIONS.reportsExport) ?? false;
 
   // Every section is a route now, so the rail navigates rather than switching
   // local state — a section a person lands on is a URL they can keep.
@@ -162,6 +164,7 @@ export function AccountingManager({
     ? sections.filter((candidate) => currentSubGroup.keys.includes(candidate.key))
     : [];
 
+  const requiresAccounts = accountingSectionNeedsAccountList(section);
   const [loadFailed, setLoadFailed] = useState(false);
   const loadAccounts = useCallback(() => {
     setLoadFailed(false);
@@ -173,7 +176,9 @@ export function AccountingManager({
       else setLoadFailed(true);
     });
   }, []);
-  useEffect(loadAccounts, [loadAccounts]);
+  useEffect(() => {
+    if (requiresAccounts) loadAccounts();
+  }, [requiresAccounts, loadAccounts]);
 
   async function run(fn: () => Promise<{ ok: boolean; data: { error?: string } }>) {
     setBusy(true);
@@ -198,7 +203,7 @@ export function AccountingManager({
     }
   }
 
-  if (!accounts) {
+  if (requiresAccounts && !accounts) {
     if (loadFailed) {
       return (
         <div className="space-y-3">
@@ -217,11 +222,11 @@ export function AccountingManager({
   const body = (
     <>
       {section === "dashboard" ? <LedgerDashboardSection onGoToTab={goToSection} refreshKey={refreshKey} /> : null}
-          {section === "trial-balance" ? <TrialBalanceSection refreshKey={refreshKey} /> : null}
+          {section === "trial-balance" ? <TrialBalanceSection refreshKey={refreshKey} canExport={canExportReports} /> : null}
           {section === "entries" ? <EntriesSection refreshKey={refreshKey} busy={busy} run={run} /> : null}
           {section === "manual" ? (
             <ManualEntrySection
-              accounts={accounts}
+              accounts={accounts ?? []}
               busy={busy}
               run={run}
               refreshKey={refreshKey}
@@ -229,7 +234,7 @@ export function AccountingManager({
               currentUserId={currentUserId}
             />
           ) : null}
-          {section === "expenses" ? <ExpenseSection accounts={accounts} busy={busy} run={run} refreshKey={refreshKey} /> : null}
+          {section === "expenses" ? <ExpenseSection accounts={accounts ?? []} busy={busy} run={run} refreshKey={refreshKey} /> : null}
           {section === "fiscal-periods" ? <FiscalPeriodsSection /> : null}
           {section === "directory" ? (
             <PartiesSection
