@@ -26,6 +26,8 @@ import {
   type NormalBalance,
 } from "./coa-template";
 import { getBusinessIndustry } from "./industry-guard";
+import { classifyAccounts, isClearing, isUsableLiquidity } from "./account-classification";
+import { ledgerSourceLabel } from "./ledger-source-labels";
 import type { Role } from "./auth";
 
 export interface ReportRow extends Record<string, unknown> {
@@ -403,36 +405,34 @@ export async function getBalanceSheet(
 // ---------------------------------------------------------------------------
 
 /**
- * "Cash and cash equivalents" for this statement: the accounts the system itself
- * posts cash movements to.
+ * "Cash and cash equivalents" for this statement are the accounts the shared
+ * classifier (`account-classification.ts`) calls usable liquidity: صندوق، بانک
+ * and تنخواه, including any custom sub-account under them — the same set the
+ * Accounting overview totals, so the two cannot disagree (dashboard audit F02,
+ * F10). Card/PSP money in transit (1120) and platform receivables (1230) are
+ * *not* cash: a sale paid by card is a movement into clearing, and the cash
+ * flow happens when the settlement reaches the bank. Their net change over
+ * the period is disclosed separately as `clearingChange`.
  *
- * The plain bank account (1110) joined the list in Phase 30. It used to be
- * excluded because nothing auto-posted to it — but a cheque clears *into the
- * bank*, not into `bankClearing` (which means "card money on its way from the
- * PSP"), so cheque clearances and presentations land there now. Leaving it out
- * would drop every cheque that cleared out of the cash-flow statement, which is
- * a worse answer than the one a business with stray manual entries against 1110
- * used to get.
+ * Each cash-touching entry is classified IAS 7-style by its counter-lines:
+ * a non-current asset (15xx) → investing; equity or a non-current liability
+ * (≥ 2500) → financing; anything else → operating. The source-type grouping is
+ * kept inside each activity as the operational movement detail, labelled
+ * through the canonical `ledgerSourceLabel` vocabulary.
  */
-const CASH_EQUIVALENT_CODES = [WELL_KNOWN_CODES.cash, WELL_KNOWN_CODES.bank, WELL_KNOWN_CODES.bankClearing];
+export type CashFlowActivity = "operating" | "investing" | "financing";
 
-const SOURCE_TYPE_LABELS: Record<string, string> = {
-  order: "دریافت از سفارش‌ها",
-  purchase: "پرداخت بابت خرید",
-  waste: "ضایعات",
-  stock_count: "تعدیل شمارش موجودی",
-  customer_return: "بازپرداخت به مشتری",
-  manual: "اسناد دستی",
-  expense: "هزینه‌های عملیاتی",
-  payroll_accrual: "تعهد حقوق و دستمزد",
-  payroll_payment: "پرداخت حقوق و دستمزد",
-  cheque: "چک",
+export const CASH_FLOW_ACTIVITY_LABELS: Record<CashFlowActivity, string> = {
+  operating: "فعالیت‌های عملیاتی",
+  investing: "فعالیت‌های سرمایه‌گذاری",
+  financing: "فعالیت‌های تأمین مالی",
 };
 
 export interface CashFlowLine {
   sourceType: string;
   label: string;
   amount: number;
+  activity: CashFlowActivity;
 }
 
 export interface CashFlowStatement {
@@ -440,14 +440,27 @@ export interface CashFlowStatement {
   closingCash: number;
   netChange: number;
   lines: CashFlowLine[];
+  /** Net cash flow per IAS 7 activity. */
+  activities: Record<CashFlowActivity, number>;
+  /** Net change in settlement-in-transit (card/gateway clearing, platform receivables) over the period — not cash. */
+  clearingChange: number;
+  /** What "cash" means here, for the screen to print. */
+  cashDefinition: string;
 }
 
-async function cashEquivalentAccountIds(businessId: string): Promise<string[]> {
-  const { rows } = await query<{ id: string }>(
-    `SELECT id FROM accounts WHERE business_id = $1 AND code = ANY($2::text[])`,
-    [businessId, CASH_EQUIVALENT_CODES],
+async function liquidityAccountIds(businessId: string): Promise<{ cash: string[]; clearing: string[] }> {
+  const { rows } = await query<{ id: string; code: string; parent_id: string | null; type: AccountType }>(
+    `SELECT id, code, parent_id, type FROM accounts WHERE business_id = $1`,
+    [businessId],
   );
-  return rows.map((r) => r.id);
+  const roles = classifyAccounts(rows.map((r) => ({ id: r.id, code: r.code, parentId: r.parent_id, type: r.type })));
+  const cash: string[] = [];
+  const clearing: string[] = [];
+  for (const [id, role] of roles) {
+    if (isUsableLiquidity(role)) cash.push(id);
+    else if (isClearing(role)) clearing.push(id);
+  }
+  return { cash, clearing };
 }
 
 async function cashBalanceAsOf(
@@ -456,6 +469,7 @@ async function cashBalanceAsOf(
   asOfDate?: string,
   locationId?: string,
 ): Promise<number> {
+  if (cashAccountIds.length === 0) return 0;
   const params: unknown[] = [businessId, cashAccountIds];
   const where = ["je.business_id = $1", "jl.account_id = ANY($2::uuid[])"];
   if (asOfDate) {
@@ -476,24 +490,24 @@ async function cashBalanceAsOf(
 }
 
 /**
- * Cash flow for a date range, direct method: every cash/bank-clearing
- * movement, grouped by the kind of event that posted it (an order payment, a
- * purchase, a manual entry, …) via journal_entries.source_type — the same
- * categorisation the auto-posting paths already stamp on every entry, so
- * this needs no new bookkeeping to be meaningful.
+ * Cash flow for a date range, direct method, by activity and posting source.
+ * See the block comment above for what counts as cash and how an entry is
+ * classified.
  */
 export async function getCashFlow(
   businessId: string,
   filters: DateRangeFilters = {},
   locationId?: string,
 ): Promise<CashFlowStatement> {
-  const cashAccountIds = await cashEquivalentAccountIds(businessId);
+  const cashDefinition = "صندوق، بانک و تنخواه (وجوه در راه کارت‌خوان و درگاه جزو نقد نیست)";
+  const empty = { operating: 0, investing: 0, financing: 0 };
+  const { cash: cashAccountIds, clearing: clearingAccountIds } = await liquidityAccountIds(businessId);
   if (cashAccountIds.length === 0) {
-    return { openingCash: 0, closingCash: 0, netChange: 0, lines: [] };
+    return { openingCash: 0, closingCash: 0, netChange: 0, lines: [], activities: empty, clearingChange: 0, cashDefinition };
   }
 
   const params: unknown[] = [businessId, cashAccountIds];
-  const where = ["je.business_id = $1", "jl.account_id = ANY($2::uuid[])"];
+  const where = ["je.business_id = $1"];
   if (filters.dateFrom) {
     params.push(filters.dateFrom);
     where.push(`je.entry_date >= $${params.length}`);
@@ -507,32 +521,68 @@ export async function getCashFlow(
     where.push("je.location_id = $" + params.length);
   }
 
-  const [openingCash, closingCash, lineRows] = await Promise.all([
+  const clearingRange = async (): Promise<number> => {
+    if (clearingAccountIds.length === 0) return 0;
+    const [open, close] = await Promise.all([
+      filters.dateFrom
+        ? cashBalanceAsOf(businessId, clearingAccountIds, addDays(filters.dateFrom, -1), locationId)
+        : Promise.resolve(0),
+      cashBalanceAsOf(businessId, clearingAccountIds, filters.dateTo, locationId),
+    ]);
+    return close - open;
+  };
+
+  const [openingCash, closingCash, lineRows, clearingChange] = await Promise.all([
     filters.dateFrom
       ? cashBalanceAsOf(businessId, cashAccountIds, addDays(filters.dateFrom, -1), locationId)
       : Promise.resolve(0),
     cashBalanceAsOf(businessId, cashAccountIds, filters.dateTo, locationId),
-    query<{ source_type: string | null; debit: string; credit: string }>(
-      `SELECT je.source_type, SUM(jl.debit) AS debit, SUM(jl.credit) AS credit
-         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
-        WHERE ${where.join(" AND ")}
-        GROUP BY je.source_type`,
+    query<{ source_type: string | null; activity: CashFlowActivity; amount: string }>(
+      `WITH per_entry AS (
+         SELECT je.id, je.source_type,
+                SUM(CASE WHEN jl.account_id = ANY($2::uuid[]) THEN jl.debit - jl.credit ELSE 0 END) AS cash_delta,
+                bool_or(jl.account_id = ANY($2::uuid[])) AS touches_cash,
+                bool_or(NOT (jl.account_id = ANY($2::uuid[])) AND a.type = 'asset'
+                        AND COALESCE(substring(a.code from '^[0-9]+')::numeric, 0) BETWEEN 1500 AND 1599) AS investing,
+                bool_or(NOT (jl.account_id = ANY($2::uuid[])) AND (a.type = 'equity'
+                        OR (a.type = 'liability' AND COALESCE(substring(a.code from '^[0-9]+')::numeric, 0) >= 2500))) AS financing
+           FROM journal_entries je
+           JOIN journal_lines jl ON jl.entry_id = je.id
+           JOIN accounts a ON a.id = jl.account_id
+          WHERE ${where.join(" AND ")}
+          GROUP BY je.id, je.source_type
+       )
+       SELECT source_type,
+              CASE WHEN investing THEN 'investing' WHEN financing THEN 'financing' ELSE 'operating' END AS activity,
+              SUM(cash_delta)::text AS amount
+         FROM per_entry
+        WHERE touches_cash
+        GROUP BY 1, 2`,
       params,
     ),
+    clearingRange(),
   ]);
 
+  const activities = { ...empty };
   const lines: CashFlowLine[] = lineRows.rows
     .map((r) => {
       const sourceType = r.source_type ?? "manual";
-      return {
-        sourceType,
-        label: SOURCE_TYPE_LABELS[sourceType] ?? sourceType,
-        amount: Number(r.debit) - Number(r.credit),
-      };
+      const amount = Number(r.amount);
+      activities[r.activity] += amount;
+      return { sourceType, label: ledgerSourceLabel(sourceType), amount, activity: r.activity };
     })
-    .sort((a, b) => b.amount - a.amount);
+    .filter((line) => line.amount !== 0)
+    .sort((a, b) => a.activity.localeCompare(b.activity) || b.amount - a.amount);
 
-  return { openingCash, closingCash, netChange: closingCash - openingCash, lines };
+  return {
+    openingCash,
+    closingCash,
+    netChange: closingCash - openingCash,
+    lines,
+    activities,
+    clearingChange,
+    cashDefinition,
+  };
 }
 
 // ---------------------------------------------------------------------------

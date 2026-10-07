@@ -466,6 +466,24 @@ describe("online sale facts — trade reports", () => {
   });
 });
 
+describe("online sale facts — accounting overview", () => {
+  it("shows website card money as clearing, not cash, and the profit as provisional", async () => {
+    const ledgerReports = await import("../src/lib/ledger-reports-service");
+    const overview = await dbLib.withTenant(biz.id, () => ledgerReports.getLedgerOverview(biz.id));
+    const { rows: [{ clearing }] } = await db.query<{ clearing: string }>(
+      `SELECT COALESCE(sum(l.debit - l.credit), 0)::text AS clearing
+         FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id JOIN accounts a ON a.id = l.account_id
+        WHERE e.business_id = $1 AND a.code = '1120'`,
+      [biz.id],
+    );
+    expect(Number(clearing)).toBeGreaterThan(0);
+    expect(overview.paymentClearing).toBe(Number(clearing));
+    expect(overview.cashAndBank).toBe(0);
+    expect(overview.costCoverage.provisional).toBe(true);
+    expect(overview.costCoverage.uncostedLines).toBeGreaterThan(0);
+  });
+});
+
 describe("legacy backfill script", () => {
   it("dry-runs without writing, then reconstructs facts idempotently with --apply", async () => {
     const { execFileSync } = await import("node:child_process");

@@ -138,10 +138,40 @@ describe("getCashFlow", () => {
     expect(bySource.manual).toBe(-100_000);
   });
 
-  it("counts bank-clearing movements as cash too", async () => {
+  // Dashboard audit F02/F10: card money on its way from the PSP is not cash.
+  // A card sale moves it into clearing (disclosed, not counted); the cash flow
+  // happens when the settlement reaches the drawer/bank, as an operating inflow.
+  it("discloses card clearing separately and counts the settlement as the cash inflow", async () => {
     await postEntry("2025-04-01", "order", "card sale", acct.bankClearing, acct.revenue, 150_000);
+    const beforeSettlement = await reportsService.getCashFlow(biz.id, { dateFrom: "2025-04-01", dateTo: "2025-04-30" });
+    expect(beforeSettlement.closingCash).toBe(0);
+    expect(beforeSettlement.clearingChange).toBe(150_000);
+
+    await postEntry("2025-04-03", "manual", "PSP settlement", acct.cash, acct.bankClearing, 150_000);
     const cf = await reportsService.getCashFlow(biz.id, { dateFrom: "2025-04-01", dateTo: "2025-04-30" });
     expect(cf.closingCash).toBe(150_000);
+    expect(cf.clearingChange).toBe(0);
+    expect(cf.activities.operating).toBe(150_000);
+  });
+
+  it("classifies cash movements by activity from the counter-account", async () => {
+    const extra = await db.query<{ id: string; code: string }>(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, '1510', 'Equipment', 'asset'), ($1, '3100', 'Owner capital', 'equity'), ($1, '1131', 'Petty cash B', 'asset')
+       RETURNING id, code`,
+      [biz.id],
+    );
+    const id = (code: string) => extra.rows.find((r) => r.code === code)!.id;
+    await postEntry("2025-05-02", "manual", "owner injects capital", acct.cash, id("3100"), 1_000_000);
+    await postEntry("2025-05-03", "manual", "buy an oven", id("1510"), acct.cash, 400_000);
+    await postEntry("2025-05-04", "manual", "fund petty cash", id("1131"), acct.cash, 50_000);
+    await postEntry("2025-05-05", "order", "cash sale", acct.cash, acct.revenue, 80_000);
+
+    const cf = await reportsService.getCashFlow(biz.id, { dateFrom: "2025-05-01", dateTo: "2025-05-31" });
+    expect(cf.activities).toEqual({ operating: 80_000, investing: -400_000, financing: 1_000_000 });
+    // Funding petty cash is a transfer between two cash accounts — no flow.
+    expect(cf.netChange).toBe(680_000);
+    expect(cf.lines.every((l) => !/[A-Za-z_]/.test(l.label))).toBe(true);
   });
 });
 

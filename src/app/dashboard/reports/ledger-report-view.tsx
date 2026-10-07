@@ -41,10 +41,13 @@ export interface BalanceSheet {
   nonCurrentLiabilities: number;
 }
 
+export type CashFlowActivity = "operating" | "investing" | "financing";
+
 export interface CashFlowLine {
   sourceType: string;
   label: string;
   amount: number;
+  activity: CashFlowActivity;
 }
 
 export interface CashFlow {
@@ -52,7 +55,19 @@ export interface CashFlow {
   closingCash: number;
   netChange: number;
   lines: CashFlowLine[];
+  activities: Record<CashFlowActivity, number>;
+  /** Net change in card/gateway clearing and platform receivables — disclosed, not cash. */
+  clearingChange: number;
+  cashDefinition: string;
 }
+
+const CASH_FLOW_ACTIVITY_LABELS: Record<CashFlowActivity, string> = {
+  operating: "فعالیت‌های عملیاتی",
+  investing: "فعالیت‌های سرمایه‌گذاری",
+  financing: "فعالیت‌های تأمین مالی",
+};
+const CASH_FLOW_ACTIVITIES: CashFlowActivity[] = ["operating", "investing", "financing"];
+const cashFlowLineKey = (line: CashFlowLine) => `${line.activity}:${line.sourceType}`;
 
 export interface FoodCostVarianceItemLine {
   menuItemId: string | null;
@@ -664,16 +679,31 @@ export function CashFlowView({
   return (
     <div>
       <section>
-        <h3 className="mb-3 text-base font-bold text-foreground">
-          گردش وجوه نقد بر اساس نوع رویداد
+        <h3 className="mb-1 text-base font-bold text-foreground">
+          صورت جریان وجوه نقد
         </h3>
+        <p className="mb-3 text-xs leading-5 text-muted-foreground">
+          وجه نقد در این صورت: {current.cashDefinition}
+        </p>
+
+        <dl className="mb-4 grid gap-2 sm:grid-cols-3">
+          {CASH_FLOW_ACTIVITIES.map((activity) => (
+            <div key={activity} className="rounded-xl border border-border/80 bg-muted p-3">
+              <dt className="text-xs text-muted-foreground">{CASH_FLOW_ACTIVITY_LABELS[activity]}</dt>
+              <dd className="mt-1 tabular-nums font-bold text-foreground">
+                {money.format(current.activities?.[activity] ?? 0)}
+              </dd>
+            </div>
+          ))}
+        </dl>
 
         <DataTable
-          caption="گردش وجوه نقد بر اساس نوع رویداد"
+          caption="گردش وجوه نقد بر اساس فعالیت و نوع رویداد"
           className="hidden sm:block"
           tableClassName="min-w-full"
         >
           <DataTableHead>
+            <Th>فعالیت</Th>
             <Th>نوع رویداد</Th>
             <Th numeric>مبلغ</Th>
             {previous ? <Th numeric>دورهٔ قبل</Th> : null}
@@ -682,10 +712,11 @@ export function CashFlowView({
             {current.lines.map((line) => {
               const previousValue =
                 previous?.lines.find(
-                  (item) => item.sourceType === line.sourceType,
+                  (item) => cashFlowLineKey(item) === cashFlowLineKey(line),
                 )?.amount ?? null;
               return (
-                <DataTableRow key={line.sourceType}>
+                <DataTableRow key={cashFlowLineKey(line)}>
+                  <Td muted className="text-xs">{CASH_FLOW_ACTIVITY_LABELS[line.activity]}</Td>
                   <Td className="font-semibold">{line.label}</Td>
                   <Td numeric>{money.format(line.amount)}</Td>
                   {previous ? (
@@ -698,7 +729,7 @@ export function CashFlowView({
             })}
             {current.lines.length === 0 ? (
               <DataTableRow>
-                <Td colSpan={previous ? 3 : 2} muted className="py-8 text-center">
+                <Td colSpan={previous ? 4 : 3} muted className="py-8 text-center">
                   بدون رویداد نقدی
                 </Td>
               </DataTableRow>
@@ -710,13 +741,14 @@ export function CashFlowView({
           {current.lines.map((line) => {
             const previousValue =
               previous?.lines.find(
-                (item) => item.sourceType === line.sourceType,
+                (item) => cashFlowLineKey(item) === cashFlowLineKey(line),
               )?.amount ?? null;
             return (
               <article
-                key={line.sourceType}
+                key={cashFlowLineKey(line)}
                 className="rounded-xl border border-border/80 bg-muted p-4"
               >
+                <p className="text-xs text-muted-foreground">{CASH_FLOW_ACTIVITY_LABELS[line.activity]}</p>
                 <h4 className="font-semibold text-foreground">{line.label}</h4>
                 <dl className="mt-3 space-y-2 border-t border-border pt-3">
                   <div className="flex items-center justify-between gap-3">
@@ -772,6 +804,12 @@ export function CashFlowView({
             {money.format(current.netChange)}
           </dd>
         </div>
+        {current.clearingChange ? (
+          <div className="flex items-center justify-between gap-3 border-t border-border/80 pt-3 text-sm">
+            <dt className="text-muted-foreground">تغییر وجوه در راه (کارت‌خوان، درگاه، پلتفرم) — جزو نقد نیست</dt>
+            <dd className="tabular-nums font-semibold text-foreground">{money.format(current.clearingChange)}</dd>
+          </div>
+        ) : null}
       </dl>
     </div>
   );

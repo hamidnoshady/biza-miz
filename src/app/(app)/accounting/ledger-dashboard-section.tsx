@@ -1,14 +1,16 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { ArrowLeftIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
 import { formatPersianNumber } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
+import { accountingProductsHref } from "@/lib/app-routes";
 import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
 import { EmptyState, KpiCard, KpiRow, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
-import { api, ErrorBox } from "@/app/dashboard/ui";
+import { api, ErrorBox, InfoBox } from "@/app/dashboard/ui";
 import type { AccountingSectionKey } from "./accounting-routes";
 
 /**
@@ -31,13 +33,19 @@ interface LedgerOverview {
   invalidEntryCount: number;
   balanceDifference: number;
   cashAndBank: number;
+  liquidity: { cash: number; bank: number; pettyCash: number };
+  paymentClearing: number;
   receivables: number;
+  otherReceivables: number;
+  vatReceivable: number;
   payables: number;
   revenue: number;
   expenses: number;
   netIncome: number;
   openReceivableCheques: number;
   openPayableCheques: number;
+  costCoverage: { uncostedLines: number; uncostedOrders: number; uncostedNetRial: number; provisional: boolean };
+  scope: { period: "lifetime"; branches: "all"; asOf: string };
   recentEntries: {
     id: string;
     date: string;
@@ -299,16 +307,45 @@ export function LedgerDashboardSection({
 
       <LedgerHealthNotice overview={overview} />
 
+      {overview.costCoverage.provisional ? (
+        <InfoBox>
+          <p className="font-semibold">سود نمایش‌داده‌شده موقت است.</p>
+          <p className="mt-1 text-xs leading-5">
+            {formatPersianNumber(overview.costCoverage.uncostedOrders)} سفارش آنلاین (
+            {formatPersianNumber(overview.costCoverage.uncostedLines)} ردیف، فروش خالص{" "}
+            {money.format(overview.costCoverage.uncostedNetRial)}) بدون بهای تمام‌شدهٔ ثبت‌شده فروخته شده‌اند؛ درآمد
+            آن‌ها کامل ثبت شده ولی بهای تمام‌شدهٔ کالای فروش‌رفته نه. برای کامل شدن سود، بهای خرید کالاها را ثبت کنید.
+          </p>
+          <Button asChild variant="outline" size="sm" className="mt-2 min-h-11">
+            <Link href={accountingProductsHref("prices")}>ثبت بهای خرید کالاها</Link>
+          </Button>
+        </InfoBox>
+      ) : null}
+
+      <p className="text-xs leading-5 text-muted-foreground">
+        مانده‌ها از ابتدای دفتر و برای همهٔ شعب، به‌روز تا {formatJalali(overview.scope.asOf, { withTime: true })}؛ مبالغ به{" "}
+        {money.unitLabel}.
+      </p>
+
       <KpiRow className="xl:grid-cols-3">
         <KpiCard
-          label="نقدینگی (صندوق و بانک)"
+          label="نقدینگی قابل استفاده"
           value={money.format(overview.cashAndBank)}
-          hint="حساب‌های ۱۱۰۰ تا ۱۱۳۰"
+          hint={`صندوق ${money.format(overview.liquidity.cash)} · بانک ${money.format(overview.liquidity.bank)} · تنخواه ${money.format(overview.liquidity.pettyCash)}`}
         />
         <KpiCard
-          label="دریافتنی‌ها"
+          label="وجوه در راه (تسویه‌نشده)"
+          value={money.format(overview.paymentClearing)}
+          hint="کارت‌خوان، درگاه و پلتفرم‌های فروش؛ تا واریز به بانک قابل خرج نیست"
+        />
+        <KpiCard
+          label="دریافتنی از مشتریان"
           value={money.format(overview.receivables)}
-          hint={`${formatPersianNumber(overview.openReceivableCheques)} چک دریافتی باز`}
+          hint={`${formatPersianNumber(overview.openReceivableCheques)} چک دریافتی باز${
+            overview.vatReceivable || overview.otherReceivables
+              ? ` · مالیات قابل استرداد و سایر: ${money.format(overview.vatReceivable + overview.otherReceivables)}`
+              : ""
+          }`}
         />
         <KpiCard
           label="پرداختنی‌ها"
@@ -318,8 +355,9 @@ export function LedgerDashboardSection({
         <KpiCard label="درآمد" value={money.format(overview.revenue)} />
         <KpiCard label="هزینه‌ها" value={money.format(overview.expenses)} />
         <KpiCard
-          label="سود (زیان) خالص"
+          label={overview.costCoverage.provisional ? "سود (زیان) خالص — موقت" : "سود (زیان) خالص"}
           value={money.format(overview.netIncome)}
+          hint={overview.costCoverage.provisional ? "بهای تمام‌شدهٔ بخشی از فروش‌ها ثبت نشده است" : undefined}
         />
       </KpiRow>
 

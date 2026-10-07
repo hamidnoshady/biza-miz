@@ -22,6 +22,7 @@
  * integration/ledger-reports.integration.test.ts.
  */
 import { query } from "./db";
+import { classifyAccounts, isClearing } from "./account-classification";
 
 export type AccountType =
   "asset" | "liability" | "equity" | "revenue" | "expense";
@@ -32,6 +33,7 @@ interface AccountTotalRow extends Record<string, unknown> {
   name: string;
   type: AccountType;
   is_active: boolean;
+  parent_id?: string | null;
   debit: string;
   credit: string;
 }
@@ -64,7 +66,7 @@ interface LedgerIntegritySummary {
  */
 async function accountTotals(businessId: string): Promise<AccountTotalRow[]> {
   const { rows } = await query<AccountTotalRow>(
-    `SELECT a.id, a.code, a.name, a.type, a.is_active,
+    `SELECT a.id, a.code, a.name, a.type, a.is_active, a.parent_id,
             COALESCE(SUM(CASE WHEN je.id IS NOT NULL THEN jl.debit ELSE 0 END), 0)::text AS debit,
             COALESCE(SUM(CASE WHEN je.id IS NOT NULL THEN jl.credit ELSE 0 END), 0)::text AS credit
        FROM accounts a
@@ -129,19 +131,6 @@ async function ledgerIntegritySummary(
     invalidEntryCount: Number(row?.invalid_entry_count ?? 0),
     balanced: row?.balanced ?? false,
   };
-}
-
-function accountCodeNumber(code: string): number | null {
-  // The system templates use ASCII digit account codes. Treat any decorated or
-  // free-form code as outside a numeric range rather than guessing.
-  if (!/^\d+$/.test(code)) return null;
-  const value = Number(code);
-  return Number.isSafeInteger(value) ? value : null;
-}
-
-function accountCodeInRange(code: string, start: number, end: number): boolean {
-  const value = accountCodeNumber(code);
-  return value !== null && value >= start && value <= end;
 }
 
 export interface TrialBalanceRow {
@@ -218,14 +207,35 @@ export interface LedgerOverview {
   invalidEntryCount: number;
   /** debit − credit across posted journal lines. */
   balanceDifference: number;
+  /**
+   * Money the business can spend now: cash, bank and petty cash, as the shared
+   * account classifier (`account-classification.ts`) defines them. Card/PSP
+   * money in transit is *not* in here — see `paymentClearing`.
+   */
   cashAndBank: number;
+  /** The usable figure split by role, so the screen can name each part. */
+  liquidity: { cash: number; bank: number; pettyCash: number };
+  /** Settlement in transit (card reader/gateway clearing, platform receivables) — real, not yet usable. */
+  paymentClearing: number;
+  /** Owed by customers (1200, notes, retention) — never recoverable VAT. */
   receivables: number;
+  /** Recoverable input VAT and non-customer receivables, kept apart from customer balances. */
+  otherReceivables: number;
+  vatReceivable: number;
   payables: number;
   revenue: number;
   expenses: number;
   netIncome: number;
   openReceivableCheques: number;
   openPayableCheques: number;
+  /**
+   * Website sales whose cost was not (fully) recorded — dashboard audit F01.
+   * When `lines > 0` the profit above is provisional: revenue is complete,
+   * COGS is not. Read from `online_sale_lines` (migration 0209).
+   */
+  costCoverage: { uncostedLines: number; uncostedOrders: number; uncostedNetRial: number; provisional: boolean };
+  /** What the balances cover: lifetime, every branch, as of this read. */
+  scope: { period: "lifetime"; branches: "all"; asOf: string };
   recentEntries: {
     id: string;
     date: string;
@@ -235,17 +245,15 @@ export interface LedgerOverview {
   }[];
 }
 
-/** Cash and bank equivalents: the 1100–1130 block (صندوق، بانک، کارت‌خوان، تنخواه and their custom sub-accounts). */
-const CASH_AND_BANK_CODE_START = 1100;
-const CASH_AND_BANK_CODE_END = 1130;
-
 /**
  * The Accounting app's dashboard, in one read.
  *
  * The balances use each account's normal side — assets and expenses are
  * debit-normal, liabilities and revenue are credit-normal — so a positive
  * number always means "we have / we owe / we earned", never a signed ledger
- * figure the owner has to decode.
+ * figure the owner has to decode. Which account counts as cash, clearing,
+ * receivable or payable is decided by `classifyAccounts`, the same contract
+ * the cash-flow statement uses, so the two cannot disagree about "cash".
  */
 export async function getLedgerOverview(
   businessId: string,
@@ -258,29 +266,44 @@ export async function getLedgerOverview(
   const balance = (row: AccountTotalRow, debitNormal: boolean) =>
     (Number(row.debit) - Number(row.credit)) * (debitNormal ? 1 : -1);
 
-  let cashAndBank = 0;
+  const roles = classifyAccounts(
+    accounts.map((a) => ({ id: a.id, code: a.code, parentId: a.parent_id ?? null, type: a.type })),
+  );
+
+  const liquidity = { cash: 0, bank: 0, pettyCash: 0 };
+  let paymentClearing = 0;
   let receivables = 0;
+  let otherReceivables = 0;
+  let vatReceivable = 0;
   let payables = 0;
   let revenue = 0;
   let expenses = 0;
 
   for (const row of accounts) {
-    if (
-      accountCodeInRange(
-        row.code,
-        CASH_AND_BANK_CODE_START,
-        CASH_AND_BANK_CODE_END,
-      )
-    ) {
-      cashAndBank += balance(row, true);
-    }
-    // حساب‌های دریافتنی و اسناد دریافتنی: the 12xx asset block.
-    if (row.code.startsWith("12")) receivables += balance(row, true);
-    // حساب‌های پرداختنی و اسناد پرداختنی: the 21xx liability block.
-    if (row.code.startsWith("21")) payables += balance(row, false);
+    const role = roles.get(row.id) ?? null;
+    if (role === "cash") liquidity.cash += balance(row, true);
+    else if (role === "bank") liquidity.bank += balance(row, true);
+    else if (role === "petty_cash") liquidity.pettyCash += balance(row, true);
+    else if (isClearing(role)) paymentClearing += balance(row, true);
+    else if (role === "trade_receivable") receivables += balance(row, true);
+    else if (role === "other_receivable") otherReceivables += balance(row, true);
+    else if (role === "vat_receivable") vatReceivable += balance(row, true);
+    else if (role === "trade_payable") payables += balance(row, false);
     if (row.type === "revenue") revenue += balance(row, false);
     if (row.type === "expense") expenses += balance(row, true);
   }
+  const cashAndBank = liquidity.cash + liquidity.bank + liquidity.pettyCash;
+
+  const { rows: coverage } = await query<{ lines: string; orders: string; net: string }>(
+    `SELECT count(*)::text AS lines, count(DISTINCT f.order_id)::text AS orders,
+            COALESCE(sum(f.net_rial), 0)::text AS net
+       FROM online_sale_lines f
+       JOIN locations l ON l.id = f.location_id AND l.business_id = $1
+       JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
+      WHERE f.cost_status IN ('partial', 'missing', 'unattributed')`,
+    [businessId],
+  );
+  const uncostedLines = Number(coverage[0]?.lines ?? 0);
 
   const { rows: cheques } = await query<{
     open_receivable: string;
@@ -323,11 +346,22 @@ export async function getLedgerOverview(
     invalidEntryCount: integrity.invalidEntryCount,
     balanceDifference: integrity.balanceDifference,
     cashAndBank,
+    liquidity,
+    paymentClearing,
     receivables,
+    otherReceivables,
+    vatReceivable,
     payables,
     revenue,
     expenses,
     netIncome: revenue - expenses,
+    costCoverage: {
+      uncostedLines,
+      uncostedOrders: Number(coverage[0]?.orders ?? 0),
+      uncostedNetRial: Number(coverage[0]?.net ?? 0),
+      provisional: uncostedLines > 0,
+    },
+    scope: { period: "lifetime", branches: "all", asOf: new Date().toISOString() },
     openReceivableCheques: Number(cheques[0]?.open_receivable ?? 0),
     openPayableCheques: Number(cheques[0]?.open_payable ?? 0),
     recentEntries: recent.map((entry) => ({
