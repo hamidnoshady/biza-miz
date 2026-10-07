@@ -1651,7 +1651,7 @@ export async function archiveFixedAsset(params: {
 
 export const FIXED_ASSET_EXPORT_MAX_ROWS = 20_000;
 
-/** The register, the depreciation schedule, the transfers and the estimate changes, as workbook sheets. */
+/** The register, the depreciation schedule, the disposals, the transfers and the estimate changes, as workbook sheets. */
 export async function fixedAssetsExportSheets(
   businessId: string,
   filters: FixedAssetListFilters = {},
@@ -1731,6 +1731,30 @@ export async function fixedAssetsExportSheets(
     [businessId],
   );
 
+  const disposals = await query<{
+    code: string | null;
+    name: string;
+    disposal_date: string;
+    disposal_kind: FixedAssetDisposalKind;
+    disposal_proceeds: string | null;
+    disposal_reason: string | null;
+    cost: string;
+    accumulated: string;
+  }>(
+    `SELECT fa.code, fa.name, fa.disposal_date::text AS disposal_date, fa.disposal_kind,
+            fa.disposal_proceeds::text AS disposal_proceeds, fa.disposal_reason,
+            fa.cost::text AS cost, COALESCE(live.accumulated, 0)::text AS accumulated
+       FROM fixed_assets fa
+       LEFT JOIN LATERAL (
+         SELECT SUM(d.amount) AS accumulated
+           FROM fixed_asset_depreciation_entries d
+          WHERE d.fixed_asset_id = fa.id AND d.reversed_at IS NULL
+       ) live ON true
+      WHERE fa.business_id = $1 AND fa.status = 'disposed'
+      ORDER BY fa.disposal_date DESC, fa.created_at DESC`,
+    [businessId],
+  );
+
   const sheets: SheetData[] = [
     {
       name: "دفتر اموال",
@@ -1804,6 +1828,48 @@ export async function fixedAssetsExportSheets(
       })),
     },
   ];
+
+  const DISPOSAL_KIND_LABELS: Record<FixedAssetDisposalKind, string> = {
+    sale: "فروش",
+    retirement: "بازنشستگی",
+    write_off: "اسقاط",
+  };
+
+  if (disposals.rows.length > 0) {
+    sheets.push({
+      name: "واگذاری‌ها",
+      columns: [
+        { key: "code", label: "کد دارایی" },
+        { key: "name", label: "نام دارایی" },
+        { key: "kind", label: "نوع واگذاری" },
+        { key: "disposalDate", label: "تاریخ واگذاری", type: "date" },
+        { key: "cost", label: "بهای تمام‌شده", type: "money" },
+        { key: "accumulated", label: "استهلاک انباشته", type: "money" },
+        { key: "netBookValue", label: "ارزش دفتری خالص", type: "money" },
+        { key: "proceeds", label: "مبلغ واگذاری", type: "money" },
+        { key: "gainLoss", label: "سود (+) / زیان (−)", type: "money" },
+        { key: "reason", label: "دلیل" },
+      ],
+      rows: disposals.rows.map((r) => {
+        const cost = Number(r.cost);
+        const accumulated = Number(r.accumulated);
+        const proceeds = Number(r.disposal_proceeds ?? 0);
+        const netBookValue = Math.max(0, cost - accumulated);
+        return {
+          code: r.code ?? "",
+          name: r.name,
+          kind: DISPOSAL_KIND_LABELS[r.disposal_kind] ?? r.disposal_kind,
+          disposalDate: r.disposal_date,
+          cost,
+          accumulated,
+          netBookValue,
+          proceeds,
+          gainLoss: proceeds - netBookValue,
+          reason: r.disposal_reason ?? "",
+        };
+      }),
+    });
+  }
 
   if (transfers.rows.length > 0) {
     sheets.push({

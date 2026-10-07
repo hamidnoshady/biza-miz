@@ -1412,11 +1412,36 @@ describe("server-side pagination, filters and export (issue #833)", () => {
     const [first] = (await fixedAssetsService.listFixedAssets(biz.id)).map((a) => a.id);
     await post(first, { periodKey: "1404-01" });
 
-    const sheets = await fixedAssetsService.fixedAssetsExportSheets(biz.id, {});
+    // No disposals yet -> no disposals sheet.
+    let sheets = await fixedAssetsService.fixedAssetsExportSheets(biz.id, {});
+    expect(sheets.find((s) => s.name === "واگذاری‌ها")).toBeUndefined();
+
+    await fixedAssetsService.disposeFixedAsset({
+      businessId: biz.id,
+      fixedAssetId: first,
+      kind: "retirement",
+      createdBy: owner.id,
+      reason: "از رده خارج",
+    });
+
+    sheets = await fixedAssetsService.fixedAssetsExportSheets(biz.id, {});
     const register = sheets.find((s) => s.name === "دفتر اموال");
     const schedule = sheets.find((s) => s.name === "برنامه استهلاک");
+    const disposalsSheet = sheets.find((s) => s.name === "واگذاری‌ها");
     expect(register?.rows).toHaveLength(3);
     expect(schedule?.rows).toHaveLength(1);
+    // The disposal facts with the recomputed net book value and zero-proceeds loss.
+    expect(disposalsSheet?.rows).toEqual([
+      expect.objectContaining({
+        kind: "بازنشستگی",
+        cost: 1_000_000,
+        accumulated: 83_333, // round(1,000,000 / 12), one period posted
+        netBookValue: 916_667,
+        proceeds: 0,
+        gainLoss: -916_667,
+        reason: "از رده خارج",
+      }),
+    ]);
 
     // A filter narrows the register sheet to the filtered rows.
     const filtered = await fixedAssetsService.fixedAssetsExportSheets(biz.id, { search: "الف" });
