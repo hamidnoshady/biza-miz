@@ -50,6 +50,8 @@ Baseline, verified before the first change:
 
 # Status — complete
 
+Delivered as draft PR #878 from `arena/396beb72-biza-miz`.
+
 Every finding is implemented, and each has a regression test at the layer where
 the bug actually lived. Findings 1–13, 15–17 and 19–22 are code; §14 and §18 are
 decisions written down where a reader will hit them, plus the tests that keep the
