@@ -6,7 +6,7 @@ import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { printLabel } from "@/lib/printing/client";
 import { labelFieldsForTrade, type LabelData } from "@/lib/label-template";
-import { useBusinessInfo } from "../use-printers";
+import { useBusinessInfo } from "../use-business-info";
 import { api, Field, inputClass } from "../ui";
 import {
   LoadingSkeleton,

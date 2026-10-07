@@ -4,14 +4,34 @@ import { query } from "@/lib/db";
 import { formatJalali } from "@/lib/jalali";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { SENDING_STALE_AFTER_SECONDS } from "@/lib/printing/routing";
+import type { PrinterErrorCode } from "@/lib/printing/errors";
 
-/** Recent handoffs for the active branch. Dates are Shamsi in the response text. */
+/**
+ * Print history for the active branch.
+ *
+ * Two things this route guarantees, because the printing pipeline is
+ * best-effort by contract and history is how an operator finds out what
+ * actually happened:
+ *
+ *  1. **A job never stays «در حال ارسال» forever.** The server stamps a row
+ *     `sending` when it renders; the browser closes it. If the browser is
+ *     closed, the tab is killed, the machine loses power or the connector
+ *     hangs, nothing closes it — so a row left `sending` for longer than
+ *     `SENDING_STALE_AFTER_SECONDS` is swept to `failed` with
+ *     `job_timeout` here, on read. The alternative is a history that shows a
+ *     receipt as permanently in-flight.
+ *  2. **Diagnostics carry provenance.** Every row answers "which printer, and
+ *     exactly which template revision, produced this?" — the question support
+ *     actually asks when a receipt prints wrong.
+ */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.printingExecute);
   if (error) return error;
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ jobs: [] });
   try {
+    await sweepStaleJobs(location.id);
     const { rows } = await query<{
       id: string;
       document_type: string;
@@ -20,8 +40,11 @@ export const GET = withTenantScope(async () => {
       error_code: string | null;
       created_at: Date;
       printer_name: string | null;
+      template_key: string | null;
+      template_version: number | null;
     }>(
-      `SELECT j.id, j.document_type, j.entity_id, j.status, j.error_code, j.created_at, p.name AS printer_name
+      `SELECT j.id, j.document_type, j.entity_id, j.status, j.error_code, j.created_at,
+              p.name AS printer_name, j.template_key, j.template_version
          FROM print_jobs j
          LEFT JOIN printers p ON p.id = j.printer_id
         WHERE j.location_id = $1
@@ -37,6 +60,8 @@ export const GET = withTenantScope(async () => {
         status: row.status,
         errorCode: row.error_code,
         printerName: row.printer_name,
+        templateKey: row.template_key,
+        templateVersion: row.template_version,
         when: formatJalali(row.created_at, { withTime: true }),
       })),
     });
@@ -46,7 +71,11 @@ export const GET = withTenantScope(async () => {
   }
 });
 
-/** Mark a job handed off or failed after the local spooler answers. */
+/**
+ * Mark a job handed off or failed after the local spooler answers. Only these
+ * two terminal states are accepted: `sending` is the server's own opening
+ * state, never a client's answer.
+ */
 export const PATCH = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.printingExecute);
   if (error) return error;
@@ -76,3 +105,23 @@ export const PATCH = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ ok: false }, { status: 500 });
   }
 });
+
+/**
+ * Close jobs whose delivery never reported back. Runs on read, is scoped to
+ * one branch, and never touches a row that is already terminal.
+ */
+async function sweepStaleJobs(locationId: string): Promise<void> {
+  try {
+    await query(
+      `UPDATE print_jobs
+          SET status = 'failed',
+              error_code = COALESCE(error_code, $3)
+        WHERE location_id = $1
+          AND status = 'sending'
+          AND created_at < now() - make_interval(secs => $2)`,
+      [locationId, SENDING_STALE_AFTER_SECONDS, "job_timeout" as PrinterErrorCode],
+    );
+  } catch (err) {
+    console.error("sweeping stale print jobs failed", err);
+  }
+}

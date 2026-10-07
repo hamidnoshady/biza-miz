@@ -26,13 +26,13 @@
  * open the browser print dialog.
  */
 import type { KitchenTicketData } from "../kitchen-ticket-template";
-import { renderLabelHtml, type LabelData } from "../label-template";
-import type { PaperKey } from "../print-template";
+import type { LabelData } from "../label-template";
+import type { DocType, PaperKey } from "../print-template";
 import type { ReceiptData } from "../receipt-template";
 import { CONNECTOR_PROTOCOL_VERSION, CONNECTOR_PORT } from "./connector-release";
 import { classifyDeliveryError, type PrinterErrorCode } from "./errors";
 import type { PrintJob } from "./render-service";
-import type { PrinterTarget } from "./types";
+import type { PrinterPurpose, PrinterTarget } from "./types";
 import type { DesktopPrintingBridge } from "../desktop-bridge";
 import "../desktop-bridge"; // registers the `Window.businessSuiteDesktop` global augmentation
 
@@ -274,6 +274,10 @@ export interface PrintResult {
   detail?: string;
   printerId?: string;
   supportsDrawer?: boolean;
+  /** The template revision that actually rendered this job — for diagnostics. */
+  templateId?: string | null;
+  templateKey?: string;
+  templateVersion?: number;
 }
 
 interface RenderedJob {
@@ -283,6 +287,9 @@ interface RenderedJob {
   printerName?: string;
   printerId?: string;
   supportsDrawer?: boolean;
+  templateId?: string | null;
+  templateKey?: string;
+  templateVersion?: number;
 }
 
 const inflightPrints = new Map<string, Promise<PrintResult>>();
@@ -307,6 +314,25 @@ function reportProgress(state: PrintProgress | null): void {
   for (const listener of progressListeners) listener(state);
 }
 
+/**
+ * Close a print job's history row. Every terminal path calls this — success
+ * and failure alike — because a job that never leaves `sending` shows as
+ * «در حال ارسال» forever, which is how a broken printer used to look like a
+ * busy one.
+ */
+function reportJobOutcome(
+  requestId: string | undefined,
+  status: "handed_off" | "failed",
+  errorCode?: PrinterErrorCode,
+): void {
+  if (!requestId) return;
+  void fetch("/api/printing/jobs", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ printRequestId: requestId, status, errorCode }),
+  }).catch(() => undefined);
+}
+
 /** Deliver a page image through the Windows driver. Network raw ports are not page printers. */
 export async function sendPageToPrinter(target: PrinterTarget, bytes: Uint8Array): Promise<ConnectorResult> {
   if (target.type !== "windows" || !target.systemName) {
@@ -326,17 +352,28 @@ export async function sendPageToPrinter(target: PrinterTarget, bytes: Uint8Array
 }
 
 /**
- * Render a job for a saved printer on the authenticated app server and
- * deliver the canonical bytes through the local connector. The server only
- * ever receives the printer ID — it resolves the hardware target from the
- * database for the caller's branch, so a hand-edited request can neither
- * print through another branch's printer nor turn the server into an
- * arbitrary TCP client.
+ * Render a job for a resolved printer on the authenticated app server and
+ * deliver the canonical bytes through the local backend.
+ *
+ * The server receives the printer ID, the document type, an optional template
+ * ID and the document's own data — never HTML and never a hardware address.
+ * It resolves the plan (template revision included), renders, and answers with
+ * the bytes plus the target for this machine to deliver.
+ *
+ * Failure is a first-class outcome: whichever step fails, the history row is
+ * closed as `failed` with its canonical code before the caller is answered.
  */
 export async function printJob(
   printerId: string | null,
   job: PrintJob,
-  opts: { requestId?: string; title?: string; entityId?: string; documentType?: string } = {},
+  opts: {
+    requestId?: string;
+    title?: string;
+    entityId?: string;
+    documentType?: string;
+    /** Pin the exact template (the settings "print sample" button). */
+    templateId?: string | null;
+  } = {},
 ): Promise<PrintResult> {
   const key = opts.requestId;
   if (key) {
@@ -357,26 +394,31 @@ async function executePrintJob(
   printerId: string | null,
   job: PrintJob,
   title: string,
-  opts: { requestId?: string; entityId?: string; documentType?: string },
+  opts: { requestId?: string; entityId?: string; documentType?: string; templateId?: string | null },
 ): Promise<PrintResult> {
   reportProgress({ phase: "preparing", title });
   let rendered: RenderedJob;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 45_000);
-    const res = await fetch("/api/printing/print", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        printerId: printerId || undefined,
-        job,
-        printRequestId: opts.requestId,
-        documentType: opts.documentType ?? (job.type === "kitchen-ticket" ? "kitchen" : job.type === "document" ? "invoice" : job.type),
-        entityId: opts.entityId,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+    let res: Response;
+    try {
+      res = await fetch("/api/printing/print", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          printerId: printerId || undefined,
+          templateId: opts.templateId || undefined,
+          job,
+          printRequestId: opts.requestId,
+          documentType: opts.documentType ?? defaultDocumentTypeOf(job),
+          entityId: opts.entityId,
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
     const data = (await res.json()) as {
       ok?: boolean;
       error?: string;
@@ -386,10 +428,14 @@ async function executePrintJob(
       printerName?: string;
       printerId?: string;
       supportsDrawer?: boolean;
+      templateId?: string | null;
+      templateKey?: string;
+      templateVersion?: number;
     };
     if (!res.ok || !data.ok || !data.target || !data.dataBase64) {
       const error = (data.error as PrinterErrorCode) ?? "render_failed";
       reportProgress({ phase: "failed", title, error });
+      reportJobOutcome(opts.requestId, "failed", error);
       return { ok: false, error, printerId: data.printerId, supportsDrawer: data.supportsDrawer };
     }
     rendered = {
@@ -399,10 +445,17 @@ async function executePrintJob(
       printerName: data.printerName,
       printerId: data.printerId,
       supportsDrawer: data.supportsDrawer,
+      templateId: data.templateId ?? null,
+      templateKey: data.templateKey,
+      templateVersion: data.templateVersion,
     };
-  } catch {
-    reportProgress({ phase: "failed", title, error: "render_failed" });
-    return { ok: false, error: "render_failed" };
+  } catch (err) {
+    // An aborted request (the caller navigated away, the server restarted) is
+    // still a finished job: never leave the row spinning at «در حال ارسال».
+    const error: PrinterErrorCode = (err as { name?: string })?.name === "AbortError" ? "job_timeout" : "render_failed";
+    reportProgress({ phase: "failed", title, error });
+    reportJobOutcome(opts.requestId, "failed", error);
+    return { ok: false, error };
   }
   reportProgress({ phase: "sending", title, printerName: rendered.printerName });
   const bytes = base64ToBytes(rendered.dataBase64);
@@ -410,57 +463,95 @@ async function executePrintJob(
     ? await sendPageToPrinter(rendered.target, bytes)
     : await sendRawToPrinter(rendered.target, bytes);
   if (!delivered.ok) {
-    reportProgress({ phase: "failed", title, printerName: rendered.printerName, error: delivered.error });
-    return { ok: false, error: delivered.error, detail: delivered.detail };
+    const error = delivered.error ?? "print_failed";
+    reportProgress({ phase: "failed", title, printerName: rendered.printerName, error });
+    reportJobOutcome(opts.requestId, "failed", error);
+    return { ok: false, error, detail: delivered.detail, printerId: rendered.printerId, supportsDrawer: rendered.supportsDrawer };
   }
   reportProgress({ phase: "handed_off", title, printerName: rendered.printerName });
-  if (opts.requestId) {
-    void fetch("/api/printing/jobs", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ printRequestId: opts.requestId, status: "handed_off" }),
-    }).catch(() => undefined);
+  reportJobOutcome(opts.requestId, "handed_off");
+  return {
+    ok: true,
+    printerId: rendered.printerId,
+    supportsDrawer: rendered.supportsDrawer,
+    templateId: rendered.templateId,
+    templateKey: rendered.templateKey,
+    templateVersion: rendered.templateVersion,
+  };
+}
+
+/** The document type a job belongs to when the caller does not name one. */
+function defaultDocumentTypeOf(job: PrintJob): string {
+  switch (job.type) {
+    case "kitchen-ticket":
+      return "kitchen";
+    case "label":
+      return "label";
+    case "test":
+      return job.kind;
+    default:
+      return "receipt";
   }
-  return { ok: true, printerId: rendered.printerId, supportsDrawer: rendered.supportsDrawer };
 }
 
 /**
  * The test print for a printer that is not saved yet (the add-printer
  * wizard's «چاپ آزمایشی»): the server renders the sample document for the
- * chosen roll width, delivery happens locally against the chosen target.
+ * chosen purpose and paper, delivery happens locally against the chosen
+ * target.
  */
 export async function testPrintDraft(
   target: PrinterTarget,
-  kind: "receipt" | "kitchen",
-  paperWidthMm: 58 | 80,
+  purpose: PrinterPurpose,
+  paper: PaperKey,
 ): Promise<PrintResult> {
-  let dataBase64: string;
+  let prepared: { dataBase64: string; delivery: "raw" | "page" };
   try {
     const res = await fetch("/api/printing/test-draft", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, paperWidthMm }),
+      body: JSON.stringify({ purpose, paper }),
     });
-    const data = (await res.json()) as { ok?: boolean; error?: string; dataBase64?: string };
+    const data = (await res.json()) as { ok?: boolean; error?: string; dataBase64?: string; delivery?: "raw" | "page" };
     if (!res.ok || !data.ok || !data.dataBase64) {
       return { ok: false, error: (data.error as PrinterErrorCode) ?? "render_failed" };
     }
-    dataBase64 = data.dataBase64;
+    prepared = { dataBase64: data.dataBase64, delivery: data.delivery === "page" ? "page" : "raw" };
   } catch {
     return { ok: false, error: "render_failed" };
   }
-  const delivered = await sendRawToPrinter(target, base64ToBytes(dataBase64));
+  const bytes = base64ToBytes(prepared.dataBase64);
+  const delivered = prepared.delivery === "page" ? await sendPageToPrinter(target, bytes) : await sendRawToPrinter(target, bytes);
   return delivered.ok ? { ok: true } : { ok: false, error: delivered.error, detail: delivered.detail };
 }
 
 /* ────────────────────────── ready-made jobs ────────────────────────── */
 
+/**
+ * A customer receipt — the thermal document the «رسید فروش» rule routes.
+ *
+ * `documentType` is explicit on purpose: a thermal receipt and a formal A4
+ * invoice are two different products with two different rules, two different
+ * printers and two different templates. The same sale may need both, so both
+ * are named actions — never inferred from which screen is open, which is how
+ * the retail invoice briefly printed as a receipt and re-printed as an
+ * invoice from its own detail modal.
+ */
 export function printReceipt(
   printerId: string | null,
   receipt: ReceiptData,
-  opts: { requestId?: string; title?: string; entityId?: string; documentType?: "receipt" | "invoice" } = {},
+  opts: { requestId?: string; title?: string; entityId?: string; templateId?: string | null } = {},
 ): Promise<PrintResult> {
-  return printJob(printerId, { type: "receipt", receipt }, { ...opts, title: opts.title ?? "چاپ رسید", documentType: opts.documentType ?? "receipt" });
+  return printJob(printerId, { type: "receipt", receipt }, { ...opts, title: opts.title ?? "چاپ رسید", documentType: "receipt" });
+}
+
+/** A formal invoice (A4/A5) for the same sale data — the «فاکتور» rule. */
+export function printInvoice(
+  printerId: string | null,
+  receipt: ReceiptData,
+  opts: { requestId?: string; title?: string; entityId?: string; templateId?: string | null } = {},
+): Promise<PrintResult> {
+  return printJob(printerId, { type: "receipt", receipt }, { ...opts, title: opts.title ?? "چاپ فاکتور", documentType: "invoice" });
 }
 
 export function printKitchenTicket(
@@ -471,23 +562,37 @@ export function printKitchenTicket(
   return printJob(printerId, { type: "kitchen-ticket", ticket }, { ...opts, title: opts.title ?? "چاپ آشپزخانه", documentType: "kitchen" });
 }
 
-export function testPrint(printerId: string, kind: "receipt" | "kitchen"): Promise<PrintResult> {
-  return printJob(printerId, { type: "test", kind });
+/** The saved printer's own test print — its built-in sample on its own paper. */
+export function testPrint(printerId: string, kind: DocType): Promise<PrintResult> {
+  return printJob(printerId, { type: "test", kind }, { title: "چاپ آزمایشی" });
+}
+
+/**
+ * Print one template's sample document through the operational pipeline —
+ * the gallery's «چاپ نمونه». The template is pinned by id, so what leaves the
+ * printer is exactly the template the card previewed, on the branch's printer
+ * for that document type.
+ */
+export function printTemplateSample(
+  template: { id?: string | null; docType: DocType },
+): Promise<PrintResult> {
+  const kind = template.docType;
+  return printJob(null, { type: "test", kind }, {
+    title: "چاپ نمونه",
+    documentType: kind,
+    templateId: template.id ?? null,
+  });
 }
 
 export function kickDrawer(printerId: string): Promise<PrintResult> {
-  return printJob(printerId, { type: "drawer-kick" });
+  return printJob(printerId, { type: "drawer-kick" }, { title: "بازکردن کشو" });
 }
 
-/** Print one shelf label. With no printer id, the server resolves the label rule. */
-export async function printLabel(printerId: string | null, label: LabelData, opts: { requestId?: string; entityId?: string } = {}): Promise<PrintResult> {
-  if (!printerId) return printJob(null, { type: "label", label }, { ...opts, documentType: "label", title: "چاپ برچسب" });
+/** Print one shelf label through the label rule's printer and template. */
+export function printLabel(
+  printerId: string | null,
+  label: LabelData,
+  opts: { requestId?: string; entityId?: string } = {},
+): Promise<PrintResult> {
   return printJob(printerId, { type: "label", label }, { ...opts, documentType: "label", title: "چاپ برچسب" });
 }
-
-/** A rendered template document. Sheets go to a Windows queue; there is no browser dialog. */
-export async function printDocument(printerId: string | null, html: string, paper: PaperKey): Promise<PrintResult> {
-  if (!printerId) return { ok: false, error: "printer_not_configured" };
-  return printJob(printerId, { type: "document", html, paper }, { title: "چاپ سند", documentType: paper === "a4" || paper === "a5" ? "invoice" : "receipt" });
-}
-

@@ -110,7 +110,7 @@ import { FilterChip } from "../filters";
 import { KnowledgeHelpButton } from "../knowledge-help";
 import { apiOrQueue, useOfflineQueue } from "../offline-queue";
 import { api, ErrorBox, errorMessage, inputClass } from "../ui";
-import { useBusinessInfo } from "../use-printers";
+import { useBusinessInfo } from "../use-business-info";
 import { cardClass } from "../page-chrome";
 import { safeRandomId } from "@/lib/client-id";
 

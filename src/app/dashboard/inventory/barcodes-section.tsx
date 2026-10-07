@@ -9,7 +9,7 @@ import { toPersianDigits } from "@/lib/digits";
 import { barcodeEntryError, normalizeBarcode } from "@/lib/barcode";
 import { printLabel } from "@/lib/printing/client";
 import { type LabelData } from "@/lib/label-template";
-import { useBusinessInfo } from "../use-printers";
+import { useBusinessInfo } from "../use-business-info";
 import { SectionCard, StatusBadge } from "../page-chrome";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { api, Field, inputClass } from "../ui";
@@ -22,9 +22,10 @@ import type { InventoryItem } from "./inventory-manager";
  * The retail trades got this in Phase 27 Wave 4 (`/api/barcodes`, the label
  * panel on the merchandising screen). F&B's `inventory_items` never had it, so
  * the only "code" an ingredient carried was `sku`, a search hint no scanner
- * emits. The label itself reuses the existing ESC/POS raster path
- * (`printLabel` → `renderLabelHtml`) unchanged; an ingredient's label carries
- * the unit rather than a shelf price, because raw stock is not priced to sell.
+ * emits. The label itself goes through the one printing pipeline every other
+ * document uses (`printLabel` → the branch's label rule → the label template →
+ * ESC/POS raster); an ingredient's label carries the unit rather than a shelf
+ * price, because raw stock is not priced to sell.
  *
  * Each card owns its own notice/error line (rendered inside the card the
  * action lives in, with `role="status"`), so a message from «چاپ لیبل» never
@@ -203,8 +204,9 @@ export function BarcodesSection({
       code,
       fields: [{ label: "واحد", value: item.unit }],
     };
-    // No registered printer is not a dead end: printLabel falls back to the
-    // browser's own print dialog, the same no-hardware path documents use.
+    // No printer id: the label rule decides. If the branch has no label
+    // printer at all, the server refuses with `printer_not_configured` — the
+    // browser's print dialog is not a fallback anywhere in this product.
     const res = await printLabel(null, label, { requestId: `label:${code}` });
     if (res.ok) return null;
     return res.error === "connector_not_installed" || res.error === "connector_outdated" ? "رابط چاپ روی این کامپیوتر در دسترس نیست؛ از تنظیمات چاپگرها نصب کنید." : "چاپ لیبل ناموفق بود.";

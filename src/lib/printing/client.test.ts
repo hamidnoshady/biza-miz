@@ -10,8 +10,11 @@
  *    reinstall-upgrade path;
  *  - errors surface as canonical codes with Persian, human sentences — never
  *    a raw ECONNREFUSED-style exception;
- *  - a `null` printer (labels, documents) opens the browser's own print
- *    dialog instead of touching any backend.
+ *  - a job's history row is closed on EVERY terminal path — success becomes
+ *    `handed_off`, any failure (server refusal, aborted request, connector
+ *    unreachable, refused queue) becomes `failed`, so nothing is ever left
+ *    showing «در حال ارسال» forever;
+ *  - the request is an intent (document type + data), never rendered HTML.
  *
  * fetch is mocked per-URL.
  */
@@ -22,13 +25,15 @@ import {
   discoverNetworkPrinters,
   kickDrawer,
   listWindowsPrinters,
-  printDocument,
+  printInvoice,
   printLabel,
   printReceipt,
+  printTemplateSample,
   probePrinterTarget,
   testPrintDraft,
 } from "./client";
 import { printerErrorMessage } from "./errors";
+import * as client from "./client";
 import type { ReceiptData } from "../receipt-template";
 
 const CONNECTOR = "http://127.0.0.1:9123";
@@ -175,6 +180,8 @@ describe("hardware jobs are printerId-scoped", () => {
       documentType: "receipt",
       job: { type: "receipt", receipt: RECEIPT },
     });
+    // The client sends an INTENT: no HTML, no target, no template body.
+    expect(String(render!.init!.body)).not.toContain("html");
     // No hardware target ever travels to the app server.
     expect(String(render!.init!.body)).not.toContain("systemName");
     expect(String(render!.init!.body)).not.toContain("10.0.0.5");
@@ -194,6 +201,48 @@ describe("hardware jobs are printerId-scoped", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toBe("printer_inactive");
     expect(calls.find((c) => c.url === `${CONNECTOR}/print/raw`)).toBeUndefined();
+  });
+
+  it("closes the job as failed on every local delivery failure — never leaving «در حال ارسال»", async () => {
+    const { calls } = mockFetch({
+      "/api/printing/print": () => respondJson({ ok: true, target: WINDOWS_TARGET, dataBase64: RENDERED_B64 }),
+      [`${CONNECTOR}/print/raw`]: () => respondJson({ ok: false, error: "spooler_rejected" }, 502),
+      "/api/printing/jobs": () => respondJson({ ok: true }),
+    });
+    const result = await printReceipt("printer-1", RECEIPT, { requestId: "req-1" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("spooler_rejected");
+    const patch = calls.find((c) => c.url === "/api/printing/jobs");
+    expect(patch).toBeDefined();
+    expect(patch!.init!.method).toBe("PATCH");
+    expect(JSON.parse(String(patch!.init!.body))).toEqual({
+      printRequestId: "req-1",
+      status: "failed",
+      errorCode: "spooler_rejected",
+    });
+  });
+
+  it("closes the job as handed_off on success", async () => {
+    const { calls } = mockFetch({
+      "/api/printing/print": () => respondJson({ ok: true, target: WINDOWS_TARGET, dataBase64: RENDERED_B64 }),
+      [`${CONNECTOR}/print/raw`]: () => respondJson({ ok: true }),
+      "/api/printing/jobs": () => respondJson({ ok: true }),
+    });
+    const result = await printReceipt("printer-1", RECEIPT, { requestId: "req-2" });
+    expect(result.ok).toBe(true);
+    const patch = calls.find((c) => c.url === "/api/printing/jobs");
+    expect(JSON.parse(String(patch!.init!.body))).toEqual({ printRequestId: "req-2", status: "handed_off" });
+  });
+
+  it("closes the job as failed when the render request itself throws", async () => {
+    const { calls } = mockFetch({
+      "/api/printing/jobs": () => respondJson({ ok: true }),
+    });
+    const result = await printReceipt("printer-1", RECEIPT, { requestId: "req-3" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("render_failed");
+    const patch = calls.find((c) => c.url === "/api/printing/jobs");
+    expect(JSON.parse(String(patch!.init!.body))).toMatchObject({ printRequestId: "req-3", status: "failed", errorCode: "render_failed" });
   });
 
   it("a printer from another branch is simply not found", async () => {
@@ -236,9 +285,9 @@ describe("the wizard's draft test print", () => {
       "/api/printing/test-draft": () => respondJson({ ok: true, dataBase64: RENDERED_B64 }),
       [`${CONNECTOR}/print/raw`]: () => respondJson({ ok: true }),
     });
-    const result = await testPrintDraft(NETWORK_TARGET, "receipt", 80);
+    const result = await testPrintDraft(NETWORK_TARGET, "receipt", "thermal80");
     expect(result.ok).toBe(true);
-    expect(JSON.parse(String(calls[0].init!.body))).toEqual({ kind: "receipt", paperWidthMm: 80 });
+    expect(JSON.parse(String(calls[0].init!.body))).toEqual({ purpose: "receipt", paper: "thermal80" });
     const payload = JSON.parse(String(calls[1].init!.body)) as { target: typeof NETWORK_TARGET };
     expect(payload.target).toEqual(NETWORK_TARGET);
   });
@@ -327,8 +376,8 @@ describe("the desktop app's native printing bridge (no loopback connector at all
   });
 });
 
-describe("the browser-dialog fallback", () => {
-  it("a label with no printer id asks the server to resolve one", async () => {
+describe("labels, invoices and template samples", () => {
+  it("a label with no printer id asks the server to resolve the label rule", async () => {
     const { calls } = mockFetch({
       "/api/printing/print": () => respondJson({ ok: false, error: "printer_not_configured" }, 409),
     });
@@ -338,10 +387,37 @@ describe("the browser-dialog fallback", () => {
     expect(calls.some((call) => call.url === "/api/printing/print")).toBe(true);
   });
 
-  it("a sheet document with no printer does not open a browser dialog", async () => {
-    const { calls } = mockFetch({});
-    const result = await printDocument(null, "<html></html>", "a4");
-    expect(result.error).toBe("printer_not_configured");
-    expect(calls).toHaveLength(0);
+  it("an invoice is an explicit document type, not a receipt by another name", async () => {
+    const { calls } = mockFetch({
+      "/api/printing/print": () => respondJson({ ok: true, target: WINDOWS_TARGET, dataBase64: RENDERED_B64, delivery: "page" }),
+      [`${CONNECTOR}/print/page`]: () => respondJson({ ok: true }),
+    });
+    const result = await printInvoice("printer-1", RECEIPT, { requestId: "inv-1" });
+    expect(result.ok).toBe(true);
+    const render = calls.find((c) => c.url === "/api/printing/print");
+    expect(JSON.parse(String(render!.init!.body))).toMatchObject({ documentType: "invoice", printerId: "printer-1" });
+    // A4 goes to the Windows driver, never to the raw ESC/POS port.
+    expect(calls.find((c) => c.url === `${CONNECTOR}/print/page`)).toBeDefined();
+  });
+
+  it("a template sample pins the exact template revision through the operational pipeline", async () => {
+    const { calls } = mockFetch({
+      "/api/printing/print": () => respondJson({ ok: true, target: WINDOWS_TARGET, dataBase64: RENDERED_B64 }),
+      [`${CONNECTOR}/print/raw`]: () => respondJson({ ok: true }),
+    });
+    const result = await printTemplateSample({ id: "template-9", docType: "receipt" });
+    expect(result.ok).toBe(true);
+    const render = calls.find((c) => c.url === "/api/printing/print");
+    expect(JSON.parse(String(render!.init!.body))).toMatchObject({
+      templateId: "template-9",
+      documentType: "receipt",
+      job: { type: "test", kind: "receipt" },
+    });
+  });
+
+  it("has no way to send raw HTML to the server", () => {
+    // The export simply does not exist any more: nothing a browser can build
+    // may be rendered by the server's Chromium.
+    expect((client as unknown as Record<string, unknown>).printDocument).toBeUndefined();
   });
 });

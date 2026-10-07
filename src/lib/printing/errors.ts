@@ -26,7 +26,9 @@ export type PrinterErrorCode =
   | "incompatible_printer"
   | "spooler_rejected"
   | "job_timeout"
-  | "template_invalid";
+  | "template_invalid"
+  | "template_not_found"
+  | "printer_unavailable";
 
 /** Persian, human, non-technical — what the operator should do next. */
 export const PRINTER_ERROR_MESSAGES: Record<PrinterErrorCode, string> = {
@@ -51,6 +53,8 @@ export const PRINTER_ERROR_MESSAGES: Record<PrinterErrorCode, string> = {
   spooler_rejected: "ویندوز این کار چاپ را نپذیرفت.",
   job_timeout: "ارسال به چاپگر بیش از حد طول کشید.",
   template_invalid: "قالب چاپ قابل استفاده نیست.",
+  template_not_found: "قالب چاپ انتخاب‌شده پیدا نشد؛ قوانین چاپ را بازخوانی کنید.",
+  printer_unavailable: "چاپگر تنظیم‌شدهٔ این سند الان در دسترس نیست؛ چاپگر را بررسی یا چاپگر جایگزین تعیین کنید.",
 };
 
 /** The one place a code becomes the sentence a user reads. */

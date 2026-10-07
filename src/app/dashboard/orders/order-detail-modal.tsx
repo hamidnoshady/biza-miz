@@ -89,7 +89,7 @@ import {
 } from "../modifier-picker";
 import { apiOrQueue } from "../offline-queue";
 import { api, errorMessage } from "../ui";
-import { useBusinessInfo } from "../use-printers";
+import { useBusinessInfo } from "../use-business-info";
 import { ClosedOrderAmendment } from "./closed-order-amendment";
 import { usePromptDialog } from "../prompt-dialog";
 import {

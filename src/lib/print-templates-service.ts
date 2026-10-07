@@ -13,6 +13,7 @@
  */
 import { query } from "./db";
 import {
+  PAPERS,
   parsePrintTemplate,
   type DocType,
   type PaperKey,
@@ -22,6 +23,12 @@ import {
 export interface SavedPrintTemplate extends PrintTemplate {
   id: string;
   isDefault: boolean;
+  /**
+   * The revision that last changed this layout. Incremented by every write
+   * and stamped onto each `print_jobs` row, so "which exact layout produced
+   * this bad receipt?" has an answer.
+   */
+  version: number;
   updatedAt: string;
 }
 
@@ -32,8 +39,11 @@ interface TemplateRow extends Record<string, unknown> {
   paper: string;
   layout: { options?: unknown; blocks?: unknown };
   is_default: boolean;
+  version: number;
   updated_at: Date | string;
 }
+
+const TEMPLATE_COLUMNS = "id, name, doc_type, paper, layout, is_default, version, updated_at";
 
 function mapRow(row: TemplateRow): SavedPrintTemplate | null {
   const parsed = parsePrintTemplate({
@@ -49,13 +59,14 @@ function mapRow(row: TemplateRow): SavedPrintTemplate | null {
     ...parsed,
     id: row.id,
     isDefault: row.is_default,
+    version: Number.isInteger(row.version) && row.version > 0 ? row.version : 1,
     updatedAt: typeof row.updated_at === "string" ? row.updated_at : row.updated_at.toISOString(),
   };
 }
 
 export async function listPrintTemplates(locationId: string): Promise<SavedPrintTemplate[]> {
   const { rows } = await query<TemplateRow>(
-    `SELECT id, name, doc_type, paper, layout, is_default, updated_at
+    `SELECT ${TEMPLATE_COLUMNS}
        FROM print_templates
       WHERE location_id = $1
       ORDER BY doc_type, is_default DESC, name`,
@@ -69,7 +80,7 @@ export async function getPrintTemplate(
   id: string,
 ): Promise<SavedPrintTemplate | null> {
   const { rows } = await query<TemplateRow>(
-    `SELECT id, name, doc_type, paper, layout, is_default, updated_at
+    `SELECT ${TEMPLATE_COLUMNS}
        FROM print_templates WHERE id = $1 AND location_id = $2`,
     [id, locationId],
   );
@@ -86,7 +97,20 @@ async function clearDefault(locationId: string, docType: DocType, exceptId?: str
   );
 }
 
-export type TemplateError = "invalid_template" | "duplicate_template_name" | "template_not_found";
+export type TemplateError = "invalid_template" | "duplicate_template_name" | "template_not_found" | "incompatible_template";
+
+/**
+ * Is this template's paper physically possible for its document type? A
+ * receipt template on A4, or a label template on a thermal roll's receipt
+ * type, is a layout the pipeline can never print — refuse it at the write
+ * boundary rather than store a row the till will fail on.
+ */
+export function templatePaperFitsDocType(docType: DocType, paper: PaperKey): boolean {
+  const kind = PAPERS[paper].kind;
+  if (docType === "invoice") return kind === "sheet";
+  if (docType === "label") return kind === "label" || kind === "thermal";
+  return kind === "thermal";
+}
 
 export async function createPrintTemplate(input: {
   locationId: string;
@@ -95,12 +119,13 @@ export async function createPrintTemplate(input: {
 }): Promise<{ template?: SavedPrintTemplate; error?: TemplateError }> {
   const parsed = parsePrintTemplate(input.template);
   if (!parsed) return { error: "invalid_template" };
+  if (!templatePaperFitsDocType(parsed.docType, parsed.paper)) return { error: "incompatible_template" };
   if (input.isDefault) await clearDefault(input.locationId, parsed.docType);
   try {
     const { rows } = await query<TemplateRow>(
       `INSERT INTO print_templates (location_id, name, doc_type, paper, layout, is_default)
        VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, name, doc_type, paper, layout, is_default, updated_at`,
+       RETURNING ${TEMPLATE_COLUMNS}`,
       [
         input.locationId,
         parsed.name,
@@ -126,16 +151,20 @@ export async function updatePrintTemplate(input: {
 }): Promise<{ template?: SavedPrintTemplate; error?: TemplateError }> {
   const parsed = parsePrintTemplate(input.template);
   if (!parsed) return { error: "invalid_template" };
+  if (!templatePaperFitsDocType(parsed.docType, parsed.paper)) return { error: "incompatible_template" };
   const existing = await getPrintTemplate(input.locationId, input.id);
   if (!existing) return { error: "template_not_found" };
   const isDefault = input.isDefault ?? existing.isDefault;
   if (isDefault) await clearDefault(input.locationId, parsed.docType, input.id);
   try {
     const { rows } = await query<TemplateRow>(
+      // Every write bumps the revision: `print_jobs.template_version` is only
+      // useful if the number changes whenever the layout does.
       `UPDATE print_templates
-          SET name = $1, doc_type = $2, paper = $3, layout = $4, is_default = $5, updated_at = now()
+          SET name = $1, doc_type = $2, paper = $3, layout = $4, is_default = $5,
+              version = version + 1, updated_at = now()
         WHERE id = $6 AND location_id = $7
-        RETURNING id, name, doc_type, paper, layout, is_default, updated_at`,
+        RETURNING ${TEMPLATE_COLUMNS}`,
       [
         parsed.name,
         parsed.docType,
@@ -162,7 +191,12 @@ export async function deletePrintTemplate(locationId: string, id: string): Promi
   return (rowCount ?? 0) > 0;
 }
 
-/** The paper a doc type's default template is designed for — used to preselect the picker. */
+/**
+ * The saved template a document type defaults to. This is not a UI
+ * convenience: `resolvePrintPlan` uses the same `isDefault` row as the
+ * runtime default when a print rule does not name a template, which is what
+ * makes the gallery's «پیش‌فرض» badge a promise about the till.
+ */
 export function defaultTemplateFor(
   templates: SavedPrintTemplate[],
   docType: DocType,
