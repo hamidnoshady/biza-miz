@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useMoney } from "@/components/money/money-context";
+import { toPersianDigits } from "@/lib/digits";
 import { JalaliDatePicker } from "../jalali-date-picker";
 import { BusinessDayRangePresets } from "./business-day-range";
 import { ErrorBox, Field, inputClass } from "../ui";
@@ -50,6 +51,10 @@ export type { SortBy, SortDir } from "./report-builder-config";
 interface SavedReportRow {
   id: string;
   name: string;
+  /** Optional free text saying what the report is for (issue #819, Step 8). */
+  description: string | null;
+  /** Bumped by every edit, so the list can say whether a shared report changed. */
+  version: number;
   /** The stored config; `ReportConfig` is the one shape both sides agree on. */
   config: ReportConfig;
   is_standard: boolean;
@@ -89,6 +94,7 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
   const [limit, setLimit] = useState("");
   const [chartType, setChartType] = useState<ChartType>("bar");
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const [rows, setRows] = useState<ReportRow[] | null>(null);
@@ -267,7 +273,7 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
       const response = await fetch(url, {
         method: editingId ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, config: currentConfig() }),
+        body: JSON.stringify({ name, description, config: currentConfig() }),
       });
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
@@ -276,6 +282,8 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
       }
       setEditingId(null);
       setName("");
+      setDescription("");
+      setNotice(editingId ? "گزارش به‌روزرسانی شد." : "گزارش ذخیره شد.");
       void loadSaved();
     } catch {
       setError("ذخیرهٔ گزارش ناموفق بود. اتصال شبکه را بررسی کنید.");
@@ -304,6 +312,7 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
     setLimit(state.limit);
     setChartType(state.chartType);
     setName(report.name);
+    setDescription(report.description ?? "");
     setEditingId(report.id);
     setRows(null);
     setError("");
@@ -590,6 +599,19 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
               />
             </label>
 
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                توضیح (اختیاری)
+              </span>
+              <input
+                className={inputClass}
+                placeholder="این گزارش برای چه پرسشی است؟"
+                value={description}
+                maxLength={500}
+                onChange={(event) => setDescription(event.target.value)}
+              />
+            </label>
+
             {capabilities.canManageSavedReports ? (
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
                 <Button
@@ -610,6 +632,7 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
                     onClick={() => {
                       setEditingId(null);
                       setName("");
+                      setDescription("");
                     }}
                     className="text-muted-foreground"
                   >
@@ -709,8 +732,18 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
                 key={report.id}
                 className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"
               >
-                <span className="min-w-0 break-words font-semibold text-foreground">
-                  {report.name}
+                <span className="min-w-0">
+                  <span className="block break-words font-semibold text-foreground">
+                    {report.name}
+                  </span>
+                  {report.description ? (
+                    <span className="mt-0.5 block break-words text-xs leading-5 text-muted-foreground">
+                      {report.description}
+                    </span>
+                  ) : null}
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    نسخهٔ {toPersianDigits(report.version)}
+                  </span>
                 </span>
                 {confirming ? (
                   <div className="flex shrink-0 flex-wrap items-center gap-2">

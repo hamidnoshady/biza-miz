@@ -65,6 +65,28 @@ describe("/api/reports/saved", () => {
     expect(reportsService.createSavedReport).not.toHaveBeenCalled();
   });
 
+  it("passes an optional description through to storage, and null when absent", async () => {
+    await POST(
+      postRequest({ name: "فروش روزانه", description: "پرسش مدیر", config: CONFIG }),
+    );
+    expect(reportsService.createSavedReport).toHaveBeenLastCalledWith(
+      "biz-1",
+      "user-1",
+      "فروش روزانه",
+      CONFIG,
+      "پرسش مدیر",
+    );
+
+    await POST(postRequest({ name: "بی‌توضیح", config: CONFIG }));
+    expect(reportsService.createSavedReport).toHaveBeenLastCalledWith(
+      "biz-1",
+      "user-1",
+      "بی‌توضیح",
+      CONFIG,
+      null,
+    );
+  });
+
   it("rejects a nameless or invalid report before writing", async () => {
     expect((await POST(postRequest({ config: CONFIG }))).status).toBe(400);
     const invalid = await POST(postRequest({ name: "x", config: { ...CONFIG, view: "nope" } }));

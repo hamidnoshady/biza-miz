@@ -14,6 +14,9 @@
  *      windows overlapped.
  *
  * Migration 0211 fixes both; this file is what stops them coming back.
+ *
+ * Migration 0212 (saved-report description/version, issue #819 Step 8) is
+ * covered here too, against the service the builder actually calls.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
@@ -27,6 +30,10 @@ if (!rootDatabaseUrl) {
 
 let databaseName: string;
 let db: Client;
+
+/** Loaded after DATABASE_URL points at the scratch database. */
+let savedReports: typeof import("../src/lib/reports-service");
+let dbLib: typeof import("../src/lib/db");
 
 let businessId = "";
 let mainId = "";
@@ -113,12 +120,19 @@ beforeAll(async () => {
 
   await runMigrations({ databaseUrl: urlFor(databaseName), quiet: true });
 
+  process.env.DATABASE_URL = urlFor(databaseName);
+  savedReports = await import("../src/lib/reports-service");
+  dbLib = await import("../src/lib/db");
+
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
 }, 120_000);
 
 afterAll(async () => {
   await db?.end();
+  // The service layer's pool outlives the raw client; closing the scratch
+  // database underneath it would otherwise log an idle-client error.
+  await dbLib?.getPool().end().catch(() => {});
   const maintenance = new Client({ connectionString: maintenanceUrl() });
   await maintenance.connect();
   try {
@@ -134,6 +148,7 @@ beforeEach(async () => {
   await db.query("DELETE FROM payments");
   await db.query("DELETE FROM orders");
   await db.query("DELETE FROM employee_shifts");
+  await db.query("DELETE FROM saved_reports");
   await db.query("DELETE FROM businesses");
 
   const biz = await db.query<{ id: string }>(
@@ -243,5 +258,93 @@ describe("v_employee_shift_reconciliation — branch boundary", () => {
     );
     expect(Number(rows[0].order_count)).toBe(1);
     expect(Number(rows[0].gross_total)).toBe(1_000_000);
+  });
+});
+
+describe("saved reports — description and version (issue #819, Step 8)", () => {
+  const config = {
+    view: "v_sales_by_day",
+    metric: "total",
+    aggregation: "sum" as const,
+    dimension: "day",
+    visualization: "pie" as const,
+  };
+
+  it("stores an optional description and starts at version 1", async () => {
+    const id = await dbLib.withTenant(businessId, () =>
+      savedReports.createSavedReport(businessId, null, "فروش روزانه", config, "پرسش مدیر"),
+    );
+    const row = await dbLib.withTenant(businessId, () => savedReports.getSavedReport(businessId, id));
+    expect(row).toMatchObject({
+      name: "فروش روزانه",
+      description: "پرسش مدیر",
+      version: 1,
+      is_standard: false,
+    });
+    // The visualization lives inside the stored config, so it round-trips too.
+    expect((row!.config as { visualization?: string }).visualization).toBe("pie");
+  });
+
+  it("leaves the description null when none was given", async () => {
+    const id = await dbLib.withTenant(businessId, () =>
+      savedReports.createSavedReport(businessId, null, "بی‌توضیح", config),
+    );
+    const row = await dbLib.withTenant(businessId, () => savedReports.getSavedReport(businessId, id));
+    expect(row!.description).toBeNull();
+  });
+
+  it("counts every edit as a version, including a rename", async () => {
+    const id = await dbLib.withTenant(businessId, () =>
+      savedReports.createSavedReport(businessId, null, "نسخه‌دار", config),
+    );
+    await dbLib.withTenant(businessId, () =>
+      savedReports.updateSavedReport(businessId, id, { config: { ...config, metric: "order_count" } }),
+    );
+    await dbLib.withTenant(businessId, () =>
+      savedReports.updateSavedReport(businessId, id, { name: "نسخه‌دار (نام تازه)" }),
+    );
+    const row = await dbLib.withTenant(businessId, () => savedReports.getSavedReport(businessId, id));
+    expect(row!.version).toBe(3);
+    expect(row!.name).toBe("نسخه‌دار (نام تازه)");
+  });
+
+  it("clears a description on an explicit empty string and refuses an empty patch", async () => {
+    const id = await dbLib.withTenant(businessId, () =>
+      savedReports.createSavedReport(businessId, null, "با توضیح", config, "بعداً پاک می‌شود"),
+    );
+    await dbLib.withTenant(businessId, () =>
+      savedReports.updateSavedReport(businessId, id, { description: "" }),
+    );
+    const cleared = await dbLib.withTenant(businessId, () => savedReports.getSavedReport(businessId, id));
+    expect(cleared!.description).toBeNull();
+
+    // No fields at all is not an edit: no row touched, no version spent.
+    const untouched = await dbLib.withTenant(businessId, () =>
+      savedReports.updateSavedReport(businessId, id, {}),
+    );
+    expect(untouched).toBe(false);
+    const after = await dbLib.withTenant(businessId, () => savedReports.getSavedReport(businessId, id));
+    expect(after!.version).toBe(2);
+  });
+
+  it("refuses to edit or delete the seeded standard reports", async () => {
+    // Standard rows are the report catalogue's projection, not the member's
+    // document — updateSavedReport and deleteSavedReport both keep them out.
+    await db.query(
+      `INSERT INTO saved_reports (business_id, name, config, is_standard, standard_key)
+       VALUES ($1, 'استاندارد', $2, true, 'daily_sales')`,
+      [businessId, JSON.stringify(config)],
+    );
+    const seeded = await db.query<{ id: string }>(
+      "SELECT id FROM saved_reports WHERE business_id = $1 AND standard_key = 'daily_sales'",
+      [businessId],
+    );
+    const id = seeded.rows[0].id;
+    expect(
+      await dbLib.withTenant(businessId, () => savedReports.updateSavedReport(businessId, id, { name: "خ" })),
+    ).toBe(false);
+    expect(
+      await dbLib.withTenant(businessId, () => savedReports.deleteSavedReport(businessId, id)),
+    ).toBe(false);
   });
 });

@@ -26,7 +26,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.reportsManage);
   if (error) return error;
 
-  let body: { name?: string; config?: ReportConfig };
+  let body: { name?: string; description?: string; config?: ReportConfig };
   try {
     body = await request.json();
   } catch {
@@ -40,6 +40,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const errors = validateReportConfig(body.config);
   if (errors.length > 0) return NextResponse.json({ error: "invalid_config", details: errors }, { status: 400 });
 
-  const id = await createSavedReport(session.businessId, session.sub, name, body.config);
+  const description = typeof body.description === "string" ? body.description : null;
+  const id = await createSavedReport(session.businessId, session.sub, name, body.config, description);
   return NextResponse.json({ ok: true, id });
 });

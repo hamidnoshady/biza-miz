@@ -21,7 +21,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   if (!existing) return NextResponse.json({ error: "not_found" }, { status: 404 });
   if (existing.is_standard) return NextResponse.json({ error: "cannot_edit_standard" }, { status: 400 });
 
-  let body: { name?: string; config?: ReportConfig };
+  let body: { name?: string; description?: string; config?: ReportConfig };
   try {
     body = await request.json();
   } catch {
@@ -34,6 +34,8 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
 
   const ok = await updateSavedReport(session.businessId, id, {
     name: body.name?.trim(),
+    // `undefined` means "not sent"; an empty string is an explicit clear.
+    description: typeof body.description === "string" ? body.description : undefined,
     config: body.config,
   });
   if (!ok) return NextResponse.json({ error: "bad_request" }, { status: 400 });

@@ -901,9 +901,13 @@ interface SavedReportRow extends Record<string, unknown> {
   business_id: string;
   created_by: string | null;
   name: string;
+  /** Optional free text saying what the report is for (issue #819, Step 8). */
+  description: string | null;
   config: ReportConfig;
   is_standard: boolean;
   standard_key: string | null;
+  /** Bumped by every edit, so a shared report says whether it changed. */
+  version: number;
   created_at: string;
   updated_at: string;
 }
@@ -929,18 +933,26 @@ export async function createSavedReport(
   createdBy: string | null,
   name: string,
   config: ReportConfig,
+  description?: string | null,
 ): Promise<string> {
   const { rows } = await query<{ id: string }>(
-    `INSERT INTO saved_reports (business_id, created_by, name, config) VALUES ($1, $2, $3, $4) RETURNING id`,
-    [businessId, createdBy, name, JSON.stringify(config)],
+    `INSERT INTO saved_reports (business_id, created_by, name, description, config)
+     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+    [businessId, createdBy, name, description?.trim() || null, JSON.stringify(config)],
   );
   return rows[0].id;
 }
 
+/**
+ * Edits a saved report. Every accepted patch bumps `version` (migration 0212):
+ * the row is a shared definition, and "has it changed since I ran it" is only
+ * answerable if edits are counted — including a rename or a description change,
+ * which are exactly the edits a reader notices.
+ */
 export async function updateSavedReport(
   businessId: string,
   id: string,
-  patch: { name?: string; config?: ReportConfig },
+  patch: { name?: string; description?: string | null; config?: ReportConfig },
 ): Promise<boolean> {
   const fields: string[] = [];
   const values: unknown[] = [id, businessId];
@@ -948,11 +960,18 @@ export async function updateSavedReport(
     values.push(patch.name);
     fields.push(`name = $${values.length}`);
   }
+  if (patch.description !== undefined) {
+    // An explicit empty string clears it, matching how the builder's input
+    // reports "the field is empty" rather than "the field was not sent".
+    values.push(patch.description?.trim() || null);
+    fields.push(`description = $${values.length}`);
+  }
   if (patch.config !== undefined) {
     values.push(JSON.stringify(patch.config));
     fields.push(`config = $${values.length}`);
   }
   if (fields.length === 0) return false;
+  fields.push("version = version + 1");
   fields.push("updated_at = now()");
   const { rowCount } = await query(
     `UPDATE saved_reports SET ${fields.join(", ")} WHERE id = $1 AND business_id = $2 AND is_standard = false`,
