@@ -98,11 +98,22 @@ describe("filters ⇄ URL", () => {
     kind: "manual",
     amountMin: "100",
     amountMax: "900",
+    entryId: "55555555-5555-4555-8555-555555555555",
   };
 
   it("round-trips every filter through the query string", () => {
     const restored = journalFiltersFromParams(journalFilterParams(filled));
     expect(restored).toEqual({ ...filled, q: "اجاره" });
+  });
+
+  // The reports drill-down links a single line to its document. That link is
+  // a filter like any other here, so it has to survive the round trip and be
+  // clearable — otherwise «بازکردن سند» strands the reader on one row.
+  it("carries the drill-down's entryId deep link, and lets it be dropped", () => {
+    const deepLink = journalFiltersFromParams(new URLSearchParams("entryId=55555555-5555-4555-8555-555555555555"));
+    expect(deepLink.entryId).toBe("55555555-5555-4555-8555-555555555555");
+    expect(hasActiveJournalFilters(deepLink)).toBe(true);
+    expect(journalFilterParams({ ...deepLink, entryId: "" }).toString()).toBe("");
   });
 
   it("writes nothing for an unfiltered journal, so the clean URL stays clean", () => {
@@ -118,7 +129,7 @@ describe("filters ⇄ URL", () => {
   });
 
   it("counts how many filters are narrowing the book", () => {
-    expect(activeJournalFilterCount(filled)).toBe(12);
+    expect(activeJournalFilterCount(filled)).toBe(13);
     expect(activeJournalFilterCount({ ...EMPTY_JOURNAL_FILTERS, q: "rent" })).toBe(1);
   });
 

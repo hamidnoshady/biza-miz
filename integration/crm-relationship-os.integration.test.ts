@@ -181,33 +181,33 @@ afterAll(async () => {
 
 describe("smart queues", () => {
   it("counts the whole queue while previewing only the first few", async () => {
-    // The shop's own today, the date `crmQueues` judges every row against —
-    // the same precaution the «opens each openable queue» block below takes,
-    // and for a failure this block actually suffered: built from the runner's
-    // clock instead, «تماس امروز» was written at 23:00 UTC, whose *business*
-    // date is already tomorrow once Tehran passes midnight. Between 20:30 and
-    // 24:00 UTC the row therefore read as overdue and the queue counted seven,
-    // so the suite was green or red by time of day.
-    const today = await day.businessToday(biz.id);
-    const dayOffset = (offset: number) =>
-      new Date(Date.parse(`${today}T00:00:00Z`) + offset * 86_400_000).toISOString().slice(0, 10);
-
     for (let index = 0; index < 6; index += 1) {
       await makeActivity(biz.id, {
         subject: `تماس عقب‌افتادهٔ ${index}`,
-        dueAt: `${dayOffset(-(index + 2))}T09:00:00Z`,
+        dueAt: new Date(Date.now() - (index + 2) * 86_400_000).toISOString(),
       });
     }
     // Due today is a different queue: an activity whose due date is today must
     // not appear in «عقب‌افتاده», or the two headings say the same thing.
+    // "Today" here is the BUSINESS zone's calendar day — the one the queues
+    // bucket by — so the instant is built in that zone too. A runner-local
+    // 23:00 is a different calendar day in the branch zone for part of every
+    // UTC day (Tehran is already tomorrow from 20:30Z), which made this suite
+    // fail whenever it ran inside that window.
+    const businessDay = await day.businessToday(biz.id);
+    const businessZone = await day.businessTimeZone(biz.id);
+    const dueTodayInstant = await db.query<{ ts: string }>(
+      "SELECT ($1::date + time '23:00') AT TIME ZONE $2 AS ts",
+      [businessDay, businessZone],
+    );
     await makeActivity(biz.id, {
       subject: "تماس امروز",
-      dueAt: `${today}T09:00:00Z`,
+      dueAt: dueTodayInstant.rows[0].ts,
     });
     // A completed one is not outstanding work at all.
     await makeActivity(biz.id, {
       subject: "تماس انجام‌شده",
-      dueAt: `${dayOffset(-3)}T09:00:00Z`,
+      dueAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
       completed: true,
     });
 

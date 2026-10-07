@@ -114,6 +114,12 @@ export interface JournalFilterState {
   /** Exact Rial decimal strings — the screen converts from the business's display unit at the input boundary. */
   amountMin: string;
   amountMax: string;
+  /**
+   * A single document, by id. Not a control in the filter panel: it arrives
+   * from «بازکردن سند» in the reports drill-down, and the screen offers it
+   * back as a dismissible chip rather than a field.
+   */
+  entryId: string;
 }
 
 export const EMPTY_JOURNAL_FILTERS: JournalFilterState = {
@@ -129,6 +135,7 @@ export const EMPTY_JOURNAL_FILTERS: JournalFilterState = {
   kind: "any",
   amountMin: "",
   amountMax: "",
+  entryId: "",
 };
 
 function oneOf<T extends readonly string[]>(value: string | null, allowed: T, fallback: T[number]): T[number] {
@@ -152,6 +159,7 @@ export function journalFiltersFromParams(params: URLSearchParams): JournalFilter
     kind: oneOf(params.get("kind"), JOURNAL_ENTRY_KINDS, "any"),
     amountMin: text("amountMin"),
     amountMax: text("amountMax"),
+    entryId: text("entryId"),
   };
 }
 
@@ -174,6 +182,7 @@ export function journalFilterParams(state: JournalFilterState): URLSearchParams 
   if (state.kind && state.kind !== "any") params.set("kind", state.kind);
   if (state.amountMin) params.set("amountMin", state.amountMin);
   if (state.amountMax) params.set("amountMax", state.amountMax);
+  if (state.entryId) params.set("entryId", state.entryId);
   return params;
 }
 
@@ -260,6 +269,7 @@ export function journalErrorMessage(code: string | undefined): string {
     invalid_amount_range: "بازهٔ مبلغ نامعتبر است؛ کمترین مبلغ باید از بیشترین مبلغ کمتر باشد.",
     invalid_filter: "یکی از فیلترها معتبر نیست؛ فیلترها را پاک کنید و دوباره تلاش کنید.",
     invalid_cursor: "ادامهٔ فهرست معتبر نیست؛ صفحه را تازه کنید.",
+    invalid_entry_id: "پیوند سند معتبر نیست؛ «نمایش همهٔ اسناد» را بزنید.",
     invalid_format: "قالب خروجی پشتیبانی نمی‌شود.",
     forbidden: "دسترسی به دفتر روزنامه مجاز نیست.",
     unauthorized: "وارد نشده‌اید.",

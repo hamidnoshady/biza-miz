@@ -72,6 +72,12 @@ export interface JournalFilters {
   accountId: string | null;
   createdBy: string | null;
   projectId: string | null;
+  /**
+   * One document by id — the deep link the reports drill-down renders
+   * («بازکردن سند»), which must open the journal *on that document* rather
+   * than at the top of the book.
+   */
+  entryId: string | null;
   reversalState: JournalReversalState;
   entryKind: JournalEntryKind;
   /** Inclusive bounds on the document's total debit, as exact Rial decimal strings. */
@@ -86,6 +92,7 @@ export type JournalFilterProblem =
   | "invalid_date_range"
   | "invalid_cursor"
   | "invalid_filter"
+  | "invalid_entry_id"
   | "invalid_amount"
   | "invalid_amount_range";
 
@@ -105,6 +112,7 @@ export const JOURNAL_FILTER_PARAM_KEYS = [
   "kind",
   "amountMin",
   "amountMax",
+  "entryId",
 ] as const;
 
 function trimmed(value: string | null | undefined): string | null {
@@ -164,6 +172,12 @@ export function parseJournalFilters(params: URLSearchParams): JournalFilterResul
     return { error: "invalid_filter" };
   }
 
+  // Its own code rather than `invalid_filter`: this one arrives from a link
+  // somebody followed, not from a control they set, so the screen has a
+  // different thing to say about it.
+  const entryId = uuidFilter(params.get("entryId"));
+  if (entryId === undefined) return { error: "invalid_entry_id" };
+
   const reversalState = enumFilter(params.get("reversal"), JOURNAL_REVERSAL_STATES);
   const entryKind = enumFilter(params.get("kind"), JOURNAL_ENTRY_KINDS);
   if (reversalState === undefined || entryKind === undefined) return { error: "invalid_filter" };
@@ -194,6 +208,7 @@ export function parseJournalFilters(params: URLSearchParams): JournalFilterResul
       accountId,
       createdBy,
       projectId,
+      entryId,
       reversalState: reversalState ?? "any",
       entryKind: entryKind ?? "any",
       amountMin,

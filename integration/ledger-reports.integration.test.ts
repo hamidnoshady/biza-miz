@@ -42,9 +42,11 @@ let dbLib: typeof import("../src/lib/db");
 let accountsService: typeof import("../src/lib/accounts-service");
 let reports: typeof import("../src/lib/ledger-reports-service");
 let installments: typeof import("../src/lib/installments-service");
+let fiscalPeriods: typeof import("../src/lib/fiscal-periods-service");
 
 const biz = { id: "" };
-const acct = { cash: "", rent: "" };
+const acct = { cash: "", rent: "", receivable: "", revenue: "" };
+const FULL_REPORT_SCOPE = { dateFrom: "0001-01-01", dateTo: "9999-12-31" } as const;
 const user = { id: "" };
 const party = { id: "" };
 
@@ -78,6 +80,7 @@ beforeAll(async () => {
   accountsService = await import("../src/lib/accounts-service");
   reports = await import("../src/lib/ledger-reports-service");
   installments = await import("../src/lib/installments-service");
+  fiscalPeriods = await import("../src/lib/fiscal-periods-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -133,6 +136,8 @@ beforeEach(async () => {
   );
   for (const r of accounts.rows) {
     if (r.code === "1100") acct.cash = r.id;
+    if (r.code === "1200") acct.receivable = r.id;
+    if (r.code === "4900") acct.revenue = r.id;
     if (r.code === "5300") acct.rent = r.id;
   }
 
@@ -159,12 +164,14 @@ async function postRentEntry(): Promise<void> {
 
 async function postManualLines(
   memo: string,
-  lines: { accountId: string; debit: number; credit: number }[],
-): Promise<void> {
+  lines: { accountId: string; debit: number | string; credit: number | string }[],
+  entryDate?: string,
+  sourceType = "manual",
+): Promise<string> {
   const entry = await db.query<{ id: string }>(
     `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, created_by)
-     VALUES ($1, CURRENT_DATE, $2, 'manual', $3) RETURNING id`,
-    [biz.id, memo, user.id],
+     VALUES ($1, COALESCE($2::date, CURRENT_DATE), $3, $4, $5) RETURNING id`,
+    [biz.id, entryDate ?? null, memo, sourceType, user.id],
   );
   for (const line of lines) {
     await db.query(
@@ -172,17 +179,21 @@ async function postManualLines(
       [entry.rows[0].id, line.accountId, line.debit, line.credit],
     );
   }
+  return entry.rows[0].id;
 }
 
 describe("ledger health in the trial balance and accounting dashboard", () => {
   it("does not call an empty ledger balanced just because both totals are zero", async () => {
-    const trial = await reports.getTrialBalance(biz.id);
-    expect(trial.totalDebit).toBe(0);
-    expect(trial.totalCredit).toBe(0);
-    expect(trial.entryCount).toBe(0);
-    expect(trial.unbalancedEntryCount).toBe(0);
-    expect(trial.invalidEntryCount).toBe(0);
-    expect(trial.balanced).toBe(false);
+    const trial = await reports.getTrialBalance(biz.id, FULL_REPORT_SCOPE);
+    expect(trial.totals.closingDebit).toBe("0");
+    expect(trial.totals.closingCredit).toBe("0");
+    expect(trial.integrity.entryCount).toBe(0);
+    expect(trial.integrity.unbalancedEntryCount).toBe(0);
+    expect(trial.integrity.invalidEntryCount).toBe(0);
+    // Two separate questions: the report has no activity to call balanced, and
+    // the ledger has nothing to call healthy.
+    expect(trial.trialBalanceBalanced).toBe(false);
+    expect(trial.integrity.ledgerHealthy).toBe(false);
 
     const overview = await reports.getLedgerOverview(biz.id);
     expect(overview.totalDebit).toBe(0);
@@ -201,13 +212,17 @@ describe("ledger health in the trial balance and accounting dashboard", () => {
       { accountId: acct.cash, debit: 0, credit: 100 },
     ]);
 
-    const trial = await reports.getTrialBalance(biz.id);
-    expect(trial.totalDebit).toBe(190);
-    expect(trial.totalCredit).toBe(190);
-    expect(trial.balanceDifference).toBe(0);
-    expect(trial.entryCount).toBe(2);
-    expect(trial.unbalancedEntryCount).toBe(2);
-    expect(trial.balanced).toBe(false);
+    const trial = await reports.getTrialBalance(biz.id, FULL_REPORT_SCOPE);
+    expect(trial.totals.closingDebit).toBe("190");
+    expect(trial.totals.closingCredit).toBe("190");
+    expect(trial.totals.closingDifference).toBe("0");
+    expect(trial.integrity.balanceDifference).toBe("0");
+    expect(trial.integrity.entryCount).toBe(2);
+    expect(trial.integrity.unbalancedEntryCount).toBe(2);
+    // The closing columns do match, but the books are not: one boolean would
+    // have hidden two corrupt entries behind an equal grand total.
+    expect(trial.trialBalanceBalanced).toBe(true);
+    expect(trial.integrity.ledgerHealthy).toBe(false);
 
     const overview = await reports.getLedgerOverview(biz.id);
     expect(overview.totalDebit).toBe(190);
@@ -223,11 +238,12 @@ describe("ledger health in the trial balance and accounting dashboard", () => {
       [biz.id, user.id],
     );
 
-    const trial = await reports.getTrialBalance(biz.id);
-    expect(trial.entryCount).toBe(1);
-    expect(trial.lineCount).toBe(0);
-    expect(trial.invalidEntryCount).toBe(1);
-    expect(trial.balanced).toBe(false);
+    const trial = await reports.getTrialBalance(biz.id, FULL_REPORT_SCOPE);
+    expect(trial.integrity.entryCount).toBe(1);
+    expect(trial.integrity.lineCount).toBe(0);
+    expect(trial.integrity.invalidEntryCount).toBe(1);
+    expect(trial.trialBalanceBalanced).toBe(false);
+    expect(trial.integrity.ledgerHealthy).toBe(false);
   });
 });
 
@@ -259,23 +275,24 @@ describe("the trial balance and the accounting dashboard, after an account is ar
   it("keeps an archived account's postings and stays balanced", async () => {
     await postRentEntry();
 
-    const before = await reports.getTrialBalance(biz.id);
-    expect(before.balanced).toBe(true);
-    expect(before.totalDebit).toBe(1000000);
+    const before = await reports.getTrialBalance(biz.id, FULL_REPORT_SCOPE);
+    expect(before.trialBalanceBalanced).toBe(true);
+    expect(before.totals.closingDebit).toBe("1000000");
 
     await accountsService.setAccountActive(biz.id, acct.rent, false, user.id);
 
-    const after = await reports.getTrialBalance(biz.id);
-    expect(after.balanced).toBe(true);
-    expect(after.totalDebit).toBe(1000000);
-    expect(after.totalCredit).toBe(1000000);
+    const after = await reports.getTrialBalance(biz.id, FULL_REPORT_SCOPE);
+    expect(after.trialBalanceBalanced).toBe(true);
+    expect(after.totals.closingDebit).toBe("1000000");
+    expect(after.totals.closingCredit).toBe("1000000");
 
-    // Still listed, and flagged so the screen can say «غیرفعال» rather than
+    // Still listed, and flagged so the screen can say «بایگانی‌شده» rather than
     // silently omitting a Rial from the report.
     const rent = after.accounts.find((a) => a.code === "5300");
     expect(rent).toBeDefined();
     expect(rent!.isActive).toBe(false);
-    expect(Number(rent!.debit)).toBe(1000000);
+    expect(rent!.closingDebit).toBe("1000000");
+    expect(rent!.closingCredit).toBe("0");
 
     const overview = await reports.getLedgerOverview(biz.id);
     expect(overview.balanced).toBe(true);
@@ -293,7 +310,7 @@ describe("the trial balance and the accounting dashboard, after an account is ar
     });
     await accountsService.setAccountActive(biz.id, id, false, user.id);
 
-    const balance = await reports.getTrialBalance(biz.id);
+    const balance = await reports.getTrialBalance(biz.id, FULL_REPORT_SCOPE);
     expect(balance.accounts.map((a) => a.code)).not.toContain("5999");
   });
 });

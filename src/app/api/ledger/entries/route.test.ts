@@ -92,6 +92,21 @@ describe("GET /api/ledger/entries — parameter validation", () => {
     expect(await (await GET(request("?cursor=tampered"))).json()).toEqual({ error: "invalid_cursor" });
     expect(await (await GET(request("?format=pdf"))).json()).toEqual({ error: "invalid_format" });
   });
+
+  // `entryId` arrives from the reports drill-down's «بازکردن سند» link, so a
+  // broken one is a broken link, not a broken control — it says so separately.
+  it("names a malformed drill-down link for what it is", async () => {
+    const res = await GET(request("?entryId=not-a-uuid"));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid_entry_id" });
+    expect(journalService.listJournalEntries).not.toHaveBeenCalled();
+  });
+
+  it("narrows the journal to the single document a drill-down linked to", async () => {
+    const entryId = "55555555-5555-4555-8555-555555555555";
+    await GET(request(`?entryId=${entryId}`));
+    expect(vi.mocked(journalService.listJournalEntries).mock.calls[0][1].entryId).toBe(entryId);
+  });
 });
 
 describe("GET /api/ledger/entries — the page", () => {

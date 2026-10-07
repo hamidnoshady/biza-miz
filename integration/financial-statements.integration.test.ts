@@ -222,15 +222,20 @@ describe("getAccountDrillDown", () => {
     const e2 = await postEntry("2025-04-06", "order", "sale two", acct.cash, acct.revenue, 200_000);
     await postEntry("2025-03-01", "order", "outside range", acct.cash, acct.revenue, 999_000);
 
-    const lines = await reportsService.getAccountDrillDown(biz.id, "4300", {
+    const page = await reportsService.getAccountDrillDown(biz.id, "4300", {
       dateFrom: "2025-04-01",
       dateTo: "2025-04-30",
     });
+    const lines = page.lines;
 
     expect(lines).toHaveLength(2);
+    expect(page.hasMore).toBe(false);
     const entryIds = lines.map((l) => l.entryId).sort();
     expect(entryIds).toEqual([e1, e2].sort());
-    expect(lines.every((l) => l.credit > 0 && l.debit === 0)).toBe(true);
+    expect(lines.every((l) => BigInt(l.credit) > 0n && l.debit === "0")).toBe(true);
+    // The window totals are what a report figure reconciles against.
+    expect(page.totals.credit).toBe("300000");
+    expect(page.totals.debit).toBe("0");
   });
 });
 

@@ -127,6 +127,7 @@ function journalScope(businessId: string, filters: JournalFilters): { sql: strin
     filters.entryKind,
     filters.amountMin,
     filters.amountMax,
+    filters.entryId,
   ];
   const sql = `FROM journal_entries je
          LEFT JOIN users u ON u.id = je.created_by
@@ -171,7 +172,8 @@ function journalScope(businessId: string, filters: JournalFilters): { sql: strin
             OR ($11::text = 'system' AND (je.source_type IS NULL OR je.source_type <> 'manual'))
           )
           AND ($12::bigint IS NULL OR totals.total_debit >= $12::bigint)
-          AND ($13::bigint IS NULL OR totals.total_debit <= $13::bigint)`;
+          AND ($13::bigint IS NULL OR totals.total_debit <= $13::bigint)
+          AND ($14::uuid IS NULL OR je.id = $14::uuid)`;
   return { sql, args };
 }
 

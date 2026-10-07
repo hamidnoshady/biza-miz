@@ -547,6 +547,22 @@ export function EntriesSection({
             <span className="text-xs text-muted-foreground">{entries ? countLabel : ""}</span>
           </div>
 
+          {filters.entryId ? (
+            /*
+             * The reports drill-down links one line to its document
+             * («بازکردن سند»). The journal honours that as a filter, so the
+             * reader has to be told the book is showing one document and
+             * given the way back out — the same escape the previous
+             * offset-based screen offered, kept through the rewrite.
+             */
+            <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-amber-400/70 px-3 py-3 dark:border-amber-500/50">
+              <p className="text-xs leading-5 text-muted-foreground">
+                فقط سند پیوندشده نمایش داده می‌شود: {toPersianDigits(filters.entryId.slice(0, 8))}
+              </p>
+              <SecondaryButton onClick={() => setFilter("entryId", "")}>نمایش همهٔ اسناد</SecondaryButton>
+            </div>
+          ) : null}
+
           {optionsFailed ? (
             <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-border px-3 py-3">
               <p className="text-xs leading-5 text-muted-foreground">
