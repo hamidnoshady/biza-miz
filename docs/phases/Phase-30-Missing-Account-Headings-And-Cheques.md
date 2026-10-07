@@ -142,6 +142,17 @@ here.
 counterparty hands over a new cheque in practice, and because a status that can loop makes "what
 happened to this cheque" unanswerable from the event log.
 
+> **Revised by issue #828 (migrations 0211/0212).** The *instrument* is still dead — a bounce
+> never loops back to `on_hand` — but the *balance* is not. A returned cheque left the value
+> sitting in «۱۲۴۴ چک‌های برگشتی» / «۲۱۲۲ چک‌های پرداختنی برگشتی» with no supported way out, and
+> registering a replacement as an ordinary new cheque credits/debits the control account a second
+> time instead of moving the returned balance. A `bounced` cheque now offers exactly two
+> resolutions — `settle` (paid another way: the returned account clears against بانک, status
+> `cleared`) and `restore` (the debt goes back to حساب‌های دریافتنی/پرداختنی, status `resolved`,
+> after which a replacement cheque is registered normally and the two entries net out). An
+> optional returned-cheque charge posts to «۵۸۶۰ هزینه چک برگشتی و جرایم بانکی» on the bounce
+> itself.
+
 ## Where the exit criteria are satisfied
 
 - Retail payroll and depreciation post against the template's own chart —

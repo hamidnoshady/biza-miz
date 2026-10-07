@@ -93,6 +93,9 @@ function requiredIsoDate(value: unknown, missingCode: string, invalidCode: strin
 
 export interface Cheque {
   id: string;
+  /** The branch that owns the instrument — every entry of its life posts here. */
+  locationId: string | null;
+  locationName: string | null;
   direction: ChequeDirection;
   status: ChequeStatus;
   serialNumber: string;
@@ -111,6 +114,8 @@ export interface Cheque {
 
 interface ChequeRow extends Record<string, unknown> {
   id: string;
+  location_id: string | null;
+  location_name?: string | null;
   direction: ChequeDirection;
   status: ChequeStatus;
   serial_number: string;
@@ -130,6 +135,8 @@ interface ChequeRow extends Record<string, unknown> {
 function toCheque(r: ChequeRow): Cheque {
   return {
     id: r.id,
+    locationId: r.location_id,
+    locationName: r.location_name ?? null,
     direction: r.direction,
     status: r.status,
     serialNumber: r.serial_number,
@@ -147,25 +154,42 @@ function toCheque(r: ChequeRow): Cheque {
   };
 }
 
-const CHEQUE_COLUMNS = `id, direction, status, serial_number, sayad_id, bank_name, account_number,
+const CHEQUE_COLUMNS = `id, location_id, direction, status, serial_number, sayad_id, bank_name, account_number,
                         amount::text AS amount, issue_date::text AS issue_date, due_date::text AS due_date,
                         counterparty_name, customer_id, supplier_id, memo, created_at`;
 
+/** The same columns read through the register's `cheques c` alias. */
+const CHEQUE_COLUMNS_PREFIXED = CHEQUE_COLUMNS.split(",")
+  .map((col) => `c.${col.trim()}`)
+  .join(", ");
+
 /** Every cheque of one direction, the ones still alive first and then by due date. */
-export async function listCheques(businessId: string, direction?: ChequeDirection): Promise<Cheque[]> {
+export async function listCheques(
+  businessId: string,
+  direction?: ChequeDirection,
+  locationId?: string | null,
+): Promise<Cheque[]> {
   if (direction && !CHEQUE_DIRECTIONS.includes(direction)) {
     throw new ChequeError("invalid_direction");
   }
   const params: unknown[] = [businessId];
-  let where = "business_id = $1";
+  let where = "c.business_id = $1";
   if (direction) {
     params.push(direction);
-    where += ` AND direction = $${params.length}`;
+    where += ` AND c.direction = $${params.length}`;
+  }
+  if (locationId) {
+    if (!isUuid(locationId)) throw new ChequeError("invalid_location");
+    params.push(locationId);
+    where += ` AND c.location_id = $${params.length}`;
   }
   const { rows } = await query<ChequeRow>(
-    `SELECT ${CHEQUE_COLUMNS} FROM cheques
+    `SELECT ${CHEQUE_COLUMNS_PREFIXED},
+            l.name AS location_name
+       FROM cheques c
+       LEFT JOIN locations l ON l.id = c.location_id
       WHERE ${where}
-      ORDER BY (status IN ('cleared', 'bounced', 'cancelled')), due_date, created_at`,
+      ORDER BY (c.status IN ('cleared', 'bounced', 'cancelled', 'resolved')), c.due_date, c.created_at`,
     params,
   );
   return rows.map(toCheque);
@@ -181,7 +205,15 @@ export interface ChequeEvent {
   createdAt: string;
 }
 
-/** One cheque's history — what happened to it, when, and which entry each step posted. */
+/**
+ * One cheque's history — what happened to it, when, and which entry each step
+ * posted.
+ *
+ * Ordered `occurred_on, created_at, id`: the timeline a treasurer reads is
+ * accounting chronology, and since `transitionCheque` refuses an event dated
+ * before the latest one, insertion order and accounting order now agree —
+ * `created_at, id` is only the tie-break for same-day steps.
+ */
 export async function getChequeHistory(businessId: string, chequeId: string): Promise<ChequeEvent[]> {
   if (!isUuid(chequeId)) throw new ChequeError("cheque_not_found", 404);
   const { rows: chequeRows } = await query<{ id: string }>(
@@ -200,7 +232,8 @@ export async function getChequeHistory(businessId: string, chequeId: string): Pr
     created_at: string;
   }>(
     `SELECT id, event, occurred_on::text AS occurred_on, entry_id, endorsed_to_supplier_id, memo, created_at
-       FROM cheque_events WHERE business_id = $1 AND cheque_id = $2 ORDER BY created_at, id`,
+       FROM cheque_events WHERE business_id = $1 AND cheque_id = $2
+      ORDER BY occurred_on, created_at, id`,
     [businessId, chequeId],
   );
   return rows.map((r) => ({
@@ -405,27 +438,45 @@ async function recordChequeEvent(
   );
 }
 
-/** Which two accounts a transition moves the money between — `null` when it moves none. */
+/** One posting a transition owes: an amount moved between two accounts. */
+interface ChequePosting {
+  debitCode: string;
+  creditCode: string;
+  amount: number;
+}
+
+/**
+ * Which accounts a transition moves the cheque's money between — an empty list
+ * when it moves none.
+ *
+ * `amount` is the cheque's, except for the returned-cheque fee, which is the
+ * bank's charge and rides along on the bounce that caused it.
+ */
 function linesFor(
   direction: ChequeDirection,
   from: ChequeStatus,
   action: ChequeAction,
-): { debitCode: string; creditCode: string } | null {
+  amount: number,
+  feeAmount: number,
+): ChequePosting[] {
+  const postings: ChequePosting[] = [];
+  const move = (debitCode: string, creditCode: string) => {
+    postings.push({ debitCode, creditCode, amount });
+  };
+
   if (direction === "receivable") {
     if (action === "deposit") {
-      return { debitCode: WELL_KNOWN_CODES.chequesInCollection, creditCode: WELL_KNOWN_CODES.chequesOnHand };
-    }
-    if (action === "endorse") {
-      return { debitCode: WELL_KNOWN_CODES.accountsPayable, creditCode: WELL_KNOWN_CODES.chequesOnHand };
-    }
-    if (action === "clear") {
+      move(WELL_KNOWN_CODES.chequesInCollection, WELL_KNOWN_CODES.chequesOnHand);
+    } else if (action === "endorse") {
+      move(WELL_KNOWN_CODES.accountsPayable, WELL_KNOWN_CODES.chequesOnHand);
+    } else if (action === "clear") {
       // An endorsed cheque clearing at the supplier's bank moves no money of
       // ours: the endorsement already settled the debt. The status advances so
       // the register stops calling it outstanding, and that is all.
-      if (from === "endorsed") return null;
-      return { debitCode: WELL_KNOWN_CODES.bank, creditCode: WELL_KNOWN_CODES.chequesInCollection };
-    }
-    if (action === "bounce") {
+      if (from !== "endorsed") {
+        move(WELL_KNOWN_CODES.bank, WELL_KNOWN_CODES.chequesInCollection);
+      }
+    } else if (action === "bounce") {
       // Wherever it was, it comes back to چک‌های برگشتی. From `endorsed` the
       // credit is accounts payable: the supplier is owed again.
       const creditCode =
@@ -434,23 +485,45 @@ function linesFor(
           : from === "endorsed"
             ? WELL_KNOWN_CODES.accountsPayable
             : WELL_KNOWN_CODES.chequesOnHand;
-      return { debitCode: WELL_KNOWN_CODES.chequesReturned, creditCode };
+      move(WELL_KNOWN_CODES.chequesReturned, creditCode);
+    } else if (action === "settle") {
+      // The customer paid the returned cheque another way; چک‌های برگشتی empties
+      // into the bank rather than sitting there forever.
+      move(WELL_KNOWN_CODES.bank, WELL_KNOWN_CODES.chequesReturned);
+    } else if (action === "restore") {
+      // Back to the customer's account. A replacement cheque is then an
+      // ordinary registration, whose own entry credits حساب‌های دریافتنی again —
+      // the two net out, so A/R is never settled twice.
+      move(WELL_KNOWN_CODES.accountsReceivable, WELL_KNOWN_CODES.chequesReturned);
     }
-    return null;
-  }
-
-  if (action === "present") {
-    return { debitCode: WELL_KNOWN_CODES.chequesIssued, creditCode: WELL_KNOWN_CODES.bank };
-  }
-  if (action === "bounce") {
-    return { debitCode: WELL_KNOWN_CODES.chequesIssued, creditCode: WELL_KNOWN_CODES.chequesIssuedReturned };
-  }
-  if (action === "cancel") {
+  } else if (action === "present") {
+    move(WELL_KNOWN_CODES.chequesIssued, WELL_KNOWN_CODES.bank);
+  } else if (action === "bounce") {
+    move(WELL_KNOWN_CODES.chequesIssued, WELL_KNOWN_CODES.chequesIssuedReturned);
+  } else if (action === "cancel") {
     // Undoing the issue: the supplier is owed again and the outstanding cheque
     // is gone. A reversal, not an edit — the original entry stays.
-    return { debitCode: WELL_KNOWN_CODES.chequesIssued, creditCode: WELL_KNOWN_CODES.accountsPayable };
+    move(WELL_KNOWN_CODES.chequesIssued, WELL_KNOWN_CODES.accountsPayable);
+  } else if (action === "settle") {
+    // We paid our returned cheque by bank/cash instead of replacing it.
+    move(WELL_KNOWN_CODES.chequesIssuedReturned, WELL_KNOWN_CODES.bank);
+  } else if (action === "restore") {
+    // The liability goes back to the supplier's account, ready for a
+    // replacement cheque or an ordinary payment.
+    move(WELL_KNOWN_CODES.chequesIssuedReturned, WELL_KNOWN_CODES.accountsPayable);
   }
-  return null;
+
+  // The bank's returned-cheque charge is ours either way, and the chart has an
+  // account for exactly it («۵۸۶۰ هزینه چک برگشتی و جرایم بانکی»).
+  if (feeAmount > 0 && action === "bounce") {
+    postings.push({
+      debitCode: WELL_KNOWN_CODES.bouncedChequeExpense,
+      creditCode: WELL_KNOWN_CODES.bank,
+      amount: feeAmount,
+    });
+  }
+
+  return postings;
 }
 
 const EVENT_FOR_ACTION: Record<ChequeAction, string> = {
@@ -460,6 +533,8 @@ const EVENT_FOR_ACTION: Record<ChequeAction, string> = {
   present: "cleared",
   bounce: "bounced",
   cancel: "cancelled",
+  settle: "settled",
+  restore: "restored",
 };
 
 const MEMO_FOR_ACTION: Record<ChequeAction, string> = {
@@ -469,16 +544,19 @@ const MEMO_FOR_ACTION: Record<ChequeAction, string> = {
   present: "پاس شدن چک صادرشده",
   bounce: "برگشت چک",
   cancel: "ابطال چک صادرشده",
+  settle: "تسویه چک برگشتی",
+  restore: "بازگشت چک برگشتی به حساب طرف",
 };
 
 export interface TransitionChequeParams {
   businessId: string;
-  locationId: string | null;
   chequeId: string;
   action: ChequeAction;
   occurredOn?: string | null;
   /** Required for `endorse`: who the cheque was passed to. */
   endorsedToSupplierId?: string | null;
+  /** Optional on `bounce`: the bank's returned-cheque charge, posted to 5860. */
+  feeAmount?: number | null;
   memo?: string | null;
   createdBy: string | null;
 }
@@ -490,6 +568,21 @@ export interface TransitionChequeParams {
  * cashiers clearing the same cheque at once cannot both post: the second one
  * finds the status already advanced and is refused by the transition table
  * rather than double-crediting چک‌های در جریان وصول.
+ *
+ * Two invariants the lock also buys, both of which used to be missing:
+ *
+ * **The branch is the cheque's, not the operator's.** The entry posts to
+ * `cheques.location_id`, so switching the active location between a deposit and
+ * its clearing cannot split one instrument across two branches' books. Moving a
+ * cheque between branches is a different operation and would need its own
+ * workflow and audit event.
+ *
+ * **Time only moves forward.** A step may not be dated before the latest event
+ * already on the cheque, so "deposited on ۱۰ بهمن, cleared on ۲۰ دی" is refused
+ * (`action_before_previous_event`) instead of being written as accounting
+ * history that could not have happened — and so a transition cannot sneak into
+ * a fiscal period earlier than one the cheque has already posted into. Same-day
+ * steps stay legal: a cheque deposited in the morning can clear that afternoon.
  */
 export async function transitionCheque(params: TransitionChequeParams): Promise<Cheque> {
   if (!isUuid(params.chequeId)) throw new ChequeError("cheque_not_found", 404);
@@ -517,26 +610,48 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
 
     const occurredOn = optionalIsoDate(params.occurredOn, "invalid_occurred_on") ?? todayIso();
     if (occurredOn < cheque.issue_date) throw new ChequeError("action_before_issue");
+
+    // Still under the row lock: the latest event is the floor for this one.
+    const { rows: latest } = await client.query<{ occurred_on: string }>(
+      `SELECT occurred_on::text AS occurred_on FROM cheque_events
+        WHERE business_id = $1 AND cheque_id = $2
+        ORDER BY occurred_on DESC, created_at DESC, id DESC LIMIT 1`,
+      [params.businessId, params.chequeId],
+    );
+    if (latest[0] && occurredOn < latest[0].occurred_on) {
+      throw new ChequeError("action_before_previous_event");
+    }
+
+    let feeAmount = 0;
+    if (params.feeAmount !== undefined && params.feeAmount !== null) {
+      const fee = Number(params.feeAmount);
+      if (!Number.isSafeInteger(fee) || fee < 0) throw new ChequeError("invalid_fee_amount");
+      if (fee > 0 && params.action !== "bounce") throw new ChequeError("fee_not_supported_for_action");
+      feeAmount = fee;
+    }
+
     const memo = optionalText(params.memo);
-    const codes = linesFor(cheque.direction, cheque.status, params.action);
+    const amount = Number(cheque.amount);
+    const postings = linesFor(cheque.direction, cheque.status, params.action, amount, feeAmount);
 
     let entryId: string | null = null;
-    if (codes) {
-      const accounts = await accountIdsByCode(client, params.businessId, [codes.debitCode, codes.creditCode]);
-      const amount = Number(cheque.amount);
+    if (postings.length > 0) {
+      const codes = [...new Set(postings.flatMap((p) => [p.debitCode, p.creditCode]))];
+      const accounts = await accountIdsByCode(client, params.businessId, codes);
       entryId = await postJournalEntry(client, {
         businessId: params.businessId,
-        locationId: params.locationId,
+        // The cheque's own branch, never the operator's current one.
+        locationId: cheque.location_id,
         entryDate: occurredOn,
         memo: `${MEMO_FOR_ACTION[params.action]} ${cheque.serial_number}`,
         sourceType: "cheque",
         sourceId: cheque.id,
         createdBy: params.createdBy,
         postingKind: `cheque_${EVENT_FOR_ACTION[params.action]}`,
-        lines: [
-          { accountId: accounts.get(codes.debitCode)!, debit: amount, credit: 0 },
-          { accountId: accounts.get(codes.creditCode)!, debit: 0, credit: amount },
-        ],
+        lines: postings.flatMap((posting) => [
+          { accountId: accounts.get(posting.debitCode)!, debit: posting.amount, credit: 0 },
+          { accountId: accounts.get(posting.creditCode)!, debit: 0, credit: posting.amount },
+        ]),
       });
     }
 

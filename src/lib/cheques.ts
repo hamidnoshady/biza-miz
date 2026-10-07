@@ -25,10 +25,20 @@ export const CHEQUE_STATUSES = [
   "cleared",
   "bounced",
   "cancelled",
+  "resolved",
 ] as const;
 export type ChequeStatus = (typeof CHEQUE_STATUSES)[number];
 
-export const CHEQUE_ACTIONS = ["deposit", "endorse", "clear", "bounce", "present", "cancel"] as const;
+export const CHEQUE_ACTIONS = [
+  "deposit",
+  "endorse",
+  "clear",
+  "bounce",
+  "present",
+  "cancel",
+  "settle",
+  "restore",
+] as const;
 export type ChequeAction = (typeof CHEQUE_ACTIONS)[number];
 
 /** The status a cheque starts in, which its direction decides entirely. */
@@ -45,18 +55,30 @@ export function initialStatus(direction: ChequeDirection): ChequeStatus {
  * if it bounces, and carrying that as an asset would need an unbalanced memo
  * pair. See the migration's header and WELL_KNOWN_CODES' note.
  *
- * A bounced receivable is terminal *here*: re-presenting one is a new cheque
- * row, because the counterparty hands over a new cheque in practice, and because
- * a status that can loop makes "what happened to this cheque" unanswerable.
+ * A bounced cheque is *not* terminal. The instrument is dead — it never loops
+ * back to `on_hand`, so "what happened to this cheque" stays answerable — but
+ * its value is sitting in چک‌های برگشتی (1244) or چک‌های پرداختنی برگشتی (2122)
+ * and something has to move it out. Two resolutions do that, and they are the
+ * only two shapes the money can take:
+ *
+ *   settle  — it was paid another way (bank/cash), so the returned account
+ *             clears against بانک and the cheque ends `cleared`.
+ *   restore — the debt goes back to its control account (حساب‌های دریافتنی /
+ *             حساب‌های پرداختنی) and the cheque ends `resolved`. A replacement
+ *             cheque is then registered as an ordinary new cheque: its own
+ *             entry credits/debits the control account again, so the pair nets
+ *             out instead of double-settling A/R or A/P.
  */
 const TRANSITIONS: Record<ChequeDirection, Partial<Record<ChequeStatus, Partial<Record<ChequeAction, ChequeStatus>>>>> = {
   receivable: {
     on_hand: { deposit: "in_collection", endorse: "endorsed", bounce: "bounced" },
     in_collection: { clear: "cleared", bounce: "bounced" },
     endorsed: { clear: "cleared", bounce: "bounced" },
+    bounced: { settle: "cleared", restore: "resolved" },
   },
   payable: {
     issued: { present: "cleared", bounce: "bounced", cancel: "cancelled" },
+    bounced: { settle: "cleared", restore: "resolved" },
   },
 };
 

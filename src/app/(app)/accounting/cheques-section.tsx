@@ -128,6 +128,8 @@ import { api } from "@/app/dashboard/ui";
 
 interface Cheque {
   id: string;
+  locationId?: string | null;
+  locationName?: string | null;
   direction: ChequeDirection;
   status: ChequeStatus;
   serialNumber: string;
@@ -167,6 +169,7 @@ const STATUS_LABELS: Record<ChequeStatus, string> = {
   cleared: "وصول‌شده",
   bounced: "برگشتی",
   cancelled: "ابطال‌شده",
+  resolved: "تعیین‌تکلیف‌شده",
 };
 
 const STATUS_TONE: Record<ChequeStatus, string> = {
@@ -182,6 +185,7 @@ const STATUS_TONE: Record<ChequeStatus, string> = {
     "bg-emerald-100 text-emerald-900 border-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-200 dark:border-emerald-500/20",
   bounced: "bg-destructive/10 text-destructive border-destructive/20",
   cancelled: "bg-muted text-muted-foreground border-border",
+  resolved: "bg-muted text-foreground border-border",
 };
 
 const ACTION_LABELS: Record<ChequeAction, string> = {
@@ -191,6 +195,8 @@ const ACTION_LABELS: Record<ChequeAction, string> = {
   present: "پاس شد",
   bounce: "برگشت خورد",
   cancel: "ابطال",
+  settle: "تسویه نقدی/بانکی",
+  restore: "بازگشت به حساب طرف",
 };
 
 const ACTION_HINT: Record<ChequeAction, string> = {
@@ -198,8 +204,11 @@ const ACTION_HINT: Record<ChequeAction, string> = {
   endorse: "به تأمین‌کننده واگذار می‌شود",
   clear: "به حساب بانک واریز می‌شود",
   present: "از بانک کسر می‌شود",
-  bounce: "برگشتی ثبت می‌شود",
+  bounce: "برگشتی ثبت می‌شود؛ در صورت نیاز کارمزد بانکی هم ثبت می‌شود",
   cancel: "بدون اثر بانکی ابطال می‌شود",
+  settle: "مبلغ چک برگشتی از حساب چک‌های برگشتی به بانک منتقل می‌شود",
+  restore:
+    "مانده چک برگشتی به حساب طرف برمی‌گردد؛ چک جایگزین پس از آن مثل یک چک عادی ثبت می‌شود",
 };
 
 const DIRECTION_META: Record<
@@ -262,6 +271,11 @@ function errorMessage(code: string | undefined): string {
     due_date_before_issue: "سررسید نمی‌تواند پیش از تاریخ دریافت/صدور باشد.",
     invalid_occurred_on: "تاریخ وقوع معتبر نیست.",
     action_before_issue: "تاریخ این اقدام نمی‌تواند پیش از تاریخ دریافت/صدور باشد.",
+    action_before_previous_event:
+      "تاریخ این اقدام نمی‌تواند پیش از تاریخ آخرین رویداد ثبت‌شده چک باشد.",
+    invalid_fee_amount: "مبلغ کارمزد معتبر نیست.",
+    fee_not_supported_for_action: "ثبت کارمزد فقط هنگام برگشت چک ممکن است.",
+    invalid_location: "شعبه انتخاب‌شده معتبر نیست.",
     invalid_counterparty_for_direction: "طرف حساب انتخاب‌شده با نوع چک هم‌خوانی ندارد.",
     network_error: "ارتباط با سرور برقرار نشد. اتصال شبکه را بررسی و دوباره تلاش کنید.",
     customer_not_found: "مشتری انتخاب‌شده معتبر نیست.",
@@ -287,8 +301,16 @@ function errorMessage(code: string | undefined): string {
 export function ChequesSection({
   busy,
   run,
+  canManage,
 }: {
   busy: boolean;
+  /**
+   * Whether this member holds `finance.cheques_manage`. A `ledger.view`-only
+   * accountant reads the register, its filters and every cheque's history, and
+   * is shown no control that would only come back 403 from the API — the API
+   * check stays authoritative either way.
+   */
+  canManage: boolean;
   run: (
     fn: () => Promise<{ ok: boolean; data: { error?: string } }>,
   ) => Promise<boolean>;
@@ -469,9 +491,13 @@ export function ChequesSection({
   const kpis = useMemo(() => {
     if (!cheques) return null;
     const t = todayIsoDate();
+    // "Active" is the outstanding instrument: not finished, and not a returned
+    // cheque — a bounce is not an outstanding cheque, it is a balance sitting in
+    // چک‌های برگشتی that has its own tile and its own resolution.
     const active = cheques.filter(
-      (c) => !["cleared", "bounced", "cancelled"].includes(c.status),
+      (c) => !["cleared", "bounced", "cancelled", "resolved"].includes(c.status),
     );
+    const returned = cheques.filter((c) => c.status === "bounced");
     const overdue = active.filter((c) => c.dueDate < t);
     const dueSoon = active.filter((c) => {
       const d = daysBetween(t, c.dueDate);
@@ -484,6 +510,8 @@ export function ChequesSection({
       return acc;
     }, {});
     return {
+      totalReturned: returned.reduce((sum, c) => sum + c.amount, 0),
+      returnedCount: returned.length,
       totalActive,
       totalOverdue,
       overdueCount: overdue.length,
@@ -518,19 +546,29 @@ export function ChequesSection({
     }
   }
 
+  // One gate, used everywhere a control is drawn: a read-only member is shown
+  // the register, not a dialog that would be refused on submit.
+  const actionsFor = useCallback(
+    (cheque: Cheque): ChequeAction[] =>
+      canManage ? availableActions(cheque.direction, cheque.status) : [],
+    [canManage],
+  );
+
   const openCreate = useCallback(() => {
+    if (!canManage) return;
     setLocalError("");
     setCreateOpen(true);
-  }, []);
+  }, [canManage]);
 
   const openAction = useCallback((cheque: Cheque, act: ChequeAction) => {
+    if (!canManage) return;
     setLocalError("");
     setActionError("");
     // Never stack a second modal on the detail modal — that traps focus between
     // two dialogs on keyboard and makes the close affordance ambiguous.
     setDetail(null);
     setAction({ cheque, act });
-  }, []);
+  }, [canManage]);
 
   return (
     <div className="space-y-4" dir="rtl">
@@ -554,17 +592,23 @@ export function ChequesSection({
             </CardDescription>
           </div>
           <CardAction className="flex flex-wrap items-center gap-2 self-start">
-            <Button onClick={openCreate} className="gap-1.5">
-              <PlusIcon className="size-4" />
-              ثبت چک جدید
-            </Button>
+            {canManage ? (
+              <Button onClick={openCreate} className="gap-1.5">
+                <PlusIcon className="size-4" />
+                ثبت چک جدید
+              </Button>
+            ) : (
+              <Badge variant="secondary" className="font-normal">
+                دسترسی فقط خواندنی
+              </Badge>
+            )}
           </CardAction>
         </CardHeader>
 
         {/* KPI strip */}
         {kpis ? (
           <CardContent className="pt-0">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <ChequeToneTile
                 icon={WalletIcon}
                 label={
@@ -582,6 +626,21 @@ export function ChequesSection({
                 value={money.format(kpis.totalOverdue)}
                 hint={`${toPersianDigits(kpis.overdueCount)} فقره نیاز به پیگیری`}
                 tone={kpis.overdueCount > 0 ? "destructive" : "muted"}
+              />
+              <ChequeToneTile
+                icon={AlertTriangleIcon}
+                label={
+                  direction === "receivable"
+                    ? "چک‌های برگشتی تعیین‌تکلیف‌نشده"
+                    : "چک‌های برگشتی پرداختنی"
+                }
+                value={money.format(kpis.totalReturned)}
+                hint={
+                  kpis.returnedCount > 0
+                    ? `${toPersianDigits(kpis.returnedCount)} فقره — مانده در حساب چک‌های برگشتی`
+                    : "موردی باز نیست"
+                }
+                tone={kpis.returnedCount > 0 ? "destructive" : "muted"}
               />
               <ChequeToneTile
                 icon={Clock3Icon}
@@ -914,6 +973,7 @@ export function ChequesSection({
                                   </Button>
                                   <ChequeRowActions
                                     cheque={c}
+                                    actions={actionsFor(c)}
                                     busy={busy}
                                     onAction={(act) => openAction(c, act)}
                                     onDetail={() => setDetail(c)}
@@ -1059,16 +1119,16 @@ export function ChequesSection({
                               </Button>
                               <ChequeRowActions
                                 cheque={c}
+                                actions={actionsFor(c)}
                                 busy={busy}
                                 onAction={(act) => openAction(c, act)}
                                 onDetail={() => setDetail(c)}
                               />
                             </div>
 
-                            {availableActions(c.direction, c.status).length >
-                            0 ? (
+                            {actionsFor(c).length > 0 ? (
                               <div className="flex flex-wrap gap-1.5 border-t pt-3">
-                                {availableActions(c.direction, c.status).map(
+                                {actionsFor(c).map(
                                   (act) => (
                                     <Button
                                       key={act}
@@ -1118,7 +1178,8 @@ export function ChequesSection({
         </CardFooter>
       </Card>
 
-      {/* Create dialog */}
+      {/* Create dialog — never mounted for a read-only member. */}
+      {canManage ? (
       <CreateChequeDialog
         open={createOpen}
         onOpenChange={(open) => {
@@ -1137,12 +1198,14 @@ export function ChequesSection({
         run={run}
         onError={setLocalError}
       />
+      ) : null}
 
       {/* Detail dialog */}
       {detail ? (
         <ChequeDetailDialog
           cheque={detail}
           onClose={() => setDetail(null)}
+          actions={actionsFor(detail)}
           onAction={(act) => openAction(detail, act)}
           suppliers={suppliers}
           money={money}
@@ -1314,16 +1377,18 @@ function EmptyCheques({
 
 function ChequeRowActions({
   cheque,
+  actions,
   busy,
   onAction,
   onDetail,
 }: {
   cheque: Cheque;
+  /** Already gated: empty for a read-only member, so nothing is drawn. */
+  actions: ChequeAction[];
   busy: boolean;
   onAction: (act: ChequeAction) => void;
   onDetail: () => void;
 }) {
-  const actions = availableActions(cheque.direction, cheque.status);
   if (actions.length === 0) return null;
   // On desktop we show a dropdown to keep the row tight
   return (
@@ -1378,6 +1443,7 @@ function availableStatusesFor(direction: ChequeDirection): ChequeStatus[] {
 function ChequeDetailDialog({
   cheque,
   onClose,
+  actions,
   onAction,
   suppliers,
   money,
@@ -1385,6 +1451,8 @@ function ChequeDetailDialog({
 }: {
   cheque: Cheque;
   onClose: () => void;
+  /** Already gated by `finance.cheques_manage`; empty means read-only. */
+  actions: ChequeAction[];
   onAction: (act: ChequeAction) => void;
   suppliers: Counterparty[];
   money: ReturnType<typeof useMoney>;
@@ -1411,7 +1479,6 @@ function ChequeDetailDialog({
     };
   }, [cheque.id, historyRefresh]);
 
-  const actions = availableActions(cheque.direction, cheque.status);
   const endorsedSupplierId = events?.find((event) => event.event === "endorsed")?.endorsedToSupplierId;
   const linkedSupplierId = cheque.direction === "payable" ? cheque.supplierId : endorsedSupplierId;
   const linkedSupplier = linkedSupplierId
@@ -1471,6 +1538,13 @@ function ChequeDetailDialog({
                 value={toPersianDigits(formatJalali(cheque.issueDate))}
               />
               <DetailItem label="وضعیت چک" value={STATUS_LABELS[cheque.status]} />
+              {/* The branch that owns the instrument: every entry of this
+                  cheque's life posts there, whatever branch the operator is
+                  currently switched into. */}
+              <DetailItem
+                label="شعبه ثبت چک"
+                value={cheque.locationName ?? "کل کسب‌وکار"}
+              />
               {cheque.accountNumber ? (
                 <DetailItem
                   label="شماره حساب"
@@ -2042,8 +2116,12 @@ function ChequeActionDialog({
   // No default: preselecting `suppliers[0]` meant one careless «ظهرنویسی»
   // handed a customer's cheque to whichever supplier sorted first.
   const [supplierId, setSupplierId] = useState("");
+  // The bank's returned-cheque charge, posted to «۵۸۶۰ هزینه چک برگشتی و جرایم
+  // بانکی» alongside the bounce itself. Optional: not every bounce is charged.
+  const [feeAmount, setFeeAmount] = useState("");
 
   const isEndorse = action === "endorse";
+  const isBounce = action === "bounce";
   const isDestructive = action === "bounce" || action === "cancel";
 
   return (
@@ -2112,6 +2190,28 @@ function ChequeActionDialog({
             </FieldDescription>
           </Field>
 
+          {isBounce ? (
+            <Field>
+              <FieldLabel htmlFor="cheque-fee">
+                کارمزد/جریمه بانکی (اختیاری)
+              </FieldLabel>
+              <PersianNumberInput
+                id="cheque-fee"
+                value={feeAmount}
+                onChange={(e) => setFeeAmount(e.target.value)}
+                inputMode="numeric"
+                allowNegative={false}
+                placeholder="۰"
+                aria-label="مبلغ کارمزد چک برگشتی"
+                className="h-10 w-full rounded-lg border border-input bg-transparent px-3 text-sm"
+              />
+              <FieldDescription>
+                در صورت ثبت، همراه همین سند به حساب «هزینه چک برگشتی و جرایم
+                بانکی» منتقل و از بانک کسر می‌شود.
+              </FieldDescription>
+            </Field>
+          ) : null}
+
           <Field>
             <FieldLabel htmlFor="amemo">یادداشت (اختیاری)</FieldLabel>
             <Input
@@ -2127,8 +2227,9 @@ function ChequeActionDialog({
               <AlertTriangleIcon className="size-4" />
               <AlertTitle>تأیید اقدام برگشتی/ابطالی</AlertTitle>
               <AlertDescription>
-                این اقدام وضعیت چک را نهایی می‌کند و در دفتر روزنامه سند
-                برگشتی/ابطالی ثبت خواهد شد.
+                این اقدام سند برگشتی/ابطالی را در دفتر روزنامه ثبت می‌کند. چک
+                برگشتی پس از آن باید تعیین‌تکلیف شود: تسویه نقدی/بانکی یا
+                بازگشت مانده به حساب طرف (و سپس ثبت چک جایگزین).
               </AlertDescription>
             </Alert>
           ) : null}
@@ -2148,6 +2249,9 @@ function ChequeActionDialog({
                 occurredOn: occurredOn || undefined,
                 memo: memo.trim() || undefined,
                 ...(isEndorse ? { endorsedToSupplierId: supplierId } : {}),
+                ...(isBounce && Number(feeAmount) > 0
+                  ? { feeAmount: Number(feeAmount) }
+                  : {}),
               });
             }}
           >

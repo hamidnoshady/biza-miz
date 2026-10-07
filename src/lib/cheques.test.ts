@@ -64,17 +64,47 @@ describe("nextStatus — payable", () => {
   });
 });
 
+describe("returned cheques get a resolution", () => {
+  it("lets a returned receivable be settled another way or put back on the customer", () => {
+    expect(nextStatus("receivable", "bounced", "settle")).toBe("cleared");
+    expect(nextStatus("receivable", "bounced", "restore")).toBe("resolved");
+  });
+
+  it("lets a returned payable be paid or put back on the supplier", () => {
+    expect(nextStatus("payable", "bounced", "settle")).toBe("cleared");
+    expect(nextStatus("payable", "bounced", "restore")).toBe("resolved");
+  });
+
+  it("never loops a returned cheque back into circulation", () => {
+    for (const direction of CHEQUE_DIRECTIONS) {
+      for (const action of ["deposit", "endorse", "clear", "present", "cancel", "bounce"] as const) {
+        expect(nextStatus(direction, "bounced", action)).toBeNull();
+      }
+    }
+  });
+
+  it("offers exactly the two resolutions, and nothing after them", () => {
+    expect(availableActions("receivable", "bounced")).toEqual(["settle", "restore"]);
+    expect(availableActions("payable", "bounced")).toEqual(["settle", "restore"]);
+    expect(isTerminal("receivable", "bounced")).toBe(false);
+    expect(isTerminal("payable", "resolved")).toBe(true);
+    expect(isTerminal("receivable", "resolved")).toBe(true);
+  });
+});
+
 describe("terminal states", () => {
-  it("ends a cheque's life at cleared, bounced and cancelled", () => {
+  it("ends a cheque's life at cleared, cancelled and resolved — but not at a bounce", () => {
     for (const direction of CHEQUE_DIRECTIONS) {
       expect(isTerminal(direction, "cleared")).toBe(true);
-      expect(isTerminal(direction, "bounced")).toBe(true);
+      expect(isTerminal(direction, "resolved")).toBe(true);
+      // A returned cheque still has a balance in 1244/2122 to move.
+      expect(isTerminal(direction, "bounced")).toBe(false);
     }
     expect(isTerminal("payable", "cancelled")).toBe(true);
   });
 
   it("leaves nothing to do from a terminal state, in any direction, for any action", () => {
-    const terminal: ChequeStatus[] = ["cleared", "bounced", "cancelled"];
+    const terminal: ChequeStatus[] = ["cleared", "cancelled", "resolved"];
     for (const direction of CHEQUE_DIRECTIONS) {
       for (const status of terminal) {
         expect(availableActions(direction, status)).toEqual([]);

@@ -278,7 +278,6 @@ describe("cheque attribution in the party subledgers", () => {
     const cheque = await receivable();
     await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "endorse",
       endorsedToSupplierId: party.supplierId,
@@ -296,7 +295,6 @@ describe("cheque attribution in the party subledgers", () => {
 
     await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "bounce",
       occurredOn: "2026-02-11",
@@ -317,7 +315,6 @@ describe("the ordinary life of a cheque we took", () => {
     const cheque = await receivable();
     await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "deposit",
       occurredOn: "2026-03-10",
@@ -325,7 +322,6 @@ describe("the ordinary life of a cheque we took", () => {
     });
     const cleared = await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "clear",
       occurredOn: "2026-03-12",
@@ -347,7 +343,6 @@ describe("the ordinary life of a cheque we took", () => {
     const cheque = await receivable();
     await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "deposit",
       createdBy: null,
@@ -361,14 +356,12 @@ describe("the ordinary life of a cheque we took", () => {
     const cheque = await receivable();
     await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "deposit",
       createdBy: null,
     });
     const bounced = await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "bounce",
       createdBy: null,
@@ -383,7 +376,6 @@ describe("endorsement (ظهرنویسی)", () => {
     const cheque = await receivable();
     const endorsed = await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "endorse",
       endorsedToSupplierId: party.supplierId,
@@ -401,7 +393,6 @@ describe("endorsement (ظهرنویسی)", () => {
     const cheque = await receivable();
     await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "endorse",
       endorsedToSupplierId: party.supplierId,
@@ -411,7 +402,6 @@ describe("endorsement (ظهرنویسی)", () => {
 
     const cleared = await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "clear",
       createdBy: null,
@@ -428,7 +418,6 @@ describe("endorsement (ظهرنویسی)", () => {
     const cheque = await receivable();
     await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "endorse",
       endorsedToSupplierId: party.supplierId,
@@ -436,7 +425,6 @@ describe("endorsement (ظهرنویسی)", () => {
     });
     await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "bounce",
       createdBy: null,
@@ -460,7 +448,6 @@ describe("endorsement (ظهرنویسی)", () => {
     await expect(
       cheques.transitionCheque({
         businessId: biz.id,
-        locationId: biz.locationId,
         chequeId: cheque.id,
         action: "endorse",
         createdBy: null,
@@ -469,7 +456,6 @@ describe("endorsement (ظهرنویسی)", () => {
     await expect(
       cheques.transitionCheque({
         businessId: biz.id,
-        locationId: biz.locationId,
         chequeId: cheque.id,
         action: "endorse",
         endorsedToSupplierId: party.otherSupplierId,
@@ -484,7 +470,6 @@ describe("cheques we wrote", () => {
     const cheque = await payable();
     const cleared = await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "present",
       createdBy: null,
@@ -497,7 +482,6 @@ describe("cheques we wrote", () => {
     const cheque = await payable();
     await cheques.transitionCheque({
       businessId: biz.id,
-      locationId: biz.locationId,
       chequeId: cheque.id,
       action: "cancel",
       createdBy: null,
@@ -512,13 +496,244 @@ describe("cheques we wrote", () => {
   });
 });
 
+describe("returned cheques are resolved, not stranded (issue #828)", () => {
+  /** The business-wide balance of one account code, debit-positive. */
+  async function balanceOf(code: string): Promise<number> {
+    const { rows } = await db.query<{ balance: string }>(
+      `SELECT COALESCE(SUM(jl.debit - jl.credit), 0)::text AS balance
+         FROM journal_lines jl JOIN accounts a ON a.id = jl.account_id
+        WHERE a.business_id = $1 AND a.code = $2`,
+      [biz.id, code],
+    );
+    return Number(rows[0].balance);
+  }
+
+  it("settles a returned receivable into the bank and empties ۱۲۴۴", async () => {
+    const cheque = await receivable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "bounce",
+      occurredOn: "2026-03-11",
+      createdBy: null,
+    });
+    expect(await balanceOf("1244")).toBe(5_000_000);
+
+    const settled = await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "settle",
+      occurredOn: "2026-03-20",
+      createdBy: null,
+    });
+    expect(settled.status).toBe("cleared");
+    expect(await balanceOf("1244")).toBe(0);
+    expect(await balanceOf("1110")).toBe(5_000_000);
+  });
+
+  it("restores a returned receivable to A/R so a replacement cheque does not settle it twice", async () => {
+    const original = await receivable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: original.id,
+      action: "bounce",
+      occurredOn: "2026-03-11",
+      createdBy: null,
+    });
+    const resolved = await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: original.id,
+      action: "restore",
+      occurredOn: "2026-03-12",
+      createdBy: null,
+    });
+    expect(resolved.status).toBe("resolved");
+    expect(await balanceOf("1244")).toBe(0);
+    // Back where it started: the customer owes us again, exactly once.
+    expect(await ar.getCustomerArBalance(biz.id, party.customerId)).toEqual({ balance: 0, hasLedger: true });
+
+    const replacement = await receivable({ issueDate: "2026-03-12", dueDate: "2026-05-10" });
+    expect(await balanceOf("1241")).toBe(5_000_000);
+    expect(await ar.getCustomerArBalance(biz.id, party.customerId)).toEqual({
+      balance: -5_000_000,
+      hasLedger: true,
+    });
+    expect(replacement.status).toBe("on_hand");
+  });
+
+  it("posts the bank's returned-cheque charge to ۵۸۶۰ on the bounce that caused it", async () => {
+    const cheque = await receivable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "bounce",
+      occurredOn: "2026-03-11",
+      feeAmount: 150_000,
+      createdBy: null,
+    });
+    expect(await balanceOf("5860")).toBe(150_000);
+    expect(await balanceOf("1110")).toBe(-150_000);
+    expect(await balanceOf("1244")).toBe(5_000_000);
+  });
+
+  it("refuses a fee on an action that is not a bounce, and a nonsense fee", async () => {
+    const cheque = await receivable();
+    await expect(
+      cheques.transitionCheque({
+        businessId: biz.id,
+        chequeId: cheque.id,
+        action: "deposit",
+        feeAmount: 10_000,
+        createdBy: null,
+      }),
+    ).rejects.toThrow("fee_not_supported_for_action");
+    await expect(
+      cheques.transitionCheque({
+        businessId: biz.id,
+        chequeId: cheque.id,
+        action: "bounce",
+        feeAmount: -1,
+        createdBy: null,
+      }),
+    ).rejects.toThrow("invalid_fee_amount");
+  });
+
+  it("resolves a returned payable, by paying it or by putting it back on the supplier", async () => {
+    const paid = await payable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: paid.id,
+      action: "bounce",
+      occurredOn: "2026-02-21",
+      createdBy: null,
+    });
+    expect(await balanceOf("2122")).toBe(-3_000_000);
+    const settled = await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: paid.id,
+      action: "settle",
+      occurredOn: "2026-02-25",
+      createdBy: null,
+    });
+    expect(settled.status).toBe("cleared");
+    expect(await balanceOf("2122")).toBe(0);
+    expect(await balanceOf("1110")).toBe(-3_000_000);
+
+    const restored = await payable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: restored.id,
+      action: "bounce",
+      occurredOn: "2026-02-21",
+      createdBy: null,
+    });
+    const resolved = await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: restored.id,
+      action: "restore",
+      occurredOn: "2026-02-22",
+      createdBy: null,
+    });
+    expect(resolved.status).toBe("resolved");
+    expect(await balanceOf("2122")).toBe(0);
+    // The supplier is owed again — the liability is neither lost nor doubled.
+    expect(await balanceOf("2100")).toBe(0);
+  });
+});
+
+describe("branch and chronology invariants (issue #828)", () => {
+  it("posts every step to the cheque's own branch, not the operator's current one", async () => {
+    const otherLocation = await db.query<{ id: string }>(
+      `INSERT INTO locations (business_id, name) VALUES ($1, 'شعبه دوم') RETURNING id`,
+      [biz.id],
+    );
+    const cheque = await receivable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "deposit",
+      occurredOn: "2026-03-10",
+      createdBy: null,
+    });
+
+    const { rows } = await db.query<{ location_id: string | null }>(
+      `SELECT location_id FROM journal_entries WHERE source_type = 'cheque' AND source_id = $1`,
+      [cheque.id],
+    );
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect(row.location_id).toBe(biz.locationId);
+    expect(otherLocation.rows[0].id).not.toBe(biz.locationId);
+  });
+
+  it("reports the cheque's branch with the register, and filters by it", async () => {
+    const cheque = await receivable();
+    const [listed] = await cheques.listCheques(biz.id, "receivable", biz.locationId);
+    expect(listed).toMatchObject({ id: cheque.id, locationId: biz.locationId, locationName: "Main" });
+    expect(await cheques.listCheques(biz.id, "receivable", randomUUID())).toEqual([]);
+  });
+
+  it("refuses a step dated before the cheque's latest event, and allows a same-day one", async () => {
+    const cheque = await receivable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "deposit",
+      occurredOn: "2026-02-10",
+      createdBy: null,
+    });
+    await expect(
+      cheques.transitionCheque({
+        businessId: biz.id,
+        chequeId: cheque.id,
+        action: "clear",
+        occurredOn: "2026-01-20",
+        createdBy: null,
+      }),
+    ).rejects.toThrow("action_before_previous_event");
+    // The rejected step wrote nothing at all.
+    expect(await cheques.getChequeHistory(biz.id, cheque.id)).toHaveLength(2);
+
+    const cleared = await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "clear",
+      occurredOn: "2026-02-10",
+      createdBy: null,
+    });
+    expect(cleared.status).toBe("cleared");
+  });
+
+  it("reads history in accounting order: occurred_on, then insertion", async () => {
+    const cheque = await receivable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "deposit",
+      occurredOn: "2026-02-10",
+      createdBy: null,
+    });
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "clear",
+      occurredOn: "2026-02-12",
+      createdBy: null,
+    });
+    const history = await cheques.getChequeHistory(biz.id, cheque.id);
+    expect(history.map((event) => [event.event, event.occurredOn])).toEqual([
+      ["received", "2026-01-10"],
+      ["deposited", "2026-02-10"],
+      ["cleared", "2026-02-12"],
+    ]);
+  });
+});
+
 describe("guards", () => {
   it("refuses a transition the cheque's life doesn't allow", async () => {
     const cheque = await receivable();
     await expect(
       cheques.transitionCheque({
         businessId: biz.id,
-        locationId: biz.locationId,
         chequeId: cheque.id,
         action: "present",
         createdBy: null,
@@ -531,7 +746,6 @@ describe("guards", () => {
     for (const _ of [0]) {
       await cheques.transitionCheque({
         businessId: biz.id,
-        locationId: biz.locationId,
         chequeId: cheque.id,
         action: "deposit",
         createdBy: null,
@@ -540,7 +754,6 @@ describe("guards", () => {
     await expect(
       cheques.transitionCheque({
         businessId: biz.id,
-        locationId: biz.locationId,
         chequeId: cheque.id,
         action: "deposit",
         createdBy: null,
@@ -553,7 +766,6 @@ describe("guards", () => {
     await expect(
       cheques.transitionCheque({
         businessId: biz.id,
-        locationId: biz.locationId,
         chequeId: cheque.id,
         action: "deposit",
         occurredOn: "2026-02-30",
@@ -563,7 +775,6 @@ describe("guards", () => {
     await expect(
       cheques.transitionCheque({
         businessId: biz.id,
-        locationId: biz.locationId,
         chequeId: cheque.id,
         action: "deposit",
         occurredOn: "2026-01-09",
@@ -577,7 +788,6 @@ describe("guards", () => {
     await expect(
       cheques.transitionCheque({
         businessId: other.id,
-        locationId: null,
         chequeId: cheque.id,
         action: "deposit",
         createdBy: null,
@@ -616,7 +826,6 @@ describe("guards", () => {
     await expect(
       cheques.transitionCheque({
         businessId: biz.id,
-        locationId: biz.locationId,
         chequeId: cheque.id,
         action: "deposit",
         occurredOn: period.startsOn,

@@ -245,7 +245,17 @@ export function AccountingManager({
           {section === "payables" ? <ApSection /> : null}
           {section === "receipts" ? <ReceiptsPaymentsSection /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
-          {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}
+          {section === "cheques" ? (
+            <ChequesSection
+              busy={busy}
+              run={run}
+              /* The cheque register reads under `ledger.view`, but every write
+                 needs `finance.cheques_manage`. Thread the capability so a
+                 read-only accountant is not offered a dialog the API will
+                 refuse; the API check stays authoritative. */
+              canManage={permissions?.includes(PERMISSIONS.financeChequesManage) ?? false}
+            />
+          ) : null}
           {section === "reconciliation" ? <ReconciliationSection busy={busy} run={run} /> : null}
           {section === "chart-of-accounts" ? (
             <ChartOfAccountsSection busy={busy} run={run} canEdit={canEditAccounts} />
