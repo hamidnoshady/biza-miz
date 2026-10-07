@@ -86,6 +86,12 @@ describe("per-member overrides", () => {
     expect(permissions.has(PERMISSIONS.inventoryAdjust)).toBe(false);
   });
 
+  it("does not grant payment-reversal approval with ordinary payable management", () => {
+    const permissions = effectivePermissions("cashier", { granted: [PERMISSIONS.financePayablesManage] });
+    expect(permissions.has(PERMISSIONS.financePayablesManage)).toBe(true);
+    expect(permissions.has(PERMISSIONS.ledgerApprove)).toBe(false);
+  });
+
   it("grants a capability the role preset does not include", () => {
     expect(hasPermission("manager", null, PERMISSIONS.ledgerPost)).toBe(false);
     expect(

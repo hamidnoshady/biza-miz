@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
+import { isValidIsoDate } from "@/lib/iso-date";
+import { isUuid } from "@/lib/uuid";
 
 /**
  * Journal entries (auto-posted + manual), newest first, with their lines.
@@ -36,17 +38,18 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
 
   const params = request.nextUrl.searchParams;
-  const isoDate = (value: string | null) => (value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null);
   const rawDateFrom = params.get("dateFrom");
   const rawDateTo = params.get("dateTo");
-  const dateFrom = isoDate(rawDateFrom);
-  const dateTo = isoDate(rawDateTo);
+  const dateFrom = rawDateFrom && isValidIsoDate(rawDateFrom) ? rawDateFrom : null;
+  const dateTo = rawDateTo && isValidIsoDate(rawDateTo) ? rawDateTo : null;
   if ((rawDateFrom && !dateFrom) || (rawDateTo && !dateTo)) {
     return NextResponse.json({ error: "invalid_date" }, { status: 400 });
   }
   if (dateFrom && dateTo && dateFrom > dateTo) {
     return NextResponse.json({ error: "invalid_date_range" }, { status: 400 });
   }
+  const rawEntryId = params.get("entryId")?.trim() || null;
+  if (rawEntryId && !isUuid(rawEntryId)) return NextResponse.json({ error: "invalid_entry_id" }, { status: 400 });
   const sourceType = params.get("sourceType")?.trim() || null;
   const q = params.get("q")?.trim() || null;
   const requestedLimit = Number(params.get("limit"));
@@ -94,9 +97,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
                AND (a.code ILIKE '%' || $5::text || '%' OR a.name ILIKE '%' || $5::text || '%')
           )
         )
+        AND ($6::uuid IS NULL OR je.id = $6::uuid)
       ORDER BY je.entry_date DESC, je.posted_at DESC, je.id DESC
-      LIMIT $6 OFFSET $7`,
-    [session.businessId, dateFrom, dateTo, sourceType, q, limit + 1, offset],
+      LIMIT $7 OFFSET $8`,
+    [session.businessId, dateFrom, dateTo, sourceType, q, rawEntryId, limit + 1, offset],
   );
   const hasMore = entries.length > limit;
   const page = hasMore ? entries.slice(0, limit) : entries;

@@ -4,6 +4,7 @@ import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
@@ -48,6 +49,11 @@ interface JournalEntryRow {
  */
 export function EntriesSection({ refreshKey, busy, run }: { refreshKey: number; busy: boolean; run: Runner }) {
   const money = useMoney();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const entryIdFromUrl = searchParams.get("entryId") ?? "";
+  const [entryId, setEntryId] = useState(entryIdFromUrl);
   const [entries, setEntries] = useState<JournalEntryRow[] | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -59,6 +65,10 @@ export function EntriesSection({ refreshKey, busy, run }: { refreshKey: number; 
   const [sourceType, setSourceType] = useState("");
   const [q, setQ] = useState("");
   const [sourceTypes, setSourceTypes] = useState<string[]>([]);
+
+  useEffect(() => {
+    setEntryId(entryIdFromUrl);
+  }, [entryIdFromUrl]);
 
   useEffect(() => {
     api<{ sourceTypes: string[] }>("/api/ledger/entries/source-types").then(({ ok, data }) => {
@@ -73,6 +83,7 @@ export function EntriesSection({ refreshKey, busy, run }: { refreshKey: number; 
       if (dateTo) params.set("dateTo", dateTo);
       if (sourceType) params.set("sourceType", sourceType);
       if (q.trim()) params.set("q", q.trim());
+      if (entryId.trim()) params.set("entryId", entryId.trim());
       if (offset) params.set("offset", String(offset));
       const currentRequest = ++requestId.current;
       setError("");
@@ -95,7 +106,7 @@ export function EntriesSection({ refreshKey, busy, run }: { refreshKey: number; 
       }
       if (append) setLoadingMore(false);
     },
-    [dateFrom, dateTo, sourceType, q],
+    [dateFrom, dateTo, sourceType, q, entryId],
   );
 
   useEffect(() => {
@@ -114,7 +125,19 @@ export function EntriesSection({ refreshKey, busy, run }: { refreshKey: number; 
     await run(() => api(`/api/ledger/entries/${id}/reverse`, { method: "POST", body: JSON.stringify({}) }));
   }
 
-  const filtered = !!(dateFrom || dateTo || sourceType || q.trim());
+  const filtered = !!(dateFrom || dateTo || sourceType || q.trim() || entryId.trim());
+
+  function clearFilters() {
+    setDateFrom("");
+    setDateTo("");
+    setSourceType("");
+    setQ("");
+    setEntryId("");
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete("entryId");
+    const suffix = nextParams.toString();
+    router.replace(suffix ? `${pathname}?${suffix}` : pathname, { scroll: false });
+  }
 
   return (
     <div className="space-y-4">
@@ -159,16 +182,10 @@ export function EntriesSection({ refreshKey, busy, run }: { refreshKey: number; 
               />
             </label>
           </div>
+          {entryId ? <p className="mt-3 rounded-lg border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">نمایش دقیق سند روزنامه با شناسهٔ {toPersianDigits(entryId)}</p> : null}
           {filtered ? (
             <div className="mt-3 flex flex-wrap items-center gap-3">
-              <SecondaryButton
-                onClick={() => {
-                  setDateFrom("");
-                  setDateTo("");
-                  setSourceType("");
-                  setQ("");
-                }}
-              >
+              <SecondaryButton onClick={clearFilters}>
                 پاک کردن فیلترها
               </SecondaryButton>
               <span className="text-xs text-muted-foreground">

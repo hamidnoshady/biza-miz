@@ -22,6 +22,7 @@ interface PaymentBody {
   amount?: number;
   paymentDate?: string;
   memo?: string;
+  clientRequestId?: string;
 }
 
 const METHODS = ["cash", "bank"] as const;
@@ -40,6 +41,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const supplierId = body.supplierId?.trim();
   if (!supplierId) return NextResponse.json({ error: "supplier_required" }, { status: 400 });
+  const clientRequestId = body.clientRequestId?.trim();
+  if (!clientRequestId || clientRequestId.length > 200) {
+    return NextResponse.json({ error: "idempotency_key_required" }, { status: 400 });
+  }
   if (!METHODS.includes(body.method as (typeof METHODS)[number])) {
     return NextResponse.json({ error: "invalid_method" }, { status: 400 });
   }
@@ -65,9 +70,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       amount,
       paymentDate,
       memo: body.memo,
+      clientRequestId,
       createdBy: session.sub,
     });
-    return NextResponse.json({ payment }, { status: 201 });
+    return NextResponse.json({ payment }, { status: payment.duplicate ? 200 : 201 });
   } catch (err) {
     if (err instanceof ApError) return NextResponse.json({ error: err.message }, { status: err.status });
     if (err instanceof MissingLedgerAccountError) {

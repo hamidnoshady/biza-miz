@@ -495,6 +495,13 @@ const ERROR_MESSAGES: Record<string, string> = {
       "بازیافت پیش‌پرداخت از ماندهٔ پیش‌پرداخت قرارداد بیشتر است؛ پیش‌پرداخت پرداخت‌شده را بررسی کنید.",
     supplier_required: "انتخاب تأمین‌کننده الزامی است.",
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
+    supplier_location_mismatch: "تأمین‌کننده به شعبهٔ دیگری تعلق دارد؛ شعبهٔ درست را انتخاب کنید.",
+    supplier_record_missing: "برای این شخص در شعبهٔ انتخاب‌شده، پروندهٔ تأمین‌کننده وجود ندارد.",
+    installment_location_required: "این برنامهٔ پرداختنی به شعبه مشخصی وابسته نیست و چند پروندهٔ تأمین‌کننده دارد؛ ابتدا شعبهٔ آن را تعیین کنید.",
+    idempotency_key_required: "شناسهٔ یکتای درخواست پرداخت معتبر نیست؛ فرم را تازه‌سازی و دوباره تلاش کنید.",
+    idempotency_conflict: "شناسهٔ درخواست قبلاً با جزئیات دیگری استفاده شده است؛ برای این پرداخت درخواست تازه‌ای بسازید.",
+    payment_not_found: "پرداخت موردنظر پیدا نشد.",
+    payment_not_reversible: "این پرداخت سند قابل برگشت ندارد یا از این مسیر قابل برگشت نیست.",
     // Phase 22 — fixed assets & depreciation
     fixed_asset_not_found: "دارایی ثابت پیدا نشد.",
     fixed_asset_has_depreciation: "برای این دارایی استهلاک ثبت شده و قابل حذف نیست.",
@@ -723,7 +730,6 @@ const ERROR_MESSAGES: Record<string, string> = {
     // screen's 404 needs a message here too — without it a wage saved against
     // a member who was just deactivated reported «خطای غیرمنتظره».
     user_not_found: "عضو موردنظر پیدا نشد.",
-    supplier_record_missing: "این شخص در فهرست تأمین‌کنندگان ثبت نشده است؛ ابتدا او را به‌عنوان تأمین‌کننده ثبت کنید.",
     installment_amount_too_small: "مبلغ هر قسط بسیار کم است؛ تعداد اقساط را کاهش دهید.",
     item_required: "قسط را انتخاب کنید.",
 };

@@ -241,9 +241,13 @@ export function AccountingManager({
               permissions={permissions}
             />
           ) : null}
-          {section === "receivables" ? <ArSection /> : null}
-          {section === "payables" ? <ApSection /> : null}
-          {section === "receipts" ? <ReceiptsPaymentsSection /> : null}
+          {section === "receivables" ? <ArSection canSettle={!!permissions?.includes(PERMISSIONS.financeReceivablesManage)} /> : null}
+          {section === "payables" ? <ApSection canSettle={!!permissions?.includes(PERMISSIONS.financePayablesManage)} /> : null}
+          {section === "receipts" ? <ReceiptsPaymentsSection
+            canManageReceivables={!!permissions?.includes(PERMISSIONS.financeReceivablesManage)}
+            canManagePayables={!!permissions?.includes(PERMISSIONS.financePayablesManage)}
+            canReversePayments={!!permissions?.includes(PERMISSIONS.ledgerApprove)}
+          /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}
           {section === "reconciliation" ? <ReconciliationSection busy={busy} run={run} /> : null}

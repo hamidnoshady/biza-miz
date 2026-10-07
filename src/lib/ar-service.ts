@@ -16,6 +16,7 @@
 import { getPool, query } from "./db";
 import { businessToday } from "./business-day-service";
 import { isUuid } from "./uuid";
+import { isValidIsoDate } from "./iso-date";
 import { PARTY_ROLE_STORAGE } from "./parties";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
@@ -34,15 +35,6 @@ export class ArError extends Error {
     super(code);
     this.status = status;
   }
-}
-
-/**
- * An actual calendar date in ISO form. The regex alone passes «2025-13-45»,
- * which `Date.parse` then reads as NaN — and every age bucket computed from a
- * NaN «today» falls through to «بیش از ۹۰ روز» without failing the request.
- */
-function isIsoDateOnly(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value));
 }
 
 async function arAccountId(businessId: string): Promise<string | null> {
@@ -356,7 +348,7 @@ export interface AgingReport {
  * question the branch's own calendar does.
  */
 export async function getArAging(businessId: string, asOfDate?: string): Promise<AgingReport> {
-  if (asOfDate !== undefined && !isIsoDateOnly(asOfDate)) throw new ArError("invalid_date");
+  if (asOfDate !== undefined && !isValidIsoDate(asOfDate)) throw new ArError("invalid_date");
   const effectiveAsOf = asOfDate ?? (await businessToday(businessId));
   const accountId = await arAccountId(businessId);
   if (!accountId) return { asOfDate: effectiveAsOf, rows: [], totals: { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 } };
@@ -438,7 +430,7 @@ export async function receivePayment(params: {
   if (!isUuid(params.customerId)) throw new ArError("customer_not_found", 404);
   // Same story for a date off the wire: reject it here, in the error
   // vocabulary the API answers with, rather than as Postgres's parse error.
-  if (params.receiptDate != null && !isIsoDateOnly(params.receiptDate)) throw new ArError("invalid_date");
+  if (params.receiptDate != null && !isValidIsoDate(params.receiptDate)) throw new ArError("invalid_date");
 
   /*
    * «امروز» here is the business's own date, not the database server's.
