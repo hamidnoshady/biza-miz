@@ -376,7 +376,7 @@ branch) and resolves in this order — the leftmost thing that exists wins:
 | 2. the rule's saved template (`template_id`) | 2. the rule's printer |
 | 3. the rule's built-in template (`template_key`) | 3. the rule's fallback printer (the primary is gone/incompatible) |
 | 4. a saved template marked default for the document type | 4. the branch's only compatible printer for that document |
-| 5. the `templateKey` a pre-0211 printer row still carries (transition read — see `legacyBehaviorOf`) | 5. the last printer that printed this document type |
+| 5. the `templateKey` a pre-0212 printer row still carries (transition read — see `legacyBehaviorOf`) | 5. the last printer that printed this document type |
 | 6. the built-in for the document type that fits the printer's paper | 6. the default printer for that purpose — otherwise `printer_not_configured` |
 | 7. the built-in for the document type | |
 
@@ -396,7 +396,7 @@ between two.
 
 ## The printer row
 
-Since migration 0211 the `printers` table answers behaviour from **relational
+Since migration 0212 the `printers` table answers behaviour from **relational
 columns** — `kind` (purpose), `printer_class`, `paper`, `paper_width_mm`,
 `supports_drawer`, `supports_cut`, `is_default`, `is_active` — and the
 `connection` jsonb holds the hardware target and nothing else. The duplicate

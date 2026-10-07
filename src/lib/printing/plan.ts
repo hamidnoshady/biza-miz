@@ -124,7 +124,7 @@ export interface TemplateChoiceInput {
   saved: SavedPrintTemplate[];
   /**
    * A template key that may still be stored on the printer row from the
-   * pre-0211 model. Only consulted when nothing else chose a template, and
+   * pre-0212 model. Only consulted when nothing else chose a template, and
    * never written by new code — see the removal note in types.ts.
    */
   legacyPrinterTemplateKey?: string | null;
@@ -235,7 +235,7 @@ export function resolveTemplateChoice(input: TemplateChoiceInput): TemplateChoic
     return { ok: true, choice: savedToResolved(savedDefault, "default") };
   }
 
-  // The pre-0211 `printer.connection.templateKey`, kept alive only so an
+  // The pre-0212 `printer.connection.templateKey`, kept alive only so an
   // un-migrated row still prints what it used to. Remove with legacyBehaviorOf.
   if (input.legacyPrinterTemplateKey) {
     const legacyBuiltIn = builtInTemplate(input.legacyPrinterTemplateKey);
@@ -462,7 +462,7 @@ export async function resolvePrintPlan(input: ResolvePrintPlanInput): Promise<Pr
   const rule = rules.find((item) => item.documentType === input.documentType) ?? null;
   const saved = await listPrintTemplates(input.locationId);
 
-  // The pre-0211 template key, read only as the resolver's last resort.
+  // The pre-0212 template key, read only as the resolver's last resort.
   const legacyTemplateKey =
     typeof (printerRow.connection as { templateKey?: unknown })?.templateKey === "string"
       ? ((printerRow.connection as { templateKey: string }).templateKey)

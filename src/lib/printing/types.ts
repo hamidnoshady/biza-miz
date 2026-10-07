@@ -18,7 +18,7 @@
  * module's `PrinterConnection` (the `printers.connection` jsonb column) and
  * nothing else does: paper, purpose, drawer, cut and defaultness are
  * relational columns on the `printers` row (migration 0173, consolidated in
- * migration 0211). Reading them back out of `connection` is what made the
+ * migration 0212). Reading them back out of `connection` is what made the
  * settings screen and production printing disagree; the one exception is the
  * documented legacy normaliser below, which exists only for rows written
  * before the backfill ran and is slated for removal.
@@ -137,7 +137,7 @@ export interface StoredPrinterConnection {
   usbProductName?: string | null;
   usbVendorId?: number | null;
   /**
-   * Behavioural keys left over from the pre-0211 model. Typed only so the
+   * Behavioural keys left over from the pre-0212 model. Typed only so the
    * transition helper below can be honest about what it reads; nothing else
    * in the app touches them.
    */
@@ -298,10 +298,10 @@ export function printerNeedsReconnect(printer: { connection?: unknown }): boolea
 }
 
 /**
- * Transition read for rows written before migration 0211 backfilled the
+ * Transition read for rows written before migration 0212 backfilled the
  * relational columns. Isolated on purpose: **remove once no deployment can
  * still hold a printer row with NULL `paper`/`supports_drawer`** (i.e. after
- * every environment has run 0211 and had one deploy cycle). New code never
+ * every environment has run 0212 and had one deploy cycle). New code never
  * writes these keys.
  */
 export function legacyBehaviorOf(connection: StoredPrinterConnection): {

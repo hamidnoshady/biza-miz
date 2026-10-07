@@ -105,7 +105,7 @@ export function parsePrinterInput(body: Record<string, unknown>, fallback?: Exis
 
   // ── the paper ──
   // A partial edit keeps whatever the row already has: the columns first,
-  // then the legacy jsonb keys of a row written before migration 0211.
+  // then the legacy jsonb keys of a row written before migration 0212.
   const paperValue = body.paper ?? fallback?.paper ?? existing.paper;
   const widthValue = Number(body.paperWidthMm ?? fallback?.paper_width_mm ?? existing.paperWidthMm);
   // The purpose's own default is the fallback: a payload that says "receipt

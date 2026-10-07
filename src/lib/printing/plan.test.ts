@@ -285,7 +285,7 @@ describe("toRoutingPrinter — the relational columns decide", () => {
         connection: {
           type: "windows",
           systemName: "EPSON",
-          // The pre-0211 duplicates; they must not win over the columns.
+          // The pre-0212 duplicates; they must not win over the columns.
           paper: "thermal80",
           openDrawer: true,
           isDefault: true,
