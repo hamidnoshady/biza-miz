@@ -65,6 +65,11 @@ const INVENTORY_CODE_BY_INDUSTRY: Record<Industry, string> = {
   wholesale: WELL_KNOWN_CODES.wholesaleInventory,
   tools_fittings: WELL_KNOWN_CODES.toolsInventory,
   haberdashery: WELL_KNOWN_CODES.haberdasheryInventory,
+  // Issue #839 — vehicles are this trade's stock on the balance sheet, and its
+  // own account (1370) rather than the generic 1300: a dealership's inventory
+  // is its largest asset, is financed per unit, and is reported on its own in
+  // every report §15 asks for.
+  automotive: WELL_KNOWN_CODES.vehicleInventory,
 };
 
 /** One side of a rule — the account, and whether it is debited or credited. */
@@ -125,6 +130,11 @@ function revenueLine(industry: Industry): PostingRuleLine {
     wholesale: { code: WELL_KNOWN_CODES.wholesaleSalesRevenue, label: "فروش عمده" },
     tools_fittings: { code: WELL_KNOWN_CODES.toolsSalesRevenue, label: "فروش ابزار و یراق" },
     haberdashery: { code: WELL_KNOWN_CODES.haberdasherySalesRevenue, label: "فروش لوازم خرازی" },
+    // Issue #839 — one revenue account for vehicle sales. A dealership that
+    // wants to split new from used reads that from the reports' condition
+    // dimension rather than from two charts, because "new or used" is a
+    // property of the unit (see automotive_vehicle_attributes.condition).
+    automotive: { code: WELL_KNOWN_CODES.vehicleSalesRevenue, label: "فروش خودرو" },
   };
   const entry = codes[industry] ?? { code: WELL_KNOWN_CODES.salesRevenue, label: "فروش" };
   return {

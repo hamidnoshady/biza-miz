@@ -152,6 +152,15 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
     { label: "انبار", module: "inventory", href: ACCOUNTING_WORKSPACE_HREFS.inventory, roles: ["owner", "manager"], flag: "inventory" },
     { label: INDUSTRY_LABELS.jewelry, module: "jewelry", href: "/accounting/jewelry", roles: ["owner", "manager"] },
     { label: INDUSTRY_LABELS.watch, module: "watch", href: "/accounting/watch", roles: ["owner", "manager"] },
+    // Issue #839 — the automotive manager. Same shape as the two above: one
+    // trade-titled entry that the module gate (and therefore the industry
+    // profile) removes entirely for every other business.
+    {
+      label: INDUSTRY_LABELS.automotive,
+      module: "automotive",
+      href: ACCOUNTING_WORKSPACE_HREFS.automotive,
+      roles: ["owner", "manager"],
+    },
     // Phase 42 — the retail trade-goods trades manage their catalogue in the
     // shared products workspace: a collapsible sidebar group — افزودن محصول،
     // لیست محصولات، لیست قیمت، ویژگی محصول، الگوی بارکد وزنی and the trade's

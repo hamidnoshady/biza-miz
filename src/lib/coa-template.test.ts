@@ -81,6 +81,18 @@ const CORE_REQUIRED_CODES: readonly string[] = [
 /** Each trade's own accounts, on top of the core every chart shares. */
 const TRADE_REQUIRED_CODES: Record<Industry, readonly string[]> = {
   service_saas: ["1200", "2100", "4500", "4510", "4520", "5660", "5670"],
+  // Issue #839 — the automotive trade's own lines: vehicle inventory and its
+  // landed-cost clearing account, vehicle revenue, the COGS/reconditioning
+  // pair that keeps capitalised cost and period expense apart, and the
+  // trade-in obligation the second wave settles against.
+  automotive: [
+    WELL_KNOWN_CODES.vehicleInventory,
+    WELL_KNOWN_CODES.vehicleLandedCostClearing,
+    WELL_KNOWN_CODES.vehicleSalesRevenue,
+    WELL_KNOWN_CODES.vehicleCogs,
+    WELL_KNOWN_CODES.vehicleReconditioningExpense,
+    WELL_KNOWN_CODES.vehicleTradeInPayable,
+  ],
   // Issue #799 — the AEC trade's own lines: its three revenues, retention on
   // both sides, contract work in progress, subcontractors' payable, and the
   // three accounts its direct project cost is split across.

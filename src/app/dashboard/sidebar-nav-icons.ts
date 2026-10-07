@@ -35,6 +35,7 @@ import {
   UsersIcon,
   WalletIcon,
   WatchIcon,
+  CarIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -57,6 +58,8 @@ export const NAV_ICONS: Record<string, LucideIcon> = {
   "/accounting/products": PackageIcon,
   "/accounting/jewelry": GemIcon,
   "/accounting/watch": WatchIcon,
+  // Issue #839 — the automotive manager.
+  "/accounting/automotive": CarIcon,
   // The Accounting app's own home (`/accounting`); the old
   // `/dashboard/ledger` address still forwards into it in middleware, so
   // nothing keys on the retired URL any more.

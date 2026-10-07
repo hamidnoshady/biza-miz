@@ -39,6 +39,7 @@ const POSTING_ENGINE_INVENTORY_CODES: Record<Industry, string> = {
   wholesale: WELL_KNOWN_CODES.wholesaleInventory,
   tools_fittings: WELL_KNOWN_CODES.toolsInventory,
   haberdashery: WELL_KNOWN_CODES.haberdasheryInventory,
+  automotive: WELL_KNOWN_CODES.vehicleInventory,
 };
 
 /** Every bare 4-digit code a rule names, with the `a / b / c` alternatives split out. */

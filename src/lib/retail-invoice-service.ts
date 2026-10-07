@@ -167,6 +167,18 @@ const LINE_KINDS_BY_INDUSTRY: Record<Industry, readonly RetailInvoiceLineInput["
   // counter's retail-invoice path is never reachable because the trade has no
   // `pos` module (industry-profile.ts).
   architecture_construction: [],
+  // Issue #839 — a dealership sells cars, but *not* through the generic
+  // stocked-line path: §3's identity ("one serialized unit = one car, one VIN")
+  // and §8 ("the line identifies the exact vehicle; no double sale; COGS frozen
+  // at the effective cost; the reservation closes with the sale") are
+  // invariants this line kind would have to carry, and the `stocked` kind
+  // decrements a quantity instead of naming a serial. Until the vehicle line
+  // kind lands with the sale path (§8, Wave 4 of the issue), the empty list is
+  // the honest fail-closed answer: the counter refuses a vehicle invoice
+  // («این نوع کالا در این کسب‌وکار قابل فروش نیست.») rather than selling a car
+  // as anonymous stock. Wave 4 replaces this with ["vehicle"] and that is the
+  // only edit this entry should ever need.
+  automotive: [],
   jewelry: ["gold"],
   watch: ["watch"],
   accessories: ["accessory"],

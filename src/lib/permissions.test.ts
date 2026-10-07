@@ -198,3 +198,102 @@ describe("owner-only permissions", () => {
     });
   });
 });
+
+/**
+ * Issue #839 — the two boundaries the automotive trade is built around.
+ *
+ * The role presets are asserted exhaustively in `permission-matrix.test.ts`;
+ * what is asserted here is the *shape* of the grant the issue asks for, so a
+ * later preset edit that quietly hands the till the margin, or the accountant
+ * the counter, fails with the reason attached.
+ */
+describe("automotive vehicle capabilities", () => {
+  const VEHICLE_WRITES = [
+    PERMISSIONS.vehiclesCreate,
+    PERMISSIONS.vehiclesEdit,
+    PERMISSIONS.vehiclesCostEdit,
+    PERMISSIONS.vehiclesPriceEdit,
+    PERMISSIONS.vehiclesReserve,
+    PERMISSIONS.vehiclesReservationCancel,
+    PERMISSIONS.vehiclesSell,
+    PERMISSIONS.vehiclesOverrideMinPrice,
+    PERMISSIONS.vehiclesTransfer,
+    PERMISSIONS.vehiclesExpenseRecord,
+    PERMISSIONS.vehiclesArchive,
+  ] as const;
+
+  it("keeps cost, margin and identity edits away from the till by default", () => {
+    // A cashier may take money for a car the office priced and nothing more:
+    // no cost read, no cost edit, no price edit, no below-floor override, and
+    // no editing of the identity facts (VIN/chassis) that make the car the car.
+    for (const role of ["cashier", "waiter", "kitchen"] as const) {
+      for (const key of [
+        PERMISSIONS.vehiclesCostView,
+        PERMISSIONS.vehiclesCostEdit,
+        PERMISSIONS.vehiclesPriceEdit,
+        PERMISSIONS.vehiclesOverrideMinPrice,
+        PERMISSIONS.vehiclesEdit,
+        PERMISSIONS.vehiclesReserve,
+      ]) {
+        expect(hasPermission(role, null, key), `${role}/${key}`).toBe(false);
+      }
+    }
+    expect(hasPermission("cashier", null, PERMISSIONS.vehiclesSell)).toBe(true);
+    expect(hasPermission("cashier", null, PERMISSIONS.vehiclesView)).toBe(true);
+  });
+
+  it("makes every vehicle act useless without the vehicle read", () => {
+    // The read prerequisite is what lets an owner build a "sales desk" role:
+    // revoke `vehicles.view` once and each write goes with it, rather than
+    // leaving eleven keys that would each 403 at a different moment.
+    const revoked = effectivePermissions("manager", { revoked: [PERMISSIONS.vehiclesView] });
+    expect(revoked.has(PERMISSIONS.vehiclesView)).toBe(false);
+    for (const key of VEHICLE_WRITES) {
+      expect(revoked.has(key), key).toBe(false);
+    }
+    expect(revoked.has(PERMISSIONS.vehiclesCostView)).toBe(false);
+  });
+
+  it("cannot record or change a cost its holder may not read", () => {
+    // Grant the write, revoke the read: the write follows the read down, so no
+    // role can ever enter a figure it is forbidden to see.
+    for (const key of [PERMISSIONS.vehiclesCostEdit, PERMISSIONS.vehiclesExpenseRecord]) {
+      const perms = effectivePermissions("cashier", {
+        granted: [key],
+        revoked: [PERMISSIONS.vehiclesCostView],
+      });
+      expect(perms.has(key), key).toBe(false);
+      expect(perms.has(PERMISSIONS.vehiclesCostView), key).toBe(false);
+    }
+    // …and with the read granted, the write is effective again.
+    const granted = effectivePermissions("cashier", {
+      granted: [PERMISSIONS.vehiclesCostEdit],
+    });
+    expect(granted.has(PERMISSIONS.vehiclesCostEdit)).toBe(true);
+    expect(granted.has(PERMISSIONS.vehiclesCostView)).toBe(true);
+  });
+
+  it("keeps the accountant on the valuation and off the counter", () => {
+    expect(hasPermission("accountant", null, PERMISSIONS.vehiclesView)).toBe(true);
+    expect(hasPermission("accountant", null, PERMISSIONS.vehiclesCostView)).toBe(true);
+    for (const key of [
+      PERMISSIONS.vehiclesSell,
+      PERMISSIONS.vehiclesReserve,
+      PERMISSIONS.vehiclesPriceEdit,
+      PERMISSIONS.vehiclesOverrideMinPrice,
+      PERMISSIONS.vehiclesExpenseRecord,
+      PERMISSIONS.vehiclesArchive,
+    ]) {
+      expect(hasPermission("accountant", null, key), key).toBe(false);
+    }
+  });
+
+  it("keeps selling and selling below the owner's floor as separate grants", () => {
+    const seller = effectivePermissions("cashier", { granted: [PERMISSIONS.vehiclesSell] });
+    expect(seller.has(PERMISSIONS.vehiclesSell)).toBe(true);
+    expect(seller.has(PERMISSIONS.vehiclesOverrideMinPrice)).toBe(false);
+    expect(
+      hasPermission("cashier", { granted: [PERMISSIONS.vehiclesOverrideMinPrice] }, PERMISSIONS.vehiclesOverrideMinPrice),
+    ).toBe(true);
+  });
+});

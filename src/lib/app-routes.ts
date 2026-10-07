@@ -126,6 +126,10 @@ export const ACCOUNTING_WORKSPACE_HREFS = {
   waiter: "/accounting/waiter",
   jewelry: "/accounting/jewelry",
   watch: "/accounting/watch",
+  // Issue #839 — the automotive trade's manager is a work area of the same
+  // kind: its own page under Accounting, canonical from the day it ships (no
+  // `/dashboard/automotive` address ever existed, so it needs no legacy row).
+  automotive: "/accounting/automotive",
 } as const;
 
 /** One products-workspace sub-section, under the one canonical products door. */

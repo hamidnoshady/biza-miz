@@ -56,6 +56,11 @@ export const MODULE_KEYS = [
   "wholesale",
   "tools_fittings",
   "haberdashery",
+  // Issue #839 — the automotive trade's own manager («خودروها»: vehicle stock,
+  // acquisition, expenses, holds and sales). Like `jewelry`/`watch` it is a
+  // trade page over the shared `items`/`item_serials` primitives, so the
+  // module gates a screen and an API prefix, never a second stock engine.
+  "automotive",
   "stock",
   "ledger",
   "integrations",
@@ -194,6 +199,25 @@ const AEC_LABELS: Partial<Record<LabelKey, string>> = {
   sellScreen: "صورتحساب و دریافت",
   catalogue: "خدمات مهندسی",
   catalogueItem: "خدمت مهندسی",
+};
+
+/**
+ * Issue #839 — the automotive trade's nouns. A dealership does not sell a menu
+ * and does not have a «کالاها» shelf: what it sells is a car, one physical
+ * vehicle at a time, and the document handed over is a فروش خودرو invoice. The
+ * words follow that, and they are not café words borrowed for the occasion.
+ */
+const AUTOMOTIVE_LABELS: Partial<Record<LabelKey, string>> = {
+  // The retail canon's *document* words, deliberately not re-invented: this
+  // label is spliced into titles («فاکتور جدید») where a longer noun would not
+  // parse, and `industry-profile.test.ts` pins a retail sale as a فاکتور for
+  // every retail trade. What is automotive here is the counter and the goods,
+  // not the word for the paper.
+  saleDocument: "فاکتور",
+  saleDocumentPlural: "فاکتورها",
+  sellScreen: "فروش خودرو",
+  catalogue: "خودروها",
+  catalogueItem: "خودرو",
 };
 
 /**
@@ -414,6 +438,40 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: [],
   },
+  /**
+   * Issue #839 — car dealerships and vehicle traders (خودرو و نمایشگاه اتومبیل).
+   *
+   * The trade is a *retail counter over individually tracked units*: it keeps
+   * the whole commercial platform (`CORE_MODULES`), sells from the retail
+   * invoice screen (`pos`, `retail_invoice`) and holds stock in
+   * `items`/`item_stock` (`stock`), which is exactly the jewellery/watch shape
+   * — a car is a unit whose identity is a VIN rather than a serial number.
+   *
+   * What it must never inherit is the café: there is no `tables`, `waiter`,
+   * `kitchen`, `reservations`, `delivery`, `inventory` or `menu` here, and
+   * `industry-profile.test.ts` asserts that for every non-F&B trade at once.
+   * The F&B feature flags behind those modules are seeded off at provision
+   * time like every other retail profile — note `reservations` there is F&B's
+   * *table* reservation flag; a vehicle hold is the automotive module's own
+   * (`automotive_vehicle_holds`, `/api/automotive/reservations`) and is never
+   * gated by it.
+   *
+   * `capabilities` carries `barcode` because a VIN is printed as a barcode on
+   * the registration card and the plate/stock number are scanned at the gate;
+   * it deliberately does not carry `repairs` (a dealership's workshop is a
+   * later wave, and claiming the capability would offer it the repair tickets
+   * of a watchmaker).
+   */
+  automotive: {
+    brandTitle: "خودرو و نمایشگاه اتومبیل",
+    brandSubtitle: "مدیریت موجودی خودرو، خرید، فروش و مشتریان",
+    modules: [...CORE_MODULES, "pos", "automotive", ...RETAIL_STOCK_MODULES],
+    labels: AUTOMOTIVE_LABELS,
+    salesModel: "retail_invoice",
+    defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
+    capabilities: ["barcode"],
+    retailDefaults: { vatPercent: 9 },
+  },
 };
 
 export function industryProfile(industry: Industry): IndustryProfile {
@@ -489,6 +547,11 @@ export const PAGE_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   ["/accounting/menu", "menu"],
   ["/accounting/jewelry", "jewelry"],
   ["/accounting/watch", "watch"],
+  // Issue #839 — the automotive trade's manager («خودروها»): vehicle stock,
+  // acquisition, expenses, holds and sales all hang off this one prefix, so
+  // the whole path is gated by the trade's own module exactly as jewellery
+  // and watch are.
+  ["/accounting/automotive", "automotive"],
   // The products workspace is the catalogue door every retail trade-goods
   // industry shares; anchored on `stock`, the module all five of those
   // profiles carry, so a trade without the variant board never sees it.
@@ -610,6 +673,11 @@ const API_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   // the availability guard refuse them with the rest of operations.
   ["/api/jewelry", "jewelry"],
   ["/api/watch", "watch"],
+  // Issue #839 — the automotive module's data routes (vehicle stock,
+  // acquisition, expenses, holds, sales and reports). The row exists so the
+  // availability guard can refuse them with the rest of operations; each
+  // handler still keeps its stricter `requireIndustryForApi` check.
+  ["/api/automotive", "automotive"],
   // Phase 42 — the shared products-workspace routes; the handlers re-check
   // the industry set themselves (requireProductWorkspaceForApi).
   ["/api/products", "stock"],

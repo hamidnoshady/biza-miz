@@ -68,4 +68,14 @@ export const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, Ret
     cogs: WELL_KNOWN_CODES.aecProjectDirectCost,
     inventory: WELL_KNOWN_CODES.inventory,
   },
+  // Issue #839 — a dealership's website lists cars, so an online order lands in
+  // the vehicle revenue account and relieves vehicle inventory; its COGS is the
+  // vehicle's own frozen effective cost, which the ingest path resolves from
+  // the unit exactly as the counter does. Every code exists in the trade's
+  // chart (coa-template.ts).
+  automotive: {
+    revenue: WELL_KNOWN_CODES.vehicleSalesRevenue,
+    cogs: WELL_KNOWN_CODES.vehicleCogs,
+    inventory: WELL_KNOWN_CODES.vehicleInventory,
+  },
 };

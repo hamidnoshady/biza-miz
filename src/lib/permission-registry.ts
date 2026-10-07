@@ -45,6 +45,7 @@ export type PermissionGroup =
   | "floor"
   | "menu"
   | "inventory"
+  | "automotive"
   | "parties"
   | "crm"
   | "workspace"
@@ -92,6 +93,7 @@ const GROUP_LABELS: Record<PermissionGroup, string> = {
   floor: "سالن و تحویل",
   menu: "منو و کالا",
   inventory: "انبار و خرید",
+  automotive: "خودرو و نمایشگاه",
   parties: "اشخاص",
   crm: "مشتریان و CRM",
   workspace: "میز کار",
@@ -112,7 +114,7 @@ export function permissionGroupLabel(group: PermissionGroup): string {
 }
 
 export const PERMISSION_GROUP_ORDER: readonly PermissionGroup[] = [
-  "ai", "orders", "payments", "floor", "menu", "inventory", "parties", "crm",
+  "ai", "orders", "payments", "floor", "menu", "inventory", "automotive", "parties", "crm",
   "workspace", "accounting", "finance", "payroll", "reports", "growth", "website", "data",
   "team", "settings", "security",
 ];
@@ -167,6 +169,26 @@ const DRAFTS: Draft[] = [
   { key: P.inventoryView, group: "inventory", label: "مشاهده انبار", description: "دیدن موجودی، بهای تمام‌شده و گردش کالا.", risk: "low", audit: false },
   { key: P.inventoryAdjust, group: "inventory", label: "اصلاح موجودی", description: "ثبت مغایرت، ضایعات و شمارش انبار.", risk: "high", audit: true, implies: [P.inventoryView] },
   { key: P.purchasesManage, group: "inventory", label: "مدیریت خرید", description: "ثبت سفارش خرید و رسید کالا از تأمین‌کننده.", risk: "medium", audit: true, implies: [P.inventoryView] },
+
+  // --- Automotive (issue #839) ---------------------------------------------
+  // One lot, three jobs. The read/write split that matters is the cost line:
+  // `vehicles.view` is a car and a price, `vehicles.cost_view` is what the
+  // dealership paid and what it stands to make. A salesperson or cashier
+  // without the latter sees the car and cannot see the margin — on screen or
+  // through the API, since the routes gate on the same key.
+  { key: P.vehiclesView, group: "automotive", label: "مشاهده خودروها", description: "دیدن فهرست خودروها، مشخصات، وضعیت و پلاک.", risk: "low", audit: false },
+  { key: P.vehiclesCreate, group: "automotive", label: "ثبت و خرید خودرو", description: "افزودن خودرو به موجودی و ثبت خرید آن.", risk: "medium", audit: true, implies: [P.vehiclesView] },
+  { key: P.vehiclesEdit, group: "automotive", label: "ویرایش مشخصات خودرو", description: "اصلاح مشخصات فنی و شناسه‌های خودرو (شاسی، موتور، مدل).", risk: "medium", audit: true, implies: [P.vehiclesView] },
+  { key: P.vehiclesCostView, group: "automotive", label: "مشاهده بهای تمام‌شده", description: "دیدن بهای خرید، هزینه‌های سرمایه‌ای و حاشیهٔ سود هر خودرو.", risk: "low", audit: false, implies: [P.vehiclesView] },
+  { key: P.vehiclesCostEdit, group: "automotive", label: "ویرایش بهای تمام‌شده", description: "ثبت خرید و هزینه‌های سرمایه‌ای خودرو؛ عددی که بهای تمام‌شدهٔ فروش روی آن قفل می‌شود.", risk: "high", audit: true, implies: [P.vehiclesView, P.vehiclesCostView] },
+  { key: P.vehiclesPriceEdit, group: "automotive", label: "تغییر قیمت فروش", description: "ثبت و تغییر قیمت آگهی، حداقل و عمدهٔ خودرو. به بهای تمام‌شده دست نمی‌زند.", risk: "medium", audit: true, implies: [P.vehiclesView] },
+  { key: P.vehiclesReserve, group: "automotive", label: "رزرو خودرو", description: "رزرو خودرو برای مشتری و ثبت بیعانه.", risk: "medium", audit: true, implies: [P.vehiclesView] },
+  { key: P.vehiclesReservationCancel, group: "automotive", label: "لغو رزرو خودرو", description: "لغو یا آزادکردن رزرو و تعیین تکلیف بیعانه.", risk: "medium", audit: true, implies: [P.vehiclesView] },
+  { key: P.vehiclesSell, group: "automotive", label: "فروش خودرو", description: "فروش خودرو با فاکتور، تسویه و بستن رزرو.", risk: "medium", audit: true, implies: [P.vehiclesView] },
+  { key: P.vehiclesOverrideMinPrice, group: "automotive", label: "فروش زیر حداقل قیمت", description: "عبور از کف قیمت تعیین‌شدهٔ خودرو. جدا از فروش است و ثبت می‌شود.", risk: "high", audit: true, implies: [P.vehiclesView] },
+  { key: P.vehiclesTransfer, group: "automotive", label: "انتقال خودرو بین شعب", description: "ارسال خودرو از یک شعبه به شعبهٔ دیگر و پذیرش آن.", risk: "medium", audit: true, implies: [P.vehiclesView] },
+  { key: P.vehiclesExpenseRecord, group: "automotive", label: "ثبت هزینهٔ خودرو", description: "ثبت هزینه‌های بازسازی، حمل و ترخیص و تصمیم سرمایه‌ای یا هزینهٔ دوره بودن آن.", risk: "medium", audit: true, implies: [P.vehiclesView, P.vehiclesCostView] },
+  { key: P.vehiclesArchive, group: "automotive", label: "بایگانی خودرو", description: "خارج‌کردن خودرو از فهرست موجودی بدون فروش.", risk: "high", audit: true, implies: [P.vehiclesView] },
 
   // --- Parties -------------------------------------------------------------
   { key: P.partiesView, group: "parties", label: "مشاهده اشخاص", description: "دیدن پرونده مشتری، تأمین‌کننده و پرسنل.", risk: "low", audit: false },
