@@ -191,7 +191,11 @@ async function supplierBalanceRows(
        ) g
        ${apSupplierJoins("g.supplier_id")}
       WHERE $3::text IS NULL
+         -- Name, phone and accounting code — the same three the A/R list
+         -- searches, so the two subledger search boxes behave alike.
          OR ${foldForSearch(AP_SUPPLIER_NAME_SQL)} ILIKE $3 ESCAPE '\\'
+         OR ${foldForSearch("coalesce(pa.phone, s.phone, '')")} ILIKE $3 ESCAPE '\\'
+         OR ${foldForSearch("coalesce(pa.accounting_code, '')")} ILIKE $3 ESCAPE '\\'
       ORDER BY g.balance DESC, g.supplier_id NULLS LAST
       LIMIT $4::int OFFSET $5::int`,
     [businessId, accountId, pattern, options.limit, options.offset],

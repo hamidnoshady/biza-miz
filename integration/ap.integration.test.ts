@@ -389,6 +389,18 @@ describe("listSupplierBalancePage", () => {
     expect(second.summary).toEqual(first.summary);
   });
 
+  it("searches the supplier file's phone and accounting code, not only the name", async () => {
+    await db.query("UPDATE parties SET accounting_code = '700011' WHERE id = $1", [party.id]);
+    await postCreditPurchase("2025-04-01", supplier.id, 500_000);
+
+    const byPhone = await apService.listSupplierBalancePage(biz.id, { q: "0912", limit: 25, offset: 0 });
+    expect(byPhone.suppliers.map((row) => row.supplierId)).toEqual([supplier.id]);
+
+    const byCode = await apService.listSupplierBalancePage(biz.id, { q: "700011", limit: 25, offset: 0 });
+    expect(byCode.suppliers.map((row) => row.supplierId)).toEqual([supplier.id]);
+    expect(byCode.total).toBe(1);
+  });
+
   it("folds the typed search in SQL, the same way the A/R list does", async () => {
     const jafar = await db.query<{ id: string }>(
       `INSERT INTO suppliers (location_id, name) VALUES ($1, 'جعفر') RETURNING id`,

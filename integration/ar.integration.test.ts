@@ -597,6 +597,23 @@ describe("listCustomerBalancePage", () => {
     expect(withDigits.total).toBe(0);
   });
 
+  it("searches the customer's phone and accounting code, not only the name", async () => {
+    const ali = await customersService.createCustomer(biz.id, { name: "Ali", phone: "09121234567" });
+    await db.query("UPDATE parties SET accounting_code = '100023' WHERE id = $1", [ali.id]);
+    const sara = await customersService.createCustomer(biz.id, { name: "Sara" });
+    await postCreditOrder("2025-04-01", ali.id, 500_000);
+    await postCreditOrder("2025-04-01", sara.id, 300_000);
+
+    // The phone on the file, and the accounting code the directory prints
+    // beside the name — the two other things a person types into that box.
+    const byPhone = await arService.listCustomerBalancePage(biz.id, { q: "0912", limit: 25, offset: 0 });
+    expect(byPhone.customers.map((row) => row.customerId)).toEqual([ali.id]);
+    expect(byPhone.total).toBe(1);
+
+    const byCode = await arService.listCustomerBalancePage(biz.id, { q: "100023", limit: 25, offset: 0 });
+    expect(byCode.customers.map((row) => row.customerId)).toEqual([ali.id]);
+  });
+
   it("keeps the unattributed bucket in the page and in the summary", async () => {
     await postCreditOrder("2025-04-01", null, 300_000);
     const page = await arService.listCustomerBalancePage(biz.id, { limit: 25, offset: 0 });

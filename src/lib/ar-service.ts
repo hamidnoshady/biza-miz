@@ -103,8 +103,9 @@ export async function listCustomerDirectory(businessId: string): Promise<Custome
  * The balance list, grouped in SQL and bounded by the caller's window: one row
  * per customer with a non-zero balance, largest first.
  *
- * `q` filters on the customer's name (folded the way the app's pickers fold a
- * typed needle), `limit`/`offset` page it, and `total` is how many rows the
+ * `q` filters on the customer's name, phone or accounting code (folded the way
+ * the app's pickers fold a typed needle), `limit`/`offset` page it, and `total`
+ * is how many rows the
  * filter matches *before* the window — so the screen can say «۲۵ از ۳۱۰» and
  * keep paging without believing the first page is the whole book. Passing
  * `limit: null` answers the whole list, which is what the callers outside the
@@ -147,7 +148,13 @@ async function customerBalanceRows(
        ) g
        LEFT JOIN parties p ON p.id = g.customer_id
       WHERE $3::text IS NULL
+         -- Name first, then the two other things a person would type to find
+         -- a customer: the phone number on the file and the accounting code
+         -- the directory prints beside it. Folded the same way as every other
+         -- picker in the app, so «علي» finds «علی» and «۱۲» finds «12».
          OR ${foldForSearch(`coalesce(p.name, '${UNATTRIBUTED_CUSTOMER_NAME}')`)} ILIKE $3 ESCAPE '\\'
+         OR ${foldForSearch("coalesce(p.phone, '')")} ILIKE $3 ESCAPE '\\'
+         OR ${foldForSearch("coalesce(p.accounting_code, '')")} ILIKE $3 ESCAPE '\\'
       ORDER BY g.balance DESC, g.customer_id NULLS LAST
       LIMIT $4::int OFFSET $5::int`,
     [businessId, accountId, pattern, options.limit, options.offset],
