@@ -12,6 +12,7 @@ import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes"
 import { ACCOUNTING_WORKSPACE_HREFS, PLATFORM_BILLING_HREF, PLATFORM_SETTINGS_HOME } from "@/lib/app-routes";
 import { settingsTabHref } from "@/lib/settings-routes";
 import { REPORTS_TABS, reportsTabHref } from "./reports/reports-nav";
+import { REPORT_CAPABILITY_PERMISSIONS } from "@/lib/report-permissions";
 import { effectiveAppAvailability } from "@/lib/app-availability-service";
 import { query, withTenant } from "@/lib/db";
 import { effectiveFeatures, isLockableFeature } from "@/lib/features";
@@ -221,17 +222,25 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       href: "/media",
       roles: ["owner", "manager"],
     },
+    // Issue #819 — the reports door and its tabs are gated by the *reporting
+    // capabilities*, not by a role list: the entry's old
+    // `roles: ["owner","manager","accountant"]` both hid «گزارش‌ها» from an
+    // admin who holds `reports.view` and, because the `roles` field is only
+    // consulted for the industry catalogue modules, did not actually restrict
+    // the children — «مقایسهٔ شعب» rendered for anyone with `reports.view`
+    // while the branch-comparison API claimed to be owner-only. Each child now
+    // names the same permission its route enforces.
     {
       label: "گزارش‌ها",
       module: "reports",
       href: ACCOUNTING_WORKSPACE_HREFS.reports,
-      roles: ["owner", "manager", "accountant"],
+      requiredAnyPermission: [REPORT_CAPABILITY_PERMISSIONS.canViewReports],
       flag: "reporting",
       children: REPORTS_TABS.map((tab) => ({
         label: tab.label,
         module: "reports" as const,
         href: reportsTabHref(tab.key),
-        roles: tab.roles ?? ["owner", "manager", "accountant"],
+        requiredAnyPermission: [REPORT_CAPABILITY_PERMISSIONS[tab.capability]],
       })),
     },
     // The assistant itself is not an entry: it IS the dashboard (`/dashboard`

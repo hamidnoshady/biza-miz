@@ -73,12 +73,46 @@ async function listReportShiftOptions(locationId: string, filters: ReportOrderFi
  */
 export type ShiftOrdersScope = "shift" | "all_shifts" | "unassigned" | "no_shift_recorded";
 
+/**
+ * The headline numbers, split by what they actually mean (issue #819).
+ *
+ * `totalAmount` was everything the filter matched — open, held, completed and
+ * voided orders added together — and the screen called it «جمع», so a shift
+ * with a voided bill and two open tables read as if that money had been taken.
+ * A voided order keeps its historical total, so the sum of `o.total` over
+ * mixed statuses is not sales at any point in the order's life.
+ *
+ * Three questions, three answers:
+ *   matchingCount  — how many orders the filters matched (face value).
+ *   completed*     — settled sales: the only figure that is revenue.
+ *   open/held*     — order value still on the floor, not yet taken.
+ *   voided*        — value that never happened, kept for loss review.
+ */
+export interface ShiftOrdersSummary {
+  matchingCount: number;
+  completedCount: number;
+  completedAmount: number;
+  openCount: number;
+  openAmount: number;
+  heldCount: number;
+  heldAmount: number;
+  voidedCount: number;
+  voidedAmount: number;
+}
+
 export interface ShiftOrdersReport {
   shift: ShiftOption | null;
   scope: ShiftOrdersScope;
   shifts: ShiftOption[];
   orders: ShiftOrder[];
+  summary: ShiftOrdersSummary;
+  /** How many orders the filter matched — same as `summary.matchingCount`. */
   totalCount: number;
+  /**
+   * Face value of every matched order, whatever its status. Kept because the
+   * export and older callers read it, but no screen labels it «جمع» any more;
+   * use `summary.completedAmount` for settled sales.
+   */
   totalAmount: number;
   page: number;
   pageSize: number;
@@ -174,12 +208,46 @@ export async function getShiftOrdersReport(
   const limit = add(pageSize); const offset = add((page - 1) * pageSize);
   const [{ rows: idRows }, { rows: totals }] = await Promise.all([
     query<{ id: string }>(`SELECT o.id FROM orders o LEFT JOIN parties c ON c.id = o.customer_id WHERE ${predicate} ORDER BY o.opened_at DESC, o.id DESC LIMIT ${limit} OFFSET ${offset}`, params),
-    query<{ total_count: string; total_amount: string }>(`SELECT count(*)::text AS total_count, coalesce(sum(o.total), 0)::text AS total_amount FROM orders o LEFT JOIN parties c ON c.id = o.customer_id WHERE ${predicate}`, params.slice(0, -2)),
+    query<{
+      total_count: string; total_amount: string;
+      completed_count: string; completed_amount: string;
+      open_count: string; open_amount: string;
+      held_count: string; held_amount: string;
+      voided_count: string; voided_amount: string;
+    }>(
+      // One pass over the matched set, split by status with FILTER. The
+      // headline a cashier reads is `completed_amount`; the rest is context
+      // (what is still on the floor, what was voided) rather than one mixed
+      // «جمع» that adds a voided bill to real revenue (issue #819).
+      `SELECT count(*)::text AS total_count,
+              coalesce(sum(o.total), 0)::text AS total_amount,
+              count(*) FILTER (WHERE o.status = 'completed')::text AS completed_count,
+              coalesce(sum(o.total) FILTER (WHERE o.status = 'completed'), 0)::text AS completed_amount,
+              count(*) FILTER (WHERE o.status = 'open')::text AS open_count,
+              coalesce(sum(o.total) FILTER (WHERE o.status = 'open'), 0)::text AS open_amount,
+              count(*) FILTER (WHERE o.status = 'held')::text AS held_count,
+              coalesce(sum(o.total) FILTER (WHERE o.status = 'held'), 0)::text AS held_amount,
+              count(*) FILTER (WHERE o.status = 'voided')::text AS voided_count,
+              coalesce(sum(o.total) FILTER (WHERE o.status = 'voided'), 0)::text AS voided_amount
+         FROM orders o LEFT JOIN parties c ON c.id = o.customer_id WHERE ${predicate}`,
+      params.slice(0, -2),
+    ),
   ]);
   const ids = idRows.map((row) => row.id);
   const totalCount = Number(totals[0]?.total_count ?? 0);
   const totalAmount = Number(totals[0]?.total_amount ?? 0);
-  if (ids.length === 0) return { shift: selected, scope, shifts, orders: [], totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
+  const summary: ShiftOrdersSummary = {
+    matchingCount: totalCount,
+    completedCount: Number(totals[0]?.completed_count ?? 0),
+    completedAmount: Number(totals[0]?.completed_amount ?? 0),
+    openCount: Number(totals[0]?.open_count ?? 0),
+    openAmount: Number(totals[0]?.open_amount ?? 0),
+    heldCount: Number(totals[0]?.held_count ?? 0),
+    heldAmount: Number(totals[0]?.held_amount ?? 0),
+    voidedCount: Number(totals[0]?.voided_count ?? 0),
+    voidedAmount: Number(totals[0]?.voided_amount ?? 0),
+  };
+  if (ids.length === 0) return { shift: selected, scope, shifts, orders: [], summary, totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
 
   const [{ rows }, { rows: paymentRows }, { rows: onlineRows }] = await Promise.all([
     query<ShiftOrderItemRow>(
@@ -228,5 +296,5 @@ export async function getShiftOrdersReport(
     ...order,
     channel: online.has(order.id) ? ("online" as const) : ("in_store" as const),
   }));
-  return { shift: selected, scope, shifts, orders, totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
+  return { shift: selected, scope, shifts, orders, summary, totalCount, totalAmount, page, pageSize, pageCount: Math.ceil(totalCount / pageSize) };
 }

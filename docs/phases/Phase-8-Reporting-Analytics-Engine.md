@@ -78,3 +78,65 @@ Defaults chosen to keep moving; each is easy to revisit.
 | Custom reports only ever query views, never raw transactional tables | `REPORT_VIEWS` whitelist + `buildReportQuery`'s validate-then-resolve design (`src/lib/reports.ts`, unit-tested in `reports.test.ts`) — a report config supplies keys, never SQL or table/column names |
 
 Dashboard UI: `/dashboard` (`src/app/dashboard/page.tsx` + `dashboard-grid.tsx`) — resizable/draggable widget grid, edit-mode toggle, per-widget remove, Owner/Manager only for editing. Reports UI: `/accounting/reports` (`reports-manager.tsx`) — «گزارش‌های آماده» (standard report library, incl. P&L/Balance Sheet) and «گزارش‌ساز» (custom report builder + saved custom reports list).
+
+---
+
+## Corrections from issue #819 (reporting audit)
+
+The audit found several places where this phase's stated behaviour and the
+implementation had drifted apart. The corrections below supersede the
+decisions above where they overlap; the code is the source of truth.
+
+- **Report access is capability-derived, not role-derived.** Decision 1's
+  "Owner/Manager only, every `/api/reports/*` is role-gated" no longer
+  describes the system. What a member may do is computed from their *effective*
+  permissions into one object (`reportCapabilities`, `src/lib/report-permissions.ts`):
+  `canViewReports` / `canBuildReports` ← `reports.view`; `canManageSavedReports`
+  ← `reports.manage`; `canExportReports` ← `reports.export`;
+  `canViewBusinessWide` ← `reports.business_wide` (owner-only, in the
+  cross-location trust family with `rollup.manage`); `canManageRoleWidgets` ←
+  `reports.dashboard_defaults.manage`. The server page passes that object to the
+  client, and both the sidebar children and the in-page rail are gated by the
+  same keys (`reports-nav.ts`) — no report surface reads a role name any more.
+- **`reports.view` runs reports; `reports.export` produces files.** The query
+  endpoint used to require `reports.export`, so a member could not read a report
+  without also being able to walk out with every file the product can produce.
+  Saving, renaming and deleting a saved report is `reports.manage` — authoring,
+  not reading and not downloading.
+- **Consolidated (business-wide) reporting has its own authorization path.**
+  `reports.business_wide` gates `GET /api/reports/business-overview`, the
+  `business_overview` export kind, the role-default dashboard layout, and the AI
+  `get_branch_comparison` tool. It is in `OWNER_ONLY_PERMISSIONS`, so no preset
+  and no per-member grant confers it.
+- **Branch isolation is the resolved active location, never the body.** Every
+  report read and the `chart`/`shift_orders` exports inject
+  `(await resolveActiveLocation(session))?.id` into the same query the screen
+  used; a `locationId` in a request body is ignored. The standard-report route
+  scopes every key except the four ledger-wide statements (P&L, cash flow,
+  balance sheet, food cost variance), which are business-wide by definition.
+- **`?tab=` is validated against the member's allowed tabs**, not against the
+  tab catalogue, and the APIs stay authoritative regardless.
+- **The builder round-trips the whole `ReportConfig`.** Every engine filter
+  published by `/api/reports/views` is offered, and sort / Top-N / the chosen
+  visualization are stored and restored (the pin button uses the stored chart
+  instead of hardcoding `bar`). Money metrics marked `money` are formatted in
+  the business's display unit. A preview superseded by a newer one is aborted
+  and cannot overwrite it.
+- **Screen == CSV == Excel == PDF.** Amounts are written in the business's
+  display unit with the unit named on the column, and a reporting view's
+  `date` column — which arrives as `YYYY-MM-DD` *text*, not a JS `Date` — is
+  written in Shamsi, which is what "Date values in exports/dashboards are
+  Jalali" always meant but did not cover.
+- **The shift questions are answered separately.** Which orders belong to a
+  shift is decided by `opened_at` (`shift-orders-service.ts`); which cash was
+  settled is decided by `closed_at` (`v_shift_reconciliation`); the drawer count
+  is `opening float + cash receipts − cash payouts`
+  (`v_employee_shift_reconciliation.cash_variance`). The shift list states
+  settled sales as its headline and keeps open/held/voided value beside it
+  instead of summing every status into one «جمع».
+- **Migration 0211 repaired two view defects** this document's line about
+  split payments would otherwise contradict: `v_shift_reconciliation` summed
+  `orders.total` across a `LEFT JOIN payments` (a split bill multiplied its
+  gross by its payment count), and `v_employee_shift_reconciliation` attributed
+  an order to a shift by employee and window alone, so an employee working a
+  second branch could have those orders counted into the first branch's shift.

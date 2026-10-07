@@ -33,7 +33,12 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   get_unreconciled_bank_lines: PERMISSIONS.financeReconciliationManage,
   get_payroll_summary: PERMISSIONS.payrollView,
   get_vat_liability: PERMISSIONS.ledgerView,
-  get_branch_comparison: PERMISSIONS.reportsView,
+  // Consolidated across the business's own branches — the AI's view of the
+  // branch-comparison report, so it is gated by the same business-wide
+  // reporting capability as that screen and its export (issue #819). With just
+  // `reports.view` a branch-scoped member could ask the assistant for every
+  // other branch's revenue.
+  get_branch_comparison: PERMISSIONS.reportsBusinessWide,
   forecast_demand: PERMISSIONS.inventoryView,
   get_menu_item_details: PERMISSIONS.menuView,
   get_bill_split_preview: PERMISSIONS.ordersView,

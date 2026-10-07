@@ -37,8 +37,19 @@ export const GET = withTenantScope(async (request: NextRequest, context: { param
   const dateTo = searchParams.get("dateTo") ?? undefined;
   const compare = searchParams.get("compare") === "1";
 
-  const location = reportShape(def) !== "rows" && !["profit_and_loss", "cash_flow", "balance_sheet", "food_cost_variance"].includes(key)
-    ? await resolveActiveLocation(session) : null;
+  // Phase 14 branch isolation is application-enforced (row security stops at
+  // the business, not the branch), so every report that *is* one branch's
+  // trading is resolved to the caller's active branch — including the plain
+  // row reports, which used to be the one shape that skipped it (issue #819):
+  // a member assigned to Branch B could read Branch A's rows through
+  // /api/reports/standard/<key> while the branch-scoped query route refused
+  // them. Never a client-supplied location.
+  //
+  // The four ledger-wide statements are the deliberate exception: they read the
+  // business's books rather than a branch's trading, and are left unscoped for
+  // the same reason the trial balance is.
+  const LEDGER_WIDE_REPORTS = ["profit_and_loss", "cash_flow", "balance_sheet", "food_cost_variance"];
+  const location = LEDGER_WIDE_REPORTS.includes(key) ? null : await resolveActiveLocation(session);
   return NextResponse.json(await runStandardReport(session.businessId, industry, def, {
     dateFrom, dateTo, compare,
     previousAsOfDate: searchParams.get("previousAsOfDate") ?? undefined,

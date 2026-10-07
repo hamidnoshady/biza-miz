@@ -155,7 +155,18 @@ function normalizeSearch(value: string): string {
   return normalizePosSearchText(value);
 }
 
-export function StandardReportsSection({ canExplain }: { canExplain: boolean }) {
+export function StandardReportsSection({
+  canExplain,
+  canExport,
+}: {
+  canExplain: boolean;
+  /**
+   * `reports.export` (issue #819). The download buttons used to be drawn for
+   * every member who could open the section, on top of a route that requires
+   * the export capability — a control whose request could only answer 403.
+   */
+  canExport: boolean;
+}) {
   const money = useMoney();
   const searchId = useId();
   const resultPanelId = `${useId()}-report-result`;
@@ -735,7 +746,7 @@ export function StandardReportsSection({ canExplain }: { canExplain: boolean }) 
                   its own numbers never covered. `disabled` while a read is in
                   flight or failed, since there is nothing truthful to export.
                 */}
-                {selected.shape === "rows" || EXPORT_KIND_BY_SHAPE[selected.shape] ? (
+                {canExport && (selected.shape === "rows" || EXPORT_KIND_BY_SHAPE[selected.shape]) ? (
                   <ExportButtons
                     disabled={loading || Boolean(loadError) || invalidRange || (rows === null && document === null)}
                     request={

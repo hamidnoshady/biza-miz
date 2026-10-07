@@ -19,6 +19,7 @@ import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@
 import { JalaliDatePicker } from "../jalali-date-picker";
 import { BusinessDayRangePresets } from "./business-day-range";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { ExportButtons } from "./export-buttons";
 
 /** Mirrors shift-orders-service.ts's ShiftOrdersReport — declared here rather than imported so the client bundle never reaches a module that imports db.ts. */
 interface ShiftOption {
@@ -28,12 +29,31 @@ interface ShiftOption {
   endedAt: string | null;
 }
 
+/**
+ * Split by what the numbers mean (issue #819): settled sales are the headline,
+ * still-open/held value is context, voided value never happened. A single
+ * «جمع» over every status added a voided bill to real revenue.
+ */
+interface ShiftOrdersSummary {
+  matchingCount: number;
+  completedCount: number;
+  completedAmount: number;
+  openCount: number;
+  openAmount: number;
+  heldCount: number;
+  heldAmount: number;
+  voidedCount: number;
+  voidedAmount: number;
+}
+
 interface ShiftOrdersReport {
   shift: ShiftOption | null;
   scope: "shift" | "all_shifts" | "unassigned" | "no_shift_recorded";
   shifts: ShiftOption[];
   orders: ShiftOrder[];
+  summary: ShiftOrdersSummary;
   totalCount: number;
+  /** Face value of every matched order whatever its status — never labelled «جمع». */
   totalAmount: number;
   page: number;
   pageSize: number;
@@ -54,11 +74,54 @@ const TYPE_LABELS: Record<ShiftOrder["type"], string> = {
   retail: "فاکتور فروش",
 };
 
+/**
+ * The three questions the shift list answers, kept apart (issue #819):
+ * settled sales, value still on the floor, and voided value. A drawer
+ * reconciliation compares cash, not these — the earlier mixed «جمع» invited
+ * exactly that wrong comparison.
+ */
+function ShiftOrdersHeadline({
+  report,
+  formatMoney,
+}: {
+  report: ShiftOrdersReport;
+  formatMoney: (value: number) => string;
+}) {
+  const { summary } = report;
+  const stillOpen = summary.openCount + summary.heldCount;
+  const stillOpenAmount = summary.openAmount + summary.heldAmount;
+  return (
+    <dl className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border bg-muted/40 px-4 py-2 text-xs">
+      <div className="flex items-baseline gap-1">
+        <dt className="text-muted-foreground" title="سفارش‌های تکمیل‌شده در همین فهرست">
+          فروش تسویه‌شده
+        </dt>
+        <dd className="font-semibold text-foreground">{formatMoney(summary.completedAmount)}</dd>
+        <dd className="text-muted-foreground">({toPersianDigits(summary.completedCount)} سفارش)</dd>
+      </div>
+      {stillOpen > 0 ? (
+        <div className="flex items-baseline gap-1">
+          <dt className="text-muted-foreground">باز/نگه‌داشته</dt>
+          <dd className="font-medium text-foreground">{formatMoney(stillOpenAmount)}</dd>
+          <dd className="text-muted-foreground">({toPersianDigits(stillOpen)} سفارش)</dd>
+        </div>
+      ) : null}
+      {summary.voidedCount > 0 ? (
+        <div className="flex items-baseline gap-1">
+          <dt className="text-muted-foreground">ابطال‌شده</dt>
+          <dd className="font-medium text-foreground">{formatMoney(summary.voidedAmount)}</dd>
+          <dd className="text-muted-foreground">({toPersianDigits(summary.voidedCount)} سفارش)</dd>
+        </div>
+      ) : null}
+    </dl>
+  );
+}
+
 /** One sentence saying what the list covers — the scope is never left to be guessed (audit F18). */
 function scopeLine(report: ShiftOrdersReport): string {
   switch (report.scope) {
     case "shift":
-      return "سفارش‌هایی که در این شیفت باز شده‌اند. فروش آنلاین و فروش خارج از شیفت را با گزینهٔ «خارج از شیفت» ببینید.";
+      return "سفارش‌هایی که در این شیفت باز شده‌اند — معیار عضویت، زمان باز شدن سفارش است تا صورتحساب‌های ناتمام با شیفت بازکننده‌شان بمانند. گردش نقدی صندوق جداگانه و بر اساس پرداخت‌های تسویه‌شده در همین بازه محاسبه می‌شود، پس دو عدد می‌توانند درست و متفاوت باشند. فروش آنلاین و فروش خارج از شیفت را با گزینهٔ «خارج از شیفت» ببینید.";
     case "unassigned":
       return "سفارش‌هایی که بیرون از همهٔ شیفت‌های این شعبه باز شده‌اند — مثل سفارش‌های وب‌سایت یا فروش بدون ورود صندوق‌دار.";
     case "no_shift_recorded":
@@ -427,7 +490,13 @@ function initialFilters(): FilterState {
   };
 }
 
-export function ShiftOrdersSection() {
+/**
+ * `canExport` comes from the server page's capability object (issue #819):
+ * downloading the detailed file needs `reports.export`, and the section hides
+ * the control when the member does not hold it. The route enforces the same
+ * key, so this is presentation, not authorization.
+ */
+export function ShiftOrdersSection({ canExport }: { canExport: boolean }) {
   const money = useMoney();
   const [report, setReport] = useState<ShiftOrdersReport | null>(null);
   const [filters, setFilters] = useState<FilterState>(initialFilters);
@@ -475,7 +544,9 @@ export function ShiftOrdersSection() {
   if (!loaded) return <SectionCardSkeleton rows={4} />;
   const activeCount = [filters.shift !== "latest", filters.from, filters.to, filters.orderNumber, filters.customer, filters.status, filters.type].filter(Boolean).length;
   const reset = () => setFilters(DEFAULT_FILTERS);
-  const subtitle = report ? `${toPersianDigits(report.totalCount)} سفارش · جمع ${money.format(report.totalAmount)}` : "هر سفارش، قلم‌به‌قلم و در تمام تاریخچهٔ شعبه";
+  const subtitle = report
+    ? `${toPersianDigits(report.summary.matchingCount)} سفارش · فروش تسویه‌شده ${money.format(report.summary.completedAmount)}`
+    : "هر سفارش، قلم‌به‌قلم و در تمام تاریخچهٔ شعبه";
   const chips: { key: keyof FilterState; label: string }[] = [
     ...(filters.shift !== "latest" ? [{ key: "shift" as const, label: filters.shift === "all" ? "همه شیفت‌ها" : filters.shift === "unassigned" ? "خارج از شیفت" : "شیفت انتخاب‌شده" }] : []),
     ...(filters.from ? [{ key: "from" as const, label: `از ${formatJalali(filters.from)}` }] : []),
@@ -503,6 +574,24 @@ export function ShiftOrdersSection() {
         <Button type="button" variant="outline" onClick={() => setRefreshKey((v) => v + 1)} disabled={refreshing}><RefreshCwIcon />{refreshing ? "در حال به‌روزرسانی…" : "به‌روزرسانی"}</Button>
       </div>
     } flush>
+      {canExport ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
+          <p className="text-xs leading-5 text-muted-foreground">
+            خروجی شامل همهٔ صفحات است، با همان فیلترهای روی صفحه.
+          </p>
+          {/*
+            The request carries the screen's own query string: the server
+            re-parses it with the same validator the list API uses and walks
+            every page, so the file can neither widen nor reinterpret what was
+            on screen (issue #819). `page` in the query is ignored by the
+            export — it starts at page one on purpose.
+          */}
+          <ExportButtons
+            disabled={!report}
+            request={{ kind: "shift_orders", title: "سفارش‌های شیفت", query }}
+          />
+        </div>
+      ) : null}
       <div className="hidden border-b border-border bg-muted/40 p-4 xl:block">
         <FilterFields filters={filters} setFilters={setFilters} shifts={report?.shifts ?? []} disabled={refreshing} />
         <BusinessDayRangePresets onSelect={(r) => setFilters({ ...filters, from: r.dateFrom, to: r.dateTo, page: 1 })} onClear={() => setFilters({ ...filters, from: "", to: "", page: 1 })} />
@@ -522,6 +611,7 @@ export function ShiftOrdersSection() {
         </button>)}
         <button type="button" onClick={reset} className="min-h-8 px-2 text-xs font-semibold text-muted-foreground hover:text-foreground">پاک کردن همه</button>
       </div> : null}
+      {report ? <ShiftOrdersHeadline report={report} formatMoney={money.format} /> : null}
       {report ? <p className="border-b border-border px-4 py-2 text-xs leading-5 text-muted-foreground">{scopeLine(report)}</p> : null}
       {error ? <p role="status" className="border-b border-border bg-amber-50 px-4 py-2 text-xs text-muted-foreground dark:bg-amber-500/15">{error}</p> : null}
       {!report ? (

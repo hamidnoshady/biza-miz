@@ -14,9 +14,16 @@ export const GET = withTenantScope(async () => {
   return NextResponse.json({ reports });
 });
 
-/** Saves a custom report built in the report builder. */
+/**
+ * Saves a custom report built in the report builder.
+ *
+ * `reports.manage` — saving a report is an authoring act, not a download and
+ * not a read (issue #819). It used to require `reports.export`, which meant the
+ * only way to let somebody build reports was to also let them walk out with
+ * every file the product can produce.
+ */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.reportsExport);
+  const { session, error } = await requirePermission(PERMISSIONS.reportsManage);
   if (error) return error;
 
   let body: { name?: string; config?: ReportConfig };

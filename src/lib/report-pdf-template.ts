@@ -30,9 +30,15 @@ function cellToLabel(v: unknown): string {
   if (typeof v === "string") {
     const window = formatShiftWindow(v);
     if (window) return window;
+    // Reporting views ship date columns as `YYYY-MM-DD` text; the PDF is
+    // human-facing and follows the screen's Shamsi labels (issue #819).
+    if (ISO_DATE_ONLY.test(v)) return toPersianDigits(formatJalali(v));
   }
   return String(v);
 }
+
+/** A `YYYY-MM-DD` held as text — how every reporting view emits a `date` column over JSON. */
+const ISO_DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 const SHARED_STYLE = `
   * { margin: 0; padding: 0; box-sizing: border-box; }

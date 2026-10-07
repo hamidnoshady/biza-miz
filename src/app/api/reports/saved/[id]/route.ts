@@ -4,9 +4,16 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { validateReportConfig, type ReportConfig } from "@/lib/reports";
 import { deleteSavedReport, getSavedReport, updateSavedReport } from "@/lib/reports-service";
 
-/** Renames or edits a custom saved report's config. Standard (seeded) reports can't be edited — copy them into a new custom report instead. */
+/**
+ * Renames or edits a custom saved report's config. Standard (seeded) reports
+ * can't be edited — copy them into a new custom report instead.
+ *
+ * `reports.manage` (issue #819): renaming or re-configuring a saved report is
+ * authoring, the same act as creating one. `reports.export` gates the file
+ * download, not the record.
+ */
 export const PATCH = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.reportsExport);
+  const { session, error } = await requirePermission(PERMISSIONS.reportsManage);
   if (error) return error;
   const { id } = await context.params;
 
@@ -33,8 +40,9 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   return NextResponse.json({ ok: true });
 });
 
+/** Deleting a saved report — `reports.manage`, like the other mutations (issue #819). */
 export const DELETE = withTenantScope(async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-  const { session, error } = await requirePermission(PERMISSIONS.reportsExport);
+  const { session, error } = await requirePermission(PERMISSIONS.reportsManage);
   if (error) return error;
   const { id } = await context.params;
 

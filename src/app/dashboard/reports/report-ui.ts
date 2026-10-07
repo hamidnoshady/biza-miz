@@ -31,10 +31,16 @@ export function rowsToChartData(rows: ReportRow[]) {
 export interface ExportRequest {
   format: "csv" | "excel" | "pdf";
   title: string;
-  kind?: "chart" | "pnl" | "balance_sheet" | "cash_flow" | "business_overview";
-  config?: Record<string, unknown>;
+  kind?: "chart" | "pnl" | "balance_sheet" | "cash_flow" | "business_overview" | "shift_orders";
+  /**
+   * The config the screen is showing, sent verbatim — a structured type like
+   * the builder's `BuilderConfig` is fine here; the route validates it again.
+   */
+  config?: object;
   dateFrom?: string;
   dateTo?: string;
+  /** The shift screen's own query string; only read by the `shift_orders` kind. */
+  query?: string;
 }
 
 /** POSTs /api/reports/export and triggers a browser download of the returned file. */

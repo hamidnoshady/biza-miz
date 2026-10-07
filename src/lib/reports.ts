@@ -245,7 +245,12 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
     ],
   },
   v_shift_reconciliation: {
-    label: "تطبیق شیفت",
+    // Day-grain and *settled* grain, not the shift-orders list: a bill counts
+    // on the day it was closed, so a bill carried over midnight stays with the
+    // shift that settled it. Issue #819 keeps that question separate from
+    // «which orders were opened during the shift» (shift-orders-service.ts) and
+    // from the drawer count (v_employee_shift_reconciliation.cash_variance).
+    label: "تطبیق شیفت (تسویه‌شده)",
     dateColumn: "business_date",
     dimensions: [
       { key: "day", label: "روز", dateTrunc: "day" },
@@ -254,12 +259,12 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       { key: "staff", label: "صندوق‌دار", columns: ["closed_by", "cashier_name"] },
     ],
     metrics: [
-      { key: "gross_total", label: "جمع فروش", column: "gross_total", money: true, aggregations: ["sum", "avg"] },
-      { key: "cash_total", label: "نقدی", column: "cash_total", money: true, aggregations: ["sum", "avg"] },
+      { key: "gross_total", label: "فروش تسویه‌شده", column: "gross_total", money: true, aggregations: ["sum", "avg"] },
+      { key: "cash_total", label: "نقدی (دریافتی)", column: "cash_total", money: true, aggregations: ["sum", "avg"] },
       { key: "card_total", label: "کارت‌خوان", column: "card_total", money: true, aggregations: ["sum", "avg"] },
       { key: "online_total", label: "آنلاین", column: "online_total", money: true, aggregations: ["sum", "avg"] },
       { key: "credit_total", label: "نسیه", column: "credit_total", money: true, aggregations: ["sum", "avg"] },
-      { key: "order_count", label: "تعداد سفارش", column: "order_count", aggregations: ["sum", "avg"] },
+      { key: "order_count", label: "تعداد سفارش تسویه‌شده", column: "order_count", aggregations: ["sum", "avg"] },
     ],
   },
   // Per-shift grain, from the real employee_shifts entity (migration 0061) —
@@ -276,8 +281,8 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       { key: "staff", label: "کارمند", columns: ["employee_id", "employee_name"] },
     ],
     metrics: [
-      { key: "gross_total", label: "جمع فروش", column: "gross_total", money: true, aggregations: ["sum", "avg"] },
-      { key: "cash_total", label: "نقدی", column: "cash_total", money: true, aggregations: ["sum", "avg"] },
+      { key: "gross_total", label: "فروش تسویه‌شده در شیفت", column: "gross_total", money: true, aggregations: ["sum", "avg"] },
+      { key: "cash_total", label: "نقدی دریافتی", column: "cash_total", money: true, aggregations: ["sum", "avg"] },
       { key: "card_total", label: "کارت‌خوان", column: "card_total", money: true, aggregations: ["sum", "avg"] },
       { key: "online_total", label: "آنلاین", column: "online_total", money: true, aggregations: ["sum", "avg"] },
       { key: "credit_total", label: "نسیه", column: "credit_total", money: true, aggregations: ["sum", "avg"] },
@@ -555,6 +560,12 @@ export interface ReportConfig {
   sort?: ReportSort;
   /** max rows returned; undefined = no limit */
   limit?: number;
+  /**
+   * The chart the author chose, stored with the report (issue #819) so a saved
+   * pie/line report reopens and pins as itself instead of resetting to a bar.
+   * Read by the builder and the pin button; it changes nothing about the SQL.
+   */
+  visualization?: ChartType;
 }
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -688,6 +699,17 @@ export function buildReportQuery(
     sql += ` LIMIT $${params.length}`;
   }
   return { sql, params };
+}
+
+/**
+ * The metric a config selects, or null when the config names a view/metric the
+ * whitelist does not have. Callers that have already validated the config can
+ * rely on it being present; it exists so an export can ask "is this measure
+ * money?" without re-walking `REPORT_VIEWS` itself.
+ */
+export function reportMetricDef(config: ReportConfig): MetricDef | null {
+  const view = Object.hasOwn(REPORT_VIEWS, config.view) ? REPORT_VIEWS[config.view] : undefined;
+  return view?.metrics.find((m) => m.key === config.metric) ?? null;
 }
 
 /** Persian labels for a config's dimension/metric — used to build export table headers and chart axis labels. */

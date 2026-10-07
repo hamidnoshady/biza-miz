@@ -970,6 +970,28 @@ export async function deleteSavedReport(businessId: string, id: string): Promise
 }
 
 /**
+ * Which of `ids` name a saved report of this business.
+ *
+ * Used by the widgets route to check client-supplied report ids before it
+ * stores a layout (issue #819): an id from another tenant (or a deleted one)
+ * would otherwise be written into `dashboard_widgets` and render as a widget
+ * nobody can open — and a dashboard layout is written from the browser, so the
+ * ids are caller input, not facts.
+ */
+export async function savedReportIdsInBusiness(
+  businessId: string,
+  ids: string[],
+): Promise<Set<string>> {
+  const unique = [...new Set(ids)].filter(Boolean);
+  if (unique.length === 0) return new Set();
+  const { rows } = await query<{ id: string }>(
+    "SELECT id FROM saved_reports WHERE business_id = $1 AND id = ANY($2::uuid[])",
+    [businessId, unique],
+  );
+  return new Set(rows.map((row) => row.id));
+}
+
+/**
  * Idempotently materializes the pre-built report library as saved_reports rows
  * for a business, so they can be pinned to a dashboard like any custom report.
  * Safe to call repeatedly (upsert on standard_key).
