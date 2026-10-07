@@ -32,7 +32,7 @@ let databaseName: string;
 let db: Client;
 
 /** Loaded after DATABASE_URL points at the scratch database. */
-let savedReports: typeof import("../src/lib/reports-service");
+let reportsService: typeof import("../src/lib/reports-service");
 let dbLib: typeof import("../src/lib/db");
 
 let businessId = "";
@@ -121,7 +121,7 @@ beforeAll(async () => {
   await runMigrations({ databaseUrl: urlFor(databaseName), quiet: true });
 
   process.env.DATABASE_URL = urlFor(databaseName);
-  savedReports = await import("../src/lib/reports-service");
+  reportsService = await import("../src/lib/reports-service");
   dbLib = await import("../src/lib/db");
 
   db = new Client({ connectionString: urlFor(databaseName) });
@@ -272,9 +272,9 @@ describe("saved reports — description and version (issue #819, Step 8)", () =>
 
   it("stores an optional description and starts at version 1", async () => {
     const id = await dbLib.withTenant(businessId, () =>
-      savedReports.createSavedReport(businessId, null, "فروش روزانه", config, "پرسش مدیر"),
+      reportsService.createSavedReport(businessId, null, "فروش روزانه", config, "پرسش مدیر"),
     );
-    const row = await dbLib.withTenant(businessId, () => savedReports.getSavedReport(businessId, id));
+    const row = await dbLib.withTenant(businessId, () => reportsService.getSavedReport(businessId, id));
     expect(row).toMatchObject({
       name: "فروش روزانه",
       description: "پرسش مدیر",
@@ -287,43 +287,43 @@ describe("saved reports — description and version (issue #819, Step 8)", () =>
 
   it("leaves the description null when none was given", async () => {
     const id = await dbLib.withTenant(businessId, () =>
-      savedReports.createSavedReport(businessId, null, "بی‌توضیح", config),
+      reportsService.createSavedReport(businessId, null, "بی‌توضیح", config),
     );
-    const row = await dbLib.withTenant(businessId, () => savedReports.getSavedReport(businessId, id));
+    const row = await dbLib.withTenant(businessId, () => reportsService.getSavedReport(businessId, id));
     expect(row!.description).toBeNull();
   });
 
   it("counts every edit as a version, including a rename", async () => {
     const id = await dbLib.withTenant(businessId, () =>
-      savedReports.createSavedReport(businessId, null, "نسخه‌دار", config),
+      reportsService.createSavedReport(businessId, null, "نسخه‌دار", config),
     );
     await dbLib.withTenant(businessId, () =>
-      savedReports.updateSavedReport(businessId, id, { config: { ...config, metric: "order_count" } }),
+      reportsService.updateSavedReport(businessId, id, { config: { ...config, metric: "order_count" } }),
     );
     await dbLib.withTenant(businessId, () =>
-      savedReports.updateSavedReport(businessId, id, { name: "نسخه‌دار (نام تازه)" }),
+      reportsService.updateSavedReport(businessId, id, { name: "نسخه‌دار (نام تازه)" }),
     );
-    const row = await dbLib.withTenant(businessId, () => savedReports.getSavedReport(businessId, id));
+    const row = await dbLib.withTenant(businessId, () => reportsService.getSavedReport(businessId, id));
     expect(row!.version).toBe(3);
     expect(row!.name).toBe("نسخه‌دار (نام تازه)");
   });
 
   it("clears a description on an explicit empty string and refuses an empty patch", async () => {
     const id = await dbLib.withTenant(businessId, () =>
-      savedReports.createSavedReport(businessId, null, "با توضیح", config, "بعداً پاک می‌شود"),
+      reportsService.createSavedReport(businessId, null, "با توضیح", config, "بعداً پاک می‌شود"),
     );
     await dbLib.withTenant(businessId, () =>
-      savedReports.updateSavedReport(businessId, id, { description: "" }),
+      reportsService.updateSavedReport(businessId, id, { description: "" }),
     );
-    const cleared = await dbLib.withTenant(businessId, () => savedReports.getSavedReport(businessId, id));
+    const cleared = await dbLib.withTenant(businessId, () => reportsService.getSavedReport(businessId, id));
     expect(cleared!.description).toBeNull();
 
     // No fields at all is not an edit: no row touched, no version spent.
     const untouched = await dbLib.withTenant(businessId, () =>
-      savedReports.updateSavedReport(businessId, id, {}),
+      reportsService.updateSavedReport(businessId, id, {}),
     );
     expect(untouched).toBe(false);
-    const after = await dbLib.withTenant(businessId, () => savedReports.getSavedReport(businessId, id));
+    const after = await dbLib.withTenant(businessId, () => reportsService.getSavedReport(businessId, id));
     expect(after!.version).toBe(2);
   });
 
@@ -341,10 +341,65 @@ describe("saved reports — description and version (issue #819, Step 8)", () =>
     );
     const id = seeded.rows[0].id;
     expect(
-      await dbLib.withTenant(businessId, () => savedReports.updateSavedReport(businessId, id, { name: "خ" })),
+      await dbLib.withTenant(businessId, () => reportsService.updateSavedReport(businessId, id, { name: "خ" })),
     ).toBe(false);
     expect(
-      await dbLib.withTenant(businessId, () => savedReports.deleteSavedReport(businessId, id)),
+      await dbLib.withTenant(businessId, () => reportsService.deleteSavedReport(businessId, id)),
     ).toBe(false);
+  });
+});
+
+describe("branch isolation of report execution (issue #819)", () => {
+  const DAY_CONFIG = {
+    view: "v_sales_by_day",
+    metric: "total",
+    aggregation: "sum" as const,
+    dimension: "day",
+  };
+
+  it("returns only the branch its location filter names, never a sibling's rows", async () => {
+    // Two branches, one sale each, same business day. v_sales_by_day carries
+    // location_id, which is what the routes inject from
+    // resolveActiveLocation(session) — a body-supplied location never reaches
+    // this call (asserted in src/app/api/reports/query/route.test.ts).
+    await insertCompletedOrder(mainId, 1, 1_000_000, "2026-08-10T09:00:00Z", [
+      { method: "cash", amount: 1_000_000 },
+    ]);
+    await insertCompletedOrder(otherId, 2, 7_000_000, "2026-08-10T10:00:00Z", [
+      { method: "card", amount: 7_000_000 },
+    ]);
+
+    const rowsFor = (locationId: string) =>
+      dbLib.withTenant(businessId, () =>
+        reportsService.runCustomReportQuery(businessId, DAY_CONFIG, locationId),
+      );
+
+    const main = await rowsFor(mainId);
+    const other = await rowsFor(otherId);
+    expect(main.map((row) => Number(row.value))).toEqual([1_000_000]);
+    expect(other.map((row) => Number(row.value))).toEqual([7_000_000]);
+
+    // Without a location the same query is the business-wide figure — the
+    // consolidated path, reachable only through an owner-level guard at the
+    // route layer, never by omitting a filter.
+    const consolidated = await dbLib.withTenant(businessId, () =>
+      reportsService.runCustomReportQuery(businessId, DAY_CONFIG),
+    );
+    expect(consolidated.map((row) => Number(row.value))).toEqual([8_000_000]);
+  });
+
+  it("scopes a standard report's raw rows to the named branch", async () => {
+    await insertCompletedOrder(mainId, 1, 1_000_000, "2026-08-10T09:00:00Z", [
+      { method: "cash", amount: 1_000_000 },
+    ]);
+    await insertCompletedOrder(otherId, 2, 7_000_000, "2026-08-10T10:00:00Z", [
+      { method: "card", amount: 7_000_000 },
+    ]);
+
+    const rows = await dbLib.withTenant(businessId, () =>
+      reportsService.runStandardReportRows("daily_sales_summary", businessId, {}, mainId),
+    );
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].total)).toBe(1_000_000);
   });
 });
