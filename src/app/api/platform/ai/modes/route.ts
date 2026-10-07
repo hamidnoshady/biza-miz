@@ -4,13 +4,12 @@ import { listPlatformAiModes, updatePlatformAiMode } from "@/lib/ai-control-plan
 import { AI_RUNTIME_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
 
 /**
- * Issue #812 §3/§7 — the three configurable LiteLLM model aliases.
+ * The app-owned runtime-mode → LiteLLM-alias mapping.
  *
- * This is the whole of what the app decides about routing: which alias a mode
- * asks for. Provider deployments, fallbacks, retries, budgets and TPS/RPS stay
- * in LiteLLM, and nothing here can move them — a blank alias means "the
- * gateway's default chat model", which is what a deployment that has not set
- * aliases up yet keeps doing.
+ * This is the whole of what the app decides about model selection: which
+ * configured alias a mode requests. Provider deployments, routing, fallbacks,
+ * retries and proxy-side limits stay in LiteLLM; a blank alias means the
+ * platform's default chat alias.
  *
  * Writes take `ai.config.manage`, the existing platform capability for holding
  * the AI configuration. It is deliberately NOT a tenant `settings.manage`: a

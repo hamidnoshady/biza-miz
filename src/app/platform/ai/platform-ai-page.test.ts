@@ -25,6 +25,13 @@ describe("/platform/ai ownership boundary", () => {
     }
   });
 
+  it("separates configuration readiness from live probe state and preserves the last probe", () => {
+    const page = readFileSync("src/app/platform/ai/page.tsx", "utf8");
+    expect(page).toContain("Gateway configuration:");
+    expect(page).toContain("Gateway connection:");
+    expect(page).toContain("status: result.data.status ?? current.status");
+  });
+
   it("keeps the gateway API free of revenue aggregation SQL", () => {
     const route = readFileSync("src/app/api/platform/ai/gateway/route.ts", "utf8");
     for (const stale of [

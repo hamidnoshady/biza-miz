@@ -6,13 +6,15 @@
  * endpoint, so the provider client in ai-service.ts never needs to learn that
  * one exists. What it *does* need is a small set of decisions made before the
  * request goes out — which credential to send and which deployed LiteLLM model
- * alias to ask for. Routing, fallback chains, provider selection and MCP are
- * LiteLLM policy and must not be mirrored into request bodies by the app.
+ * alias to ask for. LiteLLM owns upstream selection, routing, retries and
+ * fallback policy; the app does not mirror those settings into requests. The
+ * POS `/api/mcp` connector is independent and is not LiteLLM proxy MCP.
  *
- * Branch/business scope applies to virtual-key resolution only:
- * branch key -> business key -> gateway master key -> none. Model resolution is
- * gateway alias -> platform default; historical per-business model overrides
- * are deliberately ignored.
+ * Branch/business scope applies to virtual-key resolution only: when tenant
+ * virtual keys are enabled, branch key -> business key -> none (never the
+ * shared master key); otherwise the gateway master key is used. Model
+ * resolution is gateway alias -> platform default; historical per-business
+ * model overrides are deliberately ignored.
  */
 
 import type { AiConfig } from "./ai";
@@ -49,10 +51,10 @@ export interface AiGatewayConfig {
    */
   maxTurnRial: number;
 
-  // ── Issue #812: managed knowledge + Deep Research ────────────────────────
-  // Both are *pointers* into the configured AI infrastructure. The app owns no
-  // vector table, no embedding model choice and no research runtime of its own;
-  // these settings only say where the managed one lives and what its limits are.
+  // ── Managed knowledge + app-owned Deep Research ─────────────────────────
+  // Knowledge retrieval calls an optional external endpoint; the app keeps no
+  // local vector store/index. Deep Research orchestration is app-owned, with a
+  // LiteLLM alias and platform-configured limits.
   /** Whether the managed knowledge integration is switched on. */
   knowledgeEnabled: boolean;
   /** The knowledge endpoint on the configured AI infrastructure. */
@@ -535,8 +537,9 @@ export function resolveEmbeddingModel(input: {
 }
 
 /**
- * The credential for one call.
- * Precedence: Branch virtual key -> Business virtual key -> Gateway master key -> undefined.
+ * The credential for one call. With virtual keys enabled, tenant calls use
+ * branch key -> business key -> undefined (the master key is never a tenant
+ * fallback); other calls use the gateway master key.
  */
 export function resolveGatewayAuthKey(input: {
   gateway: AiGatewayConfig | null;
@@ -628,9 +631,9 @@ export function buildGatewayRuntime(input: {
   if (!input.gateway || !isGatewayActive(input.gateway)) return undefined;
   const gateway = input.gateway;
   // Reserved extension point for a future, explicitly-adopted request-body
-  // addition; core chat sends nothing extra. Routing, retries, provider
-  // fallback and MCP declarations are LiteLLM policy and must never be
-  // mirrored into the request body from here.
+  // addition; core chat sends nothing extra. Routing, retries and provider
+  // fallback belong to LiteLLM and must never be mirrored from here. The POS
+  // `/api/mcp` connector is separate; proxy MCP declarations are not sent.
   const body: Record<string, unknown> = {};
   return {
     model: resolveChatModel({

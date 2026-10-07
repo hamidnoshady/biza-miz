@@ -559,17 +559,27 @@ has kept.
 Issue #812 rebuilt this subsystem, and the boundary it drew decides where every
 later change belongs. The short version:
 
-- **LiteLLM/AI-infra owns** model and provider deployments, routing, fallbacks,
-  retries, the shared semantic cache, embeddings/RAG infrastructure, model
-  aliases (`pos-auto`, `pos-instant`, `pos-deep-research`), provider cost
-  reporting and virtual tenant keys. **The application owns** tenant identity and
-  isolation, app/project/business context, user authorization, business tools and
-  action execution, the prompt/agent config exposed from Superadmin, tenant
-  memory, Deep Research orchestration, usage/audit attribution, business billing
-  and credit settlement, and human confirmation for writes.
+- **LiteLLM/AI-infrastructure owns** upstream deployments, provider routing,
+  fallbacks, retries, provider-side limits/budgets, provider cost reporting and
+  the actual model-alias definitions (for example `pos-chat` and `pos-embed`).
+  The app stores a default chat/embedding alias in `platform_ai_gateway` and
+  runtime-mode mappings in `platform_ai_modes`; it does not own upstream
+  deployment definitions. The app owns tenant identity/isolation, context,
+  authorization, permission-filtered tools, prompt/agent config exposed from Superadmin,
+  tenant memory, Deep Research orchestration, usage/audit attribution, Rial
+  billing/settlement and human confirmation for writes. LiteLLM issues virtual
+  tenant keys; the app manages business/branch identity and stores them encrypted.
 - **The application runs no semantic answer cache of its own and no pgvector RAG
   stack of its own.** Both were deleted (migration 0204). A second cache the app
   owns is a second source of truth about what a tenant was told.
+- **The app's `/api/mcp` connector is independent of LiteLLM.** Assistant calls
+  send app-owned system prompts and permission-filtered OpenAI function tools;
+  do not send proxy MCP declarations or maintain a local proxy-MCP roster.
+- **Do not reintroduce app-side policy mirrors** for fallback, published model
+  lists, business model overrides/budgets, or MCP config; migration 0184 retires
+  those columns. Before migration 0209 removes legacy plaintext key columns,
+  follow the decrypt-verifying backfill and ciphertext-first production-read
+  runbook in Phase 39 for every deployment.
 - **There is exactly one prompt resolver** — `src/lib/ai-prompt-resolver.ts`.
   The fragment engine is deleted. Its composition order is fixed and is not
   negotiable.
@@ -629,9 +639,10 @@ coworker" section of [README.md](README.md) and
 
 ## Apps — read before adding a feature area or touching retrieval
 
-Phase 36 turned the assistant from a bubble in the corner into a workspace, and made
-"what the app knows" a retrievable thing. Four rules carry that work; see
-[docs/phases/Phase-36-App-Ecosystem.md](docs/phases/Phase-36-App-Ecosystem.md).
+Phase 36 turned the assistant from a bubble in the corner into a workspace. Its original local
+pgvector/cache implementation was later retired; see the historical correction in
+[docs/phases/Phase-36-App-Ecosystem.md](docs/phases/Phase-36-App-Ecosystem.md) and the current
+[AI subsystem architecture](docs/ai-subsystem-architecture.md).
 
 - **An app is not a folder of pages.** An app is a contribution to four shared registries:
   a read tool (`toolDefinitions`/`runReadTool`), an `ACTION_CATALOG` entry with a Phase 31
@@ -643,30 +654,18 @@ Phase 36 turned the assistant from a bubble in the corner into a workspace, and 
   says what a trade has and `moduleForApiPath` enforces it at the API. `apps.ts` says only
   what is seen next to what. If a grouping is the *only* thing hiding a route, the hiding is
   decoration and the route is open.
-- **Prompt text is built from fragments, and a database row overrides the code default** —
-  not merely its version. A bad edit or an unmigrated deploy must fall back to the code
-  fragment, never silence the assistant.
-- **No number is ever copied into a vector.** `ai_embeddings` holds slow-moving text only —
-  help, policy, procedures, item and menu descriptions, project notes, names for approximate
-  lookup. Orders, stock, payments and ledger rows are read through tools at the moment of
-  asking, because a vector copy of a figure on a POS is stale within minutes and makes the
-  model *confidently* wrong about money. `EMBEDDABLE_KINDS` in `src/lib/ai-rag.ts` is where
-  that is enforced; `NEVER_EMBEDDED_KINDS` records the exclusion so it reads as a decision.
-
-Two more, because both of these are load-bearing and easy to undo by accident:
-
-- **pgvector is optional, and its absence is not a failure.** Migrations `0113` and `0114`
-  create the extension inside a `DO … EXCEPTION WHEN OTHERS` block and create nothing
-  downstream unless `pg_extension` really has the row; `isRetrievalAvailable()` and
-  `isAnswerCacheAvailable()` probe once and answer *false* if the probe itself throws. The
-  desktop installer runs `embedded-postgres` with no `vector` library — it loses RAG, not
-  the assistant. Don't make either migration hard-fail.
-- **The answer cache key is the *business day*, not the calendar date, plus a tool
-  signature.** A café trading 18:00–03:00 runs one service; a key built from the calendar
-  date carries the pre-midnight answer into the next service. The signature is what makes a
-  late-arriving sale — an amendment, an imported invoice — invalidate the range it landed in. And only
-  read-only turns are ever cached — `isCacheableTurn()` fails closed and is checked inside
-  `storeCachedAnswer()`, not just at the call site.
+- **Prompts are app-owned, versioned control-plane data.**
+  `src/lib/ai-prompt-resolver.ts` is the sole resolver and
+  `/platform/ai/prompts` is the active Superadmin editor. Prompt versions have a safe code
+  default; do not reintroduce the retired fragment engine or send LiteLLM prompt IDs.
+- **Keep business facts out of a local vector copy.** The application has no local
+  `ai_embeddings`/pgvector index or semantic answer cache after migration 0204. Live figures
+  remain tool reads. An optional managed-knowledge endpoint is separately configured and
+  receives a server-resolved business scope; do not assume LiteLLM native RAG or proxy MCP is
+  part of that integration.
+- **No pgvector runtime dependency remains for the assistant.** The earlier Phase 36 migrations
+  are historical; do not restore local extension probing, indexing or answer-cache code without
+  a new design and explicit data-isolation review.
 - **The Growth & Marketing app (`/dashboard/growth`) is the container for every
   customer-growing surface** (Phase 36b): loyalty, campaigns/gift cards and commission are
   its sections today; messaging (#372) becomes a section of it, not a new sidebar peer.

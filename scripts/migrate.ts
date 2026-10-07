@@ -5,6 +5,12 @@
  * transaction, and records applied files in schema_migrations.
  *
  * Usage: npm run db:migrate
+ *
+ * Issue #757's secret-column cutover is a two-step release: set
+ * AI_GATEWAY_SECRET_CUTOVER_DEFER=true to let the ciphertext-only app boot
+ * while 0209 stays pending for production read verification; after every
+ * deployment passes, set AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true for the
+ * controlled migration run. The migration also checks the session GUC set here.
  */
 import "dotenv/config";
 import { createHash } from "node:crypto";
@@ -15,6 +21,9 @@ import { Client } from "pg";
 
 const MIGRATIONS_DIR = join(process.cwd(), "migrations");
 export const MIGRATION_ADVISORY_LOCK_ID = "7310318183545164275";
+const AI_GATEWAY_SECRET_CUTOVER_MIGRATION = "0209_ai_gateway_secret_cutover.sql";
+const AI_GATEWAY_SECRET_CUTOVER_DEFER_ENV = "AI_GATEWAY_SECRET_CUTOVER_DEFER";
+const AI_GATEWAY_SECRET_CUTOVER_VERIFIED_ENV = "AI_GATEWAY_SECRET_CUTOVER_VERIFIED";
 
 /**
  * One-time historical checksum corrections.
@@ -130,6 +139,7 @@ export interface MigrationRunResult {
   applied: number;
   adoptedChecksums: number;
   repairedChecksums: string[];
+  deferredMigrations: string[];
 }
 
 interface MigrationFile {
@@ -153,16 +163,27 @@ function loadMigrations(directory: string): MigrationFile[] {
 }
 
 export async function runMigrations(options: MigrationRunOptions): Promise<MigrationRunResult> {
+  const deferSecretCutover = process.env[AI_GATEWAY_SECRET_CUTOVER_DEFER_ENV] === "true";
+  const secretCutoverVerified = process.env[AI_GATEWAY_SECRET_CUTOVER_VERIFIED_ENV] === "true";
+  if (deferSecretCutover && secretCutoverVerified) {
+    throw new Error("ai_gateway_secret_cutover_flags_conflict");
+  }
+
   const client = new Client({ connectionString: options.databaseUrl });
   let lockAcquired = false;
   let adoptedChecksums = 0;
   let appliedCount = 0;
   const repairedChecksums: string[] = [];
+  const deferredMigrations: string[] = [];
 
   await client.connect();
   try {
     await client.query("SELECT pg_advisory_lock($1::bigint)", [MIGRATION_ADVISORY_LOCK_ID]);
     lockAcquired = true;
+    await client.query(
+      "SELECT set_config('app.ai_gateway_secret_cutover_verified', $1, false)",
+      [secretCutoverVerified ? "true" : "false"],
+    );
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -213,8 +234,22 @@ export async function runMigrations(options: MigrationRunOptions): Promise<Migra
       }
     }
 
-    for (const migration of migrations) {
+    for (let index = 0; index < migrations.length; index += 1) {
+      const migration = migrations[index];
       if (applied.has(migration.filename)) continue;
+      if (migration.filename === AI_GATEWAY_SECRET_CUTOVER_MIGRATION && deferSecretCutover) {
+        const laterPending = migrations.slice(index + 1).find((later) => !applied.has(later.filename));
+        if (laterPending) {
+          throw new Error(`ai_gateway_secret_cutover_deferred_blocks_later_migration:${laterPending.filename}`);
+        }
+        deferredMigrations.push(migration.filename);
+        if (!options.quiet) {
+          console.warn(
+            `Deferred ${AI_GATEWAY_SECRET_CUTOVER_MIGRATION}; verify ciphertext-backed production reads on every deployment, then rerun migrations with ${AI_GATEWAY_SECRET_CUTOVER_VERIFIED_ENV}=true.`,
+          );
+        }
+        continue;
+      }
       if (!options.quiet) process.stdout.write(`Applying ${migration.filename} ... `);
       await client.query("BEGIN");
       try {
@@ -233,7 +268,7 @@ export async function runMigrations(options: MigrationRunOptions): Promise<Migra
       }
     }
 
-    return { applied: appliedCount, adoptedChecksums, repairedChecksums };
+    return { applied: appliedCount, adoptedChecksums, repairedChecksums, deferredMigrations };
   } finally {
     try {
       if (lockAcquired) {
@@ -262,7 +297,14 @@ export async function main() {
   if (result.adoptedChecksums > 0) {
     console.log(`Adopted checksum(s) for ${result.adoptedChecksums} existing migration(s).`);
   }
-  console.log(result.applied === 0 ? "Nothing to do — schema is up to date." : `Applied ${result.applied} migration(s).`);
+  if (result.deferredMigrations.length > 0) {
+    console.log(`Deferred migration(s): ${result.deferredMigrations.join(", ")}.`);
+  }
+  console.log(
+    result.applied === 0 && result.deferredMigrations.length === 0
+      ? "Nothing to do — schema is up to date."
+      : `Applied ${result.applied} migration(s).`,
+  );
 }
 
 const entryPoint = process.argv[1] ? resolve(process.argv[1]) : null;
