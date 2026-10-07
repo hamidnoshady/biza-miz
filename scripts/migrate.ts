@@ -118,6 +118,18 @@ const CHECKSUM_REPAIRS: ReadonlyMap<string, readonly string[]> = new Map([
     // 0201 carried its additions forward (see the note above).
     ["9acc7080334deaa16af7b8a66883a89464b3ae7eb07de5d2094219d2f0d3c3c5"],
   ],
+  [
+    "0028_bank_reconciliation.sql",
+    // sha256 of the original revision, whose leading comment described
+    // reconciliation as covering only cash 1100 and bank-clearing 1120 on the
+    // reasoning that nothing posted to the plain bank account. Phase 30 made
+    // that false (a cheque clears *into* 1110) and issue #830's audit flagged
+    // the comment as one of the places the stale two-account story was still
+    // being told. Only comment lines changed — every statement in the file is
+    // byte-for-byte identical, and the schema was never account-specific — so
+    // adopting the checksum is schema-neutral, exactly like 0127 and 0140.
+    ["5c0d7299b7d79fb9995fdaf713eeb1fad423515981f924459d18704bb5bd448f"],
+  ],
 ]);
 
 export interface MigrationRunOptions {

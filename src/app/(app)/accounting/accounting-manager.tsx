@@ -153,6 +153,21 @@ export function AccountingManager({
    * «خطای غیرمنتظره». One definition, shared with the tests: `coa-tree.ts`.
    */
   const canEditAccounts = canEditChartOfAccounts(role, permissions);
+
+  /*
+   * Whether this member may run a reconciliation at all.
+   *
+   * The section opens on the app's ledger door (`ledger.view`), but every
+   * mutation behind it — start, tick, complete, discard — requires
+   * `finance.reconciliation_manage`. The screen used to draw all of those
+   * controls for whoever could open it, so a read-only accountant's every click
+   * came back 403 under a generic error. `undefined` when the page could not
+   * read the member's effective permissions: the section then draws the
+   * controls and the API stays the gate, exactly like `canApproveLedger`.
+   */
+  const canManageReconciliation = permissions
+    ? permissions.includes(PERMISSIONS.financeReconciliationManage)
+    : undefined;
   const sections = LEDGER_WORKSPACE_SECTION_KEYS.flatMap((key) => {
     const def = allowed.find((candidate) => candidate.key === key);
     return def ? [def] : [];
@@ -246,7 +261,9 @@ export function AccountingManager({
           {section === "receipts" ? <ReceiptsPaymentsSection /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}
-          {section === "reconciliation" ? <ReconciliationSection busy={busy} run={run} /> : null}
+          {section === "reconciliation" ? (
+            <ReconciliationSection busy={busy} run={run} canManage={canManageReconciliation} />
+          ) : null}
           {section === "chart-of-accounts" ? (
             <ChartOfAccountsSection busy={busy} run={run} canEdit={canEditAccounts} />
           ) : null}
