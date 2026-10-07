@@ -178,8 +178,13 @@ export const ACCOUNTING_CODE_MODE_LABELS: Record<AccountingCodeMode, string> = {
   Manual: "دستی",
 };
 
-/** VAT rate a new party is assumed to carry until somebody says otherwise. */
-export const DEFAULT_TAX_PERCENTAGE = 9;
+/**
+ * A party's own VAT rate is an *override*. `null` means the party follows the
+ * business's rate in «تنظیمات مالیات» (`tax.config`, see `vat-policy.ts`) —
+ * there is no platform-wide assumed rate: a business may be exempt (0) or
+ * charge whatever its trade is liable for (audit F05).
+ */
+export type PartyTaxPercentage = number | null;
 
 /** Length caps. Mirrored by the form's `maxLength`s, enforced again by the route. */
 export const MAX_PARTY_DISPLAY_NAME = 200;
@@ -195,7 +200,7 @@ export const MAX_TAB_JSON_CHARS = 16_000;
 export interface PartyGeneralInfo {
   nationalId: string;
   economicCode: string;
-  taxPercentage: number;
+  taxPercentage: PartyTaxPercentage;
 }
 
 export interface PartyAddressInfo {
@@ -294,7 +299,7 @@ export const PARTY_FORM_DEFAULTS: PartyFormState = {
   lastName: "",
   categoryId: "",
   notes: "",
-  generalInfo: { nationalId: "", economicCode: "", taxPercentage: DEFAULT_TAX_PERCENTAGE },
+  generalInfo: { nationalId: "", economicCode: "", taxPercentage: null },
   addressInfo: { province: "", city: "", street: "", zipCode: "", postalBox: "" },
   contactInfo: { phone: "", mobile: "", email: "", website: "" },
   financialInfo: { bankName: "", cardNumber: "", iban: "", accountNumber: "" },
@@ -543,7 +548,7 @@ export const PARTY_SCHEMA: readonly PartyFieldSpec[] = [
     when: (state) => state.personType === "Real",
   },
   { path: "generalInfo.economicCode", label: "کد اقتصادی", kind: "economicCode" },
-  { path: "generalInfo.taxPercentage", label: "نرخ مالیات", kind: "taxPercent", required: true },
+  { path: "generalInfo.taxPercentage", label: "نرخ مالیات", kind: "taxPercent" },
   { path: "contactInfo.phone", label: "تلفن ثابت", kind: "text", maxLength: 32 },
   { path: "contactInfo.mobile", label: "تلفن همراه", kind: "text", maxLength: 32 },
   { path: "contactInfo.email", label: "پست الکترونیکی", kind: "email" },
@@ -627,8 +632,8 @@ export function validatePartyForm(state: PartyFormState): PartyFieldErrors {
        * that reaches the column can no longer differ.
        */
       const text = typeof raw === "number" ? String(raw) : normalizeNumericText(String(raw ?? ""));
-      // Empty means «use the default», which `taxPercentageOf` supplies; it is
-      // not a validation failure, or clearing the box would block the save.
+      // Empty means «follow the business rate» (`taxPercentageOf` → null); it
+      // is not a validation failure, or clearing the box would block the save.
       if (text && text !== "-" && text !== ".") {
         const value = Number(text);
         if (!Number.isFinite(value) || value < 0 || value > 100) {
@@ -752,7 +757,7 @@ export interface PartyPayload {
   general_info: {
     nationalId: string | null;
     economicCode: string | null;
-    taxPercentage: number;
+    taxPercentage: PartyTaxPercentage;
   } & Record<string, unknown>;
   address_info: Record<string, unknown>;
   contact_info: Record<string, unknown>;
@@ -804,8 +809,8 @@ export function buildPartyPayload(state: PartyFormState): PartyPayload {
     general_info: {
       nationalId: state.personType === "Real" ? trimmedOrNull(state.generalInfo.nationalId) : null,
       economicCode: trimmedOrNull(state.generalInfo.economicCode),
-      // Always sent: 9 is the assumption the whole platform makes, and an
-      // explicit 9 is what lets the ledger distinguish "unset" from "set to 9".
+      // Always sent, `null` included: an explicit null says «follows the
+      // business rate», so a re-save cannot be mistaken for "tab not sent".
       taxPercentage: taxPercentageOf(state),
     },
     address_info: compactTab({ ...state.addressInfo }),
@@ -851,27 +856,29 @@ export function buildNonAccountingPayload(state: PartyFormState): NonAccountingP
  *
  * Takes the loose shape rather than `PartyGeneralInfo` because both callers are
  * mid-parse: the form has a string from an input, and the service has whatever a
- * stored document held. Both are wrong in the same direction, so both get 9.
+ * stored document held. Both are wrong in the same direction, so both get
+ * `null` — «follows the business rate» — rather than an assumed number.
  *
  * Fractional rates are real and must survive this function. It used to read the
  * text through `asciiDigits`, which strips *every* non-digit — including the
  * decimal mark — so «۹٫۵» arrived as `95`: a rate inside the valid range, stored
  * without complaint, ten times what was typed and applied to that party's
  * invoices from then on. «۱۲٫۵» became `125`, failed the range check, and came
- * back as the 9% default instead, which at least was visible. `normalizeNumericText`
+ * back as the old fixed default instead, which at least was visible. `normalizeNumericText`
  * is the shared parser that understands both Persian «٫» and Arabic-Indic
  * digits, and it is what `PersianNumberInput` emits, so the form and the service
  * now read a rate the same way.
  */
 export function taxPercentageOf(state: {
   generalInfo?: { taxPercentage?: unknown } | null;
-}): number {
+}): PartyTaxPercentage {
   const raw = state.generalInfo?.taxPercentage;
-  // "unset" has to mean the default, because 0 is a rate a business really uses:
-  // a party stored before this field existed, or one whose tab was written by an
-  // importer that knew nothing about it, must not become tax-free on its first
-  // re-save. An empty string is the same case, arriving from a cleared input.
-  if (raw === undefined || raw === null) return DEFAULT_TAX_PERCENTAGE;
+  // "unset" means «follows the business rate» (null), never 0, because 0 is a
+  // rate a business really uses: a party stored before this field existed, or
+  // one whose tab was written by an importer that knew nothing about it, must
+  // not become tax-free on its first re-save. An empty string is the same case,
+  // arriving from a cleared input.
+  if (raw === undefined || raw === null) return null;
   let value: number;
   if (typeof raw === "number") {
     value = raw;
@@ -879,13 +886,19 @@ export function taxPercentageOf(state: {
     // Whitespace-only is a cleared field, not «۰»: `asciiDigits("  ")` was `""`
     // and `Number("")` is 0, which made a party accidentally tax-exempt.
     const text = normalizeNumericText(String(raw), { allowNegative: true });
-    if (!text || text === "-" || text === ".") return DEFAULT_TAX_PERCENTAGE;
+    if (!text || text === "-" || text === ".") return null;
     value = Number(text);
   }
-  if (!Number.isFinite(value) || value < 0 || value > 100) return DEFAULT_TAX_PERCENTAGE;
+  if (!Number.isFinite(value) || value < 0 || value > 100) return null;
   // Two decimal places: enough for any published rate, and it keeps the stored
   // number free of binary-float tails like 9.299999999999999.
   return Math.round(value * 100) / 100;
+}
+
+/** The rate as the form's input text: empty for «follows the business rate». */
+export function taxPercentageText(state: { generalInfo?: { taxPercentage?: unknown } | null }): string {
+  const rate = taxPercentageOf(state);
+  return rate === null ? "" : String(rate);
 }
 
 /**
@@ -947,10 +960,7 @@ export function formStateFromParty(party: PartyApiRecord | null | undefined): Pa
   state.generalInfo = {
     nationalId: party.generalInfo?.nationalId ?? "",
     economicCode: party.generalInfo?.economicCode ?? "",
-    taxPercentage:
-      typeof party.generalInfo?.taxPercentage === "number"
-        ? party.generalInfo.taxPercentage
-        : DEFAULT_TAX_PERCENTAGE,
+    taxPercentage: taxPercentageOf(party),
   };
   state.addressInfo = mergeTab(state.addressInfo, party.addressInfo);
   state.contactInfo = mergeTab(state.contactInfo, party.contactInfo);

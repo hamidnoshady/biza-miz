@@ -389,3 +389,33 @@ export async function businessToday(businessId: string): Promise<string> {
   );
   return rows[0].today;
 }
+
+/**
+ * «امروز» for one specific branch — the business date *that* branch's own
+ * timezone and day-start produce, not the primary branch's.
+ *
+ * Why this exists: a manual journal draft is stored with the branch it will
+ * post to (`journal_entry_drafts.location_id`), and the form says «خالی یعنی
+ * تاریخ امروز». Resolving that "today" against the primary branch instead of
+ * the draft's own branch is how a Tehran head office's late-night entry got
+ * filed under a different calendar day than the branch it belongs to — and
+ * unlike a receipt, a draft's date is not re-derived at approval time, so the
+ * wrong day was the day that posted.
+ *
+ * A branch that cannot be resolved (an unknown id, a branch archived since the
+ * draft was written, a business with none) still gets a usable date: the
+ * business-wide `businessToday` is the last resort, never `CURRENT_DATE`.
+ */
+export async function locationBusinessToday(
+  businessId: string,
+  locationId: string | null | undefined,
+): Promise<string> {
+  if (!locationId) return businessToday(businessId);
+  const { rows } = await query<{ today: string }>(
+    `SELECT app_business_date(now(), l.timezone, l.business_day_start_minutes)::text AS today
+       FROM locations l
+      WHERE l.id = $1 AND l.business_id = $2`,
+    [locationId, businessId],
+  );
+  return rows[0]?.today ?? (await businessToday(businessId));
+}

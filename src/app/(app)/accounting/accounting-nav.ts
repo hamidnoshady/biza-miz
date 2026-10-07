@@ -20,9 +20,16 @@ import type { AccountingSectionKey } from "./accounting-routes";
  * The app's own door.
  *
  * `ledger.view` rather than a role list: it is the key every Accounting route
- * enforces, and its audience is exactly the owner/manager/accountant the old
- * `ACCOUNTING_ROLES` named — plus `viewer`, the read-only auditor role, for
- * whom being able to read the books is the entire point.
+ * enforces, and the presets that hold it are owner (by rule), admin, manager
+ * and accountant — the same audience the old `ACCOUNTING_ROLES` list named.
+ *
+ * The gate is *only* the capability, and that is deliberate. The old comment
+ * here named a `viewer` role — which is not a member role at all, it is
+ * `workspace-shared.ts`'s project-role ladder — so the sentence described an
+ * audience the `Role` union cannot produce. Anything that reads like a role
+ * list beside this constant is stale by construction: a custom tenant role
+ * granted `ledger.view` opens the app, and one without it does not, whatever
+ * it is called.
  */
 export const ACCOUNTING_DOOR_PERMISSION: Permission = PERMISSIONS.ledgerView;
 

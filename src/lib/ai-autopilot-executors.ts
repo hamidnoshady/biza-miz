@@ -59,8 +59,15 @@ export interface AutopilotReverterContext {
 
 export type AutopilotReverter = (ctx: AutopilotReverterContext) => Promise<AutopilotExecutionResult>;
 
-/** Every row an executor creates says so, so an automated write never reads as typed by hand. */
-export const AUTOPILOT_NOTE_PREFIX = "ثبت خودکار دستیار — ";
+/**
+ * Every row an executor creates says so, so an automated write never reads as
+ * typed by hand. The string itself lives in the framework-free
+ * `ai-provenance.ts`, because a screen that wants to show *who* drafted
+ * something cannot import this module (it opens a database pool) — re-exported
+ * here so no existing importer has to change.
+ */
+export { AUTOPILOT_NOTE_PREFIX } from "./ai-provenance";
+import { AUTOPILOT_NOTE_PREFIX } from "./ai-provenance";
 
 function fail(errorCode: string): AutopilotExecutionResult {
   return { ok: false, result: { error: errorCode }, errorCode };

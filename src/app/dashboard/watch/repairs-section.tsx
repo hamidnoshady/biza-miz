@@ -62,7 +62,10 @@ export function RepairsSection({
   // (the current owner may differ from the original buyer).
   const [customer, setCustomer] = useState<PickerCustomer | null>(null);
   const [laborCharge, setLaborCharge] = useState("0");
-  const [vatPercent, setVatPercent] = useState("9");
+  // Empty = the business's own rate from «تنظیمات مالیات»: the intake route
+  // resolves an omitted rate from `tax.config` (audit F05). A typed value,
+  // 0 included, overrides it for this ticket.
+  const [vatPercent, setVatPercent] = useState("");
 
   async function intake(e: React.FormEvent) {
     e.preventDefault();
@@ -76,7 +79,7 @@ export function RepairsSection({
           serialId: serialId || null,
           customerId: customer?.id || null,
           laborCharge: money.fromInput(Math.max(0, Math.round(Number(laborCharge || 0)))),
-          vatPercent: Number(vatPercent || 0),
+          vatPercent: vatPercent.trim() === "" ? undefined : Number(vatPercent),
         }),
       }),
     );
@@ -176,6 +179,7 @@ export function RepairsSection({
                 dir="ltr"
                 inputMode="decimal"
                 value={vatPercent}
+                placeholder="نرخ کسب‌وکار"
                 onChange={(e) => setVatPercent(e.target.value)}
               />
             </Field>

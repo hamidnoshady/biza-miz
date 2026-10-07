@@ -198,61 +198,67 @@ Suggested prompt chips appear on open, and **«توضیح این عدد»** on e
 previews/pinned widgets opens the assistant with the visible report context
 pre-filled. Every proposed action is recorded in a tenant-scoped audit trail with
 the prompting user, proposed payload summary, and applied/failed/dismissed outcome,
-available to Owner/Manager at `/dashboard/ai`. No real WhatsApp, Telegram, voice,
+available to Owner/Manager in the dashboard assistant's Activity panel (`/dashboard?aiPanel=activity`). No real WhatsApp, Telegram, voice,
 SMS, or automatic customer-message channel is introduced.
 
-**Platform-owned provider and billing.** **LiteLLM** is the only supported
-provider (Phase 39 collapsed the old direct-vendor/gateway split to one connection
-shape) — one platform-owned connection configured only at `/platform/ai`. Businesses
-never enter or receive a provider key. Each assistant turn atomically reserves a
-configured maximum, settles its actual provider token usage, and refunds unused
-credit; a business with insufficient credit is blocked before a provider request.
-Credit, subscription and top-up management is not a console surface anymore: the
-ledger keeps working, and the platform console's AI section is a purely technical
-LiteLLM console. Deployment-level env variables remain bootstrap fallbacks; see
-`.env.example`.
+**Platform-owned provider and billing.** **LiteLLM** is the only supported AI connection;
+there is no direct-provider or `AI_API_KEY` fallback. The platform singleton is stored in
+`platform_ai_gateway`; app-side `LITELLM_*` connection variables are bootstrap defaults only
+until a row is saved. Businesses never enter or receive provider credentials. Each assistant turn is
+reserved, settled against provider usage and the Rial wallet/plan allowance, and blocked before
+a provider request when the business cannot pay. Plan/Billing—not the AI connection page—owns
+prices, allowances, wallet operations and revenue.
 
-**What the console does and does not own.** `/platform/ai` configures the gateway
-address, master key, the per-mode model **aliases**, the published prompt layers,
-the system agents and their assignments, the Deep Research caps, the virtual-keys
-toggle, and per-business **and per-branch** virtual-key lifecycle (provision, verify, rotate,
-revoke) plus fleet-wide readiness monitoring — searchable, filterable
-(ready / missing key / key sync error / entitlement disabled / branch override /
-gateway unavailable) and paginated so it stays usable with many tenants. It never
-becomes a billing, routing or model-policy surface: failover between upstream
-vendors, per-model rate limits/budgets, retries and MCP tool policy live entirely in
-LiteLLM's own config (`docker/litellm/config.yaml`), never in the app. It also never
-runs the app's own semantic cache or its own pgvector RAG stack — both are
-infrastructure the LiteLLM layer owns, and the app's local copies were removed
-(migration 0204). A **system agent** is built and versioned only here; a business
-meets one through an assigned suggestion card, and never builds one. Selecting a
-specific business/branch shows a scope-aware readiness view for that exact pair —
-entitlement, credential source (its own key vs. inherited from the business), model
-alias, last verification time and any technical sync error — not just the
-business-default status.
+**The AI control plane has distinct pages.** `/platform/ai` is the technical gateway and
+business/branch key lifecycle page. Runtime modes, published prompt layers, system agents,
+research caps and widgets live under `/platform/ai/modes`, `/platform/ai/prompts`,
+`/platform/ai/agents`, `/platform/ai/research` and `/platform/ai/widgets`. The fleet is
+searchable, status-filtered (ready / missing key / key sync error / entitlement disabled /
+branch override / gateway unavailable) and paginated. Selecting a specific `(business,
+location)` shows entitlement, gateway readiness, effective credential source, business and
+branch key status, inherited-vs-branch credential, effective model alias, last verification
+and separate technical sync errors. The old `/platform/ai/gateway` **page URL** redirects to
+`/platform/ai`; `/api/platform/ai/gateway` is the live API route. Prompt versioning at
+`/platform/ai/prompts` is current and is not the retired prompt-fragment manager.
 
-Two things deliberately do not move. **Billing stays in Rial** — LiteLLM's own USD
-budgets, if configured, are only a technical backstop; the ledger in
-`ai_business_billing` is still the only thing a business is billed against, and the
-gateway's reported spend is a reconciliation diagnostic. And **a gateway failure
-fails closed, never silently**: since Phase 39 there is no other provider to fall
-back to, so a gateway or database error while resolving config surfaces the
-assistant's existing "unavailable" state rather than throwing or pretending a working
-connection exists.
+**Ownership boundaries.** LiteLLM owns upstream deployments, provider routing, retries,
+fallbacks, provider-side limits and any proxy budgets. The application owns prompt versions,
+runtime modes, permission-filtered OpenAI function tools, tenant isolation, conversation and
+research orchestration, and settlement. The app no longer runs its own semantic answer cache
+or pgvector RAG stack (migration 0204). It does not send LiteLLM prompt IDs or proxy MCP
+declarations from its assistant runtime; the POS's external MCP connector at `/api/mcp` is a
+separate surface, not a proxy MCP registry. Old app-side fallback/model/MCP mirror columns
+were dropped in migration 0184. A system agent is built/versioned by Superadmin and reaches a
+business through an assignment; tenants do not build platform agents.
 
-The `litellm` container in `docker-compose.yml` is optional and off by default — a
-deployment can instead point `LITELLM_BASE_URL` at an already-managed LiteLLM
-instance. Start the bundled one with `docker compose --profile ai up -d litellm`
-(config template at `docker/litellm/config.yaml`), then finish the technical setup on
-`/platform/ai`: connection, model aliases, and per-business/per-branch keys. It is
-bound to the compose network only, never published to the host, because it holds
-every upstream vendor key and its management API can mint keys and read spend. There
-is no user-level AI settings page — a business's model alias is set by the platform.
-See [Phase 37](docs/phases/Phase-37-LiteLLM-Gateway.md) and
-[Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md). The ownership
-boundary between the app and the LiteLLM layer, the prompt layer order, the
-layered memory hierarchy and the Deep Research workflow are in
-[docs/ai-subsystem-architecture.md](docs/ai-subsystem-architecture.md).
+Billing remains in integer Rial. LiteLLM's USD spend and optional gateway budgets are
+reconciliation/technical safeguards, not a second product wallet. Gateway or database
+resolution failures fail closed; the app has no second provider to silently fall back to.
+
+The bundled `litellm` service is optional and off by default; when AI is enabled, either run
+that profile or point the app at a separately managed LiteLLM instance. Start the bundled
+proxy with `docker compose --profile ai up -d litellm` (template:
+`docker/litellm/config.yaml`). It is not published to the host because it holds upstream
+provider credentials and exposes key-management APIs. The provider secret `OPENAI_API_KEY`
+in compose is consumed by LiteLLM only, never by the POS app. There is no tenant provider or
+model-settings page; `/dashboard/ai` is a compatibility redirect to `/dashboard`, where assistant
+panels use `?aiPanel=...`. `/dashboard/ai/settings` and `/ai/settings` also redirect to the
+dashboard. See [Phase 37](docs/phases/Phase-37-LiteLLM-Gateway.md),
+[Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md) and
+[docs/ai-subsystem-architecture.md](docs/ai-subsystem-architecture.md) for current ownership,
+prompt composition, memory and Deep Research details.
+
+**Secret-column rollout (operators).** Against every deployment database, run
+`npm run db:encrypt-ai-secrets -- --dry-run`, then `npm run db:encrypt-ai-secrets`, then
+`npm run db:encrypt-ai-secrets -- --verify-only` with the app's current
+`INTEGRATIONS_ENCRYPTION_KEY` (or `JWT_SECRET`). Deploy the ciphertext-only runtime with
+`AI_GATEWAY_SECRET_CUTOVER_DEFER=true`; the normal entrypoint then leaves migration 0209 pending
+so production ciphertext-backed reads/probes can be verified on every instance first. Drain
+pre-cutover instances, then run `AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true npm run db:migrate`.
+Both the migration runner and SQL require that post-verification confirmation when credentials
+exist. Remove the temporary flags afterward. See [Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md)
+for the full sequence. The local repository cannot establish that production backfill or
+verification has occurred.
 
 ## On-site deployment (café laptop / mini PC)
 
@@ -411,8 +417,9 @@ could not do was take an instruction and keep it. An owner who already knows the
 شیفت بسته می‌شود، نانی که مانده را ضایعات بزن» — had nowhere to put that sentence.
 
 A **job** is that sentence: a ready-made template, the owner's intent (which item, which reason,
-which formula), a trigger, and an approval mode. It lives at `/dashboard/ai` ← «همکار هوشمند», and
-each firing produces a **run** in the approval inbox.
+which formula), a trigger, and an approval mode. It lives in the dashboard assistant's
+Coworkers panel (`/dashboard?aiPanel=coworkers`), and each firing produces a **run** in the
+approval inbox.
 
 - **Triggers are business events, not just clock times.** `shift_open`, `shift_close` and
   `day_close` are facts `employee_shifts` and `business_day_closures` already know; a cron
@@ -1054,8 +1061,11 @@ waste, trial balance) becomes a suite an accountant can actually close a year on
   permissions), independent of the `ledger` feature flag.
 - **Bank & cash reconciliation**, **expense management** (categorised, with attachments and
   recurring expenses), and **payroll entries** (accrual/payment postings, not a payroll engine).
-- **Manual journals** — draft → review → post, reversal rather than deletion, recurring
-  templates, and an approval permission distinct from posting.
+- **Manual journals** — draft → review → post, reversal rather than deletion, and an approval
+  permission (`ledger.approve`) distinct from proposing one (`ledger.propose`). Each draft keeps
+  its proposer, its branch, its business-local accounting date and — once decided — its
+  approver or the reviewer who rejected it and why. Recurring journal templates were
+  deliberately deferred by Phase 16 and are **not** implemented.
 - **Chart-of-accounts customisation** and **VAT/tax reporting** (output vs. input VAT, net
   payable position).
 

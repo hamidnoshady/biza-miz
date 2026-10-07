@@ -18,7 +18,8 @@ import {
   type AccountingFinding,
   type AccountingReviewSnapshot,
 } from "./accounting-review";
-import { coaTemplateForIndustry, WELL_KNOWN_CODES } from "./coa-template";
+import { coaTemplateForIndustry } from "./coa-template";
+import { RECONCILABLE_ACCOUNTS, RECONCILABLE_ACCOUNT_CODES } from "./bank-reconciliation";
 import { industryProfile } from "./industry-profile";
 import type { Industry } from "./industries";
 
@@ -276,12 +277,17 @@ export async function collectAccountingSnapshot(
   });
 
   snapshot.unreconciledBankLines = await safely("unreconciled bank lines", snapshot.unreconciledBankLines, unavailableChecks, async () => {
-    // The two accounts reconciliation-service.ts can actually reconcile, taken
-    // from the same constants it uses rather than re-typed here. The literals
-    // this replaced were ('1110', '1120') — wrong on both ends: 1110 is the
-    // business's own bank account, which no reconciliation can ever clear, so
-    // its lines accumulated as permanently "unmatched"; and 1100 (صندوق), which
-    // the cash reconciliation does clear, was missing entirely.
+    // Every account «تطبیق بانکی و صندوق» can actually reconcile, taken from
+    // the same list the service, the API routes and the assistant read
+    // (`RECONCILABLE_ACCOUNT_CODES`) rather than re-typed here — this check
+    // has drifted twice already. First it was ('1110', '1120'), which counted
+    // the till's lines as unreconcilable while missing the account the cash
+    // reconciliation does clear. Then it was corrected to صندوق + کارت‌خوان
+    // with a comment insisting ۱۱۱۰ could never be reconciled, which stopped
+    // being true in Phase 30: a cheque clears *into the bank*, so a business
+    // taking cheques accumulates unclaimed movements on ۱۱۱۰ and this audit
+    // reported the books as clean while they sat there. One list, one reader.
+    const codes = RECONCILABLE_ACCOUNTS.map((key) => RECONCILABLE_ACCOUNT_CODES[key]);
     const { rows } = await query<{ count: string; oldest_age: string | null; amount: string }>(
       `SELECT count(*)::text AS count,
               max(floor(extract(epoch FROM (now() - je.entry_date::timestamptz)) / 86400))::text AS oldest_age,
@@ -290,9 +296,9 @@ export async function collectAccountingSnapshot(
          JOIN journal_entries je ON je.id = jl.entry_id
          JOIN accounts a ON a.id = jl.account_id
         WHERE je.business_id = $1
-          AND a.code IN ($2, $3)
+          AND a.code = ANY($2::text[])
           AND NOT EXISTS (SELECT 1 FROM bank_reconciliation_lines brl WHERE brl.journal_line_id = jl.id)`,
-      [businessId, WELL_KNOWN_CODES.cash, WELL_KNOWN_CODES.bankClearing],
+      [businessId, codes],
     );
     const row = rows[0];
     return {

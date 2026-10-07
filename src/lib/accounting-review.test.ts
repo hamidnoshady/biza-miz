@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   emptyAccountingSnapshot,
   filterFindings,
+  RECONCILABLE_ACCOUNT_NAMES,
   reviewAccounting,
   summarizeFindings,
   type AccountingReviewSnapshot,
@@ -277,5 +278,28 @@ describe("a review that could not run every check", () => {
       snapshot({ unreconciledBankLines: { count: 2, oldestAgeDays: 3, amountRial: 100 } }),
     );
     expect(summarizeFindings(findings, ["negative stock"])).toContain("کامل نیست");
+  });
+});
+
+/**
+ * Issue #830: the deterministic audit's unreconciled-lines check and its copy
+ * both used to name two of the three accounts the reconciliation itself covers.
+ * The count came from a query built on the canonical list; the sentence was
+ * typed by hand and said «صندوق یا کارت‌خوان» while a cheque-taking business's
+ * money sat unclaimed on بانک ۱۱۱۰.
+ */
+describe("the unreconciled-lines finding names every reconcilable account", () => {
+  it("lists صندوق, بانک and کارت‌خوان, derived from the canonical list", () => {
+    const finding = reviewAccounting(
+      snapshot({ unreconciledBankLines: { count: 4, oldestAgeDays: 12, amountRial: 900_000 } }),
+    ).find((candidate) => candidate.code === "unreconciled_bank_lines");
+
+    expect(finding).toBeTruthy();
+    expect(RECONCILABLE_ACCOUNT_NAMES).toEqual(["صندوق", "بانک", "کارت‌خوان (در راه)"]);
+    for (const name of RECONCILABLE_ACCOUNT_NAMES) {
+      expect(finding!.detail, name).toContain(name);
+    }
+    // The stale two-account sentence, which is what let ۱۱۱۰ go unmentioned.
+    expect(finding!.detail).not.toContain("ردیف صندوق یا کارت‌خوان");
   });
 });

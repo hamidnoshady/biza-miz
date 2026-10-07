@@ -4,7 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { requireCapabilityForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { createRepairTicket, listRepairTickets } from "@/lib/repairs-service";
-import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import { getBusinessVatPercent } from "@/lib/vat-policy-service";
 import { REPAIR_STATUSES, type RepairStatus } from "@/lib/watch";
 
 // Wave 10: repair_tickets is a shared module — a jewelry business repairing a
@@ -57,11 +57,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // business's one canonical tax configuration (the same `tax.config`
   // setting the wizard and Settings → Tax maintain), not a route literal:
   // a repair bill is as VAT-applicable as any other sale of this business.
-  let vatPercent = body.vatPercent;
-  if (vatPercent == null) {
-    const tax = await getSetting<{ defaultRate?: number }>(session.businessId, SETTING_KEYS.tax);
-    vatPercent = Number.isFinite(Number(tax?.defaultRate)) ? Number(tax?.defaultRate) : 0;
-  }
+  const vatPercent = body.vatPercent ?? (await getBusinessVatPercent(session.businessId));
 
   try {
     const ticket = await createRepairTicket({

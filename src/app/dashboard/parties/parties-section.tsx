@@ -1021,9 +1021,12 @@ function PartyCell({
       // use. A rate stored as a *string* by an importer rendered «—» before —
       // the column claimed the party had no rate while the ledger was posting
       // one.
+      // `null` is «follows the business rate», not 0 and not a missing value.
       const tax = taxPercentageOf(party);
       return (
-        <span className="tabular-nums text-muted-foreground">{toPersianDigits(String(tax))}٪</span>
+        <span className="tabular-nums text-muted-foreground">
+          {tax === null ? "نرخ کسب‌وکار" : `${toPersianDigits(String(tax))}٪`}
+        </span>
       );
     }
     case "balance":

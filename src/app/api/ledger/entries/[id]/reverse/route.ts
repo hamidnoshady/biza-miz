@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { ManualJournalError, reverseEntry } from "@/lib/manual-journal-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
+import { isUuid } from "@/lib/uuid";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -20,6 +21,11 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   if (error) return error;
 
   const { id } = await ctx.params;
+  // See the drafts routes: a non-UUID raises `invalid input syntax for type
+  // uuid` inside PostgreSQL rather than returning no row, so it is answered
+  // here with the 404 the caller is entitled to.
+  if (!isUuid(id)) return NextResponse.json({ error: "entry_not_found" }, { status: 404 });
+
   let body: { memo?: string; entryDate?: string } = {};
   try {
     body = await request.json();
