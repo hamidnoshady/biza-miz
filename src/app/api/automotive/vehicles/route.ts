@@ -144,6 +144,22 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       })
     : [];
 
+  // §6: the asking price travels with the acquisition, but the *floor* is the
+  // owner's number — naming one while registering a car is a price decision,
+  // not an inventory one.
+  if (
+    (body.minimumPriceRial != null && body.minimumPriceRial !== "") ||
+    (body.wholesalePriceRial != null && body.wholesalePriceRial !== "") ||
+    (body.promotionalPriceRial != null && body.promotionalPriceRial !== "")
+  ) {
+    if (!(await holdsPermission(session, PERMISSIONS.vehiclesPriceEdit))) {
+      return NextResponse.json(
+        { error: "MISSING_PERMISSION", permission: PERMISSIONS.vehiclesPriceEdit },
+        { status: 403 },
+      );
+    }
+  }
+
   // One permission per act: recording money against a car needs
   // `vehicles.expense_record` on top of the create permission that got us here.
   if (initialCosts.length > 0 && !(await holdsPermission(session, PERMISSIONS.vehiclesExpenseRecord))) {

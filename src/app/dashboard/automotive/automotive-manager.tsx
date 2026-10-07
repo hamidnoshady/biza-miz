@@ -14,19 +14,24 @@
  * browser never holds the owner's costs and margins even in a devtools panel.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, ErrorBox, Field, PrimaryButton, SecondaryButton, errorMessage } from "../ui";
+import { api, ErrorBox, Field, PrimaryButton, SecondaryButton, errorMessage, inputClass } from "../ui";
 import { IndustryManagerShell, type Runner, type ManagerTab } from "../industry-manager-shell";
 import { EmptyState, KpiCard, KpiRow, SectionCard, SectionCardSkeleton, StatusBadge } from "../page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "../data-table";
 import { FilterChip, FilterChipRow, FilterToolbar, FilterToolbarSearch, SearchField } from "../filters";
 import { VEHICLE_STATE_LABELS, VEHICLE_CONDITION_LABELS, type VehicleState } from "@/lib/automotive";
+import { formatJalali } from "@/lib/jalali";
+import { CustomerPicker, type PickerCustomer } from "../customer-picker";
+import { JalaliDatePicker } from "../jalali-date-picker";
 
-type SectionKey = "overview" | "stock" | "acquire" | "expenses";
+type SectionKey = "overview" | "stock" | "acquire" | "reservations" | "sales" | "expenses";
 
 const TABS: readonly ManagerTab<SectionKey>[] = [
   { key: "overview", label: "نمای کلی" },
   { key: "stock", label: "موجودی خودرو" },
   { key: "acquire", label: "ثبت و خرید خودرو" },
+  { key: "reservations", label: "رزروها" },
+  { key: "sales", label: "فروش خودرو" },
   { key: "expenses", label: "هزینهٔ خودرو" },
 ];
 
@@ -65,7 +70,11 @@ export interface VehicleListItemDto {
   chassisNumber: string | null;
   plateNumber: string | null;
   reservedForName: string | null;
+  reservedForCustomerId: string | null;
+  reservedDepositRial: number;
   reservedUntil: string | null;
+  soldOn: string | null;
+  soldPriceRial: number | null;
 }
 
 interface OverviewDto {
@@ -283,6 +292,22 @@ export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
         </div>
       ) : null}
 
+      {section === "reservations" ? (
+        <div
+          role="tabpanel"
+          id="automotive-panel-reservations"
+          aria-labelledby="automotive-tab-reservations"
+        >
+          <ReservationsSection vehicles={vehicles} run={run} />
+        </div>
+      ) : null}
+
+      {section === "sales" ? (
+        <div role="tabpanel" id="automotive-panel-sales" aria-labelledby="automotive-tab-sales">
+          <SalesSection vehicles={vehicles} canSeeCost={canSeeCost} run={run} />
+        </div>
+      ) : null}
+
       {section === "expenses" ? (
         <div role="tabpanel" id="automotive-panel-expenses" aria-labelledby="automotive-tab-expenses">
           <ExpensesSection vehicles={vehicles} run={run} />
@@ -381,48 +406,48 @@ function AcquireSection({ run }: { run: Runner }) {
     <SectionCard title="ثبت خودرو و خرید" description="موجودی">
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <Field label="برند (سازنده)">
-          <input className="input" value={make} onChange={(event) => setMake(event.target.value)} />
+          <input className={inputClass} value={make} onChange={(event) => setMake(event.target.value)} />
         </Field>
         <Field label="مدل">
-          <input className="input" value={model} onChange={(event) => setModel(event.target.value)} />
+          <input className={inputClass} value={model} onChange={(event) => setModel(event.target.value)} />
         </Field>
         <Field label="تیپ / نسخه">
-          <input className="input" value={trim} onChange={(event) => setTrim(event.target.value)} />
+          <input className={inputClass} value={trim} onChange={(event) => setTrim(event.target.value)} />
         </Field>
         <Field label="سال ساخت (مدل) — شمسی">
-          <input className="input" inputMode="numeric" value={modelYear} onChange={(event) => setModelYear(event.target.value)} />
+          <input className={inputClass} inputMode="numeric" value={modelYear} onChange={(event) => setModelYear(event.target.value)} />
         </Field>
         <Field label="وضعیت">
-          <select className="input" value={condition} onChange={(event) => setCondition(event.target.value as "new" | "used")}>
+          <select className={inputClass} value={condition} onChange={(event) => setCondition(event.target.value as "new" | "used")}>
             <option value="new">نو</option>
             <option value="used">کارکرده</option>
           </select>
         </Field>
         <Field label="شماره شاسی (VIN)">
-          <input className="input" value={vin} onChange={(event) => setVin(event.target.value)} />
+          <input className={inputClass} value={vin} onChange={(event) => setVin(event.target.value)} />
         </Field>
         <Field label="شماره شاسی/تنه">
-          <input className="input" value={chassisNumber} onChange={(event) => setChassisNumber(event.target.value)} />
+          <input className={inputClass} value={chassisNumber} onChange={(event) => setChassisNumber(event.target.value)} />
         </Field>
         <Field label="شماره انبار">
           <input
-            className="input"
+            className={inputClass}
             value={stockNumber}
             onChange={(event) => setStockNumber(event.target.value)}
             placeholder="خالی بگذارید تا خودکار شماره‌گذاری شود"
           />
         </Field>
         <Field label="پلاک">
-          <input className="input" value={plateNumber} onChange={(event) => setPlateNumber(event.target.value)} />
+          <input className={inputClass} value={plateNumber} onChange={(event) => setPlateNumber(event.target.value)} />
         </Field>
         {condition === "used" ? (
           <>
             <Field label="کارکرد (کیلومتر)">
-              <input className="input" inputMode="numeric" value={mileageKm} onChange={(event) => setMileageKm(event.target.value)} />
+              <input className={inputClass} inputMode="numeric" value={mileageKm} onChange={(event) => setMileageKm(event.target.value)} />
             </Field>
             <Field label="تعداد مالکان قبلی">
               <input
-                className="input"
+                className={inputClass}
                 inputMode="numeric"
                 value={priorOwners}
                 onChange={(event) => setPriorOwners(event.target.value)}
@@ -431,7 +456,7 @@ function AcquireSection({ run }: { run: Runner }) {
           </>
         ) : null}
         <Field label="نحوهٔ خرید">
-          <select className="input" value={acquisitionSource} onChange={(event) => setAcquisitionSource(event.target.value)}>
+          <select className={inputClass} value={acquisitionSource} onChange={(event) => setAcquisitionSource(event.target.value)}>
             {ACQUISITION_SOURCES.map((option) => (
               <option key={option.value} value={option.value}>
                 {option.label}
@@ -440,13 +465,13 @@ function AcquireSection({ run }: { run: Runner }) {
           </select>
         </Field>
         <Field label="تاریخ خرید (YYYY-MM-DD)">
-          <input className="input" value={acquisitionDate} onChange={(event) => setAcquisitionDate(event.target.value)} />
+          <input className={inputClass} value={acquisitionDate} onChange={(event) => setAcquisitionDate(event.target.value)} />
         </Field>
         <Field label="بهای خرید (ریال)">
-          <input className="input" inputMode="numeric" value={purchaseCost} onChange={(event) => setPurchaseCost(event.target.value)} />
+          <input className={inputClass} inputMode="numeric" value={purchaseCost} onChange={(event) => setPurchaseCost(event.target.value)} />
         </Field>
         <Field label="طرف حساب پرداخت">
-          <select className="input" value={settlement} onChange={(event) => setSettlement(event.target.value)}>
+          <select className={inputClass} value={settlement} onChange={(event) => setSettlement(event.target.value)}>
             {SETTLEMENTS.map((option) => (
               <option key={option.value} value={option.value}>
                 {option.label}
@@ -455,10 +480,10 @@ function AcquireSection({ run }: { run: Runner }) {
           </select>
         </Field>
         <Field label="قیمت فروش (ریال)">
-          <input className="input" inputMode="numeric" value={askingPrice} onChange={(event) => setAskingPrice(event.target.value)} />
+          <input className={inputClass} inputMode="numeric" value={askingPrice} onChange={(event) => setAskingPrice(event.target.value)} />
         </Field>
         <Field label="حداقل قیمت (ریال)">
-          <input className="input" inputMode="numeric" value={minimumPrice} onChange={(event) => setMinimumPrice(event.target.value)} />
+          <input className={inputClass} inputMode="numeric" value={minimumPrice} onChange={(event) => setMinimumPrice(event.target.value)} />
         </Field>
       </div>
       <div className="mt-4 flex items-center gap-2">
@@ -534,7 +559,7 @@ function ExpensesSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; ru
     <SectionCard title="هزینهٔ خودرو" description="سرمایه‌ای یا دوره‌ای">
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <Field label="خودرو">
-          <select className="input" value={serialId} onChange={(event) => setSerialId(event.target.value)}>
+          <select className={inputClass} value={serialId} onChange={(event) => setSerialId(event.target.value)}>
             <option value="">— انتخاب خودرو —</option>
             {vehicles.map((vehicle) => (
               <option key={vehicle.serialId} value={vehicle.serialId}>
@@ -544,7 +569,7 @@ function ExpensesSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; ru
           </select>
         </Field>
         <Field label="نوع هزینه">
-          <select className="input" value={category} onChange={(event) => setCategory(event.target.value)}>
+          <select className={inputClass} value={category} onChange={(event) => setCategory(event.target.value)}>
             {EXPENSE_CATEGORIES.map((option) => (
               <option key={option.value} value={option.value}>
                 {option.label}
@@ -554,7 +579,7 @@ function ExpensesSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; ru
         </Field>
         <Field label="اثر حسابداری">
           <select
-            className="input"
+            className={inputClass}
             value={posting}
             onChange={(event) => setPosting(event.target.value as "capitalized" | "period_expense")}
           >
@@ -563,13 +588,13 @@ function ExpensesSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; ru
           </select>
         </Field>
         <Field label="مبلغ (ریال)">
-          <input className="input" inputMode="numeric" value={amount} onChange={(event) => setAmount(event.target.value)} />
+          <input className={inputClass} inputMode="numeric" value={amount} onChange={(event) => setAmount(event.target.value)} />
         </Field>
         <Field label="تاریخ (YYYY-MM-DD)">
-          <input className="input" value={incurredOn} onChange={(event) => setIncurredOn(event.target.value)} />
+          <input className={inputClass} value={incurredOn} onChange={(event) => setIncurredOn(event.target.value)} />
         </Field>
         <Field label="پرداخت">
-          <select className="input" value={settlement} onChange={(event) => setSettlement(event.target.value)}>
+          <select className={inputClass} value={settlement} onChange={(event) => setSettlement(event.target.value)}>
             <option value="payable">بستانکار (پرداختنی)</option>
             <option value="cash">نقدی</option>
             <option value="bank">بانکی</option>
@@ -577,10 +602,10 @@ function ExpensesSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; ru
           </select>
         </Field>
         <Field label="شماره سند">
-          <input className="input" value={documentRef} onChange={(event) => setDocumentRef(event.target.value)} />
+          <input className={inputClass} value={documentRef} onChange={(event) => setDocumentRef(event.target.value)} />
         </Field>
         <Field label="توضیح">
-          <input className="input" value={notes} onChange={(event) => setNotes(event.target.value)} />
+          <input className={inputClass} value={notes} onChange={(event) => setNotes(event.target.value)} />
         </Field>
       </div>
       {selected ? (
@@ -595,6 +620,640 @@ function ExpensesSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; ru
         </PrimaryButton>
       </div>
     </SectionCard>
+  );
+}
+
+/* ===========================================================================
+ * §7 — reservations and their deposits
+ * ===========================================================================
+ *
+ * The hold is the dealership's promise: this car, for this customer, until
+ * this day, with this much of their money already in. The screen does three
+ * things and refuses to blur them:
+ *
+ *   * a hold can only be taken on a car that is actually on the shelf, so the
+ *     picker lists `in_stock`/`acquired` cars only — the server refuses the
+ *     rest anyway, and offering them here would just be a button that fails;
+ *   * the deposit carries an explicit method and an explicit refundability
+ *     checkbox, because «ودیعه برمی‌گردد یا نه» is a promise to a person, not
+ *     a default;
+ *   * releasing demands a reason, which is what the owner reads later.
+ *
+ * Money the caller may not see never reaches this component: deposits are
+ * ordinary money, so they travel; costs and margins do not (see the file's
+ * header).
+ */
+
+export interface VehicleReservationDto {
+  id: string;
+  serialId: string;
+  stockNumber: string;
+  displayName: string;
+  customerId: string;
+  customerName: string | null;
+  status: "active" | "converted" | "released" | "expired";
+  expiresAt: string | null;
+  expiresAtTime: string | null;
+  depositRial: number;
+  depositMethod: string | null;
+  depositRefundable: boolean;
+  depositNote: string | null;
+  note: string | null;
+  releaseReason: string | null;
+  createdAt: string;
+  closedAt: string | null;
+}
+
+const HOLD_STATUS_LABELS: Record<VehicleReservationDto["status"], string> = {
+  active: "فعال",
+  converted: "تبدیل به فروش",
+  released: "آزادشده",
+  expired: "منقضی",
+};
+
+const HOLD_STATUS_TONE: Record<VehicleReservationDto["status"], "active" | "positive" | "neutral" | "danger"> = {
+  active: "active",
+  converted: "positive",
+  released: "neutral",
+  expired: "danger",
+};
+
+const DEPOSIT_METHODS = [
+  { value: "cash", label: "نقدی" },
+  { value: "card", label: "کارت‌خوان" },
+  { value: "card_to_card", label: "کارت به کارت" },
+  { value: "online", label: "آنلاین" },
+];
+
+function ReservationsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: Runner }) {
+  const [reservations, setReservations] = useState<VehicleReservationDto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const [serialId, setSerialId] = useState("");
+  const [customer, setCustomer] = useState<PickerCustomer | null>(null);
+  const [expiresAt, setExpiresAt] = useState("");
+  const [expiresAtTime, setExpiresAtTime] = useState("");
+  const [deposit, setDeposit] = useState("");
+  const [depositMethod, setDepositMethod] = useState("cash");
+  const [depositRefundable, setDepositRefundable] = useState(true);
+  const [depositNote, setDepositNote] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [releaseReason, setReleaseReason] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    void (async () => {
+      const result = await api<{ reservations: VehicleReservationDto[] }>("/api/automotive/reservations");
+      if (cancelled) return;
+      if (result.ok) setReservations(result.data.reservations ?? []);
+      setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadKey]);
+
+  const reservable = vehicles.filter((vehicle) => vehicle.state === "in_stock" || vehicle.state === "acquired");
+  const depositRial = Math.max(0, Math.trunc(Number(deposit || 0)));
+
+  async function submit() {
+    if (!serialId || !customer) return;
+    setBusy(true);
+    const ok = await run(async () => {
+      const result = await api<{ error?: string; message?: string }>("/api/automotive/reservations", {
+        method: "POST",
+        body: JSON.stringify({
+          serialId,
+          customerId: customer.id,
+          expiresAt: expiresAt || null,
+          expiresAtTime: expiresAtTime || null,
+          depositRial,
+          depositMethod: depositRial > 0 ? depositMethod : null,
+          depositRefundable,
+          depositNote: depositNote || null,
+          note: note || null,
+        }),
+      });
+      if (result.ok) setReloadKey((key) => key + 1);
+      return result;
+    });
+    if (ok) {
+      setSerialId("");
+      setCustomer(null);
+      setExpiresAt("");
+      setExpiresAtTime("");
+      setDeposit("");
+      setDepositNote("");
+      setNote("");
+    }
+    setBusy(false);
+  }
+
+  async function release(id: string) {
+    const reason = (releaseReason[id] ?? "").trim();
+    if (!reason) return;
+    setBusy(true);
+    const ok = await run(async () => {
+      const result = await api<{ error?: string; message?: string }>(`/api/automotive/reservations/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ reason }),
+      });
+      if (result.ok) setReloadKey((key) => key + 1);
+      return result;
+    });
+    if (ok) setReleaseReason((map) => ({ ...map, [id]: "" }));
+    setBusy(false);
+  }
+
+  const active = reservations.filter((reservation) => reservation.status === "active");
+
+  return (
+    <div className="space-y-4">
+      <SectionCard title="رزرو خودرو برای مشتری" description="یک خودرو، یک مشتری، تا یک تاریخ">
+        <p className="text-xs leading-5 text-muted-foreground">
+          خودروی رزروشده تا وقتی رزرو فعال است به نام مشتری دیگری فروخته نمی‌شود؛ ودیعهٔ دریافتی به حساب
+          «پیش‌دریافت از مشتری» می‌رود (نه درآمد) و هنگام فروش به همان مشتری از فاکتور کسر می‌شود. رزروی که
+          تاریخش گذشته باشد، خودبه‌خود منقضی می‌شود و مانع فروش نمی‌ماند.
+        </p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <Field label="خودرو">
+            <select className={inputClass} value={serialId} onChange={(event) => setSerialId(event.target.value)}>
+              <option value="">— انتخاب خودرو —</option>
+              {reservable.map((vehicle) => (
+                <option key={vehicle.serialId} value={vehicle.serialId}>
+                  {vehicle.stockNumber} — {vehicle.displayName}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="مشتری">
+            <CustomerPicker customer={customer} onChange={setCustomer} idPrefix="automotive-reserve" canCreate={false} />
+          </Field>
+          <Field label="تاریخ انقضا">
+            <JalaliDatePicker value={expiresAt} onChange={setExpiresAt} ariaLabel="تاریخ انقضای رزرو" />
+          </Field>
+          <Field label="ساعت انقضا (اختیاری)">
+            <input
+              className={inputClass}
+              dir="ltr"
+              placeholder="18:00"
+              value={expiresAtTime}
+              onChange={(event) => setExpiresAtTime(event.target.value)}
+            />
+          </Field>
+          <Field label="ودیعه (ریال)">
+            <input
+              className={inputClass}
+              inputMode="numeric"
+              value={deposit}
+              onChange={(event) => setDeposit(event.target.value.replace(/[^0-9]/g, ""))}
+            />
+          </Field>
+          <Field label="روش دریافت ودیعه">
+            <select
+              className={inputClass}
+              value={depositMethod}
+              disabled={depositRial === 0}
+              onChange={(event) => setDepositMethod(event.target.value)}
+            >
+              {DEPOSIT_METHODS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="توضیح ودیعه">
+            <input className={inputClass} value={depositNote} onChange={(event) => setDepositNote(event.target.value)} />
+          </Field>
+          <Field label="یادداشت رزرو">
+            <input className={inputClass} value={note} onChange={(event) => setNote(event.target.value)} />
+          </Field>
+          <Field label="قابل استرداد؟">
+            <label className="flex min-h-10 items-center gap-2 text-sm text-foreground">
+              <input
+                type="checkbox"
+                checked={depositRefundable}
+                onChange={(event) => setDepositRefundable(event.target.checked)}
+              />
+              ودیعه در صورت لغو به مشتری برگردد
+            </label>
+          </Field>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <PrimaryButton onClick={submit} disabled={busy || !serialId || !customer}>
+            {busy ? "در حال ثبت…" : "ثبت رزرو"}
+          </PrimaryButton>
+          {reservable.length === 0 ? (
+            <span className="text-xs text-muted-foreground">خودروی قابل رزروی در این شعبه موجود نیست.</span>
+          ) : null}
+        </div>
+      </SectionCard>
+
+      <SectionCard title="رزروهای فعال" description={`${active.length.toLocaleString("fa-IR")} رزرو باز`}>
+        {loading ? (
+          <SectionCardSkeleton />
+        ) : active.length === 0 ? (
+          <EmptyState title="رزرو فعالی نیست">همهٔ خودروهای این شعبه آزادند.</EmptyState>
+        ) : (
+          <DataTable caption="رزروهای فعال">
+            <DataTableHead>
+              <DataTableRow>
+                <Th>خودرو</Th>
+                <Th>مشتری</Th>
+                <Th>تا تاریخ</Th>
+                <Th>ودیعه</Th>
+                <Th>استرداد</Th>
+                <Th>آزادسازی</Th>
+              </DataTableRow>
+            </DataTableHead>
+            <DataTableBody>
+              {active.map((reservation) => (
+                <DataTableRow key={reservation.id}>
+                  <Td>
+                    <div className="font-medium">{reservation.displayName}</div>
+                    <div className="font-mono text-xs text-muted-foreground">{reservation.stockNumber}</div>
+                  </Td>
+                  <Td>{reservation.customerName ?? "—"}</Td>
+                  <Td>
+                    {reservation.expiresAt ? formatJalali(reservation.expiresAt) : "تا آزادسازی"}
+                    {reservation.expiresAtTime ? ` — ${reservation.expiresAtTime}` : ""}
+                  </Td>
+                  <Td>
+                    {money(reservation.depositRial)} ریال
+                    {reservation.depositRial > 0 ? (
+                      <div className="text-xs text-muted-foreground">
+                        {DEPOSIT_METHODS.find((method) => method.value === reservation.depositMethod)?.label ??
+                          reservation.depositMethod}
+                        {reservation.depositRefundable ? " · قابل استرداد" : " · غیرقابل استرداد"}
+                      </div>
+                    ) : null}
+                  </Td>
+                  <Td>
+                    <StatusBadge tone={HOLD_STATUS_TONE[reservation.status]}>
+                      {HOLD_STATUS_LABELS[reservation.status]}
+                    </StatusBadge>
+                  </Td>
+                  <Td>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        className={`${inputClass} sm:max-w-xs`}
+                        placeholder="دلیل آزادسازی"
+                        value={releaseReason[reservation.id] ?? ""}
+                        onChange={(event) =>
+                          setReleaseReason((map) => ({ ...map, [reservation.id]: event.target.value }))
+                        }
+                      />
+                      <SecondaryButton
+                        onClick={() => release(reservation.id)}
+                        disabled={busy || !(releaseReason[reservation.id] ?? "").trim()}
+                      >
+                        آزادسازی
+                      </SecondaryButton>
+                    </div>
+                  </Td>
+                </DataTableRow>
+              ))}
+            </DataTableBody>
+          </DataTable>
+        )}
+      </SectionCard>
+
+      <SectionCard title="تاریخچهٔ رزروها" description="شامل رزروهای بسته‌شده">
+        {loading ? (
+          <SectionCardSkeleton />
+        ) : reservations.filter((reservation) => reservation.status !== "active").length === 0 ? (
+          <EmptyState title="تاریخچه‌ای نیست">هنوز رزروی بسته نشده است.</EmptyState>
+        ) : (
+          <DataTable caption="تاریخچهٔ رزروها">
+            <DataTableHead>
+              <DataTableRow>
+                <Th>خودرو</Th>
+                <Th>مشتری</Th>
+                <Th>وضعیت</Th>
+                <Th>ودیعه</Th>
+                <Th>دلیل آزادسازی</Th>
+              </DataTableRow>
+            </DataTableHead>
+            <DataTableBody>
+              {reservations
+                .filter((reservation) => reservation.status !== "active")
+                .map((reservation) => (
+                  <DataTableRow key={reservation.id}>
+                    <Td>
+                      <div className="font-medium">{reservation.displayName}</div>
+                      <div className="font-mono text-xs text-muted-foreground">{reservation.stockNumber}</div>
+                    </Td>
+                    <Td>{reservation.customerName ?? "—"}</Td>
+                    <Td>
+                      <StatusBadge tone={HOLD_STATUS_TONE[reservation.status]}>
+                        {HOLD_STATUS_LABELS[reservation.status]}
+                      </StatusBadge>
+                    </Td>
+                    <Td>{money(reservation.depositRial)} ریال</Td>
+                    <Td>{reservation.releaseReason ?? "—"}</Td>
+                  </DataTableRow>
+                ))}
+            </DataTableBody>
+          </DataTable>
+        )}
+      </SectionCard>
+    </div>
+  );
+}
+
+/* ===========================================================================
+ * §8 — selling one exact car, through the ordinary retail invoice
+ * ===========================================================================
+ *
+ * The screen does not post anything itself: it builds the `vehicle` line and
+ * hands it to `/api/sales/invoices`, which is the same till that sells
+ * everything else in this business. Two consequences worth stating, because
+ * they are the reason this section is small:
+ *
+ *   * the invoice — not this form — is the document, the accounting and the
+ *     print; a car sale is a retail sale whose line names the car;
+ *   * the permission checks that matter (`vehicles.sell`, and
+ *     `vehicles.override_min_price` for crossing the floor) live on the server.
+ *     The override checkbox is shown only to somebody who holds it, but hiding
+ *     it is a courtesy, not the gate.
+ *
+ * A reserved car is offered only to the customer whose hold it is: the server
+ * refuses a sale to anybody else, so the form says so before the cashier finds
+ * out the hard way.
+ */
+
+const VAT_RATES = [0, 6, 9, 10];
+
+function SalesSection({
+  vehicles,
+  canSeeCost,
+  run,
+}: {
+  vehicles: VehicleListItemDto[];
+  canSeeCost: boolean;
+  run: Runner;
+}) {
+  const [serialId, setSerialId] = useState("");
+  const [customer, setCustomer] = useState<PickerCustomer | null>(null);
+  const [price, setPrice] = useState("");
+  const [discount, setDiscount] = useState("");
+  const [vatPercent, setVatPercent] = useState(9);
+  const [tenderMethod, setTenderMethod] = useState<"cash" | "bank" | "credit">("cash");
+  const [override, setOverride] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [receipt, setReceipt] = useState<{ orderNumber: string; total: string } | null>(null);
+  const [reversalReason, setReversalReason] = useState<Record<string, string>>({});
+
+  const sellable = vehicles.filter((vehicle) => vehicle.state === "in_stock" || vehicle.state === "reserved");
+  const sold = vehicles.filter((vehicle) => vehicle.state === "sold");
+  const selected = sellable.find((vehicle) => vehicle.serialId === serialId);
+
+  const priceRial = Math.max(0, Math.trunc(Number(price || 0)));
+  const discountRial = Math.max(0, Math.trunc(Number(discount || 0)));
+  const net = Math.max(0, priceRial - discountRial);
+  const vat = Math.round((net * vatPercent) / 100);
+  const total = net + vat;
+  // The deposit the customer paid when they reserved is *applied*, not
+  // collected again: what is still due today is the invoice less that money.
+  const depositApplied = Math.min(selected?.reservedDepositRial ?? 0, total);
+  const dueNow = total - depositApplied;
+
+  const belowFloor =
+    selected?.minimumPriceRial != null && priceRial < selected.minimumPriceRial && discountRial === 0;
+
+  async function submit() {
+    if (!selected) return;
+    setBusy(true);
+    setReceipt(null);
+    const result = await run(async () => {
+      const closed = await api<{ invoice?: { orderNumber: string; total: string }; error?: string; message?: string }>(
+        "/api/sales/invoices",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            customerId: customer?.id ?? null,
+            // One line, one exact car — the whole point of §3's identity.
+            lines: [
+              {
+                kind: "vehicle",
+                serialId: selected.serialId,
+                price: priceRial,
+                discount: discountRial,
+                vatPercent,
+                overrideMinPrice: override,
+              },
+            ],
+            tenders: [{ method: tenderMethod, amount: dueNow }],
+          }),
+        },
+      );
+      if (closed.ok && closed.data.invoice) {
+        setReceipt({ orderNumber: closed.data.invoice.orderNumber, total: closed.data.invoice.total });
+      }
+      return closed;
+    });
+    if (result) {
+      setSerialId("");
+      setCustomer(null);
+      setPrice("");
+      setDiscount("");
+      setOverride(false);
+    }
+    setBusy(false);
+  }
+
+  async function reverse(vehicle: VehicleListItemDto) {
+    const reason = (reversalReason[vehicle.serialId] ?? "").trim();
+    if (!reason) return;
+    setBusy(true);
+    await run(async () => {
+      const result = await api<{ error?: string; message?: string }>(
+        `/api/automotive/vehicles/${vehicle.serialId}/sale/reverse`,
+        { method: "POST", body: JSON.stringify({ reason }) },
+      );
+      return result;
+    });
+    setReversalReason((map) => ({ ...map, [vehicle.serialId]: "" }));
+    setBusy(false);
+  }
+
+  return (
+    <div className="space-y-4">
+      <SectionCard title="فروش خودرو" description="فاکتور خرده‌فروشی با ردیف خودرو">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <Field label="خودرو">
+            <select
+              className={inputClass}
+              value={serialId}
+              onChange={(event) => {
+                setSerialId(event.target.value);
+                const next = sellable.find((vehicle) => vehicle.serialId === event.target.value);
+                if (next) {
+                  setPrice(String(next.askingPriceRial || ""));
+                  if (next.reservedForCustomerId && next.reservedForName) {
+                    setCustomer({ id: next.reservedForCustomerId, name: next.reservedForName } as PickerCustomer);
+                  }
+                }
+              }}
+            >
+              <option value="">— انتخاب خودرو —</option>
+              {sellable.map((vehicle) => (
+                <option key={vehicle.serialId} value={vehicle.serialId}>
+                  {vehicle.stockNumber} — {vehicle.displayName}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="مشتری">
+            <CustomerPicker customer={customer} onChange={setCustomer} idPrefix="automotive-sale" />
+          </Field>
+          <Field label="مبلغ خودرو (ریال)">
+            <input
+              className={inputClass}
+              inputMode="numeric"
+              value={price}
+              onChange={(event) => setPrice(event.target.value.replace(/[^0-9]/g, ""))}
+            />
+          </Field>
+          <Field label="تخفیف (ریال)">
+            <input
+              className={inputClass}
+              inputMode="numeric"
+              value={discount}
+              onChange={(event) => setDiscount(event.target.value.replace(/[^0-9]/g, ""))}
+            />
+          </Field>
+          <Field label="مالیات بر ارزش افزوده (٪)">
+            <select
+              className={inputClass}
+              value={String(vatPercent)}
+              onChange={(event) => setVatPercent(Number(event.target.value))}
+            >
+              {VAT_RATES.map((rate) => (
+                <option key={rate} value={String(rate)}>
+                  {rate.toLocaleString("fa-IR")}٪
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="روش پرداخت">
+            <select
+              className={inputClass}
+              value={tenderMethod}
+              onChange={(event) => setTenderMethod(event.target.value as "cash" | "bank" | "credit")}
+            >
+              <option value="cash">نقدی</option>
+              <option value="bank">کارت‌خوان / بانکی</option>
+              <option value="credit">نسیه (حساب مشتری)</option>
+            </select>
+          </Field>
+        </div>
+
+        <div className="mt-3 space-y-1 text-sm text-muted-foreground">
+          <p>
+            جمع فاکتور: <span className="font-medium text-foreground">{money(total)}</span> ریال (خالص {money(net)} +
+            مالیات {money(vat)})
+          </p>
+          {depositApplied > 0 ? (
+            <p>
+              بیعانهٔ رزرو کسر می‌شود: {money(depositApplied)} ریال — مبلغ قابل دریافت امروز{" "}
+              <span className="font-medium text-foreground">{money(dueNow)}</span> ریال
+            </p>
+          ) : null}
+          {selected?.reservedForName ? (
+            <p className="text-amber-700 dark:text-amber-300">
+              این خودرو برای «{selected.reservedForName}» رزرو شده است؛ فاکتور باید به نام همان مشتری باشد.
+            </p>
+          ) : null}
+          {belowFloor ? (
+            <p className="text-rose-700 dark:text-rose-300">
+              مبلغ واردشده از حداقل قیمت تعیین‌شده ({money(selected?.minimumPriceRial)} ریال) کمتر است
+              {canSeeCost ? "" : " — برای فروش زیر این حد با مدیر هماهنگ کنید"}.
+            </p>
+          ) : null}
+          {canSeeCost && selected?.effectiveCostRial != null && net > 0 ? (
+            <p>حاشیهٔ ناخالص این فروش: {money(net - selected.effectiveCostRial)} ریال</p>
+          ) : null}
+        </div>
+
+        {canSeeCost ? (
+          <label className="mt-3 flex items-center gap-2 text-sm text-foreground">
+            <input type="checkbox" checked={override} onChange={(event) => setOverride(event.target.checked)} />
+            فروش زیر حداقل قیمت مجاز است (تجاوز از حداقل قیمت)
+          </label>
+        ) : null}
+
+        <div className="mt-4">
+          <PrimaryButton onClick={submit} disabled={busy || !selected || priceRial <= 0 || dueNow <= 0}>
+            {busy ? "در حال صدور…" : "صدور فاکتور فروش خودرو"}
+          </PrimaryButton>
+        </div>
+
+        {receipt ? (
+          <p className="mt-3 text-sm text-emerald-700 dark:text-emerald-300">
+            فاکتور {receipt.orderNumber} به مبلغ {money(Number(receipt.total))} ریال صادر شد؛ خودرو فروخته‌شده
+            علامت خورده و بیعانهٔ رزرو (در صورت وجود) از فاکتور کسر شده است.
+          </p>
+        ) : null}
+      </SectionCard>
+
+      <SectionCard title="فروخته‌شده‌ها" description="با امکان برگشت فروش">
+        {sold.length === 0 ? (
+          <EmptyState title="فروشی ثبت نشده">خودروی فروخته‌شده‌ای در این فهرست نیست.</EmptyState>
+        ) : (
+          <DataTable caption="خودروهای فروخته‌شده">
+            <DataTableHead>
+              <DataTableRow>
+                <Th>خودرو</Th>
+                {canSeeCost ? <Th>بهای تمام‌شدهٔ منجمد</Th> : null}
+                <Th>مبلغ فروش</Th>
+                <Th>تاریخ فروش</Th>
+                <Th>وضعیت</Th>
+                <Th>برگشت فروش</Th>
+              </DataTableRow>
+            </DataTableHead>
+            <DataTableBody>
+              {sold.map((vehicle) => (
+                <DataTableRow key={vehicle.serialId}>
+                  <Td>
+                    <div className="font-medium">{vehicle.displayName}</div>
+                    <div className="font-mono text-xs text-muted-foreground">{vehicle.stockNumber}</div>
+                  </Td>
+                  {canSeeCost ? <Td>{money(vehicle.effectiveCostRial)}</Td> : null}
+                  <Td>{money(vehicle.soldPriceRial)}</Td>
+                  <Td>{vehicle.soldOn ? formatJalali(vehicle.soldOn) : "—"}</Td>
+                  <Td>
+                    <StatusBadge tone="neutral">{VEHICLE_STATE_LABELS[vehicle.state]}</StatusBadge>
+                  </Td>
+                  <Td>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        className={`${inputClass} sm:max-w-xs`}
+                        placeholder="دلیل برگشت"
+                        value={reversalReason[vehicle.serialId] ?? ""}
+                        onChange={(event) =>
+                          setReversalReason((map) => ({ ...map, [vehicle.serialId]: event.target.value }))
+                        }
+                      />
+                      <SecondaryButton
+                        onClick={() => reverse(vehicle)}
+                        disabled={busy || !(reversalReason[vehicle.serialId] ?? "").trim()}
+                      >
+                        برگشت فروش
+                      </SecondaryButton>
+                    </div>
+                  </Td>
+                </DataTableRow>
+              ))}
+            </DataTableBody>
+          </DataTable>
+        )}
+      </SectionCard>
+    </div>
   );
 }
 

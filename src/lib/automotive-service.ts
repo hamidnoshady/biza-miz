@@ -1283,17 +1283,49 @@ export async function updateVehicle(
   return updated;
 }
 
+/** The serial status that mirrors an automotive state. */
+const SERIAL_STATUS_FOR_VEHICLE_STATE: Record<VehicleState, string> = {
+  draft: "in_stock",
+  acquired: "in_stock",
+  in_stock: "in_stock",
+  reserved: "reserved",
+  sold: "sold",
+  // Off the sellable shelf while it is away, comes back when it lands.
+  returned: "in_stock",
+  transferred: "in_stock",
+  archived: "in_stock",
+};
+
 /**
  * The lifecycle's one guarded door (§3): every state change goes through the
  * pure state machine, so an illegal edge (`sold → in_stock`) is refused here
  * rather than written by whichever screen got there first.
+ *
+ * `onlyIfState` is the conditional form every automatic caller wants ("if the
+ * car is still reserved, put it back on the shelf") — a release or an expiry
+ * must never drag a car that has since sold back to `in_stock`.
  */
-export async function setVehicleState(
+export async function ensureVehicleState(
   client: PoolClient,
-  input: { businessId: string; serialId: string; state: VehicleState; actorId?: string | null },
-): Promise<VehicleDetail> {
-  const vehicle = await getVehicle(input.businessId, input.serialId, client);
+  input: {
+    businessId: string;
+    serialId: string;
+    state: VehicleState;
+    actorId?: string | null;
+    /** Defaults to the generic state-change event; callers name the act that caused it. */
+    eventType?: string;
+    onlyIfState?: VehicleState;
+  },
+): Promise<void> {
+  const { rows } = await client.query<{ state: VehicleState; location_id: string; stock_number: string }>(
+    `SELECT state, location_id, stock_number FROM automotive_vehicle_attributes
+      WHERE business_id = $1 AND serial_id = $2 FOR UPDATE`,
+    [input.businessId, input.serialId],
+  );
+  const vehicle = rows[0];
   if (!vehicle) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
+  if (input.onlyIfState && vehicle.state !== input.onlyIfState) return;
+
   const error = validateVehicleStateTransition(vehicle.state, input.state);
   if (error) throw new VehicleError("invalid_state_transition", error, 409);
 
@@ -1304,26 +1336,27 @@ export async function setVehicleState(
   );
   // The shared serial status follows the automotive state so the generic stock
   // paths (the retail board, the transfer service) never disagree with it.
-  const serialStatus =
-    input.state === "sold"
-      ? "sold"
-      : input.state === "reserved"
-        ? "reserved"
-        : input.state === "archived" || input.state === "returned" || input.state === "transferred"
-          ? "in_stock"
-          : "in_stock";
-  await client.query(`UPDATE item_serials SET status = $2 WHERE id = $1`, [input.serialId, serialStatus]);
+  await client.query(`UPDATE item_serials SET status = $2 WHERE id = $1`, [
+    input.serialId,
+    SERIAL_STATUS_FOR_VEHICLE_STATE[input.state],
+  ]);
 
   await recordDomainEvent(client, {
     businessId: input.businessId,
-    locationId: vehicle.locationId,
-    eventType: "automotive.vehicle_state_changed",
-    payload: { serialId: input.serialId, stockNumber: vehicle.stockNumber, from: vehicle.state, to: input.state },
+    locationId: vehicle.location_id,
+    eventType: input.eventType ?? "automotive.vehicle_state_changed",
+    payload: { serialId: input.serialId, stockNumber: vehicle.stock_number, from: vehicle.state, to: input.state },
     sourceType: "automotive_vehicle",
     sourceId: input.serialId,
     createdBy: input.actorId ?? null,
   });
+}
 
+export async function setVehicleState(
+  client: PoolClient,
+  input: { businessId: string; serialId: string; state: VehicleState; actorId?: string | null },
+): Promise<VehicleDetail> {
+  await ensureVehicleState(client, input);
   const updated = await getVehicle(input.businessId, input.serialId, client);
   if (!updated) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
   return updated;
@@ -1408,7 +1441,21 @@ export interface VehicleListItem {
   plateNumber: string | null;
   /** The live hold's customer, when the car is reserved — so the board says who. */
   reservedForName: string | null;
+  /**
+   * The hold's customer id and the deposit it took. Both travel because the
+   * sale path needs them and cannot guess them: a reserved car sells only to
+   * the customer the hold names (the server refuses anybody else), and the
+   * deposit the customer already paid is applied to the invoice rather than
+   * collected a second time — the screen has to know how much that is before
+   * it can say what is still due.
+   */
+  reservedForCustomerId: string | null;
+  reservedDepositRial: number;
   reservedUntil: string | null;
+  /** The day it sold, for the sold list; null while it is still stock. */
+  soldOn: string | null;
+  /** What the sale's invoice totalled (VAT included), preserved by the sale. */
+  soldPriceRial: number | null;
 }
 
 /**
@@ -1481,7 +1528,8 @@ export async function listVehicles(
         FROM automotive_vehicle_costs WHERE status = 'active' GROUP BY serial_id
     ) c ON c.serial_id = v.serial_id
     LEFT JOIN LATERAL (
-      SELECT p.name AS customer_name, sr.expires_at::text AS expires_until
+      SELECT p.name AS customer_name, sr.customer_id, sr.expires_at::text AS expires_until,
+             sr.deposit_amount_rial
         FROM serial_reservations sr
         LEFT JOIN parties p ON p.id = sr.customer_id
        WHERE sr.serial_id = v.serial_id AND sr.status = 'active'
@@ -1509,17 +1557,31 @@ export async function listVehicles(
     chassis_number: string | null;
     plate_number: string | null;
     reserved_for_name: string | null;
+    reserved_for_customer_id: string | null;
     reserved_until: string | null;
+    reserved_deposit_rial: string | null;
+    sold_on: string | null;
+    sale_price_rial: string | null;
   }>(
     `SELECT v.serial_id, v.stock_number, v.make, v.model, v.trim, v.model_year, v.condition,
             v.mileage_km, v.state, v.location_id, l.name AS location_name,
             v.purchase_cost_rial::text AS purchase_cost_rial,
-            (v.purchase_cost_rial + coalesce(c.capitalized_cost_rial, 0))::text AS effective_cost_rial,
+            -- For a sold car the *frozen* number is the effective cost: that is
+            -- the figure COGS posted, and a cost row recorded after the sale
+            -- must not make the board disagree with the ledger about a car that
+            -- has already gone.
+            coalesce(
+              v.frozen_effective_cost_rial,
+              v.purchase_cost_rial + coalesce(c.capitalized_cost_rial, 0)
+            )::text AS effective_cost_rial,
             v.asking_price_rial::text AS asking_price_rial,
             v.minimum_price_rial::text AS minimum_price_rial,
             coalesce(v.acquisition_date, v.created_at::date)::text AS acquired_on,
             v.vin, v.chassis_number, v.plate_number,
-            hold.customer_name AS reserved_for_name, hold.expires_until AS reserved_until
+            hold.customer_name AS reserved_for_name, hold.customer_id AS reserved_for_customer_id,
+            hold.deposit_amount_rial::text AS reserved_deposit_rial,
+            hold.expires_until AS reserved_until, v.sold_on::text AS sold_on,
+            v.sale_price_rial::text AS sale_price_rial
        ${FROM_SQL}
       WHERE ${whereSql}
       ORDER BY v.created_at DESC
@@ -1567,7 +1629,11 @@ export async function listVehicles(
         chassisNumber: row.chassis_number,
         plateNumber: row.plate_number,
         reservedForName: row.reserved_for_name,
+        reservedForCustomerId: row.reserved_for_customer_id,
+        reservedDepositRial: Number(row.reserved_deposit_rial ?? 0),
         reservedUntil: row.reserved_until,
+        soldOn: row.sold_on,
+        soldPriceRial: row.sale_price_rial == null ? null : Number(row.sale_price_rial),
       };
     }),
     total: Number(countRows[0]?.count ?? 0),
@@ -1610,7 +1676,14 @@ export async function summarizeVehicles(
     sale_price_rial: string | null;
   }>(
     `SELECT v.state, v.condition,
-            (v.purchase_cost_rial + coalesce(c.capitalized_cost_rial, 0))::text AS effective_cost_rial,
+            -- For a sold car the *frozen* number is the effective cost: that is
+            -- the figure COGS posted, and a cost row recorded after the sale
+            -- must not make the board disagree with the ledger about a car that
+            -- has already gone.
+            coalesce(
+              v.frozen_effective_cost_rial,
+              v.purchase_cost_rial + coalesce(c.capitalized_cost_rial, 0)
+            )::text AS effective_cost_rial,
             v.asking_price_rial::text AS asking_price_rial,
             coalesce(v.acquisition_date, v.created_at::date)::text AS acquired_on,
             v.sold_on::text AS sold_on, v.sale_price_rial::text AS sale_price_rial

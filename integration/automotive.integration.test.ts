@@ -33,9 +33,13 @@ let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let provisioning: typeof import("../src/lib/business-provisioning");
 let automotive: typeof import("../src/lib/automotive-service");
+let reservations: typeof import("../src/lib/automotive-reservation-service");
+let vehicleSales: typeof import("../src/lib/automotive-sales-service");
+let invoiceService: typeof import("../src/lib/retail-invoice-service");
 let postingEngine: typeof import("../src/lib/posting-engine");
+let exact: typeof import("../src/lib/inventory-exact");
 
-const biz = { id: "", locationId: "", secondLocationId: "", ownerId: "" };
+const biz = { id: "", locationId: "", secondLocationId: "", ownerId: "", customerId: "", otherCustomerId: "" };
 const other = { id: "", locationId: "" };
 
 function urlFor(database: string): string {
@@ -130,8 +134,12 @@ beforeAll(async () => {
   dbLib = await import("../src/lib/db");
   provisioning = await import("../src/lib/business-provisioning");
   automotive = await import("../src/lib/automotive-service");
+  reservations = await import("../src/lib/automotive-reservation-service");
+  vehicleSales = await import("../src/lib/automotive-sales-service");
+  invoiceService = await import("../src/lib/retail-invoice-service");
   postingEngine = await import("../src/lib/posting-engine");
   void postingEngine;
+  exact = await import("../src/lib/inventory-exact");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -152,6 +160,21 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  // A completed invoice's lines are immutable (guard_order_item_mutation,
+  // migration 0014) — which is the point of the sale path borrowing `orders`,
+  // and which the sale tests below assert. Between tests we take the same
+  // transaction-local escape hatch the confirmed factory reset takes
+  // (migration 0036), the way integration/retail-invoice.integration.test.ts
+  // does, rather than weakening the guard for everyone.
+  await db.query("ROLLBACK").catch(() => {});
+  await db.query("BEGIN");
+  await db.query("SELECT set_config('app.factory_reset', 'true', true)");
+  await db.query("DELETE FROM payments");
+  await db.query("DELETE FROM order_items");
+  await db.query("DELETE FROM orders");
+  await db.query("DELETE FROM order_number_counters");
+  await db.query("COMMIT");
+
   await db.query("DELETE FROM automotive_vehicle_transfers");
   await db.query("DELETE FROM automotive_vehicle_price_history");
   await db.query("DELETE FROM automotive_vehicle_costs");
@@ -180,6 +203,16 @@ beforeEach(async () => {
     [biz.id, biz.locationId],
   );
   biz.ownerId = ownerRows[0].id;
+  const { rows: customerRows } = await db.query<{ id: string }>(
+    `INSERT INTO parties (business_id, name, role) VALUES ($1, 'مشتری رزرو', 'customer') RETURNING id`,
+    [biz.id],
+  );
+  biz.customerId = customerRows[0].id;
+  const { rows: otherCustomerRows } = await db.query<{ id: string }>(
+    `INSERT INTO parties (business_id, name, role) VALUES ($1, 'مشتری دیگر', 'customer') RETURNING id`,
+    [biz.id],
+  );
+  biz.otherCustomerId = otherCustomerRows[0].id;
 
   const secondary = await makeBusiness("other");
   other.id = secondary.businessId;
@@ -580,5 +613,581 @@ describe("tenant isolation", () => {
     // The service is tenant-scoped by `business_id` on every read: naming the
     // other tenant's business with this serial id finds nothing.
     expect(await automotive.getVehicle(other.id, mine.serialId)).toBeNull();
+  });
+});
+
+/* ===========================================================================
+ * Wave 3 — reservations and the deposit they carry
+ * =========================================================================== */
+
+/**
+ * The hold's own money: Debit cash/bank, Credit the shared customer-advance
+ * liability (2430). It is the one number in this file that is *not* revenue,
+ * and the test says so explicitly — a deposit counted as income is how a
+ * dealership's VAT return and its gross profit both go wrong at once.
+ */
+async function depositBalance(businessId = biz.id): Promise<number> {
+  const row = await accountBalance("2430", businessId);
+  // `|| 0` so a settled liability reads as 0 rather than JavaScript's -0.
+  return -row || 0; // a liability's balance is its credit side
+}
+
+describe("reservations and deposits", () => {
+  it("takes a hold with a deposit, posts it as a customer advance, and parks the car", async () => {
+    const created = await withTransaction((client) =>
+      automotive.createVehicle(client, carInput({ stockNumber: "R-1" })),
+    );
+
+    const result = await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: created.serialId,
+        customerId: biz.customerId,
+        expiresAt: "2026-03-01",
+        expiresAtTime: "18:00",
+        depositRial: 50_000_000,
+        depositMethod: "cash",
+        depositRefundable: true,
+        actorId: biz.ownerId,
+      }),
+    );
+    expect(result.depositEntryId).toBeTruthy();
+
+    // The car is on hold, in both places that say so (the automotive record and
+    // the shared serial status the generic stock paths read).
+    const held = await automotive.getVehicle(biz.id, created.serialId);
+    expect(held?.state).toBe("reserved");
+    const { rows: serialRows } = await db.query<{ status: string }>(
+      "SELECT status FROM item_serials WHERE id = $1",
+      [created.serialId],
+    );
+    expect(serialRows[0].status).toBe("reserved");
+
+    // The money: cash in, customer advance out — and nothing to the revenue or
+    // VAT accounts.
+    expect(await accountBalance("1100")).toBe(50_000_000);
+    expect(await depositBalance()).toBe(50_000_000);
+    expect(await accountBalance("4590")).toBe(0);
+    expect(await accountBalance("2200")).toBe(0);
+
+    const reservation = await reservations.getVehicleReservation(biz.id, result.id);
+    expect(reservation).toMatchObject({
+      status: "active",
+      expiresAt: "2026-03-01",
+      expiresAtTime: "18:00:00",
+      depositRial: 50_000_000,
+      depositMethod: "cash",
+      depositRefundable: true,
+    });
+    // The detail carries the car and the customer a person would name it by.
+    expect(reservation?.stockNumber).toBe("R-1");
+    expect(reservation?.customerName).toBe("مشتری رزرو");
+  });
+
+  it("refuses a second active hold on the same car", async () => {
+    const created = await withTransaction((client) =>
+      automotive.createVehicle(client, carInput({ stockNumber: "R-2" })),
+    );
+    await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: created.serialId,
+        customerId: biz.customerId,
+        actorId: biz.ownerId,
+      }),
+    );
+
+    // The service refuses (the car is `reserved`), and 0202's partial unique
+    // index is behind it: even a write that bypassed the check cannot leave two
+    // live holds on one car.
+    await expect(
+      withTransaction((client) =>
+        reservations.reserveVehicle(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          serialId: created.serialId,
+          customerId: biz.otherCustomerId,
+          actorId: biz.ownerId,
+        }),
+      ),
+    ).rejects.toThrow(/رزرو/);
+  });
+
+  it("refuses a deposit with no method, and a customer who is not a customer", async () => {
+    const created = await withTransaction((client) =>
+      automotive.createVehicle(client, carInput({ stockNumber: "R-3" })),
+    );
+
+    await expect(
+      withTransaction((client) =>
+        reservations.reserveVehicle(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          serialId: created.serialId,
+          customerId: biz.customerId,
+          depositRial: 10_000_000,
+          actorId: biz.ownerId,
+        }),
+      ),
+    ).rejects.toThrow(/روش دریافت/);
+
+    await expect(
+      withTransaction((client) =>
+        reservations.reserveVehicle(client, {
+          businessId: biz.id,
+          locationId: biz.locationId,
+          serialId: created.serialId,
+          customerId: randomUUID(), // a well-formed id for somebody who is not ours
+          actorId: biz.ownerId,
+        }),
+      ),
+    ).rejects.toThrow(/مشتری یافت نشد/);
+  });
+
+  it("refunds a refundable deposit on release and keeps a non-refundable one", async () => {
+    const refundable = await withTransaction((client) =>
+      automotive.createVehicle(client, carInput({ stockNumber: "R-4" })),
+    );
+    const kept = await withTransaction((client) =>
+      automotive.createVehicle(client, carInput({ stockNumber: "R-5" })),
+    );
+
+    const first = await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: refundable.serialId,
+        customerId: biz.customerId,
+        depositRial: 20_000_000,
+        depositMethod: "cash",
+        depositRefundable: true,
+        actorId: biz.ownerId,
+      }),
+    );
+    const second = await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: kept.serialId,
+        customerId: biz.customerId,
+        depositRial: 30_000_000,
+        depositMethod: "card",
+        depositRefundable: false,
+        actorId: biz.ownerId,
+      }),
+    );
+
+    const released = await withTransaction((client) =>
+      reservations.releaseVehicleReservation(client, {
+        businessId: biz.id,
+        reservationId: first.id,
+        reason: "مشتری منصرف شد",
+        actorId: biz.ownerId,
+      }),
+    );
+    expect(released.refundedEntryId).toBeTruthy();
+
+    // Refundable: the money leaves again, the liability goes back to zero, and
+    // the car is on the shelf — the release also recorded its reason.
+    expect(await accountBalance("1100")).toBe(0);
+    expect(await depositBalance()).toBe(30_000_000);
+    const freed = await automotive.getVehicle(biz.id, refundable.serialId);
+    expect(freed?.state).toBe("in_stock");
+    const afterFirst = await reservations.getVehicleReservation(biz.id, first.id);
+    expect(afterFirst).toMatchObject({ status: "released", releaseReason: "مشتری منصرف شد" });
+
+    // Non-refundable: the hold closes, the car is freed, and the advance stays
+    // exactly where it is — that is what the counter promised the customer.
+    const secondRelease = await withTransaction((client) =>
+      reservations.releaseVehicleReservation(client, {
+        businessId: biz.id,
+        reservationId: second.id,
+        reason: "مهلت تمام شد",
+        actorId: biz.ownerId,
+      }),
+    );
+    expect(secondRelease.refundedEntryId).toBeNull();
+    expect(await depositBalance()).toBe(30_000_000);
+    expect((await automotive.getVehicle(biz.id, kept.serialId))?.state).toBe("in_stock");
+
+    // Releasing twice is refused rather than silently repeating the refund.
+    await expect(
+      withTransaction((client) =>
+        reservations.releaseVehicleReservation(client, {
+          businessId: biz.id,
+          reservationId: first.id,
+          reason: "دوباره",
+          actorId: biz.ownerId,
+        }),
+      ),
+    ).rejects.toThrow(/بسته شده/);
+  });
+
+  it("expires a hold on read once its business day has passed", async () => {
+    const created = await withTransaction((client) =>
+      automotive.createVehicle(client, carInput({ stockNumber: "R-6" })),
+    );
+    const hold = await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: created.serialId,
+        customerId: biz.customerId,
+        expiresAt: "2020-01-01",
+        actorId: biz.ownerId,
+      }),
+    );
+
+    // No cron: the sweep runs when somebody looks, and it runs inside the
+    // caller's transaction.
+    const expired = await withTransaction((client) =>
+      reservations.expireVehicleReservations(client, { businessId: biz.id, locationId: biz.locationId }),
+    );
+    expect(expired).toBe(1);
+
+    const after = await reservations.getVehicleReservation(biz.id, hold.id);
+    expect(after?.status).toBe("expired");
+    expect((await automotive.getVehicle(biz.id, created.serialId))?.state).toBe("in_stock");
+
+    // A hold with no expiry is "until released" and never lapses.
+    const open = await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: created.serialId,
+        customerId: biz.customerId,
+        actorId: biz.ownerId,
+      }),
+    );
+    expect(
+      await withTransaction((client) =>
+        reservations.expireVehicleReservations(client, { businessId: biz.id, locationId: biz.locationId }),
+      ),
+    ).toBe(0);
+    expect((await reservations.getVehicleReservation(biz.id, open.id))?.status).toBe("active");
+  });
+});
+
+/* ===========================================================================
+ * Wave 4 — selling the exact car, through the ordinary retail invoice
+ * =========================================================================== */
+
+async function sellThroughInvoice(input: {
+  serialId: string;
+  price: number;
+  discount?: number;
+  vatPercent: number;
+  tenderAmount: number;
+  customerId?: string | null;
+  tenderMethod?: "cash" | "bank" | "credit";
+}) {
+  const client = await dbLib.getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const invoice = await invoiceService.createRetailInvoice(client, {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      industry: "automotive",
+      customerId: input.customerId ?? null,
+      tenders: [{ method: input.tenderMethod ?? "cash", amount: exact.rialText(String(input.tenderAmount)) }],
+      lines: [
+        {
+          kind: "vehicle",
+          serialId: input.serialId,
+          price: input.price,
+          discount: input.discount ?? 0,
+          vatPercent: input.vatPercent,
+        },
+      ],
+    });
+    await client.query("COMMIT");
+    return invoice;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** A car with a base cost and one capitalized reconditioning cost on top. */
+async function carReadyToSell(stockNumber: string, purchase = 700_000_000, capitalized = 30_000_000) {
+  const created = await withTransaction((client) =>
+    automotive.createVehicle(client, carInput({ stockNumber, acquisition: {
+      date: "2026-01-10",
+      source: "dealer_purchase" as const,
+      costRial: purchase,
+      settlement: "payable" as const,
+    } })),
+  );
+  if (capitalized > 0) {
+    await withTransaction((client) =>
+      automotive.recordVehicleCost(client, {
+        businessId: biz.id,
+        serialId: created.serialId,
+        createdBy: biz.ownerId,
+        cost: {
+          category: "repair",
+          posting: "capitalized",
+          amountRial: capitalized,
+          incurredOn: "2026-01-20",
+          settlement: "payable",
+        },
+      }),
+    );
+  }
+  return created;
+}
+
+describe("selling the exact car", () => {
+  it("posts revenue and COGS at the frozen effective cost, and names the vehicle on the line", async () => {
+    const car = await carReadyToSell("S-1");
+    // 900,000,000 + 9% VAT = 981,000,000 — the whole invoice paid in cash.
+    const invoice = await sellThroughInvoice({
+      serialId: car.serialId,
+      price: 900_000_000,
+      vatPercent: 9,
+      tenderAmount: 981_000_000,
+    });
+
+    expect(invoice.total).toBe("981000000");
+    expect(await accountBalance("1100")).toBe(981_000_000);
+    expect(await accountBalance("4590")).toBe(-900_000_000);
+    expect(await accountBalance("2200")).toBe(-81_000_000);
+
+    // COGS is the effective cost — the purchase plus the capitalized
+    // reconditioning — and it leaves vehicle inventory, not the generic one.
+    expect(await accountBalance("5194")).toBe(730_000_000);
+    // 700,000,000 acquisition + 30,000,000 capitalized − 730,000,000 COGS: the
+    // car has left vehicle inventory, and the generic inventory account was
+    // never involved.
+    expect(await accountBalance("1370")).toBe(0);
+    expect(await accountBalance("1300")).toBe(0);
+
+    const sold = await automotive.getVehicle(biz.id, car.serialId);
+    expect(sold?.state).toBe("sold");
+    expect(sold?.soldCustomerId).toBeNull();
+    const { rows: frozen } = await db.query<{
+      sale_price_rial: string;
+      frozen_effective_cost_rial: string;
+      sold_on: string;
+      sold_order_id: string | null;
+      sold_order_item_id: string | null;
+    }>(
+      `SELECT sale_price_rial::text, frozen_effective_cost_rial::text, sold_on::text,
+              sold_order_id, sold_order_item_id
+         FROM automotive_vehicle_attributes WHERE serial_id = $1`,
+      [car.serialId],
+    );
+    expect(frozen[0]).toMatchObject({
+      sale_price_rial: "981000000",
+      frozen_effective_cost_rial: "730000000",
+      sold_order_id: invoice.orderId,
+    });
+    expect(frozen[0].sold_order_item_id).toBeTruthy();
+
+    // The line identifies the exact car, in the snapshot a reprint reads.
+    const { rows: snapshot } = await db.query<{ retail_snapshot: Record<string, unknown> }>(
+      "SELECT retail_snapshot FROM order_items WHERE order_id = $1",
+      [invoice.orderId],
+    );
+    expect(snapshot[0].retail_snapshot).toMatchObject({
+      kind: "vehicle",
+      stockNumber: "S-1",
+      frozenEffectiveCost: "730000000",
+    });
+  });
+
+  it("refuses a second sale of the same car", async () => {
+    const car = await carReadyToSell("S-2", 700_000_000, 0);
+    await sellThroughInvoice({
+      serialId: car.serialId,
+      price: 900_000_000,
+      vatPercent: 9,
+      tenderAmount: 981_000_000,
+    });
+
+    // One physical car, one sale: the second invoice refuses before it posts.
+    await expect(
+      sellThroughInvoice({
+        serialId: car.serialId,
+        price: 900_000_000,
+        vatPercent: 9,
+        tenderAmount: 981_000_000,
+      }),
+    ).rejects.toThrow(/فروخته شده/);
+
+    expect(await accountBalance("4590")).toBe(-900_000_000);
+  });
+
+  it("applies the customer's reservation deposit instead of collecting it twice", async () => {
+    const car = await carReadyToSell("S-3", 700_000_000, 0);
+    const hold = await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: car.serialId,
+        customerId: biz.customerId,
+        depositRial: 50_000_000,
+        depositMethod: "cash",
+        actorId: biz.ownerId,
+      }),
+    );
+    expect(await depositBalance()).toBe(50_000_000);
+
+    // Invoice total 981,000,000 less the 50,000,000 already in hand: the
+    // customer pays 931,000,000 today.
+    const invoice = await sellThroughInvoice({
+      serialId: car.serialId,
+      price: 900_000_000,
+      vatPercent: 9,
+      tenderAmount: 931_000_000,
+      customerId: biz.customerId,
+    });
+
+    // All the money the customer actually paid: 50,000,000 at the reservation
+    // counter and 931,000,000 today. The advance is cleared, not re-earned —
+    // 2430 is back to zero and revenue is the car's price, not a riyal more.
+    expect(await accountBalance("1100")).toBe(981_000_000);
+    expect(await depositBalance()).toBe(0);
+    expect(await accountBalance("4590")).toBe(-900_000_000);
+    expect(await accountBalance("2200")).toBe(-81_000_000);
+    // Revenue 900m + VAT 81m = tenders 931m + deposit 50m: the entry balances,
+    // and the deposit is a liability released, never income.
+    expect(await accountBalance("5194")).toBe(700_000_000);
+
+    // Today's cash, not the reservation counter's: the payments row records
+    // what was actually collected against this invoice.
+    const { rows: payments } = await db.query<{ amount: string }>(
+      "SELECT amount::text FROM payments WHERE order_id = $1",
+      [invoice.orderId],
+    );
+    expect(payments.map((row) => row.amount)).toEqual(["931000000"]);
+
+    // The hold closed as *converted* by this sale, and names the invoice.
+    const closed = await reservations.getVehicleReservation(biz.id, hold.id);
+    expect(closed?.status).toBe("converted");
+    const { rows: converted } = await db.query<{ converted_order_id: string }>(
+      "SELECT converted_order_id FROM serial_reservations WHERE id = $1",
+      [hold.id],
+    );
+    expect(converted[0].converted_order_id).toBe(invoice.orderId);
+  });
+
+  it("refuses a sale to a customer the live hold does not name", async () => {
+    const car = await carReadyToSell("S-4", 700_000_000, 0);
+    await withTransaction((client) =>
+      reservations.reserveVehicle(client, {
+        businessId: biz.id,
+        locationId: biz.locationId,
+        serialId: car.serialId,
+        customerId: biz.customerId,
+        actorId: biz.ownerId,
+      }),
+    );
+
+    await expect(
+      sellThroughInvoice({
+        serialId: car.serialId,
+        price: 900_000_000,
+        vatPercent: 9,
+        tenderAmount: 981_000_000,
+        customerId: biz.otherCustomerId,
+      }),
+    ).rejects.toThrow(/رزرو شده است/);
+
+    // Nothing posted for a sale that was refused.
+    expect(await accountBalance("4590")).toBe(0);
+    expect((await automotive.getVehicle(biz.id, car.serialId))?.state).toBe("reserved");
+  });
+
+  it("reverses a sale to `returned` at the frozen cost, not at today's cost", async () => {
+    const car = await carReadyToSell("S-5", 700_000_000, 0);
+    const invoice = await sellThroughInvoice({
+      serialId: car.serialId,
+      price: 900_000_000,
+      vatPercent: 9,
+      tenderAmount: 981_000_000,
+    });
+    expect(await accountBalance("1370")).toBe(0);
+
+    // A sold car refuses a new cost — the money belongs to the *returned*
+    // car's next life, not to the unit that has already been accounted for.
+    await expect(
+      withTransaction((client) =>
+        automotive.recordVehicleCost(client, {
+          businessId: biz.id,
+          serialId: car.serialId,
+          createdBy: biz.ownerId,
+          cost: {
+            category: "detailing",
+            posting: "capitalized",
+            amountRial: 5_000_000,
+            incurredOn: "2026-02-01",
+            settlement: "payable",
+          },
+        }),
+      ),
+    ).rejects.toThrow(/فروخته شده/);
+
+    const reversal = await withTransaction((client) =>
+      vehicleSales.reverseVehicleSale(client, {
+        businessId: biz.id,
+        serialId: car.serialId,
+        reason: "فسخ فروش",
+        actorId: biz.ownerId,
+      }),
+    );
+    // Two entries: the sale posted two (revenue, then COGS at the frozen cost)
+    // and both are mirrored — the invoice recorded which entries belong to this
+    // line, so the reversal undoes exactly those.
+    expect(reversal.reversalEntryIds).toHaveLength(2);
+
+    // The money is back with the customer and nothing of the sale survives in
+    // the books; inventory carries the car again at the frozen 700,000,000.
+    expect(await accountBalance("1100")).toBe(0);
+    expect(await accountBalance("4590")).toBe(0);
+    expect(await accountBalance("2200")).toBe(0);
+    expect(await accountBalance("1370")).toBe(700_000_000);
+    expect(await accountBalance("5194")).toBe(0);
+    const returned = await automotive.getVehicle(biz.id, car.serialId);
+    expect(returned?.state).toBe("returned");
+
+    // The frozen facts the reversal was based on are still on the row (history
+    // is never lost), and the reversal itself is on the record with its reason.
+    const { rows: events } = await db.query<{ payload: { reason?: string } }>(
+      `SELECT payload FROM domain_events
+        WHERE business_id = $1 AND event_type = 'automotive.sale_reversed'`,
+      [biz.id],
+    );
+    expect(events[0].payload.reason).toBe("فسخ فروش");
+    expect(invoice.orderId).toBeTruthy();
+  });
+
+  it("reads a vehicle line's sale back from the invoice, vehicle named", async () => {
+    const car = await carReadyToSell("S-6", 700_000_000, 0);
+    const invoice = await sellThroughInvoice({
+      serialId: car.serialId,
+      price: 900_000_000,
+      discount: 20_000_000,
+      vatPercent: 9,
+      tenderAmount: 959_200_000, // (900,000,000 − 20,000,000) × 1.09
+    });
+
+    // The discount is in the document and in the books (net revenue), and the
+    // VAT follows the discounted price — never a hard-coded rate anywhere.
+    expect(invoice.discount).toBe("20000000");
+    expect(invoice.total).toBe("959200000");
+    expect(await accountBalance("4590")).toBe(-880_000_000);
+    expect(await accountBalance("2200")).toBe(-79_200_000);
+
+    const { rows: itemRows } = await db.query<{
+      name_snapshot: string;
+      retail_snapshot: { kind: string; vin: string | null };
+    }>("SELECT name_snapshot, retail_snapshot FROM order_items WHERE order_id = $1", [invoice.orderId]);
+    expect(itemRows[0].name_snapshot).toContain("S-6");
+    expect(itemRows[0].retail_snapshot.kind).toBe("vehicle");
   });
 });

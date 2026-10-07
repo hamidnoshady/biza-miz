@@ -28,6 +28,7 @@
 import type { PoolClient } from "pg";
 import { sellWeightedItem } from "./gold-sales-service";
 import { sellSerializedUnit } from "./watch-sales-service";
+import { attachVehicleSaleLine, sellVehicle } from "./automotive-sales-service";
 import { getStock, sellAccessoryUnits } from "./accessories-service";
 import { sellCosmeticUnits } from "./cosmetics-service";
 import { recordOrderItemBatchAllocations, type BatchAllocation } from "./retail-batch-inventory";
@@ -70,6 +71,22 @@ export type RetailInvoiceLineInput =
       discount?: number;
       vatPercent: number;
       warrantyMonths?: number;
+    }
+  | {
+      /**
+       * Issue #839 §8 — a specific car (`item_serials.id` of a vehicle unit).
+       * Sold through `sellVehicle` (automotive-sales-service.ts) so the line
+       * carries §3's identity: one exact vehicle, its VIN/stock number, its
+       * frozen effective cost, and a live hold that either belongs to this
+       * invoice's customer or refuses the sale.
+       */
+      kind: "vehicle";
+      serialId: string;
+      price: number;
+      discount?: number;
+      vatPercent: number;
+      /** Only when the caller holds `vehicles.override_min_price`. */
+      overrideMinPrice?: boolean;
     }
   | {
       kind: "accessory";
@@ -178,7 +195,7 @@ const LINE_KINDS_BY_INDUSTRY: Record<Industry, readonly RetailInvoiceLineInput["
   // («این نوع کالا در این کسب‌وکار قابل فروش نیست.») rather than selling a car
   // as anonymous stock. Wave 4 replaces this with ["vehicle"] and that is the
   // only edit this entry should ever need.
-  automotive: [],
+  automotive: ["vehicle"],
   jewelry: ["gold"],
   watch: ["watch"],
   accessories: ["accessory"],
@@ -279,7 +296,7 @@ export async function createRetailInvoice(
 
   for (let lineIndex = 0; lineIndex < input.lines.length; lineIndex++) {
     const line = input.lines[lineIndex];
-    const settled = await settleLine(client, input, line, promotionDiscounts[lineIndex] ?? 0, tenderQueue);
+    const settled = await settleLine(client, input, line, promotionDiscounts[lineIndex] ?? 0, tenderQueue, orderId);
 
     const { rows: itemRows } = await client.query<{ id: string }>(
       `INSERT INTO order_items
@@ -312,6 +329,19 @@ export async function createRetailInvoice(
     // return/refund/void can restore the SAME lots instead of guessing from
     // the current shelf state. Legacy lines (sold before this table existed)
     // simply have no rows and are treated as legacy by the reversal paths.
+    // Issue #839 §8 — the invoice line that sold one exact car. `sold_order_item_id`
+    // is 0212's structural "sold once" guarantee, and it is only knowable once
+    // the line row exists; stamping it here keeps the car and the invoice
+    // inseparable in one transaction.
+    if (line.kind === "vehicle") {
+      await attachVehicleSaleLine(client, {
+        businessId: input.businessId,
+        serialId: line.serialId,
+        orderId,
+        orderItemId: itemRows[0].id,
+      });
+    }
+
     if (settled.batchAllocations && settled.batchAllocations.length > 0) {
       await recordOrderItemBatchAllocations(client, {
         orderItemId: itemRows[0].id,
@@ -549,6 +579,7 @@ async function settleLine(
   line: RetailInvoiceLineInput,
   promotionDiscount: number,
   tenderQueue: RetailTenderQueueEntry[],
+  orderId: string,
 ): Promise<SettledLine> {
   if (line.kind === "gold") {
     const item = await getItem(line.itemId, client);
@@ -608,6 +639,79 @@ async function settleLine(
         makingCharge: breakdown.makingCharge,
         profit: breakdown.profit,
         consigned: sale.consigned,
+        ledgerEntryIds: [sale.revenueEntryId, sale.cogsEntryId].filter((id): id is string => id != null),
+      },
+    };
+  }
+
+  if (line.kind === "vehicle") {
+    const { rows } = await client.query<{
+      item_id: string;
+      name: string;
+      brand_id: string | null;
+      stock_number: string;
+      vin: string | null;
+      chassis_number: string | null;
+      plate_number: string | null;
+      state: string;
+    }>(
+      `SELECT s.item_id, i.name, i.brand_id, v.stock_number, v.vin, v.chassis_number,
+              v.plate_number, v.state
+         FROM automotive_vehicle_attributes v
+         JOIN item_serials s ON s.id = v.serial_id
+         JOIN items i ON i.id = s.item_id
+        WHERE v.serial_id = $1 AND v.business_id = $2 AND v.location_id = $3`,
+      [line.serialId, input.businessId, input.locationId],
+    );
+    if (!rows[0]) throw new RetailInvoiceError("خودرو یافت نشد.");
+    const vehicleRow = rows[0];
+
+    const sale = await sellVehicle(client, {
+      businessId: input.businessId,
+      locationId: input.locationId,
+      serialId: line.serialId,
+      price: line.price,
+      discount: (line.discount ?? 0) + promotionDiscount,
+      vatPercent: line.vatPercent,
+      tenders: tenderQueue,
+      customerId: input.customerId ?? null,
+      orderId,
+      overrideMinPrice: line.overrideMinPrice === true,
+      createdBy: input.createdBy ?? null,
+    });
+
+    return {
+      itemId: vehicleRow.item_id,
+      // The stock number is what identifies the car sold; a reprint has to show it.
+      name: `${vehicleRow.name} — ${vehicleRow.stock_number}`,
+      quantity: "1",
+      gross: rialText(String(Math.round(line.price))),
+      discount: rialText(String(Math.round((line.discount ?? 0) + promotionDiscount))),
+      net: sale.net,
+      vat: sale.vat,
+      total: sale.total,
+      cost: sale.frozenEffectiveCost,
+      brandId: vehicleRow.brand_id,
+      snapshot: {
+        kind: "vehicle",
+        quantity: "1",
+        unitPrice: rialText(String(Math.round(line.price))),
+        gross: rialText(String(Math.round(line.price))),
+        manualDiscount: rialText(String(Math.max(0, Math.round(line.discount ?? 0)))),
+        promotionDiscount: rialText(String(Math.max(0, Math.round(promotionDiscount)))),
+        discount: sale.discount ?? rialText("0"),
+        vat: sale.vat,
+        net: sale.net,
+        total: sale.total,
+        serialId: line.serialId,
+        serialNumber: vehicleRow.stock_number,
+        stockNumber: vehicleRow.stock_number,
+        vin: vehicleRow.vin,
+        chassisNumber: vehicleRow.chassis_number,
+        plateNumber: vehicleRow.plate_number,
+        depositApplied: sale.depositApplied,
+        reservationId: sale.reservationId,
+        frozenEffectiveCost: sale.frozenEffectiveCost,
         ledgerEntryIds: [sale.revenueEntryId, sale.cogsEntryId].filter((id): id is string => id != null),
       },
     };

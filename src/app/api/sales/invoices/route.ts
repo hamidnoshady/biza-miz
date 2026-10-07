@@ -20,6 +20,7 @@ import { enqueueHolooSaleForOrder } from "@/lib/integrations/holoo/outbox-produc
 import { ledgerSettlementFor, type PaymentSettlement } from "@/lib/payment-methods";
 import { MAX_RETAIL_TENDERS } from "@/lib/retail-tenders";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
+import { holdsPermission } from "@/app/api/automotive/guard";
 import { formatJalali } from "@/lib/jalali";
 import { rowsToCsv, type ReportTable } from "@/lib/report-export";
 
@@ -197,6 +198,27 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const lines = body.lines as RetailInvoiceLineInput[];
   if (!lines.every((line) => line && typeof line === "object" && typeof line.kind === "string")) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  // Issue #839 §8 — a vehicle line sells one exact car, and its two
+  // automotive-specific decisions are made *here*, at the HTTP boundary, rather
+  // than trusted from the browser: selling a car needs `vehicles.sell` on top of
+  // the till's own `payments.take`, and crossing the car's recorded floor needs
+  // `vehicles.override_min_price`. A caller that asks for the override without
+  // holding it is refused, not quietly obeyed; any other caller's line keeps the
+  // floor intact.
+  const vehicleLines = lines.filter((line) => line.kind === "vehicle");
+  if (vehicleLines.length > 0) {
+    if (!(await holdsPermission(session, PERMISSIONS.vehiclesSell))) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 });
+    }
+    const mayOverride = await holdsPermission(session, PERMISSIONS.vehiclesOverrideMinPrice);
+    for (const line of vehicleLines) {
+      if (line.overrideMinPrice === true && !mayOverride) {
+        return NextResponse.json({ error: "min_price_override_forbidden" }, { status: 403 });
+      }
+      line.overrideMinPrice = line.overrideMinPrice === true && mayOverride;
+    }
   }
 
   const client = await getPool().connect();
