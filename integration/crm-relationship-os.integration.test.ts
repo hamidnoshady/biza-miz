@@ -181,23 +181,33 @@ afterAll(async () => {
 
 describe("smart queues", () => {
   it("counts the whole queue while previewing only the first few", async () => {
+    // The shop's own today, the date `crmQueues` judges every row against —
+    // the same precaution the «opens each openable queue» block below takes,
+    // and for a failure this block actually suffered: built from the runner's
+    // clock instead, «تماس امروز» was written at 23:00 UTC, whose *business*
+    // date is already tomorrow once Tehran passes midnight. Between 20:30 and
+    // 24:00 UTC the row therefore read as overdue and the queue counted seven,
+    // so the suite was green or red by time of day.
+    const today = await day.businessToday(biz.id);
+    const dayOffset = (offset: number) =>
+      new Date(Date.parse(`${today}T00:00:00Z`) + offset * 86_400_000).toISOString().slice(0, 10);
+
     for (let index = 0; index < 6; index += 1) {
       await makeActivity(biz.id, {
         subject: `تماس عقب‌افتادهٔ ${index}`,
-        dueAt: new Date(Date.now() - (index + 2) * 86_400_000).toISOString(),
+        dueAt: `${dayOffset(-(index + 2))}T09:00:00Z`,
       });
     }
     // Due today is a different queue: an activity whose due date is today must
     // not appear in «عقب‌افتاده», or the two headings say the same thing.
-    const today = new Date();
     await makeActivity(biz.id, {
       subject: "تماس امروز",
-      dueAt: new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 0, 0).toISOString(),
+      dueAt: `${today}T09:00:00Z`,
     });
     // A completed one is not outstanding work at all.
     await makeActivity(biz.id, {
       subject: "تماس انجام‌شده",
-      dueAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+      dueAt: `${dayOffset(-3)}T09:00:00Z`,
       completed: true,
     });
 
