@@ -88,9 +88,16 @@ database and runtime:**
 2. Run `npm run db:encrypt-ai-secrets`; it is resumable, decrypt-verifies each ciphertext against
    the configured encryption key, then clears the legacy plaintext copies.
 3. Run `npm run db:encrypt-ai-secrets -- --verify-only`; it must pass with no legacy plaintext.
-4. Deploy the ciphertext-only application with `AI_GATEWAY_SECRET_CUTOVER_DEFER=true`. The
-   entrypoint applies earlier migrations but explicitly leaves 0209 pending, so the new runtime
-   can start while the old columns still exist.
+4. Deploy the ciphertext-only application. While any credential is stored and
+   `AI_GATEWAY_SECRET_CUTOVER_VERIFIED` is not `true`, the migration runner defers 0209 on its own
+   (as it always does with `AI_GATEWAY_SECRET_CUTOVER_DEFER=true`) and still applies every later
+   migration that does not name a legacy column, so the new runtime starts while the old columns
+   still exist. Before starting the server the container entrypoint runs
+   `encrypt-ai-gateway-secrets.ts --keep-plaintext`, which writes and decrypt-verifies any missing
+   ciphertext with the container's own key and leaves plaintext alone; a failure there is logged,
+   not fatal. (Before this, a deployment that skipped steps 1–3 restarted forever on 0209's
+   `ai_gateway_secret_backfill_required`, and the defer flag could not help because migrations
+   `0209_online_sale_facts` onward sort after the cutover.)
 5. Verify a production runtime read/probe using ciphertext-backed credentials and the current
    `INTEGRATIONS_ENCRYPTION_KEY` (or `JWT_SECRET`) on every deployment/instance. Do not advance
    if any probe fails.

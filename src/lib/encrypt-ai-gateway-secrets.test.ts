@@ -5,10 +5,11 @@ import { encryptSecret } from "./integrations/secrets";
 describe("AI gateway secret cutover helpers", () => {
   const key = Buffer.alloc(32, 0x37);
 
-  it("parses the dry-run and ciphertext-only verification modes", () => {
-    expect(parseArgs(["--dry-run"])).toEqual({ dryRun: true, verifyOnly: false });
-    expect(parseArgs(["--verify-only"])).toEqual({ dryRun: false, verifyOnly: true });
-    expect(parseArgs([])).toEqual({ dryRun: false, verifyOnly: false });
+  it("parses the dry-run, entrypoint and ciphertext-only verification modes", () => {
+    expect(parseArgs(["--dry-run"])).toEqual({ dryRun: true, verifyOnly: false, keepPlaintext: false });
+    expect(parseArgs(["--verify-only"])).toEqual({ dryRun: false, verifyOnly: true, keepPlaintext: false });
+    expect(parseArgs(["--keep-plaintext"])).toEqual({ dryRun: false, verifyOnly: false, keepPlaintext: true });
+    expect(parseArgs([])).toEqual({ dryRun: false, verifyOnly: false, keepPlaintext: false });
   });
 
   it("decrypt-verifies that the stored ciphertext matches the legacy plaintext", () => {

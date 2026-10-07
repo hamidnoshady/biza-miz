@@ -16,6 +16,12 @@
  * run the migration until final verify-only and production runtime-read checks
  * succeed on every deployment.
  *
+ * `--keep-plaintext` is the container entrypoint's mode: it writes and
+ * decrypt-verifies the missing ciphertext so the ciphertext-only runtime can
+ * read every key, but leaves the plaintext copies alone — nothing is removed
+ * without an operator. Once 0209 has dropped the legacy columns every mode is
+ * a no-op.
+ *
  * These are platform-scope tables (`platform_ai_gateway`, `ai_business_gateway`
  * under the platform bypass), so the command runs once per deployment database
  * rather than looping through tenant DEKs like `encrypt-fields.ts` does.
@@ -26,10 +32,27 @@ import { fileURLToPath } from "node:url";
 import { getPool, query, withoutTenantScope } from "../src/lib/db";
 import { decryptSecret, encryptSecret, resolveEncryptionKey } from "../src/lib/integrations/secrets";
 
-export type Args = { dryRun: boolean; verifyOnly: boolean };
+export type Args = { dryRun: boolean; verifyOnly: boolean; keepPlaintext: boolean };
 
 export function parseArgs(argv: string[]): Args {
-  return { dryRun: argv.includes("--dry-run"), verifyOnly: argv.includes("--verify-only") };
+  return {
+    dryRun: argv.includes("--dry-run"),
+    verifyOnly: argv.includes("--verify-only"),
+    keepPlaintext: argv.includes("--keep-plaintext"),
+  };
+}
+
+/** Both legacy plaintext columns still exist, i.e. migration 0209 has not run. */
+async function legacyColumnsPresent(): Promise<boolean> {
+  return withoutTenantScope("ai gateway secrets backfill", async () => {
+    const { rows } = await query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND ((table_name = 'platform_ai_gateway' AND column_name = 'master_key')
+            OR (table_name = 'ai_business_gateway' AND column_name = 'virtual_key'))`,
+    );
+    return Number(rows[0]?.count ?? 0) === 2;
+  });
 }
 
 async function migrateGatewaySingleton(dryRun: boolean, key: Buffer): Promise<number> {
@@ -250,6 +273,7 @@ async function clearVerifiedPlaintext(key: Buffer): Promise<number> {
 async function verifyAndClearLegacySecrets(
   dryRun: boolean,
   verifyOnly: boolean,
+  keepPlaintext: boolean,
   key: Buffer,
 ): Promise<{ verified: number; legacyRemaining: number }> {
   return withoutTenantScope("ai gateway secrets verification", async () => {
@@ -264,7 +288,7 @@ async function verifyAndClearLegacySecrets(
       throw new Error(`ai_gateway_secret_plaintext_remains:${legacyRemaining}:run npm run db:encrypt-ai-secrets before migration 0209`);
     }
 
-    if (!dryRun && !verifyOnly && legacyRemaining > 0) {
+    if (!dryRun && !verifyOnly && !keepPlaintext && legacyRemaining > 0) {
       await clearVerifiedPlaintext(key);
       legacyRemaining = await countLegacySecrets();
       if (legacyRemaining > 0) {
@@ -277,19 +301,27 @@ async function verifyAndClearLegacySecrets(
 }
 
 export async function run(argv: string[] = process.argv.slice(2)): Promise<void> {
-  const { dryRun, verifyOnly } = parseArgs(argv);
-  if (dryRun && verifyOnly) throw new Error("choose only one of --dry-run or --verify-only");
+  const { dryRun, verifyOnly, keepPlaintext } = parseArgs(argv);
+  if ([dryRun, verifyOnly, keepPlaintext].filter(Boolean).length > 1) {
+    throw new Error("choose only one of --dry-run, --verify-only or --keep-plaintext");
+  }
+  if (!(await legacyColumnsPresent())) {
+    console.log("ai gateway secrets: legacy plaintext columns are gone (migration 0209 applied); nothing to do");
+    return;
+  }
 
   const key = resolveEncryptionKey(process.env);
   const gatewayCount = verifyOnly ? 0 : await migrateGatewaySingleton(dryRun, key);
   const businessCount = verifyOnly ? 0 : await migrateBusinessGateways(dryRun, 200, key);
-  const verification = await verifyAndClearLegacySecrets(dryRun, verifyOnly, key);
+  const verification = await verifyAndClearLegacySecrets(dryRun, verifyOnly, keepPlaintext, key);
   const mode = verifyOnly ? "verified" : dryRun ? "would encrypt" : "encrypted";
   console.log(`platform_ai_gateway: ${mode} ${gatewayCount} row(s)`);
   console.log(`ai_business_gateway: ${mode} ${businessCount} row(s)`);
   console.log(`ciphertext: verified ${verification.verified} secret(s)`);
   if (verification.legacyRemaining > 0) {
-    console.log(`legacy plaintext remains in ${verification.legacyRemaining} row(s); run without --dry-run before migration 0209`);
+    console.log(
+      `legacy plaintext remains in ${verification.legacyRemaining} row(s); run ${keepPlaintext ? "npm run db:encrypt-ai-secrets" : "without --dry-run"} before migration 0209`,
+    );
   }
 }
 
