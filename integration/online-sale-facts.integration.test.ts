@@ -13,6 +13,7 @@
  *   - the fact's reference affinity is enforced by the database.
  */
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
@@ -493,7 +494,11 @@ describe("legacy backfill script", () => {
 
     const run = (...args: string[]) => {
       try {
-        return execFileSync("npx", ["tsx", "scripts/backfill-online-sale-lines.ts", "--business", biz.id, ...args], {
+        // `node <tsx cli>` rather than `npx tsx`: the Windows runner has no
+        // `npx` executable without a shell (`npx.cmd`), so spawning it fails
+        // with ENOENT before the script runs.
+        const tsxCli = join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
+        return execFileSync(process.execPath, [tsxCli, "scripts/backfill-online-sale-lines.ts", "--business", biz.id, ...args], {
           env: { ...process.env, DATABASE_URL: urlFor(databaseName) },
           encoding: "utf8",
           stdio: "pipe",
