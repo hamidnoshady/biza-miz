@@ -25,7 +25,7 @@ let dbLib: typeof import("../src/lib/db");
 let apService: typeof import("../src/lib/ap-service");
 
 const biz = { id: "", locationId: "" };
-const acct = { cash: "", bankClearing: "", inventory: "", accountsPayable: "" };
+const acct = { cash: "", bank: "", bankClearing: "", inventory: "", accountsPayable: "" };
 const user = { id: "" };
 const supplier = { id: "" };
 /*
@@ -124,13 +124,15 @@ beforeEach(async () => {
 
   const accounts = await db.query<{ id: string; code: string }>(
     `INSERT INTO accounts (business_id, code, name, type)
-     VALUES ($1, '1100', 'Cash', 'asset'), ($1, '1120', 'Card clearing', 'asset'),
+     VALUES ($1, '1100', 'Cash', 'asset'), ($1, '1110', 'Bank', 'asset'),
+            ($1, '1120', 'Card clearing', 'asset'),
             ($1, '1300', 'Inventory', 'asset'), ($1, '2100', 'Accounts Payable', 'liability')
      RETURNING id, code`,
     [biz.id],
   );
   for (const r of accounts.rows) {
     if (r.code === "1100") acct.cash = r.id;
+    if (r.code === "1110") acct.bank = r.id;
     if (r.code === "1120") acct.bankClearing = r.id;
     if (r.code === "1300") acct.inventory = r.id;
     if (r.code === "2100") acct.accountsPayable = r.id;
@@ -274,7 +276,7 @@ describe("payBill", () => {
     expect(balances[0].balance).toBe(300_000);
   });
 
-  it("posts to bank-clearing for a bank payment", async () => {
+  it("posts to the bank account for a bank payment (issue #829: bank means 1110, not clearing)", async () => {
     await postCreditPurchase("2025-04-01", supplier.id, 500_000);
 
     await apService.payBill({
@@ -288,9 +290,74 @@ describe("payBill", () => {
 
     const { rows } = await db.query<{ credit: string }>(
       `SELECT COALESCE(SUM(credit),0) AS credit FROM journal_lines WHERE account_id = $1`,
+      [acct.bank],
+    );
+    expect(Number(rows[0].credit)).toBe(100_000);
+  });
+
+  it("posts to the clearing account for a clearing payment", async () => {
+    await postCreditPurchase("2025-04-01", supplier.id, 500_000);
+
+    await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "clearing",
+      amount: 100_000,
+      createdBy: user.id,
+    });
+
+    const { rows } = await db.query<{ credit: string }>(
+      `SELECT COALESCE(SUM(credit),0) AS credit FROM journal_lines WHERE account_id = $1`,
       [acct.bankClearing],
     );
     expect(Number(rows[0].credit)).toBe(100_000);
+  });
+
+  it("is idempotent on the client key: a retry returns the original voucher, not a second posting", async () => {
+    await postCreditPurchase("2025-04-01", supplier.id, 500_000);
+    const key = `ap-${randomUUID()}`;
+
+    const first = await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "cash",
+      amount: 100_000,
+      idempotencyKey: key,
+      createdBy: user.id,
+    });
+    const second = await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "cash",
+      amount: 100_000,
+      idempotencyKey: key,
+      createdBy: user.id,
+    });
+    expect(second.id).toBe(first.id);
+    expect(second.duplicate).toBe(true);
+
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM journal_entries WHERE business_id = $1 AND source_type = 'ap_payment'`,
+      [biz.id],
+    );
+    expect(Number(rows[0].count)).toBe(1);
+  });
+
+  it("rejects a deactivated supplier alias", async () => {
+    await db.query(`UPDATE suppliers SET is_active = false WHERE id = $1`, [supplier.id]);
+    await expect(
+      apService.payBill({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        supplierId: supplier.id,
+        method: "cash",
+        amount: 10_000,
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("supplier_not_found");
   });
 
   it("rejects a supplier from a different business", async () => {
@@ -330,6 +397,51 @@ describe("payBill", () => {
         createdBy: user.id,
       }),
     ).rejects.toThrow("invalid_amount");
+  });
+});
+
+describe("reversePayment", () => {
+  it("posts the mirror entry, marks the voucher reversed, and restores the balance", async () => {
+    await postCreditPurchase("2025-04-01", supplier.id, 500_000);
+    const payment = await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "cash",
+      amount: 200_000,
+      paymentDate: "2025-04-10",
+      createdBy: user.id,
+    });
+
+    const result = await apService.reversePayment({
+      businessId: biz.id,
+      paymentId: payment.id,
+      actorId: user.id,
+    });
+    expect(result.reversalEntryId).toBeTruthy();
+
+    const balances = await apService.listSupplierBalances(biz.id);
+    expect(balances[0].balance).toBe(500_000);
+
+    const detail = await apService.getPaymentDetail(biz.id, payment.id);
+    expect(detail).not.toBeNull();
+    expect(detail!.reversedAt).toBeTruthy();
+    expect(detail!.reversalEntryId).toBe(result.reversalEntryId);
+  });
+
+  it("refuses to reverse the same voucher twice", async () => {
+    const payment = await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "cash",
+      amount: 50_000,
+      createdBy: user.id,
+    });
+    await apService.reversePayment({ businessId: biz.id, paymentId: payment.id, actorId: user.id });
+    await expect(
+      apService.reversePayment({ businessId: biz.id, paymentId: payment.id, actorId: user.id }),
+    ).rejects.toThrow("already_reversed");
   });
 });
 

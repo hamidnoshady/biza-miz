@@ -18,16 +18,28 @@
  * DB-touching, so per repo convention it has no direct unit test; the pure
  * aging math (shared with AR) lives in aging.ts. Covered here by
  * integration/ap.integration.test.ts.
+ *
+ * Issue #829 hardening: mirrors `ar-service.ts` — idempotent creation,
+ * explicit settlement accounts, active-supplier validation, and first-class
+ * source-level reversal with preserved A/P attribution.
  */
+import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { businessToday } from "./business-day-service";
 import { isUuid } from "./uuid";
 import { WELL_KNOWN_CODES } from "./coa-template";
-import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
+import { accountIdsByCode, MissingLedgerAccountError, postExactMirrorEntry, postJournalEntry } from "./ledger-service";
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_SUPPLIER_KEY, type AgingSummary } from "./aging";
-import { enqueueHolooReceiptForApPayment } from "./integrations/holoo/outbox-producer";
+import { isValidIsoDate } from "./iso-date";
+import { isSettlementMethod, type SettlementMethod } from "./voucher-shared";
+import { resolveSettlementAccount, SettlementAccountError } from "./settlement-accounts";
+import {
+  enqueueHolooReceiptForApPayment,
+  enqueueHolooReversalForApPayment,
+} from "./integrations/holoo/outbox-producer";
 
 export { MissingLedgerAccountError };
+export type { SettlementMethod };
 
 /**
  * Group key for AP lines that carry no supplier attribution — a manual journal
@@ -46,11 +58,6 @@ export class ApError extends Error {
   }
 }
 
-/** An actual calendar date in ISO form — see `ar-service.ts` for why the regex alone is not enough. */
-function isIsoDateOnly(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value));
-}
-
 async function apAccountId(businessId: string): Promise<string | null> {
   const { rows } = await query<{ id: string }>(
     `SELECT id FROM accounts WHERE business_id = $1 AND code = $2`,
@@ -66,6 +73,7 @@ interface ApLineRow extends Record<string, unknown> {
   party_id: string | null;
   entry_date: string;
   source_type: string | null;
+  reverses_entry_id: string | null;
   note: string | null;
   memo: string | null;
   debit: string;
@@ -90,6 +98,7 @@ async function apLines(businessId: string, accountId: string): Promise<ApLineRow
             COALESCE(pa.phone, s.phone) AS supplier_phone,
             s.party_id AS party_id,
             je.entry_date::text AS entry_date, je.source_type,
+            je.reverses_entry_id::text AS reverses_entry_id,
             COALESCE(p.note, p2.note) AS note, je.memo,
             jl.debit, jl.credit
        FROM journal_lines jl
@@ -195,7 +204,7 @@ export async function listSupplierBalances(businessId: string): Promise<Supplier
 
 export interface ApStatementLine {
   date: string;
-  type: "bill" | "payment" | "return" | "other";
+  type: "bill" | "payment" | "return" | "reversal" | "other";
   description: string;
   debit: number;
   credit: number;
@@ -214,16 +223,28 @@ export async function getSupplierStatement(businessId: string, supplierId: strin
     const debit = Number(l.debit);
     const credit = Number(l.credit);
     balance += credit - debit;
+    // A payment reversal keeps the payment's source identity (that is what
+    // preserves attribution) and is told apart by its reverses_entry_id.
     const type: ApStatementLine["type"] =
-      l.source_type === "purchase" ? "bill" : l.source_type === "ap_payment" ? "payment" : l.source_type === "supplier_return" ? "return" : "other";
+      l.source_type === "purchase"
+        ? "bill"
+        : l.source_type === "ap_payment"
+          ? l.reverses_entry_id
+            ? "reversal"
+            : "payment"
+          : l.source_type === "supplier_return"
+            ? "return"
+            : "other";
     const description =
       type === "bill"
         ? (l.note ?? "فاکتور خرید")
         : type === "payment"
           ? (l.memo ?? "پرداخت به تأمین‌کننده")
-          : type === "return"
-            ? "برگشت به تأمین‌کننده"
-            : (l.memo ?? "سند دستی");
+          : type === "reversal"
+            ? (l.memo ?? "برگشت پرداخت")
+            : type === "return"
+              ? "برگشت به تأمین‌کننده"
+              : (l.memo ?? "سند دستی");
     return { date: l.entry_date, type, description, debit, credit, balance };
   });
 }
@@ -245,7 +266,7 @@ export interface AgingReport {
  * late shift's documents in the wrong bucket).
  */
 export async function getApAging(businessId: string, asOfDate?: string): Promise<AgingReport> {
-  if (asOfDate !== undefined && !isIsoDateOnly(asOfDate)) throw new ApError("invalid_date");
+  if (asOfDate !== undefined && !isValidIsoDate(asOfDate)) throw new ApError("invalid_date");
   const effectiveAsOf = asOfDate ?? (await businessToday(businessId));
   const accountId = await apAccountId(businessId);
   if (!accountId) return { asOfDate: effectiveAsOf, rows: [], totals: { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 } };
@@ -291,26 +312,108 @@ export interface ApPayment {
   id: string;
   supplierId: string;
   paymentDate: string;
-  method: "cash" | "bank";
+  method: SettlementMethod;
   amount: number;
   memo: string | null;
+  settlementAccountId: string | null;
+  idempotencyKey: string | null;
+  voucherNumber: number | null;
+  reversedAt: string | null;
+  reversalEntryId: string | null;
+  /**
+   * True when this call was a retry that returned the original row instead of
+   * posting again. Not a column — set by `payBill` only — so the route can
+   * answer 200 (replay) vs 201 (created).
+   */
+  duplicate?: boolean;
+}
+
+interface PaymentDbRow {
+  id: string;
+  supplier_id: string;
+  payment_date: string;
+  method: SettlementMethod;
+  amount: string;
+  memo: string | null;
+  settlement_account_id: string | null;
+  idempotency_key: string | null;
+  voucher_number: string | null;
+  reversed_at: string | null;
+  reversal_entry_id: string | null;
+}
+
+function toPayment(row: PaymentDbRow): ApPayment {
+  return {
+    id: row.id,
+    supplierId: row.supplier_id,
+    paymentDate: row.payment_date,
+    method: row.method,
+    amount: Number(row.amount),
+    memo: row.memo,
+    settlementAccountId: row.settlement_account_id,
+    idempotencyKey: row.idempotency_key,
+    voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
+    reversedAt: row.reversed_at,
+    reversalEntryId: row.reversal_entry_id,
+  };
+}
+
+const PAYMENT_RETURNING = `id, supplier_id, payment_date::text AS payment_date, method, amount::text AS amount, memo,
+  settlement_account_id, idempotency_key, voucher_number::text AS voucher_number,
+  reversed_at::text AS reversed_at, reversal_entry_id::text AS reversal_entry_id`;
+
+async function findPaymentByIdempotencyKey(
+  client: PoolClient,
+  businessId: string,
+  idempotencyKey: string,
+): Promise<ApPayment | null> {
+  const { rows } = await client.query<PaymentDbRow>(
+    `SELECT ${PAYMENT_RETURNING} FROM ap_payments WHERE business_id = $1 AND idempotency_key = $2`,
+    [businessId, idempotencyKey],
+  );
+  return rows[0] ? toPayment(rows[0]) : null;
+}
+
+async function nextPaymentVoucherNumber(client: PoolClient, businessId: string): Promise<number> {
+  const { rows } = await client.query<{ last_ap_voucher_number: string }>(
+    `INSERT INTO ar_ap_voucher_counters (business_id, last_ar_voucher_number, last_ap_voucher_number)
+     VALUES ($1, 0, 1)
+     ON CONFLICT (business_id) DO UPDATE
+       SET last_ap_voucher_number = ar_ap_voucher_counters.last_ap_voucher_number + 1
+     RETURNING last_ap_voucher_number::text AS last_ap_voucher_number`,
+    [businessId],
+  );
+  return Number(rows[0].last_ap_voucher_number);
+}
+
+function normalizeIdempotencyKey(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new ApError("invalid_idempotency_key");
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > 128) throw new ApError("invalid_idempotency_key");
+  return trimmed;
 }
 
 /**
  * Records the business paying down a supplier's AP balance: Debit Accounts
- * Payable, Credit Cash/Bank-Clearing, in the same transaction as the
- * ap_payments row both reference (source_type='ap_payment',
+ * Payable, Credit settlement account (cash/bank/clearing), in the same
+ * transaction as the ap_payments row both reference (source_type='ap_payment',
  * source_id=payment.id).
+ *
+ * Idempotent per business on `idempotencyKey`, mirroring `receivePayment`.
  */
 export async function payBill(params: {
   businessId: string;
   locationId: string | null;
   supplierId: string;
-  method: "cash" | "bank";
+  method: SettlementMethod;
   amount: number;
   paymentDate?: string | null;
   memo?: string | null;
   createdBy: string | null;
+  settlementAccountId?: string | null;
+  idempotencyKey?: string | null;
   /** Holoo imports create local payments but must not push them back to Holoo. */
   skipHolooPush?: boolean;
 }): Promise<ApPayment> {
@@ -320,7 +423,9 @@ export async function payBill(params: {
   // A non-uuid supplier id cannot match a row, and asking Postgres anyway
   // raises a syntax error rather than returning none — see `isUuid`.
   if (!isUuid(params.supplierId)) throw new ApError("supplier_not_found", 404);
-  if (params.paymentDate != null && !isIsoDateOnly(params.paymentDate)) throw new ApError("invalid_date");
+  if (params.paymentDate != null && !isValidIsoDate(params.paymentDate)) throw new ApError("invalid_date");
+  if (!isSettlementMethod(params.method)) throw new ApError("invalid_method");
+  const idempotencyKey = normalizeIdempotencyKey(params.idempotencyKey);
 
   // The business's «امروز», not the DB server's UTC date — the same argument
   // `receivePayment` in ar-service.ts makes for receipts.
@@ -330,45 +435,80 @@ export async function payBill(params: {
   try {
     await client.query("BEGIN");
 
+    if (idempotencyKey) {
+      const existing = await findPaymentByIdempotencyKey(client, params.businessId, idempotencyKey);
+      if (existing) {
+        await client.query("ROLLBACK");
+        return { ...existing, duplicate: true };
+      }
+    }
+
     // suppliers has no business_id column — verify the match through its
-    // (mandatory) location instead.
+    // (mandatory) location instead. The alias must also be active: the picker
+    // only offers active suppliers, and a crafted request must not pay a
+    // deactivated one. When the alias is linked to a party, that party must
+    // still be a live, non-merged record — otherwise a stale alias bypasses
+    // the merge/archive the directory already enforces.
     const { rows: supplierRows } = await client.query<{ id: string }>(
-      `SELECT s.id FROM suppliers s JOIN locations l ON l.id = s.location_id
-        WHERE s.id = $1 AND l.business_id = $2`,
+      `SELECT s.id FROM suppliers s
+         JOIN locations l ON l.id = s.location_id
+         LEFT JOIN parties pa ON pa.id = s.party_id
+        WHERE s.id = $1 AND l.business_id = $2 AND s.is_active
+          AND (s.party_id IS NULL OR (pa.is_active AND pa.merged_into_id IS NULL))`,
       [params.supplierId, params.businessId],
     );
     if (!supplierRows[0]) throw new ApError("supplier_not_found", 404);
 
-    const accounts = await accountIdsByCode(client, params.businessId, [
-      WELL_KNOWN_CODES.accountsPayable,
-      params.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bankClearing,
-    ]);
-    const apAccount = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
-    const cashAccount = accounts.get(params.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bankClearing)!;
+    let settlementAccountId: string;
+    let apAccount: string;
+    try {
+      const settlement = await resolveSettlementAccount(client, params.businessId, params.method, params.settlementAccountId);
+      settlementAccountId = settlement.id;
+      const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsPayable]);
+      apAccount = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
+    } catch (err) {
+      if (err instanceof SettlementAccountError) throw new ApError(err.message, err.status);
+      throw err;
+    }
 
-    const { rows } = await client.query<{
-      id: string;
-      supplier_id: string;
-      payment_date: string;
-      method: "cash" | "bank";
-      amount: string;
-      memo: string | null;
-    }>(
-      `INSERT INTO ap_payments (business_id, location_id, supplier_id, payment_date, method, amount, memo, created_by)
-       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8)
-       RETURNING id, supplier_id, payment_date::text AS payment_date, method, amount::text AS amount, memo`,
-      [
-        params.businessId,
-        params.locationId,
-        params.supplierId,
-        paymentDate,
-        params.method,
-        params.amount,
-        params.memo?.trim() || null,
-        params.createdBy,
-      ],
-    );
-    const payment = rows[0];
+    const voucherNumber = await nextPaymentVoucherNumber(client, params.businessId);
+
+    let payment: PaymentDbRow;
+    try {
+      const { rows } = await client.query<PaymentDbRow>(
+        `INSERT INTO ap_payments (business_id, location_id, supplier_id, payment_date, method, amount, memo, created_by,
+                                  idempotency_key, settlement_account_id, voucher_number)
+         VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10, $11)
+         RETURNING ${PAYMENT_RETURNING}`,
+        [
+          params.businessId,
+          params.locationId,
+          params.supplierId,
+          paymentDate,
+          params.method,
+          params.amount,
+          params.memo?.trim() || null,
+          params.createdBy,
+          idempotencyKey,
+          settlementAccountId,
+          voucherNumber,
+        ],
+      );
+      payment = rows[0];
+    } catch (err) {
+      if (
+        idempotencyKey &&
+        (err as { code?: string; constraint?: string }).code === "23505" &&
+        (err as { constraint?: string }).constraint === "uq_ap_payments_business_idempotency"
+      ) {
+        const existing = await findPaymentByIdempotencyKey(client, params.businessId, idempotencyKey);
+        if (existing) {
+          await client.query("ROLLBACK");
+          return { ...existing, duplicate: true };
+        }
+      }
+      throw err;
+    }
 
     await postJournalEntry(client, {
       businessId: params.businessId,
@@ -381,7 +521,7 @@ export async function payBill(params: {
       postingKind: "ap_payment",
       lines: [
         { accountId: apAccount, debit: params.amount, credit: 0 },
-        { accountId: cashAccount, debit: 0, credit: params.amount },
+        { accountId: settlementAccountId, debit: 0, credit: params.amount },
       ],
     });
 
@@ -390,18 +530,196 @@ export async function payBill(params: {
     }
 
     await client.query("COMMIT");
-    return {
-      id: payment.id,
-      supplierId: payment.supplier_id,
-      paymentDate: payment.payment_date,
-      method: payment.method,
-      amount: Number(payment.amount),
-      memo: payment.memo,
-    };
+    return toPayment(payment);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
   }
+}
+
+export interface ApPaymentDetail extends ApPayment {
+  supplierName: string;
+  supplierPhone: string | null;
+  supplierPartyId: string | null;
+  locationId: string | null;
+  locationName: string | null;
+  createdByName: string | null;
+  createdAt: string;
+  settlementAccountCode: string | null;
+  settlementAccountName: string | null;
+  entryId: string | null;
+  reversalDate: string | null;
+  reversedByName: string | null;
+}
+
+/** One payment voucher with the audit metadata the register drill-down shows. */
+export async function getPaymentDetail(businessId: string, paymentId: string): Promise<ApPaymentDetail | null> {
+  if (!isUuid(paymentId)) return null;
+  const { rows } = await query<{
+    id: string;
+    supplier_id: string;
+    supplier_name: string;
+    supplier_phone: string | null;
+    supplier_party_id: string | null;
+    location_id: string | null;
+    location_name: string | null;
+    payment_date: string;
+    method: SettlementMethod;
+    amount: string;
+    memo: string | null;
+    settlement_account_id: string | null;
+    settlement_account_code: string | null;
+    settlement_account_name: string | null;
+    idempotency_key: string | null;
+    voucher_number: string | null;
+    created_by_name: string | null;
+    created_at: string;
+    entry_id: string | null;
+    reversed_at: string | null;
+    reversed_by_name: string | null;
+    reversal_entry_id: string | null;
+    reversal_date: string | null;
+  }>(
+    `SELECT p.id, p.supplier_id,
+            COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص') AS supplier_name,
+            COALESCE(pa.phone, s.phone) AS supplier_phone,
+            s.party_id AS supplier_party_id,
+            p.location_id, l.name AS location_name,
+            p.payment_date::text AS payment_date, p.method, p.amount::text AS amount, p.memo,
+            p.settlement_account_id, a.code AS settlement_account_code, a.name AS settlement_account_name,
+            p.idempotency_key, p.voucher_number::text AS voucher_number,
+            u.full_name AS created_by_name, p.created_at::text AS created_at,
+            je.id::text AS entry_id,
+            p.reversed_at::text AS reversed_at, ru.full_name AS reversed_by_name,
+            p.reversal_entry_id::text AS reversal_entry_id,
+            rje.entry_date::text AS reversal_date
+       FROM ap_payments p
+       LEFT JOIN suppliers s ON s.id = p.supplier_id
+       LEFT JOIN parties pa ON pa.id = s.party_id
+       LEFT JOIN locations l ON l.id = p.location_id
+       LEFT JOIN accounts a ON a.id = p.settlement_account_id
+       LEFT JOIN users u ON u.id = p.created_by
+       LEFT JOIN users ru ON ru.id = p.reversed_by
+       LEFT JOIN journal_entries je
+         ON je.business_id = p.business_id AND je.source_type = 'ap_payment'
+        AND je.source_id = p.id AND je.posting_kind = 'ap_payment'
+       LEFT JOIN journal_entries rje ON rje.id = p.reversal_entry_id
+      WHERE p.business_id = $1 AND p.id = $2`,
+    [businessId, paymentId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    supplierId: row.supplier_id,
+    supplierName: row.supplier_name,
+    supplierPhone: row.supplier_phone,
+    supplierPartyId: row.supplier_party_id,
+    locationId: row.location_id,
+    locationName: row.location_name,
+    paymentDate: row.payment_date,
+    method: row.method,
+    amount: Number(row.amount),
+    memo: row.memo,
+    settlementAccountId: row.settlement_account_id,
+    settlementAccountCode: row.settlement_account_code,
+    settlementAccountName: row.settlement_account_name,
+    idempotencyKey: row.idempotency_key,
+    voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
+    createdByName: row.created_by_name,
+    createdAt: row.created_at,
+    entryId: row.entry_id,
+    reversedAt: row.reversed_at,
+    reversedByName: row.reversed_by_name,
+    reversalEntryId: row.reversal_entry_id,
+    reversalDate: row.reversal_date,
+  };
+}
+
+/**
+ * Reverses a posted payment — the mirror of `reverseReceipt`.
+ * Same guarantees: exact mirror under the same source identity (so the
+ * supplier statement keeps the attribution), dated on an allowed date, source
+ * row marked once, double reversal refused.
+ */
+export async function reversePayment(params: {
+  businessId: string;
+  paymentId: string;
+  actorId: string | null;
+  reversalDate?: string | null;
+  memo?: string | null;
+  skipHolooPush?: boolean;
+}): Promise<ApPaymentDetail> {
+  if (!isUuid(params.paymentId)) throw new ApError("payment_not_found", 404);
+  if (params.reversalDate != null && !isValidIsoDate(params.reversalDate)) throw new ApError("invalid_date");
+  const reversalDate = params.reversalDate ?? (await businessToday(params.businessId));
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+
+    const { rows: paymentRows } = await client.query<{
+      id: string;
+      location_id: string | null;
+      memo: string | null;
+      reversed_at: string | null;
+    }>(
+      `SELECT id, location_id, memo, reversed_at::text AS reversed_at
+         FROM ap_payments WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+      [params.paymentId, params.businessId],
+    );
+    const payment = paymentRows[0];
+    if (!payment) throw new ApError("payment_not_found", 404);
+    if (payment.reversed_at) throw new ApError("already_reversed", 409);
+
+    const { rows: linked } = await client.query<{ id: string }>(
+      `SELECT id FROM installment_items WHERE payment_id = $1 LIMIT 1`,
+      [params.paymentId],
+    );
+    if (linked[0]) throw new ApError("payment_linked_to_installment", 409);
+
+    const { rows: entryRows } = await client.query<{ id: string }>(
+      `SELECT id FROM journal_entries
+        WHERE business_id = $1 AND source_type = 'ap_payment' AND source_id = $2
+          AND posting_kind = 'ap_payment' AND reversed_at IS NULL AND reverses_entry_id IS NULL`,
+      [params.businessId, params.paymentId],
+    );
+    const original = entryRows[0];
+    if (!original) throw new ApError("payment_has_no_entry", 409);
+
+    const reversalEntryId = await postExactMirrorEntry(client, {
+      businessId: params.businessId,
+      locationId: payment.location_id,
+      originalEntryId: original.id,
+      sourceType: "ap_payment",
+      sourceId: params.paymentId,
+      postingKind: "ap_payment_reversal",
+      memo: params.memo?.trim() || `برگشت پرداخت${payment.memo ? ` — ${payment.memo}` : ""}`,
+      entryDate: reversalDate,
+      createdBy: params.actorId,
+    });
+    if (!reversalEntryId) throw new ApError("payment_has_no_entry", 409);
+
+    await client.query(
+      `UPDATE ap_payments SET reversed_at = now(), reversed_by = $2, reversal_entry_id = $3 WHERE id = $1`,
+      [params.paymentId, params.actorId, reversalEntryId],
+    );
+
+    if (!params.skipHolooPush) {
+      await enqueueHolooReversalForApPayment(client, params.businessId, params.paymentId, reversalEntryId);
+    }
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  const detail = await getPaymentDetail(params.businessId, params.paymentId);
+  if (!detail) throw new ApError("payment_not_found", 404);
+  return detail;
 }

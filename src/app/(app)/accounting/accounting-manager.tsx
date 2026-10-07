@@ -119,6 +119,15 @@ export function AccountingManager({
    * the gate, matching how `partiesSectionAbilities` treats the same gap.
    */
   const canApproveLedger = permissions ? permissions.includes(PERMISSIONS.ledgerApprove) : undefined;
+  /**
+   * Whether this member may record receipts / payments in «دریافت و پرداخت».
+   * The workspace used to draw ثبت for everyone who could view the ledger, so
+   * a viewer got a 403 from a control that looked live. `undefined` when the
+   * page could not read the member's effective permissions; the section then
+   * draws the buttons and the API stays the gate.
+   */
+  const canReceive = permissions ? permissions.includes(PERMISSIONS.financeReceivablesManage) : undefined;
+  const canPay = permissions ? permissions.includes(PERMISSIONS.financePayablesManage) : undefined;
 
   // Every section is a route now, so the rail navigates rather than switching
   // local state — a section a person lands on is a URL they can keep.
@@ -243,7 +252,7 @@ export function AccountingManager({
           ) : null}
           {section === "receivables" ? <ArSection /> : null}
           {section === "payables" ? <ApSection /> : null}
-          {section === "receipts" ? <ReceiptsPaymentsSection /> : null}
+          {section === "receipts" ? <ReceiptsPaymentsSection canReceive={canReceive} canPay={canPay} /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}
           {section === "reconciliation" ? <ReconciliationSection busy={busy} run={run} /> : null}

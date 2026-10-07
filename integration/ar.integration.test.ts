@@ -23,7 +23,7 @@ let arService: typeof import("../src/lib/ar-service");
 let customersService: typeof import("../src/lib/parties-service");
 
 const biz = { id: "", locationId: "" };
-const acct = { cash: "", bankClearing: "", revenue: "", accountsReceivable: "" };
+const acct = { cash: "", bank: "", bankClearing: "", revenue: "", accountsReceivable: "" };
 const user = { id: "" };
 
 function urlFor(database: string): string {
@@ -104,13 +104,15 @@ beforeEach(async () => {
 
   const accounts = await db.query<{ id: string; code: string }>(
     `INSERT INTO accounts (business_id, code, name, type)
-     VALUES ($1, '1100', 'Cash', 'asset'), ($1, '1120', 'Card clearing', 'asset'),
+     VALUES ($1, '1100', 'Cash', 'asset'), ($1, '1110', 'Bank', 'asset'),
+            ($1, '1120', 'Card clearing', 'asset'),
             ($1, '1200', 'Accounts Receivable', 'asset'), ($1, '4300', 'Sales', 'revenue')
      RETURNING id, code`,
     [biz.id],
   );
   for (const r of accounts.rows) {
     if (r.code === "1100") acct.cash = r.id;
+    if (r.code === "1110") acct.bank = r.id;
     if (r.code === "1120") acct.bankClearing = r.id;
     if (r.code === "1200") acct.accountsReceivable = r.id;
     if (r.code === "4300") acct.revenue = r.id;
@@ -203,7 +205,7 @@ describe("receivePayment", () => {
     expect(balances[0].balance).toBe(300_000);
   });
 
-  it("posts to bank-clearing for a bank receipt", async () => {
+  it("posts to the bank account for a bank receipt (issue #829: bank means 1110, not clearing)", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await postCreditOrder("2025-04-01", customer.id, 500_000);
 
@@ -218,9 +220,158 @@ describe("receivePayment", () => {
 
     const { rows } = await db.query<{ debit: string }>(
       `SELECT COALESCE(SUM(debit),0) AS debit FROM journal_lines WHERE account_id = $1`,
+      [acct.bank],
+    );
+    expect(Number(rows[0].debit)).toBe(100_000);
+  });
+
+  it("posts to the clearing account for a clearing receipt", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+
+    await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "clearing",
+      amount: 100_000,
+      createdBy: user.id,
+    });
+
+    const { rows } = await db.query<{ debit: string }>(
+      `SELECT COALESCE(SUM(debit),0) AS debit FROM journal_lines WHERE account_id = $1`,
       [acct.bankClearing],
     );
     expect(Number(rows[0].debit)).toBe(100_000);
+  });
+
+  it("posts to an explicit settlement account when one is given", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const { rows: subRows } = await db.query<{ id: string }>(
+      `INSERT INTO accounts (business_id, code, name, type, parent_id)
+       VALUES ($1, '1101', 'Petty cash', 'asset', $2) RETURNING id`,
+      [biz.id, acct.cash],
+    );
+
+    const receipt = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      settlementAccountId: subRows[0].id,
+      amount: 100_000,
+      createdBy: user.id,
+    });
+    expect(receipt.settlementAccountId).toBe(subRows[0].id);
+
+    const { rows } = await db.query<{ debit: string }>(
+      `SELECT COALESCE(SUM(debit),0) AS debit FROM journal_lines WHERE account_id = $1`,
+      [subRows[0].id],
+    );
+    expect(Number(rows[0].debit)).toBe(100_000);
+  });
+
+  it("rejects a settlement account outside the 11xx cash family", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await expect(
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        settlementAccountId: acct.accountsReceivable,
+        amount: 10_000,
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("invalid_settlement_account");
+  });
+
+  it("is idempotent on the client key: a retry returns the original voucher, not a second posting", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const key = `ar-${randomUUID()}`;
+
+    const first = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 100_000,
+      idempotencyKey: key,
+      createdBy: user.id,
+    });
+    const second = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 100_000,
+      idempotencyKey: key,
+      createdBy: user.id,
+    });
+    expect(second.id).toBe(first.id);
+    expect(second.duplicate).toBe(true);
+
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM journal_entries WHERE business_id = $1 AND source_type = 'ar_receipt'`,
+      [biz.id],
+    );
+    expect(Number(rows[0].count)).toBe(1);
+  });
+
+  it("assigns stable sequential voucher numbers per business", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const first = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 10_000,
+      createdBy: user.id,
+    });
+    const second = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 20_000,
+      createdBy: user.id,
+    });
+    expect(first.voucherNumber).toBe(1);
+    expect(second.voucherNumber).toBe(2);
+  });
+
+  it("rejects a supplier-only party as the receipt customer", async () => {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, role) VALUES ($1, 'Vendor', 'supplier') RETURNING id`,
+      [biz.id],
+    );
+    await expect(
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: rows[0].id,
+        method: "cash",
+        amount: 10_000,
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("customer_not_found");
+  });
+
+  it("rejects an inactive or merged customer", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await db.query(`UPDATE parties SET is_active = false WHERE id = $1`, [customer.id]);
+    await expect(
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 10_000,
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("customer_not_found");
   });
 
   it("rejects a customer from a different business", async () => {
@@ -254,6 +405,72 @@ describe("receivePayment", () => {
         createdBy: user.id,
       }),
     ).rejects.toThrow("invalid_amount");
+  });
+});
+
+describe("reverseReceipt", () => {
+  it("posts the mirror entry, marks the voucher reversed, and restores the balance", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const receipt = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 200_000,
+      receiptDate: "2025-04-10",
+      createdBy: user.id,
+    });
+
+    const result = await arService.reverseReceipt({
+      businessId: biz.id,
+      receiptId: receipt.id,
+      actorId: user.id,
+    });
+    expect(result.reversalEntryId).toBeTruthy();
+
+    const balances = await arService.listCustomerBalances(biz.id);
+    expect(balances[0].balance).toBe(500_000);
+
+    const detail = await arService.getReceiptDetail(biz.id, receipt.id);
+    expect(detail).not.toBeNull();
+    expect(detail!.reversedAt).toBeTruthy();
+    expect(detail!.reversalEntryId).toBe(result.reversalEntryId);
+  });
+
+  it("refuses to reverse the same voucher twice", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const receipt = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 50_000,
+      createdBy: user.id,
+    });
+    await arService.reverseReceipt({ businessId: biz.id, receiptId: receipt.id, actorId: user.id });
+    await expect(
+      arService.reverseReceipt({ businessId: biz.id, receiptId: receipt.id, actorId: user.id }),
+    ).rejects.toThrow("already_reversed");
+  });
+
+  it("shows the reversal in the customer statement", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const receipt = await arService.receivePayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash",
+      amount: 200_000,
+      receiptDate: "2025-04-10",
+      createdBy: user.id,
+    });
+    await arService.reverseReceipt({ businessId: biz.id, receiptId: receipt.id, actorId: user.id });
+
+    const lines = await arService.getCustomerStatement(biz.id, customer.id);
+    expect(lines.map((l) => l.type)).toEqual(["invoice", "receipt", "reversal"]);
+    expect(lines[2].balance).toBe(500_000);
   });
 });
 

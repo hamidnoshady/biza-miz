@@ -191,3 +191,76 @@ describe("listPayments", () => {
     expect((await installments.listPayments(biz.id, "قبوض")).map((r) => r.amount)).toEqual([900]);
   });
 });
+
+describe("listReceiptsPage (issue #829: cursor pagination + filters)", () => {
+  it("pages newest-first without overlap or gaps", async () => {
+    const a = await addCustomer("علی رضایی");
+    for (let i = 1; i <= 5; i += 1) {
+      await addReceipt(a, i * 100, `2026-09-0${i}`, null);
+    }
+
+    const first = await installments.listReceiptsPage(biz.id, { limit: 2 });
+    expect(first.rows.map((r) => r.amount)).toEqual([500, 400]);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).toBeTruthy();
+
+    const second = await installments.listReceiptsPage(biz.id, { limit: 2, cursor: first.nextCursor });
+    expect(second.rows.map((r) => r.amount)).toEqual([300, 200]);
+    expect(second.hasMore).toBe(true);
+
+    const third = await installments.listReceiptsPage(biz.id, { limit: 2, cursor: second.nextCursor });
+    expect(third.rows.map((r) => r.amount)).toEqual([100]);
+    expect(third.hasMore).toBe(false);
+    expect(third.nextCursor).toBeNull();
+  });
+
+  it("filters by date range, amount range, method and status", async () => {
+    const a = await addCustomer("علی رضایی");
+    const cashId = await addReceipt(a, 100, "2026-09-10", null);
+    await db.query(`UPDATE ar_receipts SET method = 'bank' WHERE id = $1`, [cashId]);
+    await addReceipt(a, 500, "2026-09-20", null);
+    const reversedId = await addReceipt(a, 900, "2026-09-25", null);
+    await db.query(`UPDATE ar_receipts SET reversed_at = now(), reversal_entry_id = gen_random_uuid() WHERE id = $1`, [
+      reversedId,
+    ]);
+
+    const byDate = await installments.listReceiptsPage(biz.id, { dateFrom: "2026-09-15", dateTo: "2026-09-30" });
+    expect(byDate.rows.map((r) => r.amount).sort()).toEqual([500, 900]);
+
+    const byAmount = await installments.listReceiptsPage(biz.id, { minAmount: 400, maxAmount: 600 });
+    expect(byAmount.rows.map((r) => r.amount)).toEqual([500]);
+
+    const byMethod = await installments.listReceiptsPage(biz.id, { method: "bank" });
+    expect(byMethod.rows.map((r) => r.amount)).toEqual([100]);
+
+    const active = await installments.listReceiptsPage(biz.id, { status: "active" });
+    expect(active.rows.map((r) => r.amount).sort()).toEqual([100, 500]);
+    const reversed = await installments.listReceiptsPage(biz.id, { status: "reversed" });
+    expect(reversed.rows.map((r) => r.amount)).toEqual([900]);
+  });
+
+  it("rejects an invalid cursor and invalid filters with 400 codes", async () => {
+    await expect(installments.listReceiptsPage(biz.id, { cursor: "not-a-cursor" })).rejects.toThrow("invalid_cursor");
+    await expect(installments.listReceiptsPage(biz.id, { dateFrom: "2026-13-99" })).rejects.toThrow("invalid_date_from");
+    await expect(
+      installments.listReceiptsPage(biz.id, { method: "cheque" as unknown as "cash" }),
+    ).rejects.toThrow("invalid_method");
+  });
+});
+
+describe("listPaymentsPage (issue #829: cursor pagination + filters)", () => {
+  it("pages newest-first without overlap or gaps", async () => {
+    const s = await addSupplier("پخش آسمان");
+    for (let i = 1; i <= 4; i += 1) {
+      await addPayment(s, i * 100, `2026-09-0${i}`, null);
+    }
+
+    const first = await installments.listPaymentsPage(biz.id, { limit: 3 });
+    expect(first.rows.map((r) => r.amount)).toEqual([400, 300, 200]);
+    expect(first.hasMore).toBe(true);
+
+    const second = await installments.listPaymentsPage(biz.id, { limit: 3, cursor: first.nextCursor });
+    expect(second.rows.map((r) => r.amount)).toEqual([100]);
+    expect(second.hasMore).toBe(false);
+  });
+});

@@ -3,17 +3,77 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { ApError, MissingLedgerAccountError, payBill } from "@/lib/ap-service";
-import { listPayments } from "@/lib/installments-service";
+import { listPaymentsPage, VoucherListError } from "@/lib/installments-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
+import { isSettlementMethod, SETTLEMENT_METHODS } from "@/lib/voucher-shared";
+import { buildCsv, sanitizeCsvText } from "@/lib/csv-safe";
 
-/** The «پرداخت‌ها» ledger slice — every payment voucher, newest first. */
+/**
+ * The «پرداخت‌ها» ledger slice — payment vouchers, newest first, keyset-
+ * paginated. Same contract as the receipts route: `limit` + `cursor` page,
+ * filters narrow, `?format=csv` exports the filtered set formula-safe.
+ */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
   if (error) return error;
-  const q = request.nextUrl.searchParams.get("q") ?? undefined;
-  const payments = await listPayments(session.businessId, q);
-  return NextResponse.json({ payments });
+  const params = request.nextUrl.searchParams;
+  const parseAmount = (key: string): number | undefined => {
+    const raw = params.get(key);
+    if (raw === null || raw === "") return undefined;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) ? value : NaN;
+  };
+  const filters = {
+    q: params.get("q") ?? undefined,
+    dateFrom: params.get("dateFrom") ?? undefined,
+    dateTo: params.get("dateTo") ?? undefined,
+    method: params.get("method") ?? undefined,
+    partyId: params.get("partyId") ?? params.get("supplierId") ?? undefined,
+    locationId: params.get("locationId") ?? undefined,
+    settlementAccountId: params.get("settlementAccountId") ?? undefined,
+    minAmount: parseAmount("minAmount"),
+    maxAmount: parseAmount("maxAmount"),
+    status: params.get("status") ?? undefined,
+  } as Parameters<typeof listPaymentsPage>[1];
+  const limitRaw = params.get("limit");
+  const limit = limitRaw === null || limitRaw === "" ? undefined : Number(limitRaw);
+  const cursor = params.get("cursor") ?? undefined;
+
+  if (params.get("format") === "csv") {
+    try {
+      const page = await listPaymentsPage(session.businessId, { ...filters, limit: 5000 });
+      const csv = buildCsv(
+        ["شماره سند", "تاریخ", "تأمین‌کننده", "روش", "مبلغ (ریال)", "شرح", "وضعیت"],
+        page.rows.map((r) => [
+          r.voucherNumber === null ? "" : String(r.voucherNumber),
+          r.date,
+          sanitizeCsvText(r.partyName),
+          r.method,
+          String(r.amount),
+          sanitizeCsvText(r.memo ?? ""),
+          r.reversedAt ? "باطل‌شده" : "فعال",
+        ]),
+      );
+      return new NextResponse(csv, {
+        headers: {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": "attachment; filename=payments.csv",
+        },
+      });
+    } catch (err) {
+      if (err instanceof VoucherListError) return NextResponse.json({ error: err.message }, { status: err.status });
+      throw err;
+    }
+  }
+
+  try {
+    const page = await listPaymentsPage(session.businessId, { ...filters, limit, cursor });
+    return NextResponse.json({ payments: page.rows, nextCursor: page.nextCursor, hasMore: page.hasMore });
+  } catch (err) {
+    if (err instanceof VoucherListError) return NextResponse.json({ error: err.message }, { status: err.status });
+    throw err;
+  }
 });
 
 interface PaymentBody {
@@ -22,9 +82,9 @@ interface PaymentBody {
   amount?: number;
   paymentDate?: string;
   memo?: string;
+  settlementAccountId?: string;
+  idempotencyKey?: string;
 }
-
-const METHODS = ["cash", "bank"] as const;
 
 /** Records the business paying down a supplier's AP balance. Same access as posting a manual journal entry. */
 export const POST = withTenantScope(async (request: NextRequest) => {
@@ -40,8 +100,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const supplierId = body.supplierId?.trim();
   if (!supplierId) return NextResponse.json({ error: "supplier_required" }, { status: 400 });
-  if (!METHODS.includes(body.method as (typeof METHODS)[number])) {
-    return NextResponse.json({ error: "invalid_method" }, { status: 400 });
+  if (!isSettlementMethod(body.method)) {
+    return NextResponse.json({ error: "invalid_method", allowed: [...SETTLEMENT_METHODS] }, { status: 400 });
   }
   const amount = Number(body.amount);
   if (!Number.isSafeInteger(amount) || amount <= 0) {
@@ -61,13 +121,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       businessId: session.businessId,
       locationId: location?.id ?? null,
       supplierId,
-      method: body.method as "cash" | "bank",
+      method: body.method,
       amount,
       paymentDate,
       memo: body.memo,
+      settlementAccountId: body.settlementAccountId?.trim() || null,
+      idempotencyKey: body.idempotencyKey,
       createdBy: session.sub,
     });
-    return NextResponse.json({ payment }, { status: 201 });
+    return NextResponse.json({ payment }, { status: payment.duplicate ? 200 : 201 });
   } catch (err) {
     if (err instanceof ApError) return NextResponse.json({ error: err.message }, { status: err.status });
     if (err instanceof MissingLedgerAccountError) {

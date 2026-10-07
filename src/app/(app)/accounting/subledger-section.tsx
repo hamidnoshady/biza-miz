@@ -57,6 +57,12 @@ import { DataTable, DataTableBody, DataTableFoot, DataTableHead, DataTableRow, T
 import { FilterChip } from "@/app/dashboard/filters";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { LedgerLoadFailed, OverlayDialog } from "./ledger-ui";
+import {
+  SettlementAccountPicker,
+  SettlementMethodPicker,
+  useIdempotencyKey,
+  type SettlementMethod,
+} from "./settlement-form";
 
 /** One row of the balances list — the common shape both sides map their payloads into. */
 export interface SubledgerPartyRow {
@@ -588,7 +594,8 @@ function SubledgerSettleDialog({
 }) {
   const money = useMoney();
   const [amount, setAmount] = useState(String(money.toInput(Math.max(party.balance, 0)) || ""));
-  const [method, setMethod] = useState<"cash" | "bank">("cash");
+  const [method, setMethod] = useState<SettlementMethod>("cash");
+  const [settlementAccountId, setSettlementAccountId] = useState("");
   // The date is optional, Shamsi. The «دریافت و پرداخت» voucher form has
   // always been able to back-date one; settling from this screen silently
   // posted *today*, and a receipt taken yesterday had to be re-entered there.
@@ -596,6 +603,7 @@ function SubledgerSettleDialog({
   const [memo, setMemo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const idempotencyKey = useIdempotencyKey();
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -627,6 +635,8 @@ function SubledgerSettleDialog({
           [side.settle.idField]: party.id,
           amount: rial,
           method,
+          settlementAccountId: settlementAccountId || undefined,
+          idempotencyKey,
           [side.settle.dateField]: settleDate || undefined,
           memo: memo.trim() || undefined,
         }),
@@ -664,13 +674,10 @@ function SubledgerSettleDialog({
         <Field label={`مبلغ (${money.unitLabel})`}>
           <PersianNumberInput className={inputClass} dir="ltr" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="۰" />
         </Field>
-        <div>
-          <p className="mb-1 text-sm font-medium text-foreground">{side.settle.methodLabel}</p>
-          <div className="flex gap-2">
-            <FilterChip dense selected={method === "cash"} onClick={() => setMethod("cash")}>نقدی</FilterChip>
-            <FilterChip dense selected={method === "bank"} onClick={() => setMethod("bank")}>بانکی</FilterChip>
-          </div>
-        </div>
+        {/* Shared with the «دریافت و پرداخت» voucher form: same three methods,
+            same optional settlement account, same idempotency key. */}
+        <SettlementMethodPicker value={method} onChange={setMethod} label={side.settle.methodLabel} />
+        <SettlementAccountPicker value={settlementAccountId} onChange={setSettlementAccountId} />
         <Field label={side.settle.dateLabel}>
           <JalaliDatePicker value={settleDate} onChange={setSettleDate} placeholder="امروز" />
         </Field>

@@ -226,8 +226,7 @@ export async function enqueueHolooPurchase(
   businessId: string,
   purchaseId: string,
   source: "purchase" | "item_purchase",
-): Promise<number> {
-  const table = source === "purchase" ? "purchases" : "item_purchases";
+): Promise<number> {  const table = source === "purchase" ? "purchases" : "item_purchases";
   const dateExpr = source === "purchase" ? "COALESCE(p.received_at::date, p.purchase_date)::text" : "p.received_at::date::text";
   const { rows } = await client.query<{
     id: string;
@@ -255,6 +254,111 @@ export async function enqueueHolooPurchase(
       payload: { occurredAt: purchase.occurred_at, totalRial: purchase.total, personRemoteId, memo: purchase.note, source },
     };
     await upsertOutbox(client, businessId, connection.id, "holoo_purchase", document.sourceId, purchase.id, document);
+    queued += 1;
+  }
+  return queued;
+}
+
+/**
+ * Issue #829 — Holoo behavior for AR/AP reversals, defined so a reversal never
+ * creates silent divergence.
+ *
+ * A reversal is enqueued as its own outbox document (distinct `remote_id` with
+ * a `:reversal` suffix) that names the voucher it undoes. It never overwrites
+ * the original receipt/payment document: Holoo keeps both, the same way the
+ * local ledger keeps both journal entries. The payload carries `reverses` +
+ * `reversalEntryId` so the companion can post a compensating document rather
+ * than deleting the original.
+ */
+export async function enqueueHolooReversalForArReceipt(
+  client: PoolClient,
+  businessId: string,
+  receiptId: string,
+  reversalEntryId: string,
+): Promise<number> {
+  const { rows } = await client.query<{
+    id: string;
+    location_id: string | null;
+    customer_id: string;
+    amount: string;
+    memo: string | null;
+    reversal_date: string | null;
+  }>(
+    `SELECT r.id, r.location_id, r.customer_id, r.amount::text, r.memo,
+            je.entry_date::text AS reversal_date
+       FROM ar_receipts r
+       LEFT JOIN journal_entries je ON je.id = r.reversal_entry_id
+      WHERE r.id = $1 AND r.business_id = $2`,
+    [receiptId, businessId],
+  );
+  const receipt = rows[0];
+  if (!receipt) return 0;
+  const connections = await holooPushConnections(client, businessId, receipt.location_id);
+  let queued = 0;
+  for (const connection of connections) {
+    const personRemoteId = await remoteIdForLocal(client, businessId, connection.id, "holoo_customer", receipt.customer_id);
+    const document: HolooDocument = {
+      sourceId: `ar_receipt:${receipt.id}:reversal`,
+      kind: "receipt",
+      values: [receipt.reversal_date, personRemoteId, receipt.amount, "receipt_reversal"],
+      payload: {
+        occurredAt: receipt.reversal_date,
+        totalRial: receipt.amount,
+        personRemoteId,
+        direction: "receipt_reversal",
+        reverses: receipt.id,
+        reversalEntryId,
+        memo: receipt.memo,
+      },
+    };
+    await upsertOutbox(client, businessId, connection.id, "holoo_receipt", document.sourceId, receipt.id, document);
+    queued += 1;
+  }
+  return queued;
+}
+
+export async function enqueueHolooReversalForApPayment(
+  client: PoolClient,
+  businessId: string,
+  paymentId: string,
+  reversalEntryId: string,
+): Promise<number> {
+  const { rows } = await client.query<{
+    id: string;
+    location_id: string | null;
+    supplier_id: string;
+    amount: string;
+    memo: string | null;
+    reversal_date: string | null;
+  }>(
+    `SELECT p.id, p.location_id, p.supplier_id, p.amount::text, p.memo,
+            je.entry_date::text AS reversal_date
+       FROM ap_payments p
+       LEFT JOIN journal_entries je ON je.id = p.reversal_entry_id
+      WHERE p.id = $1 AND p.business_id = $2`,
+    [paymentId, businessId],
+  );
+  const payment = rows[0];
+  if (!payment) return 0;
+  const connections = await holooPushConnections(client, businessId, payment.location_id);
+  let queued = 0;
+  for (const connection of connections) {
+    const personRemoteId = await remoteIdForLocal(client, businessId, connection.id, "holoo_customer", payment.supplier_id);
+    const document: HolooDocument = {
+      sourceId: `ap_payment:${payment.id}:reversal`,
+      kind: "receipt",
+      values: [payment.reversal_date, personRemoteId, payment.amount, "payment_reversal"],
+      payload: {
+        occurredAt: payment.reversal_date,
+        totalRial: payment.amount,
+        personRemoteId,
+        direction: "payment_reversal",
+        reverses: payment.id,
+        reversalEntryId,
+        memo: payment.memo,
+      },
+    };
+    await upsertOutbox(client, businessId, connection.id, "holoo_receipt", document.sourceId, payment.id, document);
     queued += 1;
   }
   return queued;

@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { InstallmentError, MissingLedgerAccountError, payInstallmentItem } from "@/lib/installments-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
+import { isSettlementMethod, SETTLEMENT_METHODS } from "@/lib/voucher-shared";
 
 /** Settles one slice of a plan — posts the subledger pair atomically. */
 export const POST = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -18,8 +19,8 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
   if (!body.itemId) return NextResponse.json({ error: "item_required" }, { status: 400 });
-  if (body.method !== "cash" && body.method !== "bank") {
-    return NextResponse.json({ error: "invalid_method" }, { status: 400 });
+  if (!isSettlementMethod(body.method)) {
+    return NextResponse.json({ error: "invalid_method", allowed: [...SETTLEMENT_METHODS] }, { status: 400 });
   }
 
   const location = await resolveActiveLocation(session);

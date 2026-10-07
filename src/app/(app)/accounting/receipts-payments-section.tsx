@@ -6,59 +6,85 @@ import {
   cardClass,
   overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
-import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useEffect, useRef, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { ArrowDownLeftIcon, ArrowUpRightIcon, DownloadIcon, PlusIcon, RefreshCwIcon, XIcon } from "lucide-react";
 import { api, ErrorBox, errorMessage, Field, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { Button } from "@/components/ui/button";
 import { FilterChip } from "@/app/dashboard/filters";
 import { fmtJalali, OverlayDialog } from "./ledger-ui";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
+import {
+  SETTLEMENT_METHOD_LABELS,
+  SettlementFormFields,
+  useIdempotencyKey,
+  type SettlementMethod,
+} from "./settlement-form";
+import { voucherReference } from "@/lib/voucher-shared";
 
 /**
  * «دریافت و پرداخت» — the voucher ledger slice. The reference software keeps
  * four lists (receive/pay/income/expense); here receive and pay are the two
  * subledger voucher streams the accounting engine already posts (ar_receipts
  * / ap_payments), so this section is a view over the very rows the receive
- * and pay actions write — one place to browse, search and export them, and to
- * register a new voucher with the platform's form language.
+ * and pay actions write — one place to browse, search, filter and export
+ * them, and to register a new voucher with the platform's form language.
+ *
+ * Issue #829: the list is cursor-paginated (a large history never ships in
+ * one response), rows carry their stable voucher number (not the visible
+ * index), reversed vouchers show their status instead of vanishing, and the
+ * ثبت buttons follow finance.receivables_manage / finance.payables_manage.
  */
 
 interface Voucher {
   id: string;
   date: string;
-  method: "cash" | "bank";
+  method: SettlementMethod;
   amount: number;
   memo: string | null;
   partyName: string;
+  voucherNumber: number | null;
+  reversedAt: string | null;
 }
 
 type Side = "receipts" | "payments";
+type MethodFilter = "all" | SettlementMethod;
+type StatusFilter = "all" | "active" | "reversed";
 
-const METHOD_LABELS: Record<Voucher["method"], string> = {
-  cash: "نقدی",
-  bank: "بانکی",
+const STATUS_LABELS: Record<Exclude<StatusFilter, "all">, string> = {
+  active: "فعال",
+  reversed: "باطل‌شده",
 };
 
-/**
- * How many vouchers the list draws. Both breakpoints used to slice differently
- * (100 on desktop, 50 on mobile) under a heading that counted *all* of them, so
- * «۳۲۰ سند» sat above a list of fifty with nothing said about the rest.
- */
-const VISIBLE_ROWS = 100;
-
-export function ReceiptsPaymentsSection() {
+export function ReceiptsPaymentsSection({
+  canReceive,
+  canPay,
+}: {
+  /**
+   * Whether this member may record receipts / payments
+   * (finance.receivables_manage / finance.payables_manage). `undefined` when
+   * the page could not read the member's effective permissions; the buttons
+   * then draw and the API stays the gate, matching how the manual-entry queue
+   * treats the same gap.
+   */
+  canReceive?: boolean;
+  canPay?: boolean;
+}) {
   const money = useMoney();
   const [side, setSide] = useState<Side>("receipts");
   const [q, setQ] = useState("");
+  const [methodFilter, setMethodFilter] = useState<MethodFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [rows, setRows] = useState<Voucher[] | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   /*
    * Responses race each other — a fast «علی» search easily outruns the slow
@@ -69,24 +95,42 @@ export function ReceiptsPaymentsSection() {
   const requestSeq = useRef(0);
   const prevSide = useRef<Side>(side);
 
+  const canCreate = side === "receipts" ? canReceive !== false : canPay !== false;
+
+  function listUrl(cursor?: string | null): string {
+    const params = new URLSearchParams();
+    if (q.trim()) params.set("q", q.trim());
+    if (methodFilter !== "all") params.set("method", methodFilter);
+    if (statusFilter !== "all") params.set("status", statusFilter);
+    if (cursor) params.set("cursor", cursor);
+    const query = params.toString();
+    const base = side === "receipts" ? "/api/ledger/ar/receipts" : "/api/ledger/ap/payments";
+    return query ? `${base}?${query}` : base;
+  }
+
   useEffect(() => {
     // Switching دریافتی/پرداختی swaps the whole dataset; what is on screen
     // belongs to the other stream, so only that transition blanks the list —
-    // searches and refreshes keep their rows and just flag «در حال به‌روزرسانی».
+    // searches, filters and refreshes keep their rows and just flag
+    // «در حال به‌روزرسانی».
     if (prevSide.current !== side) {
       prevSide.current = side;
       setRows(null);
+      setNextCursor(null);
+      setHasMore(false);
     }
     const seq = ++requestSeq.current;
     const run = () => {
       setLoading(true);
-      const params = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : "";
-      const url = side === "receipts" ? `/api/ledger/ar/receipts${params}` : `/api/ledger/ap/payments${params}`;
-      api<{ receipts?: Voucher[]; payments?: Voucher[]; error?: string }>(url)
+      api<{ receipts?: Voucher[]; payments?: Voucher[]; nextCursor?: string | null; hasMore?: boolean; error?: string }>(
+        listUrl(),
+      )
         .then(({ ok, data }) => {
           if (requestSeq.current !== seq) return;
           if (ok) {
             setRows(data.receipts ?? data.payments ?? []);
+            setNextCursor(data.nextCursor ?? null);
+            setHasMore(data.hasMore ?? false);
             setError("");
           } else {
             // A network failure resolves here too — `api()` answers the
@@ -100,38 +144,60 @@ export function ReceiptsPaymentsSection() {
     };
     const t = setTimeout(run, q ? 250 : 0);
     return () => clearTimeout(t);
-  }, [side, q, refreshKey]);
+    // listUrl closes over the filter state; listing every dep keeps the lint
+    // rule honest without re-running on an unstable function identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [side, q, methodFilter, statusFilter, refreshKey]);
+
+  async function loadMore() {
+    if (!nextCursor || loadingMore) return;
+    const seq = requestSeq.current;
+    setLoadingMore(true);
+    try {
+      const { ok, data } = await api<{
+        receipts?: Voucher[];
+        payments?: Voucher[];
+        nextCursor?: string | null;
+        hasMore?: boolean;
+        error?: string;
+      }>(listUrl(nextCursor));
+      if (requestSeq.current !== seq) return;
+      if (ok) {
+        setRows((prev) => [...(prev ?? []), ...(data.receipts ?? data.payments ?? [])]);
+        setNextCursor(data.nextCursor ?? null);
+        setHasMore(data.hasMore ?? false);
+      } else {
+        setError(errorMessage(data.error));
+      }
+    } finally {
+      if (requestSeq.current === seq) setLoadingMore(false);
+    }
+  }
 
   /*
-   * The export obeys the same Shamsi rule the screen does: a CSV is read by a
-   * person, so its date column is Jalali rather than the stored ISO/Gregorian
-   * string this used to write out. The amount column names the unit actually in
-   * use instead of asserting Rial while the screen shows Toman — as an ASCII
-   * number, because a spreadsheet has to be able to add the column up.
+   * The export is server-rendered: the visible page is a window into the
+   * history, and exporting it would silently drop every voucher outside the
+   * window. The API honors the same filters and sanitizes formula-leading
+   * cells, so a memo starting with «=» cannot become a spreadsheet formula.
    */
   function downloadCsv() {
-    if (!rows || rows.length === 0) return;
-    const head = ["تاریخ", "شخص", "شرح", "روش", `مبلغ (${money.unitLabel})`];
-    const body = rows.map((r) => [
-      fmtJalali(r.date),
-      r.partyName,
-      r.memo ?? "",
-      METHOD_LABELS[r.method],
-      String(money.toInput(r.amount)),
-    ]);
-    const csv = [head, ...body].map((line) => line.map((cell) => `"${cell.replaceAll('"', '""')}"`).join(",")).join("\n");
-    const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
+    const params = new URLSearchParams();
+    if (q.trim()) params.set("q", q.trim());
+    if (methodFilter !== "all") params.set("method", methodFilter);
+    if (statusFilter !== "all") params.set("status", statusFilter);
+    params.set("format", "csv");
+    const base = side === "receipts" ? "/api/ledger/ar/receipts" : "/api/ledger/ap/payments";
     const a = document.createElement("a");
-    a.href = url;
+    a.href = `${base}?${params.toString()}`;
     a.download = side === "receipts" ? "receipts.csv" : "payments.csv";
-    // Firefox only honors the download of an anchor that is in the document,
-    // and revoking the blob URL in the same tick can cancel the navigation the
-    // click just queued — so attach, click, detach, and revoke on a delay.
     document.body.append(a);
     a.click();
     a.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+
+  function refresh() {
+    setSelectedId(null);
+    setRefreshKey((k) => k + 1);
   }
 
   const needle = q.trim();
@@ -152,8 +218,14 @@ export function ReceiptsPaymentsSection() {
             <h2 className="mt-1 font-semibold text-foreground dark:text-stone-50">
               {side === "receipts" ? "دریافت‌ها" : "پرداخت‌ها"}
             </h2>
+            {/*
+             * Sorted by document date (newest first), not by creation order —
+             * a back-dated voucher files under its own date. The heading used
+             * to claim «به ترتیب تاریخ ثبت» while the query ordered by the
+             * voucher date.
+             */}
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              {side === "receipts" ? "اسناد دریافت وجه از مشتریان، به ترتیب تاریخ ثبت." : "اسناد پرداخت وجه به تأمین‌کنندگان، به ترتیب تاریخ ثبت."}
+              {side === "receipts" ? "اسناد دریافت وجه از مشتریان، به ترتیب تاریخ سند." : "اسناد پرداخت وجه به تأمین‌کنندگان، به ترتیب تاریخ سند."}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -176,10 +248,12 @@ export function ReceiptsPaymentsSection() {
               <DownloadIcon aria-hidden="true" className="size-4" />
               دانلود
             </button>
-            <Button onClick={() => setCreating(true)} className="min-h-10">
-              <PlusIcon aria-hidden="true" className="size-4" />
-              {side === "receipts" ? "ثبت دریافت" : "ثبت پرداخت"}
-            </Button>
+            {canCreate ? (
+              <Button onClick={() => setCreating(true)} className="min-h-10">
+                <PlusIcon aria-hidden="true" className="size-4" />
+                {side === "receipts" ? "ثبت دریافت" : "ثبت پرداخت"}
+              </Button>
+            ) : null}
           </div>
         </div>
 
@@ -208,6 +282,20 @@ export function ReceiptsPaymentsSection() {
           />
         </div>
 
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <div className="flex gap-2" role="group" aria-label="روش تسویه">
+            <FilterChip dense selected={methodFilter === "all"} onClick={() => setMethodFilter("all")}>همه روش‌ها</FilterChip>
+            <FilterChip dense selected={methodFilter === "cash"} onClick={() => setMethodFilter("cash")}>نقدی</FilterChip>
+            <FilterChip dense selected={methodFilter === "bank"} onClick={() => setMethodFilter("bank")}>بانکی</FilterChip>
+            <FilterChip dense selected={methodFilter === "clearing"} onClick={() => setMethodFilter("clearing")}>اسناد در جریان وصول</FilterChip>
+          </div>
+          <div className="flex gap-2" role="group" aria-label="وضعیت سند">
+            <FilterChip dense selected={statusFilter === "all"} onClick={() => setStatusFilter("all")}>همه وضعیت‌ها</FilterChip>
+            <FilterChip dense selected={statusFilter === "active"} onClick={() => setStatusFilter("active")}>فعال</FilterChip>
+            <FilterChip dense selected={statusFilter === "reversed"} onClick={() => setStatusFilter("reversed")}>باطل‌شده</FilterChip>
+          </div>
+        </div>
+
         <div className="mt-4" aria-busy={loading && rows !== null}>
           {!rows ? (
             error ? (
@@ -230,36 +318,46 @@ export function ReceiptsPaymentsSection() {
           ) : (
             <>
               <p className="mb-2 text-xs text-muted-foreground">
-                {rows.length > VISIBLE_ROWS
-                  ? `${toPersianDigits(VISIBLE_ROWS)} سند از ${toPersianDigits(rows.length)} سند — برای دیدن بقیه جست‌وجو کنید`
+                {hasMore
+                  ? `${toPersianDigits(rows.length)} سند — موارد بیشتر با «نمایش بیشتر»`
                   : `${toPersianDigits(rows.length)} سند`}
               </p>
               <DataTable caption="اسناد دریافت و پرداخت" className="hidden lg:block">
                 <DataTableHead>
-                  <Th>#</Th>
+                  <Th>شماره سند</Th>
                   <Th>شخص</Th>
                   <Th>شرح</Th>
                   <Th>روش</Th>
                   <Th>تاریخ</Th>
                   <Th>مبلغ</Th>
+                  <Th>وضعیت</Th>
                 </DataTableHead>
                 <DataTableBody>
-                  {rows.slice(0, VISIBLE_ROWS).map((r, index) => (
-                    <DataTableRow key={r.id}>
-                      <Td muted>{toPersianDigits(index + 1)}</Td>
+                  {rows.map((r) => (
+                    <DataTableRow
+                      key={r.id}
+                      className="cursor-pointer transition-colors hover:bg-muted/60"
+                      onClick={() => setSelectedId(r.id)}
+                    >
+                      <Td muted>{r.voucherNumber != null ? toPersianDigits(voucherReference(side === "receipts" ? "receipt" : "payment", r.voucherNumber)) : "—"}</Td>
                       <Td className="max-w-48 truncate font-medium" title={r.partyName}>{r.partyName}</Td>
                       <Td muted className="max-w-64 truncate" title={r.memo ?? undefined}>{r.memo ?? "—"}</Td>
-                      <Td muted>{METHOD_LABELS[r.method]}</Td>
+                      <Td muted>{SETTLEMENT_METHOD_LABELS[r.method]}</Td>
                       <Td nowrap muted>{fmtJalali(r.date)}</Td>
                       <Td nowrap className="font-semibold">{money.format(r.amount)}</Td>
+                      <Td muted>{r.reversedAt ? STATUS_LABELS.reversed : STATUS_LABELS.active}</Td>
                     </DataTableRow>
                   ))}
                 </DataTableBody>
               </DataTable>
 
               <div className="space-y-3 lg:hidden">
-                {rows.slice(0, VISIBLE_ROWS).map((r) => (
-                  <article key={r.id} className="rounded-xl border border-border/80 bg-muted p-4">
+                {rows.map((r) => (
+                  <article
+                    key={r.id}
+                    onClick={() => setSelectedId(r.id)}
+                    className="cursor-pointer rounded-xl border border-border/80 bg-muted p-4"
+                  >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <h3 className="truncate text-sm font-bold" title={r.partyName}>{r.partyName}</h3>
@@ -268,11 +366,21 @@ export function ReceiptsPaymentsSection() {
                       <span className="whitespace-nowrap font-bold">{money.format(r.amount)}</span>
                     </div>
                     <p className="mt-2 border-t border-border pt-2 text-xs text-muted-foreground">
-                      {fmtJalali(r.date)} · {METHOD_LABELS[r.method]}
+                      {r.voucherNumber != null ? `${toPersianDigits(voucherReference(side === "receipts" ? "receipt" : "payment", r.voucherNumber))} · ` : ""}
+                      {fmtJalali(r.date)} · {SETTLEMENT_METHOD_LABELS[r.method]}
+                      {r.reversedAt ? ` · ${STATUS_LABELS.reversed}` : ""}
                     </p>
                   </article>
                 ))}
               </div>
+
+              {hasMore ? (
+                <div className="mt-4 flex justify-center">
+                  <SecondaryButton onClick={loadMore} disabled={loadingMore}>
+                    {loadingMore ? "در حال بارگذاری…" : "نمایش بیشتر"}
+                  </SecondaryButton>
+                </div>
+              ) : null}
             </>
           )}
         </div>
@@ -286,6 +394,16 @@ export function ReceiptsPaymentsSection() {
             setCreating(false);
             setRefreshKey((k) => k + 1);
           }}
+        />
+      ) : null}
+
+      {selectedId ? (
+        <VoucherDetailDialog
+          side={side}
+          voucherId={selectedId}
+          canReverse={side === "receipts" ? canReceive !== false : canPay !== false}
+          onClose={() => setSelectedId(null)}
+          onReversed={refresh}
         />
       ) : null}
     </section>
@@ -305,11 +423,13 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
   const [directoryKey, setDirectoryKey] = useState(0);
   const [partyId, setPartyId] = useState("");
   const [amount, setAmount] = useState("");
-  const [method, setMethod] = useState<"cash" | "bank">("cash");
+  const [method, setMethod] = useState<SettlementMethod>("cash");
+  const [settlementAccountId, setSettlementAccountId] = useState("");
   const [date, setDate] = useState("");
   const [memo, setMemo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const idempotencyKey = useIdempotencyKey();
 
   /*
    * `?scope=directory`, not the open-balance list. A voucher is not always a
@@ -367,8 +487,24 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
     const url = side === "receipts" ? "/api/ledger/ar/receipts" : "/api/ledger/ap/payments";
     const body =
       side === "receipts"
-        ? { customerId: partyId, amount: rial, method, memo: memo.trim() || undefined, receiptDate: date || undefined }
-        : { supplierId: partyId, amount: rial, method, memo: memo.trim() || undefined, paymentDate: date || undefined };
+        ? {
+            customerId: partyId,
+            amount: rial,
+            method,
+            settlementAccountId: settlementAccountId || undefined,
+            idempotencyKey,
+            memo: memo.trim() || undefined,
+            receiptDate: date || undefined,
+          }
+        : {
+            supplierId: partyId,
+            amount: rial,
+            method,
+            settlementAccountId: settlementAccountId || undefined,
+            idempotencyKey,
+            memo: memo.trim() || undefined,
+            paymentDate: date || undefined,
+          };
     const { ok, data } = await api<{ error?: string }>(url, { method: "POST", body: JSON.stringify(body) });
     setBusy(false);
     if (ok) onCreated();
@@ -436,22 +572,18 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
                 </button>
               </div>
             ) : null}
-            <Field label="مبلغ" hint={money.unitLabel}>
-              <PersianNumberInput className={inputClass} dir="ltr" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="۰" />
-            </Field>
-            <div className="mb-4">
-              <p className="mb-1 text-sm font-medium text-foreground">روش</p>
-              <div className="flex gap-2">
-                <FilterChip dense selected={method === "cash"} onClick={() => setMethod("cash")}>نقدی</FilterChip>
-                <FilterChip dense selected={method === "bank"} onClick={() => setMethod("bank")}>بانکی</FilterChip>
-              </div>
-            </div>
-            <Field label="تاریخ (اختیاری)">
-              <JalaliDatePicker value={date} onChange={setDate} className={inputClass} ariaLabel="تاریخ" />
-            </Field>
-            <Field label="شرح (اختیاری)">
-              <input className={inputClass} value={memo} onChange={(e) => setMemo(e.target.value)} />
-            </Field>
+            <SettlementFormFields
+              amount={amount}
+              onAmountChange={setAmount}
+              method={method}
+              onMethodChange={setMethod}
+              settlementAccountId={settlementAccountId}
+              onSettlementAccountChange={setSettlementAccountId}
+              date={date}
+              onDateChange={setDate}
+              memo={memo}
+              onMemoChange={setMemo}
+            />
           </div>
 
           <footer className="grid shrink-0 grid-cols-2 gap-3 border-t border-border px-4 py-4 sm:px-5">
@@ -461,6 +593,213 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
             </PrimaryButton>
           </footer>
         </form>
+    </OverlayDialog>
+  );
+}
+
+interface VoucherDetail {
+  id: string;
+  receiptDate?: string;
+  paymentDate?: string;
+  method: SettlementMethod;
+  amount: number;
+  memo: string | null;
+  voucherNumber: number | null;
+  customerName?: string;
+  supplierName?: string;
+  locationName: string | null;
+  createdByName: string | null;
+  createdAt: string;
+  settlementAccountCode: string | null;
+  settlementAccountName: string | null;
+  entryId: string | null;
+  reversedAt: string | null;
+  reversalEntryId: string | null;
+  reversalDate: string | null;
+  reversedByName: string | null;
+}
+
+/**
+ * One voucher's drill-down: who, how much, through which settlement account,
+ * posted as which journal entry — and, when reversed, which entry undid it and
+ * who did it. Reversal posts a mirror entry dated today; the voucher row
+ * itself is never deleted.
+ */
+function VoucherDetailDialog({
+  side,
+  voucherId,
+  canReverse,
+  onClose,
+  onReversed,
+}: {
+  side: Side;
+  voucherId: string;
+  canReverse: boolean;
+  onClose: () => void;
+  onReversed: () => void;
+}) {
+  const money = useMoney();
+  const [detail, setDetail] = useState<VoucherDetail | null>(null);
+  const [error, setError] = useState("");
+  const [reversing, setReversing] = useState(false);
+  const [reverseMemo, setReverseMemo] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const url =
+      side === "receipts" ? `/api/ledger/ar/receipts/${voucherId}` : `/api/ledger/ap/payments/${voucherId}`;
+    api<{ receipt?: VoucherDetail; payment?: VoucherDetail; error?: string }>(url).then(({ ok, data }) => {
+      if (cancelled) return;
+      if (ok) {
+        setDetail(data.receipt ?? data.payment ?? null);
+        setError("");
+      } else {
+        setError(errorMessage(data.error));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [side, voucherId]);
+
+  async function submitReverse() {
+    setBusy(true);
+    setError("");
+    const url =
+      side === "receipts"
+        ? `/api/ledger/ar/receipts/${voucherId}/reverse`
+        : `/api/ledger/ap/payments/${voucherId}/reverse`;
+    const { ok, data } = await api<{ error?: string }>(url, {
+      method: "POST",
+      body: JSON.stringify({ memo: reverseMemo.trim() || undefined }),
+    });
+    setBusy(false);
+    if (ok) onReversed();
+    else setError(errorMessage(data.error));
+  }
+
+  const date = detail?.receiptDate ?? detail?.paymentDate ?? "";
+  const partyName = detail?.customerName ?? detail?.supplierName ?? "—";
+
+  return (
+    <OverlayDialog
+      headingId="voucher-detail-heading"
+      onClose={onClose}
+      className={`${overlayPanelClass} flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col`}
+    >
+      <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border px-4 py-4 sm:px-5">
+        <div>
+          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+            {side === "receipts" ? "جزئیات دریافت" : "جزئیات پرداخت"}
+          </p>
+          <h3 id="voucher-detail-heading" className="mt-1 text-lg font-bold">
+            {detail?.voucherNumber != null
+              ? toPersianDigits(voucherReference(side === "receipts" ? "receipt" : "payment", detail.voucherNumber))
+              : "سند"}
+          </h3>
+        </div>
+        <button type="button" onClick={onClose} aria-label="بستن" className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted">
+          <XIcon aria-hidden="true" className="size-4" />
+        </button>
+      </header>
+
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4 sm:px-5">
+        <ErrorBox>{error}</ErrorBox>
+        {!detail && !error ? (
+          <SectionCardSkeleton rows={4} />
+        ) : detail ? (
+          <>
+            <dl className="space-y-2 text-sm">
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted-foreground">{side === "receipts" ? "دریافت از" : "پرداخت به"}</dt>
+                <dd className="font-semibold">{partyName}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted-foreground">مبلغ</dt>
+                <dd className="font-bold">{money.format(detail.amount)}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted-foreground">روش</dt>
+                <dd>{SETTLEMENT_METHOD_LABELS[detail.method]}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted-foreground">حساب تسویه</dt>
+                <dd>
+                  {detail.settlementAccountCode
+                    ? `${toPersianDigits(detail.settlementAccountCode)} · ${detail.settlementAccountName ?? ""}`
+                    : "—"}
+                </dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted-foreground">تاریخ سند</dt>
+                <dd>{date ? fmtJalali(date) : "—"}</dd>
+              </div>
+              {detail.locationName ? (
+                <div className="flex justify-between gap-3">
+                  <dt className="text-muted-foreground">شعبه</dt>
+                  <dd>{detail.locationName}</dd>
+                </div>
+              ) : null}
+              {detail.memo ? (
+                <div className="flex justify-between gap-3">
+                  <dt className="text-muted-foreground">شرح</dt>
+                  <dd className="max-w-56 truncate" title={detail.memo}>{detail.memo}</dd>
+                </div>
+              ) : null}
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted-foreground">ثبت‌کننده</dt>
+                <dd>{detail.createdByName ?? "—"}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted-foreground">وضعیت</dt>
+                <dd>{detail.reversedAt ? STATUS_LABELS.reversed : STATUS_LABELS.active}</dd>
+              </div>
+              {detail.reversedAt ? (
+                <>
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted-foreground">تاریخ ابطال</dt>
+                    <dd>{detail.reversalDate ? fmtJalali(detail.reversalDate) : "—"}</dd>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-muted-foreground">باطل‌کننده</dt>
+                    <dd>{detail.reversedByName ?? "—"}</dd>
+                  </div>
+                </>
+              ) : null}
+            </dl>
+
+            {!detail.reversedAt && canReverse ? (
+              reversing ? (
+                <div className="space-y-3 rounded-xl border border-border p-3">
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    ابطال این سند یک سند معکوس با تاریخ امروز ثبت می‌کند؛ سند اصلی حذف نمی‌شود.
+                  </p>
+                  <Field label="شرح ابطال (اختیاری)">
+                    <input
+                      className={inputClass}
+                      value={reverseMemo}
+                      onChange={(e) => setReverseMemo(e.target.value)}
+                    />
+                  </Field>
+                  <div className="grid grid-cols-2 gap-3">
+                    <SecondaryButton onClick={() => setReversing(false)} disabled={busy}>انصراف</SecondaryButton>
+                    <PrimaryButton onClick={submitReverse} disabled={busy}>
+                      {busy ? "در حال ابطال…" : "تأیید ابطال"}
+                    </PrimaryButton>
+                  </div>
+                </div>
+              ) : (
+                <SecondaryButton onClick={() => setReversing(true)}>ابطال سند</SecondaryButton>
+              )
+            ) : null}
+          </>
+        ) : null}
+      </div>
+
+      <footer className="shrink-0 border-t border-border px-4 py-4 sm:px-5">
+        <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
+      </footer>
     </OverlayDialog>
   );
 }
