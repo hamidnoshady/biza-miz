@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { ManualJournalError, MANUAL_MEMO_MAX, reverseEntry } from "@/lib/manual-journal-service";
+import { resolveActiveLocation } from "@/lib/setup-state";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isUuid } from "@/lib/uuid";
 
@@ -17,19 +18,23 @@ interface Ctx {
  * screen gates the button on the same permission, so a manager no longer
  * clicks a live-looking destructive control and collects a 403.
  *
- * No `resolveActiveLocation` here any more, deliberately. Both the reversing
- * journal and its sync event are routed by the **original document's** branch
- * (`manual-journal-service.ts` explains why at length): the approver's active
- * location is where they are standing, not where the document lives, and
- * using it queued the reversal for the wrong branch in hybrid deployments.
+ * The approver's active location is passed, but it no longer routes anything.
+ * Both the reversing journal and its sync event follow the **original
+ * document's** branch (`manual-journal-service.ts` explains why at length):
+ * where the accountant is standing is not where the document lives, and using
+ * it queued the reversal for the wrong branch in hybrid deployments. It
+ * survives as the fallback for a document that has no branch of its own,
+ * which would otherwise have no queue to travel in at all.
  */
 export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerApprove);
   if (error) return error;
 
   const { id } = await ctx.params;
-  // `WHERE id = $1` against a uuid column raises a cast error rather than
-  // answering "no such row", which surfaced as a 500 and «خطای غیرمنتظره».
+  // Same guard as the drafts routes: `WHERE id = $1` against a uuid column
+  // raises `invalid input syntax for type uuid` rather than answering "no
+  // such row", which surfaced as a 500 and «خطای غیرمنتظره» instead of the
+  // 404 the caller is entitled to.
   if (!isUuid(id)) return NextResponse.json({ error: "entry_not_found" }, { status: 404 });
 
   let body: { memo?: string; entryDate?: string } = {};
@@ -46,10 +51,12 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
     return NextResponse.json({ error: "memo_too_long" }, { status: 400 });
   }
 
+  const location = await resolveActiveLocation(session);
+
   try {
     const result = await reverseEntry({
       businessId: session.businessId,
-      locationId: null,
+      locationId: location?.id ?? null,
       entryId: id,
       actorId: session.sub,
       memo: body.memo,

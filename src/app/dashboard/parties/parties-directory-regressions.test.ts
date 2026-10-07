@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { normalizeNumericText } from "@/lib/digits";
-import { DEFAULT_TAX_PERCENTAGE, taxPercentageOf } from "@/lib/parties";
+import { taxPercentageOf } from "@/lib/parties";
 
 /**
  * The «اشخاص» directory's fixed defects, pinned so they stay fixed.
@@ -43,12 +43,12 @@ describe("the tax rate a party is saved with", () => {
    * `Number(digits.replace(/[^\d.]/g, ""))`. Every case below silently wrote a
    * wrong VAT rate onto a counterparty — the field the invoices then use.
    */
-  it("reads a cleared field as the default rate, never as zero", () => {
+  it("reads a cleared field as «follows the business rate», never as zero", () => {
     // The original bug: `Number("")` is 0, and 0% is a rate a business really
     // charges, so nothing downstream could tell a cleared field from a
     // deliberate exemption.
-    expect(taxPercentageOf({ generalInfo: { taxPercentage: "" } })).toBe(DEFAULT_TAX_PERCENTAGE);
-    expect(taxPercentageOf({ generalInfo: { taxPercentage: "   " } })).toBe(DEFAULT_TAX_PERCENTAGE);
+    expect(taxPercentageOf({ generalInfo: { taxPercentage: "" } })).toBeNull();
+    expect(taxPercentageOf({ generalInfo: { taxPercentage: "   " } })).toBeNull();
   });
 
   it("still honours a deliberate zero", () => {

@@ -301,6 +301,20 @@ and a cloud event it cannot apply becomes a dead letter the owner sees.
 Replays keep the sale's own instant (`opened_at`, `closed_at`, `received_at`)
 and the paying side's journal date.
 
+**The ledger is the exception to "the desktop is the operational authority".**
+Accounting has one authority — the cloud — and the three contracts that
+describe it (`src/lib/data-ownership.ts`, `src/lib/replication-catalogue.ts`
+and the sync-event registry) now say so identically: a pulled
+`accounting.manual_journal.reversed@1` is *acknowledged* by a desktop rather
+than applied, because re-deriving a posting locally would fork the books. What
+a desktop sends is the request to reverse (`site_to_cloud`), and the reversal
+is posted where the original entry lives — the event is tagged with the
+**reversed entry's** branch, never the reversing user's currently active one,
+so a head-office accountant correcting a branch's document cannot deliver that
+branch's ledger effect into another branch's stream. Drafting, approval and
+rejection of a journal draft are cloud-only workflow and have no sync events at
+all: a draft is not a financial fact, so there is nothing for a peer to replay.
+
 **Master data** — customers (`parties`, `party_categories`), payment ways, and
 the branch's menu, modifiers, recipes, stock items and tables — synchronises
 continuously in both directions through the master-data feed

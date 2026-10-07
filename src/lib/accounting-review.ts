@@ -21,6 +21,30 @@ import { formatJalali } from "./jalali";
 import { formatRial } from "./money";
 import { formatQuantity, toPersianDigits } from "./digits";
 import { ACCOUNTING_WORKSPACE_HREFS } from "./app-routes";
+import { RECONCILABLE_ACCOUNTS } from "./bank-reconciliation";
+import { RECONCILABLE_ACCOUNT_LABELS } from "./ai-labels";
+
+/**
+ * «صندوق، بانک یا کارت‌خوان (در راه)» — the accounts an unreconciled line can
+ * sit on, spelled from the same list the reconciliation service uses rather
+ * than typed into the sentence.
+ *
+ * This copy said «صندوق یا کارت‌خوان» while the service had already learned to
+ * reconcile بانک, so the audit named two of the three places its own count came
+ * from — a reader on a cheque-taking business was told to look everywhere
+ * except the account holding the money. Deriving it means a fourth reconcilable
+ * account shows up here by itself instead of by somebody remembering.
+ */
+export const RECONCILABLE_ACCOUNT_NAMES: readonly string[] = RECONCILABLE_ACCOUNTS.map(
+  (key) => RECONCILABLE_ACCOUNT_LABELS[key] ?? key,
+);
+
+/** Persian "a، b یا c" — the last item joined with «یا», the rest with «،». */
+function persianList(items: readonly string[]): string {
+  if (items.length === 0) return "";
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join("، ")} یا ${items[items.length - 1]}`;
+}
 
 export type AccountingReviewSeverity = "high" | "medium" | "low";
 
@@ -277,7 +301,13 @@ const RULES: Rule[] = [
       detail: `${fa(rows.length)} پیش‌نویس سند بیش از ${fa(s.staleDraftAfterDays)} روز است که منتظر تأیید مانده (قدیمی‌ترین: ${fa(oldest)} روز، جمع: ${money(total)}). تا تأیید نشوند در هیچ گزارشی دیده نمی‌شوند.`,
       count: rows.length,
       amountRial: total,
-      suggestion: "پیش‌نویس‌ها را در صف تأیید اسناد بررسی و تعیین‌تکلیف کنید: تأیید، اصلاح یا حذف.",
+      // «تأیید یا رد» — deliberately not «اصلاح». There is no draft-edit
+      // workflow: the API can list, get, create, approve and reject a draft,
+      // and nothing else. Recommending an action the screen does not have sent
+      // an owner looking for an edit button that was never built, and the
+      // honest alternative (reject it and type the corrected document again)
+      // is what the route actually supports.
+      suggestion: "پیش‌نویس‌ها را در صف تأیید اسناد بررسی و تعیین‌تکلیف کنید: تأیید یا رد (و در صورت نیاز، ثبت دوبارهٔ سند اصلاح‌شده).",
       href: "/accounting/manual",
       samples: firstSamples(rows, (row) => sample(`${row.memo} — ${fa(row.ageDays)} روز`, row.id)),
     };
@@ -330,7 +360,7 @@ const RULES: Rule[] = [
       code: "unreconciled_bank_lines",
       severity: count > 20 ? "medium" : "low",
       title: "ردیف بانکی مغایرت‌گیری‌نشده",
-      detail: `${fa(count)} ردیف صندوق یا کارت‌خوان هنوز با صورتحساب تطبیق داده نشده است (جمع: ${money(amountRial)}).${age}`,
+      detail: `${fa(count)} ردیف ${persianList(RECONCILABLE_ACCOUNT_NAMES)} هنوز با صورتحساب تطبیق داده نشده است (جمع: ${money(amountRial)}).${age}`,
       count,
       amountRial,
       suggestion: "در «مغایرت‌گیری بانکی» صورتحساب دوره را وارد و ردیف‌ها را تطبیق دهید. هرچه دیرتر انجام شود، پیدا کردن ردیف جاافتاده سخت‌تر می‌شود.",

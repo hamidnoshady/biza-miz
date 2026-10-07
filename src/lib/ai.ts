@@ -60,7 +60,8 @@ export interface AiGatewayRuntime {
   authKey?: string;
   /**
    * Reserved for safe, version-compatible request extensions. Core chat leaves
-   * this empty: LiteLLM owns routing/fallback/MCP policy outside the app.
+   * this empty: routing/fallback stay in LiteLLM; the POS `/api/mcp` connector
+   * is separate and no proxy-MCP declarations are sent with chat requests.
    */
   body?: Record<string, unknown>;
 }
@@ -83,9 +84,9 @@ export interface AiConfig {
   /** Resolved per call; see `AiGatewayRuntime`. */
   gateway?: AiGatewayRuntime;
   /**
-   * Issue #812 §2 — the managed-knowledge integration, resolved from the
-   * platform gateway settings. The app owns no vector table; it asks the
-   * configured AI infrastructure, naming the tenant on every request.
+   * Optional managed-knowledge integration, resolved from platform settings.
+   * The app owns no local vector table; it calls the separately configured
+   * endpoint and names the tenant on every request.
    */
   knowledge?: {
     enabled: boolean;

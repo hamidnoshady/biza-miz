@@ -2,12 +2,15 @@
  * Issue #821 — `POST /api/ledger/entries/[id]/reverse`.
  *
  * Reversal is the journal's one destructive action, so the route's job is
- * narrow and worth pinning: `ledger.approve` and nothing less, the memo and
- * date the confirmation dialog collects forwarded verbatim, and — the fix
- * this file exists for — **no active-location lookup**. The reversing journal
- * and its sync event both belong to the original document's branch; routing
- * either by `resolveActiveLocation(session)` sent an accountant standing in
- * Branch B's reversal of a Branch A document to the wrong branch.
+ * narrow and worth pinning: `ledger.approve` and nothing less, and the memo
+ * and date the confirmation dialog collects forwarded verbatim.
+ *
+ * The approver's active location is still passed, but it is a fallback, not
+ * the routing: the reversing journal and its sync event both belong to the
+ * **original document's** branch, which only `reverseEntry` can know. Routing
+ * by `resolveActiveLocation(session)` alone sent an accountant standing in
+ * Branch B's reversal of a Branch A document to the wrong branch — that is
+ * asserted where it is decided, in `manual-journal.integration.test.ts`.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { NextRequest } from "next/server";
@@ -67,9 +70,17 @@ describe("POST /api/ledger/entries/[id]/reverse", () => {
     expect(manualJournal.reverseEntry).not.toHaveBeenCalled();
   });
 
-  it("never routes the reversal by the approver's active location", async () => {
+  it("hands the approver's branch over as a fallback, never as the routing", async () => {
     await POST(...postRequest({}));
-    expect(setupState.resolveActiveLocation).not.toHaveBeenCalled();
+    // The route cannot know the original's branch — it does not read the
+    // entry. All it may contribute is the last-resort queue for a document
+    // that has no branch of its own; `reverseEntry` decides the rest.
+    expect(vi.mocked(manualJournal.reverseEntry).mock.calls[0][0].locationId).toBe("loc-b");
+  });
+
+  it("passes null when the approver has no active branch, rather than inventing one", async () => {
+    vi.mocked(setupState.resolveActiveLocation).mockResolvedValue(null as never);
+    await POST(...postRequest({}));
     expect(vi.mocked(manualJournal.reverseEntry).mock.calls[0][0].locationId).toBeNull();
   });
 
