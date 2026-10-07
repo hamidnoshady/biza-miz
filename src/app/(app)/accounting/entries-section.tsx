@@ -4,6 +4,8 @@ import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
@@ -48,6 +50,8 @@ interface JournalEntryRow {
  */
 export function EntriesSection({ refreshKey, busy, run }: { refreshKey: number; busy: boolean; run: Runner }) {
   const money = useMoney();
+  const searchParams = useSearchParams();
+  const entryId = searchParams.get("entryId")?.trim() ?? "";
   const [entries, setEntries] = useState<JournalEntryRow[] | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -69,10 +73,13 @@ export function EntriesSection({ refreshKey, busy, run }: { refreshKey: number; 
   const load = useCallback(
     async (offset = 0, append = false) => {
       const params = new URLSearchParams();
-      if (dateFrom) params.set("dateFrom", dateFrom);
-      if (dateTo) params.set("dateTo", dateTo);
-      if (sourceType) params.set("sourceType", sourceType);
-      if (q.trim()) params.set("q", q.trim());
+      if (entryId) params.set("entryId", entryId);
+      else {
+        if (dateFrom) params.set("dateFrom", dateFrom);
+        if (dateTo) params.set("dateTo", dateTo);
+        if (sourceType) params.set("sourceType", sourceType);
+        if (q.trim()) params.set("q", q.trim());
+      }
       if (offset) params.set("offset", String(offset));
       const currentRequest = ++requestId.current;
       setError("");
@@ -95,7 +102,7 @@ export function EntriesSection({ refreshKey, busy, run }: { refreshKey: number; 
       }
       if (append) setLoadingMore(false);
     },
-    [dateFrom, dateTo, sourceType, q],
+    [dateFrom, dateTo, sourceType, q, entryId],
   );
 
   useEffect(() => {
@@ -114,7 +121,7 @@ export function EntriesSection({ refreshKey, busy, run }: { refreshKey: number; 
     await run(() => api(`/api/ledger/entries/${id}/reverse`, { method: "POST", body: JSON.stringify({}) }));
   }
 
-  const filtered = !!(dateFrom || dateTo || sourceType || q.trim());
+  const filtered = !!(dateFrom || dateTo || sourceType || q.trim() || entryId);
 
   return (
     <div className="space-y-4">
@@ -159,6 +166,11 @@ export function EntriesSection({ refreshKey, busy, run }: { refreshKey: number; 
               />
             </label>
           </div>
+          {entryId ? (
+            <p className="mt-3 text-xs text-muted-foreground">
+              سند پیوندشده: {toPersianDigits(entryId.slice(0, 8))} — <Link href="/accounting/entries" className="font-medium text-amber-800 underline underline-offset-2 dark:text-amber-300">نمایش همهٔ اسناد</Link>
+            </p>
+          ) : null}
           {filtered ? (
             <div className="mt-3 flex flex-wrap items-center gap-3">
               <SecondaryButton

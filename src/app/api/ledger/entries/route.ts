@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
+import { isUuid } from "@/lib/uuid";
 
 /**
  * Journal entries (auto-posted + manual), newest first, with their lines.
@@ -53,6 +54,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const limit = Number.isInteger(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, MAX_LIMIT) : DEFAULT_LIMIT;
   const requestedOffset = Number(params.get("offset"));
   const offset = Number.isInteger(requestedOffset) && requestedOffset >= 0 ? Math.min(requestedOffset, 50_000) : 0;
+  const entryId = params.get("entryId")?.trim() || null;
+  if (entryId && !isUuid(entryId)) {
+    return NextResponse.json({ error: "invalid_entry_id" }, { status: 400 });
+  }
 
   interface EntryRow extends Record<string, unknown> {
     id: string;
@@ -94,9 +99,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
                AND (a.code ILIKE '%' || $5::text || '%' OR a.name ILIKE '%' || $5::text || '%')
           )
         )
+        AND ($8::uuid IS NULL OR je.id = $8::uuid)
       ORDER BY je.entry_date DESC, je.posted_at DESC, je.id DESC
       LIMIT $6 OFFSET $7`,
-    [session.businessId, dateFrom, dateTo, sourceType, q, limit + 1, offset],
+    [session.businessId, dateFrom, dateTo, sourceType, q, limit + 1, offset, entryId],
   );
   const hasMore = entries.length > limit;
   const page = hasMore ? entries.slice(0, limit) : entries;
