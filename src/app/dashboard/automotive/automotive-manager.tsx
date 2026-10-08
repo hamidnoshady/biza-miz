@@ -24,7 +24,7 @@ import { formatJalali } from "@/lib/jalali";
 import { CustomerPicker, type PickerCustomer } from "../customer-picker";
 import { JalaliDatePicker } from "../jalali-date-picker";
 
-type SectionKey = "overview" | "stock" | "acquire" | "reservations" | "sales" | "expenses";
+type SectionKey = "overview" | "stock" | "acquire" | "reservations" | "sales" | "leads" | "expenses";
 
 const TABS: readonly ManagerTab<SectionKey>[] = [
   { key: "overview", label: "نمای کلی" },
@@ -32,6 +32,7 @@ const TABS: readonly ManagerTab<SectionKey>[] = [
   { key: "acquire", label: "ثبت و خرید خودرو" },
   { key: "reservations", label: "رزروها" },
   { key: "sales", label: "فروش خودرو" },
+  { key: "leads", label: "مشتریان و سرنخ‌ها" },
   { key: "expenses", label: "هزینهٔ خودرو" },
 ];
 
@@ -327,6 +328,12 @@ export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
       {section === "sales" ? (
         <div role="tabpanel" id="automotive-panel-sales" aria-labelledby="automotive-tab-sales">
           <SalesSection vehicles={vehicles} canSeeCost={canSeeCost} run={run} />
+        </div>
+      ) : null}
+
+      {section === "leads" ? (
+        <div role="tabpanel" id="automotive-panel-leads" aria-labelledby="automotive-tab-leads">
+          <LeadsSection vehicles={vehicles} run={run} />
         </div>
       ) : null}
 
@@ -1275,6 +1282,434 @@ function SalesSection({
           </DataTable>
         )}
       </SectionCard>
+    </div>
+  );
+}
+
+/* ===========================================================================
+ * §12 — customers and leads: what each one is looking for
+ * ===========================================================================
+ *
+ * The lead itself is the CRM's, and this section does not duplicate it: it
+ * reads `/api/crm/leads` for the list and adds only the car-shaped half —
+ * make/model interest, new-or-used, a year and a budget range, trade-in
+ * interest, a test drive, and the cars on this lot that lead has been shown.
+ *
+ * The interesting button is «یافتن خودروهای مناسب»: it asks the *lot* which
+ * cars match a lead's stated ranges. That query only exists because the
+ * preferences are typed columns rather than a note (migration 0213), and it is
+ * the reason a salesperson keeps them filled in.
+ */
+
+export interface LeadListDto {
+  id: string;
+  name: string;
+  status: string;
+  phone: string | null;
+}
+
+export interface LeadVehicleProfileDto {
+  leadId: string;
+  leadName: string | null;
+  leadStatus: string | null;
+  phone: string | null;
+  preferences: {
+    make: string | null;
+    model: string | null;
+    trim: string | null;
+    condition: "new" | "used" | "any";
+    vehicleYearCalendar: "jalali" | "gregorian";
+    modelYearFrom: number | null;
+    modelYearTo: number | null;
+    budgetFromRial: number | null;
+    budgetToRial: number | null;
+    tradeIn: boolean;
+    tradeInDescription: string | null;
+    testDriveRequestedAt: string | null;
+    notes: string | null;
+  } | null;
+  links: {
+    id: string;
+    serialId: string;
+    stockNumber: string;
+    displayName: string;
+    purpose: "interest" | "test_drive" | "offer" | "trade_in";
+    note: string | null;
+    createdAt: string;
+  }[];
+}
+
+export interface InterestedLeadDto {
+  leadId: string;
+  leadName: string;
+  status: string;
+  phone: string | null;
+  bestPurpose: "interest" | "test_drive" | "offer" | "trade_in" | null;
+  budgetToRial: number | null;
+  note: string | null;
+}
+
+const LEAD_STATUS_LABELS: Record<string, string> = {
+  new: "جدید",
+  contacted: "تماس گرفته‌شده",
+  working: "در حال پیگیری",
+  qualified: "واجد شرایط",
+  unqualified: "رد‌شده",
+  converted: "تبدیل‌شده",
+};
+
+const LINK_PURPOSES = [
+  { value: "interest", label: "مورد علاقه" },
+  { value: "test_drive", label: "تست درایو" },
+  { value: "offer", label: "پیشنهاد قیمت" },
+  { value: "trade_in", label: "معاوضه" },
+] as const;
+
+const PREFERENCE_CONDITIONS = [
+  { value: "any", label: "فرقی نمی‌کند" },
+  { value: "new", label: "نو" },
+  { value: "used", label: "کارکرده" },
+] as const;
+
+function LeadsSection({ vehicles, run }: { vehicles: VehicleListItemDto[]; run: Runner }) {
+  const [leads, setLeads] = useState<LeadListDto[]>([]);
+  const [leadId, setLeadId] = useState("");
+  const [profile, setProfile] = useState<LeadVehicleProfileDto | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  // Preferences form, seeded from the profile each time one is opened.
+  const [make, setMake] = useState("");
+  const [model, setModel] = useState("");
+  const [condition, setCondition] = useState<"new" | "used" | "any">("any");
+  const [yearFrom, setYearFrom] = useState("");
+  const [yearTo, setYearTo] = useState("");
+  const [budgetFrom, setBudgetFrom] = useState("");
+  const [budgetTo, setBudgetTo] = useState("");
+  const [tradeIn, setTradeIn] = useState(false);
+  const [tradeInDescription, setTradeInDescription] = useState("");
+  const [testDrive, setTestDrive] = useState(false);
+  const [notes, setNotes] = useState("");
+
+  // The link form: which car was shown, why.
+  const [linkSerialId, setLinkSerialId] = useState("");
+  const [linkPurpose, setLinkPurpose] = useState<"interest" | "test_drive" | "offer" | "trade_in">("interest");
+  const [linkNote, setLinkNote] = useState("");
+
+  // "Which cars suit this lead": asked of the lot, computed on the client from
+  // the same rows the stock table shows.
+  const [matchOnly, setMatchOnly] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    void (async () => {
+      const result = await api<{ leads: LeadListDto[] }>("/api/crm/leads?limit=50");
+      if (cancelled) return;
+      if (result.ok) setLeads(result.data.leads ?? []);
+      setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadKey]);
+
+  useEffect(() => {
+    if (!leadId) {
+      setProfile(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const result = await api<{ profile: LeadVehicleProfileDto }>(`/api/automotive/leads/${leadId}`);
+      if (cancelled || !result.ok) return;
+      const next = result.data.profile;
+      setProfile(next);
+      const preferences = next.preferences;
+      setMake(preferences?.make ?? "");
+      setModel(preferences?.model ?? "");
+      setCondition(preferences?.condition ?? "any");
+      setYearFrom(preferences?.modelYearFrom == null ? "" : String(preferences.modelYearFrom));
+      setYearTo(preferences?.modelYearTo == null ? "" : String(preferences.modelYearTo));
+      setBudgetFrom(preferences?.budgetFromRial == null ? "" : String(preferences.budgetFromRial));
+      setBudgetTo(preferences?.budgetToRial == null ? "" : String(preferences.budgetToRial));
+      setTradeIn(preferences?.tradeIn ?? false);
+      setTradeInDescription(preferences?.tradeInDescription ?? "");
+      setTestDrive(preferences?.testDriveRequestedAt != null);
+      setNotes(preferences?.notes ?? "");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [leadId]);
+
+  const digits = (value: string) => value.replace(/[^0-9]/g, "");
+
+  async function savePreferences() {
+    if (!leadId) return;
+    setBusy(true);
+    await run(async () => {
+      const result = await api<{ error?: string; message?: string }>(`/api/automotive/leads/${leadId}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          make: make || null,
+          model: model || null,
+          condition,
+          modelYearFrom: yearFrom ? Number(yearFrom) : null,
+          modelYearTo: yearTo ? Number(yearTo) : null,
+          budgetFromRial: budgetFrom ? Number(budgetFrom) : null,
+          budgetToRial: budgetTo ? Number(budgetTo) : null,
+          tradeIn,
+          tradeInDescription: tradeInDescription || null,
+          // Present means "set (or clear) it", so unticking the box clears a
+          // recorded request rather than leaving a stale date behind.
+          testDriveRequestedAt: testDrive ? (profile?.preferences?.testDriveRequestedAt ??
+            new Date().toISOString()) : null,
+          notes: notes || null,
+        }),
+      });
+      return result;
+    });
+    setBusy(false);
+  }
+
+  async function linkVehicle() {
+    if (!leadId || !linkSerialId) return;
+    setBusy(true);
+    await run(async () => {
+      const result = await api<{ error?: string; message?: string }>(
+        `/api/automotive/vehicles/${linkSerialId}/leads`,
+        { method: "POST", body: JSON.stringify({ leadId, purpose: linkPurpose, note: linkNote || null }) },
+      );
+      return result;
+    });
+    setLinkSerialId("");
+    setLinkNote("");
+    setBusy(false);
+  }
+
+  async function unlinkVehicle(serialId: string) {
+    if (!leadId) return;
+    setBusy(true);
+    await run(async () => {
+      const result = await api<{ error?: string; message?: string }>(
+        `/api/automotive/vehicles/${serialId}/leads?leadId=${encodeURIComponent(leadId)}`,
+        { method: "DELETE" },
+      );
+      return result;
+    });
+    setBusy(false);
+  }
+
+  const preferences = profile?.preferences ?? null;
+  const matchedVehicles = matchOnly
+    ? vehicles.filter((vehicle) => {
+        if (!preferences) return false;
+        if (preferences.condition !== "any" && preferences.condition !== vehicle.condition) return false;
+        if (preferences.make && !vehicle.make.toLowerCase().includes(preferences.make.toLowerCase())) return false;
+        if (preferences.model && !vehicle.model.toLowerCase().includes(preferences.model.toLowerCase())) return false;
+        if (preferences.modelYearFrom != null && vehicle.modelYear != null && vehicle.modelYear < preferences.modelYearFrom) {
+          return false;
+        }
+        if (preferences.modelYearTo != null && vehicle.modelYear != null && vehicle.modelYear > preferences.modelYearTo) {
+          return false;
+        }
+        if (preferences.budgetToRial != null && vehicle.askingPriceRial > preferences.budgetToRial) return false;
+        return true;
+      })
+    : [];
+
+  return (
+    <div className="space-y-4">
+      <SectionCard title="سرنخ‌ها و مشتریان" description="چه خودرویی می‌خواهند و چه خودرویی دیده‌اند">
+        {loading ? (
+          <SectionCardSkeleton />
+        ) : leads.length === 0 ? (
+          <EmptyState title="سرنخی ثبت نشده">سرنخ‌ها در بخش «مشتریان» ساخته می‌شوند.</EmptyState>
+        ) : (
+          <Field label="سرنخ">
+            <select className={inputClass} value={leadId} onChange={(event) => setLeadId(event.target.value)}>
+              <option value="">— انتخاب سرنخ —</option>
+              {leads.map((lead) => (
+                <option key={lead.id} value={lead.id}>
+                  {lead.name} — {LEAD_STATUS_LABELS[lead.status] ?? lead.status}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+      </SectionCard>
+
+      {leadId ? (
+        <SectionCard title="خودروی مورد نظر" description="بازه‌ها برای پیشنهاد خودرو به کار می‌روند">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <Field label="برند">
+              <input className={inputClass} value={make} onChange={(event) => setMake(event.target.value)} />
+            </Field>
+            <Field label="مدل">
+              <input className={inputClass} value={model} onChange={(event) => setModel(event.target.value)} />
+            </Field>
+            <Field label="نو / کارکرده">
+              <select
+                className={inputClass}
+                value={condition}
+                onChange={(event) => setCondition(event.target.value as "new" | "used" | "any")}
+              >
+                {PREFERENCE_CONDITIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="از سال مدل">
+              <input
+                className={inputClass}
+                inputMode="numeric"
+                value={yearFrom}
+                onChange={(event) => setYearFrom(digits(event.target.value))}
+              />
+            </Field>
+            <Field label="تا سال مدل">
+              <input
+                className={inputClass}
+                inputMode="numeric"
+                value={yearTo}
+                onChange={(event) => setYearTo(digits(event.target.value))}
+              />
+            </Field>
+            <Field label="حداقل بودجه (ریال)">
+              <input
+                className={inputClass}
+                inputMode="numeric"
+                value={budgetFrom}
+                onChange={(event) => setBudgetFrom(digits(event.target.value))}
+              />
+            </Field>
+            <Field label="حداکثر بودجه (ریال)">
+              <input
+                className={inputClass}
+                inputMode="numeric"
+                value={budgetTo}
+                onChange={(event) => setBudgetTo(digits(event.target.value))}
+              />
+            </Field>
+            <Field label="معاوضه">
+              <label className="flex min-h-10 items-center gap-2 text-sm text-foreground">
+                <input type="checkbox" checked={tradeIn} onChange={(event) => setTradeIn(event.target.checked)} />
+                خودروی مشتری به‌عنوان معاوضه
+              </label>
+            </Field>
+            <Field label="خودروی معاوضه">
+              <input
+                className={inputClass}
+                value={tradeInDescription}
+                disabled={!tradeIn}
+                onChange={(event) => setTradeInDescription(event.target.value)}
+              />
+            </Field>
+            <Field label="تست درایو">
+              <label className="flex min-h-10 items-center gap-2 text-sm text-foreground">
+                <input type="checkbox" checked={testDrive} onChange={(event) => setTestDrive(event.target.checked)} />
+                تست درایو درخواست شده است
+              </label>
+            </Field>
+            <Field label="یادداشت">
+              <input className={inputClass} value={notes} onChange={(event) => setNotes(event.target.value)} />
+            </Field>
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <PrimaryButton onClick={savePreferences} disabled={busy}>
+              {busy ? "در حال ذخیره…" : "ذخیرهٔ خودروی مورد نظر"}
+            </PrimaryButton>
+            <SecondaryButton onClick={() => setMatchOnly((value) => !value)} disabled={!preferences}>
+              {matchOnly ? "نمایش همهٔ موجودی" : "یافتن خودروهای مناسب در موجودی"}
+            </SecondaryButton>
+          </div>
+          {matchOnly ? (
+            <p className="mt-2 text-xs text-muted-foreground">
+              {matchedVehicles.length === 0
+                ? "خودرویی در موجودی با این مشخصات و بودجه نیست."
+                : `${matchedVehicles.length.toLocaleString("fa-IR")} خودرو با این درخواست می‌خواند.`}
+            </p>
+          ) : null}
+        </SectionCard>
+      ) : null}
+
+      {leadId ? (
+        <SectionCard title="خودروهای نشان‌داده‌شده" description="کدام شمارهٔ انبار به این مشتری معرفی شده است">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <Field label="خودرو">
+              <select className={inputClass} value={linkSerialId} onChange={(event) => setLinkSerialId(event.target.value)}>
+                <option value="">— انتخاب خودرو —</option>
+                {(matchOnly ? matchedVehicles : vehicles).map((vehicle) => (
+                  <option key={vehicle.serialId} value={vehicle.serialId}>
+                    {vehicle.stockNumber} — {vehicle.displayName}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="دلیل">
+              <select
+                className={inputClass}
+                value={linkPurpose}
+                onChange={(event) => setLinkPurpose(event.target.value as typeof linkPurpose)}
+              >
+                {LINK_PURPOSES.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="یادداشت">
+              <input className={inputClass} value={linkNote} onChange={(event) => setLinkNote(event.target.value)} />
+            </Field>
+          </div>
+          <div className="mt-3">
+            <PrimaryButton onClick={linkVehicle} disabled={busy || !linkSerialId}>
+              {busy ? "در حال ثبت…" : "ثبت معرفی خودرو"}
+            </PrimaryButton>
+          </div>
+
+          <div className="mt-4">
+            {(profile?.links ?? []).length === 0 ? (
+              <EmptyState title="هنوز خودرویی معرفی نشده">با فرم بالا، خودروی معرفی‌شده را ثبت کنید.</EmptyState>
+            ) : (
+              <DataTable caption="خودروهای نشان‌داده‌شده">
+                <DataTableHead>
+                  <DataTableRow>
+                    <Th>خودرو</Th>
+                    <Th>دلیل</Th>
+                    <Th>یادداشت</Th>
+                    <Th>حذف</Th>
+                  </DataTableRow>
+                </DataTableHead>
+                <DataTableBody>
+                  {(profile?.links ?? []).map((link) => (
+                    <DataTableRow key={link.id}>
+                      <Td>
+                        <div className="font-medium">{link.displayName}</div>
+                        <div className="font-mono text-xs text-muted-foreground">{link.stockNumber}</div>
+                      </Td>
+                      <Td>
+                        {LINK_PURPOSES.find((purpose) => purpose.value === link.purpose)?.label ?? link.purpose}
+                      </Td>
+                      <Td>{link.note ?? "—"}</Td>
+                      <Td>
+                        <SecondaryButton onClick={() => unlinkVehicle(link.serialId)} disabled={busy}>
+                          حذف
+                        </SecondaryButton>
+                      </Td>
+                    </DataTableRow>
+                  ))}
+                </DataTableBody>
+              </DataTable>
+            )}
+          </div>
+        </SectionCard>
+      ) : null}
     </div>
   );
 }

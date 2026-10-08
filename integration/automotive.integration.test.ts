@@ -38,6 +38,7 @@ let vehicleSales: typeof import("../src/lib/automotive-sales-service");
 let invoiceService: typeof import("../src/lib/retail-invoice-service");
 let postingEngine: typeof import("../src/lib/posting-engine");
 let exact: typeof import("../src/lib/inventory-exact");
+let leads: typeof import("../src/lib/automotive-lead-service");
 
 const biz = { id: "", locationId: "", secondLocationId: "", ownerId: "", customerId: "", otherCustomerId: "" };
 const other = { id: "", locationId: "" };
@@ -1189,5 +1190,300 @@ describe("selling the exact car", () => {
     }>("SELECT name_snapshot, retail_snapshot FROM order_items WHERE order_id = $1", [invoice.orderId]);
     expect(itemRows[0].name_snapshot).toContain("S-6");
     expect(itemRows[0].retail_snapshot.kind).toBe("vehicle");
+  });
+});
+
+/* ===========================================================================
+ * Wave 5 — the CRM half: what a lead wants, and which cars they were shown
+ * ===========================================================================
+ *
+ * The lead itself is the CRM's (0157), and these tests deliberately do not
+ * exercise it: they pin down only the two tables migration 0213 added — the
+ * typed preferences that turn "wants a used 207 up to 800 million" into a
+ * query, and the record of which exact stock number was shown to whom.
+ *
+ * The load-bearing test here is the match: it is the one thing a text note
+ * cannot do, and it is what the salesperson uses the tab for.
+ */
+
+/** A lead with nothing said about cars yet — the CRM's own table, not ours. */
+async function makeLead(name: string, status = "new"): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO crm_leads (business_id, name, phone, status) VALUES ($1, $2, '09120000000', $3) RETURNING id`,
+    [biz.id, name, status],
+  );
+  return rows[0].id;
+}
+
+/** A stocked car described only as much as a match cares about. */
+async function stockedCar(input: {
+  stockNumber: string;
+  make: string;
+  model: string;
+  condition: "new" | "used";
+  modelYear: number;
+  askingPriceRial: number;
+}) {
+  return withTransaction((client) =>
+    automotive.createVehicle(
+      client,
+      carInput({
+        stockNumber: input.stockNumber,
+        make: input.make,
+        model: input.model,
+        condition: input.condition,
+        modelYear: input.modelYear,
+        askingPriceRial: input.askingPriceRial,
+      }),
+    ),
+  );
+}
+
+beforeAll(async () => {
+  leads = await import("../src/lib/automotive-lead-service");
+});
+
+describe("what a lead is looking for", () => {
+  it("matches the lot by the typed ranges, not by a note", async () => {
+    const leadId = await makeLead("آقای رضایی");
+    await withTransaction((client) =>
+      leads.saveLeadVehiclePreferences(client, {
+        businessId: biz.id,
+        leadId,
+        make: "پژو",
+        model: "207",
+        condition: "used",
+        modelYearFrom: 1398,
+        modelYearTo: 1401,
+        budgetToRial: 800_000_000,
+        tradeIn: true,
+        tradeInDescription: "پراید ۱۳۹۵",
+        actorId: biz.ownerId,
+      }),
+    );
+
+    const fits = await stockedCar({
+      stockNumber: "L-1",
+      make: "پژو",
+      model: "207",
+      condition: "used",
+      modelYear: 1400,
+      askingPriceRial: 750_000_000,
+    });
+    // A new one: the customer asked for a used car.
+    const tooNew = await stockedCar({
+      stockNumber: "L-2",
+      make: "پژو",
+      model: "207",
+      condition: "new",
+      modelYear: 1400,
+      askingPriceRial: 750_000_000,
+    });
+    // Over the ceiling. Only the ceiling is compared: a customer whose budget
+    // *starts* above a car's price is a different conversation.
+    const tooDear = await stockedCar({
+      stockNumber: "L-3",
+      make: "پژو",
+      model: "207",
+      condition: "used",
+      modelYear: 1400,
+      askingPriceRial: 900_000_000,
+    });
+    // Older than asked for.
+    const tooOld = await stockedCar({
+      stockNumber: "L-4",
+      make: "پژو",
+      model: "207",
+      condition: "used",
+      modelYear: 1395,
+      askingPriceRial: 700_000_000,
+    });
+    // A different make entirely.
+    const otherMake = await stockedCar({
+      stockNumber: "L-5",
+      make: "کیا",
+      model: "سراتو",
+      condition: "used",
+      modelYear: 1400,
+      askingPriceRial: 700_000_000,
+    });
+
+    const matched = await leads.listLeadsInterestedInVehicle(biz.id, fits.serialId);
+    expect(matched.map((row) => row.leadId)).toEqual([leadId]);
+    expect(matched[0].budgetToRial).toBe(800_000_000);
+    // Nothing has been linked yet, so there is no reason recorded — the lead
+    // matched on what they asked for, not on what they were shown.
+    expect(matched[0].bestPurpose).toBeNull();
+
+    for (const car of [tooNew, tooDear, tooOld, otherMake]) {
+      expect(await leads.listLeadsInterestedInVehicle(biz.id, car.serialId)).toEqual([]);
+    }
+  });
+
+  it("drops leads the dealership has closed out, and never crosses tenants", async () => {
+    const gone = await makeLead("سرنخ رد‌شده", "unqualified");
+    await withTransaction((client) =>
+      leads.saveLeadVehiclePreferences(client, { businessId: biz.id, leadId: gone, condition: "any" }),
+    );
+
+    const car = await stockedCar({
+      stockNumber: "L-6",
+      make: "تویوتا",
+      model: "کرولا",
+      condition: "used",
+      modelYear: 1402,
+      askingPriceRial: 1_200_000_000,
+    });
+    const ids = (await leads.listLeadsInterestedInVehicle(biz.id, car.serialId)).map((row) => row.leadId);
+    expect(ids).not.toContain(gone);
+    // A blank preference matches anything, so the *other* tenant's read of the
+    // same car — which is not even their car — finds nothing at all.
+    expect(await leads.listLeadsInterestedInVehicle(other.id, car.serialId)).toEqual([]);
+  });
+
+  it("accepts a preference with no car named, and refuses a range typed backwards", async () => {
+    const leadId = await makeLead("خانم موسوی");
+    // "Something automatic under a billion" is a real lead: nothing is required
+    // except that the lead exists.
+    const preferences = await withTransaction((client) =>
+      leads.saveLeadVehiclePreferences(client, { businessId: biz.id, leadId, notes: "خودکار" }),
+    );
+    expect(preferences.condition).toBe("any");
+    expect(preferences.make).toBeNull();
+
+    await expect(
+      withTransaction((client) =>
+        leads.saveLeadVehiclePreferences(client, {
+          businessId: biz.id,
+          leadId,
+          budgetFromRial: 900_000_000,
+          budgetToRial: 800_000_000,
+        }),
+      ),
+    ).rejects.toThrow(/برعکس/);
+
+    // A trade-in interest with nothing said about the customer's car is not a
+    // record — the acquisition cannot be valued from it.
+    await expect(
+      withTransaction((client) =>
+        leads.saveLeadVehiclePreferences(client, { businessId: biz.id, leadId, tradeIn: true }),
+      ),
+    ).rejects.toThrow(/معاوضه/);
+  });
+
+  it("keeps a recorded test-drive request when an unrelated field is saved", async () => {
+    const leadId = await makeLead("آقای کاظمی");
+    await withTransaction((client) =>
+      leads.saveLeadVehiclePreferences(client, {
+        businessId: biz.id,
+        leadId,
+        testDriveRequestedAt: "2026-02-01T09:30:00.000Z",
+      }),
+    );
+
+    const after = await withTransaction((client) =>
+      leads.saveLeadVehiclePreferences(client, { businessId: biz.id, leadId, notes: "دوباره تماس بگیرد" }),
+    );
+    expect(after.testDriveRequestedAt).toContain("2026-02-01");
+    expect(after.notes).toBe("دوباره تماس بگیرد");
+
+    // Present-and-null is what *clears* it — an omission preserves.
+    const cleared = await withTransaction((client) =>
+      leads.saveLeadVehiclePreferences(client, { businessId: biz.id, leadId, testDriveRequestedAt: null }),
+    );
+    expect(cleared.testDriveRequestedAt).toBeNull();
+  });
+});
+
+describe("cars shown to a lead", () => {
+  it("records one link per lead and car, and reports it as the reason", async () => {
+    const leadId = await makeLead("آقای نوری");
+    const car = await stockedCar({
+      stockNumber: "L-7",
+      make: "بی‌ام‌و",
+      model: "320i",
+      condition: "used",
+      modelYear: 1399,
+      askingPriceRial: 3_500_000_000,
+    });
+
+    await withTransaction((client) =>
+      leads.linkLeadVehicle(client, { businessId: biz.id, leadId, serialId: car.serialId, actorId: biz.ownerId }),
+    );
+    // Shown again — this time a test drive. One fact, updated, not two rows.
+    await withTransaction((client) =>
+      leads.linkLeadVehicle(client, {
+        businessId: biz.id,
+        leadId,
+        serialId: car.serialId,
+        purpose: "test_drive",
+        actorId: biz.ownerId,
+      }),
+    );
+
+    const profile = await leads.getLeadVehicleProfile(biz.id, leadId);
+    expect(profile).not.toBeNull();
+    expect(profile!.links).toHaveLength(1);
+    expect(profile!.links[0].purpose).toBe("test_drive");
+    expect(profile!.links[0].stockNumber).toBe("L-7");
+    expect(profile!.links[0].displayName).toContain("320i");
+
+    // The link is now the reason the lead ranks first for that car.
+    const matched = await leads.listLeadsInterestedInVehicle(biz.id, car.serialId);
+    expect(matched[0].leadId).toBe(leadId);
+    expect(matched[0].bestPurpose).toBe("test_drive");
+
+    expect(
+      await withTransaction((client) =>
+        leads.unlinkLeadVehicle(client, { businessId: biz.id, leadId, serialId: car.serialId }),
+      ),
+    ).toBe(true);
+    expect((await leads.getLeadVehicleProfile(biz.id, leadId))!.links).toEqual([]);
+  });
+
+  it("refuses a link to another tenant's lead or another tenant's car", async () => {
+    const leadId = await makeLead("آقای سلطانی");
+    const car = await stockedCar({
+      stockNumber: "L-8",
+      make: "هیوندای",
+      model: "توسان",
+      condition: "used",
+      modelYear: 1401,
+      askingPriceRial: 2_000_000_000,
+    });
+
+    // My car, their lead id: the lead is re-checked against the active tenant.
+    await expect(
+      withTransaction((client) =>
+        leads.linkLeadVehicle(client, { businessId: other.id, leadId, serialId: car.serialId }),
+      ),
+    ).rejects.toThrow(/سرنخ/);
+
+    // My lead, a car that is not in my business.
+    await expect(
+      withTransaction((client) =>
+        leads.linkLeadVehicle(client, {
+          businessId: biz.id,
+          leadId,
+          serialId: "00000000-0000-0000-0000-000000000000",
+        }),
+      ),
+    ).rejects.toThrow(/خودرو/);
+  });
+
+  it("does not read another tenant's lead preferences", async () => {
+    const leadId = await makeLead("آقای مهدوی");
+    await withTransaction((client) =>
+      leads.saveLeadVehiclePreferences(client, { businessId: biz.id, leadId, make: "رنو", model: "تلیسمان" }),
+    );
+
+    expect(await leads.getLeadVehicleProfile(other.id, leadId)).toBeNull();
+
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM crm_lead_vehicle_preferences
+        WHERE lead_id = $1 AND business_id <> $2`,
+      [leadId, biz.id],
+    );
+    expect(Number(rows[0].count)).toBe(0);
   });
 });
