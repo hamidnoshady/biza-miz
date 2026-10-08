@@ -37,7 +37,7 @@ ALTER TABLE cheque_events
 -- The SQL twin of the TypeScript normaliser (`foldForComparison`): Persian and
 -- Arabic-Indic digits fold to Latin, the Arabic ي/ك a Persian keyboard
 -- produces fold to ی/ک, and every separator and zero-width mark is dropped.
-CREATE OR REPLACE FUNCTION cheque_canonical_text(raw text) RETURNS text
+CREATE OR REPLACE FUNCTION public.cheque_canonical_text(raw text) RETURNS text
 LANGUAGE sql IMMUTABLE AS $$
     SELECT NULLIF(
         regexp_replace(
@@ -55,11 +55,17 @@ $$;
 -- «بانک ملت» and «ملت» are one bank: the prefix is a noun, not a name. It is
 -- dropped *after* folding, so the Arabic-kaf spelling loses it too, and only
 -- when something is left behind.
-CREATE OR REPLACE FUNCTION cheque_canonical_bank(raw text) RETURNS text
+--
+-- The inner call is schema-qualified on purpose. A generated column re-runs
+-- this body whenever a row is written — including inside `pg_restore`, which
+-- runs with an empty `search_path`. An unqualified reference resolves at call
+-- time and would make every restore of a backup fail with "function
+-- cheque_canonical_text(text) does not exist".
+CREATE OR REPLACE FUNCTION public.cheque_canonical_bank(raw text) RETURNS text
 LANGUAGE sql IMMUTABLE AS $$
     SELECT coalesce(
-        NULLIF(regexp_replace(cheque_canonical_text(raw), '^بانک', ''), ''),
-        cheque_canonical_text(raw)
+        NULLIF(regexp_replace(public.cheque_canonical_text(raw), '^بانک', ''), ''),
+        public.cheque_canonical_text(raw)
     );
 $$;
 
@@ -68,9 +74,9 @@ $$;
 -- new insert path, and needs no backfill of its own.
 ALTER TABLE cheques
     ADD COLUMN bank_name_canonical text
-        GENERATED ALWAYS AS (cheque_canonical_bank(bank_name)) STORED,
+        GENERATED ALWAYS AS (public.cheque_canonical_bank(bank_name)) STORED,
     ADD COLUMN serial_number_canonical text
-        GENERATED ALWAYS AS (cheque_canonical_text(serial_number)) STORED;
+        GENERATED ALWAYS AS (public.cheque_canonical_text(serial_number)) STORED;
 
 -- The old exact-text rule stays (it is still true), and the canonical rule is
 -- added on top where the existing data permits it.

@@ -907,6 +907,37 @@ describe("canonical identity and retry safety (issue #828)", () => {
       }),
     ).rejects.toThrow("invalid_cheque_transition");
   });
+
+  // pg_restore runs every statement with an empty search_path, and a stored
+  // generated column re-runs its expression while the table is being created.
+  // An unqualified call inside cheque_canonical_bank made that restore fail
+  // ("function cheque_canonical_text(text) does not exist"), i.e. it broke
+  // restoring any backup — so the canonicalisers must be search_path-proof.
+  it("canonicalises with no search_path at all, the way a restore does", async () => {
+    await db.query("SELECT pg_catalog.set_config('search_path', '', false)");
+    try {
+      await db.query(`CREATE TABLE public.restore_shaped_like_cheques (
+        bank_name text NOT NULL,
+        serial_number text NOT NULL,
+        bank_name_canonical text GENERATED ALWAYS AS (public.cheque_canonical_bank(bank_name)) STORED,
+        serial_number_canonical text GENERATED ALWAYS AS (public.cheque_canonical_text(serial_number)) STORED
+      )`);
+      await db.query(
+        "INSERT INTO public.restore_shaped_like_cheques(bank_name, serial_number) VALUES ($1,$2),($3,$4)",
+        ["بانك ملت", "۱۲۳-۴۵۶", "ملت", "123456"],
+      );
+      const rows = await db.query<{ bank_name_canonical: string; serial_number_canonical: string }>(
+        "SELECT bank_name_canonical, serial_number_canonical FROM public.restore_shaped_like_cheques",
+      );
+      expect(rows.rows).toEqual([
+        { bank_name_canonical: "ملت", serial_number_canonical: "123456" },
+        { bank_name_canonical: "ملت", serial_number_canonical: "123456" },
+      ]);
+    } finally {
+      await db.query("DROP TABLE IF EXISTS public.restore_shaped_like_cheques");
+      await db.query("SELECT pg_catalog.set_config('search_path', 'public', false)");
+    }
+  });
 });
 
 describe("counterparty attribution is the ordinary path (issue #828)", () => {
