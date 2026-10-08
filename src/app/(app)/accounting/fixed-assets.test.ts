@@ -16,6 +16,19 @@ describe("Fixed assets error translation and resolution", () => {
     expect(errorMessageOrRaw("period_label_required")).toBe("عنوان دوره الزامی است.");
   });
 
+  it("translates the chronology error codes of the #833 review follow-up", () => {
+    expect(errorMessageOrRaw("entry_date_in_future")).toBe("تاریخ سند نمی‌تواند در آینده باشد.");
+    expect(errorMessageOrRaw("transfer_before_in_service")).toBe(
+      "تاریخ انتقال نمی‌تواند پیش از تاریخ بهره‌برداری دارایی باشد.",
+    );
+    expect(errorMessageOrRaw("transfer_before_last_transfer")).toBe(
+      "تاریخ انتقال نمی‌تواند پیش از آخرین انتقال ثبت‌شده باشد؛ سابقه انتقال‌ها تغییرناپذیر است.",
+    );
+    expect(errorMessageOrRaw("disposal_before_last_transfer")).toBe(
+      "تاریخ واگذاری نمی‌تواند پیش از آخرین انتقال ثبت‌شده باشد.",
+    );
+  });
+
   it("translates the fixed-asset lifecycle error codes of issue #833", () => {
     expect(errorMessageOrRaw("asset_disposed")).toBe("این دارایی واگذار/اسقاط شده و دیگر عملیاتی روی آن انجام نمی‌شود.");
     expect(errorMessageOrRaw("asset_archived")).toBe("این دارایی بایگانی شده است.");
