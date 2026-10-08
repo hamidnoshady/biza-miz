@@ -117,3 +117,22 @@ export function moneyToInput(rial: Rial, unit: MoneyUnit): number {
 export function moneyFromInput(value: number, unit: MoneyUnit): Rial {
   return unit === "rial" ? value : tomanToRial(value);
 }
+
+/**
+ * String-safe `moneyToInput`: Rial text → the integer text a money input shows
+ * in the chosen unit, never converted through `Number`. Toman drops the single
+ * Rial digit (always 0 in practice) exactly as `rialToToman` does. The inverse
+ * is `parseToRialText(input, unit)`.
+ */
+export function moneyToInputText(rialText: string, unit: MoneyUnit): string {
+  if (!/^\d+$/.test(rialText)) throw new Error(`Not a valid amount: ${rialText}`);
+  const value = BigInt(rialText);
+  return (unit === "rial" ? value : value / 10n).toString();
+}
+
+/** The exact sum of Rial amounts given as integer text — `BigInt` throughout, so it cannot round past 2^53. */
+export function sumRialText(values: readonly string[]): string {
+  let total = 0n;
+  for (const value of values) total += BigInt(value);
+  return total.toString();
+}
