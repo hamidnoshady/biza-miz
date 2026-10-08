@@ -954,6 +954,46 @@ describe("the register's own semantics (issue #832 §2, §5, §6, §9, §11, §1
     ).rejects.toThrow("party_not_found");
   });
 
+  it("follows a party merge, because a merge is not a deletion", async () => {
+    // §12 has two halves, and they are not the same rule. Deleting a party must
+    // *not* reach into the expense (`ON DELETE SET NULL`, asserted above). A
+    // merge is the opposite act: it declares that two directory rows were always
+    // one person, so the link has to move — leaving it on the archived loser
+    // would drop every payment to that supplier from the survivor's ledger
+    // question, «به این طرف حساب چقدر پرداختیم». `PARTY_REFERENCES` classifies
+    // it as `move`; this is the money-side proof that the classification holds.
+    const crm = await import("../src/lib/crm-service");
+    const { rows: pair } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, is_active, roles)
+       VALUES ($1, 'Landlord (old file)', true, ARRAY['supplier']),
+              ($1, 'Landlord Holdings', true, ARRAY['supplier'])
+       RETURNING id`,
+      [biz.id],
+    );
+    const [loser, winner] = pair;
+
+    const expense = await expenseService.recordExpense({
+      ...base(),
+      paymentAccountId: acct.cash,
+      amount: 250_000,
+      expenseDate: "2025-04-15",
+      vendor: "The landlord, as typed",
+      partyId: loser.id,
+      memo: "Rent, duplicate file",
+    });
+    expect(expense.partyId).toBe(loser.id);
+
+    expect(await crm.mergeCustomers(biz.id, winner.id, loser.id, { mergedBy: "آزمون" })).not.toBeNull();
+
+    const { rows } = await db.query<{ party_id: string | null; vendor: string }>(
+      "SELECT party_id, vendor FROM expenses WHERE id = $1",
+      [expense.id],
+    );
+    expect(rows[0].party_id).toBe(winner.id);
+    // The snapshot the accountant typed is not rewritten by a merge either.
+    expect(rows[0].vendor).toBe("The landlord, as typed");
+  });
+
   it("numbers each business's own documents, in its Jalali year, without gaps", async () => {
     const first = await expenseService.recordExpense({ ...base(), paymentAccountId: acct.cash, amount: 1000, expenseDate: "2025-04-15", memo: "one" });
     const second = await expenseService.recordExpense({ ...base(), paymentAccountId: acct.cash, amount: 2000, expenseDate: "2025-04-16", memo: "two" });

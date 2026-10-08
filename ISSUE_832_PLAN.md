@@ -125,6 +125,52 @@ proceeds with `expenseAccounts: []`, which suppresses the auto-selected category
 rather than falling back to the old hard-coded food-and-beverage codes. A degrade
 path that invents a category is worse than one that asks a human.
 
+## The two red gates on the first CI run
+
+`test.yml` ran on `558f60d`: nine jobs green (including `production build`, which
+this sandbox cannot run), two red. One was a real bug in this branch, one was the
+gate doing its job.
+
+**integration tests (real database) — a genuine miss, now fixed.**
+`party-merge-coverage.integration.test.ts › classifies every foreign key that
+points at parties` failed. Finding 12 added `expenses.party_id → parties(id)`, and
+that file compares PostgreSQL's own FK metadata against
+`src/lib/party-merge-references.ts`: every column pointing at a party must carry a
+merge disposition, because merging is irreversible and an unclassified reference is
+exactly how a WooCommerce mapping once survived a merge pointing at an archived
+customer. The registry had no opinion about expenses, so the sweep refused the
+run. The new entry says **`move`** — «به این طرف حساب چقدر پرداختیم» is a live
+ledger question, and leaving the link on the archived loser would answer it with a
+number missing every payment the loser had — while the audit side of §12 stays
+untouched: the `vendor` snapshot and the posted journal are what make an expense
+independent of the directory, and neither is rewritten by a merge. The behavioural
+half lives in this feature's own file
+(`follows a party merge, because a merge is not a deletion`), because the coverage
+sweep only seeds references it can populate generically and an expense row needs a
+chart of accounts.
+
+**visual regression — an intended pixel change awaiting a human approval.**
+`docs/design/visual/accounting-expenses.png` is the committed baseline for
+`/accounting/expenses`, and the register's markup is precisely what this issue
+asked to change: a document-number column, the branch column, the receipt
+indicator, the reversal status badge, the VAT line under the amount, the
+server-side totals footer, and no form at all for a viewer. The workflow is
+explicit that «a changed snapshot is reviewed as a visual diff and re-recorded
+deliberately, never auto-accepted to make a red run go green», so the re-record is
+a human action and not something to do from here:
+
+    gh workflow run test.yml --ref arena/396beb72-biza-miz -f record_baselines=true
+
+That uploads `visual-baselines` as an artifact (CI never commits images); the
+reviewed PNG then lands in an ordinary commit. Only `accounting-expenses.png`
+should differ — a diff on any other screen would mean this branch touched a surface
+it had no business touching.
+
+Both diagnostics came from re-running the suites here against a real Postgres, not
+from CI: the runner logs live on hosts this sandbox cannot reach, and the Arena
+GitHub App token is refused (`403`) on `workflow_dispatch`, so the recording has to
+be started by someone with rights on the repository.
+
 ## Files
 
 Schema `migrations/0211_expense_reversal_and_register.sql` ·
@@ -145,10 +191,11 @@ docs `README.md`, `docs/authorization/RECONCILIATION.md`
 | `npx tsc --noEmit` | clean, 0 diagnostics |
 | `npm run lint` (`eslint . --max-warnings=0`) | clean, 0 problems |
 | unit suite (`npm test`) | **628 files / 8048 tests passed**, 0 failed |
-| `integration/expense.integration.test.ts` (real Postgres, `vitest.db.config.ts`) | **34 passed** — 14 pre-existing, 20 new for #832 |
+| `integration/expense.integration.test.ts` (real Postgres, `vitest.db.config.ts`) | **35 passed** — 14 pre-existing, 21 new for #832 |
+| `integration/party-merge-coverage.integration.test.ts` | **5 passed** (was the red gate — see below) |
 | `npm run test:design` | 38 passed (design lint, primitive lint, loading coverage, reference screenshots) |
 | `npm run db:migrate` on a fresh cluster | 292 migrations applied, including 0211 |
-| `npm run build` | **not runnable here** — see below |
+| `npm run build` | **not runnable here** — see below. **Passed on CI** (`production build`, 5m26s) |
 
 `next build` needs the repository's documented 3 GB Node heap (`CLAUDE.md`), and
 this workspace is a 3.85 GB / 2-CPU sandbox with no swap: the compile phase was
