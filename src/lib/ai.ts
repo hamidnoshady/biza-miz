@@ -60,7 +60,8 @@ export interface AiGatewayRuntime {
   authKey?: string;
   /**
    * Reserved for safe, version-compatible request extensions. Core chat leaves
-   * this empty: LiteLLM owns routing/fallback/MCP policy outside the app.
+   * this empty: routing/fallback stay in LiteLLM; the POS `/api/mcp` connector
+   * is separate and no proxy-MCP declarations are sent with chat requests.
    */
   body?: Record<string, unknown>;
 }
@@ -83,9 +84,9 @@ export interface AiConfig {
   /** Resolved per call; see `AiGatewayRuntime`. */
   gateway?: AiGatewayRuntime;
   /**
-   * Issue #812 §2 — the managed-knowledge integration, resolved from the
-   * platform gateway settings. The app owns no vector table; it asks the
-   * configured AI infrastructure, naming the tenant on every request.
+   * Optional managed-knowledge integration, resolved from platform settings.
+   * The app owns no local vector table; it calls the separately configured
+   * endpoint and names the tenant on every request.
    */
   knowledge?: {
     enabled: boolean;
@@ -448,7 +449,7 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     // answer lives in `expense-accounts.ts` and is enforced by the service
     // whatever channel a proposal came from (issue #832 §13, §15).
     payloadHint:
-      "{ accountId: string /* id یک حساب هزینهٔ فعال از سرفصل همین کسب‌وکار */, paymentAccountId: string /* id حساب پرداخت: صندوق/بانک/تنخواه/تسویه کارت‌خوان — هر حساب دارایی دیگری رد می‌شود */, amount: number /* مبلغ کل به ریال */, vatAmount?: number /* بخش مالیات قابل استرداد از همین مبلغ، در صورت وجود */, expenseDate?: string /* YYYY-MM-DD، نمی‌تواند در آینده باشد */, vendor?: string, partyId?: string /* id شخص در فهرست اشخاص، اختیاری */, memo: string }",
+      "{ accountId: string /* id یک حساب هزینهٔ فعال از سرفصل همین کسب‌وکار */, settlement?: \"paid\"|\"credit\" /* پیش‌فرض paid؛ credit یعنی «پرداخت بعدی» */, paymentAccountId?: string /* فقط برای paid: id حساب پرداخت (صندوق/بانک/تنخواه/تسویه کارت‌خوان) — هر حساب دارایی دیگری رد می‌شود */, supplierId?: string /* فقط برای credit: id تأمین‌کننده در «حساب‌های پرداختنی» */, dueDate?: string /* YYYY-MM-DD اختیاری، سررسید پرداخت */, amount: number /* مبلغ کل به ریال */, vatAmount?: number /* بخش مالیات قابل استرداد از همین مبلغ، در صورت وجود */, expenseDate?: string /* YYYY-MM-DD، نمی‌تواند در آینده باشد */, vendor?: string, partyId?: string /* id شخص در فهرست اشخاص، اختیاری */, memo: string }",
     autopilotCategory: "money",
     executor: "expense",
     // Issue #832 §1: an expense now has an honest one-click undo — a mirrored

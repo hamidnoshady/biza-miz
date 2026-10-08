@@ -157,7 +157,7 @@ function renderSection(props: Partial<SectionProps> = {}) {
   };
   return render(
     <ExpenseSection
-      accounts={ACCOUNTS}
+      accounts={props.accounts ?? ACCOUNTS}
       busy={false}
       run={props.run ?? run}
       refreshKey={0}
@@ -210,7 +210,7 @@ describe("ExpenseSection — the payment-source rule in the picker (issue #832 �
     expect(labels.join(" ")).not.toContain("مالیات قابل استرداد");
   });
 
-  it("says so in the form when the chart has no payment source to offer", () => {
+  it("closes the paid half of the form when the chart has no payment source to offer", () => {
     stubFetch({ "/api/ledger/expenses": () => json(listResponse()) });
     render(
       <ExpenseSection
@@ -220,10 +220,34 @@ describe("ExpenseSection — the payment-source rule in the picker (issue #832 �
         refreshKey={0}
       />,
     );
-    expect(screen.getByText(/دست‌کم یک حساب از نوع «هزینه»/)).toBeTruthy();
+    /*
+     * This used to replace the whole form with «برای ثبت هزینه دست‌کم یک حساب
+     * … نقدی/بانکی … لازم است». Audit F11 made that refusal wrong by half: a
+     * business with no till still owes suppliers, and «پرداخت بعدی» credits
+     * Accounts Payable rather than a cash account. So the paid control closes
+     * with its reason beside it, and the form stays open.
+     */
+    expect((screen.getByRole("button", { name: "پرداخت‌شده" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "پرداخت بعدی" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(/تا ساختن چنین حسابی/)).toBeTruthy();
+    expect(screen.queryByText(/دست‌کم یک حساب از نوع «هزینه»/)).toBeNull();
     // The register below still renders: a broken chart is not a reason to hide
     // the history somebody came to read.
     expect(screen.getByRole("heading", { name: /هزینه‌ها/ })).toBeTruthy();
+  });
+
+  it("still shows the chart placeholder when there is no expense account at all", () => {
+    stubFetch({ "/api/ledger/expenses": () => json(listResponse()) });
+    render(
+      <ExpenseSection
+        accounts={ACCOUNTS.filter((a) => a.type !== "expense")}
+        busy={false}
+        run={async () => true}
+        refreshKey={0}
+      />,
+    );
+    expect(screen.getByText(/دست‌کم یک حساب از نوع «هزینه»/)).toBeTruthy();
+    expect(document.querySelector("form")).toBeNull();
   });
 });
 
@@ -436,5 +460,120 @@ describe("ExpenseSection — the register's own honesty (issue #832 §9, §20, �
     // is on screen, on the row that was reversed.
     expect(document.body.textContent).toContain(ref("EXP-1405-00009"));
     expect(document.body.textContent).toContain(ref("EXP-1405-00010"));
+  });
+});
+
+/**
+ * «پرداخت بعدی» on the same screen (audit F11).
+ *
+ * The register used to be payable-only by construction: a payment account was
+ * mandatory, so a bill that arrives with an invoice and is settled next week had
+ * to be typed as a payment and then undone in the books. These assert the three
+ * ways that could go wrong in the browser — a paid-shaped POST for an owed row,
+ * the supplier list never loading, and the paid path silently losing its only
+ * guard when a business has no till.
+ */
+describe("ExpenseSection — «پرداخت بعدی» (audit F11)", () => {
+  const SUPPLIERS = {
+    suppliers: [{ supplierId: "sup-1", supplierName: "پخش البرز", supplierPhone: null }],
+  };
+
+  function creditRow(overrides: Partial<ExpenseRow> = {}) {
+    return row({
+      settlement: "credit",
+      supplierId: "sup-1",
+      supplierName: "پخش البرز",
+      dueDate: "2026-10-01",
+      paymentAccountCode: "2100",
+      paymentAccountName: "حساب‌های پرداختنی",
+      ...overrides,
+    });
+  }
+
+  it("posts an owed expense against a supplier instead of a payment account", async () => {
+    const fetchMock = stubFetch({
+      "/api/ledger/ap/suppliers": () => json(SUPPLIERS),
+      "/api/ledger/expenses": (init) =>
+        init?.method === "POST" ? json({ expense: creditRow() }, 201) : json(listResponse([creditRow()])),
+    });
+    renderSection();
+
+    await pick("دسته هزینه", /۵۰۰۱ — خرید ملزومات|5001 — خرید ملزومات/);
+    await userEvent.setup().click(screen.getByRole("button", { name: "پرداخت بعدی" }));
+
+    // The payment picker is gone rather than merely optional: an owed expense
+    // credits Accounts Payable, so asking «از کدام حساب؟» would invite a second,
+    // wrong payment for money that has not moved.
+    expect(screen.queryByRole("button", { name: "حساب پرداخت" })).toBeNull();
+    await pick("تأمین‌کننده", /پخش البرز/);
+    fireEvent.change(screen.getByPlaceholderText("۰"), { target: { value: "۲۵۰۰۰" } });
+    fireEvent.change(screen.getByPlaceholderText("شرح و دلیل ثبت هزینه"), { target: { value: "تعمیر یخچال" } });
+
+    const form = document.querySelector("form") as HTMLFormElement;
+    await act(async () => {
+      fireEvent.submit(form);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const post = fetchMock.mock.calls.find(
+      ([url, init]) => String(url) === "/api/ledger/expenses" && (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(post, "a POST to the expenses endpoint").toBeTruthy();
+    const body = JSON.parse(String((post?.[1] as RequestInit).body));
+    expect(body).toMatchObject({ accountId: "acc-expense-1", settlement: "credit", supplierId: "sup-1", memo: "تعمیر یخچال" });
+    // Not `paymentAccountId: ""` — an empty string is what used to arrive from the
+    // form and what the route turned into «حساب پرداخت را انتخاب کنید».
+    expect(body).not.toHaveProperty("paymentAccountId");
+  });
+
+  it("describes an owed row by its supplier and due date, never as a payment", async () => {
+    stubFetch({ "/api/ledger/expenses": () => json(listResponse([creditRow()])) });
+    renderSection();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("پرداخت بعدی");
+    expect(text).toContain("پخش البرز");
+    expect(text).toContain("۱۴۰۵/۰۷/۰۹"); // 2026-10-01 — the due date, in the register's own digits
+    expect(text).not.toContain("۲۱۰۰ حساب‌های پرداختنی");
+  });
+
+  it("keeps «پرداخت بعدی» open when the chart has no payment source, and says why the other half is", () => {
+    stubFetch({
+      "/api/ledger/ap/suppliers": () => json(SUPPLIERS),
+      "/api/ledger/expenses": () => json(listResponse()),
+    });
+    renderSection({
+      accounts: ACCOUNTS.filter((account) => account.code !== "1100" && account.code !== "1101" && account.code !== "1110"),
+    });
+    // No jest-dom in this project, so the DOM property is what gets asserted.
+    expect((screen.getByRole("button", { name: "پرداخت‌شده" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(document.body.textContent).toContain("تا ساختن چنین حسابی");
+    expect((screen.getByRole("button", { name: "پرداخت بعدی" }) as HTMLButtonElement).disabled).toBe(false);
+    // The form itself is still there: a till-less business can record what it owes.
+    expect(document.querySelector("form")).toBeTruthy();
+  });
+
+  it("refuses to post an owed expense with no supplier, before the network", async () => {
+    const fetchMock = stubFetch({
+      "/api/ledger/ap/suppliers": () => json(SUPPLIERS),
+      "/api/ledger/expenses": () => json(listResponse()),
+    });
+    renderSection();
+    await pick("دسته هزینه", /۵۰۰۱ — خرید ملزومات|5001 — خرید ملزومات/);
+    await userEvent.setup().click(screen.getByRole("button", { name: "پرداخت بعدی" }));
+    fireEvent.change(screen.getByPlaceholderText("۰"), { target: { value: "۲۵۰۰۰" } });
+    fireEvent.change(screen.getByPlaceholderText("شرح و دلیل ثبت هزینه"), { target: { value: "تعمیر یخچال" } });
+
+    const submit = screen.getByRole("button", { name: "ثبت هزینه" }) as HTMLButtonElement;
+    await act(async () => {
+      fireEvent.click(submit);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.body.textContent).toContain("برای «پرداخت بعدی» تأمین‌کننده را انتخاب کنید");
+    expect(
+      fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST"),
+    ).toBe(false);
   });
 });

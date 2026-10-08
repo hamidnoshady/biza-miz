@@ -58,16 +58,16 @@ const nextConfig: NextConfig = {
    */
   serverExternalPackages: ["unpdf", "pdfjs-dist", "sharp"],
   /**
-   * The AI console was slimmed down to the LiteLLM gateway settings only: the
-   * platform's AI section is one page, and every user-level AI settings
-   * surface is gone. Old bookmarks land on the pages that remain.
+   * Legacy AI settings bookmarks. The current platform control plane has real
+   * subpages under /platform/ai (including the active prompt-version console
+   * at /platform/ai/prompts); only the former standalone gateway page and
+   * tenant provider-settings pages redirect.
    */
   async redirects() {
     return [
       { source: "/platform/ai/gateway", destination: "/platform/ai", permanent: false },
-      { source: "/platform/ai/prompts", destination: "/platform/ai", permanent: false },
-      { source: "/dashboard/ai/settings", destination: "/ai", permanent: false },
-      { source: "/ai/settings", destination: "/ai", permanent: false },
+      { source: "/dashboard/ai/settings", destination: "/dashboard", permanent: false },
+      { source: "/ai/settings", destination: "/dashboard", permanent: false },
     ];
   },
   /**

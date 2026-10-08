@@ -4,7 +4,7 @@ import type { NextRequest } from "next/server";
 import * as auth from "@/lib/auth";
 import * as setupState from "@/lib/setup-state";
 import * as expenseService from "@/lib/expense-service";
-import { ExpenseError } from "@/lib/expense-service";
+import { ExpenseError, MissingLedgerAccountError } from "@/lib/expense-service";
 import { parseExpenseCursor } from "@/lib/expense-input";
 import { GET, POST } from "./route";
 
@@ -51,6 +51,7 @@ describe("GET /api/ledger/expenses", () => {
       totalAmount: 0,
       totalVatAmount: 0,
       totalPaidAmount: 0,
+      totalOwedAmount: 0,
       totalCount: 0,
     } as never);
     const res = await GET(getRequest("?q=coffee"));
@@ -105,6 +106,25 @@ describe("GET /api/ledger/expenses", () => {
       createdAt: "2026-04-01 09:12:33.123456+00",
       id: UUID,
     });
+  });
+
+  it("carries the owed figure beside the settled one, never inside it", async () => {
+    // The footer says «پرداختی از حساب‌ها», so an owed expense — which credited
+    // Accounts Payable and moved no cash — must not be added to it. Its own
+    // number has to survive the route, or the screen has no way to say what is
+    // still outstanding (audit F11).
+    vi.mocked(expenseService.listExpenses).mockResolvedValue({
+      expenses: [],
+      hasMore: false,
+      nextCursor: null,
+      totalAmount: 12_000_000,
+      totalVatAmount: 0,
+      totalPaidAmount: 4_000_000,
+      totalOwedAmount: 8_000_000,
+      totalCount: 2,
+    } as never);
+    const body = await (await GET(getRequest())).json();
+    expect(body).toMatchObject({ totalAmount: 12_000_000, totalPaidAmount: 4_000_000, totalOwedAmount: 8_000_000 });
   });
 
   it("reports no cursor when the window is not cut off", async () => {
@@ -211,6 +231,24 @@ describe("POST /api/ledger/expenses", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toBe("receipt_asset_not_found");
+  });
+
+  it("forwards «پرداخت بعدی» (audit F11): settlement, supplier and due date", async () => {
+    vi.mocked(expenseService.recordExpense).mockResolvedValue({ id: "exp-4" } as never);
+    const res = await POST(
+      postRequest({ accountId: "a", amount: 1, memo: "x", settlement: "credit", supplierId: "sup-1", dueDate: "2026-11-01" }),
+    );
+    expect(res.status).toBe(201);
+    expect(expenseService.recordExpense).toHaveBeenCalledWith(
+      expect.objectContaining({ settlement: "credit", supplierId: "sup-1", dueDate: "2026-11-01", paymentAccountId: "" }),
+    );
+  });
+
+  it("answers a chart without Accounts Payable as a 409 naming the account", async () => {
+    vi.mocked(expenseService.recordExpense).mockRejectedValue(new MissingLedgerAccountError("2100"));
+    const res = await POST(postRequest({ accountId: "a", amount: 1, memo: "x", settlement: "credit", supplierId: "s" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "ledger_account_missing", code: "2100" });
   });
 
   it("400s on unparseable JSON before ever calling recordExpense", async () => {

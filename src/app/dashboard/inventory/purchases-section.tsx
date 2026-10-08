@@ -19,6 +19,15 @@ import {
 } from "./invoice-ocr-panel";
 import { SectionCard, StatusBadge } from "../page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
+import { toPersianDigits } from "@/lib/digits";
+import { purchasePayableRial } from "@/lib/payables-input";
+import {
+  draftVatRial,
+  EMPTY_SUPPLIER_INVOICE_DRAFT,
+  SupplierInvoiceFields,
+  supplierInvoicePayload,
+  type SupplierInvoiceDraft,
+} from "./supplier-invoice-fields";
 
 interface Purchase {
   id: string;
@@ -32,6 +41,23 @@ interface Purchase {
   ordered_at: string | null;
   received_at: string | null;
   created_at: string;
+  /** Audit F11 — the supplier invoice. Dates are ISO text from the list endpoint. */
+  supplier_invoice_number?: string | null;
+  supplier_invoice_date?: string | null;
+  /** Integer Rial, on top of `total` (the goods value). */
+  vat_amount?: string | number;
+  payment_terms_days?: number | null;
+  payment_due_date?: string | null;
+  settlement_method?: string | null;
+}
+
+/** Sum of the payload lines' Rial text (blank/invalid lines count as zero) — the goods value VAT is proposed over. */
+function goodsRialOf(payloadLines: { totalCost: string }[]): string {
+  let sum = 0n;
+  for (const l of payloadLines) {
+    if (/^\d+$/.test(l.totalCost)) sum += BigInt(l.totalCost);
+  }
+  return sum.toString();
 }
 
 /** One stored line. quantity/unit_cost are in the item's *base* unit. */
@@ -133,6 +159,11 @@ export function PurchasesSection({
   // to POST /api/inventory/purchases so the draft keeps a durable pointer
   // back to the photo it was scanned from, mirroring an expense's receipt id.
   const [invoiceAssetId, setInvoiceAssetId] = useState<string | null>(null);
+  // Audit F11 — the supplier's invoice (number, date, VAT, terms, due date).
+  const [invoiceDraft, setInvoiceDraft] = useState<SupplierInvoiceDraft>(EMPTY_SUPPLIER_INVOICE_DRAFT);
+  const [editInvoiceDraft, setEditInvoiceDraft] = useState<SupplierInvoiceDraft>(EMPTY_SUPPLIER_INVOICE_DRAFT);
+  // The business's own VAT rate (its «تنظیمات مالیات»), which proposes the VAT; 0 until loaded or when unset.
+  const [vatPercent, setVatPercent] = useState(0);
   const [settlementByPurchase, setSettlementByPurchase] = useState<Record<string, string>>({});
   const [supplierByPurchase, setSupplierByPurchase] = useState<Record<string, string>>({});
 
@@ -191,9 +222,12 @@ export function PurchasesSection({
     if (filterTo) params.set("dateTo", filterTo);
     const qs = params.toString();
     setListError("");
-    api<{ purchases: Purchase[] }>(`/api/inventory/purchases${qs ? `?${qs}` : ""}`)
+    api<{ purchases: Purchase[]; vatPercent?: number }>(`/api/inventory/purchases${qs ? `?${qs}` : ""}`)
       .then(({ ok, data }) => {
-        if (ok) setPurchases(data.purchases);
+        if (ok) {
+          setPurchases(data.purchases);
+          setVatPercent(typeof data.vatPercent === "number" ? data.vatPercent : 0);
+        }
         else setListError("خواندن فهرست خریدها ناموفق بود. اتصال را بررسی کنید.");
       })
       .catch(() => setListError("خواندن فهرست خریدها ناموفق بود. اتصال را بررسی کنید."));
@@ -234,10 +268,24 @@ export function PurchasesSection({
    * `SELECT p.*` would serialise the `date` column through the server's own
    * timezone and could prefill the picker a day off.
    */
-  function startEditing(purchaseDate: string) {
+  function startEditing(row: Purchase) {
     if (!detail) return;
+    const purchaseDate = row.purchase_date;
     setEditSupplierId(detail.purchase.supplier_id ?? "");
     setEditPurchaseDate(purchaseDate);
+    // The stored VAT is a decision already made: the edit form opens with it
+    // as typed, never re-proposed from the rate.
+    const vatRial = String(row.vat_amount ?? 0);
+    const vatText = money.formatText(vatRial, { withUnit: false });
+    setEditInvoiceDraft({
+      invoiceNumber: row.supplier_invoice_number ?? "",
+      invoiceDate: row.supplier_invoice_date ?? "",
+      vatText,
+      vatTouched: true,
+      vatOriginal: { text: vatText, rial: vatRial },
+      paymentTermsDays: row.payment_terms_days != null ? String(row.payment_terms_days) : "",
+      dueDate: row.payment_due_date ?? "",
+    });
     setEditNote(detail.purchase.note ?? "");
     setEditLines(
       detail.items.map((it) => {
@@ -346,6 +394,11 @@ export function PurchasesSection({
       setLocalError(invalid);
       return;
     }
+    const vatRial = draftVatRial(invoiceDraft, goodsRialOf(payloadLines), vatPercent, money.parseText);
+    if (vatRial === null) {
+      setLocalError("مبلغ مالیات بر ارزش افزوده معتبر نیست.");
+      return;
+    }
     setLocalError("");
 
     const ok = await run(
@@ -358,6 +411,7 @@ export function PurchasesSection({
             note,
             items: payloadLines,
             invoiceAssetId,
+            invoice: supplierInvoicePayload(invoiceDraft, vatRial),
           }),
         }),
       setLocalError,
@@ -366,6 +420,7 @@ export function PurchasesSection({
       setNote("");
       setLines([emptyLine()]);
       setInvoiceAssetId(null);
+      setInvoiceDraft(EMPTY_SUPPLIER_INVOICE_DRAFT);
       loadPurchases();
     }
   }
@@ -379,6 +434,11 @@ export function PurchasesSection({
       setLocalError(invalid);
       return;
     }
+    const vatRial = draftVatRial(editInvoiceDraft, goodsRialOf(payloadLines), vatPercent, money.parseText);
+    if (vatRial === null) {
+      setLocalError("مبلغ مالیات بر ارزش افزوده معتبر نیست.");
+      return;
+    }
     setLocalError("");
 
     const ok = await run(
@@ -390,6 +450,7 @@ export function PurchasesSection({
             purchaseDate: editPurchaseDate || null,
             note: editNote,
             items: payloadLines,
+            invoice: supplierInvoicePayload(editInvoiceDraft, vatRial),
           }),
         }),
       setLocalError,
@@ -635,6 +696,13 @@ export function PurchasesSection({
           </div>
 
           <div className="space-y-2">{lineRows(lines, updateLine, removeLine)}</div>
+          <SupplierInvoiceFields
+            value={invoiceDraft}
+            onChange={setInvoiceDraft}
+            goodsRial={goodsRialOf(toPayloadLines(lines))}
+            vatPercent={vatPercent}
+            purchaseDate={purchaseDate}
+          />
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button type="button" variant="outline" onClick={addLine}>افزودن ردیف</Button>
             <div className="w-full sm:w-52">
@@ -691,8 +759,20 @@ export function PurchasesSection({
                 <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <span className="min-w-0 break-words">
                     <StatusBadge tone={STATUS_TONES[p.status]}>{STATUS_LABELS[p.status]}</StatusBadge>{" "}
-                    {p.supplier_name ?? "بدون تأمین‌کننده"} — {money.formatText(String(p.total))} —{" "}
+                    {p.supplier_name ?? "بدون تأمین‌کننده"} — {money.formatText(String(p.total))}
+                    {Number(p.vat_amount ?? 0) > 0 ? (
+                      <span className="text-xs text-muted-foreground"> + مالیات {money.formatText(String(p.vat_amount))}</span>
+                    ) : null}{" "}
+                    —{" "}
                     <span className="text-xs text-muted-foreground">{formatJalali(p.purchase_date)}</span>
+                    {p.supplier_invoice_number ? (
+                      <span className="text-xs text-muted-foreground" dir="auto">
+                        {" "}· فاکتور {toPersianDigits(p.supplier_invoice_number)}
+                      </span>
+                    ) : null}
+                    {p.payment_due_date ? (
+                      <span className="text-xs text-muted-foreground"> · سررسید {formatJalali(p.payment_due_date)}</span>
+                    ) : null}
                   </span>
                   {/*
                     Actions and the settlement pickers. Selects get a full row
@@ -780,6 +860,13 @@ export function PurchasesSection({
                             (i) => setEditLines((prev) => prev.filter((_, idx) => idx !== i)),
                           )}
                         </div>
+                        <SupplierInvoiceFields
+                          value={editInvoiceDraft}
+                          onChange={setEditInvoiceDraft}
+                          goodsRial={goodsRialOf(toPayloadLines(editLines))}
+                          vatPercent={vatPercent}
+                          purchaseDate={editPurchaseDate}
+                        />
                         <div className="flex flex-col gap-2 sm:flex-row">
                           <Button type="button" variant="outline" onClick={() => setEditLines((prev) => [...prev, emptyLine()])}>افزودن ردیف</Button>
                           <Button type="button" variant="outline" onClick={() => setEditing(false)}>انصراف</Button>
@@ -835,6 +922,42 @@ export function PurchasesSection({
                             <dt className="text-muted-foreground">یادداشت</dt>
                             <dd className="mt-0.5 break-words">{detail.purchase.note || "—"}</dd>
                           </div>
+                          <div>
+                            <dt className="text-muted-foreground">شمارهٔ فاکتور تأمین‌کننده</dt>
+                            <dd className="mt-0.5 break-words" dir="auto">
+                              {p.supplier_invoice_number ? toPersianDigits(p.supplier_invoice_number) : "—"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">تاریخ فاکتور</dt>
+                            <dd className="mt-0.5">{p.supplier_invoice_date ? formatJalali(p.supplier_invoice_date) : "—"}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">مالیات بر ارزش افزوده</dt>
+                            <dd className="mt-0.5">{money.formatText(String(p.vat_amount ?? 0))}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">مبلغ قابل پرداخت</dt>
+                            <dd className="mt-0.5 font-semibold">
+                              {money.formatText(purchasePayableRial(String(p.total), String(p.vat_amount ?? 0)).toString())}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">تسویه</dt>
+                            <dd className="mt-0.5">
+                              {p.status === "received" && p.settlement_method ? (SETTLEMENT_LABELS[p.settlement_method] ?? "—") : "—"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">مهلت پرداخت</dt>
+                            <dd className="mt-0.5">
+                              {p.payment_terms_days != null ? `${toPersianDigits(p.payment_terms_days)} روز` : "—"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">سررسید پرداخت</dt>
+                            <dd className="mt-0.5">{p.payment_due_date ? formatJalali(p.payment_due_date) : "—"}</dd>
+                          </div>
                         </dl>
 
                         {returning ? (
@@ -873,7 +996,7 @@ export function PurchasesSection({
 
                         <div className="mt-3 flex flex-wrap items-center gap-2">
                           {isEditable(p.status) ? (
-                            <Button type="button" variant="outline" disabled={busy} onClick={() => startEditing(p.purchase_date)}>
+                            <Button type="button" variant="outline" disabled={busy} onClick={() => startEditing(p)}>
                               ویرایش
                             </Button>
                           ) : p.status === "received" ? (

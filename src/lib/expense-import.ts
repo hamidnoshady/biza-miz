@@ -15,6 +15,16 @@
  * not the same transaction, but they are close enough that the operator, not a
  * silent skip, should decide: hence the looser rule is still offered (and
  * `duplicateStrategy: "create"` still means "I know, import it anyway").
+ *
+ * One asymmetry is deliberate and stated rather than hidden: this channel can
+ * only produce **paid** expenses. Audit F11's «پرداخت بعدی» is keyed on a
+ * supplier, and `accounting.expenses` has no supplier column to map, so a sheet
+ * could not say who is owed even in principle — which is also why `حساب پرداخت`
+ * stays a required column here while the form and `POST /api/ledger/expenses`
+ * make it conditional. Adding the column is a registry change (a `reference`
+ * field resolved through `listSupplierDirectory`, the same list the picker in
+ * the form reads); the service already accepts `settlement`, `supplierId` and
+ * `dueDate`, so nothing upstream of it has to move.
  */
 
 /** A field of the expense entity a duplicate rule may be keyed on. */

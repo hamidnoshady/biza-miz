@@ -18,7 +18,7 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
  * computes a ledger amount; the totals shown are the ones the server will
  * confirm back.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, useDeferredValue } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useDeferredValue } from "react";
 import { PlusIcon, PrinterIcon, RefreshCwIcon, SplitIcon, Trash2Icon, XIcon } from "lucide-react";
 import { formatQuantity, toPersianDigits } from "@/lib/digits";
 import { useMoney } from "@/components/money/money-context";
@@ -30,7 +30,6 @@ import { computeWatchSalePrice } from "@/lib/watch-pricing";
 import {
   defaultGoldMakingChargePercent,
   defaultGoldProfitPercent,
-  defaultRetailVatPercent,
   hasCapability,
   labelFor,
 } from "@/lib/industry-profile";
@@ -169,13 +168,23 @@ function safeMoneyInput(parse: (value: string) => number, value: string): number
   }
 }
 
+/**
+ * The VAT percent a fresh line proposes: this business's own «تنظیمات مالیات»
+ * rate (`vat-policy.ts`), read once by the page — never a per-trade literal
+ * (audit F05). Every line form can still edit it before the line is added.
+ */
+const DefaultVatContext = createContext(0);
+
 export function RetailInvoiceScreen({
   industry,
   canVoidInvoice = false,
+  defaultVatPercent = 0,
 }: {
   industry: Industry;
   /** `PERMISSIONS.ordersAmendClosed` — threaded down to «مدیریت فاکتورها»'s void button. */
   canVoidInvoice?: boolean;
+  /** The business's default VAT percent from `tax.config` (0 when unset). */
+  defaultVatPercent?: number;
 }) {
   const money = useMoney();
   const [weightItems, setWeightItems] = useState<WeightItem[]>([]);
@@ -544,6 +553,7 @@ export function RetailInvoiceScreen({
       />
       <TabPanel idPrefix="retail-invoice" active={view}>
       {view === "issue" ? (
+      <DefaultVatContext.Provider value={defaultVatPercent}>
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem] xl:grid-cols-[minmax(0,1fr)_26rem]">
         <div className="min-w-0 space-y-4">
           {hasCapability(industry, "barcode") ? (
@@ -834,6 +844,7 @@ export function RetailInvoiceScreen({
           </div>
         </aside>
       </div>
+      </DefaultVatContext.Provider>
       ) : (
         <InvoiceManagementView canVoidInvoice={canVoidInvoice} />
       )}
@@ -883,6 +894,7 @@ function BarcodeScanField({
   units: SerialUnit[];
   onAdd: (line: CartLine) => void;
 }) {
+  const defaultVatPercent = useContext(DefaultVatContext);
   const [code, setCode] = useState("");
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState("");
@@ -926,7 +938,7 @@ function BarcodeScanField({
         return;
       }
       try {
-        const vatPercent = defaultRetailVatPercent(industry);
+        const vatPercent = defaultVatPercent;
         const breakdown =
           industry === "cosmetics"
             ? computeCosmeticSalePrice({ unitPrice: variant.unitPrice, quantity: "1", discount: 0, vatPercent })
@@ -967,7 +979,7 @@ function BarcodeScanField({
         // cashier still sees the breakdown in the cart before settling.
         const makingChargeValue = defaultGoldMakingChargePercent(industry);
         const profitPercent = defaultGoldProfitPercent(industry);
-        const vatPercent = defaultRetailVatPercent(industry);
+        const vatPercent = defaultVatPercent;
         const breakdown = computeGoldSalePrice({
           netWeight: item.netWeight,
           pricePerGram: rate.pricePerGram,
@@ -1078,7 +1090,8 @@ function GoldLineForm({
   const [makingChargeType, setMakingChargeType] = useState<MakingChargeType>("percent");
   const [makingChargeValue, setMakingChargeValue] = useState(() => String(defaultGoldMakingChargePercent(industry)));
   const [profitPercent, setProfitPercent] = useState(() => String(defaultGoldProfitPercent(industry)));
-  const [vatPercent, setVatPercent] = useState(() => String(defaultRetailVatPercent(industry)));
+  const defaultVatPercent = useContext(DefaultVatContext);
+  const [vatPercent, setVatPercent] = useState(() => String(defaultVatPercent));
   const [search, setSearch] = useState("");
 
   const inStock = useMemo(() => items.filter((i) => i.status === "in_stock"), [items]);
@@ -1270,7 +1283,8 @@ function WatchLineForm({
   const [serialId, setSerialId] = useState("");
   const [price, setPrice] = useState("");
   const [discount, setDiscount] = useState("");
-  const [vatPercent, setVatPercent] = useState(() => String(defaultRetailVatPercent(industry)));
+  const defaultVatPercent = useContext(DefaultVatContext);
+  const [vatPercent, setVatPercent] = useState(() => String(defaultVatPercent));
 
   const inStock = useMemo(() => units.filter((u) => u.status === "in_stock"), [units]);
   const unit = inStock.find((u) => u.id === serialId) ?? null;
@@ -1388,7 +1402,8 @@ function AccessoryLineForm({
   const [quantity, setQuantity] = useState("1");
   const [unitPrice, setUnitPrice] = useState("");
   const [discount, setDiscount] = useState("");
-  const [vatPercent, setVatPercent] = useState(() => String(defaultRetailVatPercent(industry)));
+  const defaultVatPercent = useContext(DefaultVatContext);
+  const [vatPercent, setVatPercent] = useState(() => String(defaultVatPercent));
 
   const sellable = useMemo(
     () => variants.filter((v) => v.kind !== "variant_parent" && Number(v.quantity) > 0),
@@ -1520,7 +1535,8 @@ function CosmeticsLineForm({
   const [quantity, setQuantity] = useState("1");
   const [unitPrice, setUnitPrice] = useState("");
   const [discount, setDiscount] = useState("");
-  const [vatPercent, setVatPercent] = useState(() => String(defaultRetailVatPercent(industry)));
+  const defaultVatPercent = useContext(DefaultVatContext);
+  const [vatPercent, setVatPercent] = useState(() => String(defaultVatPercent));
 
   const sellable = useMemo(
     () =>

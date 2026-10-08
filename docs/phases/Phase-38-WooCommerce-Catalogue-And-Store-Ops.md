@@ -228,10 +228,76 @@ Not yet:
 - [ ] Attribute *creation* from the app (the mirror is read-only; a term the
       store does not have cannot yet be invented here).
 
+## Duplicate SKUs: one remote product, one local item (dashboard audit F13)
+
+The audit found two identical rows for one SKU, and a second pair whose
+quantities were five and six. Product creation was check-then-insert: the
+mapping was read, found missing, and an item inserted, with nothing
+serialising two deliveries of the *same new* product. WooCommerce fires
+`product.created` and `product.updated` for one save (two delivery ids, so the
+inbox does not dedupe them), and the plugin queue, the manual catalogue pull and
+an order's variation stub all reach the same code. Both deliveries inserted an
+item, and the later mapping upsert (`ON CONFLICT … DO UPDATE SET local_id`)
+re-pointed the mapping at its own row. The first item stayed behind unmapped:
+same name, same SKU, and a stock snapshot frozen at the instant it was written —
+every later sync updates only the mapped twin. A second variant of the bug made
+one stub per *line* when an order carried the same unmapped variation twice.
+
+Creation now runs under `lockRemoteIdentity` (`mapping-service.ts`, a
+transaction-scoped advisory lock on connection + entity type + remote id) and
+re-reads the mapping inside that lock; a delivery that loses applies its payload
+as an update (`createForRemoteOnce`). A new mapping is inserted with
+`DO NOTHING` and a conflict rolls the item back (`insertNewMappingOnClient`), so
+no path can orphan a row by re-pointing a mapping. The variation stub takes the
+same lock under a savepoint.
+
+Not every shared SKU is a bug. WooCommerce reports a variation with no SKU of
+its own under its parent's SKU, so a variable family legitimately shares one.
+Other causes the code still allows, by design or because a constraint would
+need a migration: two different store products with one SKU (fix it in the
+store); a store re-linked as a new connection (mappings are per connection, so
+deleting a connection and adding it again re-creates every product); Holoo
+goods and WooCommerce products with one SKU (two sources, two mappings); and
+items are per branch. A partial unique index such as
+`(location_id, lower(btrim(sku))) WHERE kind <> 'variant_child'` was considered
+and **not** added — existing tenants already hold duplicates and a variation
+can legitimately repeat its parent's SKU, so it needs a cleanup decision first.
+
+### The report: `scripts/report-duplicate-items.ts`
+
+Read-only, one business at a time, inside `withTenant` on a `READ ONLY`
+transaction that is rolled back. It never merges, archives or deletes.
+
+```bash
+npx tsx scripts/report-duplicate-items.ts --business <uuid>                 # every duplicate SKU
+npx tsx scripts/report-duplicate-items.ts --business <uuid> --sku zza05023  # one SKU, case-insensitive
+npx tsx scripts/report-duplicate-items.ts --business <uuid> --json          # machine-readable
+```
+
+For each SKU carried by more than one item it prints each row's id, name, kind
+and parent, active flag, branch and on-hand quantity, created time (Shamsi; ISO
+in `--json`), every integration mapping (connection, provider, remote id,
+remote parent id), the newest `product.*` payload the store sent for that
+remote id, and a verdict (`src/lib/duplicate-items.ts`):
+
+| Verdict | Meaning | What to do |
+|---|---|---|
+| `variant_family` | a parent and its own variations | nothing — legitimate |
+| `per_branch_copies` | one row per branch | nothing — items are per branch |
+| `race_orphan` | a mapped row and an unmapped twin created within ten minutes of it | the unmapped row is the orphan; move any stock/history it took, then archive it |
+| `same_remote_mapped_twice` | one store record mapped by two connections to the same store | keep one connection; archive the other's rows |
+| `distinct_remote_records` | different store records share the SKU | correct the SKU in the store |
+| `unmapped_duplicate` | at least one row no integration owns | decide by hand which row is real |
+
+Before archiving an orphan, check that it has no orders, stock movements or
+batches of its own; the report deliberately does not decide that for you.
+
 ## Tests
 
 | File | What it proves |
 |---|---|
+| `integration/woocommerce-duplicate-items.integration.test.ts` | F13 — concurrent deliveries of one new product (simple, variable parent, variation) make one item; an order with one unmapped variation on two lines makes one stub; the report's verdicts, provenance, snapshot, SKU filter and business isolation |
+| `src/lib/duplicate-items.test.ts` | the verdict rules and helpers |
 | `src/lib/integrations/woo-catalogue.test.ts` | 39 — the type matrix, order-line resolution, update paths, taxonomy tree sort |
 | `src/lib/integrations/woocommerce-client.test.ts` | 23 — both namespaces, pagination, update paths |
 | `src/lib/integrations/woo-ops-service.test.ts` | 16 — the closed field lists, price/quantity/refund validation, `api_refund` forced false |

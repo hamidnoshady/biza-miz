@@ -426,6 +426,29 @@ describe("updating a party", () => {
     expect(fixed?.contactInfo.email).toBe("sales@example.ir");
   });
 
+  it("assumes no VAT rate for a new party and keeps a stored one through a save without it (audit F05)", async () => {
+    // No rate typed → «follows the business rate» (null), never an assumed 9%.
+    const plain = await parties.createParty(biz.id, { role: "Customer", displayName: "بدون نرخ" });
+    expect(plain.generalInfo.taxPercentage).toBeNull();
+
+    // A member without ledger.view saves the identity tab with the rate
+    // stripped (buildNonAccountingPayload); the stored 12% must survive it.
+    const rated = await parties.createParty(biz.id, {
+      role: "Supplier",
+      displayName: "با نرخ",
+      generalInfo: { taxPercentage: 12 },
+    });
+    const saved = await parties.updateParty(biz.id, rated.id, {
+      generalInfo: { nationalId: "", economicCode: "1234567890" },
+    });
+    expect(saved?.generalInfo.taxPercentage).toBe(12);
+    expect(saved?.generalInfo.economicCode).toBe("1234567890");
+
+    // An explicit 0 is an exemption, distinct from «follows the business rate».
+    const exempt = await parties.updateParty(biz.id, rated.id, { generalInfo: { taxPercentage: 0 } });
+    expect(exempt?.generalInfo.taxPercentage).toBe(0);
+  });
+
   it("treats a tab sent empty as cleared", async () => {
     const created = await parties.createParty(biz.id, {
       role: "Customer",

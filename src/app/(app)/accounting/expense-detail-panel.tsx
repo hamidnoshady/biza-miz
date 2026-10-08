@@ -19,6 +19,7 @@ import Link from "next/link";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali, todayIsoDate } from "@/lib/jalali";
 import { partyDirectoryHref } from "@/lib/party-directory";
+import { EXPENSE_SETTLEMENT_LABELS } from "@/lib/payables-input";
 import { useMoney } from "@/components/money/money-context";
 import { overlayPanelClass } from "@/app/dashboard/page-chrome";
 import { StatusBadge } from "@/app/dashboard/page-chrome";
@@ -121,6 +122,13 @@ export function ExpenseDetailPanel({
           </DetailItem>
           <DetailItem label="هزینه (خالص از مالیات)">
             <span className="tabular-nums">{money.format(detail.netAmount)}</span>
+          </DetailItem>
+          <DetailItem label="نحوهٔ تسویه">
+            {detail.settlement === "credit"
+              ? `${EXPENSE_SETTLEMENT_LABELS.credit}${detail.supplierName ? ` — ${detail.supplierName}` : ""}${
+                  detail.dueDate ? ` (سررسید ${formatJalali(detail.dueDate)})` : ""
+                }`
+              : EXPENSE_SETTLEMENT_LABELS.paid}
           </DetailItem>
           <DetailItem label="بستانکار (حساب پرداخت)">
             {toPersianDigits(detail.paymentAccountCode)} {detail.paymentAccountName}

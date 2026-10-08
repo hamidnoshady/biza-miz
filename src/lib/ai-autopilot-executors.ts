@@ -22,6 +22,7 @@ import { createStockCount, reverseStockCount } from "./stock-count-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
 import { recordExpense, reverseExpense, ExpenseError } from "./expense-service";
+import { parseExpenseSettlement, PayablesInputError, type ExpenseSettlementInput } from "./payables-input";
 import { createDraft, deleteDraft, ManualJournalError } from "./manual-journal-service";
 import { updateCustomer } from "./parties-service";
 import { addCustomerNote, deleteCustomerNote, setCustomerTag } from "./crm-service";
@@ -59,8 +60,15 @@ export interface AutopilotReverterContext {
 
 export type AutopilotReverter = (ctx: AutopilotReverterContext) => Promise<AutopilotExecutionResult>;
 
-/** Every row an executor creates says so, so an automated write never reads as typed by hand. */
-export const AUTOPILOT_NOTE_PREFIX = "ثبت خودکار دستیار — ";
+/**
+ * Every row an executor creates says so, so an automated write never reads as
+ * typed by hand. The string itself lives in the framework-free
+ * `ai-provenance.ts`, because a screen that wants to show *who* drafted
+ * something cannot import this module (it opens a database pool) — re-exported
+ * here so no existing importer has to change.
+ */
+export { AUTOPILOT_NOTE_PREFIX } from "./ai-provenance";
+import { AUTOPILOT_NOTE_PREFIX } from "./ai-provenance";
 
 function fail(errorCode: string): AutopilotExecutionResult {
   return { ok: false, result: { error: errorCode }, errorCode };
@@ -281,14 +289,35 @@ const expense: AutopilotExecutor = async (ctx) => {
   const paymentAccountId = str(ctx.payload.paymentAccountId);
   const amount = int(ctx.payload.amount);
   const memo = str(ctx.payload.memo);
-  if (!accountId || !paymentAccountId || amount === null || !memo) return fail("invalid_payload");
+  if (!accountId || amount === null || !memo) return fail("invalid_payload");
+  /*
+   * The settlement is read through the same parser the form and the service use,
+   * so an owed expense is not refused for the wrong reason here — a `paymentAccountId`
+   * belongs to a paid expense, and a model that omits it for «پرداخت بعدی» is
+   * right, not malformed (issue #832 §15: one rule, every channel).
+   */
+  let settlement: ExpenseSettlementInput;
+  try {
+    settlement = parseExpenseSettlement({
+      settlement: ctx.payload.settlement,
+      supplierId: ctx.payload.supplierId,
+      dueDate: ctx.payload.dueDate,
+    });
+  } catch (err) {
+    if (err instanceof PayablesInputError) return fail(err.code);
+    throw err;
+  }
+  if (settlement.settlement === "paid" && !paymentAccountId) return fail("invalid_payload");
 
   try {
     const created = await recordExpense({
       businessId: ctx.businessId,
       locationId: await defaultLocation(ctx.businessId),
       accountId,
-      paymentAccountId,
+      paymentAccountId: settlement.settlement === "credit" ? null : paymentAccountId,
+      settlement: settlement.settlement,
+      supplierId: settlement.supplierId,
+      dueDate: settlement.dueDate,
       amount,
       expenseDate: str(ctx.payload.expenseDate),
       vendor: str(ctx.payload.vendor),

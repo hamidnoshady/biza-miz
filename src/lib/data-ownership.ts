@@ -214,17 +214,36 @@ export const DATA_OWNERSHIP_REGISTRY = {
     transport: "events",
     events: [event("shift.opened", 1), event("shift.closed", 1)],
   }),
+  /*
+   * The ledger is **cloud-authoritative**, and this entry says so because two
+   * contracts used to say two different things.
+   *
+   * `replication-catalogue.ts` and `sync-event-registry.ts` both describe the
+   * cloud as the system of record for ledger effects (Phase 45: a desktop pulls
+   * a `journal_reversal` and *acknowledges* it rather than applying it), while
+   * this module called the domain `site_authoritative` + `bidirectional` +
+   * `continuousSync: active`. One source of truth, stated twice, in opposite
+   * ways: a reader could not tell whether a site's ledger or the cloud's wins.
+   *
+   * The answer is the cloud's. Fiscal periods, the chart of accounts, the
+   * draft → review → approve workflow and the journal entries themselves are
+   * all owned by the cloud; a site's *only* ledger effect is reversing a manual
+   * entry, and that travels as a request the cloud applies
+   * (`site_to_cloud`), never as a second authoritative copy. Drafts,
+   * approvals and rejections have no events at all on purpose — they are
+   * cloud-only workflow, not replicated state.
+   */
   accounting_journals: replicated({
     domain: "accounting_journals",
-    authority: "site_authoritative",
-    direction: "bidirectional",
+    authority: "cloud_authoritative",
+    direction: "site_to_cloud",
     conflictPolicy: "append_or_reverse",
     tombstonePolicy: "not_applicable",
     bootstrap: "optional",
     continuousSync: "active",
     identity: "journal entry UUID plus deterministic reversal client_event_id",
     retry:
-      "transactional sync_events outbox; reversals never overwrite posted facts",
+      "transactional sync_events outbox; reversals never overwrite posted facts; approvals and draft workflow are cloud-only and never replicated",
     transport: "events",
     events: [event("accounting.manual_journal.reversed", 1)],
   }),

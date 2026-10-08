@@ -205,3 +205,25 @@ project error — it never reached a module. The gate itself is owned by CI
 (`verify-shippables.yml`), and the parts of a build a mistake in this diff could
 break are covered by the two compile-level gates above plus the app-tree tests in
 the unit run (module reachability, API guard contract, design/primitive lint).
+
+## Merging audit F11 (main) into this branch
+
+`origin/main` reached `b1dedc2` with five commits, one of them #879 — the accounting repair whose non-payroll half is audit finding **F11**: an expense may be *owed* rather than paid («پرداخت بعدی»), carrying a supplier and an optional due date, and crediting Accounts Payable (2100) instead of a till. It rewrote the same seven files this branch rewrote, so the merge was done file by file with both implementations read first. Neither side's behaviour was given up:
+
+| File | What main wanted | What this branch wanted | The merged shape |
+| --- | --- | --- | --- |
+| `src/lib/expense-service.ts` | the settlement triple on the row, A/P as the credited account, an owed total | the payment-source rule, reversal, input VAT, keyset paging, server totals | one `recordExpense` that parses the **settlement first**, because it decides which account rules apply at all: `unknown_account`, `same_account` and payment-source eligibility are a paid expense's rules, an owed one needs a supplier and resolves 2100 through `accountIdsByCode` inside the transaction. `listExpenses` returns `totalPaidAmount` (cash that moved, credit excluded) beside `totalOwedAmount`. A reversal copies the settlement triple, so the mirrored debit still lands on the same supplier. |
+| `src/app/api/ledger/expenses/route.ts` (+ its test) | forward `settlement`/`supplierId`/`dueDate`, 409 `ledger_account_missing` when 2100 is absent | forward the receipt/party/VAT/location fields, the cursor, the totals | both, and all three tests — main's two F11 cases plus this branch's assertion that `totalAmount`/`totalPaidAmount`/`totalOwedAmount` are carried, not folded into one another. |
+| `src/app/api/ledger/accounts/route.ts` | `has_children`, `is_postable` | `parent_id` (§8) | one `SELECT`, three columns, rows returned raw so both clients keep reading what they already read. |
+| `accounting-manager.tsx` | the two new fields on `AccountRow` | the permission props `ExpenseSection` now takes | both field groups on the type, this branch's call site. |
+| `expense-section.tsx` | settlement chips, lazy supplier directory, conditional fields, owed total | permission-aware form, pagination, receipt OCR, VAT, branch/location, server totals | this branch's structure with F11 inside it. `expenseSettlementText` in `expense-shared.ts` is now the only place that answers «پرداخت از» for a row — desktop table, mobile cards and detail drawer all call it, so an owed row cannot be described three ways. |
+| `README.md` | the `ledger.approve`/`ledger.propose` manual-journal bullet | the «no recurring expense» bullets | main's bullet verbatim; this branch's bullet extended with the A/P clause. Both remain true: recurring journal templates are still not implemented, and neither is posting an expense «پرداخت بعدی» on a schedule. |
+
+Four consequences of reading both sides, rather than picking one:
+
+- **The due-date rule moved into the service.** The form refused a due date earlier than the expense date; `recordExpense` did not, which is exactly the §5 shape — a rule only the browser knows. It now throws `due_date_before_expense_date`, and the settlement parser (`parseExpenseSettlement`) is what checks the *shape* of the date, so the importer and the assistant inherit both.
+- **Five codes joined the central map** (§17): `invalid_settlement`, `supplier_required`, `supplier_not_found` (404), `invalid_due_date`, `due_date_before_expense_date`. `PayablesInputError` is converted to `ExpenseError` at the service boundary, so every channel translates one error type through one table.
+- **The assistant stopped demanding a payment account for an owed expense.** `expense.categorize` required `paymentAccountId` unconditionally, which after F11 is not a rule but a bug: it refused the one payload the register now encourages. It reads the settlement through the same parser, requires the account only for a paid expense, and its `payloadHint` in `ai.ts` says so.
+- **`chartIncomplete` narrowed to «no expense account at all».** A business with no till can still record what it owes, so the paid half of the form closes with its reason beside the disabled control instead of replacing the form. This deliberately changed one §2 expectation in `expense-section.test.tsx` — the old assertion (whole form replaced by a chart warning) is now the behaviour of the missing *expense* account only, which the file asserts separately.
+
+Not merged: the import channel still cannot produce an owed expense, because `accounting.expenses` has no supplier column to map. That is documented in `expense-import.ts` as a registry change rather than wired halfway — a sheet that could not name who is owed would have to guess, and guessing is what this issue was about.

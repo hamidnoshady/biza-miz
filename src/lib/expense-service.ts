@@ -1,13 +1,18 @@
 /**
  * Expense management — the DB-touching half of the Expenses subledger.
  *
- * Categorised operating expenses recorded as paid, not owed — the AP subledger
- * already models a bill owed to a specific supplier; genericising that to cover
- * "money spent on rent" would blur two different things. "Categorised" needs no
- * new taxonomy: the expense account chosen is the category. Every expense posts
- * a real journal entry through the same `postJournalEntry()` every other posting
- * path uses, so it is subject to the fiscal-period lock exactly like everything
- * else.
+ * "Categorised" needs no new taxonomy: the expense account chosen is the
+ * category. Every expense posts a real journal entry through the same
+ * `postJournalEntry()` every other posting path uses, so it is subject to the
+ * fiscal-period lock exactly like everything else.
+ *
+ * An expense is either **paid** (Cash / bank / float / card-settlement credited)
+ * or **owed** (audit F11 «پرداخت بعدی»: Accounts Payable credited for a named
+ * supplier, which is exactly the shape a credit purchase posts — so it lands in
+ * the A/P subledger, ages there, appears on the supplier's statement and is
+ * settled by the ordinary `payBill`). `payment_account_id` stores the account
+ * actually credited (2100 when owed), which is why every read that joins it keeps
+ * working and why the payment-source rule below applies to a paid expense only.
  *
  * Issue #832 turned this from a form that writes two tables into a register an
  * accountant can trust, by giving it the three things it was missing:
@@ -25,7 +30,8 @@
  *
  * DB-touching, so per repo convention it has no direct unit test: the rules live
  * in the pure modules above (unit-tested), and this file is covered by
- * `integration/expense.integration.test.ts`.
+ * `integration/expense.integration.test.ts` and
+ * `integration/f11-payables.integration.test.ts`.
  */
 import { getPool, query } from "./db";
 import {
@@ -42,12 +48,21 @@ import {
 } from "./expense-input";
 import { expenseCategoryAccounts, expensePaymentSourceIds } from "./expense-accounts";
 import { EXPENSE_ERROR_MESSAGES, expenseErrorStatus } from "./expense-errors";
-import { postJournalEntry, type PostJournalEntryInput } from "./ledger-service";
+import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry, type PostJournalEntryInput } from "./ledger-service";
 import { getMediaAsset } from "./media-service";
+import { isUuid } from "./uuid";
+import {
+  parseExpenseSettlement,
+  PayablesInputError,
+  type ExpenseSettlement,
+  type ExpenseSettlementInput,
+} from "./payables-input";
 import { classifyAccounts } from "./account-classification";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { todayIsoDate } from "./jalali";
 import type { PoolClient } from "pg";
+
+export { MissingLedgerAccountError };
 
 export class ExpenseError extends Error {
   status: number;
@@ -196,6 +211,12 @@ export interface Expense {
    * (0177's FK is `ON DELETE SET NULL`), which is what lets the register tell
    * «no receipt» apart from «receipt purged later» (issue #832 §7). */
   receiptFileName: string | null;
+  /** Audit F11 — `paid` (a cash/bank account was credited) or `credit` (A/P owes a supplier). */
+  settlement: ExpenseSettlement;
+  /** The supplier an owed expense is owed to — the branch alias `payBill` settles against. */
+  supplierId: string | null;
+  supplierName: string | null;
+  dueDate: string | null;
   /**
    * Where this row stands in the register: an ordinary expense, one that has
    * been reversed, or the reversal of another. Derived, never stored — the two
@@ -236,6 +257,10 @@ interface ExpenseRow extends Record<string, unknown> {
   created_at: string;
   receipt_asset_id: string | null;
   receipt_file_name: string | null;
+  settlement: ExpenseSettlement;
+  supplier_id: string | null;
+  supplier_name: string | null;
+  due_date: string | null;
   reversed_at: string | null;
   reversed_by_name: string | null;
   reversal_expense_id: string | null;
@@ -277,6 +302,10 @@ function toExpense(r: ExpenseRow): Expense {
     createdAt: r.created_at,
     receiptAssetId: r.receipt_asset_id,
     receiptFileName: r.receipt_file_name,
+    settlement: r.settlement,
+    supplierId: r.supplier_id,
+    supplierName: r.supplier_name,
+    dueDate: r.due_date,
     status: statusOf(r),
     reversedAt: r.reversed_at,
     reversedByName: r.reversed_by_name,
@@ -292,6 +321,7 @@ const SELECT_EXPENSE = `
   SELECT e.id, e.reference, e.expense_date::text AS expense_date, e.amount::text AS amount,
          e.vat_amount::text AS vat_amount, e.vendor, e.memo, e.created_at::text AS created_at,
          e.reversed_at::text AS reversed_at, e.reverses_expense_id, e.receipt_asset_id, e.receipt_file_name,
+         e.settlement, e.supplier_id, COALESCE(sp.name, s.name) AS supplier_name, e.due_date::text AS due_date,
          e.account_id, a.code AS account_code, a.name AS account_name,
          e.payment_account_id, p.code AS payment_account_code, p.name AS payment_account_name,
          e.location_id, l.name AS location_name,
@@ -306,6 +336,8 @@ const SELECT_EXPENSE = `
     JOIN accounts p ON p.id = e.payment_account_id
     LEFT JOIN locations l ON l.id = e.location_id
     LEFT JOIN parties pt ON pt.id = e.party_id
+    LEFT JOIN suppliers s ON s.id = e.supplier_id
+    LEFT JOIN parties sp ON sp.id = s.party_id
     LEFT JOIN users u ON u.id = e.created_by
     LEFT JOIN users rb ON rb.id = e.reversed_by
     LEFT JOIN expenses rev ON rev.reverses_expense_id = e.id
@@ -318,6 +350,11 @@ const SELECT_EXPENSE = `
  * reversal carries the same figures with the opposite sign, which is what makes
  * the net total equal the General Ledger's net movement on the expense accounts
  * instead of drifting away from it every time somebody corrects a mistake.
+ *
+ * «پرداختی از حساب‌ها» counts only what actually settled: an owed expense credited
+ * Accounts Payable, so no cash left anywhere, and folding it into that number
+ * would report a payment that has not happened. What is still owed is therefore
+ * returned beside it (audit F11), never inside it.
  */
 const TOTALS_SQL = `
   SELECT COALESCE(SUM(CASE WHEN e.reverses_expense_id IS NULL
@@ -325,8 +362,10 @@ const TOTALS_SQL = `
                            ELSE -(e.amount - e.vat_amount) END), 0)::text AS total,
          COALESCE(SUM(CASE WHEN e.reverses_expense_id IS NULL
                            THEN e.vat_amount ELSE -e.vat_amount END), 0)::text AS vat,
-         COALESCE(SUM(CASE WHEN e.reverses_expense_id IS NULL
-                           THEN e.amount ELSE -e.amount END), 0)::text AS paid,
+         COALESCE(SUM(CASE WHEN e.settlement = 'credit' THEN 0
+                           WHEN e.reverses_expense_id IS NULL THEN e.amount
+                           ELSE -e.amount END), 0)::text AS paid,
+         COALESCE(SUM(CASE WHEN e.settlement = 'credit' THEN e.amount ELSE 0 END), 0)::text AS owed,
          COUNT(*)::text AS count
     FROM expenses e
     JOIN accounts a ON a.id = e.account_id
@@ -342,8 +381,10 @@ export interface ExpenseListResult {
   totalAmount: number;
   /** The input-VAT part of the same set. */
   totalVatAmount: number;
-  /** What the payment accounts actually lost in the same set. */
+  /** What the payment accounts actually lost in the same set (owed rows excluded). */
   totalPaidAmount: number;
+  /** What the same set still owes suppliers, gross (audit F11). */
+  totalOwedAmount: number;
   /** How many rows match the filters in total. */
   totalCount: number;
 }
@@ -403,7 +444,13 @@ export async function listExpenses(
 
   // Totals over the whole filtered set, deliberately *before* the cursor joins
   // `where`: paging must not change the number at the bottom of the register.
-  const { rows: totals } = await query<{ total: string; vat: string; paid: string; count: string }>(
+  const { rows: totals } = await query<{
+    total: string;
+    vat: string;
+    paid: string;
+    owed: string;
+    count: string;
+  }>(
     `${TOTALS_SQL} WHERE ${clause}`,
     values,
   );
@@ -435,6 +482,7 @@ export async function listExpenses(
     totalAmount: Number(totals[0]?.total ?? 0),
     totalVatAmount: Number(totals[0]?.vat ?? 0),
     totalPaidAmount: Number(totals[0]?.paid ?? 0),
+    totalOwedAmount: Number(totals[0]?.owed ?? 0),
     totalCount: Number(totals[0]?.count ?? 0),
   };
 }
@@ -444,8 +492,18 @@ export interface RecordExpenseParams {
   /** The branch that incurred it. Validated against the business, never trusted. */
   locationId: string | null;
   accountId: string;
-  paymentAccountId: string;
-  /** Gross Rial that left the payment account. */
+  /**
+   * The cash-shaped account to credit. Required for a **paid** expense and
+   * ignored when the expense is owed: an «پرداخت بعدی» row credits Accounts
+   * Payable instead, and the account actually credited is what gets stored
+   * (audit F11).
+   */
+  paymentAccountId?: string | null;
+  /** Audit F11 — `credit` records the expense as owed to `supplierId` (Credit A/P) instead of paid. */
+  settlement?: ExpenseSettlement | null;
+  supplierId?: string | null;
+  dueDate?: string | null;
+  /** Gross Rial that left the payment account — or, when owed, that the supplier is due. */
   amount: number;
   expenseDate?: string | null;
   vendor?: string | null;
@@ -479,8 +537,27 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
     throw new ExpenseError("invalid_amount");
   }
   if (!params.memo.trim()) throw new ExpenseError("memo_required");
-  if (!params.accountId || !params.paymentAccountId) throw new ExpenseError("unknown_account");
-  if (params.accountId === params.paymentAccountId) throw new ExpenseError("same_account");
+  /*
+   * The settlement shape is parsed first, because it decides which account rules
+   * below even apply: an owed expense has no payment account to check, and a paid
+   * one must not arrive carrying a supplier. It is parsed by the same module the
+   * form and the importer read, so «پرداخت بعدی» means one thing everywhere it can
+   * be typed (issue #832 §15).
+   */
+  let settlement: ExpenseSettlementInput;
+  try {
+    settlement = parseExpenseSettlement({
+      settlement: params.settlement,
+      supplierId: params.supplierId,
+      dueDate: params.dueDate,
+    });
+  } catch (err) {
+    if (err instanceof PayablesInputError) throw new ExpenseError(err.code);
+    throw err;
+  }
+  const onCredit = settlement.settlement === "credit";
+  if (!params.accountId || (!onCredit && !params.paymentAccountId)) throw new ExpenseError("unknown_account");
+  if (!onCredit && params.accountId === params.paymentAccountId) throw new ExpenseError("same_account");
 
   const vatAmount = parseExpenseVatAmount(params.vatAmount ?? 0);
   if (vatAmount === null) throw new ExpenseError("vat_amount_invalid");
@@ -503,6 +580,17 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
   const postingDate = expenseDate ?? today;
   const violation = expenseDateViolation(postingDate, today);
   if (violation) throw new ExpenseError(violation);
+  /*
+   * `parseExpenseSettlement` checked that a due date is a date; this checks it
+   * against the day the expense is posted, because a payable created already
+   * overdue is a mistyped year far more often than a genuinely backdated bill —
+   * and it would open in the A/P ageing in the «تأخیر» bucket on its first day.
+   * The rule lives here rather than only in the form so the importer and the
+   * autopilot cannot walk past it (issue #832 §5).
+   */
+  if (onCredit && settlement.dueDate !== null && settlement.dueDate < postingDate) {
+    throw new ExpenseError("due_date_before_expense_date");
+  }
 
   const receiptAssetId = params.receiptAssetId?.trim() || null;
   let receiptFileName: string | null = null;
@@ -541,11 +629,17 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
   if (!categories.includes(params.accountId)) {
     throw new ExpenseError(chart.some((account) => account.id === params.accountId) ? "invalid_expense_account" : "unknown_account");
   }
-  const paymentSources = expensePaymentSourceIds(chart.map(asShape));
-  if (!paymentSources.has(params.paymentAccountId)) {
-    throw new ExpenseError(
-      chart.some((account) => account.id === params.paymentAccountId) ? "invalid_payment_account" : "unknown_account",
-    );
+  // The paid half of the rule: what may be credited is cash-shaped, never merely
+  // an asset. An owed expense has no payment account of its own — the A/P control
+  // account is resolved from the chart below exactly as a credit purchase resolves
+  // it, so there is nothing for a caller to get wrong there.
+  if (!onCredit) {
+    const paymentSources = expensePaymentSourceIds(chart.map(asShape));
+    if (!paymentSources.has(params.paymentAccountId!)) {
+      throw new ExpenseError(
+        chart.some((account) => account.id === params.paymentAccountId) ? "invalid_payment_account" : "unknown_account",
+      );
+    }
   }
 
   let vatAccountId: string | null = null;
@@ -562,17 +656,33 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
   try {
     await client.query("BEGIN");
 
+    // The credited account: the chosen cash/bank account, or — owed — the A/P
+    // control account a credit purchase credits too, so an owed expense is never
+    // a bill that nobody can settle from «حساب‌های پرداختنی».
+    let creditAccountId = params.paymentAccountId ?? "";
+    if (onCredit) {
+      if (!isUuid(settlement.supplierId!)) throw new ExpenseError("supplier_not_found", 404);
+      // `suppliers` has no business_id; the match goes through its location, as in `payBill`.
+      const { rows: supplierRows } = await client.query(
+        `SELECT 1 FROM suppliers s JOIN locations l ON l.id = s.location_id WHERE s.id = $1 AND l.business_id = $2`,
+        [settlement.supplierId, businessId],
+      );
+      if (!supplierRows[0]) throw new ExpenseError("supplier_not_found", 404);
+      const accounts = await accountIdsByCode(client, businessId, [WELL_KNOWN_CODES.accountsPayable]);
+      creditAccountId = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
+    }
+
     reference = await nextReference(client, businessId, postingDate);
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO expenses (business_id, location_id, account_id, payment_account_id, amount, vat_amount,
                              expense_date, vendor, party_id, memo, created_by, receipt_asset_id,
-                             receipt_file_name, reference)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
+                             receipt_file_name, reference, settlement, supplier_id, due_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING id`,
       [
         businessId,
         locationId,
         params.accountId,
-        params.paymentAccountId,
+        creditAccountId,
         params.amount,
         vatAmount,
         postingDate,
@@ -583,13 +693,16 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
         receiptAssetId,
         receiptFileName,
         reference,
+        settlement.settlement,
+        settlement.supplierId,
+        settlement.dueDate,
       ],
     );
     expenseId = rows[0].id;
 
     const lines: PostJournalEntryInput["lines"] = [
       { accountId: params.accountId, debit: expenseNet, credit: 0 },
-      { accountId: params.paymentAccountId, debit: 0, credit: params.amount },
+      { accountId: creditAccountId, debit: 0, credit: params.amount },
     ];
     if (vatAmount > 0 && vatAccountId) {
       lines.splice(1, 0, { accountId: vatAccountId, debit: vatAmount, credit: 0 });
@@ -684,8 +797,9 @@ export async function reverseExpense(params: {
     const reference = await nextReference(client, params.businessId, reversalDate);
     const { rows: inserted } = await client.query<{ id: string }>(
       `INSERT INTO expenses (business_id, location_id, account_id, payment_account_id, amount, vat_amount,
-                             expense_date, vendor, party_id, memo, created_by, reference, reverses_expense_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13) RETURNING id`,
+                             expense_date, vendor, party_id, memo, created_by, reference, reverses_expense_id,
+                             settlement, supplier_id, due_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id`,
       [
         params.businessId,
         original.location_id,
@@ -700,6 +814,13 @@ export async function reverseExpense(params: {
         params.actorId,
         reference,
         params.expenseId,
+        // A reversal of an owed expense is itself an A/P movement, or the payable
+        // the original opened would stay open forever: the A/P subledger reads the
+        // journal, and the mirrored entry's debit only reaches supplier 2100 while
+        // this row still says who is owed (audit F11, issue #832 §1).
+        original.settlement,
+        original.supplier_id,
+        original.due_date,
       ],
     );
     reversalId = inserted[0].id;

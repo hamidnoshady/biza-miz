@@ -5,12 +5,12 @@
  *
  * Ownership boundaries:
  * - This page: LiteLLM connection and business virtual-key lifecycle only.
- * - LiteLLM: upstream providers, model deployments, routing, retries, fallback
- *   and provider/MCP behaviour.
+ * - LiteLLM: upstream provider deployments, alias catalogue, routing, retries,
+ *   fallbacks and any proxy-side limits. The POS `/api/mcp` connector is separate.
  * - Plan/Billing: prices, wallet balance, included AI allowance, top-ups,
  *   overage and monetisation.
  */
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Loader2Icon } from "lucide-react";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { PlatformConfirmDialog } from "@/components/platform/dialogs";
@@ -102,6 +102,7 @@ interface TenantReadiness extends RuntimeReadiness {
   businessId: string;
   entitled: boolean;
   hasBranchOverride: boolean;
+  hasBranchSyncError: boolean;
   status: string;
 }
 
@@ -115,6 +116,8 @@ interface BranchReadiness extends RuntimeReadiness {
   inheritedFromBusiness: boolean;
   effectiveModel: string;
   lastVerifiedAt: string | null;
+  businessSyncError: string | null;
+  branchSyncError: string | null;
   syncError: string | null;
 }
 
@@ -136,6 +139,7 @@ interface GatewayData {
   tenantReadiness: TenantReadiness[];
   branchReadiness: BranchReadiness | null;
   pagination: Pagination;
+  locationPagination: Pagination;
   status: GatewayStatus | null;
   gateways: BusinessGateway[];
   businesses: BusinessSummary[];
@@ -187,6 +191,12 @@ export default function PlatformAiPage() {
   const [masterKey, setMasterKey] = useState("");
   const [selectedBusinessId, setSelectedBusinessId] = useState("");
   const [selectedLocationId, setSelectedLocationId] = useState("");
+  const [locationSearchInput, setLocationSearchInput] = useState("");
+  const [locationSearch, setLocationSearch] = useState("");
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [locationLoadingMore, setLocationLoadingMore] = useState(false);
+  const locationSearchRef = useRef(locationSearch);
+  locationSearchRef.current = locationSearch;
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
   const [searchInput, setSearchInput] = useState("");
@@ -204,6 +214,11 @@ export default function PlatformAiPage() {
     return () => clearTimeout(handle);
   }, [searchInput]);
 
+  useEffect(() => {
+    const handle = setTimeout(() => setLocationSearch(locationSearchInput.trim()), 250);
+    return () => clearTimeout(handle);
+  }, [locationSearchInput]);
+
   const load = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams({ page: String(page), pageSize: String(PAGE_SIZE) });
@@ -211,6 +226,9 @@ export default function PlatformAiPage() {
     if (statusFilter !== "all") params.set("status", statusFilter);
     if (selectedBusinessId) params.set("businessId", selectedBusinessId);
     if (selectedLocationId) params.set("locationId", selectedLocationId);
+    if (selectedBusinessId && locationSearchRef.current) params.set("locationSearch", locationSearchRef.current);
+    params.set("locationPage", "1");
+    params.set("locationPageSize", "50");
     const result = await api<GatewayData>(`/api/platform/ai/gateway?${params.toString()}`);
     if (!result.ok) {
       setError(result.data.error === "ai_configuration_load_failed"
@@ -219,7 +237,14 @@ export default function PlatformAiPage() {
       setLoading(false);
       return;
     }
-    setData(result.data);
+    setData((current) => current
+      ? {
+          ...result.data,
+          status: result.data.status ?? current.status,
+          locations: current.locations,
+          locationPagination: current.locationPagination,
+        }
+      : result.data);
     setDraft(result.data.gateway);
     setLoading(false);
   }, [page, search, statusFilter, selectedBusinessId, selectedLocationId]);
@@ -261,6 +286,63 @@ export default function PlatformAiPage() {
     () => (data?.locations ?? []).filter((loc) => loc.businessId === selectedBusinessId),
     [data?.locations, selectedBusinessId],
   );
+
+  useEffect(() => {
+    if (!selectedBusinessId) return;
+    let cancelled = false;
+    setLocationLoading(true);
+    const params = new URLSearchParams({
+      businessId: selectedBusinessId,
+      locationPage: "1",
+      locationPageSize: "50",
+    });
+    if (selectedLocationId) params.set("locationId", selectedLocationId);
+    if (locationSearch) params.set("locationSearch", locationSearch);
+    void api<GatewayData>(`/api/platform/ai/gateway?${params.toString()}`).then((result) => {
+      if (cancelled) return;
+      if (result.ok) {
+        setData((current) => current
+          ? { ...current, locations: result.data.locations ?? [], locationPagination: result.data.locationPagination }
+          : current);
+      } else {
+        setError(result.data.error ? errorMessage(result.data.error) : "خواندن فهرست شعب ممکن نشد.");
+      }
+      setLocationLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedBusinessId, selectedLocationId, locationSearch]);
+
+  async function loadMoreLocations() {
+    if (!selectedBusinessId || !data?.locationPagination || locationLoading || locationLoadingMore || locationSearchInput.trim() !== locationSearch) return;
+    const nextPage = data.locationPagination.page + 1;
+    if (nextPage > data.locationPagination.totalPages) return;
+    setLocationLoadingMore(true);
+    const params = new URLSearchParams({
+      businessId: selectedBusinessId,
+      locationPage: String(nextPage),
+      locationPageSize: "50",
+    });
+    if (selectedLocationId) params.set("locationId", selectedLocationId);
+    if (locationSearch) params.set("locationSearch", locationSearch);
+    const result = await api<GatewayData>(`/api/platform/ai/gateway?${params.toString()}`);
+    if (result.ok) {
+      setData((current) => {
+        if (!current) return current;
+        const locationsById = new Map(current.locations.map((location) => [location.id, location]));
+        for (const location of result.data.locations ?? []) locationsById.set(location.id, location);
+        return {
+          ...current,
+          locations: [...locationsById.values()],
+          locationPagination: result.data.locationPagination,
+        };
+      });
+    } else {
+      setError(result.data.error ? errorMessage(result.data.error) : "خواندن شعب بیشتر ممکن نشد.");
+    }
+    setLocationLoadingMore(false);
+  }
 
   const selectedRow = useMemo(() => {
     if (!data?.gateways || !selectedBusinessId) return null;
@@ -448,21 +530,49 @@ export default function PlatformAiPage() {
           <Field label="کسب‌وکار">
             <SearchableSelect
               value={selectedBusinessId}
-              onChange={(value) => { setSelectedBusinessId(value); setSelectedLocationId(""); }}
+              onChange={(value) => {
+                setSelectedBusinessId(value);
+                setSelectedLocationId("");
+                setLocationSearchInput("");
+                setLocationSearch("");
+              }}
               onQueryChange={setPickerQueryInput}
               loading={pickerLoading}
               options={pickerBusinesses.map((business) => ({ value: business.businessId, label: business.businessName }))}
               searchPlaceholder="جستجوی کسب‌وکار…"
             />
           </Field>
-          {businessLocations.length > 0 ? (
-            <Field label="شعبه (اختیاری)">
-              <SearchableSelect
-                value={selectedLocationId}
-                onChange={setSelectedLocationId}
-                options={[{ value: "", label: "کل کسب‌وکار (پیش‌فرض)" }, ...businessLocations.map((loc) => ({ value: loc.id, label: loc.name }))]}
-              />
-            </Field>
+          {selectedBusinessId ? (
+            <div className="space-y-1">
+              <Field label="شعبه (اختیاری)">
+                <SearchableSelect
+                  value={selectedLocationId}
+                  onChange={(value) => {
+                    setSelectedLocationId(value);
+                    setLocationSearchInput("");
+                    setLocationSearch("");
+                  }}
+                  onQueryChange={setLocationSearchInput}
+                  loading={locationLoading}
+                  emptyText="شعبه‌ای یافت نشد."
+                  searchPlaceholder="جستجوی شعبه…"
+                  options={[{ value: "", label: "کل کسب‌وکار (پیش‌فرض)" }, ...businessLocations.map((loc) => ({ value: loc.id, label: loc.name }))]}
+                />
+              </Field>
+              {data?.locationPagination && data.locationPagination.totalPages > data.locationPagination.page ? (
+                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>{businessLocations.length} از {data.locationPagination.total} شعبه</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => void loadMoreLocations()}
+                    disabled={locationLoading || locationLoadingMore || locationSearchInput.trim() !== locationSearch}
+                  >
+                    {locationLoadingMore ? <Loader2Icon className="animate-spin" /> : "بارگذاری شعب بیشتر"}
+                  </Button>
+                </div>
+              ) : null}
+            </div>
           ) : null}
         </div>
 
@@ -471,6 +581,8 @@ export default function PlatformAiPage() {
             <div className={`rounded-lg border p-3 text-sm ${branchReadiness?.ready && branchReadiness.entitled ? "border-emerald-300 bg-emerald-50 dark:bg-emerald-500/10" : "border-amber-300 bg-amber-50 dark:bg-amber-500/10"}`}>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 <p>AI entitlement: <strong>{branchReadiness?.entitled ? "فعال" : "غیرفعال"}</strong></p>
+                <p>Gateway configuration: <strong>{branchReadiness?.gatewayReady ? "آماده" : "غیرفعال/ناقص"}</strong></p>
+                <p>Gateway connection: <strong>{status ? (status.ok ? "آخرین آزمون موفق" : "آخرین آزمون ناموفق") : "آزمون نشده"}</strong></p>
                 <p>کلید مجازی: <strong>{branchReadiness?.virtualKeyRequired ? (branchReadiness.virtualKeyReady ? "آماده" : "نیازمند صدور/رفع خطا") : "الزامی نیست"}</strong></p>
                 <p>Runtime: <strong>{branchReadiness?.ready && branchReadiness.entitled ? "آماده" : "نیازمند تنظیم"}</strong></p>
                 <p>منبع اعتبارنامه: <strong>{branchReadiness ? CREDENTIAL_SOURCE_FA[branchReadiness.credentialSource] : "—"}</strong></p>
@@ -489,9 +601,17 @@ export default function PlatformAiPage() {
               <p>مدل مؤثر: <strong dir="ltr" className="font-medium">{branchReadiness?.effectiveModel ?? selectedRow?.effectiveModel ?? draft?.chatModel ?? "—"}</strong></p>
               <p>وضعیت کلید: {selectedRow?.hasVirtualKey ? "صادر شده" : "صادر نشده"}</p>
               <p>Key alias: <span dir="ltr">{selectedRow?.keyAlias ?? "—"}</span></p>
-              <p>آخرین بررسی/همگام‌سازی: {fmtDate(branchReadiness?.lastVerifiedAt ?? selectedRow?.syncedAt ?? null)}</p>
+              <p>آخرین بررسی/همگام‌سازی کلید مؤثر: {fmtDate(branchReadiness?.lastVerifiedAt ?? null)}</p>
             </div>
-            {(branchReadiness?.syncError ?? selectedRow?.syncError) ? <ErrorBox>{branchReadiness?.syncError ?? selectedRow?.syncError}</ErrorBox> : null}
+            {selectedLocationId && branchReadiness?.businessSyncError ? (
+              <ErrorBox>خطای همگام‌سازی کلید کسب‌وکار: {branchReadiness.businessSyncError}</ErrorBox>
+            ) : null}
+            {(branchReadiness?.branchSyncError ?? (selectedLocationId ? selectedRow?.syncError : null)) ? (
+              <ErrorBox>خطای همگام‌سازی کلید شعبه: {branchReadiness?.branchSyncError ?? selectedRow?.syncError}</ErrorBox>
+            ) : null}
+            {!selectedLocationId && (branchReadiness?.businessSyncError ?? selectedRow?.syncError) ? (
+              <ErrorBox>خطای همگام‌سازی کلید کسب‌وکار: {branchReadiness?.businessSyncError ?? selectedRow?.syncError}</ErrorBox>
+            ) : null}
             {canManageAi ? (
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => void write({ action: "sync_key", businessId: selectedBusinessId, locationId: selectedLocationId || null }, "sync")} disabled={Boolean(busy)}>
@@ -574,8 +694,8 @@ export default function PlatformAiPage() {
               صفحهٔ {data.pagination.page} از {data.pagination.totalPages} ({data.pagination.total} کسب‌وکار)
             </span>
             <div className="flex gap-2">
-              <Button variant="ghost" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>قبلی</Button>
-              <Button variant="ghost" onClick={() => setPage((p) => Math.min(data.pagination.totalPages, p + 1))} disabled={page >= data.pagination.totalPages}>بعدی</Button>
+              <Button variant="ghost" onClick={() => setPage(Math.max(1, data.pagination.page - 1))} disabled={data.pagination.page <= 1}>قبلی</Button>
+              <Button variant="ghost" onClick={() => setPage(Math.min(data.pagination.totalPages, data.pagination.page + 1))} disabled={data.pagination.page >= data.pagination.totalPages}>بعدی</Button>
             </div>
           </div>
         ) : null}

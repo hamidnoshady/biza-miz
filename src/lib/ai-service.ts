@@ -61,17 +61,15 @@ export interface AgentReply {
   inputRequest: InputRequestSpec | null;
   usage: AiTokenUsage;
   /**
-   * Phase 38b — the gateway's own cost figure for this turn, summed across
-   * every provider round (USD). Null whenever the responder did not report
-   * one — a direct vendor, or a proxy with cost tracking off — which the
-   * settlement reads as "price from the token rates instead", never as free.
+   * LiteLLM's reported cost for this turn, summed across every response round
+   * (USD). Null when the proxy omitted cost; settlement then uses the configured
+   * non-gateway cost fallback rather than treating the turn as free.
    */
   costUsd: number | null;
   /**
-   * Phase 36 Wave 7 — every tool this turn invoked, with the date range it was
-   * given, so the caller can build the semantic cache's tool signature and
-   * decide whether the turn was read-only. Empty for a turn that answered
-   * without tools.
+   * Every app-owned function tool this turn invoked, with the date range it
+   * read when applicable. Stored as conversation/audit trace; the retired
+   * app-owned semantic answer cache no longer consumes this shape.
    */
   toolCalls: AgentToolCallTrace[];
 }
@@ -437,10 +435,10 @@ async function callProvider(
       // in place for gateways that omit it.
       body.stream_options = { include_usage: true };
     }
-    // Some OpenAI-compatible providers reject an explicit empty tools array.
-    // MCP and per-request LiteLLM fallbacks are intentionally not merged here:
-    // routing/fallback/provider tools are gateway policy, and optional MCP must
-    // never make ordinary tenant chat invalid.
+    // Some OpenAI-compatible gateways reject an explicit empty tools array.
+    // The app sends its own permission-filtered OpenAI function tools only;
+    // LiteLLM routing/fallback is configured proxy-side, and the independent
+    // POS `/api/mcp` connector is not registered as a proxy tool.
     if (tools.length > 0) {
       body.tools = tools;
       body.tool_choice = "auto";

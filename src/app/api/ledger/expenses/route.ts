@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { ExpenseError, listExpenses, recordExpense } from "@/lib/expense-service";
+import { ExpenseError, listExpenses, MissingLedgerAccountError, recordExpense } from "@/lib/expense-service";
 import { encodeExpenseCursor, parseExpenseListQuery } from "@/lib/expense-input";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 
@@ -28,8 +28,16 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
 
   const filters = parseExpenseListQuery(request.nextUrl.searchParams);
-  const { expenses, hasMore, nextCursor, totalAmount, totalVatAmount, totalPaidAmount, totalCount } =
-    await listExpenses(session.businessId, filters);
+  const {
+    expenses,
+    hasMore,
+    nextCursor,
+    totalAmount,
+    totalVatAmount,
+    totalPaidAmount,
+    totalOwedAmount,
+    totalCount,
+  } = await listExpenses(session.businessId, filters);
   return NextResponse.json({
     expenses,
     hasMore,
@@ -39,16 +47,21 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     totalAmount,
     totalVatAmount,
     totalPaidAmount,
+    totalOwedAmount,
     totalCount,
   });
 });
 
 /**
- * Records a paid operating expense and posts it immediately (Debit the chosen
- * expense account, plus the input-VAT account when the expense carries VAT /
- * Credit the payment account for the gross). Every rule the form applies is
- * re-applied in `recordExpense()` — this route is one of four callers of that
- * service and is deliberately not the only one that enforces anything.
+ * Records an operating expense and posts it immediately: Debit the chosen expense
+ * account (net of input VAT, plus a debit to the VAT account when the expense
+ * carries any) / Credit the payment account for the gross — or, with
+ * `settlement: "credit"` («پرداخت بعدی», audit F11), Credit Accounts Payable for
+ * `supplierId`, to be settled later through `POST /api/ledger/ap/payments`.
+ *
+ * Every rule the form applies is re-applied in `recordExpense()` — this route is
+ * one of four callers of that service and is deliberately not the only one that
+ * enforces anything.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.financeExpensesManage);
@@ -65,6 +78,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     memo?: string;
     vatAmount?: number | string;
     receiptAssetId?: string;
+    settlement?: string;
+    supplierId?: string;
+    dueDate?: string;
   };
   try {
     body = await request.json();
@@ -96,10 +112,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       createdBy: session.sub,
       vatAmount: body.vatAmount ?? null,
       receiptAssetId: typeof body.receiptAssetId === "string" ? body.receiptAssetId : null,
+      settlement: typeof body.settlement === "string" ? (body.settlement as "paid" | "credit") : null,
+      supplierId: typeof body.supplierId === "string" ? body.supplierId : null,
+      dueDate: typeof body.dueDate === "string" ? body.dueDate : null,
     });
     return NextResponse.json({ expense }, { status: 201 });
   } catch (err) {
     if (err instanceof ExpenseError) return NextResponse.json({ error: err.message }, { status: err.status });
+    if (err instanceof MissingLedgerAccountError) {
+      return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
+    }
     const lockCode = fiscalPeriodLockErrorCode(err);
     if (lockCode) return NextResponse.json({ error: lockCode }, { status: 409 });
     throw err;

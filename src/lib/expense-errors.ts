@@ -37,6 +37,13 @@ export const EXPENSE_ERROR_MESSAGES = {
   receipt_asset_not_found: "تصویر رسید در کتابخانهٔ رسانه پیدا نشد.",
   party_not_found: "شخص انتخاب‌شده در فهرست اشخاص این کسب‌وکار نیست.",
   invalid_location: "شعبهٔ انتخاب‌شده برای این کسب‌وکار معتبر نیست.",
+  /* Audit F11 — «پرداخت بعدی». Parsed by `payables-input`, thrown as expense
+   * errors, so the importer and the autopilot translate them like any other. */
+  invalid_settlement: "نحوهٔ تسویهٔ هزینه معتبر نیست؛ یا «پرداخت‌شده» است یا «پرداخت بعدی».",
+  supplier_required: "برای «پرداخت بعدی» تأمین‌کننده را انتخاب کنید تا بدهی در حساب‌های پرداختنی او ثبت شود.",
+  supplier_not_found: "تأمین‌کنندهٔ انتخاب‌شده در این کسب‌وکار وجود ندارد.",
+  invalid_due_date: "تاریخ سررسید پرداخت معتبر نیست.",
+  due_date_before_expense_date: "سررسید پرداخت نمی‌تواند پیش از تاریخ هزینه باشد.",
   expense_not_found: "هزینه پیدا نشد.",
   expense_already_reversed: "این هزینه قبلاً برگشت خورده است.",
   expense_is_reversal:
@@ -72,6 +79,11 @@ const EXPENSE_ERROR_STATUS: Record<ExpenseErrorCode, number> = {
   receipt_asset_not_found: 404,
   party_not_found: 404,
   invalid_location: 400,
+  invalid_settlement: 400,
+  supplier_required: 400,
+  supplier_not_found: 404,
+  invalid_due_date: 400,
+  due_date_before_expense_date: 400,
   expense_not_found: 404,
   expense_already_reversed: 409,
   expense_is_reversal: 409,

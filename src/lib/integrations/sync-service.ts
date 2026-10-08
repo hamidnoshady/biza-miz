@@ -32,7 +32,13 @@ import { changeMenuItemPrice } from "../menu-price-service";
 import { getBusinessIndustry } from "../industry-guard";
 import { hasSellableCatalogue, isRetailCatalogueIndustry } from "../industries";
 import { getConnection, wooClientFor, type ConnectionRow } from "./connections-service";
-import { listMappings, localIdForRemote, mergeMappingMeta, upsertMapping } from "./mapping-service";
+import {
+  createForRemoteOnce,
+  listMappings,
+  localIdForRemote,
+  mergeMappingMeta,
+  upsertMapping,
+} from "./mapping-service";
 import { wooAmountToRial } from "./woo-money";
 import { writeIntegrationAudit } from "./audit";
 import {
@@ -162,9 +168,9 @@ async function upsertFnbProduct(
   const attributes = wooVariationAttributes(product);
   const name = attributes.length ? wooVariationDisplayName(product.name, attributes) : product.name;
   const price = wooAmountToRial(product.regular_price || product.price || "0", connection.currency_unit);
-  const existing = await localIdForRemote(businessId, connection.id, "product", String(product.id));
+  const remoteId = String(product.id);
 
-  if (existing) {
+  const applyUpdate = async (existing: string): Promise<"updated"> => {
     // name/sku stay a plain update; the price is a canonical price change
     // (issue #844): locked, validated, written to the current price and to
     // immutable history + audit together, `source = 'integration'` naming this
@@ -186,15 +192,23 @@ async function upsertFnbProduct(
     if (!change.ok) throw new Error(change.error);
     await recordProductShape(connection, product);
     return "updated";
-  }
+  };
+
+  const existing = await localIdForRemote(businessId, connection.id, "product", remoteId);
+  if (existing) return applyUpdate(existing);
 
   const categoryId = await categoryForProduct(connection, locationId, product);
-  const { rows } = await query<{ id: string }>(
-    `INSERT INTO menu_items (location_id, category_id, name, sku, price)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [locationId, categoryId, name, product.sku || null, price.toString()],
-  );
-  await upsertMapping(businessId, connection.id, "product", String(product.id), rows[0].id);
+  // Created under the identity lock (audit F13): a second delivery of the same
+  // new product waits here and then applies itself as an update.
+  const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO menu_items (location_id, category_id, name, sku, price)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [locationId, categoryId, name, product.sku || null, price.toString()],
+    );
+    return rows[0].id;
+  });
+  if (!outcome.created) return applyUpdate(outcome.localId);
   await recordProductShape(connection, product);
   return "created";
 }
@@ -221,9 +235,9 @@ async function upsertRetailProduct(
     shape.itemKind === "variant_child" && attributes.length
       ? wooVariationDisplayName(product.name, attributes)
       : product.name;
-  const existing = await localIdForRemote(businessId, connection.id, "product", String(product.id));
+  const remoteId = String(product.id);
 
-  if (existing) {
+  const applyUpdate = async (existing: string): Promise<"updated"> => {
     await query(
       `UPDATE items SET name = $3, sku = $4, updated_at = now()
         WHERE id = $1 AND location_id = $2`,
@@ -238,15 +252,24 @@ async function upsertRetailProduct(
     }
     await recordProductShape(connection, product);
     return "updated";
-  }
+  };
 
+  const existing = await localIdForRemote(businessId, connection.id, "product", remoteId);
+  if (existing) return applyUpdate(existing);
+
+  // Every create below runs under the identity lock (audit F13): a second
+  // delivery of the same new product waits, finds the first one's mapping and
+  // applies its payload as an update instead of inserting a twin item.
   if (shape.container) {
-    const { rows } = await query<{ id: string }>(
-      `INSERT INTO items (location_id, name, sku, kind, tracking)
-       VALUES ($1, $2, $3, 'variant_parent', 'none') RETURNING id`,
-      [locationId, name, product.sku || null],
-    );
-    await upsertMapping(businessId, connection.id, "product", String(product.id), rows[0].id);
+    const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `INSERT INTO items (location_id, name, sku, kind, tracking)
+         VALUES ($1, $2, $3, 'variant_parent', 'none') RETURNING id`,
+        [locationId, name, product.sku || null],
+      );
+      return rows[0].id;
+    });
+    if (!outcome.created) return applyUpdate(outcome.localId);
     await recordProductShape(connection, product);
     return "created";
   }
@@ -264,9 +287,7 @@ async function upsertRetailProduct(
 
   // Item + stock + attributes + mapping in one transaction, so a retry after a
   // partial failure cannot orphan a stock row or duplicate a variant.
-  const client = await getPool().connect();
-  try {
-    await client.query("BEGIN");
+  const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO items (location_id, parent_item_id, name, sku, kind, tracking)
        VALUES ($1, $2, $3, $4, $5, 'none') RETURNING id`,
@@ -284,22 +305,11 @@ async function upsertRetailProduct(
         [itemId, attr.name, attr.option],
       );
     }
-    await client.query(
-      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
-       VALUES ($1, $2, 'product', $3, $4)
-       ON CONFLICT (connection_id, entity_type, remote_id)
-       DO UPDATE SET local_id = EXCLUDED.local_id, updated_at = now()`,
-      [businessId, connection.id, String(product.id), itemId],
-    );
-    await client.query("COMMIT");
-    await recordProductShape(connection, product);
-    return "created";
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+    return itemId;
+  });
+  if (!outcome.created) return applyUpdate(outcome.localId);
+  await recordProductShape(connection, product);
+  return "created";
 }
 
 /**
