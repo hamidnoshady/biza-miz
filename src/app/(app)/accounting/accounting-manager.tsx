@@ -357,7 +357,7 @@ export function AccountingManager({
               busy={busy}
               refreshKey={refreshKey}
               canManage={canManageFixedAssets}
-              accounts={accounts}
+              accounts={accounts ?? []}
             />
           ) : null}
           {section === "financial-reports" ? <AccountingReportsSection /> : null}
