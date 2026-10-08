@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { MIN_PASSWORD_LENGTH, validateProvisionBody } from "./business-provisioning";
+import {
+  MIN_PASSWORD_LENGTH,
+  shouldCompleteSetupForPlatformProvision,
+  validateProvisionBody,
+} from "./business-provisioning";
 import { ENABLED_INDUSTRIES, INDUSTRIES } from "./industries";
 
 const VALID = {
@@ -12,6 +16,20 @@ const VALID = {
   // that isn't specifically about the phone carries a valid one.
   ownerPhone: "09121234567",
 };
+
+describe("platform provisioning setup completion", () => {
+  it("leaves food-service businesses incomplete until persisted setup readiness is met", () => {
+    expect(shouldCompleteSetupForPlatformProvision("food_service")).toBe(false);
+    // Omitted industry defaults to food_service in provisioning and must fail
+    // closed to the same onboarding contract.
+    expect(shouldCompleteSetupForPlatformProvision()).toBe(false);
+  });
+
+  it("preserves the console's ready-to-enter path for other industries", () => {
+    expect(shouldCompleteSetupForPlatformProvision("jewelry")).toBe(true);
+    expect(shouldCompleteSetupForPlatformProvision("service_saas")).toBe(true);
+  });
+});
 
 describe("validateProvisionBody", () => {
   it("accepts a complete body and normalises it", () => {
