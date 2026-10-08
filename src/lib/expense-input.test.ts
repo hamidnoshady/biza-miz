@@ -1,18 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
-  encodeExpenseCursor,
   EXPENSE_LIST_DEFAULT_LIMIT,
   EXPENSE_LIST_MAX_LIMIT,
+  MIN_EXPENSE_ISO_DATE,
+  encodeExpenseCursor,
   expenseDateViolation,
+  formatExpenseReference,
   inclusiveExpenseVatAmount,
   isExpenseVatWithinAmount,
-  formatExpenseReference,
   isValidIsoDate,
-  MIN_EXPENSE_ISO_DATE,
+  parseExpenseAmount,
   parseExpenseCursor,
-  parseExpenseVatAmount,
   parseExpenseListQuery,
   parseExpenseRegisterStatus,
+  parseExpenseVatAmount,
 } from "./expense-input";
 
 describe("isValidIsoDate", () => {
@@ -256,5 +257,50 @@ describe("formatExpenseReference", () => {
     const long = formatExpenseReference("2026-04-01", 1234567);
     expect(long.split("-")).toHaveLength(3);
     expect(long.startsWith("EXP-1405-")).toBe(true);
+  });
+});
+
+/*
+ * The amount rule of this channel, in one function — and the reason `POST` no
+ * longer truncates on the way in. These are the cases the old `Math.trunc` got
+ * wrong: a fraction became a different number, a boolean became a rial.
+ */
+describe("parseExpenseAmount", () => {
+  it("accepts a whole positive Rial", () => {
+    expect(parseExpenseAmount(1_250_000)).toBe(1_250_000);
+    expect(parseExpenseAmount(1)).toBe(1);
+  });
+
+  it("refuses a fraction instead of shortening it", () => {
+    // The bug: 1500.75 reached the ledger as 1500 and nothing said so.
+    expect(parseExpenseAmount(1_500.75)).toBeNull();
+    expect(parseExpenseAmount(0.5)).toBeNull();
+  });
+
+  it("accepts a Toman figure whose ×10 landed on a float artefact", () => {
+    // 150.7 تومان *is* 1507 rial; the fraction is in the arithmetic, not the money.
+    expect(parseExpenseAmount(1507.0000000000002)).toBe(1507);
+  });
+
+  it("reads the shapes a real client sends, and only those", () => {
+    expect(parseExpenseAmount("150000")).toBe(150000);
+    expect(parseExpenseAmount("۱۵۰٬۰۰۰")).toBe(150000); // Persian digits and the Persian thousands comma
+    expect(parseExpenseAmount("150_000")).toBe(150000);
+    expect(parseExpenseAmount(" 150000 ")).toBe(150000);
+    expect(parseExpenseAmount("1500.0")).toBeNull(); // a decimal point is out of contract
+    expect(parseExpenseAmount("1e6")).toBeNull();
+    expect(parseExpenseAmount("١٥٠٠٫٥")).toBeNull();
+  });
+
+  it("refuses every non-money", () => {
+    for (const value of [0, -5, NaN, Infinity, -Infinity, true, false, null, undefined, {}, [], ["1500"]]) {
+      expect(parseExpenseAmount(value), JSON.stringify(value)).toBeNull();
+    }
+  });
+
+  it("stops at the safe-integer ceiling the BIGINT column can hold as a JS number", () => {
+    expect(parseExpenseAmount(Number.MAX_SAFE_INTEGER)).toBe(Number.MAX_SAFE_INTEGER);
+    expect(parseExpenseAmount(Number.MAX_SAFE_INTEGER + 1)).toBeNull();
+    expect(parseExpenseAmount("99999999999999999999")).toBeNull();
   });
 });

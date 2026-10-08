@@ -21,9 +21,20 @@
 
 import { query } from "../../db";
 import { AccountsError, createAccount, setAccountActive } from "../../accounts-service";
-import { recordExpense } from "../../expense-service";
+import { MissingLedgerAccountError, recordExpense } from "../../expense-service";
 import { expenseErrorMessage } from "../../expense-errors";
+import { parseExpenseAmount, parseExpenseVatAmount } from "../../expense-input";
 import { expenseDuplicatePredicate, expenseDuplicateRule } from "../../expense-import";
+import { listSupplierDirectory } from "../../ap-service";
+import { searchParties } from "../../parties-service";
+import {
+  parseExpenseSettlement,
+  PayablesInputError,
+  type ExpenseSettlementInput,
+} from "../../payables-input";
+import { WELL_KNOWN_CODES } from "../../coa-template";
+import { isUuid } from "../../uuid";
+import { normaliseHeader } from "../codecs";
 import { fiscalPeriodLockErrorCode } from "../../fiscal-periods";
 import { postgresDateToIso } from "../../jalali";
 import {
@@ -42,6 +53,61 @@ function isoDate(value: unknown): string | null {
 function text(value: unknown): string | null {
   const trimmed = String(value ?? "").trim();
   return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * A supplier, resolved through the canonical A/P directory — the same
+ * `listSupplierDirectory` the expense form's picker reads. That matters twice
+ * over: the list is tenant-scoped by construction (it joins this business's own
+ * branches and skips inactive aliases), so guessing a foreign uuid finds nothing;
+ * and one ambiguous name is refused rather than settled by "first match", because
+ * a payable booked against the wrong supplier is a bill nobody will ever pay.
+ *
+ * The three things a file can name a supplier by are its id, its exact name and
+ * its phone digits.
+ */
+async function resolveSupplierId(businessId: string, needle: string): Promise<string> {
+  const directory = await listSupplierDirectory(businessId);
+  const wanted = needle.trim();
+  if (isUuid(wanted)) {
+    const direct = directory.find((item) => item.supplierId === wanted);
+    if (direct) return direct.supplierId;
+  }
+  const byName = normaliseHeader(wanted);
+  const phoneDigits = wanted.replace(/\D/g, "");
+  const matches = directory.filter(
+    (item) =>
+      normaliseHeader(item.supplierName) === byName ||
+      (phoneDigits.length >= 4 && (item.supplierPhone ?? "").replace(/\D/g, "") === phoneDigits),
+  );
+  if (matches.length === 1) return matches[0].supplierId;
+  if (matches.length > 1) {
+    throw new RowRejection(`«${wanted}» به بیش از یک تأمین‌کنندهٔ این کسب‌وکار می‌رسد؛ با شناسه مشخصش کنید.`);
+  }
+  throw new RowRejection(`تأمین‌کنندهٔ «${wanted}» در «حساب‌های پرداختنی» این کسب‌وکار نیست؛ اول همان‌جا بسازیدش.`);
+}
+
+/**
+ * The same principle for a person, with the directory doing the work only the
+ * directory can do: names are matched in the open while phone numbers are hashed
+ * with the business's key, and a merged-away or retired record must not become a
+ * new expense's counterparty (0148's merge keeps the survivor).
+ */
+async function resolvePartyId(businessId: string, needle: string): Promise<string> {
+  const term = needle.trim();
+  const wanted = normaliseHeader(term);
+  const phoneDigits = term.replace(/\D/g, "");
+  const found = await searchParties(businessId, term, { limit: 25 });
+  const exact = found.filter(
+    (party) =>
+      normaliseHeader(party.name) === wanted ||
+      (phoneDigits.length >= 4 && (party.phone ?? "").replace(/\D/g, "") === phoneDigits),
+  );
+  if (exact.length === 1) return exact[0].id;
+  if (exact.length > 1) {
+    throw new RowRejection(`«${term}» به بیش از یک شخص در فهرست اشخاص می‌رسد؛ با شمارهٔ تماس مشخصش کنید.`);
+  }
+  throw new RowRejection(`شخص «${term}» در فهرست اشخاص این کسب‌وکار نیست (یا دیگر فعال نیست).`);
 }
 
 /** An account by code, then by name — the two things a file names one by. */
@@ -315,26 +381,82 @@ const expensesAdapter: EntityAdapter = {
     params.push(options.limit);
     const { rows } = await query<Record<string, unknown>>(
       `SELECT e.id, a.code AS "accountCode", pa.code AS "paymentAccountCode",
-              e.amount, e.expense_date AS "expenseDate", e.vendor, e.memo
+              e.amount, e.expense_date AS "expenseDate", e.vendor, e.memo,
+              e.vat_amount AS "vatAmount", e.settlement, e.due_date::text AS "dueDate",
+              e.reference, COALESCE(sp.name, s.name) AS "supplier", pt.name AS "party"
          FROM expenses e
          JOIN accounts a ON a.id = e.account_id
          JOIN accounts pa ON pa.id = e.payment_account_id
+         LEFT JOIN suppliers s ON s.id = e.supplier_id
+         LEFT JOIN parties sp ON sp.id = s.party_id
+         LEFT JOIN parties pt ON pt.id = e.party_id
         WHERE ${where.join(" AND ")}
         ORDER BY e.expense_date DESC, e.created_at DESC
         LIMIT $${params.length}`,
       params,
     );
+    /*
+     * The export is the register's own projection: the supplier's party name when
+     * there is one and the branch alias's when there is not, exactly as
+     * `SELECT_EXPENSE` resolves it — so the sheet an operator exports is a sheet
+     * they can feed back in, and every column here is one `write` accepts.
+     * `reference` is read-only, which is the engine's way of saying it may inform a
+     * file but may never be written, so no import can claim an existing document
+     * number.
+     */
     return rows.map((row) => ({
       ...row,
       amount: Number(row.amount ?? 0),
+      vatAmount: Number(row.vatAmount ?? 0),
       expenseDate: isoDate(row.expenseDate),
+      dueDate: isoDate(row.dueDate),
     }));
   },
   async write(context: AdapterContext, values, options) {
     const accountLookup = text(values.accountCode);
     const paymentLookup = text(values.paymentAccountCode);
     if (!accountLookup) throw new RowRejection("سرفصل هزینه الزامی است.");
-    if (!paymentLookup) throw new RowRejection("حساب پرداخت الزامی است.");
+
+    /*
+     * The settlement is read by the parser the form, the API and the service share,
+     * and *before* any account rule, because it decides which rules apply to this
+     * row at all: an owed expense has no payment account to check. A cell holding
+     * anything else is refused with that code's own words — never defaulted to
+     * «پرداخت‌شده», which is how a channel ends up disagreeing with the file it
+     * just read (issue #832 §16).
+     */
+    const supplierCell = text(values.supplier);
+    const dueCell = text(values.dueDate);
+    const settlementCell =
+      values.settlement === null || values.settlement === undefined ? null : String(values.settlement);
+    /*
+     * The engine's own `enum` coercion has already run: «پرداخت بعدی» arrived as
+     * `credit`, and a cell saying anything else left the row in `error` — a status
+     * `runImportJob` never writes, so an unreadable settlement is never read as
+     * paid either. This guard is therefore not the rule but the promise that the
+     * adapter stays right even when handed a mapped object from elsewhere, and that
+     * an empty cell means what the form and `POST /api/ledger/expenses` say it
+     * means — which `parseExpenseSettlement` below states, once.
+     */
+    if (settlementCell !== null && settlementCell !== "paid" && settlementCell !== "credit") {
+      throw new RowRejection(
+        expenseErrorMessage("invalid_settlement") ?? "نحوهٔ تسویهٔ این ردیف معتبر نیست.",
+      );
+    }
+    const onCredit = settlementCell === "credit";
+    if (!onCredit && (supplierCell !== null || dueCell !== null)) {
+      /*
+       * `parseExpenseSettlement` clears both fields for a paid row, and 0212's
+       * `expenses_settlement_shape` CHECK forbids storing them. Dropping them in
+       * silence would post a bill whose supplier nobody recorded, so the row comes
+       * back with the contradiction named — the only answer that lets the operator
+       * fix the file instead of the ledger.
+       */
+      throw new RowRejection(
+        "«تأمین‌کننده» و «سررسید پرداخت» فقط برای «پرداخت بعدی» پر می‌شوند؛ یا نحوهٔ تسویه را عوض کنید یا این دو ستون را خالی بگذارید.",
+      );
+    }
+    if (!onCredit && !paymentLookup) throw new RowRejection("برای «پرداخت‌شده» «حساب پرداخت» الزامی است.");
 
     const account = await findAccountByLookup(context.businessId, accountLookup);
     if (!account) {
@@ -346,23 +468,87 @@ const expensesAdapter: EntityAdapter = {
         `سرفصل هزینهٔ «${accountLookup}» یافت نشد. سرفصل حسابداری باید از پیش تعریف شده باشد.`,
       );
     }
-    const paymentAccount = await findAccountByLookup(context.businessId, paymentLookup);
-    if (!paymentAccount) {
-      return { status: "skipped", reason: `حساب پرداخت «${paymentLookup}» یافت نشد.` };
+
+    /*
+     * An owed expense credits the Accounts Payable control account, which the
+     * service derives from this business's own chart — so on such a row the column
+     * is not a choice to honour. It is accepted when it agrees (an export carries
+     * 2100 on every owed row, and a sheet that round-trips has to re-import) and
+     * refused when it names anything else: crediting some other account on a row
+     * that says «پرداخت بعدی» is a payment nobody made.
+     */
+    let paymentAccountId: string | null = null;
+    if (paymentLookup) {
+      const found = await findAccountByLookup(context.businessId, paymentLookup);
+      if (!found) {
+        return { status: "skipped", reason: `حساب پرداخت «${paymentLookup}» یافت نشد.` };
+      }
+      if (onCredit && found.code !== WELL_KNOWN_CODES.accountsPayable) {
+        throw new RowRejection(
+          `برای «پرداخت بعدی» حساب پرداخت جدا تعیین نمی‌شود؛ بستانکار «${WELL_KNOWN_CODES.accountsPayable} حساب‌های پرداختنی» است. این ستون را خالی بگذارید.`,
+        );
+      }
+      paymentAccountId = found.id;
+    } else if (onCredit) {
+      /*
+       * Matching only. The duplicate lookup has to compare against what the write
+       * will store — the control account — or re-importing the same sheet would
+       * post the bill a second time. The write re-derives the id inside its own
+       * transaction, so nothing resolved here is trusted as the answer.
+       */
+      const control = await findAccountByLookup(context.businessId, WELL_KNOWN_CODES.accountsPayable);
+      paymentAccountId = control?.id ?? null;
     }
 
-    const amount = typeof values.amount === "number" ? values.amount : 0;
+    // Both directories, both tenant-scoped, both refusing to guess (see above).
+    const supplierId = onCredit && supplierCell ? await resolveSupplierId(context.businessId, supplierCell) : null;
+    const partyCell = text(values.party);
+    const partyId = partyCell ? await resolvePartyId(context.businessId, partyCell) : null;
+
+    /*
+     * The shared settlement rule gets the last word on the pair, because it owns
+     * «a credit row must name someone», the due date's shape, and the clearing of
+     * both on a paid row. It is asked *after* the directory lookup on purpose: a
+     * spreadsheet names a supplier rather than quoting its uuid, so handing the
+     * cell straight to the parser would call «برکت» an invalid supplier id, and
+     * handing it an empty one would call the same cell a missing supplier. Both are
+     * wrong refusals of a file that was fine; resolving first lets the rule refuse
+     * only what is genuinely absent.
+     */
+    let parsed: ExpenseSettlementInput;
+    try {
+      parsed = parseExpenseSettlement({ settlement: settlementCell, supplierId, dueDate: dueCell });
+    } catch (err) {
+      if (err instanceof PayablesInputError) {
+        throw new RowRejection(
+          expenseErrorMessage(err.code) ?? `نحوهٔ تسویه این ردیف پذیرفته نیست (${err.code}).`,
+        );
+      }
+      throw err;
+    }
+
+    const amount = parseExpenseAmount(values.amount);
+    if (amount === null) {
+      throw new RowRejection(expenseErrorMessage("invalid_amount") ?? "مبلغ هزینه معتبر نیست.");
+    }
+    const vatAmount = parseExpenseVatAmount(values.vatAmount ?? 0);
+    if (vatAmount === null) {
+      throw new RowRejection(expenseErrorMessage("vat_amount_invalid") ?? "مالیات بر ارزش افزودهٔ هزینه معتبر نیست.");
+    }
     const expenseDate = typeof values.expenseDate === "string" ? values.expenseDate : null;
     const memo = text(values.memo) ?? "ورود از فایل";
     const vendor = text(values.vendor);
 
     /*
-     * Duplicates are matched on the rule the operator chose — by default date +
-     * amount + category + payment account + vendor + memo — and the clause comes
-     * from `expense-import.ts`, the same table the in-file preview compares on
-     * (issue #832 §16). The old three-field match made two legitimate, separate
-     * expenses on one day (two taxis, same fare, same category) look like a
-     * re-import, and a silently skipped row is a row nobody can find afterwards.
+     * Duplicates are matched on the rule the operator chose — by default date,
+     * amount, category, payment account, settlement, supplier, vendor and memo —
+     * and the clause comes from `expense-import.ts`, the same table the in-file
+     * preview compares on (issue #832 §16). The old three-field match made two
+     * legitimate, separate expenses on one day (two taxis, same fare, same
+     * category) look like a re-import, and a silently skipped row is a row nobody
+     * can find afterwards. The settlement and the supplier belong in the match for
+     * the same reason: the same amount paid from a till is not the same bill owed
+     * to a person, and one bill owed to two suppliers is two bills.
      */
     const rule = expenseDuplicateRule(options.duplicateRule);
     const duplicate = expenseDuplicatePredicate(
@@ -371,7 +557,9 @@ const expensesAdapter: EntityAdapter = {
         expenseDate,
         amount,
         accountId: account.id,
-        paymentAccountId: paymentAccount.id,
+        paymentAccountId,
+        settlement: onCredit ? "credit" : "paid",
+        supplierId,
         vendor,
         memo,
       },
@@ -395,15 +583,31 @@ const expensesAdapter: EntityAdapter = {
         businessId: context.businessId,
         locationId: context.locationId,
         accountId: account.id,
-        paymentAccountId: paymentAccount.id,
+        // Null on an owed row: there is nothing for the file to have chosen, and
+        // the service resolves the control account inside the same transaction.
+        paymentAccountId,
+        settlement: parsed.settlement,
+        supplierId,
+        dueDate: parsed.dueDate,
         amount,
+        vatAmount,
         expenseDate,
-        vendor: text(values.vendor),
+        vendor,
+        partyId,
         memo,
         createdBy: context.actorUserId,
       });
       return { status: "created", id: String(expense.id) };
     } catch (error) {
+      if (error instanceof MissingLedgerAccountError) {
+        // The answer `POST /api/ledger/expenses` gives for the same fact (409
+        // `ledger_account_missing`). This is not an `ExpenseError`, so before it was
+        // mapped the operator read «ثبت هزینه ممکن نشد (2100).» — a bare account code
+        // where a sentence should be, for a chart they can actually go and fix.
+        throw new RowRejection(
+          `حساب «${error.code}» در سرفصل این کسب‌وکار نیست؛ «پرداخت بعدی» بدون آن ثبت نمی‌شود.`,
+        );
+      }
       const code = error instanceof Error ? error.message : "unknown";
       const lockCode = fiscalPeriodLockErrorCode(error);
       // Every code the service can throw, translated by the one map the screen

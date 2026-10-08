@@ -12,7 +12,9 @@
  * are the same function, so no entry channel can be stricter or laxer than
  * another (issue #832 §5).
  */
+import { toLatinDigits } from "./digits";
 import { toJalali } from "./jalali";
+import { isWholeRial } from "./money";
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -40,6 +42,39 @@ export function isValidIsoDate(value: unknown): value is string {
 
 /** Rial amounts are stored in a BIGINT column but calculated as JS numbers. */
 export const MAX_EXPENSE_AMOUNT_RIAL = Number.MAX_SAFE_INTEGER;
+
+/**
+ * The one amount parse of this channel, shared by the API route, the form and
+ * the importer (issue #832 §5, §16) — and the reason none of them can disagree.
+ *
+ * It refuses rather than repairs. `POST /api/ledger/expenses` used to hand
+ * `Math.trunc(Number(body.amount))` to the service, so ۱٬۵۷/۹ ریال became a
+ * posting of ۱٬۵۷ and a JSON `true` became a posting of ۱: the ledger quietly
+ * disagreed with the number somebody had typed, and a truncated amount is worse
+ * than a refused one because nothing on screen says so. Anything that is not a
+ * whole, positive, safe-integer Rial — a fraction, an exponent, a sign, a
+ * thousands-separated string, `Infinity` — comes back as `null`, and the caller
+ * decides what that means in its own words.
+ *
+ * A Toman entry that converts to a float artefact (`isWholeRial`) is accepted
+ * and rounded, because there the fraction is not in the money, only in the
+ * arithmetic that moved it by ten.
+ */
+export function parseExpenseAmount(value: unknown): number | null {
+  if (typeof value === "number") {
+    if (!isWholeRial(value)) return null;
+    const rial = Math.round(value);
+    return rial > 0 && rial <= MAX_EXPENSE_AMOUNT_RIAL ? rial : null;
+  }
+  if (typeof value !== "string") return null;
+  // Grouping separators and Persian/Arabic digits are what a real client sends
+  // (a copy out of a spreadsheet, a mobile form that stringifies); a decimal
+  // separator is not, and is refused rather than guessed at.
+  const digits = toLatinDigits(value).replace(/[\s,_٬]/g, "");
+  if (!/^\d+$/.test(digits)) return null;
+  const rial = Number(digits);
+  return Number.isSafeInteger(rial) && rial > 0 && rial <= MAX_EXPENSE_AMOUNT_RIAL ? rial : null;
+}
 
 /**
  * The one expense-date rule, shared by the form, `recordExpense()`, the import

@@ -22,7 +22,8 @@
 
 /** Codes `recordExpense()` / `reverseExpense()` can throw, with their Persian text. */
 export const EXPENSE_ERROR_MESSAGES = {
-  invalid_amount: "مبلغ هزینه معتبر نیست.",
+  invalid_amount:
+    "مبلغ هزینه باید عدد صحیحِ ریال و بزرگ‌تر از صفر باشد؛ مبلغ کسری ثبت نمی‌شود.",
   memo_required: "شرح هزینه الزامی است.",
   unknown_account: "یکی از حساب‌های انتخاب‌شده معتبر نیست.",
   invalid_expense_account: "دسته هزینه انتخاب‌شده یک حساب هزینه معتبر نیست.",

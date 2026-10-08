@@ -9,6 +9,15 @@
  * list and the field→column table live here, and the registry and the adapter
  * each read them instead of restating them.
  *
+ * One asymmetry worth knowing before changing either half: the engine's in-file
+ * rule signs a row only when *every* field of the rule is filled (`validateSheet`
+ * refuses to compare two incomplete rows), and an expense row always leaves one of
+ * them empty — a paid row has no supplier, an owed row no payment account. So for
+ * this entity the repeat inside one file is caught by the database-side lookup
+ * during the run, and the row report says so with the same fields; the preview
+ * stays quiet rather than guessing. The columns below are therefore written for
+ * both readers, and the skip is never silent.
+ *
  * Why the old rule was wrong: «تاریخ، مبلغ و سرفصل» made two legitimate,
  * separate expenses — two taxi receipts on the same day, same fare, same
  * category — look like one of them. Two rows that differ only by memo are also
@@ -16,15 +25,23 @@
  * silent skip, should decide: hence the looser rule is still offered (and
  * `duplicateStrategy: "create"` still means "I know, import it anyway").
  *
- * One asymmetry is deliberate and stated rather than hidden: this channel can
- * only produce **paid** expenses. Audit F11's «پرداخت بعدی» is keyed on a
- * supplier, and `accounting.expenses` has no supplier column to map, so a sheet
- * could not say who is owed even in principle — which is also why `حساب پرداخت`
- * stays a required column here while the form and `POST /api/ledger/expenses`
- * make it conditional. Adding the column is a registry change (a `reference`
- * field resolved through `listSupplierDirectory`, the same list the picker in
- * the form reads); the service already accepts `settlement`, `supplierId` and
- * `dueDate`, so nothing upstream of it has to move.
+ * What the rules may key on is a *contract with the adapter*, not a detail: the
+ * fragment this module builds is pasted into a `WHERE` clause the adapter owns.
+ * That is why every column here is unqualified — a fragment cannot name an alias
+ * it has not chosen. (It used to emit `e.expense_date`, while the adapter's
+ * query was `FROM expenses WHERE …` with no `e`, so **every** expense import died
+ * on `missing FROM-clause entry for table "e"`: not a wrong skip, a failed run.
+ * `expense-import.test.ts` pins the shape and
+ * `integration/expense-import-adapter.integration.test.ts` runs the real query.)
+ *
+ * Since audit F11 the channel can produce an owed expense too — `settlement`,
+ * `supplier` and `dueDate` are mapped columns — so a sheet may say «پرداخت بعدی»
+ * and the row lands on Accounts Payable like the one the form would have posted.
+ * `حساب پرداخت` is therefore required of a **paid** row only, and the adapter
+ * refuses rather than ignores anything that contradicts the settlement it was
+ * told (a supplier on a paid row, a payment account other than the A/P control
+ * account on an owed one), because a silently dropped column is how an import
+ * ends up disagreeing with the file it came from.
  */
 
 /** A field of the expense entity a duplicate rule may be keyed on. */
@@ -33,6 +50,8 @@ export type ExpenseDuplicateField =
   | "amount"
   | "accountCode"
   | "paymentAccountCode"
+  | "settlement"
+  | "supplier"
   | "vendor"
   | "memo";
 
@@ -43,6 +62,49 @@ export interface ExpenseDuplicateRule {
 }
 
 /**
+ * What the operator is told each matched column is called.
+ *
+ * The rule's sentence is built from this list rather than written beside it,
+ * because a label that names four of seven matched fields is how an operator
+ * learns to distrust the report: «از پیش ثبت شده است» has to say *on what grounds*,
+ * and the grounds are the `fields` array two lines away.
+ */
+export const EXPENSE_DUPLICATE_FIELD_LABELS: Record<ExpenseDuplicateField, string> = {
+  expenseDate: "تاریخ",
+  amount: "مبلغ",
+  accountCode: "سرفصل",
+  paymentAccountCode: "حساب پرداخت",
+  settlement: "نحوهٔ تسویه",
+  supplier: "تأمین‌کننده",
+  vendor: "طرف حساب",
+  memo: "شرح",
+};
+
+/** «تاریخ، مبلغ و سرفصل» — Persian list punctuation, from the fields a rule matches. */
+export function expenseDuplicateRuleLabel(
+  fields: readonly ExpenseDuplicateField[],
+  suffix = "",
+): string {
+  const names = fields.map((field) => EXPENSE_DUPLICATE_FIELD_LABELS[field]);
+  const list =
+    names.length <= 1
+      ? names.join("")
+      : `${names.slice(0, -1).join("، ")} و ${names[names.length - 1]}`;
+  return suffix ? `${list} (${suffix})` : list;
+}
+
+const EXPENSE_DEFAULT_DUPLICATE_FIELDS: readonly ExpenseDuplicateField[] = [
+  "expenseDate",
+  "amount",
+  "accountCode",
+  "paymentAccountCode",
+  "settlement",
+  "supplier",
+  "vendor",
+  "memo",
+];
+
+/**
  * The rules offered to the operator, most specific first — the first is the
  * default, so a re-import of last month's file no longer swallows a second
  * same-day, same-amount receipt that was paid from a different account or to a
@@ -51,23 +113,39 @@ export interface ExpenseDuplicateRule {
 export const EXPENSE_DUPLICATE_RULES: readonly ExpenseDuplicateRule[] = [
   {
     key: "date_amount_account_payment_party_memo",
-    label: "تاریخ، مبلغ، سرفصل، حساب پرداخت و شرح",
-    fields: ["expenseDate", "amount", "accountCode", "paymentAccountCode", "vendor", "memo"],
+    // The linked *person* (`party_id`) is deliberately not part of the identity
+    // of a row: it is an enrichment resolved from the free-text «طرف حساب», so
+    // the same taxi receipt whose party link one operator added and another left
+    // out is still one transaction, not two.
+    label: expenseDuplicateRuleLabel(EXPENSE_DEFAULT_DUPLICATE_FIELDS),
+    fields: [...EXPENSE_DEFAULT_DUPLICATE_FIELDS],
   },
   {
     key: "date_amount_account",
     // The *older* rule, kept for a file that was itself exported from Biza: it
     // calls more rows duplicates, so it has to be chosen on purpose and labelled
     // as what it does rather than as "stricter".
-    label: "تاریخ، مبلغ و سرفصل (قاعدهٔ قدیمی — ردیف‌های بیشتری را تکراری می‌گیرد)",
+    label: expenseDuplicateRuleLabel(
+      ["expenseDate", "amount", "accountCode"],
+      "قاعدهٔ قدیمی — ردیف‌های بیشتری را تکراری می‌گیرد",
+    ),
     fields: ["expenseDate", "amount", "accountCode"],
   },
 ];
 
 /** How one rule field is compared against the `expenses` table. */
 export interface ExpenseDuplicateColumn {
-  /** The SQL expression to compare. */
+  /**
+   * The column of `expenses` to compare, **unqualified** — the adapter owns the
+   * `FROM` clause, and a fragment that assumed an alias it was never given made
+   * the whole import fail with `missing FROM-clause entry for table "e"`.
+   */
   column: string;
+  /**
+   * A cast on the *column* side, needed when a nullable id is compared as text
+   * so that an empty cell and a NULL row match instead of erroring on types.
+   */
+  columnCast: string | null;
   /** A cast to apply to the bound value, when the column needs one. */
   cast: string | null;
   /**
@@ -77,22 +155,35 @@ export interface ExpenseDuplicateColumn {
    */
   nullableText: boolean;
   /** Which resolved value feeds it. */
-  source: "expenseDate" | "amount" | "accountId" | "paymentAccountId" | "vendor" | "memo";
+  source:
+    | "expenseDate"
+    | "amount"
+    | "accountId"
+    | "paymentAccountId"
+    | "settlement"
+    | "supplierId"
+    | "vendor"
+    | "memo";
 }
 
 /** Every rule field has a column; `expense-import.test.ts` fails if one is added without it. */
 export const EXPENSE_DUPLICATE_COLUMNS: Record<ExpenseDuplicateField, ExpenseDuplicateColumn> = {
-  expenseDate: { column: "e.expense_date", cast: "date", nullableText: false, source: "expenseDate" },
-  amount: { column: "e.amount", cast: null, nullableText: false, source: "amount" },
-  accountCode: { column: "e.account_id", cast: "uuid", nullableText: false, source: "accountId" },
+  expenseDate: { column: "expense_date", columnCast: null, cast: "date", nullableText: false, source: "expenseDate" },
+  amount: { column: "amount", columnCast: null, cast: null, nullableText: false, source: "amount" },
+  accountCode: { column: "account_id", columnCast: null, cast: "uuid", nullableText: false, source: "accountId" },
   paymentAccountCode: {
-    column: "e.payment_account_id",
+    column: "payment_account_id",
+    columnCast: null,
     cast: "uuid",
     nullableText: false,
     source: "paymentAccountId",
   },
-  vendor: { column: "e.vendor", cast: null, nullableText: true, source: "vendor" },
-  memo: { column: "e.memo", cast: null, nullableText: true, source: "memo" },
+  // `settlement` is NOT NULL with a `'paid'` default (0212), so a paid row and an
+  // owed one are never the same transaction even when everything else matches.
+  settlement: { column: "settlement", columnCast: null, cast: null, nullableText: false, source: "settlement" },
+  supplier: { column: "supplier_id", columnCast: "::text", cast: null, nullableText: true, source: "supplierId" },
+  vendor: { column: "vendor", columnCast: null, cast: null, nullableText: true, source: "vendor" },
+  memo: { column: "memo", columnCast: null, cast: null, nullableText: true, source: "memo" },
 };
 
 /** The rule a write should honour — the first (tightest) when none was chosen. */
@@ -104,7 +195,10 @@ export interface ExpenseDuplicateValues {
   expenseDate: string | null;
   amount: number;
   accountId: string;
-  paymentAccountId: string;
+  /** Null on an owed row: the A/P control account is what got credited, not a payment. */
+  paymentAccountId: string | null;
+  settlement: "paid" | "credit";
+  supplierId: string | null;
   vendor: string | null;
   memo: string | null;
 }
@@ -127,10 +221,11 @@ export function expenseDuplicatePredicate(
     const value = values[column.source];
     const placeholder = `$${firstParam + params.length}${column.cast ? `::${column.cast}` : ""}`;
     params.push(value ?? null);
+    const side = `${column.column}${column.columnCast ?? ""}`;
     parts.push(
       column.nullableText
-        ? `COALESCE(${column.column}, '') = COALESCE(${placeholder.replace(/::/, "")}, '')`
-        : `${column.column} = ${placeholder}`,
+        ? `COALESCE(${side}, '') = COALESCE(${placeholder.replace(/::/, "")}, '')`
+        : `${side} = ${placeholder}`,
     );
   }
   return { sql: parts.join(" AND "), params };

@@ -22,6 +22,25 @@ export function tomanToRial(toman: number): Rial {
   return toman * 10;
 }
 
+/**
+ * Is this value a whole number of Rial?
+ *
+ * Storage is integer Rial everywhere, and a Toman-denominated entry becomes
+ * `value * 10` in floating point — so ۱۵/۷ تومان lands as 1507.0000000000002,
+ * which is a binary artefact and not a fraction of a Rial. The tolerance is what
+ * separates the two: an amount that still has a fraction once rounded cannot be
+ * posted at all, and must be refused rather than quietly repaired.
+ *
+ * Every channel that accepts money shares this predicate — the expense API, the
+ * form and the data-transfer engine's `money` field — so none of them can round
+ * where another refuses.
+ */
+export function isWholeRial(value: number): boolean {
+  if (!Number.isFinite(value)) return false;
+  const rounded = Math.round(value);
+  return Math.abs(value - rounded) < 1e-6 && Number.isSafeInteger(rounded);
+}
+
 /** e.g. 1_250_000 rial → «۱۲۵٬۰۰۰ تومان» */
 export function formatToman(rial: Rial, opts: { withUnit?: boolean } = {}): string {
   const { withUnit = true } = opts;

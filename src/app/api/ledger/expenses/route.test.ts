@@ -258,3 +258,47 @@ describe("POST /api/ledger/expenses", () => {
     expect(expenseService.recordExpense).not.toHaveBeenCalled();
   });
 });
+
+/*
+ * `POST` used to write `Math.trunc(Number(body.amount))` into the service call, so
+ * the boundary that takes a person's money figure *changed it* before any rule
+ * looked at it: ۱٬۵۰/۷۵ ریال became a posting of ۱٬۵۰۰ and `true` became one rial.
+ * The route's job is to hand the value over and let the one amount rule answer;
+ * these are the two directions of that contract.
+ */
+describe("POST /api/ledger/expenses — the amount is forwarded, not repaired", () => {
+  it("hands a fractional amount to the service as an amount it must refuse", async () => {
+    vi.mocked(expenseService.recordExpense).mockResolvedValue({ id: "exp-1" } as never);
+    await POST(postRequest({ accountId: "a", paymentAccountId: "b", amount: 1_500.75, memo: "x" }));
+    const forwarded = vi.mocked(expenseService.recordExpense).mock.calls[0]?.[0] as { amount: number };
+    // Not 1500. A NaN is a value the service's `invalid_amount` rule rejects; a
+    // truncated integer is a ledger entry nobody typed.
+    expect(Number.isNaN(forwarded.amount)).toBe(true);
+  });
+
+  it("turns a JSON boolean or null into the same refusal, never into one rial", async () => {
+    vi.mocked(expenseService.recordExpense).mockResolvedValue({ id: "exp-1" } as never);
+    for (const amount of [true, null, "1500.50", "abc", ""]) {
+      await POST(postRequest({ accountId: "a", paymentAccountId: "b", amount, memo: "x" }));
+    }
+    const calls = vi.mocked(expenseService.recordExpense).mock.calls as [{ amount: number }][];
+    expect(calls).toHaveLength(5);
+    // Every one of them is a refusal the service can name, not a value invented
+    // out of the caller's `true`, `null` or half-typed amount.
+    expect(calls.map((call) => Number.isNaN(call[0].amount))).toEqual([true, true, true, true, true]);
+  });
+
+  it("still accepts a digits-only string, which is what a mobile client sends", async () => {
+    vi.mocked(expenseService.recordExpense).mockResolvedValue({ id: "exp-1" } as never);
+    await POST(postRequest({ accountId: "a", paymentAccountId: "b", amount: "۱۵۰٬۰۰۰", memo: "x" }));
+    const forwarded = vi.mocked(expenseService.recordExpense).mock.calls[0]?.[0] as { amount: number };
+    expect(forwarded.amount).toBe(150_000);
+  });
+
+  it("answers 400 with the central message, and writes nothing", async () => {
+    vi.mocked(expenseService.recordExpense).mockRejectedValue(new ExpenseError("invalid_amount"));
+    const res = await POST(postRequest({ accountId: "a", paymentAccountId: "b", amount: 1_500.75, memo: "x" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("invalid_amount");
+  });
+});

@@ -65,7 +65,7 @@ documented behaviour true.
 | 2 | `EXPENSE_PAYMENT_SOURCE_ROLES` (cash, bank, petty cash, card clearing) resolved **through the account's ancestors**, in one function (`expensePaymentSourceIds`) that the write path, the filter, the picker and the importer all call. Revenue, AR, inventory, recoverable VAT and platform-receivable accounts are refused even though some of them are assets. | `expense-accounts.test.ts` (12), `recordExpense` rejection cases, `expense-section.test.tsx`'s picker test, integration "credits cash, petty cash and card settlement — and nothing else that is an asset" |
 | 3 | Reads need `ledger.view`, writes need `finance.expenses_manage`; the UI receives `canManageExpenses` and hides the whole form — including the receipt upload and the OCR button — rather than disabling it, and a member whose permission set failed to load is *not* treated as a denial. | `expense-section.test.tsx` (read-only + writable pairs), `api/ledger/expenses/route.test.ts` (guard names) |
 | 4 | `ACCOUNTING_EXPENSES.importPermission` moved from `ledger.post` to `finance.expenses_manage`, so the importer is not a second, wider door to the same act. | `registry.test.ts` → "asks the owning app for permission to import, not a neighbouring right" (27 total) |
-| 5 | `businessToday(businessId)` → `todayIsoDate(businesses.timezone)` is the only clock any expense date rule reads; garbage dates are `invalid_expense_date` (400), not a Postgres cast failure; the floor is `MIN_EXPENSE_ISO_DATE`. | `expense-input.test.ts` (28), integration future-date + default-date cases, "rejects an impossible expense date instead of letting Postgres 500" |
+| 5 | `businessToday(businessId)` → `todayIsoDate(businesses.timezone)` is the only clock any expense date rule reads; garbage dates are `invalid_expense_date` (400), not a Postgres cast failure; the floor is `MIN_EXPENSE_ISO_DATE`. **Added on the reviewed head:** the *amount* rule of the same section, which the boundary had been breaking — `POST` wrote `Math.trunc(Number(body.amount))`, so a fraction was shortened before any rule saw it and a JSON `true` became one rial. `parseExpenseAmount` is now the single reader (whole Rial, `isWholeRial`'s tolerance for a Toman figure's float residue, digits-only strings), `validation.integral` refuses a fractional cell in the importer, and the form says the rule instead of «بیش از حد بزرگ است». | `expense-input.test.ts` (28), integration future-date + default-date cases, "rejects an impossible expense date instead of letting Postgres 500" |
 | 6 | `locationId` is accepted, validated against the tenant's own `locations`, returned with `locationName`, filterable, and **never** defaulted to the caller's active branch when the register is being read. | integration branch cases (filter, label, foreign-branch refusal), `api/ledger/expenses/route.test.ts` (explicit `locationId` wins over the active-branch default) |
 | 7 | The receipt is a canonical Media asset, linked by `receipt_asset_id`; the register shows «دارد / پیوست‌شده» from the row itself, «حذف شده» from the `receipt_file_name` snapshot 0177's `ON DELETE SET NULL` cannot clear, and the drawer previews the image through `/api/media/[id]/file` under `media.view`. | `expense-section.test.tsx` (upload → link → indicator), integration receipt cases, `ai-receipt.test.ts` (20) |
 | 8 | `expense-detail-panel.tsx` — identity, party, branch, payment account, VAT, journal lines, reversal state and both directions of the link, source channel, who/when, and the reversal action for a writer — in the drawer pattern the Accounting app already uses. | component tests for the register rows the drawer opens; `[id]/route.test.ts` for `{expense, journalLines}` |
@@ -75,14 +75,61 @@ documented behaviour true.
 | 12 | `party_id` → `parties` (`ON DELETE SET NULL`); `vendor` stays the free-text snapshot the accountant typed, so the expense outlives a rename or a deletion; a foreign party is `party_not_found`, not a silent unlink. | integration "links a party without depending on it, keeping the typed vendor" |
 | 13 | The OCR prompt is built from `listExpenseCategoryAccounts` (this tenant's active expense accounts, code-sorted, capped) and the reply's code is intersected with that list; out-of-vocabulary means **no** auto-selected category, and the server re-validates everything the model proposed. | `ai-receipt.test.ts`, `ai-receipt-service.test.ts` (6), `api/ai/receipt-ocr/route.test.ts` (10), integration "exposes the tenant's expense accounts as the AI's only vocabulary, with no fallback list" |
 | 14 | One policy, written into `ai-receipt.ts`'s header: OCR uploads are stored in the canonical Media Library immediately, deduplicated by SHA-256 per business, and **kept** if the operator never posts the expense. There is no temp bucket, no sweeper and no orphan deletion; `scripts/media-reconcile-orphans.mjs`'s "keep, report" stance is the same one. | `ai-receipt.test.ts` (dedup, no-prune) + the receipt-linkage integration cases |
-| 15 | Every channel calls `recordExpense` / `reverseExpense` / `parseExpenseListQuery`; the importer and the AI pass the same fields through the same validators, so no surface has its own arithmetic. | `ai-service.test.ts` + `api/ai/chat/route.test.ts` (24), `expense-import.test.ts` (11), `api/ledger/expenses/route.test.ts` |
-| 16 | Two duplicate rules (strict default: date + amount + account + payment + party + memo; loose opt-in), `COALESCE` on nullable text so a blank party does not hide a duplicate, and `duplicateStrategy: "create"` as an explicit, per-file escape. | `expense-import.test.ts` |
+| 15 | Every channel calls `recordExpense` / `reverseExpense` / `parseExpenseListQuery`; the importer and the AI pass the same fields through the same validators, so no surface has its own arithmetic. **Added:** the assistant's two writing actions choose their branch through `branch-service.resolveBranchRef` — an id or the exact name of one of *this* business's active branches, refused when unknown or ambiguous — instead of a private copy of «oldest active branch», and a chart with no 2100 reaches the model as `ledger_account_missing`, the route's own answer. | `ai-autopilot.integration.test.ts` (5 new cases against a real ledger), `branch-management.integration.test.ts` (4 resolution cases), `ai-service.test.ts` + `api/ai/chat/route.test.ts` (24), `expense-import.test.ts` (16), `api/ledger/expenses/route.test.ts` (21) |
+| 16 | Two duplicate rules (strict default: date + amount + account + payment account + settlement + supplier + party text + memo; loose opt-in), `COALESCE` on nullable text so a blank cell does not hide a duplicate, and `duplicateStrategy: "create"` as an explicit, per-file escape. **Added:** the *import* channel reached parity with the register — VAT, party, settlement, supplier and due date are carried, resolved through the tenant's own directories (`listSupplierDirectory`, `searchParties`) and forwarded to `recordExpense`; a payment account is required only of a paid row; the settlement is read by `parseExpenseSettlement` so no default is invented for a cell that cannot be represented; and anything the channel cannot express is refused with its own reason rather than dropped. | `expense-import.test.ts` (16, including the placeholder/alias locks) and `integration/expense-import-adapter.integration.test.ts` (14, against a real Postgres) |
 | 17 | `EXPENSE_ERROR_MESSAGES` / `EXPENSE_UI_ERROR_MESSAGES` / `expenseErrorStatus` are the only place an expense error code becomes text or an HTTP status; an unmapped code is a 400 with the code visible, never a 500 or a Persian sentence invented at the call site. | `expense-errors.test.ts` (12: every thrown code has a message, a 4xx, and a UI sentence) |
 | 18 | **Not implemented, and the documentation no longer claims otherwise.** README said expense management ships "attachments and recurring expenses" and that manual journals have "recurring templates"; `information_schema` has no `recurring*` table and `expenses` has no cadence column. The README now says what exists and where the deferral is recorded; `docs/phases/Phase-16-Accounting-Suite.md` already carried the deferral in its decisions 14 and 16. | integration "recurring expenses remain unimplemented" asserts the absence it documents |
 | 19 | Four register indexes (`(business_id, expense_date DESC, created_at DESC, id DESC)`, plus branch, category and payment-source variants) and a partial index on `party_id`, each justified by a measured plan rather than by habit: 200 000 expenses across 4 tenants and 2 branches, `EXPLAIN (ANALYZE, BUFFERS)`, before/after. `reference` and the two reversal links got unique/lookup indexes because they are uniqueness and join guarantees, not performance guesses. | `scripts/bench-expense-queries.mjs` (the numbers are quoted in the migration's own comment); verdict: all four register indexes JUSTIFIED — Sort removed and 12–27 ms → index scans with ~101–150 blocks touched |
 | 20 | `disabled={busy}` only. The comment claiming the button "stays enabled to explain why" was the lie: it was disabled on an invalid form and silently swallowed the click. Now validation advice renders under the button as the reason, the button is enabled whenever a click can do something, and the comment describes that. | `expense-section.test.tsx` (invalid → advice visible, no POST; valid → one POST) |
 | 21 | `expenses.reference` = `EXP-<jalali year of the expense date>-<0000n>` from `expense_reference_counters`, bumped inside the posting transaction so a rollback leaves no gap and two concurrent postings cannot share a number; unique per business; the register and the drawer print it, and no screen shows a bare UUID as the identity of a document. | integration "numbers each business's own documents, in its Jalali year, without gaps" (including per-tenant counters and cross-tenant invisibility), `expense-section.test.tsx` row assertion |
 | 22 | The desktop table and the mobile cards carry the same facts — reference, date, branch (when the business has branches), category, memo, party, payment account, receipt indicator, status, amount, VAT, recorder, details action — and the same filters, totals, load-more control and read-only state. | `expense-section.test.tsx` asserts the register row's account cell **twice** (desktop `<td>` and mobile `<h3>`), which is the parity check; the read-only case runs against the shared register |
+
+## Follow-up on the reviewed head `9356f62`
+
+The review of this PR confirmed two bugs and one unfinished clause. All three are
+now closed, and the reversal, register, permission and OCR work above was left as
+it stood.
+
+**1. The importer's duplicate lookup referenced a table alias that did not exist.**
+`expenseDuplicatePredicate` emitted `e.expense_date`, `e.amount`, … while the
+adapter's query is `SELECT id FROM expenses WHERE business_id = $1 AND ${sql}` —
+no `e` anywhere. Every expense import row failed with `missing FROM-clause entry
+for table "e"`. The columns are unqualified now, because the *caller* owns the
+`FROM` clause and a fragment may not assume an alias it was never given.
+
+The part worth writing down: `expense-import.test.ts` was green throughout, because
+its assertion (`toMatch(/^e\.[a-z_]+$/)`) had been read off the same buggy code.
+A shape test can only pin a shape. Three locks came out of that: no `.` may appear
+in a predicate, placeholders are numbered contiguously from the caller's first and
+one per bound value, and — the one that actually catches this class — a new
+integration file runs the complete adapter against Postgres.
+
+`COALESCE(supplier_id, '')` was a second, quieter bug on the way: comparing a
+nullable `uuid` against text is a type error, so nullable id columns carry
+`columnCast: "::text"` and the cast is stripped from the *placeholder* side.
+
+**2. `POST /api/ledger/expenses` truncated the amount before validating it.**
+`Math.trunc(Number(body.amount))` shortened ۱٬۵۰/۷۵ ریال to a posting of ۱٬۵۰۰ and
+read `true` as one rial: the boundary that takes a person's money figure changed it
+before any rule looked. The route now forwards `parseExpenseAmount(body.amount) ??
+NaN`, so the one amount rule refuses in words what the boundary used to repair in
+silence; `Number.isSafeInteger` plus `isWholeRial`'s 1e-6 tolerance is what makes
+«۱۵/۷ تومان» accepted (it *is* 1507 rial) while a real fraction is not; the
+importer refuses a fractional money cell through `validation.integral`, and the
+form's own message states the rule.
+
+**3. Import parity.** Documented in the §16 row above, with the one asymmetry
+worth knowing before anyone touches `validateSheet`: the engine's in-file duplicate
+rule signs a row only when *every* field of the rule is filled, and an expense row
+always leaves one empty (a paid row has no supplier, an owed row no payment
+account), so a repeat inside one file is caught by the database-side lookup during
+the run and named in the row report — never silently skipped, and never guessed at
+in the preview.
+
+`src/lib/ledger-expenses-queries.ts`, listed in the issue as a duplicate query
+builder to delete, does not exist in the merged tree: main's copy was superseded by
+`expense-service.ts` during the merge, so there was nothing left to remove (verified
+by `git ls-tree`, not by the file list).
 
 ## Decisions worth reading before reviewing
 

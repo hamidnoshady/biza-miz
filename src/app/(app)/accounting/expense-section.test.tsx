@@ -555,6 +555,34 @@ describe("ExpenseSection — «پرداخت بعدی» (audit F11)", () => {
     expect(document.querySelector("form")).toBeTruthy();
   });
 
+  /*
+   * The amount box is a Persian numeric input, so ۱۵/۷۵ is *typeable* — and the
+   * ledger has no such thing. Nothing here may round it into a posting nobody
+   * typed; the form refuses it with the rule, in the same words the API answers
+   * `POST /api/ledger/expenses` with (issue #832 §5), so the screen and the
+   * boundary disagree about nothing.
+   */
+  it("refuses a fractional amount by name, before the network", async () => {
+    const fetchMock = stubFetch({ "/api/ledger/expenses": () => json(listResponse()) });
+    renderSection();
+    await pick("دسته هزینه", /۵۰۰۱ — خرید ملزومات|5001 — خرید ملزومات/);
+    await pick("حساب پرداخت", /۱۱۰۰ — صندوق|1100 — صندوق/);
+    fireEvent.change(screen.getByPlaceholderText("۰"), { target: { value: "۱۵٫۷۵" } });
+    fireEvent.change(screen.getByPlaceholderText("شرح و دلیل ثبت هزینه"), { target: { value: "قبض برق" } });
+
+    const submit = screen.getByRole("button", { name: "ثبت هزینه" }) as HTMLButtonElement;
+    await act(async () => {
+      fireEvent.click(submit);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.body.textContent).toContain("مبلغ باید عدد صحیح ریال باشد");
+    // Not "not a valid number": the figure is well-formed, the unit is not.
+    expect(document.body.textContent).not.toContain("عدد معتبری نیست");
+    expect(
+      fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST"),
+    ).toBe(false);
+  });
+
   it("refuses to post an owed expense with no supplier, before the network", async () => {
     const fetchMock = stubFetch({
       "/api/ledger/ap/suppliers": () => json(SUPPLIERS),

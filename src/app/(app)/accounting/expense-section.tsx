@@ -91,6 +91,24 @@ interface SupplierOption {
  *    in the mobile cards too, because a phone-only audit trail is no audit
  *    trail.
  */
+/**
+ * What a money field the ledger cannot hold is called, and why this is a message
+ * rather than a `NaN`.
+ *
+ * The amount box is a `PersianNumberInput`, so ۱۵/۷۵ *is* typeable — and
+ * `money.parse` reads digits and thousands separators only, so a fraction never
+ * reaches a whole-Rial check: it fails the read. «عدد معتبری نیست» would then send
+ * a person looking for a stray letter in a figure that is perfectly well-formed:
+ * the honest answer is the ledger's rule, the same one `parseExpenseAmount` gives
+ * `POST /api/ledger/expenses` and the importer gives a spreadsheet cell (§5).
+ * Whole Rial, never rounded — and in Toman that is at most one decimal digit.
+ */
+function moneyInputError(text: string, label: string): string {
+  return /[.٫\/]/.test(text)
+    ? `${label} باید عدد صحیح ریال باشد؛ در واحد تومان حداکثر یک رقم اعشار.`
+    : `${label} واردشده عدد معتبری نیست.`;
+}
+
 export function ExpenseSection({
   accounts,
   busy,
@@ -400,7 +418,7 @@ export function ExpenseSection({
     try {
       rial = money.parse(amount);
     } catch {
-      return "مبلغ واردشده عدد معتبری نیست.";
+      return moneyInputError(amount, "مبلغ");
     }
     if (!Number.isFinite(rial) || rial <= 0) return "مبلغ هزینه باید بزرگ‌تر از صفر باشد.";
     if (!Number.isSafeInteger(rial)) return "مبلغ واردشده بیش از حد بزرگ است.";
@@ -410,9 +428,9 @@ export function ExpenseSection({
       try {
         vat = money.parse(vatAmount);
       } catch {
-        return "مبلغ مالیات واردشده عدد معتبری نیست.";
+        return moneyInputError(vatAmount, "مالیات");
       }
-      if (!Number.isSafeInteger(vat) || vat <= 0) return "مالیات باید عدد صحیح و بزرگ‌تر از صفر باشد.";
+      if (vat <= 0) return "مالیات باید بزرگ‌تر از صفر باشد.";
       if (vat >= rial) return "مالیات نمی‌تواند برابر یا بیشتر از مبلغ کل باشد.";
     }
     if (expenseDate && expenseDate > today) return "تاریخ هزینه نمی‌تواند در آینده باشد.";

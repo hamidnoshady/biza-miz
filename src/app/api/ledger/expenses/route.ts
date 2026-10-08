@@ -3,7 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { ExpenseError, listExpenses, MissingLedgerAccountError, recordExpense } from "@/lib/expense-service";
-import { encodeExpenseCursor, parseExpenseListQuery } from "@/lib/expense-input";
+import { encodeExpenseCursor, parseExpenseAmount, parseExpenseListQuery } from "@/lib/expense-input";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 
 /**
@@ -104,7 +104,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       locationId: requestedLocation || location?.id || null,
       accountId: String(body.accountId ?? ""),
       paymentAccountId: String(body.paymentAccountId ?? ""),
-      amount: Math.trunc(Number(body.amount)),
+      /*
+       * Not `Math.trunc(Number(...))`: the truncation happened *before* the
+       * service looked at it, so a fractional amount was posted as a different
+       * number instead of being refused. An unparseable amount reaches
+       * `recordExpense` as `NaN`, which is the one place the rule
+       * («integer, positive, within the safe range») lives — so this route cannot
+       * be stricter or laxer than the form, the importer or the assistant (§5).
+       */
+      amount: parseExpenseAmount(body.amount) ?? Number.NaN,
       expenseDate: body.expenseDate,
       vendor: body.vendor,
       partyId: typeof body.partyId === "string" ? body.partyId : null,

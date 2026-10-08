@@ -10,6 +10,7 @@ import {
   moneyToInput,
   parseMoneyToRial,
   parseToRial,
+  isWholeRial,
   parseToRialText,
   rialToToman,
   tomanToRial,
@@ -66,5 +67,28 @@ describe("business display-unit dispatch", () => {
     expect(moneyToInput(1_250_000, "rial")).toBe(1_250_000);
     expect(moneyFromInput(125_000, "toman")).toBe(1_250_000);
     expect(moneyFromInput(1_250_000, "rial")).toBe(1_250_000);
+  });
+});
+
+/*
+ * The rule every money-accepting channel shares (the expense API, the expense
+ * form, the data-transfer engine's `money` field with `validation.integral`).
+ * It is asserted here rather than three times out there, because the whole point
+ * is that there is one.
+ */
+describe("isWholeRial", () => {
+  it("accepts integers and the float residue of a Toman conversion", () => {
+    expect(isWholeRial(1_250_000)).toBe(true);
+    expect(isWholeRial(1507.0000000000002)).toBe(true); // ۱۵/۷ تومان × ۱۰
+    expect(isWholeRial(0)).toBe(true);                   // whole — sign and range are the caller's business
+    expect(isWholeRial(-3_000)).toBe(true);
+  });
+
+  it("refuses a real fraction, and everything that is not a finite number", () => {
+    expect(isWholeRial(1507.5)).toBe(false);      // ۱۵۰/۷۵ تومان: no such thing in a Rial ledger
+    expect(isWholeRial(1507.01)).toBe(false);     // beyond the tolerance
+    expect(isWholeRial(NaN)).toBe(false);
+    expect(isWholeRial(Infinity)).toBe(false);
+    expect(isWholeRial(2 ** 53)).toBe(false);     // whole, but no longer safe to hand to a JS number
   });
 });

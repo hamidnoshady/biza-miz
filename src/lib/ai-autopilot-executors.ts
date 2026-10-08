@@ -21,8 +21,10 @@ import { updateMenuItem } from "./menu-service";
 import { createStockCount, reverseStockCount } from "./stock-count-service";
 import { createDraftPurchase, cancelDraftPurchase, PurchaseServiceError } from "./purchase-service";
 import { applyOrderDiscount, normalizeDiscountInput } from "./order-discount-service";
-import { recordExpense, reverseExpense, ExpenseError } from "./expense-service";
+import { MissingLedgerAccountError, recordExpense, reverseExpense, ExpenseError } from "./expense-service";
+import { resolveBranchRef } from "./branch-service";
 import { parseExpenseSettlement, PayablesInputError, type ExpenseSettlementInput } from "./payables-input";
+import { parseExpenseAmount, parseExpenseVatAmount } from "./expense-input";
 import { createDraft, deleteDraft, ManualJournalError } from "./manual-journal-service";
 import { updateCustomer } from "./parties-service";
 import { addCustomerNote, deleteCustomerNote, setCustomerTag } from "./crm-service";
@@ -128,13 +130,31 @@ async function locationOfInventoryItems(itemIds: string[]): Promise<string | nul
   return rows[0].location_id;
 }
 
-/** For rows whose location_id is nullable (expenses, journal drafts). */
-async function defaultLocation(businessId: string): Promise<string | null> {
-  const { rows } = await query<{ id: string }>(
-    `SELECT id FROM locations WHERE business_id = $1 AND is_active ORDER BY created_at LIMIT 1`,
-    [businessId],
-  );
-  return rows[0]?.id ?? null;
+/**
+ * The branch an automated write should file under: the one the payload named — by
+ * id or by a name that belongs to exactly one of *this* business's active
+ * branches — and otherwise the default `branch-service` states (oldest active).
+ *
+ * This file used to answer that question with a private copy of the query
+ * `defaultBranchId` is. Two statements of one rule is how a later change lands in
+ * only one of them, so both writing actions now go through the resolver, and the
+ * fallback that is left is the one a person sees when they open the register.
+ *
+ * The expense action had no choice at all until now, so «اجارهٔ شعبهٔ شمال» was
+ * recorded against whichever branch happened to be oldest: a request and a ledger
+ * disagreeing quietly, which is the failure this whole issue is about, arriving
+ * from the assistant's side. A wrong or ambiguous name is refused *here* rather
+ * than passed on for `recordExpense` to reject, because the service's refusal is
+ * right but arrives after the executor has already echoed a branch id back in its
+ * result.
+ */
+async function chosenLocation(
+  businessId: string,
+  requested: string | null,
+): Promise<{ locationId: string | null } | { error: string }> {
+  const resolved = await resolveBranchRef(businessId, requested);
+  if (resolved.ok) return { locationId: resolved.locationId };
+  return { error: resolved.reason === "ambiguous" ? "ambiguous_location" : "invalid_location" };
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +307,10 @@ const orderDiscount: AutopilotExecutor = async (ctx) => {
 const expense: AutopilotExecutor = async (ctx) => {
   const accountId = str(ctx.payload.accountId);
   const paymentAccountId = str(ctx.payload.paymentAccountId);
-  const amount = int(ctx.payload.amount);
+  // The amount rule of the channel, not this file's generic integer reader: a
+  // model that hands over ۱۵۰/۷ تومان gets the same refusal the API gives, and a
+  // figure whose ×10 landed on a float artefact is read as the Rial it is (§5).
+  const amount = parseExpenseAmount(ctx.payload.amount);
   const memo = str(ctx.payload.memo);
   if (!accountId || amount === null || !memo) return fail("invalid_payload");
   /*
@@ -309,10 +332,13 @@ const expense: AutopilotExecutor = async (ctx) => {
   }
   if (settlement.settlement === "paid" && !paymentAccountId) return fail("invalid_payload");
 
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+
   try {
     const created = await recordExpense({
       businessId: ctx.businessId,
-      locationId: await defaultLocation(ctx.businessId),
+      locationId: branch.locationId,
       accountId,
       paymentAccountId: settlement.settlement === "credit" ? null : paymentAccountId,
       settlement: settlement.settlement,
@@ -322,13 +348,20 @@ const expense: AutopilotExecutor = async (ctx) => {
       expenseDate: str(ctx.payload.expenseDate),
       vendor: str(ctx.payload.vendor),
       partyId: str(ctx.payload.partyId),
-      vatAmount: ctx.payload.vatAmount === undefined ? null : Number(ctx.payload.vatAmount),
+      vatAmount: parseExpenseVatAmount(ctx.payload.vatAmount ?? 0),
       memo: `${AUTOPILOT_NOTE_PREFIX}${memo}`,
       createdBy: ctx.authorizedByUserId,
     });
     return { ok: true, result: { expenseId: created.id, amount } };
   } catch (err) {
     if (err instanceof ExpenseError) return fail(err.message);
+    if (err instanceof MissingLedgerAccountError) {
+      // `POST /api/ledger/expenses` answers 409 `ledger_account_missing` for this
+      // fact. Unmapped, the action reported the bare account code as its failure
+      // reason — a number where the model should have read «this chart has no
+      // Accounts Payable account to credit».
+      return fail("ledger_account_missing");
+    }
     return fail(err instanceof Error ? err.message : "expense_failed");
   }
 };
@@ -368,9 +401,11 @@ const journalDraft: AutopilotExecutor = async (ctx) => {
   try {
     // createDraft only — the entry lands in Phase 16's approval queue and a
     // human still approves it. Never approveDraft (Decision 1).
+    const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+    if ("error" in branch) return fail(branch.error);
     const created = await createDraft({
       businessId: ctx.businessId,
-      locationId: await defaultLocation(ctx.businessId),
+      locationId: branch.locationId,
       entryDate: str(ctx.payload.entryDate),
       memo: `${AUTOPILOT_NOTE_PREFIX}${memo}`,
       lines: lines.map((line) => ({

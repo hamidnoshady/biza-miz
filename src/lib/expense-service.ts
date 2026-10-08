@@ -595,6 +595,9 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
   const receiptAssetId = params.receiptAssetId?.trim() || null;
   let receiptFileName: string | null = null;
   if (receiptAssetId) {
+    // Same rule as the party below: an id that is not a uuid is a refusal the
+    // caller can act on, not a `22P02` from comparing text to a uuid column.
+    if (!isUuid(receiptAssetId)) throw new ExpenseError("receipt_asset_not_found");
     const asset = await getMediaAsset(businessId, receiptAssetId);
     if (!asset) throw new ExpenseError("receipt_asset_not_found");
     // The name is snapshotted alongside the id so the register can still say
@@ -605,6 +608,15 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
 
   const partyId = params.partyId?.trim() || null;
   if (partyId) {
+    /*
+     * Shaped like a uuid *before* it is compared to one. Without this, a channel
+     * that forwards a name or a spreadsheet cell instead of an id gets Postgres's
+     * `22P02` — a 500 with driver text in it, where the caller should read «this
+     * party is not in your directory». The three id fields of an expense arrive
+     * from four different places (form, route, importer, assistant) and none of
+     * them may be trusted to have checked it first.
+     */
+    if (!isUuid(partyId)) throw new ExpenseError("party_not_found");
     const { rows } = await query<{ id: string }>(
       "SELECT id FROM parties WHERE business_id = $1 AND id = $2",
       [businessId, partyId],
@@ -614,6 +626,7 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
 
   const locationId = params.locationId?.trim() || null;
   if (locationId) {
+    if (!isUuid(locationId)) throw new ExpenseError("invalid_location");
     const { rows } = await query<{ id: string }>(
       "SELECT id FROM locations WHERE business_id = $1 AND id = $2",
       [businessId, locationId],

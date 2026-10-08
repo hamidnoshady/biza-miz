@@ -209,6 +209,101 @@ describe("permissions", () => {
   });
 });
 
+/*
+ * What `accounting.expenses` promises the importer, asserted against the entity
+ * rather than against the adapter's source text — the point being that the sheet
+ * and the screen must accept the same row. Issue #832 §16's parity clause: an
+ * import that cannot say «پرداخت بعدی», or that carries no VAT or party column,
+ * is a second and narrower spelling of the same business act, and people file
+ * through whichever door is open.
+ */
+describe("the expense import contract", () => {
+  const expenses = requireEntity("accounting.expenses");
+  const keys = expenses.fields.map((field) => field.key);
+
+  it("offers every field the register itself asks for", () => {
+    for (const key of [
+      "accountCode",
+      "paymentAccountCode",
+      "amount",
+      "vatAmount",
+      "expenseDate",
+      "settlement",
+      "supplier",
+      "dueDate",
+      "party",
+      "vendor",
+      "memo",
+    ]) {
+      expect(keys, key).toContain(key);
+    }
+  });
+
+  it("asks for a payment account only of a paid row", () => {
+    // `required: true` here would reject an owed row in the mapping step, before
+    // the adapter ever learned what the row was about — so the requirement lives
+    // with the settlement that decides it.
+    expect(expenses.fields.find((f) => f.key === "paymentAccountCode")?.required).toBeUndefined();
+    expect(expenses.fields.find((f) => f.key === "accountCode")?.required).toBe(true);
+    expect(expenses.fields.find((f) => f.key === "amount")?.required).toBe(true);
+  });
+
+  it("offers the settlement in the words the A/P screens already use", () => {
+    const settlement = expenses.fields.find((f) => f.key === "settlement")!;
+    expect(settlement.type).toBe("enum");
+    expect(settlement.options?.map((option) => option.value)).toEqual(["paid", "credit"]);
+    expect(settlement.options?.map((option) => option.label)).toEqual(["پرداخت‌شده", "پرداخت بعدی"]);
+  });
+
+  it("never lets one header spelling name two fields", () => {
+    /*
+     * The mapper matches an uploaded column against each field's key, label and
+     * aliases, so a spelling claimed twice is a column it has to guess at. This
+     * happened for real: «تأمین‌کننده» was an alias of `vendor` (the free-text
+     * name), and adding a genuine supplier column made that spelling ambiguous —
+     * a payable attributed to nobody, or to the wrong person, from a file that
+     * looked perfectly clear. Every spelling of every field, therefore, belongs to
+     * exactly one field.
+     */
+    const owners = new Map<string, string>();
+    for (const field of expenses.fields) {
+      for (const spelling of [field.key, field.label, ...(field.aliases ?? [])]) {
+        const seen = owners.get(spelling);
+        // Repeating the key among the aliases is noise, not a conflict — the
+        // conflict is one spelling pointing at two *different* fields.
+        if (seen !== undefined && seen !== field.key) {
+          expect.fail(`«${spelling}» claimed by both ${seen} and ${field.key}`);
+        }
+        owners.set(spelling, field.key);
+      }
+    }
+    expect(owners.get("تأمین‌کننده")).toBe("supplier");
+    expect(owners.get("طرف حساب")).toBe("vendor");
+    expect(expenses.fields.find((f) => f.key === "vendor")?.aliases).not.toContain("تأمین‌کننده");
+  });
+
+  it("exports the new columns, so a sheet that round-trips keeps its meaning", () => {
+    for (const key of ["amount", "vatAmount", "settlement", "supplier", "dueDate", "party", "reference"]) {
+      expect(expenses.fields.find((f) => f.key === key)?.exportDefault, key).toBe(true);
+    }
+    // A document number is something an export may show and an import may never
+    // write — `readOnly` is exactly that pair of promises.
+    const reference = expenses.fields.find((f) => f.key === "reference")!;
+    expect(reference.readOnly).toBe(true);
+    expect(importableFields(expenses).map((f) => f.key)).not.toContain("reference");
+  });
+
+  it("says in the mapper what a cell may not contain", () => {
+    // The hints are the only place the conditional requirements can be shown —
+    // the required-field check runs before the settlement is known.
+    for (const key of ["paymentAccountCode", "settlement", "supplier", "party", "vatAmount"]) {
+      expect((expenses.fields.find((f) => f.key === key)?.hint ?? "").trim().length, key).toBeGreaterThan(
+        10,
+      );
+    }
+  });
+});
+
 describe("duplicate rules", () => {
   it("reference fields that exist on the entity", () => {
     for (const entity of DATA_ENTITIES) {
