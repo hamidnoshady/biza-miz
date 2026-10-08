@@ -8,6 +8,7 @@ describe("A/P source attribution contract", () => {
       "supplier_return",
       "item_purchase",
       "item_supplier_return",
+      "expense",
       "ap_payment",
       "ap_payment_reversal",
       "cheque",

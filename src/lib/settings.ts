@@ -23,6 +23,13 @@ export const SETTING_KEYS = {
   /** { defaultRate: number } — percent, applied to new menu categories */
   tax: "tax.config",
   /**
+   * PayrollSettings (src/lib/payroll-gross-to-net.ts) — the business's own
+   * insurance shares, insurance ceiling, income-tax brackets and exempt
+   * threshold (audit F11). Absent = nothing entered = no deduction applied;
+   * no statutory rate is ever assumed.
+   */
+  payroll: "payroll.config",
+  /**
    * WizardProgress (see below) — { steps: Record<string, string>,
    * completedAt: string|null }, step → ISO time done.
    *

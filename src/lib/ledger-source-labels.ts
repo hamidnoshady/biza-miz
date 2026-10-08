@@ -76,6 +76,10 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   expense: "هزینه",
   payroll_accrual: "تعهد حقوق",
   payroll_payment: "پرداخت حقوق",
+  payroll_advance: "مساعده کارکنان",
+  payroll_accrual_void: "ابطال تعهد حقوق",
+  payroll_payment_void: "ابطال پرداخت حقوق",
+  payroll_advance_void: "ابطال مساعده",
   fixed_asset_depreciation: "استهلاک دارایی ثابت",
 
   // Marketing and loyalty

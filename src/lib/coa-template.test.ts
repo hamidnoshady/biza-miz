@@ -46,6 +46,12 @@ const CORE_REQUIRED_CODES: readonly string[] = [
   WELL_KNOWN_CODES.vatPayable,
   WELL_KNOWN_CODES.salariesPayable,
   WELL_KNOWN_CODES.salariesExpense,
+  // Gross-to-net payroll (audit F11): every trade runs payroll.
+  WELL_KNOWN_CODES.employerInsuranceExpense,
+  WELL_KNOWN_CODES.insurancePayable,
+  WELL_KNOWN_CODES.payrollTaxPayable,
+  WELL_KNOWN_CODES.otherPayrollDeductionsPayable,
+  WELL_KNOWN_CODES.staffAdvances,
   WELL_KNOWN_CODES.commissionExpense,
   WELL_KNOWN_CODES.accumulatedDepreciation,
   WELL_KNOWN_CODES.depreciationExpense,

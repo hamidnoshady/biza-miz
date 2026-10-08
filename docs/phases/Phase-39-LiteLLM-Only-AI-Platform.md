@@ -1,206 +1,122 @@
-# Phase 39 — LiteLLM-Only AI Platform (Global / Business / Branch)
+# Phase 39 — LiteLLM-only AI platform
 
-**Depends on:** Phase 37 (the LiteLLM gateway as a provider), Phase 38b (gateway costing,
-usage, prompt bindings and MCP), Phase 14 (multiple locations per business — the branch
-dimension this phase adds to the gateway), Phase 18 (the Rial credit ledger, which this
-phase does not touch).
+**Status:** implemented. Current behavior and the remaining operational cutover are summarized
+here; the initial direct-provider/gateway design has been retired.
 
-## Status: shipped
+## Current connection and ownership
 
-This phase has been implemented: `AiProvider` has exactly one member (`"litellm"`),
-`platform_ai_config` was dropped and merged into `platform_ai_gateway` (migration
-`0124_ai_litellm_only.sql`), `ai_business_gateway` carries the branch dimension described
-below, and `/platform/ai` is the single technical console (there is no separate
-`/platform/ai/gateway` page — that path is only the API route backing this page). The rest of
-this document is kept as the design record; see issue #757 / PR #756 for the follow-up
-hardening pass (N+1 removal, scope-aware branch readiness, dead policy-mirror field cleanup)
-that landed after the initial phase.
+LiteLLM is the application's only supported provider. `AiProvider` has one value (`litellm`),
+`platform_ai_config` was merged into the global `platform_ai_gateway` singleton by migration
+0124, and there is no direct-vendor fallback. A missing/invalid gateway or database state fails
+closed instead of selecting another provider. Platform and runtime settings are read from the
+persisted gateway row; `LITELLM_*` connection values are bootstrap defaults only when that row
+does not exist. `AI_API_KEY`, `AI_PROVIDER`, `AI_BASE_URL` and `AI_MODEL` do not configure a
+provider connection.
 
-## Context: what exists today
+| Area | Owner | Where it is configured |
+| --- | --- | --- |
+| Upstream provider deployments, model aliases, routing, retries, failover, provider-side limits and proxy budgets | LiteLLM | `docker/litellm/config.yaml` or the separately managed proxy |
+| Global gateway URL, master key, default chat/embedding alias, virtual-key toggle | Platform | `/platform/ai` → `platform_ai_gateway` |
+| Runtime mode → model-alias mapping | Platform | `/platform/ai/modes` → `platform_ai_modes`; each alias must exist in LiteLLM |
+| Prompt versions and system-agent assignments | Platform | `/platform/ai/prompts` and `/platform/ai/agents` |
+| Deep Research limits and platform widgets | Platform | `/platform/ai/research` and `/platform/ai/widgets` |
+| Business/branch identity keys and gateway readiness | Platform | `/platform/ai` fleet/branch panel; `ai_business_gateway` |
+| Tenant tools, permissions, context, orchestration and audit | Application | app runtime and permission-filtered function tools |
+| Prices, Rial allowance, wallet settlement and revenue | Plan/Billing | billing control plane; LiteLLM spend is a diagnostic/technical backstop |
 
-Phases 37 and 38b put LiteLLM in front of the assistant as an *optional* third value of
-`provider` (`openrouter` | `arvan` | `litellm`), on top of two configuration layers: a global
-singleton (`platform_ai_config` + `platform_ai_gateway`) and one optional row per business
-(`ai_business_gateway`, migration `0121`). That design was deliberately conservative for
-introducing a new, unproven component next to a working system: a direct-vendor connection
-still runs with zero gateway code, and `ai-runtime.ts`'s `decorate()` silently degrades back
-to the direct connection on any gateway failure.
+There is no per-business model picker, budget editor, routing control, fallback field or MCP
+server roster in the application. LiteLLM owns its own policy. The app's prompts are versioned
+in `ai_prompt_versions`; it sends its system message and permission-filtered OpenAI function
+tools, not LiteLLM prompt IDs or proxy MCP declarations. The separate POS MCP connector at
+`/api/mcp` serves external MCP clients and is not wired through LiteLLM's MCP feature.
 
-The gateway has now run long enough that the platform wants to commit to it fully, for two
-reasons:
+## Business and branch credentials
 
-1. **Running two connection shapes forever is the cost, not the gateway itself.** Every AI
-   surface still has to tolerate "no gateway, direct vendor" as a live configuration, which
-   is exactly the shape Phase 37 introduced to be safe to roll out — not a shape worth
-   keeping once the rollout is done.
-2. **The gateway config has no branch dimension**, even though the rest of the product has
-   treated "business default, branch override" as a first-class idea since Phase 14: the
-   `settings` table has carried a nullable `location_id` since `migrations/0001_foundation.sql`
-   (*"location_id NULL = business-wide setting"*), `locations.business_day_start_minutes`
-   lets one branch override its trading-day boundary, and `ai_coworker_jobs` already carries
-   a nullable `location_id`. `ai_business_gateway` is the one AI-adjacent table that stopped
-   at the business boundary.
+`ai_business_gateway` stores one optional business-default row and optional branch rows. A
+branch key is preferred for that exact location; otherwise the business key is inherited. When
+virtual keys are required, a tenant call never falls back to the shared master key. Branch rows
+are identity/diagnostic state only: local model overrides, budgets, fallback, and rate-limit
+mirrors are retired. The model requested comes from the platform/runtime-mode alias.
 
-## Scope
+The fleet GET route is `/api/platform/ai/gateway`; `/platform/ai/gateway` is only a legacy UI
+bookmark and redirects to `/platform/ai`. The fleet query joins entitlement state and
+pre-aggregates key/branch error state in SQL, then loads one singleton snapshot and one batch
+of visible business keys. Search, status filters and pagination are server-side; focused branch
+locations are separately paginated. The selected business's branch readiness is calculated for
+the exact `(businessId, locationId)` pair and is shown separately from business-default
+readiness. It includes:
 
-### 1. Collapse the provider catalogue to one member
+- AI entitlement and gateway readiness;
+- effective credential source (`branch`, inherited `business`, `master`, or `none`);
+- business-key and selected-branch-key status, including whether the branch inherits;
+- effective model alias and last key verification/sync timestamp; and
+- distinct business and branch synchronization errors.
 
-`src/lib/ai.ts`'s `AiProvider` union and `PROVIDERS` map drop `openrouter` and `arvan`
-entirely; `litellm` is the only connection shape. `isGateway?: boolean` on `ProviderMeta`
-is removed — every connection is a gateway now, so nothing downstream needs to branch on it.
+Supported fleet filters are `all`, `ready`, `missing_key`, `key_sync_error`,
+`entitlement_disabled`, `branch_override` and `gateway_unavailable`. The row set is paginated;
+no per-business `resolveAiConfigFor()` calls are made by the console.
 
-### 2. Merge `platform_ai_config` into `platform_ai_gateway`
+## Retired policy mirrors and routes
 
-With one provider left, Phase 37 Decision 7's "two addresses, one wins" logic
-(`resolveGatewayBaseUrl`) no longer means anything — there is exactly one address. Migration
-`0124_ai_litellm_only.sql`:
+`AiGatewayConfig` and `BusinessGateway` no longer carry LiteLLM policy mirrors. Migration
+0184 uses `DROP COLUMN IF EXISTS` for `fallback_models`, `allow_business_models`,
+`published_models`, `prompt_bindings`, `mcp_enabled`, `mcp_servers` and `model_override`; its
+`DROP COLUMN IF EXISTS` statements work across the full migration sequence on clean installs and
+upgraded schemas. The active prompt version console at `/platform/ai/prompts` is not the old
+prompt-fragment manager and must remain reachable.
 
-- Adds `temperature` and `max_output_tokens` to `platform_ai_gateway`, backfilled from the
-  existing `platform_ai_config` row.
-- Drops `platform_ai_config`. If its `provider` was not already `'litellm'`, the new
-  `platform_ai_gateway` row is left `enabled = false` rather than having a direct vendor's
-  key/host silently copied into the gateway's master-key/address fields — a credential valid
-  for one endpoint is not valid for another, and guessing would be worse than asking an
-  operator to re-enter it once.
-- `getPlatformAiConfig()` (`src/lib/ai-config.ts`) reads `platform_ai_gateway` directly.
-  `isPlatformAiConfigured()` keeps its exact contract, so every existing caller that already
-  gates on it needs no change.
+There are no active per-business model/budget APIs or old tenant prompt-manager routes. The
+former tenant provider endpoint `/api/ai/config` is a `410 ai_configuration_platform_managed`
+compatibility tombstone; `/api/platform/ai/prompts` is the separate, active platform-owned
+version console. `/dashboard/ai/settings` and `/ai/settings` are compatibility redirects to
+`/dashboard`; `/platform/ai/gateway` redirects to the current console page. The live business AI
+workspace is inside `/dashboard`, not a provider-settings page.
 
-### 3. Add the branch layer to `ai_business_gateway`
+## Secret cutover and required rollout
 
-```sql
-ALTER TABLE ai_business_gateway
-    DROP CONSTRAINT ai_business_gateway_pkey,
-    ADD COLUMN id uuid NOT NULL DEFAULT gen_random_uuid(),
-    ADD COLUMN location_id uuid REFERENCES locations(id) ON DELETE CASCADE;
-ALTER TABLE ai_business_gateway ADD PRIMARY KEY (id);
-ALTER TABLE ai_business_gateway
-    ADD CONSTRAINT ai_business_gateway_identity
-        UNIQUE NULLS NOT DISTINCT (business_id, location_id);
-```
+Migration 0183 added `master_key_ciphertext` and `virtual_key_ciphertext` while retaining
+plaintext for the transition. The current gateway readers and writers use ciphertext only.
+Migration 0209 drops `platform_ai_gateway.master_key` and `ai_business_gateway.virtual_key` in a
+separate forward step. It refuses both unbackfilled plaintext and stored credentials without an
+explicit post-verification confirmation. The database guard cannot prove that an AES-GCM value
+decrypts with the current deployment key or that a running release successfully reads it.
 
-`location_id IS NULL` means "the business default row" — the same convention `settings`
-already uses. RLS stays keyed on `business_id` alone (unchanged from `0121`): a location
-always belongs to exactly one business, so business-scoped RLS still fully isolates tenants;
-*which* branches a given signed-in member may edit is an app-layer permission check
-(`resolveActiveLocation`/`canAccessLocation`, `src/lib/setup-state.ts`), the same split every
-other location-scoped screen already uses — RLS is not the place branch-level UI permissions
-belong.
+**Do not apply migration 0209 until all prerequisites have been completed on every deployment
+database and runtime:**
 
-`ai_gateway_usage` (migration `0123`) gains a nullable `location_id`, resolved from the
-branch's key alias at sync time exactly as `business_id` is resolved there today.
+1. Run `npm run db:encrypt-ai-secrets -- --dry-run` and review the affected row counts.
+2. Run `npm run db:encrypt-ai-secrets`; it is resumable, decrypt-verifies each ciphertext against
+   the configured encryption key, then clears the legacy plaintext copies.
+3. Run `npm run db:encrypt-ai-secrets -- --verify-only`; it must pass with no legacy plaintext.
+4. Deploy the ciphertext-only application. While any credential is stored and
+   `AI_GATEWAY_SECRET_CUTOVER_VERIFIED` is not `true`, the migration runner defers 0209 on its own
+   (as it always does with `AI_GATEWAY_SECRET_CUTOVER_DEFER=true`) and still applies every later
+   migration that does not name a legacy column, so the new runtime starts while the old columns
+   still exist. Before starting the server the container entrypoint runs
+   `encrypt-ai-gateway-secrets.ts --keep-plaintext`, which writes and decrypt-verifies any missing
+   ciphertext with the container's own key and leaves plaintext alone; a failure there is logged,
+   not fatal. (Before this, a deployment that skipped steps 1–3 restarted forever on 0209's
+   `ai_gateway_secret_backfill_required`, and the defer flag could not help because migrations
+   `0209_online_sale_facts` onward sort after the cutover.)
+5. Verify a production runtime read/probe using ciphertext-backed credentials and the current
+   `INTEGRATIONS_ENCRYPTION_KEY` (or `JWT_SECRET`) on every deployment/instance. Do not advance
+   if any probe fails.
+6. Drain older app instances that could still select the plaintext columns.
+7. Only after those checks, remove the defer setting and run
+   `AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true npm run db:migrate` (or set that flag for the
+   controlled entrypoint run). The runner scopes a confirmation setting to its DB session, and
+   migration 0209 independently checks it before dropping either column. Remove the temporary
+   flags after it is recorded in `schema_migrations`.
 
-Resolution order, applied field-by-field (a branch may override just the model while
-inheriting the business's budget): **branch row → business row (`location_id IS NULL`) →
-platform defaults.**
+The local checkout cannot establish that production backfill, key consistency, or runtime
+verification has happened. The migration fails closed without the backfill and explicit
+confirmation; do not bypass either guard or treat them as substitutes for the production-read
+checks above.
 
-### 4. `ai-gateway-service.ts` / `ai-gateway.ts` / `ai-runtime.ts`
+## Current related documentation
 
-- `getBusinessGateway`/`saveBusinessGateway`/`provisionVirtualKey`/`revokeVirtualKey`/
-  `refreshKeySpend` all gain an optional `locationId` parameter and operate on the
-  `(business_id, location_id)` row; add `getBranchGateway(businessId, locationId)` and
-  `listBranchGateways(businessId)` beside the existing business-level reads.
-- `resolveAiConfigFor(businessId, mode)` becomes
-  `resolveAiConfigFor(businessId, locationId, mode)`. `decorate()` loses its "fall back to
-  the direct connection" branch, because there is no other connection to fall back to.
-  **"Degrade, never fail" is redefined**: it no longer means "switch providers," it means
-  "fail closed into the `enabled: false` state every surface already checks via
-  `isPlatformAiConfigured()`/`config.enabled`" — a gateway or database error while resolving
-  config must never throw out of a request or a background tick, but it also must not pretend
-  a working alternate connection exists.
-
-### 5. Thread the branch id through every AI surface
-
-The chat route, receipt OCR, invoice OCR, proactive digests, autopilot and the coworker all
-currently call `resolveAiConfigFor(businessId, mode)`. Each needs its call site's location:
-
-- Request-scoped surfaces (chat, OCR) already call `resolveActiveLocation(session)` for other
-  reads in the same handler — reuse that value.
-- Background surfaces iterate businesses under `withTenant(businessId, …)` per the existing
-  "background work scopes itself" rule. `ai_coworker_jobs.location_id` (already nullable,
-  `migrations/0100_ai_coworker.sql`) is passed straight through when a job has one, `null`
-  (business default) otherwise. The proactive tick and autopilot are not currently
-  per-location and stay that way — they pass `null`. Do not invent new per-location iteration
-  for a surface that doesn't already have one; that is separate scope from this phase.
-
-### 6. Console and dashboard
-
-- `/platform/ai` and `/platform/ai/gateway` merge into one technical LiteLLM page — there is
-  no longer a "connection" vs. "gateway" distinction to show separately. The page owns the
-  gateway address, master key, aliases, staged diagnostics and per-business virtual-key
-  lifecycle only. LiteLLM owns failover, routing, provider/MCP configuration and model access;
-  Plan/Billing owns pricing, allowance, wallet and revenue.
-- The platform console's business drill-down gains branch-aware virtual-key lifecycle: each
-  location (from `businessLocations(businessId)`, the same helper `resolveActiveLocation`
-  uses) can have its own key row, showing inherited/effective technical status without app-side
-  model or budget controls.
-- `/dashboard/ai/settings` must not reintroduce branch model/budget overrides. Tenant runtime
-  resolves key + LiteLLM alias server-side; money stays in Plan/Billing and provider policy
-  stays in LiteLLM.
-
-### 7. Cleanup
-
-Remove `OPENROUTER_API_KEY`/`ARVAN_AI_API_KEY` from `.env.example`; document
-`LITELLM_MASTER_KEY`/gateway base URL as the only AI env vars. Update
-`ai.test.ts`/`ai-gateway.test.ts`/`ai-service.test.ts`/`ai-config.test.ts` for the removed
-providers and the technical-only branch/key merge order (add cases: branch key overrides
-business key; no branch row falls back to the business row; no business row falls back to the
-platform default key when tenant virtual keys are required).
-
-## Out of scope
-
-- **Per-branch prompt bindings or per-branch MCP server lists.** Stay in LiteLLM/global MCP
-  configuration; this app page must not become an MCP management surface.
-- **Splitting AI wallet/allowance billing per branch.** The Rial ledger a business is actually
-  billed against stays business-level, matching every other billing surface in the app. The
-  branch layer is virtual-key identity and diagnostics, never a second billing entity.
-- **Changing the costing formula, the `/spend/logs` sync mechanism, or the answer-cache
-  key.** Phase 38b's mechanisms are unchanged; only which config layer feeds them gains a
-  branch dimension.
-- **New per-location iteration for the proactive tick or autopilot.** They keep running
-  per-business and use the business-default row.
-
-## Rollout
-
-Because the merged `platform_ai_gateway` row starts `enabled = false` whenever the prior
-deployment wasn't already on `provider = 'litellm'`, this migration is not transparent to a
-deployment still on a direct vendor: **the assistant goes dark until a platform admin
-re-enters the gateway address and master key in the merged console page.** This is a one-time
-manual step for the platform operator (there is exactly one global row), not per-tenant work,
-and must be called out in the release notes the way any breaking migration is.
-
-## Exit criteria (all met)
-
-- `AiProvider` has exactly one member; nothing in the codebase references `openrouter` or
-  `arvan` outside historical migration files.
-- `platform_ai_config` no longer exists; `platform_ai_gateway` is the sole source of the
-  global connection.
-- A business with two branches — one with a branch virtual key and one inheriting the business
-  key — authenticates each branch's calls with the right key while using the LiteLLM/platform
-  model alias, verified end to end against a real gateway.
-- Clearing the platform gateway's master key makes `isPlatformAiConfigured()` false and every
-  AI entry point shows its existing "assistant unavailable" state rather than throwing.
-- `ai_business_gateway` (widened) and `ai_gateway_usage.location_id` both pass the Phase 17
-  generated tenant-isolation test.
-- `npx tsc --noEmit`, `npm test`, `npm run test:db` and `npm run build` all pass.
-
-## Follow-up (issue #757, PR #756 and after)
-
-- Dead LiteLLM-policy-mirror fields (`fallbackModels`, `allowBusinessModels`,
-  `publishedModels`, `modelOverride`, `mcpEnabled`, `mcpServers`) were removed from
-  `src/lib/ai-gateway.ts` and their backing columns dropped from `platform_ai_gateway` /
-  `ai_business_gateway` — the console never actually read or wrote them; LiteLLM's own config
-  (`docker/litellm/config.yaml`) is the only place that policy lives.
-- The admin fleet-readiness GET route (`/api/platform/ai/gateway`) no longer resolves each
-  business's AI config one at a time (an N+1 query pattern); it now loads the gateway,
-  business-gateway rows, locations and businesses once and decorates them in memory, with
-  server-side search, status filtering (`ready` / `missing_key` / `key_sync_error` /
-  `entitlement_disabled` / `branch_override` / `gateway_unavailable`) and pagination.
-- Selecting a specific (business, branch) pair on `/platform/ai` now returns a distinct
-  `branchReadiness` view scoped to that exact pair — credential source (branch vs. inherited
-  business vs. none), whether the branch has its own key, the effective model alias, last
-  verification time and any technical sync error — instead of only ever showing the
-  business-default scope.
-- **Deliberately left open:** the legacy plaintext `master_key`/`virtual_key` columns
-  alongside their encrypted replacements were not dropped in this pass — that cutover needs a
-  confirmed production backfill first and is unsafe to do blind.
+- `docs/ai-subsystem-architecture.md` — prompt, mode, agent, memory, tool and billing ownership.
+- `docs/phases/Phase-37-LiteLLM-Gateway.md` and `Phase-38b-LiteLLM-Platform.md` — historical
+  phase notes with a current-state summary at the top.
+- `.env.example`, `docker-compose.yml` and `docker/litellm/config.yaml` — deployment defaults
+  and proxy-side policy ownership.

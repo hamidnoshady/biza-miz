@@ -16,13 +16,15 @@
 import { getPool, query } from "./db";
 import { businessToday } from "./business-day-service";
 import { isUuid } from "./uuid";
-import { isValidIsoDate } from "./iso-date";
 import { PARTY_ROLE_STORAGE } from "./parties";
 import { WELL_KNOWN_CODES } from "./coa-template";
+import { isValidIsoDate } from "./iso-date";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_CUSTOMER_KEY, type AgingSummary } from "./aging";
 import { toPersianDigits } from "./digits";
 import { enqueueHolooReceiptForArReceipt } from "./integrations/holoo/outbox-producer";
+import { normalizeBankReference } from "./payables-input";
+import { resolveVoucherCashAccount } from "./voucher-cash-account";
 
 export { MissingLedgerAccountError };
 
@@ -36,6 +38,15 @@ export class ArError extends Error {
     this.status = status;
   }
 }
+
+/**
+ * An actual calendar date in ISO form. The regex alone passes «2025-13-45»,
+ * which `Date.parse` then reads as NaN — and every age bucket computed from a
+ * NaN «today» falls through to «بیش از ۹۰ روز» without failing the request.
+ * The rule is `iso-date.ts`'s `isValidIsoDate`, shared with A/P aging, bank
+ * reconciliation, the manual journal and «دفتر روزنامه».
+ */
+const isIsoDateOnly = isValidIsoDate;
 
 async function arAccountId(businessId: string): Promise<string | null> {
   const { rows } = await query<{ id: string }>(
@@ -348,7 +359,7 @@ export interface AgingReport {
  * question the branch's own calendar does.
  */
 export async function getArAging(businessId: string, asOfDate?: string): Promise<AgingReport> {
-  if (asOfDate !== undefined && !isValidIsoDate(asOfDate)) throw new ArError("invalid_date");
+  if (asOfDate !== undefined && !isIsoDateOnly(asOfDate)) throw new ArError("invalid_date");
   const effectiveAsOf = asOfDate ?? (await businessToday(businessId));
   const accountId = await arAccountId(businessId);
   if (!accountId) return { asOfDate: effectiveAsOf, rows: [], totals: { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 } };
@@ -402,6 +413,8 @@ export interface ArReceipt {
   method: "cash" | "bank";
   amount: number;
   memo: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
 }
 
 /**
@@ -420,6 +433,10 @@ export async function receivePayment(params: {
   createdBy: string | null;
   /** Holoo imports create local receipts but must not push them back to Holoo. */
   skipHolooPush?: boolean;
+  /** Audit F11 — the cash/bank account the money went into; null = the method's default account. */
+  cashAccountId?: string | null;
+  /** Audit F11 — the bank's tracking/reference number. */
+  bankReference?: string | null;
 }): Promise<ArReceipt> {
   if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
     throw new ArError("invalid_amount");
@@ -430,7 +447,7 @@ export async function receivePayment(params: {
   if (!isUuid(params.customerId)) throw new ArError("customer_not_found", 404);
   // Same story for a date off the wire: reject it here, in the error
   // vocabulary the API answers with, rather than as Postgres's parse error.
-  if (params.receiptDate != null && !isValidIsoDate(params.receiptDate)) throw new ArError("invalid_date");
+  if (params.receiptDate != null && !isIsoDateOnly(params.receiptDate)) throw new ArError("invalid_date");
 
   /*
    * «امروز» here is the business's own date, not the database server's.
@@ -444,6 +461,8 @@ export async function receivePayment(params: {
    * never a UTC date slice.
    */
   const receiptDate = params.receiptDate ?? (await businessToday(params.businessId));
+  // Throws PayablesInputError («invalid_bank_reference»), which the route answers as a 400.
+  const bankReference = normalizeBankReference(params.bankReference);
 
   const client = await getPool().connect();
   try {
@@ -455,12 +474,10 @@ export async function receivePayment(params: {
     );
     if (!customerRows[0]) throw new ArError("customer_not_found", 404);
 
-    const accounts = await accountIdsByCode(client, params.businessId, [
-      WELL_KNOWN_CODES.accountsReceivable,
-      params.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bankClearing,
-    ]);
+    const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsReceivable]);
     const arAccount = accounts.get(WELL_KNOWN_CODES.accountsReceivable)!;
-    const cashAccount = accounts.get(params.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bankClearing)!;
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId);
+    const cashAccount = cash.accountId;
 
     const { rows } = await client.query<{
       id: string;
@@ -469,10 +486,12 @@ export async function receivePayment(params: {
       method: "cash" | "bank";
       amount: string;
       memo: string | null;
+      cash_account_id: string | null;
+      bank_reference: string | null;
     }>(
-      `INSERT INTO ar_receipts (business_id, location_id, customer_id, receipt_date, method, amount, memo, created_by)
-       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8)
-       RETURNING id, customer_id, receipt_date::text AS receipt_date, method, amount::text AS amount, memo`,
+      `INSERT INTO ar_receipts (business_id, location_id, customer_id, receipt_date, method, amount, memo, created_by, cash_account_id, bank_reference)
+       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10)
+       RETURNING id, customer_id, receipt_date::text AS receipt_date, method, amount::text AS amount, memo, cash_account_id, bank_reference`,
       [
         params.businessId,
         params.locationId,
@@ -482,6 +501,8 @@ export async function receivePayment(params: {
         params.amount,
         params.memo?.trim() || null,
         params.createdBy,
+        cash.chosen ? cash.accountId : null,
+        bankReference,
       ],
     );
     const receipt = rows[0];
@@ -513,6 +534,8 @@ export async function receivePayment(params: {
       method: receipt.method,
       amount: Number(receipt.amount),
       memo: receipt.memo,
+      cashAccountId: receipt.cash_account_id,
+      bankReference: receipt.bank_reference,
     };
   } catch (err) {
     await client.query("ROLLBACK");

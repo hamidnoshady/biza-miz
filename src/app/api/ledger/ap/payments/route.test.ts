@@ -81,6 +81,8 @@ describe("POST /api/ledger/ap/payments", () => {
       memo: "  supplier invoice  ",
       clientRequestId: "request-1",
       createdBy: "user-1",
+      cashAccountId: null,
+      bankReference: null,
     });
   });
 

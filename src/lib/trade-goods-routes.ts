@@ -15,6 +15,7 @@ import { getPool } from "./db";
 import { createItem, createVariantChild, getItem } from "./items-service";
 import { validateVariantAttributes, type VariantAttributeInput } from "./items";
 import { recordItemEvent } from "./item-audit-service";
+import { setInitialUnitCost } from "./accessories-service";
 import { resolveActiveLocation } from "./setup-state";
 import { requireIndustryForApi } from "./industry-guard";
 import { MissingLedgerAccountError } from "./ledger-service";
@@ -145,6 +146,13 @@ export function tradeGoodsItemStockPost(industry: TradeGoodsIndustry, roleGuard:
       const stock = body.quantity != null
         ? await receiveTradeGoodsStock(id, { quantity: String(body.quantity), unitCost: Number(body.unitCost ?? 0) })
         : null;
+      // A purchase price sent without a quantity (the price-list editor's
+      // «قیمت خرید» column) is not a receipt. It may set the opening cost of
+      // an item with nothing on hand, and is refused once stock exists —
+      // before this it answered `ok` and wrote nothing.
+      if (body.quantity == null && body.unitCost != null) {
+        await setInitialUnitCost(id, Number(body.unitCost));
+      }
       if (stock) {
         await recordItemEvent({
           businessId: session.businessId,

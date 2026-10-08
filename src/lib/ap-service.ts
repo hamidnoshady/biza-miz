@@ -16,6 +16,8 @@ import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from ".
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_SUPPLIER_KEY, type AgingSummary } from "./aging";
 import { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL, apAttributionStatus } from "./ap-attribution";
 import { enqueueHolooReceiptForApPayment } from "./integrations/holoo/outbox-producer";
+import { normalizeBankReference, PayablesInputError } from "./payables-input";
+import { resolveVoucherCashAccount } from "./voucher-cash-account";
 
 export { MissingLedgerAccountError, UNKNOWN_SUPPLIER_KEY };
 export { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL };
@@ -108,7 +110,7 @@ async function queryApLines(filters: ApLineFilters): Promise<ApLineRow[]> {
             je.entry_date::text AS entry_date,
             je.source_type,
             je.source_id::text AS source_id,
-            COALESCE(p.note, p2.note, ip.note, ipr.note) AS note,
+            COALESCE(p.note, p2.note, ip.note, ipr.note, exp.memo) AS note,
             COALESCE(sr.reason, isr.reason) AS return_reason,
             je.memo,
             jl.debit::text AS debit,
@@ -266,6 +268,7 @@ function statementType(sourceType: string | null): ApStatementType {
   switch (sourceType) {
     case "purchase":
     case "item_purchase":
+    case "expense":
       return "bill";
     case "ap_payment":
       return "payment";
@@ -410,6 +413,8 @@ export interface ApPayment {
   method: "cash" | "bank";
   amount: number;
   memo: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
   /** True only when this call reused the result for an earlier matching request id. */
   duplicate: boolean;
 }
@@ -428,10 +433,14 @@ function paymentRequestFingerprint(params: {
   amount: number;
   paymentDate: string | null;
   memo: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
 }): string {
   // An ordered tuple keeps normalization/versioning explicit and avoids key
   // order dependence. Date omission remains null so a retry after midnight
-  // still refers to the original intended payment date.
+  // still refers to the original intended payment date. Voucher account and
+  // bank reference are also part of the operation: reusing a key with a changed
+  // destination must be rejected rather than silently accepted as a retry.
   const canonical = JSON.stringify([
     params.supplierId,
     params.locationId,
@@ -439,6 +448,8 @@ function paymentRequestFingerprint(params: {
     params.amount,
     params.paymentDate,
     params.memo,
+    params.cashAccountId,
+    params.bankReference,
   ]);
   return createHash("sha256").update(canonical).digest("hex");
 }
@@ -450,6 +461,8 @@ function mapApPayment(row: {
   method: "cash" | "bank";
   amount: string;
   memo: string | null;
+  cash_account_id: string | null;
+  bank_reference: string | null;
 }, duplicate: boolean): ApPayment {
   return {
     id: row.id,
@@ -458,6 +471,8 @@ function mapApPayment(row: {
     method: row.method,
     amount: Number(row.amount),
     memo: row.memo,
+    cashAccountId: row.cash_account_id,
+    bankReference: row.bank_reference,
     duplicate,
   };
 }
@@ -479,6 +494,10 @@ export async function payBill(params: {
   createdBy: string | null;
   /** Holoo imports create local payments but must not push them back to Holoo. */
   skipHolooPush?: boolean;
+  /** The cash/bank account the payment left from; null uses the method default. */
+  cashAccountId?: string | null;
+  /** Bank tracking number; normalized and validated before posting. */
+  bankReference?: string | null;
 }): Promise<ApPayment> {
   if (!Number.isSafeInteger(params.amount) || params.amount <= 0) throw new ApError("invalid_amount");
   if (!isUuid(params.supplierId)) throw new ApError("supplier_not_found", 404);
@@ -487,6 +506,10 @@ export async function payBill(params: {
   const requestedPaymentDate = params.paymentDate?.trim() || null;
   if (requestedPaymentDate && !isValidIsoDate(requestedPaymentDate)) throw new ApError("invalid_date");
   const memo = params.memo?.trim() || null;
+  const requestedCashAccountId = params.cashAccountId?.trim() || null;
+  // Throws PayablesInputError for a malformed/oversized bank reference. The
+  // normalized value makes Persian and ASCII digit forms the same operation.
+  const bankReference = normalizeBankReference(params.bankReference);
   const fingerprint = paymentRequestFingerprint({
     supplierId: params.supplierId,
     locationId: params.locationId,
@@ -494,6 +517,8 @@ export async function payBill(params: {
     amount: params.amount,
     paymentDate: requestedPaymentDate,
     memo,
+    cashAccountId: requestedCashAccountId,
+    bankReference,
   });
   const paymentDate = requestedPaymentDate ?? (await businessToday(params.businessId));
 
@@ -512,9 +537,11 @@ export async function payBill(params: {
       amount: string;
       memo: string | null;
       request_fingerprint: string | null;
+      cash_account_id: string | null;
+      bank_reference: string | null;
     }>(
       `SELECT id, supplier_id, payment_date::text AS payment_date, method,
-              amount::text AS amount, memo, request_fingerprint
+              amount::text AS amount, memo, request_fingerprint, cash_account_id, bank_reference
          FROM ap_payments
         WHERE business_id = $1 AND client_request_id = $2
         FOR UPDATE`,
@@ -537,12 +564,10 @@ export async function payBill(params: {
     if (!supplier) throw new ApError("supplier_not_found", 404);
     if (params.locationId !== supplier.location_id) throw new ApError("supplier_location_mismatch", 409);
 
-    const accounts = await accountIdsByCode(client, params.businessId, [
-      WELL_KNOWN_CODES.accountsPayable,
-      params.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bankClearing,
-    ]);
+    const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsPayable]);
     const apAccount = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
-    const cashAccount = accounts.get(params.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bankClearing)!;
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, requestedCashAccountId);
+    const cashAccount = cash.accountId;
 
     const { rows } = await client.query<{
       id: string;
@@ -551,14 +576,16 @@ export async function payBill(params: {
       method: "cash" | "bank";
       amount: string;
       memo: string | null;
+      cash_account_id: string | null;
+      bank_reference: string | null;
     }>(
       `INSERT INTO ap_payments
          (business_id, location_id, supplier_id, payment_date, method, amount, memo,
-          client_request_id, request_fingerprint, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          client_request_id, request_fingerprint, created_by, cash_account_id, bank_reference)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (business_id, client_request_id) WHERE client_request_id IS NOT NULL DO NOTHING
        RETURNING id, supplier_id, payment_date::text AS payment_date,
-                 method, amount::text AS amount, memo`,
+                 method, amount::text AS amount, memo, cash_account_id, bank_reference`,
       [
         params.businessId,
         params.locationId,
@@ -570,6 +597,8 @@ export async function payBill(params: {
         clientRequestId,
         fingerprint,
         params.createdBy,
+        cash.chosen ? cash.accountId : null,
+        bankReference,
       ],
     );
 
@@ -585,9 +614,11 @@ export async function payBill(params: {
         amount: string;
         memo: string | null;
         request_fingerprint: string | null;
+        cash_account_id: string | null;
+        bank_reference: string | null;
       }>(
         `SELECT id, supplier_id, payment_date::text AS payment_date, method,
-                amount::text AS amount, memo, request_fingerprint
+                amount::text AS amount, memo, request_fingerprint, cash_account_id, bank_reference
            FROM ap_payments
           WHERE business_id = $1 AND client_request_id = $2
           FOR UPDATE`,

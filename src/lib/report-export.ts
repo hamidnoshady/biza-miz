@@ -16,6 +16,7 @@
  */
 import { displayCell, sheetsToXlsxBuffer, toCsv } from "./data-transfer/codecs";
 import { formatShiftWindow } from "./jalali";
+import { formatMoney, moneyToInput, type MoneyUnit } from "./money";
 
 export interface ReportColumn {
   key: string;
@@ -63,4 +64,57 @@ export async function rowsToXlsxBuffer(table: ReportTable, sheetName: string): P
       ),
     },
   ]);
+}
+
+/**
+ * The column header of a money column in a file a human opens: it names the
+ * unit the numbers are in, the way the ledger statements already do
+ * («مبلغ (تومان)»). A bare «فروش خالص» over a Rial integer reads as Toman to a
+ * Toman business and is off by ten.
+ */
+export function moneyColumnLabel(label: string, unit: MoneyUnit): string {
+  return `${label} (${unit === "rial" ? "ریال" : "تومان"})`;
+}
+
+/**
+ * One money cell of a report export, in the business's selected unit.
+ *
+ * CSV and Excel get a plain number (so a spreadsheet can add the column up),
+ * already converted to the unit the header names; the PDF gets the formatted
+ * text the screen shows. Input is integer Rial, possibly as the numeric string
+ * Postgres returns for a `sum`/`avg`; an average is rounded to the Rial first.
+ */
+export function moneyExportCell(rial: unknown, unit: MoneyUnit, format: "csv" | "excel" | "pdf"): string | number {
+  if (rial === null || rial === undefined || rial === "") return "";
+  const n = Math.round(Number(rial));
+  if (!Number.isFinite(n)) return String(rial);
+  return format === "pdf" ? formatMoney(n, unit) : moneyToInput(n, unit);
+}
+
+/**
+ * A custom (dimension/metric) report as an export table. When the metric is an
+ * amount of money its column is converted to the selected unit and labelled
+ * with it; any other numeric value (a count) is handed over as a number rather
+ * than the numeric string the driver produced, so Excel does not store it as
+ * text.
+ */
+export function customReportTable(
+  rows: { dim: unknown; value: unknown }[],
+  labels: { dimensionLabel: string; metricLabel: string },
+  money: { isMoney: boolean; unit: MoneyUnit; format: "csv" | "excel" | "pdf" },
+): ReportTable {
+  return {
+    columns: [
+      { key: "dim", label: labels.dimensionLabel },
+      { key: "value", label: money.isMoney ? moneyColumnLabel(labels.metricLabel, money.unit) : labels.metricLabel },
+    ],
+    rows: rows.map((row) => ({
+      dim: row.dim,
+      value: money.isMoney
+        ? moneyExportCell(row.value, money.unit, money.format)
+        : typeof row.value === "string" && row.value.trim() !== "" && Number.isFinite(Number(row.value))
+          ? Number(row.value)
+          : row.value,
+    })),
+  };
 }

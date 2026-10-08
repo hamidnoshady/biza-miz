@@ -34,6 +34,8 @@ import {
   SecondaryButton,
 } from "@/app/dashboard/ui";
 import { FilterChip } from "@/app/dashboard/filters";
+import type { FiscalReadiness } from "@/lib/fiscal-readiness";
+import { FiscalReadinessBanner } from "./fiscal-readiness-banner";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 
 interface FiscalYear {
@@ -85,6 +87,8 @@ function errorMessage(code: string | undefined): string {
     fiscal_year_closed: "سال مالی بسته شده است و دوره‌های آن دیگر قابل بازگشایی نیستند.",
     fiscal_year_already_closed: "این سال مالی قبلاً بسته شده است.",
     periods_not_ready: "برای بستن سال مالی، ابتدا همهٔ دوره‌ها را به‌صورت موقت ببندید.",
+    uncovered_entries_before_close:
+      "بستن نهایی این سال ممکن نیست: اسنادی با تاریخ پیش از پایان سال بیرون از همهٔ دوره‌های مالی ثبت شده‌اند. سال مالیِ آن تاریخ‌ها را تعریف کنید؛ اسناد رد یا جابه‌جا نمی‌شوند.",
     periods_incomplete: "فهرست دوره‌های این سال کامل نیست؛ برای بررسی با پشتیبانی تماس بگیرید.",
     period_locked_for_closing: "دورهٔ پایانی سال قفل است؛ ابتدا آن را بازگشایی و دوباره به‌صورت موقت ببندید.",
     ledger_account_missing: "حساب «سود (زیان) انباشته» در سرفصل حساب‌ها یافت نشد.",
@@ -217,6 +221,23 @@ export function FiscalPeriodsSection() {
   const [periodsLoadFailed, setPeriodsLoadFailed] = useState(false);
   const [mutation, setMutation] = useState<Mutation>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [readiness, setReadiness] = useState<FiscalReadiness | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Advisory only: a failed read hides the warning rather than claiming the
+    // books are ready, and never blocks the year list below.
+    void api<{ readiness: FiscalReadiness }>("/api/ledger/fiscal-readiness")
+      .then(({ ok, data }) => {
+        if (!cancelled) setReadiness(ok ? data.readiness : null);
+      })
+      .catch(() => {
+        if (!cancelled) setReadiness(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -417,6 +438,7 @@ export function FiscalPeriodsSection() {
       <ErrorBox>{error}</ErrorBox>
       <ErrorBox>{yearsLoadFailed ? "بارگذاری سال‌های مالی ناموفق بود. می‌توانید دوباره تلاش کنید." : ""}</ErrorBox>
       <ErrorBox>{periodsLoadFailed ? "بارگذاری دوره‌های این سال مالی ناموفق بود. می‌توانید دوباره تلاش کنید." : ""}</ErrorBox>
+      <FiscalReadinessBanner readiness={readiness} />
       {notice ? (
         <p role="status" className="rounded-xl border border-primary/30 bg-primary/5 px-4 py-3 text-sm leading-6 text-foreground">
           {notice}

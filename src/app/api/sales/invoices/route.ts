@@ -21,7 +21,8 @@ import { ledgerSettlementFor, type PaymentSettlement } from "@/lib/payment-metho
 import { MAX_RETAIL_TENDERS } from "@/lib/retail-tenders";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
-import { rowsToCsv, type ReportTable } from "@/lib/report-export";
+import { moneyColumnLabel, moneyExportCell, rowsToCsv, type ReportTable } from "@/lib/report-export";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
 
 const PAYMENT_METHODS: SettlementMethod[] = ["cash", "bank", "credit"];
 const INVOICE_METHODS = new Set<string>(PAYMENT_METHODS);
@@ -317,6 +318,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   });
 
   if (format === "csv") {
+    // The amount column speaks the business's selected unit and says which —
+    // it used to be raw Rial under «مبلغ (ریال)» for a Toman business.
+    const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(session.businessId, SETTING_KEYS.businessPrefs);
+    const unit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
     const table: ReportTable = {
       columns: [
         { key: "orderNumber", label: "شماره فاکتور" },
@@ -324,7 +329,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
         { key: "lineCount", label: "اقلام" },
         { key: "paymentMethods", label: "روش پرداخت" },
         { key: "status", label: "وضعیت" },
-        { key: "total", label: "مبلغ (ریال)" },
+        { key: "total", label: moneyColumnLabel("مبلغ", unit) },
         { key: "closedAt", label: "تاریخ ثبت" },
       ],
       rows: invoices.map((invoice) => ({
@@ -333,7 +338,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
         lineCount: invoice.lineCount,
         paymentMethods: invoice.paymentMethods.map((m) => m.name).join("، "),
         status: invoice.status === "voided" ? "باطل‌شده" : "تکمیل‌شده",
-        total: invoice.total,
+        total: moneyExportCell(invoice.total, unit, "csv"),
         closedAt: invoice.closedAt
           ? toPersianDigits(formatJalali(invoice.closedAt, { timeZone: location.timezone, withTime: true }))
           : "",

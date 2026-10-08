@@ -12,6 +12,7 @@ export const AP_SOURCE_ATTRIBUTION_CONTRACT = {
   supplier_return: { mode: "conditional", path: "supplier_returns.purchase_id → purchases.supplier_id; accounts_payable settlement only" },
   item_purchase: { mode: "supplier", path: "item_purchases.supplier_id" },
   item_supplier_return: { mode: "conditional", path: "item_supplier_returns.purchase_id → item_purchases.supplier_id; accounts_payable settlement only" },
+  expense: { mode: "supplier", path: "expenses.supplier_id when settlement=credit" },
   ap_payment: { mode: "supplier", path: "ap_payments.supplier_id" },
   ap_payment_reversal: { mode: "supplier", path: "ap_payment_reversal → ap_payments.supplier_id" },
   cheque: { mode: "conditional", path: "cheques.supplier_id or cheque_events.endorsed_to_supplier_id" },
@@ -68,6 +69,11 @@ export const AP_SUPPLIER_ATTRIBUTION_SQL = `
         AND isr.settlement_method = 'accounts_payable'
   LEFT JOIN item_purchases ipr
          ON ipr.id = isr.purchase_id AND ipr.business_id = je.business_id
+  LEFT JOIN expenses exp
+         ON je.source_type = 'expense'
+        AND exp.id = je.source_id
+        AND exp.business_id = je.business_id
+        AND exp.settlement = 'credit'
   LEFT JOIN ap_payments ap
          ON je.source_type IN ('ap_payment', 'ap_payment_reversal')
         AND ap.id = je.source_id AND ap.business_id = je.business_id
@@ -115,6 +121,7 @@ export const AP_SUPPLIER_ATTRIBUTION_SQL = `
     p2.supplier_id,
     ip.supplier_id,
     ipr.supplier_id,
+    exp.supplier_id,
     ap.supplier_id,
     ch.supplier_id,
     endorsed.endorsed_to_supplier_id,
@@ -136,6 +143,7 @@ export const AP_SUPPLIER_ID_SQL = `COALESCE(
   p2.supplier_id,
   ip.supplier_id,
   ipr.supplier_id,
+  exp.supplier_id,
   ap.supplier_id,
   ch.supplier_id,
   endorsed.endorsed_to_supplier_id,

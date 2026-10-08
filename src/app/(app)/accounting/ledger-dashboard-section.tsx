@@ -12,6 +12,8 @@ import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
 import { EmptyState, KpiCard, KpiRow, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, InfoBox } from "@/app/dashboard/ui";
 import type { AccountingSectionKey } from "./accounting-routes";
+import type { FiscalReadiness } from "@/lib/fiscal-readiness";
+import { FiscalReadinessBanner } from "./fiscal-readiness-banner";
 
 /**
  * The Accounting app's dashboard (Phase «حسابداری» home) — its «داشبورد».
@@ -236,9 +238,15 @@ export function LedgerDashboardSection({
   const money = useMoney();
   const [overview, setOverview] = useState<LedgerOverview | null>(null);
   const [error, setError] = useState("");
+  const [readiness, setReadiness] = useState<FiscalReadiness | null>(null);
 
   const load = useCallback(() => {
     setError("");
+    // Advisory (audit F08): a failed read shows no warning, never "ready".
+    api<{ readiness: FiscalReadiness }>("/api/ledger/fiscal-readiness").then(
+      ({ ok, data }) => setReadiness(ok ? data.readiness : null),
+      () => setReadiness(null),
+    );
     api<{ overview: LedgerOverview }>("/api/ledger/overview").then(
       ({ ok, data }) => {
         if (ok) setOverview(data.overview);
@@ -314,6 +322,17 @@ export function LedgerDashboardSection({
       ) : null}
 
       <LedgerHealthNotice overview={overview} />
+
+      {hasActivity ? (
+        <FiscalReadinessBanner
+          readiness={readiness}
+          action={
+            <Button variant="outline" size="sm" className="min-h-11" onClick={() => onGoToTab("fiscal-periods")}>
+              تعریف سال مالی در «دوره‌های مالی»
+            </Button>
+          }
+        />
+      ) : null}
 
       {overview.costCoverage.provisional ? (
         <InfoBox>

@@ -723,6 +723,18 @@ function searchPattern(q: string | undefined): string | null {
   return `%${needle.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
 }
 
+/** Audit F11 — an explicitly selected cash/bank account and optional bank reference. */
+function voucherAccountFields(r: {
+  bank_reference: string | null;
+  cash_account_code: string | null;
+  cash_account_name: string | null;
+}) {
+  return {
+    bankReference: r.bank_reference,
+    cashAccount: r.cash_account_code ? { code: r.cash_account_code, name: r.cash_account_name ?? "" } : null,
+  };
+}
+
 /** Lists receipt vouchers — the «دریافت‌ها» ledger slice. */
 export async function listReceipts(businessId: string, q?: string) {
   // The filter runs in SQL, not after the fact: filtering in JS meant every
@@ -737,13 +749,19 @@ export async function listReceipts(businessId: string, q?: string) {
     amount: string;
     memo: string | null;
     party_name: string | null;
+    bank_reference: string | null;
+    cash_account_code: string | null;
+    cash_account_name: string | null;
   }>(
-    `SELECT r.id, r.receipt_date::text AS receipt_date, r.method, r.amount::text AS amount, r.memo, p.name AS party_name
+    `SELECT r.id, r.receipt_date::text AS receipt_date, r.method, r.amount::text AS amount, r.memo, p.name AS party_name,
+            r.bank_reference, ca.code AS cash_account_code, ca.name AS cash_account_name
        FROM ar_receipts r LEFT JOIN parties p ON p.id = r.customer_id
+       LEFT JOIN accounts ca ON ca.id = r.cash_account_id
       WHERE r.business_id = $1
         AND ($2::text IS NULL
              OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.name, 'بدون مشتری مشخص')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.memo, '')")} ILIKE $2 ESCAPE '\\')
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.memo, '')")} ILIKE $2 ESCAPE '\\'
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.bank_reference, '')")} ILIKE $2 ESCAPE '\\')
       ORDER BY r.receipt_date DESC, r.created_at DESC, r.id DESC`,
     [businessId, pattern],
   );
@@ -754,6 +772,7 @@ export async function listReceipts(businessId: string, q?: string) {
     amount: Number(r.amount),
     memo: r.memo,
     partyName: r.party_name ?? "بدون مشتری مشخص",
+    ...voucherAccountFields(r),
   }));
 }
 
@@ -774,10 +793,14 @@ export async function listPayments(businessId: string, q?: string) {
     reversed_at: string | null;
     reversal_entry_id: string | null;
     reversal_date: string | null;
+    bank_reference: string | null;
+    cash_account_code: string | null;
+    cash_account_name: string | null;
   }>(
     `SELECT p.id, p.payment_date::text AS payment_date, p.method, p.amount::text AS amount, p.memo,
             COALESCE(pa.name, s.name) AS party_name,
             l.name AS location_name,
+            p.bank_reference, ca.code AS cash_account_code, ca.name AS cash_account_name,
             original.reversed_at::text AS reversed_at,
             reversal.id AS reversal_entry_id,
             reversal.entry_date::text AS reversal_date
@@ -785,6 +808,7 @@ export async function listPayments(businessId: string, q?: string) {
        LEFT JOIN suppliers s ON s.id = p.supplier_id
        LEFT JOIN locations l ON l.id = p.location_id
        LEFT JOIN parties pa ON pa.id = s.party_id
+       LEFT JOIN accounts ca ON ca.id = p.cash_account_id
        LEFT JOIN LATERAL (
          SELECT je.id, je.reversed_at
            FROM journal_entries je
@@ -798,7 +822,8 @@ export async function listPayments(businessId: string, q?: string) {
         AND ($2::text IS NULL
              OR ${SEARCH_FOLD.replace("%s", "COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص')")} ILIKE $2 ESCAPE '\\'
              OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.memo, '')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(l.name, '')")} ILIKE $2 ESCAPE '\\')
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(l.name, '')")} ILIKE $2 ESCAPE '\\'
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.bank_reference, '')")} ILIKE $2 ESCAPE '\\')
       ORDER BY p.payment_date DESC, p.created_at DESC, p.id DESC`,
     [businessId, pattern],
   );
@@ -810,6 +835,7 @@ export async function listPayments(businessId: string, q?: string) {
     memo: r.memo,
     partyName: r.party_name ?? "بدون تأمین‌کننده مشخص",
     locationName: r.location_name,
+    ...voucherAccountFields(r),
     reversed: r.reversed_at !== null || r.reversal_entry_id !== null,
     reversalEntryId: r.reversal_entry_id,
     reversalDate: r.reversal_date,
