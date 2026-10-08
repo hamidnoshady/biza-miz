@@ -78,6 +78,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.query("DELETE FROM payroll_advances");
   await db.query("DELETE FROM payroll_run_lines");
   await db.query("DELETE FROM payroll_runs");
   await db.query("DELETE FROM journal_lines");
@@ -156,7 +157,7 @@ describe("accruePayroll", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد ۱۴۰۴",
+      periodKey: "1404-05",
       accrualDate: "2025-05-20",
       createdBy: owner.id,
     });
@@ -185,7 +186,7 @@ describe("accruePayroll", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
     await payrollService.setWage(biz.id, staff.a, 99_000_000);
@@ -201,7 +202,7 @@ describe("accruePayroll", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
     expect(run.totalAmount).toBe(30_000_000);
@@ -211,25 +212,69 @@ describe("accruePayroll", () => {
   it("refuses to accrue when no staff has a wage set", async () => {
     await db.query(`UPDATE users SET monthly_wage = NULL WHERE business_id = $1`, [biz.id]);
     await expect(
-      payrollService.accruePayroll({ businessId: biz.id, locationId: null, periodLabel: "مرداد", createdBy: owner.id }),
+      payrollService.accruePayroll({ businessId: biz.id, locationId: null, periodKey: "1404-05", createdBy: owner.id }),
     ).rejects.toThrow("no_wages_set");
   });
 
-  it("rejects an empty period label", async () => {
+  // The period is a Jalali month from a selector (audit F11), not free text.
+  it.each(["", "  ", "مرداد ۱۴۰۴", "1404-13", "1404-5", "1404-00"])("rejects the period %j", async (periodKey) => {
     await expect(
-      payrollService.accruePayroll({ businessId: biz.id, locationId: null, periodLabel: "  ", createdBy: owner.id }),
-    ).rejects.toThrow("period_label_required");
+      payrollService.accruePayroll({ businessId: biz.id, locationId: null, periodKey, createdBy: owner.id }),
+    ).rejects.toThrow("invalid_period");
   });
 
-  it("rejects an over-long period label", async () => {
+  it("rejects a month that has not started yet", async () => {
     await expect(
-      payrollService.accruePayroll({
-        businessId: biz.id,
-        locationId: null,
-        periodLabel: "م".repeat(121),
-        createdBy: owner.id,
-      }),
-    ).rejects.toThrow("period_label_too_long");
+      payrollService.accruePayroll({ businessId: biz.id, locationId: null, periodKey: "1499-01", createdBy: owner.id }),
+    ).rejects.toThrow("period_in_future");
+  });
+
+  it("stores the month as a key and a Persian label", async () => {
+    const run = await payrollService.accruePayroll({
+      businessId: biz.id,
+      locationId: null,
+      periodKey: "1404-05",
+      createdBy: owner.id,
+    });
+    expect(run.periodKey).toBe("1404-05");
+    expect(run.periodLabel).toBe("مرداد 1404");
+    // A closed month with no date given is dated on its own last day (31 مرداد 1404).
+    expect(run.accrualDate).toBe("2025-08-22");
+  });
+
+  it("allows one standing run per month, and a new one once it is voided", async () => {
+    const run = await payrollService.accruePayroll({
+      businessId: biz.id,
+      locationId: null,
+      periodKey: "1404-05",
+      createdBy: owner.id,
+    });
+    await expect(
+      payrollService.accruePayroll({ businessId: biz.id, locationId: null, periodKey: "1404-05", createdBy: owner.id }),
+    ).rejects.toThrow("period_already_accrued");
+    await payrollService.voidPayrollRun({ businessId: biz.id, locationId: null, runId: run.id, actorId: owner.id });
+    const again = await payrollService.accruePayroll({
+      businessId: biz.id,
+      locationId: null,
+      periodKey: "1404-05",
+      createdBy: owner.id,
+    });
+    expect(again.status).toBe("accrued");
+  });
+
+  it("keeps reading a run recorded with a free-text period before audit F11", async () => {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO payroll_runs (business_id, period_label, total_amount, accrual_date)
+       VALUES ($1, 'مرداد قدیمی', 30000000, '2025-05-20') RETURNING id`,
+      [biz.id],
+    );
+    await db.query(`INSERT INTO payroll_run_lines (run_id, user_id, amount) VALUES ($1, $2, 30000000)`, [
+      rows[0].id,
+      staff.a,
+    ]);
+    const [legacy] = await payrollService.listPayrollRuns(biz.id);
+    expect(legacy).toMatchObject({ periodKey: null, periodLabel: "مرداد قدیمی", totalAmount: 30_000_000, netAmount: 30_000_000 });
+    expect(legacy.lines[0]).toMatchObject({ amount: 30_000_000, baseSalaryRial: 30_000_000, grossRial: 30_000_000, netPayRial: 30_000_000 });
   });
 
   /*
@@ -242,7 +287,7 @@ describe("accruePayroll", () => {
       payrollService.accruePayroll({
         businessId: biz.id,
         locationId: null,
-        periodLabel: "مرداد",
+        periodKey: "1404-05",
         accrualDate: "banana",
         createdBy: owner.id,
       }),
@@ -254,18 +299,18 @@ describe("accruePayroll", () => {
       payrollService.accruePayroll({
         businessId: biz.id,
         locationId: null,
-        periodLabel: "مرداد",
+        periodKey: "1404-05",
         accrualDate: "2025-02-31",
         createdBy: owner.id,
       }),
     ).rejects.toThrow("invalid_accrual_date");
   });
 
-  it("treats a whitespace-only accrual date as today rather than crashing", async () => {
+  it("treats a whitespace-only accrual date as absent (the month's default date) rather than crashing", async () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       accrualDate: "   ",
       createdBy: owner.id,
     });
@@ -286,7 +331,7 @@ describe("accruePayroll", () => {
       payrollService.accruePayroll({
         businessId: biz.id,
         locationId: null,
-        periodLabel: "مرداد",
+        periodKey: "1404-05",
         accrualDate: "2025-02-31",
         createdBy: owner.id,
       }),
@@ -310,7 +355,7 @@ describe("accruePayroll", () => {
       payrollService.accruePayroll({
         businessId: biz.id,
         locationId: null,
-        periodLabel: "فروردین",
+        periodKey: "1404-01",
         accrualDate: farvardin.startsOn,
         createdBy: owner.id,
       }),
@@ -323,7 +368,7 @@ describe("payPayroll", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
 
@@ -372,7 +417,7 @@ describe("payPayroll", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
     await expect(
@@ -395,7 +440,7 @@ describe("payPayroll", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
     // 1120 has to exist for the bank path; the fixture's chart only has 1100.
@@ -444,7 +489,7 @@ describe("payPayroll", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
 
@@ -504,7 +549,7 @@ describe("payPayroll", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
     await payrollService.payPayroll({ businessId: biz.id, locationId: null, runId: run.id, method: "cash", actorId: owner.id });
@@ -518,7 +563,7 @@ describe("payPayroll", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
     const paid = await payrollService.payPayroll({
@@ -546,7 +591,7 @@ describe("voidPayrollRun", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       accrualDate: "2025-05-20",
       createdBy: owner.id,
     });
@@ -585,7 +630,7 @@ describe("voidPayrollRun", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
     await payrollService.payPayroll({ businessId: biz.id, locationId: null, runId: run.id, method: "cash", actorId: owner.id });
@@ -624,7 +669,7 @@ describe("voidPayrollRun", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
     await payrollService.voidPayrollRun({ businessId: biz.id, locationId: null, runId: run.id, actorId: owner.id });
@@ -653,7 +698,7 @@ describe("voidPayrollRun", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
 
@@ -688,7 +733,7 @@ describe("voidPayrollRun", () => {
     const run = await payrollService.accruePayroll({
       businessId: biz.id,
       locationId: null,
-      periodLabel: "مرداد",
+      periodKey: "1404-05",
       createdBy: owner.id,
     });
     await payrollService.voidPayrollRun({ businessId: biz.id, locationId: null, runId: run.id, actorId: owner.id });
@@ -736,7 +781,7 @@ describe("payroll for a business that is not a café", () => {
       const run = await payrollService.accruePayroll({
         businessId,
         locationId: null,
-        periodLabel: "مرداد ۱۴۰۴",
+        periodKey: "1404-05",
         createdBy: null,
       });
       expect(run.totalAmount).toBe(25_000_000);
@@ -756,4 +801,262 @@ describe("payroll for a business that is not a café", () => {
       expect(Number(rows.find((r) => r.code === "2300")!.credit)).toBe(25_000_000);
     },
   );
+});
+
+/**
+ * Audit F11 — gross-to-net. The rates are the business's own (nothing
+ * statutory is assumed); these are fixture values. Seeded from the real chart
+ * so the accounts a run posts to are the ones every business is given.
+ */
+describe("gross-to-net payroll (audit F11)", () => {
+  const SETTINGS = {
+    employeeInsurancePercent: 7,
+    employerInsurancePercent: 20,
+    unemploymentInsurancePercent: 3,
+    insuranceCeilingRial: null,
+    nonTaxableAllowancesInsurable: false,
+    deductEmployeeInsuranceFromTaxable: true,
+    taxExemptThresholdRial: 100_000_000,
+    taxBrackets: [
+      { upToRial: 140_000_000, ratePercent: 10 },
+      { upToRial: 230_000_000, ratePercent: 15 },
+      { upToRial: null, ratePercent: 20 },
+    ],
+  };
+  const full = { id: "", a: "", b: "", owner: "" };
+
+  async function linesByCode(
+    businessId: string,
+    sourceType: string,
+  ): Promise<Record<string, { debit: number; credit: number }>> {
+    const { rows } = await db.query<{ code: string; debit: string; credit: string }>(
+      `SELECT a.code, SUM(jl.debit)::text AS debit, SUM(jl.credit)::text AS credit
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN accounts a ON a.id = jl.account_id
+        WHERE je.business_id = $1 AND je.source_type = $2
+        GROUP BY a.code ORDER BY a.code`,
+      [businessId, sourceType],
+    );
+    return Object.fromEntries(rows.map((r) => [r.code, { debit: Number(r.debit), credit: Number(r.credit) }]));
+  }
+
+  async function outstanding(userId: string): Promise<number> {
+    return (await payrollService.listStaffWages(full.id)).find((s) => s.id === userId)!.advanceOutstanding;
+  }
+
+  beforeEach(async () => {
+    const bizRow = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug, industry) VALUES ('G2N Co', $1, 'food_service') RETURNING id",
+      [`g2n-${randomUUID().slice(0, 8)}`],
+    );
+    full.id = bizRow.rows[0].id;
+    const client = await dbLib.getPool().connect();
+    try {
+      await provisioning.seedChartOfAccounts(client, full.id, "food_service");
+    } finally {
+      client.release();
+    }
+    const people = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, pin_hash, monthly_wage)
+       VALUES ($1, 'owner', 'Owner', 'x', NULL), ($1, 'cashier', 'A', 'x', 200000000), ($1, 'waiter', 'B', 'x', 120000000)
+       RETURNING id`,
+      [full.id],
+    );
+    [full.owner, full.a, full.b] = people.rows.map((r) => r.id);
+  });
+
+  it("with no settings entered, posts gross = net and no deduction", async () => {
+    const run = await payrollService.accruePayroll({
+      businessId: full.id,
+      locationId: null,
+      periodKey: "1404-05",
+      createdBy: full.owner,
+    });
+    expect(run.totalAmount).toBe(320_000_000);
+    expect(run.netAmount).toBe(320_000_000);
+    for (const line of run.lines) {
+      expect(line.netPayRial).toBe(line.grossRial);
+      expect(line.employeeInsuranceRial + line.employerInsuranceRial + line.incomeTaxRial).toBe(0);
+    }
+    expect(await linesByCode(full.id, "payroll_accrual")).toEqual({
+      "2300": { debit: 0, credit: 320_000_000 },
+      "5200": { debit: 320_000_000, credit: 0 },
+    });
+  });
+
+  it("saves the settings, computes every line and posts a balanced accrual to the Rial", async () => {
+    await payrollService.savePayrollSettings(full.id, SETTINGS);
+    expect(await payrollService.getPayrollSettings(full.id)).toEqual(SETTINGS);
+    await payrollService.setStaffPayTerms(full.id, full.a, {
+      taxableAllowance: 30_000_000,
+      nonTaxableAllowance: 15_000_000,
+      fixedDeduction: 2_000_000,
+    });
+    const advance = await payrollService.recordAdvance({
+      businessId: full.id,
+      locationId: null,
+      userId: full.a,
+      amount: 5_000_000,
+      method: "cash",
+      advanceDate: "2025-08-01",
+      createdBy: full.owner,
+    });
+    expect(advance.status).toBe("active");
+    expect(await linesByCode(full.id, "payroll_advance")).toEqual({
+      "1100": { debit: 0, credit: 5_000_000 },
+      "1260": { debit: 5_000_000, credit: 0 },
+    });
+    expect(await outstanding(full.a)).toBe(5_000_000);
+
+    const run = await payrollService.accruePayroll({
+      businessId: full.id,
+      locationId: null,
+      periodKey: "1404-05",
+      overtime: { [full.a]: 10_000_000 },
+      createdBy: full.owner,
+    });
+
+    expect(run.lines.find((l) => l.userId === full.a)).toMatchObject({
+      grossRial: 255_000_000,
+      insuranceBaseRial: 240_000_000,
+      employeeInsuranceRial: 16_800_000,
+      employerInsuranceRial: 48_000_000,
+      unemploymentInsuranceRial: 7_200_000,
+      taxableIncomeRial: 223_200_000,
+      incomeTaxRial: 16_480_000,
+      otherDeductionsRial: 2_000_000,
+      advanceRecoveryRial: 5_000_000,
+      netPayRial: 214_720_000,
+    });
+    expect(run.lines.find((l) => l.userId === full.b)).toMatchObject({
+      grossRial: 120_000_000,
+      employeeInsuranceRial: 8_400_000,
+      employerInsuranceRial: 24_000_000,
+      unemploymentInsuranceRial: 3_600_000,
+      incomeTaxRial: 1_160_000,
+      netPayRial: 110_440_000,
+    });
+    expect(run.totalAmount).toBe(375_000_000);
+    expect(run.netAmount).toBe(325_160_000);
+
+    const accrual = await linesByCode(full.id, "payroll_accrual");
+    expect(accrual).toEqual({
+      "1260": { debit: 0, credit: 5_000_000 },
+      "2300": { debit: 0, credit: 325_160_000 },
+      "2460": { debit: 0, credit: 108_000_000 },
+      "2470": { debit: 0, credit: 17_640_000 },
+      "2490": { debit: 0, credit: 2_000_000 },
+      "5200": { debit: 375_000_000, credit: 0 },
+      "5220": { debit: 82_800_000, credit: 0 },
+    });
+    const debits = Object.values(accrual).reduce((s, l) => s + l.debit, 0);
+    const credits = Object.values(accrual).reduce((s, l) => s + l.credit, 0);
+    expect(debits).toBe(credits);
+
+    // The advance is recovered: nothing is owed any more, and it cannot be voided.
+    expect(await outstanding(full.a)).toBe(0);
+    await expect(
+      payrollService.voidAdvance({ businessId: full.id, locationId: null, advanceId: advance.id, actorId: full.owner }),
+    ).rejects.toThrow("advance_already_recovered");
+
+    // Paying the run moves the net only; the withholdings stay in their payables.
+    await payrollService.payPayroll({
+      businessId: full.id,
+      locationId: null,
+      runId: run.id,
+      method: "cash",
+      actorId: full.owner,
+    });
+    expect(await linesByCode(full.id, "payroll_payment")).toEqual({
+      "1100": { debit: 0, credit: 325_160_000 },
+      "2300": { debit: 325_160_000, credit: 0 },
+    });
+
+    // Voiding the run gives the recovery back.
+    await payrollService.voidPayrollRun({ businessId: full.id, locationId: null, runId: run.id, actorId: full.owner });
+    expect(await outstanding(full.a)).toBe(5_000_000);
+  });
+
+  it("caps the insurance base at the ceiling the business entered", async () => {
+    await payrollService.savePayrollSettings(full.id, { ...SETTINGS, insuranceCeilingRial: 150_000_000 });
+    const run = await payrollService.accruePayroll({
+      businessId: full.id,
+      locationId: null,
+      periodKey: "1404-05",
+      createdBy: full.owner,
+    });
+    const a = run.lines.find((l) => l.userId === full.a)!;
+    expect(a.insuranceBaseRial).toBe(150_000_000);
+    expect(a.employeeInsuranceRial).toBe(10_500_000);
+  });
+
+  it("recovers an advance larger than the month's pay in part and carries the rest", async () => {
+    await payrollService.recordAdvance({
+      businessId: full.id,
+      locationId: null,
+      userId: full.b,
+      amount: 150_000_000,
+      method: "cash",
+      createdBy: full.owner,
+    });
+    const run = await payrollService.accruePayroll({
+      businessId: full.id,
+      locationId: null,
+      periodKey: "1404-05",
+      createdBy: full.owner,
+    });
+    const b = run.lines.find((l) => l.userId === full.b)!;
+    expect(b.advanceRecoveryRial).toBe(120_000_000);
+    expect(b.netPayRial).toBe(0);
+    expect(await outstanding(full.b)).toBe(30_000_000);
+  });
+
+  it("voids an advance that has not been recovered, mirroring its entry", async () => {
+    const advance = await payrollService.recordAdvance({
+      businessId: full.id,
+      locationId: null,
+      userId: full.a,
+      amount: 4_000_000,
+      method: "cash",
+      createdBy: full.owner,
+    });
+    const voided = await payrollService.voidAdvance({
+      businessId: full.id,
+      locationId: null,
+      advanceId: advance.id,
+      actorId: full.owner,
+    });
+    expect(voided.status).toBe("voided");
+    const { rows } = await db.query<{ net: string }>(
+      `SELECT (SUM(jl.debit) - SUM(jl.credit))::text AS net
+         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+        WHERE je.business_id = $1 GROUP BY jl.account_id`,
+      [full.id],
+    );
+    for (const r of rows) expect(Number(r.net)).toBe(0);
+    expect(await outstanding(full.a)).toBe(0);
+  });
+
+  it("refuses invalid settings without saving them", async () => {
+    await expect(
+      payrollService.savePayrollSettings(full.id, { taxBrackets: [{ upToRial: 100, ratePercent: 10 }] }),
+    ).rejects.toThrow("last_bracket_must_be_open");
+    expect(await payrollService.getPayrollSettings(full.id)).toMatchObject({
+      taxBrackets: [],
+      employeeInsurancePercent: null,
+    });
+  });
+
+  it("refuses overtime for someone who is not on the run", async () => {
+    await expect(
+      payrollService.accruePayroll({
+        businessId: full.id,
+        locationId: null,
+        periodKey: "1404-05",
+        overtime: { [full.owner]: 1_000 },
+        createdBy: full.owner,
+      }),
+    ).rejects.toThrow("invalid_overtime");
+  });
 });

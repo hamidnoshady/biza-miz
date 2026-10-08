@@ -27,6 +27,7 @@ import {
 } from "@/lib/product-list";
 import { api, errorMessage, Field, inputClass } from "../ui";
 import { cn } from "@/lib/utils";
+import { itemSourceLabel } from "@/lib/item-source";
 import {
   EmptyState,
   KpiCard,
@@ -65,6 +66,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
   const [panelFor, setPanelFor] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const money = useMoney();
 
   const load = useCallback(() => {
     setLoadError(false);
@@ -122,7 +124,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
 
   function downloadCsv() {
     if (!filtered) return;
-    const blob = new Blob([buildProductsCsv(filtered)], { type: "text/csv;charset=utf-8" });
+    const blob = new Blob([buildProductsCsv(filtered, money.unit)], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -398,6 +400,7 @@ function ProductRow({
   const isFamily = isVariantParent(item);
   const status = productStatus(item);
   const inStock = status === "in_stock";
+  const sourceLabel = itemSourceLabel(item.source);
   return (
     <>
       {/* The amber "selected" wash ties the expanded panel to its row. */}
@@ -411,9 +414,18 @@ function ProductRow({
           */}
           <div className="min-w-0">
             <span className="block font-medium text-foreground">{item.name}</span>
-            {!isFamily && (item.parentName || item.attributes.length > 0) ? (
+            {(!isFamily && (item.parentName || item.attributes.length > 0)) || sourceLabel ? (
               <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
-                {item.parentName ? (
+                {/*
+                  Audit F13 — provenance: which integration owns this row.
+                  Two rows with one name and SKU are told apart here.
+                */}
+                {sourceLabel ? (
+                  <span className="text-[11px] text-muted-foreground" title="منبع این ردیف">
+                    {sourceLabel}
+                  </span>
+                ) : null}
+                {!isFamily && item.parentName ? (
                   <span className="text-xs text-muted-foreground">{item.parentName}</span>
                 ) : null}
                 {item.attributes.map((attribute) => (

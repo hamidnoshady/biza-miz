@@ -112,7 +112,10 @@ export interface AgedItem extends OpenItem {
  * allocation), so oldest-first is the standard, deterministic stand-in.
  */
 export function ageOpenItems(items: OpenItem[], payments: Payment[], asOfDate: string): AgedItem[] {
-  const sorted = [...items].sort((a, b) => a.date.localeCompare(b.date));
+  // Journal lines can share an accounting date. Use their stable source id as
+  // a final key so FIFO allocation matches the deterministic order returned by
+  // both subledger statements across requests.
+  const sorted = [...items].sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
   let pool = payments.reduce((sum, p) => sum + p.amount, 0);
   const asOfMs = Date.parse(asOfDate);
 

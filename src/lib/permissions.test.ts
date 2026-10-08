@@ -71,6 +71,37 @@ describe("role presets", () => {
     expect(hasPermission("waiter", null, PERMISSIONS.partiesManage)).toBe(false);
   });
 
+  it("separates reading the journal from reversing a document in it (issue #821)", () => {
+    // «برگشت سند» posts a new permanent accounting document, so it is gated on
+    // ledger.approve while the journal itself is only ledger.view. The gap
+    // between those two is the whole defect: the manager below may open
+    // /accounting/entries and must never be offered the reversal action there.
+    for (const role of ["owner", "accountant"] as const) {
+      const set = new Set(roleBasePermissions(role));
+      expect(set.has(PERMISSIONS.ledgerView), role).toBe(true);
+      expect(set.has(PERMISSIONS.ledgerApprove), role).toBe(true);
+    }
+
+    const manager = new Set(roleBasePermissions("manager"));
+    expect(manager.has(PERMISSIONS.ledgerView)).toBe(true);
+    expect(manager.has(PERMISSIONS.ledgerApprove)).toBe(false);
+
+    // A view-only role on the floor cannot even see the book.
+    const cashier = new Set(roleBasePermissions("cashier"));
+    expect(cashier.has(PERMISSIONS.ledgerApprove)).toBe(false);
+
+    // And approval is delegatable: an owner may hand it to that manager
+    // deliberately, which is a decision, not an accident of the UI.
+    expect(hasPermission("manager", { granted: [PERMISSIONS.ledgerApprove] }, PERMISSIONS.ledgerApprove)).toBe(
+      true,
+    );
+    expect(
+      effectivePermissions("accountant", { revoked: [PERMISSIONS.ledgerApprove] }).has(
+        PERMISSIONS.ledgerApprove,
+      ),
+    ).toBe(false);
+  });
+
   it("does not let any non-owner role manage the team by default", () => {
     for (const role of ["manager", "accountant", "cashier", "waiter", "kitchen"] as const) {
       expect(hasPermission(role, null, PERMISSIONS.teamManage)).toBe(false);
@@ -84,6 +115,12 @@ describe("per-member overrides", () => {
     const permissions = effectivePermissions("manager", { revoked: [PERMISSIONS.inventoryView] });
     expect(permissions.has(PERMISSIONS.inventoryView)).toBe(false);
     expect(permissions.has(PERMISSIONS.inventoryAdjust)).toBe(false);
+  });
+
+  it("does not grant payment-reversal approval with ordinary payable management", () => {
+    const permissions = effectivePermissions("cashier", { granted: [PERMISSIONS.financePayablesManage] });
+    expect(permissions.has(PERMISSIONS.financePayablesManage)).toBe(true);
+    expect(permissions.has(PERMISSIONS.ledgerApprove)).toBe(false);
   });
 
   it("grants a capability the role preset does not include", () => {

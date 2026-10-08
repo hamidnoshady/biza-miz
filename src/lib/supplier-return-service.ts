@@ -4,7 +4,8 @@ import {
   positiveQuantityText, proportionalDepletionValue, quantityText, rialBigInt, rialText,
   subtractQuantity, type QuantityText, type RialText,
 } from "./inventory-exact";
-import { postExactOperationalInventoryEntry } from "./ledger-service";
+import { postExactSupplierReturnEntry } from "./ledger-service";
+import { supplierReturnVatReversal } from "./payables-input";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { getCostingMethod, getInventorySystem } from "./inventory-service";
 import { appendSyncOutboxEvent } from "./sync-outbox";
@@ -20,8 +21,8 @@ export async function createSupplierReturn(client:PoolClient,params:{
   "SELECT id,total_value_rial::text FROM supplier_returns WHERE business_id=$1 AND idempotency_key=$2",
   [params.businessId,params.idempotencyKey]);
  if(prior[0])return{id:prior[0].id,value:rialText(prior[0].total_value_rial),duplicate:true};
- const {rows:purchases}=await client.query<{id:string}>(
-  "SELECT id FROM purchases WHERE id=$1 AND location_id=$2 AND status='received' FOR UPDATE",
+ const {rows:purchases}=await client.query<{id:string;total:string;vat_amount:string}>(
+  "SELECT id,total::text,vat_amount::text FROM purchases WHERE id=$1 AND location_id=$2 AND status='received' FOR UPDATE",
   [params.purchaseId,params.locationId]);
  if(!purchases[0])throw new Error("received_purchase_not_found");
  const {rows:headers}=await client.query<{id:string}>(
@@ -118,10 +119,29 @@ export async function createSupplierReturn(client:PoolClient,params:{
  const debitCode=params.settlementMethod==="cash"?WELL_KNOWN_CODES.cash:
   params.settlementMethod==="bank"?WELL_KNOWN_CODES.bankClearing:
   params.settlementMethod==="supplier_receivable"?WELL_KNOWN_CODES.supplierReceivable:WELL_KNOWN_CODES.accountsPayable;
- await postExactOperationalInventoryEntry(client,{businessId:params.businessId,locationId:params.locationId,
-  sourceType:"supplier_return",sourceId:headers[0].id,postingKind:"supplier_return",memo:"Supplier return",
-  createdBy:params.createdBy,inventoryEventId:events[0].id,debitCode,creditCode:WELL_KNOWN_CODES.inventory,
-  amount:rialText(total.toString())});
+ // Audit F11 — the purchase's input VAT comes back with the goods, in
+ // proportion, allocated cumulatively so returns that add up to the whole
+ // purchase reverse exactly the whole VAT. What earlier returns reversed is
+ // read from the ledger (their 1220 credits), never a second running total;
+ // the purchase row lock above serialises concurrent returns.
+ let vat=0n;
+ if(BigInt(purchases[0].vat_amount)>0n){
+  const {rows:prior}=await client.query<{goods:string;vat:string}>(
+   `SELECT (SELECT COALESCE(sum(r.total_value_rial),0) FROM supplier_returns r
+             WHERE r.purchase_id=$1 AND r.id<>$2)::text goods,
+           (SELECT COALESCE(sum(jl.credit),0) FROM journal_lines jl
+              JOIN journal_entries je ON je.id=jl.entry_id
+              JOIN accounts a ON a.id=jl.account_id
+              JOIN supplier_returns r ON r.id=je.source_id
+             WHERE je.source_type='supplier_return' AND r.purchase_id=$1 AND r.id<>$2
+               AND je.business_id=$3 AND a.code=$4)::text vat`,
+   [params.purchaseId,headers[0].id,params.businessId,WELL_KNOWN_CODES.vatReceivable]);
+  vat=supplierReturnVatReversal({purchaseVat:purchases[0].vat_amount,purchaseGoods:purchases[0].total,
+   priorReturnedGoods:prior[0].goods,returnedGoods:total,priorReversedVat:prior[0].vat});
+ }
+ await postExactSupplierReturnEntry(client,{businessId:params.businessId,locationId:params.locationId,
+  supplierReturnId:headers[0].id,createdBy:params.createdBy,inventoryEventId:events[0].id,debitCode,
+  goods:rialText(total.toString()),vat:rialText(vat.toString())});
  await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1",[events[0].id]);
  if(params.sync)await appendSyncOutboxEvent(client,{
   locationId:params.locationId,clientEventId:params.sync.clientEventId??params.idempotencyKey,

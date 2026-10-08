@@ -122,7 +122,7 @@ describe("perpetual-only instruments refuse a periodic business", () => {
   it("createSupplierReturn — a journal-only purchase is returned by manual credit note, not by lots", async () => {
     const { client } = scriptedClient((sql) => {
       if (sql.includes("SELECT id,total_value_rial")) return []; // no duplicate
-      if (sql.includes("SELECT id FROM purchases")) return [{ id: "purchase-1" }];
+      if (sql.includes("FROM purchases WHERE id=$1")) return [{ id: "purchase-1", total: "1000", vat_amount: "0" }];
       if (sql.includes("INSERT INTO supplier_returns")) return [{ id: "sr-1" }];
       if (sql.includes("INSERT INTO inventory_events")) return [{ id: "event-1" }];
       if (sql.includes("FROM settings")) return [{ value: PERIODIC_COSTING }];

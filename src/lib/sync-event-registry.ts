@@ -74,6 +74,17 @@ export const SYNC_EVENT_REGISTRY = [
   { type: "order.payment.completed", schemaVersion: 1, handler: "order.payment.completed", permission: PAYMENT_PERMISSION, effectClass: "payment", locationRule: "event_location", dependencyErrors: ["order_not_found", "order_not_open", "customer_not_found"], payloadFields: ["orderId", "method", "reference", "customerId", "tipAmount", "businessDate"] },
   { type: "order.payment.completed", schemaVersion: 2, handler: "order.payment.completed.v2", permission: PAYMENT_PERMISSION, effectClass: "payment", locationRule: "event_location", dependencyErrors: ["order_not_found", "order_not_open", "customer_not_found", "customer_required"], payloadFields: ["orderId", "tenders", "customerId", "tipAmount", "businessDate", "entryDate"] },
   { type: "order.customer_return.created", schemaVersion: 1, handler: "order.customer_return.created", permission: REFUND_PERMISSION, effectClass: "refund", locationRule: "event_location", dependencyErrors: ["completed_order_not_found", "order_item_not_found", "historical_cogs_unavailable"], payloadFields: ["orderId", "refundMethod", "refundAmount", "reason", "lines"] },
+  // The cloud owns the ledger (Phase 45; the one authority model, shared with
+  // data-ownership.ts and replication-catalogue.ts). A site reversing a manual
+  // entry sends this event *up*; the cloud applies it and a desktop
+  // acknowledges it on the way down rather than re-applying. The draft →
+  // approve → reject workflow has no events of its own on purpose — it is
+  // cloud-only, not replicated state.
+  //
+  // `locationRule: "event_location"` is honoured by the emitter: the event is
+  // tagged with the *reversed entry's* branch, not the caller's current one, so
+  // reversing branch A's document from branch B cannot deliver a branch-A
+  // ledger effect inside a branch-B envelope.
   { type: "accounting.manual_journal.reversed", schemaVersion: 1, handler: "accounting.manual_journal.reversed", permission: "ledger.approve", effectClass: "journal_reversal", locationRule: "event_location", dependencyErrors: ["entry_not_found"], payloadFields: ["entryId", "memo", "entryDate"] },
 
   { type: "inventory.purchase.created", schemaVersion: 1, handler: "inventory.purchase.created", permission: INVENTORY_PERMISSION, effectClass: "inventory", locationRule: "event_location", dependencyErrors: ["supplier_not_found", "item_not_found"], payloadFields: ["purchaseId", "supplierId", "note", "purchaseDate", "items"] },

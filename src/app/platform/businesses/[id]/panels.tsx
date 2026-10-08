@@ -9,11 +9,12 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatPersianNumber } from "@/lib/digits";
 import { validateSubdomain } from "@/lib/slug";
 import { INDUSTRY_LABELS, type Industry } from "@/lib/industries";
+import { businessDestructivePhrase } from "@/lib/platform-admin";
 import {
   api,
   errorMessage,
@@ -28,7 +29,10 @@ import {
 } from "../../ui";
 import { IndustryPicker } from "../../industry-picker";
 import { industrySwitchCautions } from "@/lib/industries";
-import { useBusiness } from "./context";
+// `Business` is main's addition (#886's danger-zone work) and
+// `industrySwitchCautions` is this branch's (#839's industry-switch warning);
+// neither side's import replaces the other.
+import { useBusiness, type Business } from "./context";
 
 /**
  * Name + timezone. The workspace header shows who this is; this card is the
@@ -815,32 +819,185 @@ function SessionSummary({ grant }: { grant: Grant }) {
 }
 
 /**
- * Both reset and remove are immediate and irreversible with no other safety
- * net (no archive step, no grace window), so both are confirmed by typing
- * this same fixed phrase rather than the business's own (often Persian, so
- * tedious to retype exactly) slug. Must match `DESTRUCTIVE_CONFIRMATION_PHRASE`
- * in src/lib/platform-admin.ts, which the server actually enforces.
+ * The danger zone (issue #822). Two very different actions with one shared
+ * confirmation pattern:
+ *
+ *  - Reset and delete each demand their OWN target-specific typed phrase —
+ *    `RESET {slug}` vs `DELETE {slug}` — built by the same helper the server
+ *    validates (`businessDestructivePhrase`), so the literal exists in
+ *    exactly one place and a confirmation for one action or one tenant can
+ *    never authorize the other.
+ *  - No `window.confirm()`: each action opens a design-system dialog that
+ *    shows the exact business, the consequences (what is removed, what
+ *    survives), the typed confirmation, an explicit cancel, the loading
+ *    state, and any API error — one confirmation system, final button labels
+ *    we control.
+ *  - The protected platform-internal business never renders actionable
+ *    controls; the backend stays the final authority either way.
  */
-const CONFIRMATION_PHRASE = "delete-me";
+
+/** What the dialog shows about the target, so it can never be ambiguous. */
+function DestructiveTargetSummary({ business }: { business: Business }) {
+  const { rootDomain } = useBusiness();
+  return (
+    <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm">
+      <p>
+        <span className="text-muted-foreground">کسب‌وکار: </span>
+        <span className="font-semibold">{business.name}</span>
+      </p>
+      <p className="mt-1">
+        <span className="text-muted-foreground">شناسه: </span>
+        <span dir="ltr">{business.slug}</span>
+      </p>
+      <p className="mt-1">
+        <span className="text-muted-foreground">نشانی: </span>
+        <span dir="ltr">
+          {rootDomain ? `${business.subdomain}.${rootDomain}` : business.subdomain}
+        </span>
+      </p>
+    </div>
+  );
+}
+
+interface DestructiveDialogProps {
+  open: boolean;
+  onOpenChange: (next: boolean) => void;
+  busy: boolean;
+  title: string;
+  description: string;
+  /** The exact phrase that must be typed, e.g. `RESET cafe-alpha`. */
+  phrase: string;
+  removed: string[];
+  preserved: string[];
+  actionLabel: string;
+  busyLabel: string;
+  error: string | null;
+  business: Business;
+  onConfirm: (confirmation: string) => void;
+}
+
+function DestructiveBusinessDialog({
+  open,
+  onOpenChange,
+  busy,
+  title,
+  description,
+  phrase,
+  removed,
+  preserved,
+  actionLabel,
+  busyLabel,
+  error,
+  business,
+  onConfirm,
+}: DestructiveDialogProps) {
+  const [typed, setTyped] = useState("");
+  // A re-opened dialog always starts unconfirmed.
+  useEffect(() => {
+    if (open) setTyped("");
+  }, [open]);
+  const confirmed = typed.trim() === phrase;
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+
+        <DestructiveTargetSummary business={business} />
+
+        <div className="grid gap-3 text-sm sm:grid-cols-2">
+          <div className="rounded-lg border border-red-500/25 bg-red-500/8 p-3 text-red-900 dark:text-red-100">
+            <p className="font-semibold">از بین می‌رود</p>
+            <ul className="mt-2 list-disc space-y-1 ps-4 text-xs leading-5 text-red-900/80 dark:text-red-100/80">
+              {removed.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+          {preserved.length > 0 ? (
+            <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/8 p-3 text-emerald-900 dark:text-emerald-100">
+              <p className="font-semibold">باقی می‌ماند</p>
+              <ul className="mt-2 list-disc space-y-1 ps-4 text-xs leading-5 text-emerald-900/80 dark:text-emerald-100/80">
+                {preserved.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+
+        <Field label={`برای تأیید، عبارت زیر را دقیق وارد کنید: ${phrase}`}>
+          <input
+            dir="ltr"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            className={inputClass}
+            placeholder={phrase}
+            autoComplete="off"
+            disabled={busy}
+            aria-label="عبارت تأیید"
+          />
+        </Field>
+
+        <ErrorBox>{error}</ErrorBox>
+
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+            انصراف
+          </Button>
+          <Button variant="danger" onClick={() => onConfirm(typed.trim())} disabled={busy || !confirmed}>
+            {busy ? busyLabel : actionLabel}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** The reset scope, worded exactly as `resetBusiness` implements it. */
+const RESET_REMOVED = [
+  "سفارش‌ها، مراجوعی‌ها و تاریخچهٔ فروش",
+  "حسابداری: اسناد، حساب‌ها، مغایرت‌گیری بانکی، دریافتنی/پرداختنی، هزینه‌ها و حقوق",
+  "انبار: کالاها، موجودی، انتقال‌ها، قطع موجودی و شمارش‌ها",
+  "منو/کالاها و دسته‌بندی‌ها",
+  "همهٔ شعبه‌ها — با یک شعبهٔ پیش‌فرض جدید جایگزین می‌شوند",
+  "کارکنان و همهٔ عضویت‌ها — فقط عضویت مالک دوباره ساخته می‌شود",
+  "تنظیمات و پیشرفت ویزارد راه‌اندازی",
+  "بازنویسی‌های پرچم ویژگی",
+  "داده‌های طرف‌حساب/CRM داخل این کسب‌وکار",
+  "داده‌های عملیاتی وب‌سایت و پیکربندی همگام‌سازی",
+  "هوش مصنوعی: گفت‌وگوها، حافظه، پروژه‌ها و خودکارسازی‌ها",
+  "تیکت‌های پشتیبانی، اعلان‌ها و کمپین‌ها",
+  "جفت‌شدن دستگاه‌ها، کدهای اتصال، کلیدهای API و وب‌هوک‌ها",
+];
+
+const RESET_PRESERVED = [
+  "اشتراک و پلن",
+  "موجودی کیف پول و تاریخچهٔ تراکنش‌های آن",
+  "فاکتورها، پرداخت‌ها و تعدیلات صورتحساب",
+  "حق‌امتیزها و مصرف قابلیت‌ها",
+  "سیاست هزینه و بازنویسی‌های تجاری",
+  "اشتراک و هزینه‌های سرویس وب‌سایت",
+  "نگاشت این کسب‌وکار در CRM/حسابداری شرکت سکو (در صورت وجود)",
+  "وضعیت کسب‌وکار — بازنشانی کسب‌وکار معلق یا بایگانی را فعال نمی‌کند",
+  "نام، شناسه، زیردامنه، نوع، منطقهٔ زمانی و تاریخ ایجاد",
+  "هویت سراسری مالک — ورود، رمز و ورود دومرحله‌ای",
+];
 
 export function ResetPanel() {
   const { business, reload, setNotice } = useBusiness();
   const can = useCan();
-  const [confirmation, setConfirmation] = useState("");
+  const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   if (!business || !can("business.reset")) return null;
+  if (business.ownershipKind === "platform_internal") return null;
 
-  async function reset() {
-    if (
-      !window.confirm(
-        `همهٔ داده‌های «${business!.name}» حذف شود و کسب‌وکار از ابتدا راه‌اندازی شود؟ این عمل برگشت‌ناپذیر است.`,
-      )
-    ) {
-      return;
-    }
-
+  async function confirmReset(confirmation: string) {
     setBusy(true);
     setError(null);
     const { ok, data } = await api<{ error?: string }>(`/api/platform/businesses/${business!.id}`, {
@@ -849,8 +1006,10 @@ export function ResetPanel() {
     });
     setBusy(false);
     if (ok) {
-      setConfirmation("");
-      setNotice("داده‌های کسب‌وکار پاک شد. مالک باید دوباره وارد شود و راه‌اندازی اولیه را انجام دهد.");
+      setOpen(false);
+      setNotice(
+        "داده‌های عملیاتی کسب‌وکار پاک شد؛ اشتراک، کیف پول و فاکتورها باقی ماندند. مالک باید دوباره وارد شود و راه‌اندازی اولیه را انجام دهد.",
+      );
       void reload();
     } else {
       setError(errorMessage(data.error));
@@ -858,55 +1017,62 @@ export function ResetPanel() {
   }
 
   return (
-    <Card title="ریست کامل داده‌ها">
-      <ErrorBox>{error}</ErrorBox>
+    <Card title="بازنشانی کسب‌وکار">
       <div className="rounded-lg border border-red-500/25 bg-red-500/8 p-3 text-sm text-red-900 dark:text-red-100">
-        <p className="font-semibold">همهٔ داده‌های این کسب‌وکار حذف می‌شوند.</p>
+        <p className="font-semibold">داده‌های عملیاتی پاک می‌شوند؛ سوابق تجاری باقی می‌مانند.</p>
         <p className="mt-1 text-red-900/70 dark:text-red-100/70">
-          سفارش‌ها، انبار، حسابداری، تنظیمات، شعبه‌ها، کاربران و دسترسی‌های ویژگی پاک می‌شوند. تنها
-          هویت سراسری مالک و پلن کسب‌وکار باقی می‌ماند تا راه‌اندازی از ابتدا انجام شود.
+          بازنشانی، کسب‌وکار را برای شروع مجدد آماده می‌کند: شعبه‌ها، کاربران، سفارش‌ها، انبار و
+          تنظیمات پاک می‌شوند، اما اشتراک، کیف پول، فاکتورها و هویت مالک دست‌نخورده می‌مانند و
+          وضعیت کسب‌وکار تغییر نمی‌کند.
         </p>
       </div>
       <div className="mt-4">
-        <Field label={`برای تأیید، عبارت زیر را دقیق وارد کنید: ${CONFIRMATION_PHRASE}`}>
-          <input
-            dir="ltr"
-            value={confirmation}
-            onChange={(e) => setConfirmation(e.target.value)}
-            className={inputClass}
-            placeholder={CONFIRMATION_PHRASE}
-            autoComplete="off"
-          />
-        </Field>
-        <Button
-          variant="danger"
-          onClick={reset}
-          disabled={busy || confirmation.trim() !== CONFIRMATION_PHRASE}
-          className="w-full sm:w-auto"
-        >
-          {busy ? "در حال ریست…" : "حذف داده‌ها و شروع مجدد"}
+        <Button variant="danger" onClick={() => setOpen(true)} className="w-full sm:w-auto">
+          بازنشانی و شروع مجدد
         </Button>
       </div>
+      <DestructiveBusinessDialog
+        open={open}
+        onOpenChange={setOpen}
+        busy={busy}
+        title="بازنشانی کسب‌وکار"
+        description={`کسب‌وکار «${business.name}» بازنشانی می‌شود: داده‌های عملیاتی پاک می‌شوند، سوابق تجاری باقی می‌مانند و مالک دوباره از راه‌اندازی اولیه شروع می‌کند.`}
+        phrase={businessDestructivePhrase("reset", business.slug)}
+        removed={RESET_REMOVED}
+        preserved={RESET_PRESERVED}
+        actionLabel="بازنشانی و شروع مجدد"
+        busyLabel="در حال بازنشانی…"
+        error={error}
+        business={business}
+        onConfirm={(confirmation) => void confirmReset(confirmation)}
+      />
     </Card>
   );
 }
 
+/** The hard-delete scope, worded exactly as `hardDeleteBusiness` implements it. */
+const DELETE_REMOVED = [
+  "رکورد کسب‌وکار برای همیشه حذف می‌شود — بدون بازگشت و بدون دورهٔ مهلت",
+  "همهٔ داده‌های عملیاتی (همان محدودهٔ بازنشانی)",
+  "سوابق تجاری هم حذف می‌شوند: اشتراک، کیف پول، فاکتورها و پرداخت‌ها",
+  "نگاشت این کسب‌وکار در شرکت سکو قطع می‌شود؛ خود رکورد مشتری در CRM باقی می‌ماند",
+  "عضویت کارکنان حذف می‌شود؛ هویت سراسری مالک هم اگر در کسب‌وکار دیگری عضویت نداشته باشد حذف می‌شود",
+];
+
+const DELETE_SURVIVES = ["فقط ردپای عملیات در گزارش حسابرسی سکو باقی می‌ماند"];
+
 export function RemovePanel() {
   const { business } = useBusiness();
   const can = useCan();
-  const [confirmation, setConfirmation] = useState("");
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   if (!business || !can("business.delete")) return null;
+  if (business.ownershipKind === "platform_internal") return null;
 
-  async function remove() {
-    if (
-      !window.confirm(`«${business!.name}» برای همیشه حذف شود؟ این عمل قطعی و بازگشت‌ناپذیر است.`)
-    ) {
-      return;
-    }
-
+  async function confirmRemove(confirmation: string) {
     setBusy(true);
     setError(null);
     const { ok, data } = await api<{ error?: string }>(`/api/platform/businesses/${business!.id}`, {
@@ -916,7 +1082,7 @@ export function RemovePanel() {
     if (ok) {
       // The business list is `/platform/businesses`; `/platform` is the console
       // home, and landing there after a delete reads as "nothing happened".
-      window.location.href = "/platform/businesses";
+      router.push("/platform/businesses");
       return;
     }
     setBusy(false);
@@ -924,35 +1090,35 @@ export function RemovePanel() {
   }
 
   return (
-    <Card title="حذف کسب‌وکار">
-      <ErrorBox>{error}</ErrorBox>
+    <Card title="حذف دائمی کسب‌وکار">
       <div className="rounded-lg border border-red-500/25 bg-red-500/8 p-3 text-sm text-red-900 dark:text-red-100">
         <p className="font-semibold">این کسب‌وکار برای همیشه حذف می‌شود.</p>
         <p className="mt-1 text-red-900/70 dark:text-red-100/70">
-          فوری و قطعی است — بدون بایگانی و بدون مهلت. همهٔ داده‌ها، کاربران، شعبه‌ها و اطلاعات
-          کسب‌وکار از بین می‌روند.
+          فوری و قطعی است — بدون بایگانی و بدون مهلت. برخلاف بازنشانی، سوابق تجاری (اشتراک، کیف پول
+          و فاکتورها) هم حذف می‌شوند و اگر هویت مالک در کسب‌وکار دیگری عضویت نداشته باشد، ورود
+          سراسری او نیز از بین می‌رود.
         </p>
       </div>
       <div className="mt-4">
-        <Field label={`برای تأیید، عبارت زیر را دقیق وارد کنید: ${CONFIRMATION_PHRASE}`}>
-          <input
-            dir="ltr"
-            value={confirmation}
-            onChange={(e) => setConfirmation(e.target.value)}
-            className={inputClass}
-            placeholder={CONFIRMATION_PHRASE}
-            autoComplete="off"
-          />
-        </Field>
-        <Button
-          variant="danger"
-          onClick={remove}
-          disabled={busy || confirmation.trim() !== CONFIRMATION_PHRASE}
-          className="w-full sm:w-auto"
-        >
-          {busy ? "در حال حذف…" : "حذف قطعی کسب‌وکار"}
+        <Button variant="danger" onClick={() => setOpen(true)} className="w-full sm:w-auto">
+          حذف دائمی کسب‌وکار
         </Button>
       </div>
+      <DestructiveBusinessDialog
+        open={open}
+        onOpenChange={setOpen}
+        busy={busy}
+        title="حذف دائمی کسب‌وکار"
+        description={`کسب‌وکار «${business.name}» به‌طور دائمی حذف می‌شود؛ این عمل فوری، قطعی و بازگشت‌ناپذیر است.`}
+        phrase={businessDestructivePhrase("delete", business.slug)}
+        removed={DELETE_REMOVED}
+        preserved={DELETE_SURVIVES}
+        actionLabel="حذف دائمی کسب‌وکار"
+        busyLabel="در حال حذف دائمی…"
+        error={error}
+        business={business}
+        onConfirm={(confirmation) => void confirmRemove(confirmation)}
+      />
     </Card>
   );
 }

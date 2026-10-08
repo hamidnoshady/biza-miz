@@ -17,12 +17,15 @@ export function ApStatementPanel({
   supplierId,
   supplierName,
   supplierPartyId,
+  supplierLocationName,
   onClose,
 }: {
   supplierId: string;
   supplierName: string;
   /** The party behind the branch alias — what a deep link into «اشخاص» is keyed by. Null for the unattributed bucket. */
   supplierPartyId: string | null;
+  /** Location context when opened from the business-wide party directory. */
+  supplierLocationName?: string | null;
   onClose: () => void;
 }) {
   return (
@@ -31,6 +34,7 @@ export function ApStatementPanel({
       id={supplierId}
       name={supplierName}
       partyId={supplierPartyId}
+      locationName={supplierLocationName}
       onClose={onClose}
     />
   );

@@ -5,7 +5,7 @@
  * stock/price pushes against the last-pushed value.
  */
 import type { PoolClient } from "pg";
-import { query } from "../db";
+import { getPool, query } from "../db";
 
 export type MappingEntityType =
   | "product"
@@ -178,4 +178,98 @@ export async function setLastPushedPayload(
       WHERE business_id = $1 AND connection_id = $2 AND entity_type = $3 AND remote_id = $4`,
     [businessId, connectionId, entityType, remoteId, JSON.stringify(payload)],
   );
+}
+
+/**
+ * Take the per-remote-identity lock on the caller's open transaction and
+ * return what the identity is mapped to *now* (dashboard audit F13).
+ *
+ * Creation used to be check-then-insert: read the mapping, find nothing,
+ * insert an item, then upsert the mapping with `DO UPDATE SET local_id`. Two
+ * deliveries of one new product — WooCommerce fires `product.created` and
+ * `product.updated` for a single save, and the plugin queue, the manual
+ * catalogue pull and an order's variation stub all reach the same code — both
+ * found nothing, both inserted, and the later upsert silently re-pointed the
+ * mapping at its own row. The first item stayed behind unmapped: the same
+ * name, the same SKU and a stock snapshot frozen at that instant.
+ *
+ * The UNIQUE (connection_id, entity_type, remote_id) index cannot stop that on
+ * its own, because the duplicate is the *item*, not the mapping. This lock is
+ * what serialises creation; it is released with the transaction.
+ */
+export async function lockRemoteIdentity(
+  client: PoolClient,
+  businessId: string,
+  connectionId: string,
+  entityType: MappingEntityType,
+  remoteId: string,
+): Promise<string | null> {
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+    `integration-identity:${connectionId}:${entityType}:${remoteId}`,
+  ]);
+  const { rows } = await client.query<{ local_id: string }>(
+    `SELECT local_id FROM integration_mappings
+      WHERE business_id = $1 AND connection_id = $2 AND entity_type = $3 AND remote_id = $4`,
+    [businessId, connectionId, entityType, remoteId],
+  );
+  return rows[0]?.local_id ?? null;
+}
+
+/**
+ * Insert a brand-new mapping on the caller's transaction, refusing to
+ * re-point an existing one. Used only after {@link lockRemoteIdentity} said
+ * the identity was unmapped; a conflict therefore means a writer that skipped
+ * the lock, and throwing (so the caller's item insert rolls back) is the only
+ * answer that cannot orphan a row.
+ */
+export async function insertNewMappingOnClient(
+  client: PoolClient,
+  businessId: string,
+  connectionId: string,
+  entityType: MappingEntityType,
+  remoteId: string,
+  localId: string,
+): Promise<void> {
+  const { rowCount } = await client.query(
+    `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (connection_id, entity_type, remote_id) DO NOTHING`,
+    [businessId, connectionId, entityType, remoteId, localId],
+  );
+  if (rowCount !== 1) throw new Error("mapping_conflict");
+}
+
+/**
+ * Create the local row for a remote identity exactly once.
+ *
+ * Runs `create` in its own transaction under {@link lockRemoteIdentity}. If
+ * another delivery mapped the identity first, nothing is created and its
+ * local id is returned with `created: false`, so the caller applies its
+ * payload as an update instead.
+ */
+export async function createForRemoteOnce(
+  businessId: string,
+  connectionId: string,
+  entityType: MappingEntityType,
+  remoteId: string,
+  create: (client: PoolClient) => Promise<string>,
+): Promise<{ created: boolean; localId: string }> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const mapped = await lockRemoteIdentity(client, businessId, connectionId, entityType, remoteId);
+    if (mapped) {
+      await client.query("COMMIT");
+      return { created: false, localId: mapped };
+    }
+    const localId = await create(client);
+    await insertNewMappingOnClient(client, businessId, connectionId, entityType, remoteId, localId);
+    await client.query("COMMIT");
+    return { created: true, localId };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 }

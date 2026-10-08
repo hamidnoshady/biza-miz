@@ -495,6 +495,13 @@ const ERROR_MESSAGES: Record<string, string> = {
       "بازیافت پیش‌پرداخت از ماندهٔ پیش‌پرداخت قرارداد بیشتر است؛ پیش‌پرداخت پرداخت‌شده را بررسی کنید.",
     supplier_required: "انتخاب تأمین‌کننده الزامی است.",
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
+    supplier_location_mismatch: "تأمین‌کننده به شعبهٔ دیگری تعلق دارد؛ شعبهٔ درست را انتخاب کنید.",
+    supplier_record_missing: "برای این شخص در شعبهٔ انتخاب‌شده، پروندهٔ تأمین‌کننده وجود ندارد.",
+    installment_location_required: "این برنامهٔ پرداختنی به شعبه مشخصی وابسته نیست و چند پروندهٔ تأمین‌کننده دارد؛ ابتدا شعبهٔ آن را تعیین کنید.",
+    idempotency_key_required: "شناسهٔ یکتای درخواست پرداخت معتبر نیست؛ فرم را تازه‌سازی و دوباره تلاش کنید.",
+    idempotency_conflict: "شناسهٔ درخواست قبلاً با جزئیات دیگری استفاده شده است؛ برای این پرداخت درخواست تازه‌ای بسازید.",
+    payment_not_found: "پرداخت موردنظر پیدا نشد.",
+    payment_not_reversible: "این پرداخت سند قابل برگشت ندارد یا از این مسیر قابل برگشت نیست.",
     // Phase 22 — fixed assets & depreciation
     fixed_asset_not_found: "دارایی ثابت پیدا نشد.",
     fixed_asset_has_depreciation: "برای این دارایی استهلاک ثبت شده و قابل حذف نیست.",
@@ -514,8 +521,14 @@ const ERROR_MESSAGES: Record<string, string> = {
     negative_statement_balance:
       "مانده صورتحساب صندوق یا کارت‌خوان نمی‌تواند منفی باشد؛ مانده پایانی را وارد کنید، نه گردش دوره.",
     journal_line_not_found: "سند انتخاب‌شده معتبر نیست.",
+    journal_line_required: "هیچ سندی انتخاب نشده است.",
     journal_line_already_reconciled: "این سند در یک تطبیق قفل‌شدهٔ دیگر ثبت شده و دوباره قابل تطبیق نیست.",
     balance_mismatch: "مانده محاسبه‌شده با مانده صورتحساب برابر نیست.",
+    // A future statement would lock the account against every real statement
+    // after it, so the server refuses it rather than warning about it.
+    statement_date_in_future:
+      "تاریخ صورتحساب نمی‌تواند در آینده باشد؛ تاریخ پایان صورتحسابی را وارد کنید که دریافت کرده‌اید.",
+    invalid_cursor: "نشانی صفحهٔ درخواستی معتبر نیست؛ فهرست را از نو بارگذاری کنید.",
     // Phase 17 — plan limits / feature gating
     feature_disabled: "این امکان برای کسب‌وکار شما فعال نیست.",
     branch_limit_exceeded: "به سقف تعداد شعبه در پلن فعلی رسیده‌اید. برای افزودن شعبهٔ بیشتر، پلن را ارتقا دهید.",
@@ -723,7 +736,6 @@ const ERROR_MESSAGES: Record<string, string> = {
     // screen's 404 needs a message here too — without it a wage saved against
     // a member who was just deactivated reported «خطای غیرمنتظره».
     user_not_found: "عضو موردنظر پیدا نشد.",
-    supplier_record_missing: "این شخص در فهرست تأمین‌کنندگان ثبت نشده است؛ ابتدا او را به‌عنوان تأمین‌کننده ثبت کنید.",
     installment_amount_too_small: "مبلغ هر قسط بسیار کم است؛ تعداد اقساط را کاهش دهید.",
     item_required: "قسط را انتخاب کنید.",
 };
@@ -824,19 +836,29 @@ export function PrimaryButton({
   );
 }
 
+/**
+ * The default is `type="button"` — and it is a default rather than an
+ * afterthought because every `<button>` inside a `<form>` submits that form
+ * unless something says otherwise. A secondary control («افزودن ردیف»,
+ * «انصراف», a pager) that a person reaches for while filling a form must never
+ * be the thing that files it; `type` is exposed so a caller can still ask for
+ * `submit` explicitly instead of relying on the browser's default.
+ */
 export function SecondaryButton({
   children,
   onClick,
   disabled,
   className,
+  type = "button",
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   disabled?: boolean;
   className?: string;
+  type?: "submit" | "button";
 }) {
   return (
-    <Button type="button" variant="outline" onClick={onClick} disabled={disabled} className={`px-4 ${className ?? ""}`}>
+    <Button type={type} variant="outline" onClick={onClick} disabled={disabled} className={`px-4 ${className ?? ""}`}>
       {children}
     </Button>
   );

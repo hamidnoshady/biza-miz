@@ -1209,12 +1209,18 @@ function ChequeToneTile({
     <div className={`rounded-xl border p-4 ${toneClass}`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs font-medium opacity-80">{label}</p>
+          {/*
+            Label and hint carry the tone's own colour at full strength. They
+            used to be faded to 70–80% opacity, which on these tinted cards
+            measured 2.6:1–3.5:1 (axe color-contrast) — 12px text a cashier
+            could not read on a bright screen.
+          */}
+          <p className="text-xs font-medium">{label}</p>
           <p className="mt-2 truncate text-sm font-bold leading-5 sm:text-base">
             {value}
           </p>
           {hint ? (
-            <p className="mt-1 text-xs opacity-70 leading-4">{hint}</p>
+            <p className="mt-1 text-xs leading-4">{hint}</p>
           ) : null}
         </div>
         <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg bg-card/70 text-foreground/70">
