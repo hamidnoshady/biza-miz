@@ -160,17 +160,82 @@ export async function listSettledOrdersInWindow(
   return rows;
 }
 
+/**
+ * The row shapes `getOrderDetail` reads. Money columns are `text`-typed here
+ * because that is what node-postgres hands back for `bigint`/`numeric` (see
+ * items-service.ts's note on `unit_cost`) — the printing loaders parse them
+ * with `Number()` exactly like every other reader of these columns.
+ */
+export interface OrderDetailOrder extends Record<string, unknown> {
+  id: string;
+  location_id: string;
+  /** bigint — a string from the driver on most installs, a number on some. */
+  order_number: string | number;
+  type: string;
+  status: string;
+  table_id: string | null;
+  table_name: string | null;
+  customer_id: string | null;
+  customer_name: string | null;
+  customer_phone: string | null;
+  guest_count: number | null;
+  subtotal: string;
+  discount: string;
+  discount_type: string | null;
+  discount_value: string | null;
+  service_charge: string;
+  tax: string;
+  total: string;
+  tip_amount: string;
+  note: string | null;
+  opened_by: string | null;
+  closed_by: string | null;
+  opened_at: Date;
+  closed_at: Date | null;
+  voided_reason: string | null;
+}
+
+export interface OrderDetailItem extends Record<string, unknown> {
+  id: string;
+  menu_item_id: string | null;
+  name_snapshot: string;
+  unit_price: string;
+  quantity: number;
+  status: string;
+  note: string | null;
+  void_reason: string | null;
+  created_at: Date;
+}
+
+export interface OrderDetailModifier extends Record<string, unknown> {
+  id: string;
+  order_item_id: string;
+  modifier_id: string | null;
+  name_snapshot: string;
+  price_delta: string;
+  quantity: number;
+}
+
+export interface OrderDetailPayment extends Record<string, unknown> {
+  id: string;
+  method: string;
+  amount: string;
+  reference: string | null;
+  received_at: Date;
+  payment_method_name: string | null;
+}
+
 export interface OrderDetail {
-  order: Record<string, unknown>;
-  items: Record<string, unknown>[];
-  modifiers: Record<string, unknown>[];
+  order: OrderDetailOrder;
+  items: OrderDetailItem[];
+  modifiers: OrderDetailModifier[];
   /** Tender snapshots are needed for an accurate reprint, especially for retail invoices. */
-  payments: Record<string, unknown>[];
+  payments: OrderDetailPayment[];
 }
 
 /** Fetches one order and its immutable line/modifier snapshots from one branch. */
 export async function getOrderDetail(locationId: string, id: string): Promise<OrderDetail | null> {
-  const { rows: orders } = await query<Record<string, unknown>>(
+  const { rows: orders } = await query<OrderDetailOrder>(
     "SELECT o.*, dt.name AS table_name, c.name AS customer_name, c.phone AS customer_phone " +
       "FROM orders o LEFT JOIN dining_tables dt ON dt.id = o.table_id " +
       "LEFT JOIN parties c ON c.id = o.customer_id " +
@@ -181,17 +246,17 @@ export async function getOrderDetail(locationId: string, id: string): Promise<Or
   if (!order) return null;
 
   const [{ rows: items }, { rows: modifiers }, { rows: payments }] = await Promise.all([
-    query(
+    query<OrderDetailItem>(
       "SELECT id, menu_item_id, name_snapshot, unit_price, quantity, status, note, void_reason, created_at FROM order_items WHERE order_id = $1 ORDER BY created_at",
       [id],
     ),
-    query(
+    query<OrderDetailModifier>(
       // modifier_id rides along so an open order's line can be re-opened in the
       // add-on picker with its current selection already ticked.
       "SELECT oim.id, oim.order_item_id, oim.modifier_id, oim.name_snapshot, oim.price_delta, oim.quantity FROM order_item_modifiers oim JOIN order_items oi ON oi.id = oim.order_item_id WHERE oi.order_id = $1",
       [id],
     ),
-    query(
+    query<OrderDetailPayment>(
       "SELECT p.id, p.method::text AS method, p.amount, p.reference, p.received_at, pm.name AS payment_method_name FROM payments p LEFT JOIN payment_methods pm ON pm.id = p.payment_method_id WHERE p.order_id = $1 ORDER BY p.received_at, p.id",
       [id],
     ),

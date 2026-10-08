@@ -28,6 +28,9 @@ export type PrinterErrorCode =
   | "job_timeout"
   | "template_invalid"
   | "template_not_found"
+  | "document_required"
+  | "document_not_found"
+  | "document_type_mismatch"
   | "printer_unavailable";
 
 /** Persian, human, non-technical — what the operator should do next. */
@@ -54,6 +57,13 @@ export const PRINTER_ERROR_MESSAGES: Record<PrinterErrorCode, string> = {
   job_timeout: "ارسال به چاپگر بیش از حد طول کشید.",
   template_invalid: "قالب چاپ قابل استفاده نیست.",
   template_not_found: "قالب چاپ انتخاب‌شده پیدا نشد؛ قوانین چاپ را بازخوانی کنید.",
+  // The three document codes only ever arrive from a client that is out of
+  // date (or hand-edited): since the printing audit the browser names a stored
+  // document instead of shipping one of its own. The wording therefore tells
+  // the operator the one thing that fixes it — reload the screen.
+  document_required: "این صفحه قدیمی است؛ یک‌بار تازه‌سازی کنید و دوباره چاپ کنید.",
+  document_not_found: "سند موردنظر برای چاپ در این شعبه پیدا نشد.",
+  document_type_mismatch: "نوع چاپ انتخاب‌شده با این سند هم‌خوان نیست.",
   printer_unavailable: "چاپگر تنظیم‌شدهٔ این سند الان در دسترس نیست؛ چاپگر را بررسی یا چاپگر جایگزین تعیین کنید.",
 };
 

@@ -6,73 +6,94 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 import { resolvePrintPlan, type PrintDocumentType } from "@/lib/printing/plan";
 import { preparePrint, printerRefusal, type PrintJob } from "@/lib/printing/render-service";
 import { printerTargetOf } from "@/lib/printing/types";
-import { isDocType } from "@/lib/printing/routing";
+import { defaultDocumentTypeFor, documentTypesFor, parsePrintRequest } from "@/lib/printing/document-request";
+import { loadPrintDocument } from "@/lib/printing/document-loader";
+import type { PrinterErrorCode } from "@/lib/printing/errors";
 
 /**
  * The one hardware print endpoint: resolve the print plan for the caller's
- * branch, render it to canonical bytes on the authenticated app server, and
- * hand them back for local delivery.
+ * branch, load the document the request names from this branch's own rows,
+ * render it to canonical bytes on the authenticated app server, and hand them
+ * back for local delivery.
  *
- * The request is an **intent**, not output. It carries a document type, an
- * optional printer/template id and the document's own data; it can NOT carry
- * rendered HTML. That restriction is the whole security model of this route:
- * the server renders in Chromium, so accepting a client's HTML would make
- * every `printingExecute` role able to point that browser — and therefore the
- * server's network position — anywhere it liked. With the request limited to
- * documents the pipeline itself builds, the render context can stay hostile
- * by default (see printing/chromium.ts).
+ * The request is an **intent**, not output, and it is not an assertion about
+ * the business either. It carries a document *reference* (an order id, a
+ * barcode's item) plus an optional printer/template id; the server loads the
+ * document, so the receipt a customer walks out with is built from the sale's
+ * rows and the label's bars point at the catalogue row they name:
  *
- * Nor can the request name hardware: printer and template ids are resolved
- * against the caller's active location, so a hand-edited body can neither
- * print through another branch's printer nor aim the server at an arbitrary
- * IP, queue or port. The response records exactly which template revision and
- * which printer (primary or fallback) produced the job.
+ *  - no `html` job type exists — the server renders in Chromium, and accepting
+ *    a client's markup would let every `printingExecute` role point that
+ *    browser, and therefore the server's network position, anywhere it liked
+ *    (see printing/chromium.ts);
+ *  - no `connection`/`target` in the body is read: printer and template ids
+ *    are resolved against the caller's active location, so a hand-edited body
+ *    can neither print through another branch's printer nor aim the server at
+ *    an arbitrary IP, queue or port — and a document reference from another
+ *    branch does not resolve either;
+ *  - no browser-built `ReceiptData`/`KitchenTicketData`/`LabelData` is
+ *    accepted any more (`document_required`): a price, a branch or a line a
+ *    client made up cannot reach paper.
+ *
+ * History is written for **every** attempt — the row is opened here, addressed
+ * by its own id, and closed here when the render itself fails; the browser
+ * closes it once the local spooler answers. `print_request_id` is the caller's
+ * correlation id, recorded for support, never a uniqueness key (migration
+ * 0213 explains why attempts must not collapse).
  */
 export const runtime = "nodejs";
 
-interface PrintRequestBody {
-  printerId?: string;
-  templateId?: string;
-  printRequestId?: string;
-  documentType?: string;
-  entityId?: string;
-  job?: {
-    type?: string;
-    receipt?: unknown;
-    ticket?: unknown;
-    label?: unknown;
-    kind?: unknown;
-  };
-}
+/**
+ * A request carries ids and a document reference — a few hundred bytes. The
+ * ceiling exists so the endpoint cannot be used as a general-purpose upload
+ * sink now that no document data travels through it at all.
+ */
+const MAX_BODY_BYTES = 16 * 1024;
 
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.printingExecute);
   if (error) return error;
 
-  let body: PrintRequestBody;
+  const declaredLength = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
+    return NextResponse.json({ ok: false, error: "bad_request" }, { status: 413 });
+  }
+
+  let body: unknown;
   try {
-    body = (await request.json()) as PrintRequestBody;
+    body = await request.json();
   } catch {
     return NextResponse.json({ ok: false, error: "bad_request" }, { status: 400 });
   }
 
+  const parsed = parsePrintRequest(body);
+  if (!parsed.ok) return NextResponse.json({ ok: false, error: parsed.error }, { status: parsed.status });
+
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ ok: false, error: "printer_not_configured" }, { status: 404 });
 
-  const job = parseJob(body.job);
-  if (!job) return NextResponse.json({ ok: false, error: "bad_request" }, { status: 400 });
+  const documentType: PrintDocumentType =
+    parsed.documentType ??
+    (parsed.source.kind === "document"
+      ? defaultDocumentTypeFor(parsed.source.document)
+      : parsed.source.job.type === "test"
+        ? parsed.source.job.kind
+        : // The drawer hangs off the receipt printer (ESC p), so its plan is
+          // the receipt plan — a caller does not have to say so.
+          "receipt");
 
-  const documentType = documentTypeOf(body, job);
-  if (!documentType) return NextResponse.json({ ok: false, error: "bad_request" }, { status: 400 });
-
-  const printerId = typeof body.printerId === "string" && body.printerId ? body.printerId : null;
-  const templateId = typeof body.templateId === "string" && body.templateId ? body.templateId : null;
+  // Refuse a document/type mismatch before the plan (and its queries) exist:
+  // a caller asking to print a kitchen ticket as a receipt has asked for a
+  // different document, not for a different printer.
+  if (parsed.source.kind === "document" && !documentTypesFor(parsed.source.document).includes(documentType)) {
+    return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
+  }
 
   const resolved = await resolvePrintPlan({
     locationId: location.id,
     documentType,
-    requestedPrinterId: printerId,
-    requestedTemplateId: templateId,
+    requestedPrinterId: parsed.printerId,
+    requestedTemplateId: parsed.templateId,
   });
   if (!resolved.ok) {
     const status = resolved.error === "printer_not_found" || resolved.error === "template_not_found" ? 404 : 409;
@@ -86,40 +107,47 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const target = printerTargetOf(plan.printer.connection);
   if (!target) return NextResponse.json({ ok: false, error: "reconnect_required" }, { status: 409 });
 
-  const requestId = typeof body.printRequestId === "string" ? body.printRequestId.slice(0, 80) : "";
-  const entityId = typeof body.entityId === "string" ? body.entityId.slice(0, 120) : null;
+  // The document itself: loaded from this branch's rows, or — for a test print
+  // and a drawer kick — the product's own sample, which carries no data.
+  let job: PrintJob;
+  let entityId: string | null;
+  let documentSource: string;
+  if (parsed.source.kind === "document") {
+    const loaded = await loadPrintDocument({
+      businessId: session.businessId,
+      locationId: location.id,
+      document: parsed.source.document,
+      documentType,
+    });
+    if (!loaded.ok) return NextResponse.json({ ok: false, error: loaded.error }, { status: loaded.status });
+    job = loaded.document.job;
+    entityId = loaded.document.entityId;
+    documentSource = loaded.document.source;
+  } else {
+    job = parsed.source.job;
+    entityId = null;
+    documentSource = "sample";
+  }
+
+  const jobId = await openJobRow({
+    locationId: location.id,
+    documentType,
+    entityId,
+    plan,
+    printRequestId: parsed.printRequestId,
+  });
 
   try {
     const prepared = await preparePrint(plan, job);
-    if (requestId) {
-      try {
-        await query(
-          `INSERT INTO print_jobs
-             (location_id, document_type, entity_id, printer_id, template_id, template_key, template_version, status, print_request_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 'sending', $8)
-           ON CONFLICT (location_id, print_request_id) DO NOTHING`,
-          [
-            location.id,
-            documentType,
-            entityId,
-            plan.printer.id,
-            plan.templateId,
-            plan.templateKey,
-            plan.templateVersion,
-            requestId,
-          ],
-        );
-      } catch (err) {
-        // History is diagnostics, never a reason a receipt does not print.
-        console.error("print job row skipped", err);
-      }
-    }
     console.info(
       JSON.stringify({
         event: "print_render",
         locationId: location.id,
         printerId: plan.printer.id,
         documentType,
+        documentSource,
+        entityId,
+        jobId,
         templateId: plan.templateId,
         templateKey: plan.templateKey,
         templateVersion: plan.templateVersion,
@@ -131,6 +159,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     );
     return NextResponse.json({
       ok: true,
+      jobId,
+      printRequestId: parsed.printRequestId,
+      entityId,
       target,
       delivery: prepared.delivery,
       printerId: plan.printer.id,
@@ -145,57 +176,63 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       dataBase64: Buffer.from(prepared.bytes).toString("base64"),
     });
   } catch (err) {
+    // A render that failed is a finished attempt, and it is recorded as one —
+    // here, by the side that watched it fail, rather than hoping the browser
+    // comes back to report it. The row closes even when nothing renders.
     console.error("print render failed", err);
-    return NextResponse.json({ ok: false, error: "render_failed" }, { status: 502 });
+    await closeJobAsFailed(jobId, "render_failed");
+    return NextResponse.json({ ok: false, error: "render_failed", jobId }, { status: 502 });
   }
 });
 
-function documentTypeOf(body: PrintRequestBody, job: PrintJob): PrintDocumentType | null {
-  if (isDocType(body.documentType)) return body.documentType;
-  switch (job.type) {
-    case "receipt":
-      return "receipt";
-    case "kitchen-ticket":
-      return "kitchen";
-    case "label":
-      return "label";
-    case "test":
-      return job.kind;
-    case "drawer-kick":
-      // The drawer hangs off the receipt printer (ESC p), so its plan is the
-      // receipt plan — a caller does not have to say so.
-      return "receipt";
-    default:
-      return null;
-  }
-}
-
 /**
- * Parse the structured job payload. There is deliberately no `document`/`html`
- * branch: the only documents this endpoint renders are the ones the product
- * itself constructs from this data.
+ * Open this attempt's history row before the render starts.
+ *
+ * Best-effort by contract — history is diagnostics and must never be the
+ * reason a receipt does not print — but best-effort means "a failed insert is
+ * logged and the print continues", not "only record the prints we feel like".
+ * The row's id is what the browser closes the attempt with.
  */
-function parseJob(raw: PrintRequestBody["job"]): PrintJob | null {
-  if (!raw || typeof raw !== "object") return null;
-  switch (raw.type) {
-    case "receipt":
-      return isRecord(raw.receipt) ? { type: "receipt", receipt: raw.receipt as never } : null;
-    case "kitchen-ticket":
-      return isRecord(raw.ticket) ? { type: "kitchen-ticket", ticket: raw.ticket as never } : null;
-    case "label":
-      return isRecord(raw.label) ? { type: "label", label: raw.label as never } : null;
-    case "test": {
-      const kind = raw.kind;
-      if (isDocType(kind)) return { type: "test", kind };
-      return null;
-    }
-    case "drawer-kick":
-      return { type: "drawer-kick" };
-    default:
-      return null;
+async function openJobRow(input: {
+  locationId: string;
+  documentType: string;
+  entityId: string | null;
+  plan: { printer: { id: string }; templateId: string | null; templateKey: string; templateVersion: number };
+  printRequestId: string | null;
+}): Promise<string | null> {
+  try {
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO print_jobs
+         (location_id, document_type, entity_id, printer_id, template_id, template_key, template_version, status, print_request_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'sending', $8)
+       RETURNING id`,
+      [
+        input.locationId,
+        input.documentType,
+        input.entityId,
+        input.plan.printer.id,
+        input.plan.templateId,
+        input.plan.templateKey,
+        input.plan.templateVersion,
+        input.printRequestId,
+      ],
+    );
+    return rows[0]?.id ?? null;
+  } catch (err) {
+    console.error("print job row skipped", err);
+    return null;
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+/** Close an attempt the server itself saw fail. A row already terminal (swept, or closed by the browser) is left alone. */
+async function closeJobAsFailed(jobId: string | null, code: PrinterErrorCode): Promise<void> {
+  if (!jobId) return;
+  try {
+    await query(
+      `UPDATE print_jobs SET status = 'failed', error_code = $2 WHERE id = $1 AND status = 'sending'`,
+      [jobId, code],
+    );
+  } catch (err) {
+    console.error("closing the failed print job skipped", err);
+  }
 }

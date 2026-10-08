@@ -40,6 +40,7 @@
  */
 import net from "node:net";
 import { PGlite } from "@electric-sql/pglite";
+import { btree_gist } from "@electric-sql/pglite/contrib/btree_gist";
 import { citext } from "@electric-sql/pglite/contrib/citext";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
@@ -58,7 +59,7 @@ async function backendFor(name) {
   if (starting.has(name)) return starting.get(name);
 
   const boot = (async () => {
-    const db = await PGlite.create({ extensions: { citext, pgcrypto } });
+    const db = await PGlite.create({ extensions: { btree_gist, citext, pgcrypto } });
     // Port 0 = let the OS pick. maxConnections must be raised from the
     // default of 1: the suites hold a long-lived admin client open for
     // fixtures *and* exercise the app's own pool at the same time, so one

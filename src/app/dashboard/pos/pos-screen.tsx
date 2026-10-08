@@ -32,12 +32,9 @@ import {
 } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { toPersianDigits } from "@/lib/digits";
-import type { KitchenTicketData } from "@/lib/kitchen-ticket-template";
-import type { ReceiptData } from "@/lib/receipt-template";
 import { useMoney } from "@/components/money/money-context";
 import {
   draftOpensDrawer,
-  draftReceiptPayments,
   draftRequiresCustomer,
   emptyPaymentDraft,
   methodOf,
@@ -55,7 +52,7 @@ import {
 import {
   kickDrawer,
   printKitchenTicket,
-  printReceipt,
+  printSaleReceipt,
 } from "@/lib/printing/client";
 import {
   cartQuantitiesByItem,
@@ -81,7 +78,6 @@ import {
   formatModifierDelta,
   linePriceBreakdown,
   modifierDeltasOf,
-  modifierNamesLabel,
   sumModifierDeltas,
   type DisplayModifier,
 } from "@/lib/modifier-display";
@@ -101,10 +97,7 @@ import {
   type PosCartModifierPick,
 } from "@/lib/pos-cart";
 import { TablePickerDialog } from "./table-picker-dialog";
-import {
-  SearchableSelect,
-  type SelectOption,
-} from "@/components/ui/searchable-select";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { BranchSwitcher } from "../branch-switcher";
 import { FilterChip } from "../filters";
 import { KnowledgeHelpButton } from "../knowledge-help";
@@ -907,80 +900,38 @@ export function PosScreen({
       }
     }
 
-    const kitchenRequestId = `kitchen:${creation.data.id ?? crypto.randomUUID()}`;
-    {
-      // The big line on a kitchen ticket is the table when there is one — that
-      // is what the runner carries the tray to.
-      const label = tableName ?? typeLabel;
-      const ticket: KitchenTicketData = {
-        label,
-        orderTypeLabel: typeLabel,
-        sentAt: new Date().toISOString(),
-        lines: cart.map((line) => ({
-          name: line.name,
-          quantity: line.quantity,
-          modifiersLabel: modifierNamesLabel(line.modifiers) || null,
-          note: line.note || null,
-        })),
-      };
-      void printKitchenTicket(null, ticket, { requestId: kitchenRequestId, entityId: creation.data.id }).then((result) => {
+    // Printing is a document the SERVER loads from the order's own rows, so it
+    // needs the order's id. An order still sitting in the offline queue has
+    // none yet — nothing exists to print from, and the ticket/ receipt print
+    // from the orders screen once the queue syncs (the panel below says so).
+    const printOrderId = creation.queued ? null : (creation.data.id ?? null);
+
+    if (printOrderId) {
+      const kitchenRequestId = `kitchen:${printOrderId}`;
+      const kitchenTicket = (requestId: string) => printKitchenTicket(null, printOrderId, { requestId });
+      void kitchenTicket(kitchenRequestId).then((result) => {
         if (!result.ok && result.error !== "printer_not_configured") {
           toast.warning("سفارش ثبت شد اما ارسال به چاپگر آشپزخانه ناموفق بود.", {
             duration: Infinity,
-            action: { label: "تلاش دوباره", onClick: () => void printKitchenTicket(null, ticket, { requestId: `${kitchenRequestId}:retry`, entityId: creation.data.id }) },
+            action: { label: "تلاش دوباره", onClick: () => void kitchenTicket(`${kitchenRequestId}:retry`) },
           });
         }
       });
     }
 
-    if (paid) {
-        const receipt: ReceiptData = {
-          business: {
-            name: business.name,
-            address: business.address,
-            phone: business.phone,
-          },
-          orderLabel: orderNumber
-            ? formatQueueLabel(orderType, orderNumber)
-            : typeLabel,
-          orderTypeLabel:
-            orderType === "dine_in"
-              ? "حضوری" + (tableName ? " — " + tableName : "")
-              : typeLabel,
-          issuedAt: new Date().toISOString(),
-          lines: cart.map((line) => ({
-            name: line.name,
-            quantity: line.quantity,
-            lineTotal: linePriceBreakdown({
-              unitPrice: line.unitPrice,
-              modifierDeltas: modifierDeltasOf(line.modifiers),
-              quantity: line.quantity,
-            }).total,
-            modifiersLabel: modifierNamesLabel(line.modifiers) || null,
-          })),
-          subtotal: totals.subtotal,
-          discount: totals.discount,
-          tax: totals.tax,
-          total: totals.total,
-          tip: tipNum,
-          payments: draftReceiptPayments(
-            paymentDraft,
-            paymentMethods,
-            totals.total,
-            money.unit,
-          ),
-        };
-        const receiptRequestId = `receipt:${creation.data.id ?? crypto.randomUUID()}`;
-        void printReceipt(null, receipt, { requestId: receiptRequestId, entityId: creation.data.id }).then((result) => {
-          if (!result.ok && result.error !== "printer_not_configured") {
-            toast.warning("چاپ رسید انجام نشد؛ سفارش با موفقیت ثبت شده است.", {
-              action: { label: "چاپ دوباره", onClick: () => void printReceipt(null, receipt, { requestId: `${receiptRequestId}:retry`, entityId: creation.data.id }) },
-            });
-          }
-          if (draftOpensDrawer(paymentDraft, paymentMethods) && result.supportsDrawer && result.printerId) {
-            void kickDrawer(result.printerId);
-          }
-        });
+    if (paid && printOrderId) {
+      const receiptRequestId = `receipt:${printOrderId}`;
+      const receipt = (requestId: string) => printSaleReceipt(null, printOrderId, { requestId });
+      void receipt(receiptRequestId).then((result) => {
+        if (!result.ok && result.error !== "printer_not_configured") {
+          toast.warning("چاپ رسید انجام نشد؛ سفارش با موفقیت ثبت شده است.", {
+            action: { label: "چاپ دوباره", onClick: () => void receipt(`${receiptRequestId}:retry`) },
+          });
+        }
+        if (draftOpensDrawer(paymentDraft, paymentMethods) && result.supportsDrawer && result.printerId) {
+          void kickDrawer(result.printerId);
+        }
+      });
     }
 
     setResult({
@@ -2365,7 +2316,7 @@ function CheckoutConfirmation({
               {result.queued
                 ? result.paymentPending
                   ? "دریافت وجه را پس از اتصال از بخش سفارش‌ها تکمیل کنید."
-                  : "با اتصال مجدد، سفارش بدون از دست رفتن داده‌ها ارسال می‌شود."
+                  : "با اتصال مجدد، سفارش بدون از دست رفتن داده‌ها ارسال می‌شود؛ رسید و فیش آشپزخانه را هم از همان‌جا می‌توانید چاپ کنید."
                 : result.paid
                   ? "رسید و کشوی پول، در صورت اتصال چاپگر، اجرا شدند."
                   : result.paymentPending

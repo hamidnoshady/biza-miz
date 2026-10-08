@@ -41,6 +41,9 @@ if (!rootDatabaseUrl) {
 let databaseName: string;
 let tempDir: string;
 let ownerClient: Client;
+/** The seeded branch and one of its printers — migration 0213's assertions need both. */
+let seededLocationId: string;
+let seededPrinterId: string;
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -98,11 +101,13 @@ beforeAll(async () => {
     ["استاب نصب اولیه", "receipt", { ip: null, port: 9100, driver: "escpos-stub" }],
     ["شبکه بدون پورت", "receipt", { transport: "network", ip: "10.0.0.9" }],
   ];
+  seededLocationId = locationId;
   for (const [name, kind, connection] of rows) {
-    await ownerClient.query(
-      `INSERT INTO printers (location_id, name, kind, connection) VALUES ($1, $2, $3, $4)`,
+    const { rows: inserted } = await ownerClient.query<{ id: string }>(
+      `INSERT INTO printers (location_id, name, kind, connection) VALUES ($1, $2, $3, $4) RETURNING id`,
       [locationId, name, kind, JSON.stringify(connection)],
     );
+    seededPrinterId ??= inserted[0].id;
   }
 });
 
@@ -246,6 +251,51 @@ describe("the printer connection model — after the full migration history", ()
     );
     expect(indexes).toHaveLength(1);
     expect(String(indexes[0].indexdef)).toContain("UNIQUE");
+  });
+
+  it("records print ATTEMPTS, not documents (migration 0213)", async () => {
+    // 0173 made `print_request_id` NOT NULL and UNIQUE (location_id,
+    // print_request_id), and the screens' ids are per DOCUMENT
+    // (`receipt:{orderId}`, `label:{code}`) — so a reprint collided with the
+    // first row and was recorded nowhere. An attempt is the row itself now:
+    // the correlation id may repeat, and may be absent.
+    const { rows: column } = await ownerClient.query(
+      `SELECT is_nullable FROM information_schema.columns
+        WHERE table_name = 'print_jobs' AND column_name = 'print_request_id'`,
+    );
+    expect(column[0].is_nullable).toBe("YES");
+
+    const { rows: unique } = await ownerClient.query(
+      `SELECT conname FROM pg_constraint
+        WHERE conrelid = 'print_jobs'::regclass AND contype = 'u'
+          AND pg_get_constraintdef(oid) LIKE '%(location_id, print_request_id)%'`,
+    );
+    expect(unique).toHaveLength(0);
+
+    const sameDocument = "receipt:attempt-test";
+    await ownerClient.query(
+      `INSERT INTO print_jobs (location_id, document_type, printer_id, print_request_id, status)
+       VALUES ($1, 'receipt', $2, $3, 'handed_off'), ($1, 'receipt', $2, $3, 'failed')`,
+      [seededLocationId, seededPrinterId, sameDocument],
+    );
+    const { rows: attempts } = await ownerClient.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM print_jobs WHERE location_id = $1 AND print_request_id = $2`,
+      [seededLocationId, sameDocument],
+    );
+    expect(attempts[0].count).toBe(2);
+    // A print that carried no id at all is still an attempt (the server mints
+    // its own row id and answers with it).
+    const { rows: anonymous } = await ownerClient.query<{ id: string }>(
+      `INSERT INTO print_jobs (location_id, document_type, printer_id, status)
+       VALUES ($1, 'receipt', $2, 'sending') RETURNING id`,
+      [seededLocationId, seededPrinterId],
+    );
+    expect(anonymous[0].id).toMatch(/^[0-9a-f-]{36}$/i);
+    // …and the correlation id stays queryable for support.
+    const { rows: indexes } = await ownerClient.query(
+      `SELECT indexname FROM pg_indexes WHERE tablename = 'print_jobs' AND indexname = 'idx_print_jobs_request'`,
+    );
+    expect(indexes).toHaveLength(1);
   });
 
   it("keeps every converted row readable by the runtime model", async () => {

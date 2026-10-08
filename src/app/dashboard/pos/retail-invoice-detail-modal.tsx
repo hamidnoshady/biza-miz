@@ -26,13 +26,12 @@ import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import { paymentMethodLabel, CONDITION_GRADE_LABELS } from "@/lib/receipt-template";
-import { printInvoice, printReceipt } from "@/lib/printing/client";
+import { printSaleInvoice, printSaleReceipt } from "@/lib/printing/client";
 import { printerErrorMessage } from "@/lib/printing/errors";
 import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes";
 import { api, ErrorBox, errorMessageOrRaw } from "../ui";
 import { StatusBadge, LoadingSkeleton } from "../page-chrome";
 import type { RetailInvoiceDetail, RetailInvoiceDetailLine } from "@/lib/retail-invoice/types";
-import type { ReceiptData } from "@/lib/receipt-template";
 
 const PURITY_LABELS: Record<string, string> = { "18": "عیار ۱۸", "21": "عیار ۲۱", "24": "عیار ۲۴" };
 
@@ -171,23 +170,22 @@ export function RetailInvoiceDetailModal({
    * either way and neither action can silently become the other — which is
    * exactly what happened when this modal's reprint asked for an invoice
    * while the sale itself had printed a receipt.
+   *
+   * The document itself comes from the same place the sale's first print got
+   * it: the server loads this invoice's rows (`getRetailInvoicePrintData`) and
+   * renders it through the rule for the named type. The modal only says which
+   * of the two documents the operator pressed.
    */
   async function printDocument(documentType: "invoice" | "receipt") {
     if (!invoiceId) return;
     setPrinting(true);
-    const { ok, data } = await api<{ receipt?: ReceiptData; error?: string }>(
-      `/api/sales/invoices/${invoiceId}?view=print`,
-    );
-    setPrinting(false);
-    if (!ok || !data.receipt) {
-      toast.error("اطلاعات چاپ این فاکتور دریافت نشد.");
-      return;
-    }
-    const receipt = data.receipt;
     const requestId = `reprint:${documentType}:${crypto.randomUUID()}`;
     const issue = (id: string) =>
-      documentType === "invoice" ? printInvoice(null, receipt, { requestId: id }) : printReceipt(null, receipt, { requestId: id });
+      documentType === "invoice"
+        ? printSaleInvoice(null, invoiceId, { requestId: id })
+        : printSaleReceipt(null, invoiceId, { requestId: id });
     const result = await issue(requestId);
+    setPrinting(false);
     if (result.ok) {
       toast.success(documentType === "invoice" ? "فاکتور برای چاپ ارسال شد" : "رسید برای چاپ ارسال شد");
       return;

@@ -30,6 +30,13 @@ export const PRINT_PHASE_LABELS: Record<PrintJobPhase, string> = {
 /** A job left in `sending` for longer than this is a lost handoff, not a live one. */
 export const SENDING_STALE_AFTER_SECONDS = 120;
 
+/**
+ * The longest caller correlation id a print request may carry (`receipt:{uuid}`,
+ * `reprint:invoice:{uuid}`). Long enough for the ids the screens mint, short
+ * enough that the column stays a key rather than a payload.
+ */
+export const MAX_PRINT_REQUEST_ID = 120;
+
 export type WindowsQueueStatus =
   | "ready"
   | "available"

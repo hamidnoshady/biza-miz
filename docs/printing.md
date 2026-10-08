@@ -251,12 +251,17 @@ canonical model.
 | `src/lib/printing/printer-input.ts` | The one parser both printer routes write through (canonical model only). Pure. |
 | `src/lib/printing/errors.ts` | The canonical error codes and their Persian sentences. Pure. |
 | `src/lib/printing/render-service.ts` | The server half: plan + document → template → HTML → PNG → ESC/POS bytes (or a page image). Refuses an unusable printer with its canonical code before rendering anything. Server-only. |
+| `src/lib/printing/document-request.ts` | The request's write boundary: kinds and their ids (`order-receipt`, `kitchen-ticket`, `item-label`), the sample jobs, and the refusals. A request that carries, say, a browser-built `ReceiptData` instead of an order id never reaches a loader. Pure. |
+| `src/lib/printing/document-loader.ts` | The one place a reference becomes a document: load the sale / ticket / label in the caller's `location_id`, with the branch's identity, or answer `document_not_found`. Server-only. |
+| `src/lib/printing/order-print-data.ts` | A stored sale → `ReceiptData` / `KitchenTicketData`: persisted lines, the sale's own money and issue moment, add-ons and voided lines handled once, here. Pure. |
+| `src/lib/printing/label-print-data.ts` | A stored barcode row → `LabelData`: the branch's code, the trade's fields (`labelFieldsForTrade`) and the business's money unit. Server-only. |
+| `src/lib/printing/identity.ts` | The letterhead every document carries: business name, the branch's address/phone, the profile's footer and the money unit. Replaces the browser's copy of the same lookups. Server-only. |
 | `src/lib/printing/chromium.ts` | HTML → PNG with the embedded Vazirmatn font (server-side). Server-only. |
 | `src/lib/printing/raster.ts` | PNG → grayscale decode. Pure. |
 | `src/lib/printing/client.ts` | The browser's printing client: connector calls, intent-only jobs, progress phases, and closing the history row on every terminal path. No browser-dialog fallback exists. |
-| `src/app/api/printing/print` | The one hardware job endpoint: printerId in, canonical bytes + target out. |
+| `src/app/api/printing/print` | The one hardware job endpoint: **a document reference in** (a sale, a kitchen ticket's sale, an item's barcode — never the document itself), canonical bytes + target out. It resolves the reference inside the caller's own branch and builds the document from that branch's rows. |
 | `src/app/api/printing/test-draft` | The add-printer wizard's test print before the printer is saved: renders the sample for a purpose + paper, validating both with the same matrix the write boundary uses. |
-| `src/app/api/printing/jobs` | Print history: closes a job (`handed_off` / `failed` + code) and sweeps stale `sending` rows to `failed` on read. |
+| `src/app/api/printing/jobs` | Print history: **one row per attempt** (migration 0213), addressed by the id the print endpoint returned, closed by the browser with `handed_off` / `failed` + code, and swept to `failed`/`job_timeout` on read when nobody closed it. |
 | `src/app/api/settings/print-rules` | The routing table's only writer: validates the template (of this branch, of this document type) and the printers (owned, active, compatible) with the same predicates the resolver uses. |
 | `src/app/api/printing/connector/installer` | Authenticated per-origin Windows connector installer download. |
 | `src/lib/printing/connector-release.ts` | Protocol/release versions, allowed-origin normalisation and the download-base resolution (the file above depends on both halves of this contract). Pure. |
@@ -267,6 +272,45 @@ canonical model.
 | `src/lib/desktop-bridge.ts` | The one typed shape of `window.businessSuiteDesktop`, shared by the printing client and the Local Devices panel. |
 | `src/lib/native-printing.test.ts` | Unit/logic coverage of `native-printing.js`'s pure decision logic and injected-collaborator dispatch — no real Windows/printer/network dependency. |
 | `src/app/(app)/settings/printing/**` | The section, in three tabs: **چاپگرها** (hardware only), **قالب‌ها** (appearance + logo), **قوانین چاپ** (routing). The printers panel is shared with the setup wizard. |
+
+## The print request
+
+`POST /api/printing/print` takes an **intent**, never output:
+
+```jsonc
+{ "document": { "kind": "order-receipt", "orderId": "…" },   // a stored sale
+  "documentType": "receipt",        // receipt | invoice | kitchen | label
+  "printerId": "…",                 // optional: pin the printer instead of the rule
+  "templateId": "…",                // optional: pin a saved template
+  "printRequestId": "receipt:…" }   // optional: the caller's correlation id
+```
+
+The other references are `{ "kind": "kitchen-ticket", "orderId": "…" }` and
+`{ "kind": "item-label", "itemId": "…", "code": "…"? }`. Sample documents —
+a saved printer's test print, a template's «چاپ نمونه», a drawer kick — are the
+only jobs the browser spells out at all, and they carry no business data:
+`{ "job": { "type": "test", "kind": "receipt" } }`,
+`{ "job": { "type": "drawer-kick" } }`.
+
+What the endpoint refuses, and why:
+
+- **browser-built documents** (`receipt` / `kitchen-ticket` / `label` payloads)
+  — a price, a line or a letterhead the caller typed cannot reach paper or
+  history (`document_required`, HTTP 400). Screens that were open across the
+  deployment that introduced this get that answer once; a reload fixes them.
+- **a reference outside the caller's branch** — the loaders are `location_id`
+  queries, so another branch's sale, or a barcode that belongs to another
+  shop's item, is simply `document_not_found` (404);
+- **a document printed as the wrong kind of document** (`document_type_mismatch`,
+  409) — a kitchen ticket is not a receipt;
+- **anything the plan refuses** — an inactive or unreachable printer, a template
+  of another branch, a printer whose paper cannot carry the document
+  (`printer_inactive` / `reconnect_required` / `incompatible_printer` / …);
+- **a body over 16 KiB** (413): documents no longer travel through the request,
+  so nothing legitimate is large.
+
+`print_request_id` is recorded for support and may repeat: the same receipt
+printed twice is two attempts, and the id is how a support engineer finds both.
 
 ## Papers
 
@@ -414,8 +458,9 @@ Every failure maps to one canonical code (`connector_not_installed`,
 `printer_inactive`, `printer_unavailable`, `incompatible_printer`,
 `template_not_found`, `template_invalid`, `printer_offline`,
 `network_unreachable`, `print_failed`, `render_failed`, `job_timeout`,
-`reconnect_required`, …) defined in `src/lib/printing/errors.ts`, each with
-its Persian sentence. Screens show the sentence, never the raw exception —
+`reconnect_required`, and the document-refusals `document_required`,
+`document_not_found`, `document_type_mismatch`) defined in
+`src/lib/printing/errors.ts`, each with its Persian sentence. Screens show the sentence, never the raw exception —
 technical detail goes to the server log and the connector's own log file
 (`%LOCALAPPDATA%\CafePOS\PrintConnector\connector.log`: startup, version,
 print attempts, spooler/TCP failures, probe failures — never receipt
@@ -437,6 +482,14 @@ fallback route and the template that actually renders.
 `src/lib/printing/render-service.test.ts` pins the render pipeline, including
 the regression that matters most: **production HTML is byte-identical to the
 template preview's** for the same template and document, branding included.
+`printing/document-request.test.ts` pins the request boundary (only real
+ids, only the documents the server can load, samples and nothing else);
+`printing/document-loader.test.ts` pins the reference → document resolution,
+including that another branch's sale is `document_not_found`;
+`printing/order-print-data.test.ts` pins the receipt/ticket built from a
+sale's rows (persisted money and issue moment, voided lines, add-ons in
+Persian); `printing/label-print-data.test.ts` and `printing/identity.test.ts`
+pin the label's code/fields and the letterhead's branch scoping;
 `print-templates-service.test.ts` pins the saved-template write boundary
 (paper/doc-type matrix, version bump, exactly-one default);
 `api/settings/print-rules/route.test.ts` pins the rule validation
@@ -458,9 +511,17 @@ the browser client (both backends, via the desktop-bridge branch);
 contract; `native-printing.test.ts` the desktop app's own hardware gateway
 (unit/logic only — see "Two products, two hardware backends" above for why a
 real-Windows verification pass is still outstanding); `api/printing/**` the
-route security model; and
-`integration/printer-connection-migration.integration.test.ts` migration 0155
-on a real database.
+route security model. On a real database,
+`integration/printing-boundary.integration.test.ts` proves the boundary every
+route depends on — a sibling branch's or another tenant's sale, label, printer
+or template does not resolve, each branch prints its own, and every table on
+the path (print_jobs, print_rules, print_templates, printers) carries FORCE
+ROW LEVEL SECURITY, with the cross-tenant read exercised through the
+deployment's unprivileged runtime role.
+`integration/printer-connection-migration.integration.test.ts` covers 0155 and
+0212 on a pre-0155 database, and migration 0213's move from document-keyed rows
+to one row per attempt (a repeated correlation id, and a print with none at
+all).
 
 ## Adding to the model
 

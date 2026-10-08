@@ -4,8 +4,10 @@ import { query } from "@/lib/db";
 import { formatJalali } from "@/lib/jalali";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { SENDING_STALE_AFTER_SECONDS } from "@/lib/printing/routing";
+import { MAX_PRINT_REQUEST_ID, SENDING_STALE_AFTER_SECONDS } from "@/lib/printing/routing";
 import type { PrinterErrorCode } from "@/lib/printing/errors";
+
+const JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Print history for the active branch.
@@ -72,34 +74,63 @@ export const GET = withTenantScope(async () => {
 });
 
 /**
- * Mark a job handed off or failed after the local spooler answers. Only these
- * two terminal states are accepted: `sending` is the server's own opening
- * state, never a client's answer.
+ * Mark a print ATTEMPT handed off or failed after the local spooler answers.
+ *
+ * The attempt is addressed by its own id — the one the print endpoint
+ * returned when it opened the row (`jobId`) — so two prints of the same
+ * receipt are two rows, each closed by the delivery that actually carried it.
+ * Before migration 0213 the key was the caller's `print_request_id`, which the
+ * screens derive from the document (`receipt:{orderId}`); a retry therefore
+ * wrote nothing, and a successful reprint could not be told from the failed
+ * first attempt it followed.
+ *
+ * `printRequestId` is still accepted, and closes that caller's newest in-flight
+ * attempt: a browser tab that was open across this deployment keeps working.
+ * Only the two terminal states are accepted — `sending` is the server's own
+ * opening state, never a client's answer — and a row that is already terminal
+ * (swept to `job_timeout`, or closed by the render failure that produced it) is
+ * never reopened by a late acknowledgement.
  */
 export const PATCH = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.printingExecute);
   if (error) return error;
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ ok: false }, { status: 404 });
-  let body: { printRequestId?: string; status?: string; errorCode?: string };
+  let body: { jobId?: string; printRequestId?: string; status?: string; errorCode?: string };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ ok: false }, { status: 400 });
   }
-  if (!body.printRequestId || (body.status !== "handed_off" && body.status !== "failed")) {
+  if (body.status !== "handed_off" && body.status !== "failed") {
     return NextResponse.json({ ok: false }, { status: 400 });
   }
+  const jobId = typeof body.jobId === "string" && JOB_ID.test(body.jobId) ? body.jobId : null;
+  const requestId =
+    typeof body.printRequestId === "string" && body.printRequestId.length > 0 && body.printRequestId.length <= MAX_PRINT_REQUEST_ID
+      ? body.printRequestId
+      : null;
+  if (!jobId && !requestId) return NextResponse.json({ ok: false }, { status: 400 });
+  const errorCode =
+    typeof body.errorCode === "string" && /^[a-z_]{1,40}$/.test(body.errorCode) ? body.errorCode : null;
+
   try {
     await query(
       `UPDATE print_jobs
           SET status = $3,
               error_code = $4,
               handed_off_at = CASE WHEN $3 = 'handed_off' THEN now() ELSE handed_off_at END
-        WHERE location_id = $1 AND print_request_id = $2`,
-      [location.id, body.printRequestId.slice(0, 80), body.status, body.errorCode ?? null],
+        WHERE location_id = $1
+          AND status = 'sending'
+          AND id = COALESCE(
+                $2::uuid,
+                (SELECT id FROM print_jobs
+                  WHERE location_id = $1 AND print_request_id = $5 AND status = 'sending'
+                  ORDER BY created_at DESC, id DESC LIMIT 1)
+              )`,
+      [location.id, jobId, body.status, errorCode, requestId],
     );
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, jobId });
   } catch (err) {
     console.error("updating print job failed", err);
     return NextResponse.json({ ok: false }, { status: 500 });
