@@ -24,6 +24,7 @@ interface SupplierBalance {
   supplierName: string;
   supplierPhone: string | null;
   supplierPartyId: string | null;
+  locationName: string | null;
   balance: number;
 }
 
@@ -35,19 +36,20 @@ interface AgingRow {
   d61_90: number;
   over90: number;
   total: number;
+  locationName: string | null;
 }
 
 interface AgingReport {
   asOfDate: string;
   rows: AgingRow[];
-  totals: Omit<AgingRow, "supplierId" | "supplierName">;
+  totals: Omit<AgingRow, "supplierId" | "supplierName" | "locationName">;
 }
 
 /** The payables side — shared with the directory's statement overlay (`ap-statement-panel.tsx`). */
 export const PAYABLES_SIDE: SubledgerSide = {
   eyebrow: "تعهدات تأمین‌کنندگان",
   title: "حساب‌های پرداختنی",
-  description: "مانده حساب‌ها و نمای سنی بدهی تأمین‌کنندگان، بر پایه ثبت‌های فعلی.",
+  description: "مانده حساب‌ها و نمای سنی بدهی تأمین‌کنندگان، بر پایه ثبت‌های فعلی. ماندهٔ منفی یعنی پیش‌پرداخت یا بستانکاری شما نزد تأمین‌کننده، نه بدهی.",
   partyNoun: "تأمین‌کننده",
   balancesCaption: "مانده حساب‌های پرداختنی به تفکیک تأمین‌کننده",
   agingCaption: "نمای سنی بدهی به تأمین‌کنندگان",
@@ -56,6 +58,7 @@ export const PAYABLES_SIDE: SubledgerSide = {
   agingTotalLabel: "جمع کل حساب‌های پرداختنی",
   directoryHref: accountingSuppliersHref(),
   directoryLinkLabel: "تأمین‌کنندگان در حسابداری",
+  unknownExplanation: "ماندهٔ «بدون تأمین‌کننده مشخص» یک استثنای تطبیق است، نه حساب یک تأمین‌کننده. ردیف‌ها در صورتحساب این بخش، همراه با منبع، وضعیت انتساب و پیوند دقیق به سند روزنامه بررسی می‌شوند.",
 
   unknownKey: UNKNOWN_SUPPLIER_KEY,
   listEndpoint: "/api/ledger/ap/suppliers",
@@ -64,10 +67,11 @@ export const PAYABLES_SIDE: SubledgerSide = {
     const data = raw as { suppliers?: SupplierBalance[] };
     return (data.suppliers ?? []).map((s) => ({
       id: s.supplierId,
-      name: s.supplierName,
+      name: s.supplierId === UNKNOWN_SUPPLIER_KEY ? "استثنای تطبیق — بدون تأمین‌کننده" : s.supplierName,
       phone: s.supplierPhone,
       balance: s.balance,
       partyId: s.supplierPartyId,
+      locationName: s.locationName,
     }));
   },
   readAging: (raw) => {
@@ -76,7 +80,7 @@ export const PAYABLES_SIDE: SubledgerSide = {
       asOfDate: data.asOfDate,
       rows: (data.rows ?? []).map((r) => ({
         id: r.supplierId,
-        name: r.supplierName,
+        name: r.supplierId === UNKNOWN_SUPPLIER_KEY ? "استثنای تطبیق — بدون تأمین‌کننده" : r.supplierName,
         current: r.current,
         d31_60: r.d31_60,
         d61_90: r.d61_90,
@@ -85,12 +89,16 @@ export const PAYABLES_SIDE: SubledgerSide = {
         // The aging payload names the branch alias only; the directory link
         // stays hidden rather than pointing at a guessed party.
         partyId: null,
+        locationName: r.locationName,
       })),
       totals: data.totals,
     };
   },
 
-  marksCreditBalances: false,
+  negativeBalanceLabel: "پیش‌پرداخت / بستانکاری نزد تأمین‌کننده",
+  negativeSettleActionLabel: "افزودن پیش‌پرداخت",
+  negativeTitlePrefix: "پیش‌پرداخت به ",
+  negativeBalanceMessage: "ماندهٔ منفی یعنی پیش‌پرداخت یا بستانکاری شما نزد این تأمین‌کننده است، نه بدهی. پرداخت تازه، مبلغ پیش‌پرداخت را بیشتر می‌کند.",
 
   settle: {
     actionLabel: "ثبت پرداخت",
@@ -111,7 +119,11 @@ export const PAYABLES_SIDE: SubledgerSide = {
     typeLabels: {
       bill: "فاکتور",
       payment: "پرداخت",
+      payment_reversal: "برگشت پرداخت",
       return: "برگشت",
+      cheque: "رویداد چک",
+      interest: "سود اقساط",
+      adjustment: "تعدیل / استثنای تطبیق",
       other: "سایر",
     },
     caption: "گردش حساب این تأمین‌کننده",
@@ -123,6 +135,6 @@ export const PAYABLES_SIDE: SubledgerSide = {
   },
 };
 
-export function ApSection() {
-  return <SubledgerSection side={PAYABLES_SIDE} />;
+export function ApSection({ canSettle = false }: { canSettle?: boolean }) {
+  return <SubledgerSection side={PAYABLES_SIDE} canSettle={canSettle} />;
 }

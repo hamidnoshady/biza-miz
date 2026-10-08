@@ -23,6 +23,7 @@ import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { coaTemplateForIndustry } from "../src/lib/coa-template";
+import { SETTING_KEYS } from "../src/lib/settings";
 import type { Industry } from "../src/lib/industries";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -34,7 +35,9 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let provisioning: typeof import("../src/lib/business-provisioning");
+let setupState: typeof import("../src/lib/setup-state");
 let platformService: typeof import("../src/lib/platform-service");
+let paymentMethods: typeof import("../src/lib/payment-methods-service");
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -64,7 +67,9 @@ beforeAll(async () => {
   process.env.DATABASE_URL = urlFor(databaseName);
   dbLib = await import("../src/lib/db");
   provisioning = await import("../src/lib/business-provisioning");
+  setupState = await import("../src/lib/setup-state");
   platformService = await import("../src/lib/platform-service");
+  paymentMethods = await import("../src/lib/payment-methods-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -97,6 +102,7 @@ async function provision(industry: Industry) {
     subdomain: `biz${industry.replace("_", "")}${seq}`,
     industry,
     seedChartOfAccounts: true,
+    completeSetup: provisioning.shouldCompleteSetupForPlatformProvision(industry),
   });
 }
 
@@ -106,6 +112,26 @@ async function accountCodes(businessId: string): Promise<string[]> {
     [businessId],
   );
   return rows.map((r) => r.code);
+}
+
+async function writeSetupProgress(businessId: string, completed: boolean): Promise<void> {
+  const value = completed
+    ? JSON.stringify({ steps: {}, completedAt: new Date().toISOString() })
+    : JSON.stringify({ steps: {}, completedAt: null });
+  await db.query(
+    `INSERT INTO settings (business_id, location_id, key, value)
+     VALUES ($1, NULL, $2, $3::jsonb)
+     ON CONFLICT (business_id, location_id, key) DO UPDATE SET value = EXCLUDED.value`,
+    [businessId, SETTING_KEYS.wizardProgress, value],
+  );
+}
+
+async function completedAt(businessId: string): Promise<string | null> {
+  const { rows } = await db.query<{ completed_at: string | null }>(
+    "SELECT value ->> 'completedAt' AS completed_at FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2",
+    [businessId, SETTING_KEYS.wizardProgress],
+  );
+  return rows[0]?.completed_at ?? null;
 }
 
 describe("provisioning with an industry", () => {
@@ -208,6 +234,16 @@ describe("provisioning with an industry", () => {
       [businessId],
     );
     expect(rows[0].industry).toBe("food_service");
+  });
+
+  it("keeps a bare console-provisioned F&B business in setup while preserving the other-trade shortcut", async () => {
+    const foodBusiness = await provision("food_service");
+    expect(await completedAt(foodBusiness.businessId)).toBeNull();
+    expect(await setupState.isSetupComplete(foodBusiness.businessId)).toBe(false);
+
+    const retailBusiness = await provision("jewelry");
+    expect(await completedAt(retailBusiness.businessId)).not.toBeNull();
+    expect(await setupState.isSetupComplete(retailBusiness.businessId)).toBe(true);
   });
 });
 
@@ -393,5 +429,135 @@ describe("industry feature defaults", () => {
     const flags = await overrides(businessId);
     expect(flags.inventory).toBe(false);
     expect(flags.reservations).toBe(false);
+  });
+});
+
+describe("industry-transition readiness lifecycle", () => {
+  it("re-opens a completed retail tenant when F&B prerequisites are missing", async () => {
+    const { businessId } = await provision("jewelry");
+    await writeSetupProgress(businessId, true);
+    expect(await completedAt(businessId)).not.toBeNull();
+
+    await platformService.changeBusinessIndustry(businessId, "food_service");
+
+    expect(await completedAt(businessId)).toBeNull();
+  });
+
+  it("preserves completed setup when F&B readiness is already satisfied", async () => {
+    const { businessId, locationId } = await provision("jewelry");
+    await db.query(
+      `INSERT INTO settings (business_id, location_id, key, value) VALUES
+         ($1, NULL, $2, '{"currencyDisplay":"toman"}'::jsonb),
+         ($1, NULL, $3, '{"method":"fifo","system":"perpetual","lockedAt":null}'::jsonb),
+         ($1, NULL, $4, '{"defaultRate":0}'::jsonb)
+       ON CONFLICT (business_id, location_id, key) DO UPDATE SET value = EXCLUDED.value`,
+      [businessId, SETTING_KEYS.businessPrefs, SETTING_KEYS.costing, SETTING_KEYS.tax],
+    );
+    await db.query(
+      `INSERT INTO menu_items (location_id, name, price, is_active) VALUES ($1, 'چای', 50000, true)`,
+      [locationId],
+    );
+    await writeSetupProgress(businessId, true);
+
+    await platformService.changeBusinessIndustry(businessId, "food_service");
+
+    expect(await completedAt(businessId)).not.toBeNull();
+  });
+});
+
+describe("industry-transition payment methods", () => {
+  it("adds SnapFood once when entering F&B and preserves existing custom methods", async () => {
+    const { businessId } = await provision("jewelry");
+    await db.query(
+      `INSERT INTO payment_methods
+         (business_id, code, name, settlement, sort_order, is_builtin, opens_drawer, requires_reference)
+       VALUES ($1, 'wallet_custom', 'کیف پول فروشگاه', 'online', 70, false, false, true)`,
+      [businessId],
+    );
+
+    await platformService.changeBusinessIndustry(businessId, "food_service");
+    await platformService.changeBusinessIndustry(businessId, "food_service");
+
+    const { rows: snapRows } = await db.query<{ id: string; is_active: boolean; is_builtin: boolean }>(
+      "SELECT id, is_active, is_builtin FROM payment_methods WHERE business_id = $1 AND code = 'snappfood'",
+      [businessId],
+    );
+    expect(snapRows).toHaveLength(1);
+    expect(snapRows[0]).toMatchObject({ is_active: true, is_builtin: true });
+
+    const { rows: custom } = await db.query<{ name: string; settlement: string; requires_reference: boolean }>(
+      "SELECT name, settlement::text AS settlement, requires_reference FROM payment_methods WHERE business_id = $1 AND code = 'wallet_custom'",
+      [businessId],
+    );
+    expect(custom).toEqual([{ name: "کیف پول فروشگاه", settlement: "online", requires_reference: true }]);
+  });
+
+  it("retires SnapFood outside F&B without exposing, deleting, or severing historical payments", async () => {
+    const { businessId, locationId } = await provision("food_service");
+    const { rows: snapRows } = await db.query<{ id: string }>(
+      "SELECT id FROM payment_methods WHERE business_id = $1 AND code = 'snappfood'",
+      [businessId],
+    );
+    const snapId = snapRows[0].id;
+    await db.query(
+      "UPDATE payment_methods SET name = $2, requires_reference = true, sort_order = 77 WHERE id = $1",
+      [snapId, "اسنپ‌فود قراردادی"],
+    );
+    await db.query(
+      `INSERT INTO payment_methods (business_id, code, name, settlement, sort_order, is_builtin)
+       VALUES ($1, 'wallet_custom', 'کیف پول سفارشی', 'online', 70, false)`,
+      [businessId],
+    );
+    const { rows: orderRows } = await db.query<{ id: string }>(
+      `INSERT INTO orders (location_id, order_number, type, total)
+       VALUES ($1, 900001, 'delivery', 100000) RETURNING id`,
+      [locationId],
+    );
+    await db.query(
+      `INSERT INTO payments (location_id, order_id, method, amount, payment_method_id)
+       VALUES ($1, $2, 'snappfood', 100000, $3)`,
+      [locationId, orderRows[0].id, snapId],
+    );
+
+    await platformService.changeBusinessIndustry(businessId, "jewelry");
+
+    const { rows: retired } = await db.query<{
+      id: string;
+      name: string;
+      is_active: boolean;
+      sort_order: number;
+      requires_reference: boolean;
+    }>(
+      "SELECT id, name, is_active, sort_order, requires_reference FROM payment_methods WHERE business_id = $1 AND code = 'snappfood'",
+      [businessId],
+    );
+    expect(retired).toEqual([
+      { id: snapId, name: "اسنپ‌فود قراردادی", is_active: false, sort_order: 77, requires_reference: true },
+    ]);
+    const { rows: history } = await db.query<{ payment_method_id: string | null }>(
+      "SELECT payment_method_id FROM payments WHERE order_id = $1",
+      [orderRows[0].id],
+    );
+    expect(history).toEqual([{ payment_method_id: snapId }]);
+
+    const outsideMethods = await dbLib.withTenant(businessId, () =>
+      paymentMethods.listPaymentMethods(businessId, { includeInactive: true }),
+    );
+    expect(outsideMethods.some((method) => method.code === "snappfood")).toBe(false);
+    expect(outsideMethods.some((method) => method.code === "wallet_custom")).toBe(true);
+
+    await platformService.changeBusinessIndustry(businessId, "food_service");
+    const { rows: restored } = await db.query<{ id: string; name: string; is_active: boolean; sort_order: number; requires_reference: boolean }>(
+      "SELECT id, name, is_active, sort_order, requires_reference FROM payment_methods WHERE business_id = $1 AND code = 'snappfood'",
+      [businessId],
+    );
+    expect(restored).toEqual([
+      { id: snapId, name: "اسنپ‌فود قراردادی", is_active: true, sort_order: 77, requires_reference: true },
+    ]);
+    const { rows: historyAfterReturn } = await db.query<{ payment_method_id: string | null }>(
+      "SELECT payment_method_id FROM payments WHERE order_id = $1",
+      [orderRows[0].id],
+    );
+    expect(historyAfterReturn).toEqual([{ payment_method_id: snapId }]);
   });
 });

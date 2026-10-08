@@ -70,6 +70,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   // Money in and out
   ar_receipt: "دریافت از مشتری",
   ap_payment: "پرداخت به تأمین‌کننده",
+  ap_payment_reversal: "برگشت پرداخت به تأمین‌کننده",
   installment_interest: "سود برنامهٔ اقساط",
   cheque: "چک",
   expense: "هزینه",

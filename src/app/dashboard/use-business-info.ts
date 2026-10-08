@@ -21,13 +21,24 @@ export interface BusinessInfo {
    * server's refusal be the last word.
    */
   features?: Record<string, boolean>;
+  /** The first request finished; absent feature flags then mean a legacy/unknown response. */
+  loaded: boolean;
 }
 
 /** Business/location name + contact info for the printed receipt header. */
 export function useBusinessInfo(): BusinessInfo {
-  const [info, setInfo] = useState<BusinessInfo>({ name: "", address: null, phone: null });
+  const [info, setInfo] = useState<BusinessInfo>({
+    name: "",
+    address: null,
+    phone: null,
+    loaded: false,
+  });
   useEffect(() => {
-    api<BusinessInfo>("/api/business-info").then(({ ok, data }) => ok && setInfo(data));
+    api<BusinessInfo>("/api/business-info")
+      .then(({ ok, data }) => {
+        setInfo((current) => (ok ? { ...data, loaded: true } : { ...current, loaded: true }));
+      })
+      .catch(() => setInfo((current) => ({ ...current, loaded: true })));
   }, []);
   return info;
 }
