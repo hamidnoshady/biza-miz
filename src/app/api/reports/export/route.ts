@@ -6,22 +6,48 @@ import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import { getPrimaryLocation } from "@/lib/setup-state";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
-import { reportConfigLabels, validateReportConfig, type ReportConfig } from "@/lib/reports";
+import { reportConfigIsMoney, reportConfigLabels, validateReportConfig, type ReportConfig } from "@/lib/reports";
 import { CASH_FLOW_ACTIVITY_LABELS, getBalanceSheet, getCashFlow, getProfitAndLoss, getBusinessOverview, runCustomReportQuery } from "@/lib/reports-service";
-import { formatMoney, moneyToInput, type MoneyUnit } from "@/lib/money";
-import { rowsToCsv, rowsToXlsxBuffer, type ReportTable } from "@/lib/report-export";
+import { formatMoney, formatMoneyText, moneyToInput, type MoneyUnit } from "@/lib/money";
+import {
+  customReportTable,
+  moneyColumnLabel,
+  moneyExportCell,
+  rowsToCsv,
+  rowsToXlsxBuffer,
+  type ReportTable,
+} from "@/lib/report-export";
 import { renderReportLedgerHtml, renderReportTableHtml, type ReportPdfBusinessInfo } from "@/lib/report-pdf-template";
 import { renderHtmlToPdf } from "@/lib/pdf-render";
+import { getTrialBalance } from "@/lib/ledger-reports-service";
+import type { AccountType } from "@/lib/coa-template";
+import { isValidIsoDate } from "@/lib/iso-date";
+import {
+  filterTrialBalanceRows,
+  type TrialBalanceAccountStatus,
+  type TrialBalanceDisplayFilters,
+  type TrialBalancePresentation,
+} from "@/lib/trial-balance";
 
 type ExportFormat = "csv" | "excel" | "pdf";
+
+interface TrialBalanceExportOptions {
+  presentation?: TrialBalancePresentation;
+  search?: string;
+  accountType?: AccountType | "all";
+  accountStatus?: TrialBalanceAccountStatus;
+  includeZeroBalances?: boolean;
+}
 
 interface ExportBody {
   format?: ExportFormat;
   title?: string;
-  kind?: "chart" | "pnl" | "balance_sheet" | "cash_flow" | "business_overview";
+  kind?: "chart" | "pnl" | "balance_sheet" | "cash_flow" | "business_overview" | "trial_balance";
   config?: ReportConfig;
   dateFrom?: string;
   dateTo?: string;
+  asOf?: string;
+  trialBalanceOptions?: TrialBalanceExportOptions;
 }
 
 async function getBusinessInfo(businessId: string): Promise<ReportPdfBusinessInfo> {
@@ -69,6 +95,172 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
   const kind = body.kind ?? "chart";
 
+  if (kind === "trial_balance") {
+    // Exporting this accounting report requires both the existing export grant
+    // (checked above) and the same ledger-view grant as its on-screen route.
+    const { error: ledgerViewError } = await requirePermission(PERMISSIONS.ledgerView);
+    if (ledgerViewError) return ledgerViewError;
+
+    const asOf = body.asOf;
+    const dateFrom = body.dateFrom;
+    const dateTo = body.dateTo;
+    if (
+      (asOf !== undefined &&
+        (!isValidIsoDate(asOf) || dateFrom !== undefined || dateTo !== undefined)) ||
+      (asOf === undefined &&
+        (!isValidIsoDate(dateFrom) || !isValidIsoDate(dateTo) || dateFrom! > dateTo!))
+    ) {
+      return NextResponse.json({ error: "invalid_report_scope" }, { status: 400 });
+    }
+
+    const requestedOptions = body.trialBalanceOptions ?? {};
+    const validTypes = new Set<AccountType>(["asset", "liability", "equity", "revenue", "expense"]);
+    if (
+      (requestedOptions.presentation !== undefined &&
+        requestedOptions.presentation !== "detailed" && requestedOptions.presentation !== "closing") ||
+      (requestedOptions.accountType !== undefined &&
+        requestedOptions.accountType !== "all" && !validTypes.has(requestedOptions.accountType)) ||
+      (requestedOptions.accountStatus !== undefined &&
+        !["all", "active", "archived"].includes(requestedOptions.accountStatus)) ||
+      (requestedOptions.includeZeroBalances !== undefined &&
+        typeof requestedOptions.includeZeroBalances !== "boolean") ||
+      (requestedOptions.search !== undefined &&
+        (typeof requestedOptions.search !== "string" || requestedOptions.search.length > 200))
+    ) {
+      return NextResponse.json({ error: "invalid_trial_balance_filter" }, { status: 400 });
+    }
+
+    const report = await getTrialBalance(
+      session.businessId,
+      asOf !== undefined ? { asOf } : { dateFrom: dateFrom!, dateTo: dateTo! },
+    );
+    const presentation: TrialBalancePresentation = report.mode;
+    const displayFilters: TrialBalanceDisplayFilters = {
+      ...requestedOptions,
+      presentation,
+      includeZeroBalances: requestedOptions.includeZeroBalances ?? false,
+    };
+    const accounts = filterTrialBalanceRows(report.accounts, displayFilters);
+    const title = body.title?.trim() || "تراز آزمایشی";
+    const generatedAt = new Date();
+    const generatedLabel = toPersianDigits(formatJalali(generatedAt, { withMonthName: true }));
+    const scopeLabel = report.mode === "closing"
+      ? `مانده در تاریخ ${toPersianDigits(formatJalali(report.periodTo))} — دفتر تجمیعی همهٔ شعب`
+      : `${periodLabel(report.periodFrom ?? undefined, report.periodTo)} — دفتر تجمیعی همهٔ شعب`;
+    // Lines, not entries: a journal header that arrived with no lines leaves
+    // both columns at zero, and zero equals zero is not a verdict.
+    const trialBalanceLabel = report.activity.lineCount === 0
+      ? "بدون سند تا تاریخ گزارش؛ تراز هنوز قابل تأیید نیست"
+      : report.trialBalanceBalanced ? "مانده‌های پایان دوره برابر است" : "مانده‌های پایان دوره نامتوازن است";
+    const ledgerHealthLabel = report.integrity.ledgerHealthy
+      ? "دفتر سالم است"
+      : `دفتر نیازمند بازبینی: ${toPersianDigits(report.integrity.unbalancedEntryCount)} سند نامتوازن، ${toPersianDigits(report.integrity.invalidEntryCount)} سند ناقص`;
+    const accountTypeLabels: Record<AccountType, string> = {
+      asset: "دارایی", liability: "بدهی", equity: "حقوق صاحبان سرمایه", revenue: "درآمد", expense: "هزینه",
+    };
+    const accountLevelLabels: Record<string, string> = {
+      group: "گروه", kol: "کل", moein: "معین", tafsili: "تفصیلی",
+    };
+    const activeLabel = (active: boolean) => active ? "فعال" : "بایگانی‌شده";
+    const emptyAmounts = {
+      openingDebit: "", openingCredit: "", periodDebit: "", periodCredit: "",
+      closingDebit: "", closingCredit: "",
+    };
+    const reportRows: Record<string, unknown>[] = accounts.map((account) => ({
+      code: account.code,
+      name: account.name,
+      type: accountTypeLabels[account.type],
+      level: accountLevelLabels[account.level],
+      status: activeLabel(account.isActive),
+      openingDebit: account.openingDebit,
+      openingCredit: account.openingCredit,
+      periodDebit: account.periodDebit,
+      periodCredit: account.periodCredit,
+      closingDebit: account.closingDebit,
+      closingCredit: account.closingCredit,
+    }));
+    const totalRow: Record<string, unknown> = {
+      code: "جمع حساب‌های نمایش‌داده‌شده",
+      name: "",
+      type: "",
+      level: "",
+      status: "",
+      ...reportRows.reduce<Record<string, string>>((sum, row) => {
+        for (const key of Object.keys(emptyAmounts)) {
+          sum[key] = (BigInt(sum[key] || "0") + BigInt(String(row[key] || "0"))).toString();
+        }
+        return sum;
+      }, { ...emptyAmounts }),
+    };
+    const statusRows: Record<string, unknown>[] = [
+      { code: "وضعیت تراز کل گزارش", name: trialBalanceLabel, type: "", level: "", status: "", ...emptyAmounts },
+      { code: "سلامت دفتر", name: ledgerHealthLabel, type: "", level: "", status: "", ...emptyAmounts },
+    ];
+    const metadataRows: Record<string, unknown>[] = [
+      { code: "کسب‌وکار", name: report.businessName, type: "", level: "", status: "", ...emptyAmounts },
+      { code: "گزارش", name: title, type: "", level: "", status: "", ...emptyAmounts },
+      { code: "بازه", name: scopeLabel, type: "", level: "", status: "", ...emptyAmounts },
+      { code: "تاریخ تولید", name: generatedLabel, type: "", level: "", status: "", ...emptyAmounts },
+    ];
+    /*
+     * One column set, labelled with the unit its cells actually carry.
+     *
+     * CSV and Excel get **integer Rial as text**, deliberately: a spreadsheet
+     * stores numbers as IEEE doubles, so writing a balance above
+     * `Number.MAX_SAFE_INTEGER` as a numeric cell would silently round a Rial
+     * away — the exact failure the report exists to avoid. Text keeps every
+     * digit. The PDF is for reading, so it is rendered in the business's own
+     * display unit through the same BigInt-safe formatter the screen uses.
+     */
+    const unitLabel = unit === "rial" ? "ریال" : "تومان";
+    const amountColumns = (labelUnit: string) => [
+      ...(presentation === "detailed"
+        ? [
+            { key: "openingDebit", label: `مانده افتتاحیه بدهکار (${labelUnit})` },
+            { key: "openingCredit", label: `مانده افتتاحیه بستانکار (${labelUnit})` },
+            { key: "periodDebit", label: `گردش بدهکار دوره (${labelUnit})` },
+            { key: "periodCredit", label: `گردش بستانکار دوره (${labelUnit})` },
+          ]
+        : []),
+      { key: "closingDebit", label: `مانده پایان بدهکار (${labelUnit})` },
+      { key: "closingCredit", label: `مانده پایان بستانکار (${labelUnit})` },
+    ];
+    const identityColumns = [
+      { key: "code", label: "کد حساب" },
+      { key: "name", label: "نام حساب" },
+      { key: "type", label: "نوع حساب" },
+      { key: "level", label: "سطح" },
+      { key: "status", label: "وضعیت" },
+    ];
+
+    if (format === "pdf") {
+      const pdfRows = [...reportRows, totalRow, ...statusRows].map((row) => {
+        const formatted = { ...row };
+        for (const key of Object.keys(emptyAmounts)) {
+          if (typeof formatted[key] === "string" && formatted[key]) {
+            formatted[key] = formatMoneyText(String(formatted[key]), unit);
+          }
+        }
+        return formatted;
+      });
+      const html = renderReportTableHtml({
+        business: await getBusinessInfo(session.businessId),
+        title,
+        generatedAt,
+        filterSummary: `${scopeLabel} — ${trialBalanceLabel} — ${ledgerHealthLabel}`,
+        columns: [...identityColumns, ...amountColumns(unitLabel)],
+        rows: pdfRows,
+      });
+      return fileResponse(await renderHtmlToPdf(html), "application/pdf", `${title}.pdf`);
+    }
+
+    const table: ReportTable = {
+      columns: [...identityColumns, ...amountColumns("ریال")],
+      rows: [...metadataRows, ...reportRows, totalRow, ...statusRows],
+    };
+    return respondWithTable(table, title, format, session.businessId);
+  }
+
   if (kind === "chart") {
     if (!body.config) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
     const errors = validateReportConfig(body.config);
@@ -76,13 +268,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
     const { dimensionLabel, metricLabel, viewLabel } = reportConfigLabels(body.config);
     const rows = await runCustomReportQuery(session.businessId, body.config);
-    const table: ReportTable = {
-      columns: [
-        { key: "dim", label: dimensionLabel },
-        { key: "value", label: metricLabel },
-      ],
+    // A money metric is stored in integer Rial; the file speaks the business's
+    // selected unit and says which one in the header, like the statements do.
+    const table: ReportTable = customReportTable(
       rows,
-    };
+      { dimensionLabel, metricLabel },
+      { isMoney: reportConfigIsMoney(body.config), unit, format },
+    );
     const title = body.title?.trim() || viewLabel;
     return respondWithTable(table, title, format, session.businessId, body.config.filters);
   }
@@ -207,23 +399,27 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     });
     const title = body.title?.trim() || "مقایسهٔ عملکرد شعب";
 
+    // Money columns: a spreadsheet gets the number in the selected unit with
+    // the unit in its header; the PDF gets the formatted text. They used to
+    // carry raw Rial under a unit-less header — ten times the Toman figure.
+    const moneyLabel = (label: string) => (format === "pdf" ? label : moneyColumnLabel(label, unit));
     const tableColumns = [
       { key: "branch", label: "شعبه" },
       { key: "status", label: "وضعیت" },
       { key: "orderCount", label: "تعداد سفارش" },
-      { key: "subtotal", label: "فروش ناخالص" },
-      { key: "discount", label: "تخفیف" },
-      { key: "tax", label: "مالیات" },
-      { key: "total", label: "فروش خالص" },
-      { key: "cogs", label: "بهای تمام‌شده" },
-      { key: "wasteCost", label: "ضایعات" },
-      { key: "grossProfit", label: "سود ناخالص" },
+      { key: "subtotal", label: moneyLabel("فروش ناخالص") },
+      { key: "discount", label: moneyLabel("تخفیف") },
+      { key: "tax", label: moneyLabel("مالیات") },
+      { key: "total", label: moneyLabel("فروش خالص") },
+      { key: "cogs", label: moneyLabel("بهای تمام‌شده") },
+      { key: "wasteCost", label: moneyLabel("ضایعات") },
+      { key: "grossProfit", label: moneyLabel("سود ناخالص") },
       { key: "margin", label: "حاشیه سود (%)" },
-      { key: "avgTicket", label: "میانگین فاکتور" },
+      { key: "avgTicket", label: moneyLabel("میانگین فاکتور") },
       { key: "share", label: "سهم از کل (%)" },
     ];
 
-    const formatMoneyVal = (n: number) => formatMoney(n, unit);
+    const money = (rial: number) => moneyExportCell(rial, unit, format);
 
     const rows: Record<string, unknown>[] = overview.branches.map((b) => {
       const grossProfit = b.total - b.cogs;
@@ -238,15 +434,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         branch: b.locationName,
         status: b.isActive ? "فعال" : "غیرفعال",
         orderCount: b.orderCount,
-        subtotal: format === "pdf" ? formatMoneyVal(b.subtotal) : b.subtotal,
-        discount: format === "pdf" ? formatMoneyVal(b.discount) : b.discount,
-        tax: format === "pdf" ? formatMoneyVal(b.tax) : b.tax,
-        total: format === "pdf" ? formatMoneyVal(b.total) : b.total,
-        cogs: format === "pdf" ? formatMoneyVal(b.cogs) : b.cogs,
-        wasteCost: format === "pdf" ? formatMoneyVal(b.wasteCost) : b.wasteCost,
-        grossProfit: format === "pdf" ? formatMoneyVal(grossProfit) : grossProfit,
+        subtotal: money(b.subtotal),
+        discount: money(b.discount),
+        tax: money(b.tax),
+        total: money(b.total),
+        cogs: money(b.cogs),
+        wasteCost: money(b.wasteCost),
+        grossProfit: money(grossProfit),
         margin: `${margin}%`,
-        avgTicket: format === "pdf" ? formatMoneyVal(avgTicket) : avgTicket,
+        avgTicket: money(avgTicket),
         share: `${share}%`,
       };
     });
@@ -265,15 +461,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       branch: "مجموع کسب‌وکار",
       status: "—",
       orderCount: overview.consolidated.orderCount,
-      subtotal: format === "pdf" ? formatMoneyVal(overview.consolidated.subtotal) : overview.consolidated.subtotal,
-      discount: format === "pdf" ? formatMoneyVal(overview.consolidated.discount) : overview.consolidated.discount,
-      tax: format === "pdf" ? formatMoneyVal(overview.consolidated.tax) : overview.consolidated.tax,
-      total: format === "pdf" ? formatMoneyVal(overview.consolidated.total) : overview.consolidated.total,
-      cogs: format === "pdf" ? formatMoneyVal(overview.consolidated.cogs) : overview.consolidated.cogs,
-      wasteCost: format === "pdf" ? formatMoneyVal(overview.consolidated.wasteCost) : overview.consolidated.wasteCost,
-      grossProfit: format === "pdf" ? formatMoneyVal(cGrossProfit) : cGrossProfit,
+      subtotal: money(overview.consolidated.subtotal),
+      discount: money(overview.consolidated.discount),
+      tax: money(overview.consolidated.tax),
+      total: money(overview.consolidated.total),
+      cogs: money(overview.consolidated.cogs),
+      wasteCost: money(overview.consolidated.wasteCost),
+      grossProfit: money(cGrossProfit),
       margin: `${cMargin}%`,
-      avgTicket: format === "pdf" ? formatMoneyVal(cAvgTicket) : cAvgTicket,
+      avgTicket: money(cAvgTicket),
       share: "۱۰۰٪",
     });
 

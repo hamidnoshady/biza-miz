@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { getArAging } from "@/lib/ar-service";
 import { isValidIsoDate } from "@/lib/iso-date";
+import { getArAging } from "@/lib/ar-service";
 
 /**
  * Standard 30/60/90-day AR aging as of ?asOfDate= (defaults to today).

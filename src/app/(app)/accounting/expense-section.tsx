@@ -13,6 +13,8 @@ import { api, ErrorBox, inputClass, PrimaryButton, SecondaryButton } from "@/app
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import type { AccountRow, Runner } from "./accounting-manager";
 import { cardClass } from "@/app/dashboard/page-chrome";
+import { FilterChip } from "@/app/dashboard/filters";
+import { EXPENSE_SETTLEMENT_LABELS, type ExpenseSettlement } from "@/lib/payables-input";
 
 interface ExpenseRow {
   id: string;
@@ -25,6 +27,23 @@ interface ExpenseRow {
   vendor: string | null;
   memo: string;
   createdByName: string | null;
+  /** Audit F11 — `credit` («پرداخت بعدی») was posted to Accounts Payable for `supplierName`. */
+  settlement?: ExpenseSettlement;
+  supplierName?: string | null;
+  dueDate?: string | null;
+}
+
+interface SupplierOption {
+  supplierId: string;
+  supplierName: string;
+  supplierPhone: string | null;
+}
+
+/** «پرداخت از» for a paid expense; «پرداخت بعدی — تأمین‌کننده (سررسید …)» for one owed. */
+function settlementText(e: ExpenseRow): string {
+  if (e.settlement !== "credit") return `${toPersianDigits(e.paymentAccountCode)} ${e.paymentAccountName}`;
+  const due = e.dueDate ? ` (سررسید ${toPersianDigits(formatJalali(e.dueDate))})` : "";
+  return `${EXPENSE_SETTLEMENT_LABELS.credit} — ${e.supplierName ?? "تأمین‌کننده"}${due}`;
 }
 
 interface ExpenseListResponse {
@@ -84,6 +103,17 @@ export function ExpenseSection({
   const money = useMoney();
   const [accountId, setAccountId] = useState("");
   const [paymentAccountId, setPaymentAccountId] = useState("");
+  /*
+   * Audit F11 — «پرداخت بعدی». An owed expense credits Accounts Payable for a
+   * supplier instead of a cash/bank account and is settled later from
+   * «حساب‌های پرداختنی» like any supplier bill. The supplier list loads only
+   * when that option is chosen.
+   */
+  const [settlement, setSettlement] = useState<ExpenseSettlement>("paid");
+  const [supplierId, setSupplierId] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [suppliers, setSuppliers] = useState<SupplierOption[] | null>(null);
+  const [suppliersError, setSuppliersError] = useState(false);
   const [amount, setAmount] = useState("");
   const [expenseDate, setExpenseDate] = useState("");
   const [vendor, setVendor] = useState("");
@@ -232,8 +262,12 @@ export function ExpenseSection({
    */
   function validate(): string {
     if (!accountId) return "دسته هزینه را انتخاب کنید.";
-    if (!paymentAccountId) return "حساب پرداخت را انتخاب کنید.";
-    if (accountId === paymentAccountId) return "دسته هزینه و حساب پرداخت نمی‌توانند یکسان باشند.";
+    if (settlement === "paid") {
+      if (!paymentAccountId) return "حساب پرداخت را انتخاب کنید.";
+      if (accountId === paymentAccountId) return "دسته هزینه و حساب پرداخت نمی‌توانند یکسان باشند.";
+    } else if (!supplierId) {
+      return "برای «پرداخت بعدی» تأمین‌کننده را انتخاب کنید تا بدهی در حساب‌های پرداختنی او ثبت شود.";
+    }
     if (!amount.trim()) return "مبلغ هزینه را وارد کنید.";
     let rial: number;
     try {
@@ -245,6 +279,9 @@ export function ExpenseSection({
     if (!Number.isSafeInteger(rial)) return "مبلغ واردشده بیش از حد بزرگ است.";
     if (expenseDate && expenseDate > today) return "تاریخ هزینه نمی‌تواند در آینده باشد.";
     if (!memo.trim()) return "شرح هزینه الزامی است.";
+    if (settlement === "credit" && dueDate && dueDate < (expenseDate || today)) {
+      return "سررسید پرداخت نمی‌تواند پیش از تاریخ هزینه باشد.";
+    }
     return "";
   }
 
@@ -267,7 +304,9 @@ export function ExpenseSection({
         method: "POST",
         body: JSON.stringify({
           accountId,
-          paymentAccountId,
+          ...(settlement === "credit"
+            ? { settlement, supplierId, dueDate: dueDate || undefined }
+            : { settlement, paymentAccountId }),
           amount: rial,
           expenseDate: expenseDate || undefined,
           vendor: vendor.trim() || undefined,
@@ -277,9 +316,15 @@ export function ExpenseSection({
       }),
     );
     if (ok) {
-      setNotice(`هزینه به مبلغ ${money.format(rial)} ثبت و در دفاتر منعکس شد.`);
+      setNotice(
+        settlement === "credit"
+          ? `هزینه به مبلغ ${money.format(rial)} به‌صورت «پرداخت بعدی» در حساب‌های پرداختنی ثبت شد.`
+          : `هزینه به مبلغ ${money.format(rial)} ثبت و در دفاتر منعکس شد.`,
+      );
       setAccountId("");
       setPaymentAccountId("");
+      setSupplierId("");
+      setDueDate("");
       setAmount("");
       setExpenseDate("");
       setVendor("");
@@ -312,6 +357,30 @@ export function ExpenseSection({
     [paymentAccounts],
   );
 
+  function chooseSettlement(next: ExpenseSettlement) {
+    setSettlement(next);
+    setFormError("");
+    if (next === "credit" && suppliers === null) {
+      setSuppliersError(false);
+      void api<{ suppliers?: SupplierOption[] }>("/api/ledger/ap/suppliers?scope=directory").then(({ ok, data }) => {
+        if (ok) setSuppliers(data.suppliers ?? []);
+        else setSuppliersError(true);
+      });
+    }
+  }
+
+  const supplierOptions = useMemo(
+    () => [
+      { value: "", label: suppliers === null ? "در حال بارگذاری…" : "انتخاب تأمین‌کننده" },
+      ...(suppliers ?? []).map((s) => ({
+        value: s.supplierId,
+        label: s.supplierPhone ? `${s.supplierName} · ${toPersianDigits(s.supplierPhone)}` : s.supplierName,
+        searchString: `${s.supplierName} ${s.supplierPhone ?? ""}`,
+      })),
+    ],
+    [suppliers],
+  );
+
   // A business whose chart has no expense (or no asset) account cannot record
   // anything here; say so and point at the chart rather than showing a form
   // whose first field is permanently empty.
@@ -326,8 +395,8 @@ export function ExpenseSection({
             ثبت هزینه
           </h2>
           <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-            هزینه به‌عنوان پرداخت‌شده ثبت می‌شود و بلافاصله در دفاتر منعکس خواهد شد: بدهکار «دسته هزینه» و
-            بستانکار «حساب پرداخت».
+            هزینه بلافاصله در دفاتر منعکس می‌شود: بدهکار «دسته هزینه» و بستانکار «حساب پرداخت»؛ یا با «پرداخت
+            بعدی»، بستانکار حساب‌های پرداختنیِ تأمین‌کننده تا بعداً از «حساب‌های پرداختنی» تسویه شود.
           </p>
         </header>
 
@@ -355,17 +424,64 @@ export function ExpenseSection({
               </div>
 
               <div className="block">
-                <span className="mb-1.5 block text-sm font-medium text-foreground">پرداخت از</span>
-                <SearchableSelect
-                  value={paymentAccountId}
-                  onChange={(value) => {
-                    setPaymentAccountId(value);
-                    setFormError("");
-                  }}
-                  ariaLabel="حساب پرداخت"
-                  options={paymentOptions}
-                />
+                <span className="mb-1.5 block text-sm font-medium text-foreground">نحوهٔ تسویه</span>
+                <div className="flex gap-2" role="group" aria-label="نحوهٔ تسویه">
+                  <FilterChip dense selected={settlement === "paid"} onClick={() => chooseSettlement("paid")}>
+                    {EXPENSE_SETTLEMENT_LABELS.paid}
+                  </FilterChip>
+                  <FilterChip dense selected={settlement === "credit"} onClick={() => chooseSettlement("credit")}>
+                    {EXPENSE_SETTLEMENT_LABELS.credit}
+                  </FilterChip>
+                </div>
               </div>
+
+              {settlement === "paid" ? (
+                <div className="block">
+                  <span className="mb-1.5 block text-sm font-medium text-foreground">پرداخت از</span>
+                  <SearchableSelect
+                    value={paymentAccountId}
+                    onChange={(value) => {
+                      setPaymentAccountId(value);
+                      setFormError("");
+                    }}
+                    ariaLabel="حساب پرداخت"
+                    options={paymentOptions}
+                  />
+                </div>
+              ) : (
+                <>
+                  <div className="block">
+                    <span className="mb-1.5 block text-sm font-medium text-foreground">بدهکار به تأمین‌کننده</span>
+                    <SearchableSelect
+                      value={supplierId}
+                      onChange={(value) => {
+                        setSupplierId(value);
+                        setFormError("");
+                      }}
+                      ariaLabel="تأمین‌کننده"
+                      loading={suppliers === null && !suppliersError}
+                      disabled={suppliersError}
+                      options={supplierOptions}
+                    />
+                    {suppliersError ? (
+                      <span className="mt-1 block text-xs text-destructive">فهرست تأمین‌کنندگان بارگذاری نشد.</span>
+                    ) : null}
+                  </div>
+                  <label className="block">
+                    <span className="mb-1.5 block text-sm font-medium text-foreground">
+                      سررسید پرداخت <span className="font-normal text-muted-foreground">(اختیاری)</span>
+                    </span>
+                    <JalaliDatePicker
+                      value={dueDate}
+                      onChange={(value) => {
+                        setDueDate(value);
+                        setFormError("");
+                      }}
+                      placeholder="بدون سررسید"
+                    />
+                  </label>
+                </>
+              )}
 
               <label className="block">
                 <span className="mb-1.5 block text-sm font-medium text-foreground">
@@ -579,9 +695,7 @@ export function ExpenseSection({
                       </Td>
                       <Td className="max-w-[18rem] break-words">{e.memo}</Td>
                       <Td muted>{e.vendor ?? "—"}</Td>
-                      <Td muted>
-                        {toPersianDigits(e.paymentAccountCode)} {e.paymentAccountName}
-                      </Td>
+                      <Td muted>{settlementText(e)}</Td>
                       <Td muted>{e.createdByName ?? "—"}</Td>
                       <Td numeric nowrap className="font-semibold">
                         {money.format(e.amount)}
@@ -617,10 +731,8 @@ export function ExpenseSection({
                         <dd className="mt-1 break-words text-sm text-foreground">{e.vendor ?? "—"}</dd>
                       </div>
                       <div className="min-w-0">
-                        <dt className="text-muted-foreground">پرداخت از</dt>
-                        <dd className="mt-1 break-words text-sm text-foreground">
-                          {toPersianDigits(e.paymentAccountCode)} {e.paymentAccountName}
-                        </dd>
+                        <dt className="text-muted-foreground">پرداخت از / تسویه</dt>
+                        <dd className="mt-1 break-words text-sm text-foreground">{settlementText(e)}</dd>
                       </div>
                       <div className="col-span-2 min-w-0">
                         <dt className="text-muted-foreground">ثبت‌کننده</dt>

@@ -619,6 +619,147 @@ describe("reverseEntry", () => {
     expect(rows[0].location_id).toBe(loc.front);
   });
 
+  /**
+   * Issue #821 — the hybrid/multi-branch convergence bug.
+   *
+   * The reversing journal was always written to the original document's
+   * branch, but the sync event carried `params.locationId`, which the route
+   * reads from the approver's *currently active* location. An accountant
+   * standing in Branch B reversing Branch A's journal therefore wrote the row
+   * to A and queued the event for B: the desktop at A never learned its own
+   * document had been reversed, and the one at B was handed an entry id it
+   * does not own.
+   *
+   * `appendSyncOutboxEvent` only records on the central server for a branch a
+   * desktop is actually paired to, so each of these registers an active site
+   * device first — that is also what makes "queued for the wrong branch"
+   * observable rather than invisible.
+   */
+  async function pairDevice(locationId: string, name: string): Promise<void> {
+    await db.query(
+      `INSERT INTO site_devices (business_id, location_id, display_name, status)
+       VALUES ($1, $2, $3, 'active')`,
+      [biz.id, locationId, name],
+    );
+  }
+
+  // Also issue #823 §8, which found the same defect from the sync side.
+  it("queues the reversal's sync event for the original document's branch, not the approver's", async () => {
+    await pairDevice(loc.front, "صندوق شعبهٔ جلو");
+    await pairDevice(loc.back, "صندوق شعبهٔ پشت");
+    const entryId = await approvedEntryId(loc.front);
+
+    const { entryId: reversalId } = await manualJournal.reverseEntry({
+      businessId: biz.id,
+      // The approver is active in Branch B; the document lives in Branch A.
+      locationId: loc.back,
+      entryId,
+      actorId: user.id,
+      sync: { actorRole: "owner" },
+    });
+
+    const { rows: events } = await db.query<{ location_id: string; payload: { entryId: string } }>(
+      `SELECT location_id, payload FROM sync_events
+        WHERE event_type = 'accounting.manual_journal.reversed'`,
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0].location_id).toBe(loc.front);
+    expect(events[0].location_id).not.toBe(loc.back);
+    expect(events[0].payload.entryId).toBe(entryId);
+
+    // And the journal row itself agrees, so event and effect cannot diverge.
+    const { rows } = await db.query<{ location_id: string | null }>(
+      "SELECT location_id FROM journal_entries WHERE id = $1",
+      [reversalId],
+    );
+    expect(rows[0].location_id).toBe(loc.front);
+  });
+
+  it("falls back to the approver's branch only for a document that has none of its own", async () => {
+    // A business-wide entry (or one from before branches existed) has no
+    // branch to route by, and `sync_events.location_id` is NOT NULL — a site's
+    // own writes reach the central server only through this queue, so dropping
+    // the event would lose the reversal rather than delay it. The envelope is
+    // the caller's branch; the effect is still derived from the original on
+    // the applying side.
+    await pairDevice(loc.back, "صندوق شعبهٔ پشت");
+    const entryId = await approvedEntryId(null);
+
+    await manualJournal.reverseEntry({
+      businessId: biz.id,
+      locationId: loc.back,
+      entryId,
+      actorId: user.id,
+      sync: { actorRole: "owner" },
+    });
+
+    const { rows } = await db.query<{ location_id: string }>(
+      `SELECT location_id FROM sync_events
+        WHERE event_type = 'accounting.manual_journal.reversed'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].location_id).toBe(loc.back);
+  });
+
+  it("queues nothing when neither the document nor the approver has a branch", async () => {
+    const entryId = await approvedEntryId(null);
+
+    await manualJournal.reverseEntry({
+      businessId: biz.id,
+      locationId: null,
+      entryId,
+      actorId: user.id,
+      sync: { actorRole: "owner" },
+    });
+
+    const { rows } = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM sync_events
+        WHERE event_type = 'accounting.manual_journal.reversed'`,
+    );
+    expect(rows[0].n).toBe(0);
+  });
+
+  it("replays a reversal onto the original's branch even if the event reaches it labelled with another", async () => {
+    // The receiving side of the bug above: `sync-domain-handlers.ts` hands the
+    // *event's* location to `reverseEntryInTransaction`, which is how a
+    // misrouted (or historical, wrongly-queued) event used to post a second
+    // branch's copy. Deriving the branch from the original document means both
+    // peers reach the same journal whatever the envelope says — that is what
+    // convergence means here. A replay also queues nothing back, or the two
+    // installs would trade the same reversal forever.
+    await pairDevice(loc.front, "صندوق شعبهٔ جلو");
+    await pairDevice(loc.back, "صندوق شعبهٔ پشت");
+    const entryId = await approvedEntryId(loc.front);
+
+    const client = await dbLib.getPool().connect();
+    let reversalId = "";
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.sync_replay', 'on', true)");
+      ({ entryId: reversalId } = await manualJournal.reverseEntryInTransaction(client, {
+        businessId: biz.id,
+        locationId: loc.back,
+        entryId,
+        actorId: user.id,
+      }));
+      await client.query("COMMIT");
+    } finally {
+      client.release();
+    }
+
+    const { rows } = await db.query<{ location_id: string | null }>(
+      "SELECT location_id FROM journal_entries WHERE id = $1",
+      [reversalId],
+    );
+    expect(rows[0].location_id).toBe(loc.front);
+
+    const { rows: events } = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM sync_events
+        WHERE event_type = 'accounting.manual_journal.reversed'`,
+    );
+    expect(events[0].n).toBe(0);
+  });
+
   it("serializes concurrent reversals so one manual document receives one reversal", async () => {
     const entryId = await approvedEntryId(loc.front);
 
@@ -1210,47 +1351,5 @@ describe("draft listing (issue #823 §17, §6, §13)", () => {
     // type uuid` for a non-uuid, which reaches the browser as a 500.
     expect(await manualJournal.getDraft(biz.id, "not-a-uuid")).toBeNull();
     expect(await manualJournal.getDraft(biz.id, "")).toBeNull();
-  });
-});
-
-describe("reversal sync event (issue #823 §8)", () => {
-  it("tags the outbox event with the reversed entry's own branch, not the caller's", async () => {
-    const draft = await manualJournal.createDraft({
-      businessId: biz.id,
-      locationId: loc.front,
-      entryDate: "2025-04-15",
-      memo: "Rent",
-      lines: balancedLines(),
-      createdBy: user.id,
-    });
-    const { entryId } = await manualJournal.approveDraft({
-      businessId: biz.id,
-      locationId: loc.front,
-      draftId: draft.id,
-      actorId: user.id,
-    });
-
-    const { rows: entryRows } = await db.query<{ location_id: string }>(
-      `SELECT location_id FROM journal_entries WHERE id = $1`,
-      [entryId],
-    );
-    expect(entryRows[0].location_id).toBe(loc.front);
-
-    // Reversed from a session sitting in the *other* branch: the ledger effect
-    // belongs to «Front branch», so the event has to say so.
-    await manualJournal.reverseEntry({
-      businessId: biz.id,
-      locationId: loc.back,
-      entryId,
-      actorId: user.id,
-      sync: { actorRole: "owner" },
-    });
-
-    const { rows } = await db.query<{ location_id: string; event_type: string }>(
-      `SELECT location_id, event_type FROM sync_events
-        WHERE event_type = 'accounting.manual_journal.reversed'`,
-    );
-    expect(rows).toHaveLength(1);
-    expect(rows[0].location_id).toBe(loc.front);
   });
 });

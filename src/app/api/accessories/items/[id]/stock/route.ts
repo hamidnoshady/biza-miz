@@ -4,7 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { requireIndustryForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { getItem } from "@/lib/items-service";
-import { receiveStock, setUnitPrice } from "@/lib/accessories-service";
+import { receiveStock, setInitialUnitCost, setUnitPrice } from "@/lib/accessories-service";
 import { recordItemEvent } from "@/lib/item-audit-service";
 
 async function ownedItem(session: SessionPayload, id: string) {
@@ -49,6 +49,12 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       body.quantity != null
         ? await receiveStock(id, { quantity: String(body.quantity), unitCost: Number(body.unitCost ?? 0) })
         : null;
+    // A purchase price sent without a quantity (the price-list editor's
+    // «قیمت خرید» column) is not a receipt: it may set the opening cost of an
+    // item with nothing on hand, and is refused once stock exists.
+    if (body.quantity == null && body.unitCost != null) {
+      await setInitialUnitCost(id, Number(body.unitCost));
+    }
     if (stock) {
       await recordItemEvent({
         businessId: session.businessId,

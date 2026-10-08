@@ -21,6 +21,30 @@ import { formatJalali } from "./jalali";
 import { formatRial } from "./money";
 import { formatQuantity, toPersianDigits } from "./digits";
 import { ACCOUNTING_WORKSPACE_HREFS } from "./app-routes";
+import { RECONCILABLE_ACCOUNTS } from "./bank-reconciliation";
+import { RECONCILABLE_ACCOUNT_LABELS } from "./ai-labels";
+
+/**
+ * «صندوق، بانک یا کارت‌خوان (در راه)» — the accounts an unreconciled line can
+ * sit on, spelled from the same list the reconciliation service uses rather
+ * than typed into the sentence.
+ *
+ * This copy said «صندوق یا کارت‌خوان» while the service had already learned to
+ * reconcile بانک, so the audit named two of the three places its own count came
+ * from — a reader on a cheque-taking business was told to look everywhere
+ * except the account holding the money. Deriving it means a fourth reconcilable
+ * account shows up here by itself instead of by somebody remembering.
+ */
+export const RECONCILABLE_ACCOUNT_NAMES: readonly string[] = RECONCILABLE_ACCOUNTS.map(
+  (key) => RECONCILABLE_ACCOUNT_LABELS[key] ?? key,
+);
+
+/** Persian "a، b یا c" — the last item joined with «یا», the rest with «،». */
+function persianList(items: readonly string[]): string {
+  if (items.length === 0) return "";
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join("، ")} یا ${items[items.length - 1]}`;
+}
 
 export type AccountingReviewSeverity = "high" | "medium" | "low";
 
@@ -83,6 +107,12 @@ export interface AccountingReviewSnapshot {
   /** Fiscal periods that ended but were never soft-closed or locked. */
   unlockedPastPeriods: { id: string; label: string; endsOn: string }[];
   /**
+   * Journal entries dated outside every configured fiscal period (audit F08),
+   * and how many fiscal years exist at all. Reported, never rejected: the
+   * database permits an uncovered date on purpose.
+   */
+  uncoveredFiscalEntries: { count: number; earliest: string | null; latest: string | null; fiscalYearCount: number };
+  /**
    * Codes of findings whose row list hit the service's row cap, so their count
    * is a floor rather than a total. An audit tool that prints «۵۰ مورد» when
    * there are six hundred is lying in the same way one that finds nothing
@@ -112,6 +142,7 @@ export function emptyAccountingSnapshot(asOfDate: string, windowDays = 30): Acco
     staleDraftPurchases: [],
     staleDraftPurchaseAfterDays: 14,
     unlockedPastPeriods: [],
+    uncoveredFiscalEntries: { count: 0, earliest: null, latest: null, fiscalYearCount: 0 },
     truncatedChecks: [],
   };
 }
@@ -336,7 +367,7 @@ const RULES: Rule[] = [
       code: "unreconciled_bank_lines",
       severity: count > 20 ? "medium" : "low",
       title: "ردیف بانکی مغایرت‌گیری‌نشده",
-      detail: `${fa(count)} ردیف صندوق یا کارت‌خوان هنوز با صورتحساب تطبیق داده نشده است (جمع: ${money(amountRial)}).${age}`,
+      detail: `${fa(count)} ردیف ${persianList(RECONCILABLE_ACCOUNT_NAMES)} هنوز با صورتحساب تطبیق داده نشده است (جمع: ${money(amountRial)}).${age}`,
       count,
       amountRial,
       suggestion: "در «مغایرت‌گیری بانکی» صورتحساب دوره را وارد و ردیف‌ها را تطبیق دهید. هرچه دیرتر انجام شود، پیدا کردن ردیف جاافتاده سخت‌تر می‌شود.",
@@ -409,6 +440,25 @@ const RULES: Rule[] = [
       suggestion: "پس از اطمینان از کامل‌بودن اسناد، دوره را در «دوره‌های مالی» ببندید و سپس قفل کنید.",
       href: "/accounting/fiscal-periods",
       samples: firstSamples(rows, (row) => sample(`${row.label} — پایان ${day(row.endsOn)}`, row.id)),
+    };
+  },
+
+  (s) => {
+    const u = s.uncoveredFiscalEntries;
+    if (u.count === 0 || !u.earliest || !u.latest) return null;
+    const noYear = u.fiscalYearCount === 0;
+    return {
+      code: "uncovered_fiscal_dates",
+      severity: "medium",
+      title: noYear ? "سال مالی تعریف نشده" : "سند بیرون از دوره‌های مالی",
+      detail: `${fa(u.count)} سند حسابداری از ${day(u.earliest)} تا ${day(u.latest)} در هیچ دورهٔ مالی تعریف‌شده‌ای نیست${
+        noYear ? "؛ هنوز هیچ سال مالی‌ای تعریف نشده است" : ""
+      }. این اسناد رد یا جابه‌جا نمی‌شوند، اما تا زیر پوشش دوره نروند قابل قفل نیستند و بستن حساب‌های سال ممکن نیست.`,
+      count: u.count,
+      amountRial: null,
+      suggestion: "سال مالیِ تاریخ‌های این اسناد را در «دوره‌های مالی» تعریف کنید؛ تعریف سال، سندی را تغییر نمی‌دهد.",
+      href: "/accounting/fiscal-periods",
+      samples: [],
     };
   },
 ];
