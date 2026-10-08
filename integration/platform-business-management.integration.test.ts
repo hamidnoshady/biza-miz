@@ -1,9 +1,17 @@
 /**
  * Super-admin business management — real-database regression coverage.
  *
- * A reset must remove every tenant-owned record without touching another
- * business, while retaining exactly one usable owner identity and starting the
- * target tenant at the first-run setup state.
+ * A reset must clear the tenant's OPERATIONAL data without touching another
+ * business, while retaining exactly one usable owner identity and starting
+ * the target tenant at the first-run setup state.
+ *
+ * Issue #822 hardened this suite: the old reset deleted and recreated the
+ * root `businesses` row, and the reset tests seeded no commercial state — so
+ * the cascade that swept away subscriptions, wallets, invoices and payments
+ * stayed invisible. These tests seed the full commercial/control-plane
+ * surface and assert, column for column, what survives a reset and what a
+ * hard delete deliberately destroys — including the platform-company
+ * customer-tenant mapping that RESTRICT-references the business.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
@@ -186,6 +194,129 @@ async function seedBusiness(name: string, slug: string): Promise<SeededBusiness>
   );
 
   return { id: businessId, locationId, ownerId, platformUserId, name, slug, subdomain };
+}
+
+/**
+ * The full commercial/control-plane surface a real tenant accumulates —
+ * exactly the rows the old delete/recreate reset cascaded away (issue #822).
+ * Every value is chosen so the post-reset assertions can prove byte-for-byte
+ * preservation, not merely row existence.
+ */
+async function seedCommercialState(businessId: string): Promise<{ invoiceId: string }> {
+  await db.query(
+    `INSERT INTO business_subscriptions
+       (business_id, plan_key, status, started_at, current_period_start, current_period_end, auto_renew)
+     VALUES ($1, 'business', 'active', '2026-01-15T08:00:00Z', '2026-09-15T08:00:00Z', '2026-10-15T08:00:00Z', true)`,
+    [businessId],
+  );
+  await db.query(
+    `INSERT INTO business_wallets (business_id, balance_rial, total_topped_up_rial, total_spent_rial)
+     VALUES ($1, 500000, 700000, 200000)`,
+    [businessId],
+  );
+  await db.query(
+    `INSERT INTO wallet_ledger (business_id, kind, direction, amount_rial, balance_after_rial, note, created_at)
+     VALUES
+       ($1, 'top_up', 'credit', 700000, 700000, 'seed top-up', '2026-02-01T08:00:00Z'),
+       ($1, 'feature_charge', 'debit', 200000, 500000, 'seed charge', '2026-02-02T08:00:00Z')`,
+    [businessId],
+  );
+  await db.query(
+    `INSERT INTO billing_payments (business_id, gateway, purpose, amount_rial, credit_rial, description, status, created_at)
+     VALUES ($1, 'manual', 'top_up', 700000, 700000, 'seed payment', 'verified', '2026-02-01T08:00:00Z')`,
+    [businessId],
+  );
+  const invoice = await db.query<{ id: string }>(
+    `INSERT INTO billing_invoices
+       (business_id, invoice_number, status, subtotal_rial, total_rial, paid_rial, reference, created_at)
+     VALUES ($1, 'INV-1', 'paid', 150000000, 150000000, 150000000, 'seed-invoice', '2026-01-15T08:00:00Z')
+     RETURNING id`,
+    [businessId],
+  );
+  await db.query(
+    `INSERT INTO billing_invoice_lines (invoice_id, kind, description, quantity, unit_amount_rial, amount_rial)
+     VALUES ($1, 'plan', 'پلن سازمانی', 1, 150000000, 150000000)`,
+    [invoice.rows[0].id],
+  );
+  await db.query(
+    `INSERT INTO business_entitlements (business_id, feature_key, source)
+     VALUES ($1, 'inventory', 'plan')`,
+    [businessId],
+  );
+  await db.query(
+    `INSERT INTO feature_usage (business_id, feature_key, used_count, charged_count, spent_rial)
+     VALUES ($1, 'inventory', 42, 10, 25000)`,
+    [businessId],
+  );
+  await db.query(
+    `INSERT INTO business_spend_policies (business_id, monthly_budget_rial)
+     VALUES ($1, 10000000)`,
+    [businessId],
+  );
+  await db.query(
+    `INSERT INTO billing_vendor_cost_events (business_id, provider, source_reference, amount_rial)
+     VALUES ($1, 'litellm', 'seed-cost-1', 1234)`,
+    [businessId],
+  );
+  await db.query(
+    `INSERT INTO website_service_subscriptions (business_id, plan_key, status, current_period_start, current_period_end)
+     VALUES ($1, 'site_starter', 'active', '2026-09-01T08:00:00Z', '2026-10-01T08:00:00Z')`,
+    [businessId],
+  );
+  await db.query(
+    `INSERT INTO website_service_charges (business_id, kind, description, amount_rial, reference)
+     VALUES ($1, 'subscription', 'ماهانه', 2000000, 'seed-charge-1')`,
+    [businessId],
+  );
+  await db.query(
+    `INSERT INTO ai_plan_allowance_usage (business_id, period_month, granted_rial, used_rial)
+     VALUES ($1, '2026-09', 500000, 100000)`,
+    [businessId],
+  );
+  return { invoiceId: invoice.rows[0].id };
+}
+
+interface PlatformCompanyMapping {
+  internalBusinessId: string;
+  customerId: string;
+}
+
+/**
+ * Maps one or more customer tenants into the platform company's CRM domain —
+ * the `platform_company_customer_tenants` rows whose RESTRICT foreign key on
+ * `customer_tenant_id` used to make both reset and hard delete fail with a
+ * raw FK error once a real customer was mapped (issue #822).
+ */
+async function seedPlatformCompanyMapping(
+  customerTenantIds: string[],
+): Promise<PlatformCompanyMapping> {
+  const internal = await db.query<{ id: string }>(
+    `INSERT INTO businesses (name, slug, subdomain, industry, ownership_kind, status, plan)
+     VALUES ('شرکت سکو', 'platform-internal-co', 'platform-internal-co', 'service_saas', 'platform_internal', 'active', 'business')
+     RETURNING id`,
+  );
+  const internalBusinessId = internal.rows[0].id;
+  const party = await db.query<{ id: string }>(
+    `INSERT INTO parties (business_id, name, role)
+     VALUES ($1, 'مشتریِ نگاشت‌شده', 'customer')
+     RETURNING id`,
+    [internalBusinessId],
+  );
+  const customer = await db.query<{ id: string }>(
+    `INSERT INTO platform_company_customers (business_id, party_id, legal_name, billing_customer_key)
+     VALUES ($1, $2, 'کسب‌وکار مشتری', 'CUST-1')
+     RETURNING id`,
+    [internalBusinessId, party.rows[0].id],
+  );
+  const customerId = customer.rows[0].id;
+  for (const tenantId of customerTenantIds) {
+    await db.query(
+      `INSERT INTO platform_company_customer_tenants (business_id, customer_id, customer_tenant_id)
+       VALUES ($1, $2, $3)`,
+      [internalBusinessId, customerId, tenantId],
+    );
+  }
+  return { internalBusinessId, customerId };
 }
 
 beforeEach(async () => {
@@ -387,6 +518,278 @@ describe("resetBusiness", () => {
   });
 });
 
+describe("resetBusiness — commercial state survives (issue #822)", () => {
+  it("keeps id, created_at, identity, status, wallet, invoices, payments, subscriptions and mappings while clearing operational data", async () => {
+    const target = await seedBusiness("Commercial Cafe", `commercial-${randomUUID().slice(0, 8)}`);
+    const neighbour = await seedBusiness("Neighbour Cafe 3", `neighbour3-${randomUUID().slice(0, 8)}`);
+    const commercial = await seedCommercialState(target.id);
+    await seedPlatformCompanyMapping([target.id, neighbour.id]);
+
+    const before = await db.query<{ created_at: string; subdomain: string }>(
+      `SELECT created_at, subdomain::text AS subdomain FROM businesses WHERE id = $1`,
+      [target.id],
+    );
+
+    await platformService.resetBusiness(target.id);
+
+    // Root identity: same row, untouched — id, created_at, slug, subdomain,
+    // name, plan, status, industry and timezone must all survive verbatim.
+    const { rows: afterRows } = await db.query<{
+      id: string;
+      created_at: string;
+      name: string;
+      slug: string;
+      subdomain: string;
+      status: string;
+      plan: string;
+      industry: string;
+      timezone: string;
+    }>(
+      `SELECT id, created_at, name, slug::text AS slug, subdomain::text AS subdomain,
+              status::text AS status, plan, industry, timezone
+         FROM businesses WHERE id = $1`,
+      [target.id],
+    );
+    expect(afterRows[0]).toEqual({
+      id: target.id,
+      created_at: before.rows[0].created_at,
+      name: target.name,
+      slug: target.slug,
+      subdomain: before.rows[0].subdomain,
+      status: "active",
+      plan: "business",
+      industry: "food_service",
+      timezone: "Asia/Tehran",
+    });
+
+    // Subscription survives with its exact period/renewal state.
+    const { rows: subscriptions } = await db.query(
+      `SELECT plan_key, status, auto_renew, started_at, current_period_end
+         FROM business_subscriptions WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]).toMatchObject({ plan_key: "business", status: "active", auto_renew: true });
+
+    // Wallet balance and the full ledger history survive with exact values.
+    const { rows: wallets } = await db.query(
+      `SELECT balance_rial, total_topped_up_rial, total_spent_rial
+         FROM business_wallets WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(wallets[0]).toEqual({
+      balance_rial: "500000",
+      total_topped_up_rial: "700000",
+      total_spent_rial: "200000",
+    });
+    const { rows: ledger } = await db.query<{ kind: string; direction: string; amount_rial: string }>(
+      `SELECT kind, direction, amount_rial::text AS amount_rial
+         FROM wallet_ledger WHERE business_id = $1 ORDER BY created_at`,
+      [target.id],
+    );
+    expect(ledger).toEqual([
+      { kind: "top_up", direction: "credit", amount_rial: "700000" },
+      { kind: "feature_charge", direction: "debit", amount_rial: "200000" },
+    ]);
+
+    // Payments, invoices and invoice lines survive.
+    const { rows: payments } = await db.query(
+      `SELECT amount_rial, credit_rial, status FROM billing_payments WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(payments).toHaveLength(1);
+    expect(payments[0]).toMatchObject({ amount_rial: "700000", credit_rial: "700000", status: "verified" });
+    const { rows: invoices } = await db.query(
+      `SELECT invoice_number, status, total_rial, paid_rial
+         FROM billing_invoices WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(invoices).toHaveLength(1);
+    expect(invoices[0]).toMatchObject({
+      invoice_number: "INV-1",
+      status: "paid",
+      total_rial: "150000000",
+      paid_rial: "150000000",
+    });
+    const { rows: invoiceLines } = await db.query(
+      `SELECT amount_rial FROM billing_invoice_lines WHERE invoice_id = $1`,
+      [commercial.invoiceId],
+    );
+    expect(invoiceLines).toHaveLength(1);
+
+    // Entitlements, usage meters, spend policy and vendor costs survive.
+    expect(
+      (await db.query(`SELECT 1 FROM business_entitlements WHERE business_id = $1 AND feature_key = 'inventory'`, [target.id])).rowCount,
+    ).toBe(1);
+    const { rows: usage } = await db.query(
+      `SELECT used_count, charged_count, spent_rial FROM feature_usage WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(usage[0]).toEqual({ used_count: "42", charged_count: "10", spent_rial: "25000" });
+    const { rows: policies } = await db.query(
+      `SELECT monthly_budget_rial FROM business_spend_policies WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(policies[0]).toEqual({ monthly_budget_rial: "10000000" });
+    expect(
+      (await db.query(`SELECT 1 FROM billing_vendor_cost_events WHERE business_id = $1 AND source_reference = 'seed-cost-1'`, [target.id])).rowCount,
+    ).toBe(1);
+
+    // Website commercial state and the AI plan allowance survive.
+    expect(
+      (await db.query(`SELECT 1 FROM website_service_subscriptions WHERE business_id = $1 AND plan_key = 'site_starter'`, [target.id])).rowCount,
+    ).toBe(1);
+    expect(
+      (await db.query(`SELECT 1 FROM website_service_charges WHERE business_id = $1 AND reference = 'seed-charge-1'`, [target.id])).rowCount,
+    ).toBe(1);
+    const { rows: allowance } = await db.query(
+      `SELECT granted_rial, used_rial FROM ai_plan_allowance_usage WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(allowance[0]).toEqual({ granted_rial: "500000", used_rial: "100000" });
+
+    // The platform-company customer mapping survives the reset — the
+    // RESTRICT FK that used to break delete/recreate resets.
+    const { rows: mappings } = await db.query<{ customer_tenant_id: string }>(
+      `SELECT customer_tenant_id FROM platform_company_customer_tenants
+        WHERE customer_tenant_id IN ($1, $2)
+        ORDER BY customer_tenant_id`,
+      [target.id, neighbour.id],
+    );
+    expect(mappings.map((m) => m.customer_tenant_id).sort()).toEqual(
+      [target.id, neighbour.id].sort(),
+    );
+
+    // The operational data is gone, replaced by the first-run state:
+    // one blank default branch and exactly one owner membership.
+    for (const table of ["settings", "accounts", "business_features"] as const) {
+      const { rows } = await db.query(
+        `SELECT count(*)::text AS n FROM ${table} WHERE business_id = $1`,
+        [target.id],
+      );
+      expect(rows[0].n, table).toBe("0");
+    }
+    const { rows: locations } = await db.query<{ id: string; name: string }>(
+      `SELECT id, name FROM locations WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(locations).toHaveLength(1);
+    expect(locations[0].name).toBe("شعبه مرکزی");
+    expect(locations[0].id).not.toBe(target.locationId);
+    const { rows: ordersLeft } = await db.query(
+      `SELECT count(*)::text AS n FROM orders WHERE location_id = $1`,
+      [target.locationId],
+    );
+    expect(ordersLeft[0].n).toBe("0");
+    const { rows: members } = await db.query<{ role: string; platform_user_id: string }>(
+      `SELECT role::text AS role, platform_user_id FROM users WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(members).toEqual([{ role: "owner", platform_user_id: target.platformUserId }]);
+
+    // Another tenant — and its commercial mapping — is untouched.
+    const neighbourState = await db.query<{ menu_items: string; users: string }>(
+      `SELECT
+         (SELECT count(*) FROM menu_items WHERE location_id = $1)::text AS menu_items,
+         (SELECT count(*) FROM users WHERE business_id = $2)::text AS users`,
+      [neighbour.locationId, neighbour.id],
+    );
+    expect(neighbourState.rows[0]).toEqual({ menu_items: "1", users: "2" });
+  });
+
+  it("does not silently reactivate a suspended tenant", async () => {
+    const target = await seedBusiness("Suspended Cafe", `suspended-${randomUUID().slice(0, 8)}`);
+    await seedCommercialState(target.id);
+    await db.query(
+      `UPDATE businesses SET status = 'suspended', suspended_at = '2026-03-01T08:00:00Z' WHERE id = $1`,
+      [target.id],
+    );
+
+    await platformService.resetBusiness(target.id);
+
+    const { rows } = await db.query<{ status: string; suspended_at: string | null }>(
+      `SELECT status::text AS status, suspended_at FROM businesses WHERE id = $1`,
+      [target.id],
+    );
+    // Reset is an operational cleanup, not a lifecycle move: the status and
+    // its timestamp survive exactly as they were.
+    expect(rows[0].status).toBe("suspended");
+    expect(new Date(rows[0].suspended_at!).toISOString()).toBe("2026-03-01T08:00:00.000Z");
+  });
+
+  it("rolls back completely when the sweep fails part-way — no partial reset", async () => {
+    const target = await seedBusiness("Atomic Cafe", `atomic-${randomUUID().slice(0, 8)}`);
+    await seedCommercialState(target.id);
+    await seedPlatformCompanyMapping([target.id]);
+    const before = await db.query<{ created_at: string }>(
+      `SELECT created_at FROM businesses WHERE id = $1`,
+      [target.id],
+    );
+
+    // Inject a failure into the middle of the operational sweep: settings is
+    // one of the swept children, so the transaction dies mid-reset. The whole
+    // point of the single transaction is that nothing observable changes.
+    await db.query(
+      `CREATE FUNCTION fail_reset_injection() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN RAISE EXCEPTION 'injected reset failure'; END; $$`,
+    );
+    await db.query(
+      `CREATE TRIGGER fail_reset_injection AFTER DELETE ON settings
+         FOR EACH ROW EXECUTE FUNCTION fail_reset_injection()`,
+    );
+
+    try {
+      await expect(platformService.resetBusiness(target.id)).rejects.toThrow(/injected reset failure/);
+    } finally {
+      await db.query(`DROP TRIGGER IF EXISTS fail_reset_injection ON settings`);
+      await db.query(`DROP FUNCTION IF EXISTS fail_reset_injection()`);
+    }
+
+    // Nothing changed: commercial rows intact…
+    const { rows: wallets } = await db.query(
+      `SELECT balance_rial FROM business_wallets WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(wallets[0].balance_rial).toBe("500000");
+    expect(
+      (await db.query(`SELECT 1 FROM platform_company_customer_tenants WHERE customer_tenant_id = $1`, [target.id])).rowCount,
+    ).toBe(1);
+    // …and operational rows still in place, including the original branch,
+    // memberships, menu and settings.
+    const survivors = await db.query<{
+      users: string;
+      menu_items: string;
+      settings: string;
+      locations: string;
+    }>(
+      `SELECT
+         (SELECT count(*) FROM users WHERE business_id = $1)::text AS users,
+         (SELECT count(*) FROM menu_items WHERE location_id = $2)::text AS menu_items,
+         (SELECT count(*) FROM settings WHERE business_id = $1)::text AS settings,
+         (SELECT count(*) FROM locations WHERE business_id = $1)::text AS locations`,
+      [target.id, target.locationId],
+    );
+    expect(survivors.rows[0]).toEqual({ users: "2", menu_items: "1", settings: "1", locations: "1" });
+    const after = await db.query<{ created_at: string }>(
+      `SELECT created_at FROM businesses WHERE id = $1`,
+      [target.id],
+    );
+    expect(after.rows[0].created_at).toEqual(before.rows[0].created_at);
+  });
+
+  it("refuses the protected platform-internal business", async () => {
+    const { internalBusinessId } = await seedPlatformCompanyMapping([]);
+    await expect(platformService.resetBusiness(internalBusinessId)).rejects.toBeInstanceOf(
+      platformService.ProtectedInternalBusinessError,
+    );
+    await expect(platformService.hardDeleteBusiness(internalBusinessId)).rejects.toBeInstanceOf(
+      platformService.ProtectedInternalBusinessError,
+    );
+    const { rows } = await db.query(`SELECT 1 FROM businesses WHERE id = $1`, [internalBusinessId]);
+    expect(rows).toHaveLength(1);
+  });
+});
+
 describe("hardDeleteBusiness", () => {
   it("deletes an active business immediately, with no archive step, and leaves another tenant untouched", async () => {
     const target = await seedBusiness("Doomed Cafe", `doomed-${randomUUID().slice(0, 8)}`);
@@ -457,5 +860,78 @@ describe("hardDeleteBusiness", () => {
     await expect(platformService.hardDeleteBusiness(randomUUID())).rejects.toBeInstanceOf(
       platformService.BusinessNotFoundError,
     );
+  });
+
+  it("deliberately detaches the platform-company customer mapping — never a raw FK failure (issue #822)", async () => {
+    const target = await seedBusiness("Mapped Cafe", `mapped-${randomUUID().slice(0, 8)}`);
+    const neighbour = await seedBusiness("Mapped Neighbour", `mappedn-${randomUUID().slice(0, 8)}`);
+    const mapping = await seedPlatformCompanyMapping([target.id, neighbour.id]);
+
+    // The mapping RESTRICT-references the tenant; the delete must handle it
+    // on purpose and report the severance, not crash on the FK.
+    const result = await platformService.hardDeleteBusiness(target.id);
+    expect(result.detachedCustomerTenantMappings).toBe(1);
+
+    expect(
+      (await db.query(`SELECT 1 FROM businesses WHERE id = $1`, [target.id])).rowCount,
+    ).toBe(0);
+    // The deleted tenant's mapping row is gone; the other tenant's link, the
+    // CRM customer record and its party all survive — the platform company's
+    // domain is corrupted by nothing.
+    const { rows: remaining } = await db.query<{ customer_tenant_id: string }>(
+      `SELECT customer_tenant_id FROM platform_company_customer_tenants
+        WHERE customer_id = $1`,
+      [mapping.customerId],
+    );
+    expect(remaining).toEqual([{ customer_tenant_id: neighbour.id }]);
+    expect(
+      (await db.query(`SELECT 1 FROM platform_company_customers WHERE id = $1`, [mapping.customerId])).rowCount,
+    ).toBe(1);
+  });
+
+  it("removes commercial history too — a hard delete wipes what a reset preserves", async () => {
+    const target = await seedBusiness("Broke Cafe", `broke-${randomUUID().slice(0, 8)}`);
+    await seedCommercialState(target.id);
+
+    const result = await platformService.hardDeleteBusiness(target.id);
+    expect(result.detachedCustomerTenantMappings).toBe(0);
+
+    for (const table of [
+      "business_subscriptions",
+      "business_wallets",
+      "wallet_ledger",
+      "billing_payments",
+      "billing_invoices",
+      "business_entitlements",
+      "feature_usage",
+      "business_spend_policies",
+      "billing_vendor_cost_events",
+      "website_service_subscriptions",
+      "website_service_charges",
+      "ai_plan_allowance_usage",
+    ] as const) {
+      const { rows } = await db.query(
+        `SELECT count(*)::text AS n FROM ${table} WHERE business_id = $1`,
+        [target.id],
+      );
+      expect(rows[0].n, table).toBe("0");
+    }
+
+    // The owner's global identity is purged when orphaned (no membership
+    // anywhere else), so the email is free to sign up again.
+    expect(
+      (await db.query(`SELECT 1 FROM platform_users WHERE id = $1`, [target.platformUserId])).rowCount,
+    ).toBe(0);
+  });
+
+  it("deletes a suspended tenant the same way", async () => {
+    const target = await seedBusiness("Doomed Suspended", `doomeds-${randomUUID().slice(0, 8)}`);
+    await db.query(`UPDATE businesses SET status = 'suspended', suspended_at = now() WHERE id = $1`, [target.id]);
+
+    await platformService.hardDeleteBusiness(target.id);
+
+    expect(
+      (await db.query(`SELECT 1 FROM businesses WHERE id = $1`, [target.id])).rowCount,
+    ).toBe(0);
   });
 });

@@ -21,6 +21,7 @@ import type { BusinessSummary } from "@/lib/platform-service";
 const state = vi.hoisted(() => ({
   role: "owner" as PlatformAdminRole,
   status: "active" as "active" | "suspended" | "archived",
+  ownershipKind: "customer" as "customer" | "platform_internal",
   audit: [] as { action: string; businessId?: string | null; payload?: Record<string, unknown> | null }[],
 }));
 
@@ -53,7 +54,7 @@ function summary(status: string): BusinessSummary {
     plan: "pro",
     timezone: "Asia/Tehran",
     industry: "food_service",
-    ownershipKind: "customer",
+    ownershipKind: state.ownershipKind,
     createdAt: "2026-01-01T00:00:00.000Z",
     suspendedAt: null,
     archivedAt: status === "archived" ? "2026-02-01T00:00:00.000Z" : null,
@@ -66,24 +67,32 @@ function summary(status: string): BusinessSummary {
 
 const setBusinessStatus = vi.hoisted(() => vi.fn());
 const hardDeleteBusiness = vi.hoisted(() => vi.fn());
+const resetBusiness = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/platform-service", () => ({
   getBusiness: vi.fn(async () => summary(state.status)),
   setBusinessStatus,
   hardDeleteBusiness,
+  resetBusiness,
   updateBusiness: vi.fn(async () => summary(state.status)),
   renameBusinessSubdomain: vi.fn(async () => ({ ok: false, error: "not_found" })),
   changeBusinessIndustry: vi.fn(async () => null),
   industryDataCounts: vi.fn(async () => null),
-  resetBusiness: vi.fn(async () => {}),
   BusinessNotFoundError: class BusinessNotFoundError extends Error {},
   ResetBusinessNotPossibleError: class ResetBusinessNotPossibleError extends Error {},
+  ProtectedInternalBusinessError: class ProtectedInternalBusinessError extends Error {},
+  BusinessDeleteBlockedError: class BusinessDeleteBlockedError extends Error {
+    constructor(readonly reference: string) {
+      super("delete_blocked");
+    }
+  },
 }));
 
 vi.mock("@/lib/host", () => ({ rootDomain: () => "example.test" }));
 vi.mock("@/lib/host-resolution", () => ({ listSubdomainAliases: vi.fn(async () => []) }));
 
-const { PATCH, DELETE } = await import("./route");
+const { PATCH, POST, DELETE } = await import("./route");
+const service = await import("@/lib/platform-service");
 
 const ctx = { params: Promise.resolve({ id: "biz-1" }) };
 
@@ -100,11 +109,14 @@ function patch(body: Record<string, unknown>): Promise<Response> {
 beforeEach(() => {
   state.role = "owner";
   state.status = "active";
+  state.ownershipKind = "customer";
   state.audit = [];
   setBusinessStatus.mockReset();
   setBusinessStatus.mockImplementation(async (_id: string, next: string) => summary(next));
   hardDeleteBusiness.mockReset();
-  hardDeleteBusiness.mockResolvedValue(undefined);
+  hardDeleteBusiness.mockResolvedValue({ detachedCustomerTenantMappings: 0 });
+  resetBusiness.mockReset();
+  resetBusiness.mockResolvedValue(undefined);
 });
 
 describe("PATCH lifecycle — authorization follows the transition, not the target", () => {
@@ -213,18 +225,92 @@ describe("PATCH { plan } — the second plan-change path is gone", () => {
   });
 });
 
+describe("POST reset — requested/completed/failed lifecycle (issue #822)", () => {
+  function reset(confirmation: string): Promise<Response> {
+    return POST(
+      new NextRequest("http://localhost:3000/api/platform/businesses/biz-1", {
+        method: "POST",
+        body: JSON.stringify({ confirmation }),
+      }),
+      ctx,
+    ) as Promise<Response>;
+  }
+
+  it("accepts only the target-specific phrase `RESET {slug}`", async () => {
+    for (const wrong of ["", "delete-me", "RESET alpha ", "DELETE alpha", "reset alpha", "RESET beta"]) {
+      // (the route trims, so "RESET alpha " is the one near-miss that passes;
+      // keep it out of the rejection set)
+      if (wrong.trim() === "RESET alpha") continue;
+      const res = await reset(wrong);
+      expect(res.status, wrong).toBe(400);
+      expect(await res.json(), wrong).toMatchObject({ error: "reset_confirmation_required" });
+    }
+    expect(state.audit).toHaveLength(0);
+    expect(resetBusiness).not.toHaveBeenCalled();
+
+    expect((await reset("RESET alpha")).status).toBe(200);
+  });
+
+  it("writes requested then completed — completed only after the reset committed", async () => {
+    const res = await reset("RESET alpha");
+    expect(res.status).toBe(200);
+    expect(state.audit.map((a) => a.action)).toEqual([
+      "business.reset.requested",
+      "business.reset.completed",
+    ]);
+    // The business row survives a reset, so both events keep its business_id
+    // (unlike hard delete's completion).
+    for (const event of state.audit) expect(event.businessId).toBe("biz-1");
+    expect(state.audit[0].payload).toMatchObject({ name: "کافه الفبا", slug: "alpha", plan: "pro" });
+  });
+
+  it("writes requested then failed when the service throws — with an audit-safe reason, never the raw error", async () => {
+    resetBusiness.mockRejectedValueOnce(new Error("deadlock detected"));
+    const res = await reset("RESET alpha");
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ error: "reset_failed" });
+    expect(state.audit.map((a) => a.action)).toEqual([
+      "business.reset.requested",
+      "business.reset.failed",
+    ]);
+    expect(state.audit[1].payload).toMatchObject({ reason: "reset_unexpected_error" });
+    expect(JSON.stringify(state.audit[1].payload)).not.toContain("deadlock");
+  });
+
+  it("maps reset_not_possible to a 409 and still records the failure", async () => {
+    resetBusiness.mockRejectedValueOnce(new service.ResetBusinessNotPossibleError());
+    const res = await reset("RESET alpha");
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "reset_not_possible" });
+    expect(state.audit.map((a) => a.action)).toEqual([
+      "business.reset.requested",
+      "business.reset.failed",
+    ]);
+    expect(state.audit[1].payload).toMatchObject({ reason: "reset_not_possible" });
+  });
+
+  it("needs the business.reset capability — an engineer cannot reset", async () => {
+    state.role = "engineer";
+    const res = await reset("RESET alpha");
+    expect(res.status).toBe(403);
+    expect(state.audit).toHaveLength(0);
+    expect(resetBusiness).not.toHaveBeenCalled();
+  });
+});
+
 describe("DELETE — the audit trail cannot imply a delete that did not happen", () => {
-  function del(): Promise<Response> {
+  function del(confirmation = "DELETE alpha"): Promise<Response> {
     return DELETE(
       new NextRequest("http://localhost:3000/api/platform/businesses/biz-1", {
         method: "DELETE",
-        body: JSON.stringify({ confirmation: "delete-me" }),
+        body: JSON.stringify({ confirmation }),
       }),
       ctx,
     ) as Promise<Response>;
   }
 
   it("writes requested then completed, and only after the delete committed", async () => {
+    hardDeleteBusiness.mockResolvedValueOnce({ detachedCustomerTenantMappings: 1 });
     const res = await del();
     expect(res.status).toBe(200);
     expect(state.audit.map((a) => a.action)).toEqual([
@@ -235,7 +321,11 @@ describe("DELETE — the audit trail cannot imply a delete that did not happen",
     // (the FK would reject it) — identity lives in the payload.
     const completed = state.audit[1];
     expect(completed.businessId).toBeNull();
-    expect(completed.payload).toMatchObject({ name: "کافه الفبا", slug: "alpha" });
+    expect(completed.payload).toMatchObject({
+      name: "کافه الفبا",
+      slug: "alpha",
+      detachedCustomerTenantMappings: 1,
+    });
   });
 
   it("writes requested then failed — and never completed — when the delete throws", async () => {
@@ -246,19 +336,74 @@ describe("DELETE — the audit trail cannot imply a delete that did not happen",
       "business.delete.requested",
       "business.delete.failed",
     ]);
-    expect(state.audit[1].payload).toMatchObject({ reason: "deadlock detected" });
+    // The failure payload is audit-safe: a stable token, never raw DB text.
+    expect(state.audit[1].payload).toMatchObject({ reason: "delete_unexpected_error" });
+    expect(JSON.stringify(state.audit[1].payload)).not.toContain("deadlock");
   });
 
-  it("still requires the typed confirmation phrase", async () => {
-    const res = await DELETE(
+  it("surfaces a live reference as a specific operator-facing blocker, not a raw FK error", async () => {
+    hardDeleteBusiness.mockRejectedValueOnce(new service.BusinessDeleteBlockedError("some_fk"));
+    const res = await del();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "delete_blocked", reference: "some_fk" });
+    expect(state.audit.map((a) => a.action)).toEqual([
+      "business.delete.requested",
+      "business.delete.failed",
+    ]);
+    expect(state.audit[1].payload).toMatchObject({ reason: "reference_blocked" });
+  });
+
+  it("requires the target-specific typed phrase — the old shared phrase and the reset phrase are both rejected", async () => {
+    for (const wrong of ["nope", "delete-me", "RESET alpha", "DELETE beta"]) {
+      const res = await del(wrong);
+      expect(res.status, wrong).toBe(400);
+      expect(await res.json(), wrong).toMatchObject({ error: "delete_confirmation_required" });
+    }
+    expect(state.audit).toHaveLength(0);
+    expect(hardDeleteBusiness).not.toHaveBeenCalled();
+  });
+
+  it("needs the business.delete capability — an engineer cannot delete", async () => {
+    state.role = "engineer";
+    const res = await del();
+    expect(res.status).toBe(403);
+    expect(state.audit).toHaveLength(0);
+    expect(hardDeleteBusiness).not.toHaveBeenCalled();
+  });
+});
+
+describe("the protected platform-internal business", () => {
+  beforeEach(() => {
+    state.ownershipKind = "platform_internal";
+  });
+
+  it("is refused by every destructive route before any audit or service call", async () => {
+    const patchRes = await patch({ name: "X", timezone: "Asia/Tehran" });
+    expect(patchRes.status).toBe(409);
+    expect(await patchRes.json()).toMatchObject({ error: "protected_internal_business" });
+
+    const resetRes = await POST(
       new NextRequest("http://localhost:3000/api/platform/businesses/biz-1", {
-        method: "DELETE",
-        body: JSON.stringify({ confirmation: "nope" }),
+        method: "POST",
+        body: JSON.stringify({ confirmation: "RESET alpha" }),
       }),
       ctx,
-    ) as Response;
-    expect(res.status).toBe(400);
+    );
+    expect(resetRes.status).toBe(409);
+    expect(await resetRes.json()).toMatchObject({ error: "protected_internal_business" });
+
+    const deleteRes = await DELETE(
+      new NextRequest("http://localhost:3000/api/platform/businesses/biz-1", {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: "DELETE alpha" }),
+      }),
+      ctx,
+    );
+    expect(deleteRes.status).toBe(409);
+    expect(await deleteRes.json()).toMatchObject({ error: "protected_internal_business" });
+
     expect(state.audit).toHaveLength(0);
+    expect(resetBusiness).not.toHaveBeenCalled();
     expect(hardDeleteBusiness).not.toHaveBeenCalled();
   });
 });
