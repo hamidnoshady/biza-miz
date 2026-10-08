@@ -25,7 +25,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
-import { depreciationPeriod } from "../src/lib/depreciation";
+import { depreciationPeriod, depreciationPeriodOfDate } from "../src/lib/depreciation";
 import { isoDateToJalali } from "../src/lib/jalali";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -504,6 +504,40 @@ describe("postDepreciation — canonical months and concurrency (audit F07)", ()
   });
 });
 
+describe("chronology and catch-up policy (issue #833 follow-up)", () => {
+  it("accepts out-of-order and skipped months as catch-up, each at its own month's amount", async () => {
+    // The three months before the current one, oldest first. m2 is skipped
+    // until the end; m3 is posted before m1.
+    const [m1, m2, m3] = recentPeriodKeys(3, false);
+    const asset = await createAsset({ cost: 12_000_000, usefulLifeMonths: 12 });
+
+    const third = await post(asset.id, { periodKey: m3 });
+    const first = await post(asset.id, { periodKey: m1 });
+    const late = await post(asset.id, { periodKey: m2 });
+    // Straight-line: every month is 1,000,000 regardless of arrival order.
+    expect([first, third, late].map((r) => r.amount)).toEqual([1_000_000, 1_000_000, 1_000_000]);
+
+    const detail = await fixedAssetsService.getFixedAssetWithDepreciation(biz.id, asset.id);
+    expect(detail.fixedAsset.accumulatedDepreciation).toBe(3_000_000);
+    expect(detail.fixedAsset.depreciationCount).toBe(3);
+  });
+
+  it("refuses a document dated in the future, even inside the current month", async () => {
+    const asset = await createAsset();
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const period = depreciationPeriodOfDate(todayIso)!;
+    // Deterministic coverage of the same rule lives in depreciation.test.ts
+    // with a fixed today; this guard runs whenever the month has days left.
+    if (period.endsOn > todayIso) {
+      await expect(post(asset.id, { periodKey: period.key, entryDate: period.endsOn })).rejects.toThrow(
+        "entry_date_in_future",
+      );
+    }
+    // A past day inside the current month is fine.
+    await expect(post(asset.id, { periodKey: period.key, entryDate: todayIso })).resolves.toBeTruthy();
+  });
+});
+
 describe("branch integrity — the asset's own location, never the caller's (issue #833)", () => {
   it("posts depreciation to the asset's registered branch", async () => {
     const asset = await createAsset({ locationId: biz.locationA });
@@ -515,27 +549,39 @@ describe("branch integrity — the asset's own location, never the caller's (iss
     expect(rows[0].location_id).toBe(biz.locationA);
   });
 
-  it("keeps posting to branch A after a transfer, then to branch B once transferred", async () => {
+  it("resolves the posting branch by the document's date, never by the asset's branch today", async () => {
+    // 1404-01 = 2025-03-21..2025-04-20, 1404-02 = ..2025-05-21, 1404-03 = ..2025-06-21.
     const asset = await createAsset({ locationId: biz.locationA });
-    await post(asset.id, { periodKey: "1404-01" });
 
+    // Posted while the asset sat in branch A: a historical fact that stays A.
+    await post(asset.id, { periodKey: "1404-02" });
+
+    // A transfer effective 2025-05-01 — after 1404-01's and 1404-02's document
+    // dates, before 1404-03's.
     await fixedAssetsService.transferFixedAsset({
       businessId: biz.id,
       fixedAssetId: asset.id,
       toLocationId: biz.locationB,
+      effectiveDate: "2025-05-01",
       reason: "انتقال به شعبه مرکزی",
       createdBy: owner.id,
     });
 
-    await post(asset.id, { periodKey: "1404-02" });
+    // A catch-up month from BEFORE the transfer date posts to the branch that
+    // held the asset then — branch A — even though the asset now sits in B.
+    await post(asset.id, { periodKey: "1404-01" });
+    // A month from after the transfer date posts to the new branch.
+    await post(asset.id, { periodKey: "1404-03" });
 
     const { rows } = await db.query<{ location_id: string | null; entry_date: string }>(
       `SELECT location_id, entry_date::text FROM journal_entries WHERE business_id = $1 ORDER BY entry_date`,
       [biz.id],
     );
-    expect(rows).toHaveLength(2);
-    expect(rows[0].location_id).toBe(biz.locationA);
-    expect(rows[1].location_id).toBe(biz.locationB);
+    expect(rows).toHaveLength(3);
+    // 1404-01 (document 2025-04-20, before the transfer) → A.
+    // 1404-02 (posted while in A) → A, untouched by the later transfer.
+    // 1404-03 (document 2025-06-21, after the transfer) → B.
+    expect(rows.map((r) => r.location_id)).toEqual([biz.locationA, biz.locationA, biz.locationB]);
 
     const detail = await fixedAssetsService.getFixedAssetWithDepreciation(biz.id, asset.id);
     expect(detail.transfers).toHaveLength(1);
@@ -546,6 +592,35 @@ describe("branch integrity — the asset's own location, never the caller's (iss
       transferredByName: "Owner",
     });
     expect(detail.fixedAsset.locationId).toBe(biz.locationB);
+  });
+
+  it("refuses transfers that would rewrite history: before in-service, or before the latest transfer", async () => {
+    const asset = await createAsset({ locationId: biz.locationA }); // in service 2025-01-01
+    const transfer = (effectiveDate: string, toLocationId = biz.locationB) =>
+      fixedAssetsService.transferFixedAsset({
+        businessId: biz.id,
+        fixedAssetId: asset.id,
+        toLocationId,
+        effectiveDate,
+        reason: "تست",
+        createdBy: owner.id,
+      });
+
+    await expect(transfer("2024-06-01")).rejects.toThrow("transfer_before_in_service");
+    await expect(transfer("2025-05-01")).resolves.toBeTruthy();
+    // The recorded chain is append-only: an earlier-dated transfer would need
+    // the previous transfer's `from` rewritten. (Destination A — distinct
+    // from the asset's current branch B, so the same-branch refusal cannot
+    // mask the chronology one.)
+    await expect(transfer("2025-04-01", biz.locationA)).rejects.toThrow("transfer_before_last_transfer");
+    // Same-date and later transfers are fine (the asset moves back to A).
+    await expect(transfer("2025-06-01", biz.locationA)).resolves.toBeTruthy();
+    const detail = await fixedAssetsService.getFixedAssetWithDepreciation(biz.id, asset.id);
+    // The history lists newest first.
+    expect(detail.transfers.map((t) => `${t.fromLocationName}→${t.toLocationName}`)).toEqual([
+      "Branch B→Branch A",
+      "Branch A→Branch B",
+    ]);
   });
 
   it("refuses a transfer to the same branch and records the reason as audit", async () => {
@@ -758,6 +833,37 @@ describe("depreciation reversal — the auditable correction path (issue #833)",
     expect(detail.fixedAsset.depreciationCount).toBe(0);
     expect(detail.fixedAsset.bookValue).toBe(120_000_000);
     await expect(postOne(asset.id, "1404-01")).resolves.toMatchObject({ amount: 2_000_000 });
+  });
+
+  it("mirrors a pre-transfer posting on the branch it was posted to, even after a transfer", async () => {
+    const asset = await createAsset({ locationId: biz.locationA });
+    const original = await post(asset.id, { periodKey: "1404-01" }); // posted in branch A
+
+    await fixedAssetsService.transferFixedAsset({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      toLocationId: biz.locationB,
+      effectiveDate: "2025-05-01",
+      reason: "انتقال",
+      createdBy: owner.id,
+    });
+
+    const reversal = await fixedAssetsService.reverseDepreciation({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      depreciationEntryId: original.depreciationEntryId,
+      reason: "اصلاح سند شعبهٔ قبل",
+      createdBy: owner.id,
+    });
+    expect(reversal.reversalJournalEntryId).toBeTruthy();
+
+    // The undo of a branch-A posting happens on branch A — the asset's new
+    // branch (B) must not inherit the mirror.
+    const { rows } = await db.query<{ location_id: string | null }>(
+      `SELECT location_id FROM journal_entries WHERE id = $1`,
+      [reversal.reversalJournalEntryId],
+    );
+    expect(rows[0].location_id).toBe(biz.locationA);
   });
 
   it("refuses a double reversal", async () => {
@@ -980,6 +1086,46 @@ describe("disposal / sale / retirement (issue #833)", () => {
     expect(await fixedAssetsService.getFixedAssetReconciliation(biz.id)).toMatchObject({ status: "reconciled" });
   });
 
+  it("disposes on the branch that held the asset on the disposal date, and refuses one dated before the last transfer", async () => {
+    const asset = await createAsset({ locationId: biz.locationA, cost: 10_000_000, usefulLifeMonths: 10 });
+    await fixedAssetsService.transferFixedAsset({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      toLocationId: biz.locationB,
+      effectiveDate: "2025-06-01",
+      reason: "انتقال",
+      createdBy: owner.id,
+    });
+
+    // A disposal dated before the transfer contradicts the recorded history.
+    await expect(
+      fixedAssetsService.disposeFixedAsset({
+        businessId: biz.id,
+        fixedAssetId: asset.id,
+        kind: "retirement",
+        disposalDate: "2025-05-15",
+        createdBy: owner.id,
+        reason: null,
+      }),
+    ).rejects.toThrow("disposal_before_last_transfer");
+
+    // A disposal dated after it posts on the branch that held the asset then.
+    const outcome = await fixedAssetsService.disposeFixedAsset({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      kind: "retirement",
+      disposalDate: "2025-07-15",
+      createdBy: owner.id,
+      reason: null,
+    });
+    expect(outcome.journalEntryId).toBeTruthy();
+    const { rows } = await db.query<{ location_id: string | null }>(
+      `SELECT location_id FROM journal_entries WHERE id = $1`,
+      [outcome.journalEntryId],
+    );
+    expect(rows[0].location_id).toBe(biz.locationB);
+  });
+
   it("validates the disposal shape", async () => {
     const asset = await createAsset();
     const base = { businessId: biz.id, fixedAssetId: asset.id, createdBy: owner.id } as const;
@@ -1145,6 +1291,157 @@ describe("prospective estimate changes (issue #833)", () => {
   });
 });
 
+describe("estimate changes resolved by period (issue #833 follow-up)", () => {
+  it("charges a catch-up month from before the change under the ORIGINAL schedule, and the revised schedule absorbs the reduction", async () => {
+    // 12,000,000 over 12 months = 1,000,000/month. m1 is deliberately left
+    // unposted; m2 and m3 are the next two months before the current one.
+    const [m1, m2, m3] = recentPeriodKeys(3, false);
+    const asset = await createAsset({ cost: 12_000_000, usefulLifeMonths: 12 });
+    await post(asset.id, { periodKey: m2 });
+    await post(asset.id, { periodKey: m3 });
+
+    // Shorten the life to 4: with 2 live periods, 2 scheduled months remain
+    // (remainingBase 10,000,000 over remainingLife 2).
+    await fixedAssetsService.changeFixedAssetEstimate({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      usefulLifeMonths: 4,
+      reason: "کوتاه‌شدن عمر",
+      createdBy: owner.id,
+    });
+
+    // Catch up m1 — a month from BEFORE the change's effective period. It is
+    // charged under the original schedule: 1,000,000, not the revised
+    // schedule's 5,000,000 monthly. (The pre-follow-up code applied the
+    // newest revision to any unposted month — this is the regression.)
+    const catchUp = await post(asset.id, { periodKey: m1 });
+    expect(catchUp.amount).toBe(1_000_000);
+
+    // The catch-up consumed the revised schedule's remaining base:
+    // 10,000,000 − 1,000,000 = 9,000,000. The current period is the revised
+    // schedule's final one (the catch-up ate one of its two months), so it
+    // absorbs exactly what is left.
+    const [currentKey] = recentPeriodKeys(1);
+    const final = await post(asset.id, { periodKey: currentKey });
+    expect(final.amount).toBe(9_000_000);
+
+    const [listed] = await fixedAssetsService.listFixedAssets(biz.id);
+    expect(listed.accumulatedDepreciation).toBe(12_000_000);
+    expect(listed.bookValue).toBe(0);
+    await expect(post(asset.id, { periodKey: "1404-04" })).rejects.toThrow("fully_depreciated");
+  });
+
+  it("resolves the applicable estimate by period: the latest change in force for the month, with its own snapshot", async () => {
+    const [m1, m2, m3] = recentPeriodKeys(3, false);
+    const asset = await createAsset({ cost: 12_000_000, usefulLifeMonths: 12 });
+    await post(asset.id, { periodKey: m2 });
+    await post(asset.id, { periodKey: m3 }); // 2,000,000 accumulated
+
+    // Two changes, both effective from the current period; the later one
+    // supersedes within that period.
+    await fixedAssetsService.changeFixedAssetEstimate({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      usefulLifeMonths: 10,
+      reason: "برآورد اول",
+      createdBy: owner.id,
+    });
+    await fixedAssetsService.changeFixedAssetEstimate({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      usefulLifeMonths: 5,
+      reason: "برآورد دوم",
+      createdBy: owner.id,
+    });
+
+    // The catch-up month still runs on the original schedule.
+    expect((await post(asset.id, { periodKey: m1 })).amount).toBe(1_000_000);
+
+    // The current period runs on the SECOND change (remainingBase 10,000,000
+    // over remainingLife 3): since the change only m1 was posted, so the
+    // remaining is 10,000,000 − 1,000,000 = 9,000,000 and this is not the
+    // final scheduled period — monthly = round(10,000,000 / 3).
+    const [currentKey] = recentPeriodKeys(1);
+    const current = await post(asset.id, { periodKey: currentKey });
+    expect(current.amount).toBe(3_333_333);
+  });
+
+  it("a reversed pre-change month re-posts under the original schedule; a reversed revised month re-posts at the same amount", async () => {
+    const [m1, m2] = recentPeriodKeys(2, false);
+    const asset = await createAsset({ cost: 12_000_000, usefulLifeMonths: 12 });
+    const first = await post(asset.id, { periodKey: m1 });
+    await post(asset.id, { periodKey: m2 });
+    await fixedAssetsService.reverseDepreciation({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      depreciationEntryId: first.depreciationEntryId ?? "",
+      reason: "برگشت برای تست",
+      createdBy: owner.id,
+    });
+
+    // Change with one live period (m2): remainingBase 11,000,000 over 7 months.
+    await fixedAssetsService.changeFixedAssetEstimate({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      usefulLifeMonths: 8,
+      reason: "بازبینی",
+      createdBy: owner.id,
+    });
+
+    // Re-post m1 (pre-change): original schedule, 1,000,000 — not the
+    // revision's round(11,000,000 / 7).
+    const rePosted = await post(asset.id, { periodKey: m1 });
+    expect(rePosted.amount).toBe(1_000_000);
+
+    // The current period runs on the revision: since the change, m1 (1,000,000)
+    // has been posted, so remaining = 11,000,000 − 1,000,000 = 10,000,000 and
+    // this is the first of 7 scheduled months: round(11,000,000 / 7).
+    const [currentKey] = recentPeriodKeys(1);
+    const original = await post(asset.id, { periodKey: currentKey });
+    expect(original.amount).toBe(Math.round(11_000_000 / 7));
+
+    // Reverse that revised posting and post the same month again: same
+    // revision, same snapshot, same amount.
+    await fixedAssetsService.reverseDepreciation({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      depreciationEntryId: original.depreciationEntryId ?? "",
+      reason: "برگشت ماه جاری",
+      createdBy: owner.id,
+    });
+    const again = await post(asset.id, { periodKey: currentKey });
+    expect(again.amount).toBe(original.amount);
+  });
+
+  it("never depreciates past cost minus salvage across revisions and catch-ups", async () => {
+    const [m0, m1, m2] = recentPeriodKeys(3, false);
+    const asset = await createAsset({ cost: 10_000_000, salvageValue: 1_000_000, usefulLifeMonths: 10 });
+    await post(asset.id, { periodKey: m1 });
+    await post(asset.id, { periodKey: m2 }); // 2 × 900,000 = 1,800,000
+
+    // Shorten the life to 3: one scheduled month remains (7,200,000).
+    await fixedAssetsService.changeFixedAssetEstimate({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      usefulLifeMonths: 3,
+      reason: "کوتاه",
+      createdBy: owner.id,
+    });
+    // A catch-up from before the change (900,000 under the original schedule)
+    // reduces the revised remaining to 6,300,000…
+    expect((await post(asset.id, { periodKey: m0 })).amount).toBe(900_000);
+    // …which the revised schedule's final period absorbs exactly.
+    const [currentKey] = recentPeriodKeys(1);
+    expect((await post(asset.id, { periodKey: currentKey })).amount).toBe(6_300_000);
+
+    const [listed] = await fixedAssetsService.listFixedAssets(biz.id);
+    expect(listed.accumulatedDepreciation).toBe(9_000_000); // cost − salvage, exactly
+    expect(listed.bookValue).toBe(1_000_000); // the salvage value survives
+    expect(listed.fullyDepreciated).toBe(true);
+    await expect(post(asset.id, { periodKey: "1404-01" })).rejects.toThrow("fully_depreciated");
+  });
+});
+
 describe("archiving (issue #833)", () => {
   it("archives an asset with a reason and freezes it", async () => {
     const asset = await createAsset();
@@ -1279,6 +1576,86 @@ describe("deleteFixedAsset — source-history integrity (issue #833)", () => {
   });
 });
 
+describe("tenant isolation of the lifecycle mutations", () => {
+  it("refuses another business's asset on every mutation, and its locations cannot lure an asset away", async () => {
+    const asset = await createAsset();
+    const posted = await post(asset.id, { periodKey: "1404-01" });
+
+    const other = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Other Co', $1) RETURNING id",
+      [`fa-iso-${randomUUID().slice(0, 8)}`],
+    );
+    const otherBusinessId = other.rows[0].id;
+    const otherLoc = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Elsewhere') RETURNING id",
+      [otherBusinessId],
+    );
+
+    await expect(
+      fixedAssetsService.reverseDepreciation({
+        businessId: otherBusinessId,
+        fixedAssetId: asset.id,
+        depreciationEntryId: posted.depreciationEntryId ?? "",
+        reason: "دلیل",
+        createdBy: owner.id,
+      }),
+    ).rejects.toThrow("fixed_asset_not_found");
+    await expect(
+      fixedAssetsService.disposeFixedAsset({
+        businessId: otherBusinessId,
+        fixedAssetId: asset.id,
+        kind: "retirement",
+        createdBy: owner.id,
+        reason: null,
+      }),
+    ).rejects.toThrow("fixed_asset_not_found");
+    await expect(
+      fixedAssetsService.transferFixedAsset({
+        businessId: otherBusinessId,
+        fixedAssetId: asset.id,
+        toLocationId: biz.locationB,
+        reason: "دلیل",
+        createdBy: owner.id,
+      }),
+    ).rejects.toThrow("fixed_asset_not_found");
+    await expect(
+      fixedAssetsService.changeFixedAssetEstimate({
+        businessId: otherBusinessId,
+        fixedAssetId: asset.id,
+        usefulLifeMonths: 24,
+        reason: "دلیل",
+        createdBy: owner.id,
+      }),
+    ).rejects.toThrow("fixed_asset_not_found");
+    await expect(
+      fixedAssetsService.archiveFixedAsset({
+        businessId: otherBusinessId,
+        fixedAssetId: asset.id,
+        reason: "دلیل",
+        createdBy: owner.id,
+      }),
+    ).rejects.toThrow("fixed_asset_not_found");
+
+    // And the owning business cannot transfer its asset INTO the other
+    // business's branch, either.
+    await expect(
+      fixedAssetsService.transferFixedAsset({
+        businessId: biz.id,
+        fixedAssetId: asset.id,
+        toLocationId: otherLoc.rows[0].id,
+        reason: "دلیل",
+        createdBy: owner.id,
+      }),
+    ).rejects.toThrow("location_not_found");
+
+    // Nothing above touched the asset.
+    const detail = await fixedAssetsService.getFixedAssetWithDepreciation(biz.id, asset.id);
+    expect(detail.fixedAsset.status).toBe("active");
+    expect(detail.fixedAsset.locationId).toBe(biz.locationA);
+    expect(detail.fixedAsset.accumulatedDepreciation).toBe(2_000_000);
+  });
+});
+
 describe("getFixedAssetWithDepreciation", () => {
   it("retrieves the asset along with its full history", async () => {
     const asset = await createAsset();
@@ -1396,7 +1773,124 @@ describe("server-side pagination, filters and export (issue #833)", () => {
     expect((await fixedAssetsService.listFixedAssetsPage(biz.id, {})).kpis.disposedCount).toBe(1);
   });
 
-  it("exports the full filtered dataset, not one page", async () => {
+  it("exports every sheet over the SAME filtered set, with the posting branch on the schedule", async () => {
+    // «الف» in branch A with a full lifecycle; «ب» in branch B with none;
+    // «ج» in branch A with none.
+    const a = await fixedAssetsService.createFixedAsset({
+      businessId: biz.id,
+      locationId: biz.locationA,
+      name: "یخچال الف",
+      acquisitionDate: "2025-01-01",
+      cost: 1_000_000,
+      salvageValue: 0,
+      usefulLifeMonths: 12,
+      category: "تبرید",
+      createdBy: owner.id,
+    });
+    await fixedAssetsService.createFixedAsset({
+      businessId: biz.id,
+      locationId: biz.locationB,
+      name: "خودرو ب",
+      acquisitionDate: "2025-01-01",
+      cost: 2_000_000,
+      salvageValue: 0,
+      usefulLifeMonths: 24,
+      category: "حمل‌ونقل",
+      createdBy: owner.id,
+    });
+    await fixedAssetsService.createFixedAsset({
+      businessId: biz.id,
+      locationId: biz.locationA,
+      name: "میز ج",
+      acquisitionDate: "2025-01-01",
+      cost: 500_000,
+      salvageValue: 0,
+      usefulLifeMonths: 12,
+      category: "اداری",
+      createdBy: owner.id,
+    });
+
+    // «الف»: one month posted in branch A, then transferred to B, estimate
+    // revised, and finally disposed — every history sheet gets a row.
+    await post(a.id, { periodKey: "1404-01" });
+    await fixedAssetsService.transferFixedAsset({
+      businessId: biz.id,
+      fixedAssetId: a.id,
+      toLocationId: biz.locationB,
+      effectiveDate: "2025-06-01",
+      reason: "انتقال",
+      createdBy: owner.id,
+    });
+    await fixedAssetsService.changeFixedAssetEstimate({
+      businessId: biz.id,
+      fixedAssetId: a.id,
+      usefulLifeMonths: 24,
+      reason: "بازبینی",
+      createdBy: owner.id,
+    });
+    await fixedAssetsService.disposeFixedAsset({
+      businessId: biz.id,
+      fixedAssetId: a.id,
+      kind: "retirement",
+      createdBy: owner.id,
+      reason: "از رده خارج",
+    });
+
+    // Unfiltered: the complete workbook.
+    const full = await fixedAssetsService.fixedAssetsExportSheets(biz.id, {});
+    expect(full).toMatchObject({ truncated: false, registerTotal: 3, maxRows: 20_000 });
+    expect(full.sheets.find((s) => s.name === "دفتر اموال")?.rows).toHaveLength(3);
+    expect(full.sheets.find((s) => s.name === "برنامه استهلاک")?.rows).toHaveLength(1);
+    expect(full.sheets.find((s) => s.name === "انتقال شعب")?.rows).toHaveLength(1);
+    expect(full.sheets.find((s) => s.name === "تغییر برآوردها")?.rows).toHaveLength(1);
+    expect(full.sheets.find((s) => s.name === "واگذاری‌ها")?.rows).toHaveLength(1);
+    // The schedule reports the branch the posting was journalled to (A) —
+    // not the asset's branch today (B, after the transfer).
+    expect(full.sheets.find((s) => s.name === "برنامه استهلاک")?.rows[0]).toMatchObject({
+      code: "FA-0001",
+      locationName: "Branch A",
+    });
+
+    // A search filter narrows EVERY sheet, not just the register.
+    const bySearch = await fixedAssetsService.fixedAssetsExportSheets(biz.id, { search: "ب" });
+    expect(bySearch.registerTotal).toBe(1);
+    expect(bySearch.sheets.find((s) => s.name === "دفتر اموال")?.rows).toHaveLength(1);
+    // The register and schedule sheets are structural (always present, empty
+    // when their rows filter out); the history sheets drop with their rows.
+    expect(bySearch.sheets.find((s) => s.name === "برنامه استهلاک")?.rows).toHaveLength(0);
+    for (const name of ["انتقال شعب", "تغییر برآوردها", "واگذاری‌ها"]) {
+      expect(bySearch.sheets.find((s) => s.name === name), name).toBeUndefined();
+    }
+
+    // A category filter keeps the asset with its whole history.
+    const byCategory = await fixedAssetsService.fixedAssetsExportSheets(biz.id, { category: "تبرید" });
+    expect(byCategory.registerTotal).toBe(1);
+    for (const name of ["دفتر اموال", "برنامه استهلاک", "انتقال شعب", "تغییر برآوردها", "واگذاری‌ها"]) {
+      expect(byCategory.sheets.find((s) => s.name === name)?.rows, name).toHaveLength(1);
+    }
+
+    // A branch filter: «الف» now sits in branch B, so branch B carries its
+    // history sheets and branch A only the quiet asset «ج».
+    const byBranch = await fixedAssetsService.fixedAssetsExportSheets(biz.id, { locationId: biz.locationB });
+    expect(byBranch.registerTotal).toBe(2);
+    expect(byBranch.sheets.find((s) => s.name === "برنامه استهلاک")?.rows).toHaveLength(1);
+    const byBranchA = await fixedAssetsService.fixedAssetsExportSheets(biz.id, { locationId: biz.locationA });
+    expect(byBranchA.registerTotal).toBe(1);
+    expect(byBranchA.sheets.find((s) => s.name === "برنامه استهلاک")?.rows).toHaveLength(0);
+    expect(byBranchA.sheets.find((s) => s.name === "واگذاری‌ها")).toBeUndefined();
+
+    // A status filter keeps the disposed asset with its history.
+    const byStatus = await fixedAssetsService.fixedAssetsExportSheets(biz.id, { status: "disposed" });
+    expect(byStatus.registerTotal).toBe(1);
+    expect(byStatus.sheets.find((s) => s.name === "واگذاری‌ها")?.rows).toHaveLength(1);
+
+    // A date range that admits nothing admits nothing — on every sheet.
+    const byDate = await fixedAssetsService.fixedAssetsExportSheets(biz.id, { dateTo: "2024-12-31" });
+    expect(byDate.registerTotal).toBe(0);
+    expect(byDate.sheets.find((s) => s.name === "دفتر اموال")?.rows).toHaveLength(0);
+  });
+
+  it("never truncates silently: the cap is explicit, exact, and explained to the reader", async () => {
     for (const name of ["الف", "ب", "ج"]) {
       await fixedAssetsService.createFixedAsset({
         businessId: biz.id,
@@ -1409,43 +1903,28 @@ describe("server-side pagination, filters and export (issue #833)", () => {
         createdBy: owner.id,
       });
     }
-    const [first] = (await fixedAssetsService.listFixedAssets(biz.id)).map((a) => a.id);
-    await post(first, { periodKey: "1404-01" });
 
-    // No disposals yet -> no disposals sheet.
-    let sheets = await fixedAssetsService.fixedAssetsExportSheets(biz.id, {});
-    expect(sheets.find((s) => s.name === "واگذاری‌ها")).toBeUndefined();
+    // Under the cap: complete, not truncated.
+    const complete = await fixedAssetsService.fixedAssetsExportSheets(biz.id, {}, { maxRows: 3 });
+    expect(complete.truncated).toBe(false);
+    expect(complete.sheets.find((s) => s.name === "دفتر اموال")?.rows).toHaveLength(3);
 
-    await fixedAssetsService.disposeFixedAsset({
-      businessId: biz.id,
-      fixedAssetId: first,
-      kind: "retirement",
-      createdBy: owner.id,
-      reason: "از رده خارج",
-    });
+    // Over the cap: exactly maxRows rows, the flag set, the real total kept.
+    const partial = await fixedAssetsService.fixedAssetsExportSheets(biz.id, {}, { maxRows: 2 });
+    expect(partial).toMatchObject({ truncated: true, registerTotal: 3, maxRows: 2 });
+    expect(partial.sheets.find((s) => s.name === "دفتر اموال")?.rows).toHaveLength(2);
 
-    sheets = await fixedAssetsService.fixedAssetsExportSheets(biz.id, {});
-    const register = sheets.find((s) => s.name === "دفتر اموال");
-    const schedule = sheets.find((s) => s.name === "برنامه استهلاک");
-    const disposalsSheet = sheets.find((s) => s.name === "واگذاری‌ها");
-    expect(register?.rows).toHaveLength(3);
-    expect(schedule?.rows).toHaveLength(1);
-    // The disposal facts with the recomputed net book value and zero-proceeds loss.
-    expect(disposalsSheet?.rows).toEqual([
-      expect.objectContaining({
-        kind: "بازنشستگی",
-        cost: 1_000_000,
-        accumulated: 83_333, // round(1,000,000 / 12), one period posted
-        netBookValue: 916_667,
-        proceeds: 0,
-        gainLoss: -916_667,
-        reason: "از رده خارج",
-      }),
-    ]);
+    // The notice sheet the route puts in front of a truncated workbook names
+    // both numbers, in Persian digits, with the way out.
+    const notice = fixedAssetsService.fixedAssetExportTruncationNotice(3, 2);
+    expect(notice.name).toBe("توجه");
+    const message = String(notice.rows[0].message);
+    expect(message).toContain("۳");
+    expect(message).toContain("۲");
+    expect(message).toContain("فیلتر");
 
-    // A filter narrows the register sheet to the filtered rows.
-    const filtered = await fixedAssetsService.fixedAssetsExportSheets(biz.id, { search: "الف" });
-    expect(filtered.find((s) => s.name === "دفتر اموال")?.rows).toHaveLength(1);
+    // The production cap is a fact, not folklore.
+    expect(fixedAssetsService.FIXED_ASSET_EXPORT_MAX_ROWS).toBe(20_000);
   });
 });
 

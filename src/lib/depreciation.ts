@@ -160,6 +160,7 @@ export type DepreciationRefusal =
   | "invalid_period"
   | "invalid_entry_date"
   | "entry_date_outside_period"
+  | "entry_date_in_future"
   | "period_before_in_service"
   | "period_in_future"
   | "period_already_depreciated"
@@ -170,6 +171,16 @@ export interface DepreciationPlanInput {
   /** Period keys already posted for this asset (legacy rows: the key of their entry date). */
   postedPeriodKeys: string[];
   accumulatedSoFar: number;
+  /**
+   * Periods counted against the schedule that governs the requested month.
+   * Defaults to `postedPeriodKeys.length` — every live posting — which is
+   * right for an asset with no estimate changes. With changes, the caller
+   * passes the window-scoped count (live at the applicable change, plus
+   * postings since into that change's window), because a catch-up month from
+   * *before* the change must not shorten the revised schedule's remaining
+   * life, and a later revision's postings must not either.
+   */
+  schedulePeriodsPosted?: number;
   /** Requested Jalali month; when absent it is the month of `entryDate`, else of `today`. */
   periodKey?: string | null;
   /** Requested document date; when absent the month's last day, or today inside the current month. */
@@ -177,10 +188,18 @@ export interface DepreciationPlanInput {
   /** The business's today (ISO). */
   today: string;
   /**
-   * The latest estimate change still in force, when there is one. Once an
-   * asset's useful life or salvage value has been revised, every later period
-   * spreads *what was left when the estimate changed* over *the life that was
-   * left*, prospectively — the historical postings are never recomputed.
+   * The estimate change in force for the month being planned, when there is
+   * one. The caller resolves it *by period* — the latest change whose
+   * effective period is at or before the requested month, not merely the
+   * latest change recorded — and scopes `accumulatedSoFar` /
+   * `postedPeriodKeys` to that revision's window (everything live at the
+   * change, plus everything posted since into periods the revision governs;
+   * charges belonging to a later revision's window are excluded). Once an
+   * asset's useful life or salvage value has been revised, every period from
+   * the change forward spreads *what was left when the estimate changed* over
+   * *the life that was left*, prospectively — the historical postings are
+   * never recomputed, and a catch-up month from before the change is charged
+   * under the schedule that was in force for it.
    */
   revision?: DepreciationRevision | null;
 }
@@ -237,7 +256,26 @@ export function depreciationForPeriodUnderRevision(
  * the canonical month, the document date, and the amount — capped by
  * `depreciationForPeriod` at cost minus salvage. Refuses a month before the
  * asset entered service, a month that has not started yet, a document dated
- * outside its month, and a month already posted under any label.
+ * outside its month, a document dated after today, and a month already
+ * posted under any label.
+ *
+ * ## Chronology and catch-up policy (issue #833)
+ *
+ * Continuity is NOT required: months are identified, not counted by position.
+ * A register that started depreciating late, or skipped months, posts each
+ * missing month individually as catch-up — each at its own schedule amount,
+ * under the estimate version in force for that month (see `revision`) — and
+ * the final scheduled period absorbs the rounding remainder, so the schedule
+ * always lands on exactly cost minus salvage. Out-of-order posting is the
+ * same thing: a later month may be posted before an earlier one; the amount
+ * depends only on which months are live and which schedule version governs
+ * the requested month, never on the order the rows arrived.
+ *
+ * What is refused: a month before the asset entered service, a month that has
+ * not started, the same canonical month twice, a document dated outside its
+ * month, and a document dated after today — a past month's document is dated
+ * at its month's last day (or any past day within the month), never a future
+ * one, so no posting can carry a date the business has not reached yet.
  */
 export function planDepreciation(input: DepreciationPlanInput): DepreciationPlan {
   const requestedDate = input.entryDate?.trim() || null;
@@ -254,12 +292,16 @@ export function planDepreciation(input: DepreciationPlanInput): DepreciationPlan
 
   const entryDate = requestedDate ?? (period.endsOn <= input.today ? period.endsOn : input.today);
   if (entryDate < period.startsOn || entryDate > period.endsOn) return { ok: false, error: "entry_date_outside_period" };
+  // A date inside the current month but still ahead of the business's today is
+  // a document from the future — the month has started, the day has not.
+  if (entryDate > input.today) return { ok: false, error: "entry_date_in_future" };
 
   if (input.postedPeriodKeys.includes(period.key)) return { ok: false, error: "period_already_depreciated" };
 
+  const schedulePeriodsPosted = input.schedulePeriodsPosted ?? input.postedPeriodKeys.length;
   const amount = input.revision
-    ? depreciationForPeriodUnderRevision(input.revision, input.accumulatedSoFar, input.postedPeriodKeys.length)
-    : depreciationForPeriod(input.asset, input.accumulatedSoFar, input.postedPeriodKeys.length);
+    ? depreciationForPeriodUnderRevision(input.revision, input.accumulatedSoFar, schedulePeriodsPosted)
+    : depreciationForPeriod(input.asset, input.accumulatedSoFar, schedulePeriodsPosted);
   if (amount <= 0) return { ok: false, error: "fully_depreciated" };
   return { ok: true, period, entryDate, amount };
 }

@@ -171,6 +171,52 @@ describe("planDepreciation", () => {
     expect(planDepreciation({ ...base, entryDate: "2026-02-31" })).toEqual({ ok: false, error: "invalid_entry_date" });
   });
 
+  it("refuses a document dated in the future, even inside the current month", () => {
+    // 1405-07 runs 2026-09-23..2026-10-22 and today is 2026-10-07: 2026-10-15
+    // is inside the month but ahead of the business's today.
+    expect(planDepreciation({ ...base, periodKey: "1405-07", entryDate: "2026-10-15" })).toEqual({
+      ok: false,
+      error: "entry_date_in_future",
+    });
+    // The same month at today — or any past day inside it — is fine.
+    expect(planDepreciation({ ...base, periodKey: "1405-07", entryDate: "2026-10-07" })).toMatchObject({
+      ok: true,
+      entryDate: "2026-10-07",
+    });
+    expect(planDepreciation({ ...base, periodKey: "1405-07", entryDate: "2026-09-25" })).toMatchObject({
+      ok: true,
+      entryDate: "2026-09-25",
+    });
+  });
+
+  it("scopes the schedule's consumed periods to the revision's window, separate from all live postings", () => {
+    // A revision froze {2 periods posted, 4,000,000 accumulated, 8,000,000
+    // over 4 months}. Live now: the two snapshot periods, one period posted
+    // into this revision's window, and two periods a LATER revision governs —
+    // those must not shorten this schedule's remaining life.
+    const revision = {
+      periodsPostedAtChange: 2,
+      accumulatedAtChange: 4_000_000,
+      remainingBase: 8_000_000,
+      remainingLifeMonths: 4,
+    };
+    const plan = planDepreciation({
+      asset,
+      // The duplicate-month check sees every live period…
+      postedPeriodKeys: ["1404-11", "1404-12", "1405-02", "1405-06", "1405-07"],
+      // …but the schedule counts only its own window (snapshot + 1405-02).
+      accumulatedSoFar: 6_000_000,
+      schedulePeriodsPosted: 3,
+      periodKey: "1405-03",
+      today: "2026-10-07",
+      revision,
+    });
+    // Not the final scheduled period (1 consumed of 4 since the change), so
+    // the regular monthly amount: round(8,000,000 / 4) — not the whole
+    // remaining 6,000,000 the raw live count would have made it absorb.
+    expect(plan).toMatchObject({ ok: true, amount: 2_000_000 });
+  });
+
   it("caps at cost minus salvage and then refuses", () => {
     const small = { cost: 100_000, salvageValue: 10_000, usefulLifeMonths: 3, inServiceDate: "2026-04-01" };
     expect(

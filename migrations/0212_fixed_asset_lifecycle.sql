@@ -132,6 +132,12 @@ CREATE TABLE fixed_asset_estimate_changes (
     -- Live accumulated depreciation when the change was made — what the
     -- remaining_base was computed after, so future amounts are facts.
     accumulated_at_change   bigint NOT NULL CHECK (accumulated_at_change >= 0),
+    -- The period keys that were live when the change was made. The counts
+    -- above say how much history existed; this says WHICH months it covered,
+    -- which is what lets a later catch-up posting for a pre-change month be
+    -- told apart from a posting made under the revised schedule: the revised
+    -- schedule's remaining base is reduced by the former, not the latter.
+    snapshot_period_keys    text[] NOT NULL DEFAULT '{}',
     reason                  text NOT NULL,
     changed_by              uuid REFERENCES users(id) ON DELETE SET NULL,
     created_at              timestamptz NOT NULL DEFAULT now()

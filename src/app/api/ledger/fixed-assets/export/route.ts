@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import {
+  fixedAssetExportTruncationNotice,
   fixedAssetsExportSheets,
   type FixedAssetListFilters,
 } from "@/lib/fixed-assets-service";
@@ -21,10 +22,13 @@ function xlsxResponse(body: Buffer): NextResponse {
 }
 
 /**
- * The accountant-grade outputs (issue #833): the full filtered register, the
- * depreciation schedule, the transfers and the estimate changes, as one
- * right-to-left Excel workbook. Always the *full* filtered dataset — never
- * just the visible page.
+ * The accountant-grade outputs (issue #833): the filtered register, the
+ * depreciation schedule, the disposals, the transfers and the estimate
+ * changes, as one right-to-left Excel workbook — always over the whole
+ * filtered dataset, never just the visible page. Each sheet is capped at
+ * FIXED_ASSET_EXPORT_MAX_ROWS rows; when the cap bites, a Persian notice
+ * sheet goes in front of the workbook (and the X-Export-Truncated header
+ * says so for programmatic readers) rather than a silently short report.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
@@ -60,7 +64,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
         : null,
   };
 
-  const sheets = await fixedAssetsExportSheets(session.businessId, filters);
-  const buffer = await sheetsToXlsxBuffer(sheets);
-  return xlsxResponse(buffer);
+  const { sheets, truncated, registerTotal, maxRows } = await fixedAssetsExportSheets(session.businessId, filters);
+  const buffer = await sheetsToXlsxBuffer(
+    truncated ? [fixedAssetExportTruncationNotice(registerTotal, maxRows), ...sheets] : sheets,
+  );
+  const response = xlsxResponse(buffer);
+  if (truncated) response.headers.set("X-Export-Truncated", "1");
+  return response;
 });

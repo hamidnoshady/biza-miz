@@ -41,6 +41,7 @@ import { isValidIsoDate } from "./jalali";
 import {
   depreciationPeriodOfDate,
   disposalOutcome,
+  parseDepreciationPeriodKey,
   FIXED_ASSET_SERIAL_MAX_LENGTH,
   FIXED_ASSET_USEFUL_LIFE_MAX_MONTHS,
   planDepreciation,
@@ -199,6 +200,18 @@ interface FixedAssetRow extends Record<string, unknown> {
 // the export need. The accumulated depreciation and posted-period count come
 // from a LATERAL over *live* rows only (reversed_at IS NULL) — a reversal
 // restores the schedule, it does not leave a hole in it.
+const FIXED_ASSET_FROM = `
+    FROM fixed_assets fa
+    LEFT JOIN locations l ON l.id = fa.location_id
+    LEFT JOIN parties vp ON vp.id = fa.vendor_party_id
+    LEFT JOIN parties cp ON cp.id = fa.custodian_party_id
+    LEFT JOIN accounts aa ON aa.id = fa.asset_account_id
+    LEFT JOIN LATERAL (
+      SELECT SUM(d.amount) AS accumulated, COUNT(d.id) AS periods
+        FROM fixed_asset_depreciation_entries d
+       WHERE d.fixed_asset_id = fa.id AND d.reversed_at IS NULL
+    ) live ON true`;
+
 const FIXED_ASSET_SELECT = `
   SELECT fa.id, fa.code, fa.location_id, l.name AS location_name, fa.name,
          fa.category, fa.serial_number, fa.purchase_reference, fa.notes,
@@ -213,17 +226,7 @@ const FIXED_ASSET_SELECT = `
          fa.disposal_proceeds::text AS disposal_proceeds, fa.disposal_journal_entry_id,
          fa.disposal_reason, fa.archived_at::text AS archived_at,
          COALESCE(live.accumulated, 0)::text AS accumulated_depreciation,
-         COALESCE(live.periods, 0)::int AS depreciation_count
-    FROM fixed_assets fa
-    LEFT JOIN locations l ON l.id = fa.location_id
-    LEFT JOIN parties vp ON vp.id = fa.vendor_party_id
-    LEFT JOIN parties cp ON cp.id = fa.custodian_party_id
-    LEFT JOIN accounts aa ON aa.id = fa.asset_account_id
-    LEFT JOIN LATERAL (
-      SELECT SUM(d.amount) AS accumulated, COUNT(d.id) AS periods
-        FROM fixed_asset_depreciation_entries d
-       WHERE d.fixed_asset_id = fa.id AND d.reversed_at IS NULL
-    ) live ON true`;
+         COALESCE(live.periods, 0)::int AS depreciation_count${FIXED_ASSET_FROM}`;
 
 function toFixedAsset(r: FixedAssetRow): FixedAsset {
   const cost = Number(r.cost);
@@ -1050,44 +1053,192 @@ function assertMutable(asset: LockedAsset): void {
   if (asset.archivedAt) throw new FixedAssetError("asset_archived", 409);
 }
 
+/** One live (non-reversed) depreciation posting, as the schedule sees it. */
+interface LiveDepreciationPosting {
+  /** Canonical `YYYY-MM`; legacy free-text rows resolve by their entry date. */
+  periodKey: string;
+  amount: number;
+}
+
 /** Live (non-reversed) depreciation state, read under the asset's lock. */
 async function liveDepreciation(
   client: PoolClient,
   fixedAssetId: string,
-): Promise<{ periodKeys: string[]; accumulated: number; entryDates: string[] }> {
+): Promise<{ periodKeys: string[]; accumulated: number; entryDates: string[]; postings: LiveDepreciationPosting[] }> {
   const { rows } = await client.query<{ period_key: string | null; entry_date: string; amount: string }>(
     `SELECT period_key, entry_date::text AS entry_date, amount::text AS amount
        FROM fixed_asset_depreciation_entries WHERE fixed_asset_id = $1 AND reversed_at IS NULL`,
     [fixedAssetId],
   );
+  const postings = rows.map((r) => ({
+    periodKey: r.period_key ?? depreciationPeriodOfDate(r.entry_date)?.key ?? r.entry_date,
+    amount: Number(r.amount),
+  }));
   return {
-    periodKeys: rows.map((r) => r.period_key ?? depreciationPeriodOfDate(r.entry_date)?.key ?? r.entry_date),
-    accumulated: rows.reduce((sum, r) => sum + Number(r.amount), 0),
+    periodKeys: postings.map((p) => p.periodKey),
+    accumulated: postings.reduce((sum, p) => sum + p.amount, 0),
     entryDates: rows.map((r) => r.entry_date),
+    postings,
   };
 }
 
-/** The latest estimate change still in force, or null when the schedule is virgin. */
-async function currentRevision(client: PoolClient, fixedAssetId: string): Promise<DepreciationRevision | null> {
-  const { rows } = await client.query<{
+/**
+ * What `planDepreciation` should count for one target month: the estimate
+ * change in force *for that month* — the latest whose effective period is at
+ * or before it, not merely the latest recorded — and the live totals scoped
+ * to that schedule's window.
+ *
+ * A month from before a change is catch-up under the schedule that governed
+ * it: with no applicable change, the amount comes from the original schedule
+ * and only the postings before the first change count against it. A month
+ * from after a change runs on that change's frozen schedule: the snapshot
+ * (`accumulated_at_change` / `periods_posted_at_change` / the period keys
+ * live at the change) is the baseline, plus everything posted since into the
+ * window the change governs — its own periods, catch-ups from before it
+ * (they consume its remaining base), and nothing from a later change's
+ * window, which that later change already accounted for in its own snapshot.
+ */
+async function revisionContextForPeriod(
+  client: PoolClient,
+  asset: LockedAsset,
+  targetPeriodKey: string,
+  live: { postings: LiveDepreciationPosting[]; accumulated: number },
+): Promise<{
+  revision: DepreciationRevision | null;
+  accumulatedSoFar: number;
+  schedulePeriodsPosted: number;
+  /** The schedule parameters in force for the target month. */
+  scheduleAsset: { cost: number; salvageValue: number; usefulLifeMonths: number; inServiceDate: string };
+}> {
+  interface ChangeRow {
+    effective_period_key: string;
     periods_posted_at_change: number;
     accumulated_at_change: string;
     remaining_base: string;
     remaining_life_months: number;
-  }>(
-    `SELECT periods_posted_at_change, accumulated_at_change::text AS accumulated_at_change,
-            remaining_base::text AS remaining_base, remaining_life_months
+    snapshot_period_keys: string[] | null;
+    old_useful_life_months: number;
+    old_salvage_value: string;
+  }
+  const { rows } = await client.query<ChangeRow>(
+    `SELECT effective_period_key, periods_posted_at_change, accumulated_at_change::text AS accumulated_at_change,
+            remaining_base::text AS remaining_base, remaining_life_months, snapshot_period_keys,
+            old_useful_life_months, old_salvage_value::text AS old_salvage_value
        FROM fixed_asset_estimate_changes WHERE fixed_asset_id = $1
-      ORDER BY created_at DESC LIMIT 1`,
+      ORDER BY effective_period_key ASC, created_at ASC`,
+    [asset.id],
+  );
+
+  const currentAsset = {
+    cost: asset.cost,
+    salvageValue: asset.salvageValue,
+    usefulLifeMonths: asset.usefulLifeMonths,
+    inServiceDate: asset.inServiceDate,
+  };
+
+  // No estimate changes ever: the original schedule, all live postings.
+  if (rows.length === 0) {
+    return {
+      revision: null,
+      accumulatedSoFar: live.accumulated,
+      schedulePeriodsPosted: live.postings.length,
+      scheduleAsset: currentAsset,
+    };
+  }
+
+  // The change in force for the target month: the latest with an effective
+  // period at or before it (period keys are zero-padded YYYY-MM, so the
+  // string comparison is chronological).
+  let applicable: ChangeRow | null = null;
+  let nextBoundary: string | null = null;
+  for (const change of rows) {
+    if (change.effective_period_key <= targetPeriodKey) applicable = change;
+    else {
+      nextBoundary = change.effective_period_key;
+      break;
+    }
+  }
+
+  // The target month predates every change: the ORIGINAL schedule — the
+  // parameters the first change recorded replacing, not the asset row's
+  // current values, which that change already overwrote. Two different
+  // counts matter here: the schedule's PROGRESSION (how many of the
+  // original schedule's months are consumed, whether this posting is its
+  // final one) sees only the postings from before the first change, while
+  // the lifetime CAP sees every live posting — the depreciable base is the
+  // asset's, shared across every revision, so a fully-depreciated asset must
+  // refuse a late pre-change catch-up just the same.
+  if (!applicable) {
+    const first = rows[0];
+    const firstBoundary = first.effective_period_key;
+    const windowCount = live.postings.filter((p) => p.periodKey < firstBoundary).length;
+    return {
+      revision: null,
+      accumulatedSoFar: live.accumulated,
+      schedulePeriodsPosted: windowCount,
+      scheduleAsset: {
+        cost: asset.cost,
+        salvageValue: Number(first.old_salvage_value),
+        usefulLifeMonths: first.old_useful_life_months,
+        inServiceDate: asset.inServiceDate,
+      },
+    };
+  }
+
+  const snapshot = new Set(applicable.snapshot_period_keys ?? []);
+  const since = live.postings.filter(
+    (p) => !snapshot.has(p.periodKey) && (nextBoundary === null || p.periodKey < nextBoundary),
+  );
+  return {
+    revision: {
+      periodsPostedAtChange: applicable.periods_posted_at_change,
+      accumulatedAtChange: Number(applicable.accumulated_at_change),
+      remainingBase: Number(applicable.remaining_base),
+      remainingLifeMonths: applicable.remaining_life_months,
+    },
+    accumulatedSoFar: Number(applicable.accumulated_at_change) + since.reduce((sum, p) => sum + p.amount, 0),
+    schedulePeriodsPosted: applicable.periods_posted_at_change + since.length,
+    // The revision's own numbers govern the amount; the asset row's current
+    // parameters are only the identity/cost this schedule belongs to.
+    scheduleAsset: currentAsset,
+  };
+}
+
+/**
+ * The branch an asset belonged to on a given date (issue #833): the transfers
+ * that had taken effect by then, applied in order. Read under the asset's
+ * lock, so a concurrent transfer cannot move the answer mid-posting.
+ */
+async function locationAtDate(client: PoolClient, asset: LockedAsset, isoDate: string): Promise<string> {
+  const { rows } = await client.query<{ to_location_id: string }>(
+    `SELECT to_location_id FROM fixed_asset_transfers
+      WHERE fixed_asset_id = $1 AND effective_date <= $2
+      ORDER BY effective_date DESC, created_at DESC LIMIT 1`,
+    [asset.id, isoDate],
+  );
+  if (rows[0]) return rows[0].to_location_id;
+  // Before any transfer took effect the asset sat where it was registered —
+  // which the first transfer recorded as its `from`, and which is still
+  // `location_id` when there was never a transfer at all.
+  const { rows: first } = await client.query<{ from_location_id: string }>(
+    `SELECT from_location_id FROM fixed_asset_transfers
+      WHERE fixed_asset_id = $1 ORDER BY effective_date ASC, created_at ASC LIMIT 1`,
+    [asset.id],
+  );
+  return first[0]?.from_location_id ?? asset.locationId;
+}
+
+/** The latest recorded transfer, under the asset's lock, for chronology checks. */
+async function latestTransfer(
+  client: PoolClient,
+  fixedAssetId: string,
+): Promise<{ effective_date: string; to_location_id: string } | null> {
+  const { rows } = await client.query<{ effective_date: string; to_location_id: string }>(
+    `SELECT effective_date::text AS effective_date, to_location_id FROM fixed_asset_transfers
+      WHERE fixed_asset_id = $1 ORDER BY effective_date DESC, created_at DESC LIMIT 1`,
     [fixedAssetId],
   );
-  if (!rows[0]) return null;
-  return {
-    periodsPostedAtChange: rows[0].periods_posted_at_change,
-    accumulatedAtChange: Number(rows[0].accumulated_at_change),
-    remainingBase: Number(rows[0].remaining_base),
-    remainingLifeMonths: rows[0].remaining_life_months,
-  };
+  return rows[0] ?? null;
 }
 
 function assertReason(reason: string | null | undefined): string {
@@ -1142,21 +1293,42 @@ export async function postDepreciation(params: {
     if (asset.archivedAt) throw new FixedAssetError("asset_archived", 409);
 
     const live = await liveDepreciation(client, asset.id);
-    const revision = await currentRevision(client, asset.id);
+
+    // The month being asked for decides which estimate schedule governs it —
+    // resolve the period first, then the schedule in force for that period.
+    const requestedPeriodKey = params.periodKey?.trim() ?? null;
+    const targetPeriod = requestedPeriodKey
+      ? parseDepreciationPeriodKey(requestedPeriodKey)
+      : params.entryDate?.trim() && isValidIsoDate(params.entryDate.trim())
+        ? depreciationPeriodOfDate(params.entryDate.trim())
+        : depreciationPeriodOfDate(today);
+    const revisionContext = targetPeriod
+      ? await revisionContextForPeriod(client, asset, targetPeriod.key, live)
+      : {
+          revision: null,
+          accumulatedSoFar: live.accumulated,
+          schedulePeriodsPosted: live.postings.length,
+          scheduleAsset: {
+            cost: asset.cost,
+            salvageValue: asset.salvageValue,
+            usefulLifeMonths: asset.usefulLifeMonths,
+            inServiceDate: asset.inServiceDate,
+          },
+        };
 
     const plan = planDepreciation({
-      asset: {
-        cost: asset.cost,
-        salvageValue: asset.salvageValue,
-        usefulLifeMonths: asset.usefulLifeMonths,
-        inServiceDate: asset.inServiceDate,
-      },
+      // The schedule in force for the requested month — the original
+      // parameters for a pre-change month, the asset row's otherwise.
+      asset: revisionContext.scheduleAsset,
+      // The full live list is what the duplicate-month check needs; the
+      // amount comes from the window-scoped totals of the applicable schedule.
       postedPeriodKeys: live.periodKeys,
-      accumulatedSoFar: live.accumulated,
+      accumulatedSoFar: revisionContext.accumulatedSoFar,
+      schedulePeriodsPosted: revisionContext.schedulePeriodsPosted,
       periodKey: params.periodKey,
       entryDate: params.entryDate,
       today,
-      revision,
+      revision: revisionContext.revision,
     });
     if (!plan.ok) {
       const status = plan.error === "period_already_depreciated" || plan.error === "fully_depreciated" ? 409 : 400;
@@ -1180,13 +1352,17 @@ export async function postDepreciation(params: {
       throw err;
     }
 
+    // The asset's branch *at the document's date*, not its branch today: a
+    // transfer recorded after the fact must not move a historical posting.
+    const postingLocationId = await locationAtDate(client, asset, plan.entryDate);
+
     const accounts = await accountIdsByCode(client, params.businessId, [
       WELL_KNOWN_CODES.depreciationExpense,
       WELL_KNOWN_CODES.accumulatedDepreciation,
     ]);
     const journalEntryId = await postJournalEntry(client, {
       businessId: params.businessId,
-      locationId: asset.locationId,
+      locationId: postingLocationId,
       entryDate: plan.entryDate,
       memo: `استهلاک — ${label}`,
       sourceType: "fixed_asset_depreciation",
@@ -1268,8 +1444,11 @@ export async function reverseDepreciation(params: {
     if (!entry) throw new FixedAssetError("depreciation_entry_not_found", 404);
     if (entry.reversed_at) throw new FixedAssetError("depreciation_already_reversed", 409);
 
-    const { rows: journals } = await client.query<{ id: string }>(
-      `SELECT id FROM journal_entries
+    // The original posting's own branch, not the asset's branch today: a
+    // transfer recorded since must not move the undo of an old posting to the
+    // new branch. The mirror undoes the original where the original happened.
+    const { rows: journals } = await client.query<{ id: string; location_id: string | null }>(
+      `SELECT id, location_id FROM journal_entries
         WHERE business_id = $1 AND source_type = 'fixed_asset_depreciation' AND source_id = $2
           AND reverses_entry_id IS NULL`,
       [params.businessId, entry.id],
@@ -1280,7 +1459,7 @@ export async function reverseDepreciation(params: {
     if (journals[0]) {
       reversalJournalEntryId = await postExactMirrorEntry(client, {
         businessId: params.businessId,
-        locationId: asset.locationId,
+        locationId: journals[0].location_id ?? asset.locationId,
         originalEntryId: journals[0].id,
         sourceType: "fixed_asset_depreciation",
         sourceId: entry.id,
@@ -1368,6 +1547,13 @@ export async function disposeFixedAsset(params: {
     if (asset.status === "disposed") throw new FixedAssetError("asset_disposed", 409);
     if (asset.archivedAt) throw new FixedAssetError("asset_archived", 409);
     if (disposalDate < asset.inServiceDate) throw new FixedAssetError("disposal_before_in_service");
+    // A disposal dated before the latest transfer would claim the asset left
+    // the register before it demonstrably moved between branches — the
+    // transfer happened while the asset was still in service.
+    const latest = await latestTransfer(client, asset.id);
+    if (latest && disposalDate < latest.effective_date) {
+      throw new FixedAssetError("disposal_before_last_transfer");
+    }
 
     const live = await liveDepreciation(client, asset.id);
     const outcome = disposalOutcome({
@@ -1435,9 +1621,12 @@ export async function disposeFixedAsset(params: {
         : params.kind === "retirement"
           ? `اسقاط دارایی ثابت — ${asset.name}`
           : `حذف دارایی ثابت — ${asset.name}`;
+    // The branch that held the asset on the disposal date — the same
+    // effective-dated rule depreciation posts under.
+    const disposalLocationId = await locationAtDate(client, asset, disposalDate);
     const journalEntryId = await postJournalEntry(client, {
       businessId: params.businessId,
-      locationId: asset.locationId,
+      locationId: disposalLocationId,
       entryDate: disposalDate,
       memo,
       sourceType: "fixed_asset_disposal",
@@ -1528,8 +1717,8 @@ export async function changeFixedAssetEstimate(params: {
       `INSERT INTO fixed_asset_estimate_changes
          (fixed_asset_id, effective_period_key, old_useful_life_months, new_useful_life_months,
           old_salvage_value, new_salvage_value, periods_posted_at_change, remaining_life_months,
-          remaining_base, accumulated_at_change, reason, changed_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+          remaining_base, accumulated_at_change, snapshot_period_keys, reason, changed_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
       [
         asset.id,
         effectivePeriod.key,
@@ -1541,6 +1730,10 @@ export async function changeFixedAssetEstimate(params: {
         remainingLifeMonths,
         remainingBase,
         live.accumulated,
+        // Which months the live history covered — not just how many — so a
+        // later catch-up for a pre-change month can be told apart from a
+        // posting made under the revised schedule.
+        live.periodKeys,
         reason,
         params.createdBy,
       ],
@@ -1589,6 +1782,16 @@ export async function transferFixedAsset(params: {
     assertMutable(asset);
     await assertLocationOfBusiness(client, params.businessId, params.toLocationId);
     if (asset.locationId === params.toLocationId) throw new FixedAssetError("transfer_same_location", 409);
+
+    // Chronology: a transfer is a fact about a date, recorded in order. An
+    // entry dated before the asset entered service would move an asset that
+    // did not exist yet, and one dated before the latest recorded transfer
+    // would need that transfer's `from` rewritten — history is append-only.
+    if (effectiveDate < asset.inServiceDate) throw new FixedAssetError("transfer_before_in_service");
+    const latest = await latestTransfer(client, asset.id);
+    if (latest && effectiveDate < latest.effective_date) {
+      throw new FixedAssetError("transfer_before_last_transfer");
+    }
 
     await client.query(
       `INSERT INTO fixed_asset_transfers
@@ -1651,17 +1854,52 @@ export async function archiveFixedAsset(params: {
 
 export const FIXED_ASSET_EXPORT_MAX_ROWS = 20_000;
 
-/** The register, the depreciation schedule, the disposals, the transfers and the estimate changes, as workbook sheets. */
+/** What `fixedAssetsExportSheets` produced, including the honesty it owes the reader. */
+export interface FixedAssetsExportResult {
+  /** The workbook sheets, in reading order. */
+  sheets: SheetData[];
+  /** True when any sheet hit its row cap — the workbook is knowingly partial, and must say so. */
+  truncated: boolean;
+  /** Rows in the filtered register before any cap — the number the reader expected. */
+  registerTotal: number;
+  /** The per-sheet row cap that was applied. */
+  maxRows: number;
+}
+
+/**
+ * The accountant-grade outputs (issue #833): the register, the depreciation
+ * schedule, the disposals, the transfers and the estimate changes — every
+ * sheet over the SAME filtered asset set, so a filter narrows the whole
+ * workbook, not just the register.
+ *
+ * Each sheet is capped at `maxRows` rows (a workbook is a document, not a
+ * database dump). Hitting the cap is never silent: `truncated` tells the
+ * caller, and `fixedAssetExportTruncationNotice` is the sheet the route puts
+ * in front of the workbook so the reader knows to narrow the filters.
+ */
 export async function fixedAssetsExportSheets(
   businessId: string,
   filters: FixedAssetListFilters = {},
-): Promise<SheetData[]> {
+  options: { maxRows?: number } = {},
+): Promise<FixedAssetsExportResult> {
+  const maxRows = Math.max(1, Math.floor(options.maxRows ?? FIXED_ASSET_EXPORT_MAX_ROWS));
   const { clause, params } = fixedAssetWhere(filters);
   params[0] = businessId;
-  const register = await query<FixedAssetRow & Record<string, unknown>>(
-    `${FIXED_ASSET_SELECT} WHERE ${clause} ${fixedAssetOrderBy(filters.sortBy)} LIMIT ${FIXED_ASSET_EXPORT_MAX_ROWS}`,
+
+  // The one filtered asset selection every sheet reads from — resolved once,
+  // so the register, the schedule and the history sheets can never disagree
+  // about which assets the filter admitted.
+  const { rows: idRows } = await query<{ id: string }>(
+    `SELECT fa.id${FIXED_ASSET_FROM} WHERE ${clause}`,
     params,
   );
+  const assetIds = idRows.map((r) => r.id);
+
+  const register = await query<FixedAssetRow & Record<string, unknown>>(
+    `${FIXED_ASSET_SELECT} WHERE fa.id = ANY($1) ${fixedAssetOrderBy(filters.sortBy)} LIMIT ${maxRows + 1}`,
+    [assetIds],
+  );
+  let truncated = register.rows.length > maxRows;
 
   const schedule = await query<{
     code: string | null;
@@ -1676,15 +1914,25 @@ export async function fixedAssetsExportSheets(
   }>(
     `SELECT fa.code, fa.name, d.period_label, d.period_key, d.entry_date::text AS entry_date,
             d.amount::text AS amount, d.reversed_at::text AS reversed_at,
-            u.full_name AS created_by_name, l.name AS location_name
+            u.full_name AS created_by_name,
+            -- The branch the posting was journalled to — the asset's branch at
+            -- the document date, which a later transfer does not rewrite. The
+            -- asset's current branch is only the fallback for legacy rows that
+            -- predate journal linking.
+            COALESCE(jl.name, l.name) AS location_name
        FROM fixed_asset_depreciation_entries d
        JOIN fixed_assets fa ON fa.id = d.fixed_asset_id
        LEFT JOIN users u ON u.id = d.created_by
        LEFT JOIN locations l ON l.id = fa.location_id
-      WHERE fa.business_id = $1
-      ORDER BY fa.code NULLS LAST, d.entry_date ASC`,
-    [businessId],
+       LEFT JOIN journal_entries je
+         ON je.source_type = 'fixed_asset_depreciation' AND je.source_id = d.id AND je.reverses_entry_id IS NULL
+       LEFT JOIN locations jl ON jl.id = je.location_id
+      WHERE fa.id = ANY($1)
+      ORDER BY fa.code NULLS LAST, d.entry_date ASC
+      LIMIT ${maxRows + 1}`,
+    [assetIds],
   );
+  truncated = truncated || schedule.rows.length > maxRows;
 
   const transfers = await query<{
     code: string | null;
@@ -1702,10 +1950,12 @@ export async function fixedAssetsExportSheets(
        LEFT JOIN locations fl ON fl.id = t.from_location_id
        LEFT JOIN locations tl ON tl.id = t.to_location_id
        LEFT JOIN users u ON u.id = t.transferred_by
-      WHERE fa.business_id = $1
-      ORDER BY t.effective_date DESC`,
-    [businessId],
+      WHERE fa.id = ANY($1)
+      ORDER BY t.effective_date DESC
+      LIMIT ${maxRows + 1}`,
+    [assetIds],
   );
+  truncated = truncated || transfers.rows.length > maxRows;
 
   const changes = await query<{
     code: string | null;
@@ -1726,10 +1976,12 @@ export async function fixedAssetsExportSheets(
        FROM fixed_asset_estimate_changes c
        JOIN fixed_assets fa ON fa.id = c.fixed_asset_id
        LEFT JOIN users u ON u.id = c.changed_by
-      WHERE fa.business_id = $1
-      ORDER BY c.changed_at DESC`,
-    [businessId],
+      WHERE fa.id = ANY($1)
+      ORDER BY c.changed_at DESC
+      LIMIT ${maxRows + 1}`,
+    [assetIds],
   );
+  truncated = truncated || changes.rows.length > maxRows;
 
   const disposals = await query<{
     code: string | null;
@@ -1750,10 +2002,12 @@ export async function fixedAssetsExportSheets(
            FROM fixed_asset_depreciation_entries d
           WHERE d.fixed_asset_id = fa.id AND d.reversed_at IS NULL
        ) live ON true
-      WHERE fa.business_id = $1 AND fa.status = 'disposed'
-      ORDER BY fa.disposal_date DESC, fa.created_at DESC`,
-    [businessId],
+      WHERE fa.id = ANY($1) AND fa.status = 'disposed'
+      ORDER BY fa.disposal_date DESC, fa.created_at DESC
+      LIMIT ${maxRows + 1}`,
+    [assetIds],
   );
+  truncated = truncated || disposals.rows.length > maxRows;
 
   const sheets: SheetData[] = [
     {
@@ -1779,7 +2033,7 @@ export async function fixedAssetsExportSheets(
         { key: "purchaseReference", label: "مرجع خرید" },
         { key: "notes", label: "یادداشت" },
       ],
-      rows: register.rows.map((r) => {
+      rows: register.rows.slice(0, maxRows).map((r) => {
         const asset = toFixedAsset(r);
         return {
           code: asset.code ?? "",
@@ -1816,7 +2070,7 @@ export async function fixedAssetsExportSheets(
         { key: "createdByName", label: "ثبت‌کننده" },
         { key: "locationName", label: "شعبه" },
       ],
-      rows: schedule.rows.map((r) => ({
+      rows: schedule.rows.slice(0, maxRows).map((r) => ({
         code: r.code ?? "",
         name: r.name,
         period: r.period_key ? `${r.period_key} (${r.period_label})` : r.period_label,
@@ -1850,7 +2104,7 @@ export async function fixedAssetsExportSheets(
         { key: "gainLoss", label: "سود (+) / زیان (−)", type: "money" },
         { key: "reason", label: "دلیل" },
       ],
-      rows: disposals.rows.map((r) => {
+      rows: disposals.rows.slice(0, maxRows).map((r) => {
         const cost = Number(r.cost);
         const accumulated = Number(r.accumulated);
         const proceeds = Number(r.disposal_proceeds ?? 0);
@@ -1883,7 +2137,7 @@ export async function fixedAssetsExportSheets(
         { key: "reason", label: "دلیل" },
         { key: "transferredByName", label: "انتقال‌دهنده" },
       ],
-      rows: transfers.rows.map((r) => ({
+      rows: transfers.rows.slice(0, maxRows).map((r) => ({
         code: r.code ?? "",
         name: r.name,
         from: r.from_location_name ?? "",
@@ -1907,7 +2161,7 @@ export async function fixedAssetsExportSheets(
         { key: "reason", label: "دلیل" },
         { key: "changedByName", label: "تغییردهنده" },
       ],
-      rows: changes.rows.map((r) => ({
+      rows: changes.rows.slice(0, maxRows).map((r) => ({
         code: r.code ?? "",
         name: r.name,
         changedAt: r.changed_at,
@@ -1919,5 +2173,31 @@ export async function fixedAssetsExportSheets(
     });
   }
 
-  return sheets;
+  return {
+    sheets,
+    truncated,
+    registerTotal: assetIds.length,
+    maxRows,
+  };
+}
+
+/**
+ * The sheet the export route puts in front of a truncated workbook (issue
+ * #833): the reader is told, in the workbook itself, that what they hold is
+ * partial and how to get the rest — a silently short export is an accounting
+ * report that lies by omission.
+ */
+export function fixedAssetExportTruncationNotice(registerTotal: number, maxRows: number): SheetData {
+  return {
+    name: "توجه",
+    columns: [{ key: "message", label: "محدودیت خروجی" }],
+    rows: [
+      {
+        message:
+          `این خروجی در سقف ${maxRows.toLocaleString("fa-IR")} ردیف در هر برگه محدود شده است؛ ` +
+          `دفتر اموال شما ${registerTotal.toLocaleString("fa-IR")} ردیف دارد و فقط ${maxRows.toLocaleString("fa-IR")} ردیف نخست هر برگه آمده است. ` +
+          "برای دریافت کامل، فیلترها را محدودتر کنید (مثلاً دسته، شعبه یا بازهٔ تاریخ).",
+      },
+    ],
+  };
 }

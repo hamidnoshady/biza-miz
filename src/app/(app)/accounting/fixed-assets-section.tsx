@@ -185,6 +185,10 @@ const ERROR_TRANSLATIONS: Record<string, string> = {
   invalid_useful_life: "عمر مفید باید عدد صحیح بین ۱ تا ۱۲۰۰ ماه باشد.",
   salvage_not_less_than_cost: "ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.",
   transfer_same_location: "دارایی هم‌اکنون در همین شعبه است.",
+  disposal_before_last_transfer: "تاریخ واگذاری نمی‌تواند پیش از آخرین انتقال ثبت‌شده باشد.",
+  transfer_before_last_transfer: "تاریخ انتقال نمی‌تواند پیش از آخرین انتقال ثبت‌شده باشد؛ سابقه انتقال‌ها تغییرناپذیر است.",
+  transfer_before_in_service: "تاریخ انتقال نمی‌تواند پیش از تاریخ بهره‌برداری دارایی باشد.",
+  entry_date_in_future: "تاریخ سند نمی‌تواند در آینده باشد.",
   transfer_date_in_future: "تاریخ انتقال نمی‌تواند در آینده باشد.",
   invalid_transfer_date: "تاریخ انتقال معتبر نیست.",
   location_not_found: "شعبه انتخاب‌شده معتبر نیست.",
@@ -278,8 +282,11 @@ export function FixedAssetsSection({
   refreshKey: number;
   /**
    * Whether the member may mutate the register. `undefined` = effective
-   * permissions could not be read: draw the controls, the API stays the gate
-   * (the same convention the manual-entry review queue uses).
+   * permissions are not known yet (still loading, or could not be read):
+   * read-only until they are — a member whose capability is merely unknown
+   * must not be shown live accounting controls that will 403 on click. The
+   * API remains the authoritative gate either way; this only stops the UI
+   * from offering what it cannot promise.
    */
   canManage?: boolean;
   /** The chart of accounts the workspace already loaded — for the asset-account and proceeds-account pickers. */
@@ -294,7 +301,9 @@ export function FixedAssetsSection({
   const [localError, setLocalError] = useState("");
   const [localNotice, setLocalNotice] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const readOnly = canManage === false;
+  // Unknown (`undefined`) is read-only too — capability must be affirmatively
+  // known before a mutation control is drawn.
+  const readOnly = canManage !== true;
 
   // Server-backed filters (issue #833: the browser must not download the
   // whole register to search it).
@@ -558,7 +567,7 @@ export function FixedAssetsSection({
             <a
               href={exportHref}
               className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              title="دریافت اکسل کل داده‌های فیلترشده"
+              title="دریافت اکسل کل داده‌های فیلترشده (دفتر اموال، برنامه استهلاک، واگذاری‌ها، انتقال‌ها و تغییر برآوردها) — حداکثر ۲۰٬۰۰۰ ردیف در هر برگه"
             >
               <FileDownIcon className="size-3.5" />
               <span>دریافت اکسل</span>
@@ -1772,6 +1781,12 @@ function DepreciateDialog({
         </div>
       </div>
 
+      <InfoBox>
+        ثبت ماه‌های گذشته (جبرانی) مجاز است: هر ماه با مبلغ برنامهٔ خودش و در شعبه‌ای که دارایی در آن تاریخ بوده ثبت
+        می‌شود. اگر دوره‌ای جا مانده باشد، لازم نیست به‌ترتیب ثبت کنید؛ دورهٔ آخر برنامه، باقیمانده را کامل جذب می‌کند تا
+        جمع استهلاک دقیقاً برابر «بهای تمام‌شده منهای ارزش اسقاط» شود.
+      </InfoBox>
+
       <form onSubmit={handleSubmit} className="space-y-4">
         <Field label="ماه استهلاک" hint="هر ماه فقط یک‌بار برای هر دارایی ثبت می‌شود">
           <div className="grid grid-cols-2 gap-2">
@@ -2506,6 +2521,11 @@ function TransferDialog({
         شعبه فعلی: <strong className="text-foreground">{asset.locationName ?? "بدون شعبه"}</strong>. پس از انتقال، اسناد
         استهلاک بعدی به شعبه جدید صادر می‌شود؛ سوابق استهلاک قبلی دست‌نخورده می‌مانند.
       </p>
+      <InfoBox>
+        تاریخ مؤثر یعنی دارایی از چه تاریخی در شعبهٔ جدید حساب می‌شود: استهلاک دوره‌هایی که پیش از این تاریخ هستند (حتی
+        اگر بعداً به‌عنوان جبرانی ثبت شوند) به شعبهٔ قبلی می‌افتند و دوره‌های بعد از آن به شعبهٔ جدید. تاریخ نمی‌تواند پیش از
+        بهره‌برداری دارایی یا پیش از آخرین انتقال قبلی باشد.
+      </InfoBox>
 
       <form onSubmit={handleSubmit} className="space-y-4">
         <Field label="شعبه مقصد">
