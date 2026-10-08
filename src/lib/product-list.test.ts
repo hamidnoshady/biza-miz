@@ -233,6 +233,18 @@ describe("buildProductsCsv", () => {
     expect(quoted).toContain('"حلقه ""ویژه"""');
   });
 
+  it("speaks the business's selected unit and says so in the header", () => {
+    const toman = buildProductsCsv([family, row], "toman").replace(/^﻿/, "").split("\r\n");
+    expect(toman[0]).toBe('"نام","خانواده","کد کالا","بارکد","واحد","موجودی","قیمت فروش (تومان)","قیمت خرید (تومان)"');
+    expect(toman[2]).toBe('"انگشتر استیل آبی","انگشتر استیل","1014","62600101401","عدد","5","53000","25000"');
+  });
+
+  it("neutralises a formula-looking name so Excel does not execute it", () => {
+    const csv = buildProductsCsv([{ ...row, name: "=HYPERLINK(\"http://x\")", sku: "+1" }]);
+    expect(csv).toContain('"\'=HYPERLINK(""http://x"")"');
+    expect(csv).toContain('"\'+1"');
+  });
+
   it("is not fooled into treating a variant child as the family row", () => {
     expect(isVariantParent(row)).toBe(false);
     expect(isVariantParent(family)).toBe(true);

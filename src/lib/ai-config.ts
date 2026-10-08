@@ -9,24 +9,15 @@ import { defaultConfig, type AiConfig } from "./ai";
 import { query } from "./db";
 import { decryptSecret, resolveEncryptionKey } from "./integrations/secrets";
 
-/**
- * Decrypt the master key, preferring the ciphertext column written by
- * migration 0183's cutover (`ai-gateway-service.ts`'s `saveAiGatewayConfig`)
- * and falling back to the legacy plaintext column for a row nobody has
- * re-saved since. See that file's header comment for the full story; this is
- * the *other* reader of `platform_ai_gateway` (the hot request path), so it
- * needs the same fallback, not just the platform console's.
- */
-function decryptMasterKey(ciphertext: string | null | undefined, plaintext: string | null | undefined): string {
-  if (ciphertext) {
-    try {
-      return decryptSecret(ciphertext, resolveEncryptionKey(process.env));
-    } catch (err) {
-      console.error("platform AI master key ciphertext could not be decrypted; treating as absent", err);
-      return "";
-    }
+/** Decrypt the ciphertext-only master key (migration 0209). */
+function decryptMasterKey(ciphertext: string | null | undefined): string {
+  if (!ciphertext) return "";
+  try {
+    return decryptSecret(ciphertext, resolveEncryptionKey(process.env));
+  } catch (err) {
+    console.error("platform AI master key ciphertext could not be decrypted; treating as absent", err);
+    return "";
   }
-  return plaintext?.trim() || "";
 }
 
 export type AiRuntimeUnavailableReason =
@@ -74,11 +65,10 @@ export interface PlatformAiConfig extends AiConfig {
   usdRialRate: number | null;
 }
 
-type GatewayConfigRow = {
+export type PlatformAiGatewayRow = {
   enabled: boolean;
   chat_model: string;
   base_url: string;
-  master_key: string | null;
   master_key_ciphertext: string | null;
   temperature: string | number;
   input_cost_rial_per_million: string | number | null;
@@ -106,11 +96,10 @@ function envNumber(name: string): number {
 }
 
 function envKey(): string {
-  return (
-    process.env.LITELLM_MASTER_KEY?.trim() ||
-    process.env.AI_API_KEY?.trim() ||
-    ""
-  );
+  // AI_API_KEY is deliberately not a fallback: in a LiteLLM-only deployment
+  // it is ambiguous whether it is an upstream provider key or the proxy's
+  // management key. Only the explicitly-owned LiteLLM variable is accepted.
+  return process.env.LITELLM_MASTER_KEY?.trim() || "";
 }
 
 export function effectiveRate(costRialPerMillion: number, marginPercent: number): number {
@@ -124,9 +113,12 @@ export function defaultPlatformConfig(): PlatformAiConfig {
   const maxOutputTokens = envNumber("AI_MAX_OUTPUT_TOKENS");
   return {
     ...base,
-    enabled: process.env.AI_ENABLED === "true",
-    model: process.env.AI_MODEL?.trim() || process.env.LITELLM_CHAT_MODEL?.trim() || base.model,
-    baseUrl: process.env.AI_BASE_URL?.trim() || process.env.LITELLM_BASE_URL?.trim() || base.baseUrl,
+    // With no persisted platform_ai_gateway row, LITELLM_* is the single
+    // bootstrap namespace for the one supported connection. A stored row is
+    // authoritative and is mapped separately below.
+    enabled: process.env.LITELLM_ENABLED === "true",
+    model: process.env.LITELLM_CHAT_MODEL?.trim() || base.model,
+    baseUrl: process.env.LITELLM_BASE_URL?.trim() || base.baseUrl,
     apiKey: envKey(),
     temperature: temp >= 0 && temp <= 2 ? temp : base.temperature,
     inputCostRialPerMillion: envNumber("AI_INPUT_COST_RIAL_PER_MILLION"),
@@ -151,15 +143,14 @@ export function defaultPlatformConfig(): PlatformAiConfig {
   };
 }
 
-function rowToConfig(row: GatewayConfigRow): PlatformAiConfig {
-  const fallback = defaultPlatformConfig();
+export function platformAiConfigFromGatewayRow(row: PlatformAiGatewayRow): PlatformAiConfig {
   const base = defaultConfig("litellm");
   return {
     enabled: row.enabled,
     provider: "litellm",
-    model: row.chat_model?.trim() || fallback.model || base.model,
-    baseUrl: row.base_url?.trim() || fallback.baseUrl || base.baseUrl,
-    apiKey: decryptMasterKey(row.master_key_ciphertext, row.master_key) || fallback.apiKey || "",
+    model: row.chat_model?.trim() || base.model,
+    baseUrl: row.base_url?.trim() || base.baseUrl,
+    apiKey: decryptMasterKey(row.master_key_ciphertext),
     temperature: numberValue(row.temperature),
     inputCostRialPerMillion: numberValue(row.input_cost_rial_per_million),
     outputCostRialPerMillion: numberValue(row.output_cost_rial_per_million),
@@ -182,15 +173,15 @@ function rowToConfig(row: GatewayConfigRow): PlatformAiConfig {
 
 export async function getPlatformAiConfig(): Promise<PlatformAiConfig> {
   try {
-    const { rows } = await query<GatewayConfigRow>(
-      `SELECT enabled, chat_model, base_url, master_key, master_key_ciphertext, temperature,
+    const { rows } = await query<PlatformAiGatewayRow>(
+      `SELECT enabled, chat_model, base_url, master_key_ciphertext, temperature,
               input_cost_rial_per_million, output_cost_rial_per_million,
               revenue_margin_percent, max_turn_rial, max_output_tokens,
               gateway_costing_enabled, usd_rial_rate
          FROM platform_ai_gateway
         WHERE id = true`,
     );
-    return rows[0] ? rowToConfig(rows[0]) : defaultPlatformConfig();
+    return rows[0] ? platformAiConfigFromGatewayRow(rows[0]) : defaultPlatformConfig();
   } catch (err) {
     console.error("platform AI config unavailable; failing closed", err);
     return { ...defaultPlatformConfig(), enabled: false, runtimeUnavailableReason: "configuration_load_failed" };

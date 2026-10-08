@@ -1,5 +1,5 @@
 -- ---------------------------------------------------------------------------
--- Cheques: the rules that go with the `resolved` status added in 0211.
+-- Cheques: the rules that go with the `resolved` status added in 0215.
 -- ---------------------------------------------------------------------------
 -- A new enum value cannot be referenced in the transaction that created it, so
 -- the constraint work lives in its own migration file.
@@ -22,4 +22,4 @@ ALTER TABLE cheque_events ADD CONSTRAINT cheque_events_event_check CHECK (
     event IN ('received', 'issued', 'deposited', 'endorsed', 'cleared', 'bounced', 'cancelled', 'settled', 'restored')
 );
 
-CREATE INDEX idx_cheque_events_chronology ON cheque_events (cheque_id, occurred_on, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_cheque_events_chronology ON cheque_events (cheque_id, occurred_on, created_at, id);

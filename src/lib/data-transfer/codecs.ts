@@ -186,6 +186,10 @@ export function parseCsv(text: string, delimiter?: CsvDelimiter): string[][] {
  */
 export function csvCell(value: unknown): string {
   if (value === null || value === undefined) return "";
+  // A finite JS number cannot carry a formula, and prefixing a negative one
+  // (`-1800000` → `'-1800000`) turned a balance-sheet overdraft into text a
+  // spreadsheet will not add up. Only strings are neutralised.
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
   let text = String(value);
   if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
   if (/[",\n\r;\t]/.test(text)) return `"${text.replaceAll('"', '""')}"`;

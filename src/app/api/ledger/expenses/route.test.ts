@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 import * as auth from "@/lib/auth";
 import * as setupState from "@/lib/setup-state";
 import * as expenseService from "@/lib/expense-service";
-import { ExpenseError } from "@/lib/expense-service";
+import { ExpenseError, MissingLedgerAccountError } from "@/lib/expense-service";
 import { GET, POST } from "./route";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -90,6 +90,24 @@ describe("POST /api/ledger/expenses", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toBe("receipt_asset_not_found");
+  });
+
+  it("forwards «پرداخت بعدی» (audit F11): settlement, supplier and due date", async () => {
+    vi.mocked(expenseService.recordExpense).mockResolvedValue({ id: "exp-4" } as never);
+    const res = await POST(
+      postRequest({ accountId: "a", amount: 1, memo: "x", settlement: "credit", supplierId: "sup-1", dueDate: "2026-11-01" }),
+    );
+    expect(res.status).toBe(201);
+    expect(expenseService.recordExpense).toHaveBeenCalledWith(
+      expect.objectContaining({ settlement: "credit", supplierId: "sup-1", dueDate: "2026-11-01", paymentAccountId: "" }),
+    );
+  });
+
+  it("answers a chart without Accounts Payable as a 409 naming the account", async () => {
+    vi.mocked(expenseService.recordExpense).mockRejectedValue(new MissingLedgerAccountError("2100"));
+    const res = await POST(postRequest({ accountId: "a", amount: 1, memo: "x", settlement: "credit", supplierId: "s" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "ledger_account_missing", code: "2100" });
   });
 
   it("400s on unparseable JSON before ever calling recordExpense", async () => {

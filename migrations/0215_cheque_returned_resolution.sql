@@ -25,4 +25,4 @@
 ALTER TYPE cheque_status ADD VALUE IF NOT EXISTS 'resolved';
 
 COMMENT ON TYPE cheque_status IS
-    'Cheque lifecycle status. `resolved` (0211) closes a returned cheque whose balance was moved out of 1244/2122 by a settle/restore resolution.';
+    'Cheque lifecycle status. `resolved` (0215) closes a returned cheque whose balance was moved out of 1244/2122 by a settle/restore resolution.';

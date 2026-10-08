@@ -142,7 +142,7 @@ here.
 counterparty hands over a new cheque in practice, and because a status that can loop makes "what
 happened to this cheque" unanswerable from the event log.
 
-> **Revised by issue #828 (migrations 0211/0212).** The *instrument* is still dead — a bounce
+> **Revised by issue #828 (migrations 0215/0216).** The *instrument* is still dead — a bounce
 > never loops back to `on_hand` — but the *balance* is not. A returned cheque left the value
 > sitting in «۱۲۴۴ چک‌های برگشتی» / «۲۱۲۲ چک‌های پرداختنی برگشتی» with no supported way out, and
 > registering a replacement as an ordinary new cheque credits/debits the control account a second

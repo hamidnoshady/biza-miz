@@ -1,9 +1,12 @@
-# AI Billing Architecture — the single-billing cutover (migration 0168)
+# AI Billing Architecture — single-billing cutover (historical migration 0168)
 
-> Status: implemented. This document is the contract the code now enforces;
-> the tests that pin it are `integration/ai-billing-flow.integration.test.ts`
-> (the money story), `integration/ai-virtual-key-provisioning.integration.test.ts`
-> (the identity-only key mint) and `src/lib/ai-gateway.test.ts` (the pure half).
+> This document records the 0168 billing/key cutover and remains useful for the Rial settlement
+> invariants, but its early route/schema examples have since evolved. LiteLLM is now the only
+> provider; issue #757 added exact branch readiness, retired app-side policy columns in migration
+> 0184, and documented the guarded plaintext-secret removal in migration 0209. Use
+> [Phase 39](../phases/Phase-39-LiteLLM-Only-AI-Platform.md) for current provider ownership and
+> rollout prerequisites, and [the AI architecture guide](../ai-subsystem-architecture.md) for the
+> current control-plane routes.
 
 ## The one-sentence rule
 
@@ -90,11 +93,10 @@ The refusal is the one code `ai_credit_required` with the message
 - **No `models` allowlist** — changing the platform's chat alias must not
   orphan every existing key against the new model. Model choice is the request
   path's decision (`resolveChatModel`), not the key's.
-- **No `max_budget` / `budget_duration` / `tpm_limit` / `rpm_limit`** — those
-  are LiteLLM's to enforce *for its own reasons* (configured in
-  `docker/litellm/config.yaml`), never mirrored from the platform. A mirrored
-  key budget used to 429 tenants whose Rial wallet still had credit; that
-  double-gate is gone.
+- **No app-mirrored `max_budget` / `budget_duration` / `tpm_limit` / `rpm_limit`** — migration
+  0184 removes the retired app-side policy columns. LiteLLM may be configured with proxy limits
+  separately, but the bundled `docker/litellm/config.yaml` does not make them a second product
+  wallet. The app's Plan/Billing ledger remains the product billing source of truth.
 - Keys are minted **lazily** (`ensureTenantVirtualKey`) on the first request
   that authenticates as the business; console read paths never mint. A branch
   key is optional and rides the business key when absent.
@@ -108,28 +110,31 @@ The refusal is the one code `ai_credit_required` with the message
 |---|---|---|
 | Rial billing, affordability, debt, allowance | `wallet-service.ts` + `ai-plan-allowance.ts` | The single stop. |
 | Routing strategy, per-model RPM/TPM, per-key budgets | `docker/litellm/config.yaml` | The platform console mirrors none of them (migration 0168 dropped the columns and the env knobs). |
-| Model aliases served | `platform_ai_gateway` chat/embedding aliases | Compared against the proxy's live list by the console's probe. |
-| Per-business model override | `ai_business_gateway.model_override` | Legacy column only; ignored by runtime and not managed from `/platform/ai`. LiteLLM owns tenant/model access. |
+| Model aliases served | LiteLLM deployment catalogue; app defaults and mode mappings are stored in `platform_ai_gateway` / `platform_ai_modes` | Alias names must exist in the proxy; the app does not mirror deployment policy. |
+| Per-business model override | None | Retired app-side `model_override` column dropped by migration 0184; runtime uses platform/mode aliases. |
 | Platform revenue | `ai_wallet_settlements` aggregation | Billing/finance reporting only; not shown on `/platform/ai`. |
 
-## Console surfaces (post-cutover)
+## Console surfaces (current routes)
 
-- **`/platform/ai`** — technical LiteLLM connection settings (enabled, base
-  URL, master key, default chat alias, embedding alias, connection diagnostics)
-  and business virtual-key lifecycle (provision / verify / rotate / revoke).
-  It does not show customer pricing, wallet balances, allowances or revenue.
-- **Plan/Billing** — customer price, monthly AI allowance, wallet balance,
-  top-ups, overage and monetisation. AI settlements still flow through
-  `ai_wallet_settlements`, `business_wallets` and `ai_plan_allowance_usage`.
-- **LiteLLM** — upstream providers, model deployments, routing, retries,
-  fallback, load balancing, provider costs and optional MCP/gateway behaviour.
+- **`/platform/ai`** — gateway connection diagnostics, global defaults and the batched business/
+  branch virtual-key fleet. The selected `(businessId, locationId)` readiness is distinct from
+  business-default readiness and includes entitlement, key source/status, alias and sync errors.
+  The old UI bookmark `/platform/ai/gateway` redirects here; `/api/platform/ai/gateway` remains
+  the active API.
+- **`/platform/ai/modes`, `/platform/ai/prompts`, `/platform/ai/agents`, `/platform/ai/research`
+  and `/platform/ai/widgets`** — current runtime mode mappings, prompt versions, system-agent
+  assignments, research caps and platform widgets. `/platform/ai/prompts` is active; it is not the
+  retired prompt-fragment manager.
+- **Plan/Billing** — customer price, monthly AI allowance, wallet balance, top-ups, overage and
+  monetisation. AI settlements still flow through `ai_wallet_settlements`, `business_wallets` and
+  `ai_plan_allowance_usage`.
+- **LiteLLM** — upstream provider deployments, aliases, routing, retries, fallbacks and any
+  independently configured proxy-side limits. LiteLLM's MCP/prompt features are not wired into
+  the app's assistant runtime; the POS `/api/mcp` server is a separate external-client connector.
 
-Legacy note: earlier builds showed per-business usage on `/platform/ai` (requests, tokens, charged
-  Rial including allowance-used, wallet balance and remaining monthly
-  allowance). The routing/budget/duration/TPM/RPM controls are **gone**.
-- **`/platform/plans`** — the Plan Builder carries «اعتبار ماهانهٔ هوش مصنوعی
-  (تومان)» for new plans and a per-plan «سقف هوش مصنوعی این پلن» editor; the
-  plan chips badge `✦ N ت اعتبار AI`.
+Legacy note: earlier builds showed per-business usage on `/platform/ai` and local
+routing/budget/duration/TPM/RPM controls. Those console mirrors are retired; Plan/Billing owns
+product prices and allowances, while the active technical fleet remains at `/platform/ai`.
 
 ## Error vocabulary (user-facing)
 

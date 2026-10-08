@@ -148,9 +148,10 @@ describe("createDraft", () => {
     expect(rows[0].n).toBe(0);
 
     const listed = await manualJournal.listDrafts(biz.id);
-    expect(listed).toHaveLength(1);
-    expect(listed[0].memo).toBe("Rent");
-    expect(listed[0].lines).toHaveLength(2);
+    expect(listed.total).toBe(1);
+    expect(listed.drafts).toHaveLength(1);
+    expect(listed.drafts[0].memo).toBe("Rent");
+    expect(listed.drafts[0].lines).toHaveLength(2);
   });
 
   it("rejects an unbalanced draft", async () => {
@@ -328,7 +329,7 @@ describe("createDraft", () => {
       expected,
     );
     const listed = await manualJournal.listDrafts(biz.id);
-    expect(listed.find((d) => d.id === draft.id)?.lines.map((l) => l.debit)).toEqual(expected);
+    expect(listed.drafts.find((d) => d.id === draft.id)?.lines.map((l) => l.debit)).toEqual(expected);
 
     // …and the order has to survive the posting, not just the review screen.
     const { entryId } = await manualJournal.approveDraft({
@@ -379,7 +380,7 @@ describe("deleteDraft (reject)", () => {
       createdBy: user.id,
     });
     await manualJournal.deleteDraft(biz.id, draft.id);
-    expect(await manualJournal.listDrafts(biz.id)).toHaveLength(0);
+    expect((await manualJournal.listDrafts(biz.id)).drafts).toHaveLength(0);
   });
 
   it("404s deleting an already-gone draft", async () => {
@@ -407,7 +408,7 @@ describe("approveDraft", () => {
       actorId: user.id,
     });
 
-    expect(await manualJournal.listDrafts(biz.id)).toHaveLength(0);
+    expect((await manualJournal.listDrafts(biz.id)).drafts).toHaveLength(0);
 
     const { rows: entryRows } = await db.query(
       "SELECT source_type, memo, entry_date::text AS entry_date FROM journal_entries WHERE id = $1",
@@ -491,7 +492,7 @@ describe("approveDraft", () => {
       [biz.id],
     );
     expect(Number(entries[0].n)).toBe(1);
-    expect(await manualJournal.listDrafts(biz.id)).toHaveLength(0);
+    expect((await manualJournal.listDrafts(biz.id)).drafts).toHaveLength(0);
   });
 
   it("404s approving a draft that doesn't exist", async () => {
@@ -541,7 +542,7 @@ describe("approveDraft", () => {
     ).rejects.toThrow("fiscal_period_locked");
 
     // The rejected approval must not have consumed the draft.
-    expect(await manualJournal.listDrafts(biz.id)).toHaveLength(1);
+    expect((await manualJournal.listDrafts(biz.id)).drafts).toHaveLength(1);
   });
 });
 
@@ -616,6 +617,147 @@ describe("reverseEntry", () => {
       [reversalId],
     );
     expect(rows[0].location_id).toBe(loc.front);
+  });
+
+  /**
+   * Issue #821 — the hybrid/multi-branch convergence bug.
+   *
+   * The reversing journal was always written to the original document's
+   * branch, but the sync event carried `params.locationId`, which the route
+   * reads from the approver's *currently active* location. An accountant
+   * standing in Branch B reversing Branch A's journal therefore wrote the row
+   * to A and queued the event for B: the desktop at A never learned its own
+   * document had been reversed, and the one at B was handed an entry id it
+   * does not own.
+   *
+   * `appendSyncOutboxEvent` only records on the central server for a branch a
+   * desktop is actually paired to, so each of these registers an active site
+   * device first — that is also what makes "queued for the wrong branch"
+   * observable rather than invisible.
+   */
+  async function pairDevice(locationId: string, name: string): Promise<void> {
+    await db.query(
+      `INSERT INTO site_devices (business_id, location_id, display_name, status)
+       VALUES ($1, $2, $3, 'active')`,
+      [biz.id, locationId, name],
+    );
+  }
+
+  // Also issue #823 §8, which found the same defect from the sync side.
+  it("queues the reversal's sync event for the original document's branch, not the approver's", async () => {
+    await pairDevice(loc.front, "صندوق شعبهٔ جلو");
+    await pairDevice(loc.back, "صندوق شعبهٔ پشت");
+    const entryId = await approvedEntryId(loc.front);
+
+    const { entryId: reversalId } = await manualJournal.reverseEntry({
+      businessId: biz.id,
+      // The approver is active in Branch B; the document lives in Branch A.
+      locationId: loc.back,
+      entryId,
+      actorId: user.id,
+      sync: { actorRole: "owner" },
+    });
+
+    const { rows: events } = await db.query<{ location_id: string; payload: { entryId: string } }>(
+      `SELECT location_id, payload FROM sync_events
+        WHERE event_type = 'accounting.manual_journal.reversed'`,
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0].location_id).toBe(loc.front);
+    expect(events[0].location_id).not.toBe(loc.back);
+    expect(events[0].payload.entryId).toBe(entryId);
+
+    // And the journal row itself agrees, so event and effect cannot diverge.
+    const { rows } = await db.query<{ location_id: string | null }>(
+      "SELECT location_id FROM journal_entries WHERE id = $1",
+      [reversalId],
+    );
+    expect(rows[0].location_id).toBe(loc.front);
+  });
+
+  it("falls back to the approver's branch only for a document that has none of its own", async () => {
+    // A business-wide entry (or one from before branches existed) has no
+    // branch to route by, and `sync_events.location_id` is NOT NULL — a site's
+    // own writes reach the central server only through this queue, so dropping
+    // the event would lose the reversal rather than delay it. The envelope is
+    // the caller's branch; the effect is still derived from the original on
+    // the applying side.
+    await pairDevice(loc.back, "صندوق شعبهٔ پشت");
+    const entryId = await approvedEntryId(null);
+
+    await manualJournal.reverseEntry({
+      businessId: biz.id,
+      locationId: loc.back,
+      entryId,
+      actorId: user.id,
+      sync: { actorRole: "owner" },
+    });
+
+    const { rows } = await db.query<{ location_id: string }>(
+      `SELECT location_id FROM sync_events
+        WHERE event_type = 'accounting.manual_journal.reversed'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].location_id).toBe(loc.back);
+  });
+
+  it("queues nothing when neither the document nor the approver has a branch", async () => {
+    const entryId = await approvedEntryId(null);
+
+    await manualJournal.reverseEntry({
+      businessId: biz.id,
+      locationId: null,
+      entryId,
+      actorId: user.id,
+      sync: { actorRole: "owner" },
+    });
+
+    const { rows } = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM sync_events
+        WHERE event_type = 'accounting.manual_journal.reversed'`,
+    );
+    expect(rows[0].n).toBe(0);
+  });
+
+  it("replays a reversal onto the original's branch even if the event reaches it labelled with another", async () => {
+    // The receiving side of the bug above: `sync-domain-handlers.ts` hands the
+    // *event's* location to `reverseEntryInTransaction`, which is how a
+    // misrouted (or historical, wrongly-queued) event used to post a second
+    // branch's copy. Deriving the branch from the original document means both
+    // peers reach the same journal whatever the envelope says — that is what
+    // convergence means here. A replay also queues nothing back, or the two
+    // installs would trade the same reversal forever.
+    await pairDevice(loc.front, "صندوق شعبهٔ جلو");
+    await pairDevice(loc.back, "صندوق شعبهٔ پشت");
+    const entryId = await approvedEntryId(loc.front);
+
+    const client = await dbLib.getPool().connect();
+    let reversalId = "";
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.sync_replay', 'on', true)");
+      ({ entryId: reversalId } = await manualJournal.reverseEntryInTransaction(client, {
+        businessId: biz.id,
+        locationId: loc.back,
+        entryId,
+        actorId: user.id,
+      }));
+      await client.query("COMMIT");
+    } finally {
+      client.release();
+    }
+
+    const { rows } = await db.query<{ location_id: string | null }>(
+      "SELECT location_id FROM journal_entries WHERE id = $1",
+      [reversalId],
+    );
+    expect(rows[0].location_id).toBe(loc.front);
+
+    const { rows: events } = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM sync_events
+        WHERE event_type = 'accounting.manual_journal.reversed'`,
+    );
+    expect(events[0].n).toBe(0);
   });
 
   it("serializes concurrent reversals so one manual document receives one reversal", async () => {
@@ -750,5 +892,464 @@ describe("reverseEntry", () => {
         actorId: user.id,
       }),
     ).rejects.toThrow("cannot_reverse_a_reversal");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #823 — the workflow hardening pass over the draft → review → post
+// path. Each block here is one acceptance criterion from the issue that only a
+// real database can settle: what the *stored* date is, what survives a draft's
+// deletion, and which branch a sync event is tagged with.
+// ---------------------------------------------------------------------------
+
+/** A branch's own calendar date right now, computed in SQL the way the service does. */
+async function businessDateIn(timezone: string): Promise<string> {
+  const { rows } = await db.query<{ today: string }>(
+    `SELECT app_business_date(now(), $1, NULL)::text AS today`,
+    [timezone],
+  );
+  return rows[0].today;
+}
+
+/**
+ * A timezone whose calendar date differs from UTC's *right now*.
+ *
+ * The offsets are chosen so one of them always differs: Kiritimati (UTC+14)
+ * rolls over a day for any UTC hour from 10:00, and Midway (UTC−11) for any
+ * hour before 11:00. Between them every instant of the day is covered, so the
+ * test cannot pass by accident at 03:00 UTC and fail at 15:00.
+ */
+async function timezoneDifferingFromUtc(): Promise<string> {
+  const { rows } = await db.query<{ zone: string }>(
+    `SELECT z AS zone
+       FROM unnest(ARRAY['Pacific/Kiritimati','Pacific/Auckland','Asia/Tokyo',
+                        'America/Los_Angeles','Pacific/Honolulu','Pacific/Midway']) AS z
+      WHERE app_business_date(now(), z, NULL) <> app_business_date(now(), 'UTC', NULL)
+      LIMIT 1`,
+  );
+  return rows[0].zone;
+}
+
+async function setLocationTimezone(locationId: string, timezone: string): Promise<void> {
+  await db.query(`UPDATE locations SET timezone = $2 WHERE id = $1`, [locationId, timezone]);
+}
+
+describe("draft accounting date (issue #823 §2)", () => {
+  it("persists a concrete date when the form means «امروز», instead of NULL", async () => {
+    const draft = await manualJournal.createDraft({
+      businessId: biz.id,
+      locationId: loc.front,
+      // undefined/null is what the screen sends when the date field is left blank.
+      entryDate: null,
+      memo: "Rent",
+      lines: balancedLines(),
+      createdBy: user.id,
+    });
+
+    const { rows } = await db.query<{ entry_date: string | null }>(
+      `SELECT entry_date::text AS entry_date FROM journal_entry_drafts WHERE id = $1`,
+      [draft.id],
+    );
+    // NULL here is the whole defect: approval later handed NULL to
+    // postJournalEntry, which fell back to CURRENT_DATE — the *approval* day.
+    expect(rows[0].entry_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("resolves «امروز» in the branch's own timezone, never as a UTC date slice", async () => {
+    // The location's timezone versus the server's: a café closing after
+    // midnight in Tehran files today's takings under tomorrow's date if the
+    // date comes from UTC (which is what CURRENT_DATE gives the Docker image).
+    const zone = await timezoneDifferingFromUtc();
+    await setLocationTimezone(loc.front, zone);
+
+    const draft = await manualJournal.createDraft({
+      businessId: biz.id,
+      locationId: loc.front,
+      entryDate: null,
+      memo: "Late shift",
+      lines: balancedLines(),
+      createdBy: user.id,
+    });
+
+    const { rows } = await db.query<{ entry_date: string }>(
+      `SELECT entry_date::text AS entry_date FROM journal_entry_drafts WHERE id = $1`,
+      [draft.id],
+    );
+    const [expected, utcDate] = await Promise.all([businessDateIn(zone), businessDateIn("UTC")]);
+    expect(rows[0].entry_date).toBe(expected);
+    // The assertion that actually pins the bug: it is not the UTC day.
+    expect(rows[0].entry_date).not.toBe(utcDate);
+  });
+
+  it("posts on the draft's own date when approval happens on a later day", async () => {
+    // Approved "tomorrow" by moving the draft's clock back: entry_date is
+    // frozen at creation, so approving cannot re-derive it from now().
+    const zone = await timezoneDifferingFromUtc();
+    await setLocationTimezone(loc.front, zone);
+    const draft = await manualJournal.createDraft({
+      businessId: biz.id,
+      locationId: loc.front,
+      entryDate: null,
+      memo: "Rent",
+      lines: balancedLines(),
+      createdBy: user.id,
+    });
+    const { rows: draftRows } = await db.query<{ entry_date: string }>(
+      `SELECT entry_date::text AS entry_date FROM journal_entry_drafts WHERE id = $1`,
+      [draft.id],
+    );
+    await db.query(
+      `UPDATE journal_entry_drafts SET created_at = created_at - interval '3 days' WHERE id = $1`,
+      [draft.id],
+    );
+
+    const { entryId } = await manualJournal.approveDraft({
+      businessId: biz.id,
+      locationId: null,
+      draftId: draft.id,
+      actorId: user.id,
+    });
+    const { rows } = await db.query<{ entry_date: string }>(
+      `SELECT entry_date::text AS entry_date FROM journal_entries WHERE id = $1`,
+      [entryId],
+    );
+    // …and not the day it was approved, which is three days later.
+    expect(rows[0].entry_date).toBe(draftRows[0].entry_date);
+    expect(rows[0].entry_date).not.toBe(await businessDateIn("UTC"));
+  });
+
+  it("resolves a legacy NULL date at approval rather than posting it as CURRENT_DATE", async () => {
+    // A draft written before the fix: entry_date NULL. The service must not
+    // hand that NULL to postJournalEntry.
+    const draft = await manualJournal.createDraft({
+      businessId: biz.id,
+      locationId: loc.front,
+      entryDate: "2025-04-15",
+      memo: "Legacy",
+      lines: balancedLines(),
+      createdBy: user.id,
+    });
+    await db.query(`UPDATE journal_entry_drafts SET entry_date = NULL WHERE id = $1`, [draft.id]);
+
+    const { entryId } = await manualJournal.approveDraft({
+      businessId: biz.id,
+      locationId: null,
+      draftId: draft.id,
+      actorId: user.id,
+    });
+    const { rows } = await db.query<{ entry_date: string | null }>(
+      `SELECT entry_date::text AS entry_date FROM journal_entries WHERE id = $1`,
+      [entryId],
+    );
+    expect(rows[0].entry_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+});
+
+describe("malformed ids (issue #823 §13)", () => {
+  it("answers every draft operation with draft_not_found rather than a PostgreSQL uuid error", async () => {
+    // `WHERE id = $2` against a `uuid` column raises
+    // `invalid input syntax for type uuid` instead of returning no row, which
+    // reaches the browser as a 500 under «خطای غیرمنتظره».
+    for (const bad of ["not-a-uuid", "", "1859e1a0-bad0-4d0a-9d0a-00000000000", "null"]) {
+      await expect(manualJournal.deleteDraft(biz.id, bad)).rejects.toThrow("draft_not_found");
+      await expect(
+        manualJournal.rejectDraft({ businessId: biz.id, draftId: bad, actorId: user.id }),
+      ).rejects.toThrow("draft_not_found");
+      await expect(
+        manualJournal.approveDraft({
+          businessId: biz.id,
+          locationId: null,
+          draftId: bad,
+          actorId: user.id,
+        }),
+      ).rejects.toThrow("draft_not_found");
+      expect(await manualJournal.getDraft(biz.id, bad)).toBeNull();
+    }
+  });
+
+  it("refuses a malformed account id before it reaches the uuid cast", async () => {
+    await expect(
+      manualJournal.createDraft({
+        businessId: biz.id,
+        locationId: null,
+        entryDate: "2025-04-15",
+        memo: "Bad account id",
+        lines: [
+          { accountId: "unknown", debit: 10_000, credit: 0 },
+          { accountId: acct.cash, debit: 0, credit: 10_000 },
+        ],
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("unknown_account");
+  });
+});
+
+describe("account postability (issue #823 §9)", () => {
+  it("refuses a parent whose only child is archived, the way the picker now hides it", async () => {
+    // The picker used to derive "leaf" from the *active* accounts only, so a
+    // parent whose only child had been archived looked postable on screen and
+    // was refused here — by the reviewer, at approval time. The server's
+    // answer now travels to the client; this is the invariant it asserts.
+    const parent = await db.query<{ id: string }>(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, '5200', 'Expenses heading', 'expense') RETURNING id`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO accounts (business_id, code, name, type, parent_id, is_active)
+       VALUES ($1, '5201', 'Archived child', 'expense', $2, false)`,
+      [biz.id, parent.rows[0].id],
+    );
+
+    await expect(
+      manualJournal.createDraft({
+        businessId: biz.id,
+        locationId: null,
+        entryDate: "2025-04-15",
+        memo: "Wrong account",
+        lines: [
+          { accountId: parent.rows[0].id, debit: 10_000, credit: 0 },
+          { accountId: acct.cash, debit: 0, credit: 10_000 },
+        ],
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("not_a_leaf_account");
+  });
+});
+
+describe("draft idempotency (issue #823 §16)", () => {
+  it("creates one draft for a retried request with the same key", async () => {
+    const params = {
+      businessId: biz.id,
+      locationId: null,
+      entryDate: "2025-04-15",
+      memo: "Rent",
+      lines: balancedLines(),
+      createdBy: user.id,
+      idempotencyKey: "retry-after-timeout",
+    } as const;
+    const first = await manualJournal.createDraft(params);
+    const second = await manualJournal.createDraft(params);
+
+    expect(second.id).toBe(first.id);
+    expect(first.duplicate).toBe(false);
+    expect(second.duplicate).toBe(true);
+    expect((await manualJournal.listDrafts(biz.id)).total).toBe(1);
+  });
+
+  it("treats a different key — and no key at all — as a separate document", async () => {
+    const base = {
+      businessId: biz.id,
+      locationId: null,
+      entryDate: "2025-04-15",
+      memo: "Rent",
+      lines: balancedLines(),
+      createdBy: user.id,
+    } as const;
+    await manualJournal.createDraft({ ...base, idempotencyKey: "key-a" });
+    await manualJournal.createDraft({ ...base, idempotencyKey: "key-b" });
+    await manualJournal.createDraft(base);
+    await manualJournal.createDraft(base);
+
+    expect((await manualJournal.listDrafts(biz.id)).total).toBe(4);
+  });
+});
+
+describe("workflow history (issue #823 §3)", () => {
+  it("keeps the proposer and the approver on the posted entry", async () => {
+    const proposer = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, pin_hash)
+       VALUES ($1, 'manager', 'Proposer', 'x') RETURNING id`,
+      [biz.id],
+    );
+    const approver = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, pin_hash)
+       VALUES ($1, 'accountant', 'Approver', 'x') RETURNING id`,
+      [biz.id],
+    );
+    const draft = await manualJournal.createDraft({
+      businessId: biz.id,
+      locationId: null,
+      entryDate: "2025-04-15",
+      memo: "Rent",
+      lines: balancedLines(),
+      createdBy: proposer.rows[0].id,
+    });
+    const { entryId } = await manualJournal.approveDraft({
+      businessId: biz.id,
+      locationId: null,
+      draftId: draft.id,
+      actorId: approver.rows[0].id,
+    });
+
+    const { rows } = await db.query<{
+      created_by: string;
+      proposed_by: string;
+      proposed_at: string | null;
+      approved_by: string;
+      approved_at: string | null;
+      draft_id: string | null;
+    }>(
+      `SELECT created_by, proposed_by, proposed_at::text AS proposed_at,
+              approved_by, approved_at::text AS approved_at, draft_id
+         FROM journal_entries WHERE id = $1`,
+      [entryId],
+    );
+    // The draft row is deleted by the approval, so without these the only name
+    // left on the entry is the approver's.
+    expect(rows[0].proposed_by).toBe(proposer.rows[0].id);
+    expect(rows[0].approved_by).toBe(approver.rows[0].id);
+    // `created_by` keeps its long-standing meaning: whose action wrote the row.
+    expect(rows[0].created_by).toBe(approver.rows[0].id);
+    expect(rows[0].proposed_at).toBeTruthy();
+    expect(rows[0].approved_at).toBeTruthy();
+    expect(rows[0].draft_id).toBe(draft.id);
+  });
+
+  it("keeps the rejector, the time and the reason after the draft is gone", async () => {
+    const reviewer = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, pin_hash)
+       VALUES ($1, 'accountant', 'Reviewer', 'x') RETURNING id`,
+      [biz.id],
+    );
+    const draft = await manualJournal.createDraft({
+      businessId: biz.id,
+      locationId: loc.front,
+      entryDate: "2025-04-15",
+      memo: "Rent",
+      lines: balancedLines(),
+      createdBy: user.id,
+    });
+
+    await manualJournal.rejectDraft({
+      businessId: biz.id,
+      draftId: draft.id,
+      actorId: reviewer.rows[0].id,
+      reason: "مبلغ با فاکتور مطابقت ندارد",
+      requireReason: true,
+    });
+
+    expect((await manualJournal.listDrafts(biz.id)).total).toBe(0);
+    // The history table has no foreign key to the drafts table on purpose: the
+    // draft row is deleted by the very rejection being recorded.
+    const { rows } = await db.query<{
+      draft_id: string;
+      memo: string;
+      entry_date: string | null;
+      proposed_by: string;
+      rejected_by: string;
+      rejected_at: string | null;
+      rejection_reason: string | null;
+    }>(
+      `SELECT draft_id, memo, entry_date::text AS entry_date, proposed_by,
+              rejected_by, rejected_at::text AS rejected_at, rejection_reason
+         FROM journal_entry_draft_rejections WHERE business_id = $1`,
+      [biz.id],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      draft_id: draft.id,
+      memo: "Rent",
+      entry_date: "2025-04-15",
+      proposed_by: user.id,
+      rejected_by: reviewer.rows[0].id,
+      rejection_reason: "مبلغ با فاکتور مطابقت ندارد",
+    });
+    expect(rows[0].rejected_at).toBeTruthy();
+  });
+
+  it("refuses a rejection with no reason, so it cannot be a bare deletion", async () => {
+    const draft = await manualJournal.createDraft({
+      businessId: biz.id,
+      locationId: null,
+      entryDate: "2025-04-15",
+      memo: "Rent",
+      lines: balancedLines(),
+      createdBy: user.id,
+    });
+    await expect(
+      manualJournal.rejectDraft({
+        businessId: biz.id,
+        draftId: draft.id,
+        actorId: user.id,
+        reason: "   ",
+        requireReason: true,
+      }),
+    ).rejects.toThrow("rejection_reason_required");
+    // …and nothing was deleted, so a refused rejection is not a lost draft.
+    expect((await manualJournal.listDrafts(biz.id)).total).toBe(1);
+  });
+
+  it("lets a drafter withdraw their own draft without saying why", async () => {
+    const draft = await manualJournal.createDraft({
+      businessId: biz.id,
+      locationId: null,
+      entryDate: "2025-04-15",
+      memo: "Typo",
+      lines: balancedLines(),
+      createdBy: user.id,
+    });
+    const result = await manualJournal.rejectDraft({
+      businessId: biz.id,
+      draftId: draft.id,
+      actorId: user.id,
+    });
+    expect(result.reason).toBeNull();
+    expect((await manualJournal.listDrafts(biz.id)).total).toBe(0);
+  });
+
+  it("404s a rejection of a draft that does not exist", async () => {
+    await expect(
+      manualJournal.rejectDraft({
+        businessId: biz.id,
+        draftId: randomUUID(),
+        actorId: user.id,
+        reason: "nope",
+      }),
+    ).rejects.toThrow("draft_not_found");
+  });
+});
+
+describe("draft listing (issue #823 §17, §6, §13)", () => {
+  it("returns a bounded page, the real total, and the posting branch", async () => {
+    for (const memo of ["a", "b", "c"]) {
+      await manualJournal.createDraft({
+        businessId: biz.id,
+        locationId: loc.back,
+        entryDate: "2025-04-15",
+        memo,
+        lines: balancedLines(),
+        createdBy: user.id,
+      });
+    }
+
+    const first = await manualJournal.listDrafts(biz.id, { limit: 2 });
+    expect(first.drafts).toHaveLength(2);
+    expect(first.total).toBe(3);
+    expect(first.hasMore).toBe(true);
+    // The branch is business-wide context a reviewer cannot see anywhere else:
+    // approval posts to the draft's own location, not the reviewer's.
+    expect(first.drafts[0].locationName).toBe("Back branch");
+    expect(first.drafts[0].proposedBy).toBe(user.id);
+    expect(first.drafts[0].proposedAt).toBeTruthy();
+
+    const second = await manualJournal.listDrafts(biz.id, { limit: 2, offset: 2 });
+    expect(second.drafts).toHaveLength(1);
+    expect(second.hasMore).toBe(false);
+    // Stable across pages: no row appears twice or goes missing.
+    const seen = new Set([...first.drafts, ...second.drafts].map((d) => d.id));
+    expect(seen.size).toBe(3);
+  });
+
+  it("caps an oversized limit rather than loading the whole queue", async () => {
+    const page = await manualJournal.listDrafts(biz.id, { limit: 10_000 });
+    expect(page.limit).toBe(manualJournal.MANUAL_DRAFTS_PAGE_SIZE);
+  });
+
+  it("answers a malformed draft id with null, not a PostgreSQL uuid error", async () => {
+    // `WHERE id = $2` against a uuid column raises `invalid input syntax for
+    // type uuid` for a non-uuid, which reaches the browser as a 500.
+    expect(await manualJournal.getDraft(biz.id, "not-a-uuid")).toBeNull();
+    expect(await manualJournal.getDraft(biz.id, "")).toBeNull();
   });
 });

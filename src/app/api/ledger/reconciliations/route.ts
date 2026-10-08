@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import { todayIsoDate } from "@/lib/jalali";
+import { parseCreateReconciliationRequest } from "@/lib/bank-reconciliation";
 import {
   createReconciliation,
   ReconciliationError,
@@ -10,9 +12,9 @@ import {
 } from "@/lib/reconciliation-service";
 
 /**
- * The reconcilable set lives in the service (`RECONCILABLE_ACCOUNTS`) so the
- * route cannot fall behind it — the local copy here was still two entries long
- * after بانک became a posted-to account.
+ * The reconcilable set lives in `bank-reconciliation.ts` (and is re-exported by
+ * the service) so the route cannot fall behind it — the local copy here was
+ * still two entries long after بانک became a posted-to account.
  */
 const ACCOUNT_CODES: readonly ReconcilableAccount[] = RECONCILABLE_ACCOUNTS;
 
@@ -38,41 +40,38 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   }
 });
 
-interface CreateBody {
-  accountCode?: string;
-  statementDate?: string;
-  statementBalance?: number;
-}
-
-/** Starts a new reconciliation for an account. Only one may be in progress per account at a time. */
+/**
+ * Starts a new reconciliation for an account. Only one may be in progress per
+ * account at a time.
+ *
+ * The body is parsed by `parseCreateReconciliationRequest`, which is where the
+ * wire contract lives: `body.statementDate?.trim()` used to answer a numeric
+ * `statementDate` with a 500, and `Number(body.statementBalance)` turned
+ * `null` into a statement balance of 0 — a legal value no later check would
+ * question. Both are 400s now, with the reason named.
+ */
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.financeReconciliationManage);
   if (error) return error;
 
-  let body: CreateBody;
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
-  if (!ACCOUNT_CODES.includes(body.accountCode as ReconcilableAccount)) {
-    return NextResponse.json({ error: "invalid_account" }, { status: 400 });
-  }
-  if (!body.statementDate?.trim()) {
-    return NextResponse.json({ error: "statement_date_required" }, { status: 400 });
-  }
-  const statementBalance = Number(body.statementBalance);
-  if (!Number.isSafeInteger(statementBalance)) {
-    return NextResponse.json({ error: "invalid_amount" }, { status: 400 });
-  }
+  // Tehran's day, not UTC's: between midnight and 03:30 local the two disagree,
+  // and a statement dated *today* is the most likely date there is.
+  const parsed = parseCreateReconciliationRequest(body, { todayIso: todayIsoDate() });
+  if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
 
   try {
     const reconciliation = await createReconciliation({
       businessId: session.businessId,
-      accountCode: body.accountCode as ReconcilableAccount,
-      statementDate: body.statementDate.trim(),
-      statementBalance,
+      accountCode: parsed.value.accountCode,
+      statementDate: parsed.value.statementDate,
+      statementBalance: parsed.value.statementBalance,
       createdBy: session.sub,
     });
     return NextResponse.json({ reconciliation }, { status: 201 });
