@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   availableActions,
+  canonicalBankName,
+  canonicalSerialNumber,
   bucketChequesByDueDate,
   CHEQUE_ACTIONS,
   CHEQUE_DIRECTIONS,
@@ -61,6 +63,37 @@ describe("nextStatus — payable", () => {
     expect(nextStatus("payable", "issued", "deposit")).toBeNull();
     expect(nextStatus("payable", "issued", "endorse")).toBeNull();
     expect(nextStatus("payable", "issued", "clear")).toBeNull();
+  });
+});
+
+describe("canonical instrument identity", () => {
+  it("reads one cheque's serial the same however it was typed", () => {
+    const canonical = canonicalSerialNumber("123456");
+    for (const typed of ["۱۲۳۴۵۶", "١٢٣٤٥٦", " 123-456 ", "123/456", "123 456"]) {
+      expect(canonicalSerialNumber(typed)).toBe(canonical);
+    }
+  });
+
+  it("keeps genuinely different serials apart", () => {
+    expect(canonicalSerialNumber("123456")).not.toBe(canonicalSerialNumber("123457"));
+    expect(canonicalSerialNumber("A-123")).not.toBe(canonicalSerialNumber("B-123"));
+  });
+
+  it("treats «بانک ملت» and «ملت» as one bank", () => {
+    const mellat = canonicalBankName("ملت");
+    expect(canonicalBankName("بانک ملت")).toBe(mellat);
+    expect(canonicalBankName("  ملت ")).toBe(mellat);
+    expect(canonicalBankName("بانک  ملت")).toBe(mellat);
+  });
+
+  it("does not collapse two different banks, and keeps «بانک» inside a name", () => {
+    expect(canonicalBankName("ملی")).not.toBe(canonicalBankName("ملت"));
+    expect(canonicalBankName("بانک خاورمیانه")).toBe(canonicalBankName("خاورمیانه"));
+  });
+
+  it("folds the Arabic ي/ك a Persian keyboard produces by accident", () => {
+    expect(canonicalBankName("ملي")).toBe(canonicalBankName("ملی"));
+    expect(canonicalBankName("بانك ملت")).toBe(canonicalBankName("بانک ملت"));
   });
 });
 

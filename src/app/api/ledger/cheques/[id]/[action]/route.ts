@@ -5,12 +5,14 @@ import { transitionCheque } from "@/lib/cheques-service";
 import { CHEQUE_ACTIONS, type ChequeAction } from "@/lib/cheques";
 import { chequeErrorResponse } from "../../errors";
 import { MalformedBodyError, readJsonObjectBody } from "../../body";
+import { idempotencyKeyOf } from "../../idempotency";
 
 interface ActionBody {
   occurredOn?: string;
   endorsedToSupplierId?: string;
   feeAmount?: number;
   memo?: string;
+  idempotencyKey?: string;
 }
 
 /**
@@ -49,6 +51,7 @@ export const POST = withTenantScope(
         businessId: session.businessId,
         chequeId: id,
         action: action as ChequeAction,
+        idempotencyKey: idempotencyKeyOf(request, body.idempotencyKey),
         occurredOn: body.occurredOn ?? null,
         endorsedToSupplierId: body.endorsedToSupplierId ?? null,
         feeAmount: body.feeAmount ?? null,

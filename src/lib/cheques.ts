@@ -122,6 +122,49 @@ export function normalizeSayadId(raw: string): string | null {
   return /^[0-9]{16}$/.test(digits) ? digits : null;
 }
 
+/**
+ * Fold the Persian/Arabic-Indic digits and the two Arabic letters a Persian
+ * keyboard produces by accident («ي»، «ك») onto their canonical forms, then
+ * drop every separator and zero-width mark. What is left is the form two
+ * spellings of the same thing share.
+ */
+function foldForComparison(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/\u064a/g, "\u06cc")
+    .replace(/\u0643/g, "\u06a9")
+    .replace(/[\s\u200b-\u200f._/\\-]+/g, "");
+}
+
+/**
+ * The comparable form of a cheque's serial number.
+ *
+ * A counter types «۱۲۳-۴۵۶» today and "123456" tomorrow off the same cheque,
+ * and the register used to hold both: one instrument, two rows, two postings.
+ * Identity is the canonical pair (bank, serial) — the typed text is still what
+ * is printed on the paper and still what the register shows.
+ */
+export function canonicalSerialNumber(raw: string): string {
+  return foldForComparison(raw);
+}
+
+/**
+ * The comparable form of a bank's name: «بانک ملت»، «ملت » and «ملت» are one
+ * bank. Only the leading word «بانک» is dropped — it is a noun, not a name,
+ * and no Iranian bank is distinguished from another by it.
+ */
+export function canonicalBankName(raw: string): string {
+  // Fold first: «بانك ملت» (Arabic kaf, off a Persian keyboard) has to lose
+  // its prefix exactly as «بانک ملت» does, and folding is what makes the two
+  // the same word. The prefix is only dropped when something is left.
+  const folded = foldForComparison(raw);
+  const withoutPrefix = folded.replace(/^بانک/u, "");
+  return withoutPrefix || folded;
+}
+
 export interface ChequeDueItem {
   id: string;
   dueDate: string;

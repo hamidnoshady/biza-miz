@@ -6,6 +6,7 @@ import { listCheques, recordCheque } from "@/lib/cheques-service";
 import { CHEQUE_DIRECTIONS, type ChequeDirection } from "@/lib/cheques";
 import { chequeErrorResponse } from "./errors";
 import { MalformedBodyError, readJsonObjectBody } from "./body";
+import { idempotencyKeyOf } from "./idempotency";
 
 /** The cheque register. Same access as the rest of the ledger's subledgers. */
 export const GET = withTenantScope(async (request: NextRequest) => {
@@ -17,18 +18,30 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (raw && !CHEQUE_DIRECTIONS.includes(raw as ChequeDirection)) {
     return NextResponse.json({ error: "invalid_direction" }, { status: 400 });
   }
-  // A multi-branch register has to be able to ask "which cheques are this
-  // branch's?" — the answer is the cheque's own location, the same one every
-  // entry of its life posts to.
-  const locationId = search.get("locationId");
+
+  const limit = Number(search.get("limit") ?? 50);
+  const offset = Number(search.get("offset") ?? 0);
+  if (!Number.isFinite(limit) || !Number.isFinite(offset) || limit < 1 || offset < 0) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
 
   try {
-    const cheques = await listCheques(
-      session.businessId,
-      (raw as ChequeDirection) || undefined,
-      locationId || undefined,
-    );
-    return NextResponse.json({ cheques });
+    // Searching, filtering, sorting, paging and the summary totals all happen
+    // in Postgres: a large tenant's register is not a download.
+    const page = await listCheques(session.businessId, {
+      direction: (raw as ChequeDirection) || undefined,
+      // A multi-branch register has to be able to ask "which cheques are this
+      // branch's?" — the answer is the cheque's own location, the same one
+      // every entry of its life posts to.
+      locationId: search.get("locationId"),
+      status: search.get("status"),
+      bankName: search.get("bank"),
+      q: search.get("q"),
+      sort: search.get("sort"),
+      limit,
+      offset,
+    });
+    return NextResponse.json(page);
   } catch (err) {
     return chequeErrorResponse(err);
   }
@@ -47,6 +60,11 @@ interface ChequeBody {
   customerId?: string;
   supplierId?: string;
   memo?: string;
+  /** Opt-in to the unattributed-capture exception (issue #828 (10)). */
+  allowUnattributed?: boolean;
+  /** The returned cheque this one replaces. */
+  replacesChequeId?: string;
+  idempotencyKey?: string;
 }
 
 function isChequeBody(value: unknown): value is ChequeBody {
@@ -102,6 +120,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       customerId: body.customerId ?? null,
       supplierId: body.supplierId ?? null,
       memo: body.memo ?? null,
+      allowUnattributed: body.allowUnattributed === true,
+      replacesChequeId: body.replacesChequeId ?? null,
+      idempotencyKey: idempotencyKeyOf(request, body.idempotencyKey),
       createdBy: session.sub,
     });
     return NextResponse.json({ cheque }, { status: 201 });

@@ -152,6 +152,15 @@ happened to this cheque" unanswerable from the event log.
 > after which a replacement cheque is registered normally and the two entries net out). An
 > optional returned-cheque charge posts to «۵۸۶۰ هزینه چک برگشتی و جرایم بانکی» on the bounce
 > itself.
+>
+> The same issue settled four more things about the register (migration 0217):
+> **identity** — the uniqueness rule compares canonical forms (Latin digits, no separators, no
+> «بانک » prefix), so «۱۲۳-۴۵۶» at «بانک ملت» and "123456" at «ملت» are one instrument;
+> **retry safety** — `cheques.idempotency_key` and `cheque_events.idempotency_key` make a
+> replayed registration or lifecycle step return the first result instead of posting twice;
+> **attribution** — an ordinary registration must name a customer/supplier, and capturing an
+> unattributed cheque is an explicit, visibly exceptional choice; **replacement** —
+> `replaces_cheque_id` records which cheque replaced which, so the history drills through.
 
 ## Where the exit criteria are satisfied
 
