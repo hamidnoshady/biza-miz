@@ -1,4 +1,9 @@
-# Issue #812 — the AI subsystem, after the rebuild
+# AI subsystem architecture — current ownership
+
+> Current map after the LiteLLM-only consolidation and issue #757 hardening. Older phase/audit
+> documents may describe direct vendors, gateway policy mirrors, or single-page consoles that are
+> no longer current. In particular, see [Phase 39](phases/Phase-39-LiteLLM-Only-AI-Platform.md)
+> for fleet readiness and the guarded secret-column rollout.
 
 Read this before touching anything under `src/lib/ai-*`, `src/app/api/ai/**` or
 `src/app/platform/ai/**`. It is the map of who owns what, and almost every bug
@@ -15,18 +20,23 @@ human's yes before it writes. Every turn is settled once, with attribution.
 
 ## Ownership — the boundary that decides everything else
 
-| The LiteLLM/AI-infrastructure layer owns | The application owns |
+| The LiteLLM / upstream AI-infrastructure layer owns | The application owns |
 | --- | --- |
-| Model and provider deployments | Tenant / business identity and isolation metadata |
-| Routing, fallbacks, retries | App / project / business context |
-| Budgets, TPS/RPS, rate limits | User authorization |
-| The shared semantic cache | Business tools and action execution |
-| Embeddings and RAG infrastructure | Prompt and agent config, **exposed from Superadmin** |
-| Model aliases (`pos-auto`, `pos-instant`, `pos-deep-research`) | Tenant memory as a product feature |
-| Provider cost reporting | Deep Research orchestration |
-| Virtual tenant keys | Usage and audit attribution |
-| | Business billing and credit settlement |
+| Upstream model/provider deployments and the proxy's alias catalogue | Tenant/business identity and isolation |
+| Routing, fallbacks, retries, provider-side limits and optional proxy budgets | App/project/business context and user authorization |
+| Provider response-cost reporting | Business tools, permission checks and action execution |
+| Issuing virtual keys | Runtime-mode → alias mapping in `platform_ai_modes` |
+| | Versioned prompts, system agents and their assignments (Superadmin) |
+| | Tenant memory and Deep Research orchestration/limits |
+| | Usage/audit attribution, Rial billing and settlement |
 | | Human confirmation for manual writes |
+
+The proxy defines model aliases (for example `pos-chat` and `pos-embed`); the app stores its
+default chat/embedding alias and runtime-mode mappings but does not duplicate provider routing
+policy. The app's optional managed-knowledge retrieval calls a separately configured external
+knowledge endpoint using server-resolved tenant scope. The local pgvector/index/cache stack is
+retired; do not assume that LiteLLM's proxy MCP or prompt features are part of the application
+request path. The POS `/api/mcp` connector is an independent external-client surface.
 
 Two consequences worth stating plainly, because they are the reason the issue
 exists:
@@ -41,6 +51,17 @@ exists:
    the live source of truth. The old fragment engine (`ai-prompts.ts`,
    `PROMPT_FRAGMENTS`, `assembleFromFragments`) is deleted. Two prompt builders
    is a prompt you cannot predict.
+
+## Platform console routes
+
+The control plane is split by responsibility: `/platform/ai` owns gateway connection/fleet and
+business/branch key lifecycle; `/platform/ai/modes` owns mode aliases; `/platform/ai/prompts`
+owns versioned prompts; `/platform/ai/agents` owns system agents/assignments;
+`/platform/ai/research` owns research limits; and `/platform/ai/widgets` owns suggested widgets.
+`/platform/ai/prompts` is an active linked route and must not be redirected. The old
+`/platform/ai/gateway` page bookmark redirects to `/platform/ai`; the separate
+`/api/platform/ai/gateway` API remains active. Tenant provider settings at `/dashboard/ai/settings`
+and `/ai/settings` redirect to the dashboard.
 
 ## Runtime modes — three, and only three
 
@@ -162,17 +183,23 @@ approver's own effective set — the same helper chat uses. It also takes
 `ai.use` explicitly, because `getSession()` only proves the caller belongs to
 the business.
 
-## Knowledge — tenant-isolated, and infrastructure-owned
+## Managed knowledge retrieval — external endpoint, no local vector store
 
-`src/lib/ai-knowledge-gateway.ts` reaches the managed, tenant-isolated
-knowledge integration through the configured LiteLLM layer. The tenant is
-stated **twice on every request** — as a path segment and in the metadata — so a
-gateway reading either one alone still lands in the right namespace. A network
-failure or a 5xx degrades to **empty**, never to a partial or cached answer: a
-stale retrieval is a confidently wrong answer.
+`src/lib/ai-knowledge-gateway.ts` optionally calls the separately configured managed-knowledge
+endpoint; it is not the LiteLLM chat-proxy MCP feature. The endpoint URL, credential, optional
+embedding model/alias and result limit are stored with the platform gateway settings. The app
+owns the tenant-qualified client and prompt formatting, but does not chunk, embed, index or keep a
+local pgvector/RAG database (migration 0204 removed that local stack).
 
-There is no tenant knowledge/reindex surface. Knowledge is infrastructure, not
-something a tenant feeds.
+The tenant id is resolved server-side and stated **twice on every request** — as the path segment
+and in request metadata — so a correctly configured external service can partition by tenant. The
+optional branch/app/project/source fields narrow the search; they cannot replace the tenant id. A
+network failure, timeout, malformed response or 5xx degrades to an empty retrieval rather than a
+failed answer or stale local fallback. Proxy model aliases/routing, app prompt versions, and the
+separate POS MCP connector are independent concerns.
+
+There is no tenant knowledge/reindex surface. Knowledge ingestion/indexing belongs to the
+external service/operator; the app only consumes tenant-scoped results.
 
 ## Settlement — once, with attribution
 

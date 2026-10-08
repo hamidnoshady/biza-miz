@@ -6,6 +6,7 @@ import { getBusinessIndustry, requireModuleForPage } from "@/lib/industry-guard"
 import { industryProfile } from "@/lib/industry-profile";
 import { PosScreen } from "@/app/dashboard/pos/pos-screen";
 import { RetailInvoiceScreen } from "@/app/dashboard/pos/retail-invoice-screen";
+import { getBusinessVatPercent } from "@/lib/vat-policy-service";
 
 /**
  * The one public selling screen. Both hospitality and retail businesses enter
@@ -31,7 +32,15 @@ export default async function PosPage({
     // closed-order amendment — same permission, see retail-invoice-void-
     // service.ts and its API route's own doc comment.
     const canVoidInvoice = permissions.has(PERMISSIONS.ordersAmendClosed);
-    return <RetailInvoiceScreen industry={industry} canVoidInvoice={canVoidInvoice} />;
+    // A fresh line proposes this business's own VAT rate (audit F05).
+    const defaultVatPercent = await getBusinessVatPercent(session.businessId);
+    return (
+      <RetailInvoiceScreen
+        industry={industry}
+        canVoidInvoice={canVoidInvoice}
+        defaultVatPercent={defaultVatPercent}
+      />
+    );
   }
   const { table } = await searchParams;
   return <PosScreen initialTableId={table ?? null} />;

@@ -1,5 +1,13 @@
-# Phase 36 — the app ecosystem («برنامه‌ها»)
+# Phase 36 — the app ecosystem («برنامه‌ها») (historical implementation notes)
 
+> **Current-state correction:** Waves 6 and 7 below record the earlier local pgvector RAG and
+> semantic-answer-cache implementation. That local vector/cache stack was later retired by
+> migration 0204; do not treat this phase as current AI infrastructure guidance. The app may use a
+> separately configured external managed-knowledge endpoint, but no local vector index/cache is
+> maintained. Prompt fragments were superseded by the versioned Superadmin prompt console at
+> `/platform/ai/prompts`. See [current AI architecture](../ai-subsystem-architecture.md) and
+> [Phase 39](Phase-39-LiteLLM-Only-AI-Platform.md).
+>
 > Filed as 36 because 35 is taken by notifications. The GitHub issues for this
 > work (#358 and its waves #359–#366) call it "Phase 35"; they were written
 > before the notifications phase landed under that number. The waves and their

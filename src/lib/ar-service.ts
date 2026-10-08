@@ -25,10 +25,10 @@ import { businessToday } from "./business-day-service";
 import { isUuid } from "./uuid";
 import { PARTY_ROLE_STORAGE } from "./parties";
 import { WELL_KNOWN_CODES } from "./coa-template";
+import { isValidIsoDate } from "./iso-date";
 import { accountIdsByCode, MissingLedgerAccountError, postExactMirrorEntry, postJournalEntry } from "./ledger-service";
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_CUSTOMER_KEY, type AgingSummary } from "./aging";
 import { toPersianDigits } from "./digits";
-import { isValidIsoDate } from "./iso-date";
 import { isSettlementMethod, type SettlementMethod } from "./voucher-shared";
 import { resolveSettlementAccount, SettlementAccountError } from "./settlement-accounts";
 import {
@@ -422,7 +422,7 @@ export interface ArReceipt {
   method: SettlementMethod;
   amount: number;
   memo: string | null;
-  /** The explicit settlement account the voucher posted against (migration 0211). */
+  /** The explicit settlement account the voucher posted against (migration 0212). */
   settlementAccountId: string | null;
   /** Client idempotency key, when the submission carried one. */
   idempotencyKey: string | null;

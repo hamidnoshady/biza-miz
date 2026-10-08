@@ -189,10 +189,20 @@ describe("smart queues", () => {
     }
     // Due today is a different queue: an activity whose due date is today must
     // not appear in «عقب‌افتاده», or the two headings say the same thing.
-    const today = new Date();
+    // "Today" here is the BUSINESS zone's calendar day — the one the queues
+    // bucket by — so the instant is built in that zone too. A runner-local
+    // 23:00 is a different calendar day in the branch zone for part of every
+    // UTC day (Tehran is already tomorrow from 20:30Z), which made this suite
+    // fail whenever it ran inside that window.
+    const businessDay = await day.businessToday(biz.id);
+    const businessZone = await day.businessTimeZone(biz.id);
+    const dueTodayInstant = await db.query<{ ts: string }>(
+      "SELECT ($1::date + time '23:00') AT TIME ZONE $2 AS ts",
+      [businessDay, businessZone],
+    );
     await makeActivity(biz.id, {
       subject: "تماس امروز",
-      dueAt: new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 0, 0).toISOString(),
+      dueAt: dueTodayInstant.rows[0].ts,
     });
     // A completed one is not outstanding work at all.
     await makeActivity(biz.id, {

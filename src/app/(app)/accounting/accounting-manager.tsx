@@ -20,6 +20,7 @@ import {
   type AccountingSectionKey,
 } from "./accounting-routes";
 import { accountingSectionsFor } from "./accounting-nav";
+import { accountingSectionNeedsAccountList } from "./accounting-manager-policy";
 import { LEDGER_WORKSPACE_SECTION_KEYS, LEDGER_WORKSPACE_SUBGROUPS } from "./accounting-workspace";
 import { TrialBalanceSection } from "./trial-balance-section";
 import { EntriesSection } from "./entries-section";
@@ -48,6 +49,15 @@ export interface AccountRow {
   name: string;
   type: "asset" | "liability" | "equity" | "revenue" | "expense";
   parent_code: string | null;
+  /**
+   * Whether a manual journal may post to this account, as the server computes
+   * it over the *whole* chart. Optional because this row type is also built by
+   * tests and by callers reading the older payload shape; the manual-entry
+   * picker falls back to deriving it only when the server did not say.
+   */
+  is_postable?: boolean;
+  /** The same query's own answer, for callers that need the negative. */
+  has_children?: boolean;
 }
 
 
@@ -59,10 +69,28 @@ export function AccountingManager({
 }: {
   role: string;
   section: AccountingSectionKey;
-  /** The member's effective permission keys — the directory's buttons follow them. */
-  permissions?: readonly string[];
-  /** Who is looking — a drafter may discard their own manual draft without ledger.approve. */
-  currentUserId?: string;
+  /**
+   * The member's effective permission keys — the directory's buttons follow them.
+   *
+   * Required rather than optional, because the page's own gate guarantees it:
+   * `AccountingPageBody` redirects when `memberAccessFor` returns nothing, so
+   * `undefined` here used to mean "the read failed", never "the member holds
+   * nothing". Modelling it as absent let the presentation fall *open* —
+   * approve/reject controls drawn for a session whose permissions could not be
+   * read — which is a UI that lies about what will happen on click. A failure
+   * to resolve permissions is now a type error at the call site, and the
+   * caller has to say something.
+   */
+  permissions: readonly string[];
+  /**
+   * Who is looking — a drafter may discard their own manual draft without
+   * `ledger.approve`, so the review queue's «رد کردن» is shown on their own
+   * rows only. Required rather than optional, like the page that guarantees
+   * it: an unknown viewer used to fall *open*, drawing approve/reject controls
+   * for a session the server would refuse, because "we could not read the
+   * member" was indistinguishable from "this member may".
+   */
+  currentUserId: string;
 }) {
   const [accounts, setAccounts] = useState<AccountRow[] | null>(null);
   const [error, setError] = useState("");
@@ -114,20 +142,36 @@ export function AccountingManager({
    * accountant may all draft), so «تأیید و ثبت» in the manual-entry review
    * queue is the one accounting button whose permission is narrower than the
    * page it sits on — a manager pressed it and got a 403 from a control that
-   * looked live. `undefined` when the page could not read the member's
-   * effective permissions; the section then draws the button and the API stays
-   * the gate, matching how `partiesSectionAbilities` treats the same gap.
+   * looked live. A plain boolean now, because `permissions` is required above:
+   * the section's contract is "the page read the member", and an unread
+   * member cannot reach this component.
    */
-  const canApproveLedger = permissions ? permissions.includes(PERMISSIONS.ledgerApprove) : undefined;
+  const canApproveLedger = permissions.includes(PERMISSIONS.ledgerApprove);
+  const canExportReports = permissions.includes(PERMISSIONS.reportsExport);
+
+  /**
+   * Whether this member may *propose* a draft.
+   *
+   * `ledger.propose` is narrower than the page's own door in the other
+   * direction: the page opens on `ledger.view`, so a custom role built for
+   * read-only review reaches /accounting/manual with the whole form drawn and
+   * live-looking, types a document, and is told 403 only after pressing
+   * «ثبت پیش‌نویس». Read-only means read-only on screen too — the section
+   * replaces the form with an explanation rather than offering a button the
+   * API is going to refuse.
+   */
+  const canProposeLedger = permissions.includes(PERMISSIONS.ledgerPropose);
   /**
    * Whether this member may record receipts / payments in «دریافت و پرداخت».
    * The workspace used to draw ثبت for everyone who could view the ledger, so
-   * a viewer got a 403 from a control that looked live. `undefined` when the
-   * page could not read the member's effective permissions; the section then
-   * draws the buttons and the API stays the gate.
+   * a viewer got a 403 from a control that looked live. Plain booleans like
+   * `canApproveLedger`/`canProposeLedger` — `permissions` is required, so
+   * there is no unread-member case to represent (the section still accepts
+   * `undefined` and treats it as allowed, keeping the API as the gate for any
+   * future optional caller).
    */
-  const canReceive = permissions ? permissions.includes(PERMISSIONS.financeReceivablesManage) : undefined;
-  const canPay = permissions ? permissions.includes(PERMISSIONS.financePayablesManage) : undefined;
+  const canReceive = permissions.includes(PERMISSIONS.financeReceivablesManage);
+  const canPay = permissions.includes(PERMISSIONS.financePayablesManage);
 
   // Every section is a route now, so the rail navigates rather than switching
   // local state — a section a person lands on is a URL they can keep.
@@ -162,6 +206,21 @@ export function AccountingManager({
    * «خطای غیرمنتظره». One definition, shared with the tests: `coa-tree.ts`.
    */
   const canEditAccounts = canEditChartOfAccounts(role, permissions);
+
+  /*
+   * Whether this member may run a reconciliation at all.
+   *
+   * The section opens on the app's ledger door (`ledger.view`), but every
+   * mutation behind it — start, tick, complete, discard — requires
+   * `finance.reconciliation_manage`. The screen used to draw all of those
+   * controls for whoever could open it, so a read-only accountant's every click
+   * came back 403 under a generic error. `undefined` when the page could not
+   * read the member's effective permissions: the section then draws the
+   * controls and the API stays the gate, exactly like `canApproveLedger`.
+   */
+  const canManageReconciliation = permissions
+    ? permissions.includes(PERMISSIONS.financeReconciliationManage)
+    : undefined;
   const sections = LEDGER_WORKSPACE_SECTION_KEYS.flatMap((key) => {
     const def = allowed.find((candidate) => candidate.key === key);
     return def ? [def] : [];
@@ -171,6 +230,7 @@ export function AccountingManager({
     ? sections.filter((candidate) => currentSubGroup.keys.includes(candidate.key))
     : [];
 
+  const requiresAccounts = accountingSectionNeedsAccountList(section);
   const [loadFailed, setLoadFailed] = useState(false);
   const loadAccounts = useCallback(() => {
     setLoadFailed(false);
@@ -182,7 +242,9 @@ export function AccountingManager({
       else setLoadFailed(true);
     });
   }, []);
-  useEffect(loadAccounts, [loadAccounts]);
+  useEffect(() => {
+    if (requiresAccounts) loadAccounts();
+  }, [requiresAccounts, loadAccounts]);
 
   async function run(fn: () => Promise<{ ok: boolean; data: { error?: string } }>) {
     setBusy(true);
@@ -207,7 +269,7 @@ export function AccountingManager({
     }
   }
 
-  if (!accounts) {
+  if (requiresAccounts && !accounts) {
     if (loadFailed) {
       return (
         <div className="space-y-3">
@@ -226,19 +288,38 @@ export function AccountingManager({
   const body = (
     <>
       {section === "dashboard" ? <LedgerDashboardSection onGoToTab={goToSection} refreshKey={refreshKey} /> : null}
-          {section === "trial-balance" ? <TrialBalanceSection refreshKey={refreshKey} /> : null}
-          {section === "entries" ? <EntriesSection refreshKey={refreshKey} busy={busy} run={run} /> : null}
+          {section === "trial-balance" ? (
+            <TrialBalanceSection refreshKey={refreshKey} canExport={canExportReports} />
+          ) : null}
+          {section === "entries" ? (
+            /*
+             * `canApprove` is the same `ledger.approve` the manual-entry
+             * review queue gets, and for the same reason: «برگشت سند» is
+             * gated on it server-side, so a manager who cannot approve must
+             * not be shown a live destructive accounting control. `accounts`
+             * is the chart this workspace already loaded — the journal's
+             * «حساب» filter picks from it rather than fetching it twice.
+             */
+            <EntriesSection
+              refreshKey={refreshKey}
+              busy={busy}
+              accounts={accounts ?? []}
+              canApprove={canApproveLedger}
+              onRefresh={() => setRefreshKey((key) => key + 1)}
+            />
+          ) : null}
           {section === "manual" ? (
             <ManualEntrySection
-              accounts={accounts}
+              accounts={accounts ?? []}
               busy={busy}
               run={run}
               refreshKey={refreshKey}
               canApprove={canApproveLedger}
+              canPropose={canProposeLedger}
               currentUserId={currentUserId}
             />
           ) : null}
-          {section === "expenses" ? <ExpenseSection accounts={accounts} busy={busy} run={run} refreshKey={refreshKey} /> : null}
+          {section === "expenses" ? <ExpenseSection accounts={accounts ?? []} busy={busy} run={run} refreshKey={refreshKey} /> : null}
           {section === "fiscal-periods" ? <FiscalPeriodsSection /> : null}
           {section === "directory" ? (
             <PartiesSection
@@ -255,7 +336,9 @@ export function AccountingManager({
           {section === "receipts" ? <ReceiptsPaymentsSection canReceive={canReceive} canPay={canPay} /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}
-          {section === "reconciliation" ? <ReconciliationSection busy={busy} run={run} /> : null}
+          {section === "reconciliation" ? (
+            <ReconciliationSection busy={busy} run={run} canManage={canManageReconciliation} />
+          ) : null}
           {section === "chart-of-accounts" ? (
             <ChartOfAccountsSection busy={busy} run={run} canEdit={canEditAccounts} />
           ) : null}

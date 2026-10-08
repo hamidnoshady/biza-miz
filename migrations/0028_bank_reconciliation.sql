@@ -1,10 +1,15 @@
 -- Phase 16 — bank & cash reconciliation.
 --
--- Reconciles one account (cash 1100, or bank-clearing 1120 — the only two
--- accounts anything in this system posts to; see coa-template.ts) against a
--- manually-entered statement ending balance (decision: manual entry first, a
--- bank-file import format is deferred — see the phase doc's resolved open
--- questions). A reconciliation starts 'in_progress': the candidate journal
+-- Reconciles one settlement account — صندوق 1100, بانک 1110 or کارت‌خوان در راه
+-- 1120; the canonical list is `RECONCILABLE_ACCOUNTS` in
+-- src/lib/bank-reconciliation.ts — against a manually-entered statement ending
+-- balance (decision: manual entry first, a bank-file import format is deferred
+-- — see the phase doc's resolved open questions). This file originally named
+-- only 1100 and 1120, on the reasoning that nothing posted to the plain bank
+-- account; Phase 30 changed that, when a cheque began clearing *into the
+-- bank*. Only this comment moved: every statement below is unchanged, and the
+-- schema was never account-specific.
+-- A reconciliation starts 'in_progress': the candidate journal
 -- lines are every posting to the account not already claimed by an earlier
 -- reconciliation (via bank_reconciliation_lines), up to the statement date —
 -- so "unreconciled items carry forward" falls out of the model for free,

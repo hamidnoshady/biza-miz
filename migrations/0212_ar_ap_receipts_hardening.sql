@@ -1,4 +1,4 @@
--- 0211_ar_ap_receipts_hardening.sql — Issue #829: idempotency, reversal, settlement accounts, pagination.
+-- 0212_ar_ap_receipts_hardening.sql — Issue #829: idempotency, reversal, settlement accounts, pagination.
 --
 -- `ar_receipts` / `ap_payments` are the combined دریافت و پرداخت voucher workspace.
 -- This migration adds the columns the hardening needs, without rewriting history:

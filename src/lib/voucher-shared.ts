@@ -18,7 +18,7 @@ import { WELL_KNOWN_CODES } from "./coa-template";
  * - `clearing` → کارت‌خوان/درگاه در راه (1120)
  *
  * Pre-#829 `bank` vouchers posted to 1120; their rows keep
- * `settlement_account_id` pointing at 1120 (migration 0211 backfill), so the
+ * `settlement_account_id` pointing at 1120 (migration 0212 backfill), so the
  * register shows the account the money actually moved on.
  */
 export const SETTLEMENT_METHODS = ["cash", "bank", "clearing"] as const;
@@ -161,7 +161,7 @@ export function newIdempotencyKey(): string {
 /**
  * Stable voucher reference shown in the register (`#` is no longer
  * `index + 1`). ASCII digits — callers wrap in `toPersianDigits` for display.
- * A null number (legacy rows predating migration 0211 backfill, or a row
+ * A null number (legacy rows predating migration 0212 backfill, or a row
  * whose counter never ran) falls back to the id prefix so the cell is never
  * blank.
  */
