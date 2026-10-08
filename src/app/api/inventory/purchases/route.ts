@@ -5,6 +5,7 @@ import { query } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { PurchaseLineError, type PurchaseItemInput } from "@/lib/purchase-lines";
 import { createDraftPurchase, PurchaseServiceError } from "@/lib/purchase-service";
+import { getBusinessVatPercent } from "@/lib/vat-policy-service";
 
 const PURCHASE_STATUSES = ["draft", "ordered", "received", "cancelled"] as const;
 
@@ -19,7 +20,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
 
   const location = await resolveActiveLocation(session);
-  if (!location) return NextResponse.json({ purchases: [] });
+  // Audit F11 — the business's own VAT rate, which the form proposes for a
+  // supplier invoice's VAT (never a platform-wide assumed rate).
+  const vatPercent = await getBusinessVatPercent(session.businessId);
+  if (!location) return NextResponse.json({ purchases: [], vatPercent });
 
   const { searchParams } = new URL(request.url);
   const status = searchParams.get("status");
@@ -52,12 +56,15 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const { rows } = await query(
     `SELECT p.id, p.status, p.total, p.note, p.supplier_id, p.ordered_at, p.received_at, p.created_at,
             p.purchase_date::text AS purchase_date,
+            p.supplier_invoice_number, p.supplier_invoice_date::text AS supplier_invoice_date,
+            p.vat_amount::text AS vat_amount, p.payment_terms_days, p.payment_due_date::text AS payment_due_date,
+            p.settlement_method,
             s.name AS supplier_name
        FROM purchases p LEFT JOIN suppliers s ON s.id = p.supplier_id
       WHERE ${conditions.join(" AND ")} ORDER BY p.purchase_date DESC, p.created_at DESC LIMIT 100`,
     params,
   );
-  return NextResponse.json({ purchases: rows });
+  return NextResponse.json({ purchases: rows, vatPercent });
 });
 
 /**
@@ -82,6 +89,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
      * against this business below so a stale or cross-tenant id from the
      * client can never be linked onto someone else's purchase. */
     invoiceAssetId?: string | null;
+    /** Audit F11 — the supplier's invoice number/date, VAT (integer Rial), payment terms and due date. */
+    invoice?: unknown;
   };
   try {
     body = await request.json();
@@ -103,6 +112,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       sync: { actorRole: session.role },
       businessId: session.businessId,
       invoiceAssetId: typeof body.invoiceAssetId === "string" ? body.invoiceAssetId : null,
+      invoice: body.invoice,
     });
     return NextResponse.json({ ok: true, id, total });
   } catch (err) {

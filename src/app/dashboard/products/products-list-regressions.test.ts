@@ -89,7 +89,8 @@ describe("search and status filtering", () => {
   });
 
   it("exports the current filtered result through the shared CSV builder", () => {
-    expect(SECTION).toContain("buildProductsCsv(filtered)");
+    // …in the business's selected unit, like every other export.
+    expect(SECTION).toContain("buildProductsCsv(filtered, money.unit)");
     expect(SECTION).toContain("دانلود CSV");
     expect(SECTION).toContain("const PAGE_SIZES = [10, 20, 50] as const;");
     expect(SECTION).toContain("ردیف در صفحه");

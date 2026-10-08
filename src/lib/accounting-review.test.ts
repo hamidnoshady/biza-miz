@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   emptyAccountingSnapshot,
   filterFindings,
+  RECONCILABLE_ACCOUNT_NAMES,
   reviewAccounting,
   summarizeFindings,
   type AccountingReviewSnapshot,
@@ -190,10 +191,11 @@ describe("every finding is actionable", () => {
       ],
       staleDraftPurchases: [{ id: "p1", supplierName: null, createdAt: "2026-08-01", ageDays: 30 }],
       unlockedPastPeriods: [{ id: "f1", label: "1405-04", endsOn: "2026-07-22" }],
+      uncoveredFiscalEntries: { count: 1, earliest: "2026-08-01", latest: "2026-08-01", fiscalYearCount: 0 },
     });
 
     const findings = reviewAccounting(everything);
-    expect(findings.length).toBe(12);
+    expect(findings.length).toBe(13);
     for (const finding of findings) {
       expect(finding.count, finding.code).toBeGreaterThan(0);
       expect(finding.title.length, finding.code).toBeGreaterThan(0);
@@ -230,6 +232,30 @@ describe("how a finding reads on a Persian phone", () => {
     )[0];
     expect(finding.detail.startsWith("۲ کالا")).toBe(true);
     expect(finding.samples[0].label).toContain("-۲٫۵ لیتر");
+  });
+});
+
+describe("entries outside every fiscal period (audit F08)", () => {
+  it("reports them with a Shamsi range and says nothing is rejected or moved", () => {
+    const [finding] = reviewAccounting(
+      snapshot({
+        uncoveredFiscalEntries: { count: 7, earliest: "2026-03-21", latest: "2026-08-22", fiscalYearCount: 0 },
+      }),
+    );
+    expect(finding.code).toBe("uncovered_fiscal_dates");
+    expect(finding.severity).toBe("medium");
+    expect(finding.count).toBe(7);
+    expect(finding.title).toBe("سال مالی تعریف نشده");
+    expect(finding.detail).toContain("۱۴۰۵/۰۱/۰۱");
+    expect(finding.detail).not.toContain("2026");
+    expect(finding.detail).toContain("رد یا جابه‌جا نمی‌شوند");
+    expect(finding.href).toBe("/accounting/fiscal-periods");
+  });
+
+  it("stays silent when every entry is covered", () => {
+    expect(
+      codes(snapshot({ uncoveredFiscalEntries: { count: 0, earliest: null, latest: null, fiscalYearCount: 1 } })),
+    ).toEqual([]);
   });
 });
 
@@ -277,5 +303,28 @@ describe("a review that could not run every check", () => {
       snapshot({ unreconciledBankLines: { count: 2, oldestAgeDays: 3, amountRial: 100 } }),
     );
     expect(summarizeFindings(findings, ["negative stock"])).toContain("کامل نیست");
+  });
+});
+
+/**
+ * Issue #830: the deterministic audit's unreconciled-lines check and its copy
+ * both used to name two of the three accounts the reconciliation itself covers.
+ * The count came from a query built on the canonical list; the sentence was
+ * typed by hand and said «صندوق یا کارت‌خوان» while a cheque-taking business's
+ * money sat unclaimed on بانک ۱۱۱۰.
+ */
+describe("the unreconciled-lines finding names every reconcilable account", () => {
+  it("lists صندوق, بانک and کارت‌خوان, derived from the canonical list", () => {
+    const finding = reviewAccounting(
+      snapshot({ unreconciledBankLines: { count: 4, oldestAgeDays: 12, amountRial: 900_000 } }),
+    ).find((candidate) => candidate.code === "unreconciled_bank_lines");
+
+    expect(finding).toBeTruthy();
+    expect(RECONCILABLE_ACCOUNT_NAMES).toEqual(["صندوق", "بانک", "کارت‌خوان (در راه)"]);
+    for (const name of RECONCILABLE_ACCOUNT_NAMES) {
+      expect(finding!.detail, name).toContain(name);
+    }
+    // The stale two-account sentence, which is what let ۱۱۱۰ go unmentioned.
+    expect(finding!.detail).not.toContain("ردیف صندوق یا کارت‌خوان");
   });
 });

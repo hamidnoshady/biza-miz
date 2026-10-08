@@ -1,0 +1,67 @@
+/*
+ * The trial balance's print sheet — STRUCTURAL AND PAPER-ONLY.
+ *
+ * The sheet is portalled onto <body> (see trial-balance-section.tsx) and is the
+ * one element `globals.css`'s print rule keeps visible, so a printout carries
+ * the report instead of the application chrome around it. Everything here is
+ * paper styling: a white sheet, black ink, a dense landscape table with its
+ * header repeated on every page. On screen the sheet is `display: none`.
+ *
+ * Deliberately no `:global(...)` and no theme tokens in here: print is not a
+ * theme surface, and the app's own colours are the markup's job on screen.
+ */
+
+.sheet {
+  display: none;
+}
+
+@media print {
+  .sheet {
+    display: block;
+    color: #111;
+    background: #fff;
+    direction: rtl;
+    font-family: sans-serif;
+    font-size: 10pt;
+    line-height: 1.5;
+  }
+
+  .sheet h1 {
+    margin: 0 0 3mm;
+    font-size: 17pt;
+  }
+
+  .sheet p {
+    margin: 1mm 0;
+  }
+
+  .sheet table {
+    width: 100%;
+    margin-top: 4mm;
+    border-collapse: collapse;
+  }
+
+  .sheet th,
+  .sheet td {
+    padding: 2mm 1.5mm;
+    border-bottom: 1px solid #bbb;
+    text-align: start;
+    font-size: 8pt;
+  }
+
+  .sheet th {
+    background: #eee;
+  }
+
+  .sheet thead {
+    display: table-header-group;
+  }
+
+  .sheet tfoot {
+    display: table-row-group;
+  }
+
+  .sheet tr {
+    break-inside: avoid;
+  }
+}

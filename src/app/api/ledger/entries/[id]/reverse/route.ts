@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import { ManualJournalError, MANUAL_MEMO_MAX, reverseEntry } from "@/lib/manual-journal-service";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { ManualJournalError, reverseEntry } from "@/lib/manual-journal-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
+import { isUuid } from "@/lib/uuid";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -13,18 +14,41 @@ interface Ctx {
  * Reverses a posted manual entry: a new entry with every line's debit and
  * credit swapped, dated today (or a given date) rather than backdated into
  * the original's period. Same trust level as approving a draft —
- * ledger.approve — since this is an equally ledger-altering action.
+ * `ledger.approve` — since this is an equally ledger-altering action. The
+ * screen gates the button on the same permission, so a manager no longer
+ * clicks a live-looking destructive control and collects a 403.
+ *
+ * The approver's active location is passed, but it no longer routes anything.
+ * Both the reversing journal and its sync event follow the **original
+ * document's** branch (`manual-journal-service.ts` explains why at length):
+ * where the accountant is standing is not where the document lives, and using
+ * it queued the reversal for the wrong branch in hybrid deployments. It
+ * survives as the fallback for a document that has no branch of its own,
+ * which would otherwise have no queue to travel in at all.
  */
 export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerApprove);
   if (error) return error;
 
   const { id } = await ctx.params;
+  // Same guard as the drafts routes: `WHERE id = $1` against a uuid column
+  // raises `invalid input syntax for type uuid` rather than answering "no
+  // such row", which surfaced as a 500 and «خطای غیرمنتظره» instead of the
+  // 404 the caller is entitled to.
+  if (!isUuid(id)) return NextResponse.json({ error: "entry_not_found" }, { status: 404 });
+
   let body: { memo?: string; entryDate?: string } = {};
   try {
     body = await request.json();
   } catch {
     // no body is fine; memo/entryDate are optional
+  }
+
+  // The reversal memo is free text a person types into the confirmation
+  // dialog, so it gets the same bound the draft memo has — `memo` is `text`
+  // in Postgres and an accidental paste would otherwise be stored in full.
+  if (typeof body.memo === "string" && body.memo.trim().length > MANUAL_MEMO_MAX) {
+    return NextResponse.json({ error: "memo_too_long" }, { status: 400 });
   }
 
   const location = await resolveActiveLocation(session);

@@ -20,8 +20,27 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ accounts });
   }
 
+  /*
+   * `is_postable` is decided by the server, over the *whole* chart, and
+   * handed to the client — because the client used to guess.
+   *
+   * The picker derived "leaf" itself: from the active accounts this endpoint
+   * returned, the leaves were the codes nothing else named as a parent. But
+   * the postability check in `manual-journal-service.ts` asks whether the
+   * account has *any* child, including an archived one. An account whose only
+   * child had been archived therefore looked selectable (it is not a parent in
+   * the active-only subset) and was refused at approval time with
+   * `not_a_leaf_account` — a draft that cannot be approved, discovered by the
+   * person trying to approve it rather than by the person typing it.
+   *
+   * `has_children` is the same query's own answer, so the picker and the
+   * approval path can no longer disagree, and the client stops re-deriving an
+   * invariant it does not have the data for.
+   */
   const { rows } = await query(
-    `SELECT a.id, a.code, a.name, a.type, p.code AS parent_code
+    `SELECT a.id, a.code, a.name, a.type, p.code AS parent_code,
+            EXISTS (SELECT 1 FROM accounts k WHERE k.parent_id = a.id) AS has_children,
+            NOT EXISTS (SELECT 1 FROM accounts k WHERE k.parent_id = a.id) AS is_postable
        FROM accounts a LEFT JOIN accounts p ON p.id = a.parent_id
       WHERE a.business_id = $1 AND a.is_active ORDER BY a.code`,
     [session.businessId],

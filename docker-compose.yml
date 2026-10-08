@@ -16,20 +16,18 @@ services:
       timeout: 3s
       retries: 10
 
-  # Phase 37 — optional LLM gateway (LiteLLM).
-  #
-  # Not started by `docker compose up -d`: it sits behind a profile, because a
-  # shop that buys directly from OpenRouter or ArvanCloud needs one less
-  # container, and a laptop or offline install must keep working with no
-  # gateway at all. Start it with:
+  # Optional bundled LiteLLM proxy. The application has no direct-provider
+  # fallback: leaving this profile off means AI is unavailable unless the app
+  # is pointed at a separately managed LiteLLM instance. Start the bundled
+  # proxy with:
   #
   #   docker compose --profile ai up -d litellm
   #
-  # Then finish the technical setup (base URL, master key, model aliases,
-  # virtual-key provisioning) on the /platform/ai console. Bound to the
-  # compose network only — never published
-  # to the host — because this service holds every upstream vendor key and its
-  # management API can mint keys and read spend.
+  # Then set the connection/default aliases in /platform/ai (or LITELLM_* at
+  # bootstrap) and provision tenant virtual keys as needed. The proxy is bound
+  # to the compose network only — never published to the host — because it
+  # holds upstream provider credentials and its management API can mint keys
+  # and read spend.
   litellm:
     image: ghcr.io/berriai/litellm:main-stable
     profiles:
@@ -46,6 +44,7 @@ services:
       # once first (`createdb -U pos litellm` inside the db container) — the
       # gateway creates its tables, but not the database.
       LITELLM_DATABASE_URL: postgres://${POSTGRES_USER:-pos}:${POSTGRES_PASSWORD:-pos}@db:5432/${LITELLM_DB:-litellm}
+      # Upstream provider credential consumed by LiteLLM only; the POS app does not read it.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     depends_on:
       db:

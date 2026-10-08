@@ -23,9 +23,12 @@ import {
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
+import { todayJalali } from "@/lib/jalali";
 import { normalizePosSearchText } from "@/lib/pos-selection";
 import type { VariantSummary } from "@/lib/accessories-service";
 import type { PriceEntry, PriceList } from "@/lib/price-lists-service";
+import { entryKey, type EntryConflict } from "@/lib/price-list-conflicts";
+import { formatJalali } from "@/lib/jalali";
 import { api, ErrorBox, errorMessage, Field, inputClass } from "../ui";
 import { EmptyState, SectionCard, SectionCardSkeleton } from "../page-chrome";
 import { SearchField } from "@/app/dashboard/filters";
@@ -34,6 +37,15 @@ import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@
 type ColumnKey = string; // "sale" | "purchase" | <price list id>
 type Row = Record<ColumnKey, string>;
 type Cells = Record<string, Row>;
+
+/**
+ * A list cell the server refused because someone changed it after this screen
+ * loaded it (audit F14). `value` is what the user typed — kept in the grid
+ * across the reload — and `sentVersion` is the stale version the save carried,
+ * which the cell keeps sending until the user decides: reload the current
+ * value, or overwrite it deliberately.
+ */
+type PendingConflict = EntryConflict & { value: string; sentVersion: string | null };
 
 /** Rows per page of the price matrix; each row carries two inputs plus one per price list. */
 const PRICE_PAGE_SIZE = 50;
@@ -58,6 +70,10 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
   const [lists, setLists] = useState<PriceList[]>([]);
   const [cells, setCells] = useState<Cells>({});
   const [initial, setInitial] = useState<Cells>({});
+  // `entryKey(list, item)` → the version each filled list cell had when loaded.
+  // A cell with no key was empty, which the save sends as `null`.
+  const [versions, setVersions] = useState<Record<string, string>>({});
+  const [conflicts, setConflicts] = useState<Record<string, PendingConflict>>({});
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const deferredSearch = useDeferredValue(search);
@@ -82,8 +98,13 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
   // superseded (two quick saves, or a save racing the initial load).
   const requestId = useRef(0);
 
+  /**
+   * `keep` carries the cells a save could not apply because of a conflict:
+   * the reload shows everything else as it now is, but those cells keep the
+   * user's unsaved value (and their pending conflict) instead of being reset.
+   */
   const load = useCallback(
-    async (signal?: AbortSignal) => {
+    async (signal?: AbortSignal, keep: Record<string, PendingConflict> = {}) => {
       const ticket = ++requestId.current;
       const [itemsRes, listsRes] = await Promise.all([
         api<{ items: VariantSummary[] }>(`${apiBase}/items`, { signal }),
@@ -121,12 +142,28 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         next[item.id] = row;
       }
 
+      // structuredClone of a plain string map; JSON round-tripping a matrix of
+      // a few thousand cells on every load was pure overhead.
+      const baseline = Object.fromEntries(Object.entries(next).map(([id, row]) => [id, { ...row }]));
+      const kept: Record<string, PendingConflict> = {};
+      for (const [key, conflict] of Object.entries(keep)) {
+        const row = next[conflict.itemId];
+        // An item or list deleted meanwhile has no cell left to keep.
+        if (!row || !(conflict.priceListId in row)) continue;
+        row[conflict.priceListId] = conflict.value;
+        kept[key] = conflict;
+      }
+
       setItems(priced);
       setLists(listsRes.data.lists);
       setCells(next);
-      // structuredClone of a plain string map; JSON round-tripping a matrix of
-      // a few thousand cells on every load was pure overhead.
-      setInitial(Object.fromEntries(Object.entries(next).map(([id, row]) => [id, { ...row }])));
+      setInitial(baseline);
+      setVersions(
+        Object.fromEntries(
+          listsRes.data.entries.map((entry) => [entryKey(entry.priceListId, entry.itemId), entry.version]),
+        ),
+      );
+      setConflicts(kept);
     },
     [apiBase],
   );
@@ -231,19 +268,35 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
     const entryUpdates = dirty.filter((u) => u.column !== "sale" && u.column !== "purchase");
     const stockUpdates = dirty.filter((u) => u.column === "sale" || u.column === "purchase");
     const failures: string[] = [];
+    const refused: Record<string, PendingConflict> = {};
 
     if (entryUpdates.length > 0) {
-      const { ok, data } = await api<{ error?: string }>("/api/products/price-lists/entries", {
-        method: "PUT",
-        body: JSON.stringify({
-          updates: entryUpdates.map((u) => ({
-            priceListId: u.column,
-            itemId: u.itemId,
-            price: priceOf(u.value),
-          })),
-        }),
-      });
+      // Each cell carries the version it was loaded at — or, while a conflict
+      // on it is still undecided, the stale version that conflicted, so a
+      // second press of «ذخیره» cannot overwrite the colleague's value by
+      // accident. Only «جایگزینی با مقدار من» moves it to the current version.
+      const expectedOf = (key: string) =>
+        key in conflicts ? conflicts[key].sentVersion : (versions[key] ?? null);
+      const typed = new Map(entryUpdates.map((u) => [entryKey(u.column, u.itemId), u.value]));
+      const { ok, data } = await api<{ error?: string; conflicts?: EntryConflict[] }>(
+        "/api/products/price-lists/entries",
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            updates: entryUpdates.map((u) => ({
+              priceListId: u.column,
+              itemId: u.itemId,
+              price: priceOf(u.value),
+              expectedVersion: expectedOf(entryKey(u.column, u.itemId)),
+            })),
+          }),
+        },
+      );
       if (!ok) failures.push(errorMessage(data.error));
+      for (const conflict of (ok ? data.conflicts : undefined) ?? []) {
+        const key = entryKey(conflict.priceListId, conflict.itemId);
+        refused[key] = { ...conflict, value: typed.get(key) ?? "", sentVersion: expectedOf(key) };
+      }
     }
 
     /**
@@ -261,8 +314,8 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
           const price = priceOf(update.value);
           // Clearing a sale/purchase cell is not a stock write: `item_stock`
           // has no "unset the price" operation, so the field is left alone.
-          if (price == null) return { ok: true, cleared: true, data: {} as { error?: string } };
-          const { ok, data } = await api<{ error?: string }>(
+          if (price == null) return { ok: true, cleared: true, data: {} as { error?: string; message?: string } };
+          const { ok, data } = await api<{ error?: string; message?: string }>(
             `${apiBase}/items/${update.itemId}/stock`,
             {
               method: "POST",
@@ -275,18 +328,26 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
         }),
       );
       for (const result of results) {
-        if (!result.ok) failures.push(errorMessage(result.data.error));
+        if (!result.ok) failures.push(result.data.message ?? errorMessage(result.data.error));
       }
     }
 
     const clearedStock = stockUpdates.filter((u) => u.value.trim() === "").length;
+    const conflictCount = Object.keys(refused).length;
     setBusy(false);
 
     if (failures.length > 0) {
       // Show the actual reason the server gave rather than a flat "some prices
       // were not saved", and de-duplicate so one repeated cause reads once.
       setError([...new Set(failures)].join(" "));
-      await load();
+      await load(undefined, refused);
+      return;
+    }
+    if (conflictCount > 0) {
+      setError(
+        `${toPersianDigits(conflictCount)} قیمت ذخیره نشد، چون پس از باز شدن این صفحه کس دیگری آن را تغییر داده است. بقیهٔ تغییرات ذخیره شد؛ برای هر مورد مقدار فعلی را بارگذاری کنید یا آگاهانه مقدار خود را جایگزین کنید.`,
+      );
+      await load(undefined, refused);
       return;
     }
     setNotice(
@@ -299,8 +360,46 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
 
   function discard() {
     setCells(Object.fromEntries(Object.entries(initial).map(([id, row]) => [id, { ...row }])));
+    setConflicts({});
     setError("");
     setNotice("تغییرات ذخیره‌نشده لغو شد.");
+  }
+
+  /** Drop the user's value for these conflicted cells and show what is stored now. */
+  function takeCurrent(keys: string[]) {
+    setCells((current) => {
+      const next = { ...current };
+      for (const key of keys) {
+        const conflict = conflicts[key];
+        if (!conflict || !next[conflict.itemId]) continue;
+        next[conflict.itemId] = {
+          ...next[conflict.itemId],
+          [conflict.priceListId]: initial[conflict.itemId]?.[conflict.priceListId] ?? "",
+        };
+      }
+      return next;
+    });
+    resolveConflicts(keys);
+  }
+
+  /**
+   * Keep the user's value and let the next save replace the stored one. The
+   * cell then sends the version the reload read, so if the value moves *again*
+   * before the save, that is reported as a fresh conflict rather than
+   * overwritten.
+   */
+  function overwrite(keys: string[]) {
+    resolveConflicts(keys);
+    setError("");
+    setNotice("مقدار شما با «ذخیره» جایگزین مقدار فعلی می‌شود.");
+  }
+
+  function resolveConflicts(keys: string[]) {
+    setConflicts((current) => {
+      const next = { ...current };
+      for (const key of keys) delete next[key];
+      return next;
+    });
   }
 
   function downloadCsv() {
@@ -341,7 +440,10 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `price-lists-${new Date().toISOString().slice(0, 10)}.csv`;
+    // The file name carries the Shamsi date — it is shown to the user in the
+    // downloads bar and the file manager, so it is a date a user sees.
+    const { jy, jm, jd } = todayJalali();
+    anchor.download = `price-lists-${jy}-${String(jm).padStart(2, "0")}-${String(jd).padStart(2, "0")}.csv`;
     document.body.append(anchor);
     anchor.click();
     anchor.remove();
@@ -405,6 +507,54 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
       </p>
       {notice ? (
         <p className="text-xs text-emerald-700 dark:text-emerald-400">{notice}</p>
+      ) : null}
+
+      {Object.keys(conflicts).length > 0 ? (
+        <SectionCard
+          title="قیمت‌هایی که هم‌زمان تغییر کرده‌اند"
+          description="این قیمت‌ها پس از باز شدن صفحه در جای دیگری تغییر کرده‌اند و ذخیره نشدند. مقدار شما در جدول باقی مانده است."
+          actions={
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => takeCurrent(Object.keys(conflicts))}>
+                بارگذاری مقدار فعلی همه
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => overwrite(Object.keys(conflicts))}>
+                جایگزینی همه با مقدار من
+              </Button>
+            </div>
+          }
+        >
+          <ul className="divide-y divide-border/80 text-sm">
+            {Object.entries(conflicts).map(([key, conflict]) => {
+              const itemName = items?.find((item) => item.id === conflict.itemId)?.name ?? "کالا";
+              const listName = lists.find((list) => list.id === conflict.priceListId)?.name ?? "لیست قیمت";
+              const mine = conflict.value.trim() === "" ? "بدون قیمت" : `${toPersianDigits(conflict.value.trim())} ${money.unitLabel}`;
+              const theirs =
+                conflict.currentPrice == null ? "بدون قیمت" : money.format(conflict.currentPrice, { withUnit: true });
+              return (
+                <li key={key} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                  <div className="min-w-0 space-y-1">
+                    <p className="font-medium">{`${itemName} — ${listName}`}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {`مقدار شما: ${mine} · مقدار فعلی: ${theirs}`}
+                      {conflict.updatedAt
+                        ? ` · آخرین تغییر: ${formatJalali(conflict.updatedAt, { withTime: true })}`
+                        : " · این قیمت در این فاصله حذف شده است"}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" variant="ghost" size="sm" onClick={() => takeCurrent([key])}>
+                      بارگذاری مقدار فعلی
+                    </Button>
+                    <Button type="button" variant="outline" size="sm" onClick={() => overwrite([key])}>
+                      جایگزینی با مقدار من
+                    </Button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </SectionCard>
       ) : null}
 
       <SectionCard
@@ -481,6 +631,7 @@ export function PriceListsSection({ apiBase }: { apiBase: string }) {
                         label={`${list.name} ${item.name}`}
                         value={cells[item.id]?.[list.id] ?? ""}
                         changed={(initial[item.id]?.[list.id] ?? "") !== (cells[item.id]?.[list.id] ?? "")}
+                        conflict={entryKey(list.id, item.id) in conflicts}
                         onChange={setCell}
                       />
                     </Td>
@@ -554,6 +705,7 @@ function PriceCell({
   label,
   value,
   changed,
+  conflict = false,
   onChange,
 }: {
   itemId: string;
@@ -561,13 +713,15 @@ function PriceCell({
   label: string;
   value: string;
   changed: boolean;
+  /** Someone else changed this cell after it loaded; the save refused it. */
+  conflict?: boolean;
   onChange: (itemId: string, column: ColumnKey, value: string) => void;
 }) {
   const invalid = cellError(value);
   return (
     <PersianNumberInput
       className={`${inputClass} min-h-9 w-28 text-xs ${
-        invalid
+        invalid || conflict
           ? "border-destructive text-destructive focus-visible:border-destructive"
           : changed
             ? "border-amber-500 bg-amber-50 dark:bg-amber-950/30"
@@ -580,8 +734,8 @@ function PriceCell({
       allowNegative={false}
       allowDecimal={false}
       value={value}
-      aria-label={label}
-      aria-invalid={invalid || undefined}
+      aria-label={conflict ? `${label} (تغییر هم‌زمان؛ ذخیره نشد)` : label}
+      aria-invalid={invalid || conflict || undefined}
       onChange={(event) => onChange(itemId, column, event.target.value)}
       placeholder="—"
     />

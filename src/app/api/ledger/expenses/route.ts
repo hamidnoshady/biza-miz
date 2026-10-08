@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { ExpenseError, listExpenses, recordExpense } from "@/lib/expense-service";
+import { ExpenseError, listExpenses, MissingLedgerAccountError, recordExpense } from "@/lib/expense-service";
 import { parseExpenseListQuery } from "@/lib/expense-input";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 
@@ -22,7 +22,12 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   return NextResponse.json({ expenses, hasMore, totalAmount, totalCount });
 });
 
-/** Records a paid operating expense and posts it immediately (Debit the chosen expense account / Credit the payment account). */
+/**
+ * Records an operating expense and posts it immediately: Debit the chosen
+ * expense account / Credit the payment account — or, with
+ * `settlement: "credit"` («پرداخت بعدی», audit F11), Credit Accounts Payable
+ * for `supplierId`, settled later through POST /api/ledger/ap/payments.
+ */
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.financeExpensesManage);
   if (error) return error;
@@ -35,6 +40,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     vendor?: string;
     memo?: string;
     receiptAssetId?: string;
+    settlement?: string;
+    supplierId?: string;
+    dueDate?: string;
   };
   try {
     body = await request.json();
@@ -56,10 +64,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       memo: String(body.memo ?? ""),
       createdBy: session.sub,
       receiptAssetId: typeof body.receiptAssetId === "string" ? body.receiptAssetId : null,
+      settlement: typeof body.settlement === "string" ? (body.settlement as "paid" | "credit") : null,
+      supplierId: typeof body.supplierId === "string" ? body.supplierId : null,
+      dueDate: typeof body.dueDate === "string" ? body.dueDate : null,
     });
     return NextResponse.json({ expense }, { status: 201 });
   } catch (err) {
     if (err instanceof ExpenseError) return NextResponse.json({ error: err.message }, { status: err.status });
+    if (err instanceof MissingLedgerAccountError) {
+      return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
+    }
     const lockCode = fiscalPeriodLockErrorCode(err);
     if (lockCode) return NextResponse.json({ error: lockCode }, { status: 409 });
     throw err;
