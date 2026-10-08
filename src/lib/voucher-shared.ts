@@ -2,55 +2,14 @@
  * Shared AR/AP voucher vocabulary — Issue #829.
  *
  * Framework-free (no `db`, no `next/`) so the services, the API routes and the
- * browser forms all read the same settlement methods, cursor shape and filter
- * vocabulary. The DB half (posting, validation, pagination queries) lives in
+ * browser forms all read the same cursor shape and filter vocabulary. The
+ * method vocabulary (`VoucherMethod`, labels, role rules) lives in
+ * `payables-input.ts`, shared with the account picker and the cash resolver;
+ * the DB half (posting, validation, pagination queries) lives in
  * `ar-service.ts`, `ap-service.ts` and `installments-service.ts`.
  */
 
-import { WELL_KNOWN_CODES } from "./coa-template";
-
-/**
- * Settlement classification. `method` is display/metadata; the authoritative
- * posting destination is `settlement_account_id`.
- *
- * - `cash`     → صندوق (1100)
- * - `bank`     → بانک — direct transfer/payment (1110)
- * - `clearing` → کارت‌خوان/درگاه در راه (1120)
- *
- * Pre-#829 `bank` vouchers posted to 1120; their rows keep
- * `settlement_account_id` pointing at 1120 (migration 0212 backfill), so the
- * register shows the account the money actually moved on.
- */
-export const SETTLEMENT_METHODS = ["cash", "bank", "clearing"] as const;
-export type SettlementMethod = (typeof SETTLEMENT_METHODS)[number];
-
-/** Legacy two-value shape still accepted on the wire (mapped forward). */
-export const LEGACY_SETTLEMENT_METHODS = ["cash", "bank"] as const;
-
-export const SETTLEMENT_METHOD_LABELS: Record<SettlementMethod, string> = {
-  cash: "نقدی",
-  bank: "بانکی",
-  clearing: "اسناد در جریان وصول",
-};
-
-export function isSettlementMethod(value: unknown): value is SettlementMethod {
-  return (
-    typeof value === "string" &&
-    (SETTLEMENT_METHODS as readonly string[]).includes(value)
-  );
-}
-
-/** The well-known account code a method resolves to when no explicit settlement account is given. */
-export function settlementCodeForMethod(method: SettlementMethod): string {
-  switch (method) {
-    case "cash":
-      return WELL_KNOWN_CODES.cash;
-    case "bank":
-      return WELL_KNOWN_CODES.bank;
-    case "clearing":
-      return WELL_KNOWN_CODES.bankClearing;
-  }
-}
+import type { VoucherMethod } from "./payables-input";
 
 /** Voucher status filter. */
 export type VoucherStatusFilter = "all" | "active" | "reversed";
@@ -67,8 +26,8 @@ export interface VoucherListFilters {
   q?: string;
   dateFrom?: string;
   dateTo?: string;
-  method?: SettlementMethod;
-  settlementAccountId?: string;
+  method?: VoucherMethod;
+  cashAccountId?: string;
   partyId?: string;
   locationId?: string;
   minAmount?: number;
@@ -161,7 +120,7 @@ export function newIdempotencyKey(): string {
 /**
  * Stable voucher reference shown in the register (`#` is no longer
  * `index + 1`). ASCII digits — callers wrap in `toPersianDigits` for display.
- * A null number (legacy rows predating migration 0212 backfill, or a row
+ * A null number (legacy rows predating migration 0215 backfill, or a row
  * whose counter never ran) falls back to the id prefix so the cell is never
  * blank.
  */

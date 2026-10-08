@@ -57,12 +57,8 @@ import { DataTable, DataTableBody, DataTableFoot, DataTableHead, DataTableRow, T
 import { FilterChip } from "@/app/dashboard/filters";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { LedgerLoadFailed, OverlayDialog } from "./ledger-ui";
-import {
-  SettlementAccountPicker,
-  SettlementMethodPicker,
-  useIdempotencyKey,
-  type SettlementMethod,
-} from "./settlement-form";
+import { CashAccountPicker, VoucherMethodPicker, useIdempotencyKey } from "./settlement-form";
+import type { VoucherMethod } from "@/lib/payables-input";
 
 /** One row of the balances list — the common shape both sides map their payloads into. */
 export interface SubledgerPartyRow {
@@ -594,8 +590,14 @@ function SubledgerSettleDialog({
 }) {
   const money = useMoney();
   const [amount, setAmount] = useState(String(money.toInput(Math.max(party.balance, 0)) || ""));
-  const [method, setMethod] = useState<SettlementMethod>("cash");
-  const [settlementAccountId, setSettlementAccountId] = useState("");
+  const [method, setMethod] = useState<VoucherMethod>("cash");
+  const [cashAccountId, setCashAccountId] = useState("");
+
+  function chooseMethod(next: VoucherMethod) {
+    // An account belongs to one method; the picker's options change with it.
+    setMethod(next);
+    setCashAccountId("");
+  }
   // The date is optional, Shamsi. The «دریافت و پرداخت» voucher form has
   // always been able to back-date one; settling from this screen silently
   // posted *today*, and a receipt taken yesterday had to be re-entered there.
@@ -635,7 +637,7 @@ function SubledgerSettleDialog({
           [side.settle.idField]: party.id,
           amount: rial,
           method,
-          settlementAccountId: settlementAccountId || undefined,
+          cashAccountId: cashAccountId || undefined,
           idempotencyKey,
           [side.settle.dateField]: settleDate || undefined,
           memo: memo.trim() || undefined,
@@ -675,9 +677,9 @@ function SubledgerSettleDialog({
           <PersianNumberInput className={inputClass} dir="ltr" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="۰" />
         </Field>
         {/* Shared with the «دریافت و پرداخت» voucher form: same three methods,
-            same optional settlement account, same idempotency key. */}
-        <SettlementMethodPicker value={method} onChange={setMethod} label={side.settle.methodLabel} />
-        <SettlementAccountPicker value={settlementAccountId} onChange={setSettlementAccountId} />
+            same optional cash account, same idempotency key. */}
+        <VoucherMethodPicker value={method} onChange={chooseMethod} label={side.settle.methodLabel} />
+        <CashAccountPicker value={cashAccountId} onChange={setCashAccountId} method={method} />
         <Field label={side.settle.dateLabel}>
           <JalaliDatePicker value={settleDate} onChange={setSettleDate} placeholder="امروز" />
         </Field>

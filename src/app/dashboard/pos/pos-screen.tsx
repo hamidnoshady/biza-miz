@@ -1766,7 +1766,7 @@ export function PosScreen({
               {cart.length === 0
                 ? "سبد خالی است"
                 : `${toPersianDigits(cartItemCount)} قلم در سبد`}
-              <span className="block truncate text-[11px] font-normal opacity-80">
+              <span className="block truncate text-[11px] font-normal">
                 {orderType === "dine_in"
                   ? "حضوری — " + tableLabel
                   : orderType === "takeaway"

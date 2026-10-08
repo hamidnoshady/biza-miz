@@ -1,4 +1,4 @@
--- 0212_ar_ap_receipts_hardening.sql — Issue #829: idempotency, reversal, settlement accounts, pagination.
+-- 0215_ar_ap_receipts_hardening.sql — Issue #829: idempotency, reversal, clearing method, pagination.
 --
 -- `ar_receipts` / `ap_payments` are the combined دریافت و پرداخت voucher workspace.
 -- This migration adds the columns the hardening needs, without rewriting history:
@@ -7,14 +7,13 @@
 --     Unique per business where present (retries with the same key return the
 --     original row instead of posting twice). NULL stays allowed for legacy
 --     rows and installment settlements, which are idempotent by their own key.
---   * `settlement_account_id` — the explicit cash/bank asset account the voucher
---     posts against. `method` stays as classification/display metadata. Legacy
---     rows are backfilled to their historical posting account (cash -> 1100,
---     bank -> 1120, the pre-#829 mapping), so the register keeps showing the
---     account the money actually moved on even after `bank` means direct bank
---     (1110) for new vouchers.
 --   * `method` gains 'clearing' (POS/card/PSP money in transit, 1120). New
---     `bank` vouchers post to the real bank account (1110).
+--     `bank` vouchers post to the real bank account (1110); the explicit
+--     cash/bank/clearing account itself is `cash_account_id` from 0212
+--     (audit F11), whose NULL-means-method-default convention this issue
+--     keeps — no backfill: a legacy bank voucher named no account and the
+--     register shows only its method, while its journal keeps the true 1120
+--     line and reversals mirror the original entry's own lines.
 --   * `reversed_at` / `reversed_by` / `reversal_entry_id` — source-level
 --     reversal state. The reversal journal mirrors the original entry exactly
 --     (same source_type/source_id, posting_kind *_reversal) so A/R and A/P
@@ -24,10 +23,11 @@
 --     number never changes. Assigned from `ar_ap_voucher_counters` under a row
 --     lock in the service layer (see ar-service.ts / ap-service.ts).
 --   * List indexes aligned with the register's newest-first order
---     (business + voucher date + created_at + id).
+--     (business + voucher date + created_at + id), plus indexes on the 0212
+--     `cash_account_id` columns the register's account filter reads.
 --
--- Forward-only; no legacy row is rewritten except for the two backfills above,
--- which record what was already true about that row.
+-- Forward-only; no legacy row is rewritten except for the voucher-number
+-- backfill below, which numbers existing rows oldest-first.
 
 -- ---------------------------------------------------------------------------
 -- 1. New columns
@@ -35,7 +35,6 @@
 ALTER TABLE ar_receipts
     ADD COLUMN idempotency_key text
         CHECK (idempotency_key IS NULL OR (char_length(idempotency_key) BETWEEN 1 AND 128)),
-    ADD COLUMN settlement_account_id uuid REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN reversed_at timestamptz,
     ADD COLUMN reversed_by uuid REFERENCES users(id) ON DELETE SET NULL,
     ADD COLUMN reversal_entry_id uuid REFERENCES journal_entries(id) ON DELETE SET NULL,
@@ -44,7 +43,6 @@ ALTER TABLE ar_receipts
 ALTER TABLE ap_payments
     ADD COLUMN idempotency_key text
         CHECK (idempotency_key IS NULL OR (char_length(idempotency_key) BETWEEN 1 AND 128)),
-    ADD COLUMN settlement_account_id uuid REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN reversed_at timestamptz,
     ADD COLUMN reversed_by uuid REFERENCES users(id) ON DELETE SET NULL,
     ADD COLUMN reversal_entry_id uuid REFERENCES journal_entries(id) ON DELETE SET NULL,
@@ -70,65 +68,7 @@ ALTER TABLE ap_payments
     ADD CONSTRAINT ap_payments_method_check CHECK (method IN ('cash', 'bank', 'clearing'));
 
 -- ---------------------------------------------------------------------------
--- 3. Settlement-account affinity: the account must be this business's own
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION ar_receipt_settlement_affinity() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-    IF NEW.settlement_account_id IS NOT NULL AND NOT EXISTS (
-        SELECT 1 FROM accounts a
-         WHERE a.id = NEW.settlement_account_id AND a.business_id = NEW.business_id
-    ) THEN
-        RAISE EXCEPTION 'invalid_settlement_account' USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS trg_ar_receipt_settlement_affinity ON ar_receipts;
-CREATE TRIGGER trg_ar_receipt_settlement_affinity
-    BEFORE INSERT OR UPDATE OF settlement_account_id, business_id ON ar_receipts
-    FOR EACH ROW EXECUTE FUNCTION ar_receipt_settlement_affinity();
-
-CREATE OR REPLACE FUNCTION ap_payment_settlement_affinity() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-    IF NEW.settlement_account_id IS NOT NULL AND NOT EXISTS (
-        SELECT 1 FROM accounts a
-         WHERE a.id = NEW.settlement_account_id AND a.business_id = NEW.business_id
-    ) THEN
-        RAISE EXCEPTION 'invalid_settlement_account' USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS trg_ap_payment_settlement_affinity ON ap_payments;
-CREATE TRIGGER trg_ap_payment_settlement_affinity
-    BEFORE INSERT OR UPDATE OF settlement_account_id, business_id ON ap_payments
-    FOR EACH ROW EXECUTE FUNCTION ap_payment_settlement_affinity();
-
--- ---------------------------------------------------------------------------
--- 4. Backfill legacy settlement accounts (historical posting truth)
--- ---------------------------------------------------------------------------
--- cash -> 1100, bank -> 1120 (the pre-#829 mapping). A business whose chart no
--- longer carries the account keeps NULL rather than pointing at a wrong one.
-UPDATE ar_receipts r
-   SET settlement_account_id = a.id
-  FROM accounts a
- WHERE r.settlement_account_id IS NULL
-   AND a.business_id = r.business_id
-   AND a.code = CASE WHEN r.method = 'cash' THEN '1100' ELSE '1120' END;
-
-UPDATE ap_payments p
-   SET settlement_account_id = a.id
-  FROM accounts a
- WHERE p.settlement_account_id IS NULL
-   AND a.business_id = p.business_id
-   AND a.code = CASE WHEN p.method = 'cash' THEN '1100' ELSE '1120' END;
-
--- ---------------------------------------------------------------------------
--- 5. Per-business sequential voucher numbers + counters
+-- 3. Per-business sequential voucher numbers + counters
 -- ---------------------------------------------------------------------------
 CREATE TABLE ar_ap_voucher_counters (
     business_id uuid PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
@@ -188,7 +128,7 @@ CREATE UNIQUE INDEX uq_ap_payments_business_voucher_number
     WHERE voucher_number IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
--- 6. Idempotency uniqueness (NULLs ignored: legacy/installment rows carry none)
+-- 4. Idempotency uniqueness (NULLs ignored: legacy/installment rows carry none)
 -- ---------------------------------------------------------------------------
 CREATE UNIQUE INDEX uq_ar_receipts_business_idempotency
     ON ar_receipts (business_id, idempotency_key)
@@ -198,23 +138,24 @@ CREATE UNIQUE INDEX uq_ap_payments_business_idempotency
     WHERE idempotency_key IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
--- 7. Register list indexes (business + voucher date + created_at + id)
+-- 5. Register list indexes (business + voucher date + created_at + id)
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_ar_receipts_business_date_list
     ON ar_receipts (business_id, receipt_date DESC, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_ap_payments_business_date_list
     ON ap_payments (business_id, payment_date DESC, created_at DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_ar_receipts_settlement_account
-    ON ar_receipts (settlement_account_id) WHERE settlement_account_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_ap_payments_settlement_account
-    ON ap_payments (settlement_account_id) WHERE settlement_account_id IS NOT NULL;
+-- The 0212 cash-account columns the register's account filter reads.
+CREATE INDEX IF NOT EXISTS idx_ar_receipts_cash_account
+    ON ar_receipts (cash_account_id) WHERE cash_account_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ap_payments_cash_account
+    ON ap_payments (cash_account_id) WHERE cash_account_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_ar_receipts_location_date
     ON ar_receipts (business_id, location_id, receipt_date DESC) WHERE location_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_ap_payments_location_date
     ON ap_payments (business_id, location_id, payment_date DESC) WHERE location_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
--- 8. Installment slice settlements share the voucher settlement vocabulary
+-- 6. Installment slice settlements share the voucher method vocabulary
 -- ---------------------------------------------------------------------------
 ALTER TABLE installment_items DROP CONSTRAINT IF EXISTS installment_items_paid_method_check;
 ALTER TABLE installment_items

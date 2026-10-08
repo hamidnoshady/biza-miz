@@ -191,10 +191,11 @@ describe("every finding is actionable", () => {
       ],
       staleDraftPurchases: [{ id: "p1", supplierName: null, createdAt: "2026-08-01", ageDays: 30 }],
       unlockedPastPeriods: [{ id: "f1", label: "1405-04", endsOn: "2026-07-22" }],
+      uncoveredFiscalEntries: { count: 1, earliest: "2026-08-01", latest: "2026-08-01", fiscalYearCount: 0 },
     });
 
     const findings = reviewAccounting(everything);
-    expect(findings.length).toBe(12);
+    expect(findings.length).toBe(13);
     for (const finding of findings) {
       expect(finding.count, finding.code).toBeGreaterThan(0);
       expect(finding.title.length, finding.code).toBeGreaterThan(0);
@@ -231,6 +232,30 @@ describe("how a finding reads on a Persian phone", () => {
     )[0];
     expect(finding.detail.startsWith("۲ کالا")).toBe(true);
     expect(finding.samples[0].label).toContain("-۲٫۵ لیتر");
+  });
+});
+
+describe("entries outside every fiscal period (audit F08)", () => {
+  it("reports them with a Shamsi range and says nothing is rejected or moved", () => {
+    const [finding] = reviewAccounting(
+      snapshot({
+        uncoveredFiscalEntries: { count: 7, earliest: "2026-03-21", latest: "2026-08-22", fiscalYearCount: 0 },
+      }),
+    );
+    expect(finding.code).toBe("uncovered_fiscal_dates");
+    expect(finding.severity).toBe("medium");
+    expect(finding.count).toBe(7);
+    expect(finding.title).toBe("سال مالی تعریف نشده");
+    expect(finding.detail).toContain("۱۴۰۵/۰۱/۰۱");
+    expect(finding.detail).not.toContain("2026");
+    expect(finding.detail).toContain("رد یا جابه‌جا نمی‌شوند");
+    expect(finding.href).toBe("/accounting/fiscal-periods");
+  });
+
+  it("stays silent when every entry is covered", () => {
+    expect(
+      codes(snapshot({ uncoveredFiscalEntries: { count: 0, earliest: null, latest: null, fiscalYearCount: 1 } })),
+    ).toEqual([]);
   });
 });
 

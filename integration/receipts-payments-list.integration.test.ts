@@ -253,6 +253,23 @@ describe("listReceiptsPage (issue #829: cursor pagination + filters)", () => {
       installments.listReceiptsPage(biz.id, { method: "cheque" as unknown as "cash" }),
     ).rejects.toThrow("invalid_method");
   });
+
+  it("filters by the named cash account and reads its code/name", async () => {
+    const a = await addCustomer("علی رضایی");
+    const { rows: acctRows } = await db.query<{ id: string }>(
+      `INSERT INTO accounts (business_id, code, name, type) VALUES ($1, '1110', 'Bank', 'asset') RETURNING id`,
+      [biz.id],
+    );
+    const withAccount = await addReceipt(a, 100, "2026-09-10", null);
+    await addReceipt(a, 200, "2026-09-11", null);
+    await db.query(`UPDATE ar_receipts SET cash_account_id = $2 WHERE id = $1`, [withAccount, acctRows[0].id]);
+
+    const filtered = await installments.listReceiptsPage(biz.id, { cashAccountId: acctRows[0].id });
+    expect(filtered.rows.map((r) => r.amount)).toEqual([100]);
+    expect(filtered.rows[0].cashAccountId).toBe(acctRows[0].id);
+    expect(filtered.rows[0].cashAccount).toEqual({ code: "1110", name: "Bank" });
+    expect(filtered.rows[0].bankReference).toBeNull();
+  });
 });
 
 describe("listPaymentsPage (issue #829: cursor pagination + filters)", () => {

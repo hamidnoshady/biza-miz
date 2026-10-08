@@ -20,8 +20,9 @@
  * integration/ap.integration.test.ts.
  *
  * Issue #829 hardening: mirrors `ar-service.ts` — idempotent creation,
- * explicit settlement accounts, active-supplier validation, and first-class
- * source-level reversal with preserved A/P attribution.
+ * the cash/bank/clearing account the money moved through, active-supplier
+ * validation, and first-class source-level reversal with preserved A/P
+ * attribution.
  */
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
@@ -31,15 +32,14 @@ import { WELL_KNOWN_CODES } from "./coa-template";
 import { isValidIsoDate } from "./iso-date";
 import { accountIdsByCode, MissingLedgerAccountError, postExactMirrorEntry, postJournalEntry } from "./ledger-service";
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_SUPPLIER_KEY, type AgingSummary } from "./aging";
-import { isSettlementMethod, type SettlementMethod } from "./voucher-shared";
-import { resolveSettlementAccount, SettlementAccountError } from "./settlement-accounts";
 import {
   enqueueHolooReceiptForApPayment,
   enqueueHolooReversalForApPayment,
 } from "./integrations/holoo/outbox-producer";
+import { isVoucherMethod, normalizeBankReference, type VoucherMethod } from "./payables-input";
+import { resolveVoucherCashAccount } from "./voucher-cash-account";
 
 export { MissingLedgerAccountError };
-export type { SettlementMethod };
 
 /**
  * Group key for AP lines that carry no supplier attribution — a manual journal
@@ -100,7 +100,7 @@ async function apLines(businessId: string, accountId: string): Promise<ApLineRow
             s.party_id AS party_id,
             je.entry_date::text AS entry_date, je.source_type,
             je.reverses_entry_id::text AS reverses_entry_id,
-            COALESCE(p.note, p2.note) AS note, je.memo,
+            COALESCE(p.note, p2.note, ex.memo) AS note, je.memo,
             jl.debit, jl.credit
        FROM journal_lines jl
        JOIN journal_entries je ON je.id = jl.entry_id
@@ -109,6 +109,9 @@ async function apLines(businessId: string, accountId: string): Promise<ApLineRow
        LEFT JOIN purchases p2 ON sr.purchase_id = p2.id
        LEFT JOIN ap_payments ap ON je.source_type = 'ap_payment' AND ap.id = je.source_id
        LEFT JOIN cheques ch ON je.source_type = 'cheque' AND ch.id = je.source_id
+       -- Audit F11: an expense recorded «پرداخت بعدی» credits A/P for the
+       -- supplier it names, so it is that supplier's bill like a purchase.
+       LEFT JOIN expenses ex ON je.source_type = 'expense' AND ex.id = je.source_id
        -- An endorsed received cheque has no supplier_id on its original row:
        -- the supplier is the one recorded by the endorsement event. Reuse it
        -- for a later bounce too, so that debit and reversing credit stay in
@@ -124,6 +127,7 @@ async function apLines(businessId: string, accountId: string): Promise<ApLineRow
          p.supplier_id,
          p2.supplier_id,
          ap.supplier_id,
+         ex.supplier_id,
          ch.supplier_id,
          endorsed.endorsed_to_supplier_id
        )
@@ -227,7 +231,7 @@ export async function getSupplierStatement(businessId: string, supplierId: strin
     // A payment reversal keeps the payment's source identity (that is what
     // preserves attribution) and is told apart by its reverses_entry_id.
     const type: ApStatementLine["type"] =
-      l.source_type === "purchase"
+      l.source_type === "purchase" || l.source_type === "expense"
         ? "bill"
         : l.source_type === "ap_payment"
           ? l.reverses_entry_id
@@ -238,7 +242,7 @@ export async function getSupplierStatement(businessId: string, supplierId: strin
             : "other";
     const description =
       type === "bill"
-        ? (l.note ?? "فاکتور خرید")
+        ? (l.note ?? (l.source_type === "expense" ? "هزینه" : "فاکتور خرید"))
         : type === "payment"
           ? (l.memo ?? "پرداخت به تأمین‌کننده")
           : type === "reversal"
@@ -313,10 +317,16 @@ export interface ApPayment {
   id: string;
   supplierId: string;
   paymentDate: string;
-  method: SettlementMethod;
+  method: VoucherMethod;
   amount: number;
   memo: string | null;
-  settlementAccountId: string | null;
+  /**
+   * The cash/bank/clearing account named on the voucher (migration 0212);
+   * null = the method's default account took it.
+   */
+  cashAccountId: string | null;
+  /** The bank's tracking number, when one was recorded. */
+  bankReference: string | null;
   idempotencyKey: string | null;
   voucherNumber: number | null;
   reversedAt: string | null;
@@ -333,10 +343,11 @@ interface PaymentDbRow {
   id: string;
   supplier_id: string;
   payment_date: string;
-  method: SettlementMethod;
+  method: VoucherMethod;
   amount: string;
   memo: string | null;
-  settlement_account_id: string | null;
+  cash_account_id: string | null;
+  bank_reference: string | null;
   idempotency_key: string | null;
   voucher_number: string | null;
   reversed_at: string | null;
@@ -351,7 +362,8 @@ function toPayment(row: PaymentDbRow): ApPayment {
     method: row.method,
     amount: Number(row.amount),
     memo: row.memo,
-    settlementAccountId: row.settlement_account_id,
+    cashAccountId: row.cash_account_id,
+    bankReference: row.bank_reference,
     idempotencyKey: row.idempotency_key,
     voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
     reversedAt: row.reversed_at,
@@ -360,7 +372,7 @@ function toPayment(row: PaymentDbRow): ApPayment {
 }
 
 const PAYMENT_RETURNING = `id, supplier_id, payment_date::text AS payment_date, method, amount::text AS amount, memo,
-  settlement_account_id, idempotency_key, voucher_number::text AS voucher_number,
+  cash_account_id, bank_reference, idempotency_key, voucher_number::text AS voucher_number,
   reversed_at::text AS reversed_at, reversal_entry_id::text AS reversal_entry_id`;
 
 async function findPaymentByIdempotencyKey(
@@ -398,8 +410,8 @@ function normalizeIdempotencyKey(value: unknown): string | null {
 
 /**
  * Records the business paying down a supplier's AP balance: Debit Accounts
- * Payable, Credit settlement account (cash/bank/clearing), in the same
- * transaction as the ap_payments row both reference (source_type='ap_payment',
+ * Payable, Credit cash/bank/clearing, in the same transaction as the
+ * ap_payments row both reference (source_type='ap_payment',
  * source_id=payment.id).
  *
  * Idempotent per business on `idempotencyKey`, mirroring `receivePayment`.
@@ -408,15 +420,18 @@ export async function payBill(params: {
   businessId: string;
   locationId: string | null;
   supplierId: string;
-  method: SettlementMethod;
+  method: VoucherMethod;
   amount: number;
   paymentDate?: string | null;
   memo?: string | null;
   createdBy: string | null;
-  settlementAccountId?: string | null;
   idempotencyKey?: string | null;
   /** Holoo imports create local payments but must not push them back to Holoo. */
   skipHolooPush?: boolean;
+  /** The cash/bank/clearing account the money left from; null = the method's default account. */
+  cashAccountId?: string | null;
+  /** The bank's tracking/reference number. */
+  bankReference?: string | null;
 }): Promise<ApPayment> {
   if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
     throw new ApError("invalid_amount");
@@ -425,12 +440,14 @@ export async function payBill(params: {
   // raises a syntax error rather than returning none — see `isUuid`.
   if (!isUuid(params.supplierId)) throw new ApError("supplier_not_found", 404);
   if (params.paymentDate != null && !isValidIsoDate(params.paymentDate)) throw new ApError("invalid_date");
-  if (!isSettlementMethod(params.method)) throw new ApError("invalid_method");
+  if (!isVoucherMethod(params.method)) throw new ApError("invalid_method");
   const idempotencyKey = normalizeIdempotencyKey(params.idempotencyKey);
 
   // The business's «امروز», not the DB server's UTC date — the same argument
   // `receivePayment` in ar-service.ts makes for receipts.
   const paymentDate = params.paymentDate ?? (await businessToday(params.businessId));
+  // Throws PayablesInputError («invalid_bank_reference»), which the route answers as a 400.
+  const bankReference = normalizeBankReference(params.bankReference);
 
   const client = await getPool().connect();
   try {
@@ -460,17 +477,12 @@ export async function payBill(params: {
     );
     if (!supplierRows[0]) throw new ApError("supplier_not_found", 404);
 
-    let settlementAccountId: string;
-    let apAccount: string;
-    try {
-      const settlement = await resolveSettlementAccount(client, params.businessId, params.method, params.settlementAccountId);
-      settlementAccountId = settlement.id;
-      const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsPayable]);
-      apAccount = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
-    } catch (err) {
-      if (err instanceof SettlementAccountError) throw new ApError(err.message, err.status);
-      throw err;
-    }
+    const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsPayable]);
+    const apAccount = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
+    // Throws PayablesInputError (invalid_cash_account /
+    // cash_account_method_mismatch), which the route answers as a 400.
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId);
+    const cashAccountId = cash.accountId;
 
     const voucherNumber = await nextPaymentVoucherNumber(client, params.businessId);
 
@@ -478,8 +490,8 @@ export async function payBill(params: {
     try {
       const { rows } = await client.query<PaymentDbRow>(
         `INSERT INTO ap_payments (business_id, location_id, supplier_id, payment_date, method, amount, memo, created_by,
-                                  idempotency_key, settlement_account_id, voucher_number)
-         VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10, $11)
+                                  idempotency_key, cash_account_id, bank_reference, voucher_number)
+         VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING ${PAYMENT_RETURNING}`,
         [
           params.businessId,
@@ -491,12 +503,16 @@ export async function payBill(params: {
           params.memo?.trim() || null,
           params.createdBy,
           idempotencyKey,
-          settlementAccountId,
+          cash.chosen ? cash.accountId : null,
+          bankReference,
           voucherNumber,
         ],
       );
       payment = rows[0];
     } catch (err) {
+      // Two simultaneous submissions with the same key both passed the fast
+      // path above; the unique index admits exactly one. The loser answers
+      // the winner's row rather than a 500.
       if (
         idempotencyKey &&
         (err as { code?: string; constraint?: string }).code === "23505" &&
@@ -522,7 +538,7 @@ export async function payBill(params: {
       postingKind: "ap_payment",
       lines: [
         { accountId: apAccount, debit: params.amount, credit: 0 },
-        { accountId: settlementAccountId, debit: 0, credit: params.amount },
+        { accountId: cashAccountId, debit: 0, credit: params.amount },
       ],
     });
 
@@ -548,8 +564,8 @@ export interface ApPaymentDetail extends ApPayment {
   locationName: string | null;
   createdByName: string | null;
   createdAt: string;
-  settlementAccountCode: string | null;
-  settlementAccountName: string | null;
+  /** The named cash/bank/clearing account; null = the method's default took it. */
+  cashAccount: { code: string; name: string } | null;
   entryId: string | null;
   reversalDate: string | null;
   reversedByName: string | null;
@@ -567,12 +583,13 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
     location_id: string | null;
     location_name: string | null;
     payment_date: string;
-    method: SettlementMethod;
+    method: VoucherMethod;
     amount: string;
     memo: string | null;
-    settlement_account_id: string | null;
-    settlement_account_code: string | null;
-    settlement_account_name: string | null;
+    cash_account_id: string | null;
+    bank_reference: string | null;
+    cash_account_code: string | null;
+    cash_account_name: string | null;
     idempotency_key: string | null;
     voucher_number: string | null;
     created_by_name: string | null;
@@ -589,7 +606,8 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
             s.party_id AS supplier_party_id,
             p.location_id, l.name AS location_name,
             p.payment_date::text AS payment_date, p.method, p.amount::text AS amount, p.memo,
-            p.settlement_account_id, a.code AS settlement_account_code, a.name AS settlement_account_name,
+            p.cash_account_id, p.bank_reference,
+            ca.code AS cash_account_code, ca.name AS cash_account_name,
             p.idempotency_key, p.voucher_number::text AS voucher_number,
             u.full_name AS created_by_name, p.created_at::text AS created_at,
             je.id::text AS entry_id,
@@ -600,7 +618,7 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
        LEFT JOIN suppliers s ON s.id = p.supplier_id
        LEFT JOIN parties pa ON pa.id = s.party_id
        LEFT JOIN locations l ON l.id = p.location_id
-       LEFT JOIN accounts a ON a.id = p.settlement_account_id
+       LEFT JOIN accounts ca ON ca.id = p.cash_account_id
        LEFT JOIN users u ON u.id = p.created_by
        LEFT JOIN users ru ON ru.id = p.reversed_by
        LEFT JOIN journal_entries je
@@ -624,9 +642,11 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
     method: row.method,
     amount: Number(row.amount),
     memo: row.memo,
-    settlementAccountId: row.settlement_account_id,
-    settlementAccountCode: row.settlement_account_code,
-    settlementAccountName: row.settlement_account_name,
+    cashAccountId: row.cash_account_id,
+    bankReference: row.bank_reference,
+    cashAccount: row.cash_account_code
+      ? { code: row.cash_account_code, name: row.cash_account_name ?? "" }
+      : null,
     idempotencyKey: row.idempotency_key,
     voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
     createdByName: row.created_by_name,

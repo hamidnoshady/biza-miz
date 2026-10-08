@@ -6,14 +6,14 @@ import { ArError, MissingLedgerAccountError, receivePayment } from "@/lib/ar-ser
 import { listReceiptsPage, VoucherListError } from "@/lib/installments-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
-import { isSettlementMethod, SETTLEMENT_METHODS } from "@/lib/voucher-shared";
 import { buildCsv, sanitizeCsvText } from "@/lib/csv-safe";
+import { isVoucherMethod, PayablesInputError, VOUCHER_METHOD_LABELS, VOUCHER_METHODS } from "@/lib/payables-input";
 
 /**
  * The «دریافت‌ها» ledger slice — receipt vouchers, newest first, keyset-
  * paginated. Issue #829: the old version returned the business's entire
  * history; callers now page with `limit` + `cursor` and filter with
- * `q/dateFrom/dateTo/method/partyId/locationId/settlementAccountId/
+ * `q/dateFrom/dateTo/method/partyId/locationId/cashAccountId/
  * minAmount/maxAmount/status`. `?format=csv` exports the filtered set
  * (formula-safe, capped) instead of a page.
  */
@@ -34,7 +34,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     method: params.get("method") ?? undefined,
     partyId: params.get("partyId") ?? params.get("customerId") ?? undefined,
     locationId: params.get("locationId") ?? undefined,
-    settlementAccountId: params.get("settlementAccountId") ?? undefined,
+    cashAccountId: params.get("cashAccountId") ?? undefined,
     minAmount: parseAmount("minAmount"),
     maxAmount: parseAmount("maxAmount"),
     status: params.get("status") ?? undefined,
@@ -49,12 +49,15 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     try {
       const page = await listReceiptsPage(session.businessId, { ...filters, limit: 5000 });
       const csv = buildCsv(
-        ["شماره سند", "تاریخ", "مشتری", "روش", "مبلغ (ریال)", "شرح", "وضعیت"],
+        ["شماره سند", "تاریخ", "مشتری", "روش", "شماره پیگیری", "مبلغ (ریال)", "شرح", "وضعیت"],
         page.rows.map((r) => [
           r.voucherNumber === null ? "" : String(r.voucherNumber),
           r.date,
           sanitizeCsvText(r.partyName),
-          r.method,
+          sanitizeCsvText(
+            r.cashAccount ? `${VOUCHER_METHOD_LABELS[r.method]} · ${r.cashAccount.name}` : VOUCHER_METHOD_LABELS[r.method],
+          ),
+          sanitizeCsvText(r.bankReference ?? ""),
           String(r.amount),
           sanitizeCsvText(r.memo ?? ""),
           r.reversedAt ? "باطل‌شده" : "فعال",
@@ -87,7 +90,10 @@ interface ReceiptBody {
   amount?: number;
   receiptDate?: string;
   memo?: string;
-  settlementAccountId?: string;
+  /** The cash/bank/clearing account (an active account of the chosen method); omitted = the method's default. */
+  cashAccountId?: string | null;
+  /** The bank's tracking/reference number. */
+  bankReference?: string | null;
   idempotencyKey?: string;
 }
 
@@ -105,8 +111,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const customerId = body.customerId?.trim();
   if (!customerId) return NextResponse.json({ error: "customer_required" }, { status: 400 });
-  if (!isSettlementMethod(body.method)) {
-    return NextResponse.json({ error: "invalid_method", allowed: [...SETTLEMENT_METHODS] }, { status: 400 });
+  if (!isVoucherMethod(body.method)) {
+    return NextResponse.json({ error: "invalid_method", allowed: [...VOUCHER_METHODS] }, { status: 400 });
   }
   const amount = Number(body.amount);
   if (!Number.isSafeInteger(amount) || amount <= 0) {
@@ -131,15 +137,17 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       amount,
       receiptDate,
       memo: body.memo,
-      settlementAccountId: body.settlementAccountId?.trim() || null,
       idempotencyKey: body.idempotencyKey,
       createdBy: session.sub,
+      cashAccountId: typeof body.cashAccountId === "string" ? body.cashAccountId : null,
+      bankReference: typeof body.bankReference === "string" ? body.bankReference : null,
     });
     // An idempotent replay answers the original voucher with 200 so the client
     // can tell it did not create a second one; a fresh posting is 201.
     return NextResponse.json({ receipt }, { status: receipt.duplicate ? 200 : 201 });
   } catch (err) {
     if (err instanceof ArError) return NextResponse.json({ error: err.message }, { status: err.status });
+    if (err instanceof PayablesInputError) return NextResponse.json({ error: err.code }, { status: 400 });
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }

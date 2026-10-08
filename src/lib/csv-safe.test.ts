@@ -32,13 +32,13 @@ describe("quoteCsvCell", () => {
 });
 
 describe("buildCsv", () => {
-  it("quotes cells", () => {
+  it("quotes cells and joins rows CRLF with a BOM, like every other export", () => {
     const csv = buildCsv(["شرح", "مبلغ"], [["گفت \"سلام\"", "100"]]);
-    expect(csv).toBe('"شرح","مبلغ"\n"گفت ""سلام""","100"');
+    expect(csv).toBe('﻿"شرح","مبلغ"\r\n"گفت ""سلام""","100"\r\n');
   });
 
   it("keeps a sanitized formula cell inert", () => {
     const csv = buildCsv(["شرح"], [[sanitizeCsvText("=1+1")]]);
-    expect(csv).toBe('"شرح"\n"\'=1+1"');
+    expect(csv).toBe('﻿"شرح"\r\n"\'=1+1"\r\n');
   });
 });

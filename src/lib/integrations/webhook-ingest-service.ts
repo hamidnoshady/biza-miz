@@ -36,6 +36,7 @@ import {
 } from "./webhook-signature";
 import { wooAmountToRial } from "./woo-money";
 import { writeIntegrationAudit } from "./audit";
+import { insertNewMappingOnClient, lockRemoteIdentity } from "./mapping-service";
 import { getBusinessIndustry } from "../industry-guard";
 import { connectionLocationId, resolveOrderCustomerId, upsertCustomerFromWoo, upsertProductFromWoo } from "./sync-service";
 import { wooLineCandidateIds, shouldImportWooOrder } from "./woo-catalogue";
@@ -543,7 +544,25 @@ async function ensureVariationStub(
 ): Promise<string | null> {
   const variationId = Number(line.variation_id ?? 0) || 0;
   if (variationId <= 0) return null;
+  // A savepoint, so a failure here really is best-effort: without it a failed
+  // statement aborted the whole order transaction despite the catch below.
+  await db.query("SAVEPOINT variation_stub");
   try {
+    // Audit F13: under the identity lock, and re-reading the mapping, so the
+    // same variation on a second line of this order — or a concurrent product
+    // sync of it — reuses the one row instead of minting a twin and
+    // re-pointing the mapping at it.
+    const mapped = await lockRemoteIdentity(
+      db,
+      connection.business_id,
+      connection.id,
+      "product",
+      String(variationId),
+    );
+    if (mapped) {
+      await db.query("RELEASE SAVEPOINT variation_stub");
+      return mapped;
+    }
     const { rows } = await db.query<{ id: string }>(
       `INSERT INTO items (location_id, parent_item_id, name, sku, kind, tracking)
        VALUES ($1, $2, $3, $4, 'variant_child', 'none') RETURNING id`,
@@ -554,17 +573,13 @@ async function ensureVariationStub(
       `INSERT INTO item_stock (item_id, quantity, unit_price) VALUES ($1, 0, $2)`,
       [itemId, priceRial > 0n ? Number(priceRial) : null],
     );
-    await db.query(
-      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
-       VALUES ($1, $2, 'product', $3, $4)
-       ON CONFLICT (connection_id, entity_type, remote_id)
-       DO UPDATE SET local_id = EXCLUDED.local_id, updated_at = now()`,
-      [connection.business_id, connection.id, String(variationId), itemId],
-    );
+    await insertNewMappingOnClient(db, connection.business_id, connection.id, "product", String(variationId), itemId);
+    await db.query("RELEASE SAVEPOINT variation_stub");
     return itemId;
   } catch {
-    // A duplicate SKU, a constraint from an extension — none of it is worth
+    // A constraint from an extension, a lock conflict — none of it is worth
     // failing the order over.
+    await db.query("ROLLBACK TO SAVEPOINT variation_stub");
     return null;
   }
 }

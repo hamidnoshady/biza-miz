@@ -16,13 +16,9 @@ import { Button } from "@/components/ui/button";
 import { FilterChip } from "@/app/dashboard/filters";
 import { fmtJalali, OverlayDialog } from "./ledger-ui";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
-import {
-  SETTLEMENT_METHOD_LABELS,
-  SettlementFormFields,
-  useIdempotencyKey,
-  type SettlementMethod,
-} from "./settlement-form";
+import { VoucherFormFields, useIdempotencyKey } from "./settlement-form";
 import { voucherReference } from "@/lib/voucher-shared";
+import { VOUCHER_METHOD_LABELS, type VoucherMethod } from "@/lib/payables-input";
 
 /**
  * «دریافت و پرداخت» — the voucher ledger slice. The reference software keeps
@@ -41,16 +37,27 @@ import { voucherReference } from "@/lib/voucher-shared";
 interface Voucher {
   id: string;
   date: string;
-  method: SettlementMethod;
+  method: VoucherMethod;
   amount: number;
   memo: string | null;
   partyName: string;
   voucherNumber: number | null;
   reversedAt: string | null;
+  /** The bank's tracking number, when one was recorded. */
+  bankReference: string | null;
+  /** The cash/bank/clearing account named on the voucher; null = the method's default account. */
+  cashAccount: { code: string; name: string } | null;
+}
+
+/** «بانکی · بانک ملت» — the method, plus the account when the voucher named one. */
+function methodText(r: { method: VoucherMethod; cashAccount: { code: string; name: string } | null }): string {
+  return r.cashAccount
+    ? `${VOUCHER_METHOD_LABELS[r.method]} · ${r.cashAccount.name}`
+    : VOUCHER_METHOD_LABELS[r.method];
 }
 
 type Side = "receipts" | "payments";
-type MethodFilter = "all" | SettlementMethod;
+type MethodFilter = "all" | VoucherMethod;
 type StatusFilter = "all" | "active" | "reversed";
 
 const STATUS_LABELS: Record<Exclude<StatusFilter, "all">, string> = {
@@ -275,8 +282,8 @@ export function ReceiptsPaymentsSection({
           <input
             type="search"
             className={`${inputClass} h-11 ms-auto w-40 sm:w-56`}
-            placeholder="جست‌وجوی شخص یا شرح…"
-            aria-label="جست‌وجوی شخص یا شرح"
+            placeholder="جست‌وجوی شخص، شرح یا شماره پیگیری…"
+            aria-label="جست‌وجوی شخص، شرح یا شماره پیگیری"
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
@@ -287,7 +294,7 @@ export function ReceiptsPaymentsSection({
             <FilterChip dense selected={methodFilter === "all"} onClick={() => setMethodFilter("all")}>همه روش‌ها</FilterChip>
             <FilterChip dense selected={methodFilter === "cash"} onClick={() => setMethodFilter("cash")}>نقدی</FilterChip>
             <FilterChip dense selected={methodFilter === "bank"} onClick={() => setMethodFilter("bank")}>بانکی</FilterChip>
-            <FilterChip dense selected={methodFilter === "clearing"} onClick={() => setMethodFilter("clearing")}>اسناد در جریان وصول</FilterChip>
+            <FilterChip dense selected={methodFilter === "clearing"} onClick={() => setMethodFilter("clearing")}>در جریان وصول</FilterChip>
           </div>
           <div className="flex gap-2" role="group" aria-label="وضعیت سند">
             <FilterChip dense selected={statusFilter === "all"} onClick={() => setStatusFilter("all")}>همه وضعیت‌ها</FilterChip>
@@ -328,6 +335,7 @@ export function ReceiptsPaymentsSection({
                   <Th>شخص</Th>
                   <Th>شرح</Th>
                   <Th>روش</Th>
+                  <Th>شماره پیگیری</Th>
                   <Th>تاریخ</Th>
                   <Th>مبلغ</Th>
                   <Th>وضعیت</Th>
@@ -342,7 +350,8 @@ export function ReceiptsPaymentsSection({
                       <Td muted>{r.voucherNumber != null ? toPersianDigits(voucherReference(side === "receipts" ? "receipt" : "payment", r.voucherNumber)) : "—"}</Td>
                       <Td className="max-w-48 truncate font-medium" title={r.partyName}>{r.partyName}</Td>
                       <Td muted className="max-w-64 truncate" title={r.memo ?? undefined}>{r.memo ?? "—"}</Td>
-                      <Td muted>{SETTLEMENT_METHOD_LABELS[r.method]}</Td>
+                      <Td muted className="max-w-48 truncate" title={methodText(r)}>{methodText(r)}</Td>
+                      <Td muted nowrap dir="ltr">{r.bankReference ? toPersianDigits(r.bankReference) : "—"}</Td>
                       <Td nowrap muted>{fmtJalali(r.date)}</Td>
                       <Td nowrap className="font-semibold">{money.format(r.amount)}</Td>
                       <Td muted>{r.reversedAt ? STATUS_LABELS.reversed : STATUS_LABELS.active}</Td>
@@ -367,7 +376,8 @@ export function ReceiptsPaymentsSection({
                     </div>
                     <p className="mt-2 border-t border-border pt-2 text-xs text-muted-foreground">
                       {r.voucherNumber != null ? `${toPersianDigits(voucherReference(side === "receipts" ? "receipt" : "payment", r.voucherNumber))} · ` : ""}
-                      {fmtJalali(r.date)} · {SETTLEMENT_METHOD_LABELS[r.method]}
+                      {fmtJalali(r.date)} · {methodText(r)}
+                      {r.bankReference ? ` · پیگیری ${toPersianDigits(r.bankReference)}` : ""}
                       {r.reversedAt ? ` · ${STATUS_LABELS.reversed}` : ""}
                     </p>
                   </article>
@@ -423,8 +433,10 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
   const [directoryKey, setDirectoryKey] = useState(0);
   const [partyId, setPartyId] = useState("");
   const [amount, setAmount] = useState("");
-  const [method, setMethod] = useState<SettlementMethod>("cash");
-  const [settlementAccountId, setSettlementAccountId] = useState("");
+  const [method, setMethod] = useState<VoucherMethod>("cash");
+  /** "" = the method's default account. */
+  const [cashAccountId, setCashAccountId] = useState("");
+  const [bankReference, setBankReference] = useState("");
   const [date, setDate] = useState("");
   const [memo, setMemo] = useState("");
   const [busy, setBusy] = useState(false);
@@ -466,6 +478,14 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
     };
   }, [side, directoryKey]);
 
+  function chooseMethod(next: VoucherMethod) {
+    setMethod(next);
+    // An account belongs to one method; a reference number only to a bank or
+    // clearing transfer — cash carries none.
+    setCashAccountId("");
+    if (next === "cash") setBankReference("");
+  }
+
   async function submit() {
     if (!partyId) {
       setError("شخص را انتخاب کنید.");
@@ -485,26 +505,18 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
     setBusy(true);
     setError("");
     const url = side === "receipts" ? "/api/ledger/ar/receipts" : "/api/ledger/ap/payments";
+    const common = {
+      amount: rial,
+      method,
+      memo: memo.trim() || undefined,
+      cashAccountId: cashAccountId || undefined,
+      bankReference: bankReference.trim() || undefined,
+      idempotencyKey,
+    };
     const body =
       side === "receipts"
-        ? {
-            customerId: partyId,
-            amount: rial,
-            method,
-            settlementAccountId: settlementAccountId || undefined,
-            idempotencyKey,
-            memo: memo.trim() || undefined,
-            receiptDate: date || undefined,
-          }
-        : {
-            supplierId: partyId,
-            amount: rial,
-            method,
-            settlementAccountId: settlementAccountId || undefined,
-            idempotencyKey,
-            memo: memo.trim() || undefined,
-            paymentDate: date || undefined,
-          };
+        ? { ...common, customerId: partyId, receiptDate: date || undefined }
+        : { ...common, supplierId: partyId, paymentDate: date || undefined };
     const { ok, data } = await api<{ error?: string }>(url, { method: "POST", body: JSON.stringify(body) });
     setBusy(false);
     if (ok) onCreated();
@@ -572,13 +584,16 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
                 </button>
               </div>
             ) : null}
-            <SettlementFormFields
+            <VoucherFormFields
               amount={amount}
               onAmountChange={setAmount}
               method={method}
-              onMethodChange={setMethod}
-              settlementAccountId={settlementAccountId}
-              onSettlementAccountChange={setSettlementAccountId}
+              onMethodChange={chooseMethod}
+              cashAccountId={cashAccountId}
+              onCashAccountChange={setCashAccountId}
+              showBankReference
+              bankReference={bankReference}
+              onBankReferenceChange={setBankReference}
               date={date}
               onDateChange={setDate}
               memo={memo}
@@ -601,7 +616,7 @@ interface VoucherDetail {
   id: string;
   receiptDate?: string;
   paymentDate?: string;
-  method: SettlementMethod;
+  method: VoucherMethod;
   amount: number;
   memo: string | null;
   voucherNumber: number | null;
@@ -610,8 +625,8 @@ interface VoucherDetail {
   locationName: string | null;
   createdByName: string | null;
   createdAt: string;
-  settlementAccountCode: string | null;
-  settlementAccountName: string | null;
+  bankReference: string | null;
+  cashAccount: { code: string; name: string } | null;
   entryId: string | null;
   reversedAt: string | null;
   reversalEntryId: string | null;
@@ -620,7 +635,7 @@ interface VoucherDetail {
 }
 
 /**
- * One voucher's drill-down: who, how much, through which settlement account,
+ * One voucher's drill-down: who, how much, through which cash account,
  * posted as which journal entry — and, when reversed, which entry undid it and
  * who did it. Reversal posts a mirror entry dated today; the voucher row
  * itself is never deleted.
@@ -721,16 +736,14 @@ function VoucherDetailDialog({
               </div>
               <div className="flex justify-between gap-3">
                 <dt className="text-muted-foreground">روش</dt>
-                <dd>{SETTLEMENT_METHOD_LABELS[detail.method]}</dd>
+                <dd>{methodText(detail)}</dd>
               </div>
-              <div className="flex justify-between gap-3">
-                <dt className="text-muted-foreground">حساب تسویه</dt>
-                <dd>
-                  {detail.settlementAccountCode
-                    ? `${toPersianDigits(detail.settlementAccountCode)} · ${detail.settlementAccountName ?? ""}`
-                    : "—"}
-                </dd>
-              </div>
+              {detail.bankReference ? (
+                <div className="flex justify-between gap-3">
+                  <dt className="text-muted-foreground">شماره پیگیری</dt>
+                  <dd dir="ltr">{toPersianDigits(detail.bankReference)}</dd>
+                </div>
+              ) : null}
               <div className="flex justify-between gap-3">
                 <dt className="text-muted-foreground">تاریخ سند</dt>
                 <dd>{date ? fmtJalali(date) : "—"}</dd>

@@ -14,10 +14,10 @@
  * aging.test.ts covers. Covered here by integration/ar.integration.test.ts.
  *
  * Issue #829 hardening: idempotent creation (per-business idempotency key),
- * explicit settlement accounts (cash → 1100, bank → 1110, clearing → 1120),
- * canonical customer validation, and first-class source-level reversal that
- * keeps A/R party attribution (same source_type/source_id, `*_reversal`
- * posting kind).
+ * the cash/bank/clearing account the money moved through (cash → 1100,
+ * bank → 1110, clearing → 1120), canonical customer validation, and
+ * first-class source-level reversal that keeps A/R party attribution (same
+ * source_type/source_id, `*_reversal` posting kind).
  */
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
@@ -29,15 +29,14 @@ import { isValidIsoDate } from "./iso-date";
 import { accountIdsByCode, MissingLedgerAccountError, postExactMirrorEntry, postJournalEntry } from "./ledger-service";
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_CUSTOMER_KEY, type AgingSummary } from "./aging";
 import { toPersianDigits } from "./digits";
-import { isSettlementMethod, type SettlementMethod } from "./voucher-shared";
-import { resolveSettlementAccount, SettlementAccountError } from "./settlement-accounts";
 import {
   enqueueHolooReceiptForArReceipt,
   enqueueHolooReversalForArReceipt,
 } from "./integrations/holoo/outbox-producer";
+import { isVoucherMethod, normalizeBankReference, type VoucherMethod } from "./payables-input";
+import { resolveVoucherCashAccount } from "./voucher-cash-account";
 
 export { MissingLedgerAccountError };
-export type { SettlementMethod };
 
 /** Group key for AR lines that carry no customer attribution. Defined in the pure `aging` module so client components can import it without pulling in `pg`; re-exported here because this is where callers expect to find it. */
 export { UNKNOWN_CUSTOMER_KEY };
@@ -419,11 +418,16 @@ export interface ArReceipt {
   id: string;
   customerId: string;
   receiptDate: string;
-  method: SettlementMethod;
+  method: VoucherMethod;
   amount: number;
   memo: string | null;
-  /** The explicit settlement account the voucher posted against (migration 0212). */
-  settlementAccountId: string | null;
+  /**
+   * The cash/bank/clearing account named on the voucher (migration 0212);
+   * null = the method's default account took it.
+   */
+  cashAccountId: string | null;
+  /** The bank's tracking number, when one was recorded. */
+  bankReference: string | null;
   /** Client idempotency key, when the submission carried one. */
   idempotencyKey: string | null;
   /** Stable per-business document number. */
@@ -442,10 +446,11 @@ interface ReceiptDbRow {
   id: string;
   customer_id: string;
   receipt_date: string;
-  method: SettlementMethod;
+  method: VoucherMethod;
   amount: string;
   memo: string | null;
-  settlement_account_id: string | null;
+  cash_account_id: string | null;
+  bank_reference: string | null;
   idempotency_key: string | null;
   voucher_number: string | null;
   reversed_at: string | null;
@@ -460,7 +465,8 @@ function toReceipt(row: ReceiptDbRow): ArReceipt {
     method: row.method,
     amount: Number(row.amount),
     memo: row.memo,
-    settlementAccountId: row.settlement_account_id,
+    cashAccountId: row.cash_account_id,
+    bankReference: row.bank_reference,
     idempotencyKey: row.idempotency_key,
     voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
     reversedAt: row.reversed_at,
@@ -469,7 +475,7 @@ function toReceipt(row: ReceiptDbRow): ArReceipt {
 }
 
 const RECEIPT_RETURNING = `id, customer_id, receipt_date::text AS receipt_date, method, amount::text AS amount, memo,
-  settlement_account_id, idempotency_key, voucher_number::text AS voucher_number,
+  cash_account_id, bank_reference, idempotency_key, voucher_number::text AS voucher_number,
   reversed_at::text AS reversed_at, reversal_entry_id::text AS reversal_entry_id`;
 
 async function findReceiptByIdempotencyKey(
@@ -511,10 +517,9 @@ function normalizeIdempotencyKey(value: unknown): string | null {
 }
 
 /**
- * Records a customer paying down their AR balance: Debit settlement account
- * (cash/bank/clearing), Credit Accounts Receivable, in the same transaction as
- * the ar_receipts row both reference (source_type='ar_receipt',
- * source_id=receipt.id).
+ * Records a customer paying down their AR balance: Debit cash/bank/clearing,
+ * Credit Accounts Receivable, in the same transaction as the ar_receipts row
+ * both reference (source_type='ar_receipt', source_id=receipt.id).
  *
  * Idempotent per business on `idempotencyKey`: a retry with the same key
  * returns the original receipt instead of posting a second one.
@@ -523,17 +528,19 @@ export async function receivePayment(params: {
   businessId: string;
   locationId: string | null;
   customerId: string;
-  method: SettlementMethod;
+  method: VoucherMethod;
   amount: number;
   receiptDate?: string | null;
   memo?: string | null;
   createdBy: string | null;
-  /** Explicit settlement account; when omitted the method's well-known account is used. */
-  settlementAccountId?: string | null;
   /** Client-generated key per logical voucher submission (retry-safe). */
   idempotencyKey?: string | null;
   /** Holoo imports create local receipts but must not push them back to Holoo. */
   skipHolooPush?: boolean;
+  /** The cash/bank/clearing account the money went into; null = the method's default account. */
+  cashAccountId?: string | null;
+  /** The bank's tracking/reference number. */
+  bankReference?: string | null;
 }): Promise<ArReceipt> {
   if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
     throw new ArError("invalid_amount");
@@ -545,7 +552,7 @@ export async function receivePayment(params: {
   // Same story for a date off the wire: reject it here, in the error
   // vocabulary the API answers with, rather than as Postgres's parse error.
   if (params.receiptDate != null && !isValidIsoDate(params.receiptDate)) throw new ArError("invalid_date");
-  if (!isSettlementMethod(params.method)) throw new ArError("invalid_method");
+  if (!isVoucherMethod(params.method)) throw new ArError("invalid_method");
   const idempotencyKey = normalizeIdempotencyKey(params.idempotencyKey);
 
   /*
@@ -560,6 +567,8 @@ export async function receivePayment(params: {
    * never a UTC date slice.
    */
   const receiptDate = params.receiptDate ?? (await businessToday(params.businessId));
+  // Throws PayablesInputError («invalid_bank_reference»), which the route answers as a 400.
+  const bankReference = normalizeBankReference(params.bankReference);
 
   const client = await getPool().connect();
   try {
@@ -587,17 +596,12 @@ export async function receivePayment(params: {
     );
     if (!customerRows[0]) throw new ArError("customer_not_found", 404);
 
-    let settlementAccountId: string;
-    let arAccount: string;
-    try {
-      const settlement = await resolveSettlementAccount(client, params.businessId, params.method, params.settlementAccountId);
-      settlementAccountId = settlement.id;
-      const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsReceivable]);
-      arAccount = accounts.get(WELL_KNOWN_CODES.accountsReceivable)!;
-    } catch (err) {
-      if (err instanceof SettlementAccountError) throw new ArError(err.message, err.status);
-      throw err;
-    }
+    const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsReceivable]);
+    const arAccount = accounts.get(WELL_KNOWN_CODES.accountsReceivable)!;
+    // Throws PayablesInputError (invalid_cash_account /
+    // cash_account_method_mismatch), which the route answers as a 400.
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId);
+    const cashAccountId = cash.accountId;
 
     const voucherNumber = await nextReceiptVoucherNumber(client, params.businessId);
 
@@ -605,8 +609,8 @@ export async function receivePayment(params: {
     try {
       const { rows } = await client.query<ReceiptDbRow>(
         `INSERT INTO ar_receipts (business_id, location_id, customer_id, receipt_date, method, amount, memo, created_by,
-                                 idempotency_key, settlement_account_id, voucher_number)
-         VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10, $11)
+                                 idempotency_key, cash_account_id, bank_reference, voucher_number)
+         VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING ${RECEIPT_RETURNING}`,
         [
           params.businessId,
@@ -618,7 +622,8 @@ export async function receivePayment(params: {
           params.memo?.trim() || null,
           params.createdBy,
           idempotencyKey,
-          settlementAccountId,
+          cash.chosen ? cash.accountId : null,
+          bankReference,
           voucherNumber,
         ],
       );
@@ -651,7 +656,7 @@ export async function receivePayment(params: {
       createdBy: params.createdBy,
       postingKind: "ar_receipt",
       lines: [
-        { accountId: settlementAccountId, debit: params.amount, credit: 0 },
+        { accountId: cashAccountId, debit: params.amount, credit: 0 },
         { accountId: arAccount, debit: 0, credit: params.amount },
       ],
     });
@@ -677,8 +682,8 @@ export interface ArReceiptDetail extends ArReceipt {
   locationName: string | null;
   createdByName: string | null;
   createdAt: string;
-  settlementAccountCode: string | null;
-  settlementAccountName: string | null;
+  /** The named cash/bank/clearing account; null = the method's default took it. */
+  cashAccount: { code: string; name: string } | null;
   /** The live journal entry this voucher posted (null for legacy rows predating the posting). */
   entryId: string | null;
   reversalDate: string | null;
@@ -696,12 +701,13 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
     location_id: string | null;
     location_name: string | null;
     receipt_date: string;
-    method: SettlementMethod;
+    method: VoucherMethod;
     amount: string;
     memo: string | null;
-    settlement_account_id: string | null;
-    settlement_account_code: string | null;
-    settlement_account_name: string | null;
+    cash_account_id: string | null;
+    bank_reference: string | null;
+    cash_account_code: string | null;
+    cash_account_name: string | null;
     idempotency_key: string | null;
     voucher_number: string | null;
     created_by_name: string | null;
@@ -716,7 +722,8 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
             COALESCE(p.name, 'بدون مشتری مشخص') AS customer_name, p.phone AS customer_phone,
             r.location_id, l.name AS location_name,
             r.receipt_date::text AS receipt_date, r.method, r.amount::text AS amount, r.memo,
-            r.settlement_account_id, a.code AS settlement_account_code, a.name AS settlement_account_name,
+            r.cash_account_id, r.bank_reference,
+            ca.code AS cash_account_code, ca.name AS cash_account_name,
             r.idempotency_key, r.voucher_number::text AS voucher_number,
             u.full_name AS created_by_name, r.created_at::text AS created_at,
             je.id::text AS entry_id,
@@ -726,7 +733,7 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
        FROM ar_receipts r
        LEFT JOIN parties p ON p.id = r.customer_id
        LEFT JOIN locations l ON l.id = r.location_id
-       LEFT JOIN accounts a ON a.id = r.settlement_account_id
+       LEFT JOIN accounts ca ON ca.id = r.cash_account_id
        LEFT JOIN users u ON u.id = r.created_by
        LEFT JOIN users ru ON ru.id = r.reversed_by
        LEFT JOIN journal_entries je
@@ -749,9 +756,11 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
     method: row.method,
     amount: Number(row.amount),
     memo: row.memo,
-    settlementAccountId: row.settlement_account_id,
-    settlementAccountCode: row.settlement_account_code,
-    settlementAccountName: row.settlement_account_name,
+    cashAccountId: row.cash_account_id,
+    bankReference: row.bank_reference,
+    cashAccount: row.cash_account_code
+      ? { code: row.cash_account_code, name: row.cash_account_name ?? "" }
+      : null,
     idempotencyKey: row.idempotency_key,
     voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
     createdByName: row.created_by_name,

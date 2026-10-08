@@ -245,7 +245,7 @@ describe("receivePayment", () => {
     expect(Number(rows[0].debit)).toBe(100_000);
   });
 
-  it("posts to an explicit settlement account when one is given", async () => {
+  it("posts to an explicit cash account when one is given", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await postCreditOrder("2025-04-01", customer.id, 500_000);
     const { rows: subRows } = await db.query<{ id: string }>(
@@ -259,11 +259,11 @@ describe("receivePayment", () => {
       locationId: biz.locationId,
       customerId: customer.id,
       method: "cash",
-      settlementAccountId: subRows[0].id,
+      cashAccountId: subRows[0].id,
       amount: 100_000,
       createdBy: user.id,
     });
-    expect(receipt.settlementAccountId).toBe(subRows[0].id);
+    expect(receipt.cashAccountId).toBe(subRows[0].id);
 
     const { rows } = await db.query<{ debit: string }>(
       `SELECT COALESCE(SUM(debit),0) AS debit FROM journal_lines WHERE account_id = $1`,
@@ -272,7 +272,7 @@ describe("receivePayment", () => {
     expect(Number(rows[0].debit)).toBe(100_000);
   });
 
-  it("rejects a settlement account outside the 11xx cash family", async () => {
+  it("rejects a cash account that is not a cash/bank/clearing account", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await expect(
       arService.receivePayment({
@@ -280,11 +280,11 @@ describe("receivePayment", () => {
         locationId: biz.locationId,
         customerId: customer.id,
         method: "cash",
-        settlementAccountId: acct.accountsReceivable,
+        cashAccountId: acct.accountsReceivable,
         amount: 10_000,
         createdBy: user.id,
       }),
-    ).rejects.toThrow("invalid_settlement_account");
+    ).rejects.toThrow("invalid_cash_account");
   });
 
   it("is idempotent on the client key: a retry returns the original voucher, not a second posting", async () => {

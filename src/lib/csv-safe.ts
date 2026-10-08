@@ -51,9 +51,10 @@ export function csvRow(cells: readonly string[]): string {
 }
 
 /**
- * Builds a complete CSV document (LF-joined, no trailing newline).
+ * Builds a complete CSV document: BOM + CRLF rows with a trailing CRLF, like
+ * every other export in the repo (Excel on Windows mis-reads a bare LF).
  * Text cells must already be sanitized by the caller; this only quotes.
  */
 export function buildCsv(head: readonly string[], body: readonly (readonly string[])[]): string {
-  return [head, ...body].map(csvRow).join("\n");
+  return `\uFEFF${[head, ...body].map(csvRow).join("\r\n")}\r\n`;
 }

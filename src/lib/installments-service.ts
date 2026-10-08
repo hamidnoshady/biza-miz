@@ -9,14 +9,13 @@ import { isValidIsoDate } from "./iso-date";
 import {
   decodeVoucherCursor,
   encodeVoucherCursor,
-  isSettlementMethod,
-  settlementCodeForMethod,
   VOUCHER_PAGE_SIZE,
   VOUCHER_PAGE_SIZE_MAX,
-  type SettlementMethod,
   type VoucherCursor,
   type VoucherListFilters,
 } from "./voucher-shared";
+import { isVoucherMethod, type VoucherMethod } from "./payables-input";
+import { resolveVoucherCashAccount } from "./voucher-cash-account";
 
 /**
  * Installment schedules (اقساط) — see migrations/0140_installments.sql for the
@@ -58,7 +57,7 @@ export interface InstallmentItemRow {
   dueDate: string;
   amount: number;
   paidAt: string | null;
-  paidMethod: SettlementMethod | null;
+  paidMethod: VoucherMethod | null;
   paidMemo: string | null;
 }
 
@@ -463,7 +462,7 @@ export async function getInstallmentPlan(businessId: string, planId: string): Pr
     due_date: string;
     amount: string;
     paid_at: string | null;
-    paid_method: SettlementMethod | null;
+    paid_method: VoucherMethod | null;
     paid_memo: string | null;
   }>(
     `SELECT id, seq, due_date::text AS due_date, amount::text AS amount,
@@ -493,9 +492,15 @@ export async function payInstallmentItem(params: {
   locationId: string | null;
   planId: string;
   itemId: string;
-  method: SettlementMethod;
+  method: VoucherMethod;
   memo?: string | null;
   createdBy: string | null;
+  /**
+   * The cash/bank/clearing account the slice settles through; null = the
+   * method's default. Validated like a voucher's choice (business-owned,
+   * active, of the method's kind).
+   */
+  cashAccountId?: string | null;
 }): Promise<void> {
   // UUID route parameters are untrusted. Passing malformed values to a uuid
   // comparison produces a PostgreSQL parser error instead of a useful 404.
@@ -532,18 +537,21 @@ export async function payInstallmentItem(params: {
     if (item.paid_at) throw new InstallmentError("already_paid");
     const amount = Number(item.amount);
 
-    if (!isSettlementMethod(params.method)) throw new InstallmentError("invalid_method");
+    if (!isVoucherMethod(params.method)) throw new InstallmentError("invalid_method");
     const balanceAccountCode = plan.direction === "receivable"
       ? WELL_KNOWN_CODES.accountsReceivable
       : WELL_KNOWN_CODES.accountsPayable;
-    // Issue #829: installment slices share the voucher settlement vocabulary.
+    // Issue #829: installment slices share the voucher method vocabulary.
     // "bank" means money at the bank (1110); deferred/uncleared cheques use the
     // explicit "clearing" method (1120). The old bank->clearing mapping is gone.
-    const cashAccountCode = settlementCodeForMethod(params.method);
+    // Throws PayablesInputError for a foreign/inactive/wrong-kind account,
+    // which the route answers as a 400.
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId);
+    const cashAccount = cash.accountId;
+    const storedCashAccountId = cash.chosen ? cash.accountId : null;
     // Do not require the opposite subledger account: a receivable settlement
     // must not fail merely because this business has no active A/P account.
-    const accounts = await accountIdsByCode(client, params.businessId, [balanceAccountCode, cashAccountCode]);
-    const cashAccount = accounts.get(cashAccountCode)!;
+    const accounts = await accountIdsByCode(client, params.businessId, [balanceAccountCode]);
     const effectiveLocationId = plan.location_id ?? params.locationId;
     const { rows: dateRows } = await client.query<{ business_date: string }>(
       `SELECT app_business_date(now(), COALESCE(l.timezone, 'Asia/Tehran'), l.business_day_start_minutes)::text AS business_date
@@ -567,9 +575,9 @@ export async function payInstallmentItem(params: {
       );
       const { rows } = await client.query<{ id: string; receipt_date: string }>(
         `INSERT INTO ar_receipts
-           (business_id, location_id, customer_id, receipt_date, method, settlement_account_id, voucher_number, amount, memo, created_by)
+           (business_id, location_id, customer_id, receipt_date, method, cash_account_id, voucher_number, amount, memo, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id, receipt_date::text AS receipt_date`,
-        [params.businessId, effectiveLocationId, plan.party_id, paymentDate, params.method, cashAccount, voucherRows[0].voucher_number, amount, memo, params.createdBy],
+        [params.businessId, effectiveLocationId, plan.party_id, paymentDate, params.method, storedCashAccountId, voucherRows[0].voucher_number, amount, memo, params.createdBy],
       );
       await postJournalEntry(client, {
         businessId: params.businessId,
@@ -610,9 +618,9 @@ export async function payInstallmentItem(params: {
       );
       const { rows } = await client.query<{ id: string; payment_date: string }>(
         `INSERT INTO ap_payments
-           (business_id, location_id, supplier_id, payment_date, method, settlement_account_id, voucher_number, amount, memo, created_by)
+           (business_id, location_id, supplier_id, payment_date, method, cash_account_id, voucher_number, amount, memo, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id, payment_date::text AS payment_date`,
-        [params.businessId, effectiveLocationId, supplierRows[0].id, paymentDate, params.method, cashAccount, voucherRows[0].voucher_number, amount, memo, params.createdBy],
+        [params.businessId, effectiveLocationId, supplierRows[0].id, paymentDate, params.method, storedCashAccountId, voucherRows[0].voucher_number, amount, memo, params.createdBy],
       );
       await postJournalEntry(client, {
         businessId: params.businessId,
@@ -667,7 +675,7 @@ function searchPattern(q: string | undefined): string | null {
 export interface ReceiptListRow {
   id: string;
   date: string;
-  method: SettlementMethod;
+  method: VoucherMethod;
   amount: number;
   memo: string | null;
   partyId: string;
@@ -677,9 +685,9 @@ export interface ReceiptListRow {
   locationName: string | null;
   createdAt: string;
   createdByName: string | null;
-  settlementAccountId: string | null;
-  settlementAccountCode: string | null;
-  settlementAccountName: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
+  cashAccount: { code: string; name: string } | null;
   entryId: string | null;
   reversedAt: string | null;
   reversalEntryId: string | null;
@@ -688,7 +696,7 @@ export interface ReceiptListRow {
 export interface PaymentListRow {
   id: string;
   date: string;
-  method: SettlementMethod;
+  method: VoucherMethod;
   amount: number;
   memo: string | null;
   supplierId: string;
@@ -699,9 +707,9 @@ export interface PaymentListRow {
   locationName: string | null;
   createdAt: string;
   createdByName: string | null;
-  settlementAccountId: string | null;
-  settlementAccountCode: string | null;
-  settlementAccountName: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
+  cashAccount: { code: string; name: string } | null;
   entryId: string | null;
   reversedAt: string | null;
   reversalEntryId: string | null;
@@ -741,11 +749,11 @@ function parseCursor(raw: string | null | undefined): VoucherCursor | null {
 function validateListFilters(filters: VoucherListFilters): void {
   if (filters.dateFrom && !isValidIsoDate(filters.dateFrom)) throw new VoucherListError("invalid_date_from");
   if (filters.dateTo && !isValidIsoDate(filters.dateTo)) throw new VoucherListError("invalid_date_to");
-  if (filters.method && !isSettlementMethod(filters.method)) throw new VoucherListError("invalid_method");
+  if (filters.method && !isVoucherMethod(filters.method)) throw new VoucherListError("invalid_method");
   if (filters.status && filters.status !== "all" && filters.status !== "active" && filters.status !== "reversed") {
     throw new VoucherListError("invalid_status");
   }
-  for (const key of ["partyId", "locationId", "settlementAccountId"] as const) {
+  for (const key of ["partyId", "locationId", "cashAccountId"] as const) {
     const value = filters[key];
     if (value && !isUuid(value)) throw new VoucherListError(`invalid_${key}`);
   }
@@ -757,6 +765,12 @@ function validateListFilters(filters: VoucherListFilters): void {
   }
 }
 
+/**
+ * Lists receipt vouchers — the «دریافت‌ها» ledger slice — newest first with
+ * keyset pagination. Issue #829: the old version returned the business's
+ * entire receipt history in one query; the route now pages through this with
+ * a cursor so a large history never ships in one response.
+ */
 /**
  * Lists receipt vouchers — the «دریافت‌ها» ledger slice — newest first with
  * keyset pagination. Issue #829: the old version returned the business's
@@ -781,14 +795,15 @@ export async function listReceiptsPage(
   if (pattern) {
     const p = push(pattern);
     conditions.push(`(${SEARCH_FOLD.replace("%s", "COALESCE(p.name, 'بدون مشتری مشخص')")} ILIKE ${p} ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.memo, '')")} ILIKE ${p} ESCAPE '\\')`);
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.memo, '')")} ILIKE ${p} ESCAPE '\\'
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.bank_reference, '')")} ILIKE ${p} ESCAPE '\\')`);
   }
   if (params.dateFrom) conditions.push(`r.receipt_date >= ${push(params.dateFrom)}::date`);
   if (params.dateTo) conditions.push(`r.receipt_date <= ${push(params.dateTo)}::date`);
   if (params.method) conditions.push(`r.method = ${push(params.method)}`);
   if (params.partyId) conditions.push(`r.customer_id = ${push(params.partyId)}::uuid`);
   if (params.locationId) conditions.push(`r.location_id = ${push(params.locationId)}::uuid`);
-  if (params.settlementAccountId) conditions.push(`r.settlement_account_id = ${push(params.settlementAccountId)}::uuid`);
+  if (params.cashAccountId) conditions.push(`r.cash_account_id = ${push(params.cashAccountId)}::uuid`);
   if (params.minAmount !== undefined) conditions.push(`r.amount >= ${push(params.minAmount)}`);
   if (params.maxAmount !== undefined) conditions.push(`r.amount <= ${push(params.maxAmount)}`);
   if (params.status === "active") conditions.push(`r.reversed_at IS NULL`);
@@ -804,7 +819,7 @@ export async function listReceiptsPage(
   const { rows } = await query<{
     id: string;
     receipt_date: string;
-    method: SettlementMethod;
+    method: VoucherMethod;
     amount: string;
     memo: string | null;
     customer_id: string;
@@ -814,9 +829,10 @@ export async function listReceiptsPage(
     location_name: string | null;
     created_at: string;
     created_by_name: string | null;
-    settlement_account_id: string | null;
-    settlement_account_code: string | null;
-    settlement_account_name: string | null;
+    cash_account_id: string | null;
+    bank_reference: string | null;
+    cash_account_code: string | null;
+    cash_account_name: string | null;
     entry_id: string | null;
     reversed_at: string | null;
     reversal_entry_id: string | null;
@@ -826,14 +842,15 @@ export async function listReceiptsPage(
             r.voucher_number::text AS voucher_number,
             r.location_id, l.name AS location_name,
             r.created_at::text AS created_at, u.full_name AS created_by_name,
-            r.settlement_account_id, a.code AS settlement_account_code, a.name AS settlement_account_name,
+            r.cash_account_id, r.bank_reference,
+            ca.code AS cash_account_code, ca.name AS cash_account_name,
             je.id AS entry_id,
             r.reversed_at::text AS reversed_at, r.reversal_entry_id
        FROM ar_receipts r
        LEFT JOIN parties p ON p.id = r.customer_id
        LEFT JOIN locations l ON l.id = r.location_id
        LEFT JOIN users u ON u.id = r.created_by
-       LEFT JOIN accounts a ON a.id = r.settlement_account_id
+       LEFT JOIN accounts ca ON ca.id = r.cash_account_id
        LEFT JOIN journal_entries je
          ON je.business_id = r.business_id AND je.source_type = 'ar_receipt'
         AND je.source_id = r.id AND je.posting_kind = 'ar_receipt'
@@ -859,9 +876,8 @@ export async function listReceiptsPage(
       locationName: r.location_name,
       createdAt: r.created_at,
       createdByName: r.created_by_name,
-      settlementAccountId: r.settlement_account_id,
-      settlementAccountCode: r.settlement_account_code,
-      settlementAccountName: r.settlement_account_name,
+      cashAccountId: r.cash_account_id,
+      ...voucherAccountFields(r),
       entryId: r.entry_id,
       reversedAt: r.reversed_at,
       reversalEntryId: r.reversal_entry_id,
@@ -870,6 +886,18 @@ export async function listReceiptsPage(
       ? encodeVoucherCursor({ date: last.receipt_date, createdAt: last.created_at, id: last.id })
       : null,
     hasMore,
+  };
+}
+
+/**
+ * Audit F11 — the account a voucher named and the bank's reference. A voucher
+ * recorded before 0212 (or without a choice) names no account: the method's
+ * default account took it, and the screen says only the method.
+ */
+function voucherAccountFields(r: { bank_reference: string | null; cash_account_code: string | null; cash_account_name: string | null }) {
+  return {
+    bankReference: r.bank_reference,
+    cashAccount: r.cash_account_code ? { code: r.cash_account_code, name: r.cash_account_name ?? "" } : null,
   };
 }
 
@@ -894,16 +922,17 @@ export async function listPaymentsPage(
   };
 
   if (pattern) {
-    const ph = push(pattern);
-    conditions.push(`(${SEARCH_FOLD.replace("%s", "COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص')")} ILIKE ${ph} ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.memo, '')")} ILIKE ${ph} ESCAPE '\\')`);
+    const p = push(pattern);
+    conditions.push(`(${SEARCH_FOLD.replace("%s", "COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص')")} ILIKE ${p} ESCAPE '\\'
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.memo, '')")} ILIKE ${p} ESCAPE '\\'
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.bank_reference, '')")} ILIKE ${p} ESCAPE '\\')`);
   }
   if (params.dateFrom) conditions.push(`p.payment_date >= ${push(params.dateFrom)}::date`);
   if (params.dateTo) conditions.push(`p.payment_date <= ${push(params.dateTo)}::date`);
   if (params.method) conditions.push(`p.method = ${push(params.method)}`);
   if (params.partyId) conditions.push(`p.supplier_id = ${push(params.partyId)}::uuid`);
   if (params.locationId) conditions.push(`p.location_id = ${push(params.locationId)}::uuid`);
-  if (params.settlementAccountId) conditions.push(`p.settlement_account_id = ${push(params.settlementAccountId)}::uuid`);
+  if (params.cashAccountId) conditions.push(`p.cash_account_id = ${push(params.cashAccountId)}::uuid`);
   if (params.minAmount !== undefined) conditions.push(`p.amount >= ${push(params.minAmount)}`);
   if (params.maxAmount !== undefined) conditions.push(`p.amount <= ${push(params.maxAmount)}`);
   if (params.status === "active") conditions.push(`p.reversed_at IS NULL`);
@@ -919,7 +948,7 @@ export async function listPaymentsPage(
   const { rows } = await query<{
     id: string;
     payment_date: string;
-    method: SettlementMethod;
+    method: VoucherMethod;
     amount: string;
     memo: string | null;
     supplier_id: string;
@@ -930,9 +959,10 @@ export async function listPaymentsPage(
     location_name: string | null;
     created_at: string;
     created_by_name: string | null;
-    settlement_account_id: string | null;
-    settlement_account_code: string | null;
-    settlement_account_name: string | null;
+    cash_account_id: string | null;
+    bank_reference: string | null;
+    cash_account_code: string | null;
+    cash_account_name: string | null;
     entry_id: string | null;
     reversed_at: string | null;
     reversal_entry_id: string | null;
@@ -943,7 +973,8 @@ export async function listPaymentsPage(
             p.voucher_number::text AS voucher_number,
             p.location_id, l.name AS location_name,
             p.created_at::text AS created_at, u.full_name AS created_by_name,
-            p.settlement_account_id, a.code AS settlement_account_code, a.name AS settlement_account_name,
+            p.cash_account_id, p.bank_reference,
+            ca.code AS cash_account_code, ca.name AS cash_account_name,
             je.id AS entry_id,
             p.reversed_at::text AS reversed_at, p.reversal_entry_id
        FROM ap_payments p
@@ -951,7 +982,7 @@ export async function listPaymentsPage(
        LEFT JOIN parties pa ON pa.id = s.party_id
        LEFT JOIN locations l ON l.id = p.location_id
        LEFT JOIN users u ON u.id = p.created_by
-       LEFT JOIN accounts a ON a.id = p.settlement_account_id
+       LEFT JOIN accounts ca ON ca.id = p.cash_account_id
        LEFT JOIN journal_entries je
          ON je.business_id = p.business_id AND je.source_type = 'ap_payment'
         AND je.source_id = p.id AND je.posting_kind = 'ap_payment'
@@ -978,9 +1009,8 @@ export async function listPaymentsPage(
       locationName: r.location_name,
       createdAt: r.created_at,
       createdByName: r.created_by_name,
-      settlementAccountId: r.settlement_account_id,
-      settlementAccountCode: r.settlement_account_code,
-      settlementAccountName: r.settlement_account_name,
+      cashAccountId: r.cash_account_id,
+      ...voucherAccountFields(r),
       entryId: r.entry_id,
       reversedAt: r.reversed_at,
       reversalEntryId: r.reversal_entry_id,
@@ -995,7 +1025,8 @@ export async function listPaymentsPage(
 /**
  * Backwards-compatible wrappers kept for the pre-pagination call sites and
  * tests: the first page's rows, oldest contract (id/date/method/amount/memo/
- * partyName). New code uses the `*Page` variants with filters + cursor.
+ * partyName) plus the named cash account and bank reference. New code uses
+ * the `*Page` variants with filters + cursor.
  */
 export async function listReceipts(businessId: string, q?: string) {
   const page = await listReceiptsPage(businessId, { q, limit: VOUCHER_PAGE_SIZE_MAX });
@@ -1006,6 +1037,8 @@ export async function listReceipts(businessId: string, q?: string) {
     amount: r.amount,
     memo: r.memo,
     partyName: r.partyName,
+    bankReference: r.bankReference,
+    cashAccount: r.cashAccount,
   }));
 }
 
@@ -1018,6 +1051,8 @@ export async function listPayments(businessId: string, q?: string) {
     amount: r.amount,
     memo: r.memo,
     partyName: r.partyName,
+    bankReference: r.bankReference,
+    cashAccount: r.cashAccount,
   }));
 }
 

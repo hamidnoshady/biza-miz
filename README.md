@@ -251,9 +251,11 @@ prompt composition, memory and Deep Research details.
 **Secret-column rollout (operators).** Against every deployment database, run
 `npm run db:encrypt-ai-secrets -- --dry-run`, then `npm run db:encrypt-ai-secrets`, then
 `npm run db:encrypt-ai-secrets -- --verify-only` with the app's current
-`INTEGRATIONS_ENCRYPTION_KEY` (or `JWT_SECRET`). Deploy the ciphertext-only runtime with
-`AI_GATEWAY_SECRET_CUTOVER_DEFER=true`; the normal entrypoint then leaves migration 0209 pending
-so production ciphertext-backed reads/probes can be verified on every instance first. Drain
+`INTEGRATIONS_ENCRYPTION_KEY` (or `JWT_SECRET`). While any credential is stored and the
+confirmation below is not set, the migration runner leaves 0209 pending on its own (later
+migrations still apply) and the container entrypoint backfills missing ciphertext without
+clearing plaintext, so production ciphertext-backed reads/probes can be verified on every
+instance first. Drain
 pre-cutover instances, then run `AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true npm run db:migrate`.
 Both the migration runner and SQL require that post-verification confirmation when credentials
 exist. Remove the temporary flags afterward. See [Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md)
