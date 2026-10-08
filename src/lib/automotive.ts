@@ -782,10 +782,10 @@ export function normalizeVehicleSearch(raw: string): string {
 /**
  * The next stock number from the last one issued, e.g.
  * `«۱۴۰۳-۰۰۷» → «۱۴۰۳-۰۰۸»`. Pure, and deliberately a *helper* rather than a
- * rule: the service falls back to a plain counter when the dealership's own
- * numbering does not parse, because refusing to register a car whose stock
- * number a human typed by hand would be the system being clever at the
- * counter's expense.
+ * rule: the service falls back to the next unused plain number when the
+ * dealership's own numbering does not parse, because refusing to register a car
+ * whose stock number a human typed by hand would be the system being clever at
+ * the counter's expense.
  */
 export function nextStockNumber(lastStockNumber: string | null | undefined): string | null {
   if (!lastStockNumber) return null;

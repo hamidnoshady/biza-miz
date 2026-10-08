@@ -272,6 +272,31 @@ describe("vehicle stock", () => {
     expect(serialRows[0].count).toBe("2");
   });
 
+  it("never issues a stock number that is already taken, gap or no gap", async () => {
+    // «1», «2», «4» — a lot with a gap — and then a car whose number a human
+    // typed as «ویژه». The next blank one reaches the generator's fallback, and
+    // the old `count(*) + 1` answered «4»: already on a car, so the unique index
+    // rejected a car whose stock number the user had deliberately left blank
+    // («duplicate vehicle identity» for a field nobody filled in).
+    await withTransaction((client) => automotive.createVehicle(client, carInput({ stockNumber: "1" })));
+    await withTransaction((client) => automotive.createVehicle(client, carInput({ stockNumber: "2" })));
+    await withTransaction((client) => automotive.createVehicle(client, carInput({ stockNumber: "4" })));
+    await withTransaction((client) => automotive.createVehicle(client, carInput({ stockNumber: "ویژه" })));
+
+    const auto = await withTransaction((client) => automotive.createVehicle(client, carInput()));
+    expect(auto.stockNumber).toBe("5");
+
+    // And the next blank one carries on from there rather than repeating «5».
+    const second = await withTransaction((client) => automotive.createVehicle(client, carInput()));
+    expect(second.stockNumber).toBe("6");
+  });
+
+  it("continues the numbering a human typed, including its zero padding", async () => {
+    await withTransaction((client) => automotive.createVehicle(client, carInput({ stockNumber: "1403-007" })));
+    const auto = await withTransaction((client) => automotive.createVehicle(client, carInput()));
+    expect(auto.stockNumber).toBe("1403-008");
+  });
+
   it("refuses a second car claiming the same VIN, case-insensitively", async () => {
     await withTransaction((client) =>
       automotive.createVehicle(client, carInput({ stockNumber: "A", vin: "WBAABCDEFGHJK1234" })),

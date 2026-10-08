@@ -199,8 +199,17 @@ export async function businessToday(client: PoolClient, locationId: string): Pro
 
 /**
  * The next stock number in the branch's own sequence: the last one issued plus
- * one when it parses (`nextStockNumber`), a plain fallback counter otherwise.
- * A human-typed number always wins — the auto value only fills a blank.
+ * one when it parses (`nextStockNumber`), the next unused plain number
+ * otherwise. A human-typed number always wins — the auto value only fills a
+ * blank.
+ *
+ * The fallback used to be `count(*) + 1`, which is wrong the moment a tenant's
+ * numbering has a gap: a lot holding «1» and «3» was told its next number was
+ * «3», and the unique index (`uq_automotive_vehicle_stock_number`) then
+ * rejected a car whose stock number the user had deliberately left blank. It
+ * is also reached whenever the newest car carries a human number that does not
+ * end in digits («ویژه»), so the path is not exotic. `max(numeric) + 1` is
+ * free by construction and keeps a tenant's zero padding: «007» → «008».
  */
 export async function nextStockNumberFor(client: PoolClient, businessId: string): Promise<string> {
   const { rows } = await client.query<{ stock_number: string }>(
@@ -210,11 +219,15 @@ export async function nextStockNumberFor(client: PoolClient, businessId: string)
   );
   const next = nextStockNumber(rows[0]?.stock_number);
   if (next) return next;
-  const { rows: countRows } = await client.query<{ count: string }>(
-    `SELECT count(*)::text AS count FROM automotive_vehicle_attributes WHERE business_id = $1`,
+  // Only wholly numeric numbers take part: «1403-001» is a scheme of its own
+  // and is continued by `nextStockNumber` above, never folded into this count.
+  const { rows: maxRows } = await client.query<{ next: string }>(
+    `SELECT (coalesce(max(stock_number::bigint), 0) + 1)::text AS next
+       FROM automotive_vehicle_attributes
+      WHERE business_id = $1 AND stock_number ~ '^[0-9]+$'`,
     [businessId],
   );
-  return String(Number(countRows[0]?.count ?? 0) + 1);
+  return maxRows[0]?.next ?? "1";
 }
 
 /* ===========================================================================
