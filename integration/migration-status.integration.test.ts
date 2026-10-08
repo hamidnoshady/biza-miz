@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { cp, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
@@ -28,7 +29,9 @@ if (!rootDatabaseUrl) {
 }
 
 const CUTOVER = "0209_ai_gateway_secret_cutover.sql";
-const REPO_MIGRATIONS = new URL("../migrations", import.meta.url).pathname;
+// `fileURLToPath`, not `URL.pathname`: the suite also runs on Windows, where
+// `pathname` keeps the leading slash of a drive-letter path.
+const REPO_MIGRATIONS = fileURLToPath(new URL("../migrations", import.meta.url));
 
 let databaseName: string;
 let db: Client;
