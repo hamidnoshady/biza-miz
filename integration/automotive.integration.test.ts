@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import type { Industry } from "../src/lib/industries";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -39,6 +40,8 @@ let invoiceService: typeof import("../src/lib/retail-invoice-service");
 let postingEngine: typeof import("../src/lib/posting-engine");
 let exact: typeof import("../src/lib/inventory-exact");
 let leads: typeof import("../src/lib/automotive-lead-service");
+let platform: typeof import("../src/lib/platform-service");
+let industryGuard: typeof import("../src/lib/industry-guard");
 
 const biz = { id: "", locationId: "", secondLocationId: "", ownerId: "", customerId: "", otherCustomerId: "" };
 const other = { id: "", locationId: "" };
@@ -82,7 +85,7 @@ async function accountBalance(code: string, businessId = biz.id): Promise<number
   return Number(rows[0].debit) - Number(rows[0].credit);
 }
 
-async function makeBusiness(slugPrefix: string, industry = "automotive") {
+async function makeBusiness(slugPrefix: string, industry: Industry = "automotive") {
   const { rows } = await db.query<{ id: string }>(
     "INSERT INTO businesses (name, slug, industry) VALUES ($1, $2, $3) RETURNING id",
     [`${slugPrefix} Co`, `${slugPrefix}-${randomUUID().slice(0, 8)}`, industry],
@@ -92,7 +95,10 @@ async function makeBusiness(slugPrefix: string, industry = "automotive") {
     "INSERT INTO locations (business_id, name) VALUES ($1, 'Main') RETURNING id",
     [businessId],
   );
-  await withTransaction((client) => provisioning.seedChartOfAccounts(client, businessId, "automotive"));
+  // The chart follows the industry asked for. Seeding automotive regardless was
+  // invisible while every caller wanted automotive; the upgrade test below needs
+  // a tenant that really is a café, down to its ledger.
+  await withTransaction((client) => provisioning.seedChartOfAccounts(client, businessId, industry));
   return { businessId, locationId: locRows[0].id };
 }
 
@@ -1241,6 +1247,8 @@ async function stockedCar(input: {
 
 beforeAll(async () => {
   leads = await import("../src/lib/automotive-lead-service");
+  platform = await import("../src/lib/platform-service");
+  industryGuard = await import("../src/lib/industry-guard");
 });
 
 describe("what a lead is looking for", () => {
@@ -1485,5 +1493,77 @@ describe("cars shown to a lead", () => {
       [leadId, biz.id],
     );
     expect(Number(rows[0].count)).toBe(0);
+  });
+});
+
+/* ===========================================================================
+ * Wave 6 — an existing tenant is never reinterpreted
+ * ===========================================================================
+ *
+ * The acceptance criterion for #839 is not "a dealership works"; it is that
+ * nothing that already works changes. A trade switch is the dangerous moment:
+ * the operator sees a warning built from `industryDataCounts`, the change is
+ * audited with the `from` value (route-level), the chart of accounts is topped
+ * up additively — and *nothing* the old trade stored is renamed, moved or read
+ * as something else. The switch may not conjure a car out of a latte either,
+ * which is what the zero counts after the switch assert.
+ */
+
+describe("switching an existing tenant to the automotive trade", () => {
+  it("adds the trade's accounts, warns with real counts, and invents no vehicle", async () => {
+    const cafe = await makeBusiness("cafe", "food_service");
+
+    // The warning the operator confirms against: real numbers, read from the
+    // tables a switch would leave behind — zeros for a tenant that has not
+    // traded yet, which is the honest answer rather than a reassuring one.
+    const before = await platform.industryDataCounts(cafe.businessId);
+    expect(before).toEqual({ menuItems: 0, industryItems: 0, orders: 0, journalEntries: 0 });
+
+    // A café's ledger has no vehicle inventory account; that is what makes the
+    // switch meaningful rather than cosmetic.
+    const { rows: accountsBefore } = await db.query<{ code: string }>(
+      `SELECT code FROM accounts WHERE business_id = $1 AND code IN ('1370', '1375', '5195')`,
+      [cafe.businessId],
+    );
+    expect(accountsBefore).toEqual([]);
+
+    // The trade gate, before the switch: the automotive manager is not a screen
+    // a café is served with an empty version of — it is refused.
+    const asSession = (businessId: string) =>
+      ({ businessId, sub: biz.ownerId, role: "owner" }) as unknown as Parameters<
+        typeof industryGuard.requireIndustryForApi
+      >[0];
+    expect((await industryGuard.requireIndustryForApi(asSession(cafe.businessId), "automotive"))?.status).toBe(403);
+
+    const result = await platform.changeBusinessIndustry(cafe.businessId, "automotive");
+    expect(result).not.toBeNull();
+    expect(result!.business.industry).toBe("automotive");
+    // Exactly the codes the automotive template needed and the café lacked.
+    for (const code of ["1370", "1375", "5195"]) {
+      expect(result!.seededAccountCodes, `automotive account ${code}`).toContain(code);
+    }
+
+    // The re-seed is additive: the café's own accounts are still there, with
+    // their names, and only the new trade's missing codes were added. This is
+    // the property the whole switch is exposed on.
+    const { rows: keptRows } = await db.query<{ code: string; name: string }>(
+      `SELECT code, name FROM accounts WHERE business_id = $1 AND code IN ('1300', '5100') ORDER BY code`,
+      [cafe.businessId],
+    );
+    expect(keptRows.map((row) => row.code)).toEqual(["1300", "5100"]);
+
+    // Nothing the tenant already held became something else: same counts, and
+    // no vehicle row exists to have "found" the café's inventory.
+    expect(await platform.industryDataCounts(cafe.businessId)).toEqual(before);
+    const { rows: vehicleRows } = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM automotive_vehicle_attributes WHERE business_id = $1`,
+      [cafe.businessId],
+    );
+    expect(Number(vehicleRows[0].n)).toBe(0);
+
+    // …and the same gate now admits it, because it reads the *current* industry
+    // rather than a cached one. (Switching back would be a second audited change;
+    // one direction is enough to prove it is not cached.)
+    expect(await industryGuard.requireIndustryForApi(asSession(cafe.businessId), "automotive")).toBeNull();
   });
 });

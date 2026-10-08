@@ -126,6 +126,12 @@ export const DOCUMENT_SHAPES = new Set<ReportShape>([
   "near_expiry",
   "low_stock",
   "dead_stock",
+  // Issue #839 §14 — the dealership's three reports. Each is its own document
+  // shape rather than a row dump, because a car row means nothing without its
+  // capitalised costs next to its asking price.
+  "vehicle_inventory",
+  "vehicle_sales",
+  "vehicle_reservations",
 ]);
 
 /**
@@ -145,6 +151,12 @@ export const UNDATED_SHAPES = new Set<ReportShape>([
   "near_expiry",
   "low_stock",
   "dead_stock",
+  // Current stock and the reservations register are as-of-now: their service
+  // reads take a `today`, and a date range would silently do nothing to the
+  // figures. The sales/profitability report is deliberately *not* here — it is
+  // a period report and uses the range.
+  "vehicle_inventory",
+  "vehicle_reservations",
 ]);
 
 /**
