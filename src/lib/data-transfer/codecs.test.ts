@@ -103,6 +103,12 @@ describe("csvCell", () => {
     expect(csvCell("@SUM(A1)")).toBe("'@SUM(A1)");
   });
 
+  it("keeps a finite number numeric — only text can carry a formula", () => {
+    expect(csvCell(-1800000)).toBe("-1800000");
+    expect(csvCell(-0.5)).toBe("-0.5");
+    expect(csvCell("-1800000")).toBe("'-1800000");
+  });
+
   it("quotes cells containing a comma, quote or newline", () => {
     expect(csvCell("الف, ب")).toBe('"الف, ب"');
     expect(csvCell('say "hi"')).toBe('"say ""hi"""');

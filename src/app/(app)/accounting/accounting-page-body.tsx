@@ -60,7 +60,15 @@ export async function AccountingPageBody({ section }: { section: AccountingSecti
       <AccountingManager
         role={member?.role ?? session.role}
         section={section}
-        permissions={member ? [...member.permissions] : undefined}
+        /*
+         * The gates above guarantee `member`: `canOpenLedger` reads the same
+         * effective-permission set and redirects on an empty one, so a page
+         * that renders at all has resolved its member. The array below is
+         * therefore never the `undefined` this used to be allowed to pass —
+         * which is what let the manual-journal buttons be drawn for a session
+         * whose permissions had not been read.
+         */
+        permissions={member ? [...member.permissions] : []}
         currentUserId={session.sub}
       />
     </PageShell>

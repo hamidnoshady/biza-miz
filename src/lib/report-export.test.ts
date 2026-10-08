@@ -20,7 +20,7 @@
  * date label.
  */
 import { describe, expect, it } from "vitest";
-import { rowsToCsv, type ReportTable } from "./report-export";
+import { customReportTable, moneyColumnLabel, moneyExportCell, rowsToCsv, type ReportTable } from "./report-export";
 
 describe("rowsToCsv", () => {
   it("emits a UTF-8 BOM followed by a header row and data rows", () => {
@@ -94,5 +94,47 @@ describe("rowsToCsv", () => {
     // ordinary CSV escaping of a cell that also contains a double quote.
     expect(dataLine).toContain("'=HYPERLINK");
     expect(dataLine.replace(/^"/, "").startsWith("'=")).toBe(true);
+  });
+
+  it("keeps a negative amount numeric instead of neutralising it as a formula", () => {
+    // A balance-sheet overdraft used to export as `'-1800000` — text a
+    // spreadsheet will not add up.
+    const table: ReportTable = { columns: [{ key: "amount", label: "مبلغ (تومان)" }], rows: [{ amount: -1_800_000 }] };
+    expect(rowsToCsv(table).slice(1).split("\r\n")[1]).toBe("-1800000");
+  });
+});
+
+describe("money in a report export", () => {
+  it("names the unit in a money column's header", () => {
+    expect(moneyColumnLabel("فروش خالص", "toman")).toBe("فروش خالص (تومان)");
+    expect(moneyColumnLabel("فروش خالص", "rial")).toBe("فروش خالص (ریال)");
+  });
+
+  it("converts integer Rial to the selected unit for a spreadsheet and formats it for a PDF", () => {
+    expect(moneyExportCell(2_550_000, "toman", "csv")).toBe(255_000);
+    expect(moneyExportCell("2550000", "toman", "excel")).toBe(255_000);
+    expect(moneyExportCell("1234.6", "rial", "excel")).toBe(1235);
+    expect(moneyExportCell(2_550_000, "rial", "csv")).toBe(2_550_000);
+    expect(moneyExportCell(2_550_000, "toman", "pdf")).toBe("۲۵۵٬۰۰۰ تومان");
+    expect(moneyExportCell(null, "toman", "csv")).toBe("");
+  });
+
+  it("exports a money metric in the selected unit, and a count as a number rather than text", () => {
+    const money = customReportTable(
+      [{ dim: "اسپرسو", value: "2550000" }],
+      { dimensionLabel: "کالا", metricLabel: "جمع فروش" },
+      { isMoney: true, unit: "toman", format: "csv" },
+    );
+    expect(money.columns[1].label).toBe("جمع فروش (تومان)");
+    expect(money.rows[0].value).toBe(255_000);
+    expect(rowsToCsv(money).slice(1).split("\r\n")[1]).toBe("اسپرسو,255000");
+
+    const count = customReportTable(
+      [{ dim: "اسپرسو", value: "12" }],
+      { dimensionLabel: "کالا", metricLabel: "تعداد" },
+      { isMoney: false, unit: "toman", format: "excel" },
+    );
+    expect(count.columns[1].label).toBe("تعداد");
+    expect(count.rows[0].value).toBe(12);
   });
 });

@@ -42,7 +42,7 @@
 
 import { query } from "./db";
 import { phonePairKeySql } from "./parties-service";
-import { businessToday } from "./business-day-service";
+import { businessToday, businessTimeZone } from "./business-day-service";
 import { caseSla } from "./crm-case-service";
 import { CASE_BREACH_SQL_CASES, CASE_OPEN_STATUSES, caseBreachSql } from "./crm-case-clock";
 import { crmQueueView, type CrmQueueView } from "./crm-queue-views";
@@ -163,6 +163,7 @@ async function readQueue(sql: string, params: unknown[]): Promise<{ count: numbe
 function queueQueries(
   businessId: string,
   today: string,
+  timeZone: string,
 ): Record<Exclude<CrmQueueKey, "sla_risk">, Promise<CrmQueue>> {
   const limit = PREVIEW_LIMIT;
 
@@ -177,10 +178,13 @@ function queueQueries(
          LEFT JOIN parties p ON p.id = a.customer_id
         WHERE a.business_id = $1
           AND a.completed_at IS NULL AND a.due_at IS NOT NULL
-          AND a.due_at::date < $2::date
+          -- Calendar day in the BUSINESS zone, the one the today parameter
+          -- came from: a session-zone cast here disagrees with it for the
+          -- 20:30-24:00 UTC slice of every day (see businessTimeZone).
+          AND (a.due_at AT TIME ZONE $4)::date < $2::date
         ORDER BY a.due_at, a.id
         LIMIT $3`,
-      [businessId, today, limit],
+      [businessId, today, limit, timeZone],
     ).then((result) => withQueueMeta("overdue_follow_ups", result)),
 
     due_today: readQueue(
@@ -193,10 +197,10 @@ function queueQueries(
          LEFT JOIN parties p ON p.id = a.customer_id
         WHERE a.business_id = $1
           AND a.completed_at IS NULL AND a.due_at IS NOT NULL
-          AND a.due_at::date = $2::date
+          AND (a.due_at AT TIME ZONE $4)::date = $2::date
         ORDER BY a.due_at, a.id
         LIMIT $3`,
-      [businessId, today, limit],
+      [businessId, today, limit, timeZone],
     ).then((result) => withQueueMeta("due_today", result)),
 
     stalled_deals: readQueue(
@@ -525,11 +529,17 @@ async function readSlaRiskQueue(businessId: string): Promise<CrmQueue> {
  * logged, because a queue that silently disappears for a week is its own bug.
  */
 export async function crmQueues(businessId: string): Promise<CrmQueue[]> {
-  const today = await businessToday(businessId);
+  // `today` is the business zone's calendar day; the queues that bucket stored
+  // timestamps by day must cast in that same zone, or the two disagree for the
+  // 3.5 hours of every UTC day that the branch is already tomorrow.
+  const [today, timeZone] = await Promise.all([
+    businessToday(businessId),
+    businessTimeZone(businessId),
+  ]);
   // `sla_risk` is not in this map on purpose: it is the one queue with a rule
   // SQL cannot state without restating it, so it runs through `caseSla`.
   const queries: Record<CrmQueueKey, Promise<CrmQueue>> = {
-    ...queueQueries(businessId, today),
+    ...queueQueries(businessId, today, timeZone),
     sla_risk: readSlaRiskQueue(businessId),
   };
 
