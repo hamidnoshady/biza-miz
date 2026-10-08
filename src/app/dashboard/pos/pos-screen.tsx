@@ -113,6 +113,13 @@ import { api, ErrorBox, errorMessage, inputClass } from "../ui";
 import { useBusinessInfo } from "../use-printers";
 import { cardClass } from "../page-chrome";
 import { safeRandomId } from "@/lib/client-id";
+import {
+  loadPosBaseData,
+  orderTypeForEntitlements,
+  orderTypesForEntitlements,
+  tableServiceEnabled as isTableServiceEnabled,
+  type PosOrderType,
+} from "@/lib/pos-feature-policy";
 
 /**
  * The menu is the canonical shared model (restaurant-menu.ts): the POS, the
@@ -147,7 +154,7 @@ interface CartUiLine {
   note: string;
 }
 
-type OrderType = "dine_in" | "takeaway" | "delivery";
+type OrderType = PosOrderType;
 type CheckoutIntent = "order" | "payment";
 
 interface CheckoutResult {
@@ -261,16 +268,33 @@ export function PosScreen({
   // one each time — cleared once the order is actually created.
   const clientRequestIdRef = useRef<string | null>(null);
 
+  /**
+   * Delivery is an entitlement, and the domain layer refuses a delivery order
+   * for a business whose `delivery` feature is off (order-mutations.ts). The
+   * till aligns with it: no delivery tab, and the courier list is never
+   * requested. While `business.features` is unknown, compatibility behavior is
+   * to offer it and let the server's refusal be the last word.
+   */
+  const deliveryEnabled = business.features?.delivery !== false;
+  /**
+   * Table service is gated by the reservations feature. Wait for the business
+   * info read before loading tables or rendering dine-in; a legacy response
+   * without `features` remains enabled for backwards compatibility.
+   */
+  const tableServiceEnabled = isTableServiceEnabled(business.loaded, business.features);
+  const activeOrderType: OrderType = orderTypeForEntitlements(orderType, {
+    tableServiceEnabled,
+    deliveryEnabled,
+  });
+
   const load = useCallback(() => {
+    // Do not race the feature read: a disabled floor must never trigger even a
+    // transient /api/tables request from the selling screen.
+    if (!business.loaded) return;
     setIsRefreshing(true);
     // Couriers are fetched separately (below) and only while the delivery
-    // order type is actually offered: `/api/couriers` is gated on the
-    // `delivery` feature, and a till that cannot sell delivery must not ask
-    // for the courier list at all — the 403 used to read as a load error.
-    Promise.all([
-      api<MenuTreePayload>("/api/menu"),
-      api<{ tables: PosTable[] }>("/api/tables"),
-    ])
+    // order type is actually offered; `/api/couriers` is also feature-gated.
+    loadPosBaseData<MenuTreePayload, { tables: PosTable[] }>(api, tableServiceEnabled)
       .then(([menuRes, tablesRes]) => {
         if (menuRes.ok) {
           const menu = toRestaurantMenu(menuRes.data);
@@ -282,9 +306,10 @@ export function PosScreen({
               "",
           );
         }
-        if (tablesRes.ok) setTables(tablesRes.data.tables);
+        if (tablesRes?.ok) setTables(tablesRes.data.tables);
+        else if (!tableServiceEnabled) setTables([]);
         setLoadError(
-          !menuRes.ok || !tablesRes.ok
+          !menuRes.ok || (tablesRes !== null && !tablesRes.ok)
             ? "بخشی از اطلاعات صندوق به‌روز نشد. داده‌های موجود حفظ شده‌اند."
             : "",
         );
@@ -296,18 +321,21 @@ export function PosScreen({
         setInitialLoading(false);
         setIsRefreshing(false);
       });
-  }, []);
+  }, [business.loaded, tableServiceEnabled]);
 
-  useEffect(load, [load]);
+  useEffect(() => {
+    if (business.loaded) load();
+  }, [business.loaded, load]);
 
-  /**
-   * Delivery is an entitlement, and the domain layer refuses a delivery order
-   * for a business whose `delivery` feature is off (order-mutations.ts). The
-   * till aligns with it: no delivery tab, and the courier list is never
-   * requested. While `business.features` has not loaded yet the tab stays
-   * available — the server's `feature_disabled` refusal is the last word.
-   */
-  const deliveryEnabled = business.features?.delivery !== false;
+  useEffect(() => {
+    if (business.loaded && business.features?.reservations === false) {
+      setOrderType("takeaway");
+      setTableId("");
+      setGuestCount("");
+      setTablePickerFor(null);
+      setTables([]);
+    }
+  }, [business.loaded, business.features?.reservations]);
 
   const menuIndex = useMemo(
     () => (menu ? buildRestaurantMenuIndex(menu) : null),
@@ -601,10 +629,11 @@ export function PosScreen({
    * the two are only ever asked for together.
    */
   function changeOrderType(next: OrderType) {
-    // A disabled delivery feature is enforced by the domain; the tab is gone,
-    // and this guard keeps a stale keyboard shortcut or a cached state from
-    // selecting it anyway.
+    // Disabled order types are enforced by the domain; their tabs are hidden,
+    // and this guard also prevents a stale keyboard/cached action selecting
+    // delivery or dine-in after the business flags have loaded.
     if (next === "delivery" && !deliveryEnabled) return;
+    if (next === "dine_in" && !tableServiceEnabled) return;
     setOrderType(next);
     if (next !== "dine_in") {
       setTableId("");
@@ -683,12 +712,12 @@ export function PosScreen({
   const blocker = useMemo<PosCheckoutRequirement | null>(
     () =>
       missingCheckoutRequirement({
-        orderType,
+        orderType: activeOrderType,
         tableId,
         deliveryAddress,
         lineCount: cart.length,
       }),
-    [cart.length, deliveryAddress, orderType, tableId],
+    [activeOrderType, cart.length, deliveryAddress, tableId],
   );
   /** The chosen table, once it is one this branch still has. */
   const selectedTable = useMemo(
@@ -713,7 +742,7 @@ export function PosScreen({
   );
   // Fee/tip are entered in Toman (like menu prices) but stored/sent in Rial.
   const feeNum =
-    orderType === "delivery"
+    activeOrderType === "delivery"
       ? money.fromInput(Math.max(0, Math.round(Number(deliveryFee) || 0)))
       : 0;
   const tipNum = money.fromInput(
@@ -743,17 +772,18 @@ export function PosScreen({
   ): Promise<boolean> {
     if (busy || submissionInFlight.current) return false;
     setError("");
+    const effectiveOrderType = activeOrderType;
     const effectiveTableId = overrides?.tableId ?? tableId;
     const effectiveGuestCount = overrides?.guestCount ?? guestCount;
     if (cart.length === 0) {
       setError("سبد خرید خالی است.");
       return false;
     }
-    if (requiresTableSelection({ orderType, tableId: effectiveTableId })) {
+    if (requiresTableSelection({ orderType: effectiveOrderType, tableId: effectiveTableId })) {
       setError("برای سفارش حضوری، میز را انتخاب کنید.");
       return false;
     }
-    if (orderType === "delivery" && !deliveryAddress.trim()) {
+    if (effectiveOrderType === "delivery" && !deliveryAddress.trim()) {
       setError("برای سفارش ارسالی آدرس الزامی است.");
       return false;
     }
@@ -792,9 +822,9 @@ export function PosScreen({
       clientRequestIdRef.current = safeRandomId();
     }
     const orderBody = {
-      type: orderType,
+      type: effectiveOrderType,
       clientRequestId: clientRequestIdRef.current,
-      tableId: orderType === "dine_in" ? effectiveTableId : undefined,
+      tableId: effectiveOrderType === "dine_in" ? effectiveTableId : undefined,
       customerId: customer?.id ?? undefined,
       guestCount: effectiveGuestCount ? Number(effectiveGuestCount) : undefined,
       discount: discountType
@@ -815,7 +845,7 @@ export function PosScreen({
         note: line.note || undefined,
       })),
       delivery:
-        orderType === "delivery"
+        effectiveOrderType === "delivery"
           ? {
               address: deliveryAddress.trim(),
               phone: deliveryPhone.trim() || undefined,
@@ -825,13 +855,13 @@ export function PosScreen({
           : undefined,
     };
     const typeLabel =
-      orderType === "dine_in"
+      effectiveOrderType === "dine_in"
         ? "حضوری"
-        : orderType === "takeaway"
+        : effectiveOrderType === "takeaway"
           ? "بیرون‌بر"
           : "ارسالی";
     const tableName =
-      orderType === "dine_in"
+      effectiveOrderType === "dine_in"
         ? (tables.find((table) => table.id === effectiveTableId)?.name ?? null)
         : null;
 
@@ -941,10 +971,10 @@ export function PosScreen({
             phone: business.phone,
           },
           orderLabel: orderNumber
-            ? formatQueueLabel(orderType, orderNumber)
+            ? formatQueueLabel(effectiveOrderType, orderNumber)
             : typeLabel,
           orderTypeLabel:
-            orderType === "dine_in"
+            effectiveOrderType === "dine_in"
               ? "حضوری" + (tableName ? " — " + tableName : "")
               : typeLabel,
           issuedAt: new Date().toISOString(),
@@ -985,7 +1015,7 @@ export function PosScreen({
 
     setResult({
       orderNumber,
-      type: orderType,
+      type: effectiveOrderType,
       tableName,
       total: totals.total,
       queued: creation.queued,
@@ -1030,7 +1060,7 @@ export function PosScreen({
   function startCheckout(intent: CheckoutIntent) {
     setError("");
     setCheckoutIntent(intent);
-    if (requiresTableSelection({ orderType, tableId })) {
+    if (requiresTableSelection({ orderType: activeOrderType, tableId })) {
       setTablePickerFor(intent);
       return;
     }
@@ -1502,8 +1532,8 @@ export function PosScreen({
       >
         <div className="shrink-0 border-b border-border/80 p-4">
           <ErrorBox>{error}</ErrorBox>
-          <OrderTypeTabs value={orderType} onChange={changeOrderType} deliveryEnabled={deliveryEnabled} />
-          {orderType === "dine_in" ? (
+          <OrderTypeTabs value={activeOrderType} onChange={changeOrderType} deliveryEnabled={deliveryEnabled} tableServiceEnabled={tableServiceEnabled} />
+          {tableServiceEnabled && activeOrderType === "dine_in" ? (
             <div className="mt-3 grid grid-cols-[minmax(0,1fr)_7rem] gap-2">
               <TableField
                 label={tableLabel}
@@ -1530,7 +1560,7 @@ export function PosScreen({
               </label>
             </div>
           ) : null}
-          {orderType === "delivery" ? (
+          {activeOrderType === "delivery" ? (
             <div className="space-y-3">
               <label
                 className="block text-xs font-semibold text-muted-foreground"
@@ -1766,10 +1796,10 @@ export function PosScreen({
               {cart.length === 0
                 ? "سبد خالی است"
                 : `${toPersianDigits(cartItemCount)} قلم در سبد`}
-              <span className="block truncate text-[11px] font-normal">
-                {orderType === "dine_in"
+              <span className="block truncate text-[11px] font-normal opacity-80">
+                {activeOrderType === "dine_in"
                   ? "حضوری — " + tableLabel
-                  : orderType === "takeaway"
+                  : activeOrderType === "takeaway"
                     ? "بیرون‌بر"
                     : "ارسالی"}
               </span>
@@ -1791,8 +1821,8 @@ export function PosScreen({
           {/* One scroll region keeps the cart usable on short phone screens. */}
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
             <div className="border-b border-border p-4">
-              <OrderTypeTabs value={orderType} onChange={changeOrderType} deliveryEnabled={deliveryEnabled} />
-              {orderType === "dine_in" ? (
+              <OrderTypeTabs value={activeOrderType} onChange={changeOrderType} deliveryEnabled={deliveryEnabled} tableServiceEnabled={tableServiceEnabled} />
+              {tableServiceEnabled && activeOrderType === "dine_in" ? (
                 <div className="mt-3 grid grid-cols-[minmax(0,1fr)_7rem] gap-2">
                   <TableField
                     label={tableLabel}
@@ -1819,7 +1849,7 @@ export function PosScreen({
                   </label>
                 </div>
               ) : null}
-              {orderType === "delivery" ? (
+              {activeOrderType === "delivery" ? (
                 <div className="mt-3 space-y-3">
                   <label
                     className="block text-xs font-semibold text-muted-foreground"
@@ -2040,17 +2070,17 @@ export function PosScreen({
                 <Row
                   label="نوع سفارش"
                   value={
-                    orderType === "dine_in"
+                    activeOrderType === "dine_in"
                       ? "حضوری"
-                      : orderType === "takeaway"
+                      : activeOrderType === "takeaway"
                         ? "بیرون‌بر"
                         : "ارسالی"
                   }
                 />
-                {orderType === "dine_in" ? (
+                {tableServiceEnabled && activeOrderType === "dine_in" ? (
                   <Row label="میز" value={tableLabel} />
                 ) : null}
-                {orderType === "delivery" ? (
+                {activeOrderType === "delivery" ? (
                   <Row
                     label="آدرس"
                     value={deliveryAddress.trim() || "ثبت نشده"}
@@ -2246,7 +2276,7 @@ export function PosScreen({
         not yet re-rendered with.
       */}
       <TablePickerDialog
-        open={tablePickerFor !== null}
+        open={tableServiceEnabled && tablePickerFor !== null}
         intent={tablePickerFor ?? "select"}
         tables={tables}
         selectedTableId={tableId}
@@ -2527,15 +2557,19 @@ function OrderTypeTabs({
   value,
   onChange,
   deliveryEnabled = true,
+  tableServiceEnabled = true,
 }: {
   value: OrderType;
   onChange: (next: OrderType) => void;
   /** The domain refuses delivery orders when the feature is off; the till does not offer the tab. */
   deliveryEnabled?: boolean;
+  /** The reservations entitlement controls both table service and the dine-in tab. */
+  tableServiceEnabled?: boolean;
 }) {
-  const tabs = deliveryEnabled
-    ? ORDER_TYPE_TABS
-    : ORDER_TYPE_TABS.filter((tab) => tab.value !== "delivery");
+  const availableTypes = new Set(
+    orderTypesForEntitlements({ tableServiceEnabled, deliveryEnabled }),
+  );
+  const tabs = ORDER_TYPE_TABS.filter((tab) => availableTypes.has(tab.value));
   return (
     <div
       className="mb-3 grid gap-2 text-sm font-medium"
