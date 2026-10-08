@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
+import { ITEM_SOURCE_SQL, type ItemSource } from "./item-source";
 import { getStock, receiveStock, setUnitPrice, type ItemStock } from "./accessories-service";
 import { cosmeticCogs, computeCosmeticSalePrice, type CosmeticSalePriceBreakdown } from "./cosmetics";
 import { isBatchExpired, sellableQuantity } from "./fefo";
@@ -486,6 +487,8 @@ export interface CosmeticVariantSummary {
   barcode: string | null;
   unit: string | null;
   isSellable: boolean;
+  /** Audit F13 — the integration row that owns this item, so twins are told apart. */
+  source: ItemSource | null;
 }
 
 /** The cosmetics board: every family and variant at this branch, with attributes, stock, pricing and (for batch-tracked items) their batches. */
@@ -513,8 +516,10 @@ export async function listCosmeticBoard(locationId: string): Promise<CosmeticVar
     barcode: string | null;
     unit: string | null;
     is_sellable: boolean;
+    source: ItemSource | null;
   }>(
     `SELECT i.id, i.parent_item_id, p.name AS parent_name, i.name, i.sku, i.kind, i.tracking, i.is_active,
+            ${ITEM_SOURCE_SQL} AS source,
             s.quantity, s.unit_cost, s.unit_price,
             i.brand_id, b.name AS brand_name, i.irc_code, i.health_permit,
             i.authenticity_registration, i.tags, i.barcode, i.unit, i.is_sellable,
@@ -580,6 +585,7 @@ export async function listCosmeticBoard(locationId: string): Promise<CosmeticVar
       barcode: r.barcode,
       unit: r.unit,
       isSellable: r.is_sellable,
+      source: r.source ?? null,
     };
   });
 }

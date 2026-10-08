@@ -21,6 +21,7 @@ import {
 import { coaTemplateForIndustry } from "./coa-template";
 import { RECONCILABLE_ACCOUNTS, RECONCILABLE_ACCOUNT_CODES } from "./bank-reconciliation";
 import { industryProfile } from "./industry-profile";
+import { readUncoveredEntries } from "./fiscal-periods-service";
 import type { Industry } from "./industries";
 
 const DEFAULT_WINDOW_DAYS = 30;
@@ -424,6 +425,15 @@ export async function collectAccountingSnapshot(
       [businessId, asOfDate],
     );
     return rows.map((row) => ({ id: row.id, label: row.label, endsOn: row.ends_on }));
+  });
+
+  snapshot.uncoveredFiscalEntries = await safely("uncovered fiscal dates", snapshot.uncoveredFiscalEntries, unavailableChecks, async () => {
+    const { rows } = await query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM fiscal_years WHERE business_id = $1",
+      [businessId],
+    );
+    const uncovered = await readUncoveredEntries(businessId);
+    return { ...uncovered, fiscalYearCount: Number(rows[0]?.count ?? 0) };
   });
 
   return { snapshot, unavailableChecks };

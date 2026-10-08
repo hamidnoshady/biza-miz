@@ -21,6 +21,7 @@ import { postExactJournalEntry, postJournalEntry } from "./ledger-service";
 import type { JournalLine } from "./ledger";
 import type { Role } from "./auth-edge";
 import { appendSyncOutboxEvent } from "./sync-outbox";
+import { normalizeOptionalIsoDate } from "./iso-date";
 import {
   MANUAL_LINES_MAX,
   MANUAL_MEMO_MAX,
@@ -52,43 +53,21 @@ export interface DraftLineInput {
   credit: number;
 }
 
-function isGregorianLeapYear(year: number): boolean {
-  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-}
-
+/**
+ * The document's date, or `null` for "whenever this is posted".
+ *
+ * The month-length table this used to carry by hand is `iso-date.ts` now —
+ * the module that exists for exactly this check, and the one A/R aging, A/P
+ * aging, bank reconciliation and «دفتر روزنامه» validate through. A
+ * well-shaped impossible day (`2026-02-31`) must be a named 400 here rather
+ * than a `date` cast error three layers down.
+ */
 function normalizeEntryDate(
   entryDate: string | null | undefined,
 ): string | null {
-  if (entryDate === null || entryDate === undefined) return null;
-  if (typeof entryDate !== "string") {
-    throw new ManualJournalError("invalid_entry_date");
-  }
-  const value = entryDate.trim();
-  if (!value) return null;
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!match) throw new ManualJournalError("invalid_entry_date");
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const daysByMonth = [
-    31,
-    isGregorianLeapYear(year) ? 29 : 28,
-    31,
-    30,
-    31,
-    30,
-    31,
-    31,
-    30,
-    31,
-    30,
-    31,
-  ];
-  const daysInMonth = daysByMonth[month - 1] ?? 0;
-  if (year < 1 || month < 1 || month > 12 || day < 1 || day > daysInMonth) {
-    throw new ManualJournalError("invalid_entry_date");
-  }
-  return value;
+  const normalized = normalizeOptionalIsoDate(entryDate);
+  if (!normalized.ok) throw new ManualJournalError("invalid_entry_date");
+  return normalized.value;
 }
 
 /**
@@ -647,7 +626,15 @@ export async function approveDraft(params: {
  */
 export interface ReverseManualEntryParams {
   businessId: string;
-  /** Kept for API compatibility; the reversal uses the original entry's location. */
+  /**
+   * The caller's active location — a *fallback*, never the routing.
+   *
+   * Both the reversing journal and its sync event follow the original entry's
+   * own branch; where the accountant happens to be standing is not where the
+   * document lives. This value is consulted only for a document that has no
+   * branch at all, and only so the event has a queue to travel in (see
+   * `reverseEntryInTransaction`).
+   */
   locationId: string | null;
   entryId: string;
   actorId: string;
@@ -706,20 +693,33 @@ export async function reverseEntryInTransaction(
   });
   await client.query("UPDATE journal_entries SET reverses_entry_id = $2 WHERE id = $1", [entryId, params.entryId]);
   await client.query("UPDATE journal_entries SET reversed_at = now(), reversed_by = $2 WHERE id = $1", [params.entryId, params.actorId]);
-  if (params.sync && params.locationId) await appendSyncOutboxEvent(client, {
-    /*
-     * The *original entry's* branch, not the caller's.
-     *
-     * The reversal posts to `original.location_id` (see `postExactJournalEntry`
-     * above) so the compensating entry lands in the same books as the document
-     * it cancels — but the outbox event was tagged with the caller's current
-     * branch and declared `locationRule: "event_location"`. A reviewer sitting
-     * in branch B who reversed a branch A entry sent a branch-A ledger effect
-     * inside a branch-B envelope: the receiving peer applied it against the
-     * wrong branch, and the event could not even be delivered to the branch
-     * whose books actually changed.
-     */
-    locationId: original.location_id ?? params.locationId,
+  /*
+   * The outbox event is routed by the *original document's* branch, never by
+   * the approver's currently active one.
+   *
+   * The reversing journal is posted to `original.location_id` (right above),
+   * but the event used to carry `params.locationId` — which the route reads
+   * from `resolveActiveLocation(session)`, i.e. wherever the accountant
+   * happens to be standing. `accounting.manual_journal.reversed` is registered
+   * with `locationRule: "event_location"` and `sync-outbox.ts` routes
+   * cloud/site delivery by that value, so an accountant active in Branch B
+   * reversing Branch A's journal wrote the row to A and queued the event for
+   * B: the desktop at A never learned its own document had been reversed, and
+   * the one at B was handed an entry id it does not own. In a hybrid
+   * deployment that is a permanent divergence, not a delayed one.
+   *
+   * The caller's branch survives only as a last resort, for a document that
+   * has none of its own (`location_id IS NULL` — a business-wide entry, or a
+   * single-location business that predates branches). `sync_events.location_id`
+   * is NOT NULL and a site's own writes reach the central server only through
+   * this queue, so dropping the event there would lose a desktop's reversal
+   * rather than merely delay it. Delivering it to the actor's branch is safe
+   * because the applying side derives the branch from the original too: the
+   * handler's `locationId` is an envelope, not an instruction.
+   */
+  const syncLocationId = original.location_id ?? params.locationId;
+  if (params.sync && syncLocationId) await appendSyncOutboxEvent(client, {
+    locationId: syncLocationId,
     clientEventId: params.sync.clientEventId ?? `journal:reverse:${params.entryId}`,
     eventType: "accounting.manual_journal.reversed",
     payload: { entryId: params.entryId, memo: params.memo ?? null, entryDate: params.entryDate ?? null },

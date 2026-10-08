@@ -7,19 +7,28 @@
  * cannot race a final year close into an impossible "closed year / open
  * period" state.
  */
-import { getPool, query } from "./db";
+import { getPool, query, type PoolClient } from "./db";
+import { businessToday } from "./business-day-service";
 import {
   canTransitionPeriod,
   fiscalYearSpec,
   type FiscalPeriodStatus,
 } from "./fiscal-periods";
+import {
+  evaluateFiscalReadiness,
+  type FiscalReadiness,
+  type UncoveredEntrySummary,
+} from "./fiscal-readiness";
 import { isUuid } from "./uuid";
 
 export class FiscalPeriodError extends Error {
   status: number;
-  constructor(code: string, status = 400) {
+  /** Optional structured context a route may return beside the code. */
+  details?: Record<string, unknown>;
+  constructor(code: string, status = 400, details?: Record<string, unknown>) {
     super(code);
     this.status = status;
+    if (details) this.details = details;
   }
 }
 
@@ -273,4 +282,70 @@ export async function setPeriodStatus(
   } finally {
     client.release();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Coverage / readiness (audit finding F08). Read-only: nothing here rejects,
+// moves or re-dates an entry — see fiscal-readiness.ts for the policy.
+// ---------------------------------------------------------------------------
+
+const UNCOVERED_ENTRIES_SQL = `
+  SELECT count(*)::int            AS count,
+         min(je.entry_date)::text AS earliest,
+         max(je.entry_date)::text AS latest
+    FROM journal_entries je
+   WHERE je.business_id = $1
+     AND ($2::date IS NULL OR je.entry_date <= $2::date)
+     AND NOT EXISTS (
+           SELECT 1 FROM fiscal_periods fp
+            WHERE fp.business_id = je.business_id
+              AND je.entry_date BETWEEN fp.starts_on AND fp.ends_on
+         )`;
+
+interface UncoveredRow extends Record<string, unknown> {
+  count: number;
+  earliest: string | null;
+  latest: string | null;
+}
+
+/**
+ * Journal entries dated outside every configured fiscal period (optionally
+ * only those on or before `upTo`). Pass `client` to read inside a caller's
+ * transaction — `closeFiscalYear` does, under its year lock.
+ */
+export async function readUncoveredEntries(
+  businessId: string,
+  options: { upTo?: string; client?: PoolClient } = {},
+): Promise<UncoveredEntrySummary> {
+  const params = [businessId, options.upTo ?? null];
+  const { rows } = options.client
+    ? await options.client.query<UncoveredRow>(UNCOVERED_ENTRIES_SQL, params)
+    : await query<UncoveredRow>(UNCOVERED_ENTRIES_SQL, params);
+  const row = rows[0];
+  const count = Number(row?.count ?? 0);
+  return count > 0
+    ? { count, earliest: row.earliest, latest: row.latest }
+    : { count: 0, earliest: null, latest: null };
+}
+
+/** Is any fiscal year configured, is today covered, what is uncovered, can a year be closed. */
+export async function getFiscalReadiness(businessId: string): Promise<FiscalReadiness> {
+  const [fiscalYears, today, uncovered] = await Promise.all([
+    listFiscalYears(businessId),
+    businessToday(businessId),
+    readUncoveredEntries(businessId),
+  ]);
+  const { rows } = await query<{ covered: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM fiscal_periods
+        WHERE business_id = $1 AND $2::date BETWEEN starts_on AND ends_on
+     ) AS covered`,
+    [businessId, today],
+  );
+  return evaluateFiscalReadiness({
+    fiscalYears,
+    today,
+    todayCovered: rows[0]?.covered === true,
+    uncovered,
+  });
 }

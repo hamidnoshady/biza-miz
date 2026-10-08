@@ -83,6 +83,9 @@ export const WELL_KNOWN_CODES = {
   bank: "1110",
   bankClearing: "1120",
   accountsReceivable: "1200",
+  // Audit F11 — salary advances (مساعده) paid to staff, recovered by a later
+  // payroll run. An asset until recovered (migration 0214).
+  staffAdvances: "1260",
   supplierReceivable: "1210",
   vatReceivable: "1220",
   // Issue #160 §4 — the last of Wave 4's three deferrals. What SnapFood owes
@@ -102,6 +105,16 @@ export const WELL_KNOWN_CODES = {
   accountsPayable: "2100",
   vatPayable: "2200",
   salariesPayable: "2300",
+  // Audit F11 — gross-to-net payroll (migration 0214). The withholdings a run
+  // credits beside net salary payable: insurance (employee + employer +
+  // unemployment shares, all owed to the same insurer), income tax withheld,
+  // and any other fixed deduction the business withholds for a third party.
+  // 2460/2470 were seeded by 0094 as headings for manual entries; a run posts
+  // to them automatically now, which is why they are well-known (never
+  // archived from under the posting).
+  insurancePayable: "2460",
+  payrollTaxPayable: "2470",
+  otherPayrollDeductionsPayable: "2490",
   // Tip capture (issue #160 §4) — a pass-through liability owed to staff,
   // not revenue. See migrations/0059_tip_capture.sql for the product
   // decisions this rests on.
@@ -141,6 +154,9 @@ export const WELL_KNOWN_CODES = {
   periodicPurchases: "5105",
   wasteExpense: "5150",
   salariesExpense: "5200",
+  // Audit F11 — the employer's insurance (and unemployment) share is a cost
+  // on top of gross pay, not part of it (migration 0214).
+  employerInsuranceExpense: "5220",
   // Phase 27 Wave 7 — sales-staff commission, posted as a payroll liability
   // (Debit this, Credit salariesPayable) through the domain-event engine.
   commissionExpense: "5210",
@@ -459,6 +475,8 @@ const SHARED_ASSET_ACCOUNTS: TemplateAccount[] = [
   { code: "1241", name: "چک‌های نزد صندوق", type: "asset", parentCode: "1240" },
   { code: "1242", name: "چک‌های در جریان وصول", type: "asset", parentCode: "1240" },
   { code: "1244", name: "چک‌های برگشتی", type: "asset", parentCode: "1240" },
+  // Salary advances, recovered by the next payroll run (audit F11, 0214).
+  { code: "1260", name: "مساعده و علی‌الحساب کارکنان", type: "asset", parentCode: "1000" },
 ];
 
 const SHARED_LIABILITY_ACCOUNTS: TemplateAccount[] = [
@@ -468,11 +486,12 @@ const SHARED_LIABILITY_ACCOUNTS: TemplateAccount[] = [
   { code: "2121", name: "چک‌های صادرشده در جریان", type: "liability", parentCode: "2120" },
   { code: "2122", name: "چک‌های پرداختنی برگشتی", type: "liability", parentCode: "2120" },
   { code: "2430", name: "پیش‌دریافت از مشتری", type: "liability", parentCode: "2000" },
-  // Payroll withholdings. `accruePayroll` posts gross wages today (5200/2300);
-  // these are the headings the deductions belong in when it learns to split
-  // them, and the ones a manual payroll entry needs meanwhile.
+  // Payroll withholdings. A gross-to-net run (audit F11) credits 2460/2470
+  // with the insurance and income tax it withheld and 2490 with any other
+  // fixed deduction; only net pay goes to 2300.
   { code: "2460", name: "بیمه پرداختنی", type: "liability", parentCode: "2300" },
   { code: "2470", name: "مالیات حقوق پرداختنی", type: "liability", parentCode: "2300" },
+  { code: "2490", name: "سایر کسور حقوق پرداختنی", type: "liability", parentCode: "2300" },
   { code: "2480", name: "مالیات بر درآمد (عملکرد) پرداختنی", type: "liability", parentCode: "2000" },
   // Phase 37 Wave 4 — what the business owes the platform for message credits
   // actually consumed. Metered messaging is cross-industry, so the heading is
@@ -498,6 +517,8 @@ const SHARED_REVENUE_ACCOUNTS: TemplateAccount[] = [
 const SHARED_EXPENSE_ACCOUNTS: TemplateAccount[] = [
   // Periodic-system purchases (سیستم ادواری) — see WELL_KNOWN_CODES.periodicPurchases.
   { code: "5105", name: "خرید طی دوره (سیستم ادواری)", type: "expense", parentCode: "5000" },
+  // The employer's insurance and unemployment shares (audit F11, 0214).
+  { code: "5220", name: "بیمه سهم کارفرما", type: "expense", parentCode: "5000" },
   { code: "5750", name: "زیان فروش دارایی ثابت", type: "expense", parentCode: "5000" },
   { code: "5800", name: "کارمزد بانکی و درگاه پرداخت", type: "expense", parentCode: "5000" },
   { code: "5810", name: "کسری و اضافه صندوق", type: "expense", parentCode: "5000" },

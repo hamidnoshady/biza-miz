@@ -20,6 +20,7 @@ import {
   type AccountingSectionKey,
 } from "./accounting-routes";
 import { accountingSectionsFor } from "./accounting-nav";
+import { accountingSectionNeedsAccountList } from "./accounting-manager-policy";
 import { LEDGER_WORKSPACE_SECTION_KEYS, LEDGER_WORKSPACE_SUBGROUPS } from "./accounting-workspace";
 import { TrialBalanceSection } from "./trial-balance-section";
 import { EntriesSection } from "./entries-section";
@@ -146,6 +147,7 @@ export function AccountingManager({
    * member cannot reach this component.
    */
   const canApproveLedger = permissions.includes(PERMISSIONS.ledgerApprove);
+  const canExportReports = permissions.includes(PERMISSIONS.reportsExport);
 
   /**
    * Whether this member may *propose* a draft.
@@ -236,6 +238,7 @@ export function AccountingManager({
     ? sections.filter((candidate) => currentSubGroup.keys.includes(candidate.key))
     : [];
 
+  const requiresAccounts = accountingSectionNeedsAccountList(section);
   const [loadFailed, setLoadFailed] = useState(false);
   const loadAccounts = useCallback(() => {
     setLoadFailed(false);
@@ -247,7 +250,9 @@ export function AccountingManager({
       else setLoadFailed(true);
     });
   }, []);
-  useEffect(loadAccounts, [loadAccounts]);
+  useEffect(() => {
+    if (requiresAccounts) loadAccounts();
+  }, [requiresAccounts, loadAccounts]);
 
   async function run(fn: () => Promise<{ ok: boolean; data: { error?: string } }>) {
     setBusy(true);
@@ -272,7 +277,7 @@ export function AccountingManager({
     }
   }
 
-  if (!accounts) {
+  if (requiresAccounts && !accounts) {
     if (loadFailed) {
       return (
         <div className="space-y-3">
@@ -291,11 +296,29 @@ export function AccountingManager({
   const body = (
     <>
       {section === "dashboard" ? <LedgerDashboardSection onGoToTab={goToSection} refreshKey={refreshKey} /> : null}
-          {section === "trial-balance" ? <TrialBalanceSection refreshKey={refreshKey} /> : null}
-          {section === "entries" ? <EntriesSection refreshKey={refreshKey} busy={busy} run={run} /> : null}
+          {section === "trial-balance" ? (
+            <TrialBalanceSection refreshKey={refreshKey} canExport={canExportReports} />
+          ) : null}
+          {section === "entries" ? (
+            /*
+             * `canApprove` is the same `ledger.approve` the manual-entry
+             * review queue gets, and for the same reason: «برگشت سند» is
+             * gated on it server-side, so a manager who cannot approve must
+             * not be shown a live destructive accounting control. `accounts`
+             * is the chart this workspace already loaded — the journal's
+             * «حساب» filter picks from it rather than fetching it twice.
+             */
+            <EntriesSection
+              refreshKey={refreshKey}
+              busy={busy}
+              accounts={accounts ?? []}
+              canApprove={canApproveLedger}
+              onRefresh={() => setRefreshKey((key) => key + 1)}
+            />
+          ) : null}
           {section === "manual" ? (
             <ManualEntrySection
-              accounts={accounts}
+              accounts={accounts ?? []}
               busy={busy}
               run={run}
               refreshKey={refreshKey}
@@ -304,7 +327,7 @@ export function AccountingManager({
               currentUserId={currentUserId}
             />
           ) : null}
-          {section === "expenses" ? <ExpenseSection accounts={accounts} busy={busy} run={run} refreshKey={refreshKey} /> : null}
+          {section === "expenses" ? <ExpenseSection accounts={accounts ?? []} busy={busy} run={run} refreshKey={refreshKey} /> : null}
           {section === "fiscal-periods" ? <FiscalPeriodsSection /> : null}
           {section === "directory" ? (
             <PartiesSection
@@ -480,8 +503,17 @@ function errorMessage(code: string | undefined): string {
     // Phase 16 — payroll entries
     user_not_found: "عضو موردنظر پیدا نشد.",
     no_wages_set: "هیچ عضو فعالی حقوق تعیین‌شده ندارد.",
-    period_label_required: "عنوان دوره الزامی است.",
-    period_label_too_long: "عنوان دوره بیش از حد طولانی است.",
+    // Audit F11 — a run is a Jalali month, computed gross-to-net.
+    invalid_period: "ماه حقوق معتبر نیست.",
+    period_in_future: "این ماه هنوز شروع نشده است و حقوق آن قابل ثبت نیست.",
+    period_already_accrued: "برای این ماه قبلاً تعهد حقوق ثبت شده است؛ برای ثبت دوباره ابتدا آن را ابطال کنید.",
+    invalid_overtime: "مبلغ اضافه‌کار معتبر نیست.",
+    deductions_exceed_gross: "کسور یکی از کارکنان از حقوق ناخالص او بیشتر است؛ کسور ثابت یا نرخ‌ها را بررسی کنید.",
+    amount_too_large: "مبلغ حقوق بیش از حد بزرگ است.",
+    advance_not_found: "مساعده پیدا نشد.",
+    advance_already_recovered: "بخشی از این مساعده در حقوق کسر شده است؛ ابتدا تعهد حقوق آن ماه را ابطال کنید.",
+    invalid_advance_date: "تاریخ مساعده معتبر نیست.",
+    note_too_long: "توضیح مساعده بیش از حد طولانی است.",
     invalid_accrual_date: "تاریخ تعهد معتبر نیست.",
     invalid_paid_date: "تاریخ پرداخت معتبر نیست.",
     run_not_found: "تعهد حقوق پیدا نشد.",

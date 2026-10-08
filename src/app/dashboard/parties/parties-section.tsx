@@ -52,7 +52,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { EmptyState, LoadingSkeleton, SectionCard, StatusBadge, TabBar } from "../page-chrome";
+import { EmptyState, LoadingSkeleton, SectionCard, StatusBadge, TabBar, TabPanel } from "../page-chrome";
 import {
   PARTY_DIRECTORY_VIEWS,
   partyDirectoryView,
@@ -644,6 +644,7 @@ export function PartiesSection({
           </div>
         ) : null}
 
+        <DirectoryViewPanel tabbed={views.length > 1 && Boolean(onViewChange)} active={activeView.key}>
         {/*
           The toolbar stacks on a phone and lays out in a row from `sm` up. It
           is a grid rather than a wrapping flex row because the three controls
@@ -848,6 +849,7 @@ export function PartiesSection({
             ) : null}
           </>
         )}
+        </DirectoryViewPanel>
       </SectionCard>
 
       {form ? (
@@ -919,6 +921,22 @@ export function PartiesSection({
         />
       ) : null}
     </div>
+  );
+}
+
+/**
+ * The list under the directory's view tabs. Each tab names
+ * `party-directory-tabpanel` in `aria-controls`; without a panel carrying that
+ * id the attribute pointed at nothing (axe: aria-valid-attr-value, critical)
+ * and a screen reader could not move from a tab to the list it filters. A
+ * scope with a single view draws no tabs and so needs no panel.
+ */
+function DirectoryViewPanel({ tabbed, active, children }: { tabbed: boolean; active: string; children: ReactNode }) {
+  if (!tabbed) return <>{children}</>;
+  return (
+    <TabPanel idPrefix="party-directory" active={active}>
+      {children}
+    </TabPanel>
   );
 }
 
