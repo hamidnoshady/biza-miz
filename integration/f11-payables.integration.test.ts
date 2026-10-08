@@ -249,7 +249,19 @@ describe("expense «پرداخت بعدی»", () => {
     expect(balances).toEqual([expect.objectContaining({ supplierId: supplier.id, balance: 7_500_000 })]);
     const statement = await apService.getSupplierStatement(biz.id, supplier.id);
     expect(statement).toEqual([
-      { date: "2026-09-01", type: "bill", description: "اجارهٔ شهریور", debit: 0, credit: 7_500_000, balance: 7_500_000 },
+      {
+        // Issue #825: a statement line carries the journal entry and the
+        // source record behind it, so the screen can drill into the voucher
+        // instead of guessing a URL out of the description.
+        entryId: expect.any(String),
+        date: "2026-09-01",
+        type: "bill",
+        description: "اجارهٔ شهریور",
+        debit: 0,
+        credit: 7_500_000,
+        balance: 7_500_000,
+        source: { type: "expense", id: expense.id, label: null, purchaseId: null },
+      },
     ]);
 
     // Settled later through the existing A/P payment path, from a chosen bank account with a reference.
