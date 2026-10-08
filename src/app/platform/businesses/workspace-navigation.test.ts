@@ -63,9 +63,13 @@ describe("the business workspace points at the business list, not the console ho
   });
 
   it("redirects to the business list after a hard delete", () => {
+    // Issue #822 moved the navigation from `window.location.href` to the
+    // router so the danger-zone tests can observe it; what stays pinned is
+    // the destination — the business list, never the console home.
     const panels = source(join(WORKSPACE_ROOT, "[id]", "panels.tsx"));
     const removePanel = panels.slice(panels.indexOf("export function RemovePanel"));
-    expect(removePanel).toContain('window.location.href = "/platform/businesses"');
+    expect(removePanel).toContain('router.push("/platform/businesses")');
+    expect(removePanel).not.toContain('href = "/platform"');
   });
 
   it("does not link to the retired plan address", () => {
