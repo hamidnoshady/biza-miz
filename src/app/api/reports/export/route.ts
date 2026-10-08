@@ -6,10 +6,17 @@ import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import { getPrimaryLocation } from "@/lib/setup-state";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
-import { reportConfigLabels, validateReportConfig, type ReportConfig } from "@/lib/reports";
+import { reportConfigIsMoney, reportConfigLabels, validateReportConfig, type ReportConfig } from "@/lib/reports";
 import { CASH_FLOW_ACTIVITY_LABELS, getBalanceSheet, getCashFlow, getProfitAndLoss, getBusinessOverview, runCustomReportQuery } from "@/lib/reports-service";
 import { formatMoney, formatMoneyText, moneyToInput, type MoneyUnit } from "@/lib/money";
-import { rowsToCsv, rowsToXlsxBuffer, type ReportTable } from "@/lib/report-export";
+import {
+  customReportTable,
+  moneyColumnLabel,
+  moneyExportCell,
+  rowsToCsv,
+  rowsToXlsxBuffer,
+  type ReportTable,
+} from "@/lib/report-export";
 import { renderReportLedgerHtml, renderReportTableHtml, type ReportPdfBusinessInfo } from "@/lib/report-pdf-template";
 import { renderHtmlToPdf } from "@/lib/pdf-render";
 import { getTrialBalance } from "@/lib/ledger-reports-service";
@@ -261,13 +268,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
     const { dimensionLabel, metricLabel, viewLabel } = reportConfigLabels(body.config);
     const rows = await runCustomReportQuery(session.businessId, body.config);
-    const table: ReportTable = {
-      columns: [
-        { key: "dim", label: dimensionLabel },
-        { key: "value", label: metricLabel },
-      ],
+    // A money metric is stored in integer Rial; the file speaks the business's
+    // selected unit and says which one in the header, like the statements do.
+    const table: ReportTable = customReportTable(
       rows,
-    };
+      { dimensionLabel, metricLabel },
+      { isMoney: reportConfigIsMoney(body.config), unit, format },
+    );
     const title = body.title?.trim() || viewLabel;
     return respondWithTable(table, title, format, session.businessId, body.config.filters);
   }
@@ -392,23 +399,27 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     });
     const title = body.title?.trim() || "مقایسهٔ عملکرد شعب";
 
+    // Money columns: a spreadsheet gets the number in the selected unit with
+    // the unit in its header; the PDF gets the formatted text. They used to
+    // carry raw Rial under a unit-less header — ten times the Toman figure.
+    const moneyLabel = (label: string) => (format === "pdf" ? label : moneyColumnLabel(label, unit));
     const tableColumns = [
       { key: "branch", label: "شعبه" },
       { key: "status", label: "وضعیت" },
       { key: "orderCount", label: "تعداد سفارش" },
-      { key: "subtotal", label: "فروش ناخالص" },
-      { key: "discount", label: "تخفیف" },
-      { key: "tax", label: "مالیات" },
-      { key: "total", label: "فروش خالص" },
-      { key: "cogs", label: "بهای تمام‌شده" },
-      { key: "wasteCost", label: "ضایعات" },
-      { key: "grossProfit", label: "سود ناخالص" },
+      { key: "subtotal", label: moneyLabel("فروش ناخالص") },
+      { key: "discount", label: moneyLabel("تخفیف") },
+      { key: "tax", label: moneyLabel("مالیات") },
+      { key: "total", label: moneyLabel("فروش خالص") },
+      { key: "cogs", label: moneyLabel("بهای تمام‌شده") },
+      { key: "wasteCost", label: moneyLabel("ضایعات") },
+      { key: "grossProfit", label: moneyLabel("سود ناخالص") },
       { key: "margin", label: "حاشیه سود (%)" },
-      { key: "avgTicket", label: "میانگین فاکتور" },
+      { key: "avgTicket", label: moneyLabel("میانگین فاکتور") },
       { key: "share", label: "سهم از کل (%)" },
     ];
 
-    const formatMoneyVal = (n: number) => formatMoney(n, unit);
+    const money = (rial: number) => moneyExportCell(rial, unit, format);
 
     const rows: Record<string, unknown>[] = overview.branches.map((b) => {
       const grossProfit = b.total - b.cogs;
@@ -423,15 +434,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         branch: b.locationName,
         status: b.isActive ? "فعال" : "غیرفعال",
         orderCount: b.orderCount,
-        subtotal: format === "pdf" ? formatMoneyVal(b.subtotal) : b.subtotal,
-        discount: format === "pdf" ? formatMoneyVal(b.discount) : b.discount,
-        tax: format === "pdf" ? formatMoneyVal(b.tax) : b.tax,
-        total: format === "pdf" ? formatMoneyVal(b.total) : b.total,
-        cogs: format === "pdf" ? formatMoneyVal(b.cogs) : b.cogs,
-        wasteCost: format === "pdf" ? formatMoneyVal(b.wasteCost) : b.wasteCost,
-        grossProfit: format === "pdf" ? formatMoneyVal(grossProfit) : grossProfit,
+        subtotal: money(b.subtotal),
+        discount: money(b.discount),
+        tax: money(b.tax),
+        total: money(b.total),
+        cogs: money(b.cogs),
+        wasteCost: money(b.wasteCost),
+        grossProfit: money(grossProfit),
         margin: `${margin}%`,
-        avgTicket: format === "pdf" ? formatMoneyVal(avgTicket) : avgTicket,
+        avgTicket: money(avgTicket),
         share: `${share}%`,
       };
     });
@@ -450,15 +461,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       branch: "مجموع کسب‌وکار",
       status: "—",
       orderCount: overview.consolidated.orderCount,
-      subtotal: format === "pdf" ? formatMoneyVal(overview.consolidated.subtotal) : overview.consolidated.subtotal,
-      discount: format === "pdf" ? formatMoneyVal(overview.consolidated.discount) : overview.consolidated.discount,
-      tax: format === "pdf" ? formatMoneyVal(overview.consolidated.tax) : overview.consolidated.tax,
-      total: format === "pdf" ? formatMoneyVal(overview.consolidated.total) : overview.consolidated.total,
-      cogs: format === "pdf" ? formatMoneyVal(overview.consolidated.cogs) : overview.consolidated.cogs,
-      wasteCost: format === "pdf" ? formatMoneyVal(overview.consolidated.wasteCost) : overview.consolidated.wasteCost,
-      grossProfit: format === "pdf" ? formatMoneyVal(cGrossProfit) : cGrossProfit,
+      subtotal: money(overview.consolidated.subtotal),
+      discount: money(overview.consolidated.discount),
+      tax: money(overview.consolidated.tax),
+      total: money(overview.consolidated.total),
+      cogs: money(overview.consolidated.cogs),
+      wasteCost: money(overview.consolidated.wasteCost),
+      grossProfit: money(cGrossProfit),
       margin: `${cMargin}%`,
-      avgTicket: format === "pdf" ? formatMoneyVal(cAvgTicket) : cAvgTicket,
+      avgTicket: money(cAvgTicket),
       share: "۱۰۰٪",
     });
 

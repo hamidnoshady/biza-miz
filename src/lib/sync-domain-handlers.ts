@@ -226,6 +226,8 @@ export async function applySyncDomainHandler(context: SyncDomainContext): Promis
           purchaseQty: requiredString(line, "purchaseQty"),
           totalCost: requiredString(line, "totalCost"),
         })),
+        // Audit F11 — the supplier invoice travels with the draft (absent on events recorded before 0212).
+        invoice: payload.invoice ?? undefined,
       });
       return { effectType: "purchase", effectId: result.id, result: { total: result.total } };
     }

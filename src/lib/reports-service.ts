@@ -622,7 +622,7 @@ export interface VatReport {
   periodTo: string | null;
   /** Net movement on vatPayable in the period — VAT collected on sales, net of any credited back (e.g. sales returns). */
   outputVat: number;
-  /** Net movement on vatReceivable in the period — VAT paid on purchases, recorded via a manual journal entry against it. */
+  /** Net movement on vatReceivable in the period — VAT paid on purchases (posted on receipt from the supplier invoice, or by a manual entry). */
   inputVat: number;
   /** outputVat - inputVat: positive is owed to the tax authority for the period, negative is a refundable position. */
   netPayable: number;
@@ -634,12 +634,12 @@ export interface VatReport {
 
 /**
  * Output VAT has posted to vatPayable since Phase 7 (every order payment
- * credits it). Input VAT has no automatic posting — it's recorded as its own
- * manual journal entry (Debit vatReceivable / Credit Accounts Payable or
- * Cash) alongside entering a supplier bill, deliberately kept separate from
- * purchase receiving itself (see the phase doc's decision on this). This
- * report just reads both control accounts' movements over a period and nets
- * them — a return-shaped summary, not a new posting path.
+ * credits it). Input VAT is debited to vatReceivable when a purchase is
+ * received with its supplier invoice's VAT (audit F11: the purchase posting's
+ * own leg, in the same entry as the goods), and a manual journal entry can
+ * still post to it for anything bought outside «خرید». This report just reads
+ * both control accounts' movements over a period and nets them — a
+ * return-shaped summary, not a new posting path.
  */
 export async function getVatReport(businessId: string, filters: DateRangeFilters = {}): Promise<VatReport> {
   const codes = [WELL_KNOWN_CODES.vatPayable, WELL_KNOWN_CODES.vatReceivable];

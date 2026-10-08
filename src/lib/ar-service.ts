@@ -23,6 +23,8 @@ import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from ".
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_CUSTOMER_KEY, type AgingSummary } from "./aging";
 import { toPersianDigits } from "./digits";
 import { enqueueHolooReceiptForArReceipt } from "./integrations/holoo/outbox-producer";
+import { normalizeBankReference } from "./payables-input";
+import { resolveVoucherCashAccount } from "./voucher-cash-account";
 
 export { MissingLedgerAccountError };
 
@@ -411,6 +413,8 @@ export interface ArReceipt {
   method: "cash" | "bank";
   amount: number;
   memo: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
 }
 
 /**
@@ -429,6 +433,10 @@ export async function receivePayment(params: {
   createdBy: string | null;
   /** Holoo imports create local receipts but must not push them back to Holoo. */
   skipHolooPush?: boolean;
+  /** Audit F11 — the cash/bank account the money went into; null = the method's default account. */
+  cashAccountId?: string | null;
+  /** Audit F11 — the bank's tracking/reference number. */
+  bankReference?: string | null;
 }): Promise<ArReceipt> {
   if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
     throw new ArError("invalid_amount");
@@ -453,6 +461,8 @@ export async function receivePayment(params: {
    * never a UTC date slice.
    */
   const receiptDate = params.receiptDate ?? (await businessToday(params.businessId));
+  // Throws PayablesInputError («invalid_bank_reference»), which the route answers as a 400.
+  const bankReference = normalizeBankReference(params.bankReference);
 
   const client = await getPool().connect();
   try {
@@ -464,12 +474,10 @@ export async function receivePayment(params: {
     );
     if (!customerRows[0]) throw new ArError("customer_not_found", 404);
 
-    const accounts = await accountIdsByCode(client, params.businessId, [
-      WELL_KNOWN_CODES.accountsReceivable,
-      params.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bankClearing,
-    ]);
+    const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsReceivable]);
     const arAccount = accounts.get(WELL_KNOWN_CODES.accountsReceivable)!;
-    const cashAccount = accounts.get(params.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bankClearing)!;
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId);
+    const cashAccount = cash.accountId;
 
     const { rows } = await client.query<{
       id: string;
@@ -478,10 +486,12 @@ export async function receivePayment(params: {
       method: "cash" | "bank";
       amount: string;
       memo: string | null;
+      cash_account_id: string | null;
+      bank_reference: string | null;
     }>(
-      `INSERT INTO ar_receipts (business_id, location_id, customer_id, receipt_date, method, amount, memo, created_by)
-       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8)
-       RETURNING id, customer_id, receipt_date::text AS receipt_date, method, amount::text AS amount, memo`,
+      `INSERT INTO ar_receipts (business_id, location_id, customer_id, receipt_date, method, amount, memo, created_by, cash_account_id, bank_reference)
+       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10)
+       RETURNING id, customer_id, receipt_date::text AS receipt_date, method, amount::text AS amount, memo, cash_account_id, bank_reference`,
       [
         params.businessId,
         params.locationId,
@@ -491,6 +501,8 @@ export async function receivePayment(params: {
         params.amount,
         params.memo?.trim() || null,
         params.createdBy,
+        cash.chosen ? cash.accountId : null,
+        bankReference,
       ],
     );
     const receipt = rows[0];
@@ -522,6 +534,8 @@ export async function receivePayment(params: {
       method: receipt.method,
       amount: Number(receipt.amount),
       memo: receipt.memo,
+      cashAccountId: receipt.cash_account_id,
+      bankReference: receipt.bank_reference,
     };
   } catch (err) {
     await client.query("ROLLBACK");
