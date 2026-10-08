@@ -33,7 +33,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 
     const canSeeCost = await holdsPermission(session, PERMISSIONS.vehiclesCostView);
     if (canSeeCost) return NextResponse.json({ ok: true, onDate, summary });
-    const { stockValueRial, askingValueRial, potentialMarginRial, ...visible } = summary;
+    // The month's money is cost-derived too: a cashier learns how many cars
+    // the lot sold this month (`soldThisMonth` stays visible), never what they
+    // earned.
+    const { stockValueRial, askingValueRial, potentialMarginRial, revenueThisMonthRial, grossProfitThisMonthRial, averageMarginThisMonth, ...visible } = summary;
     return NextResponse.json({ ok: true, onDate, canSeeCost, summary: visible });
   } catch (err) {
     return handleAutomotiveError(err);

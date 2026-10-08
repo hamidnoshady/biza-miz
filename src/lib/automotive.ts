@@ -18,6 +18,7 @@
  * that two people cannot end up believing they hold the same car, or that one
  * car was sold twice.
  */
+import { isoDateToJalali, jalaliMonthLength, jalaliToIsoDate } from "./jalali";
 
 /* ===========================================================================
  * Condition — new or used, declared, never inferred
@@ -809,6 +810,13 @@ export interface VehicleStockSummaryInput {
   soldOn?: string | null;
   /** Sale price when sold — the report's realised figure, not the asking price. */
   salePriceRial?: number | null;
+  /**
+   * Net revenue (invoice total less the VAT the sale posted) and the frozen
+   * effective cost, both as the sale recorded them. Used for the month's
+   * realised figures only: VAT is the tax office's money and never margin.
+   */
+  saleNetRial?: number | null;
+  soldCostRial?: number | null;
 }
 
 export interface VehicleStockSummary {
@@ -821,6 +829,11 @@ export interface VehicleStockSummary {
   averageAgeDays: number | null;
   slowCount: number;
   deadCount: number;
+  /** §16 — cars whose sale date falls in `onDate`'s Jalali month. */
+  soldThisMonth: number;
+  revenueThisMonthRial: number;
+  grossProfitThisMonthRial: number;
+  averageMarginThisMonth: number | null;
 }
 
 /**
@@ -830,6 +843,20 @@ export interface VehicleStockSummary {
  * over a lot of four cars reduces to the same thing only by accident, and
  * «میانگین حاشیهٔ سود» should be the aggregate the owner can reconcile.
  */
+/**
+ * The first and last day of the Jalali month `onDate` falls in, as ISO dates.
+ * A "month" in this product is a Jalali month — «فروش مهر» is what an owner
+ * asks for, and comparing ISO strings outside that range would silently answer
+ * the Gregorian question instead.
+ */
+export function jalaliMonthRange(onDate: string): [string, string] {
+  const parts = isoDateToJalali(onDate);
+  if (!parts) return [onDate, onDate];
+  const startJd = 1;
+  const endJd = jalaliMonthLength(parts.jy, parts.jm);
+  return [jalaliToIsoDate(parts.jy, parts.jm, startJd), jalaliToIsoDate(parts.jy, parts.jm, endJd)];
+}
+
 export function summarizeVehicleStock(
   vehicles: readonly VehicleStockSummaryInput[],
   onDate: string,
@@ -844,9 +871,23 @@ export function summarizeVehicleStock(
   let slowCount = 0;
   let deadCount = 0;
 
+  // The Jalali month `onDate` falls in — «فروش این ماه» is the owner's month,
+  // not the Gregorian one.
+  const [monthStart, monthEnd] = jalaliMonthRange(onDate);
+  let soldThisMonth = 0;
+  let revenueThisMonth = 0;
+  let costThisMonth = 0;
+
   for (const vehicle of vehicles) {
     if (vehicle.state === "sold") {
       sold += 1;
+      if (vehicle.soldOn && vehicle.soldOn >= monthStart && vehicle.soldOn <= monthEnd) {
+        soldThisMonth += 1;
+        // The invoice's *net* revenue is what the ledgers credited; the row's
+        // sale price is the VAT-inclusive total, and VAT is never margin.
+        revenueThisMonth += vehicle.saleNetRial ?? 0;
+        costThisMonth += vehicle.soldCostRial ?? 0;
+      }
       continue;
     }
     if (vehicle.state === "archived") continue;
@@ -873,5 +914,10 @@ export function summarizeVehicleStock(
     averageAgeDays: ageCount === 0 ? null : Math.round(ageSum / ageCount),
     slowCount,
     deadCount,
+    soldThisMonth,
+    revenueThisMonthRial: revenueThisMonth,
+    grossProfitThisMonthRial: revenueThisMonth - costThisMonth,
+    averageMarginThisMonth:
+      revenueThisMonth > 0 ? Math.round(((revenueThisMonth - costThisMonth) / revenueThisMonth) * 1000) / 10 : null,
   };
 }

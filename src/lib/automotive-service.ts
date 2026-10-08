@@ -1562,6 +1562,7 @@ export async function listVehicles(
     reserved_deposit_rial: string | null;
     sold_on: string | null;
     sale_price_rial: string | null;
+    vat_rial: string;
   }>(
     `SELECT v.serial_id, v.stock_number, v.make, v.model, v.trim, v.model_year, v.condition,
             v.mileage_km, v.state, v.location_id, l.name AS location_name,
@@ -1659,6 +1660,10 @@ export async function summarizeVehicles(
   averageAgeDays: number | null;
   slowCount: number;
   deadCount: number;
+  soldThisMonth: number;
+  revenueThisMonthRial: number;
+  grossProfitThisMonthRial: number;
+  averageMarginThisMonth: number | null;
 }> {
   const { summarizeVehicleStock } = await import("./automotive");
   const params: unknown[] = [businessId];
@@ -1674,6 +1679,7 @@ export async function summarizeVehicles(
     acquired_on: string;
     sold_on: string | null;
     sale_price_rial: string | null;
+    vat_rial: string;
   }>(
     `SELECT v.state, v.condition,
             -- For a sold car the *frozen* number is the effective cost: that is
@@ -1686,7 +1692,17 @@ export async function summarizeVehicles(
             )::text AS effective_cost_rial,
             v.asking_price_rial::text AS asking_price_rial,
             coalesce(v.acquisition_date, v.created_at::date)::text AS acquired_on,
-            v.sold_on::text AS sold_on, v.sale_price_rial::text AS sale_price_rial
+            v.sold_on::text AS sold_on, v.sale_price_rial::text AS sale_price_rial,
+            -- The VAT the sale's own revenue entry charged, read from the books
+            -- rather than re-derived from a configured rate: this figure feeds
+            -- the month's margin, and it must agree with what was posted.
+            coalesce((
+              SELECT sum(jl.credit) FROM journal_entries e
+                JOIN journal_lines jl ON jl.entry_id = e.id
+                JOIN accounts a ON a.id = jl.account_id
+               WHERE e.business_id = v.business_id AND e.source_id = v.serial_id
+                 AND e.posting_kind = 'automotive_sale_revenue' AND a.code = '2200'
+            ), 0)::text AS vat_rial
        FROM automotive_vehicle_attributes v
        LEFT JOIN (
          SELECT serial_id, sum(amount_rial) FILTER (WHERE posting = 'capitalized') AS capitalized_cost_rial
@@ -1705,6 +1721,11 @@ export async function summarizeVehicles(
       acquiredOn: row.acquired_on,
       soldOn: row.sold_on,
       salePriceRial: row.sale_price_rial == null ? null : Number(row.sale_price_rial),
+      // Net of VAT, and at the frozen cost — the same two numbers the ledger
+      // recorded for this sale, so the dashboard's margin is the report's.
+      saleNetRial:
+        row.sale_price_rial == null ? null : Math.max(0, Number(row.sale_price_rial) - Number(row.vat_rial)),
+      soldCostRial: row.sold_on == null ? null : Number(row.effective_cost_rial),
     })),
     options.onDate,
   );

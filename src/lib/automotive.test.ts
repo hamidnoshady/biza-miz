@@ -32,6 +32,7 @@ import {
   holdHasExpired,
   holdIsBlocking,
   isVehicleAvailable,
+  jalaliMonthRange,
   isVehicleCondition,
   isVehicleYearCalendar,
   minimumPriceFloor,
@@ -488,3 +489,104 @@ describe("the dashboard summary", () => {
     expect(summarizeVehicleStock([], "2025-10-01").averageAgeDays).toBeNull();
   });
 });
+
+describe("jalaliMonthRange", () => {
+  it("returns the first and last day of the Jalali month a date falls in", () => {
+    // 2026-01-10 is 20 Dey 1404; Dey has 30 days.
+    expect(jalaliMonthRange("2026-01-10")).toEqual(["2025-12-22", "2026-01-20"]);
+    // 2026-04-05 is 16 Farvardin 1405 (Nowruz 1405 = 2026-03-21), 31 days long.
+    expect(jalaliMonthRange("2026-04-05")).toEqual(["2026-03-21", "2026-04-20"]);
+  });
+
+  it("handles Esfand of a leap year without inventing a day", () => {
+    const [start, end] = jalaliMonthRange("2026-03-15"); // 24 Esfand 1404
+    expect(start).toBe("2026-02-20");
+    expect(end).toBe("2026-03-20");
+  });
+});
+
+describe("summarizeVehicleStock month figures", () => {
+  const onDate = "2026-01-15"; // 25 Dey 1404
+
+  it("counts this Jalali month's sales, at net revenue and the frozen cost", () => {
+    const summary = summarizeVehicleStock(
+      [
+        // Sold inside Dey 1404 (2025-12-22 … 2026-01-20).
+        {
+          state: "sold",
+          condition: "new",
+          effectiveCostRial: 700_000_000,
+          askingPriceRial: 900_000_000,
+          acquiredOn: "2025-12-01",
+          soldOn: "2026-01-05",
+          salePriceRial: 981_000_000,
+          saleNetRial: 900_000_000,
+          soldCostRial: 700_000_000,
+        },
+        // Sold in the PREVIOUS Gregorian month, in the same Jalali month —
+        // both must count, which is the whole point of a Jalali range.
+        {
+          state: "sold",
+          condition: "used",
+          effectiveCostRial: 400_000_000,
+          askingPriceRial: 500_000_000,
+          acquiredOn: "2025-11-01",
+          soldOn: "2025-12-28",
+          salePriceRial: 545_000_000,
+          saleNetRial: 500_000_000,
+          soldCostRial: 400_000_000,
+        },
+        // Sold *after* the month: a lifetime sale, but not this month's.
+        {
+          state: "sold",
+          condition: "new",
+          effectiveCostRial: 1_000_000_000,
+          askingPriceRial: 1_200_000_000,
+          acquiredOn: "2025-10-01",
+          soldOn: "2026-01-25",
+          salePriceRial: 1_308_000_000,
+          saleNetRial: 1_200_000_000,
+          soldCostRial: 1_000_000_000,
+        },
+        {
+          state: "in_stock",
+          condition: "new",
+          effectiveCostRial: 600_000_000,
+          askingPriceRial: 750_000_000,
+          acquiredOn: "2026-01-02",
+        },
+      ],
+      onDate,
+    );
+
+    expect(summary.sold).toBe(3);
+    expect(summary.soldThisMonth).toBe(2);
+    // VAT is never margin: 981m invoice and 545m invoice both come in net.
+    expect(summary.revenueThisMonthRial).toBe(1_400_000_000);
+    expect(summary.grossProfitThisMonthRial).toBe(300_000_000);
+    expect(summary.averageMarginThisMonth).toBe(21.4);
+    // The stock side is untouched by any of it.
+    expect(summary.inStock).toBe(1);
+    expect(summary.stockValueRial).toBe(600_000_000);
+  });
+
+  it("answers a month with no sales with zeros rather than a NaN margin", () => {
+    const summary = summarizeVehicleStock(
+      [
+        {
+          state: "in_stock",
+          condition: "new",
+          effectiveCostRial: 600_000_000,
+          askingPriceRial: 750_000_000,
+          acquiredOn: "2026-01-02",
+        },
+      ],
+      onDate,
+    );
+    expect(summary.soldThisMonth).toBe(0);
+    expect(summary.revenueThisMonthRial).toBe(0);
+    expect(summary.grossProfitThisMonthRial).toBe(0);
+    expect(summary.averageMarginThisMonth).toBeNull();
+  });
+});
+

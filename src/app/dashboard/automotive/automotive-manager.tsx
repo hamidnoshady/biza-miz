@@ -90,6 +90,10 @@ interface OverviewDto {
     averageAgeDays: number | null;
     slowCount: number;
     deadCount: number;
+    soldThisMonth: number;
+    revenueThisMonthRial?: number;
+    grossProfitThisMonthRial?: number;
+    averageMarginThisMonth?: number | null;
   };
 }
 
@@ -146,7 +150,9 @@ export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
     };
   }, [search, condition, stateFilter, reloadKey]);
 
-  const soldThisMonth = useMemo(() => overview?.summary.sold ?? 0, [overview]);
+  // §16's "sold this month" — the *same-month* count, not the lifetime `sold`
+  // total the summary also carries.
+  const soldThisMonth = useMemo(() => overview?.summary.soldThisMonth ?? 0, [overview]);
 
   return (
     <IndustryManagerShell
@@ -168,7 +174,23 @@ export function AutomotiveManager({ canSeeCost }: { canSeeCost: boolean }) {
             <KpiRow>
               <KpiCard label="خودروهای موجود" value={String(overview?.summary.inStock ?? 0)} />
               <KpiCard label="رزروشده" value={String(overview?.summary.reserved ?? 0)} />
-              <KpiCard label="فروش‌رفته (این دوره)" value={String(soldThisMonth)} />
+              <KpiCard label="فروش‌رفتهٔ این ماه" value={String(soldThisMonth)} />
+              {canSeeCost ? (
+                <KpiCard label="درآمد این ماه (بی‌مالیات)" value={money(overview?.summary.revenueThisMonthRial)} />
+              ) : null}
+              {canSeeCost ? (
+                <KpiCard label="سود ناخالص این ماه" value={money(overview?.summary.grossProfitThisMonthRial)} />
+              ) : null}
+              {canSeeCost ? (
+                <KpiCard
+                  label="میانگین حاشیهٔ این ماه"
+                  value={
+                    overview?.summary.averageMarginThisMonth == null
+                      ? "—"
+                      : `${overview.summary.averageMarginThisMonth.toLocaleString("fa-IR")}٪`
+                  }
+                />
+              ) : null}
               <KpiCard
                 label="میانگین روز در انبار"
                 value={overview?.summary.averageAgeDays == null ? "—" : String(overview.summary.averageAgeDays)}

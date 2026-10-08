@@ -34,7 +34,11 @@ export type ReportShape =
   | "brand_sales"
   | "near_expiry"
   | "low_stock"
-  | "dead_stock";
+  | "dead_stock"
+  // Issue #839 §14 — the dealership's own report payloads.
+  | "vehicle_inventory"
+  | "vehicle_sales"
+  | "vehicle_reservations";
 
 /**
  * A standard report's chart config, as the API hands it over.
