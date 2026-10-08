@@ -85,11 +85,11 @@ interface PaymentBody {
   amount?: number;
   paymentDate?: string;
   memo?: string;
+  clientRequestId?: string;
   /** The cash/bank/clearing account (an active account of the chosen method); omitted = the method's default. */
   cashAccountId?: string | null;
   /** The bank's tracking/reference number. */
   bankReference?: string | null;
-  idempotencyKey?: string;
 }
 
 /** Records the business paying down a supplier's AP balance. Same access as posting a manual journal entry. */
@@ -106,6 +106,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const supplierId = body.supplierId?.trim();
   if (!supplierId) return NextResponse.json({ error: "supplier_required" }, { status: 400 });
+  const clientRequestId = body.clientRequestId?.trim();
+  if (!clientRequestId || clientRequestId.length > 200) {
+    return NextResponse.json({ error: "idempotency_key_required" }, { status: 400 });
+  }
   if (!isVoucherMethod(body.method)) {
     return NextResponse.json({ error: "invalid_method", allowed: [...VOUCHER_METHODS] }, { status: 400 });
   }
@@ -131,7 +135,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       amount,
       paymentDate,
       memo: body.memo,
-      idempotencyKey: body.idempotencyKey,
+      clientRequestId,
       createdBy: session.sub,
       cashAccountId: typeof body.cashAccountId === "string" ? body.cashAccountId : null,
       bankReference: typeof body.bankReference === "string" ? body.bankReference : null,

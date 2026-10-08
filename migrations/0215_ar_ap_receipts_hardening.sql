@@ -3,10 +3,12 @@
 -- `ar_receipts` / `ap_payments` are the combined دریافت و پرداخت voucher workspace.
 -- This migration adds the columns the hardening needs, without rewriting history:
 --
---   * `idempotency_key` — client-generated per logical voucher submission.
---     Unique per business where present (retries with the same key return the
+--   * `idempotency_key` on ar_receipts — client-generated per logical receipt
+--     submission. Unique per business where present (a retry returns the
 --     original row instead of posting twice). NULL stays allowed for legacy
 --     rows and installment settlements, which are idempotent by their own key.
+--     A/P idempotency is `client_request_id` + `request_fingerprint` from
+--     0211_ap_subledger_integrity (issue #826), not a second key here.
 --   * `method` gains 'clearing' (POS/card/PSP money in transit, 1120). New
 --     `bank` vouchers post to the real bank account (1110); the explicit
 --     cash/bank/clearing account itself is `cash_account_id` from 0212
@@ -41,8 +43,6 @@ ALTER TABLE ar_receipts
     ADD COLUMN voucher_number bigint CHECK (voucher_number IS NULL OR voucher_number > 0);
 
 ALTER TABLE ap_payments
-    ADD COLUMN idempotency_key text
-        CHECK (idempotency_key IS NULL OR (char_length(idempotency_key) BETWEEN 1 AND 128)),
     ADD COLUMN reversed_at timestamptz,
     ADD COLUMN reversed_by uuid REFERENCES users(id) ON DELETE SET NULL,
     ADD COLUMN reversal_entry_id uuid REFERENCES journal_entries(id) ON DELETE SET NULL,
@@ -132,9 +132,6 @@ CREATE UNIQUE INDEX uq_ap_payments_business_voucher_number
 -- ---------------------------------------------------------------------------
 CREATE UNIQUE INDEX uq_ar_receipts_business_idempotency
     ON ar_receipts (business_id, idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
-CREATE UNIQUE INDEX uq_ap_payments_business_idempotency
-    ON ap_payments (business_id, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
 
 -- ---------------------------------------------------------------------------

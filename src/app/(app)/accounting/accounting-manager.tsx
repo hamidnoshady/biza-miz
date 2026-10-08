@@ -170,8 +170,9 @@ export function AccountingManager({
    * `undefined` and treats it as allowed, keeping the API as the gate for any
    * future optional caller).
    */
-  const canReceive = permissions.includes(PERMISSIONS.financeReceivablesManage);
-  const canPay = permissions.includes(PERMISSIONS.financePayablesManage);
+  const canManageReceivables = permissions.includes(PERMISSIONS.financeReceivablesManage);
+  const canManagePayables = permissions.includes(PERMISSIONS.financePayablesManage);
+  const canReverseVouchers = permissions.includes(PERMISSIONS.ledgerApprove);
 
   // Every section is a route now, so the rail navigates rather than switching
   // local state — a section a person lands on is a URL they can keep.
@@ -331,9 +332,14 @@ export function AccountingManager({
               permissions={permissions}
             />
           ) : null}
-          {section === "receivables" ? <ArSection /> : null}
-          {section === "payables" ? <ApSection /> : null}
-          {section === "receipts" ? <ReceiptsPaymentsSection canReceive={canReceive} canPay={canPay} /> : null}
+          {section === "receivables" ? <ArSection canSettle={canManageReceivables} /> : null}
+          {section === "payables" ? <ApSection canSettle={canManagePayables} /> : null}
+          {section === "receipts" ? <ReceiptsPaymentsSection
+            canManageReceivables={canManageReceivables}
+            canManagePayables={canManagePayables}
+            canReversePayments={canReverseVouchers}
+            canReverseReceipts={canReverseVouchers}
+          /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}
           {section === "reconciliation" ? (

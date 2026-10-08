@@ -248,9 +248,16 @@ describe("expense «پرداخت بعدی»", () => {
     const balances = await apService.listSupplierBalances(biz.id);
     expect(balances).toEqual([expect.objectContaining({ supplierId: supplier.id, balance: 7_500_000 })]);
     const statement = await apService.getSupplierStatement(biz.id, supplier.id);
-    expect(statement).toEqual([
-      { date: "2026-09-01", type: "bill", description: "اجارهٔ شهریور", debit: 0, credit: 7_500_000, balance: 7_500_000 },
-    ]);
+    expect(statement).toHaveLength(1);
+    expect(statement[0]).toMatchObject({
+      date: "2026-09-01",
+      type: "bill",
+      description: "اجارهٔ شهریور",
+      debit: 0,
+      credit: 7_500_000,
+      balance: 7_500_000,
+      sourceType: "expense",
+    });
 
     // Settled later through the existing A/P payment path, from a chosen bank account with a reference.
     const payment = await apService.payBill({
@@ -260,6 +267,7 @@ describe("expense «پرداخت بعدی»", () => {
       method: "bank",
       amount: 7_500_000,
       paymentDate: "2026-09-20",
+      clientRequestId: `f11-settle:${randomUUID()}`,
       createdBy: user.id,
       cashAccountId: acct["1119"],
       bankReference: "۸۸۷۷۶۶",
@@ -635,6 +643,7 @@ describe("receipt/payment voucher account and bank reference", () => {
       method: "bank",
       amount: 60_000,
       paymentDate: "2026-10-05",
+      clientRequestId: `f11-list:${randomUUID()}`,
       createdBy: user.id,
       cashAccountId: acct["1110"],
       bankReference: "REF-1",

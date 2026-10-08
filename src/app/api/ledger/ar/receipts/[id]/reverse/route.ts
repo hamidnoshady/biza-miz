@@ -10,12 +10,12 @@ interface Ctx {
 
 /**
  * Reverses a receipt voucher: posts the exact mirror of its journal entry
- * (dated today, never backdated) and marks the source row reversed. Same gate
- * as recording the receipt — finance.receivables_manage — since a reversal is
- * an equally ledger-altering action.
+ * (dated today, never backdated) and marks the source row reversed. ledger.
+ * approve is deliberately required, like the A/P payment reversal: this is an
+ * append-only accounting correction, not ordinary receipt entry.
  */
 export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
-  const { session, error } = await requirePermission(PERMISSIONS.financeReceivablesManage);
+  const { session, error } = await requirePermission(PERMISSIONS.ledgerApprove);
   if (error) return error;
 
   const { id } = await ctx.params;

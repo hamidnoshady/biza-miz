@@ -7,7 +7,7 @@ import {
   overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import { useEffect, useRef, useState } from "react";
-import { toPersianDigits } from "@/lib/digits";
+import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { ArrowDownLeftIcon, ArrowUpRightIcon, DownloadIcon, PlusIcon, RefreshCwIcon, XIcon } from "lucide-react";
@@ -19,6 +19,8 @@ import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@
 import { VoucherFormFields, useIdempotencyKey } from "./settlement-form";
 import { voucherReference } from "@/lib/voucher-shared";
 import { VOUCHER_METHOD_LABELS, type VoucherMethod } from "@/lib/payables-input";
+import Link from "next/link";
+import { accountingSectionHref } from "./accounting-routes";
 
 /**
  * «دریافت و پرداخت» — the voucher ledger slice. The reference software keeps
@@ -47,6 +49,10 @@ interface Voucher {
   bankReference: string | null;
   /** The cash/bank/clearing account named on the voucher; null = the method's default account. */
   cashAccount: { code: string; name: string } | null;
+  locationName?: string | null;
+  reversed?: boolean;
+  reversalDate?: string | null;
+  reversalEntryId?: string | null;
 }
 
 /** «بانکی · بانک ملت» — the method, plus the account when the voucher named one. */
@@ -66,18 +72,23 @@ const STATUS_LABELS: Record<Exclude<StatusFilter, "all">, string> = {
 };
 
 export function ReceiptsPaymentsSection({
-  canReceive,
-  canPay,
+  canManageReceivables,
+  canManagePayables,
+  canReversePayments,
+  canReverseReceipts,
 }: {
   /**
    * Whether this member may record receipts / payments
-   * (finance.receivables_manage / finance.payables_manage). `undefined` when
-   * the page could not read the member's effective permissions; the buttons
-   * then draw and the API stays the gate, matching how the manual-entry queue
-   * treats the same gap.
+   * (finance.receivables_manage / finance.payables_manage) or approve a
+   * correction (ledger.approve). `undefined` when the page could not read
+   * the member's effective permissions; the ثبت buttons then draw and the
+   * API stays the gate, matching how the manual-entry queue treats the
+   * same gap. The correction buttons stay hidden until approval is known.
    */
-  canReceive?: boolean;
-  canPay?: boolean;
+  canManageReceivables?: boolean;
+  canManagePayables?: boolean;
+  canReversePayments?: boolean;
+  canReverseReceipts?: boolean;
 }) {
   const money = useMoney();
   const [side, setSide] = useState<Side>("receipts");
@@ -93,6 +104,7 @@ export function ReceiptsPaymentsSection({
   const [creating, setCreating] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [reversingId, setReversingId] = useState<string | null>(null);
   /*
    * Responses race each other — a fast «علی» search easily outruns the slow
    * unfiltered listing it was typed over, and without the token the *older*
@@ -100,9 +112,16 @@ export function ReceiptsPaymentsSection({
    * user asked for. Only the latest request may write state.
    */
   const requestSeq = useRef(0);
+  /*
+   * The register API projects stored row columns; `reversed` is derived, not
+   * stored, so every fetch normalizes it before the rows reach state.
+   */
+  function normalizeRow(row: Voucher): Voucher {
+    return { ...row, reversed: row.reversedAt !== null };
+  }
   const prevSide = useRef<Side>(side);
 
-  const canCreate = side === "receipts" ? canReceive !== false : canPay !== false;
+  const canCreate = side === "receipts" ? canManageReceivables !== false : canManagePayables !== false;
 
   function listUrl(cursor?: string | null): string {
     const params = new URLSearchParams();
@@ -135,7 +154,7 @@ export function ReceiptsPaymentsSection({
         .then(({ ok, data }) => {
           if (requestSeq.current !== seq) return;
           if (ok) {
-            setRows(data.receipts ?? data.payments ?? []);
+            setRows((data.receipts ?? data.payments ?? []).map(normalizeRow));
             setNextCursor(data.nextCursor ?? null);
             setHasMore(data.hasMore ?? false);
             setError("");
@@ -170,7 +189,7 @@ export function ReceiptsPaymentsSection({
       }>(listUrl(nextCursor));
       if (requestSeq.current !== seq) return;
       if (ok) {
-        setRows((prev) => [...(prev ?? []), ...(data.receipts ?? data.payments ?? [])]);
+        setRows((prev) => [...(prev ?? []), ...(data.receipts ?? data.payments ?? []).map(normalizeRow)]);
         setNextCursor(data.nextCursor ?? null);
         setHasMore(data.hasMore ?? false);
       } else {
@@ -205,6 +224,21 @@ export function ReceiptsPaymentsSection({
   function refresh() {
     setSelectedId(null);
     setRefreshKey((k) => k + 1);
+  }
+
+
+  async function reversePayment(row: Voucher) {
+    if (!canReversePayments || row.reversed || reversingId) return;
+    if (!window.confirm(`برگشت پرداخت ${row.partyName} به مبلغ ${money.format(row.amount)} ثبت شود؟ این کار سند اصلاحی تازه‌ای می‌سازد و قابل حذف نیست.`)) return;
+    setReversingId(row.id);
+    setError("");
+    const { ok, data } = await api<{ error?: string }>(`/api/ledger/ap/payments/${row.id}/reverse`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    setReversingId(null);
+    if (ok) setRefreshKey((k) => k + 1);
+    else setError(errorMessage(data.error));
   }
 
   const needle = q.trim();
@@ -339,6 +373,7 @@ export function ReceiptsPaymentsSection({
                   <Th>تاریخ</Th>
                   <Th>مبلغ</Th>
                   <Th>وضعیت</Th>
+                  {side === "payments" && canReversePayments ? <Th>اقدام</Th> : null}
                 </DataTableHead>
                 <DataTableBody>
                   {rows.map((r) => (
@@ -348,13 +383,21 @@ export function ReceiptsPaymentsSection({
                       onClick={() => setSelectedId(r.id)}
                     >
                       <Td muted>{r.voucherNumber != null ? toPersianDigits(voucherReference(side === "receipts" ? "receipt" : "payment", r.voucherNumber)) : "—"}</Td>
-                      <Td className="max-w-48 truncate font-medium" title={r.partyName}>{r.partyName}</Td>
+                      <Td className="max-w-48 truncate font-medium" title={r.partyName}>
+                        {r.partyName}
+                        {side === "payments" && r.locationName ? <span className="mt-1 block text-xs font-normal text-muted-foreground">شعبهٔ {r.locationName}</span> : null}
+                      </Td>
                       <Td muted className="max-w-64 truncate" title={r.memo ?? undefined}>{r.memo ?? "—"}</Td>
                       <Td muted className="max-w-48 truncate" title={methodText(r)}>{methodText(r)}</Td>
                       <Td muted nowrap dir="ltr">{r.bankReference ? toPersianDigits(r.bankReference) : "—"}</Td>
                       <Td nowrap muted>{fmtJalali(r.date)}</Td>
-                      <Td nowrap className="font-semibold">{money.format(r.amount)}</Td>
+                      <Td nowrap className="font-semibold">
+                        {money.format(r.amount)}
+                        {side === "payments" && r.reversed ? <span className="mt-1 block text-xs font-medium text-muted-foreground">برگشت‌خورده{r.reversalDate ? ` · ${fmtJalali(r.reversalDate)}` : ""}</span> : null}
+                        {side === "payments" && r.reversalEntryId ? <Link className="mt-1 block text-xs font-semibold text-primary underline-offset-4 hover:underline" href={`${accountingSectionHref("entries")}?entryId=${encodeURIComponent(r.reversalEntryId)}`}>سند برگشت</Link> : null}
+                      </Td>
                       <Td muted>{r.reversedAt ? STATUS_LABELS.reversed : STATUS_LABELS.active}</Td>
+                      {side === "payments" && canReversePayments ? <Td>{r.reversed ? <span className="text-xs text-muted-foreground">برگشت‌خورده</span> : <span onClick={(e) => e.stopPropagation()}><SecondaryButton disabled={!!reversingId} onClick={() => void reversePayment(r)}>{reversingId === r.id ? "در حال ثبت…" : "برگشت پرداخت"}</SecondaryButton></span>}</Td> : null}
                     </DataTableRow>
                   ))}
                 </DataTableBody>
@@ -370,6 +413,7 @@ export function ReceiptsPaymentsSection({
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <h3 className="truncate text-sm font-bold" title={r.partyName}>{r.partyName}</h3>
+                        {side === "payments" && r.locationName ? <p className="mt-1 text-xs text-muted-foreground">شعبهٔ {r.locationName}</p> : null}
                         <p className="mt-1 text-xs text-muted-foreground">{r.memo ?? (side === "receipts" ? "دریافت وجه" : "پرداخت وجه")}</p>
                       </div>
                       <span className="whitespace-nowrap font-bold">{money.format(r.amount)}</span>
@@ -380,6 +424,9 @@ export function ReceiptsPaymentsSection({
                       {r.bankReference ? ` · پیگیری ${toPersianDigits(r.bankReference)}` : ""}
                       {r.reversedAt ? ` · ${STATUS_LABELS.reversed}` : ""}
                     </p>
+                    {side === "payments" && r.reversed ? <p className="mt-2 text-xs font-medium text-muted-foreground">برگشت‌خورده{r.reversalDate ? ` · ${fmtJalali(r.reversalDate)}` : ""}</p> : null}
+                    {side === "payments" && r.reversalEntryId ? <Link className="mt-2 inline-block text-xs font-semibold text-primary underline-offset-4 hover:underline" href={`${accountingSectionHref("entries")}?entryId=${encodeURIComponent(r.reversalEntryId)}`}>مشاهدهٔ سند برگشت</Link> : null}
+                    {side === "payments" && canReversePayments && !r.reversed ? <span className="mt-3 block" onClick={(e) => e.stopPropagation()}><SecondaryButton className="w-full" disabled={!!reversingId} onClick={() => void reversePayment(r)}>{reversingId === r.id ? "در حال ثبت…" : "برگشت پرداخت"}</SecondaryButton></span> : null}
                   </article>
                 ))}
               </div>
@@ -411,7 +458,7 @@ export function ReceiptsPaymentsSection({
         <VoucherDetailDialog
           side={side}
           voucherId={selectedId}
-          canReverse={side === "receipts" ? canReceive !== false : canPay !== false}
+          canReverse={side === "receipts" ? !!canReverseReceipts : !!canReversePayments}
           onClose={() => setSelectedId(null)}
           onReversed={refresh}
         />
@@ -424,6 +471,7 @@ interface PartyOption {
   id: string;
   name: string;
   phone: string | null;
+  locationName?: string | null;
 }
 
 function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => void; onCreated: () => void }) {
@@ -442,6 +490,7 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const idempotencyKey = useIdempotencyKey();
+  const requestKeyRef = useRef<{ intent: string; key: string } | null>(null);
 
   /*
    * `?scope=directory`, not the open-balance list. A voucher is not always a
@@ -457,7 +506,7 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
       side === "receipts" ? "/api/ledger/ar/customers?scope=directory" : "/api/ledger/ap/suppliers?scope=directory";
     api<{
       customers?: { customerId: string; customerName: string; customerPhone: string | null }[];
-      suppliers?: { supplierId: string; supplierName: string; supplierPhone: string | null }[];
+      suppliers?: { supplierId: string; supplierName: string; supplierPhone: string | null; locationName?: string | null }[];
     }>(url).then(({ ok, data }) => {
       if (cancelled) return;
       // `api()` resolves even when the network drops (as «network_error»), so
@@ -469,7 +518,7 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
       setParties(
         side === "receipts"
           ? (data.customers ?? []).map((c) => ({ id: c.customerId, name: c.customerName, phone: c.customerPhone }))
-          : (data.suppliers ?? []).map((s) => ({ id: s.supplierId, name: s.supplierName, phone: s.supplierPhone })),
+          : (data.suppliers ?? []).map((s) => ({ id: s.supplierId, name: s.supplierName, phone: s.supplierPhone, locationName: s.locationName })),
       );
       setPartyState("ready");
     });
@@ -505,18 +554,36 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
     setBusy(true);
     setError("");
     const url = side === "receipts" ? "/api/ledger/ar/receipts" : "/api/ledger/ap/payments";
+    const memoValue = memo.trim() || undefined;
+    const bankReferenceValue = bankReference.trim() || undefined;
     const common = {
       amount: rial,
       method,
-      memo: memo.trim() || undefined,
+      memo: memoValue,
       cashAccountId: cashAccountId || undefined,
-      bankReference: bankReference.trim() || undefined,
-      idempotencyKey,
+      bankReference: bankReferenceValue,
     };
-    const body =
-      side === "receipts"
-        ? { ...common, customerId: partyId, receiptDate: date || undefined }
-        : { ...common, supplierId: partyId, paymentDate: date || undefined };
+    let body: Record<string, string | number | undefined>;
+    if (side === "receipts") {
+      body = { ...common, customerId: partyId, receiptDate: date || undefined, idempotencyKey };
+    } else {
+      // One request key belongs to one intended A/P transfer and survives a
+      // retry after an ambiguous network result. Any material edit rotates it.
+      const intent = JSON.stringify({
+        supplierId: partyId,
+        amount: rial,
+        method,
+        paymentDate: date || null,
+        memo: memoValue ?? null,
+        cashAccountId: cashAccountId || null,
+        bankReference: bankReferenceValue ? toLatinDigits(bankReferenceValue).trim() : null,
+      });
+      if (requestKeyRef.current?.intent !== intent) {
+        const key = globalThis.crypto?.randomUUID?.() ?? `ap-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        requestKeyRef.current = { intent, key };
+      }
+      body = { ...common, supplierId: partyId, paymentDate: date || undefined, clientRequestId: requestKeyRef.current.key };
+    }
     const { ok, data } = await api<{ error?: string }>(url, { method: "POST", body: JSON.stringify(body) });
     setBusy(false);
     if (ok) onCreated();
@@ -566,8 +633,8 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
                     // Two customers can share a name; the phone number is how
                     // the accountant tells them apart before money moves
                     // against the wrong person's account.
-                    label: p.phone ? `${p.name} · ${toPersianDigits(p.phone)}` : p.name,
-                    searchString: `${p.name} ${p.phone ?? ""}`,
+                    label: [p.name, p.locationName ? `شعبهٔ ${p.locationName}` : null, p.phone ? toPersianDigits(p.phone) : null].filter(Boolean).join(" · "),
+                    searchString: `${p.name} ${p.locationName ?? ""} ${p.phone ?? ""}`,
                   })),
                 ]}
               />

@@ -595,6 +595,10 @@ const API_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   // must follow the tab's menu gate rather than the broader settings module;
   // longer prefixes stay before the catch-all because first match wins.
   ["/api/settings/pricing", "menu"],
+  // SnapFood commission and online delivery configuration belong to the
+  // delivery module, not shared settings; withTenantScope enforces this even
+  // for a direct URL from a trade without delivery.
+  ["/api/settings/online-platforms", "delivery"],
   ["/api/settings", "settings"],
   // The per-industry data routes. See the note above: the stricter
   // `requireIndustryForApi` check at each handler stays; this row is what lets

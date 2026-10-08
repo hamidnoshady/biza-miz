@@ -27,6 +27,7 @@ import { SETTING_KEYS, markSetupComplete } from "./settings";
 import { coaTemplateForIndustry, nextAccountLevel, type AccountLevel, type TemplateAccount } from "./coa-template";
 import { ENABLED_INDUSTRIES, INDUSTRIES, type Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
+import { wizardStepsForIndustry } from "./wizard-steps";
 import { seedPaymentMethods } from "./payment-methods-service";
 import { isMobilePhone, phoneE164 } from "./phone";
 import { generateSecret, generateURI } from "otplib";
@@ -37,6 +38,18 @@ import { getMasterKey } from "./master-key";
 import { totpQrDataUrl } from "./totp-qr";
 import { createOwnerActivation } from "./owner-activation";
 import { randomBytes } from "node:crypto";
+
+/**
+ * Platform-created non-F&B tenants retain the console's ready-to-enter path.
+ * A food_service tenant cannot be stamped complete by bare provisioning: its
+ * normal completion contract requires persisted business preferences, costing,
+ * tax and a sellable menu, which provisioning does not manufacture.
+ */
+export function shouldCompleteSetupForPlatformProvision(industry?: Industry): boolean {
+  // The canonical wizard defines which industries require a menu; platform
+  // provisioning does not create any menu-backed setup data.
+  return !wizardStepsForIndustry(industry ?? "food_service").includes("menu");
+}
 
 export interface ProvisionBusinessInput {
   businessName: string;
@@ -113,15 +126,15 @@ export interface ProvisionBusinessInput {
    */
   confirmExistingOwner?: boolean;
   /**
-   * Issue #808 §4 — this call provisions a business that is *finished*:
-   * stamp `setup.progress.completedAt` in the same transaction, the way
-   * pairing does, so the owner is never routed into the first-run wizard.
-   *
-   * Set by the callers that promise a ready-to-use business (the platform
-   * console, which also seeds the chart of accounts, and the platform's own
-   * company workspace). Deliberately NOT set by the first-run bootstrap or
-   * public signup: those *are* the wizard's front doors, and their business
-   * must stay incomplete until the owner reaches Finish.
+   * Issue #808 §4 — stamp `setup.progress.completedAt` in the same transaction
+   * when the caller's provisioning contract really satisfies that industry's
+   * readiness requirements. The platform console uses this for non-F&B trades
+   * it provisions ready to enter; it deliberately leaves food_service unset
+   * because provisioning does not create its preferences, costing, tax and
+   * sellable-menu prerequisites. The platform's own company workspace has its
+   * separate ready-to-enter contract. First-run bootstrap and public signup
+   * never set this: those are the wizard's front doors, and their business must
+   * stay incomplete until the owner reaches Finish.
    */
   completeSetup?: boolean;
 }

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { getPool, query } from "./db";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
@@ -218,17 +219,23 @@ export async function createInstallmentPlan(input: InstallmentPlanInput): Promis
     );
     if (!rows[0]) throw new InstallmentError("party_not_found", 404);
     if (input.direction === "payable") {
-      // Settling a payable slice posts an ap_payments row, which needs the
-      // party's per-location supplier record — refuse the plan up front
-      // rather than at the first slice.
-      const { rows: supplierRows } = await query<{ id: string }>(
-        `SELECT s.id FROM suppliers s JOIN locations l ON l.id = s.location_id
+      // A payable plan needs one exact branch alias. A branch-bound plan must
+      // resolve there. A business-wide/null-location plan is safe only when
+      // this party has exactly one supplier alias; choosing the first alias
+      // from several branches would make interest and later payments drift.
+      const { rows: supplierRows } = await query<{ id: string; location_id: string }>(
+        `SELECT s.id, s.location_id
+           FROM suppliers s
+           JOIN locations l ON l.id = s.location_id
           WHERE s.party_id = $1 AND l.business_id = $2
             AND ($3::uuid IS NULL OR s.location_id = $3)
-          ORDER BY s.id LIMIT 1`,
+          ORDER BY s.id`,
         [partyId, input.businessId, input.locationId],
       );
       if (!supplierRows[0]) throw new InstallmentError("supplier_record_missing", 409);
+      if (input.locationId === null && supplierRows.length !== 1) {
+        throw new InstallmentError("installment_location_required", 409);
+      }
     }
   }
 
@@ -481,6 +488,19 @@ export async function getInstallmentPlan(businessId: string, planId: string): Pr
   })));
 }
 
+/** Stable fingerprint for the one payment attached to a payable installment item. */
+function installmentApPaymentFingerprint(input: {
+  supplierId: string;
+  locationId: string;
+  method: VoucherMethod;
+  amount: number;
+  memo: string;
+}): string {
+  return createHash("sha256")
+    .update(JSON.stringify(["installment-ap-v1", input.supplierId, input.locationId, input.method, input.amount, input.memo]))
+    .digest("hex");
+}
+
 /**
  * Settles one slice. Receivable slices post the exact ar_receipt pair
  * (Debit Cash/Bank / Credit A/R); payable slices the ap_payments mirror —
@@ -527,15 +547,88 @@ export async function payInstallmentItem(params: {
     if (!plan) throw new InstallmentError("plan_not_found", 404);
     if (!plan.party_id) throw new InstallmentError("plan_has_no_party");
 
-    const { rows: itemRows } = await client.query<{ id: string; amount: string; paid_at: string | null; seq: string }>(
-      `SELECT id, amount::text AS amount, paid_at::text AS paid_at, seq::text AS seq
+    const { rows: itemRows } = await client.query<{ id: string; amount: string; paid_at: string | null; seq: string; payment_id: string | null }>(
+      `SELECT id, amount::text AS amount, paid_at::text AS paid_at, seq::text AS seq, payment_id
          FROM installment_items WHERE id = $1 AND installment_id = $2 FOR UPDATE`,
       [params.itemId, params.planId],
     );
     const item = itemRows[0];
     if (!item) throw new InstallmentError("item_not_found", 404);
-    if (item.paid_at) throw new InstallmentError("already_paid");
     const amount = Number(item.amount);
+    const memo = params.memo?.trim() || `قسط ${item.seq} — ${plan.party_name ?? ""}`;
+    const installmentRequestId = `installment-ap:${plan.id}:${item.id}`;
+    if (item.paid_at) {
+      if (plan.direction === "payable" && item.payment_id) {
+        const { rows: existingPaymentRows } = await client.query<{
+          supplier_id: string;
+          location_id: string;
+          method: VoucherMethod;
+          amount: string;
+          memo: string | null;
+          client_request_id: string | null;
+          request_fingerprint: string | null;
+        }>(
+          `SELECT supplier_id, location_id, method, amount::text AS amount, memo,
+                  client_request_id, request_fingerprint
+             FROM ap_payments
+            WHERE business_id = $1 AND id = $2`,
+          [params.businessId, item.payment_id],
+        );
+        const payment = existingPaymentRows[0];
+        if (payment?.client_request_id === installmentRequestId) {
+          const fingerprint = installmentApPaymentFingerprint({
+            supplierId: payment.supplier_id,
+            locationId: payment.location_id,
+            method: params.method,
+            amount: Number(payment.amount),
+            memo,
+          });
+          if (payment.request_fingerprint !== fingerprint) throw new InstallmentError("idempotency_conflict", 409);
+          await client.query("COMMIT");
+          return;
+        }
+      }
+      throw new InstallmentError("already_paid", 409);
+    }
+
+    let effectiveLocationId = plan.location_id ?? params.locationId;
+    let payableSupplierId: string | null = null;
+    if (plan.direction === "payable") {
+      // The supplier alias and payment location are one branch under the
+      // strict branch-liability rule. For a legacy/null-location plan, only a
+      // unique alias can supply a deterministic branch; several aliases need
+      // the plan to be assigned to one of them.
+      const { rows: supplierRows } = await client.query<{ id: string; location_id: string }>(
+        `SELECT s.id, s.location_id
+           FROM suppliers s
+           JOIN locations l ON l.id = s.location_id
+          WHERE s.party_id = $1 AND l.business_id = $2
+            AND (
+              ($3::uuid IS NOT NULL AND s.location_id = $3)
+              OR
+              ($3::uuid IS NULL AND (
+                SELECT count(*)
+                  FROM suppliers sx
+                  JOIN locations slx ON slx.id = sx.location_id
+                 WHERE sx.party_id = $1 AND slx.business_id = $2
+              ) = 1)
+            )
+          ORDER BY s.id
+          LIMIT 1`,
+        [plan.party_id, params.businessId, plan.location_id],
+      );
+      if (!supplierRows[0]) {
+        throw new InstallmentError(plan.location_id ? "supplier_record_missing" : "installment_location_required", 409);
+      }
+      payableSupplierId = supplierRows[0].id;
+      effectiveLocationId = supplierRows[0].location_id;
+      // A branch-bound plan (or a legacy plan with one uniquely resolved alias)
+      // provides a safe posting location when the session has no active branch.
+      // If the caller *does* have an active branch, it must be the same one.
+      if (params.locationId !== null && params.locationId !== effectiveLocationId) {
+        throw new InstallmentError("supplier_location_mismatch", 409);
+      }
+    }
 
     if (!isVoucherMethod(params.method)) throw new InstallmentError("invalid_method");
     const balanceAccountCode = plan.direction === "receivable"
@@ -552,7 +645,6 @@ export async function payInstallmentItem(params: {
     // Do not require the opposite subledger account: a receivable settlement
     // must not fail merely because this business has no active A/P account.
     const accounts = await accountIdsByCode(client, params.businessId, [balanceAccountCode]);
-    const effectiveLocationId = plan.location_id ?? params.locationId;
     const { rows: dateRows } = await client.query<{ business_date: string }>(
       `SELECT app_business_date(now(), COALESCE(l.timezone, 'Asia/Tehran'), l.business_day_start_minutes)::text AS business_date
          FROM (SELECT 1) one
@@ -560,8 +652,6 @@ export async function payInstallmentItem(params: {
       [effectiveLocationId, params.businessId],
     );
     const paymentDate = dateRows[0].business_date;
-
-    const memo = params.memo?.trim() || `قسط ${item.seq} — ${plan.party_name ?? ""}`;
 
     if (plan.direction === "receivable") {
       const arAccount = accounts.get(WELL_KNOWN_CODES.accountsReceivable)!;
@@ -599,14 +689,6 @@ export async function payInstallmentItem(params: {
       );
     } else {
       // ap_payments points at the per-location supplier row, not the party.
-      const { rows: supplierRows } = await client.query<{ id: string }>(
-        `SELECT s.id FROM suppliers s JOIN locations l ON l.id = s.location_id
-          WHERE s.party_id = $1 AND l.business_id = $2
-            AND ($3::uuid IS NULL OR s.location_id = $3)
-          ORDER BY s.id LIMIT 1`,
-        [plan.party_id, params.businessId, effectiveLocationId],
-      );
-      if (!supplierRows[0]) throw new InstallmentError("supplier_record_missing", 409);
       const apAccount = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
       const { rows: voucherRows } = await client.query<{ voucher_number: string }>(
         `INSERT INTO ar_ap_voucher_counters (business_id, last_ar_voucher_number, last_ap_voucher_number)
@@ -616,11 +698,21 @@ export async function payInstallmentItem(params: {
          RETURNING last_ap_voucher_number::text AS voucher_number`,
         [params.businessId],
       );
+      const requestFingerprint = installmentApPaymentFingerprint({
+        supplierId: payableSupplierId!,
+        locationId: effectiveLocationId!,
+        method: params.method,
+        amount,
+        memo,
+      });
       const { rows } = await client.query<{ id: string; payment_date: string }>(
         `INSERT INTO ap_payments
-           (business_id, location_id, supplier_id, payment_date, method, cash_account_id, voucher_number, amount, memo, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id, payment_date::text AS payment_date`,
-        [params.businessId, effectiveLocationId, supplierRows[0].id, paymentDate, params.method, storedCashAccountId, voucherRows[0].voucher_number, amount, memo, params.createdBy],
+           (business_id, location_id, supplier_id, payment_date, method, cash_account_id, amount, memo,
+            client_request_id, request_fingerprint, voucher_number, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id, payment_date::text AS payment_date`,
+        [params.businessId, effectiveLocationId, payableSupplierId, paymentDate, params.method, storedCashAccountId, amount, memo,
+          installmentRequestId, requestFingerprint, voucherRows[0].voucher_number, params.createdBy],
       );
       await postJournalEntry(client, {
         businessId: params.businessId,
@@ -713,6 +805,7 @@ export interface PaymentListRow {
   entryId: string | null;
   reversedAt: string | null;
   reversalEntryId: string | null;
+  reversalDate: string | null;
 }
 
 export interface VoucherPage<T> {
@@ -925,6 +1018,7 @@ export async function listPaymentsPage(
     const p = push(pattern);
     conditions.push(`(${SEARCH_FOLD.replace("%s", "COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص')")} ILIKE ${p} ESCAPE '\\'
              OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.memo, '')")} ILIKE ${p} ESCAPE '\\'
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(l.name, '')")} ILIKE ${p} ESCAPE '\\'
              OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.bank_reference, '')")} ILIKE ${p} ESCAPE '\\')`);
   }
   if (params.dateFrom) conditions.push(`p.payment_date >= ${push(params.dateFrom)}::date`);
@@ -960,6 +1054,7 @@ export async function listPaymentsPage(
     created_at: string;
     created_by_name: string | null;
     cash_account_id: string | null;
+    reversal_date: string | null;
     bank_reference: string | null;
     cash_account_code: string | null;
     cash_account_name: string | null;
@@ -976,16 +1071,18 @@ export async function listPaymentsPage(
             p.cash_account_id, p.bank_reference,
             ca.code AS cash_account_code, ca.name AS cash_account_name,
             je.id AS entry_id,
-            p.reversed_at::text AS reversed_at, p.reversal_entry_id
+            p.reversed_at::text AS reversed_at, p.reversal_entry_id,
+            rje.entry_date::text AS reversal_date
        FROM ap_payments p
        LEFT JOIN suppliers s ON s.id = p.supplier_id
-       LEFT JOIN parties pa ON pa.id = s.party_id
        LEFT JOIN locations l ON l.id = p.location_id
+       LEFT JOIN parties pa ON pa.id = s.party_id
        LEFT JOIN users u ON u.id = p.created_by
        LEFT JOIN accounts ca ON ca.id = p.cash_account_id
        LEFT JOIN journal_entries je
          ON je.business_id = p.business_id AND je.source_type = 'ap_payment'
         AND je.source_id = p.id AND je.posting_kind = 'ap_payment'
+       LEFT JOIN journal_entries rje ON rje.id = p.reversal_entry_id
       WHERE ${conditions.join(" AND ")}
       ORDER BY p.payment_date DESC, p.created_at DESC, p.id DESC
       LIMIT ${fetch}`,
@@ -1014,6 +1111,7 @@ export async function listPaymentsPage(
       entryId: r.entry_id,
       reversedAt: r.reversed_at,
       reversalEntryId: r.reversal_entry_id,
+      reversalDate: r.reversal_date,
     })),
     nextCursor: hasMore && last
       ? encodeVoucherCursor({ date: last.payment_date, createdAt: last.created_at, id: last.id })
@@ -1051,8 +1149,12 @@ export async function listPayments(businessId: string, q?: string) {
     amount: r.amount,
     memo: r.memo,
     partyName: r.partyName,
+    locationName: r.locationName,
     bankReference: r.bankReference,
     cashAccount: r.cashAccount,
+    reversed: r.reversedAt !== null,
+    reversalEntryId: r.reversalEntryId,
+    reversalDate: r.reversalDate,
   }));
 }
 
