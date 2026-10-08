@@ -353,6 +353,32 @@ describe("DELETE — the audit trail cannot imply a delete that did not happen",
     expect(state.audit[1].payload).toMatchObject({ reason: "reference_blocked" });
   });
 
+  it("closes the trail with a not_found failure when the row vanishes between request and lock", async () => {
+    hardDeleteBusiness.mockRejectedValueOnce(new service.BusinessNotFoundError());
+    const res = await del();
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: "not_found" });
+    // `requested` must never dangle without a terminal event — the failed
+    // record is what proves nothing was deleted by this attempt.
+    expect(state.audit.map((a) => a.action)).toEqual([
+      "business.delete.requested",
+      "business.delete.failed",
+    ]);
+    expect(state.audit[1].payload).toMatchObject({ reason: "not_found" });
+  });
+
+  it("maps the service's deeper platform-internal refusal to the same operator-facing 409", async () => {
+    hardDeleteBusiness.mockRejectedValueOnce(new service.ProtectedInternalBusinessError());
+    const res = await del();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "protected_internal_business" });
+    expect(state.audit.map((a) => a.action)).toEqual([
+      "business.delete.requested",
+      "business.delete.failed",
+    ]);
+    expect(state.audit[1].payload).toMatchObject({ reason: "protected_internal_business" });
+  });
+
   it("requires the target-specific typed phrase — the old shared phrase and the reset phrase are both rejected", async () => {
     for (const wrong of ["nope", "delete-me", "RESET alpha", "DELETE beta"]) {
       const res = await del(wrong);

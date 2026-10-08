@@ -788,6 +788,35 @@ describe("resetBusiness — commercial state survives (issue #822)", () => {
     const { rows } = await db.query(`SELECT 1 FROM businesses WHERE id = $1`, [internalBusinessId]);
     expect(rows).toHaveLength(1);
   });
+
+  it("serializes concurrent resets — both run, the result stays exactly one owner, one branch, commercial intact", async () => {
+    const target = await seedBusiness("Race Reset Cafe", `racereset-${randomUUID().slice(0, 8)}`);
+    await seedCommercialState(target.id);
+
+    // Two operators hit reset at once: the row lock serializes them, and the
+    // outcome must be indistinguishable from a single reset — never two
+    // branches, two owners, or a commercial row lost in the interleaving.
+    await Promise.all([platformService.resetBusiness(target.id), platformService.resetBusiness(target.id)]);
+
+    const { rows: locations } = await db.query(
+      `SELECT count(*)::text AS n FROM locations WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(locations[0].n).toBe("1");
+    const { rows: members } = await db.query<{ role: string }>(
+      `SELECT role::text AS role FROM users WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(members).toEqual([{ role: "owner" }]);
+    const { rows: wallet } = await db.query(
+      `SELECT balance_rial FROM business_wallets WHERE business_id = $1`,
+      [target.id],
+    );
+    expect(wallet[0].balance_rial).toBe("500000");
+    expect(
+      (await db.query(`SELECT 1 FROM businesses WHERE id = $1`, [target.id])).rowCount,
+    ).toBe(1);
+  });
 });
 
 describe("hardDeleteBusiness", () => {
@@ -933,5 +962,38 @@ describe("hardDeleteBusiness", () => {
     expect(
       (await db.query(`SELECT 1 FROM businesses WHERE id = $1`, [target.id])).rowCount,
     ).toBe(0);
+  });
+
+  it("serializes concurrent deletes — one wins, the other reports not found, never a corrupted state", async () => {
+    const target = await seedBusiness("Race Cafe", `race-${randomUUID().slice(0, 8)}`);
+    await seedCommercialState(target.id);
+
+    // Both calls race for the same `FOR UPDATE` lock; the loser waits, then
+    // finds the row gone. The contract: exactly one success, the other a
+    // clean BusinessNotFoundError — no half-deleted tenant either way.
+    const results = await Promise.allSettled([
+      platformService.hardDeleteBusiness(target.id),
+      platformService.hardDeleteBusiness(target.id),
+    ]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+      platformService.BusinessNotFoundError,
+    );
+
+    expect(
+      (await db.query(`SELECT 1 FROM businesses WHERE id = $1`, [target.id])).rowCount,
+    ).toBe(0);
+    // The commercial rows cascaded with the one winning delete — no orphaned
+    // half of them survived the race.
+    const { rows: leftovers } = await db.query(
+      `SELECT (SELECT count(*) FROM business_wallets WHERE business_id = $1)
+             + (SELECT count(*) FROM billing_invoices WHERE business_id = $1)
+             + (SELECT count(*) FROM business_subscriptions WHERE business_id = $1) AS n`,
+      [target.id],
+    );
+    expect(leftovers[0].n).toBe("0");
   });
 });

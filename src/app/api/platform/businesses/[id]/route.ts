@@ -469,7 +469,32 @@ export const DELETE = withPlatformScope(async (request: NextRequest, ctx: Ctx) =
     result = await hardDeleteBusiness(id);
   } catch (err) {
     if (err instanceof BusinessNotFoundError) {
+      // A race: the row was there when `requested` was audited and is gone
+      // by the time the service takes its lock (a concurrent delete won).
+      // The trail must not dangle a `requested` with no terminal event.
+      await platformAudit({
+        adminId: session.padmin,
+        businessId: id,
+        action: "business.delete.failed",
+        entity: "business",
+        entityId: id,
+        payload: { ...identity, reason: "not_found" },
+      });
       return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
+    if (err instanceof ProtectedInternalBusinessError) {
+      // Defense-in-depth only — the route refuses platform-internal tenants
+      // before auditing `requested` — but if the deeper service check ever
+      // fires, it maps to the same operator-facing 409, never a raw 500.
+      await platformAudit({
+        adminId: session.padmin,
+        businessId: id,
+        action: "business.delete.failed",
+        entity: "business",
+        entityId: id,
+        payload: { ...identity, reason: "protected_internal_business" },
+      });
+      return NextResponse.json({ error: "protected_internal_business" }, { status: 409 });
     }
     if (err instanceof BusinessDeleteBlockedError) {
       // A live reference the service has no deliberate rule for — a specific
