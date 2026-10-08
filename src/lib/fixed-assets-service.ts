@@ -38,7 +38,9 @@ import { accountIdsByCode, postExactMirrorEntry, postJournalEntry } from "./ledg
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { businessToday } from "./business-day-service";
 import { isValidIsoDate } from "./jalali";
+import { isUuid } from "./uuid";
 import {
+  addMonthsToPeriodKey,
   depreciationPeriodOfDate,
   disposalOutcome,
   parseDepreciationPeriodKey,
@@ -46,10 +48,16 @@ import {
   FIXED_ASSET_USEFUL_LIFE_MAX_MONTHS,
   planDepreciation,
   reconcileFixedAssetRegister,
+  scheduleEndPeriodKey,
   validateFixedAsset,
-  type DepreciationRevision,
   type FixedAssetReconciliation,
 } from "./depreciation";
+import {
+  ASSET_ACQUISITION_SOURCE_ROLES,
+  ASSET_SALE_PROCEEDS_ROLES,
+  classifyAccounts,
+  type AccountRole,
+} from "./account-classification";
 import type { SheetData } from "./data-transfer/codecs";
 
 export class FixedAssetError extends Error {
@@ -294,7 +302,12 @@ export interface FixedAssetListFilters {
   includeArchived?: boolean;
   sortBy?: "date_desc" | "date_asc" | "cost_desc" | "book_value_desc" | null;
   limit?: number | null;
-  offset?: number | null;
+  /**
+   * Opaque keyset cursor (the `nextCursor` of a previous page) — stable under
+   * concurrent inserts, unlike an offset: «load more» never skips or repeats
+   * a row just because another asset was registered in between.
+   */
+  cursor?: string | null;
 }
 
 export interface FixedAssetKpis {
@@ -324,7 +337,11 @@ function fixedAssetWhere(filters: FixedAssetListFilters): { clause: string; para
     if (!filters.includeArchived) conditions.push("fa.archived_at IS NULL");
   }
   if (filters.category) conditions.push(`fa.category = ${push(filters.category)}`);
-  if (filters.locationId) conditions.push(`fa.location_id = ${push(filters.locationId)}`);
+  // A location filter that is not a uuid cannot match anything — the same
+  // honest empty page as an unknown one, never a database syntax error.
+  if (filters.locationId) {
+    conditions.push(isUuid(filters.locationId) ? `fa.location_id = ${push(filters.locationId)}` : "FALSE");
+  }
   if (filters.dateFrom) conditions.push(`fa.acquisition_date >= ${push(filters.dateFrom)}::date`);
   if (filters.dateTo) conditions.push(`fa.acquisition_date <= ${push(filters.dateTo)}::date`);
   if (filters.depreciationState === "none") {
@@ -341,17 +358,69 @@ function fixedAssetWhere(filters: FixedAssetListFilters): { clause: string; para
   return { clause: conditions.join(" AND "), params };
 }
 
-function fixedAssetOrderBy(sortBy: FixedAssetListFilters["sortBy"]): string {
+/**
+ * One sort definition = the ORDER BY (always with the row id as the final
+ * unique tie-breaker, so the order is total and a keyset cursor is exact)
+ * plus the SQL expression and comparison direction the cursor resume needs.
+ */
+interface FixedAssetSortDef {
+  orderBy: string;
+  /** The sort expression the cursor's value belongs to. */
+  expr: string;
+  /** How the cursor value is cast when resumed. */
+  cast: string;
+  descending: boolean;
+}
+
+function fixedAssetSort(sortBy: FixedAssetListFilters["sortBy"]): FixedAssetSortDef {
   switch (sortBy) {
     case "date_asc":
-      return "ORDER BY fa.acquisition_date ASC, fa.created_at ASC";
+      return {
+        orderBy: "ORDER BY fa.acquisition_date ASC, fa.id ASC",
+        expr: "fa.acquisition_date",
+        cast: "::date",
+        descending: false,
+      };
     case "cost_desc":
-      return "ORDER BY fa.cost DESC, fa.created_at DESC";
+      return {
+        orderBy: "ORDER BY fa.cost DESC, fa.id DESC",
+        expr: "fa.cost",
+        cast: "::bigint",
+        descending: true,
+      };
     case "book_value_desc":
-      return "ORDER BY (fa.cost - COALESCE(live.accumulated, 0)) DESC, fa.created_at DESC";
+      return {
+        orderBy: "ORDER BY (fa.cost - COALESCE(live.accumulated, 0)) DESC, fa.id DESC",
+        expr: "(fa.cost - COALESCE(live.accumulated, 0))",
+        cast: "::bigint",
+        descending: true,
+      };
     default:
-      return "ORDER BY fa.acquisition_date DESC, fa.created_at DESC";
+      return {
+        orderBy: "ORDER BY fa.acquisition_date DESC, fa.id DESC",
+        expr: "fa.acquisition_date",
+        cast: "::date",
+        descending: true,
+      };
   }
+}
+
+/** Encodes a keyset cursor (sort value + row id) as an opaque token. */
+function encodeCursor(value: string | number | (string | number)[], id: string): string {
+  return Buffer.from(JSON.stringify([value, id]), "utf8").toString("base64url");
+}
+
+/** Decodes a cursor `encodeCursor` produced; null when it is not one. */
+function decodeCursor(cursor: string): { value: unknown; id: string } | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    if (Array.isArray(parsed) && parsed.length === 2 && typeof parsed[1] === "string") {
+      return { value: parsed[0], id: parsed[1] };
+    }
+  } catch {
+    // fall through: a malformed cursor is a bad request, not a crash
+  }
+  return null;
 }
 
 export const FIXED_ASSET_PAGE_DEFAULT_LIMIT = 50;
@@ -360,23 +429,50 @@ export const FIXED_ASSET_PAGE_MAX_LIMIT = 200;
 export async function listFixedAssetsPage(
   businessId: string,
   filters: FixedAssetListFilters = {},
-): Promise<{ assets: FixedAsset[]; hasMore: boolean; kpis: FixedAssetKpis }> {
+): Promise<{ assets: FixedAsset[]; hasMore: boolean; nextCursor: string | null; kpis: FixedAssetKpis }> {
   const { clause, params } = fixedAssetWhere(filters);
   params[0] = businessId;
+  // The totals query carries only the WHERE clause's placeholders — the
+  // cursor's resume parameters below belong to the page query alone.
+  const whereParams = [...params];
   const limit = Math.min(
     Number.isInteger(filters.limit) && (filters.limit as number) > 0
       ? (filters.limit as number)
       : FIXED_ASSET_PAGE_DEFAULT_LIMIT,
     FIXED_ASSET_PAGE_MAX_LIMIT,
   );
-  const offset = Number.isInteger(filters.offset) && (filters.offset as number) >= 0 ? (filters.offset as number) : 0;
+  const sort = fixedAssetSort(filters.sortBy);
+
+  // The keyset resume: rows strictly after the cursor's (sort value, id) in
+  // the sort's direction. The id tie-breaker makes the order total, so no
+  // row can be skipped or repeated by a concurrent insert between pages.
+  let resumeClause = "";
+  if (filters.cursor) {
+    const decoded = decodeCursor(filters.cursor);
+    if (!decoded || typeof decoded.value !== "string" && typeof decoded.value !== "number") {
+      throw new FixedAssetError("invalid_cursor", 400);
+    }
+    const valueParam = params.push(String(decoded.value));
+    const idParam = params.push(decoded.id);
+    const comparison = sort.descending ? "<" : ">";
+    resumeClause = ` AND (${sort.expr}, fa.id) ${comparison} ($${valueParam}${sort.cast}, $${idParam}::uuid)`;
+  }
 
   // limit + 1 rows, so hasMore is a fact the database stated.
   const { rows } = await query<FixedAssetRow & Record<string, unknown>>(
-    `${FIXED_ASSET_SELECT} WHERE ${clause} ${fixedAssetOrderBy(filters.sortBy)} LIMIT ${limit + 1} OFFSET ${offset}`,
+    `${FIXED_ASSET_SELECT} WHERE ${clause}${resumeClause} ${sort.orderBy} LIMIT ${limit + 1}`,
     params,
   );
   const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit).map(toFixedAsset);
+  const last = page[page.length - 1];
+  const nextCursor =
+    hasMore && last
+      ? encodeCursor(
+          filters.sortBy === "cost_desc" ? last.cost : filters.sortBy === "book_value_desc" ? last.bookValue : last.acquisitionDate,
+          last.id,
+        )
+      : null;
 
   const { rows: totals } = await query<{
     count: number;
@@ -403,12 +499,13 @@ export async function listFixedAssetsPage(
           WHERE d.fixed_asset_id = fa.id AND d.reversed_at IS NULL
        ) live ON true
       WHERE ${clause}`,
-    params,
+    whereParams,
   );
   const t = totals[0];
   return {
-    assets: rows.slice(0, limit).map(toFixedAsset),
+    assets: page,
     hasMore,
+    nextCursor,
     kpis: {
       count: t.count,
       totalCost: Number(t.total_cost),
@@ -424,12 +521,15 @@ export async function listFixedAssetsPage(
 /** The whole register, unpaginated — for the tests and internal roll-ups. */
 export async function listFixedAssets(businessId: string): Promise<FixedAsset[]> {
   const all: FixedAsset[] = [];
-  let offset = 0;
+  let cursor: string | null = null;
   for (;;) {
-    const { assets } = await listFixedAssetsPage(businessId, { limit: FIXED_ASSET_PAGE_MAX_LIMIT, offset });
+    const { assets, nextCursor } = await listFixedAssetsPage(businessId, {
+      limit: FIXED_ASSET_PAGE_MAX_LIMIT,
+      cursor,
+    });
     all.push(...assets);
-    if (assets.length < FIXED_ASSET_PAGE_MAX_LIMIT) break;
-    offset += assets.length;
+    if (!nextCursor) break;
+    cursor = nextCursor;
   }
   return all;
 }
@@ -440,20 +540,55 @@ export async function listFixedAssets(businessId: string): Promise<FixedAsset[]>
 // every journal link is the stored source identity.
 // ---------------------------------------------------------------------------
 
+export const FIXED_ASSET_HISTORY_DEFAULT_LIMIT = 100;
+export const FIXED_ASSET_HISTORY_MAX_LIMIT = 500;
+
+/**
+ * One asset, with its history — depreciation entries (cursor-paginated: a
+ * long-lived asset with reversals can outgrow one payload), transfers and
+ * estimate changes (bounded by practice, so complete). Nothing is inferred
+ * from memo text: every journal link is the stored source identity.
+ */
 export async function getFixedAssetWithDepreciation(
   businessId: string,
   id: string,
+  options: { depreciationCursor?: string | null; depreciationLimit?: number | null } = {},
 ): Promise<{
   fixedAsset: FixedAsset;
   depreciationEntries: FixedAssetDepreciationEntry[];
+  depreciationHasMore: boolean;
+  depreciationNextCursor: string | null;
   transfers: FixedAssetTransfer[];
   estimateChanges: FixedAssetEstimateChange[];
 }> {
+  // A malformed id is the same 404 as an unknown one, never a raw database error.
+  if (!isUuid(id)) throw new FixedAssetError("fixed_asset_not_found", 404);
   const { rows } = await query<FixedAssetRow>(
     `${FIXED_ASSET_SELECT} WHERE fa.business_id = $1 AND fa.id = $2`,
     [businessId, id],
   );
   if (!rows[0]) throw new FixedAssetError("fixed_asset_not_found", 404);
+
+  const historyLimit = Math.min(
+    Number.isInteger(options.depreciationLimit) && (options.depreciationLimit as number) > 0
+      ? (options.depreciationLimit as number)
+      : FIXED_ASSET_HISTORY_DEFAULT_LIMIT,
+    FIXED_ASSET_HISTORY_MAX_LIMIT,
+  );
+  // The keyset resume over (entry_date, created_at, id) — a total order, so
+  // «load more» is stable no matter what was posted in between.
+  let historyParams: unknown[] = [businessId, id];
+  let resumeClause = "";
+  if (options.depreciationCursor) {
+    const decoded = decodeCursor(options.depreciationCursor);
+    const pair = decoded?.value;
+    if (!decoded || !Array.isArray(pair) || pair.length !== 2 || pair.some((v) => typeof v !== "string")) {
+      throw new FixedAssetError("invalid_cursor", 400);
+    }
+    const [entryDate, createdAt] = pair as [string, string];
+    historyParams = [businessId, id, entryDate, createdAt, decoded.id];
+    resumeClause = ` AND (d.entry_date, d.created_at, d.id) < ($3::date, $4::timestamptz, $5::uuid)`;
+  }
 
   const { rows: entries } = await query<{
     id: string;
@@ -486,10 +621,18 @@ export async function getFixedAssetWithDepreciation(
          ON je.source_type = 'fixed_asset_depreciation' AND je.source_id = d.id AND je.reverses_entry_id IS NULL
        LEFT JOIN locations jl ON jl.id = je.location_id
        LEFT JOIN journal_entries rje ON rje.id = d.reversal_journal_entry_id
-      WHERE fa.business_id = $1 AND d.fixed_asset_id = $2
-      ORDER BY d.entry_date DESC, d.created_at DESC`,
-    [businessId, id],
+      WHERE fa.business_id = $1 AND d.fixed_asset_id = $2${resumeClause}
+      ORDER BY d.entry_date DESC, d.created_at DESC, d.id DESC
+      LIMIT ${historyLimit + 1}`,
+    historyParams,
   );
+  const historyHasMore = entries.length > historyLimit;
+  const historyPage = entries.slice(0, historyLimit);
+  const historyLast = historyPage[historyPage.length - 1];
+  const depreciationNextCursor =
+    historyHasMore && historyLast
+      ? encodeCursor([historyLast.entry_date, historyLast.created_at], historyLast.id)
+      : null;
 
   const { rows: transfers } = await query<{
     id: string;
@@ -543,7 +686,7 @@ export async function getFixedAssetWithDepreciation(
 
   return {
     fixedAsset: toFixedAsset(rows[0]),
-    depreciationEntries: entries.map((e) => ({
+    depreciationEntries: historyPage.map((e) => ({
       id: e.id,
       fixedAssetId: e.fixed_asset_id,
       periodKey: e.period_key,
@@ -560,6 +703,8 @@ export async function getFixedAssetWithDepreciation(
       reversalReason: e.reversal_reason,
       reversalJournalEntryId: e.reversal_journal_entry_id,
     })),
+    depreciationHasMore: historyHasMore,
+    depreciationNextCursor,
     transfers: transfers.map((t) => ({
       id: t.id,
       fromLocationId: t.from_location_id,
@@ -602,6 +747,14 @@ export async function createFixedAsset(params: {
   usefulLifeMonths: number;
   acquisitionSource?: FixedAssetAcquisitionSource;
   acquisitionEntryId?: string | null;
+  /**
+   * Post the acquisition entry as part of the registration (issue #833's
+   * "normal acquisition flow"): Dr the fixed-asset account (the chosen
+   * `assetAccountId`, else the chart's 1500 root) / Cr the given settlement
+   * account, linked to the new asset row in the same transaction. Mutually
+   * exclusive with `acquisitionEntryId` (linking an already-posted entry).
+   */
+  acquisition?: { sourceAccountId: string; entryDate?: string | null } | null;
   createdBy: string | null;
   /** Repeat-safe create: the same key returns the original asset (issue #833). */
   idempotencyKey?: string | null;
@@ -616,7 +769,18 @@ export async function createFixedAsset(params: {
 }): Promise<FixedAsset> {
   const errors = validateFixedAsset(params);
   if (errors.length > 0) throw new FixedAssetError(errors.join(" "));
-  const link = normaliseAcquisitionLink(params.acquisitionSource, params.acquisitionEntryId);
+  // Posting the acquisition and linking an existing entry are two different
+  // provenances; asking for both is a client bug, refused loudly.
+  if (params.acquisition && params.acquisitionEntryId) {
+    throw new FixedAssetError("invalid_acquisition_source");
+  }
+  if (params.acquisition?.entryDate && !isValidIsoDate(params.acquisition.entryDate.trim())) {
+    throw new FixedAssetError("invalid_acquisition_date");
+  }
+  const link = normaliseAcquisitionLink(
+    params.acquisition ? "unlinked" : params.acquisitionSource,
+    params.acquisition ? null : params.acquisitionEntryId,
+  );
   const inServiceDate = params.inServiceDate?.trim() || null;
 
   const code = params.code?.trim() || null;
@@ -709,6 +873,44 @@ export async function createFixedAsset(params: {
       ],
     );
     id = rows[0].id;
+
+    // The normal acquisition flow (issue #833): the purchase entry itself,
+    // posted through the same shared ledger path every other posting uses,
+    // atomically with the register row it belongs to — Dr the fixed-asset
+    // account, Cr the settlement account (cash/bank/in-transit/payable), and
+    // the asset is born linked, never an unexplained balance-sheet number.
+    if (params.acquisition) {
+      await assertAccountInRoles(
+        client,
+        params.businessId,
+        params.acquisition.sourceAccountId,
+        ASSET_ACQUISITION_SOURCE_ROLES,
+        "invalid_acquisition_account",
+      );
+      const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.fixedAssets]);
+      const debitAccountId = params.assetAccountId ?? accounts.get(WELL_KNOWN_CODES.fixedAssets)!;
+      const acquisitionEntryId = await postJournalEntry(client, {
+        businessId: params.businessId,
+        locationId: params.locationId,
+        entryDate: params.acquisition.entryDate?.trim() || params.acquisitionDate,
+        memo: `خرید دارایی ثابت — ${params.name.trim()}`,
+        sourceType: "fixed_asset_acquisition",
+        sourceId: id,
+        postingKind: "acquisition",
+        createdBy: params.createdBy,
+        lines: [
+          { accountId: debitAccountId, debit: params.cost, credit: 0 },
+          { accountId: params.acquisition.sourceAccountId, debit: 0, credit: params.cost },
+        ],
+      });
+      if (acquisitionEntryId) {
+        await client.query(
+          `UPDATE fixed_assets SET acquisition_source = 'journal', acquisition_entry_id = $3 WHERE id = $1 AND business_id = $2`,
+          [id, params.businessId, acquisitionEntryId],
+        );
+      }
+    }
+
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
@@ -737,6 +939,7 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 async function assertLocationOfBusiness(client: PoolClient, businessId: string, locationId: string): Promise<void> {
+  if (!isUuid(locationId)) throw new FixedAssetError("location_not_found", 404);
   const { rows } = await client.query(
     `SELECT 1 FROM locations WHERE id = $2 AND business_id = $1 AND is_active`,
     [businessId, locationId],
@@ -750,6 +953,7 @@ async function assertPartyOfBusiness(
   partyId: string,
   error: string,
 ): Promise<void> {
+  if (!isUuid(partyId)) throw new FixedAssetError(error, 404);
   const { rows } = await client.query(`SELECT 1 FROM parties WHERE id = $2 AND business_id = $1`, [
     businessId,
     partyId,
@@ -772,6 +976,7 @@ async function assertAssetAccountOfBusiness(
   businessId: string,
   accountId: string,
 ): Promise<void> {
+  if (!isUuid(accountId)) throw new FixedAssetError("invalid_asset_account");
   const { rows } = await client.query<{ id: string }>(
     `SELECT a.id FROM accounts a
       WHERE a.id = $2 AND a.business_id = $1 AND a.is_active
@@ -779,6 +984,32 @@ async function assertAssetAccountOfBusiness(
     [businessId, accountId],
   );
   if (!rows[0]) throw new FixedAssetError("invalid_asset_account");
+}
+
+/**
+ * Classifies the business's whole chart once (the canonical
+ * `account-classification` module — one definition of "cash", "bank",
+ * "payable"…, shared with every other screen that asks) and asserts the given
+ * account is an active account of this business carrying one of the allowed
+ * roles. The pickers offer the same sets; this is the server's own word.
+ */
+async function assertAccountInRoles(
+  client: PoolClient,
+  businessId: string,
+  accountId: string,
+  allowedRoles: ReadonlySet<AccountRole>,
+  error: string,
+): Promise<void> {
+  const { rows } = await client.query<{ id: string; code: string; parent_id: string | null; type: string; is_active: boolean }>(
+    `SELECT id, code, parent_id, type, is_active FROM accounts WHERE business_id = $1`,
+    [businessId],
+  );
+  const account = rows.find((a) => a.id === accountId);
+  if (!account || !account.is_active) throw new FixedAssetError(error, 400);
+  const roles = classifyAccounts(
+    rows.map((a) => ({ id: a.id, code: a.code, parentId: a.parent_id, type: a.type as "asset" | "liability" | "equity" | "revenue" | "expense" })),
+  );
+  if (!allowedRoles.has(roles.get(accountId) ?? ("" as AccountRole))) throw new FixedAssetError(error, 400);
 }
 
 function normaliseAcquisitionLink(
@@ -839,6 +1070,7 @@ export async function setFixedAssetAcquisition(params: {
   acquisitionEntryId?: string | null;
 }): Promise<FixedAsset> {
   const link = normaliseAcquisitionLink(params.acquisitionSource, params.acquisitionEntryId);
+  if (!isUuid(params.fixedAssetId)) throw new FixedAssetError("fixed_asset_not_found", 404);
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
@@ -959,6 +1191,7 @@ export async function getFixedAssetReconciliation(businessId: string): Promise<F
 // ---------------------------------------------------------------------------
 
 export async function deleteFixedAsset(businessId: string, id: string): Promise<void> {
+  if (!isUuid(id)) throw new FixedAssetError("fixed_asset_not_found", 404);
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
@@ -1013,6 +1246,9 @@ interface LockedAsset {
 }
 
 async function lockAsset(client: PoolClient, businessId: string, fixedAssetId: string): Promise<LockedAsset> {
+  // A non-uuid id cannot name a row — answer with the domain's own 404, not
+  // the database's syntax error (see `isUuid`).
+  if (!isUuid(fixedAssetId)) throw new FixedAssetError("fixed_asset_not_found", 404);
   const { rows } = await client.query<{
     id: string;
     name: string;
@@ -1083,124 +1319,81 @@ async function liveDepreciation(
 }
 
 /**
- * What `planDepreciation` should count for one target month: the estimate
- * change in force *for that month* — the latest whose effective period is at
- * or before it, not merely the latest recorded — and the live totals scoped
- * to that schedule's window.
+ * Which estimate schedule governs one target month (issue #833): the latest
+ * change whose effective period is at or before it — not merely the latest
+ * change recorded. A month from before every change runs on the ORIGINAL
+ * schedule, the parameters the first change recorded replacing (the asset
+ * row already holds the newest values); a month from after a change runs on
+ * that change's new parameters.
  *
- * A month from before a change is catch-up under the schedule that governed
- * it: with no applicable change, the amount comes from the original schedule
- * and only the postings before the first change count against it. A month
- * from after a change runs on that change's frozen schedule: the snapshot
- * (`accumulated_at_change` / `periods_posted_at_change` / the period keys
- * live at the change) is the baseline, plus everything posted since into the
- * window the change governs — its own periods, catch-ups from before it
- * (they consume its remaining base), and nothing from a later change's
- * window, which that later change already accounted for in its own snapshot.
+ * The schedules themselves are calendar sequences anchored at the in-service
+ * month; the amounts come from the live postings the caller passes, so the
+ * frozen change snapshots stay audit facts, never a second accounting truth
+ * (see `planDepreciation`).
  */
-async function revisionContextForPeriod(
+async function scheduleContextForPeriod(
   client: PoolClient,
   asset: LockedAsset,
   targetPeriodKey: string,
-  live: { postings: LiveDepreciationPosting[]; accumulated: number },
 ): Promise<{
-  revision: DepreciationRevision | null;
-  accumulatedSoFar: number;
-  schedulePeriodsPosted: number;
-  /** The schedule parameters in force for the target month. */
-  scheduleAsset: { cost: number; salvageValue: number; usefulLifeMonths: number; inServiceDate: string };
+  schedule: { cost: number; salvageValue: number; usefulLifeMonths: number; inServiceDate: string };
+  final: { salvageValue: number; usefulLifeMonths: number };
 }> {
   interface ChangeRow {
     effective_period_key: string;
-    periods_posted_at_change: number;
-    accumulated_at_change: string;
-    remaining_base: string;
-    remaining_life_months: number;
-    snapshot_period_keys: string[] | null;
     old_useful_life_months: number;
+    new_useful_life_months: number;
     old_salvage_value: string;
+    new_salvage_value: string;
   }
   const { rows } = await client.query<ChangeRow>(
-    `SELECT effective_period_key, periods_posted_at_change, accumulated_at_change::text AS accumulated_at_change,
-            remaining_base::text AS remaining_base, remaining_life_months, snapshot_period_keys,
-            old_useful_life_months, old_salvage_value::text AS old_salvage_value
+    `SELECT effective_period_key, old_useful_life_months, new_useful_life_months,
+            old_salvage_value::text AS old_salvage_value, new_salvage_value::text AS new_salvage_value
        FROM fixed_asset_estimate_changes WHERE fixed_asset_id = $1
       ORDER BY effective_period_key ASC, created_at ASC`,
     [asset.id],
   );
 
-  const currentAsset = {
-    cost: asset.cost,
-    salvageValue: asset.salvageValue,
-    usefulLifeMonths: asset.usefulLifeMonths,
-    inServiceDate: asset.inServiceDate,
-  };
-
-  // No estimate changes ever: the original schedule, all live postings.
-  if (rows.length === 0) {
-    return {
-      revision: null,
-      accumulatedSoFar: live.accumulated,
-      schedulePeriodsPosted: live.postings.length,
-      scheduleAsset: currentAsset,
-    };
-  }
-
-  // The change in force for the target month: the latest with an effective
-  // period at or before it (period keys are zero-padded YYYY-MM, so the
-  // string comparison is chronological).
+  // The latest change in force for the target month (period keys are
+  // zero-padded YYYY-MM, so the string comparison is chronological).
   let applicable: ChangeRow | null = null;
-  let nextBoundary: string | null = null;
   for (const change of rows) {
     if (change.effective_period_key <= targetPeriodKey) applicable = change;
-    else {
-      nextBoundary = change.effective_period_key;
-      break;
-    }
   }
 
-  // The target month predates every change: the ORIGINAL schedule — the
-  // parameters the first change recorded replacing, not the asset row's
-  // current values, which that change already overwrote. Two different
-  // counts matter here: the schedule's PROGRESSION (how many of the
-  // original schedule's months are consumed, whether this posting is its
-  // final one) sees only the postings from before the first change, while
-  // the lifetime CAP sees every live posting — the depreciable base is the
-  // asset's, shared across every revision, so a fully-depreciated asset must
-  // refuse a late pre-change catch-up just the same.
-  if (!applicable) {
-    const first = rows[0];
-    const firstBoundary = first.effective_period_key;
-    const windowCount = live.postings.filter((p) => p.periodKey < firstBoundary).length;
+  if (!rows.length) {
     return {
-      revision: null,
-      accumulatedSoFar: live.accumulated,
-      schedulePeriodsPosted: windowCount,
-      scheduleAsset: {
+      schedule: {
+        cost: asset.cost,
+        salvageValue: asset.salvageValue,
+        usefulLifeMonths: asset.usefulLifeMonths,
+        inServiceDate: asset.inServiceDate,
+      },
+      final: { salvageValue: asset.salvageValue, usefulLifeMonths: asset.usefulLifeMonths },
+    };
+  }
+  if (!applicable) {
+    // Before every change: the original schedule, from the first change's
+    // recorded "old" values — the asset row's values were overwritten.
+    const first = rows[0];
+    return {
+      schedule: {
         cost: asset.cost,
         salvageValue: Number(first.old_salvage_value),
         usefulLifeMonths: first.old_useful_life_months,
         inServiceDate: asset.inServiceDate,
       },
+      final: { salvageValue: asset.salvageValue, usefulLifeMonths: asset.usefulLifeMonths },
     };
   }
-
-  const snapshot = new Set(applicable.snapshot_period_keys ?? []);
-  const since = live.postings.filter(
-    (p) => !snapshot.has(p.periodKey) && (nextBoundary === null || p.periodKey < nextBoundary),
-  );
   return {
-    revision: {
-      periodsPostedAtChange: applicable.periods_posted_at_change,
-      accumulatedAtChange: Number(applicable.accumulated_at_change),
-      remainingBase: Number(applicable.remaining_base),
-      remainingLifeMonths: applicable.remaining_life_months,
+    schedule: {
+      cost: asset.cost,
+      salvageValue: Number(applicable.new_salvage_value),
+      usefulLifeMonths: applicable.new_useful_life_months,
+      inServiceDate: asset.inServiceDate,
     },
-    accumulatedSoFar: Number(applicable.accumulated_at_change) + since.reduce((sum, p) => sum + p.amount, 0),
-    schedulePeriodsPosted: applicable.periods_posted_at_change + since.length,
-    // The revision's own numbers govern the amount; the asset row's current
-    // parameters are only the identity/cost this schedule belongs to.
-    scheduleAsset: currentAsset,
+    final: { salvageValue: asset.salvageValue, usefulLifeMonths: asset.usefulLifeMonths },
   };
 }
 
@@ -1302,33 +1495,30 @@ export async function postDepreciation(params: {
       : params.entryDate?.trim() && isValidIsoDate(params.entryDate.trim())
         ? depreciationPeriodOfDate(params.entryDate.trim())
         : depreciationPeriodOfDate(today);
-    const revisionContext = targetPeriod
-      ? await revisionContextForPeriod(client, asset, targetPeriod.key, live)
+    const context = targetPeriod
+      ? await scheduleContextForPeriod(client, asset, targetPeriod.key)
       : {
-          revision: null,
-          accumulatedSoFar: live.accumulated,
-          schedulePeriodsPosted: live.postings.length,
-          scheduleAsset: {
+          schedule: {
             cost: asset.cost,
             salvageValue: asset.salvageValue,
             usefulLifeMonths: asset.usefulLifeMonths,
             inServiceDate: asset.inServiceDate,
           },
+          final: { salvageValue: asset.salvageValue, usefulLifeMonths: asset.usefulLifeMonths },
         };
 
+    // Everything live is what the plan sees: the duplicate-month check, the
+    // lifetime cap, and the amounts — a reversal is simply absent here, so a
+    // re-posted month is priced from what is genuinely on the books.
     const plan = planDepreciation({
-      // The schedule in force for the requested month — the original
-      // parameters for a pre-change month, the asset row's otherwise.
-      asset: revisionContext.scheduleAsset,
-      // The full live list is what the duplicate-month check needs; the
-      // amount comes from the window-scoped totals of the applicable schedule.
+      schedule: context.schedule,
+      finalSalvageValue: context.final.salvageValue,
+      finalUsefulLifeMonths: context.final.usefulLifeMonths,
       postedPeriodKeys: live.periodKeys,
-      accumulatedSoFar: revisionContext.accumulatedSoFar,
-      schedulePeriodsPosted: revisionContext.schedulePeriodsPosted,
+      accumulatedSoFar: live.accumulated,
       periodKey: params.periodKey,
       entryDate: params.entryDate,
       today,
-      revision: revisionContext.revision,
     });
     if (!plan.ok) {
       const status = plan.error === "period_already_depreciated" || plan.error === "fully_depreciated" ? 409 : 400;
@@ -1418,6 +1608,7 @@ export async function reverseDepreciation(params: {
   reversalDate: string;
 }> {
   const reason = assertReason(params.reason);
+  if (!isUuid(params.depreciationEntryId)) throw new FixedAssetError("depreciation_entry_not_found", 404);
   const requestedDate = params.reversalDate?.trim() || null;
   if (requestedDate && !isValidIsoDate(requestedDate)) throw new FixedAssetError("invalid_reversal_date");
 
@@ -1556,6 +1747,14 @@ export async function disposeFixedAsset(params: {
     }
 
     const live = await liveDepreciation(client, asset.id);
+    // The disposal must not predate the depreciation already on the books: a
+    // disposal dated August cannot carry away a depreciation document dated
+    // September. The correction path is explicit — reverse the later
+    // postings first, then dispose.
+    const latestLiveEntryDate = live.entryDates.reduce((max, d) => (d > max ? d : max), "");
+    if (latestLiveEntryDate && disposalDate < latestLiveEntryDate) {
+      throw new FixedAssetError("disposal_before_depreciation");
+    }
     const outcome = disposalOutcome({
       cost: asset.cost,
       accumulatedDepreciation: live.accumulated,
@@ -1585,14 +1784,17 @@ export async function disposeFixedAsset(params: {
 
     let proceedsAccountId: string | null = null;
     if (isSale) {
-      const { rows: proceedsRows } = await client.query<{ id: string }>(
-        `SELECT a.id FROM accounts a
-          WHERE a.id = $2 AND a.business_id = $1 AND a.is_active
-            AND NOT (${FIXED_ASSET_ACCOUNT_SQL})`,
-        [params.businessId, params.proceedsAccountId],
+      // Sale proceeds land in a settlement account — cash, bank, in-transit
+      // money or a receivable — never an expense, revenue or fixed-asset
+      // account (the same canonical classification the picker offers).
+      await assertAccountInRoles(
+        client,
+        params.businessId,
+        params.proceedsAccountId!,
+        ASSET_SALE_PROCEEDS_ROLES,
+        "invalid_proceeds_account",
       );
-      if (!proceedsRows[0]) throw new FixedAssetError("invalid_proceeds_account");
-      proceedsAccountId = proceedsRows[0].id;
+      proceedsAccountId = params.proceedsAccountId!;
     }
 
     const lines: { accountId: string; debit: number; credit: number }[] = [
@@ -1701,9 +1903,26 @@ export async function changeFixedAssetEstimate(params: {
     }
 
     const live = await liveDepreciation(client, asset.id);
+    // The schedule is a real calendar sequence from the in-service month: a
+    // shortened life must still cover every month already depreciated — a
+    // change that would strand posted months beyond the new schedule's end
+    // contradicts the history it is supposed to revise.
+    const inServicePeriod = depreciationPeriodOfDate(asset.inServiceDate);
+    if (inServicePeriod) {
+      const newScheduleEnd = addMonthsToPeriodKey(inServicePeriod.key, newLife - 1);
+      if (live.postings.some((p) => p.periodKey > newScheduleEnd)) {
+        throw new FixedAssetError("estimate_change_excludes_history");
+      }
+    }
+    // And the salvage must leave room for what is already depreciated: a
+    // salvage above cost − accumulated would make the live history
+    // over-depreciated the moment the change lands.
+    if (asset.cost - newSalvage - live.accumulated < 0) {
+      throw new FixedAssetError("salvage_above_depreciated_base");
+    }
     // The snapshot: what the change leaves to depreciate, and how long it now
-    // has to take. A life shortened past what's already consumed (0 months
-    // left) makes the whole remainder due on the next period.
+    // has to take — an audit fact about what the change meant. The amounts
+    // later postings are priced from stay live-authoritative.
     const remainingBase = Math.max(0, asset.cost - newSalvage - live.accumulated);
     const remainingLifeMonths = Math.max(0, newLife - live.periodKeys.length);
     const effectivePeriod = depreciationPeriodOfDate(await businessToday(params.businessId));
@@ -1849,40 +2068,39 @@ export async function archiveFixedAsset(params: {
 
 // ---------------------------------------------------------------------------
 // Export — the accountant-grade outputs (issue #833), built from the full
-// filtered dataset, never just the visible page.
+// filtered dataset, never just the visible page, with no row caps: a filter
+// that admits the rows admits the whole workbook.
 // ---------------------------------------------------------------------------
 
-export const FIXED_ASSET_EXPORT_MAX_ROWS = 20_000;
+/**
+ * The xlsx format's own hard ceiling (1,048,576 rows per sheet, one of which
+ * is the header). A workbook beyond it would not open; the reader gets a
+ * clean domain error and a narrower filter instead.
+ */
+export const XLSX_MAX_ROWS_PER_SHEET = 1_048_575;
 
-/** What `fixedAssetsExportSheets` produced, including the honesty it owes the reader. */
+/** What `fixedAssetsExportSheets` produced. */
 export interface FixedAssetsExportResult {
   /** The workbook sheets, in reading order. */
   sheets: SheetData[];
-  /** True when any sheet hit its row cap — the workbook is knowingly partial, and must say so. */
-  truncated: boolean;
-  /** Rows in the filtered register before any cap — the number the reader expected. */
+  /** Rows in the filtered register — the number the register sheet carries. */
   registerTotal: number;
-  /** The per-sheet row cap that was applied. */
-  maxRows: number;
 }
 
 /**
- * The accountant-grade outputs (issue #833): the register, the depreciation
- * schedule, the disposals, the transfers and the estimate changes — every
- * sheet over the SAME filtered asset set, so a filter narrows the whole
- * workbook, not just the register.
- *
- * Each sheet is capped at `maxRows` rows (a workbook is a document, not a
- * database dump). Hitting the cap is never silent: `truncated` tells the
- * caller, and `fixedAssetExportTruncationNotice` is the sheet the route puts
- * in front of the workbook so the reader knows to narrow the filters.
+ * The accountant-grade outputs (issue #833): the register, the posted
+ * depreciation schedule, the REMAINING schedule (the forecast still to
+ * charge), the disposals, the transfers, the estimate changes, and the
+ * category/branch summaries plus a roll-forward over the filtered window —
+ * every sheet over the SAME filtered asset set, so a filter narrows the
+ * whole workbook, not just the register. Complete by construction: no sheet
+ * is capped, so nothing the filter admitted is silently dropped (the only
+ * refusal is the xlsx format's own row ceiling).
  */
 export async function fixedAssetsExportSheets(
   businessId: string,
   filters: FixedAssetListFilters = {},
-  options: { maxRows?: number } = {},
 ): Promise<FixedAssetsExportResult> {
-  const maxRows = Math.max(1, Math.floor(options.maxRows ?? FIXED_ASSET_EXPORT_MAX_ROWS));
   const { clause, params } = fixedAssetWhere(filters);
   params[0] = businessId;
 
@@ -1895,13 +2113,29 @@ export async function fixedAssetsExportSheets(
   );
   const assetIds = idRows.map((r) => r.id);
 
+  // The roll-forward's movement window is the acquisition-date range, but its
+  // OPENING balance needs the assets acquired before the window too — so it
+  // reads from the same filters with the date range stripped.
+  const hasDateWindow = !!(filters.dateFrom || filters.dateTo);
+  let windowAssetIds = assetIds;
+  if (hasDateWindow) {
+    const windowFilters = { ...filters, dateFrom: null, dateTo: null };
+    const { clause: windowClause, params: windowParams } = fixedAssetWhere(windowFilters);
+    windowParams[0] = businessId;
+    const { rows: windowRows } = await query<{ id: string }>(
+      `SELECT fa.id${FIXED_ASSET_FROM} WHERE ${windowClause}`,
+      windowParams,
+    );
+    windowAssetIds = windowRows.map((r) => r.id);
+  }
+
   const register = await query<FixedAssetRow & Record<string, unknown>>(
-    `${FIXED_ASSET_SELECT} WHERE fa.id = ANY($1) ${fixedAssetOrderBy(filters.sortBy)} LIMIT ${maxRows + 1}`,
+    `${FIXED_ASSET_SELECT} WHERE fa.id = ANY($1) ${fixedAssetSort(filters.sortBy).orderBy}`,
     [assetIds],
   );
-  let truncated = register.rows.length > maxRows;
 
-  const schedule = await query<{
+  const postings = await query<{
+    fixed_asset_id: string;
     code: string | null;
     name: string;
     period_label: string;
@@ -1912,7 +2146,7 @@ export async function fixedAssetsExportSheets(
     created_by_name: string | null;
     location_name: string | null;
   }>(
-    `SELECT fa.code, fa.name, d.period_label, d.period_key, d.entry_date::text AS entry_date,
+    `SELECT d.fixed_asset_id, fa.code, fa.name, d.period_label, d.period_key, d.entry_date::text AS entry_date,
             d.amount::text AS amount, d.reversed_at::text AS reversed_at,
             u.full_name AS created_by_name,
             -- The branch the posting was journalled to — the asset's branch at
@@ -1928,11 +2162,9 @@ export async function fixedAssetsExportSheets(
          ON je.source_type = 'fixed_asset_depreciation' AND je.source_id = d.id AND je.reverses_entry_id IS NULL
        LEFT JOIN locations jl ON jl.id = je.location_id
       WHERE fa.id = ANY($1)
-      ORDER BY fa.code NULLS LAST, d.entry_date ASC
-      LIMIT ${maxRows + 1}`,
-    [assetIds],
+      ORDER BY fa.code NULLS LAST, d.entry_date ASC`,
+    [windowAssetIds],
   );
-  truncated = truncated || schedule.rows.length > maxRows;
 
   const transfers = await query<{
     code: string | null;
@@ -1951,13 +2183,12 @@ export async function fixedAssetsExportSheets(
        LEFT JOIN locations tl ON tl.id = t.to_location_id
        LEFT JOIN users u ON u.id = t.transferred_by
       WHERE fa.id = ANY($1)
-      ORDER BY t.effective_date DESC
-      LIMIT ${maxRows + 1}`,
+      ORDER BY t.effective_date DESC`,
     [assetIds],
   );
-  truncated = truncated || transfers.rows.length > maxRows;
 
   const changes = await query<{
+    fixed_asset_id: string;
     code: string | null;
     name: string;
     changed_at: string;
@@ -1969,7 +2200,7 @@ export async function fixedAssetsExportSheets(
     reason: string;
     changed_by_name: string | null;
   }>(
-    `SELECT fa.code, fa.name, c.changed_at::text AS changed_at, c.effective_period_key,
+    `SELECT c.fixed_asset_id, fa.code, fa.name, c.changed_at::text AS changed_at, c.effective_period_key,
             c.old_useful_life_months, c.new_useful_life_months,
             c.old_salvage_value::text AS old_salvage_value, c.new_salvage_value::text AS new_salvage_value,
             c.reason, u.full_name AS changed_by_name
@@ -1977,13 +2208,12 @@ export async function fixedAssetsExportSheets(
        JOIN fixed_assets fa ON fa.id = c.fixed_asset_id
        LEFT JOIN users u ON u.id = c.changed_by
       WHERE fa.id = ANY($1)
-      ORDER BY c.changed_at DESC
-      LIMIT ${maxRows + 1}`,
-    [assetIds],
+      ORDER BY c.changed_at DESC`,
+    [windowAssetIds],
   );
-  truncated = truncated || changes.rows.length > maxRows;
 
   const disposals = await query<{
+    fixed_asset_id: string;
     code: string | null;
     name: string;
     disposal_date: string;
@@ -1992,9 +2222,10 @@ export async function fixedAssetsExportSheets(
     disposal_reason: string | null;
     cost: string;
     accumulated: string;
+    category: string | null;
   }>(
-    `SELECT fa.code, fa.name, fa.disposal_date::text AS disposal_date, fa.disposal_kind,
-            fa.disposal_proceeds::text AS disposal_proceeds, fa.disposal_reason,
+    `SELECT fa.id AS fixed_asset_id, fa.code, fa.name, fa.disposal_date::text AS disposal_date, fa.disposal_kind,
+            fa.disposal_proceeds::text AS disposal_proceeds, fa.disposal_reason, fa.category,
             fa.cost::text AS cost, COALESCE(live.accumulated, 0)::text AS accumulated
        FROM fixed_assets fa
        LEFT JOIN LATERAL (
@@ -2003,11 +2234,43 @@ export async function fixedAssetsExportSheets(
           WHERE d.fixed_asset_id = fa.id AND d.reversed_at IS NULL
        ) live ON true
       WHERE fa.id = ANY($1) AND fa.status = 'disposed'
-      ORDER BY fa.disposal_date DESC, fa.created_at DESC
-      LIMIT ${maxRows + 1}`,
-    [assetIds],
+      ORDER BY fa.disposal_date DESC, fa.created_at DESC`,
+    [windowAssetIds],
   );
-  truncated = truncated || disposals.rows.length > maxRows;
+
+  const DISPOSAL_KIND_LABELS: Record<FixedAssetDisposalKind, string> = {
+    sale: "فروش",
+    retirement: "بازنشستگی",
+    write_off: "اسقاط",
+  };
+
+  const registerRows = register.rows.map((r) => {
+    const asset = toFixedAsset(r);
+    return {
+      asset,
+      row: {
+        code: asset.code ?? "",
+        name: asset.name,
+        category: asset.category ?? "",
+        status: asset.status === "disposed" ? `واگذارشده (${asset.disposalKind ?? ""})` : asset.archivedAt ? "بایگانی‌شده" : asset.fullyDepreciated ? "مستهلک‌شده" : "فعال",
+        locationName: asset.locationName ?? "",
+        acquisitionDate: asset.acquisitionDate,
+        inServiceDate: asset.inServiceDate,
+        cost: asset.cost,
+        salvageValue: asset.salvageValue,
+        usefulLifeMonths: asset.usefulLifeMonths,
+        depreciationCount: asset.depreciationCount ?? 0,
+        accumulatedDepreciation: asset.accumulatedDepreciation,
+        bookValue: asset.bookValue,
+        acquisitionSource: asset.acquisitionSource,
+        vendorName: asset.vendorName ?? "",
+        custodianName: asset.custodianName ?? "",
+        serialNumber: asset.serialNumber ?? "",
+        purchaseReference: asset.purchaseReference ?? "",
+        notes: asset.notes ?? "",
+      },
+    };
+  });
 
   const sheets: SheetData[] = [
     {
@@ -2033,30 +2296,7 @@ export async function fixedAssetsExportSheets(
         { key: "purchaseReference", label: "مرجع خرید" },
         { key: "notes", label: "یادداشت" },
       ],
-      rows: register.rows.slice(0, maxRows).map((r) => {
-        const asset = toFixedAsset(r);
-        return {
-          code: asset.code ?? "",
-          name: asset.name,
-          category: asset.category ?? "",
-          status: asset.status === "disposed" ? `واگذارشده (${asset.disposalKind ?? ""})` : asset.archivedAt ? "بایگانی‌شده" : asset.fullyDepreciated ? "مستهلک‌شده" : "فعال",
-          locationName: asset.locationName ?? "",
-          acquisitionDate: asset.acquisitionDate,
-          inServiceDate: asset.inServiceDate,
-          cost: asset.cost,
-          salvageValue: asset.salvageValue,
-          usefulLifeMonths: asset.usefulLifeMonths,
-          depreciationCount: asset.depreciationCount ?? 0,
-          accumulatedDepreciation: asset.accumulatedDepreciation,
-          bookValue: asset.bookValue,
-          acquisitionSource: asset.acquisitionSource,
-          vendorName: asset.vendorName ?? "",
-          custodianName: asset.custodianName ?? "",
-          serialNumber: asset.serialNumber ?? "",
-          purchaseReference: asset.purchaseReference ?? "",
-          notes: asset.notes ?? "",
-        };
-      }),
+      rows: registerRows.map((r) => r.row),
     },
     {
       name: "برنامه استهلاک",
@@ -2070,24 +2310,107 @@ export async function fixedAssetsExportSheets(
         { key: "createdByName", label: "ثبت‌کننده" },
         { key: "locationName", label: "شعبه" },
       ],
-      rows: schedule.rows.slice(0, maxRows).map((r) => ({
-        code: r.code ?? "",
-        name: r.name,
-        period: r.period_key ? `${r.period_key} (${r.period_label})` : r.period_label,
-        entryDate: r.entry_date,
-        amount: Number(r.amount),
-        reversed: r.reversed_at ? "بله" : "خیر",
-        createdByName: r.created_by_name ?? "",
-        locationName: r.location_name ?? "",
-      })),
+      rows: postings.rows
+        .filter((r) => assetIds.includes(r.fixed_asset_id))
+        .map((r) => ({
+          code: r.code ?? "",
+          name: r.name,
+          period: r.period_key ? `${r.period_key} (${r.period_label})` : r.period_label,
+          entryDate: r.entry_date,
+          amount: Number(r.amount),
+          reversed: r.reversed_at ? "بله" : "خیر",
+          createdByName: r.created_by_name ?? "",
+          locationName: r.location_name ?? "",
+        })),
     },
   ];
 
-  const DISPOSAL_KIND_LABELS: Record<FixedAssetDisposalKind, string> = {
-    sale: "فروش",
-    retirement: "بازنشستگی",
-    write_off: "اسقاط",
-  };
+  // ------------------------------------------------------------- the remaining schedule
+  // The forecast per asset: which schedule governs today, its monthly rate,
+  // how much of the lifetime base is genuinely left, and which scheduled
+  // months are still open — the plan a fresh posting would follow.
+  const today = await businessToday(businessId);
+  const currentPeriodKey = depreciationPeriodOfDate(today)?.key ?? "";
+  const postingsByAsset = new Map<string, typeof postings.rows>();
+  for (const p of postings.rows) {
+    const list = postingsByAsset.get(p.fixed_asset_id) ?? [];
+    list.push(p);
+    postingsByAsset.set(p.fixed_asset_id, list);
+  }
+  const changesByAsset = new Map<string, typeof changes.rows>();
+  for (const ch of changes.rows) {
+    const list = changesByAsset.get(ch.fixed_asset_id) ?? [];
+    list.push(ch);
+    changesByAsset.set(ch.fixed_asset_id, list);
+  }
+  const remainingRows: Record<string, string | number>[] = [];
+  for (const { asset } of registerRows) {
+    if (asset.status === "disposed") continue;
+    const assetPostings = (postingsByAsset.get(asset.id) ?? []).filter((p) => !p.reversed_at);
+    const liveKeys = new Set(
+      assetPostings.map((p) => p.period_key ?? depreciationPeriodOfDate(p.entry_date)?.key ?? p.entry_date),
+    );
+    const liveAccumulated = assetPostings.reduce((sum, p) => sum + Number(p.amount), 0);
+    const assetChanges = [...(changesByAsset.get(asset.id) ?? [])].sort((a, b) =>
+      a.effective_period_key === b.effective_period_key
+        ? a.changed_at.localeCompare(b.changed_at)
+        : a.effective_period_key.localeCompare(b.effective_period_key),
+    );
+    // The schedule in force for the current month — the same resolution
+    // `postDepreciation` applies.
+    let governing = { salvageValue: asset.salvageValue, usefulLifeMonths: asset.usefulLifeMonths };
+    for (const ch of assetChanges) {
+      if (ch.effective_period_key <= currentPeriodKey) {
+        governing = { salvageValue: Number(ch.new_salvage_value), usefulLifeMonths: ch.new_useful_life_months };
+      }
+    }
+    if (assetChanges.length > 0 && assetChanges.every((ch) => ch.effective_period_key > currentPeriodKey)) {
+      governing = {
+        salvageValue: Number(assetChanges[0].old_salvage_value),
+        usefulLifeMonths: assetChanges[0].old_useful_life_months,
+      };
+    }
+    const finalEnd = scheduleEndPeriodKey(asset.inServiceDate, asset.usefulLifeMonths);
+    if (!finalEnd) continue;
+    const openMonths: string[] = [];
+    for (
+      let key = currentPeriodKey || asset.inServiceDate;
+      key <= finalEnd;
+      key = addMonthsToPeriodKey(key, 1)
+    ) {
+      if (!liveKeys.has(key)) openMonths.push(key);
+    }
+    const remaining = asset.cost - asset.salvageValue - liveAccumulated;
+    if (remaining <= 0 || openMonths.length === 0) continue;
+    remainingRows.push({
+      code: asset.code ?? "",
+      name: asset.name,
+      category: asset.category ?? "",
+      locationName: asset.locationName ?? "",
+      life: governing.usefulLifeMonths,
+      monthlyRate: Math.round((asset.cost - governing.salvageValue) / governing.usefulLifeMonths),
+      remaining,
+      openPeriods: openMonths.length,
+      nextOpenPeriod: openMonths[0],
+      finalPeriod: finalEnd,
+    });
+  }
+  sheets.push({
+    name: "برنامه باقیمانده",
+    columns: [
+      { key: "code", label: "کد دارایی" },
+      { key: "name", label: "نام دارایی" },
+      { key: "category", label: "دسته" },
+      { key: "locationName", label: "شعبه" },
+      { key: "life", label: "عمر مفید جاری (ماه)", type: "integer" },
+      { key: "monthlyRate", label: "استهلاک ماهانهٔ جاری", type: "money" },
+      { key: "remaining", label: "باقیمانده قابل استهلاک", type: "money" },
+      { key: "openPeriods", label: "دوره‌های باز", type: "integer" },
+      { key: "nextOpenPeriod", label: "نخستین دورهٔ باز" },
+      { key: "finalPeriod", label: "آخرین دورهٔ برنامه" },
+    ],
+    rows: remainingRows,
+  });
 
   if (disposals.rows.length > 0) {
     sheets.push({
@@ -2104,24 +2427,26 @@ export async function fixedAssetsExportSheets(
         { key: "gainLoss", label: "سود (+) / زیان (−)", type: "money" },
         { key: "reason", label: "دلیل" },
       ],
-      rows: disposals.rows.slice(0, maxRows).map((r) => {
-        const cost = Number(r.cost);
-        const accumulated = Number(r.accumulated);
-        const proceeds = Number(r.disposal_proceeds ?? 0);
-        const netBookValue = Math.max(0, cost - accumulated);
-        return {
-          code: r.code ?? "",
-          name: r.name,
-          kind: DISPOSAL_KIND_LABELS[r.disposal_kind] ?? r.disposal_kind,
-          disposalDate: r.disposal_date,
-          cost,
-          accumulated,
-          netBookValue,
-          proceeds,
-          gainLoss: proceeds - netBookValue,
-          reason: r.disposal_reason ?? "",
-        };
-      }),
+      rows: disposals.rows
+        .filter((r) => assetIds.includes(r.fixed_asset_id))
+        .map((r) => {
+          const cost = Number(r.cost);
+          const accumulated = Number(r.accumulated);
+          const proceeds = Number(r.disposal_proceeds ?? 0);
+          const netBookValue = Math.max(0, cost - accumulated);
+          return {
+            code: r.code ?? "",
+            name: r.name,
+            kind: DISPOSAL_KIND_LABELS[r.disposal_kind] ?? r.disposal_kind,
+            disposalDate: r.disposal_date,
+            cost,
+            accumulated,
+            netBookValue,
+            proceeds,
+            gainLoss: proceeds - netBookValue,
+            reason: r.disposal_reason ?? "",
+          };
+        }),
     });
   }
 
@@ -2137,7 +2462,7 @@ export async function fixedAssetsExportSheets(
         { key: "reason", label: "دلیل" },
         { key: "transferredByName", label: "انتقال‌دهنده" },
       ],
-      rows: transfers.rows.slice(0, maxRows).map((r) => ({
+      rows: transfers.rows.map((r) => ({
         code: r.code ?? "",
         name: r.name,
         from: r.from_location_name ?? "",
@@ -2156,48 +2481,157 @@ export async function fixedAssetsExportSheets(
         { key: "code", label: "کد دارایی" },
         { key: "name", label: "نام دارایی" },
         { key: "changedAt", label: "تاریخ تغییر" },
+        { key: "effectivePeriod", label: "اعمال از دوره" },
         { key: "life", label: "عمر مفید (قدیم ← جدید)" },
         { key: "salvage", label: "ارزش اسقاط (قدیم ← جدید)" },
         { key: "reason", label: "دلیل" },
         { key: "changedByName", label: "تغییردهنده" },
       ],
-      rows: changes.rows.slice(0, maxRows).map((r) => ({
-        code: r.code ?? "",
-        name: r.name,
-        changedAt: r.changed_at,
-        life: `${r.old_useful_life_months} ← ${r.new_useful_life_months}`,
-        salvage: `${Number(r.old_salvage_value)} ← ${Number(r.new_salvage_value)}`,
-        reason: r.reason,
-        changedByName: r.changed_by_name ?? "",
-      })),
+      rows: changes.rows
+        .filter((r) => assetIds.includes(r.fixed_asset_id))
+        .map((r) => ({
+          code: r.code ?? "",
+          name: r.name,
+          changedAt: r.changed_at,
+          effectivePeriod: r.effective_period_key,
+          life: `${r.old_useful_life_months} ← ${r.new_useful_life_months}`,
+          salvage: `${Number(r.old_salvage_value)} ← ${Number(r.new_salvage_value)}`,
+          reason: r.reason,
+          changedByName: r.changed_by_name ?? "",
+        })),
     });
   }
 
-  return {
-    sheets,
-    truncated,
-    registerTotal: assetIds.length,
-    maxRows,
+  // ------------------------------------------------------------- category / branch summaries
+  const summaryOf = (groupOf: (a: FixedAsset) => string, label: string) => {
+    const groups = new Map<string, { count: number; cost: number; accumulated: number; bookValue: number; fully: number; disposed: number }>();
+    for (const { asset } of registerRows) {
+      const key = groupOf(asset) || "بدون دسته";
+      const g = groups.get(key) ?? { count: 0, cost: 0, accumulated: 0, bookValue: 0, fully: 0, disposed: 0 };
+      g.count += 1;
+      g.cost += asset.cost;
+      g.accumulated += asset.accumulatedDepreciation;
+      g.bookValue += asset.bookValue;
+      if (asset.status === "disposed") g.disposed += 1;
+      else if (asset.fullyDepreciated) g.fully += 1;
+      groups.set(key, g);
+    }
+    return {
+      name: label,
+      columns: [
+        { key: "group", label: label },
+        { key: "count", label: "تعداد دارایی", type: "integer" },
+        { key: "cost", label: "بهای تمام‌شده", type: "money" },
+        { key: "accumulated", label: "استهلاک انباشته", type: "money" },
+        { key: "bookValue", label: "ارزش دفتری خالص", type: "money" },
+        { key: "fully", label: "مستهلک‌شده", type: "integer" },
+        { key: "disposed", label: "واگذارشده", type: "integer" },
+      ],
+      rows: [...groups.entries()]
+        .sort((a, b) => b[1].cost - a[1].cost)
+        .map(([group, g]) => ({ group, ...g })),
+    } satisfies SheetData;
   };
-}
+  sheets.push(summaryOf((a) => a.category ?? "", "دسته"));
+  sheets.push(summaryOf((a) => a.locationName ?? "", "شعبه"));
 
-/**
- * The sheet the export route puts in front of a truncated workbook (issue
- * #833): the reader is told, in the workbook itself, that what they hold is
- * partial and how to get the rest — a silently short export is an accounting
- * report that lies by omission.
- */
-export function fixedAssetExportTruncationNotice(registerTotal: number, maxRows: number): SheetData {
-  return {
-    name: "توجه",
-    columns: [{ key: "message", label: "محدودیت خروجی" }],
-    rows: [
-      {
-        message:
-          `این خروجی در سقف ${maxRows.toLocaleString("fa-IR")} ردیف در هر برگه محدود شده است؛ ` +
-          `دفتر اموال شما ${registerTotal.toLocaleString("fa-IR")} ردیف دارد و فقط ${maxRows.toLocaleString("fa-IR")} ردیف نخست هر برگه آمده است. ` +
-          "برای دریافت کامل، فیلترها را محدودتر کنید (مثلاً دسته، شعبه یا بازهٔ تاریخ).",
-      },
+  // ------------------------------------------------------------- the roll-forward
+  // Movement over the filtered acquisition-date window (all time when no
+  // range is set), grouped by category, from the register's own facts.
+  const windowFrom = filters.dateFrom ?? "0000-01-01";
+  const windowTo = filters.dateTo ?? "9999-12-31";
+  const windowRegister = await query<FixedAssetRow & Record<string, unknown>>(
+    `${FIXED_ASSET_SELECT} WHERE fa.id = ANY($1)`,
+    [windowAssetIds],
+  );
+  const rollup = new Map<
+    string,
+    { openingCost: number; additions: number; depreciation: number; disposalsCost: number; disposalsAccumulated: number }
+  >();
+  const rollFor = (category: string) =>
+    rollup.get(category) ??
+    { openingCost: 0, additions: 0, depreciation: 0, disposalsCost: 0, disposalsAccumulated: 0 };
+  const disposalByAsset = new Map(disposals.rows.map((d) => [d.fixed_asset_id, d]));
+  for (const r of windowRegister.rows) {
+    const asset = toFixedAsset(r);
+    const g = rollFor(asset.category ?? "");
+    const disposal = disposalByAsset.get(asset.id);
+    const disposalDate = disposal?.disposal_date ?? null;
+    if (asset.acquisitionDate < windowFrom) {
+      // Held before the window opened — unless it was disposed of before then.
+      if (!disposalDate || disposalDate >= windowFrom) g.openingCost += asset.cost;
+    } else if (asset.acquisitionDate <= windowTo) {
+      g.additions += asset.cost;
+    }
+    if (disposal && disposalDate && disposalDate >= windowFrom && disposalDate <= windowTo) {
+      g.disposalsCost += asset.cost;
+      g.disposalsAccumulated += Number(disposal.accumulated);
+    }
+    rollup.set(asset.category ?? "", g);
+  }
+  for (const [assetId, list] of postingsByAsset) {
+    const live = list.filter((p) => !p.reversed_at && p.entry_date >= windowFrom && p.entry_date <= windowTo);
+    if (live.length === 0) continue;
+    const owner = windowRegister.rows.find((r) => r.id === assetId);
+    if (!owner) continue;
+    const category = (owner.category as string | null) ?? "";
+    const g = rollFor(category);
+    g.depreciation += live.reduce((sum, p) => sum + Number(p.amount), 0);
+    rollup.set(category, g);
+  }
+  // Closing balances as of the window's end (or now): what the register
+  // still carries, cost and accumulated, after the window's movement.
+  const closing = new Map<string, { cost: number; accumulated: number }>();
+  for (const r of windowRegister.rows) {
+    const asset = toFixedAsset(r);
+    const disposal = disposalByAsset.get(asset.id);
+    const disposalDate = disposal?.disposal_date ?? null;
+    if (asset.acquisitionDate > windowTo) continue;
+    if (disposalDate && disposalDate <= windowTo) continue;
+    const g = closing.get(asset.category ?? "") ?? { cost: 0, accumulated: 0 };
+    g.cost += asset.cost;
+    const live = (postingsByAsset.get(asset.id) ?? []).filter((p) => !p.reversed_at && p.entry_date <= windowTo);
+    g.accumulated += live.reduce((sum, p) => sum + Number(p.amount), 0);
+    closing.set(asset.category ?? "", g);
+  }
+  sheets.push({
+    name: "گزارش حرکت",
+    columns: [
+      { key: "category", label: "دسته" },
+      { key: "openingCost", label: "هزینهٔ افتتاحیه", type: "money" },
+      { key: "additions", label: "افزودنی‌ها", type: "money" },
+      { key: "depreciation", label: "استهلاک دوره", type: "money" },
+      { key: "disposalsCost", label: "واگذاری‌ها (هزینه)", type: "money" },
+      { key: "disposalsAccumulated", label: "استهلاک واگذاری‌ها", type: "money" },
+      { key: "closingCost", label: "هزینهٔ پایانی", type: "money" },
+      { key: "closingAccumulated", label: "استهلاک انباشتهٔ پایانی", type: "money" },
+      { key: "closingBookValue", label: "ارزش دفتری پایانی", type: "money" },
     ],
-  };
+    rows: [...new Set([...rollup.keys(), ...closing.keys()])]
+      .sort()
+      .map((category) => {
+        const g = rollup.get(category) ?? { openingCost: 0, additions: 0, depreciation: 0, disposalsCost: 0, disposalsAccumulated: 0 };
+        const cl = closing.get(category) ?? { cost: 0, accumulated: 0 };
+        return {
+          category: category || "بدون دسته",
+          openingCost: g.openingCost,
+          additions: g.additions,
+          depreciation: g.depreciation,
+          disposalsCost: g.disposalsCost,
+          disposalsAccumulated: g.disposalsAccumulated,
+          closingCost: cl.cost,
+          closingAccumulated: cl.accumulated,
+          closingBookValue: cl.cost - cl.accumulated,
+        };
+      }),
+  });
+
+  // The xlsx format's own ceiling — the only refusal, and an honest one.
+  for (const sheet of sheets) {
+    if (sheet.rows.length > XLSX_MAX_ROWS_PER_SHEET) {
+      throw new FixedAssetError("export_too_large");
+    }
+  }
+
+  return { sheets, registerTotal: assetIds.length };
 }

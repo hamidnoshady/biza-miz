@@ -5,7 +5,8 @@ import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { useCallback, useEffect, useState, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FilterChip, FilterChipRow } from "@/app/dashboard/filters";
-import { api, ErrorBox, SecondaryButton } from "@/app/dashboard/ui";
+import { api, ErrorBox, errorMessageOrRaw, SecondaryButton } from "@/app/dashboard/ui";
+import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
 import { PERMISSIONS } from "@/lib/permissions";
 import { partyScopeFor } from "@/lib/parties-scopes";
 import {
@@ -169,9 +170,10 @@ export function AccountingManager({
    * The page opens with `ledger.view`, but every mutation route checks
    * `finance.assets_manage`; a ledger-only member used to see apparently
    * live buttons and discover the 403 only after pressing one. `undefined`
-   * when effective permissions could not be read: the section then draws
-   * the controls and the API stays the gate — the same convention as
-   * `canApproveLedger` above.
+   * when effective permissions could not be read: the section is then
+   * READ-ONLY until the capability is affirmatively known — fail-closed,
+   * never "draw the controls and let the API say no" (the API stays the
+   * authority either way).
    *
    * `finance.assets_manage` is *the* authority for this register's
    * controlled auto-postings too (depreciation, reversal, disposal): it is
@@ -508,7 +510,6 @@ function errorMessage(code: string | undefined): string {
     user_not_found: "عضو موردنظر پیدا نشد.",
     no_wages_set: "هیچ عضو فعالی حقوق تعیین‌شده ندارد.",
     // Audit F11 — a run is a Jalali month, computed gross-to-net.
-    invalid_period: "ماه حقوق معتبر نیست.",
     period_in_future: "این ماه هنوز شروع نشده است و حقوق آن قابل ثبت نیست.",
     period_already_accrued: "برای این ماه قبلاً تعهد حقوق ثبت شده است؛ برای ثبت دوباره ابتدا آن را ابطال کنید.",
     invalid_overtime: "مبلغ اضافه‌کار معتبر نیست.",
@@ -525,41 +526,13 @@ function errorMessage(code: string | undefined): string {
     already_voided: "این تعهد قبلاً ابطال شده است.",
     run_voided: "این تعهد ابطال شده و قابل پرداخت نیست.",
     // Phase 22 — fixed assets & depreciation (lifecycle per issue #833)
-    fixed_asset_not_found: "دارایی ثابت پیدا نشد.",
-    fixed_asset_has_depreciation: "برای این دارایی سابقه حسابداری ثبت شده و حذف آن ممکن نیست؛ می‌توانید آن را بایگانی کنید.",
-    fixed_asset_has_history: "برای این دارایی سابقه ثبت شده (خرید، انتقال یا تغییر برآورد) و حذف آن ممکن نیست؛ می‌توانید آن را بایگانی کنید.",
-    period_already_depreciated: "استهلاک این دوره قبلاً ثبت شده است.",
-    fully_depreciated: "این دارایی به‌طور کامل مستهلک شده است.",
-    asset_disposed: "این دارایی واگذار/اسقاط شده و دیگر عملیاتی روی آن انجام نمی‌شود.",
-    asset_archived: "این دارایی بایگانی شده است.",
-    depreciation_entry_not_found: "سند استهلاک انتخاب‌شده پیدا نشد.",
-    depreciation_already_reversed: "این استهلاک قبلاً برگشت خورده است.",
-    invalid_disposal_kind: "نوع واگذاری معتبر نیست.",
-    invalid_disposal_date: "تاریخ واگذاری معتبر نیست.",
-    disposal_date_in_future: "تاریخ واگذاری نمی‌تواند در آینده باشد.",
-    disposal_before_in_service: "تاریخ واگذاری نمی‌تواند پیش از تاریخ بهره‌برداری دارایی باشد.",
-    disposal_proceeds_required: "برای فروش، مبلغ واگذاری (بزرگ‌تر از صفر) الزامی است.",
-    disposal_proceeds_not_allowed: "برای اسقاط یا حذف، مبلغ واگذاری نباید وارد شود.",
-    proceeds_account_required: "حساب وصول مبلغ فروش را انتخاب کنید.",
-    invalid_proceeds_account: "حساب وصول انتخاب‌شده معتبر نیست.",
-    estimate_change_required: "حداقل یکی از عمر مفید یا ارزش اسقاط را مشخص کنید.",
-    estimate_unchanged: "مقدار جدید با مقدار فعلی یکسان است.",
-    invalid_useful_life: "عمر مفید باید عدد صحیح بین ۱ تا ۱۲۰۰ ماه باشد.",
-    salvage_not_less_than_cost: "ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.",
-    transfer_same_location: "دارایی هم‌اکنون در همین شعبه است.",
-    disposal_before_last_transfer: "تاریخ واگذاری نمی‌تواند پیش از آخرین انتقال ثبت‌شده باشد.",
-    transfer_before_last_transfer: "تاریخ انتقال نمی‌تواند پیش از آخرین انتقال ثبت‌شده باشد؛ سابقه انتقال‌ها تغییرناپذیر است.",
-    transfer_before_in_service: "تاریخ انتقال نمی‌تواند پیش از تاریخ بهره‌برداری دارایی باشد.",
-    entry_date_in_future: "تاریخ سند نمی‌تواند در آینده باشد.",
-    transfer_date_in_future: "تاریخ انتقال نمی‌تواند در آینده باشد.",
-    invalid_transfer_date: "تاریخ انتقال معتبر نیست.",
     location_not_found: "شعبه انتخاب‌شده معتبر نیست.",
     reason_required: "ذکر دلیل الزامی است.",
     reason_too_long: "دلیل واردشده بیش از حد طولانی است.",
-    vendor_not_found: "فروشنده انتخاب‌شده معتبر نیست.",
-    custodian_not_found: "متصدی انتخاب‌شده معتبر نیست.",
-    invalid_asset_account: "حساب دارایی انتخاب‌شده باید یک حساب دارایی ثابت (۱۵۰۰ تا ۱۵۹۹) باشد.",
-    fixed_asset_code_taken: "دارایی دیگری با همین کد ثبت شده است.",
   };
-  return map[code ?? ""] ?? "خطای غیرمنتظره. دوباره تلاش کنید.";
+  // The fixed-asset register's domain errors come from the one canonical
+  // dictionary (fixed-assets-errors.ts); everything else is this screen's
+  // own journal/account vocabulary or the shared dashboard fallback.
+  if (code && FIXED_ASSET_ERROR_TRANSLATIONS[code]) return FIXED_ASSET_ERROR_TRANSLATIONS[code];
+  return map[code ?? ""] ?? errorMessageOrRaw(code);
 }

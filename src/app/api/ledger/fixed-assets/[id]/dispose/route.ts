@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import { isUuid } from "@/lib/uuid";
 import { FixedAssetError, disposeFixedAsset, type FixedAssetDisposalKind } from "@/lib/fixed-assets-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
@@ -21,10 +22,14 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   if (error) return error;
 
   const { id } = await ctx.params;
+  if (!isUuid(id)) return NextResponse.json({ error: "fixed_asset_not_found" }, { status: 404 });
   let body: { kind?: string; disposalDate?: string; proceeds?: number; proceedsAccountId?: string; reason?: string };
   try {
     body = await request.json();
   } catch {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 

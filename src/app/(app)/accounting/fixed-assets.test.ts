@@ -11,7 +11,9 @@ describe("Fixed assets error translation and resolution", () => {
       "برای این دارایی سابقه ثبت شده (خرید، انتقال یا تغییر برآورد) و حذف آن ممکن نیست؛ می‌توانید آن را بایگانی کنید.",
     );
     expect(errorMessageOrRaw("period_already_depreciated")).toBe("استهلاک این دوره قبلاً برای این دارایی ثبت شده است.");
-    expect(errorMessageOrRaw("fully_depreciated")).toBe("این دارایی به‌طور کامل مستهلک شده است.");
+    expect(errorMessageOrRaw("fully_depreciated")).toBe(
+      "این دارایی به‌طور کامل مستهلک شده است و امکان ثبت استهلاک بیشتر وجود ندارد.",
+    );
     expect(errorMessageOrRaw("salvage_value_invalid")).toBe("ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.");
     expect(errorMessageOrRaw("period_label_required")).toBe("عنوان دوره الزامی است.");
   });
@@ -40,7 +42,7 @@ describe("Fixed assets error translation and resolution", () => {
     expect(errorMessageOrRaw("estimate_unchanged")).toBe("مقدار جدید با مقدار فعلی یکسان است.");
     expect(errorMessageOrRaw("transfer_same_location")).toBe("دارایی هم‌اکنون در همین شعبه است.");
     expect(errorMessageOrRaw("invalid_asset_account")).toBe(
-      "حساب دارایی انتخاب‌شده باید یک حساب دارایی ثابت (۱۵۰۰ تا ۱۵۹۹) باشد.",
+      "حساب دارایی انتخاب‌شده باید یک حساب دارایی ثابت (۱۵۰۰ تا ۱۵۹۹، به‌جز استهلاک انباشته) باشد.",
     );
   });
 

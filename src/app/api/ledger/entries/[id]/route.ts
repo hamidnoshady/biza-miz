@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
+import { isUuid } from "@/lib/uuid";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -39,6 +40,9 @@ export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
   if (error) return error;
 
   const { id } = await ctx.params;
+  // A malformed id is the same 404 as an unknown one — never a raw database
+  // error (the manual-reversal route's own guard, same reasoning).
+  if (!isUuid(id)) return NextResponse.json({ error: "entry_not_found" }, { status: 404 });
   const { rows } = await query<EntryRow>(
     `SELECT je.id, je.entry_date::text AS entry_date, je.memo, je.source_type,
             l.name AS location_name, u.full_name AS created_by_name,

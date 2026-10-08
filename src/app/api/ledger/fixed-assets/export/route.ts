@@ -1,11 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import {
-  fixedAssetExportTruncationNotice,
-  fixedAssetsExportSheets,
-  type FixedAssetListFilters,
-} from "@/lib/fixed-assets-service";
+import { fixedAssetsExportSheets, FixedAssetError, type FixedAssetListFilters } from "@/lib/fixed-assets-service";
 import { sheetsToXlsxBuffer } from "@/lib/data-transfer/codecs";
 import { isValidIsoDate } from "@/lib/jalali";
 
@@ -23,12 +19,13 @@ function xlsxResponse(body: Buffer): NextResponse {
 
 /**
  * The accountant-grade outputs (issue #833): the filtered register, the
- * depreciation schedule, the disposals, the transfers and the estimate
- * changes, as one right-to-left Excel workbook — always over the whole
- * filtered dataset, never just the visible page. Each sheet is capped at
- * FIXED_ASSET_EXPORT_MAX_ROWS rows; when the cap bites, a Persian notice
- * sheet goes in front of the workbook (and the X-Export-Truncated header
- * says so for programmatic readers) rather than a silently short report.
+ * posted depreciation schedule, the remaining-schedule forecast, the
+ * disposals, the transfers, the estimate changes, and the category/branch
+ * summaries plus the roll-forward — as one right-to-left Excel workbook,
+ * always over the whole filtered dataset, never just the visible page and
+ * never capped: a filter that admits the rows admits the whole workbook.
+ * (The xlsx format's own ~1M-row ceiling is the only refusal, and it says
+ * so in Persian rather than shipping a file Excel cannot open.)
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
@@ -64,11 +61,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
         : null,
   };
 
-  const { sheets, truncated, registerTotal, maxRows } = await fixedAssetsExportSheets(session.businessId, filters);
-  const buffer = await sheetsToXlsxBuffer(
-    truncated ? [fixedAssetExportTruncationNotice(registerTotal, maxRows), ...sheets] : sheets,
-  );
-  const response = xlsxResponse(buffer);
-  if (truncated) response.headers.set("X-Export-Truncated", "1");
-  return response;
+  try {
+    const { sheets } = await fixedAssetsExportSheets(session.businessId, filters);
+    const buffer = await sheetsToXlsxBuffer(sheets);
+    return xlsxResponse(buffer);
+  } catch (err) {
+    if (err instanceof FixedAssetError && err.message === "export_too_large") {
+      return NextResponse.json({ error: "export_too_large" }, { status: 413 });
+    }
+    throw err;
+  }
 });

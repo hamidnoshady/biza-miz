@@ -11,6 +11,8 @@ import {
   type FixedAssetListFilters,
 } from "@/lib/fixed-assets-service";
 import { isValidIsoDate } from "@/lib/jalali";
+import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
+import { MissingLedgerAccountError } from "@/lib/ledger-service";
 
 export const dynamic = "force-dynamic";
 
@@ -48,7 +50,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
         ? (sortBy as FixedAssetListFilters["sortBy"])
         : null,
     limit: Number(params.get("limit")) || null,
-    offset: Number(params.get("offset")) || null,
+    cursor: params.get("cursor"),
   };
   if (filters.dateFrom && !isValidIsoDate(filters.dateFrom)) {
     return NextResponse.json({ error: "invalid_date" }, { status: 400 });
@@ -57,11 +59,19 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "invalid_date" }, { status: 400 });
   }
 
-  const [{ assets, hasMore, kpis }, reconciliation] = await Promise.all([
-    listFixedAssetsPage(session.businessId, filters),
-    getFixedAssetReconciliation(session.businessId),
-  ]);
-  return NextResponse.json({ fixedAssets: assets, hasMore, kpis, reconciliation });
+  try {
+    const [{ assets, hasMore, nextCursor, kpis }, reconciliation] = await Promise.all([
+      listFixedAssetsPage(session.businessId, filters),
+      getFixedAssetReconciliation(session.businessId),
+    ]);
+    return NextResponse.json({ fixedAssets: assets, hasMore, nextCursor, kpis, reconciliation });
+  } catch (err) {
+    if (err instanceof FixedAssetError) return NextResponse.json({ error: err.message }, { status: err.status });
+    if (err instanceof MissingLedgerAccountError) return NextResponse.json({ error: "ledger_account_missing" }, { status: 400 });
+    const lockCode = fiscalPeriodLockErrorCode(err);
+    if (lockCode) return NextResponse.json({ error: lockCode }, { status: 409 });
+    throw err;
+  }
 });
 
 /**
@@ -79,6 +89,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     inServiceDate?: string | null;
     acquisitionSource?: string;
     acquisitionEntryId?: string | null;
+    acquisitionAccountId?: string | null;
+    acquisitionEntryDate?: string | null;
     cost?: number;
     salvageValue?: number;
     usefulLifeMonths?: number;
@@ -97,7 +109,18 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
   const location = await resolveActiveLocation(session);
+
+  // «post_now»: the registration itself posts the purchase entry (Dr the
+  // fixed-asset account / Cr a settlement account) — the normal acquisition
+  // flow of issue #833. Everything else links an existing entry or records
+  // opening/unlinked provenance.
+  const wantsAcquisitionPosting =
+    body.acquisitionSource === "post_now" && typeof body.acquisitionAccountId === "string" && body.acquisitionAccountId;
 
   try {
     const fixedAsset = await createFixedAsset({
@@ -106,8 +129,20 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       name: String(body.name ?? ""),
       acquisitionDate: String(body.acquisitionDate ?? ""),
       inServiceDate: typeof body.inServiceDate === "string" ? body.inServiceDate : null,
-      acquisitionSource: body.acquisitionSource as FixedAssetAcquisitionSource | undefined,
-      acquisitionEntryId: typeof body.acquisitionEntryId === "string" ? body.acquisitionEntryId : null,
+      acquisitionSource: (wantsAcquisitionPosting ? "unlinked" : body.acquisitionSource) as
+        | FixedAssetAcquisitionSource
+        | undefined,
+      acquisitionEntryId: wantsAcquisitionPosting
+        ? null
+        : typeof body.acquisitionEntryId === "string"
+          ? body.acquisitionEntryId
+          : null,
+      acquisition: wantsAcquisitionPosting
+        ? {
+            sourceAccountId: body.acquisitionAccountId!,
+            entryDate: typeof body.acquisitionEntryDate === "string" ? body.acquisitionEntryDate : null,
+          }
+        : null,
       cost: Number(body.cost),
       salvageValue: Number(body.salvageValue ?? 0),
       usefulLifeMonths: Number(body.usefulLifeMonths),
@@ -125,6 +160,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ fixedAsset }, { status: 201 });
   } catch (err) {
     if (err instanceof FixedAssetError) return NextResponse.json({ error: err.message }, { status: err.status });
+    if (err instanceof MissingLedgerAccountError) return NextResponse.json({ error: "ledger_account_missing" }, { status: 400 });
+    const lockCode = fiscalPeriodLockErrorCode(err);
+    if (lockCode) return NextResponse.json({ error: lockCode }, { status: 409 });
     throw err;
   }
 });

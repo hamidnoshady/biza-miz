@@ -37,6 +37,13 @@ import {
   XIcon,
 } from "lucide-react";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
+import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
+import {
+  ASSET_ACQUISITION_SOURCE_ROLES,
+  ASSET_SALE_PROCEEDS_ROLES,
+  classifyAccounts,
+  type AccountRole,
+} from "@/lib/account-classification";
 
 // ---------------------------------------------------------------------------
 // Shapes — the API's, kept in one place so the section and its dialogs agree.
@@ -144,70 +151,7 @@ interface PartyOption {
   name?: string;
 }
 
-const ERROR_TRANSLATIONS: Record<string, string> = {
-  fixed_asset_not_found: "دارایی ثابت پیدا نشد.",
-  fixed_asset_has_depreciation: "برای این دارایی سابقه حسابداری ثبت شده و حذف آن ممکن نیست؛ می‌توانید آن را بایگانی کنید.",
-  fixed_asset_has_history: "برای این دارایی سابقه ثبت شده (خرید، انتقال یا تغییر برآورد) و حذف آن ممکن نیست؛ می‌توانید آن را بایگانی کنید.",
-  period_label_required: "عنوان دوره الزامی است.",
-  period_already_depreciated: "استهلاک این دوره قبلاً برای این دارایی ثبت شده است.",
-  fully_depreciated: "این دارایی به‌طور کامل مستهلک شده است و امکان ثبت استهلاک بیشتر وجود ندارد.",
-  fiscal_period_locked: "دوره مالی این تاریخ قفل است و امکان ثبت سند وجود ندارد.",
-  fiscal_period_soft_closed: "دوره مالی این تاریخ بسته‌ی موقت است؛ فقط مالک یا حسابدار می‌تواند سند ثبت کند.",
-  ledger_account_missing: "یکی از حساب‌های مورد نیاز سیستم (۱۵۱۰، ۵۷۰۰، ۴۹۲۰ یا ۵۷۵۰) در سرفصل حساب‌ها یافت نشد.",
-  period_label_too_long: "یادداشت دوره بیش از حد طولانی است.",
-  invalid_period: "ماه استهلاک معتبر نیست.",
-  invalid_entry_date: "تاریخ سند معتبر نیست.",
-  entry_date_outside_period: "تاریخ سند باید داخل همان ماه استهلاک باشد.",
-  period_before_in_service: "این ماه پیش از تاریخ بهره‌برداری دارایی است؛ استهلاک از ماه بهره‌برداری شروع می‌شود.",
-  period_in_future: "این ماه هنوز شروع نشده است؛ استهلاک ماه آینده را نمی‌توان از پیش ثبت کرد.",
-  invalid_acquisition_source: "منشأ ثبت بهای دارایی معتبر نیست.",
-  acquisition_entry_required: "برای اتصال به سند خرید، یک سند را انتخاب کنید.",
-  acquisition_entry_not_found: "سند خرید انتخاب‌شده پیدا نشد.",
-  acquisition_entry_reversed: "سند انتخاب‌شده برگشت خورده است و نمی‌تواند سند خرید دارایی باشد.",
-  acquisition_entry_insufficient: "مبلغ ثبت‌شده در حساب دارایی‌های ثابت این سند، کمتر از بهای این دارایی (پس از کسر دارایی‌های دیگرِ متصل) است.",
-  // lifecycle (issue #833)
-  asset_disposed: "این دارایی واگذار/اسقاط شده و دیگر عملیاتی روی آن انجام نمی‌شود.",
-  asset_archived: "این دارایی بایگانی شده است.",
-  depreciation_entry_not_found: "سند استهلاک انتخاب‌شده پیدا نشد.",
-  depreciation_already_reversed: "این استهلاک قبلاً برگشت خورده است.",
-  depreciation_entry_required: "ردیف استهلاک انتخاب نشده است.",
-  invalid_reversal_date: "تاریخ برگشت معتبر نیست.",
-  invalid_disposal_kind: "نوع واگذاری معتبر نیست.",
-  invalid_disposal_date: "تاریخ واگذاری معتبر نیست.",
-  disposal_date_in_future: "تاریخ واگذاری نمی‌تواند در آینده باشد.",
-  disposal_before_in_service: "تاریخ واگذاری نمی‌تواند پیش از تاریخ بهره‌برداری دارایی باشد.",
-  disposal_proceeds_required: "برای فروش، مبلغ واگذاری (بزرگ‌تر از صفر) الزامی است.",
-  disposal_proceeds_not_allowed: "برای اسقاط یا حذف، مبلغ واگذاری نباید وارد شود.",
-  proceeds_account_required: "حساب وصول مبلغ فروش را انتخاب کنید.",
-  invalid_proceeds_account: "حساب وصول انتخاب‌شده معتبر نیست (نمی‌تواند حساب دارایی ثابت باشد).",
-  estimate_change_required: "حداقل یکی از عمر مفید یا ارزش اسقاط را مشخص کنید.",
-  estimate_unchanged: "مقدار جدید با مقدار فعلی یکسان است.",
-  invalid_useful_life: "عمر مفید باید عدد صحیح بین ۱ تا ۱۲۰۰ ماه باشد.",
-  salvage_not_less_than_cost: "ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.",
-  transfer_same_location: "دارایی هم‌اکنون در همین شعبه است.",
-  disposal_before_last_transfer: "تاریخ واگذاری نمی‌تواند پیش از آخرین انتقال ثبت‌شده باشد.",
-  transfer_before_last_transfer: "تاریخ انتقال نمی‌تواند پیش از آخرین انتقال ثبت‌شده باشد؛ سابقه انتقال‌ها تغییرناپذیر است.",
-  transfer_before_in_service: "تاریخ انتقال نمی‌تواند پیش از تاریخ بهره‌برداری دارایی باشد.",
-  entry_date_in_future: "تاریخ سند نمی‌تواند در آینده باشد.",
-  transfer_date_in_future: "تاریخ انتقال نمی‌تواند در آینده باشد.",
-  invalid_transfer_date: "تاریخ انتقال معتبر نیست.",
-  location_not_found: "شعبه انتخاب‌شده معتبر نیست.",
-  location_required: "انتخاب شعبه الزامی است.",
-  reason_required: "ذکر دلیل الزامی است.",
-  reason_too_long: "دلیل واردشده بیش از حد طولانی است.",
-  vendor_not_found: "فروشنده انتخاب‌شده معتبر نیست.",
-  custodian_not_found: "متصدی انتخاب‌شده معتبر نیست.",
-  invalid_asset_account: "حساب دارایی انتخاب‌شده باید یک حساب دارایی ثابت (۱۵۰۰ تا ۱۵۹۹، به‌جز استهلاک انباشته) باشد.",
-  fixed_asset_code_taken: "دارایی دیگری با همین کد ثبت شده است.",
-  fixed_asset_code_too_long: "کد دارایی بیش از حد طولانی است.",
-  fixed_asset_category_too_long: "دسته دارایی بیش از حد طولانی است.",
-  fixed_asset_serial_too_long: "شماره سریال بیش از حد طولانی است.",
-  fixed_asset_reference_too_long: "مرجع خرید بیش از حد طولانی است.",
-  fixed_asset_notes_too_long: "یادداشت بیش از حد طولانی است.",
-  idempotency_key_too_long: "کلید تکرارپذیری بیش از حد طولانی است.",
-  invalid_date: "تاریخ واردشده معتبر نیست.",
-  bad_request: "درخواست نامعتبر بود.",
-};
+const ERROR_TRANSLATIONS: Record<string, string> = FIXED_ASSET_ERROR_TRANSLATIONS;
 
 export interface FixedAssetReconciliationView {
   registerCost: string;
@@ -228,6 +172,24 @@ interface AcquisitionCandidate {
   sourceType: string | null;
   debitedRial: string;
   availableRial: string;
+}
+
+/**
+ * The settlement accounts of one allowed-role set, from the SAME canonical
+ * classification the server checks against (issue #833): the pickers offer
+ * exactly what the service will accept — never a control that 400s on click.
+ */
+function settlementAccountOptions(accounts: AccountRow[], allowed: ReadonlySet<AccountRole>): AccountRow[] {
+  const byCode = new Map(accounts.map((a) => [a.code, a]));
+  const roles = classifyAccounts(
+    accounts.map((a) => ({
+      id: a.id,
+      code: a.code,
+      parentId: a.parent_code ? (byCode.get(a.parent_code)?.id ?? null) : null,
+      type: a.type,
+    })),
+  );
+  return accounts.filter((a) => allowed.has(roles.get(a.id) ?? ("" as AccountRole)));
 }
 
 const ACQUISITION_SOURCE_LABELS: Record<NonNullable<FixedAssetRow["acquisitionSource"]>, string> = {
@@ -295,6 +257,8 @@ export function FixedAssetsSection({
   const money = useMoney();
   const [assets, setAssets] = useState<FixedAssetRow[] | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  /** The keyset cursor of the last loaded row — «load more» resumes here. */
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [kpis, setKpis] = useState<FixedAssetKpis | null>(null);
   const [reconciliation, setReconciliation] = useState<FixedAssetReconciliationView | null>(null);
@@ -356,14 +320,15 @@ export function FixedAssetsSection({
   }, [searchTerm, statusFilter, categoryFilter, branchFilter, dateFrom, dateTo, sortBy]);
 
   const load = useCallback(
-    async (offset = 0, append = false) => {
+    async (cursor: string | null = null, append = false) => {
       const params = filterParams();
-      if (offset) params.set("offset", String(offset));
+      if (cursor) params.set("cursor", cursor);
       const current = ++requestId.current;
       if (append) setLoadingMore(true);
       const { ok, data } = await api<{
         fixedAssets: FixedAssetRow[];
         hasMore?: boolean;
+        nextCursor?: string | null;
         kpis?: FixedAssetKpis;
         reconciliation?: FixedAssetReconciliationView;
         error?: string;
@@ -372,6 +337,7 @@ export function FixedAssetsSection({
       if (ok) {
         setAssets((previous) => (append && previous ? [...previous, ...data.fixedAssets] : data.fixedAssets));
         setHasMore(!!data.hasMore);
+        setNextCursor(data.nextCursor ?? null);
         setKpis(data.kpis ?? null);
         setReconciliation(data.reconciliation ?? null);
       } else {
@@ -390,6 +356,7 @@ export function FixedAssetsSection({
     requestId.current += 1;
     setAssets(null);
     setHasMore(false);
+    setNextCursor(null);
     setLoadingMore(false);
     const timer = setTimeout(() => void load(), searchTerm ? 300 : 0);
     return () => clearTimeout(timer);
@@ -567,7 +534,7 @@ export function FixedAssetsSection({
             <a
               href={exportHref}
               className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              title="دریافت اکسل کل داده‌های فیلترشده (دفتر اموال، برنامه استهلاک، واگذاری‌ها، انتقال‌ها و تغییر برآوردها) — حداکثر ۲۰٬۰۰۰ ردیف در هر برگه"
+              title="دریافت اکسل کل داده‌های فیلترشده — کامل و بدون سقف ردیف: دفتر اموال، برنامه استهلاک، برنامه باقیمانده، واگذاری‌ها، انتقال‌ها، تغییر برآوردها، خلاصهٔ دسته‌ها و شعب و گزارش حرکت"
             >
               <FileDownIcon className="size-3.5" />
               <span>دریافت اکسل</span>
@@ -883,7 +850,7 @@ export function FixedAssetsSection({
 
               {hasMore ? (
                 <div className="mt-4 flex justify-center">
-                  <SecondaryButton disabled={loadingMore} onClick={() => void load(assets.length, true)}>
+                  <SecondaryButton disabled={loadingMore || !nextCursor} onClick={() => void load(nextCursor, true)}>
                     {loadingMore ? "در حال بارگذاری…" : "دارایی‌های بیشتر"}
                   </SecondaryButton>
                 </div>
@@ -1036,8 +1003,11 @@ function AssetForm({
   const [salvageValue, setSalvageValue] = useState("");
   const [usefulLifeMonths, setUsefulLifeMonths] = useState("");
   const [inServiceDate, setInServiceDate] = useState("");
-  const [acquisitionSource, setAcquisitionSource] = useState<NonNullable<FixedAssetRow["acquisitionSource"]>>("unlinked");
+  const [acquisitionSource, setAcquisitionSource] = useState<NonNullable<FixedAssetRow["acquisitionSource"]> | "post_now">("unlinked");
   const [acquisitionEntryId, setAcquisitionEntryId] = useState("");
+  /** «post_now»: the registration itself posts Dr fixed-asset / Cr settlement. */
+  const [acquisitionAccountId, setAcquisitionAccountId] = useState("");
+  const [acquisitionEntryDate, setAcquisitionEntryDate] = useState("");
   const [candidates, setCandidates] = useState<AcquisitionCandidate[] | null>(null);
   const [category, setCategory] = useState("");
   const [serialNumber, setSerialNumber] = useState("");
@@ -1048,6 +1018,10 @@ function AssetForm({
   const [custodianPartyId, setCustodianPartyId] = useState("");
   const [assetAccountId, setAssetAccountId] = useState("");
   const [suppliers, setSuppliers] = useState<PartyOption[] | null>(null);
+  const acquisitionSettlementAccounts = useMemo(
+    () => settlementAccountOptions(accounts ?? [], ASSET_ACQUISITION_SOURCE_ROLES),
+    [accounts],
+  );
   const [staff, setStaff] = useState<PartyOption[] | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -1131,6 +1105,9 @@ function AssetForm({
     if (!Number.isInteger(monthsNum) || monthsNum <= 0) return onError("عمر مفید باید یک عدد صحیح مثبت (حداقل ۱ ماه) باشد.");
     if (inServiceDate && inServiceDate < acquisitionDate) return onError("تاریخ بهره‌برداری نمی‌تواند پیش از تاریخ خرید باشد.");
     if (acquisitionSource === "journal" && !acquisitionEntryId) return onError("برای اتصال به سند خرید، یک سند را انتخاب کنید.");
+    if (acquisitionSource === "post_now" && !acquisitionAccountId) {
+      return onError("برای ثبت سند خرید، حساب پرداخت (صندوق، بانک یا پرداختنی) را انتخاب کنید.");
+    }
 
     setIsSubmitting(true);
     const idempotencyKey = `asset-${crypto.randomUUID()}`;
@@ -1143,6 +1120,8 @@ function AssetForm({
         inServiceDate: inServiceDate || null,
         acquisitionSource,
         acquisitionEntryId: acquisitionSource === "journal" ? acquisitionEntryId : null,
+        acquisitionAccountId: acquisitionSource === "post_now" ? acquisitionAccountId : null,
+        acquisitionEntryDate: acquisitionSource === "post_now" && acquisitionEntryDate ? acquisitionEntryDate : null,
         cost: costRial,
         salvageValue: salvageRial,
         usefulLifeMonths: monthsNum,
@@ -1229,7 +1208,10 @@ function AssetForm({
             />
           </Field>
 
-          <Field label="بهای دارایی در دفاتر" hint="ثبت دارایی سندی صادر نمی‌کند؛ مشخص کنید بهای آن کجا در دفاتر آمده است">
+          <Field
+            label="بهای دارایی در دفاتر"
+            hint="ثبت دارایی به‌تنهایی سندی صادر نمی‌کند؛ مشخص کنید بهای آن کجا در دفاتر آمده است"
+          >
             <select
               className={inputClass}
               value={acquisitionSource}
@@ -1239,8 +1221,41 @@ function AssetForm({
               <option value="unlinked">{ACQUISITION_SOURCE_LABELS.unlinked}</option>
               <option value="journal">{ACQUISITION_SOURCE_LABELS.journal}</option>
               <option value="opening_balance">{ACQUISITION_SOURCE_LABELS.opening_balance}</option>
+              <option value="post_now">ثبت سند خرید هم‌اکنون (بدهکار دارایی ثابت)</option>
             </select>
           </Field>
+
+          {acquisitionSource === "post_now" ? (
+            <>
+              <Field label="حساب پرداخت" hint="صندوق، بانک، تنخواه یا حساب پرداختنی که بهای دارایی از آن پرداخت می‌شود">
+                {acquisitionSettlementAccounts.length === 0 ? (
+                  <p className="text-xs leading-5 text-muted-foreground">حساب مناسبی برای پرداخت یافت نشد.</p>
+                ) : (
+                  <select
+                    className={inputClass}
+                    value={acquisitionAccountId}
+                    onChange={(e) => setAcquisitionAccountId(e.target.value)}
+                    disabled={busy || isSubmitting}
+                  >
+                    <option value="">انتخاب حساب…</option>
+                    {acquisitionSettlementAccounts.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.code} — {a.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </Field>
+              <Field label="تاریخ سند خرید" hint="پیش‌فرض همان تاریخ خرید است؛ در دورهٔ باز دیگری هم می‌توانید ثبت کنید">
+                <JalaliDatePicker
+                  value={acquisitionEntryDate || acquisitionDate}
+                  onChange={setAcquisitionEntryDate}
+                  placeholder="همان تاریخ خرید"
+                  disabled={busy || isSubmitting}
+                />
+              </Field>
+            </>
+          ) : null}
 
           {acquisitionSource === "journal" ? (
             <Field label="سند خرید" hint="اسنادی که حساب دارایی‌های ثابت (۱۵۰۰) را بدهکار کرده‌اند">
@@ -1870,21 +1885,27 @@ function DepreciationHistoryModal({
   const [transfers, setTransfers] = useState<FixedAssetTransferItem[] | null>(null);
   const [estimateChanges, setEstimateChanges] = useState<FixedAssetEstimateChangeItem[] | null>(null);
   const [error, setError] = useState("");
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const requestId = useRef(0);
 
   useEffect(() => {
     const current = ++requestId.current;
     setError("");
     setEntries(null);
+    setHistoryCursor(null);
     api<{
       depreciationEntries: DepreciationHistoryItem[];
+      depreciationHasMore?: boolean;
+      depreciationNextCursor?: string | null;
       transfers: FixedAssetTransferItem[];
       estimateChanges: FixedAssetEstimateChangeItem[];
-    }>(`/api/ledger/fixed-assets/${asset.id}`)
+    }>(`/api/ledger/fixed-assets/${asset.id}?depreciationLimit=25`)
       .then(({ ok, data }) => {
         if (current !== requestId.current) return;
         if (ok) {
           setEntries(data.depreciationEntries);
+          setHistoryCursor(data.depreciationNextCursor ?? null);
           setTransfers(data.transfers);
           setEstimateChanges(data.estimateChanges);
         } else {
@@ -1895,6 +1916,24 @@ function DepreciationHistoryModal({
         if (current === requestId.current) setError("ارتباط با سرور برقرار نشد.");
       });
   }, [asset.id]);
+
+  /** «ادامه»: the next page of the depreciation history, by its keyset cursor. */
+  const loadMoreHistory = async () => {
+    if (!historyCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const { ok, data } = await api<{
+        depreciationEntries: DepreciationHistoryItem[];
+        depreciationNextCursor?: string | null;
+      }>(`/api/ledger/fixed-assets/${asset.id}?depreciationLimit=25&depreciationCursor=${encodeURIComponent(historyCursor)}`);
+      if (ok) {
+        setEntries((previous) => [...(previous ?? []), ...data.depreciationEntries]);
+        setHistoryCursor(data.depreciationNextCursor ?? null);
+      }
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const liveEntries = (entries ?? []).filter((e) => !e.reversedAt);
   const totalLive = liveEntries.reduce((sum, e) => sum + e.amount, 0);
@@ -2015,6 +2054,13 @@ function DepreciationHistoryModal({
               </DataTableBody>
             </DataTable>
           )}
+          {historyCursor ? (
+            <div className="flex justify-center">
+              <SecondaryButton disabled={loadingMore} onClick={() => void loadMoreHistory()}>
+                {loadingMore ? "در حال بارگذاری…" : "ادامهٔ تاریخچه"}
+              </SecondaryButton>
+            </div>
+          ) : null}
 
           {entries.length > 0 ? (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/80 bg-muted/60 px-4 py-3 text-sm">
@@ -2257,12 +2303,10 @@ function DisposeDialog({
   const [localError, setLocalError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const settlementAccounts = useMemo(() => {
-    // Any liquid/operating asset account outside the fixed-asset block —
-    // cash, bank, receivables. The server validates strictly; this picker
-    // just avoids offering 1500 itself.
-    return (accounts ?? []).filter((a) => a.type === "asset" && !a.code.startsWith("15"));
-  }, [accounts]);
+  const settlementAccounts = useMemo(
+    () => settlementAccountOptions(accounts ?? [], ASSET_SALE_PROCEEDS_ROLES),
+    [accounts],
+  );
 
   const netBookValue = Math.max(0, asset.cost - asset.accumulatedDepreciation);
   let parsedProceeds = 0;

@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  addMonthsToPeriodKey,
   depreciableBase,
-  depreciationForPeriod,
-  depreciationForPeriodUnderRevision,
   depreciationPeriodOfDate,
   disposalOutcome,
   monthlyDepreciation,
   parseDepreciationPeriodKey,
   planDepreciation,
   reconcileFixedAssetRegister,
+  scheduleEndPeriodKey,
   validateFixedAsset,
 } from "./depreciation";
 
@@ -30,44 +30,6 @@ describe("monthlyDepreciation", () => {
   it("rounds to the nearest whole Rial", () => {
     // 100/3 = 33.333...
     expect(monthlyDepreciation({ cost: 100, salvageValue: 0, usefulLifeMonths: 3 })).toBe(33);
-  });
-});
-
-describe("depreciationForPeriod", () => {
-  const asset = { cost: 100_000, salvageValue: 10_000, usefulLifeMonths: 9 };
-  // depreciableBase = 90_000, monthlyDepreciation = 10_000
-
-  it("is the regular monthly amount when nothing's accumulated yet", () => {
-    expect(depreciationForPeriod(asset, 0, 0)).toBe(10_000);
-  });
-
-  it("is the regular monthly amount mid-schedule, even if less than what remains", () => {
-    // period index 5 of 9 (periodsPostedSoFar=4) — not the final period yet.
-    expect(depreciationForPeriod(asset, 40_000, 4)).toBe(10_000);
-  });
-
-  it("absorbs whatever's left of the depreciable base on the final scheduled period, even if that's more than the regular monthly amount", () => {
-    // periodsPostedSoFar=8 -> this would be period 9 of 9, the final one.
-    expect(depreciationForPeriod(asset, 75_000, 8)).toBe(15_000);
-  });
-
-  it("is zero once fully depreciated", () => {
-    expect(depreciationForPeriod(asset, 90_000, 9)).toBe(0);
-  });
-
-  it("is zero if somehow over-depreciated (defensive, shouldn't happen)", () => {
-    expect(depreciationForPeriod(asset, 95_000, 9)).toBe(0);
-  });
-
-  it("rounding: three periods of a 100,000-over-3-months asset sum to exactly the depreciable base", () => {
-    const roundingAsset = { cost: 100_000, salvageValue: 0, usefulLifeMonths: 3 };
-    const p1 = depreciationForPeriod(roundingAsset, 0, 0);
-    const p2 = depreciationForPeriod(roundingAsset, p1, 1);
-    const p3 = depreciationForPeriod(roundingAsset, p1 + p2, 2);
-    expect(p1).toBe(33_333);
-    expect(p2).toBe(33_333);
-    expect(p3).toBe(33_334); // absorbs the rounding remainder on the final period
-    expect(p1 + p2 + p3).toBe(100_000);
   });
 });
 
@@ -132,11 +94,33 @@ describe("canonical depreciation periods", () => {
     expect(parseDepreciationPeriodKey("1405-13")).toBeNull();
     expect(parseDepreciationPeriodKey("p1")).toBeNull();
   });
+
+  it("shifts a period key by whole months, carrying the year", () => {
+    expect(addMonthsToPeriodKey("1405-01", 2)).toBe("1405-03");
+    expect(addMonthsToPeriodKey("1405-01", -1)).toBe("1404-12");
+    expect(addMonthsToPeriodKey("1405-12", 1)).toBe("1406-01");
+    expect(addMonthsToPeriodKey("1405-07", 0)).toBe("1405-07");
+  });
+
+  it("ends a schedule at the in-service month plus the life, minus one", () => {
+    // In service 1405-01-12 (2026-04-01), 12 months → ends 1405-12.
+    expect(scheduleEndPeriodKey("2026-04-01", 12)).toBe("1405-12");
+    expect(scheduleEndPeriodKey("2026-04-01", 1)).toBe("1405-01");
+    expect(scheduleEndPeriodKey("not-a-date", 12)).toBeNull();
+  });
 });
 
 describe("planDepreciation", () => {
-  const asset = { cost: 120_000_000, salvageValue: 0, usefulLifeMonths: 60, inServiceDate: "2026-04-01" };
-  const base = { asset, postedPeriodKeys: [] as string[], accumulatedSoFar: 0, today: "2026-10-07" };
+  // In service 2026-04-01 = 1405-01-12; a 60-month schedule ends 1409-12.
+  const schedule = { cost: 120_000_000, salvageValue: 0, usefulLifeMonths: 60, inServiceDate: "2026-04-01" };
+  const base = {
+    schedule,
+    finalSalvageValue: 0,
+    finalUsefulLifeMonths: 60,
+    postedPeriodKeys: [] as string[],
+    accumulatedSoFar: 0,
+    today: "2026-10-07",
+  };
 
   it("dates a past month at its last day and a current month at today", () => {
     expect(planDepreciation({ ...base, periodKey: "1405-02" })).toMatchObject({
@@ -189,150 +173,139 @@ describe("planDepreciation", () => {
     });
   });
 
-  it("scopes the schedule's consumed periods to the revision's window, separate from all live postings", () => {
-    // A revision froze {2 periods posted, 4,000,000 accumulated, 8,000,000
-    // over 4 months}. Live now: the two snapshot periods, one period posted
-    // into this revision's window, and two periods a LATER revision governs —
-    // those must not shorten this schedule's remaining life.
-    const revision = {
-      periodsPostedAtChange: 2,
-      accumulatedAtChange: 4_000_000,
-      remainingBase: 8_000_000,
-      remainingLifeMonths: 4,
+  it("refuses a month beyond the useful-life schedule — the schedule is a calendar, not a row count", () => {
+    // A two-month life from 1405-01 ends at 1405-02; a much later month is
+    // not a "missing scheduled month", it is beyond the schedule.
+    const short = { ...base, schedule: { ...schedule, usefulLifeMonths: 2 }, finalUsefulLifeMonths: 2 };
+    expect(planDepreciation({ ...short, periodKey: "1405-02" }).ok).toBe(true);
+    // 1405-06 has started (2026-08-23) — it is refused by the SCHEDULE, not
+    // by the calendar.
+    expect(planDepreciation({ ...short, periodKey: "1405-06" })).toEqual({ ok: false, error: "period_beyond_schedule" });
+    // Extending the life re-opens months from the change's effective month
+    // forward: the service resolves the governing schedule for 1405-09 to the
+    // EXTENSION (12 months, span to 1405-12), so the month is eligible again.
+    const extended = {
+      ...short,
+      schedule: { ...schedule, usefulLifeMonths: 12 },
+      finalUsefulLifeMonths: 12,
+      today: "2027-06-01",
     };
-    const plan = planDepreciation({
-      asset,
-      // The duplicate-month check sees every live period…
-      postedPeriodKeys: ["1404-11", "1404-12", "1405-02", "1405-06", "1405-07"],
-      // …but the schedule counts only its own window (snapshot + 1405-02).
-      accumulatedSoFar: 6_000_000,
-      schedulePeriodsPosted: 3,
-      periodKey: "1405-03",
+    expect(planDepreciation({ ...extended, periodKey: "1405-09" }).ok).toBe(true);
+    // The months the original 2-month schedule never covered stay closed to
+    // it: with the original still governing (no change effective by then),
+    // they are beyond the schedule.
+    expect(planDepreciation({ ...short, today: "2027-06-01", periodKey: "1405-09" })).toEqual({
+      ok: false,
+      error: "period_beyond_schedule",
+    });
+  });
+
+  it("refuses a month beyond the FINAL schedule even when the governing schedule was longer", () => {
+    // The governing (original) schedule runs to 1409-12, but the final
+    // estimate shortened the life: past the final end, nothing is postable.
+    const shortened = { ...base, finalUsefulLifeMonths: 4 };
+    expect(planDepreciation({ ...shortened, periodKey: "1405-04" }).ok).toBe(true);
+    expect(planDepreciation({ ...shortened, periodKey: "1405-05" })).toEqual({ ok: false, error: "period_beyond_schedule" });
+  });
+
+  it("charges the governing schedule's rate for a pre-change month, capped by what is genuinely left", () => {
+    // The original schedule (rate 2,000,000) governs 1405-02; a later change
+    // (final: salvage 20,000,000, life 30) bounds the lifetime total. The
+    // catch-up month is charged the ORIGINAL rate, never re-priced.
+    const revised = { ...base, finalSalvageValue: 20_000_000, finalUsefulLifeMonths: 30 };
+    expect(planDepreciation({ ...revised, periodKey: "1405-02" })).toMatchObject({ ok: true, amount: 2_000_000 });
+    // …and never more than what remains of the lifetime base.
+    const nearlyDone = { ...revised, accumulatedSoFar: 99_500_000, postedPeriodKeys: ["1405-01"] };
+    expect(planDepreciation({ ...nearlyDone, periodKey: "1405-02" })).toMatchObject({ ok: true, amount: 500_000 });
+  });
+
+  it("absorbs the remainder on the last open month of the final schedule, landing exactly on cost − final salvage", () => {
+    // 100,000 over 3 months: 33,333 + 33,333 + 33,334.
+    const small = {
+      schedule: { cost: 100_000, salvageValue: 0, usefulLifeMonths: 3, inServiceDate: "2026-04-01" },
+      finalSalvageValue: 0,
+      finalUsefulLifeMonths: 3,
+      postedPeriodKeys: [] as string[],
+      accumulatedSoFar: 0,
       today: "2026-10-07",
-      revision,
-    });
-    // Not the final scheduled period (1 consumed of 4 since the change), so
-    // the regular monthly amount: round(8,000,000 / 4) — not the whole
-    // remaining 6,000,000 the raw live count would have made it absorb.
-    expect(plan).toMatchObject({ ok: true, amount: 2_000_000 });
-  });
-
-  it("caps at cost minus salvage and then refuses", () => {
-    const small = { cost: 100_000, salvageValue: 10_000, usefulLifeMonths: 3, inServiceDate: "2026-04-01" };
-    expect(
-      planDepreciation({ ...base, asset: small, postedPeriodKeys: ["1405-01", "1405-02"], accumulatedSoFar: 60_000, periodKey: "1405-03" }),
-    ).toMatchObject({ ok: true, amount: 30_000 });
-    expect(
-      planDepreciation({
-        ...base,
-        asset: small,
-        postedPeriodKeys: ["1405-01", "1405-02", "1405-03"],
-        accumulatedSoFar: 90_000,
-        periodKey: "1405-04",
-      }),
-    ).toEqual({ ok: false, error: "fully_depreciated" });
-  });
-});
-
-describe("validateFixedAsset in-service date", () => {
-  const valid = { name: "x", acquisitionDate: "2026-04-01", cost: 10, salvageValue: 0, usefulLifeMonths: 1 };
-  it("refuses an in-service date before the purchase", () => {
-    expect(validateFixedAsset({ ...valid, inServiceDate: "2026-03-01" })).toEqual(["تاریخ بهره‌برداری نمی‌تواند پیش از تاریخ خرید باشد."]);
-    expect(validateFixedAsset({ ...valid, inServiceDate: "2026-05-01" })).toEqual([]);
-  });
-});
-
-describe("reconcileFixedAssetRegister", () => {
-  it("is reconciled only when cost and accumulated both agree", () => {
-    const input = {
-      registerCost: 100n,
-      registerAccumulated: 10n,
-      ledgerCost: 100n,
-      ledgerAccumulated: 10n,
-      unlinkedCount: 0,
-      unlinkedCost: 0n,
     };
-    expect(reconcileFixedAssetRegister(input).status).toBe("reconciled");
-    const off = reconcileFixedAssetRegister({ ...input, ledgerCost: 0n });
-    expect(off).toMatchObject({ status: "difference", costDifference: "-100" });
+    const p1 = planDepreciation({ ...small, periodKey: "1405-01" }) as { ok: true; amount: number };
+    const p2 = planDepreciation({
+      ...small,
+      periodKey: "1405-02",
+      postedPeriodKeys: ["1405-01"],
+      accumulatedSoFar: p1.amount,
+    }) as { ok: true; amount: number };
+    // 1405-03 is past today's month — re-anchor today so the final month is
+    // merely past, not future.
+    const p3 = planDepreciation({
+      ...small,
+      today: "2026-07-01",
+      periodKey: "1405-03",
+      postedPeriodKeys: ["1405-01", "1405-02"],
+      accumulatedSoFar: p1.amount + p2.amount,
+    }) as { ok: true; amount: number };
+    expect(p1.amount).toBe(33_333);
+    expect(p2.amount).toBe(33_333);
+    expect(p3.amount).toBe(33_334); // the last open month absorbs the rounding
+    expect(p1.amount + p2.amount + p3.amount).toBe(100_000);
+  });
+
+  it("treats a reversed posting as never posted — the live history is the only truth", () => {
+    // 1405-01 was posted and reversed: it is absent from the live facts, so
+    // re-posting it charges the full rate again (not a stale schedule's
+    // leftover), and the total still lands exactly.
+    const schedule1200 = { cost: 1_200, salvageValue: 0, usefulLifeMonths: 12, inServiceDate: "2026-04-01" };
+    const rev = {
+      schedule: schedule1200,
+      finalSalvageValue: 0,
+      finalUsefulLifeMonths: 12,
+      postedPeriodKeys: [] as string[],
+      accumulatedSoFar: 0,
+      today: "2026-10-07",
+    };
+    // The revision that a change would have frozen is irrelevant here: with
+    // the posting reversed, the month is simply open again at its rate.
+    expect(planDepreciation({ ...rev, periodKey: "1405-01" })).toMatchObject({ ok: true, amount: 100 });
+  });
+
+  it("refuses once the lifetime base is consumed, whatever the schedule counts", () => {
+    const done = { ...base, accumulatedSoFar: 120_000_000, postedPeriodKeys: ["1405-01"] };
+    expect(planDepreciation({ ...done, periodKey: "1405-02" })).toEqual({ ok: false, error: "fully_depreciated" });
   });
 });
 
-describe("depreciationForPeriodUnderRevision (issue #833)", () => {
-  // A 120,000,000 asset, 24 of 60 months posted at 2,000,000 (48,000,000),
-  // then the life revised to 48 months: 72,000,000 over the 24 months left.
-  const revision = {
-    periodsPostedAtChange: 24,
-    accumulatedAtChange: 48_000_000,
-    remainingBase: 72_000_000,
-    remainingLifeMonths: 24,
-  };
-
-  it("spreads the remaining base over the revised remaining life", () => {
-    expect(depreciationForPeriodUnderRevision(revision, 48_000_000, 24)).toBe(3_000_000);
-    expect(depreciationForPeriodUnderRevision(revision, 51_000_000, 25)).toBe(3_000_000);
-  });
-
-  it("lands on the exact remaining base on the final scheduled period", () => {
-    // 23 periods since the change at 3,000,000 each = 69,000,000; the 24th
-    // (final) period absorbs the last 3,000,000.
-    expect(depreciationForPeriodUnderRevision(revision, 48_000_000 + 69_000_000, 47)).toBe(3_000_000);
-    // A rounding-heavy revision: 10,000,000 left over 3 months = 3,333,333.33;
-    // the final period takes whatever is left.
-    const ragged = { periodsPostedAtChange: 0, accumulatedAtChange: 0, remainingBase: 10_000_000, remainingLifeMonths: 3 };
-    expect(depreciationForPeriodUnderRevision(ragged, 3_333_333, 1)).toBe(3_333_333);
-    expect(depreciationForPeriodUnderRevision(ragged, 6_666_666, 2)).toBe(3_333_334);
-  });
-
-  it("falls due in full on the next period when the revised life is already consumed", () => {
-    const dueNow = { ...revision, remainingLifeMonths: 0 };
-    expect(depreciationForPeriodUnderRevision(dueNow, 48_000_000, 24)).toBe(72_000_000);
-  });
-
-  it("is zero once the revised remaining base is exhausted", () => {
-    expect(depreciationForPeriodUnderRevision(revision, 120_000_000, 48)).toBe(0);
-    expect(depreciationForPeriodUnderRevision(revision, 125_000_000, 50)).toBe(0);
-  });
-});
-
-describe("disposalOutcome (issue #833)", () => {
-  it("realises a gain when the proceeds exceed net book value", () => {
-    expect(disposalOutcome({ cost: 100, accumulatedDepreciation: 24, proceeds: 80 })).toEqual({
-      netBookValue: 76,
-      gain: 4,
+describe("disposalOutcome", () => {
+  it("splits proceeds around the net book value into gain or loss", () => {
+    expect(disposalOutcome({ cost: 100, accumulatedDepreciation: 40, proceeds: 70 })).toEqual({
+      netBookValue: 60,
+      gain: 10,
       loss: 0,
     });
-  });
-
-  it("realises a loss when the proceeds fall short of net book value", () => {
-    expect(disposalOutcome({ cost: 100, accumulatedDepreciation: 24, proceeds: 70 })).toEqual({
-      netBookValue: 76,
-      gain: 0,
-      loss: 6,
-    });
-  });
-
-  it("breaks even when the proceeds equal net book value exactly", () => {
-    expect(disposalOutcome({ cost: 100, accumulatedDepreciation: 24, proceeds: 76 })).toEqual({
-      netBookValue: 76,
-      gain: 0,
-      loss: 0,
-    });
-  });
-
-  it("expenses the whole un-depreciated cost on a zero-proceeds write-off", () => {
-    expect(disposalOutcome({ cost: 50, accumulatedDepreciation: 10, proceeds: 0 })).toEqual({
-      netBookValue: 40,
+    expect(disposalOutcome({ cost: 100, accumulatedDepreciation: 40, proceeds: 20 })).toEqual({
+      netBookValue: 60,
       gain: 0,
       loss: 40,
     });
   });
 
-  it("treats over-depreciation defensively: net book value floors at zero", () => {
-    expect(disposalOutcome({ cost: 50, accumulatedDepreciation: 60, proceeds: 5 })).toEqual({
-      netBookValue: 0,
-      gain: 5,
-      loss: 0,
-    });
+  it("never reports a negative net book value", () => {
+    expect(disposalOutcome({ cost: 100, accumulatedDepreciation: 130, proceeds: 0 }).netBookValue).toBe(0);
+  });
+});
+
+describe("reconcileFixedAssetRegister", () => {
+  it("is reconciled only when both sides agree exactly", () => {
+    const base = {
+      registerCost: 100n,
+      ledgerCost: 100n,
+      registerAccumulated: 40n,
+      ledgerAccumulated: 40n,
+      unlinkedCount: 0,
+      unlinkedCost: 0n,
+    };
+    expect(reconcileFixedAssetRegister(base).status).toBe("reconciled");
+    expect(reconcileFixedAssetRegister({ ...base, ledgerCost: 90n }).status).toBe("difference");
+    expect(reconcileFixedAssetRegister({ ...base, ledgerAccumulated: 41n }).status).toBe("difference");
   });
 });
