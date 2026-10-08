@@ -18,6 +18,7 @@ import { businessToday } from "./business-day-service";
 import { isUuid } from "./uuid";
 import { PARTY_ROLE_STORAGE } from "./parties";
 import { WELL_KNOWN_CODES } from "./coa-template";
+import { isValidIsoDate } from "./iso-date";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_CUSTOMER_KEY, type AgingSummary } from "./aging";
 import { toPersianDigits } from "./digits";
@@ -40,10 +41,10 @@ export class ArError extends Error {
  * An actual calendar date in ISO form. The regex alone passes «2025-13-45»,
  * which `Date.parse` then reads as NaN — and every age bucket computed from a
  * NaN «today» falls through to «بیش از ۹۰ روز» without failing the request.
+ * The rule is `iso-date.ts`'s `isValidIsoDate`, shared with A/P aging, bank
+ * reconciliation, the manual journal and «دفتر روزنامه».
  */
-function isIsoDateOnly(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value));
-}
+const isIsoDateOnly = isValidIsoDate;
 
 async function arAccountId(businessId: string): Promise<string | null> {
   const { rows } = await query<{ id: string }>(

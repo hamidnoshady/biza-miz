@@ -277,8 +277,26 @@ export function AccountingManager({
   const body = (
     <>
       {section === "dashboard" ? <LedgerDashboardSection onGoToTab={goToSection} refreshKey={refreshKey} /> : null}
-          {section === "trial-balance" ? <TrialBalanceSection refreshKey={refreshKey} canExport={canExportReports} /> : null}
-          {section === "entries" ? <EntriesSection refreshKey={refreshKey} busy={busy} run={run} /> : null}
+          {section === "trial-balance" ? (
+            <TrialBalanceSection refreshKey={refreshKey} canExport={canExportReports} />
+          ) : null}
+          {section === "entries" ? (
+            /*
+             * `canApprove` is the same `ledger.approve` the manual-entry
+             * review queue gets, and for the same reason: «برگشت سند» is
+             * gated on it server-side, so a manager who cannot approve must
+             * not be shown a live destructive accounting control. `accounts`
+             * is the chart this workspace already loaded — the journal's
+             * «حساب» filter picks from it rather than fetching it twice.
+             */
+            <EntriesSection
+              refreshKey={refreshKey}
+              busy={busy}
+              accounts={accounts ?? []}
+              canApprove={canApproveLedger}
+              onRefresh={() => setRefreshKey((key) => key + 1)}
+            />
+          ) : null}
           {section === "manual" ? (
             <ManualEntrySection
               accounts={accounts ?? []}
