@@ -41,6 +41,29 @@ function connectorConnectSources(rawUrl = process.env.NEXT_PUBLIC_PRINT_CONNECTO
   return [...sources];
 }
 
+/**
+ * Origins the dashboard may frame: the Eshobe CMS admin, shown in the «ویرایش» modal of the
+ * website manager. Read from the environment only — the CSP is built per request in
+ * middleware, which cannot reach the database where an operator may have saved a different
+ * CMS address; such a deployment lists it in `CMS_EMBED_ORIGINS` (comma-separated).
+ * Anything that is not a plain http(s) origin is dropped rather than widening `frame-src`.
+ */
+export function cmsFrameSources(env: Record<string, string | undefined> = process.env): string[] {
+  const origins = new Set<string>();
+  const candidates = [env.ESHOBE_CMS_URL, ...(env.CMS_EMBED_ORIGINS ?? "").split(",")];
+  for (const candidate of candidates) {
+    const raw = candidate?.trim();
+    if (!raw) continue;
+    try {
+      const url = new URL(raw);
+      if (url.protocol === "http:" || url.protocol === "https:") origins.add(url.origin);
+    } catch {
+      // A malformed address frames nothing; the modal then shows its own error.
+    }
+  }
+  return [...origins];
+}
+
 export function contentSecurityPolicy(
   nonce: string,
   opts: { https: boolean; reportOnly?: boolean } = { https: false },
@@ -50,6 +73,9 @@ export function contentSecurityPolicy(
     "base-uri 'self'",
     "object-src 'none'",
     "frame-ancestors 'none'",
+    // The only frames this app opens are the CMS admin (website manager's edit modal).
+    // Without this line `default-src 'self'` would refuse them under an enforced policy.
+    `frame-src 'self' ${cmsFrameSources().join(" ")}`.trim(),
     "form-action 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
     "style-src 'self' 'unsafe-inline'",

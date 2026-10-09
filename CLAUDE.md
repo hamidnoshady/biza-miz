@@ -801,6 +801,16 @@ and the CMS-side surface `/api/platform/*` (its own
   door would be a second place to forget that. Moving a connected site's domain
   stays the business's own «تنظیمات و همگام‌سازی» flow.
 
+### Editing in a modal — the CMS page, not a copy of it
+
+Posts and pages are created and edited in `CmsEmbedDialog` (`cms/cms-sections.tsx`): an iframe on the CMS's own admin document, entered through `POST /api/cms/website/embed`. See [docs/eshobe-cms-integration.md](docs/eshobe-cms-integration.md) «Editing in a modal».
+
+- **Do not rebuild a CMS editor here.** A new content type gets an entry in the CMS's embed allowlist (`EMBED_COLLECTIONS`) and a dialog use, not a form.
+- **`canPublish` is derived from the session on the server** (`membership.permissions.has(cmsPublish)`), never read from the body — it picks which CMS user the frame acts as.
+- **The returned URL is a credential for a minute.** It is returned once, never stored or logged, and `createOwnerEmbedSession` refuses one that is not on the CMS origin it called.
+- **Outside clicks must not close the modal** (`onInteractOutside` is prevented): an unsaved page is the cost.
+- `frame-src` in `contentSecurityPolicy` comes from `ESHOBE_CMS_URL` + `CMS_EMBED_ORIGINS` only; a new framed origin is a decision, not a wildcard.
+
 ### Building a site, and paying for it (migration 0138)
 
 > **سایت‌ساز کار سایت را می‌کند؛ پول را این‌جا می‌گیریم.** The CMS renders and
