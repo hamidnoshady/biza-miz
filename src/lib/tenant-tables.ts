@@ -29,7 +29,17 @@ export const EXEMPT_TABLES = new Set([
   "auth_password_resets",
   "auth_admin_sessions",
   "mfa_enrolments",
-  "mfa_challenges",
+  // `mfa_challenges` is deliberately NOT here any more. It used to be exempt on
+  // the reasoning that a login challenge exists before any business is known,
+  // but migration 0215 gave the row `business_id` and `destination` (a member's
+  // phone number) so a phone-OTP code could be bound to the tenant it was
+  // issued for. That made it tenant data, and an exempt table is readable from
+  // any tenant-scoped connection — so business A could reach business B's
+  // challenge rows. Migration 0216 gives it the standard tenant policy
+  // instead. The platform realms leave `business_id` NULL and are reached only
+  // through `withoutTenantScope("platform", …)`, which bypasses the policy, so
+  // they are unaffected; the `employee_phone` realm reads under
+  // `withTenant(businessId, …)`, where the row's business is the one checked.
   "mfa_recovery_codes",
   "mfa_grace_periods",
   "platform_sms_config",

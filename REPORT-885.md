@@ -124,6 +124,16 @@ That wiring exposed a second defect, in the hook itself rather than the step. `c
 
 **A regression I introduced and then caught.** My first edit to `phone-otp/verify/route.ts` collapsed both failure branches into `unauthorized`, which reopened exactly the member-existence oracle L15 exists to close: an unknown number would have answered `unauthorized` where a wrong code answered `invalid_code`. Confirmed against the base commit with `git show d14f0e3:…`, then fixed. `src/app/api/auth/phone-otp/verify/route.test.ts` now pins it — reverting the fix makes that test fail, which I verified by reverting and re-running.
 
+**A second regression, found by the full integration suite, and fixed (migration 0216).** Migration 0215 gave `mfa_challenges` a `business_id` and a `destination` — a member's phone number — so a phone-OTP code could be bound to the tenant it was issued for. That was the right binding and the wrong table state: `mfa_challenges` was still listed in `EXEMPT_TABLES`, the set of tables with **no row-level security**, on the original reasoning that a login challenge exists before any business is known. The reasoning stopped holding the moment the row carried a business. An exempt table is readable from any tenant-scoped connection, so a member of business A could have reached business B's challenge rows, phone numbers included.
+
+`integration/tenant-isolation.integration.test.ts` asserts precisely this invariant and failed with `mfa_challenges is exempt but carries a tenant column`. It was right to. I confirmed the cause was mine rather than pre-existing: `migrations/0071_auth_mfa.sql` creates the table with no `business_id`, and 0215 is the only migration that adds it.
+
+The fix protects the table rather than weakening the test. Migration 0216 enables and forces RLS with the standard `tenant_isolation` policy, and `mfa_challenges` comes off `EXEMPT_TABLES`. That was safe only because I audited every access path first: the platform realms (`platform_user`, `platform_admin`) leave `business_id` NULL and are reached exclusively through `withoutTenantScope("platform", …)`, which sets `app.rls_bypass` and ignores the policy — `mfa-verify.ts`, `mfa-enrol.ts`, `mfa-service.ts`, and the send/rollback paths in `phone-otp.ts`. The `employee_phone` realm writes under the same bypass and reads under `withTenant(businessId, …)` in `verifyEmployeePhoneOtp`, where the row's business is the one being verified. So every existing path either bypasses deliberately or matches.
+
+The effect on the platform rows is the point, not a side effect: with `business_id IS NULL` they now satisfy no tenant predicate, so they are invisible to every tenant-scoped connection and reachable only through the auditable bypass.
+
+It is a separate migration rather than an edit to 0215 because 0215 has already run on the development database; editing it in place would leave that database unprotected with nothing to re-apply the fix.
+
 ---
 
 ## 6. Dead / legacy removed
@@ -173,11 +183,21 @@ All commands run in this sandbox on the work commit.
 | `NODE_OPTIONS=--max-old-space-size=3072 npx tsc --noEmit` | **exit 0**, no output |
 | `npx eslint . --max-warnings=0` | **exit 0** |
 | `npx vitest run --maxWorkers=2` | **675 files / 8,518 tests passed**, exit 0 |
-| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts <13 files>` | **13 files / 120 tests passed**, exit 0, 217.3 s |
+| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (**full suite, 196 files**) | **192 files passed / 4 failed · 2446 tests passed / 14 failed / 10 skipped**, 1805.5 s |
+| …re-run of the 4 failing files' domains after the RLS fix | `tenant-isolation` **20/20**, `tenant-export` + `ai-tenant-isolation` **11/11**, auth/IAM **11 files / 87 tests** — all exit 0 |
 
-Run as one command at the final commit, so the total is measured rather than two earlier partial runs added together. Per file: `authorization` 21, `team` 23, `hybrid-credential-sync` 16, `phone-otp` 13, `plan-limits` 10, `password-reset-request` 7, `trusted-device` 7, `staff-login-tenant` 7, `auth-account-security` 5, `login-lockout-enumeration` 4, `auth-lockout` 3, `iam-login-credentials` 2, `desktop-cloud-login` 2 — which sums to 120.
+The full suite was run end to end rather than sampled. **All 14 failures are accounted for, and none is an unexplained break:**
 
-The set is the union of the auth/IAM integration tests and everything found by grepping `integration/` for `auth_login_attempts`, `mfa_challenges`, `password-reset`, `consumePasswordResetToken`, `team-service` or `revokeTrustedDevices` — i.e. every integration test that reaches code this change touched, not a convenience sample.
+| Failing file | Tests | Cause | Mine? |
+|---|---|---|---|
+| `platform-system-backup` | 7 (+9 skipped) | No `pg_dump` exists anywhere on this box (`find / -name pg_dump -type f` → empty); `src/lib/pg-tools.ts:195` requires client major 16, the embedded server is 18.4, so it raises `postgresql_tool_server_incompatible` before doing any work. `pg-tools.ts` is not in this diff. | No — environmental |
+| `runtime-database-url` | 4 | `APP_DB_PASSWORD is required` (`src/lib/create-app-role.ts:55`). This sandbox's cluster uses trust auth with no password. Not in this diff. | No — environmental |
+| `runtime-role-regrant` | 2 | Same missing-password precondition. Not in this diff. | No — environmental |
+| `tenant-isolation` | 1 | `mfa_challenges is exempt but carries a tenant column`. **Caused by this work** — migration 0215 gave the table `business_id` and `destination` while it was still listed as RLS-exempt. | **Yes — fixed** |
+
+The `tenant-isolation` failure was a genuine defect in my own change and is fixed by migration 0216 plus removing `mfa_challenges` from `EXEMPT_TABLES` (§5). The other three are sandbox limitations: they need a PostgreSQL 16 client binary and a password-authenticated runtime role, neither of which this environment provides, and none of the files they exercise appears in this diff.
+
+The 10 skipped tests are `platform-system-backup`'s own `describe.skip` blocks for its peer-download and peer-HTTP surfaces, which are conditional on a second server; they were skipped, not failed.
 
 Database: PostgreSQL **18.4**, provisioned via `embedded-postgres` on 127.0.0.1:54339, migrations applied through `scripts/migrate.ts`.
 
@@ -225,7 +245,12 @@ One note on how the paste fix was chosen. The obvious reading of the symptom is 
 
 **Hostless multi-match disclosure is retained deliberately.** When a phone number matches members at several businesses, the response names those businesses before any proof is offered. Closing it means changing a flow that legitimate users depend on, so it is reported here rather than silently "fixed".
 
-**The full 195-file integration suite was not completed here.** It reached 20 files, all passing and with no failures logged, before I stopped it — at this machine's speed it needed hours and contended with the build for the same 2 cores. Rather than leave that as a bare gap, I then enumerated the integration tests that actually reach code this change touched, by grepping `integration/` for `auth_login_attempts`, `mfa_challenges`, `password-reset`, `consumePasswordResetToken`, `team-service` and `revokeTrustedDevices`, and ran the full set alongside the auth/IAM files: **13 files / 120 tests, all passing** (§8). So the change is covered by every integration test that can observe it; what remains unverified is the set of domains this change does not reach.
+**The full 196-file integration suite was completed, and 3 files still fail here for environmental reasons.** All 196 files ran end to end (1805.5 s): 192 passed, 4 failed. One of those four was a real defect in this work and is fixed (§5). The remaining three — `platform-system-backup`, `runtime-database-url`, `runtime-role-regrant` — fail on sandbox preconditions this environment cannot supply, and none of the source files they exercise is in this diff:
+
+- `platform-system-backup` needs a `pg_dump` binary at PostgreSQL major 16. There is no `pg_dump` anywhere on this box (`find / -name pg_dump -type f` returns nothing), and `src/lib/pg-tools.ts:195` refuses any other major, so it raises `postgresql_tool_server_incompatible` against the 18.4 server before doing any work.
+- `runtime-database-url` and `runtime-role-regrant` need `APP_DB_PASSWORD`, because `src/lib/create-app-role.ts:55` provisions a password-authenticated restricted role. This sandbox's cluster runs trust auth with no password.
+
+**These must be run on CI or a machine with the PostgreSQL 16 client tools and a password-authenticated runtime role before merge.** They are reported here rather than quietly excluded, and I did not skip, disable or loosen them to get a green total.
 
 Migration `0215` is additive (new nullable columns, widened constraints, one new table), and it was applied successfully by every file that ran across all attempts — the 20 from the partial full run plus the 12 targeted ones — so the migration itself is exercised well beyond the auth domain.
 
