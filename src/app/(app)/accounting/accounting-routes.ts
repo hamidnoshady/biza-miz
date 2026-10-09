@@ -45,6 +45,10 @@ export const ACCOUNTING_SECTION_KEYS = [
   "installments",
   "cheques",
   "reconciliation",
+  // Multicurrency (issue #863) — the foreign-currency workspace: currency
+  // configuration and rates, foreign documents, settlements, revaluation and
+  // the six FX reports, one section so «ارز» has one address.
+  "multicurrency",
   "chart-of-accounts",
   "payroll",
   "vat",

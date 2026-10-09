@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
+import { requirePlatformAdmin } from "@/lib/platform-auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import {
   createCurrency,
@@ -28,13 +29,15 @@ export const GET = withTenantScope(async () => {
 });
 
 /**
- * Adds a custom currency to the catalogue. Owner/manager only — the catalogue
- * is shared by every business, so this is a settings-level act, not a
- * ledger-level one. ISO-standard currencies ship seeded; this exists for the
- * long tail (a crypto-adjacent unit, a remittance currency we never seeded).
+ * Adds a custom currency to the catalogue. PLATFORM-admin only: the catalogue
+ * is one set of rows shared by every tenant on the install, so a tenant's
+ * settings.manage must never be able to add, rename, re-scale or deactivate a
+ * currency into anybody else's books. Tenants configure WHICH currencies they
+ * use on /api/currencies/settings; the catalogue itself is provisioned here.
+ * ISO-standard currencies ship seeded; this exists for the long tail.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { error } = await requirePermission(PERMISSIONS.settingsManage);
+  const { error } = await requirePlatformAdmin();
   if (error) return error;
 
   let body: unknown;

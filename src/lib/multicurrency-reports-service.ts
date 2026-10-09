@@ -560,13 +560,26 @@ export async function gainLossReport(
               sum(app.foreign_applied)::text AS foreign_applied,
               sum(app.base_applied)::text AS base_at_booking,
               je.exchange_rate AS settlement_rate,
-              (sum(app.base_applied) + legs.gain_credit - legs.loss_debit)::text AS base_at_settlement,
+              -- What the settlement actually MOVED, on each side's own view:
+              -- a receivable's money in is the booked base plus a gain
+              -- (minus a loss); a payable's money out is the booked base
+              -- MINUS a gain (plus a loss) — parting with less than the
+              -- booked 600, say 550, must report 550, not 650.
+              CASE WHEN app.direction = 'receivable'
+                   THEN sum(app.base_applied) + legs.gain_credit - legs.loss_debit
+                   ELSE sum(app.base_applied) - legs.gain_credit + legs.loss_debit
+              END::text AS base_at_settlement,
               (legs.gain_credit - legs.loss_debit)::text AS difference
          FROM fx_settlement_applications app
          JOIN journal_entries je ON je.id = app.settlement_entry_id
          JOIN legs ON legs.entry_id = app.settlement_entry_id
          LEFT JOIN parties p ON p.id = app.party_id
         WHERE app.business_id = $1
+          -- A settlement that was itself reversed is not realized anymore:
+          -- its entry was undone, so the report must not keep counting FX
+          -- results the GL no longer carries.
+          AND je.reversed_at IS NULL
+          AND je.reverses_entry_id IS NULL
           AND ($2::date IS NULL OR je.entry_date >= $2::date)
           AND ($3::date IS NULL OR je.entry_date <= $3::date)
         GROUP BY app.settlement_entry_id, je.entry_date, app.direction, app.currency_code,

@@ -40,6 +40,11 @@ export const JOURNAL_EXPORT_COLUMNS = [
   { key: "foreignDebit", label: "بدهکار ارزی" },
   { key: "foreignCredit", label: "بستانکار ارزی" },
   { key: "exchangeRate", label: "نرخ تسعیر سند" },
+  // The rounding contract the snapshot was booked under — completing the
+  // snapshot in the audit artefact: with the version and the absorbed delta,
+  // an auditor can recompute every base amount from the foreign side.
+  { key: "roundingVersion", label: "نسخه سیاست گرد کردن" },
+  { key: "roundingDelta", label: "اختلاف گرد کردن (ریال)" },
   { key: "entryTotal", label: "جمع سند (ریال)" },
   { key: "location", label: "شعبه" },
   { key: "project", label: "پروژه" },
@@ -97,6 +102,8 @@ export function buildJournalExportTable(entries: readonly JournalEntryRecord[]):
         foreignDebit: "",
         foreignCredit: "",
         exchangeRate: entry.exchangeRate ?? "",
+        roundingVersion: entry.roundingVersion != null ? String(entry.roundingVersion) : "",
+        roundingDelta: entry.roundingDelta ?? "",
       });
       continue;
     }
@@ -111,6 +118,8 @@ export function buildJournalExportTable(entries: readonly JournalEntryRecord[]):
         foreignDebit: line.foreignDebit !== "0" ? line.foreignDebit : "",
         foreignCredit: line.foreignCredit !== "0" ? line.foreignCredit : "",
         exchangeRate: entry.exchangeRate ?? "",
+        roundingVersion: entry.roundingVersion != null ? String(entry.roundingVersion) : "",
+        roundingDelta: entry.roundingDelta ?? "",
       });
     }
   }
