@@ -28,7 +28,9 @@ class BridgeCommandRouterTest {
         assertEquals(4, result.getInt("appVersionCode"))
         assertEquals("staging", result.getString("environment"))
         assertEquals(BridgeProtocol.BRIDGE_VERSION, result.getInt("bridgeVersion"))
-        assertEquals(listOf("notifications"), result.getJSONArray("capabilities").toList())
+        val capabilities = result.getJSONArray("capabilities")
+        assertEquals(1, capabilities.length())
+        assertEquals("notifications", capabilities.getString(0))
     }
 
     @Test
