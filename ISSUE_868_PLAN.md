@@ -144,19 +144,19 @@ Each of these is a real part of the issue. None is a silent omission: each has i
 
 ## Verification
 
-Recorded on `arena/10b8596c-biza-miz`, on the final source. No source file changed after the last of these runs; only this plan changed afterwards.
+Recorded on `arena/10b8596c-biza-miz` at commit `90cc02b`, which is the final source. The commits after it change documentation only; no file under `src`, `scripts`, `electron`, `bin`, `migrations`, `integration` or `.github` differs from `90cc02b`.
 
 Environment: the sandbox has 4 GB of RAM and 2 vCPUs, and runs Node 22.22.3, while `package.json` asks for `>=24`. `tsc` needs `NODE_OPTIONS=--max-old-space-size=3072` to finish.
 
 | Step | Command | Result |
 | --- | --- | --- |
 | Type check | `npx tsc --noEmit` (with the heap setting above) | exit 0 |
-| Unit suite | `npm test` | 707 files, 9,284 tests passed, exit 0 |
-| Migrations | `npm run db:migrate` on a fresh embedded cluster | 303 applied, including `0216_accounting_dimensions.sql`, exit 0 |
-| Database suite | `npm run test:db` after the migration above | 199 of 199 files, 2,745 tests passed, 1 skipped, exit 0 |
+| Unit suite | `npm test` | 709 files, 9,334 tests passed, exit 0 |
+| Migrations | `DATABASE_URL=postgres://pos:pos@localhost:55432/pos npm run db:migrate` | up to date (303 applied, including `0216_accounting_dimensions.sql`), exit 0 |
+| Database suite | `DATABASE_URL=… npm run test:db` | 199 of 199 files, 2,745 tests passed, 1 skipped, exit 0 |
 | Design suite | `npm run test:design` | 5 files, 38 tests, exit 0 |
 | Lint | `npm run lint` (`--max-warnings=0`) | exit 0 |
-| Build | `npm run build` | **Not completed in this sandbox.** The kernel's out-of-memory killer stopped it at heap limits of 3072 MB and 3300 MB, and 2400 MB ran out of memory in the same way; the default heap also failed. The base commit `7b1b11c`, built with the same 3072 MB setting, stops the same way, so the cause is the sandbox's 4 GB of RAM. The build is therefore confirmed by the CI build step on this PR, where `.github/workflows/test.yml` sets `NODE_OPTIONS=--max-old-space-size=3072`. |
+| Build | `npm run build` with `NODE_OPTIONS=--max-old-space-size=3072` | exit 0. The sandbox has 4 GB of RAM, which was not enough alone, so an 8 GB swap file was added for this run. The only warnings are the existing `jose` edge-runtime notices, which come from `src/lib/platform-auth-edge.ts`. |
 
 The one skipped DB test is the row-level-security case in `integration/ai-gateway.integration.test.ts`. It skips itself when `rlsEffective()` is false, which is the case on this cluster, because its role is the bootstrap superuser and superusers bypass row-level security.
 
@@ -172,6 +172,34 @@ Notes on the run history:
 - The first full DB run used the dev database before it was migrated; I had skipped `db:migrate`, which CI runs first. Only `runtime-role-regrant.integration.test.ts` reads the root database, and it failed with `relation "schema_migrations" does not exist`. The database was migrated, that file passed 2 of 2, and the whole suite was re-run. The table above is the re-run.
 - The unit suite was first run before the drill-down change; it was re-run on the final code, and the table above is that run.
 
+### Desktop payload and the size budgets
+
+Two budgets stop the desktop build: the staged runtime (200 MiB) and the installed payload (620 MiB, the runaway detector). The installer gate (175 MiB) was not reached. The first version of this branch broke the first two, and neither budget was raised, bypassed or disabled to pass.
+
+**Root cause, measured.** The cost-centre report panel imported `toCsv` from `src/lib/data-transfer/codecs.ts`. That module holds the XLSX and PDF readers, which load exceljs and unpdf through dynamic imports. Each dynamic import reachable from client code becomes a static client chunk, so the panel shipped about 2.5 MiB of client chunks and 1 MiB of server chunks for two libraries that never run in the browser. On a Linux build, the base commit `7b1b11c` against the first version of this branch differed by 3.745 MiB, and 3.3 MiB of that was these chunks. The pure CSV helpers now live in `src/lib/data-transfer/csv.ts`, which declares no imports, and `codecs.ts` re-exports them (commit `9f893ad`). The Linux difference after the fix is 457,424 bytes (+0.436 MiB).
+
+**Gates on Windows, from CI.**
+
+| Measurement | Gate | First version of the branch (`d6fc640`) | This branch (`90cc02b`) |
+| --- | --- | --- | --- |
+| Staged runtime | 200 MiB | over the gate; the failing step printed only its message, so the exact figure was not recorded | 198.150 MiB (207,775,699 bytes, 6,968 files) |
+| Installed payload, unpacked | 620 MiB | 621.9 MiB | 618.583 MiB (648,631,215 bytes, 9,233 files) |
+| Installer | 175 MiB | 161.8 MiB | 161 MiB |
+
+Runs: the packaged job `37979722293` (push) and `37979728260` (pull request) passed every step, including the budget steps. The `desktop shell` job on the pull request's run `37979728266` passed and measured the merge-test commit `9d891aea`. That commit's parents are `7b1b11c` and `90cc02b`, and its tree equals the head's tree (`d77245a9`), so the byte totals are identical. `main` at `6ec02b5` packaged to 618.1 MiB unpacked and 161 MiB installer (run `37925908034`).
+
+**What the remaining growth is.** Linux, base to head, after the fix, +457,424 bytes in total: client-reference manifests +245 KiB, server chunks +51 KiB, client route chunks +41 KiB, client shared chunks +32 KiB, build traces (`*.nft.json`) +31 KiB, `bin/` +20 KiB, route handlers +13 KiB, migration `0216` +12 KiB. Almost all of the manifest term is the four new API routes: each route's client-reference manifest is about 67 KiB. The 1,047 existing manifests change by a net −24.5 KiB, and on two of them, checked with the absolute build paths normalised, the client-module sets are identical, so that change sits in their numeric IDs and paths and is not attributed to any feature. None of the three new client components appears in any manifest, so they add no manifest bytes. The feature therefore costs about 0.44 MiB: its four API routes, its screens, its server code and its migration.
+
+**The base on Windows is not measured.** Dispatching `verify-shippables` and `build-desktop-installer` with `source_ref=7b1b11c54f9ccb19a82fba69b590d10b10da31ba` from this session returned HTTP 403 (the session token cannot start workflow runs), so the base's staged figure on Windows is missing. If the Linux delta carries over, the base would be about 197.7 MiB. Those two dispatches, run manually on this branch with that `source_ref`, would record it exactly.
+
+**Diagnostics, so a budget failure keeps its numbers.** `src/lib/desktop-size-diagnostics.ts` (pure, with 37 tests) and `scripts/desktop-size-diagnostics.ts` (a `tsx` CLI) write the totals, the categories, the traced packages, the largest files and a manifest. They run `if: always()` after each budget step, and the reports upload even when a budget fails (`desktop-staged-runtime-size` and `business-suite-desktop-size-report`). Both manual workflows take a `source_ref`; a `source_ref` run is never a release: `RELEASE_BUILD` evaluates to false for it, the value the branch's pushes get, and on run `37979722293` the release job was skipped. A `source_ref` dispatch itself has not run yet, because of the 403 above. Provenance now records the checked-out commit rather than `GITHUB_SHA`.
+
+**Follow-ups, not in this PR, each with its measured size.**
+
+1. Per-route client-reference manifests: 1,051 files, 71.95 MiB on Windows, the largest term. Every route handler carries a copy of the client-module map. This is Next's build output, not feature code, so it is a separate framework-level change.
+2. Build traces (`*.nft.json`): 1,054 files, 8.31 MiB on Linux. Only Next's build code reads them (`next/dist/build` and `next/dist/esm/build`); the app, `electron/` and `scripts/` do not. Removing them from the staged runtime needs a `next start` smoke test from the staged runtime first.
+3. Traced packages to verify before any change: `amphtml-validator` (3.83 MiB), Next's compiled babel bundles (2.77 MiB), and `capsize-font-metrics.json` (4.10 MiB). Whether the app can reach them at runtime is not verified.
+
 ---
 
 # Status — draft PR open
@@ -184,5 +212,12 @@ Delivered (§6):
 - The expense importer: four optional code columns, resolved to this business's own values and refused by name when unknown or archived.
 - Reads and reports: the journal's per-kind filters, the trial balance filter, the cost-centre account card, the account × dimension matrix, profit by profit centre, CSV export and print. A non-zero matrix cell drills into the journal lines behind it.
 - Screens: dimension management at `/accounting/dimensions` and the report panel, with searchable selectors and the Project / Cost centre distinction kept in the labels.
+- The desktop size budgets pass on the PR head with the first version's growth removed. The growth was one import: the report panel reached the codec module's spreadsheet and PDF libraries. The fix, the measurements and the follow-ups are in the Desktop payload section above. The staged runtime is 198.150 MiB against 200, and the installed payload 618.583 MiB against 620.
+- Size diagnostics run on every desktop build, after the budgets, and their reports upload even when a budget fails.
 
 Deferred (§7), each with its reason in the plan: payroll attribution, fixed assets, trading postings, receipts and payments (by design, since they settle balances), system-generated opening and carry-forward entries, the Holoo journal-voucher import, bulk assignment, hybrid sync of dimensions, rollup reports, and journal CSV attribution columns.
+
+Open at this writing:
+
+- The base commit's staged figure on Windows. It needs the two `source_ref` runs described in the Desktop payload section, which this session could not start.
+- `visual regression` fails on this branch with the same file and figure as on `main`: `docs/design/visual/accounting-expenses.png` at 4.06%. The baseline is not re-recorded here.
