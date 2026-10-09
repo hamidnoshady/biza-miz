@@ -173,12 +173,11 @@ All commands run in this sandbox on the work commit.
 | `NODE_OPTIONS=--max-old-space-size=3072 npx tsc --noEmit` | **exit 0**, no output |
 | `npx eslint . --max-warnings=0` | **exit 0** |
 | `npx vitest run --maxWorkers=2` | **675 files / 8,518 tests passed**, exit 0 |
-| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (11 auth/IAM files) | **11 files / 87 tests passed**, exit 0, 201.3 s |
-| Plus the 3 files exercising `team-service.ts` / `password-reset.ts` | **3 files / 49 tests passed**, exit 0, 141.0 s |
+| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts <13 files>` | **13 files / 120 tests passed**, exit 0, 217.3 s |
 
-Auth/IAM integration breakdown: `phone-otp` 13, `password-reset-request` 7, `trusted-device` 7, `auth-account-security` 5, `auth-lockout` 3, `login-lockout-enumeration` 4, `staff-login-tenant` 7, `iam-login-credentials` 2, `authorization` 21, `desktop-cloud-login` 2, `hybrid-credential-sync` 16.
+Run as one command at the final commit, so the total is measured rather than two earlier partial runs added together. Per file: `authorization` 21, `team` 23, `hybrid-credential-sync` 16, `phone-otp` 13, `plan-limits` 10, `password-reset-request` 7, `trusted-device` 7, `staff-login-tenant` 7, `auth-account-security` 5, `login-lockout-enumeration` 4, `auth-lockout` 3, `iam-login-credentials` 2, `desktop-cloud-login` 2 — which sums to 120.
 
-Modified-code integration breakdown: `hybrid-credential-sync` 16, `team` 23, `plan-limits` 10. These three were selected by grepping `integration/` for every test that references `auth_login_attempts`, `mfa_challenges`, `password-reset`, `consumePasswordResetToken`, `team-service`, or `revokeTrustedDevices` — i.e. the full set of integration tests reaching code this change touched, not a convenience sample. Combined with the auth set: **13 files / 120 tests**.
+The set is the union of the auth/IAM integration tests and everything found by grepping `integration/` for `auth_login_attempts`, `mfa_challenges`, `password-reset`, `consumePasswordResetToken`, `team-service` or `revokeTrustedDevices` — i.e. every integration test that reaches code this change touched, not a convenience sample.
 
 Database: PostgreSQL **18.4**, provisioned via `embedded-postgres` on 127.0.0.1:54339, migrations applied through `scripts/migrate.ts`.
 
@@ -226,7 +225,7 @@ One note on how the paste fix was chosen. The obvious reading of the symptom is 
 
 **Hostless multi-match disclosure is retained deliberately.** When a phone number matches members at several businesses, the response names those businesses before any proof is offered. Closing it means changing a flow that legitimate users depend on, so it is reported here rather than silently "fixed".
 
-**The full 195-file integration suite was not completed here.** It reached 20 files, all passing and with no failures logged, before I stopped it — at this machine's speed it needed hours and contended with the build for the same 2 cores. Rather than leave that as a bare gap, I then enumerated the integration tests that actually reach code this change touched, by grepping `integration/` for `auth_login_attempts`, `mfa_challenges`, `password-reset`, `consumePasswordResetToken`, `team-service` and `revokeTrustedDevices`, and ran all 12 of those files: **113 tests, all passing** (§8). So the change is covered by every integration test that can observe it; what remains unverified is the set of domains this change does not reach.
+**The full 195-file integration suite was not completed here.** It reached 20 files, all passing and with no failures logged, before I stopped it — at this machine's speed it needed hours and contended with the build for the same 2 cores. Rather than leave that as a bare gap, I then enumerated the integration tests that actually reach code this change touched, by grepping `integration/` for `auth_login_attempts`, `mfa_challenges`, `password-reset`, `consumePasswordResetToken`, `team-service` and `revokeTrustedDevices`, and ran the full set alongside the auth/IAM files: **13 files / 120 tests, all passing** (§8). So the change is covered by every integration test that can observe it; what remains unverified is the set of domains this change does not reach.
 
 Migration `0215` is additive (new nullable columns, widened constraints, one new table), and it was applied successfully by every file that ran across all attempts — the 20 from the partial full run plus the 12 targeted ones — so the migration itself is exercised well beyond the auth domain.
 
