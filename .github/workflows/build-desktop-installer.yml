@@ -7,6 +7,11 @@ on:
         description: 'Installer version (X.Y.Z); empty = next patch after electron/package.json'
         type: string
         required: false
+      source_ref:
+        description: 'Measurement only: commit or branch to package instead of this run''s commit. Non-empty = never a release (no version commit, no tag), so a base commit can be sized on this runner image.'
+        type: string
+        required: false
+        default: ''
   pull_request:
     paths:
       - 'electron/**'
@@ -107,6 +112,21 @@ jobs:
       release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Empty = the commit this run is on (see source_ref above).
+          ref: ${{ inputs.source_ref || github.sha }}
+
+      # The size tooling comes from the commit running this workflow, not from
+      # the measured commit. Sparse, and kept out of the packaged app.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .size-tooling
+          sparse-checkout: |
+            scripts/desktop-size-diagnostics.ts
+            src/lib/desktop-size-diagnostics.ts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       - uses: actions/setup-node@v7
         with:
@@ -124,7 +144,9 @@ jobs:
         id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
-          RELEASE_BUILD: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
+          # A manual run is a release unless it names a source_ref to measure. A
+          # measurement run never commits a version bump or tags desktop-vX.Y.Z.
+          RELEASE_BUILD: ${{ (github.event_name == 'workflow_dispatch' && inputs.source_ref == '') || (github.event_name != 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
         run: |
           $ErrorActionPreference = "Stop"
           function Add-GitHubOutput([string]$line) {
@@ -159,7 +181,11 @@ jobs:
           exit 0
 
       - name: Embed Desktop build provenance
-        run: npm pkg set "buildCommit=$env:GITHUB_SHA" "buildId=ci-$env:GITHUB_RUN_ID" "releaseChannel=internal" --prefix electron
+        # The commit that was checked out, not GITHUB_SHA: a measurement run
+        # (source_ref) must name the commit it was actually built from.
+        run: |
+          $sha = (git rev-parse HEAD).Trim()
+          npm pkg set "buildCommit=$sha" "buildId=ci-$env:GITHUB_RUN_ID" "releaseChannel=internal" --prefix electron
 
       - name: Install application dependencies
         run: npm ci
@@ -400,6 +426,15 @@ jobs:
           if ($exe.Length -gt 175MB) { throw "Installer $installerMiB MiB exceeds the 175 MiB release baseline" }
           if ($unpacked -gt 620MB) { throw "Installed payload $installedMiB MiB exceeds 620 MiB budget" }
 
+      # Runs after the budgets even when they fail. The packaged payload and the
+      # staged runtime are both recorded, with exact bytes, categories, traced
+      # packages and a manifest, so a failed budget still leaves its numbers.
+      - name: Packaged payload and staged runtime size diagnostics
+        if: always()
+        run: |
+          npx tsx .size-tooling/scripts/desktop-size-diagnostics.ts --root=electron/dist/win-unpacked --strip-prefix=resources/desktop-runtime/ --label=packaged-payload --out=desktop-size-diagnostics
+          npx tsx .size-tooling/scripts/desktop-size-diagnostics.ts --root=.desktop-runtime --label=staged-runtime --out=desktop-size-diagnostics
+
       - name: Write Windows Server package evidence
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -426,13 +461,17 @@ jobs:
           path: electron/dist/*.exe
           if-no-files-found: error
 
+      # Always uploaded: a failed size budget is exactly when these reports are
+      # needed, and a missing file in a failed run must not hide the others.
       - name: Upload desktop size reports
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: business-suite-desktop-size-report
           path: |
             desktop-size-before-package.md
             desktop-size-report.md
+            desktop-size-diagnostics/
             windows-signature-verification.json
             packaged-electron-runtime.json
             packaged-pg-tools-acceptance.json
@@ -441,7 +480,7 @@ jobs:
             controlled-input/provenance.json
             windows-server-package-evidence.json
             electron/dist/windows-signing-status.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Job summary
         env:
