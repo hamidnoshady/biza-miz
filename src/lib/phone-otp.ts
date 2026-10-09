@@ -281,6 +281,8 @@ export async function liveEmployeePhoneChallenge(options: {
   purpose: Extract<OtpPurpose, "login" | "verify_login_phone" | "change_login_phone">;
 }): Promise<{
   maskedPhone: string | null;
+  /** When the code was sent — the resend cooldown counts from here (P2.25). */
+  requestedAt: string;
   expiresAt: string;
   /** The exact number the code went to — the server's copy, not the body's. */
   candidatePhoneE164: string | null;
@@ -294,6 +296,7 @@ export async function liveEmployeePhoneChallenge(options: {
   if (!live) return null;
   return {
     maskedPhone: live.candidatePhoneE164 ? maskPhoneE164(live.candidatePhoneE164) : null,
+    requestedAt: live.createdAt.toISOString(),
     expiresAt: live.expiresAt.toISOString(),
     candidatePhoneE164: live.candidatePhoneE164,
     purpose: options.purpose,

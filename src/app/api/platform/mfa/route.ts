@@ -55,22 +55,41 @@ export const GET = withPlatformScope(async () => {
     activeEnrolments.find((e) => e.method === "sms_otp") ??
     pendingEnrolments.find((e) => e.method === "sms_otp");
 
-  // Issue #854 (P2.25) — the resend button shows a live countdown of the
-  // server's 60-second challenge cooldown, which only works if the UI knows
-  // when the last send actually happened. With a pending SMS enrolment, look
-  // the last challenge's request time up instead of guessing from the click.
+  /**
+   * Issue #854 (P2.25) — the resend button shows a live countdown of the
+   * server's 60-second challenge cooldown, which only works if the UI knows
+   * when the last send actually happened. Read the live challenge's own
+   * timestamps (not the member's click), and do it unconditionally: a
+   * replacement (P2.21) proves a new number without staging a pending row, so
+   * gating this on a pending enrolment existing would hide exactly the
+   * ceremony that most needs the honest timer.
+   */
   let smsChallengeRequestedAt: string | null = null;
-  if (pendingEnrolments.some((e) => e.method === "sms_otp")) {
-    const { rows } = await query<{ otp_request_at: Date }>(
-      `SELECT otp_request_at
+  let smsChallengeExpiresAt: string | null = null;
+  {
+    const { rows } = await query<{ created_at: Date; expires_at: Date }>(
+      `SELECT created_at, expires_at
          FROM mfa_challenges
-        WHERE account_id = $1 AND subject_realm = 'platform'
-        ORDER BY otp_request_at DESC
+        WHERE subject_id = $1
+          AND subject_realm = 'platform_admin'
+          AND purpose = 'mfa_enrol_sms'
+          AND consumed_at IS NULL
+          AND expires_at > now()
+        ORDER BY created_at DESC
         LIMIT 1`,
       [session.padmin],
     );
-    if (rows[0]) smsChallengeRequestedAt = new Date(rows[0].otp_request_at).toISOString();
+    if (rows[0]) {
+      smsChallengeRequestedAt = new Date(rows[0].created_at).toISOString();
+      smsChallengeExpiresAt = new Date(rows[0].expires_at).toISOString();
+    }
   }
+
+  // Issue #854 (P2.21) — resuming a reloaded fresh-enrolment ceremony: the
+  // staged row's number is what `confirm` must name to stay bound to the
+  // proven destination. A replacement has no staged row and restarts instead.
+  const pendingSmsPhone =
+    pendingEnrolments.find((e) => e.method === "sms_otp")?.phone_e164 ?? null;
 
   const graceDaysLeft = graceDaysRemaining(ownGrace, now);
   const requirement = enrolmentRequirement(
@@ -106,6 +125,9 @@ export const GET = withPlatformScope(async () => {
     graceDaysLeft,
     unusedRecoveryCodes: ownRecovery,
     recentAuth: isRecentAuth(session),
+    smsChallengeRequestedAt,
+    smsChallengeExpiresAt,
+    pendingSmsPhone,
   });
 });
 
@@ -158,12 +180,26 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
           email,
           method: body.method,
           phone: body.phone,
+          /**
+           * Issue #854 (gap 1) — the first send is part of the ceremony on the
+           * tenant realm; the console must not demand a manual resend before
+           * the member can type anything. Both realms, one round trip.
+           */
+          sendSmsChallenge: true,
           // Issue #854 (P2.21): same replacement rule as the tenant ceremony.
           replaceConfirmed: true,
         });
         if (!result.ok) {
-          const status = result.error === "already_enrolled" ? 409 : 400;
-          return NextResponse.json({ error: result.error }, { status });
+          const status =
+            result.error === "already_enrolled"
+              ? 409
+              : result.error === "rate_limited"
+                ? 429
+                : 400;
+          return NextResponse.json(
+            { error: result.error, retryAfterMs: result.retryAfterMs },
+            { status },
+          );
         }
         return NextResponse.json({
           status: result.status,
@@ -185,6 +221,18 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
         if (!code) {
           return NextResponse.json({ error: "missing_code" }, { status: 400 });
         }
+        /*
+         * Issue #854 (P2.21) — a named phone is a hard binding, as in the
+         * tenant ceremony: provided but not canonicalisable means refuse,
+         * never confirm against some other destination.
+         */
+        let expectedPhoneE164: string | null = null;
+        if (body.method === "sms_otp" && typeof body.phone === "string" && body.phone.trim() !== "") {
+          expectedPhoneE164 = canonicalMemberPhone(body.phone);
+          if (!expectedPhoneE164) {
+            return NextResponse.json({ error: "invalid_phone" }, { status: 400 });
+          }
+        }
         /**
          * Issue #854 (P1.11) — the same inversion the tenant confirm action had:
          * `verifyAndConfirmMfaCode` without the flag is the *strict* path, which
@@ -201,8 +249,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
           // Issue #854 (P2.21): same binding as the tenant ceremony — the
           // named phone must be the one the redeemed challenge was sent to,
           // and a confirmed factor on another number gets atomically replaced.
-          expectedPhoneE164:
-            body.method === "sms_otp" ? canonicalMemberPhone(body.phone ?? null) : null,
+          expectedPhoneE164,
           // Issue #854 (invariant 12): the platform realm's own audit table,
           // written inside the same transaction as the confirmation.
           auditRealm: "platform",
@@ -231,7 +278,21 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
         }
         const all = await getAccountMfaEnrolments("platform_admin", session.padmin);
         const smsRow = all.find((e) => e.method === "sms_otp" && e.phone_e164);
-        if (!smsRow?.phone_e164) {
+        /**
+         * Issue #854 (P2.21) — a replacement ceremony names the destination it
+         * is proving: the stored factor still points at the number being
+         * replaced, so a resend that only read the row would text the old one.
+         * Without a named phone the ceremony must have a staged or confirmed
+         * number to address at all.
+         */
+        const resendPhone =
+          typeof body.phone === "string" && body.phone.trim() !== ""
+            ? canonicalMemberPhone(body.phone)
+            : null;
+        if (typeof body.phone === "string" && body.phone.trim() !== "" && !resendPhone) {
+          return NextResponse.json({ error: "invalid_phone" }, { status: 400 });
+        }
+        if (!resendPhone && !smsRow?.phone_e164) {
           return NextResponse.json({ error: "not_enrolled" }, { status: 400 });
         }
         // Issue #854 (invariant 4): an enrolment screen sends enrolment codes.
@@ -240,6 +301,8 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
           subjectId: session.padmin,
           email,
           purpose: "mfa_enrol_sms",
+          phoneE164: resendPhone,
+          requireActiveFactor: false,
         });
         if (!challenge.ok) {
           const status = challenge.error === "rate_limited" ? 429 : 502;

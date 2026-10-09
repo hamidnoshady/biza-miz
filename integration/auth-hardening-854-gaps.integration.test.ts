@@ -510,6 +510,202 @@ describe("Issue #854 P2.21 — the only SMS factor can be replaced without going
 });
 
 // ---------------------------------------------------------------------------
+// P2.21 (UI contract) — the replacement ceremony the profile card performs
+// ---------------------------------------------------------------------------
+
+describe("Issue #854 P2.21 UI contract — resend naming the new number, wrong-destination refusal, concurrency", () => {
+  /** Seed a confirmed SMS factor on `oldPhone` and return it. */
+  async function seedConfirmedSms(oldPhone: string) {
+    const seeded = await seedBusiness("ReplaceUi");
+    const first = await mfaEnrol.enrolMfaMethod({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      email: seeded.ownerEmail,
+      method: "sms_otp",
+      phone: oldPhone,
+      sendSmsChallenge: true,
+    });
+    expect(first.ok).toBe(true);
+    const confirmed = await mfaVerify.verifyAndConfirmPendingMfaEnrolment({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      method: "sms_otp",
+      code: sms.sent[sms.sent.length - 1].code,
+      expectedPhoneE164: oldPhone,
+    });
+    expect(confirmed.outcome).toBe("sms_otp");
+    await db.query(`DELETE FROM auth_login_attempts WHERE realm = 'mfa_challenge'`);
+    return seeded;
+  }
+
+  it("a replacement resend names the new number, and its code redeems only for that number", async () => {
+    const oldPhone = "+989121000011";
+    const newPhone = "+989121000012";
+    const seeded = await seedConfirmedSms(oldPhone);
+
+    // The card's resend during a replacement calls `resend_challenge` with the
+    // named phone — the route mints the challenge bound to exactly it.
+    const resent = await mfaEnrol.issueSmsMfaChallenge({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      email: seeded.ownerEmail,
+      purpose: "mfa_enrol_sms",
+      phoneE164: newPhone,
+      requireActiveFactor: false,
+    });
+    expect(resent.ok).toBe(true);
+    // The code went to the new number, never the stored (old) one.
+    expect(sms.sent[sms.sent.length - 1].phone).toBe(newPhone);
+
+    // Redeeming it while naming the *old* destination must fail: the binding
+    // is what makes a code intercepted on the old line unspendable.
+    const wrongDestination = await mfaVerify.verifyAndConfirmPendingMfaEnrolment({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      method: "sms_otp",
+      code: sms.sent[sms.sent.length - 1].code,
+      expectedPhoneE164: oldPhone,
+    });
+    expect(wrongDestination.outcome).toBe("rejected");
+
+    const afterRefusal = await db.query<{ phone_e164: string }>(
+      `SELECT phone_e164 FROM mfa_enrolments
+        WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
+      [seeded.ownerPlatformUserId],
+    );
+    expect(afterRefusal.rows[0].phone_e164).toBe(oldPhone);
+
+    // Naming the right destination completes the swap.
+    await db.query(`DELETE FROM auth_login_attempts WHERE realm = 'mfa_challenge'`);
+    const done = await mfaVerify.verifyAndConfirmPendingMfaEnrolment({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      method: "sms_otp",
+      code: sms.sent[sms.sent.length - 1].code,
+      expectedPhoneE164: newPhone,
+    });
+    expect(done.outcome).toBe("sms_otp");
+    const after = await db.query<{ phone_e164: string }>(
+      `SELECT phone_e164 FROM mfa_enrolments
+        WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
+      [seeded.ownerPlatformUserId],
+    );
+    expect(after.rows[0].phone_e164).toBe(newPhone);
+  });
+
+  it("cancelling mid-ceremony leaves the confirmed factor untouched", async () => {
+    const oldPhone = "+989121000013";
+    const newPhone = "+989121000014";
+    const seeded = await seedConfirmedSms(oldPhone);
+
+    // Start the replacement ceremony…
+    const replace = await mfaEnrol.enrolMfaMethod({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      email: seeded.ownerEmail,
+      method: "sms_otp",
+      phone: newPhone,
+      sendSmsChallenge: true,
+      replaceConfirmed: true,
+    });
+    expect(replace.ok).toBe(true);
+
+    // …and walk away: no confirmation ever arrives. The challenge simply
+    // expires on the server's clock; nothing here consumes it. The confirmed
+    // factor must still be exactly what it was.
+    const row = await db.query<{ phone_e164: string; confirmed_at: Date }>(
+      `SELECT phone_e164, confirmed_at FROM mfa_enrolments
+        WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
+      [seeded.ownerPlatformUserId],
+    );
+    expect(row.rows[0].phone_e164).toBe(oldPhone);
+    expect(row.rows[0].confirmed_at).not.toBeNull();
+
+    // And the old number still authenticates: the strict verifier spends a
+    // login-purpose challenge sent to the stored factor. (The send-cooldown
+    // rows from the ceremony above are cleared, as the other cases do, so the
+    // login send is not answered with the 60-second resend window.)
+    await db.query(`DELETE FROM auth_login_attempts WHERE realm = 'mfa_challenge'`);
+    const loginChallenge = await mfaEnrol.issueSmsMfaChallenge({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      email: seeded.ownerEmail,
+      purpose: "mfa_login",
+    });
+    expect(loginChallenge.ok).toBe(true);
+    const verified = await mfaVerify.verifyExistingConfirmedMfaFactor({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      method: "sms_otp",
+      code: sms.sent[sms.sent.length - 1].code,
+      smsPurposes: ["mfa_login"],
+    });
+    expect(verified.outcome).toBe("sms_otp");
+  });
+
+  it("a concurrent removal cannot win against the replacement on a required account", async () => {
+    const oldPhone = "+989121000015";
+    const newPhone = "+989121000016";
+    const seeded = await seedConfirmedSms(oldPhone);
+
+    const replace = await mfaEnrol.enrolMfaMethod({
+      subjectRealm: "platform_user",
+      subjectId: seeded.ownerPlatformUserId,
+      email: seeded.ownerEmail,
+      method: "sms_otp",
+      phone: newPhone,
+      sendSmsChallenge: true,
+      replaceConfirmed: true,
+    });
+    expect(replace.ok).toBe(true);
+    const code = sms.sent[sms.sent.length - 1].code;
+
+    // Fire the swap confirmation and a removal at the same account lock. The
+    // owner role requires a factor globally, so whichever order the lock
+    // grants, the account may never end factorless: the removal is refused
+    // and the swap lands.
+    const [removal, swap] = await Promise.all([
+      mfaService.removeMfaFactorChecked({
+        subjectRealm: "platform_user",
+        subjectId: seeded.ownerPlatformUserId,
+        method: "sms_otp",
+        allowRemoveLast: true,
+        evaluateGlobalRequirement: true,
+        audit: {
+          businessId: seeded.businessId,
+          actorUserId: seeded.ownerId,
+          platformUserId: seeded.ownerPlatformUserId,
+        },
+      }),
+      mfaVerify.verifyAndConfirmPendingMfaEnrolment({
+        subjectRealm: "platform_user",
+        subjectId: seeded.ownerPlatformUserId,
+        method: "sms_otp",
+        code,
+        expectedPhoneE164: newPhone,
+        audit: {
+          businessId: seeded.businessId,
+          actorUserId: seeded.ownerId,
+          platformUserId: seeded.ownerPlatformUserId,
+        },
+      }),
+    ]);
+
+    expect(removal.ok).toBe(false);
+    expect(swap.outcome).toBe("sms_otp");
+
+    const after = await db.query<{ phone_e164: string; confirmed_at: Date }>(
+      `SELECT phone_e164, confirmed_at FROM mfa_enrolments
+        WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
+      [seeded.ownerPlatformUserId],
+    );
+    expect(after.rows).toHaveLength(1);
+    expect(after.rows[0].phone_e164).toBe(newPhone);
+    expect(after.rows[0].confirmed_at).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GAP 3 — concurrent last-factor removal is serialised
 // ---------------------------------------------------------------------------
 

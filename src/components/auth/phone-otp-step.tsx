@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import { MfaStep } from "./mfa-step";
 import { BusinessPicker, useBusinessSelection } from "./business-picker";
+import { useResendCooldown } from "./use-resend-cooldown";
 
 /** How to address a resend — mirrors the three modes of /api/auth/phone-otp/request. */
 export type PhoneOtpSendSpec =
@@ -104,6 +105,25 @@ export function PhoneOtpStep({
   } | null>(null);
   const { selection, capture, clear } = useBusinessSelection();
 
+  /**
+   * Issue #854 (P2.25) — the door's resend button gets the same live cooldown
+   * as every other OTP surface. The parent performs the *first* send just
+   * before mounting this step, so the window starts when we mount; each resend
+   * and each 429 answer then rewrites it from the server's own word.
+   */
+  const {
+    waitSeconds: resendWait,
+    coolingDown,
+    start: startCooldown,
+    applyRetryAfterMs,
+  } = useResendCooldown(60);
+
+  useEffect(() => {
+    startCooldown();
+    // Deliberately once per mount: this mirrors the parent's first send.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     setToken(initialToken);
     setMaskedPhone(initialMaskedPhone);
@@ -132,6 +152,7 @@ export function PhoneOtpStep({
       });
       const data = (await res.json().catch(() => ({}))) as RequestResponse;
       if (res.status === 429) {
+        applyRetryAfterMs(data.retryAfterMs);
         setError(retryAfterMessage(data.retryAfterMs));
         return;
       }
@@ -142,6 +163,7 @@ export function PhoneOtpStep({
       if (data.token) setToken(data.token);
       if (data.maskedPhone) setMaskedPhone(data.maskedPhone);
       setCode("");
+      startCooldown();
       setNotice(`کد تازه به ${toPersianDigits(data.maskedPhone ?? maskedPhone ?? "")} پیامک شد.`);
     } catch {
       setError("ارتباط با سرور برقرار نشد.");
@@ -289,11 +311,13 @@ export function PhoneOtpStep({
 
       <button
         type="button"
-        disabled={busy}
+        disabled={busy || coolingDown}
         onClick={() => void resend()}
         className="w-full rounded-lg border border-input py-2.5 text-sm font-semibold transition hover:bg-primary/10 disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50"
       >
-        ارسال دوبارهٔ کد
+        {coolingDown
+          ? `ارسال دوبارهٔ کد (${toPersianDigits(resendWait)})`
+          : "ارسال دوبارهٔ کد"}
       </button>
 
       <div className="text-center">

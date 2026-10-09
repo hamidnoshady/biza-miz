@@ -108,20 +108,47 @@ export const GET = withTenantScope(async () => {
 
   const graceDaysLeft = graceDaysRemaining(graceUntil, now);
 
-  // Issue #854 (P2.25) — seed the resend countdown from the challenge's real
-  // request time so a reload mid-cooldown shows the honest remaining seconds.
+  /**
+   * Issue #854 (P2.25) — the resend countdown and the expiry line both read
+   * the live challenge's own timestamps, so a reload mid-ceremony shows the
+   * honest remaining window instead of a fresh timer. Live means neither
+   * consumed nor expired; anything else is not a window the member is in.
+   * The query is not gated on a *pending enrolment* existing: a replacement
+   * (P2.21) proves a new number without staging a row, so its challenge is
+   * the only trace of the ceremony in flight.
+   */
   let smsChallengeRequestedAt: string | null = null;
-  if (pendingEnrolments.some((e) => e.method === "sms_otp")) {
-    const { rows } = await query<{ otp_request_at: Date }>(
-      `SELECT otp_request_at
+  let smsChallengeExpiresAt: string | null = null;
+  {
+    const { rows } = await query<{ created_at: Date; expires_at: Date }>(
+      `SELECT created_at, expires_at
          FROM mfa_challenges
-        WHERE account_id = $1 AND subject_realm = 'platform_user'
-        ORDER BY otp_request_at DESC
+        WHERE subject_id = $1
+          AND subject_realm = 'platform_user'
+          AND purpose = 'mfa_enrol_sms'
+          AND consumed_at IS NULL
+          AND expires_at > now()
+        ORDER BY created_at DESC
         LIMIT 1`,
       [subjectId],
     );
-    if (rows[0]) smsChallengeRequestedAt = new Date(rows[0].otp_request_at).toISOString();
+    if (rows[0]) {
+      smsChallengeRequestedAt = new Date(rows[0].created_at).toISOString();
+      smsChallengeExpiresAt = new Date(rows[0].expires_at).toISOString();
+    }
   }
+
+  /**
+   * Issue #854 (P2.21) — resuming a reload of the *fresh-enrolment* ceremony:
+   * the staged row holds the number being proven, and `confirm` must name it
+   * to keep the redemption bound to exactly that destination. This is the
+   * member's own staging data, read back on their own authenticated session —
+   * the same value the enrol response handed them when they started. A
+   * *replacement* deliberately has no row to resume from; that ceremony
+   * restarts after a reload, which is what the screen says.
+   */
+  const pendingSmsPhone =
+    pendingEnrolments.find((e) => e.method === "sms_otp")?.phone_e164 ?? null;
 
   return NextResponse.json({
     applies,
@@ -147,6 +174,8 @@ export const GET = withTenantScope(async () => {
     loginManagedByCloud: deployment.profile === "hybrid",
     credential,
     smsChallengeRequestedAt,
+    smsChallengeExpiresAt,
+    pendingSmsPhone,
   });
 });
 
@@ -243,12 +272,28 @@ export const POST = withTenantScope(async (request: NextRequest) => {
        * transaction type — and, once `confirm` was narrowed to enrolment
        * purposes, would have left the enrolment screen unable to finish.
        * Signing in has its own route (`/api/auth/mfa/challenge`).
+       *
+       * The optional `phone` (P2.21): a *replacement* ceremony proves a new
+       * number without staging a pending row, so the stored sms_otp factor
+       * still points at the old one — a resend that read the row would text
+       * the number being replaced. Naming the destination sends the code where
+       * the ceremony is actually happening, and the confirm step's phone
+       * binding is what makes a code sent anywhere else unspendable.
        */
+      const resendPhone =
+        typeof body.phone === "string" && body.phone.trim() !== ""
+          ? canonicalMemberPhone(body.phone)
+          : null;
+      if (typeof body.phone === "string" && body.phone.trim() !== "" && !resendPhone) {
+        return NextResponse.json({ error: "invalid_phone" }, { status: 400 });
+      }
       const challenge = await issueSmsMfaChallenge({
         subjectRealm: "platform_user",
         subjectId,
         email,
         purpose: "mfa_enrol_sms",
+        phoneE164: resendPhone,
+        requireActiveFactor: false,
       });
       if (!challenge.ok) {
         const status = challenge.error === "rate_limited" ? 429 : 400;
@@ -280,6 +325,20 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       const code = body.code?.trim() ?? "";
       if (!method || !code) {
         return NextResponse.json({ error: "bad_request" }, { status: 400 });
+      }
+      /*
+       * Issue #854 (P2.21) — a named phone is a hard binding: if it was
+       * provided but does not canonicalise, the request is refused instead of
+       * quietly confirming against a challenge bound to whatever destination
+       * happened to be stored. (A confirmation that names no phone keeps the
+       * pre-replacement behaviour for fresh enrolments.)
+       */
+      let expectedPhoneE164: string | null = null;
+      if (method === "sms_otp" && typeof body.phone === "string" && body.phone.trim() !== "") {
+        expectedPhoneE164 = canonicalMemberPhone(body.phone);
+        if (!expectedPhoneE164) {
+          return NextResponse.json({ error: "invalid_phone" }, { status: 400 });
+        }
       }
       /**
        * Issue #854 (P1.11) — this is the enrolment ceremony, so it uses the

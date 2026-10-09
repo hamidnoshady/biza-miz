@@ -72,6 +72,9 @@ export const GET = withTenantScope(async () => {
       ? {
           maskedPhone: live.maskedPhone,
           purpose: live.purpose,
+          // Issue #854 (P2.25) — the resend cooldown is honest only if it
+          // counts from when the code was actually sent, which a reload needs.
+          requestedAt: live.requestedAt,
           expiresAt: live.expiresAt,
         }
       : null,

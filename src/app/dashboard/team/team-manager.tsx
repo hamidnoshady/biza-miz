@@ -36,6 +36,7 @@ import {
 import { RolesManager } from "@/components/team/roles-manager";
 import { IamSyncCard } from "@/components/team/iam-sync-card";
 import { LocalToHybridGuide } from "@/components/team/local-to-hybrid-guide";
+import { SecurityConfirmDialog } from "@/components/auth/security-confirm-dialog";
 import { partyScopeFor } from "@/lib/parties-scopes";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -153,6 +154,15 @@ export function TeamManager({
   const [phoneEditing, setPhoneEditing] = useState<Member | null>(null);
   /** Which member's PIN/password reset dialog is open. */
   const [credentialsEditing, setCredentialsEditing] = useState<Member | null>(null);
+  /**
+   * Issue #854 (P2.26) — suspension and offboarding are destructive security
+   * actions; they wait behind a product confirmation that spells out the
+   * consequences, instead of a bare `confirm()` whose cancel path is only a
+   * reflex check. Only the dialog's confirm path sends the mutation.
+   */
+  const [pendingSuspend, setPendingSuspend] = useState<Member | null>(null);
+  const [pendingOffboard, setPendingOffboard] = useState<Member | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   const load = useCallback(async () => {
     const [membersRes, invitesRes] = await Promise.all([
@@ -196,6 +206,26 @@ export function TeamManager({
     () => new Map(locations.map((location) => [location.id, location.name])),
     [locations],
   );
+
+  /** Issue #854 (P2.26) — the only paths that send these mutations. */
+  async function executeSuspend(member: Member) {
+    setPendingSuspend(null);
+    setConfirmBusy(true);
+    const ok = await mutate(`/api/team/${member.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ isActive: false }),
+    });
+    setConfirmBusy(false);
+    if (ok) setError("");
+  }
+
+  async function executeOffboard(member: Member) {
+    setPendingOffboard(null);
+    setConfirmBusy(true);
+    const ok = await mutate(`/api/team/${member.id}`, { method: "DELETE" });
+    setConfirmBusy(false);
+    if (ok) setError("");
+  }
 
   if (loading) return <LoadingSkeleton rows={3} />;
   const isOwner = role === "owner";
@@ -309,8 +339,10 @@ export function TeamManager({
                   </SecondaryButton> : null}
                   {(canManage && (isOwner || member.role !== "owner")) ? <SecondaryButton
                     onClick={() => {
-                      if (member.isActive && !confirm(`حساب «${member.fullName}» تعلیق شود؟ دسترسی او بلافاصله قطع خواهد شد.`)) return;
-                      void mutate(`/api/team/${member.id}`, {
+                      // Issue #854 (P2.26) — suspension asks with consequences
+                      // spelled out; reactivation is harmless and asks nothing.
+                      if (member.isActive) setPendingSuspend(member);
+                      else void mutate(`/api/team/${member.id}`, {
                         method: "PATCH",
                         body: JSON.stringify({ isActive: !member.isActive }),
                       });
@@ -319,10 +351,7 @@ export function TeamManager({
                     {member.isActive ? "تعلیق" : "فعال‌سازی"}
                   </SecondaryButton> : null}
                   {(canManage && (isOwner || member.role !== "owner")) ? <SecondaryButton
-                    onClick={() => {
-                      if (!confirm(`همکاری «${member.fullName}» خاتمه یابد؟ دسترسی، نشست‌ها و اعتبارنامه‌های فعال لغو می‌شوند و سوابق تاریخی حفظ خواهند شد.`)) return;
-                      void mutate(`/api/team/${member.id}`, { method: "DELETE" });
-                    }}
+                    onClick={() => setPendingOffboard(member)}
                     className="border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
                   >
                     قطع همکاری
@@ -399,6 +428,45 @@ export function TeamManager({
         <p className="mb-2 text-xs font-semibold text-amber-700 dark:text-amber-300">پروندهٔ کارکنان</p>
         <PartiesSection scope={partyScopeFor("team")} role={role} permissions={permissions} />
       </div>
+
+      {/* Issue #854 (P2.26) — suspension/offboarding confirmations. */}
+      <SecurityConfirmDialog
+        open={pendingSuspend !== null}
+        title={pendingSuspend ? `تعلیق حساب «${pendingSuspend.fullName}»` : ""}
+        description="دسترسی این عضو به سامانه موقتاً قطع می‌شود."
+        consequences={[
+          "ورود او از همین لحظه قطع می‌شود و نشست‌های باز دیگر کار نمی‌کنند.",
+          "سوابق کاری، اسناد و ثبت‌هایی که ساخته دست‌نخورده می‌مانند.",
+          "هر زمان می‌توانید با «فعال‌سازی» حساب را بدون از دست رفتن اطلاعات برگردانید.",
+        ]}
+        confirmLabel="بله، تعلیق شود"
+        busy={confirmBusy}
+        onOpenChange={(next) => {
+          if (!next) setPendingSuspend(null);
+        }}
+        onConfirm={() => {
+          if (pendingSuspend) void executeSuspend(pendingSuspend);
+        }}
+      />
+      <SecurityConfirmDialog
+        open={pendingOffboard !== null}
+        title={pendingOffboard ? `قطع همکاری «${pendingOffboard.fullName}»` : ""}
+        description="همکاری این عضو با کسب‌وکار خاتمه می‌یابد."
+        consequences={[
+          "دسترسی، نشست‌های فعال و اعتبارنامه‌های ورود او لغو می‌شوند.",
+          "اگر ورود دومرحله‌ای یا شمارهٔ ورودی داشته، برای این کسب‌وکار بی‌اثر می‌شوند.",
+          "سوابق تاریخی و اسنادی که به نام او ثبت شده حفظ می‌شوند.",
+          "بازگشت دوبارهٔ همین شخص از مسیر دعوت/افزودن عضو انجام می‌شود، نه بازکردن همین حساب.",
+        ]}
+        confirmLabel="بله، قطع همکاری شود"
+        busy={confirmBusy}
+        onOpenChange={(next) => {
+          if (!next) setPendingOffboard(null);
+        }}
+        onConfirm={() => {
+          if (pendingOffboard) void executeOffboard(pendingOffboard);
+        }}
+      />
     </div>
   );
 }

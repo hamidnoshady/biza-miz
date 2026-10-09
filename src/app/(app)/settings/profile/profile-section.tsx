@@ -26,6 +26,12 @@ import {
   type SessionRevokeAction,
 } from "@/lib/session-contract";
 import { StepUpPrompt, RECENT_AUTH_MESSAGE } from "@/components/auth/step-up-prompt";
+import {
+  smsChallengeExpiryMessage,
+  useNowTick,
+  useResendCooldown,
+} from "@/components/auth/use-resend-cooldown";
+import { WebAuthnManager } from "@/components/auth/webauthn-manager";
 import { TwoFactorSettings } from "../two-factor-settings";
 
 export interface ProfileSectionProps {
@@ -46,7 +52,13 @@ export interface ProfileSectionProps {
   credentialSurfaces?: Partial<Record<CredentialFieldName, CredentialSurface>>;
 }
 
-type CredentialFieldName = "global_password" | "login_phone" | "totp_secret" | "staff_pin";
+type CredentialFieldName =
+  | "global_password"
+  | "login_phone"
+  | "totp_secret"
+  | "staff_pin"
+  /** Issue #854 (P2.28) — WebAuthn/biometric credentials join the profile. */
+  | "webauthn_credential";
 
 /** Shown in place of any control this deployment does not own (P1.15). */
 function CloudManagedNotice({ surface }: { surface?: CredentialSurface }) {
@@ -139,6 +151,20 @@ export function ProfileSection({
           </p>
         </SectionCard>
       )}
+
+      {/*
+        Issue #854 (P2.28) — the canonical WebAuthn/biometric surface. It used
+        to live only in the sidebar's overlay panel (unreachable from this
+        page); the profile page now owns it, and the sidebar shortcut links
+        here. Available to every role: biometric login is per-device
+        self-service, not a business configuration.
+      */}
+      <SectionCard
+        title="ورود بیومتریک (اثر انگشت / چهره)"
+        description="دستگاه‌های ثبت‌شده برای ورود بیومتریک این حساب."
+      >
+        <WebAuthnManager surface={credentialSurfaces.webauthn_credential} />
+      </SectionCard>
 
       <SelfSessionsCard
         onSignedOutEverywhere={() => {
@@ -482,6 +508,8 @@ interface SelfPhoneStatus {
   pendingChallenge?: {
     maskedPhone: string | null;
     purpose: "change_login_phone" | "verify_login_phone";
+    /** When the code was sent — the resend cooldown counts from here (P2.25). */
+    requestedAt: string;
     expiresAt: string;
   } | null;
   credential?: CredentialSurface;
@@ -510,6 +538,20 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
   const [stepUpOpen, setStepUpOpen] = useState(false);
   const [retryAfterStepUp, setRetryAfterStepUp] = useState<(() => void) | null>(null);
 
+  /**
+   * Issue #854 (P2.25) — the resend cooldown, seeded from the challenge's
+   * actual send time so a reload mid-window shows the honest remaining seconds.
+   */
+  const {
+    waitSeconds: resendWait,
+    coolingDown,
+    seedFromRequestedAt,
+    start: startCooldown,
+    applyRetryAfterMs,
+    clear: clearCooldown,
+  } = useResendCooldown(60);
+  const nowTick = useNowTick(Boolean(maskedSentTo && status?.pendingChallenge?.expiresAt));
+
   const load = useCallback(async () => {
     const { ok, data } = await api<SelfPhoneStatus>("/api/auth/phone/self");
     if (ok) {
@@ -518,6 +560,7 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
       if (data.pendingChallenge && !maskedSentTo) {
         setMaskedSentTo(data.pendingChallenge.maskedPhone);
         setEditing(data.pendingChallenge.purpose === "change_login_phone");
+        seedFromRequestedAt(data.pendingChallenge.requestedAt);
       }
     } else {
       setError(
@@ -527,9 +570,9 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
     }
     // `maskedSentTo` is intentionally not a dependency: this effect must run
     // once, and reading it only decides whether an in-flight challenge is
-    // adopted on first load.
+    // adopted on first load. `seedFromRequestedAt` is a stable hook callback.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [seedFromRequestedAt]);
 
   useEffect(() => {
     void load();
@@ -545,6 +588,7 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
       maskedPhone?: string;
       error?: string;
       message?: string;
+      retryAfterMs?: number;
     }>("/api/auth/phone/self", {
       method: "POST",
       body: JSON.stringify({
@@ -559,6 +603,8 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
         setStepUpOpen(true);
         return;
       }
+      // Issue #854 (P2.25) — the limiter's own answer drives the countdown.
+      if (httpStatus === 429) applyRetryAfterMs(data.retryAfterMs);
       setError(
         data.message ||
           (data.error && PHONE_ERROR_MESSAGES[data.error]) ||
@@ -568,6 +614,7 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
     }
     setMaskedSentTo(data.maskedPhone ?? phoneInput.trim());
     setCodeInput("");
+    startCooldown();
   }
 
   async function verifyOtp(e: React.FormEvent) {
@@ -603,6 +650,7 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
     setMaskedSentTo(null);
     setEditing(false);
     setCodeInput("");
+    clearCooldown();
     setNotice("شمارهٔ موبایل ورود شما با موفقیت تأیید شد.");
     await load();
   }
@@ -644,6 +692,15 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
           <p className="text-xs text-muted-foreground">
             کد ۶ رقمی ارسال‌شده به {toPersianDigits(maskedSentTo)} را وارد کنید:
           </p>
+          {/*
+            Issue #854 (P2.25) — the challenge has a deadline; say how long is
+            left instead of letting a correct-looking code fail unexplained.
+          */}
+          {status.pendingChallenge?.expiresAt ? (
+            <p className="text-xs text-muted-foreground">
+              {smsChallengeExpiryMessage(status.pendingChallenge.expiresAt, nowTick)}
+            </p>
+          ) : null}
           <div className="flex flex-wrap items-end gap-2">
             <div className="min-w-44 flex-1">
               <input
@@ -660,7 +717,25 @@ function SelfPhoneCard({ surface }: { surface?: CredentialSurface }) {
             <PrimaryButton type="submit" disabled={busy || codeInput.trim().length < 6}>
               تأیید کد
             </PrimaryButton>
-            <SecondaryButton onClick={() => setMaskedSentTo(null)} disabled={busy}>
+            <SecondaryButton
+              type="button"
+              onClick={() => void sendOtp()}
+              disabled={busy || coolingDown}
+            >
+              {coolingDown
+                ? `ارسال مجدد کد (${toPersianDigits(resendWait)})`
+                : "ارسال مجدد کد"}
+            </SecondaryButton>
+            <SecondaryButton
+              type="button"
+              onClick={() => {
+                // Cancellation sends no mutation; the in-flight challenge
+                // simply expires on the server's own clock.
+                setMaskedSentTo(null);
+                clearCooldown();
+              }}
+              disabled={busy}
+            >
               انصراف
             </SecondaryButton>
           </div>

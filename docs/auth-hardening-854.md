@@ -24,7 +24,7 @@ a green table.
 | 10 | Sensitive changes need recent auth in a credential the user actually has | `recent-auth.ts` + `src/lib/auth-contracts.ts` (`availableStepUpMethods`) + `components/auth/step-up-prompt.tsx` |
 | 11 | Session UI describes the scope it revokes | `src/lib/session-contract.ts`, `/api/sessions/self` (`scope`, `sessionRevokeDescription`) |
 | 12 | Sensitive mutations are audited | `src/lib/security-audit.ts` (`recordSecurityAudit`) writes a secret-free row **inside the same transaction** as every personal-security mutation in both realms (enrol start/confirm, factor removed/replaced, primary changed, recovery codes, step-up success/failure, session revoke scopes), plus the `audit_log` rows on every changed route (`auth.step_up`, `auth.self_phone_changed`, `auth.self_pin_changed`, `crew.pin_rotation`, `team.invited`, `team.invitation_accepted`, …) and the membership rows carrying actor + change + reason (GAP 4) |
-| 13 | UI/API contracts are covered by regression tests | `src/lib/{auth-contracts,session-contract,credential-authority,membership-authority,auth-hardening}.test.ts`, `integration/auth-hardening-854.integration.test.ts`, `integration/auth-hardening-854-gaps.integration.test.ts` (second-pass gaps 1–8 + P2.21) |
+| 13 | UI/API contracts are covered by regression tests | `src/lib/{auth-contracts,session-contract,credential-authority,membership-authority,auth-hardening}.test.ts`, `integration/auth-hardening-854.integration.test.ts`, `integration/auth-hardening-854-gaps.integration.test.ts` (second-pass gaps 1–8 + P2.21, including the replacement's UI contract), plus rendered contracts `src/app/(app)/settings/two-factor-settings.test.tsx` (replacement reachability, phone binding on confirm/resend, confirmation dialogs) and `src/components/auth/webauthn-manager.test.tsx` (profile WebAuthn surface, removal confirmation) |
 | 14 | No duplicated phone/MFA state drifts between surfaces | the challenge row is the single source of the destination and purpose; `GET` returns the live challenge rather than letting the UI remember it |
 | 15 | Door-changing decisions and door-changing writes cannot interleave | `src/lib/membership-lock.ts` — one advisory transaction lock per (business, membership), taken first by role transitions, creation, invitation acceptance, PIN writes, cloud credential/PIN replication, IAM event application, site commands, offboarding and owner-profile suspension (GAP 7). Deferred phone-verification stamps commit only after the whole ceremony (GAP 8, `MfaPendingPayload.phoneCompletion`) |
 
@@ -104,14 +104,14 @@ corrected record: one row per finding, status, and where the proof lives.
 | P2.18 MFA endpoint lacks an action allowlist | resolved (pass 1) | explicit `KNOWN_MFA_ACTIONS` allowlist on `/api/auth/mfa/self` |
 | P2.19 pending setup not resumable | resolved (pass 1) | `GET` surfaces return the live challenge; masked destination from the challenge, not the client |
 | P2.20 two SMS numbers for one user | resolved as *kept separate*, labelled | the login phone (membership, `users.phone_e164`) and the MFA SMS factor (identity, `mfa_enrolments.phone_e164`) are independent by design; Profile labels them as login vs second factor, and the strict verifier binds each code to the number its challenge was sent to — collapsing them would make "which number gets which code" ambiguous |
-| P2.21 replacing the only SMS factor | **resolved (pass 2, GAP 10)** | enrolment accepts `replaceConfirmed` for a *different* number, keeps the confirmed row untouched during the ceremony (never factorless), and the confirmation commits the swap inside the account lock — `commitSmsFactorReplacement` semantics live in `confirmMfaEnrolment` (`provenPhoneE164`), audited as `auth.mfa_factor_replaced`; pinned by two cases in `auth-hardening-854-gaps.integration.test.ts` (P2.21) |
+| P2.21 replacing the only SMS factor | **resolved (pass 2 backend, pass 3 UI)** | enrolment accepts `replaceConfirmed` for a *different* number, keeps the confirmed row untouched during the ceremony (never factorless), and the confirmation commits the swap inside the account lock — `commitSmsFactorReplacement` semantics live in `confirmMfaEnrolment` (`provenPhoneE164`), audited as `auth.mfa_factor_replaced`. Pass 3 finished the *screen* half the service tests could not see: the tenant and platform cards render «تغییر شمارهٔ دریافت» for a member who already has a confirmed SMS factor (the form used to render only when none existed), the confirmation and the replacement resend both name the new number (`expectedPhoneE164` / `provenPhoneE164` carry it; a provided phone that does not canonicalise is a 400, never a silent drop), the swap itself waits behind the P2.26 confirmation, cancellation sends nothing, and a reload resumes a fresh enrolment from `pendingSmsPhone` (a replacement deliberately restarts — the screen says so). Pinned by the P2.21 cases in `auth-hardening-854-gaps.integration.test.ts` (swap-on-proof, wrong-destination refusal, resend-to-named-number, abandon-mid-ceremony, concurrent replacement-vs-removal) and by the rendered contract `src/app/(app)/settings/two-factor-settings.test.tsx` |
 | P2.22 personal security under-audited | **resolved (pass 1 + pass 2, GAP 5)** | `recordSecurityAudit` writes a secret-free row inside the same transaction as every sensitive mutation (enrol start/confirm, factor removed/replaced, primary changed, recovery codes, step-up success/failure, session revoke scopes) in both realms; `auditRevocation` no longer swallows failures |
 | P2.23 Persian digits in OTP/TOTP inputs | resolved (pass 1) | `toLatinDigits` normalisation before validation |
 | P2.24 "trusted device" wording inaccurate | **resolved (pass 2)** | `otp_login_at` is membership-wide and the wording now says so — the Profile phone card reads «رمز عددی تا ۷ روز برای همهٔ ورودهای این عضویت کار می‌کند (نه فقط یک دستگاه)»; the security-center and login-screen copy already described the window without per-device claims. No per-device trust is claimed anywhere |
-| P2.25 resend UX for phone verification | resolved | server-side cooldown and caps (`checkPhoneOtpRateLimit`: 60 s resend, 5/hour, 20/day; the MFA challenge limiter is the twin), `retryAfterMs` surfaced by the routes, and `phone-otp-step.tsx` / `mfa-step.tsx` render the resend button, the retry-after message, the masked destination and expiry. The only remainder is a live ticking countdown, which is presentation polish, not a missing control |
-| P2.26 destructive actions confirmed | resolved (pass 1) | product dialogs |
+| P2.25 resend UX for phone verification | resolved (pass 2 + pass 3) | server-side cooldown and caps (`checkPhoneOtpRateLimit`: 60 s resend, 5/hour, 20/day; the MFA challenge limiter is the twin) with `retryAfterMs` surfaced by the routes. Pass 3 finished the presentation the issue actually asks for, via one shared hook (`components/auth/use-resend-cooldown.ts`): a **live ticking countdown** seeded from the challenge's real send time (so a reload mid-window shows the honest remainder, not a fresh 60), the limiter's own `retryAfterMs` rewriting the window on a 429, the masked destination, and a live expiry line (`smsChallengeExpiryMessage`) driven by `useNowTick`. Wired into the tenant two-factor card, the platform console card, the Profile login-phone card (whose pending challenge now carries `requestedAt`), and the door's `phone-otp-step` |
+| P2.26 destructive actions confirmed | **resolved (pass 3)** | one shared product confirmation (`components/auth/security-confirm-dialog.tsx`): consequences are a required, rendered list; cancellation sends no mutation; while busy the dialog cannot be closed and both buttons disable, so a retry cannot duplicate the mutation; recent-auth stays a separate gate. It now fronts every destructive personal/membership-security action that used to be a bare `confirm()` or nothing: factor removal and recovery-code regeneration (tenant card + platform console card), the SMS-factor swap, WebAuthn credential removal, team suspension and offboarding, and the IAM card's «ترمیم از نسخهٔ ابری» and detach-to-local. Session revocation keeps its own inline confirmed panel (P1.4). Pinned by `two-factor-settings.test.tsx` and `components/auth/webauthn-manager.test.tsx` |
 | P2.27 weak device/session labels | resolved (pass 1) | device labels + login methods recorded |
-| P2.28 personal security split across surfaces | resolved (pass 1) | Profile is the canonical personal-security screen |
+| P2.28 personal security split across surfaces | **resolved (pass 3)** | `/settings/profile` is the canonical personal-security screen **including WebAuthn**: pass 3 extracted the sidebar-only biometric overlay into the reusable `components/auth/webauthn-manager.tsx` card, added it to the profile under the `webauthn_credential` credential surface (server authority unchanged — writable on every profile, read-only contract honoured), and reduced the sidebar's `BiometricSettingsButton` to a link to the profile instead of a duplicate panel. Pinned by `components/auth/webauthn-manager.test.tsx` |
 
 ### Second-pass gaps (GAP 1–10) mapped to findings
 
@@ -167,9 +167,25 @@ factor-removal invalidation, GAP 3's concurrent last-factor removal, GAP 4's
 reason refusals and persistence across memberships/roles/invitations, GAP 6's
 event-payload-equals-row and site application, GAP 7's lock serialisation and
 rollback, GAP 8's deferred stamps through the real routes, and P2.21's atomic
-SMS replacement), `integration/team.integration.test.ts` (P1.12's four transition
+SMS replacement — the swap on proof plus the UI-contract cases: a replacement
+resend bound to the named number, wrong-destination refusal, abandonment leaving
+the old factor authenticating, and a concurrent replacement-vs-removal that can
+never end factorless), `integration/team.integration.test.ts` (P1.12's four transition
 cases, now exercising the reason rule), plus the updated
 `integration/{team,auth-account-security,phone-otp,iam-login-credentials,parties}.integration.test.ts`.
+
+Rendered component contracts (jsdom, real components against a fake server):
+`src/app/(app)/settings/two-factor-settings.test.tsx` — the replacement form is
+reachable with a confirmed SMS factor, the enrol/confirm/resend bodies carry the
+new number, the swap waits behind its dialog and cancellation sends nothing,
+factor removal and recovery regeneration are dialog-gated, a reload resumes a
+fresh enrolment from the server's pending row, and a 429 surfaces the limiter's
+message — and `src/components/auth/webauthn-manager.test.tsx` — the profile's
+WebAuthn card lists devices, renders the empty state, gates removal behind the
+confirmation (cancellation sends no DELETE), and a read-only deployment surface
+renders the notice without controls. These exist because the service tests
+proved the backend of P2.21 while the screen still hid the form — the layer the
+issue said was broken.
 
 Screen contracts without rendering: `src/lib/admin-screen-contracts.test.ts`
 holds the admin screens to the same rules the routes enforce, including P1.19 —
@@ -179,25 +195,28 @@ and check `capture(data)` *before* treating the response as a sign-in.
 ## Remaining work
 
 Every P0 and P1 finding is closed end to end. Of the P2 list, all items are
-resolved except four recorded product decisions, none of which hides a
+resolved except three recorded product decisions, none of which hides a
 security invariant:
 
 - **P2.5** personnel edits renaming memberships backwards — needs a product
   ownership decision; the forward direction (membership rename repairs the
-  personnel file) is implemented and tested.
+  personnel file) is implemented and tested. (P2.5 is identity drift between a
+  membership and its personnel file, not anything the MFA rows touch.)
 - **P2.7** a membership-scoped personnel read path for Team managers without
   `parties.view` — the page degrades safely today; the dedicated path is a
-  larger change.
+  larger change. (P2.7 is about reading personnel without `parties.view`, not
+  permission gating in general.)
 - **P2.8 / P2.9** suspend→reactivate is safe and re-checked; offboard→rehire
   needs new membership states, credential re-establishment and a migration.
   The dangerous half — reactivating a stripped membership as if nothing
   happened — is refused today.
-- **P2.25 remainder** — a live ticking countdown in the resend button
-  (presentation polish; the cooldown, retry-after, masked destination and
-  expiry feedback are all live).
 
-P2.20's two phone numbers are kept deliberately and labelled; the rationale is
-in its row above.
+Items closed in the third pass that earlier drafts of this document credited to
+pass 1/2 without the screen half being done: P2.21 (the replacement UI), P2.25
+(the live countdown/expiry feedback), P2.26 (the confirmation dialogs), P2.28
+(WebAuthn on the profile). P2.20's two phone numbers — the membership's login
+phone and the identity's MFA SMS factor — are kept deliberately separate and
+labelled; the rationale is in its row above.
 
 ## Gate results in this workspace
 
@@ -208,4 +227,5 @@ in its row above.
 | `npm run lint` (`eslint . --max-warnings=0`) | clean |
 | `npm run test:design` | 38 passed |
 | `npm run test:db` | 184 of 188 files passed (2236 tests). The four failures are sandbox-environmental and none is in the auth/team/MFA path: `platform-system-backup` (`postgresql_tool_server_incompatible:16:18` — bundled pg tools are v16, this server is v18), `runtime-database-url` + `runtime-role-regrant` (`APP_DB_PASSWORD` unset), and `platform-company` (all 59 skipped: `role "pos" does not exist`). `integration/{tenant-isolation,team,auth-hardening-854,auth-account-security,phone-otp,iam-login-credentials}` all pass — tenant-isolation is what pins the `mfa_challenges` decision above |
-| `npm run build` | **not run to completion here** — the sandbox has 3.9 GB of RAM and `next build --experimental-build-mode compile` is OOM-killed at ~3.68 GB RSS in every configuration tried (default heap, 6144, 3072, 2560, 2048, with Postgres stopped). The repo's own CI runs it at `NODE_OPTIONS=--max-old-space-size=3072` (`.github/workflows/test.yml`) |
+| `npm run build` | production build completed with `NODE_OPTIONS=--max-old-space-size=3072` (same as CI) once the sandbox gained swap; every earlier attempt on the swap-less 4 GB box was OOM-killed |
+| `npm run test:visual` | run locally against the CI-mirrored recipe in `docs/design/visual-regression.md` (Chromium `141.0.7390.0` from `@sparticuz/chromium@141.0.0`, seeded DB, production server, `TZ=Asia/Tehran`). Before this pass it failed exactly as CI did, and **only** on `accounting-expenses` (3.67% of pixels, bounds 54,18 1342×831; CI measured 4.06% at 54,18 1370×830 on the same stale baseline) with the other 13 screens byte-comparable. The diff is the #832 expenses redesign — the screen gained the VAT checkbox, the receipt-upload file input, the status/receipt/number/actions columns and the «پرداختی از حساب‌ها» totals line, all on the existing primitives (teal primary, amber eyebrow, the same table skin) — for which no baseline was ever re-recorded, on main as well as here. Reviewed per policy and re-recorded once, committed with this explanation; the suite is now 14/14 |

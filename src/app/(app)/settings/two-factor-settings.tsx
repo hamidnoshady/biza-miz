@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { LoadingSkeleton, SectionCard } from "@/app/dashboard/page-chrome";
 import {
   ErrorBox,
@@ -15,6 +15,12 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { RecoveryCodeSheet, TENANT_MFA_THEME, type MfaMethod } from "@/components/auth/mfa-step";
 import { StepUpPrompt, RECENT_AUTH_MESSAGE } from "@/components/auth/step-up-prompt";
+import { SecurityConfirmDialog } from "@/components/auth/security-confirm-dialog";
+import {
+  smsChallengeExpiryMessage,
+  useNowTick,
+  useResendCooldown,
+} from "@/components/auth/use-resend-cooldown";
 import type { CredentialSurface } from "@/lib/credential-authority";
 import { toPersianDigits } from "@/lib/digits";
 
@@ -34,6 +40,9 @@ interface SelfMfaStatus {
   recoveryCodesRemaining?: number;
   recentAuth?: boolean;
   smsChallengeRequestedAt?: string | null;
+  smsChallengeExpiresAt?: string | null;
+  /** Issue #854 (P2.21) — the number a reloaded fresh enrolment is proving. */
+  pendingSmsPhone?: string | null;
   /** True when the deployment merely applies the cloud's factors (P1.15). */
   loginManagedByCloud?: boolean;
   credential?: CredentialSurface;
@@ -49,6 +58,7 @@ interface EnrolResult {
   recoveryCodes?: string[];
   error?: string;
   message?: string;
+  retryAfterMs?: number;
 }
 
 function selfErrorMessage(code: string | undefined, fallbackMessage?: string): string {
@@ -71,6 +81,8 @@ function selfErrorMessage(code: string | undefined, fallbackMessage?: string): s
   };
   return (code && map[code]) || "خطای غیرمنتظره. دوباره تلاش کنید.";
 }
+
+
 
 export function TwoFactorSettings({
   isOwner,
@@ -106,34 +118,49 @@ export function TwoFactorSettings({
   const [stepUpOpen, setStepUpOpen] = useState(false);
   const [pendingAction, setPendingAction] = useState<Record<string, unknown> | null>(null);
 
-  // Issue #854 (P2.25) — live countdown of the server's 60-second resend
-  // cooldown, seeded from the challenge's actual request time so a reload
-  // mid-window still shows the honest remaining seconds instead of a fresh 60.
-  const RESEND_COOLDOWN_S = 60;
-  const [resendWait, setResendWait] = useState(0);
-  const cooldownRef = useRef<{ requestedAt: number } | null>(null);
+  /**
+   * Issue #854 (P2.25) — live countdown of the server's 60-second resend
+   * cooldown, seeded from the challenge's actual request time so a reload
+   * mid-window shows the honest remaining seconds instead of a fresh 60.
+   */
+  const {
+    waitSeconds: resendWait,
+    coolingDown,
+    seedFromRequestedAt,
+    start: startCooldown,
+    applyRetryAfterMs,
+    clear: clearCooldown,
+  } = useResendCooldown(60);
 
-  function startResendCooldown(requestedAtIso?: string | null) {
-    const requestedAt = requestedAtIso ? Date.parse(requestedAtIso) : Date.now();
-    cooldownRef.current = { requestedAt };
-    setResendWait(
-      Math.max(0, Math.ceil((requestedAt + RESEND_COOLDOWN_S * 1000 - Date.now()) / 1000)),
-    );
-  }
+  /**
+   * Issue #854 (P2.25) — the expiry countdown must keep moving on its own;
+   * the resend-cooldown ticker stops ticking once its own window lapses.
+   */
+  const nowTick = useNowTick(
+    pendingSetup?.method === "sms_otp" && Boolean(status?.smsChallengeExpiresAt),
+  );
 
-  useEffect(() => {
-    const tick = setInterval(() => {
-      const pending = cooldownRef.current;
-      if (!pending) return;
-      const remaining = Math.max(
-        0,
-        Math.ceil((pending.requestedAt + RESEND_COOLDOWN_S * 1000 - Date.now()) / 1000),
-      );
-      setResendWait(remaining);
-      if (remaining <= 0) cooldownRef.current = null;
-    }, 500);
-    return () => clearInterval(tick);
-  }, []);
+  /**
+   * Issue #854 (P2.26) — destructive security mutations wait behind a product
+   * confirmation. The dialog's `onConfirm` is the only path that sends the
+   * mutation; closing it sends nothing.
+   */
+  const [confirmAction, setConfirmAction] = useState<
+    | { kind: "remove"; method: MfaMethod }
+    | { kind: "regenerate_codes" }
+    | null
+  >(null);
+
+  /**
+   * Issue #854 (P2.21) — the replacement's own confirmation: typing the code
+   * proves possession of the new number, and the dialog before the swap spells
+   * out that the old number stops receiving codes the moment it lands.
+   */
+  const [replaceConfirm, setReplaceConfirm] = useState<{
+    method: MfaMethod;
+    code: string;
+    phone: string;
+  } | null>(null);
 
   const load = useCallback(async () => {
     if (scope === "policy") {
@@ -156,11 +183,28 @@ export function TwoFactorSettings({
     );
     if (ok) {
       setStatus(data);
-      if (data.smsChallengeRequestedAt) startResendCooldown(data.smsChallengeRequestedAt);
+      seedFromRequestedAt(data.smsChallengeRequestedAt);
+      /**
+       * Issue #854 (P2.21) — resume a fresh-enrolment ceremony a reload left
+       * mid-flight: the pending row names the number being proven, so the
+       * confirm panel comes back with its destination and binding intact.
+       * A *replacement* stages no row, so there is nothing to resume — the
+       * member starts it again, which is what the empty state below them says.
+       */
+      if (data.pendingMethods?.includes("sms_otp") && data.pendingSmsPhone) {
+        setPendingSetup((current) =>
+          current ?? {
+            method: "sms_otp",
+            status: "pending_confirmation",
+            phone: data.pendingSmsPhone ?? null,
+            maskedPhone: data.phone ?? null,
+          },
+        );
+      }
     } else {
       setError(selfErrorMessage(data.error));
     }
-  }, [scope, isOwner]);
+  }, [scope, isOwner, seedFromRequestedAt]);
 
   useEffect(() => {
     void load();
@@ -181,6 +225,9 @@ export function TwoFactorSettings({
         setStepUpOpen(true);
         return null;
       }
+      // Issue #854 (P2.25) — the limiter's own answer drives the countdown:
+      // it names a longer window than the base cooldown once caps engage.
+      if (httpStatus === 429) applyRetryAfterMs(data.retryAfterMs);
       setError(selfErrorMessage(data.error, data.message));
       return null;
     }
@@ -210,15 +257,18 @@ export function TwoFactorSettings({
       setPendingSetup(data);
       setConfirmCode("");
       setSmsFormOpen(false);
+      // The code that just went out starts the cooldown clock now (P2.25).
+      if (body.method === "sms_otp") startCooldown();
     } else if (body.action === "confirm") {
       setPendingSetup(null);
       setConfirmCode("");
-      cooldownRef.current = null;
-      setResendWait(0);
+      clearCooldown();
       if (data.recoveryCodes?.length) {
         setShownCodes(data.recoveryCodes);
       }
       setNotice("روش دومرحله‌ای با موفقیت تأیید و فعال شد.");
+    } else if (body.action === "resend_challenge") {
+      startCooldown();
     } else if (body.action === "regenerate_recovery_codes" && data.recoveryCodes?.length) {
       setShownCodes(data.recoveryCodes);
       setNotice("کدهای بازیابی جدید صادر شدند.");
@@ -241,26 +291,81 @@ export function TwoFactorSettings({
     if (data) handleActionSuccess(body, data);
   }
 
+  /**
+   * Issue #854 (P2.21) — confirm always names the number being proven, so the
+   * redemption stays bound to exactly that destination. When a confirmed SMS
+   * factor already exists, the same field is what turns the confirmation into
+   * the atomic replacement — which first goes through the swap dialog (P2.26),
+   * never straight to the mutation.
+   */
   async function confirmFactor(e: React.FormEvent) {
     e.preventDefault();
     if (!pendingSetup?.method) return;
+    if (pendingSetup.method === "sms_otp" && hasSms && pendingSetup.phone) {
+      setReplaceConfirm({
+        method: pendingSetup.method,
+        code: confirmCode.trim(),
+        phone: pendingSetup.phone,
+      });
+      return;
+    }
     const body = {
       action: "confirm",
       method: pendingSetup.method,
       code: confirmCode.trim(),
+      phone:
+        pendingSetup.method === "sms_otp" && pendingSetup.phone
+          ? pendingSetup.phone
+          : undefined,
     };
     const data = await act(body);
     if (data) handleActionSuccess(body, data);
   }
 
+  async function submitReplaceConfirm() {
+    if (!replaceConfirm) return;
+    const body = {
+      action: "confirm",
+      method: replaceConfirm.method,
+      code: replaceConfirm.code,
+      phone: replaceConfirm.phone,
+    };
+    setReplaceConfirm(null);
+    const data = await act(body);
+    if (data) {
+      handleActionSuccess(body, data);
+      setNotice("شمارهٔ دریافت کد پیامکی با موفقیت جایگزین شد.");
+    }
+  }
+
+  /**
+   * Issue #854 (P2.21) — a resend during a *replacement* names the number
+   * being proven: the stored factor still points at the old one, and a resend
+   * that did not say where it was going would text the number being replaced.
+   */
   async function resendSmsChallenge() {
-    const data = await act({ action: "resend_challenge", method: "sms_otp" });
+    const replacing = Boolean(hasSms && pendingSetup?.method === "sms_otp");
+    const body = {
+      action: "resend_challenge",
+      method: "sms_otp",
+      ...(replacing && pendingSetup?.phone ? { phone: pendingSetup.phone } : {}),
+    };
+    const data = await act(body);
     if (data) {
       setNotice("کد تأیید پیامکی مجدداً ارسال شد.");
     }
   }
 
-  async function removeMethod(method: MfaMethod) {
+  /**
+   * Issue #854 (P2.26) — removal opens the confirmation dialog; the mutation
+   * only leaves from the dialog's confirm path, so cancelling sends nothing.
+   */
+  function removeMethod(method: MfaMethod) {
+    setConfirmAction({ kind: "remove", method });
+  }
+
+  async function executeRemove(method: MfaMethod) {
+    setConfirmAction(null);
     setPendingSetup(null);
     setShownCodes([]);
     await act({ action: "remove", method });
@@ -272,11 +377,24 @@ export function TwoFactorSettings({
     if (data) handleActionSuccess(body, data);
   }
 
-  async function regenerateCodes() {
+  function regenerateCodes() {
+    setConfirmAction({ kind: "regenerate_codes" });
+  }
+
+  async function executeRegenerateCodes() {
+    setConfirmAction(null);
     setPendingSetup(null);
     const body = { action: "regenerate_recovery_codes" };
     const data = await act(body);
     if (data) handleActionSuccess(body, data);
+  }
+
+  /** Cancel the SMS ceremony in flight. Cancellation sends no mutation. */
+  function cancelSmsCeremony() {
+    setPendingSetup(null);
+    setConfirmCode("");
+    setSmsFormOpen(false);
+    clearCooldown();
   }
 
   /**
@@ -393,6 +511,12 @@ export function TwoFactorSettings({
   const pendingTotp = status?.pendingMethods?.includes("totp") ?? false;
   const pendingSms = status?.pendingMethods?.includes("sms_otp") ?? false;
   const anyEnrolled = hasTotp || hasSms;
+  /**
+   * Issue #854 (P2.21) — replacement mode: a confirmed SMS factor exists and
+   * an SMS ceremony is in flight. Until the new number's code is redeemed the
+   * old factor keeps receiving and authenticating.
+   */
+  const replacingSms = hasSms && pendingSetup?.method === "sms_otp";
   /**
    * Issue #854 (P1.15): a deployment that only *applies* the cloud's factors
    * shows them but offers no controls, and says why. The old surface rendered
@@ -574,7 +698,7 @@ export function TwoFactorSettings({
                       روش اصلی
                     </span>
                   ) : null}
-                  {!hasSms && pendingSms ? (
+                  {pendingSms || replacingSms ? (
                     <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
                       در انتظار تأیید کد پیامکی
                     </span>
@@ -594,12 +718,26 @@ export function TwoFactorSettings({
                   </SecondaryButton>
                 ) : null}
                 {hasSms ? (
-                  <SecondaryButton
-                    onClick={() => void removeMethod("sms_otp")}
-                    disabled={busy}
-                  >
-                    حذف
-                  </SecondaryButton>
+                  <>
+                    {/*
+                      Issue #854 (P2.21) — replacement entry: members who
+                      already have a confirmed SMS factor could never reach
+                      this form before; now the same staging/confirmation
+                      pathway doubles as "prove a new number, then swap".
+                    */}
+                    <SecondaryButton
+                      onClick={() => {
+                        setSmsFormOpen((v) => !v);
+                        setPhoneInput("");
+                      }}
+                      disabled={busy || replacingSms}
+                    >
+                      تغییر شمارهٔ دریافت
+                    </SecondaryButton>
+                    <SecondaryButton onClick={() => removeMethod("sms_otp")} disabled={busy}>
+                      حذف
+                    </SecondaryButton>
+                  </>
                 ) : (
                   <SecondaryButton
                     onClick={() => {
@@ -615,10 +753,10 @@ export function TwoFactorSettings({
               )}
             </div>
 
-            {smsFormOpen && !hasSms ? (
+            {smsFormOpen && !replacingSms ? (
               <form onSubmit={startSms} className="flex flex-wrap items-end gap-2 pt-2">
                 <div className="min-w-56 flex-1">
-                  <Field label="شمارهٔ موبایل">
+                  <Field label={hasSms ? "شمارهٔ جدید برای دریافت کدها" : "شمارهٔ موبایل"}>
                     <input
                       dir="ltr"
                       inputMode="tel"
@@ -635,6 +773,12 @@ export function TwoFactorSettings({
                 </PrimaryButton>
               </form>
             ) : null}
+            {hasSms && !replacingSms ? (
+              <p className="text-xs text-muted-foreground">
+                برای تغییر شماره، شمارهٔ جدید را وارد کنید؛ کد تأیید به شمارهٔ تازه می‌رود و تا
+                تأیید نهایی، همین شمارهٔ فعلی فعال می‌ماند.
+              </p>
+            ) : null}
 
             {pendingSetup?.method === "sms_otp" ? (
               <form
@@ -642,10 +786,30 @@ export function TwoFactorSettings({
                 className="space-y-3 rounded-xl border border-primary/30 bg-primary/5 p-3"
               >
                 <p className="text-xs font-semibold">
-                  کد ۶ رقمی ارسال‌شده به{" "}
-                  {toPersianDigits(pendingSetup.maskedPhone ?? pendingSetup.phone ?? "")} را برای
-                  تأیید نهایی وارد کنید:
+                  {replacingSms ? (
+                    <>
+                      کد ۶ رقمی ارسال‌شده به شمارهٔ جدید{" "}
+                      {toPersianDigits(pendingSetup.phone ?? pendingSetup.maskedPhone ?? "")} را
+                      وارد کنید؛ پس از تأیید، این شماره جایگزین شمارهٔ فعلی می‌شود:
+                    </>
+                  ) : (
+                    <>
+                      کد ۶ رقمی ارسال‌شده به{" "}
+                      {toPersianDigits(pendingSetup.maskedPhone ?? pendingSetup.phone ?? "")} را
+                      برای تأیید نهایی وارد کنید:
+                    </>
+                  )}
                 </p>
+                {/*
+                  Issue #854 (P2.25) — the challenge has a deadline; name it
+                  instead of leaving the member guessing why a correct code
+                  gets rejected.
+                */}
+                {status?.smsChallengeExpiresAt ? (
+                  <p className="text-xs text-muted-foreground">
+                    {smsChallengeExpiryMessage(status.smsChallengeExpiresAt, nowTick)}
+                  </p>
+                ) : null}
                 <div className="flex flex-wrap items-end gap-2">
                   <div className="min-w-44 flex-1">
                     <input
@@ -663,17 +827,27 @@ export function TwoFactorSettings({
                     type="submit"
                     disabled={busy || confirmCode.trim().length < 6}
                   >
-                    تأیید شماره و فعال‌سازی
+                    {replacingSms ? "تأیید شماره و جایگزینی" : "تأیید شماره و فعال‌سازی"}
                   </PrimaryButton>
                   <SecondaryButton
+                    type="button"
                     onClick={() => void resendSmsChallenge()}
-                    disabled={busy || resendWait > 0}
+                    disabled={busy || coolingDown}
                   >
-                    {resendWait > 0
+                    {coolingDown
                       ? `ارسال مجدد کد (${toPersianDigits(resendWait)})`
                       : "ارسال مجدد کد"}
                   </SecondaryButton>
+                  <SecondaryButton type="button" onClick={cancelSmsCeremony} disabled={busy}>
+                    انصراف
+                  </SecondaryButton>
                 </div>
+                {replacingSms ? (
+                  <p className="text-xs text-muted-foreground">
+                    شمارهٔ فعلی تا پایان تأیید شمارهٔ جدید فعال می‌ماند؛ انصراف هیچ تغییری در روش
+                    فعال ایجاد نمی‌کند.
+                  </p>
+                ) : null}
               </form>
             ) : null}
           </div>
@@ -701,6 +875,77 @@ export function TwoFactorSettings({
           ) : null}
         </div>
       )}
+
+      {/*
+        Issue #854 (P2.26) — the destructive mutations leave only from here:
+        removing a factor or regenerating recovery codes asks for a deliberate
+        confirmation that spells out exactly what changes, and closing the
+        dialog sends no request at all.
+      */}
+      <SecurityConfirmDialog
+        open={confirmAction !== null}
+        title={
+          confirmAction?.kind === "remove"
+            ? confirmAction.method === "totp"
+              ? "حذف برنامهٔ رمزساز"
+              : "حذف پیامک یک‌بارمصرف"
+            : "ساخت کدهای بازیابی جدید"
+        }
+        description={
+          confirmAction?.kind === "remove"
+            ? "این روش بلافاصله از حساب شما حذف می‌شود."
+            : "کدهای بازیابی تازه صادر می‌شوند و فهرست قبلی باطل می‌گردد."
+        }
+        consequences={
+          confirmAction?.kind === "remove"
+            ? [
+                confirmAction.method === "totp"
+                  ? "از این پس کد برنامهٔ رمزساز برای ورود شما پذیرفته نمی‌شود."
+                  : "از این پس کدی به شمارهٔ فعلی پیامک نمی‌شود و ورود پیامکی این حساب قطع می‌گردد.",
+                activeMethodNames.filter((m) => m !== confirmAction.method).length === 0
+                  ? "این آخرین روش دومرحله‌ای شماست؛ اگر سیاست کسب‌وکار برای نقش شما اجباری باشد، سرور حذف را رد می‌کند."
+                  : "بقیهٔ روش‌های دومرحله‌ای شما دست‌نخورده می‌مانند.",
+                "کدهای بازیابی قبلی همچنان به‌عنوان راه پشتیبان باقی می‌مانند.",
+              ]
+            : [
+                "تمام کدهای بازیابی قبلی همان لحظه باطل می‌شوند و دیگر در هیچ ورودی کار نمی‌کنند.",
+                "فهرست تازه تنها یک بار نمایش داده می‌شود؛ آن را در جای امنی نگهداری کنید.",
+                "روش‌های دومرحله‌ای شما (رمزساز یا پیامک) تغییری نمی‌کنند.",
+              ]
+        }
+        confirmLabel={confirmAction?.kind === "remove" ? "بله، حذف شود" : "بله، کدهای جدید بساز"}
+        busy={busy}
+        onOpenChange={(next) => {
+          if (!next) setConfirmAction(null);
+        }}
+        onConfirm={() => {
+          if (confirmAction?.kind === "remove") void executeRemove(confirmAction.method);
+          if (confirmAction?.kind === "regenerate_codes") void executeRegenerateCodes();
+        }}
+      />
+
+      {/* Issue #854 (P2.21 + P2.26) — the atomic swap gets its own confirmation. */}
+      <SecurityConfirmDialog
+        open={replaceConfirm !== null}
+        title="جایگزینی شمارهٔ دریافت کد پیامکی"
+        description={
+          replaceConfirm
+            ? `کد واردشده برای ${toPersianDigits(replaceConfirm.phone)} تأیید شد؛ با ثبت این تغییر، شمارهٔ دریافت عوض می‌شود.`
+            : ""
+        }
+        consequences={[
+          "شمارهٔ فعلی از همین لحظه دیگر کدی دریافت نمی‌کند.",
+          "ورودهای بعدی با رمز عبور، کد را به شمارهٔ تازه می‌فرستند.",
+          "این تغییر به‌صورت اتمی ثبت می‌شود: هیچ لحظه‌ای حساب بدون عامل دومرحله‌ای نمی‌ماند.",
+        ]}
+        confirmLabel="بله، شماره جایگزین شود"
+        variant="default"
+        busy={busy}
+        onOpenChange={(next) => {
+          if (!next) setReplaceConfirm(null);
+        }}
+        onConfirm={() => void submitReplaceConfirm()}
+      />
     </SectionCard>
   );
 }

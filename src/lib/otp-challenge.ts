@@ -359,10 +359,16 @@ export async function liveChallengePhone(input: {
   subjectRealm: string;
   subjectId: string;
   purpose: OtpPurpose;
-}): Promise<{ challengeId: string; candidatePhoneE164: string | null; expiresAt: Date } | null> {
+}): Promise<{
+  challengeId: string;
+  candidatePhoneE164: string | null;
+  /** When the code was sent — the resend cooldown counts from here (P2.25). */
+  createdAt: Date;
+  expiresAt: Date;
+} | null> {
   const { rows } = await withoutTenantScope("platform", () =>
-    query<{ id: string; candidate_phone_e164: string | null; expires_at: Date }>(
-      `SELECT id, candidate_phone_e164, expires_at
+    query<{ id: string; candidate_phone_e164: string | null; created_at: Date; expires_at: Date }>(
+      `SELECT id, candidate_phone_e164, created_at, expires_at
          FROM mfa_challenges
         WHERE subject_realm = $1 AND subject_id = $2 AND purpose = $3
           AND consumed_at IS NULL AND expires_at > now() AND attempts < $4
@@ -375,6 +381,7 @@ export async function liveChallengePhone(input: {
   return {
     challengeId: row.id,
     candidatePhoneE164: row.candidate_phone_e164,
+    createdAt: row.created_at,
     expiresAt: row.expires_at,
   };
 }

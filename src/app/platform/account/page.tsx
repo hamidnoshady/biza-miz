@@ -1,7 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import {
+  smsChallengeExpiryMessage,
+  useNowTick,
+  useResendCooldown,
+} from "@/components/auth/use-resend-cooldown";
+import { SecurityConfirmDialog } from "@/components/auth/security-confirm-dialog";
 import {
   Button,
   Card,
@@ -207,6 +213,9 @@ interface PlatformSelfMfa {
   unusedRecoveryCodes: number;
   recentAuth?: boolean;
   smsChallengeRequestedAt?: string | null;
+  smsChallengeExpiresAt?: string | null;
+  /** Issue #854 (P2.21) — the number a reloaded fresh enrolment is proving. */
+  pendingSmsPhone?: string | null;
 }
 
 interface PlatformEnrolResult {
@@ -219,6 +228,7 @@ interface PlatformEnrolResult {
   recoveryCodes?: string[];
   error?: string;
   message?: string;
+  retryAfterMs?: number;
 }
 
 function PlatformSelfMfaSection() {
@@ -237,34 +247,34 @@ function PlatformSelfMfaSection() {
   const [stepUpMfaCode, setStepUpMfaCode] = useState("");
   const [pendingAction, setPendingAction] = useState<Record<string, unknown> | null>(null);
 
-  // Issue #854 (P2.25) — live countdown of the server's 60-second resend
-  // cooldown, seeded from the challenge's actual request time so a reload
-  // mid-window still shows the honest remaining seconds instead of a fresh 60.
-  const RESEND_COOLDOWN_S = 60;
-  const [resendWait, setResendWait] = useState(0);
-  const cooldownRef = useRef<{ requestedAt: number } | null>(null);
+  /**
+   * Issue #854 (P2.25) — live countdown of the server's 60-second resend
+   * cooldown, seeded from the challenge's actual request time so a reload
+   * mid-window shows the honest remaining seconds instead of a fresh 60.
+   */
+  const {
+    waitSeconds: resendWait,
+    coolingDown,
+    seedFromRequestedAt,
+    start: startCooldown,
+    applyRetryAfterMs,
+    clear: clearCooldown,
+  } = useResendCooldown(60);
+  const nowTick = useNowTick(
+    pendingSetup?.method === "sms_otp" && Boolean(status?.smsChallengeExpiresAt),
+  );
 
-  function startResendCooldown(requestedAtIso?: string | null) {
-    const requestedAt = requestedAtIso ? Date.parse(requestedAtIso) : Date.now();
-    cooldownRef.current = { requestedAt };
-    setResendWait(
-      Math.max(0, Math.ceil((requestedAt + RESEND_COOLDOWN_S * 1000 - Date.now()) / 1000)),
-    );
-  }
+  /** Issue #854 (P2.26) — destructive mutations wait behind a confirmation. */
+  const [confirmAction, setConfirmAction] = useState<
+    { kind: "remove"; method: MfaMethod } | { kind: "regenerate_codes" } | null
+  >(null);
 
-  useEffect(() => {
-    const tick = setInterval(() => {
-      const pending = cooldownRef.current;
-      if (!pending) return;
-      const remaining = Math.max(
-        0,
-        Math.ceil((pending.requestedAt + RESEND_COOLDOWN_S * 1000 - Date.now()) / 1000),
-      );
-      setResendWait(remaining);
-      if (remaining <= 0) cooldownRef.current = null;
-    }, 500);
-    return () => clearInterval(tick);
-  }, []);
+  /** Issue #854 (P2.21) — the replacement's own confirmation before the swap. */
+  const [replaceConfirm, setReplaceConfirm] = useState<{
+    method: MfaMethod;
+    code: string;
+    phone: string;
+  } | null>(null);
 
   const load = useCallback(async () => {
     const { ok, data } = await api<PlatformSelfMfa & { error?: string }>(
@@ -272,9 +282,23 @@ function PlatformSelfMfaSection() {
     );
     if (ok) {
       setStatus(data);
-      if (data.smsChallengeRequestedAt) startResendCooldown(data.smsChallengeRequestedAt);
+      seedFromRequestedAt(data.smsChallengeRequestedAt);
+      /**
+       * Issue #854 (P2.21) — resume a fresh-enrolment ceremony a reload left
+       * mid-flight; a replacement stages no row and is started again instead.
+       */
+      if (data.pendingMethods?.includes("sms_otp") && data.pendingSmsPhone) {
+        setPendingSetup((current) =>
+          current ?? {
+            method: "sms_otp",
+            status: "pending_confirmation",
+            phone: data.pendingSmsPhone ?? null,
+            maskedPhone: data.phone ?? null,
+          },
+        );
+      }
     } else setError(errorMessage(data.error));
-  }, []);
+  }, [seedFromRequestedAt]);
 
   useEffect(() => {
     void load();
@@ -298,6 +322,8 @@ function PlatformSelfMfaSection() {
         setStepUpOpen(true);
         return null;
       }
+      // Issue #854 (P2.25) — the limiter's own answer drives the countdown.
+      if (httpStatus === 429) applyRetryAfterMs(data.retryAfterMs);
       setError(data.message || errorMessage(data.error));
       return null;
     }
@@ -310,21 +336,63 @@ function PlatformSelfMfaSection() {
       setPendingSetup(data);
       setConfirmCode("");
       setSmsOpen(false);
+      if (body.method === "sms_otp") startCooldown();
     } else if (body.action === "confirm") {
       setPendingSetup(null);
       setConfirmCode("");
-      cooldownRef.current = null;
-      setResendWait(0);
+      clearCooldown();
       if (data.recoveryCodes?.length) {
         setShownCodes(data.recoveryCodes);
       }
       setNotice("روش دومرحله‌ای با موفقیت تأیید و فعال شد.");
+    } else if (body.action === "resend_challenge") {
+      startCooldown();
     } else if (body.action === "regenerate_recovery_codes" && data.recoveryCodes?.length) {
       setShownCodes(data.recoveryCodes);
       setNotice("کدهای بازیابی جدید صادر شدند.");
     } else if (body.action === "set_primary") {
       setNotice("روش اصلی ورود دومرحله‌ای تغییر کرد.");
     }
+  }
+
+  /** Cancel the SMS ceremony in flight. Cancellation sends no mutation. */
+  function cancelSmsCeremony() {
+    setPendingSetup(null);
+    setConfirmCode("");
+    setSmsOpen(false);
+    clearCooldown();
+  }
+
+  /** Issue #854 (P2.21 + P2.26) — the confirmed atomic swap. */
+  async function submitReplaceConfirm() {
+    if (!replaceConfirm) return;
+    const body = {
+      action: "confirm",
+      method: replaceConfirm.method,
+      code: replaceConfirm.code,
+      phone: replaceConfirm.phone,
+    };
+    setReplaceConfirm(null);
+    const data = await act(body);
+    if (data) {
+      handleActionSuccess(body, data);
+      setNotice("شمارهٔ دریافت کد پیامکی با موفقیت جایگزین شد.");
+    }
+  }
+
+  async function executeRemove(method: MfaMethod) {
+    setConfirmAction(null);
+    setPendingSetup(null);
+    setShownCodes([]);
+    await act({ action: "remove", method });
+  }
+
+  async function executeRegenerateCodes() {
+    setConfirmAction(null);
+    setPendingSetup(null);
+    const body = { action: "regenerate_recovery_codes" };
+    const data = await act(body);
+    if (data) handleActionSuccess(body, data);
   }
 
   async function submitStepUp(e: React.FormEvent) {
@@ -361,6 +429,8 @@ function PlatformSelfMfaSection() {
   const pendingTotp = status?.pendingMethods?.includes("totp") ?? false;
   const pendingSms = status?.pendingMethods?.includes("sms_otp") ?? false;
   const anyEnrolled = hasTotp || hasSms;
+  /** Issue #854 (P2.21) — replacement mode (see the tenant card for notes). */
+  const replacingSms = hasSms && pendingSetup?.method === "sms_otp";
 
   return (
     <Card title="ورود دومرحله‌ای حساب من">
@@ -469,7 +539,7 @@ function PlatformSelfMfaSection() {
               {hasTotp ? (
                 <Button
                   variant="ghost"
-                  onClick={() => void act({ action: "remove", method: "totp" })}
+                  onClick={() => setConfirmAction({ kind: "remove", method: "totp" })}
                   disabled={busy}
                 >
                   حذف
@@ -557,7 +627,7 @@ function PlatformSelfMfaSection() {
                       روش اصلی
                     </span>
                   ) : null}
-                  {!hasSms && pendingSms ? (
+                  {pendingSms || replacingSms ? (
                     <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
                       در انتظار تأیید کد پیامکی
                     </span>
@@ -583,13 +653,26 @@ function PlatformSelfMfaSection() {
                   </Button>
                 ) : null}
                 {hasSms ? (
-                  <Button
-                    variant="ghost"
-                    onClick={() => void act({ action: "remove", method: "sms_otp" })}
-                    disabled={busy}
-                  >
-                    حذف
-                  </Button>
+                  <>
+                    {/* Issue #854 (P2.21) — replacement entry for admins too. */}
+                    <Button
+                      variant="ghost"
+                      onClick={() => {
+                        setSmsOpen((v) => !v);
+                        setPhoneInput("");
+                      }}
+                      disabled={busy || replacingSms}
+                    >
+                      تغییر شمارهٔ دریافت
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      onClick={() => setConfirmAction({ kind: "remove", method: "sms_otp" })}
+                      disabled={busy}
+                    >
+                      حذف
+                    </Button>
+                  </>
                 ) : (
                   <Button
                     variant="ghost"
@@ -605,7 +688,7 @@ function PlatformSelfMfaSection() {
               </div>
             </div>
 
-            {smsOpen && !hasSms ? (
+            {smsOpen && !replacingSms ? (
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -619,7 +702,7 @@ function PlatformSelfMfaSection() {
                 className="flex flex-wrap items-end gap-2 pt-2"
               >
                 <div className="min-w-56 flex-1">
-                  <Field label="شمارهٔ موبایل">
+                  <Field label={hasSms ? "شمارهٔ جدید برای دریافت کدها" : "شمارهٔ موبایل"}>
                     <input
                       dir="ltr"
                       inputMode="tel"
@@ -636,25 +719,60 @@ function PlatformSelfMfaSection() {
                 </Button>
               </form>
             ) : null}
+            {hasSms && !replacingSms ? (
+              <p className="text-xs text-muted-foreground">
+                برای تغییر شماره، شمارهٔ جدید را وارد کنید؛ کد تأیید به شمارهٔ تازه می‌رود و تا
+                تأیید نهایی، همین شمارهٔ فعلی فعال می‌ماند.
+              </p>
+            ) : null}
 
             {pendingSetup?.method === "sms_otp" ? (
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
+                  /**
+                   * Issue #854 (P2.21 + P2.26) — naming the number binds the
+                   * redemption to it; with a confirmed factor present the same
+                   * request is the atomic swap, gated behind its own dialog.
+                   */
+                  if (replacingSms && pendingSetup.phone) {
+                    setReplaceConfirm({
+                      method: "sms_otp",
+                      code: confirmCode.trim(),
+                      phone: pendingSetup.phone,
+                    });
+                    return;
+                  }
                   const body = {
                     action: "confirm",
                     method: "sms_otp",
                     code: confirmCode.trim(),
+                    phone: pendingSetup.phone ?? undefined,
                   };
                   void act(body).then((d) => d && handleActionSuccess(body, d));
                 }}
                 className="space-y-3 rounded-xl border border-sky-500/30 bg-sky-500/5 p-3"
               >
                 <p className="text-xs font-semibold">
-                  کد ۶ رقمی ارسال‌شده به{" "}
-                  {toPersianDigits(pendingSetup.maskedPhone ?? pendingSetup.phone ?? "")} را برای
-                  تأیید نهایی وارد کنید:
+                  {replacingSms ? (
+                    <>
+                      کد ۶ رقمی ارسال‌شده به شمارهٔ جدید{" "}
+                      {toPersianDigits(pendingSetup.phone ?? pendingSetup.maskedPhone ?? "")} را
+                      وارد کنید؛ پس از تأیید، این شماره جایگزین شمارهٔ فعلی می‌شود:
+                    </>
+                  ) : (
+                    <>
+                      کد ۶ رقمی ارسال‌شده به{" "}
+                      {toPersianDigits(pendingSetup.maskedPhone ?? pendingSetup.phone ?? "")} را
+                      برای تأیید نهایی وارد کنید:
+                    </>
+                  )}
                 </p>
+                {status?.smsChallengeExpiresAt ? (
+                  <p className="text-xs text-muted-foreground">
+                    {smsChallengeExpiryMessage(status.smsChallengeExpiresAt, nowTick)}
+                  </p>
+                ) : null}
                 <div className="flex flex-wrap items-end gap-2">
                   <div className="min-w-44 flex-1">
                     <input
@@ -672,20 +790,38 @@ function PlatformSelfMfaSection() {
                     type="submit"
                     disabled={busy || confirmCode.trim().length < 6}
                   >
-                    تأیید شماره و فعال‌سازی
+                    {replacingSms ? "تأیید شماره و جایگزینی" : "تأیید شماره و فعال‌سازی"}
                   </Button>
                   <Button
                     variant="ghost"
-                    onClick={() =>
-                      void act({ action: "resend_challenge", method: "sms_otp" })
-                    }
-                    disabled={busy || resendWait > 0}
+                    onClick={() => {
+                      const body = {
+                        action: "resend_challenge",
+                        method: "sms_otp",
+                        // Issue #854 (P2.21) — a replacement resend must name
+                        // the new number, not the stored (old) one.
+                        ...(replacingSms && pendingSetup?.phone
+                          ? { phone: pendingSetup.phone }
+                          : {}),
+                      };
+                      void act(body).then((d) => d && handleActionSuccess(body, d));
+                    }}
+                    disabled={busy || coolingDown}
                   >
-                    {resendWait > 0
+                    {coolingDown
                       ? `ارسال مجدد کد (${toPersianDigits(resendWait)})`
                       : "ارسال مجدد کد"}
                   </Button>
+                  <Button variant="ghost" onClick={cancelSmsCeremony} disabled={busy}>
+                    انصراف
+                  </Button>
                 </div>
+                {replacingSms ? (
+                  <p className="text-xs text-muted-foreground">
+                    شمارهٔ فعلی تا پایان تأیید شمارهٔ جدید فعال می‌ماند؛ انصراف هیچ تغییری در روش
+                    فعال ایجاد نمی‌کند.
+                  </p>
+                ) : null}
               </form>
             ) : null}
           </div>
@@ -701,10 +837,7 @@ function PlatformSelfMfaSection() {
               </div>
               <Button
                 variant="ghost"
-                onClick={() => {
-                  const body = { action: "regenerate_recovery_codes" };
-                  void act(body).then((d) => d && handleActionSuccess(body, d));
-                }}
+                onClick={() => setConfirmAction({ kind: "regenerate_codes" })}
                 disabled={busy}
               >
                 ساخت کدهای جدید
@@ -717,6 +850,70 @@ function PlatformSelfMfaSection() {
           ) : null}
         </div>
       )}
+
+      {/* Issue #854 (P2.26) — the same confirmation contract as the tenant card. */}
+      <SecurityConfirmDialog
+        open={confirmAction !== null}
+        title={
+          confirmAction?.kind === "remove"
+            ? confirmAction.method === "totp"
+              ? "حذف برنامهٔ رمزساز"
+              : "حذف پیامک یک‌بارمصرف"
+            : "ساخت کدهای بازیابی جدید"
+        }
+        description={
+          confirmAction?.kind === "remove"
+            ? "این روش بلافاصله از حساب شما حذف می‌شود."
+            : "کدهای بازیابی تازه صادر می‌شوند و فهرست قبلی باطل می‌گردد."
+        }
+        consequences={
+          confirmAction?.kind === "remove"
+            ? [
+                confirmAction.method === "totp"
+                  ? "از این پس کد برنامهٔ رمزساز برای ورود شما پذیرفته نمی‌شود."
+                  : "از این پس کدی به شمارهٔ فعلی پیامک نمی‌شود و ورود پیامکی این حساب قطع می‌گردد.",
+                (status?.methods ?? []).filter((m) => m !== confirmAction.method).length === 0
+                  ? "این آخرین روش دومرحله‌ای شماست؛ ورود دومرحله‌ای برای حساب‌های مدیریت سکو اجباری است و سرور حذف را رد می‌کند."
+                  : "بقیهٔ روش‌های دومرحله‌ای شما دست‌نخورده می‌مانند.",
+                "کدهای بازیابی قبلی همچنان به‌عنوان راه پشتیبان باقی می‌مانند.",
+              ]
+            : [
+                "تمام کدهای بازیابی قبلی همان لحظه باطل می‌شوند و دیگر در هیچ ورودی کار نمی‌کنند.",
+                "فهرست تازه تنها یک بار نمایش داده می‌شود؛ آن را در جای امنی نگهداری کنید.",
+                "روش‌های دومرحله‌ای شما (رمزساز یا پیامک) تغییری نمی‌کنند.",
+              ]
+        }
+        confirmLabel={confirmAction?.kind === "remove" ? "بله، حذف شود" : "بله، کدهای جدید بساز"}
+        busy={busy}
+        onOpenChange={(next) => {
+          if (!next) setConfirmAction(null);
+        }}
+        onConfirm={() => {
+          if (confirmAction?.kind === "remove") void executeRemove(confirmAction.method);
+          if (confirmAction?.kind === "regenerate_codes") void executeRegenerateCodes();
+        }}
+      />
+      <SecurityConfirmDialog
+        open={replaceConfirm !== null}
+        title="جایگزینی شمارهٔ دریافت کد پیامکی"
+        description={
+          replaceConfirm
+            ? `کد واردشده برای ${toPersianDigits(replaceConfirm.phone)} تأیید شد؛ با ثبت این تغییر، شمارهٔ دریافت عوض می‌شود.`
+            : ""
+        }
+        consequences={[
+          "شمارهٔ فعلی از همین لحظه دیگر کدی دریافت نمی‌کند.",
+          "ورودهای بعدی با رمز عبور، کد را به شمارهٔ تازه می‌فرستند.",
+          "این تغییر به‌صورت اتمی ثبت می‌شود: هیچ لحظه‌ای حساب بدون عامل دومرحله‌ای نمی‌ماند.",
+        ]}
+        confirmLabel="بله، شماره جایگزین شود"
+        variant="default"
+        busy={busy}
+        onOpenChange={(next) => {
+          if (!next) setReplaceConfirm(null);
+        }}
+        onConfirm={() => void submitReplaceConfirm()}
+      />
     </Card>
   );
 }

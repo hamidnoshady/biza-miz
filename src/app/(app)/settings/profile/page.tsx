@@ -74,6 +74,12 @@ export default async function ProfilePage() {
           login_phone: describeCredentialSurface(deployment.profile, "login_phone"),
           totp_secret: describeCredentialSurface(deployment.profile, "totp_secret"),
           staff_pin: describeCredentialSurface(deployment.profile, "staff_pin"),
+          /**
+           * Issue #854 (P2.28) — the profile page is now the canonical home of
+           * WebAuthn/biometric credential management; its authority rides the
+           * same deployment matrix as every other credential surface.
+           */
+          webauthn_credential: describeCredentialSurface(deployment.profile, "webauthn_credential"),
         }}
       />
     </PageShell>
