@@ -1,9 +1,11 @@
 /**
  * Printer settings API regression coverage. A Windows printer carries no IP
- * address, and saving a default touches pre-existing JSON rows before the
- * insert; both paths must remain valid and transactional. New writes are
- * canonical-model only — the parser (printing/printer-input.test.ts) pins
- * that; these tests pin the route's plumbing around it.
+ * address, and saving a default clears its predecessor of the same purpose
+ * before the insert; both paths must remain valid and transactional.
+ *
+ * The route is plumbing over the canonical write boundary: the row's columns
+ * are the source of truth and the jsonb is only the hardware target. The
+ * parser itself is pinned in src/lib/printing/printer-input.test.ts.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { NextRequest } from "next/server";
@@ -67,13 +69,17 @@ beforeEach(() => {
 });
 
 describe("GET /api/settings/printers", () => {
-  it("orders defaults with safe JSON containment rather than a fragile text-to-boolean cast", async () => {
+  it("reads the canonical relational columns and never a behavioural jsonb key", async () => {
     const response = await GET();
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ printers: [SAVED] });
-    const sql = vi.mocked(db.query).mock.calls[0][0];
-    expect(sql).toContain("connection @>");
-    expect(sql).not.toContain("connection->>'isDefault')::boolean");
+    const sql = String(vi.mocked(db.query).mock.calls[0][0]);
+    expect(sql).toContain("printer_class");
+    expect(sql).toContain("paper");
+    expect(sql).toContain("supports_drawer");
+    // Behaviour is columns now; nothing may be cast out of the jsonb blob.
+    expect(sql).not.toContain("connection->>");
+    expect(sql).not.toContain("connection @>");
   });
 
   it("returns a stable error body when the database read fails", async () => {
@@ -103,10 +109,20 @@ describe("POST /api/settings/printers", () => {
     expect(client.query).not.toHaveBeenCalledWith("ROLLBACK");
     const insert = client.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO printers"));
     expect(insert?.[1]?.[0]).toBe("loc-1");
+    // The jsonb is the hardware target and nothing else…
     const stored = JSON.parse(String(insert?.[1]?.[3]));
-    expect(stored).toMatchObject({ type: "windows", systemName: "EPSON TM-T20III", paperWidthMm: 80 });
+    expect(stored).toEqual({ type: "windows", systemName: "EPSON TM-T20III" });
     expect(stored).not.toHaveProperty("transport");
     expect(stored).not.toHaveProperty("ip");
+    expect(stored).not.toHaveProperty("paperWidthMm");
+    expect(stored).not.toHaveProperty("openDrawer");
+    expect(stored).not.toHaveProperty("templateKey");
+    // …while behaviour travels in the columns the row is read from.
+    const params = insert?.[1] as unknown[];
+    expect(params[5]).toBe("thermal"); // printer_class
+    expect(params[8]).toBe(false); // is_default
+    expect(params[9]).toBe("thermal80"); // paper
+    expect(params[10]).toBe(80); // paper_width_mm
     expect(client.release).toHaveBeenCalledOnce();
   });
 
@@ -123,7 +139,7 @@ describe("POST /api/settings/printers", () => {
     expect(db.getPool).not.toHaveBeenCalled();
   });
 
-  it("clears an old default defensively and atomically", async () => {
+  it("clears the previous default of the same purpose in the same transaction", async () => {
     const response = await POST(
       request({
         name: "POS80",
@@ -135,8 +151,14 @@ describe("POST /api/settings/printers", () => {
     );
     expect(response.status).toBe(201);
     const update = client.query.mock.calls.find(([sql]) => String(sql).includes("UPDATE printers"));
-    expect(update?.[0]).toContain("jsonb_typeof(connection)");
-    expect(update?.[0]).toContain("||");
+    expect(update?.[0]).toContain("is_default = false");
+    expect(update?.[0]).toContain("kind = $2");
+    expect(update?.[1]).toEqual(["loc-1", "receipt"]);
+  });
+
+  it("does not disturb the default when the new printer is not one", async () => {
+    await POST(request({ name: "POS80", kind: "receipt", connection: { type: "windows", systemName: "POS80" }, paperWidthMm: 80 }));
+    expect(client.query.mock.calls.some(([sql]) => String(sql).includes("UPDATE printers"))).toBe(false);
   });
 
   it("rolls back and returns printer_save_failed when the insert fails", async () => {

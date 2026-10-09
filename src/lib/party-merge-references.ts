@@ -174,6 +174,22 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "رسید دریافت",
   },
   {
+    table: "fixed_assets",
+    column: "custodian_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "An asset's custodian is operational: the register reads it live (history, responsibility), so it must resolve to the surviving party instead of an archived one. No journal line references the custodian — the trial balance is untouched.",
+  },
+  {
+    table: "fixed_assets",
+    column: "vendor_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The vendor an asset was bought from is a live register attribute (list, filters, export), not an audit row about the party itself; re-pointing keeps the provenance readable after two supplier files become one. The purchase journal entry is not touched.",
+  },
+  {
     table: "cheques",
     column: "customer_id",
     scope: "business",

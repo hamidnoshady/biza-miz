@@ -45,6 +45,32 @@ describe("ageOpenItems", () => {
     expect(aged[0].outstanding).toBe(50_000);
   });
 
+  it("uses a stable id tie-breaker for same-date FIFO items regardless of input order", () => {
+    const aged = ageOpenItems(
+      [
+        { id: "z-line", date: "2025-01-01", amount: 100_000 },
+        { id: "a-line", date: "2025-01-01", amount: 100_000 },
+      ],
+      [{ id: "r1", date: "2025-01-02", amount: 150_000 }],
+      "2025-01-10",
+    );
+    expect(aged).toEqual([
+      { id: "z-line", date: "2025-01-01", amount: 100_000, outstanding: 50_000, ageDays: 9, bucket: "current" },
+    ]);
+  });
+
+  it("returns same-date open items in stable id order", () => {
+    const aged = ageOpenItems(
+      [
+        { id: "z-line", date: "2025-01-01", amount: 10_000 },
+        { id: "a-line", date: "2025-01-01", amount: 20_000 },
+      ],
+      [],
+      "2025-01-10",
+    );
+    expect(aged.map((item) => item.id)).toEqual(["a-line", "z-line"]);
+  });
+
   it("leaves everything outstanding when there are no receipts", () => {
     const invoices = [
       { id: "i1", date: "2025-01-01", amount: 40_000 },

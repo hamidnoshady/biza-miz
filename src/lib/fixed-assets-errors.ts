@@ -1,0 +1,72 @@
+/**
+ * The fixed-asset register's domain errors, in Persian, ONCE (issue #833
+ * review follow-up): the register section, the accounting manager and the
+ * shared dashboard error map all used to carry their own copies, which is
+ * how a new refusal code could land translated in one screen and raw in
+ * another. This module is the single dictionary for every error code the
+ * fixed-assets service and its routes emit; generic codes (bad_request,
+ * fiscal locks, ledger_account_missing, …) stay in the dashboard's shared
+ * map, which every screen already falls back to.
+ */
+export const FIXED_ASSET_ERROR_TRANSLATIONS: Record<string, string> = {
+  fixed_asset_not_found: "دارایی ثابت پیدا نشد.",
+  fixed_asset_has_depreciation: "برای این دارایی سابقه حسابداری ثبت شده و حذف آن ممکن نیست؛ می‌توانید آن را بایگانی کنید.",
+  fixed_asset_has_history: "برای این دارایی سابقه ثبت شده (خرید، انتقال یا تغییر برآورد) و حذف آن ممکن نیست؛ می‌توانید آن را بایگانی کنید.",
+  period_label_required: "عنوان دوره الزامی است.",
+  period_label_too_long: "یادداشت دوره بیش از حد طولانی است.",
+  period_already_depreciated: "استهلاک این دوره قبلاً برای این دارایی ثبت شده است.",
+  fully_depreciated: "این دارایی به‌طور کامل مستهلک شده است و امکان ثبت استهلاک بیشتر وجود ندارد.",
+  invalid_period: "ماه استهلاک معتبر نیست.",
+  entry_date_outside_period: "تاریخ سند باید داخل همان ماه استهلاک باشد.",
+  entry_date_in_future: "تاریخ سند نمی‌تواند در آینده باشد.",
+  period_before_in_service: "این ماه پیش از تاریخ بهره‌برداری دارایی است؛ استهلاک از ماه بهره‌برداری شروع می‌شود.",
+  period_beyond_schedule: "این ماه خارج از برنامهٔ استهلاک دارایی است؛ برنامهٔ استهلاک از ماه بهره‌برداری به اندازهٔ عمر مفید ادامه دارد. برای استهلاک ماه‌های دورتر، ابتدا عمر مفید را (از دورهٔ جاری، آینده‌نگر) افزایش دهید.",
+  invalid_acquisition_source: "منشأ ثبت بهای دارایی معتبر نیست.",
+  invalid_acquisition_date: "تاریخ سند خرید معتبر نیست.",
+  invalid_acquisition_account: "حساب پرداخت انتخاب‌شده معتبر نیست؛ باید صندوق، بانک، تنخواه، وجوه در راه یا حساب پرداختنی باشد.",
+  acquisition_entry_required: "برای اتصال به سند خرید، یک سند را انتخاب کنید.",
+  acquisition_entry_not_found: "سند خرید انتخاب‌شده پیدا نشد.",
+  acquisition_entry_reversed: "سند انتخاب‌شده برگشت خورده است و نمی‌تواند سند خرید دارایی باشد.",
+  acquisition_entry_insufficient: "مبلغ ثبت‌شده در حساب دارایی‌های ثابت این سند، کمتر از بهای این دارایی (پس از کسر دارایی‌های دیگرِ متصل) است.",
+  // lifecycle (issue #833)
+  asset_disposed: "این دارایی واگذار/اسقاط شده و دیگر عملیاتی روی آن انجام نمی‌شود.",
+  asset_archived: "این دارایی بایگانی شده است.",
+  depreciation_entry_not_found: "سند استهلاک انتخاب‌شده پیدا نشد.",
+  depreciation_entry_required: "ردیف استهلاک انتخاب نشده است.",
+  depreciation_already_reversed: "این استهلاک قبلاً برگشت خورده است.",
+  invalid_reversal_date: "تاریخ برگشت معتبر نیست.",
+  invalid_disposal_kind: "نوع واگذاری معتبر نیست.",
+  invalid_disposal_date: "تاریخ واگذاری معتبر نیست.",
+  disposal_date_in_future: "تاریخ واگذاری نمی‌تواند در آینده باشد.",
+  disposal_before_in_service: "تاریخ واگذاری نمی‌تواند پیش از تاریخ بهره‌برداری دارایی باشد.",
+  disposal_before_last_transfer: "تاریخ واگذاری نمی‌تواند پیش از آخرین انتقال ثبت‌شده باشد.",
+  disposal_before_depreciation: "تاریخ واگذاری نمی‌تواند پیش از آخرین استهلاک ثبت‌شده باشد؛ ابتدا سند استهلاک‌های بعد از تاریخ واگذاری را برگشت بزنید.",
+  disposal_proceeds_required: "برای فروش، مبلغ واگذاری (بزرگ‌تر از صفر) الزامی است.",
+  disposal_proceeds_not_allowed: "برای اسقاط یا حذف، مبلغ واگذاری نباید وارد شود.",
+  proceeds_account_required: "حساب وصول مبلغ فروش را انتخاب کنید.",
+  invalid_proceeds_account: "حساب وصول انتخاب‌شده معتبر نیست؛ باید صندوق، بانک، تنخواه، وجوه در راه یا یک حساب دریافتنی باشد.",
+  estimate_change_required: "حداقل یکی از عمر مفید یا ارزش اسقاط را مشخص کنید.",
+  estimate_unchanged: "مقدار جدید با مقدار فعلی یکسان است.",
+  invalid_useful_life: "عمر مفید باید عدد صحیح بین ۱ تا ۱۲۰۰ ماه باشد.",
+  salvage_not_less_than_cost: "ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.",
+  salvage_above_depreciated_base: "ارزش اسقاط جدید نمی‌تواند بیش از باقیماندهٔ غیرمستهلک دارایی باشد؛ استهلاک ثبت‌شده از این مقدار بیشتر است.",
+  estimate_change_excludes_history: "عمر مفید جدید نمی‌تواند کوتاه‌تر از ماه‌هایی باشد که قبلاً استهلاک آن‌ها ثبت شده است.",
+  transfer_same_location: "دارایی هم‌اکنون در همین شعبه است.",
+  transfer_before_last_transfer: "تاریخ انتقال نمی‌تواند پیش از آخرین انتقال ثبت‌شده باشد؛ سابقه انتقال‌ها تغییرناپذیر است.",
+  transfer_before_in_service: "تاریخ انتقال نمی‌تواند پیش از تاریخ بهره‌برداری دارایی باشد.",
+  transfer_date_in_future: "تاریخ انتقال نمی‌تواند در آینده باشد.",
+  invalid_transfer_date: "تاریخ انتقال معتبر نیست.",
+  invalid_asset_account: "حساب دارایی انتخاب‌شده باید یک حساب دارایی ثابت (۱۵۰۰ تا ۱۵۹۹، به‌جز استهلاک انباشته) باشد.",
+  fixed_asset_code_taken: "دارایی دیگری با همین کد ثبت شده است.",
+  fixed_asset_code_too_long: "کد دارایی بیش از حد طولانی است.",
+  fixed_asset_category_too_long: "دسته دارایی بیش از حد طولانی است.",
+  fixed_asset_serial_too_long: "شماره سریال بیش از حد طولانی است.",
+  fixed_asset_reference_too_long: "مرجع خرید بیش از حد طولانی است.",
+  fixed_asset_notes_too_long: "یادداشت بیش از حد طولانی است.",
+  idempotency_key_too_long: "کلید تکرارپذیری بیش از حد طولانی است.",
+  vendor_not_found: "فروشنده انتخاب‌شده معتبر نیست.",
+  custodian_not_found: "متصدی انتخاب‌شده معتبر نیست.",
+  // the export's own honesty (issue #833): the xlsx format ceiling, not a policy cap.
+  export_too_large: "حجم داده‌های فیلترشده از سقف مجاز هر برگهٔ اکسل (حدود یک میلیون ردیف) بیشتر است؛ فیلترها را محدودتر کنید (دسته، شعبه یا بازهٔ تاریخ).",
+  invalid_cursor: "نشانهٔ صفحه‌بندی نامعتبر است؛ فهرست را از ابتدا بارگذاری کنید.",
+};
