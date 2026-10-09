@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { buildMigrationStatus } from "../src/lib/migration-status-service";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -34,6 +35,25 @@ function maintenanceUrl(): string {
   const url = new URL(rootDatabaseUrl!);
   url.pathname = "/postgres";
   return url.toString();
+}
+
+/**
+ * A migration status for the overview aggregation, built by the same pure
+ * classifier the shared service uses — so the assertions below exercise the
+ * production classification path rather than a hand-written fixture.
+ */
+function statusFor(files: string[], applied: string[] = []) {
+  return buildMigrationStatus({
+    files,
+    applied: new Map(applied.map((filename) => [filename, "2026-01-01T00:00:00.000Z"])),
+    cutoverDatabase: {
+      secretsStored: false,
+      legacyColumnsPresent: false,
+      rowsMissingCiphertext: 0,
+      legacyPlaintextRows: 0,
+    },
+    now: new Date("2026-01-02T00:00:00.000Z"),
+  });
 }
 
 async function seedBusiness(opts: {
@@ -322,23 +342,73 @@ describe("queryBugReports", () => {
 
 describe("getPlatformOverview", () => {
   it("aggregates business counts and growth in one call", async () => {
-    const o = await overviewService.getPlatformOverview(0);
+    const o = await overviewService.getPlatformOverview(statusFor(["0001_a.sql"], ["0001_a.sql"]));
     expect(o.businesses.total).toBe(4);
     expect(o.businesses.active).toBe(2);
     expect(o.businesses.suspended).toBe(1);
     expect(o.businesses.archived).toBe(1);
     expect(o.system.pendingMigrations).toBe(0);
+    expect(o.system.migrationHeadline?.tone).toBe("ok");
   });
 
-  it("raises a migration alert when migrations are pending", async () => {
-    const o = await overviewService.getPlatformOverview(3);
+  it("raises a migration alert when ordinary migrations are pending", async () => {
+    const o = await overviewService.getPlatformOverview(
+      statusFor(["0001_a.sql", "0002_b.sql", "0003_c.sql", "0004_d.sql"], ["0001_a.sql"]),
+    );
     const alert = o.alerts.find((a) => a.href === "/platform/system");
     expect(alert).toBeDefined();
     expect(alert?.level).toBe("error");
+    expect(o.system.ordinaryPendingMigrations).toBe(3);
+    expect(o.system.pendingMigrations).toBe(3);
+    expect(o.system.migrationHeadline?.tone).toBe("bad");
+  });
+
+  it("reports the gated AI gateway secret cutover separately from ordinary pending work", async () => {
+    const o = await overviewService.getPlatformOverview(
+      buildMigrationStatus({
+        files: ["0209_ai_gateway_secret_cutover.sql", "0210_later.sql"],
+        applied: new Map(),
+        cutoverDatabase: {
+          secretsStored: true,
+          legacyColumnsPresent: true,
+          rowsMissingCiphertext: 0,
+          legacyPlaintextRows: 2,
+        },
+      }),
+    );
+    expect(o.system.gatedMigrations).toBe(1);
+    expect(o.system.ordinaryPendingMigrations).toBe(1);
+    // The gated migration is never dropped from the pending total.
+    expect(o.system.pendingMigrations).toBe(2);
+    // Only the migration alerts; the RLS alert shares the same destination.
+    const alerts = o.alerts.filter((a) => a.href === "/platform/system" && !a.title.includes("RLS"));
+    expect(alerts.map((a) => a.level)).toEqual(["error", "warning"]);
+    expect(alerts[1].title).toContain("پاک‌سازی کلیدهای قدیمی هوش مصنوعی");
+    expect(o.system.migrationHeadline?.tone).toBe("bad");
+  });
+
+  it("warns instead of reporting zero pending when the migration inventory is unreadable", async () => {
+    const o = await overviewService.getPlatformOverview(
+      buildMigrationStatus({
+        files: null,
+        applied: new Map(),
+        cutoverDatabase: {
+          secretsStored: null,
+          legacyColumnsPresent: null,
+          rowsMissingCiphertext: null,
+          legacyPlaintextRows: null,
+        },
+      }),
+    );
+    expect(o.system.pendingMigrations).toBeNull();
+    expect(o.system.migrationStatusAvailable).toBe(false);
+    expect(o.system.migrationHeadline?.tone).toBe("unknown");
+    const alert = o.alerts.find((a) => a.href === "/platform/system");
+    expect(alert?.level).toBe("warning");
   });
 
   it("reports empty support/bug/payment counts on a fresh deployment", async () => {
-    const o = await overviewService.getPlatformOverview(0);
+    const o = await overviewService.getPlatformOverview(statusFor(["0001_a.sql"], ["0001_a.sql"]));
     expect(o.support.open).toBe(0);
     expect(o.bugReports.new).toBe(0);
     expect(o.payments.manualPending).toBe(0);
