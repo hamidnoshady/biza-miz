@@ -71,6 +71,10 @@ Redemption already existed — an admin could mint a link from the team screen a
 
 **L17 — malformed roster rendered as an empty roster.** A 200 whose body has no `employees` array is now a failure state, not a silent "no staff here".
 
+**L17 — the OTP step's async could outlive a cancelled step.** `phone-otp-step.tsx` was still on a bare `await fetch` behind a local `busy` flag, so nothing moved on when the member backed out mid-verify. A response landing afterwards ran its handlers regardless: `onVerified()` completed a login the member had already abandoned. It now goes through `useLoginRequest`, gaining the generation guard and the bounded timeout the two sign-in forms already had.
+
+That wiring exposed a second defect, in the hook itself rather than the step. `cancel()` moved the generation on, which is enough to protect the caller's state, but never aborted the request — so an abandoned verify still reached the server, still consumed an OTP attempt, and still counted against the send ceiling. A member who backed out and retried could burn the attempt their next code needed. `cancel()` now aborts the in-flight controller.
+
 **A pre-existing bug the audit did not list.** `auth_login_attempts` (migration 0070) constrained `realm` to `('tenant_password','platform_admin','directory')`; 0078 widened only the realm list. `sendEmployeePhoneOtp` has inserted `realm='phone_otp'` since Phase 42, so **every** OTP send violated the check constraint — *after* the SMS had already been dispatched, outside any `try/catch`. Two consequences: the route's catch answered `502 sms_dispatch_failed` for a message that had been delivered (inviting a retry), and no attempt row was recorded, so `checkPhoneOtpRateLimit` always read an empty budget and the 1/min, 5/hr, 20/day ceiling never applied. Verified by direct insert against PostgreSQL 18.4. Fixed by re-adding both constraints to include `'phone_otp'` and `'reserved'`.
 
 ---
@@ -146,6 +150,7 @@ The legacy PIN-only scan was reviewed but **not retired** — it is still the on
 | `src/components/auth/login-door-chooser.test.tsx` | 11 | new — `next` preservation, offline copy, capability degradation |
 | `src/lib/trusted-device.test.ts` | 11 | new — trust matrix, exact 7-day boundary, invalid date fails closed |
 | `src/components/auth/use-login-request.test.tsx` | 10 | new — busy release on reject/timeout/non-JSON, stale-response guard, cancel |
+| `src/components/auth/phone-otp-step.test.tsx` | 7 | new — late verify after unmount cannot log in, in-flight verify is aborted, network failure releases the button, MFA branch preserved, SMS paste |
 | `src/lib/login-eligibility.test.ts` | 12 | new — SQL fragment shape, per-profile widening, and that WebAuthn stays narrow when the PIN door widens |
 | `src/lib/password-reset-request.test.ts` | 13 | new — budget boundaries, order independence, corrupt stamps, reset-email copy |
 | `src/app/api/auth/password-reset/request/route.test.ts` | 8 | new — all six outcomes answer identically, no 429, no outcome echo |
@@ -167,7 +172,7 @@ All commands run in this sandbox on the work commit.
 |---|---|
 | `NODE_OPTIONS=--max-old-space-size=3072 npx tsc --noEmit` | **exit 0**, no output |
 | `npx eslint . --max-warnings=0` | **exit 0** |
-| `npx vitest run --maxWorkers=2` | **674 files / 8,511 tests passed**, exit 0 |
+| `npx vitest run --maxWorkers=2` | **675 files / 8,518 tests passed**, exit 0 |
 | `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (11 auth/IAM files) | **11 files / 87 tests passed**, exit 0, 201.3 s |
 | Plus the 3 files exercising `team-service.ts` / `password-reset.ts` | **3 files / 49 tests passed**, exit 0, 141.0 s |
 
@@ -177,7 +182,7 @@ Modified-code integration breakdown: `hybrid-credential-sync` 16, `team` 23, `pl
 
 Database: PostgreSQL **18.4**, provisioned via `embedded-postgres` on 127.0.0.1:54339, migrations applied through `scripts/migrate.ts`.
 
-Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. This change therefore adds **8 unit test files and 125 tests** (8,511 − 8,386) with no existing test removed or altered in expectation.
+Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. This change therefore adds **9 unit test files and 132 tests** (8,518 − 8,386) with no existing test removed or altered in expectation.
 
 GitHub CI: **no runs or statuses exist** for this repository — the lookup returns empty. There is no CI to report against.
 

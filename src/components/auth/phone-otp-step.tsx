@@ -15,6 +15,7 @@
 import { useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import { normalizeOtpCode, otpFromPastedText } from "@/lib/login-contract";
+import { networkErrorMessage, useLoginRequest } from "./use-login-request";
 import { MfaStep } from "./mfa-step";
 
 /** How to address a resend — mirrors the three modes of /api/auth/phone-otp/request. */
@@ -89,7 +90,18 @@ export function PhoneOtpStep({
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  /**
+   * Issue #885 L17 — the OTP step's async could outlive a cancelled step.
+   *
+   * Both calls below used to be a bare `await fetch` with a local `busy`
+   * flag. Nothing moved on when the member backed out mid-verify, so a
+   * response that landed afterwards still ran its handlers: `onVerified()`
+   * completed a login the member had already abandoned, and `setError`
+   * wrote to a step that was gone. `useLoginRequest` owns the generation
+   * counter, so an overtaken call resolves as `{ stale: true }` and touches
+   * nothing — and it adds the bounded timeout this component never had.
+   */
+  const { busy, send, cancel } = useLoginRequest();
   /**
    * Issue #885 — «اعتماد به این دستگاه برای ۷ روز».
    *
@@ -111,85 +123,96 @@ export function PhoneOtpStep({
     setMaskedPhone(initialMaskedPhone);
   }, [initialToken, initialMaskedPhone]);
 
+  // Leaving the step abandons whatever is in flight rather than letting it
+  // land on a component that no longer exists.
+  useEffect(() => cancel, [cancel]);
+
   async function resend() {
-    setBusy(true);
     setError(null);
     setNotice(null);
-    try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      let body: Record<string, unknown> = {};
-      if (sendSpec.kind === "token") {
-        headers.Authorization = `Bearer ${sendSpec.token}`;
-        body = { phone: sendSpec.phone };
-      } else if (sendSpec.kind === "employee") {
-        body = { employeeId: sendSpec.employeeId, businessId: sendSpec.businessId };
-      } else {
-        body = { phone: sendSpec.phone, businessId: sendSpec.businessId };
-      }
 
-      const res = await fetch("/api/auth/phone-otp/request", {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    let body: Record<string, unknown> = {};
+    if (sendSpec.kind === "token") {
+      headers.Authorization = `Bearer ${sendSpec.token}`;
+      body = { phone: sendSpec.phone };
+    } else if (sendSpec.kind === "employee") {
+      body = { employeeId: sendSpec.employeeId, businessId: sendSpec.businessId };
+    } else {
+      body = { phone: sendSpec.phone, businessId: sendSpec.businessId };
+    }
+
+    const outcome = await send<RequestResponse>((signal) =>
+      fetch("/api/auth/phone-otp/request", {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-      });
-      const data = (await res.json().catch(() => ({}))) as RequestResponse;
-      if (res.status === 429) {
-        setError(retryAfterMessage(data.retryAfterMs));
-        return;
-      }
-      if (!res.ok) {
-        setError(phoneOtpErrorMessage(data.error, res.status, data.message));
-        return;
-      }
-      if (data.token) setToken(data.token);
-      if (data.maskedPhone) setMaskedPhone(data.maskedPhone);
-      setCode("");
-      setNotice(`کد تازه به ${toPersianDigits(data.maskedPhone ?? maskedPhone ?? "")} پیامک شد.`);
-    } catch {
-      setError("ارتباط با سرور برقرار نشد.");
-    } finally {
-      setBusy(false);
+        signal,
+      }),
+    );
+    if (outcome.stale) return;
+    if (outcome.networkError) {
+      setError(networkErrorMessage(outcome.networkError));
+      return;
     }
+    if (outcome.status === 429) {
+      setError(retryAfterMessage(outcome.data.retryAfterMs));
+      return;
+    }
+    if (!outcome.ok) {
+      setError(phoneOtpErrorMessage(outcome.data.error, outcome.status, outcome.data.message));
+      return;
+    }
+    if (outcome.data.token) setToken(outcome.data.token);
+    if (outcome.data.maskedPhone) setMaskedPhone(outcome.data.maskedPhone);
+    setCode("");
+    setNotice(
+      `کد تازه به ${toPersianDigits(outcome.data.maskedPhone ?? maskedPhone ?? "")} پیامک شد.`,
+    );
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    setBusy(true);
     setError(null);
-    try {
-      const res = await fetch("/api/auth/phone-otp/verify", {
+
+    const outcome = await send<
+      RequestResponse & {
+        mfaRequired?: boolean;
+        mfaToken?: string;
+        mfaMethod?: "totp" | "sms_otp" | null;
+        availableMethods?: ("totp" | "sms_otp")[];
+      }
+    >((signal) =>
+      fetch("/api/auth/phone-otp/verify", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ code, deviceToken, trustDevice }),
-      });
-      const data = (await res.json().catch(() => ({}))) as RequestResponse & {
-        mfaRequired?: boolean;
-        mfaToken?: string;
-        mfaMethod?: "totp" | "sms_otp" | null;
-        availableMethods?: ("totp" | "sms_otp")[];
-      };
-      if (res.ok) {
-        if (data.mfaRequired && data.mfaToken) {
-          setMfaPending({
-            token: data.mfaToken,
-            method: data.mfaMethod ?? null,
-            availableMethods: data.availableMethods ?? [],
-          });
-          return;
-        }
-        onVerified();
+        signal,
+      }),
+    );
+    if (outcome.stale) return;
+    if (outcome.networkError) {
+      setError(networkErrorMessage(outcome.networkError));
+      return;
+    }
+    if (outcome.ok) {
+      const data = outcome.data;
+      if (data.mfaRequired && data.mfaToken) {
+        setMfaPending({
+          token: data.mfaToken,
+          method: data.mfaMethod ?? null,
+          availableMethods: data.availableMethods ?? [],
+        });
         return;
       }
-      setError(phoneOtpErrorMessage(data.error, res.status, data.message));
-      setCode("");
-    } catch {
-      setError("ارتباط با سرور برقرار نشد.");
-    } finally {
-      setBusy(false);
+      onVerified();
+      return;
     }
+    setError(phoneOtpErrorMessage(outcome.data.error, outcome.status, outcome.data.message));
+    setCode("");
   }
 
   if (mfaPending) {

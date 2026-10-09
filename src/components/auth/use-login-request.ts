@@ -54,6 +54,8 @@ export function useLoginRequest(timeoutMs: number = DEFAULT_LOGIN_TIMEOUT_MS) {
   const [busy, setBusy] = useState(false);
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
+  /** The controller of whatever is in flight, so cancelling can abort it. */
+  const controllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -81,6 +83,7 @@ export function useLoginRequest(timeoutMs: number = DEFAULT_LOGIN_TIMEOUT_MS) {
       if (mountedRef.current) setBusy(true);
 
       const controller = new AbortController();
+      controllerRef.current = controller;
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const res = await doFetch(controller.signal);
@@ -103,6 +106,7 @@ export function useLoginRequest(timeoutMs: number = DEFAULT_LOGIN_TIMEOUT_MS) {
         };
       } finally {
         clearTimeout(timer);
+        if (controllerRef.current === controller) controllerRef.current = null;
         if (id === generationRef.current) release();
       }
     },
@@ -112,9 +116,18 @@ export function useLoginRequest(timeoutMs: number = DEFAULT_LOGIN_TIMEOUT_MS) {
   /**
    * Abandon whatever is in flight. The generation moves on, so the pending
    * call resolves into `{ stale: true }` and cannot touch state afterwards.
+   *
+   * Issue #885 L17 — it also aborts. Moving the generation on is enough to
+   * protect the caller's state, but the request itself kept running to
+   * completion: a verify abandoned at the till still hit the server, still
+   * consumed an OTP attempt, and still counted against the send ceiling. A
+   * member who backed out and retried could therefore burn the attempt their
+   * next code needed. Aborting tells the browser to drop the connection.
    */
   const cancel = useCallback(() => {
     generationRef.current += 1;
+    controllerRef.current?.abort();
+    controllerRef.current = null;
     release();
   }, [release]);
 
