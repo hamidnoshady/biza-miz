@@ -112,7 +112,10 @@ export function createNativeRuntimeStore(): NativeRuntimeStore {
 
   function adopt(port: MessagePort, ready: NativeAppInfo | null) {
     closeClient();
-    const next = createNativeBridgeClient({ transport: portTransport(port) });
+    const next = createNativeBridgeClient({
+      transport: portTransport(port),
+      peerBridgeVersion: () => snapshot.app?.bridgeVersion ?? null,
+    });
     client = next;
     next.onEvent("bridge.ready", (info) => {
       if (client === next) update({ connection: "connected", app: info });

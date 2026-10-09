@@ -8,6 +8,7 @@
  */
 import {
   NATIVE_COMMANDS,
+  NATIVE_COMMAND_MIN_BRIDGE,
   buildRequestEnvelope,
   parseCommandResult,
   parseEventPayload,
@@ -44,6 +45,8 @@ export interface BridgeTransport {
 
 export interface NativeBridgeClientOptions {
   transport: BridgeTransport;
+  /** The connected app's bridge version, or null before it is known. Commands it cannot run are refused. */
+  peerBridgeVersion?: () => number | null;
   timeoutMs?: number;
   createId?: () => string;
   setTimer?: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
@@ -127,6 +130,10 @@ export function createNativeBridgeClient(options: NativeBridgeClientOptions): Na
       if (closed) return Promise.reject(new NativeBridgeError("channel_closed"));
       if (!(NATIVE_COMMANDS as readonly string[]).includes(command)) {
         return Promise.reject(new NativeBridgeError("unknown_command"));
+      }
+      const peerVersion = options.peerBridgeVersion?.() ?? null;
+      if (peerVersion !== null && peerVersion < NATIVE_COMMAND_MIN_BRIDGE[command]) {
+        return Promise.reject(new NativeBridgeError("bridge_version_too_old"));
       }
       const id = createId();
       return new Promise<NativeCommandResults[C]>((resolve, reject) => {

@@ -101,6 +101,26 @@ jobs:
           print("::error title=Gradle failure::" + encoded)
           PY
 
+      # The release guard is only worth having if it fires. This asks for a staging release with no
+      # origin and no signing, and fails the job unless Gradle refuses it with the guard's message.
+      - name: Check that a staging release is refused without an origin and signing
+        working-directory: android
+        run: |
+          set +e
+          ./gradlew --no-daemon :app:assembleStagingRelease > release-guard.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "A staging release built without a web origin or signing." >&2
+            exit 1
+          fi
+          if ! grep -q "Cannot build staging release" release-guard.log; then
+            echo "The release build failed, but not because of the release guard:" >&2
+            tail -n 40 release-guard.log >&2
+            exit 1
+          fi
+          echo "The release guard refused the staging release, as intended."
+
       - name: Upload the development debug APK (NON-PRODUCTION)
         uses: actions/upload-artifact@v7
         with:

@@ -129,6 +129,18 @@ describe("createNativeBridgeClient", () => {
     await assertion;
   });
 
+  it("refuses a command the connected app is too old to run, without sending it", async () => {
+    const { client, sent } = setup({ peerBridgeVersion: () => 0 });
+    await expect(client.request("app.info")).rejects.toMatchObject({ code: "bridge_version_too_old" });
+    expect(sent).toEqual([]);
+  });
+
+  it("sends a command once the app's version is known to be new enough", async () => {
+    const { client, sent } = setup({ peerBridgeVersion: () => 1 });
+    void client.request("app.info");
+    expect(sent).toHaveLength(1);
+  });
+
   it("refuses a command outside the allowlist without sending anything", async () => {
     const { client, sent } = setup();
     await expect(client.request("shell.exec" as never)).rejects.toMatchObject({ code: "unknown_command" });

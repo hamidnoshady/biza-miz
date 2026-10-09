@@ -15,6 +15,7 @@ import environments from "../../../config/android-environments.json";
 import {
   NATIVE_CAPABILITIES,
   NATIVE_CAPABILITY_MIN_BRIDGE,
+  NATIVE_COMMAND_MIN_BRIDGE,
   NATIVE_COMMANDS,
   NATIVE_ENVIRONMENTS,
   NATIVE_ERROR_CODES,
@@ -59,6 +60,12 @@ describe("bridge contract matches its TypeScript mirror", () => {
     expect(sorted(NATIVE_CAPABILITIES)).toEqual(sorted(Object.keys(contract.capabilities)));
     for (const capability of NATIVE_CAPABILITIES) {
       expect(NATIVE_CAPABILITY_MIN_BRIDGE[capability]).toBe(contract.capabilities[capability].nativeMinBridgeVersion);
+    }
+  });
+
+  it("has the same minimum bridge version for each command", () => {
+    for (const command of NATIVE_COMMANDS) {
+      expect(NATIVE_COMMAND_MIN_BRIDGE[command]).toBe(contract.commands[command].minBridgeVersion);
     }
   });
 

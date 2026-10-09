@@ -26,6 +26,16 @@ export const NATIVE_BRIDGE_VERSION: number = contract.bridgeVersion;
 export const NATIVE_COMMANDS = ["app.info", "notifications.status"] as const;
 export type NativeCommand = (typeof NATIVE_COMMANDS)[number];
 
+/**
+ * The bridge version at which the app first understands each command. The client refuses a
+ * command that the connected app is too old for, rather than sending it.
+ */
+export const NATIVE_COMMAND_MIN_BRIDGE: Readonly<Record<NativeCommand, number>> = Object.freeze(
+  Object.fromEntries(
+    Object.entries(contract.commands).map(([key, spec]) => [key, spec.minBridgeVersion]),
+  ) as Record<NativeCommand, number>,
+);
+
 export const NATIVE_EVENTS = ["bridge.ready"] as const;
 export type NativeEventName = (typeof NATIVE_EVENTS)[number];
 

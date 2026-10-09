@@ -61,10 +61,10 @@ cd android
 ```
 
 The debug APK is `android/app/build/outputs/apk/development/debug/app-development-debug.apk`.
-It points at `https://app.invalid`, so it can only show the offline or not-configured screen
-until the development origin is changed. To test against a real host, pass
-`-Pbiza.webOrigin.development=https://<host>`. The host must serve `assetlinks.json` for
-App Links to verify.
+It points at `https://app.invalid`, which does not resolve. The TWA opens and Chrome shows its
+own error page, so the APK is useful for checking the shell, not the web app. To test against a
+real host, pass `-Pbiza.webOrigin.development=https://<host>`. The host must serve
+`assetlinks.json` for App Links to verify.
 
 ## Testing
 
@@ -175,7 +175,7 @@ Business data is not stored on the device. The offline layer is the existing PWA
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `android-build.yml` | PR and push to `main`/`arena/**`, path-filtered | Web bridge tests; Gradle lint, JVM tests and a development debug APK, uploaded as `biza-miz-android-development-debug-NON-PRODUCTION`. No secrets are used. |
+| `android-build.yml` | PR and push to `main`/`arena/**`, path-filtered | Web bridge tests; Gradle lint, JVM tests and a development debug APK, uploaded as `biza-miz-android-development-debug-NON-PRODUCTION`. It also checks that a staging release is refused without an origin and signing. No secrets are used. |
 | `android-signed-candidate.yml` | manual, `main` only | Signed staging APK and AAB, with the `android-staging` environment. Uploads an artifact and does not publish. |
 | `android-production-release.yml` | manual, `main` only | Signed production AAB and APK, tag `android-v<version>`, and a Google Play upload to the chosen track when Play is configured. Uses the `android-production` environment. |
 

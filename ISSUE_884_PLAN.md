@@ -26,11 +26,10 @@ store promotion from a candidate.
 
 ## Baseline and what could be verified here
 
-- Node 22 in the sandbox. The repo targets `>=24`. Web checks use the real toolchain.
+- Node 22 in the sandbox. The repo targets `>=24`. The web checks were run with the repo's own scripts.
 - No JDK, Gradle, or Android SDK can be installed in this sandbox. Maven, Google Maven, and the
-  Gradle distribution host are blocked. So the Android project was **not compiled or tested
-  locally**. It is verified by the `android-build.yml` run on the pull request. Any failure there
-  is the first thing to fix.
+  Gradle distribution host are blocked. So the Android project was not compiled or tested locally.
+  It was verified by the `android-build.yml` run on the pull request, which is green on `af78713`.
 - The Gradle wrapper JAR and scripts were taken from the `gradle/gradle` repository at tag
   `v8.14.3` through the GitHub API. The distribution checksum is pinned in
   `android/gradle/wrapper/gradle-wrapper.properties`.
@@ -81,7 +80,7 @@ so the app needs one library rather than two.
 - [x] Gradle project: `settings.gradle.kts`, `build.gradle.kts`, `gradle.properties`, `gradle/libs.versions.toml`, the wrapper
 - [x] One module, `:app`, with product flavors `development`, `staging` and `production` on the `environment` dimension
 - [x] Configuration read from `config/*.json` at configuration time, not copied into Kotlin
-- [x] Release tasks fail before compiling if the origin or the signing values are missing (`gradle.taskGraph.whenReady`)
+- [x] Release tasks fail before compiling if the origin or the signing values are missing (`gradle.taskGraph.whenReady`). Every PR proves the refusal: the job asks for a staging release with neither, and fails unless Gradle says so.
 - [x] `BridgeProtocol`, `BridgeCommandRouter`, `TwaSessionHolder`, `AppLinkRouter`
 - [x] JVM tests: `AppLinkRouterTest`, `BridgeProtocolTest`, `BridgeCommandRouterTest`, `BridgeContractTest`
 - [ ] Instrumented tests — deferred until there is a feature that needs an emulator
@@ -95,7 +94,7 @@ so the app needs one library rather than two.
 - [x] `.gitignore`: anchored Android build output, local SDK paths, and keystore patterns
 - [x] Existing workflows are unchanged, including `mobile-emulator-acceptance.yml` and `mobile-real-device-acceptance.yml`
 - [ ] Repository setup: the `android-staging` and `android-production` environments, their secrets and variables, and reviewers on the production environment — owner action
-- [ ] First green `android-build.yml` run — pending the push
+- [x] First green `android-build.yml` run: pull-request run `37942083863` on `af78713` (web bridge tests, Gradle lint, JVM tests, debug APK artifact)
 
 ## Phase 5 — documentation
 
@@ -111,7 +110,7 @@ this slice and is listed under follow-up work.
 | # | Criterion | Status | Proof / what remains |
 |---|---|---|---|
 | 1 | Existing repo structure is preserved | Done | Nothing under `src/`, `electron/` or `apps/` moved. `src/app/layout.tsx` gained one provider. |
-| 2 | New `android/` runtime added | Done | `android/` Gradle project. First CI run pending. |
+| 2 | New `android/` runtime added | Done | `android/` Gradle project. Green in CI (run `37942083863`). |
 | 3 | Verified TWA works without browser chrome | Partial | TWA launcher with the trusted builder. Not run on a device. |
 | 4 | Digital Asset Links validated | Partial | `assetlinks.json` with three statements. Fingerprints and the live check are open. |
 | 5 | App Links deep-link to the correct platform routes | Partial | Intent filter and `AppLinkRouterTest` (same host, https, default port). Not run on a device. |
@@ -131,7 +130,7 @@ this slice and is listed under follow-up work.
 | 19 | Post-call CRM activity can be saved | Deferred | Needs the caller module. |
 | 20 | Tenant isolation is enforced for native cached data and actions | Partial | No native cache and no tenant-bearing command exist yet. The rule is in the docs and the native-permission check is documented as not authorization. |
 | 21 | Android PR CI is path-aware | Done | `android-build.yml` path filters, which include the issue's list. |
-| 22 | Android PRs produce a debug APK artifact | Done | `biza-miz-android-development-debug-NON-PRODUCTION`. First run pending. |
+| 22 | Android PRs produce a debug APK artifact | Done | `biza-miz-android-development-debug-NON-PRODUCTION` (2.5 MB), uploaded by run `37942083863`. |
 | 23 | Android release and signing secrets are protected | Done | Secrets are referenced only by the two release workflows, which run in environments and only on `main`. The keystore is decoded to the runner temp and removed. The Gradle check fails before compilation. Environment setup is an owner action. |
 | 24 | Android has a separate build/release workflow from web and Windows | Done | Three `android-*.yml` files. Nothing in `test.yml` or the Windows workflows changed. |
 | 25 | Web deploys do not unnecessarily require an Android release | Done | Web and Android versions are independent. `src/lib/native/**` changes run the Android build but not a release. |
@@ -205,18 +204,26 @@ this slice and is listed under follow-up work.
 
 ## Gates
 
-Run in the sandbox, against this branch:
+Local, on the final tree (sandbox: Node 22, 2 CPUs, 3.9 GB RAM):
 
-- `npx tsc --noEmit`: see the result below
-- `npm test` (full unit suite): see the result below
-- `npx vitest run src/lib/native src/components/native`: 156 tests across 9 files, all passing (Gradle drift guards included)
-- `npx eslint src/lib/native src/components/native src/app/layout.tsx --max-warnings=0`: clean
+- `npx tsc --noEmit` with `NODE_OPTIONS=--max-old-space-size=3072` (the heap CI uses): exit 0. The first attempt ran out of the default heap, which is a sandbox limit and not a type error.
+- `npm test`: 706 files, 9,300 tests passed.
+- `npx vitest run src/lib/native src/components/native`: 9 files, 158 tests passed. That count includes 33 existing printing tests that the path filter matches.
+- `npx eslint src/lib/native src/components/native src/app/layout.tsx --max-warnings=0`: clean. `npm run lint` (whole repo): exit 0.
+- `npm run db:migrate` (302 migrations applied) then `npm run test:db`: 197 files, 2,696 tests passed, 1 skipped.
+- `npm run build`: **not completed here**. The production build needs more memory than this sandbox has, and a memory watchdog stopped it before the build finished. The `production build` job in `test.yml` is the gate for this step. It passed on the pull-request run for `af78713`.
 
-Not run in the sandbox:
+Android, on GitHub (the sandbox has no JDK, SDK, or Gradle host access):
 
-- `npm run test:db` and `npm run build`: recorded below if they ran
-- Every Android task: no JDK or SDK here. The `android-build.yml` run is the gate. Its result is
-  recorded in the pull request, not claimed here.
+Not yet exercised: the two release workflows (`android-signed-candidate.yml`, `android-production-release.yml`). They are manual, main-only, and need the protected environments and their secrets, which are owner setup. A signed build and a Play upload have not run.
+
+- `android-build` on `af78713`, both pull-request and push: web native bridge tests passed. `android development debug` passed: Gradle lint, JVM unit tests and the debug APK all succeeded.
+- Four CI runs failed before the green one, and each was a real defect. Three were the Gradle `whenReady` release guard: a bare lambda resolved to the deprecated Groovy `Closure` overload (two runs), and a lambda with an explicit `Action` type still did not infer (one run). An object expression fixed it. The fourth was a `toList()` call on `JSONArray` in a unit test, which only showed once the app code had compiled. Reading the androidx.browser source before CI reported it also found that `TrustedWebActivityIntentBuilder.build()` returns a `TrustedWebActivityIntent`, not an `Intent`. That was fixed in the same push as the diagnostics, and the app code compiled in the fourth run, so the fix is confirmed.
+
+`test.yml` on `af78713` (pull request):
+
+- passed: production build, unit tests, ESLint, type check, data transfer engine (real database), API guard and permission tests, design checks, media E2E tests.
+- **failed: visual regression.** It reports a 4.06% pixel diff on `docs/design/visual/accounting-expenses.png`. The same diff fails on `main` in runs `37919841516` and `37925908136`, so it predates this branch. Nothing under `docs/design` or the accounting UI changed here. The baseline is not re-recorded, per the repo rules. Because `required` depends on it, the PR will show red until `main` is fixed.
 
 ## Files
 
