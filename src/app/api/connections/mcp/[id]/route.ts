@@ -14,7 +14,7 @@ import { revokeMcpConnection, updateMcpConnectionAccess } from "@/lib/mcp/connec
  */
 export const PATCH = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+    const { session, error } = await requirePermission(PERMISSIONS.mcpManage);
     if (error) return error;
     const { id } = await context.params;
 
@@ -50,7 +50,7 @@ export const PATCH = withTenantScope(
  */
 export const DELETE = withTenantScope(
   async (_request: Request, context: { params: Promise<{ id: string }> }) => {
-    const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+    const { session, error } = await requirePermission(PERMISSIONS.mcpManage);
     if (error) return error;
     const { id } = await context.params;
 

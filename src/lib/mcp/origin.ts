@@ -64,3 +64,30 @@ export async function resolveMcpTenant(headers: Headers): Promise<McpTenantResol
   if (business.status !== "active") return { ok: false, reason: "suspended" };
   return { ok: true, business };
 }
+
+/**
+ * Issue #883 P1-6 — may a bearer credential for `businessId` answer on the host
+ * this resolution came from?
+ *
+ * The OAuth flow resolves the tenant from the hostname; before this check the
+ * tool endpoint authenticated from the token alone and never compared the two,
+ * so a token minted for business A answered on business B's host. The rules,
+ * in the order they decide:
+ *
+ *   * a decisive resolution must name the *same* business — a token replayed
+ *     onto another business's host dies here, aliases included (an alias
+ *     resolves to the same business, so a rename does not break connectors);
+ *   * `unknown_host`, `not_a_business_host` (the apex, the admin console) and
+ *     `suspended` deny: none of those hosts may serve a tenant's tools;
+ *   * `ambiguous` allows: no host routing and more than one business — the
+ *     documented single-origin shape where the token *is* the tenant selector.
+ *
+ * Pure, so the policy is unit tested rather than only exercised over HTTP.
+ */
+export function mcpHostAllowsBusiness(
+  resolution: McpTenantResolution,
+  businessId: string,
+): boolean {
+  if (!resolution.ok) return resolution.reason === "ambiguous";
+  return resolution.business.businessId === businessId;
+}

@@ -257,6 +257,10 @@ export const PERMISSIONS = {
   rollupManage: "rollup.manage",
   // Phase 19: long-lived third-party credentials remain owner-only in V1.
   apiManage: "api.manage",
+  // Issue #883 P0-4: minting, narrowing, revoking and consenting to MCP
+  // connections — a machine credential with continuous read (and optional
+  // write) reach over a whole branch — is owner-only, exactly like api.manage.
+  mcpManage: "mcp.manage",
 
   // Website, growth and integration applications
   websiteView: "website.view",
@@ -375,6 +379,7 @@ export const PERMISSION_DEFINITIONS: readonly PermissionMetadata[] = ALL_PERMISS
     PERMISSIONS.backupConfigure,
     PERMISSIONS.backupExport,
     PERMISSIONS.backupRestore,
+    PERMISSIONS.mcpManage,
     PERMISSIONS.rollupManage,
   ]).has(key);
   const risk: PermissionRisk = ownerOnly ? "critical" : HIGH_RISK.has(key) ? "high" : "medium";
@@ -405,6 +410,7 @@ export const OWNER_ONLY_PERMISSIONS: readonly Permission[] = [
   PERMISSIONS.backupConfigure,
   PERMISSIONS.backupExport,
   PERMISSIONS.backupRestore,
+  PERMISSIONS.mcpManage,
   PERMISSIONS.rollupManage,
 ];
 

@@ -68,6 +68,10 @@ export function McpPanel() {
   const [connections, setConnections] = useState<McpConnection[]>([]);
   const [pending, setPending] = useState<PendingAction[]>([]);
   const [endpoint, setEndpoint] = useState("");
+  // Issue #883 P0-4 — creating, narrowing, revoking and approving are
+  // owner-only (`mcp.manage`). The panel still lists what is connected, but
+  // renders every mutating control only when the server says this member may.
+  const [canManage, setCanManage] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -91,11 +95,13 @@ export function McpPanel() {
       connections?: McpConnection[];
       pending?: PendingAction[];
       endpoint?: string;
+      canManage?: boolean;
     }>("/api/connections/mcp");
     if (ok) {
       setConnections(data.connections ?? []);
       setPending(data.pending ?? []);
       setEndpoint(data.endpoint ?? "");
+      setCanManage(data.canManage === true);
     } else {
       setMessage({ kind: "error", text: "بارگذاری اتصال‌ها ممکن نشد." });
     }
@@ -226,6 +232,13 @@ export function McpPanel() {
         </div>
       ) : null}
 
+      {!canManage && !loading ? (
+        <InfoBox>
+          ساخت، تغییر و ابطال اتصال‌های هوش مصنوعی و تأیید درخواست‌های در انتظار، مخصوص مالک
+          کسب‌وکار است. این فهرست برای شما فقط‌خواندنی است.
+        </InfoBox>
+      ) : null}
+
       {pending.length > 0 ? (
         <SectionCard title={`تغییرهای منتظر تأیید (${pending.length.toLocaleString("fa-IR")})`}>
           <p className="mb-3 text-xs leading-5 text-muted-foreground">
@@ -244,21 +257,23 @@ export function McpPanel() {
                 <p dir="ltr" className="mt-1 break-all text-start text-xs text-muted-foreground">
                   {action.summary}
                 </p>
-                <div className="mt-2 flex gap-2">
-                  <Button type="button" size="xs" onClick={() => decide(action, "approve")} disabled={busy}>
-                    تأیید و ثبت
-                  </Button>
-                  <Button
-                    type="button"
-                    size="xs"
-                    variant="ghost"
-                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                    onClick={() => decide(action, "reject")}
-                    disabled={busy}
-                  >
-                    رد
-                  </Button>
-                </div>
+                {canManage ? (
+                  <div className="mt-2 flex gap-2">
+                    <Button type="button" size="xs" onClick={() => decide(action, "approve")} disabled={busy}>
+                      تأیید و ثبت
+                    </Button>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      onClick={() => decide(action, "reject")}
+                      disabled={busy}
+                    >
+                      رد
+                    </Button>
+                  </div>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -290,6 +305,7 @@ export function McpPanel() {
         </div>
       </SectionCard>
 
+      {canManage ? (
       <SectionCard title="ساخت توکن برای برنامه‌های دیگر">
         <p className="mb-3 text-xs leading-5 text-muted-foreground">
           برای ابزارهایی مثل Codex یا افزونه‌های ویرایشگر که به‌جای ورود، توکن را از فایل تنظیمات می‌خوانند.
@@ -365,6 +381,7 @@ export function McpPanel() {
           {busy ? "در حال ساخت…" : "ساخت اتصال"}
         </Button>
       </SectionCard>
+      ) : null}
 
       <SectionCard title="اتصال‌های موجود">
         {loading ? (
@@ -388,7 +405,7 @@ export function McpPanel() {
                   <StatusBadge tone={connection.status === "active" ? "positive" : "neutral"}>
                     {connection.status === "active" ? "فعال" : "باطل‌شده"}
                   </StatusBadge>
-                  {connection.status === "active" ? (
+                  {connection.status === "active" && canManage ? (
                     <Button
                       type="button"
                       variant="ghost"
@@ -415,7 +432,7 @@ export function McpPanel() {
                   ) : null}
                 </div>
 
-                {connection.status === "active" ? (
+                {connection.status === "active" && canManage ? (
                   <div className="mt-2 flex flex-wrap gap-2">
                     {connection.scopes.includes(MCP_SCOPES.write) ? (
                       <>

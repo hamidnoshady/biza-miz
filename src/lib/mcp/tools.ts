@@ -30,6 +30,8 @@ import {
   type AutopilotExecutorKey,
   type OpenAiTool,
 } from "../ai";
+import { aiActionPermission, canUseAiTool } from "../ai-capabilities";
+import type { Permission } from "../permissions";
 import { MCP_SCOPES, type McpScope } from "./scopes";
 
 /** MCP's own tool descriptor. `annotations` are hints a client may show or ignore. */
@@ -582,19 +584,43 @@ export function assertWriteToolsMatchCatalogue(): { missing: ActionType[]; extra
 /**
  * The tools this connection may call.
  *
- * Filtered by scope, not merely annotated with it: a read-only connection must
- * not be able to *see* that a write tool exists, or a model will keep proposing
- * one and telling the owner the app refused. Server-side, `server.ts` checks the
- * scope again on every call — this list is a courtesy to the client, never the
- * guard.
+ * Filtered twice, and both filters fail closed:
+ *
+ *   * **by scope** — a read-only connection must not be able to *see* that a
+ *     write tool exists, or a model will keep proposing one and telling the
+ *     owner the app refused;
+ *   * **by the authorizer's current permissions**, when the caller passes
+ *     them (the dispatcher always does) — a connector authorized by a member
+ *     without `payroll.view` neither sees nor calls `get_payroll_summary`,
+ *     and a write whose action maps to no recognisable domain permission is
+ *     withheld entirely (issue #883 P0-1).
+ *
+ * The catalogue is a courtesy to the client; `server.ts` re-checks the same
+ * two axes on every call. Omitting `permissions` yields the scope-only list
+ * (`isKnownMcpTool`'s "exists at all" answer) — it must never be passed to a
+ * client as what they may use.
  */
-export function mcpToolCatalogue(scopes: readonly McpScope[]): McpTool[] {
+export function mcpToolCatalogue(
+  scopes: readonly McpScope[],
+  permissions?: ReadonlySet<Permission>,
+): McpTool[] {
   const all = [...mcpReadTools(), ...mcpWriteTools()];
-  return all.filter((tool) => scopes.includes(tool.scope));
+  return all.filter((tool) => {
+    if (!scopes.includes(tool.scope)) return false;
+    if (!permissions) return true;
+    return tool.binding.kind === "read"
+      ? canUseAiTool(tool.binding.readToolName, permissions)
+      : aiActionPermission(tool.binding.actionType) !== null &&
+          permissions.has(aiActionPermission(tool.binding.actionType)!);
+  });
 }
 
-export function findMcpTool(name: string, scopes: readonly McpScope[]): McpTool | null {
-  return mcpToolCatalogue(scopes).find((tool) => tool.descriptor.name === name) ?? null;
+export function findMcpTool(
+  name: string,
+  scopes: readonly McpScope[],
+  permissions?: ReadonlySet<Permission>,
+): McpTool | null {
+  return mcpToolCatalogue(scopes, permissions).find((tool) => tool.descriptor.name === name) ?? null;
 }
 
 /** True for a name this server knows at all — so "no access" and "no such tool" can be told apart. */

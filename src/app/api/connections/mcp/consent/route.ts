@@ -53,7 +53,7 @@ interface ConsentBody {
 }
 
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.integrationsManage);
+  const { session, error } = await requirePermission(PERMISSIONS.mcpManage);
   if (error) return error;
 
   if (!(await isFeatureEnabled(session.businessId, "api_platform"))) {

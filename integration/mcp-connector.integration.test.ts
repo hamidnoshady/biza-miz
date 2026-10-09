@@ -401,25 +401,25 @@ describe("writing in apply mode", () => {
     expect(result.structuredContent.status).toBe("failed");
   });
 
-  it("refuses to write at all once the authorizing owner is gone", async () => {
+  it("stops authenticating altogether once the authorizer's membership is gone", async () => {
+    // Issue #883 P0-1: the legacy "can still read with no authorizer" fallback
+    // is gone. A credential whose authorizing member has been removed has no
+    // authority behind it, so it authenticates nothing — exactly like a
+    // revoked connection — rather than keeping full read access.
     const token = await mintToken({ scopes: ["pos.read", "pos.write"], writeMode: "apply" });
-    await db.query("UPDATE mcp_connections SET authorized_by = NULL WHERE business_id = $1", [
-      shop.businessId,
-    ]);
+    await db.query("DELETE FROM users WHERE id = $1", [shop.userId]);
 
-    const result = resultOf(
-      await call(token, "tools/call", {
-        name: "write_menu_item_price",
-        arguments: { menuItemId: shop.menuItemId, price: 700_000 },
-      }),
-    ) as { structuredContent: { status: string; error: string } };
-    expect(result.structuredContent.status).toBe("failed");
-    expect(result.structuredContent.error).toBe("mcp_unauthorized_writer");
+    const outcome = await mcpAuth.withMcpScope(bearer(token), () => Promise.resolve("reached"));
+    expect(outcome.ok).toBe(false);
     expect(await priceOf(shop.menuItemId)).toBe(500_000);
+  });
 
-    // …but it can still read, which is the point of the distinction.
-    const read = resultOf(await call(token, "tools/list")) as { tools: Array<{ name: string }> };
-    expect(read.tools.some((tool) => tool.name === "run_report")).toBe(true);
+  it("stops authenticating the moment the authorizing member is deactivated", async () => {
+    const token = await mintToken({ scopes: ["pos.read"] });
+    await db.query("UPDATE users SET is_active = false WHERE id = $1", [shop.userId]);
+
+    const outcome = await mcpAuth.withMcpScope(bearer(token), () => Promise.resolve("reached"));
+    expect(outcome.ok).toBe(false);
   });
 });
 
@@ -509,8 +509,6 @@ describe("writing in approve mode", () => {
   });
 
   it("takes the write tools away the moment the owner narrows the connection", async () => {
-    // The pending item itself stays in the owner's list — it is theirs to
-    // approve or reject either way — but the connector can ask for no more.
     const token = await mintToken({ scopes: ["pos.read", "pos.write"], writeMode: "approve" });
     await call(token, "tools/call", {
       name: "write_menu_item_price",
@@ -528,6 +526,19 @@ describe("writing in approve mode", () => {
 
     const listed = resultOf(await call(token, "tools/list")) as { tools: Array<{ name: string }> };
     expect(listed.tools.some((tool) => tool.name.startsWith("write_"))).toBe(false);
+
+    // Issue #883 P0-3: the queued write does not survive the narrow — a
+    // connection that may no longer write retains no approvable authority.
+    const pending = await dbLib.withTenant(shop.businessId, () =>
+      connections.listMcpPendingActions(shop.businessId),
+    );
+    expect(pending).toHaveLength(0);
+    const { rows: audit } = await db.query<{ status: string; result: { cancelled?: string } }>(
+      "SELECT status, result FROM ai_action_audit",
+    );
+    expect(audit[0].status).toBe("dismissed");
+    expect(audit[0].result.cancelled).toBe("connection_narrowed");
+    expect(await priceOf(shop.menuItemId)).toBe(500_000);
   });
 });
 
@@ -843,5 +854,243 @@ describe("the OAuth flow, end to end", () => {
       ),
     );
     expect(validation).toMatchObject({ ok: false, kind: "redirect", error: "invalid_request" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #883 — the P0 blockers, reproduced and fixed.
+// ---------------------------------------------------------------------------
+
+/** A second, non-owner member — the staff role the P0-1 scenarios are about.
+ *  Pinned to the shop's branch, the way a real branch employee is. */
+async function addStaff(role: string, overrides?: { granted?: string[]; revoked?: string[] }) {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO users (business_id, role, full_name, email, password_hash, permissions, location_id)
+     VALUES ($1, $2, $3, $4, 'x', COALESCE($5::jsonb, '{}'::jsonb), $6) RETURNING id`,
+    [
+      shop.businessId,
+      role,
+      `کارمند ${role}`,
+      `${role}-${randomUUID().slice(0, 8)}@example.test`,
+      overrides ? JSON.stringify(overrides) : null,
+      shop.locationId,
+    ],
+  );
+  return rows[0].id;
+}
+
+describe("P0-1: reads respect the authorizer's CURRENT permissions", () => {
+  it("a cashier-authorized connection cannot see or call the payroll tool", async () => {
+    const cashierId = await addStaff("cashier");
+    const token = await mintToken({ scopes: ["pos.read", "pos.write"], userId: cashierId });
+
+    const listed = resultOf(await call(token, "tools/list")) as { tools: Array<{ name: string }> };
+    const names = listed.tools.map((tool) => tool.name);
+    // menuView and the floor CRM note are in the cashier preset; payroll,
+    // the ledger and the report engine are not.
+    expect(names).toContain("find_items");
+    expect(names).not.toContain("get_payroll_summary");
+    expect(names).not.toContain("get_vat_liability");
+    expect(names).not.toContain("run_report");
+    // …and asking for one by name anyway gets the refusal, never the data.
+    const refused = await call(token, "tools/call", { name: "get_payroll_summary" });
+    expect((refused as { error?: { message: string } }).error?.message).toContain("مجاز نیست");
+  });
+
+  it("the same tools/list for the owner still contains those tools — it is RBAC, not a narrower catalogue", async () => {
+    const token = await mintToken({ scopes: ["pos.read"] });
+    const listed = resultOf(await call(token, "tools/list")) as { tools: Array<{ name: string }> };
+    const names = listed.tools.map((tool) => tool.name);
+    expect(names).toContain("get_payroll_summary");
+    expect(names).toContain("run_report");
+    expect(names).toContain("find_customers");
+  });
+
+  it("a permission revoked mid-life is gone on the very next call", async () => {
+    // A manager starts able to read CRM…
+    const managerId = await addStaff("manager", { revoked: [] });
+    const token = await mintToken({ scopes: ["pos.read"], userId: managerId });
+    const before = resultOf(await call(token, "tools/list")) as { tools: Array<{ name: string }> };
+    expect(before.tools.some((tool) => tool.name === "find_customers")).toBe(true);
+
+    // …the owner revokes crm.view from that one member…
+    await db.query("UPDATE users SET permissions = $2::jsonb WHERE id = $1", [
+      managerId,
+      JSON.stringify({ revoked: ["crm.view"] }),
+    ]);
+
+    // …and the very next call no longer lists or answers the tool.
+    const after = resultOf(await call(token, "tools/list")) as { tools: Array<{ name: string }> };
+    expect(after.tools.some((tool) => tool.name === "find_customers")).toBe(false);
+    const refused = await call(token, "tools/call", { name: "find_customers", arguments: { query: "الف" } });
+    expect((refused as { error?: { message: string } }).error?.message).toContain("مجاز نیست");
+  });
+
+  it("resources follow the same rule: no report catalogue without reports.view", async () => {
+    const cashierId = await addStaff("cashier");
+    const token = await mintToken({ scopes: ["pos.read"], userId: cashierId });
+
+    const listed = resultOf(await call(token, "resources/list")) as {
+      resources: Array<{ uri: string }>;
+    };
+    const uris = listed.resources.map((resource) => resource.uri);
+    expect(uris).toContain("pos://app/conventions");
+    expect(uris).not.toContain("pos://reports/catalog");
+
+    const refused = await call(token, "resources/read", { uri: "pos://reports/catalog" });
+    expect((refused as { error?: { message: string } }).error?.message).toContain("وجود ندارد");
+  });
+});
+
+describe("P0-5: writes re-check the acting member's CURRENT permission", () => {
+  it("an apply-mode write fails closed when the authorizer lacks the action's permission", async () => {
+    // The cashier has menu.view but not menu.edit — the write tool is hidden…
+    const cashierId = await addStaff("cashier");
+    const token = await mintToken({ scopes: ["pos.read", "pos.write"], writeMode: "apply", userId: cashierId });
+    const listed = resultOf(await call(token, "tools/list")) as { tools: Array<{ name: string }> };
+    expect(listed.tools.some((tool) => tool.name === "write_menu_item_price")).toBe(false);
+
+    // …and a direct call is refused with nothing changed.
+    const refused = await call(token, "tools/call", {
+      name: "write_menu_item_price",
+      arguments: { menuItemId: shop.menuItemId, price: 700_000 },
+    });
+    expect((refused as { error?: { message: string } }).error?.message).toContain("مجاز نیست");
+    expect(await priceOf(shop.menuItemId)).toBe(500_000);
+  });
+
+  it("a permission granted later takes effect on the very next write — no re-consent needed", async () => {
+    const cashierId = await addStaff("cashier", { granted: ["menu.edit"] });
+    const token = await mintToken({ scopes: ["pos.read", "pos.write"], writeMode: "apply", userId: cashierId });
+
+    const result = resultOf(
+      await call(token, "tools/call", {
+        name: "write_menu_item_price",
+        arguments: { menuItemId: shop.menuItemId, price: 700_000 },
+      }),
+    ) as { structuredContent: { status: string } };
+    expect(result.structuredContent.status).toBe("applied");
+    expect(await priceOf(shop.menuItemId)).toBe(700_000);
+  });
+});
+
+describe("P0-2: a connection never writes across its own branch", () => {
+  it("an apply-mode write naming another branch's item is refused", async () => {
+    const { rows: otherLocation } = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'شعبه دوم') RETURNING id",
+      [shop.businessId],
+    );
+    const { rows: cat } = await db.query<{ id: string }>(
+      "INSERT INTO menu_categories (location_id, name) VALUES ($1, 'نوشیدنی') RETURNING id",
+      [otherLocation[0].id],
+    );
+    const { rows: otherItem } = await db.query<{ id: string }>(
+      `INSERT INTO menu_items (location_id, category_id, name, price)
+       VALUES ($1, $2, 'چای', 300000) RETURNING id`,
+      [otherLocation[0].id, cat[0].id],
+    );
+
+    // The connection is minted on branch ONE (shop.locationId) and the model
+    // was handed an id belonging to branch TWO — tampering, or an id that
+    // leaked through find_items on a stale connection. Either way: refused.
+    const token = await mintToken({ scopes: ["pos.read", "pos.write"], writeMode: "apply" });
+    const result = resultOf(
+      await call(token, "tools/call", {
+        name: "write_menu_item_price",
+        arguments: { menuItemId: otherItem[0].id, price: 700_000 },
+      }),
+    ) as { structuredContent: { status: string; error: string } };
+    expect(result.structuredContent.status).toBe("failed");
+    expect(result.structuredContent.error).toBe("branch_forbidden");
+
+    const { rows: price } = await db.query<{ price: string }>(
+      "SELECT price FROM menu_items WHERE id = $1",
+      [otherItem[0].id],
+    );
+    expect(Number(price[0].price)).toBe(300_000);
+  });
+});
+
+describe("P0-3: no duplicate or stale executions", () => {
+  async function proposePrice(amount: number) {
+    const token = await mintToken({ scopes: ["pos.read", "pos.write"], writeMode: "approve" });
+    await call(token, "tools/call", {
+      name: "write_menu_item_price",
+      arguments: { menuItemId: shop.menuItemId, price: amount },
+    });
+    const [pending] = await dbLib.withTenant(shop.businessId, () =>
+      connections.listMcpPendingActions(shop.businessId),
+    );
+    return pending.id;
+  }
+
+  function decide(auditId: string) {
+    return dbLib.withTenant(shop.businessId, () =>
+      writeService.decideMcpPendingAction({
+        businessId: shop.businessId,
+        auditId,
+        decision: "approve",
+        deciderUserId: shop.userId,
+      }),
+    );
+  }
+
+  it("two parallel approvals execute the side effect exactly once", async () => {
+    const auditId = await proposePrice(900_000);
+    const [first, second] = await Promise.all([decide(auditId), decide(auditId)]);
+
+    const winners = [first, second].filter((r) => r.ok);
+    const losers = [first, second].filter((r) => !r.ok);
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+    expect(losers[0]).toMatchObject({ ok: false, error: "not_found" });
+    expect(await priceOf(shop.menuItemId)).toBe(900_000);
+
+    const { rows } = await db.query<{ status: string }>("SELECT status FROM ai_action_audit");
+    expect(rows.map((r) => r.status)).toEqual(["applied"]);
+  });
+
+  it("a retried apply with the same idempotency key applies once and returns the original outcome", async () => {
+    const token = await mintToken({ scopes: ["pos.read", "pos.write"], writeMode: "apply" });
+    const invoke = async () =>
+      resultOf(
+        await call(token, "tools/call", {
+          name: "write_menu_item_price",
+          arguments: { menuItemId: shop.menuItemId, price: 800_000 },
+          _meta: { idempotencyKey: "retry-42" },
+        }),
+      ) as { structuredContent: { status: string; auditId: string } };
+
+    const first = await invoke();
+    const second = await invoke();
+    expect(first.structuredContent.status).toBe("applied");
+    expect(second.structuredContent.status).toBe("applied");
+    // Same audit row — the retry read the durable outcome, no second effect.
+    expect(second.structuredContent.auditId).toBe(first.structuredContent.auditId);
+
+    const { rows } = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM ai_action_audit WHERE mcp_idempotency_key = 'retry-42'",
+    );
+    expect(Number(rows[0].count)).toBe(1);
+    expect(await priceOf(shop.menuItemId)).toBe(800_000);
+  });
+
+  it("a revoked connection's queued writes are cancelled, not approvable", async () => {
+    const auditId = await proposePrice(900_000);
+    const { rows } = await db.query<{ id: string }>("SELECT id FROM mcp_connections");
+    await dbLib.withTenant(shop.businessId, () =>
+      connections.revokeMcpConnection(shop.businessId, rows[0].id),
+    );
+
+    const decided = await decide(auditId);
+    expect(decided).toMatchObject({ ok: false, error: "not_found" });
+    expect(await priceOf(shop.menuItemId)).toBe(500_000);
+
+    const { rows: audit } = await db.query<{ status: string; result: { cancelled?: string } }>(
+      "SELECT status, result FROM ai_action_audit WHERE id = $1",
+      [auditId],
+    );
+    expect(audit[0].status).toBe("dismissed");
+    expect(audit[0].result.cancelled).toBe("connection_revoked");
   });
 });

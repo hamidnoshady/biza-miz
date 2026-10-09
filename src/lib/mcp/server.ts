@@ -13,7 +13,8 @@
  * re-checks the *scope*, because that is the boundary RLS says nothing about.
  */
 import { query } from "../db";
-import { runSystemReadTool } from "../ai-system-read";
+import { runReadTool } from "../ai-tools";
+import { canUseAiTool } from "../ai-capabilities";
 import { getBusinessIndustry } from "../industry-guard";
 import { INDUSTRY_LABELS } from "../industries";
 import { industryProfile, labelFor } from "../industry-profile";
@@ -29,7 +30,7 @@ import {
   type JsonRpcResponse,
   type ParsedMessage,
 } from "./protocol";
-import { MCP_RESOURCES, readMcpResource } from "./resources";
+import { mcpResourcesFor, readMcpResource } from "./resources";
 import { MCP_SCOPES, hasMcpScope } from "./scopes";
 import { findMcpTool, isKnownMcpTool, mcpToolCatalogue } from "./tools";
 import { performMcpWrite } from "./write-service";
@@ -99,6 +100,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * P1-9 — one write tool's arguments may not be a denial of service. Sized what
+ * a CMS body *already* is: the largest legitimate payload (a website post's
+ * Markdown body) comfortably fits in a tenth of this.
+ */
+const MAX_TOOL_ARGUMENT_BYTES = 64 * 1024;
+
+/**
+ * The idempotency key a client attaches to a write retry, in the spec's own
+ * out-of-band channel (`params._meta`) so it never collides with a tool's
+ * declared input schema. Bounded and namespaced: the durable contract lives in
+ * `write-service.ts`.
+ */
+const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
+
+function readIdempotencyKey(params: Record<string, unknown>): string | null {
+  const meta = isRecord(params._meta) ? params._meta : null;
+  const candidate = meta?.idempotencyKey;
+  if (typeof candidate !== "string") return null;
+  const trimmed = candidate.trim();
+  return trimmed.length > 0 && trimmed.length <= MAX_IDEMPOTENCY_KEY_LENGTH ? trimmed : null;
+}
+
 async function callTool(
   auth: McpAuthentication,
   params: Record<string, unknown>,
@@ -106,13 +130,24 @@ async function callTool(
   const name = typeof params.name === "string" ? params.name : "";
   const args = isRecord(params.arguments) ? params.arguments : {};
 
-  const tool = findMcpTool(name, auth.scopes);
+  if (JSON.stringify(args).length > MAX_TOOL_ARGUMENT_BYTES) {
+    return {
+      error: {
+        code: JSON_RPC_ERRORS.invalidParams,
+        message: "ورودی ابزار بیش از حد بزرگ است. متن یا فهرست اقلام را کوتاه‌تر کنید.",
+      },
+    };
+  }
+
+  const tool = findMcpTool(name, auth.scopes, auth.permissions);
   if (!tool) {
     // "You may not" and "no such thing" are different answers and a model
     // behaves differently for each: the first is worth telling the user about,
-    // the second means it should stop trying.
+    // the second means it should stop trying. Scope, module and the
+    // authorizer's current permission all land in the first bucket — the
+    // client needs no finer distinction to behave correctly.
     const message = isKnownMcpTool(name)
-      ? `ابزار «${name}» برای این اتصال مجاز نیست. این اتصال دسترسی نوشتن ندارد.`
+      ? `ابزار «${name}» برای این اتصال مجاز نیست. ممکن است اتصال دسترسی نوشتن نداشته باشد یا کاربر مجوزش نداشته باشد.`
       : `ابزار «${name}» وجود ندارد.`;
     return { error: { code: JSON_RPC_ERRORS.invalidParams, message } };
   }
@@ -120,15 +155,17 @@ async function callTool(
   if (tool.binding.kind === "read") {
     // The workspace tools need to know who is asking — `mine: true` means the
     // human who authorized this connection, and nothing else. Every other read
-    // tool ignores the argument. A connection with no authorizing user (a
-    // machine token) gets a decline from the tool itself, which is the right
-    // answer: there is no "my tasks" without a "my".
-    const outcome = await runSystemReadTool(
+    // tool ignores the argument.
+    // P0-1: the permission set is the authorizer's *current* set, resolved in
+    // `authenticateMcp`, never the all-permissions SYSTEM read context — a
+    // connector reaches exactly what its authorizer's own session would.
+    const outcome = await runReadTool(
       tool.binding.readToolName,
       args,
       auth.businessId,
       undefined,
-      auth.authorizedByUserId ?? undefined,
+      auth.authorizedByUserId,
+      auth.permissions,
     );
     return { result: toolResult(outcome.data, !outcome.ok) };
   }
@@ -138,6 +175,7 @@ async function callTool(
     actionType: tool.binding.actionType,
     payload: args,
     summary: summarizeWrite(name, args),
+    idempotencyKey: readIdempotencyKey(params),
   });
   return {
     result: toolResult(
@@ -191,7 +229,7 @@ export async function dispatchMcpMessage(
 
     case "tools/list":
       return jsonRpcResult(id, {
-        tools: mcpToolCatalogue(auth.scopes).map((tool) => tool.descriptor),
+        tools: mcpToolCatalogue(auth.scopes, auth.permissions).map((tool) => tool.descriptor),
       });
 
     case "tools/call": {
@@ -202,7 +240,7 @@ export async function dispatchMcpMessage(
     }
 
     case "resources/list":
-      return jsonRpcResult(id, { resources: MCP_RESOURCES });
+      return jsonRpcResult(id, { resources: mcpResourcesFor(auth.permissions) });
 
     // Nothing here is parameterised by a URI template. Answering with an empty
     // list is required: a client that gets "method not found" for this stops
@@ -212,7 +250,15 @@ export async function dispatchMcpMessage(
 
     case "resources/read": {
       const uri = typeof params.uri === "string" ? params.uri : "";
-      const content = await readMcpResource(uri, auth.businessId);
+      // Resources are data like any read: the overview is `describe_app`'s
+      // content and the report catalogue lists reports, so each inherits its
+      // tool's permission (P0-1). Unknown and unauthorized get the same
+      // answer — a resource the authorizer may not see is not one to confirm
+      // the existence of.
+      if (!mcpResourcesFor(auth.permissions).some((resource) => resource.uri === uri)) {
+        return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);
+      }
+      const content = await readMcpResource(uri, auth.businessId, auth.permissions);
       return content
         ? jsonRpcResult(id, { contents: [content] })
         : jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);

@@ -189,7 +189,30 @@ export async function revokeMcpConnection(businessId: string, id: string): Promi
     id,
     businessId,
   ]);
+  await cancelOutstandingProposals(businessId, id, "connection_revoked");
   return true;
+}
+
+/**
+ * Issue #883 P0-3 — a proposal whose connection can no longer write must not
+ * sit in the approval queue holding authority the owner already withdrew.
+ * Outstanding `proposed` rows are dismissed with the reason kept; a row in
+ * `processing` is mid-execution — its claimant's finalize CAS owns it, so it
+ * is left to close itself out (and `decideMcpPendingAction` revalidates the
+ * connection at approval time, so nothing new can claim the survivors).
+ */
+export async function cancelOutstandingProposals(
+  businessId: string,
+  connectionId: string,
+  reason: "connection_revoked" | "connection_narrowed",
+): Promise<number> {
+  const { rowCount } = await query(
+    `UPDATE ai_action_audit
+        SET status = 'dismissed', result = $3::jsonb
+      WHERE business_id = $1 AND mcp_connection_id = $2 AND source = 'mcp' AND status = 'proposed'`,
+    [businessId, connectionId, JSON.stringify({ cancelled: reason })],
+  );
+  return rowCount ?? 0;
 }
 
 /**
@@ -216,6 +239,13 @@ export async function updateMcpConnectionAccess(
     [id, businessId, scopes, input.writeMode, input.authorizedBy],
   );
   if ((rowCount ?? 0) === 0) return { ok: false, error: "connection_not_found" };
+
+  // Narrowing away the write grant cancels what it had queued: keeping those
+  // rows approvable would let a human execute writes for a connector the
+  // owner has since decided may not write (issue #883 P0-3).
+  if (!scopes.includes(MCP_SCOPES.write)) {
+    await cancelOutstandingProposals(businessId, id, "connection_narrowed");
+  }
 
   const connection = await getMcpConnection(businessId, id);
   return connection ? { ok: true, connection } : { ok: false, error: "connection_not_found" };

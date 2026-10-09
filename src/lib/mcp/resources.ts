@@ -15,8 +15,10 @@
  * catalogue, and a short guide to the conventions. A resource list is read in
  * full by most clients, so length here is a cost paid on every conversation.
  */
-import { runSystemReadTool } from "../ai-system-read";
+import { runReadTool } from "../ai-tools";
+import { canUseAiTool } from "../ai-capabilities";
 import { getBusinessIndustry } from "../industry-guard";
+import type { Permission } from "../permissions";
 import { standardReportsFor } from "../reports";
 
 export interface McpResourceDescriptor {
@@ -127,6 +129,29 @@ export interface McpResourceContent {
 }
 
 /**
+ * The permission each resource's content stands on — the tool whose answer it
+ * is republishing (issue #883 P0-1). The conventions document is static prose
+ * about this codebase's own storage rules and names nothing about the tenant,
+ * so it has no entry.
+ */
+const RESOURCE_TOOL: Record<string, string> = {
+  "pos://app/overview": "describe_app",
+  "pos://reports/catalog": "run_report",
+};
+
+/**
+ * The resources this connection's authorizer may read. `resources/list` shows
+ * exactly this set and `resources/read` refuses anything outside it, so an
+ * unauthorized URI and a nonexistent one are indistinguishable.
+ */
+export function mcpResourcesFor(permissions: ReadonlySet<Permission>): McpResourceDescriptor[] {
+  return MCP_RESOURCES.filter((resource) => {
+    const tool = RESOURCE_TOOL[resource.uri];
+    return !tool || canUseAiTool(tool, permissions);
+  });
+}
+
+/**
  * Read one resource. Returns null for an unknown URI, which the caller turns
  * into a JSON-RPC error rather than an empty document — a client that receives
  * an empty resource shows the model nothing and gives no reason.
@@ -134,10 +159,18 @@ export interface McpResourceContent {
 export async function readMcpResource(
   uri: string,
   businessId: string,
+  permissions?: ReadonlySet<Permission>,
 ): Promise<McpResourceContent | null> {
   switch (uri) {
     case "pos://app/overview": {
-      const result = await runSystemReadTool("describe_app", {}, businessId);
+      const result = await runReadTool(
+        "describe_app",
+        {},
+        businessId,
+        undefined,
+        undefined,
+        permissions,
+      );
       return {
         uri,
         mimeType: "application/json",
