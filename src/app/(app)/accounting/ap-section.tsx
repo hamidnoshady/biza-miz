@@ -61,6 +61,7 @@ interface ReconciliationSummaryPayload {
 interface BalancesPayload {
   suppliers?: SupplierBalance[];
   total?: number;
+  nextOffset?: number | null;
   summary?: ReconciliationSummaryPayload | null;
 }
 
@@ -97,6 +98,7 @@ export const PAYABLES_SIDE: SubledgerSide = {
         locationName: s.locationName,
       })),
       total: data.total ?? rows.length,
+      nextOffset: data.nextOffset ?? null,
       summary: data.summary
         ? {
             primaryTotal: data.summary.payableTotal,

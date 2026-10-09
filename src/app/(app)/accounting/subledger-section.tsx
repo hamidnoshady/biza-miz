@@ -53,6 +53,7 @@
  * paging, the layouts, the aging buckets, the overlays — is here, once.
  */
 
+import { SUBLEDGER_PAGE_SIZE } from "@/lib/subledger-pagination";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { toPersianDigits } from "@/lib/digits";
@@ -87,7 +88,7 @@ import { LedgerLoadFailed, fmtJalali, OverlayDialog } from "./ledger-ui";
  * thousands of customers never ships the whole book to draw a screen, large
  * enough that a small shop's list is one page.
  */
-const PAGE_SIZE = 25;
+const PAGE_SIZE = SUBLEDGER_PAGE_SIZE;
 
 /** Typing settles before the request goes out — the same 250ms the voucher lists use. */
 const SEARCH_DEBOUNCE_MS = 250;
@@ -132,6 +133,7 @@ export interface SubledgerSummary {
 
 /** The balances response as this screen reads it — one page plus the facts that must not change with it. */
 export interface SubledgerBalancePage {
+  nextOffset: number | null;
   rows: SubledgerPartyRow[];
   /** Rows the search matches, before the window — «۲۵ از ۳۱۰». */
   total: number;
@@ -486,6 +488,7 @@ export function SubledgerSection({ side, canSettle }: { side: SubledgerSide; can
   const money = useMoney();
   const [parties, setParties] = useState<SubledgerPartyRow[] | null>(null);
   const [partiesTotal, setPartiesTotal] = useState(0);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [summary, setSummary] = useState<SubledgerSummary | null>(null);
   const [partiesFailed, setPartiesFailed] = useState(false);
   const [loadingBalances, setLoadingBalances] = useState(false);
@@ -503,49 +506,62 @@ export function SubledgerSection({ side, canSettle }: { side: SubledgerSide; can
   // accepted one and answered with the date it used; the picker is what lets
   // an accountant ask what the ageing looked like at a period end.
   const [asOfDate, setAsOfDate] = useState("");
-  // The typed search and the one actually sent. The gap is the debounce: a
-  // request per keystroke would race its own answers, which is what the
-  // sequence token below is for.
   const [search, setSearch] = useState("");
-  const [appliedSearch, setAppliedSearch] = useState("");
-  /*
-   * Only the newest request may write state. The unfiltered listing and a
-   * search typed over it take different amounts of time, and without the token
-   * the *older* answer can land last and put rows on screen that match nothing
-   * the user asked for.
-   */
+  // A generation owns replacement + its pages. Only that generation may
+  // finish either loading state; invalidation releases the old page's state.
   const balanceSeq = useRef(0);
+  const loadedSeq = useRef<number | null>(null);
+  const pageOwner = useRef<object | null>(null);
   const agingSeq = useRef(0);
-
-  useEffect(() => {
-    const trimmed = search.trim();
-    const timer = setTimeout(() => setAppliedSearch(trimmed), trimmed ? SEARCH_DEBOUNCE_MS : 0);
-    return () => clearTimeout(timer);
-  }, [search]);
+  const invalidateBalances = () => {
+    balanceSeq.current += 1;
+    loadedSeq.current = null;
+    pageOwner.current = null;
+    setLoadingMore(false);
+  };
+  const refresh = () => {
+    invalidateBalances();
+    setRefreshKey((k) => k + 1);
+  };
 
   useEffect(() => {
     const seq = ++balanceSeq.current;
+    const controller = new AbortController();
+    loadedSeq.current = null;
+    pageOwner.current = null;
+    setLoadingMore(false);
     setPartiesFailed(false);
     setLoadMoreFailed(false);
     setLoadingBalances(true);
     const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: "0" });
-    if (appliedSearch) params.set("q", appliedSearch);
-    api(`${side.listEndpoint}?${params.toString()}`).then(({ ok, data }) => {
-      if (balanceSeq.current !== seq) return;
-      setLoadingBalances(false);
-      if (ok) {
-        const page = side.readBalances(data);
-        setParties(page.rows);
-        setPartiesTotal(page.total);
-        setSummary(page.summary);
-      } else {
-        // The list keeps whatever it had — a failed *refresh* must not turn a
-        // good list into an empty one — and the flag says the request failed.
-        setParties((prev) => prev ?? []);
-        setPartiesFailed(true);
-      }
-    });
-  }, [refreshKey, appliedSearch, side]);
+    const query = search.trim();
+    if (query) params.set("q", query);
+    // Invalidate immediately, including the debounce interval. Old rows remain
+    // readable, but cannot supply an offset for a replacement query.
+    const timer = setTimeout(() => {
+      api(`${side.listEndpoint}?${params.toString()}`, { signal: controller.signal }).then(({ ok, data }) => {
+        if (balanceSeq.current !== seq) return;
+        setLoadingBalances(false);
+        if (ok) {
+          const page = side.readBalances(data);
+          loadedSeq.current = seq;
+          setParties(page.rows);
+          setPartiesTotal(page.total);
+          setNextOffset(page.nextOffset);
+          setSummary(page.summary);
+        } else {
+          setParties((prev) => prev ?? []);
+          setPartiesFailed(true);
+        }
+      });
+    }, query ? SEARCH_DEBOUNCE_MS : 0);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+      if (balanceSeq.current === seq) balanceSeq.current += 1;
+      pageOwner.current = null;
+    };
+  }, [refreshKey, search, side]);
 
   useEffect(() => {
     if (view !== "aging") return;
@@ -563,17 +579,17 @@ export function SubledgerSection({ side, canSettle }: { side: SubledgerSide; can
 
   /** One more page, appended to what is on screen — the table never blanks while it loads. */
   const loadMore = useCallback(() => {
-    const offset = parties?.length ?? 0;
     const seq = balanceSeq.current;
+    if (loadedSeq.current !== seq || pageOwner.current || loadingBalances || nextOffset === null) return;
+    const owner = {};
+    pageOwner.current = owner;
     setLoadingMore(true);
     setLoadMoreFailed(false);
-    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
-    if (appliedSearch) params.set("q", appliedSearch);
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(nextOffset) });
+    if (search.trim()) params.set("q", search.trim());
     api(`${side.listEndpoint}?${params.toString()}`).then(({ ok, data }) => {
-      // A search or a refresh landed while this page was in flight: its rows
-      // belong to a different question and must not be appended to the new
-      // answer.
-      if (balanceSeq.current !== seq) return;
+      if (balanceSeq.current !== seq || pageOwner.current !== owner) return;
+      pageOwner.current = null;
       setLoadingMore(false);
       if (!ok) {
         setLoadMoreFailed(true);
@@ -585,16 +601,17 @@ export function SubledgerSection({ side, canSettle }: { side: SubledgerSide; can
         const seen = new Set(existing.map((row) => row.id));
         return [...existing, ...page.rows.filter((row) => !seen.has(row.id))];
       });
+      setNextOffset(page.nextOffset);
       setPartiesTotal(page.total);
       setSummary(page.summary);
     });
-  }, [appliedSearch, parties, side]);
+  }, [search, nextOffset, loadingBalances, side]);
 
   if (!parties && loadingBalances) {
     return <SectionCardSkeleton rows={4} />;
   }
 
-  const hasMore = parties !== null && parties.length < partiesTotal;
+  const hasMore = nextOffset !== null;
 
   return (
     <section className="space-y-4">
@@ -632,7 +649,7 @@ export function SubledgerSection({ side, canSettle }: { side: SubledgerSide; can
               <div className="mb-3 flex flex-wrap items-center gap-2">
                 <SearchField
                   value={search}
-                  onChange={setSearch}
+                  onChange={(value) => { if (value !== search) { invalidateBalances(); setSearch(value); } }}
                   label={side.searchLabel}
                   placeholder={`${side.searchLabel}…`}
                   className="w-full sm:w-64"
@@ -645,17 +662,17 @@ export function SubledgerSection({ side, canSettle }: { side: SubledgerSide; can
                 ) : null}
               </div>
               {partiesFailed && (parties?.length ?? 0) === 0 ? (
-                <LedgerLoadFailed message={side.loadBalancesFailed} onRetry={() => setRefreshKey((k) => k + 1)} />
+                <LedgerLoadFailed message={side.loadBalancesFailed} onRetry={refresh} />
               ) : parties && parties.length === 0 ? (
                 <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
-                  {appliedSearch ? side.noSearchMatches : side.emptyBalances}
+                  {search.trim() ? side.noSearchMatches : side.emptyBalances}
                 </p>
               ) : parties ? (
                 <>
                   {/* A failed *refresh* keeps the rows it had and says so above them. */}
                   {partiesFailed ? (
                     <div className="mb-3">
-                      <LedgerLoadFailed message={side.loadBalancesFailed} onRetry={() => setRefreshKey((k) => k + 1)} />
+                      <LedgerLoadFailed message={side.loadBalancesFailed} onRetry={refresh} />
                     </div>
                   ) : null}
                   <DataTable caption={side.balancesCaption} className="hidden lg:block">
@@ -712,7 +729,7 @@ export function SubledgerSection({ side, canSettle }: { side: SubledgerSide; can
                           بارگذاری بخش بعدی ناموفق بود؛ نگران نباشید، ردیف‌های نمایش‌داده‌شده هنوز معتبرند.
                         </p>
                       ) : null}
-                      <SecondaryButton onClick={loadMore} disabled={loadingMore}>
+                      <SecondaryButton onClick={loadMore} disabled={loadingMore || loadingBalances || loadedSeq.current !== balanceSeq.current}>
                         {loadingMore ? "در حال بارگذاری…" : "نمایش موارد بیشتر"}
                       </SecondaryButton>
                     </div>
@@ -726,7 +743,7 @@ export function SubledgerSection({ side, canSettle }: { side: SubledgerSide; can
             <div>
               <AgingAsOfPicker asOfDate={asOfDate} onAsOfDateChange={setAsOfDate} report={aging} />
               {agingFailed ? (
-                <LedgerLoadFailed message="بارگذاری نمای سنی بدهی‌ها ناموفق بود." onRetry={() => setRefreshKey((k) => k + 1)} />
+                <LedgerLoadFailed message="بارگذاری نمای سنی بدهی‌ها ناموفق بود." onRetry={refresh} />
               ) : !aging ? (
                 <LoadingSkeleton rows={3} />
               ) : aging.rows.length === 0 ? (
@@ -796,7 +813,7 @@ export function SubledgerSection({ side, canSettle }: { side: SubledgerSide; can
           onClose={() => setSettleTarget(null)}
           onDone={() => {
             setSettleTarget(null);
-            setRefreshKey((k) => k + 1);
+            refresh();
           }}
         />
       ) : null}

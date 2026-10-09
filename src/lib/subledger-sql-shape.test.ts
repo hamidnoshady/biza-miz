@@ -45,6 +45,7 @@ const AP = read("./ap-service.ts");
  * hardening — imported *and* re-exported by ap-service, the same way
  * `crm-app-boundaries.test.ts` requires A/R's to stay where it is.
  */
+const AR_ATTRIBUTION = read("./ar-attribution.ts");
 const AP_ATTRIBUTION = read("./ap-attribution.ts");
 
 describe("the aging report's SQL shape", () => {
@@ -79,27 +80,26 @@ describe("the aging report's SQL shape", () => {
 
 describe("the balance list's SQL shape", () => {
   it("counts the match before the window in the same round trip, and drops settled parties in SQL", () => {
-    // `count(*) OVER ()` is evaluated after WHERE and before LIMIT, so a page
-    // and its total come back together; `HAVING` keeps a settled party out of
+    // The count must survive even when the page is empty; `HAVING` keeps a settled party out of
     // the result set rather than out of a JS array.
-    expect(AR).toMatch(/count\(\*\) OVER \(\) AS total/);
+    expect(AR).toMatch(/SELECT count\(\*\)::text AS total FROM filtered/);
+    expect(AR).toMatch(/LEFT JOIN LATERAL/);
     expect(AR).toMatch(/HAVING sum\(jl\.debit - jl\.credit\) <> 0/);
-    expect(AP).toMatch(/count\(\*\) OVER \(\) AS total/);
+    expect(AP).toMatch(/SELECT count\(\*\)::text AS total FROM filtered/);
+    expect(AP).toMatch(/LEFT JOIN LATERAL/);
   });
 });
 
 describe("the attribution rule", () => {
   it("exists once per service, inside the exported fragment, and is never re-stated inline", () => {
-    // The amendment bridge is the piece a copy would silently drop.
-    expect(AR.match(/LEFT JOIN cheques ch/g)).toHaveLength(1);
-    expect(AP_ATTRIBUTION.match(/LEFT JOIN cheques ch/g)).toHaveLength(1);
-    expect(AR.match(/LEFT JOIN orders o/g)).toHaveLength(1);
-    expect(AR).toMatch(/export const AR_CUSTOMER_ATTRIBUTION_SQL = `/);
-    expect(AP_ATTRIBUTION).toMatch(/export const AP_SUPPLIER_ATTRIBUTION_SQL = `/);
-    // ap-service names the fragment rather than its joins: the joins appear in
-    // the service only inside the imported constant.
+    // Both broad and named reads are generated from one source relation.
+    expect(AR_ATTRIBUTION.match(/FROM order_amendments am JOIN orders o/g)).toHaveLength(1);
+    expect(AR_ATTRIBUTION).toContain("AR_CUSTOMER_ATTRIBUTION_SQL = arCustomerAttributionSql()");
+    expect(AP_ATTRIBUTION).toContain("AP_SUPPLIER_ATTRIBUTION_SQL = apSupplierAttributionSql()");
+    expect(AR).toContain('arCustomerAttributionSql("$3::uuid")');
+    expect(AP).toContain('apSupplierAttributionSql("$3::uuid")');
+    expect(AR).not.toMatch(/LEFT JOIN cheques ch/);
     expect(AP).not.toMatch(/LEFT JOIN cheques ch/);
-    expect(AP).toMatch(/export \{ AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL \}/);
     // Every read model names the fragment rather than its joins.
     expect(AR.match(/\$\{AR_CUSTOMER_ATTRIBUTION_SQL\}/g)!.length).toBeGreaterThanOrEqual(3);
     expect(AP.match(/\$\{AP_SUPPLIER_ATTRIBUTION_SQL\}/g)!.length).toBeGreaterThanOrEqual(3);

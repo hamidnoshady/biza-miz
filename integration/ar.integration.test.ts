@@ -632,6 +632,7 @@ describe("listCustomerBalancePage", () => {
     expect(page).toEqual({
       customers: [],
       total: 0,
+      nextOffset: null,
       summary: expect.objectContaining({ netTotal: 0, reconciles: true, parties: 0 }),
     });
   });

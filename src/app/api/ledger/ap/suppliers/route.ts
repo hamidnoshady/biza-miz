@@ -1,3 +1,4 @@
+import { parseSubledgerWindow } from "@/lib/subledger-pagination";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -8,11 +9,9 @@ import { listSupplierBalances, listSupplierBalancePage, listSupplierDirectory } 
  * needs); default → only suppliers with a nonzero A/P balance, plus the
  * unattributed bucket (what the A/P report shows). The mirror of
  * `/api/ledger/ar/customers`, including `?q=` / `?limit=` / `?offset=` and the
- * `total` + `summary` they answer with — see that route for why an absent
- * `limit` must keep meaning "the whole list".
+ * `total` + `summary` they answer with — see that route for why a request
+ * without search or paging parameters must keep meaning "the whole list".
  */
-const MAX_LIMIT = 200;
-const MAX_OFFSET = 50_000;
 
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
@@ -23,15 +22,16 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ suppliers: await listSupplierDirectory(session.businessId) });
   }
 
-  const limitParam = params.get("limit");
-  if (limitParam === null) {
+  let window: ReturnType<typeof parseSubledgerWindow>;
+  try {
+    window = parseSubledgerWindow(params);
+  } catch {
+    return NextResponse.json({ error: "invalid_pagination" }, { status: 400 });
+  }
+  if (!window) {
     return NextResponse.json({ suppliers: await listSupplierBalances(session.businessId) });
   }
-  const requestedLimit = Number(limitParam);
-  const limit = Number.isInteger(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, MAX_LIMIT) : MAX_LIMIT;
-  const requestedOffset = Number(params.get("offset"));
-  const offset = Number.isInteger(requestedOffset) && requestedOffset >= 0 ? Math.min(requestedOffset, MAX_OFFSET) : 0;
   const q = params.get("q")?.trim() || null;
 
-  return NextResponse.json(await listSupplierBalancePage(session.businessId, { q, limit, offset }));
+  return NextResponse.json(await listSupplierBalancePage(session.businessId, { q, ...window }));
 });

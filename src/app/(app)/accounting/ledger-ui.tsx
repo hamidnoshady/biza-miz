@@ -103,6 +103,7 @@ export function OverlayDialog({
   const requestClose = useCallback(() => {
     if (dismissible) onClose();
   }, [dismissible, onClose]);
+  useOverlayEscape(requestClose, dismissible);
 
   return (
     <div

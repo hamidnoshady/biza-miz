@@ -503,3 +503,132 @@ describe("drill-down", () => {
     expect(payload.lines[0].debit).toBe(300_000);
   });
 });
+
+// More than the old 50,000 ceiling, real sources and real journal lines. This
+// catches repeated windows that a mocked route or a 3-party fixture cannot.
+describe("subledger pagination at scale", () => {
+  it("counts empty windows, advances beyond 50,000, preserves unknowns and isolates both ledgers", async () => {
+    const count = 50_004;
+    await db.query(`INSERT INTO parties (business_id, name, role, roles)
+      SELECT $1, 'Page ' || lpad(n::text, 6, '0'), 'customer', ARRAY['customer','supplier']
+      FROM generate_series(1, $2::int) n`, [biz.id, count]);
+    await db.query(`INSERT INTO suppliers (location_id, party_id, name)
+      SELECT $1, id, name FROM parties WHERE business_id = $2`, [biz.locationId, biz.id]);
+    await db.query(`INSERT INTO ar_receipts (business_id, customer_id, method, amount, receipt_date)
+      SELECT $1, id, 'cash', 100, '2025-04-01' FROM parties WHERE business_id = $1`, [biz.id]);
+    await db.query(`INSERT INTO ap_payments (business_id, supplier_id, method, amount, payment_date)
+      SELECT $1, id, 'cash', 100, '2025-04-01' FROM suppliers WHERE location_id = $2`, [biz.id, biz.locationId]);
+    await db.query(`INSERT INTO journal_entries (business_id, entry_date, source_type, source_id)
+      SELECT $1, receipt_date, 'ar_receipt', id FROM ar_receipts WHERE business_id = $1
+      UNION ALL SELECT $1, payment_date, 'ap_payment', id FROM ap_payments WHERE business_id = $1`, [biz.id]);
+    await db.query(`INSERT INTO journal_lines (entry_id, account_id, debit, credit)
+      SELECT je.id, a.id, CASE WHEN a.code = '2100' OR (a.code = '1100' AND je.source_type = 'ar_receipt') THEN 100 ELSE 0 END,
+             CASE WHEN a.code = '1200' OR (a.code = '1100' AND je.source_type = 'ap_payment') THEN 100 ELSE 0 END
+      FROM journal_entries je JOIN accounts a ON a.business_id = je.business_id
+       AND a.code IN ('1100', CASE WHEN je.source_type = 'ar_receipt' THEN '1200' ELSE '2100' END)
+      WHERE je.business_id = $1`, [biz.id]);
+    // Deliberate unattributed advances: not the metadata-only empty-page row.
+    await db.query(`WITH entry AS (
+      INSERT INTO journal_entries (business_id, entry_date, source_type) VALUES ($1, '2025-04-01', 'manual') RETURNING id
+    ) INSERT INTO journal_lines (entry_id, account_id, debit, credit)
+      SELECT entry.id, a.id, CASE WHEN code = '2100' THEN 200 ELSE 0 END,
+             CASE WHEN code = '1200' THEN 200 ELSE 0 END
+      FROM entry, accounts a WHERE a.business_id = $1 AND a.code IN ('1200','2100')`, [biz.id]);
+    const other = await seedBusiness();
+    await db.query(`INSERT INTO accounts (business_id, code, name, type) VALUES ($1,'1200','AR','asset'),($1,'2100','AP','liability')`, [other.id]);
+    await db.query(`WITH entry AS (
+      INSERT INTO journal_entries (business_id, entry_date, source_type) VALUES ($1, '2025-04-01', 'manual') RETURNING id
+    ) INSERT INTO journal_lines (entry_id, account_id, debit, credit)
+      SELECT entry.id, a.id, 999, 0 FROM entry, accounts a WHERE a.business_id = $1`, [other.id]);
+    for (const table of ["parties", "suppliers", "ar_receipts", "ap_payments", "journal_entries", "journal_lines"]) await db.query(`ANALYZE ${table}`);
+
+    const querySpy = vi.spyOn(dbLib, "query");
+    for (const [side, key, idKey, route] of [
+      ["ar", "customers", "customerId", customersRoute], ["ap", "suppliers", "supplierId", suppliersRoute],
+    ] as const) {
+      const get = async (query: string) => {
+        const response = await route.GET(jsonRequest(`/api/ledger/${side}/${key}?${query}`));
+        expect(response.status).toBe(200);
+        return response.json();
+      };
+      const first = await get("limit=2&offset=50000");
+      expect(first.total).toBe(count + 1);
+      expect(first.nextOffset).toBe(50002);
+      const next = await get(`limit=2&offset=${first.nextOffset}`);
+      expect(next.nextOffset).toBe(50004);
+      expect(new Set([...first[key], ...next[key]].map((row) => row[idKey])).size).toBe(4);
+      expect((await get("limit=2&offset=50000"))[key]).toEqual(first[key]);
+      const last = await get("limit=2&offset=50004");
+      expect(last[key]).toHaveLength(1);
+      expect(last[key][0][idKey]).toBe("unknown");
+      expect(last[key][0].balance).toBe(-200);
+      expect(last.nextOffset).toBeNull();
+      const outside = await get("limit=2&offset=2147483648");
+      expect(outside[key]).toEqual([]);
+      expect(outside.total).toBe(count + 1);
+      expect(outside.nextOffset).toBeNull();
+      expect(outside.summary).toEqual(first.summary);
+      const searched = await get("limit=2&offset=999&q=Page%20000001");
+      expect(searched[key]).toEqual([]);
+      expect(searched.total).toBe(1);
+      expect(searched.summary).toEqual(first.summary);
+      expect((await get("limit=2&q=Nobody")).total).toBe(0);
+      for (const invalid of ["offset=-1", "offset=1.5", "offset=9007199254740992", "limit=201"]) {
+        const response = await route.GET(jsonRequest(`/api/ledger/${side}/${key}?${invalid}`));
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ error: "invalid_pagination" });
+      }
+      sessionState.permissions.clear();
+      expect((await route.GET(jsonRequest(`/api/ledger/${side}/${key}?limit=25`))).status).toBe(403);
+      sessionState.permissions.add("ledger.view");
+    }
+    {
+      // Guard database work, not just returned rows, under a non-bypass RLS role.
+      const { writeFile } = await import("node:fs/promises");
+      const apService = await import("../src/lib/ap-service");
+      const party = (await db.query("SELECT id FROM parties WHERE business_id=$1 ORDER BY id LIMIT 1", [biz.id])).rows[0].id;
+      const supplier = (await db.query("SELECT id FROM suppliers WHERE location_id=$1 ORDER BY id LIMIT 1", [biz.locationId])).rows[0].id;
+      expect(await arService.getCustomerStatement(biz.id, party)).toHaveLength(1);
+      expect(await apService.getSupplierStatement(biz.id, supplier)).toHaveLength(1);
+      if (process.env.SUBLEDGER_PLAN_OUTPUT) {
+        await arService.getArAging(biz.id, "2025-04-01");
+        await apService.getApAging(biz.id, "2025-04-01");
+      }
+      const plans: unknown[] = [];
+      const role = `plan_reader_${randomUUID().replaceAll("-", "")}`;
+      await db.query(`CREATE ROLE ${role} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
+      await db.query(`GRANT USAGE ON SCHEMA public TO ${role}`);
+      await db.query(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${role}`);
+      await db.query(`SET ROLE ${role}`);
+      await db.query("SELECT set_config('app.business_id',$1,false), set_config('app.rls_bypass','false',false)", [biz.id]);
+      try {
+        // Even a deliberately wrong business predicate cannot escape RLS.
+        expect((await db.query("SELECT id FROM journal_entries WHERE business_id=$1", [other.id])).rows).toEqual([]);
+        const seen = new Set<string>();
+        for (const [sql, params] of querySpy.mock.calls) {
+          if (typeof sql !== "string" || !sql.includes("journal_lines jl") || seen.has(sql)) continue;
+          seen.add(sql);
+          const statement = sql.includes("AS entry_id") || sql.includes("AS journal_entry_id");
+          if (!process.env.SUBLEDGER_PLAN_OUTPUT && !statement) continue;
+          const result = await db.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`, params);
+          const plan = result.rows[0]["QUERY PLAN"];
+          if (statement) {
+            type PlanNode = { "Relation Name"?: string; "Actual Rows": number; "Actual Loops": number; "Rows Removed by Filter"?: number; Plans?: PlanNode[] };
+            const work = (node: PlanNode, relation: string): number =>
+              (node["Relation Name"] === relation ? (node["Actual Rows"] + (node["Rows Removed by Filter"] ?? 0)) * node["Actual Loops"] : 0) +
+              (node.Plans ?? []).reduce((sum, child) => sum + work(child, relation), 0);
+            expect(work(plan[0].Plan, "journal_lines")).toBeLessThanOrEqual(4);
+            expect(work(plan[0].Plan, "journal_entries")).toBeLessThanOrEqual(4);
+          }
+          plans.push({ sql, params, plan });
+        }
+        if (process.env.SUBLEDGER_PLAN_OUTPUT) await writeFile(process.env.SUBLEDGER_PLAN_OUTPUT, JSON.stringify(plans, null, 2));
+      } finally {
+        await db.query("RESET ROLE");
+        await db.query(`DROP OWNED BY ${role}`);
+        await db.query(`DROP ROLE ${role}`);
+      }
+    }
+    querySpy.mockRestore();
+  }, 120_000);
+});

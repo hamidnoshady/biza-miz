@@ -1,3 +1,4 @@
+import { subledgerNextOffset, validateSubledgerWindow } from "./subledger-pagination";
 /**
  * Accounts Payable subledger and supplier-payment workflows.
  *
@@ -27,7 +28,7 @@ import { isValidIsoDate } from "./iso-date";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
 import { agingBucketCaseSql, UNKNOWN_SUPPLIER_KEY, type AgingSummary } from "./aging";
-import { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL, apAttributionStatus } from "./ap-attribution";
+import { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL, apSupplierAttributionSql, apAttributionStatus } from "./ap-attribution";
 import { foldForSearch, searchPattern } from "./sql-search";
 import { enqueueHolooReceiptForApPayment } from "./integrations/holoo/outbox-producer";
 import { normalizeBankReference, PayablesInputError } from "./payables-input";
@@ -102,36 +103,11 @@ interface ApLineRow extends Record<string, unknown> {
   installment_plan_id: string | null;
 }
 
-interface ApLineFilters {
-  businessId: string;
-  accountId: string;
-  supplierId?: string;
-  asOfDate?: string;
-}
-
-/**
- * Line-level A/P activity for statement/aging calculations. Unlike the old
- * whole-history helper, this pushes both supplier selection and the as-of date
- * into PostgreSQL before any rows reach Node.
- */
-async function queryApLines(filters: ApLineFilters): Promise<ApLineRow[]> {
-  const values: unknown[] = [filters.businessId, filters.accountId];
-  const predicates = ["je.business_id = $1", "jl.account_id = $2"];
-  if (filters.asOfDate) {
-    values.push(filters.asOfDate);
-    predicates.push(`je.entry_date <= $${values.length}::date`);
-  }
-  if (filters.supplierId !== undefined) {
-    values.push(filters.supplierId);
-    const supplierParameter = `$${values.length}::text`;
-    predicates.push(
-      `CASE WHEN ${supplierParameter} = '${UNKNOWN_SUPPLIER_KEY}'
-            THEN ${AP_SUPPLIER_ID_SQL} IS NULL
-            ELSE ${AP_SUPPLIER_ID_SQL}::text = ${supplierParameter}
-       END`,
-    );
-  }
-
+/** A statement's sources are filtered inside the canonical relation, before
+ * the journal join. Unknown statements use its full LEFT JOIN to retain gaps. */
+async function queryApLines(filters: { businessId: string; accountId: string; supplierId: string }): Promise<ApLineRow[]> {
+  const known = filters.supplierId !== UNKNOWN_SUPPLIER_KEY;
+  const values = known ? [filters.businessId, filters.accountId, filters.supplierId] : [filters.businessId, filters.accountId];
   const { rows } = await query<ApLineRow>(
     `SELECT s.id AS supplier_id,
             COALESCE(pa.name, s.name) AS supplier_name,
@@ -146,20 +122,17 @@ async function queryApLines(filters: ApLineFilters): Promise<ApLineRow[]> {
             je.entry_date::text AS entry_date,
             je.source_type,
             je.source_id::text AS source_id,
-            COALESCE(p.note, p2.note, ip.note, ipr.note, exp.memo) AS note,
-            COALESCE(sr.reason, isr.reason) AS return_reason,
+            ap_source.note,
+            ap_source.return_reason,
             je.memo,
             jl.debit::text AS debit,
             jl.credit::text AS credit,
-            COALESCE(p.id, p2.id)::text AS purchase_id,
-            COALESCE(ip.id, ipr.id)::text AS item_purchase_id,
-            sr.id::text AS supplier_return_id,
-            isr.id::text AS item_supplier_return_id,
-            ap.id::text AS payment_id,
-            ch.id::text AS cheque_id,
-            ins.id::text AS installment_plan_id
-       ${AP_SUPPLIER_ATTRIBUTION_SQL}
-      WHERE ${predicates.join(" AND ")}
+            ap_source.purchase_id, ap_source.item_purchase_id,
+            ap_source.supplier_return_id, ap_source.item_supplier_return_id,
+            ap_source.payment_id, ap_source.cheque_id, ap_source.installment_plan_id
+       ${known ? apSupplierAttributionSql("$3::uuid") : AP_SUPPLIER_ATTRIBUTION_SQL}
+      WHERE je.business_id = $1 AND jl.account_id = $2
+        AND ${known ? `${AP_SUPPLIER_ID_SQL} = $3::uuid` : `${AP_SUPPLIER_ID_SQL} IS NULL`}
       ORDER BY je.entry_date, je.posted_at, je.id, jl.id`,
     values,
   );
@@ -227,9 +200,8 @@ export async function listSupplierDirectory(businessId: string): Promise<Supplie
  * (name, phone, accounting code) the A/R list searches.
  *
  * `$3` is the folded pattern or NULL; `$4`/`$5` are the window, both NULL for
- * the whole list. `count(*) OVER ()` is evaluated after WHERE and before
- * LIMIT, so a page and the number of matches it was cut from come back in one
- * round trip.
+ * the whole list. A counted filtered CTE retains the total even for an empty
+ * page, in the same SQL snapshot and round trip as the rows.
  */
 async function supplierBalanceRows(
   businessId: string,
@@ -246,15 +218,16 @@ async function supplierBalanceRows(
     location_name: string | null;
     balance: string;
     total: string;
+    present: boolean | null;
   }>(
-    `SELECT g.supplier_id,
+    `WITH filtered AS (
+     SELECT g.supplier_id,
             ${AP_SUPPLIER_NAME_SQL} AS supplier_name,
             coalesce(pa.phone, s.phone) AS supplier_phone,
             s.party_id AS party_id,
             supplier_location.id AS location_id,
             supplier_location.name AS location_name,
-            g.balance::text AS balance,
-            count(*) OVER () AS total
+            g.balance AS balance
        FROM (
          SELECT ${AP_SUPPLIER_ID_SQL} AS supplier_id,
                 sum(jl.credit - jl.debit) AS balance
@@ -268,16 +241,20 @@ async function supplierBalanceRows(
          OR ${foldForSearch(AP_SUPPLIER_NAME_SQL)} ILIKE $3 ESCAPE '\\'
          OR ${foldForSearch("coalesce(pa.phone, s.phone, '')")} ILIKE $3 ESCAPE '\\'
          OR ${foldForSearch("coalesce(pa.accounting_code, '')")} ILIKE $3 ESCAPE '\\'
-      ORDER BY g.balance DESC,
-               ${AP_SUPPLIER_NAME_SQL},
-               supplier_location.name NULLS FIRST,
-               g.supplier_id NULLS FIRST
-      LIMIT $4::int OFFSET $5::int`,
+     )
+     SELECT page.*, counts.total
+       FROM (SELECT count(*)::text AS total FROM filtered) counts
+       LEFT JOIN LATERAL (
+         SELECT *, true AS present FROM filtered
+          ORDER BY balance DESC, supplier_name, location_name NULLS FIRST, supplier_id NULLS FIRST
+          LIMIT $4::int OFFSET $5::bigint
+       ) page ON true
+      ORDER BY balance DESC, supplier_name, location_name NULLS FIRST, supplier_id NULLS FIRST`,
     [businessId, accountId, pattern, options.limit, options.offset],
   );
 
   return {
-    suppliers: rows.map((row) => ({
+    suppliers: rows.filter((row) => row.present).map((row) => ({
       supplierId: row.supplier_id ?? UNKNOWN_SUPPLIER_KEY,
       supplierName: row.supplier_name ?? UNATTRIBUTED_SUPPLIER_NAME,
       supplierPhone: row.supplier_phone,
@@ -385,6 +362,7 @@ export async function getApReconciliationSummary(businessId: string): Promise<Ap
 
 /** One page of the A/P balances list, with the totals the page must not change. */
 export interface SupplierBalancePage {
+  nextOffset: number | null;
   suppliers: SupplierBalance[];
   total: number;
   summary: ApReconciliationSummary;
@@ -395,8 +373,9 @@ export async function listSupplierBalancePage(
   businessId: string,
   options: { q?: string | null; limit: number; offset: number },
 ): Promise<SupplierBalancePage> {
+  validateSubledgerWindow(options.limit, options.offset);
   const accountId = await apAccountId(businessId);
-  if (!accountId) return { suppliers: [], total: 0, summary: { ...EMPTY_AP_SUMMARY } };
+  if (!accountId) return { suppliers: [], total: 0, nextOffset: null, summary: { ...EMPTY_AP_SUMMARY } };
   const [{ suppliers, total }, summary] = await Promise.all([
     supplierBalanceRows(businessId, accountId, {
       q: options.q?.trim() || null,
@@ -405,7 +384,7 @@ export async function listSupplierBalancePage(
     }),
     getApReconciliationSummary(businessId),
   ]);
-  return { suppliers, total, summary };
+  return { suppliers, total, summary, nextOffset: subledgerNextOffset(options.offset, suppliers.length, total) };
 }
 
 export type ApStatementType =

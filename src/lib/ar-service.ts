@@ -1,3 +1,5 @@
+import { AR_CUSTOMER_ATTRIBUTION_SQL, AR_CUSTOMER_ID_SQL, arCustomerAttributionSql } from "./ar-attribution";
+import { subledgerNextOffset, validateSubledgerWindow } from "./subledger-pagination";
 /**
  * Phase 16 — AR subledger, the DB-touching part.
  *
@@ -126,20 +128,22 @@ async function customerBalanceRows(
     phone: string | null;
     balance: string;
     total: string;
+    present: boolean | null;
   }>(
     /*
      * `HAVING … <> 0` rather than filtering after the fact: a customer who has
      * settled in full has nothing to show, and a row carrying a zero would
      * read as a debt of nothing.
      *
-     * The `count(*) OVER ()` is evaluated after `WHERE` and before `LIMIT`, so
-     * one round trip answers both "these rows" and "how many rows there are".
+     * Count the filtered relation independently of the window. The LEFT JOIN
+     * retains its count even when the requested page is empty; present marks
+     * real rows, including the null-key unknown bucket.
      */
-    `SELECT g.customer_id,
+    `WITH filtered AS (
+     SELECT g.customer_id,
             coalesce(p.name, '${UNATTRIBUTED_CUSTOMER_NAME}') AS name,
             p.phone,
-            g.balance::text AS balance,
-            count(*) OVER () AS total
+            g.balance AS balance
        FROM (
          SELECT ${AR_CUSTOMER_ID_SQL} AS customer_id,
                 sum(jl.debit - jl.credit) AS balance
@@ -157,12 +161,19 @@ async function customerBalanceRows(
          OR ${foldForSearch(`coalesce(p.name, '${UNATTRIBUTED_CUSTOMER_NAME}')`)} ILIKE $3 ESCAPE '\\'
          OR ${foldForSearch("coalesce(p.phone, '')")} ILIKE $3 ESCAPE '\\'
          OR ${foldForSearch("coalesce(p.accounting_code, '')")} ILIKE $3 ESCAPE '\\'
-      ORDER BY g.balance DESC, g.customer_id NULLS LAST
-      LIMIT $4::int OFFSET $5::int`,
+     )
+     SELECT page.*, counts.total
+       FROM (SELECT count(*)::text AS total FROM filtered) counts
+       LEFT JOIN LATERAL (
+         SELECT *, true AS present FROM filtered
+          ORDER BY balance DESC, customer_id NULLS LAST
+          LIMIT $4::int OFFSET $5::bigint
+       ) page ON true
+      ORDER BY balance DESC, customer_id NULLS LAST`,
     [businessId, accountId, pattern, options.limit, options.offset],
   );
   return {
-    customers: rows.map((r) => ({
+    customers: rows.filter((row) => row.present).map((r) => ({
       customerId: r.customer_id ?? UNKNOWN_CUSTOMER_KEY,
       customerName: r.name,
       customerPhone: r.phone,
@@ -294,6 +305,7 @@ export async function getArReconciliationSummary(businessId: string): Promise<Ar
 
 /** One page of the balances list, with the totals the page must not change. */
 export interface CustomerBalancePage {
+  nextOffset: number | null;
   customers: CustomerBalance[];
   /** Rows matching the search, before the window — «۲۵ از ۳۱۰». */
   total: number;
@@ -312,8 +324,9 @@ export async function listCustomerBalancePage(
   businessId: string,
   options: { q?: string | null; limit: number; offset: number },
 ): Promise<CustomerBalancePage> {
+  validateSubledgerWindow(options.limit, options.offset);
   const accountId = await arAccountId(businessId);
-  if (!accountId) return { customers: [], total: 0, summary: { ...EMPTY_AR_SUMMARY } };
+  if (!accountId) return { customers: [], total: 0, nextOffset: null, summary: { ...EMPTY_AR_SUMMARY } };
   const [{ customers, total }, summary] = await Promise.all([
     customerBalanceRows(businessId, accountId, {
       q: options.q?.trim() || null,
@@ -322,7 +335,7 @@ export async function listCustomerBalancePage(
     }),
     getArReconciliationSummary(businessId),
   ]);
-  return { customers, total, summary };
+  return { customers, total, summary, nextOffset: subledgerNextOffset(options.offset, customers.length, total) };
 }
 
 /**
@@ -371,20 +384,8 @@ export async function arBalancesForCustomers(
  *
  * `$1` is the business id. The caller supplies the account filter.
  */
-export const AR_CUSTOMER_ATTRIBUTION_SQL = `
-  FROM journal_lines jl
-  JOIN journal_entries je ON je.id = jl.entry_id
-  LEFT JOIN order_amendments am
-         ON je.source_type = 'order_amendment' AND am.id = je.source_id
-  LEFT JOIN orders o
-         ON o.id = CASE WHEN je.source_type = 'order' THEN je.source_id ELSE am.order_id END
-  LEFT JOIN ar_receipts r
-         ON je.source_type = 'ar_receipt' AND r.id = je.source_id
-  LEFT JOIN cheques ch
-         ON je.source_type = 'cheque' AND ch.id = je.source_id`;
-
-/** The customer-id expression that goes with {@link AR_CUSTOMER_ATTRIBUTION_SQL}. */
-export const AR_CUSTOMER_ID_SQL = "COALESCE(o.customer_id, r.customer_id, ch.customer_id)";
+// Re-export the public contract for CRM and existing service consumers.
+export { AR_CUSTOMER_ATTRIBUTION_SQL, AR_CUSTOMER_ID_SQL } from "./ar-attribution";
 
 /**
  * A ready-made CTE body giving every customer's A/R balance in one pass.
@@ -536,17 +537,10 @@ function statementSourceLabel(row: ArStatementRow): string | null {
  *
  * The rows are attributed in SQL and only this customer's leave the database —
  * the pre-fix version pulled every A/R line the business had ever posted into
- * Node and filtered there. What it deliberately does *not* do is fork the
- * attribution to make the filter indexable: a line belongs to a customer
- * through the order, the receipt, the cheque or the amendment bridge, and the
- * canonical fragment is the one place that rule exists. The consequence, read
- * off `EXPLAIN ANALYZE` on a 138k-line ledger rather than assumed: the plan
- * walks the business's A/R lines (bitmap index scan on
- * `idx_journal_lines_account`) and filters after attributing them, so a
- * statement costs the subledger, not the statement. Pushing the filter into
- * the source tables would need a `journal_entries (source_type, source_id)`
- * index and would mean re-stating the attribution in a fourth place — a worse
- * trade than a bounded, index-backed scan.
+ * Node and filtered there. Named statements now start from the canonical
+ * source relation filtered to this customer, using the journal source index;
+ * the unknown bucket necessarily checks unmatched sources across the account.
+ * Attribution is shared with balances, aging and CRM, never restated here.
  */
 export async function getCustomerStatement(businessId: string, customerId: string): Promise<ArStatementLine[]> {
   const accountId = await arAccountId(businessId);
@@ -561,11 +555,11 @@ export async function getCustomerStatement(businessId: string, customerId: strin
     // The same attribution fragment as every other A/R number; here it also
     // supplies the source joins the drill-down metadata is read from.
     `SELECT je.id AS entry_id, je.entry_date::text AS entry_date, je.source_type, je.source_id,
-            o.id AS order_id, o.order_number,
-            ch.serial_number, ch.bank_name,
-            r.method AS receipt_method,
+            ar_source.order_id, ar_source.order_number,
+            ar_source.serial_number, ar_source.bank_name,
+            ar_source.receipt_method,
             je.memo, jl.debit::text AS debit, jl.credit::text AS credit
-     ${AR_CUSTOMER_ATTRIBUTION_SQL}
+     ${isUnknown ? AR_CUSTOMER_ATTRIBUTION_SQL : arCustomerAttributionSql("$3::uuid")}
       WHERE je.business_id = $1 AND jl.account_id = $2
         AND ${isUnknown ? `${AR_CUSTOMER_ID_SQL} IS NULL` : `${AR_CUSTOMER_ID_SQL} = $3`}
       ORDER BY je.entry_date, je.posted_at, jl.id`,

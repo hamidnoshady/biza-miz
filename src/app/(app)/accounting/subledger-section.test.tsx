@@ -24,9 +24,12 @@
  *    record's own id (never parsed out of the Persian description), and the
  *    journal entry behind the line is fetched on demand.
  */
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MoneyProvider } from "@/components/money/money-context";
+import { formatMoney } from "@/lib/money";
+import { formatJalali } from "@/lib/jalali";
 import { RECEIVABLES_SIDE } from "./ar-section";
 import { PAYABLES_SIDE } from "./ap-section";
 import { SubledgerSection, SubledgerStatementPanel } from "./subledger-section";
@@ -84,6 +87,7 @@ function balancePage(
       balance: row.balance,
     })),
     total,
+    nextOffset: rows.length < total ? rows.length : null,
     summary: summary(overrides),
   };
 }
@@ -398,5 +402,91 @@ describe("A/P contracts preserved by the shared screen", () => {
     await waitFor(() => expect(payments).toHaveLength(3));
     expect(payments[2].memo).toBe("Revised payment");
     expect(payments[2].clientRequestId).not.toBe(payments[0].clientRequestId);
+  });
+});
+
+
+describe("paging request ownership", () => {
+  function deferred() {
+    let resolve!: (response: MockResponse) => void;
+    const promise = new Promise<MockResponse>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  it.each(["search", "settlement refresh"])("releases superseded paging during %s without letting it finish the new page", async (replacement) => {
+    const oldPage = deferred();
+    const newList = deferred();
+    const newPage = deferred();
+    let listRequests = 0;
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+      if (init?.method === "POST") return Promise.resolve(respond({}));
+      listRequests += 1;
+      if (listRequests === 1) return Promise.resolve(respond(balancePage([{ id: ALI, name: "Ali", balance: 100 }], 3)));
+      if (listRequests === 2) return oldPage.promise;
+      if (listRequests === 3) return newList.promise;
+      return newPage.promise;
+    });
+    render(<SubledgerSection side={RECEIVABLES_SIDE} canSettle />);
+    await screen.findAllByText("Ali");
+    await userEvent.click(screen.getByRole("button", { name: "نمایش موارد بیشتر" }));
+    expect(listRequests).toBe(2);
+    if (replacement === "search") {
+      fireEvent.change(screen.getByLabelText(SEARCH), { target: { value: "New" } });
+    } else {
+      await userEvent.click(screen.getAllByRole("button", { name: ACTION })[0]);
+      await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: RECEIVABLES_SIDE.settle.submitLabel }));
+    }
+    await waitFor(() => expect(listRequests).toBe(3));
+    expect(screen.getAllByText("Ali")).toHaveLength(2);
+    const blocked = screen.getByRole("button", { name: "نمایش موارد بیشتر" }) as HTMLButtonElement;
+    expect(blocked.disabled).toBe(true);
+    await userEvent.click(blocked);
+    expect(listRequests).toBe(3);
+
+    await act(async () => newList.resolve(respond(balancePage([{ id: SARA, name: "New first", balance: 90 }], 3))));
+    expect(screen.queryAllByText("Ali")).toHaveLength(0);
+    await userEvent.click(screen.getByRole("button", { name: "نمایش موارد بیشتر" }));
+    expect(listRequests).toBe(4);
+    // An obsolete failure must not clear the new page's spinner or set its error.
+    await act(async () => oldPage.resolve(respond({ error: "network_error" }, false, 500)));
+    expect((screen.getByRole("button", { name: "در حال بارگذاری…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText(RECEIVABLES_SIDE.loadBalancesFailed)).toBeNull();
+    await act(async () => newPage.resolve(respond({ ...balancePage([{ id: ENTRY, name: "New next", balance: 80 }], 3), nextOffset: 2 })));
+    expect(screen.getAllByText("New next")).toHaveLength(2);
+    expect((screen.getByRole("button", { name: "نمایش موارد بیشتر" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(String(fetchMock.mock.calls.filter(([, init]) => init?.method !== "POST")[3][0])).toContain("offset=1");
+  });
+
+  it("advances by the server window even if live reordering repeats a row", async () => {
+    routeFetch((url) => {
+      if (url.includes("offset=2")) return respond({ ...balancePage([{ id: SARA, name: "Sara", balance: 80 }], 3), nextOffset: null });
+      if (url.includes("offset=1")) return respond({ ...balancePage([{ id: ALI, name: "Ali", balance: 100 }], 3), nextOffset: 2 });
+      return respond(balancePage([{ id: ALI, name: "Ali", balance: 100 }], 3));
+    });
+    render(<SubledgerSection side={RECEIVABLES_SIDE} canSettle={false} />);
+    await screen.findAllByText("Ali");
+    await userEvent.click(screen.getByRole("button", { name: "نمایش موارد بیشتر" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "نمایش موارد بیشتر" }) as HTMLButtonElement).disabled).toBe(false));
+    await userEvent.click(screen.getByRole("button", { name: "نمایش موارد بیشتر" }));
+    await screen.findAllByText("Sara");
+    expect(screen.queryByRole("button", { name: "نمایش موارد بیشتر" })).toBeNull();
+  });
+});
+
+
+describe("subledger presentation contracts", () => {
+  it.each(["rial", "toman"] as const)("uses %s and Jalali in both statement layouts; Escape dismisses the dialog", async (unit) => {
+    routeFetch(() => respond(balancePage([{ id: ALI, name: "Ali", balance: 800_000 }])));
+    render(<MoneyProvider unit={unit}><SubledgerSection side={RECEIVABLES_SIDE} canSettle={false} /></MoneyProvider>);
+    expect(await screen.findAllByText(formatMoney(800_000, unit))).not.toHaveLength(0);
+    await userEvent.click(screen.getAllByRole("button", { name: "Ali" })[0]);
+    await screen.findAllByText("سفارش ۱۲۳");
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(dialog.getAttribute("aria-labelledby")).toBe(RECEIVABLES_SIDE.statement.headingId);
+    expect(within(dialog).getAllByText(formatJalali("2025-04-01"), { exact: false })).toHaveLength(2);
+    expect(within(dialog).queryByText("2025-04-01")).toBeNull();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

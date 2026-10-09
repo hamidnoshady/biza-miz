@@ -1,3 +1,4 @@
+import { parseSubledgerWindow } from "@/lib/subledger-pagination";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -17,12 +18,10 @@ import { listCustomerBalances, listCustomerBalancePage, listCustomerDirectory } 
  * search box and a «بیشتر» button asks for one window and gets `total` (the
  * rows the search matches, before the window) plus `summary` (the whole
  * subledger's totals, deliberately unchanged by the search or the page). With
- * no `limit` the route answers the whole list, exactly as it always did — the
+ * no paging or search parameters the route answers the whole list, exactly as it always did — the
  * directory's balance column and the assistant both read it that way, and a
  * silent 25-row default would have quietly truncated them.
  */
-const MAX_LIMIT = 200;
-const MAX_OFFSET = 50_000;
 
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
@@ -33,16 +32,16 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ customers: await listCustomerDirectory(session.businessId) });
   }
 
-  const limitParam = params.get("limit");
-  if (limitParam === null) {
-    // No window asked for: the unbounded list, with no totals to compute.
+  let window: ReturnType<typeof parseSubledgerWindow>;
+  try {
+    window = parseSubledgerWindow(params);
+  } catch {
+    return NextResponse.json({ error: "invalid_pagination" }, { status: 400 });
+  }
+  if (!window) {
     return NextResponse.json({ customers: await listCustomerBalances(session.businessId) });
   }
-  const requestedLimit = Number(limitParam);
-  const limit = Number.isInteger(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, MAX_LIMIT) : MAX_LIMIT;
-  const requestedOffset = Number(params.get("offset"));
-  const offset = Number.isInteger(requestedOffset) && requestedOffset >= 0 ? Math.min(requestedOffset, MAX_OFFSET) : 0;
   const q = params.get("q")?.trim() || null;
 
-  return NextResponse.json(await listCustomerBalancePage(session.businessId, { q, limit, offset }));
+  return NextResponse.json(await listCustomerBalancePage(session.businessId, { q, ...window }));
 });

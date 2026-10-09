@@ -57,6 +57,7 @@ interface ReconciliationSummaryPayload {
 interface BalancesPayload {
   customers?: CustomerBalance[];
   total?: number;
+  nextOffset?: number | null;
   summary?: ReconciliationSummaryPayload | null;
 }
 
@@ -94,6 +95,7 @@ export const RECEIVABLES_SIDE: SubledgerSide = {
       // An endpoint that answered without a window (an older caller, a mock)
       // still yields a usable total rather than «۰ از ۰».
       total: data.total ?? rows.length,
+      nextOffset: data.nextOffset ?? null,
       summary: data.summary
         ? {
             primaryTotal: data.summary.receivableTotal,
