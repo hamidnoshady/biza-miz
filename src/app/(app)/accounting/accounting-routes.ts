@@ -22,6 +22,12 @@ export const ACCOUNTING_HOME = "/accounting/overview";
 
 export const ACCOUNTING_SECTION_KEYS = [
   "dashboard",
+  // «فضای کار حسابداری» — the ledger workspace's own landing page at
+  // `/accounting/ledger`: one ordinary menu link whose page lists every
+  // permitted ledger tool by the accountant's own divisions. It is a section
+  // like the rest (one route, one gate, one heading), not a disclosure in the
+  // sidebar and not a second copy of the tools themselves.
+  "ledger",
   "trial-balance",
   "entries",
   "manual",

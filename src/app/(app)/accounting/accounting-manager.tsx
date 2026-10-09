@@ -23,6 +23,7 @@ import {
 import { accountingSectionsFor } from "./accounting-nav";
 import { accountingSectionNeedsAccountList } from "./accounting-manager-policy";
 import { LEDGER_WORKSPACE_SECTION_KEYS, LEDGER_WORKSPACE_SUBGROUPS } from "./accounting-workspace";
+import { LedgerWorkspaceSection } from "./ledger-workspace-section";
 import { TrialBalanceSection } from "./trial-balance-section";
 import { EntriesSection } from "./entries-section";
 import { ManualEntrySection } from "./manual-entry-section";
@@ -298,6 +299,7 @@ export function AccountingManager({
   const body = (
     <>
       {section === "dashboard" ? <LedgerDashboardSection onGoToTab={goToSection} refreshKey={refreshKey} /> : null}
+      {section === "ledger" ? <LedgerWorkspaceSection permissions={permissionSet} /> : null}
           {section === "trial-balance" ? (
             <TrialBalanceSection refreshKey={refreshKey} canExport={canExportReports} />
           ) : null}

@@ -47,6 +47,11 @@ export interface AccountingSectionDef {
 /** The app's sections, in menu order. The dashboard (the app's home) is first. */
 export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "dashboard", label: "داشبورد حسابداری" },
+  // The ledger workspace's landing page. One ordinary menu link — the same
+  // skin as «فروش و فاکتور» — whose page lists the permitted ledger tools.
+  // The label is exact: the menu row, the page heading and the workspace link
+  // all wear «فضای کار حسابداری» from this one definition.
+  { key: "ledger", label: "فضای کار حسابداری" },
   { key: "trial-balance", label: "تراز آزمایشی" },
   { key: "entries", label: "دفتر روزنامه" },
   { key: "manual", label: "ثبت سند دستی" },
@@ -82,15 +87,14 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
 ];
 
 /**
- * How the *ledger rail* («فضای کار حسابداری», the in-page menu) divides those
- * sections.
+ * How the ledger's sections divide into work areas.
  *
- * The app's **sidebar** is no longer this list: Accounting is the business's
- * primary workspace now, so its menu is composed in
- * `accounting-workspace.ts` — the business's work areas plus these sections
- * gathered into one group. This grouping stays because the in-page rail still
- * draws it, and because it is the one place that guarantees every section has
- * a home.
+ * The app's **sidebar** is not this list: Accounting is the business's primary
+ * workspace now, so its menu is composed in `accounting-workspace.ts` — the
+ * business's work areas plus one ordinary link, «فضای کار حسابداری», whose
+ * landing page (`/accounting/ledger`) lists the permitted tools under the
+ * divisions in `LEDGER_WORKSPACE_SUBGROUPS`. This grouping stays because it is
+ * the one place that guarantees every section has a home.
  *
  * Twenty-three rows in one column is a list nobody reads; these are the
  * accountant's own divisions of the work. Every key appears in exactly one
@@ -106,6 +110,7 @@ export const ACCOUNTING_NAV_GROUPS: readonly {
     label: "دفتر",
     keys: [
       "dashboard",
+      "ledger",
       "trial-balance",
       "entries",
       "manual",

@@ -9,8 +9,10 @@
  * `/dashboard/*`. Two competing "main" navigations for one product, and the
  * one called «حسابداری» was the narrower of the two.
  *
- * So Accounting is the primary workspace, and the ledger is a named group
- * inside it. Concretely:
+ * So Accounting is the primary workspace, and the ledger is one ordinary
+ * link inside it — «فضای کار حسابداری», no disclosure and no chevron — whose
+ * landing page (`/accounting/ledger`, the `ledger` section) lists every
+ * permitted ledger tool under the accountant's own divisions. Concretely:
  *
  *  - the **work areas** (sales, purchases, inventory, products, reports, the
  *    trade's own operational screens) are the business nav entries that
@@ -18,9 +20,10 @@
  *    — `navItems`, with every module / role / feature / permission filter
  *    already applied — and never re-declared here. A business whose trade has
  *    no انبار has no انبار row, because the entry was never in the list.
- *  - the **ledger sections** are `ACCOUNTING_SECTIONS`, unchanged, gathered
- *    into one group called «فضای کار حسابداری» so the words on the screen
- *    match the words in the product.
+ *  - the **ledger tools** are `LEDGER_WORKSPACE_SECTION_KEYS`, unchanged: they
+ *    keep their routes, gates and labels, and `LEDGER_WORKSPACE_SUBGROUPS`
+ *    arranges them on the workspace page the way an accountant divides the
+ *    work — دفتر، دریافتنی و پرداختنی، وجوه و هزینه، دوره و مالیات.
  *
  * Framework-free (no React, no JSX, no icons) like `accounting-nav.ts` beside
  * it, so the same composition is testable and can be read by the server nav
@@ -41,48 +44,29 @@ export interface WorkspaceNavEntry {
   external?: boolean;
   /** The Accounting section this entry is, when it is one. Decides the glyph and the active rule. */
   section?: AccountingSectionKey;
-  /** The nav icon key, for an entry drawn from the business nav. */
+  /**
+   * The nav icon key, for an entry drawn from the business nav — and for the
+   * one section row that wears the app's own glyph (`LEDGER_WORKSPACE_ICON_KEY`)
+   * instead of its section map entry.
+   */
   iconKey?: string;
 }
 
 /**
- * A named division *inside* a group.
- *
- * Only the long collapsible group needs them: sixteen ledger tools under one
- * heading is the same unreadable column the flat menu was, so the ledger is
- * divided the way an accountant divides the work — دفتر، دریافتنی و پرداختنی،
- * وجوه و هزینه، دوره و مالیات، پیکربندی. Every other group in this menu is
- * short enough to read as one list.
+ * A named block of the menu: a heading over its rows. A group with no label is
+ * one ordinary link standing in the column where a group used to be — the
+ * «فضای کار حسابداری» workspace door, which wears its words on the row the way
+ * «فروش و فاکتور» does rather than on a heading above it.
  */
-export interface WorkspaceNavSubGroup {
-  key: string;
-  label: string;
-  entries: WorkspaceNavEntry[];
-}
-
 export interface WorkspaceNavGroup {
-  /** The group's own id, stable across renders — used for the open/closed memory. */
+  /** The group's own id, stable across renders. */
   key: string;
-  label: string;
+  /** Absent for the single-link workspace door — the row *is* the label. */
+  label?: string;
   /** One line under the heading, for the groups whose contents are not obvious. */
   description?: string;
-  /**
-   * Every entry of the group, flat and in menu order — what a picker, a test
-   * or a bottom-nav reads. `subGroups`, when present, is the *same* entries
-   * arranged under headings; it is never a second list.
-   */
+  /** Every entry of the group, flat and in menu order — what a picker, a test or a bottom-nav reads. */
   entries: WorkspaceNavEntry[];
-  /** The group's own glyph (an `NAV_ICONS` key), drawn on a disclosure header. */
-  iconKey?: string;
-  /**
-   * A group that discloses rather than always being open. «فضای کار حسابداری»
-   * is the long one — sixteen ledger tools — and it is the group a
-   * non-accountant opens least often, so it starts closed unless you are
-   * standing in it.
-   */
-  collapsible?: boolean;
-  /** Headings inside the group, for a group too long to read as one list. */
-  subGroups?: WorkspaceNavSubGroup[];
 }
 
 /** The business nav entries this menu is willing to adopt, by href, in menu order. */
@@ -152,16 +136,19 @@ const REPORTS_SLOTS: readonly WorkspaceSlot[] = [
 ];
 
 /**
- * The ledger's own sections — everything «فضای کار حسابداری» holds.
+ * The ledger's own tools — everything the «فضای کار حسابداری» page links to.
  *
  * Membership lives here; the *order* and the headings live in
  * `LEDGER_WORKSPACE_SUBGROUPS` below, which arranges exactly these keys.
+ * Their routes, labels, icons and permissions are untouched: the sidebar
+ * simply links to the workspace page instead of listing them all, and the
+ * page lists them through the same permission helper the menu used.
  *
- * Everything `ACCOUNTING_SECTIONS` holds except the app-level areas: the
- * app's home (a group of its own at the top), the directory (the people
- * group), reports, the cross-domain growth analysis, and app settings. Those
- * destinations have their own focused groups rather than being buried among
- * ledger tools.
+ * Everything `ACCOUNTING_SECTIONS` holds except the workspace door itself and
+ * the app-level areas: the app's home (a group of its own at the top), the
+ * directory (the people group), reports, the cross-domain growth analysis,
+ * and app settings. Those destinations have their own focused groups rather
+ * than being buried among ledger tools.
  */
 export const LEDGER_WORKSPACE_SECTION_KEYS: readonly AccountingSectionKey[] = [
   "trial-balance",
@@ -182,17 +169,16 @@ export const LEDGER_WORKSPACE_SECTION_KEYS: readonly AccountingSectionKey[] = [
 ];
 
 /**
- * How «فضای کار حسابداری» divides its own sections inside the menu.
+ * How the «فضای کار حسابداری» page divides its tools.
  *
- * Every other group in the Accounting menu carries a heading over a short
- * list. The ledger carried sixteen rows under a single heading, which is why
- * it read as an unstructured drawer rather than as part of the menu: it was
- * the one group with a disclosure and no internal structure. These are the
- * accountant's own divisions — the same ones the in-page rail already draws
- * (`ACCOUNTING_NAV_GROUPS`), narrowed to the keys this group holds.
+ * The workspace is one ordinary menu link now, so the ledger's sixteen rows no
+ * longer sit in the sidebar at all — they are listed on `/accounting/ledger`
+ * under these headings. These are the accountant's own divisions — the same
+ * ones the in-page rail already draws (`ACCOUNTING_NAV_GROUPS`), narrowed to
+ * the keys `LEDGER_WORKSPACE_SECTION_KEYS` holds.
  *
  * The union of these keys is exactly `LEDGER_WORKSPACE_SECTION_KEYS`, asserted
- * in `accounting-workspace.test.ts`, so a ledger section can never be added
+ * in `accounting-workspace.test.ts`, so a ledger tool can never be added
  * without a home — and the sub-groups can never become a second, disagreeing
  * list.
  */
@@ -211,14 +197,14 @@ export const LEDGER_WORKSPACE_SUBGROUPS: readonly {
   { key: "ledger-periods", label: "دوره، مالیات و حقوق", keys: ["fiscal-periods", "vat", "payroll"] },
 ];
 
-/** The label «فضای کار حسابداری» wears wherever it is drawn — menu and page alike. */
+/** The label «فضای کار حسابداری» wears wherever it is drawn — menu row and page alike. */
 export const LEDGER_WORKSPACE_LABEL = "فضای کار حسابداری";
-export const LEDGER_WORKSPACE_DESCRIPTION = "دفتر، اسناد و عملیات مالی";
 export const LEDGER_WORKSPACE_GROUP_KEY = "ledger";
 /**
- * The glyph the ledger group's own header wears — the same calculator the
- * workspace rail and the bottom nav already use for «حسابداری», so the group
- * is recognisable at 4rem where headings are hidden.
+ * The glyph the workspace row wears — the same calculator the workspace rail
+ * and the bottom nav already use for «حسابداری», so the row is recognisable at
+ * 4rem where its label is hidden. It is the *mapping* (an `NAV_ICONS` key), not
+ * a copy of the icon, so the two surfaces can never drift apart.
  */
 export const LEDGER_WORKSPACE_ICON_KEY = "/accounting";
 
@@ -299,24 +285,20 @@ export function accountingWorkspaceGroups({
     });
   }
 
-  // 4. «فضای کار حسابداری» — the ledger, as a named group inside this menu,
-  // divided into the same named sub-groups every other part of the menu has.
-  const ledgerSubGroups = LEDGER_WORKSPACE_SUBGROUPS.flatMap((subGroup) => {
-    const entries = subGroup.keys.flatMap((key) => sectionEntry(key));
-    return entries.length > 0 ? [{ key: subGroup.key, label: subGroup.label, entries }] : [];
-  });
-  // The flat list stays the source of truth for order and membership; the
-  // sub-groups only arrange it, so the two can never hold different entries.
-  const ledgerEntries = ledgerSubGroups.flatMap((subGroup) => subGroup.entries);
-  if (ledgerEntries.length > 0) {
+  // 4. «فضای کار حسابداری» — one ordinary link, in the same menu position the
+  // long ledger group used to occupy. No disclosure, no chevron, no nested
+  // panel: the row is drawn like every other menu link and opens the workspace
+  // page (`/accounting/ledger`), which lists the permitted tools under the
+  // accountant's own divisions. It appears only for a member the same section
+  // gate lets in (`accountingSectionsFor` → the `ledger.view` door).
+  const ledgerWorkspace = sectionEntry("ledger").map((entry) => ({
+    ...entry,
+    iconKey: LEDGER_WORKSPACE_ICON_KEY,
+  }));
+  if (ledgerWorkspace.length > 0) {
     groups.push({
       key: LEDGER_WORKSPACE_GROUP_KEY,
-      label: LEDGER_WORKSPACE_LABEL,
-      description: LEDGER_WORKSPACE_DESCRIPTION,
-      entries: ledgerEntries,
-      iconKey: LEDGER_WORKSPACE_ICON_KEY,
-      collapsible: true,
-      subGroups: ledgerSubGroups,
+      entries: ledgerWorkspace,
     });
   }
 
@@ -347,6 +329,52 @@ export function accountingWorkspaceHrefs(groups: readonly WorkspaceNavGroup[]): 
   return groups.flatMap((group) => group.entries.map((entry) => entry.href));
 }
 
+/** One heading of the workspace page, with the permitted tools under it. */
+export interface LedgerWorkspaceToolGroup {
+  key: string;
+  label: string;
+  entries: WorkspaceNavEntry[];
+}
+
+/**
+ * What the «فضای کار حسابداری» page lists: the ledger's tools, arranged by
+ * `LEDGER_WORKSPACE_SUBGROUPS` and filtered through the *same* permission
+ * helper the menu and the page gates use (`accountingSectionsFor`). The page
+ * and the sidebar therefore can never disagree about who sees payroll — and
+ * this function is the testable half of that promise.
+ *
+ * A sub-group the member's permissions empty is dropped rather than shown as
+ * an empty heading.
+ */
+export function ledgerWorkspaceToolGroups(
+  permissions: ReadonlySet<string>,
+): LedgerWorkspaceToolGroup[] {
+  const allowed = accountingSectionsFor(permissions);
+  return LEDGER_WORKSPACE_SUBGROUPS.flatMap((subGroup) => {
+    const entries = subGroup.keys.flatMap((key) => {
+      const section = allowed.find((candidate) => candidate.key === key);
+      return section ? [{ label: section.label, href: accountingSectionHref(key), section: key }] : [];
+    });
+    return entries.length > 0 ? [{ key: subGroup.key, label: subGroup.label, entries }] : [];
+  });
+}
+
+/**
+ * Whether this pathname is the ledger workspace or one of the tools it owns —
+ * the «you are here» of the one menu row that stands for all of them.
+ *
+ * Deliberately *not* every Accounting page: the workspace row must light on
+ * `/accounting/ledger` and the tool routes (`LEDGER_WORKSPACE_SECTION_KEYS`)
+ * and stay dark on unrelated areas — sales, inventory, the directory, reports
+ * and the overview (`داشبورد حسابداری`) each have their own row.
+ */
+export function isLedgerWorkspacePathname(pathname: string): boolean {
+  return (
+    isAccountingSectionPathname(pathname, "ledger") ||
+    LEDGER_WORKSPACE_SECTION_KEYS.some((key) => isAccountingSectionPathname(pathname, key))
+  );
+}
+
 /**
  * Is this entry the page we are on? — the ONE rule, for every menu that draws
  * these groups.
@@ -358,6 +386,8 @@ export function accountingWorkspaceHrefs(groups: readonly WorkspaceNavGroup[]): 
  * those states consistent wherever the group is rendered.
  *
  * Three kinds of entry, three rules:
+ *  - the ledger workspace row matches its landing page *and* the tool routes
+ *    it owns (`isLedgerWorkspacePathname`) — and nothing else;
  *  - an accounting *section* matches by section key, plus the `?view=` filter
  *    so a deep link («مشتریان») is only current while that view is showing and
  *    the parent («اشخاص») owns the default list;
@@ -369,6 +399,9 @@ export function workspaceEntryIsActive(
   pathname: string,
   search: string,
 ): boolean {
+  if (entry.section === "ledger") {
+    return isLedgerWorkspacePathname(pathname);
+  }
   if (entry.section) {
     if (!isAccountingSectionPathname(pathname, entry.section)) return false;
     const view = new URLSearchParams(entry.href.split("?")[1] ?? "").get("view");

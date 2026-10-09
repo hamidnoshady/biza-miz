@@ -178,10 +178,14 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       ? [{ label: INDUSTRY_LABELS.cosmetics, module: "cosmetics" as const, href: ACCOUNTING_WORKSPACE_HREFS.cosmetics, roles: ["owner", "manager"] }]
       : []),
     // The «حسابداری» sub-menu — the Accounting app's sections, each a real
-    // route under the app's own prefix (`/accounting/…`), drawn as a
-    // collapsible sidebar group (the same shape «محصولات» uses) with the app's
-    // dashboard as its first entry. The parent keeps its href so the section is
-    // still one tap away and still pinnable to the bottom bar; the app's old
+    // route under the app's own prefix (`/accounting/…`). This tree is the
+    // href *registry* the flattened-nav consumers read (the mobile header's
+    // page title, the bottom bar's picker and pin filter, the app launcher's
+    // landing resolver); the app's own sidebar is composed in
+    // `accounting-workspace.ts` and draws «فضای کار حسابداری» as ONE ordinary
+    // link to its workspace page (`/accounting/ledger`), not as a disclosure
+    // over these rows. The parent keeps its href so the overview is still one
+    // tap away and still pinnable to the bottom bar; the app's old
     // `/dashboard/ledger?tab=…` addresses forward to these routes.
     {
       label: "حسابداری",

@@ -64,7 +64,10 @@ CLAUDE.md. Don't assume the everyday English sense:
 
 «حسابداری» is the business's main work menu, not a ledger tool: its sidebar
 holds the business's own work areas (فروش، خرید و انبار، محصولات، عملیات،
-گزارش‌ها، تنظیمات) **plus** the ledger as one named group, «فضای کار حسابداری».
+گزارش‌ها، تنظیمات) **plus** ONE ordinary link, «فضای کار حسابداری», which
+opens the ledger workspace page at `/accounting/ledger` where the permitted
+ledger tools are listed. It is a plain menu link — never a disclosure,
+chevron or nested panel — with the same row skin as «فروش و فاکتور».
 
 Two rules when you touch that menu:
 

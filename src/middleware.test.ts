@@ -82,6 +82,7 @@ describe("isPublicPath", () => {
     for (const pathname of [
       "/accounting",
       "/accounting/overview",
+      "/accounting/ledger",
       "/accounting/expenses",
       "/accounting/pos",
       "/accounting/inventory",

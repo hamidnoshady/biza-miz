@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACCOUNTING_SECTIONS,
   accountingSectionsFor,
+  canViewAccountingSection,
 } from "./accounting-nav";
 import { roleBasePermissions } from "@/lib/permissions";
 import type { Role } from "@/lib/auth";
@@ -12,7 +13,10 @@ import {
 import {
   accountingWorkspaceGroups,
   accountingWorkspaceHrefs,
+  isLedgerWorkspacePathname,
+  ledgerWorkspaceToolGroups,
   LEDGER_WORKSPACE_GROUP_KEY,
+  LEDGER_WORKSPACE_ICON_KEY,
   LEDGER_WORKSPACE_LABEL,
   LEDGER_WORKSPACE_SECTION_KEYS,
   LEDGER_WORKSPACE_SUBGROUPS,
@@ -31,11 +35,17 @@ import {
  * The regression these assertions exist to prevent is the one they were
  * written for: «حسابداری» opening straight into the ledger rail, with every
  * other work area of the business living in a second main menu at
- * `/dashboard/*`. So the contract is:
+ * `/dashboard/*`. Then a second one: the ledger as a long disclosure bolted
+ * onto the menu — sixteen rows, a chevron and a remembered open/closed state.
+ * So the contract is:
  *
  *  1. the menu is a *complete* work menu, not the ledger alone;
- *  2. «فضای کار حسابداری» is a group *inside* it, never the whole thing;
- *  3. the business entries are adopted from the nav the shell already gated —
+ *  2. «فضای کار حسابداری» is ONE ordinary link inside it — same row skin as
+ *     every other entry, no disclosure, no nested panel — whose href is the
+ *     workspace page at `/accounting/ledger`;
+ *  3. the workspace page lists every permitted ledger tool at its canonical
+ *     route, filtered by the same permission helper the pages enforce;
+ *  4. the business entries are adopted from the nav the shell already gated —
  *     never re-declared here, so a page the member cannot open cannot appear.
  */
 
@@ -94,30 +104,30 @@ describe("the Accounting workspace menu", () => {
     }
   });
 
-  it("keeps «فضای کار حسابداری» as one named group inside the menu", () => {
+  it("keeps «فضای کار حسابداری» as ONE ordinary link in the same menu position", () => {
     const groups = groupsFor("owner");
-    const ledger = groups.find(
-      (group) => group.key === LEDGER_WORKSPACE_GROUP_KEY,
-    );
-    expect(ledger).toBeDefined();
-    expect(ledger?.label).toBe(LEDGER_WORKSPACE_LABEL);
+    const ledger = groups.find((group) => group.key === LEDGER_WORKSPACE_GROUP_KEY);
+    // One row, labelled exactly, at the workspace page's canonical href.
+    expect(ledger?.entries).toEqual([
+      {
+        label: LEDGER_WORKSPACE_LABEL,
+        href: "/accounting/ledger",
+        section: "ledger",
+        iconKey: LEDGER_WORKSPACE_ICON_KEY,
+      },
+    ]);
+    // An ordinary row: it carries no disclosure furniture at all — no
+    // collapsible marker, no sub-groups, no heading of its own. The words live
+    // on the row, like «فروش و فاکتور»'s.
+    expect(ledger?.label).toBeUndefined();
+    expect(ledger?.description).toBeUndefined();
+    // …in the same position it has always held: after the people directory,
+    // before «گزارش و تحلیل».
+    const keys = groups.map((group) => group.key);
+    expect(keys.indexOf(LEDGER_WORKSPACE_GROUP_KEY)).toBeGreaterThan(keys.indexOf("people"));
+    expect(keys.indexOf(LEDGER_WORKSPACE_GROUP_KEY)).toBeLessThan(keys.indexOf("reports"));
     // A group, not the menu: there is strictly more in the menu than it.
     expect(groups.length).toBeGreaterThan(1);
-    // And it holds the financial tools the product promises there.
-    const keys = ledger?.entries.map((entry) => entry.section);
-    for (const expected of [
-      "trial-balance",
-      "entries",
-      "manual",
-      "expenses",
-      "fiscal-periods",
-      "receivables",
-      "payables",
-      "receipts",
-      "installments",
-    ]) {
-      expect(keys).toContain(expected);
-    }
   });
 
   it("keeps Accounting settings in one final app-owned group", () => {
@@ -134,16 +144,22 @@ describe("the Accounting workspace menu", () => {
     ).toBe("تنظیمات حسابداری");
   });
 
-  it("gives every accounting section a home somewhere in the menu", () => {
-    // The ledger group plus the top-level entries must between them account
-    // for every section an owner may open — a section with no home is a
-    // section that silently vanished from the app.
-    const hrefs = new Set(accountingWorkspaceHrefs(groupsFor("owner")));
+  it("gives every accounting section a home: a menu row or the workspace page", () => {
+    // The menu rows plus the workspace door plus the tools the workspace page
+    // lists must between them account for every section an owner may open — a
+    // section with no home is a section that silently vanished from the app.
+    const menuHrefs = new Set(accountingWorkspaceHrefs(groupsFor("owner")));
+    const toolHrefs = new Set(
+      ledgerWorkspaceToolGroups(of("owner")).flatMap((group) =>
+        group.entries.map((entry) => entry.href),
+      ),
+    );
     for (const section of accountingSectionsFor(of("owner"))) {
+      const href = accountingSectionHref(section.key);
       expect(
-        hrefs,
-        `section "${section.key}" has no entry in the Accounting menu`,
-      ).toContain(accountingSectionHref(section.key));
+        menuHrefs.has(href) || toolHrefs.has(href),
+        `section "${section.key}" has no entry in the Accounting menu or on the workspace page`,
+      ).toBe(true);
     }
   });
 
@@ -167,25 +183,32 @@ describe("the Accounting workspace menu", () => {
     expect(hrefs).not.toContain("/knowledge");
   });
 
-  it("respects the per-section role gate", () => {
-    // Payroll is owner + accountant (compensation data); a manager's menu has
-    // the ledger group without it.
-    const managerHrefs = accountingWorkspaceHrefs(groupsFor("manager"));
-    expect(managerHrefs).not.toContain(accountingSectionHref("payroll"));
-    expect(managerHrefs).toContain(accountingSectionHref("trial-balance"));
-    expect(accountingWorkspaceHrefs(groupsFor("owner"))).toContain(
-      accountingSectionHref("payroll"),
-    );
+  it("respects the per-section role gate on the workspace page", () => {
+    // Payroll is owner + accountant (compensation data); a manager's workspace
+    // page has the other tools without it.
+    const managerTools = ledgerWorkspaceToolGroups(of("manager")).flatMap((group) => group.entries);
+    expect(managerTools.map((entry) => entry.href)).not.toContain(accountingSectionHref("payroll"));
+    expect(managerTools.map((entry) => entry.href)).toContain(accountingSectionHref("trial-balance"));
+    const ownerTools = ledgerWorkspaceToolGroups(of("owner")).flatMap((group) => group.entries);
+    expect(ownerTools.map((entry) => entry.href)).toContain(accountingSectionHref("payroll"));
+    // And the section's own gate is what a hand-typed URL meets — hidden on
+    // the page and denied at the door are the same permission, not two.
+    expect(canViewAccountingSection(of("manager"), "payroll")).toBe(false);
+    expect(canViewAccountingSection(of("owner"), "payroll")).toBe(true);
   });
 
-  it("restricts a non-accounting role to their authorized business groups without ledger sections", () => {
-    const cashierHrefs = accountingWorkspaceHrefs(groupsFor("cashier"));
+  it("restricts a non-accounting role to their authorized business groups without the ledger", () => {
+    const cashierGroups = groupsFor("cashier");
+    const cashierHrefs = accountingWorkspaceHrefs(cashierGroups);
     expect(cashierHrefs).toContain(ACCOUNTING_WORKSPACE_HREFS.orders);
     expect(cashierHrefs).toContain(ACCOUNTING_WORKSPACE_HREFS.pos);
+    // No workspace door, no tool links — and the door is denied server-side too.
+    expect(cashierHrefs).not.toContain(accountingSectionHref("ledger"));
     expect(cashierHrefs).not.toContain(accountingSectionHref("dashboard"));
     expect(cashierHrefs).not.toContain(accountingSectionHref("trial-balance"));
-    expect(cashierHrefs).not.toContain(accountingSectionHref("payroll"));
-    expect(cashierHrefs).not.toContain(accountingSectionHref("entries"));
+    expect(ledgerWorkspaceToolGroups(of("cashier"))).toEqual([]);
+    expect(canViewAccountingSection(of("cashier"), "ledger")).toBe(false);
+    expect(canViewAccountingSection(of("cashier"), "trial-balance")).toBe(false);
   });
 
   it("offers exactly one people directory, plus filtered deep links", () => {
@@ -207,66 +230,59 @@ describe("the Accounting workspace menu", () => {
     const hrefs = accountingWorkspaceHrefs(groupsFor("owner"));
     expect(new Set(hrefs).size).toBe(hrefs.length);
   });
+});
 
-  it("divides the long ledger group into named sub-groups, like every other group", () => {
-    // The regression: «فضای کار حسابداری» was the one group in the menu with
-    // sixteen rows under a single heading and no internal structure, which is
-    // what made it read as a drawer bolted onto the menu rather than a part
-    // of it.
-    const ledger = groupsFor("owner").find((group) => group.key === LEDGER_WORKSPACE_GROUP_KEY);
-    expect(ledger?.subGroups?.length).toBeGreaterThan(1);
-    for (const subGroup of ledger!.subGroups!) {
-      expect(subGroup.label).not.toBe("");
-      expect(subGroup.entries.length).toBeGreaterThan(0);
-    }
-  });
-
-  it("keeps the sub-groups an arrangement of the group, never a second list", () => {
-    const ledger = groupsFor("owner").find((group) => group.key === LEDGER_WORKSPACE_GROUP_KEY);
-    const fromSubGroups = ledger!.subGroups!.flatMap((subGroup) => subGroup.entries.map((e) => e.href));
-    expect(fromSubGroups).toEqual(ledger!.entries.map((entry) => entry.href));
-    // …and each entry sits in exactly one of them.
-    expect(new Set(fromSubGroups).size).toBe(fromSubGroups.length);
-  });
-
-  it("drops a sub-group the member's role empties, rather than showing an empty heading", () => {
-    // Payroll is owner + accountant; a manager keeps «دوره، مالیات و حقوق»
-    // (it still holds دوره‌های مالی و مالیات) but never an empty heading.
-    for (const role of ["owner", "manager", "accountant"] as const) {
-      const ledger = groupsFor(role).find((group) => group.key === LEDGER_WORKSPACE_GROUP_KEY);
-      for (const subGroup of ledger?.subGroups ?? []) {
-        expect(subGroup.entries.length, `«${subGroup.label}» is empty for ${role}`).toBeGreaterThan(0);
+describe("the «فضای کار حسابداری» workspace page's tool list", () => {
+  it("lists every ledger tool under its named division", () => {
+    // The regression: the ledger was sixteen rows in the sidebar with no
+    // internal structure. The four divisions live on the workspace page now,
+    // and every tool keeps its canonical route.
+    const groups = ledgerWorkspaceToolGroups(of("owner"));
+    expect(groups.map((group) => group.label)).toEqual([
+      "دفتر و اسناد",
+      "دریافتنی و پرداختنی",
+      "وجوه و هزینه",
+      "دوره، مالیات و حقوق",
+    ]);
+    for (const group of groups) {
+      expect(group.entries.length).toBeGreaterThan(0);
+      for (const entry of group.entries) {
+        expect(entry.href).toBe(accountingSectionHref(entry.section!));
       }
     }
   });
 
-  it("gives the collapsible group a glyph, because its heading hides at the icon rail", () => {
-    const ledger = groupsFor("owner").find((group) => group.key === LEDGER_WORKSPACE_GROUP_KEY);
-    expect(ledger?.iconKey).toBeTruthy();
+  it("is an arrangement of the ledger tools, never a second list", () => {
+    const fromPage = ledgerWorkspaceToolGroups(of("owner"))
+      .flatMap((group) => group.entries.map((entry) => entry.href))
+      .sort();
+    const canonical = LEDGER_WORKSPACE_SECTION_KEYS.map((key) =>
+      accountingSectionHref(key),
+    ).sort();
+    expect(fromPage).toEqual(canonical);
+    // …and each tool sits in exactly one division.
+    expect(new Set(fromPage).size).toBe(fromPage.length);
   });
 
-  it("only marks the long ledger group as collapsible", () => {
-    const collapsible = groupsFor("owner").filter((group) => group.collapsible);
-    expect(collapsible.map((group) => group.key)).toEqual([
-      LEDGER_WORKSPACE_GROUP_KEY,
-    ]);
+  it("drops a division the member's role empties, rather than showing an empty heading", () => {
+    // Payroll is owner + accountant; a manager keeps «دوره، مالیات و حقوق»
+    // (it still holds دوره‌های مالی و مالیات) but never an empty heading.
+    for (const role of ["owner", "manager", "accountant"] as const) {
+      for (const group of ledgerWorkspaceToolGroups(of(role))) {
+        expect(group.entries.length, `«${group.label}» is empty for ${role}`).toBeGreaterThan(0);
+      }
+    }
+    // …and payroll is genuinely absent from the manager's page, not merely
+    // hidden by the renderer: the same helper the section gate reads.
+    const managerTools = ledgerWorkspaceToolGroups(of("manager"))
+      .flatMap((group) => group.entries)
+      .map((entry) => entry.section);
+    expect(managerTools).not.toContain("payroll");
+    expect(managerTools).toContain("vat");
   });
 });
 
-describe("the ledger group's own sub-groups", () => {
-  it("gives every ledger section exactly one sub-group", () => {
-    const placed = LEDGER_WORKSPACE_SUBGROUPS.flatMap((subGroup) => subGroup.keys);
-    expect(new Set(placed).size).toBe(placed.length);
-    expect([...placed].sort()).toEqual([...LEDGER_WORKSPACE_SECTION_KEYS].sort());
-  });
-
-  it("names each sub-group once", () => {
-    const keys = LEDGER_WORKSPACE_SUBGROUPS.map((subGroup) => subGroup.key);
-    expect(new Set(keys).size).toBe(keys.length);
-  });
-});
-
-describe("the ledger group's own section list", () => {
+describe("the ledger workspace's own section list", () => {
   it("names only real sections, none of them twice", () => {
     for (const key of LEDGER_WORKSPACE_SECTION_KEYS) {
       expect(ACCOUNTING_SECTION_KEYS).toContain(key);
@@ -276,11 +292,13 @@ describe("the ledger group's own section list", () => {
     );
   });
 
-  it("leaves app-level areas out of the ledger while keeping every section owned", () => {
-    // Home, people, reports, growth analysis and app settings are focused
-    // groups of their own; none is buried in the financial-tools disclosure.
+  it("leaves app-level areas and the workspace door itself out of the tool list", () => {
+    // Home, the workspace page, people, reports, growth analysis and app
+    // settings are focused homes of their own; none is buried among ledger
+    // tools — and every section still has a home (menu row or workspace page).
     for (const outside of [
       "dashboard",
+      "ledger",
       "directory",
       "financial-reports",
       "growth",
@@ -288,22 +306,29 @@ describe("the ledger group's own section list", () => {
     ]) {
       expect(LEDGER_WORKSPACE_SECTION_KEYS).not.toContain(outside);
     }
-    const hrefs = new Set(accountingWorkspaceHrefs(groupsFor("owner")));
-    for (const section of ACCOUNTING_SECTIONS) {
-      expect(hrefs, `section "${section.key}" is in no Accounting menu group`).toContain(
-        accountingSectionHref(section.key),
-      );
-    }
   });
 });
 
+describe("the ledger tool divisions", () => {
+  it("gives every ledger tool exactly one division", () => {
+    const placed = LEDGER_WORKSPACE_SUBGROUPS.flatMap((subGroup) => subGroup.keys);
+    expect(new Set(placed).size).toBe(placed.length);
+    expect([...placed].sort()).toEqual([...LEDGER_WORKSPACE_SECTION_KEYS].sort());
+  });
+
+  it("names each division once", () => {
+    const keys = LEDGER_WORKSPACE_SUBGROUPS.map((subGroup) => subGroup.key);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+});
 
 /**
- * One «you are here» rule for both sidebars that draw this menu.
+ * One «you are here» rule for the menu that draws these groups.
  *
  * The Accounting app's contextual sidebar is the one renderer of these groups.
- * The active rule is still kept separately because filtered directory views and
- * nested product pages are the places a raw prefix match gets wrong.
+ * The active rule is still kept separately because the workspace row stands
+ * for sixteen pages, filtered directory views and nested product pages are the
+ * places a raw prefix match gets wrong.
  */
 describe("which menu entry is the page you are on", () => {
   const entry = (href: string, extra: Partial<WorkspaceNavEntry> = {}): WorkspaceNavEntry => ({
@@ -340,6 +365,41 @@ describe("which menu entry is the page you are on", () => {
     expect(workspaceEntryIsActive(home, "/dashboard/pos", "")).toBe(false);
   });
 
+  it("lights the workspace row on its landing page and its owned tool routes", () => {
+    const workspace = entry(accountingSectionHref("ledger"), {
+      section: "ledger",
+      iconKey: LEDGER_WORKSPACE_ICON_KEY,
+    });
+    expect(workspaceEntryIsActive(workspace, "/accounting/ledger", "")).toBe(true);
+    for (const key of LEDGER_WORKSPACE_SECTION_KEYS) {
+      expect(
+        workspaceEntryIsActive(workspace, accountingSectionHref(key), ""),
+        `the workspace row must light on ${key}`,
+      ).toBe(true);
+    }
+    expect(isLedgerWorkspacePathname("/accounting/ledger")).toBe(true);
+  });
+
+  it("keeps the workspace row dark on unrelated Accounting areas", () => {
+    const workspace = entry(accountingSectionHref("ledger"), { section: "ledger" });
+    for (const path of [
+      "/accounting/overview",
+      "/accounting/directory",
+      "/accounting/orders",
+      "/accounting/orders/42",
+      "/accounting/pos",
+      "/accounting/inventory",
+      "/accounting/reports",
+      "/accounting/settings",
+    ]) {
+      expect(
+        workspaceEntryIsActive(workspace, path, ""),
+        `the workspace row must stay dark on ${path}`,
+      ).toBe(false);
+      expect(isLedgerWorkspacePathname(path), `${path} is not a ledger workspace route`).toBe(false);
+    }
+  });
+
   it("lets a `?view=` deep link own its view, and the parent own the default", () => {
     const all = entry(partyDirectoryHref(), { section: "directory" });
     const customers = entry(partyDirectoryHref("customers"), { section: "directory" });
@@ -359,6 +419,19 @@ describe("which menu entry is the page you are on", () => {
         workspaceEntryIsActive(candidate, pathname, search),
       );
       expect(lit.map((item) => item.href)).toEqual([current.href]);
+    }
+  });
+
+  it("lights exactly one entry on every tool route too", () => {
+    // The tools are not in the menu any more — the workspace row is the one
+    // «you are here» that stands for them, and nothing else may light beside it.
+    const groups = accountingWorkspaceGroups({ permissions: of("owner"), navItems: [] });
+    const entries = groups.flatMap((group) => group.entries);
+    for (const key of LEDGER_WORKSPACE_SECTION_KEYS) {
+      const lit = entries.filter((candidate) =>
+        workspaceEntryIsActive(candidate, accountingSectionHref(key), ""),
+      );
+      expect(lit.map((item) => item.href)).toEqual([accountingSectionHref("ledger")]);
     }
   });
 });
