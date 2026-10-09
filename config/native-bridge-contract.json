@@ -1,0 +1,50 @@
+{
+  "$comment": "Single source of truth for the Web <-> Android Trusted Web Activity bridge contract (issue #884). Read by src/lib/native/bridge-contract.ts (web), android/app/src/test/.../BridgeContractTest.kt (Android unit tests) and android/app/build.gradle.kts (BuildConfig.NATIVE_BRIDGE_VERSION). A change here is a contract change: bump bridgeVersion only with a new command or a changed shape, never to rename, and see docs/android-runtime.md#bridge-contract before editing.",
+  "protocol": "biza-native-bridge",
+  "bridgeVersion": 1,
+  "transport": "CustomTabsSession.requestPostMessageChannel inside a Trusted Web Activity (Chrome 115+). The page receives a MessagePort from the app; every frame is a JSON envelope. Requires delegate_permission/common.use_as_origin in public/.well-known/assetlinks.json.",
+  "envelope": {
+    "request": ["v", "kind", "id", "command", "payload"],
+    "response": ["v", "kind", "id", "ok", "result|error"],
+    "event": ["v", "kind", "name", "payload"]
+  },
+  "commands": {
+    "app.info": {
+      "minBridgeVersion": 1,
+      "payload": [],
+      "result": ["appVersionName", "appVersionCode", "environment", "bridgeVersion", "capabilities"]
+    },
+    "notifications.status": {
+      "minBridgeVersion": 1,
+      "payload": [],
+      "result": ["permission"]
+    }
+  },
+  "events": {
+    "bridge.ready": {
+      "minBridgeVersion": 1,
+      "payload": ["appVersionName", "appVersionCode", "environment", "bridgeVersion", "capabilities"]
+    }
+  },
+  "errorCodes": [
+    "unknown_command",
+    "unsupported",
+    "invalid_payload",
+    "permission_denied",
+    "native_failure",
+    "timeout",
+    "channel_closed",
+    "bridge_unavailable",
+    "bridge_version_too_old"
+  ],
+  "permissionStates": ["granted", "denied", "not_determined"],
+  "environments": ["development", "staging", "production"],
+  "capabilities": {
+    "barcode.scan": { "nativeMinBridgeVersion": 2 },
+    "printer": { "nativeMinBridgeVersion": 2 },
+    "crm.caller-id": { "nativeMinBridgeVersion": 2 },
+    "biometric": { "nativeMinBridgeVersion": 2 },
+    "notifications": { "nativeMinBridgeVersion": 1 },
+    "share": { "nativeMinBridgeVersion": 2 }
+  }
+}

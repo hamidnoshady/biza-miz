@@ -6,6 +6,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { PrintJobModal } from "@/app/dashboard/print-job-modal";
 import { PwaRegister } from "@/components/pwa-register";
+import { NativeProvider } from "@/components/native/native-provider";
 import { CLOUD_EMBED_MARKER_SCRIPT } from "@/lib/cloud-embed";
 
 const vazirmatn = localFont({
@@ -66,10 +67,12 @@ export default async function RootLayout({
         {/* Phase 46: inside the desktop's cloud pane, hide this page's own sidebar before it paints. */}
         <script nonce={nonce} dangerouslySetInnerHTML={{ __html: CLOUD_EMBED_MARKER_SCRIPT }} />
         <ThemeProvider nonce={nonce}>
-          {children}
-          <Toaster position="bottom-center" dir="rtl" />
-          <PrintJobModal />
-          <PwaRegister />
+          <NativeProvider>
+            {children}
+            <Toaster position="bottom-center" dir="rtl" />
+            <PrintJobModal />
+            <PwaRegister />
+          </NativeProvider>
         </ThemeProvider>
 
       </body>

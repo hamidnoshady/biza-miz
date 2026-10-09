@@ -56,3 +56,15 @@ electron/build-output.log
 
 # Local read-only reporting browser-review screenshots (not approved baselines).
 .cache/platform-report-smoke/
+
+# Android runtime (issue #884). Build output, local SDK paths and signing material never belong
+# in git. The paths are anchored for the same reason as /build/ above: an unanchored build/
+# would also match App Router directories.
+/android/.gradle/
+/android/.idea/
+/android/build/
+/android/app/build/
+/android/local.properties
+*.jks
+*.keystore
+keystore.properties

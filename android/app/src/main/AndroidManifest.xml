@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Android 11+ package visibility: needed to find the Custom Tabs provider (Chrome). -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.BizaMiz">
+
+        <!--
+          The only entry point. The launcher icon opens the app's home page. An https App Link
+          for ${appLinkHost} opens the matching page inside the TWA. autoVerify makes Android
+          check https://${appLinkHost}/.well-known/assetlinks.json before it routes links here.
+        -->
+        <activity
+            android:name=".TwaLauncherActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.BizaMiz.Launcher">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="${appLinkHost}" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".OfflineActivity"
+            android:exported="false"
+            android:theme="@style/Theme.BizaMiz" />
+
+        <!--
+          Required for postMessage between the TWA and the page. Chrome binds to it, so it must be
+          exported. The bridge checks every request itself; see docs/android-runtime.md.
+        -->
+        <service
+            android:name="androidx.browser.customtabs.PostMessageService"
+            android:exported="true"
+            tools:ignore="ExportedService" />
+    </application>
+</manifest>
