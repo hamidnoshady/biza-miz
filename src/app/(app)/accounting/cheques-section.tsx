@@ -1679,8 +1679,22 @@ function ChequeToneTile({
 
 function ChequesSkeleton() {
   return (
-    <div className="space-y-3">
-      <div className="hidden lg:block">
+    /*
+     * The register's busy state is announced, like every other data region
+     * in this app (`page-chrome`'s `LoadingSkeleton` is the reference): a
+     * reader on a screen reader otherwise hears nothing at all between
+     * asking for the page and the rows arriving. The bars themselves are
+     * decoration, so they are hidden from the accessibility tree — and the
+     * visual harness waits on exactly this signal before photographing.
+     */
+    <div
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label="در حال بارگذاری فهرست چک‌ها"
+      className="space-y-3"
+    >
+      <div aria-hidden="true" className="hidden lg:block">
         <div className="overflow-hidden rounded-xl border">
           <div className="space-y-0">
             {Array.from({ length: 5 }).map((_, i) => (
@@ -1697,7 +1711,7 @@ function ChequesSkeleton() {
           </div>
         </div>
       </div>
-      <div className="grid gap-3 lg:hidden">
+      <div aria-hidden="true" className="grid gap-3 lg:hidden">
         {Array.from({ length: 3 }).map((_, i) => (
           <Card key={i} className="p-4">
             <Skeleton className="h-5 w-32" />
@@ -1996,12 +2010,14 @@ function ChequeDetailDialog({
             did nothing.
           */}
           {navigation?.status === "loading" ? (
+            // A busy *label*, not a spinner: the design system reserves
+            // motion for skeletons of regions, and an action in flight says
+            // so in words (docs/design-system.md §Charts and loading).
             <p
               role="status"
               aria-live="polite"
-              className="flex items-center gap-2 rounded-lg border border-dashed bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+              className="rounded-lg border border-dashed bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
             >
-              <Clock3Icon aria-hidden className="size-4 animate-spin" />
               در حال باز کردن چک مرتبط…
             </p>
           ) : null}

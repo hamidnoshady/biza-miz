@@ -14,7 +14,7 @@
  *  - The KPI strip reported a single "active" number that reconciled to no
  *    control account.
  */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toPersianDigits } from "@/lib/digits";
@@ -940,6 +940,123 @@ describe("opening a related cheque", () => {
     await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
     expect(screen.getByText(new RegExp(`جزئیات چک ${toPersianDigits("S-OTHER")}`))).toBeTruthy();
     expect(screen.queryByText(new RegExp(`جزئیات چک ${toPersianDigits("S-ORIG")}`))).toBeNull();
+  });
+});
+
+
+/*
+ * The states a baseline photograph cannot cover.
+ *
+ * The cheque screen is going into the visual suite, and a screenshot is one
+ * frame of one viewport: it says nothing about what a screen reader hears
+ * while the register loads, what the empty and failed states offer, whether
+ * the mobile layout exists at all, or whether the Latin-numeral fields are
+ * marked LTR inside an RTL document. Those are asserted here instead.
+ */
+describe("the cheque register's states, direction and accessibility", () => {
+  const page = {
+    cheques: [cheque(1, { sayadId: "1234567890123456", accountNumber: "0203045678001" })],
+    total: 1,
+    hasMore: false,
+    banks: ["ملت"],
+    summary: summary(),
+  };
+
+  it("announces that it is loading, and stops announcing when the rows arrive", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.startsWith("/api/ledger/cheques?")) {
+          await held;
+          return { ok: true, status: 200, json: async () => page };
+        }
+        return { ok: true, status: 200, json: async () => ({ locations: [], customers: [], suppliers: [] }) };
+      }),
+    );
+
+    renderSection();
+    const busy = await screen.findByRole("status", { name: "در حال بارگذاری فهرست چک‌ها" });
+    expect(busy.getAttribute("aria-busy")).toBe("true");
+    expect(busy.getAttribute("aria-live")).toBe("polite");
+
+    release();
+    await screen.findByText(toPersianDigits("S-001"));
+    expect(screen.queryByRole("status", { name: "در حال بارگذاری فهرست چک‌ها" })).toBeNull();
+  });
+
+  it("offers a way forward from the empty register", async () => {
+    stubFetch(() => ({ cheques: [], total: 0, hasMore: false, banks: [], summary: summary() }));
+    renderSection();
+    expect(await screen.findByText("هنوز چک‌های دریافتی ثبت نشده است")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /ثبت چک دریافتی/ })).toBeTruthy();
+  });
+
+  it("explains a failed load and retries it on request", async () => {
+    let attempt = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.startsWith("/api/ledger/cheques?")) {
+          attempt += 1;
+          if (attempt === 1) return { ok: false, status: 500, json: async () => ({ error: "server_error" }) };
+          return { ok: true, status: 200, json: async () => page };
+        }
+        return { ok: true, status: 200, json: async () => ({ locations: [], customers: [], suppliers: [] }) };
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderSection();
+    expect(await screen.findByText("فهرست چک‌ها در دسترس نیست")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "تلاش دوباره" }));
+    await screen.findByText(toPersianDigits("S-001"));
+    expect(screen.queryByText("فهرست چک‌ها در دسترس نیست")).toBeNull();
+  });
+
+  it("renders both the desktop table and the mobile card for every cheque", async () => {
+    stubFetch(() => page);
+    const { container } = renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+
+    // One row in the table, one card beside it — the small-screen layout is
+    // a real DOM branch, not a CSS reflow of the table.
+    expect(container.querySelector(".hidden.lg\\:block table")).toBeTruthy();
+    expect(container.querySelector(".lg\\:hidden")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: /جزئیات/ })).toHaveLength(2);
+  });
+
+  it("lays the register out right-to-left and marks the Latin-numeral fields LTR", async () => {
+    stubFetch(() => page);
+    const user = userEvent.setup();
+    const { container } = renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+    expect(container.querySelector("[dir='rtl']")).toBeTruthy();
+
+    await user.click(screen.getAllByRole("button", { name: /جزئیات/ })[0]);
+    // Serial, صیاد id and account number are identifiers: they read
+    // left-to-right even inside the RTL dialog, or the digits reorder.
+    const dialog = await screen.findByRole("dialog");
+    for (const label of ["شماره چک", "شناسه صیاد", "شماره حساب"]) {
+      const field = within(dialog).getAllByText(label)[0].parentElement;
+      expect(field?.querySelector("[dir='ltr']")).toBeTruthy();
+    }
+  });
+
+  it("gives the detail dialog an accessible name and closes it from the keyboard", async () => {
+    stubFetch(() => page);
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+    await user.click(screen.getAllByRole("button", { name: /جزئیات/ })[0]);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("جزئیات چک");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 });
 
