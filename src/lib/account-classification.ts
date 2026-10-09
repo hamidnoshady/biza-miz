@@ -41,6 +41,35 @@ export type AccountRole =
   /** What we owe suppliers, consignors, contractors and on issued cheques (21xx). */
   | "trade_payable";
 
+/**
+ * Roles that can receive a fixed asset's sale proceeds (the debit side of a
+ * sale — issue #833): liquid money, money in transit, or a claim the buyer
+ * now owes. Never a fixed-asset, expense or revenue account; the register's
+ * own disposal and acquisition pickers and the server-side checks share this
+ * one definition.
+ */
+export const ASSET_SALE_PROCEEDS_ROLES: ReadonlySet<AccountRole> = new Set([
+  "cash",
+  "bank",
+  "petty_cash",
+  "payment_clearing",
+  "trade_receivable",
+  "other_receivable",
+]);
+/**
+ * Roles that can settle a fixed asset's acquisition (the credit side of a
+ * purchase — issue #833): pay now from liquid money or in transit, or owe the
+ * supplier. Receivables are deliberately absent — a customer's debt is not a
+ * way to pay for a machine.
+ */
+export const ASSET_ACQUISITION_SOURCE_ROLES: ReadonlySet<AccountRole> = new Set([
+  "cash",
+  "bank",
+  "petty_cash",
+  "payment_clearing",
+  "trade_payable",
+]);
+
 /** Roles that are money the business can spend today (cash and cash equivalents). */
 export const USABLE_LIQUIDITY_ROLES: ReadonlySet<AccountRole> = new Set(["cash", "bank", "petty_cash"]);
 /** Roles that are settlement in transit: real money, not yet usable. */

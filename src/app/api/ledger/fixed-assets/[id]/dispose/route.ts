@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { isUuid } from "@/lib/uuid";
-import { FixedAssetError, postDepreciation } from "@/lib/fixed-assets-service";
+import { FixedAssetError, disposeFixedAsset, type FixedAssetDisposalKind } from "@/lib/fixed-assets-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 
@@ -11,13 +11,11 @@ interface Ctx {
 }
 
 /**
- * Posts one Jalali month's straight-line depreciation for this asset
- * (`periodKey` = `YYYY-MM`).
- *
- * The journal entry's branch is the asset's own location — never the
- * operator's currently active one (issue #833): an asset registered at Branch
- * A keeps posting to Branch A until a recorded transfer moves it, so this
- * route deliberately never resolves the caller's active location.
+ * Disposes of an asset — `sale` (with proceeds and a settlement account),
+ * `retirement` or `write_off` (both zero-proceeds). Posts the entry that
+ * removes cost and live accumulated depreciation from the Balance Sheet and
+ * realises the gain or loss; from here on the asset can never depreciate
+ * again (issue #833).
  */
 export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   const { session, error } = await requirePermission(PERMISSIONS.financeAssetsManage);
@@ -25,7 +23,7 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
 
   const { id } = await ctx.params;
   if (!isUuid(id)) return NextResponse.json({ error: "fixed_asset_not_found" }, { status: 404 });
-  let body: { periodKey?: string; periodLabel?: string; entryDate?: string };
+  let body: { kind?: string; disposalDate?: string; proceeds?: number; proceedsAccountId?: string; reason?: string };
   try {
     body = await request.json();
   } catch {
@@ -36,12 +34,14 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   }
 
   try {
-    const result = await postDepreciation({
+    const result = await disposeFixedAsset({
       businessId: session.businessId,
       fixedAssetId: id,
-      periodKey: typeof body.periodKey === "string" ? body.periodKey : null,
-      periodLabel: typeof body.periodLabel === "string" ? body.periodLabel : null,
-      entryDate: body.entryDate,
+      kind: body.kind as FixedAssetDisposalKind,
+      disposalDate: typeof body.disposalDate === "string" ? body.disposalDate : null,
+      proceeds: body.proceeds === undefined || body.proceeds === null ? null : Number(body.proceeds),
+      proceedsAccountId: typeof body.proceedsAccountId === "string" && body.proceedsAccountId ? body.proceedsAccountId : null,
+      reason: typeof body.reason === "string" ? body.reason : null,
       createdBy: session.sub,
     });
     return NextResponse.json(result);
