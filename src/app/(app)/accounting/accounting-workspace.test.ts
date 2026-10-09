@@ -184,8 +184,10 @@ describe("the Accounting workspace menu", () => {
   });
 
   it("respects the per-section role gate on the workspace page", () => {
-    // Payroll is owner + accountant (compensation data); a manager's workspace
-    // page has the other tools without it.
+    // Payroll needs `payroll.view` (compensation data): the owner, the admin
+    // and the accountant presets hold it by default, the manager's does not —
+    // unless the business grants them the key — so a manager's workspace page
+    // has the other tools without it.
     const managerTools = ledgerWorkspaceToolGroups(of("manager")).flatMap((group) => group.entries);
     expect(managerTools.map((entry) => entry.href)).not.toContain(accountingSectionHref("payroll"));
     expect(managerTools.map((entry) => entry.href)).toContain(accountingSectionHref("trial-balance"));
@@ -265,8 +267,9 @@ describe("the «فضای کار حسابداری» workspace page's tool list", 
   });
 
   it("drops a division the member's role empties, rather than showing an empty heading", () => {
-    // Payroll is owner + accountant; a manager keeps «دوره، مالیات و حقوق»
-    // (it still holds دوره‌های مالی و مالیات) but never an empty heading.
+    // Payroll needs `payroll.view`, which the manager preset lacks; a manager
+    // keeps «دوره، مالیات و حقوق» (it still holds دوره‌های مالی و مالیات) but
+    // never an empty heading.
     for (const role of ["owner", "manager", "accountant"] as const) {
       for (const group of ledgerWorkspaceToolGroups(of(role))) {
         expect(group.entries.length, `«${group.label}» is empty for ${role}`).toBeGreaterThan(0);

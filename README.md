@@ -1069,8 +1069,12 @@ waste, trial balance) becomes a suite an accountant can actually close a year on
   canonical record remain CRM-owned: `/dashboard/customers` is a compatibility redirect to the
   CRM directory (Owner/Manager/Cashier/Accountant, gated by the `customers.view`/`customers.manage`
   permissions), independent of the `ledger` feature flag.
-- **Bank & cash reconciliation**, **expense management** (categorised, with attachments and
-  recurring expenses), and **payroll entries** (accrual/payment postings, not a payroll engine).
+- **Bank & cash reconciliation**, **expense management** (categorised; paid out of a cash, bank,
+  float or card-settlement account, or recorded as owed to a named supplier — «پرداخت بعدی», which
+  credits Accounts Payable and is settled from the A/P screen like any supplier bill — with a receipt
+  photo held in the Media Library, input-VAT splitting and reversals rather than edits; *no
+  recurring/scheduled expenses*: the phase that scoped them deferred them, and no schema for them
+  exists), and **payroll** (a monthly gross-to-net run from the business's own insurance and tax rates, salary advances, commission settled with the run, and payment and void postings — journal-level, not a statutory payroll engine; see [docs/payroll.md](docs/payroll.md)).
 - **Manual journals** — draft → review → post, reversal rather than deletion, and an approval
   permission (`ledger.approve`) distinct from proposing one (`ledger.propose`). Each draft keeps
   its proposer, its branch, its business-local accounting date and — once decided — its

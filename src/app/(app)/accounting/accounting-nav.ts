@@ -69,13 +69,14 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "cheques", label: "چک‌ها" },
   { key: "reconciliation", label: "تطبیق بانکی" },
   { key: "chart-of-accounts", label: "سرفصل حساب‌ها" },
-  // Wages are compensation data — owner + accountant only, the same line the
-  // in-page rail draws. A manager may open every other section. This used to
-  // borrow `ledger.post` because that preset happened to be the right
-  // audience; it now asks for the key that actually means "may see payroll",
-  // which is also what `/api/ledger/payroll/*` enforces. Borrowing a key for
-  // its preset rather than its meaning is how a menu and an API drift apart
-  // the next time either preset changes.
+  // Wages are compensation data, so this entry follows `payroll.view` — the
+  // same capability the in-page rail and `/api/ledger/payroll/*` enforce. By
+  // default that is the owner, the admin and the accountant; a manager may open
+  // every other section but not this one, unless the business grants them the
+  // key. This used to borrow `ledger.post` because that preset happened to be
+  // the right audience; it now asks for the key that actually means "may see
+  // payroll". Borrowing a key for its preset rather than its meaning is how a
+  // menu and an API drift apart the next time either preset changes.
   { key: "payroll", label: "حقوق و دستمزد", permission: PERMISSIONS.payrollView },
   { key: "vat", label: "گزارش مالیات" },
   { key: "fixed-assets", label: "دارایی‌های ثابت" },
