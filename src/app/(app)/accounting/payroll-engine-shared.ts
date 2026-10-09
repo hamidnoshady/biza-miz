@@ -96,8 +96,10 @@ export function useEngineData<T>(url: string | null, reloadKey: unknown = 0) {
   }, [url]);
   useEffect(() => {
     void load();
+    // A request counter, not a DOM ref: bumping it on cleanup orphans the in-flight reply.
+    const counter = seq;
     return () => {
-      seq.current++;
+      counter.current++;
     };
   }, [load, reloadKey]);
   return { data, error, loading, reload: load };
