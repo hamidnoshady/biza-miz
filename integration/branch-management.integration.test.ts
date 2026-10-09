@@ -697,3 +697,121 @@ describe("consolidated reporting reconciles with per-branch numbers", () => {
     });
   });
 });
+
+/*
+ * The branch an automated action writes to — `branch-service.resolveBranchRef`,
+ * which is what issue #832 §15 asked the assistant's channels to stop guessing.
+ *
+ * Before it, `ai-autopilot-executors.ts` had its own copy of «oldest active
+ * branch» and passed that to `recordExpense` and `createDraft` whatever the model
+ * had been told: «اجارهٔ شعبهٔ شمال» landed on Main, and nothing disagreed with the
+ * requester because the number and the date were right. Three things make the
+ * resolver the right shape rather than a new invention: it reads the business's
+ * own list, so a branch id from another tenant is simply absent (a refusal, not a
+ * widened write); it compares names with `isSameBranchName`, the key the branch
+ * form enforces uniqueness with, so a lookup cannot match two names the business
+ * would refuse to create twice; and an ambiguous name is its own answer, because a
+ * coin flip inside a posting is worse than a question.
+ */
+describe("branch reference resolution", () => {
+  it("accepts the id or the name of a branch of this business", async () => {
+    await asBusiness(biz.id, async () => {
+      expect(await branchService.resolveBranchRef(biz.id, biz.northLocationId)).toEqual({
+        ok: true,
+        locationId: biz.northLocationId,
+        matched: "requested",
+      });
+      expect(await branchService.resolveBranchRef(biz.id, " North ")).toEqual({
+        ok: true,
+        locationId: biz.northLocationId,
+        matched: "requested",
+      });
+    });
+  });
+
+  it("reads a name the way the branch form would", async () => {
+    // The comparison is the uniqueness key, so the variants a person types —
+    // Arabic yeh, a stray diacritic, wrong case, digits in either script — reach
+    // the same branch, and «شعبه ۲» and «شعبه 2» are never two answers.
+    const { rows: named } = await db.query<{ id: string }>(
+      `INSERT INTO locations (business_id, name, color) VALUES ($1, 'شعبه ۲', 'amber') RETURNING id`,
+      [biz.id],
+    );
+    await asBusiness(biz.id, async () => {
+      for (const spelling of ["شعبه ۲", "شعبه 2", "شعبه  2", " شعبهٔ 2 "]) {
+        expect(await branchService.resolveBranchRef(biz.id, spelling), spelling).toMatchObject({
+          ok: true,
+          locationId: named[0].id,
+        });
+      }
+    });
+  });
+
+  it("falls back to the oldest active branch only when nothing was asked for", async () => {
+    const { rows: eldest } = await db.query<{ id: string }>(
+      `INSERT INTO locations (business_id, name, color, created_at)
+       VALUES ($1, 'Eldest', 'teal', now() - interval '1 year') RETURNING id`,
+      [biz.id],
+    );
+    await asBusiness(biz.id, async () => {
+      for (const unasked of [null, undefined, "", "   "]) {
+        expect(await branchService.resolveBranchRef(biz.id, unasked)).toEqual({
+          ok: true,
+          locationId: eldest[0].id,
+          matched: "default",
+        });
+      }
+      // The rule the two writing actions use for "no branch named" is this one, so
+      // they cannot drift from it.
+      expect(await branchService.defaultBranchId(biz.id)).toBe(eldest[0].id);
+    });
+  });
+
+  it("refuses another business's branch, a closed branch, and a name two branches share", async () => {
+    const other = await db.query<{ id: string }>(
+      `INSERT INTO businesses (name, slug) VALUES ('Other Co', $1) RETURNING id`,
+      [`other-${randomUUID().slice(0, 8)}`],
+    );
+    const { rows: foreign } = await db.query<{ id: string }>(
+      `INSERT INTO locations (business_id, name, color) VALUES ($1, 'North', 'slate') RETURNING id`,
+      [other.rows[0].id],
+    );
+    await db.query(
+      `INSERT INTO locations (business_id, name, color) VALUES ($1, 'Duplicate', 'slate'), ($1, 'Duplicate', 'amber')`,
+      [biz.id],
+    );
+
+    await asBusiness(biz.id, async () => {
+      // A foreign id is not "the other tenant's North"; it is no branch at all.
+      // The answer is deliberately the same as for a name nobody has, so a probe
+      // cannot tell "exists elsewhere" from "does not exist".
+      const rejected = await branchService.resolveBranchRef(biz.id, foreign[0].id);
+      expect(rejected).toMatchObject({ ok: false, reason: "unknown" });
+      // What a refusal offers instead is this business's own list — never the fact
+      // that the id was somebody else's branch.
+      if (!rejected.ok) expect(rejected.branchNames).toHaveLength(4);
+      expect(await branchService.resolveBranchRef(biz.id, "هیچ شعبه‌ای")).toMatchObject({
+        ok: false,
+        reason: "unknown",
+      });
+      // Two branches answering to one name: the automation asks rather than picks.
+      const ambiguous = await branchService.resolveBranchRef(biz.id, "duplicate");
+      expect(ambiguous).toMatchObject({ ok: false, reason: "ambiguous" });
+      if (!ambiguous.ok) expect(ambiguous.branchNames).toEqual(["Duplicate", "Duplicate"]);
+    });
+
+    // A deactivated branch is not a branch an action may be filed against, even
+    // though its id is still a row in `locations`.
+    await branchService.deactivateBranch(biz.id, biz.northLocationId, null);
+    await asBusiness(biz.id, async () => {
+      expect(await branchService.resolveBranchRef(biz.id, biz.northLocationId)).toMatchObject({
+        ok: false,
+        reason: "unknown",
+      });
+      expect(await branchService.resolveBranchRef(biz.id, "North")).toMatchObject({
+        ok: false,
+        reason: "unknown",
+      });
+    });
+  });
+});

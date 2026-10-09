@@ -6,6 +6,7 @@ import * as aiRuntime from "@/lib/ai-runtime";
 import * as aiWalletBilling from "@/lib/ai-wallet-billing";
 import * as receiptService from "@/lib/ai-receipt-service";
 import * as mediaService from "@/lib/media-service";
+import * as expenseService from "@/lib/expense-service";
 import { POST } from "./route";
 
 /**
@@ -38,6 +39,20 @@ vi.mock("@/lib/ai-receipt-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/ai-receipt-service")>();
   return { ...actual, runReceiptOcr: vi.fn() };
 });
+
+/*
+ * The route reads the tenant's expense chart so the model can only answer with
+ * an account this business owns (issue #832 §13). In a unit test that read is a
+ * database query, so the service is stubbed — and what the route hands it is
+ * asserted below, which is the part worth holding: the chart is passed *in*, and
+ * a failure to read it degrades to "no suggestion", never to a fixed F&B list.
+ */
+vi.mock("@/lib/expense-service", () => ({
+  listExpenseCategoryAccounts: vi.fn(async () => [
+    { id: "acc-1", code: "5400", name: "اجاره" },
+    { id: "acc-2", code: "55100", name: "تعمیرات" },
+  ]),
+}));
 
 vi.mock("@/lib/media-service", () => ({
   getMediaConfig: vi.fn(),
@@ -105,6 +120,32 @@ describe("POST /api/ai/receipt-ocr", () => {
     const res = await POST(req({ image: PNG_DATA_URL }));
     expect(res.status).toBe(402);
     expect(receiptService.runReceiptOcr).not.toHaveBeenCalled();
+  });
+
+  it("gives the model this tenant's expense accounts as its only vocabulary", async () => {
+    // §13, at the boundary: the route is what supplies the chart, so neither the
+    // service nor the prompt can be called by a route that forgot to.
+    await POST(req({ image: PNG_DATA_URL }));
+    expect(expenseService.listExpenseCategoryAccounts).toHaveBeenCalledWith(SESSION.businessId);
+    expect(receiptService.runReceiptOcr).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expenseAccounts: [
+          { id: "acc-1", code: "5400", name: "اجاره" },
+          { id: "acc-2", code: "55100", name: "تعمیرات" },
+        ],
+      }),
+    );
+  });
+
+  it("degrades to no suggestion at all when the chart cannot be read", async () => {
+    // Not an unfiltered answer, and not a 500: a person's photo is still worth
+    // reading even when the chart is momentarily unreachable.
+    vi.mocked(expenseService.listExpenseCategoryAccounts).mockRejectedValueOnce(new Error("db down"));
+    const res = await POST(req({ image: PNG_DATA_URL }));
+    expect(res.status).toBe(200);
+    expect(receiptService.runReceiptOcr).toHaveBeenCalledWith(
+      expect.objectContaining({ expenseAccounts: [] }),
+    );
   });
 
   it("on success: settles the wallet, stores the photo as a Media asset, and returns both fields and the asset", async () => {
