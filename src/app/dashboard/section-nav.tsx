@@ -21,8 +21,19 @@
  * never flashes on a phone. `open` only ever means something below `md`.
  */
 
-import { useCallback, useId, useRef, useState, type ReactNode } from "react";
-import { ChevronLeftIcon, ChevronRightIcon, type LucideIcon } from "lucide-react";
+import {
+  useCallback,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TabBar, TabPanel, cardClass, type Tab } from "./page-chrome";
 
@@ -113,16 +124,32 @@ export function SectionNav<K extends string>({
     focusTop();
   }, [focusTop, setOpen]);
 
-  const byKey = new Map(sections.map((section) => [section.key, section]));
+  const { byKey, rendered } = useMemo(() => {
+    const mappedByKey = new Map(
+      sections.map((section) => [section.key, section]),
+    );
+
+    const mappedRendered: ReadonlyArray<{
+      label: string | null;
+      items: Section<K>[];
+    }> = groups
+      ? groups
+          .map((group) => ({
+            label: group.label,
+            items: group.keys
+              .map((key) => mappedByKey.get(key))
+              .filter((item): item is Section<K> => Boolean(item)),
+          }))
+          .filter((group) => group.items.length > 0)
+      : [{ label: null, items: [...sections] }];
+
+    return {
+      byKey: mappedByKey,
+
+      rendered: mappedRendered,
+    };
+  }, [sections, groups]);
   const activeSection = byKey.get(active);
-  const rendered: ReadonlyArray<{ label: string | null; items: Section<K>[] }> = groups
-    ? groups
-        .map((group) => ({
-          label: group.label,
-          items: group.keys.map((key) => byKey.get(key)).filter((item): item is Section<K> => Boolean(item)),
-        }))
-        .filter((group) => group.items.length > 0)
-    : [{ label: null, items: [...sections] }];
 
   // The rail owns the tab ids because it renders no `TabBar`; in the strip
   // variant the strip owns them and the mobile list only points at the panel,
@@ -142,14 +169,20 @@ export function SectionNav<K extends string>({
   const list = (
     <nav
       aria-labelledby={listHeadingId}
-      className={cn("overflow-hidden", cardClass, variant === "strip" && "md:hidden")}
+      className={cn(
+        "overflow-hidden",
+        cardClass,
+        variant === "strip" && "md:hidden",
+      )}
     >
       <div className="border-b border-border/80 px-5 py-4">
         <h2 id={listHeadingId} className="text-base font-bold text-foreground">
           {title ?? label}
         </h2>
         {description ? (
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {description}
+          </p>
         ) : null}
       </div>
       <div className="p-2 lg:max-h-[calc(100dvh-190px)] lg:overflow-y-auto">
@@ -182,14 +215,33 @@ export function SectionNav<K extends string>({
                     {Icon ? (
                       <Icon
                         aria-hidden="true"
-                        className={cn("size-[18px] shrink-0", isActive ? "text-amber-800 dark:text-amber-300" : "text-muted-foreground")}
+                        className={cn(
+                          "size-[18px] shrink-0",
+                          isActive
+                            ? "text-amber-800 dark:text-amber-300"
+                            : "text-muted-foreground",
+                        )}
                       />
                     ) : null}
-                    <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                    <span className="min-w-0 flex-1 truncate">
+                      {item.label}
+                    </span>
                     {isActive && listOwnsIds ? (
-                      <span className={cn("size-1.5 shrink-0 rounded-full bg-amber-700 dark:bg-amber-400", bp.show)} aria-hidden="true" />
+                      <span
+                        className={cn(
+                          "size-1.5 shrink-0 rounded-full bg-amber-700 dark:bg-amber-400",
+                          bp.show,
+                        )}
+                        aria-hidden="true"
+                      />
                     ) : null}
-                    <ChevronLeftIcon aria-hidden="true" className={cn("size-4 shrink-0 text-muted-foreground", bp.only)} />
+                    <ChevronLeftIcon
+                      aria-hidden="true"
+                      className={cn(
+                        "size-4 shrink-0 text-muted-foreground",
+                        bp.only,
+                      )}
+                    />
                   </button>
                 );
               })}
@@ -215,7 +267,8 @@ export function SectionNav<K extends string>({
         className={cn(
           // Below the breakpoint the menu *is* the page until a section opens.
           open && bp.hide,
-          variant === "rail" && "w-full shrink-0 lg:sticky lg:top-5 lg:w-[280px]",
+          variant === "rail" &&
+            "w-full shrink-0 lg:sticky lg:top-5 lg:w-[280px]",
         )}
       >
         {variant === "strip" ? (
@@ -231,7 +284,12 @@ export function SectionNav<K extends string>({
         {list}
       </div>
 
-      <div className={cn("min-w-0 flex-1 space-y-4 sm:space-y-5", !open && bp.hide)}>
+      <div
+        className={cn(
+          "min-w-0 flex-1 space-y-4 sm:space-y-5",
+          !open && bp.hide,
+        )}
+      >
         <button
           type="button"
           onClick={back}
@@ -240,9 +298,16 @@ export function SectionNav<K extends string>({
             bp.only,
           )}
         >
-          <ChevronRightIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 truncate text-right">{activeSection?.label ?? label}</span>
-          <span className="shrink-0 text-xs font-normal text-muted-foreground">بازگشت</span>
+          <ChevronRightIcon
+            aria-hidden="true"
+            className="size-4 shrink-0 text-muted-foreground"
+          />
+          <span className="min-w-0 flex-1 truncate text-right">
+            {activeSection?.label ?? label}
+          </span>
+          <span className="shrink-0 text-xs font-normal text-muted-foreground">
+            بازگشت
+          </span>
         </button>
 
         <TabPanel idPrefix={idPrefix} active={active}>
