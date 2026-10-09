@@ -2,8 +2,8 @@
 
 **Branch:** `arena/d6aa0a4a-biza-miz`
 **Base commit:** `d14f0e3557253591da3b083771745e87ee244b93`
-**Work commits:** `1ffa97e` (core), `7d3a99f` (L10), `73aefff` (L13) — branch HEAD is `73aefff`
-**Diff (`d14f0e3` → `73aefff`):** 51 files changed, +5,978 / −312 — 31 modified, 20 added
+**Work commits:** `1ffa97e` (core), `7d3a99f` (L10), `73aefff` (L13), plus report corrections
+**Diff (`d14f0e3` → branch HEAD), code and tests only:** 50 files changed, +5,766 / −312 — 31 modified, 19 added. (This report is excluded from the count, so the figure does not move as the report is edited.)
 
 ---
 
