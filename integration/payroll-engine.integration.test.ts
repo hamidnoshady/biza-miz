@@ -276,3 +276,292 @@ describe("payroll engine — workflow", () => {
     await expect(setup.saveComponent({ ...actor(), id: (await setup.listComponents(biz.id)).find((c) => c.code === "TAX")!.id, body: { isActive: false } })).rejects.toThrow("system_component_locked");
   });
 });
+
+// ---------------------------------------------------------------------------
+// #865 completion: partial months, signed corrections, dimensioned posting,
+// strict filters, tenant-safe allocation, database identity, concurrency and a
+// snapshot-consistent reconciliation.
+// ---------------------------------------------------------------------------
+
+async function location(businessId: string, name = "شعبه"): Promise<string> {
+  return (await db.query<{ id: string }>(`INSERT INTO locations (business_id, name) VALUES ($1, $2) RETURNING id`, [businessId, name])).rows[0].id;
+}
+
+async function project(businessId: string, name = "پروژه"): Promise<string> {
+  return (await db.query<{ id: string }>(`INSERT INTO ai_projects (business_id, name, created_by) VALUES ($1, $2, 'test') RETURNING id`, [businessId, name])).rows[0].id;
+}
+
+async function otherBusiness(): Promise<string> {
+  return (await db.query<{ id: string }>("INSERT INTO businesses (name, slug) VALUES ('Other Co', $1) RETURNING id", [`oth-${randomUUID().slice(0, 8)}`])).rows[0].id;
+}
+
+async function advance(runId: string, ...steps: Array<"review" | "approve" | "post">) {
+  for (const step of steps) {
+    if (step === "review") await runs.reviewEngineRun({ ...actor(), runId });
+    if (step === "approve") await runs.approveEngineRun({ ...actor(), runId });
+    if (step === "post") await runs.postEngineRun({ ...actor(), runId });
+  }
+}
+
+describe("payroll engine — partial months", () => {
+  it("prorates base pay over the days employed and a recurring item over its own window", async () => {
+    // Mordad 1404 = 2025-07-23 … 2025-08-22 (31 days); hired 2025-08-02 → 21 days of a 30-day basis.
+    await setup.saveProfile({ ...actor(), userId: staff.b, body: { hireDate: "2025-08-02" } });
+    const housing = (await setup.listComponents(biz.id)).find((c) => c.code === "HOUSING")!;
+    // Item from 2025-08-13 → 10 days of the month.
+    await setup.addItem({ ...actor(), body: { userId: staff.b, componentId: housing.id, amount: "9000000", effectiveFrom: "2025-08-13" } });
+    const run = await runs.createEngineRun({ ...actor(), periodKey: MORDAD });
+    await runs.calculateEngineRun({ ...actor(), runId: run.id });
+    const sara = (await runs.listPayslips(biz.id, run.id)).find((s) => s.userId === staff.b)!;
+    expect(sara.workedDays).toBe(21);
+    expect(sara.baseSalary).toBe("90000000");
+    expect(sara.earnings.find((e) => e.code === "BASE")!.amount).toBe("63000000");
+    expect(sara.earnings.find((e) => e.code === "HOUSING")!.amount).toBe("3000000");
+    expect(sara.netPay).toBe("66000000");
+    // A full-month employee is paid in full whatever the month's calendar length.
+    const ali = (await runs.listPayslips(biz.id, run.id)).find((s) => s.userId === staff.a)!;
+    expect(ali.workedDays).toBe(30);
+    expect(ali.earnings.find((e) => e.code === "BASE")!.amount).toBe("150000000");
+  });
+
+  it("stops at the termination date", async () => {
+    await setup.saveProfile({ ...actor(), userId: staff.b, body: { terminationDate: "2025-07-27" } });
+    const run = await runs.createEngineRun({ ...actor(), periodKey: MORDAD });
+    await runs.calculateEngineRun({ ...actor(), runId: run.id });
+    const sara = (await runs.listPayslips(biz.id, run.id)).find((s) => s.userId === staff.b)!;
+    expect(sara.workedDays).toBe(5);
+    expect(sara.netPay).toBe("15000000");
+  });
+});
+
+describe("payroll engine — signed corrections", () => {
+  it("reverses overtime with a supplemental run, carries the debt on 1260 and recovers it next month", async () => {
+    // Sara: uninsured and tax-exempt, so the figures are exactly base and overtime.
+    const regular = await runs.createEngineRun({ ...actor(), periodKey: MORDAD, inputs: { [staff.b]: { overtimeHours: 10 } } });
+    await runs.calculateEngineRun({ ...actor(), runId: regular.id });
+    await advance(regular.id, "review", "approve", "post");
+    const paidOt = BigInt((await runs.listPayslips(biz.id, regular.id)).find((s) => s.userId === staff.b)!.earnings.find((e) => e.code === "OVERTIME")!.amount);
+    // 90M / 192h × 1.4 × 10h = 6,562,500
+    expect(paidOt).toBe(6_562_500n);
+
+    await expect(
+      runs.createEngineRun({ ...actor(), periodKey: MORDAD, runType: "supplemental", inputs: { [staff.b]: { overtimeHours: -11 } } }).then((r) =>
+        runs.calculateEngineRun({ ...actor(), runId: r.id }),
+      ),
+    ).rejects.toThrow("invalid_overtime_hours");
+    const pending = (await runs.listEngineRuns(biz.id)).find((r) => r.runType === "supplemental" && r.status === "draft")!;
+    await runs.cancelEngineRun({ ...actor(), runId: pending.id });
+
+    const supp = await runs.createEngineRun({ ...actor(), periodKey: MORDAD, runType: "supplemental", inputs: { [staff.b]: { overtimeHours: -10 } } });
+    await runs.calculateEngineRun({ ...actor(), runId: supp.id });
+    const [fix] = await runs.listPayslips(biz.id, supp.id);
+    expect(fix.overtimeHours).toBe(-10);
+    expect(fix.earnings.find((e) => e.code === "OVERTIME")!.amount).toBe((-paidOt).toString());
+    expect(fix.netPay).toBe("0");
+    expect(fix.employeeDebt).toBe(paidOt.toString());
+    await advance(supp.id, "review", "approve", "post");
+    expect(-(await balance("1260"))).toBe(paidOt);
+    expect((await runs.payrollLiabilityReconciliation(biz.id)).reconciled).toBe(true);
+
+    // The debt is owed through payroll — the one ledger of what a member owes.
+    const owed = await advances.outstandingAdvances((t, p) => db.query(t, p as never) as never, biz.id);
+    expect(owed.get(staff.b)).toBe(paidOt);
+
+    const next = await runs.createEngineRun({ ...actor(), periodKey: SHAHRIVAR });
+    await runs.calculateEngineRun({ ...actor(), runId: next.id });
+    const sara = (await runs.listPayslips(biz.id, next.id)).find((s) => s.userId === staff.b)!;
+    expect(sara.deductions.find((d) => d.code === "ADVANCE")!.amount).toBe(paidOt.toString());
+    await advance(next.id, "review", "approve", "post");
+    expect(await balance("1260")).toBe(0n);
+    expect((await advances.outstandingAdvances((t, p) => db.query(t, p as never) as never, biz.id)).get(staff.b) ?? 0n).toBe(0n);
+    expect((await runs.payrollLiabilityReconciliation(biz.id)).reconciled).toBe(true);
+  });
+
+  it("gives back unpaid leave deducted in error", async () => {
+    const regular = await runs.createEngineRun({ ...actor(), periodKey: MORDAD, inputs: { [staff.b]: { unpaidLeaveDays: 2 } } });
+    await runs.calculateEngineRun({ ...actor(), runId: regular.id });
+    await advance(regular.id, "review", "approve", "post");
+    const supp = await runs.createEngineRun({ ...actor(), periodKey: MORDAD, runType: "supplemental", inputs: { [staff.b]: { unpaidLeaveDays: -2 } } });
+    await runs.calculateEngineRun({ ...actor(), runId: supp.id });
+    const [fix] = await runs.listPayslips(biz.id, supp.id);
+    expect(fix.netPay).toBe("6000000"); // 90M / 30 × 2
+    expect(fix.employeeDebt).toBe("0");
+  });
+});
+
+describe("payroll engine — dimensioned posting", () => {
+  it("posts one balanced entry per branch × project bucket, summing exactly to the run", async () => {
+    const branch = await location(biz.id, "شعبه مرکزی");
+    const proj = await project(biz.id, "پروژه الف");
+    await setup.saveProfile({
+      ...actor(),
+      userId: staff.a,
+      body: { costAllocation: [{ percent: 33.33, locationId: branch }, { percent: 66.67, locationId: branch, projectId: proj }] },
+    });
+    const run = await approvedRun();
+    const posted = await runs.postEngineRun({ ...actor(), runId: run.id });
+    // Ali's two buckets + Sara's undimensioned one.
+    expect(posted.accrualEntryIds).toHaveLength(3);
+    const { rows } = await db.query<{ id: string; location_id: string | null; project_id: string | null; posting_kind: string; dr: string; cr: string; expense: string }>(
+      `SELECT je.id, je.location_id, je.project_id, je.posting_kind, sum(jl.debit)::text AS dr, sum(jl.credit)::text AS cr,
+              COALESCE(sum(jl.debit - jl.credit) FILTER (WHERE a.code = '5200'), 0)::text AS expense
+         FROM journal_entries je JOIN journal_lines jl ON jl.entry_id = je.id JOIN accounts a ON a.id = jl.account_id
+        WHERE je.business_id = $1 AND je.source_type = 'payroll_engine_accrual' AND je.source_id = $2
+        GROUP BY je.id ORDER BY je.posting_kind`,
+      [biz.id, run.id],
+    );
+    expect(rows).toHaveLength(3);
+    for (const r of rows) expect(r.dr).toBe(r.cr);
+    expect(rows.map((r) => r.posting_kind)).toEqual([`alloc:-:-`, `alloc:${branch}:-`, `alloc:${branch}:${proj}`].sort());
+    const byKind = Object.fromEntries(rows.map((r) => [r.posting_kind, r]));
+    expect(byKind[`alloc:${branch}:${proj}`].project_id).toBe(proj);
+    expect(byKind[`alloc:${branch}:-`].location_id).toBe(branch);
+    expect(byKind["alloc:-:-"].location_id).toBeNull();
+    // 150M × 33.33% = 49,995,000; the rest exactly to the other share; Sara 90M undimensioned.
+    expect(byKind[`alloc:${branch}:-`].expense).toBe("49995000");
+    expect(byKind[`alloc:${branch}:${proj}`].expense).toBe("100005000");
+    expect(byKind["alloc:-:-"].expense).toBe("90000000");
+    expect((await runs.payrollLiabilityReconciliation(biz.id)).reconciled).toBe(true);
+    // The ledger's unique posting key refuses a second post of any bucket.
+    const plain = new Client({ connectionString: urlFor(databaseName) });
+    await plain.connect();
+    try {
+      await plain.query("SELECT set_config('app.rls_bypass', 'on', false)");
+      await expect(
+        plain.query(
+          `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, source_id, posting_kind) VALUES ($1, '2025-08-22', 'x', 'payroll_engine_accrual', $2, 'alloc:-:-')`,
+          [biz.id, run.id],
+        ),
+      ).rejects.toThrow(/uq_journal_business_source_posting|duplicate/);
+    } finally {
+      await plain.end();
+    }
+  });
+
+  it("refuses a branch or project of another business, or one that is closed or archived", async () => {
+    const other = await otherBusiness();
+    const foreignBranch = await location(other);
+    const foreignProject = await project(other);
+    const save = (costAllocation: unknown) => setup.saveProfile({ ...actor(), userId: staff.a, body: { costAllocation } });
+    await expect(save([{ percent: 100, locationId: foreignBranch }])).rejects.toThrow("invalid_cost_allocation");
+    await expect(save([{ percent: 100, projectId: foreignProject }])).rejects.toThrow("invalid_cost_allocation");
+    const closed = await location(biz.id);
+    await db.query(`UPDATE locations SET is_active = false WHERE id = $1`, [closed]);
+    await expect(save([{ percent: 100, locationId: closed }])).rejects.toThrow("invalid_cost_allocation");
+
+    // Valid when saved, archived before the run: the calculation refuses rather than post to it.
+    const proj = await project(biz.id);
+    await save([{ percent: 100, projectId: proj }]);
+    await db.query(`UPDATE ai_projects SET archived_at = now() WHERE id = $1`, [proj]);
+    const run = await runs.createEngineRun({ ...actor(), periodKey: MORDAD });
+    await expect(runs.calculateEngineRun({ ...actor(), runId: run.id })).rejects.toMatchObject({
+      message: "invalid_cost_allocation",
+      details: { userId: staff.a, projectId: proj },
+    });
+  });
+});
+
+describe("payroll engine — strict report filters", () => {
+  it("refuses malformed run ids, periods and years instead of widening the report", async () => {
+    await approvedRun();
+    await expect(runs.payrollRegister(biz.id, { runId: "not-a-uuid" })).rejects.toThrow("invalid_run_id");
+    await expect(runs.payrollRegister(biz.id, { runId: randomUUID(), periodKey: "1404-13" })).rejects.toThrow("invalid_period");
+    await expect(runs.payrollRegister(biz.id, { periodKey: "garbage" })).rejects.toThrow("invalid_period");
+    await expect(runs.payrollRegister(biz.id, {})).rejects.toThrow("invalid_period");
+    expect((await runs.payrollRegister(biz.id, { runId: randomUUID() })).payslips).toHaveLength(0);
+    await expect(runs.employeePayrollCard(biz.id, staff.a, " 1404")).rejects.toThrow("invalid_period");
+    await expect(runs.employeePayrollCard(biz.id, "x", "1404")).rejects.toThrow("invalid_user_id");
+    expect((await runs.employeePayrollCard(biz.id, staff.a, "1404")).payslips).toHaveLength(1);
+    await expect(runs.periodComparison(biz.id, MORDAD, "1404-6x")).rejects.toThrow("invalid_period");
+  });
+});
+
+describe("payroll engine — database identity", () => {
+  it("refuses moving a payslip between runs or businesses, in either direction", async () => {
+    const approved = await approvedRun();
+    const draft = await runs.createEngineRun({ ...actor(), periodKey: SHAHRIVAR });
+    await runs.calculateEngineRun({ ...actor(), runId: draft.id });
+    const plain = new Client({ connectionString: urlFor(databaseName) });
+    await plain.connect();
+    try {
+      await plain.query("SELECT set_config('app.rls_bypass', 'on', false)");
+      // Out of an approved run, net changed on the way — the original #6 hole.
+      await expect(
+        plain.query(`UPDATE payroll_payslips SET run_id = $2, net_pay = 1 WHERE run_id = $1`, [approved.id, draft.id]),
+      ).rejects.toThrow(/immutable|cannot be moved/);
+      // Into an approved run from a draft.
+      await expect(plain.query(`UPDATE payroll_payslips SET run_id = $2 WHERE run_id = $1`, [draft.id, approved.id])).rejects.toThrow(
+        /immutable|cannot be moved/,
+      );
+      const other = await otherBusiness();
+      await expect(plain.query(`UPDATE payroll_payslips SET business_id = $2 WHERE run_id = $1`, [draft.id, other])).rejects.toThrow(
+        /cannot be moved|foreign key/,
+      );
+      await expect(plain.query(`UPDATE payroll_engine_runs SET period_key = '1404-07' WHERE id = $1`, [draft.id])).rejects.toThrow(/identity|immutable/);
+      // A payslip cannot point at another business's run, even on insert.
+      await expect(
+        plain.query(
+          `INSERT INTO payroll_payslips (business_id, run_id, employee_name_snapshot, gross, net_pay, employer_cost, lines, cost_allocation)
+           VALUES ($1, $2, 'x', 0, 0, 0, '[]', '[]')`,
+          [other, draft.id],
+        ),
+      ).rejects.toThrow(/foreign key|violates/);
+    } finally {
+      await plain.end();
+    }
+  });
+});
+
+describe("payroll engine — concurrency", () => {
+  it("posts once under a racing double post", async () => {
+    const run = await approvedRun();
+    const results = await Promise.allSettled([runs.postEngineRun({ ...actor(), runId: run.id }), runs.postEngineRun({ ...actor(), runId: run.id })]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect((results.find((r) => r.status === "rejected") as PromiseRejectedResult).reason.message).toBe("already_posted");
+    const { rows } = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM journal_entries WHERE source_type = 'payroll_engine_accrual' AND source_id = $1`, [run.id]);
+    expect(rows[0].n).toBe(String((await runs.getEngineRun(biz.id, run.id))!.accrualEntryIds.length));
+  });
+
+  it("recovers an advance once when the engine and the #835 path claim it at the same time", async () => {
+    await advances.recordAdvance({ businessId: biz.id, userId: staff.a, amount: "5000000", method: "cash", createdBy: owner.id, advanceDate: "2025-07-25" });
+    await db.query(`UPDATE users SET monthly_wage = 10000000 WHERE id = $1`, [staff.a]);
+    const run = await runs.createEngineRun({ ...actor(), periodKey: MORDAD });
+    const settled = await Promise.allSettled([
+      runs.calculateEngineRun({ ...actor(), runId: run.id }),
+      legacy.accruePayroll({ businessId: biz.id, createdBy: owner.id, periodKey: SHAHRIVAR }),
+    ]);
+    // Both must really run — a claim that failed for another reason would make this pass vacuously.
+    expect(settled.map((r) => (r.status === "rejected" ? String(r.reason) : "ok"))).toEqual(["ok", "ok"]);
+    const { rows } = await db.query<{ total: string }>(
+      `SELECT (COALESCE((SELECT sum(advance_recovery) FROM payroll_payslips WHERE run_id = $1 AND user_id = $2), 0)
+             + COALESCE((SELECT sum(rl.advance_recovery) FROM payroll_run_lines rl JOIN payroll_runs r ON r.id = rl.run_id
+                          WHERE r.business_id = $3 AND r.status <> 'voided' AND rl.user_id = $2), 0))::text AS total`,
+      [run.id, staff.a, biz.id],
+    );
+    expect(rows[0].total).toBe("5000000");
+  });
+});
+
+describe("payroll engine — reconciliation snapshot", () => {
+  it("reads one snapshot, so a post committed mid-report does not unbalance it", async () => {
+    const first = await approvedRun();
+    await runs.postEngineRun({ ...actor(), runId: first.id });
+    const supp = await runs.createEngineRun({ ...actor(), periodKey: MORDAD, runType: "supplemental", inputs: { [staff.a]: { items: [{ code: "BONUS", amount: "100000000" }] } } });
+    await runs.calculateEngineRun({ ...actor(), runId: supp.id });
+    await advance(supp.id, "review", "approve");
+    const recon = await runs.payrollLiabilityReconciliation(biz.id, {
+      onSnapshotTaken: async () => {
+        await runs.postEngineRun({ ...actor(), runId: supp.id });
+      },
+    });
+    // Every read saw the database before the post: one run, its two payslips, and a ledger that matches them.
+    // Under READ COMMITTED the payslip read would already include the supplemental's payslip (3).
+    expect(recon.runs).toBe(1);
+    expect(recon.payslips).toBe(2);
+    expect(recon.reconciled).toBe(true);
+    const after = await runs.payrollLiabilityReconciliation(biz.id);
+    expect(after.runs).toBe(2);
+    expect(after.payslips).toBe(3);
+    expect(after.reconciled).toBe(true);
+  });
+});

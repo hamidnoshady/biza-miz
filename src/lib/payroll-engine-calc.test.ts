@@ -2,14 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   accrualPostingSides,
   allocateExact,
+  allocatePayslip,
   canTransition,
   computePayslip,
+  coveredDays,
   DEFAULT_COMPONENTS,
   divRound,
   IRAN_RULE_TEMPLATE,
   NO_PRIOR,
   parsePayrollRuleSet,
   progressiveTax,
+  prorate,
+  type PriorPeriodTotals,
   type PayrollRuleSet,
   type PayslipInput,
 } from "./payroll-engine-calc";
@@ -26,6 +30,7 @@ const rules: PayrollRuleSet = {
 
 const base = (over: Partial<PayslipInput> = {}): PayslipInput => ({
   baseSalary: 150_000_000n,
+  workedDays: null,
   insured: true,
   taxExempt: false,
   overtimeHours: 0,
@@ -138,5 +143,126 @@ describe("posting", () => {
     expect(canTransition("reviewed", "approved")).toBe(true);
     expect(canTransition("approved", "calculated")).toBe(false);
     expect(canTransition("closed", "paid")).toBe(false);
+  });
+});
+
+/** What a standing regular run leaves behind as `prior` for a correction. */
+const priorOf = (slip: ReturnType<typeof computePayslip>, hours = 0, days = 0): PriorPeriodTotals => ({
+  ...NO_PRIOR,
+  insurableRaw: slip.insurableRaw,
+  insuranceBase: slip.insuranceBase,
+  employeeInsurance: slip.employeeInsurance,
+  employerInsurance: slip.employerInsurance,
+  unemploymentInsurance: slip.unemploymentInsurance,
+  taxableBase: slip.taxableBase,
+  incomeTax: slip.incomeTax,
+  baseSalary: slip.baseSalary,
+  workedDays: slip.workedDays,
+  overtimeHours: hours,
+  overtimeAmount: slip.lines.filter((l) => l.systemKey === "overtime").reduce((s, l) => s + l.amount, 0n),
+  unpaidLeaveDays: days,
+  unpaidLeaveAmount: -slip.lines.filter((l) => l.systemKey === "unpaid_leave").reduce((s, l) => s + l.amount, 0n),
+});
+
+describe("partial months", () => {
+  it("counts covered days, null for the whole month, capped at the rule basis", () => {
+    expect(coveredDays("2025-03-21", "2025-04-20", [{ from: null, to: null }], 30)).toBeNull();
+    expect(coveredDays("2025-03-21", "2025-04-20", [{ from: "2025-04-11", to: null }], 30)).toBe(10);
+    expect(coveredDays("2025-03-21", "2025-04-20", [{ from: null, to: "2025-03-30" }], 30)).toBe(10);
+    // Employment and an item's own window intersect.
+    expect(coveredDays("2025-03-21", "2025-04-20", [{ from: "2025-03-26", to: null }, { from: null, to: "2025-03-30" }], 30)).toBe(5);
+    expect(coveredDays("2025-03-21", "2025-04-20", [{ from: "2025-05-01", to: null }], 30)).toBe(0);
+    // A 31-day Jalali month missing only its first day: 30 days, the full basis.
+    expect(coveredDays("2025-03-21", "2025-04-20", [{ from: "2025-03-22", to: null }], 30)).toBe(30);
+  });
+  it("prorates base pay and keeps a full month exact", () => {
+    expect(prorate(150_000_000n, null, 30)).toBe(150_000_000n);
+    expect(prorate(150_000_000n, 10, 30)).toBe(50_000_000n);
+    expect(prorate(100n, 10, 30)).toBe(33n);
+    const r = computePayslip(base({ workedDays: 10, insured: false, taxExempt: true }), rules, DEFAULT_COMPONENTS);
+    expect(r.gross).toBe(50_000_000n);
+    expect(r.workedDays).toBe(10);
+    expect(() => computePayslip(base({ workedDays: 10, unpaidLeaveDays: 11 }), rules, DEFAULT_COMPONENTS)).toThrow("invalid_unpaid_leave_days");
+    expect(() => computePayslip(base({ workedDays: 31 }), rules, DEFAULT_COMPONENTS)).toThrow("invalid_worked_days");
+  });
+});
+
+describe("signed corrections", () => {
+  const plain = { ...rules, taxBrackets: [], taxExemptMonthlyRial: 0 };
+  it("reverses overtime exactly and leaves an employee debt instead of a negative net", () => {
+    const first = computePayslip(base({ overtimeHours: 10, insured: false, taxExempt: true }), plain, DEFAULT_COMPONENTS);
+    const otPaid = first.lines.find((l) => l.systemKey === "overtime")!.amount;
+    const fix = computePayslip(base({ overtimeHours: -10, insured: false, taxExempt: true }), plain, DEFAULT_COMPONENTS, priorOf(first, 10), {
+      supplemental: true,
+    });
+    expect(fix.lines.find((l) => l.systemKey === "overtime")!.amount).toBe(-otPaid);
+    expect(fix.netPay).toBe(0n);
+    expect(fix.employeeDebt).toBe(otPaid);
+    // Cannot reverse more than was paid.
+    expect(() =>
+      computePayslip(base({ overtimeHours: -11 }), plain, DEFAULT_COMPONENTS, priorOf(first, 10), { supplemental: true }),
+    ).toThrow("invalid_overtime_hours");
+  });
+  it("adds and removes unpaid leave against the days already deducted", () => {
+    const first = computePayslip(base({ unpaidLeaveDays: 2, insured: false, taxExempt: true }), plain, DEFAULT_COMPONENTS);
+    const deducted = -first.lines.find((l) => l.systemKey === "unpaid_leave")!.amount;
+    const undo = computePayslip(base({ unpaidLeaveDays: -2, insured: false, taxExempt: true }), plain, DEFAULT_COMPONENTS, priorOf(first, 0, 2), {
+      supplemental: true,
+    });
+    expect(undo.lines.find((l) => l.systemKey === "unpaid_leave")!.amount).toBe(deducted);
+    expect(undo.netPay).toBe(deducted);
+    expect(() =>
+      computePayslip(base({ unpaidLeaveDays: -3 }), plain, DEFAULT_COMPONENTS, priorOf(first, 0, 2), { supplemental: true }),
+    ).toThrow("invalid_unpaid_leave_days");
+  });
+  it("re-settles insurance and tax downward on the cumulative month", () => {
+    const first = computePayslip(base({ items: [{ code: "BONUS", amount: 100_000_000n }] }), rules, DEFAULT_COMPONENTS);
+    const fix = computePayslip(base({ items: [{ code: "BONUS", amount: -100_000_000n }] }), rules, DEFAULT_COMPONENTS, priorOf(first), {
+      supplemental: true,
+    });
+    const plainMonth = computePayslip(base(), rules, DEFAULT_COMPONENTS);
+    expect(first.incomeTax + fix.incomeTax).toBe(plainMonth.incomeTax);
+    expect(first.employeeInsurance + fix.employeeInsurance).toBe(plainMonth.employeeInsurance);
+    expect(fix.netPay === 0n || fix.employeeDebt === 0n).toBe(true);
+    expect(fix.netPay - fix.employeeDebt).toBe(-100_000_000n - fix.incomeTax - fix.employeeInsurance);
+  });
+  it("needs the regular run's rate to price an hours correction", () => {
+    expect(() => computePayslip(base({ overtimeHours: 1 }), rules, DEFAULT_COMPONENTS, NO_PRIOR, { supplemental: true })).toThrow("no_base_salary");
+  });
+  it("posts a debt to the staff receivable, balanced", () => {
+    const first = computePayslip(base({ overtimeHours: 10, insured: false, taxExempt: true }), plain, DEFAULT_COMPONENTS);
+    const fix = computePayslip(base({ overtimeHours: -10, insured: false, taxExempt: true }), plain, DEFAULT_COMPONENTS, priorOf(first, 10), {
+      supplemental: true,
+    });
+    const sides = accrualPostingSides([fix]);
+    expect(sides.find((s) => s.accountCode === "1260")!.debit).toBe(fix.employeeDebt);
+    expect(sides.find((s) => s.accountCode === "5200")!.credit).toBe(fix.employeeDebt);
+  });
+});
+
+describe("allocatePayslip", () => {
+  it("splits every line and the net exactly, each share balancing on its own", () => {
+    const slip = computePayslip(base({ baseSalary: 100_000_001n, items: [{ code: "LOAN", amount: 1_000_001n }] }), rules, DEFAULT_COMPONENTS);
+    const parts = allocatePayslip(slip, [33.33, 33.33, 33.34]);
+    expect(parts).toHaveLength(3);
+    expect(parts.reduce((s, p) => s + p.netPay, 0n)).toBe(slip.netPay);
+    for (let j = 0; j < slip.lines.length; j++) expect(parts.reduce((s, p) => s + p.lines[j].amount, 0n)).toBe(slip.lines[j].amount);
+    const whole = accrualPostingSides([slip]);
+    const split = parts.map((p) => accrualPostingSides([p]));
+    for (const side of whole) {
+      const debit = split.flat().filter((s) => s.accountCode === side.accountCode).reduce((s, x) => s + x.debit - x.credit, 0n);
+      expect(debit).toBe(side.debit - side.credit);
+    }
+    expect(allocatePayslip(slip, [])).toEqual([slip]);
+  });
+  it("splits a debt as well", () => {
+    const plain = { ...rules, taxBrackets: [], taxExemptMonthlyRial: 0 };
+    const first = computePayslip(base({ overtimeHours: 7, insured: false, taxExempt: true }), plain, DEFAULT_COMPONENTS);
+    const fix = computePayslip(base({ overtimeHours: -7, insured: false, taxExempt: true }), plain, DEFAULT_COMPONENTS, priorOf(first, 7), {
+      supplemental: true,
+    });
+    const parts = allocatePayslip(fix, [50, 50]);
+    expect(parts.reduce((s, p) => s + p.employeeDebt, 0n)).toBe(fix.employeeDebt);
+    expect(parts.reduce((s, p) => s + p.netPay, 0n)).toBe(0n);
   });
 });

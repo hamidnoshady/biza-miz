@@ -19,7 +19,6 @@ import {
   DEFAULT_COMPONENTS,
   IRAN_RULE_TEMPLATE,
   parsePayrollRuleSet,
-  SYSTEM_COMPONENT_KEYS,
   type ComponentKind,
   type PayrollComponentDef,
   type PayrollRuleSet,
@@ -273,7 +272,7 @@ export async function listComponentChanges(businessId: string, componentId: stri
 // Employee profiles
 // ---------------------------------------------------------------------------
 
-export const EMPLOYMENT_TYPES = ["full_time", "part_time", "contract", "hourly", "intern"] as const;
+const EMPLOYMENT_TYPES = ["full_time", "part_time", "contract", "hourly", "intern"] as const;
 
 export interface CostAllocationShare {
   percent: number;
@@ -360,7 +359,7 @@ function optionalText(value: unknown, max: number, field: string): string | null
 }
 
 /** Validates a cost-allocation list: shares of 0–100 summing to exactly 100 (or an empty list). */
-export function parseCostAllocation(raw: unknown): CostAllocationShare[] {
+function parseCostAllocation(raw: unknown): CostAllocationShare[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw) || raw.length > 20) throw new PayrollError("invalid_cost_allocation", 400, "costAllocation");
   let total = 0;
@@ -385,6 +384,34 @@ export function parseCostAllocation(raw: unknown): CostAllocationShare[] {
   }
   if (out.length > 0 && total !== 10_000) throw new PayrollError("allocation_must_total_100", 400, "costAllocation");
   return out;
+}
+
+/**
+ * Every branch and project an allocation names must be this business's own and
+ * usable: an active location, a project that is not archived. Checked with an
+ * explicit `business_id` filter (not only RLS), so a foreign id is refused even
+ * on a connection whose tenant scope is bypassed. Throws
+ * `invalid_cost_allocation` naming the offending field.
+ */
+export async function assertAllocationReferences(run: Runner, businessId: string, shares: readonly CostAllocationShare[]): Promise<void> {
+  const locationIds = [...new Set(shares.map((s) => s.locationId).filter((v): v is string => !!v))];
+  const projectIds = [...new Set(shares.map((s) => s.projectId).filter((v): v is string => !!v))];
+  if (locationIds.length > 0) {
+    const { rows } = await run<{ id: string }>(
+      `SELECT id FROM locations WHERE business_id = $1 AND id = ANY($2::uuid[]) AND is_active`,
+      [businessId, locationIds],
+    );
+    const missing = locationIds.find((id) => !rows.some((r) => r.id === id));
+    if (missing) throw new PayrollError("invalid_cost_allocation", 400, { field: "costAllocation.locationId", locationId: missing });
+  }
+  if (projectIds.length > 0) {
+    const { rows } = await run<{ id: string }>(
+      `SELECT id FROM ai_projects WHERE business_id = $1 AND id = ANY($2::uuid[]) AND archived_at IS NULL`,
+      [businessId, projectIds],
+    );
+    const missing = projectIds.find((id) => !rows.some((r) => r.id === id));
+    if (missing) throw new PayrollError("invalid_cost_allocation", 400, { field: "costAllocation.projectId", projectId: missing });
+  }
 }
 
 /** Creates or updates a team member's payroll profile, auditing the before/after. */
@@ -420,6 +447,7 @@ export async function saveProfile(params: { businessId: string; actorId: string 
   const iban = optionalText(dest.iban, 34, "paymentDestination.iban");
   if (iban && !/^IR[0-9]{24}$/.test(iban.replace(/\s/g, "").toUpperCase())) throw new PayrollError("invalid_iban", 400, "paymentDestination.iban");
   const allocation = parseCostAllocation(pick("costAllocation", current.costAllocation));
+  await assertAllocationReferences(poolRunner, params.businessId, allocation);
   const isActive = pick("isActive", current.isActive);
   if (typeof isActive !== "boolean") throw new PayrollError("invalid_profile", 400, "isActive");
 
@@ -583,4 +611,3 @@ export async function endItem(params: { businessId: string; itemId: string; effe
   return toItem(out[0]);
 }
 
-export { SYSTEM_COMPONENT_KEYS };

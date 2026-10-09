@@ -21,7 +21,7 @@ interface Ctx {
 /**
  * Issue #865 payroll reports. `payroll.view`.
  *
- *   register?period=|runId=     payroll register
+ *   register?period=|runId=     payroll register (malformed filter → 400 invalid_period / invalid_run_id)
  *   employee-card?userId=&year= employee payroll card (Jalali year)
  *   insurance?period=           insurance summary
  *   tax?period=                 payroll tax summary
@@ -42,14 +42,11 @@ export const GET = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   try {
     const businessId = session.businessId;
     switch (report) {
-      case "register": {
-        const runId = q.get("runId") ?? undefined;
-        const periodKey = period() ?? undefined;
-        if (!runId && !periodKey) return badRequest("invalid_period");
-        return NextResponse.json(await payrollRegister(businessId, { runId, periodKey }));
-      }
+      case "register":
+        // Raw filters: the service refuses a malformed runId / period instead of dropping it.
+        return NextResponse.json(await payrollRegister(businessId, { runId: q.get("runId"), periodKey: q.get("period") }));
       case "employee-card":
-        return NextResponse.json(await employeePayrollCard(businessId, q.get("userId") ?? "", Number(q.get("year"))));
+        return NextResponse.json(await employeePayrollCard(businessId, q.get("userId") ?? "", q.get("year") ?? ""));
       case "insurance":
       case "tax":
       case "employer-cost": {

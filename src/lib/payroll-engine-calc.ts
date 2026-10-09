@@ -42,6 +42,23 @@
  * month (everything already approved for the period + this run) minus what was
  * already withheld (`PriorPeriodTotals`), so the ceiling and the progressive
  * brackets apply to the month as a whole, never twice.
+ *
+ * Corrections may be signed. Overtime hours and unpaid-leave days in a
+ * supplemental run are *deltas* to what the month already paid, priced at the
+ * regular run's contract rate on the cumulative month (so +5 h then −5 h nets to
+ * the Rial). A downward correction that leaves gross − deductions below zero is
+ * never clamped: net pay is 0 and the shortfall is the employee's **debt**,
+ * posted Debit staff receivable (1260) and recovered by later regular runs
+ * exactly like a salary advance.
+ *
+ * ## Partial months
+ *
+ * Base salary and recurring items are prorated by the days of the Jalali month
+ * the employee was employed (hire/termination) — and, for an item, the days it
+ * was in force — on the rule's month basis: `amount × days ÷ monthDays`. A
+ * window covering the whole month pays the full amount regardless of the
+ * month's calendar length (`coveredDays`). Overtime and leave are priced at the
+ * full monthly rate; leave cannot exceed the days worked.
  */
 
 /** One income-tax band: monthly income up to `upToRial` is taxed at `ratePercent`. `null` = open-ended. */
@@ -186,7 +203,7 @@ export function parsePayrollRuleSet(raw: unknown): RuleParse {
 export type ComponentKind = "earning" | "deduction" | "employer_contribution";
 
 /** The components the engine computes itself; everything else is a business-defined fixed/input amount. */
-export const SYSTEM_COMPONENT_KEYS = [
+const SYSTEM_COMPONENT_KEYS = [
   "base_wage",
   "overtime",
   "bonus",
@@ -276,6 +293,48 @@ export function progressiveTax(taxable: bigint, rules: PayrollRuleSet): bigint {
 }
 
 // ---------------------------------------------------------------------------
+// Partial months
+// ---------------------------------------------------------------------------
+
+const DAY_MS = 86_400_000;
+const isoDay = (iso: string): number => Math.floor(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)) / DAY_MS);
+
+/** A date window, inclusive; `null` = open on that side. */
+export interface DateWindow {
+  from: string | null;
+  to: string | null;
+}
+
+/**
+ * How much of a payroll month a set of windows covers (employment, and an
+ * item's own effective dates), intersected.
+ *
+ * Returns `null` when the whole month is covered — the amount is paid in full,
+ * whatever the month's calendar length. Otherwise the covered calendar days,
+ * capped at the rule's month basis (`monthDays`, statutorily 30), which is what
+ * a monthly amount is prorated over: `amount × days ÷ monthDays`. Zero when the
+ * windows do not meet the month at all.
+ */
+export function coveredDays(periodStart: string, periodEnd: string, windows: readonly DateWindow[], monthDays: number): number | null {
+  let from = isoDay(periodStart);
+  let to = isoDay(periodEnd);
+  const full = to - from + 1;
+  for (const w of windows) {
+    if (w.from) from = Math.max(from, isoDay(w.from));
+    if (w.to) to = Math.min(to, isoDay(w.to));
+  }
+  const days = Math.max(0, to - from + 1);
+  if (days >= full) return null;
+  return Math.min(days, monthDays);
+}
+
+/** A monthly amount for `days` of a `monthDays` month (`null` days = the full amount). Exact, half away from zero. */
+export function prorate(amount: bigint, days: number | null, monthDays: number): bigint {
+  if (days === null) return amount;
+  return divRound(amount * BigInt(Math.round(days * 100)), BigInt(monthDays) * 100n);
+}
+
+// ---------------------------------------------------------------------------
 // Calculator
 // ---------------------------------------------------------------------------
 
@@ -287,17 +346,31 @@ export interface PayslipItemInput {
 }
 
 export interface PayslipInput {
-  /** Monthly base salary; 0 in a supplemental run (the base was already paid). */
+  /**
+   * The monthly contract rate (base salary). In a regular run it is paid
+   * (prorated by `workedDays`); in a supplemental run it is not paid again and
+   * only prices overtime / unpaid-leave corrections.
+   */
   baseSalary: bigint;
+  /** Days employed in the month on the rule's basis; `null` = the full month. Regular runs only. */
+  workedDays: number | null;
   insured: boolean;
   taxExempt: boolean;
+  /**
+   * Regular run: the month's overtime hours (≥ 0).
+   * Supplemental run: a signed *correction* to the hours already paid this month.
+   */
   overtimeHours: number;
+  /**
+   * Regular run: the month's unpaid-leave days (≥ 0, at most the days worked).
+   * Supplemental run: a signed *correction* to the days already deducted.
+   */
   unpaidLeaveDays: number;
-  /** Recurring allowances / deductions / benefits from the profile, and this month's inputs (bonus, one-off items). */
+  /** Recurring allowances / deductions / benefits (already prorated) and this month's inputs. */
   items: PayslipItemInput[];
   /** Unsettled commission to include (0 = not included). */
   commission: bigint;
-  /** Salary advance still owed; recovered up to what the month leaves. */
+  /** Salary advance / payroll debt still owed; recovered up to what the month leaves. Regular runs only. */
   advanceOwed: bigint;
 }
 
@@ -310,6 +383,15 @@ export interface PriorPeriodTotals {
   unemploymentInsurance: bigint;
   taxableBase: bigint;
   incomeTax: bigint;
+  /** The contract rate the regular run used (0 = the employee was not in it). */
+  baseSalary: bigint;
+  /** The days the regular run counted as worked (`null` = full month). */
+  workedDays: number | null;
+  overtimeHours: number;
+  overtimeAmount: bigint;
+  unpaidLeaveDays: number;
+  /** Positive: the total unpaid-leave deduction already applied. */
+  unpaidLeaveAmount: bigint;
 }
 
 export const NO_PRIOR: PriorPeriodTotals = Object.freeze({
@@ -320,6 +402,12 @@ export const NO_PRIOR: PriorPeriodTotals = Object.freeze({
   unemploymentInsurance: 0n,
   taxableBase: 0n,
   incomeTax: 0n,
+  baseSalary: 0n,
+  workedDays: null,
+  overtimeHours: 0,
+  overtimeAmount: 0n,
+  unpaidLeaveDays: 0,
+  unpaidLeaveAmount: 0n,
 }) as PriorPeriodTotals;
 
 export interface PayslipLine {
@@ -346,21 +434,33 @@ export interface PayslipResult {
   taxableBase: bigint;
   incomeTax: bigint;
   totalDeductions: bigint;
+  /** What is paid to the employee; never negative. */
   netPay: bigint;
+  /**
+   * What the employee owes back after a downward correction (gross − deductions
+   * < 0 in a supplemental run). Posted Debit staff receivable (1260) and recovered
+   * by later regular runs like a salary advance. Never both net and debt.
+   */
+  employeeDebt: bigint;
   employerCost: bigint;
+  /** Snapshot of this run's own inputs, for later corrections. */
+  baseSalary: bigint;
+  workedDays: number | null;
+  overtimeHours: number;
+  unpaidLeaveDays: number;
 }
 
 export type PayrollCalcErrorCode =
   | "invalid_amount"
   | "invalid_overtime_hours"
   | "invalid_unpaid_leave_days"
+  | "invalid_worked_days"
   | "no_base_salary"
   | "unknown_component"
   | "component_not_enterable"
   | "component_missing"
   | "negative_gross"
   | "deductions_exceed_gross"
-  | "negative_net"
   | "allocation_must_total_100";
 
 export class PayrollCalcError extends Error {
@@ -390,9 +490,24 @@ const lineOf = (def: PayrollComponentDef, amount: bigint): PayslipLine => ({
   creditAccountCode: def.creditAccountCode,
 });
 
+const hundredths = (n: number): bigint => BigInt(Math.round(n * 100));
+const isHundredths = (n: number): boolean => Number.isFinite(n) && Math.abs(n * 100 - Math.round(n * 100)) < 1e-9;
+
+/** Overtime pay for `hours` at `base`'s hourly rate. */
+function overtimeFor(base: bigint, hours: number, rules: PayrollRuleSet): bigint {
+  return divRound(base * hundredths(hours) * bp(rules.overtimeFactorPercent), BigInt(rules.monthlyHours) * 100n * 10_000n);
+}
+
+/** The unpaid-leave deduction (positive) for `days` at `base`'s daily rate. */
+function leaveFor(base: bigint, days: number, rules: PayrollRuleSet): bigint {
+  return divRound(base * hundredths(days), BigInt(rules.monthDays) * 100n);
+}
+
 /**
- * One employee's payslip for one run. `options.supplemental` allows signed
- * (corrective) items; a regular run refuses negative input and negative pay.
+ * One employee's payslip for one run. `options.supplemental` makes it a
+ * correction of the month: signed items, signed overtime/leave deltas priced at
+ * the regular run's contract rate, cumulative insurance and tax, and an
+ * employee debt instead of a negative net.
  */
 export function computePayslip(
   input: PayslipInput,
@@ -403,35 +518,51 @@ export function computePayslip(
 ): PayslipResult {
   const supplemental = options.supplemental === true;
   if (input.baseSalary < 0n) throw new PayrollCalcError("invalid_amount", "baseSalary");
-  if (!Number.isFinite(input.overtimeHours) || input.overtimeHours < 0 || input.overtimeHours > 400) {
+  if (!isHundredths(input.overtimeHours) || Math.abs(input.overtimeHours) > 400 || (!supplemental && input.overtimeHours < 0)) {
     throw new PayrollCalcError("invalid_overtime_hours");
   }
-  if (!Number.isFinite(input.unpaidLeaveDays) || input.unpaidLeaveDays < 0 || input.unpaidLeaveDays > rules.monthDays) {
+  if (!isHundredths(input.unpaidLeaveDays) || Math.abs(input.unpaidLeaveDays) > rules.monthDays || (!supplemental && input.unpaidLeaveDays < 0)) {
     throw new PayrollCalcError("invalid_unpaid_leave_days");
   }
+  if (input.workedDays !== null && (!isHundredths(input.workedDays) || input.workedDays < 0 || input.workedDays > rules.monthDays)) {
+    throw new PayrollCalcError("invalid_worked_days");
+  }
 
-  const lines: PayslipLine[] = [];
   const earnings: PayslipLine[] = [];
   const fixedDeductions: PayslipLine[] = [];
+  let workedDays = input.workedDays;
+  let rate = input.baseSalary;
 
-  if (input.baseSalary > 0n) {
-    earnings.push(lineOf(bySystemKey(catalogue, "base_wage"), input.baseSalary));
-    if (input.unpaidLeaveDays > 0) {
-      // Hundredths of a day, so a half day is exact.
-      const hundredths = BigInt(Math.round(input.unpaidLeaveDays * 100));
-      const leave = divRound(input.baseSalary * hundredths, BigInt(rules.monthDays) * 100n);
-      earnings.push(lineOf(bySystemKey(catalogue, "unpaid_leave"), -leave));
+  if (!supplemental) {
+    const available = workedDays ?? rules.monthDays;
+    if (input.unpaidLeaveDays > available) throw new PayrollCalcError("invalid_unpaid_leave_days");
+    if (rate === 0n && (input.overtimeHours > 0 || input.unpaidLeaveDays > 0)) throw new PayrollCalcError("no_base_salary");
+    if (rate > 0n) {
+      const paid = prorate(rate, workedDays, rules.monthDays);
+      if (paid > 0n) earnings.push(lineOf(bySystemKey(catalogue, "base_wage"), paid));
+      if (input.unpaidLeaveDays > 0) earnings.push(lineOf(bySystemKey(catalogue, "unpaid_leave"), -leaveFor(rate, input.unpaidLeaveDays, rules)));
+      if (input.overtimeHours > 0) earnings.push(lineOf(bySystemKey(catalogue, "overtime"), overtimeFor(rate, input.overtimeHours, rules)));
     }
-    if (input.overtimeHours > 0) {
-      const hundredthsHours = BigInt(Math.round(input.overtimeHours * 100));
-      const overtime = divRound(
-        input.baseSalary * hundredthsHours * bp(rules.overtimeFactorPercent),
-        BigInt(rules.monthlyHours) * 100n * 10_000n,
-      );
-      earnings.push(lineOf(bySystemKey(catalogue, "overtime"), overtime));
+  } else {
+    // Corrections are priced at the rate the regular run used, on the cumulative
+    // month, so a correction and its reversal cancel to the Rial.
+    rate = prior.baseSalary;
+    workedDays = prior.workedDays;
+    if (input.overtimeHours !== 0 || input.unpaidLeaveDays !== 0) {
+      if (rate === 0n) throw new PayrollCalcError("no_base_salary");
+      const hours = prior.overtimeHours + input.overtimeHours;
+      if (hours < 0 || hours > 400) throw new PayrollCalcError("invalid_overtime_hours");
+      const days = prior.unpaidLeaveDays + input.unpaidLeaveDays;
+      if (days < 0 || days > (workedDays ?? rules.monthDays)) throw new PayrollCalcError("invalid_unpaid_leave_days");
+      if (input.unpaidLeaveDays !== 0) {
+        const delta = leaveFor(rate, days, rules) - prior.unpaidLeaveAmount;
+        if (delta !== 0n) earnings.push(lineOf(bySystemKey(catalogue, "unpaid_leave"), -delta));
+      }
+      if (input.overtimeHours !== 0) {
+        const delta = overtimeFor(rate, hours, rules) - prior.overtimeAmount;
+        if (delta !== 0n) earnings.push(lineOf(bySystemKey(catalogue, "overtime"), delta));
+      }
     }
-  } else if (input.overtimeHours > 0 || input.unpaidLeaveDays > 0) {
-    throw new PayrollCalcError("no_base_salary");
   }
 
   if (input.commission !== 0n) earnings.push(lineOf(bySystemKey(catalogue, "commission"), input.commission));
@@ -442,7 +573,7 @@ export function computePayslip(
     if (item.amount === 0n) continue;
     if (item.amount < 0n && !supplemental) throw new PayrollCalcError("invalid_amount", item.code);
     if (def.kind === "employer_contribution" || (def.systemKey && !["bonus", "loan_installment"].includes(def.systemKey))) {
-      // Statutory components and advance recovery are computed, never entered.
+      // Statutory components, overtime/leave and advance recovery are computed, never entered.
       throw new PayrollCalcError("component_not_enterable", item.code);
     }
     if (def.kind === "earning") earnings.push(lineOf(def, item.amount));
@@ -476,7 +607,7 @@ export function computePayslip(
     incomeTax = progressiveTax(cumulativeTaxable, rules) - prior.incomeTax;
   }
 
-  lines.push(...earnings);
+  const lines: PayslipLine[] = [...earnings];
   if (employeeInsurance !== 0n) lines.push(lineOf(bySystemKey(catalogue, "insurance_employee"), employeeInsurance));
   if (incomeTax !== 0n) lines.push(lineOf(bySystemKey(catalogue, "income_tax"), incomeTax));
 
@@ -487,18 +618,17 @@ export function computePayslip(
   }
   if (remaining < 0n && !supplemental) throw new PayrollCalcError("deductions_exceed_gross");
 
-  let advance = 0n;
-  if (input.advanceOwed > 0n && remaining > 0n) {
-    advance = input.advanceOwed < remaining ? input.advanceOwed : remaining;
+  if (!supplemental && input.advanceOwed > 0n && remaining > 0n) {
+    const advance = input.advanceOwed < remaining ? input.advanceOwed : remaining;
     lines.push(lineOf(bySystemKey(catalogue, "advance_recovery"), advance));
     remaining -= advance;
   }
-  if (remaining < 0n) throw new PayrollCalcError("negative_net");
 
   if (employerInsurance !== 0n) lines.push(lineOf(bySystemKey(catalogue, "insurance_employer"), employerInsurance));
   if (unemploymentInsurance !== 0n) lines.push(lineOf(bySystemKey(catalogue, "insurance_unemployment"), unemploymentInsurance));
 
-  const totalDeductions = gross - remaining;
+  const netPay = remaining > 0n ? remaining : 0n;
+  const employeeDebt = remaining < 0n ? -remaining : 0n;
   return {
     lines,
     gross,
@@ -509,9 +639,14 @@ export function computePayslip(
     unemploymentInsurance,
     taxableBase,
     incomeTax,
-    totalDeductions,
-    netPay: remaining,
+    totalDeductions: gross - remaining,
+    netPay,
+    employeeDebt,
     employerCost: gross + employerInsurance + unemploymentInsurance,
+    baseSalary: rate,
+    workedDays,
+    overtimeHours: input.overtimeHours,
+    unpaidLeaveDays: input.unpaidLeaveDays,
   };
 }
 
@@ -525,23 +660,31 @@ export interface PostingSide {
   credit: bigint;
 }
 
+/** The part of a payslip the accrual posts. */
+export type PostablePayslip = Pick<PayslipResult, "lines" | "netPay" | "employeeDebt">;
+
+export interface PostingAccounts {
+  salariesPayable: string;
+  /** Where an employee's debt from a downward correction is carried (staff advances / receivable). */
+  employeeDebt: string;
+}
+
+const DEFAULT_POSTING_ACCOUNTS: PostingAccounts = Object.freeze({ salariesPayable: "2300", employeeDebt: "1260" });
+
 /**
- * The run's accrual entry, from its payslips' lines, netted per account and
- * always balanced:
+ * The accrual entry for a set of payslips, netted per account and always balanced:
  *
  *   earning               Dr its debit account   (commission: Dr 2300 — a reclassification)
  *   employer contribution Dr its debit account / Cr its credit account
  *   deduction             Cr its credit account
- *   net pay               Cr 2300
+ *   net pay               Cr salaries payable
+ *   employee debt         Dr staff receivable (a downward correction the employee owes back)
  *
  * Earnings' own credit side is the employee's gross claim, which is exactly
- * net + deductions — so it is not posted separately. A negative net per
+ * net − debt + deductions — so it is not posted separately. A negative net per
  * account (a correction) flips sides; zero-sum accounts drop out.
  */
-export function accrualPostingSides(
-  payslips: readonly Pick<PayslipResult, "lines" | "netPay">[],
-  salariesPayableCode = "2300",
-): PostingSide[] {
+export function accrualPostingSides(payslips: readonly PostablePayslip[], accounts: PostingAccounts = DEFAULT_POSTING_ACCOUNTS): PostingSide[] {
   const net = new Map<string, bigint>();
   const add = (code: string, signed: bigint) => net.set(code, (net.get(code) ?? 0n) + signed);
   for (const slip of payslips) {
@@ -552,7 +695,8 @@ export function accrualPostingSides(
         add(line.creditAccountCode, -line.amount);
       } else add(line.creditAccountCode, -line.amount);
     }
-    add(salariesPayableCode, -slip.netPay);
+    add(accounts.salariesPayable, -slip.netPay);
+    add(accounts.employeeDebt, slip.employeeDebt);
   }
   const sides: PostingSide[] = [];
   for (const [accountCode, amount] of [...net.entries()].sort(([a], [b]) => a.localeCompare(b))) {
@@ -577,8 +721,30 @@ export function allocateExact(amount: bigint, percents: readonly number[]): bigi
   return parts;
 }
 
+/**
+ * Splits one payslip across its cost-allocation shares, exactly. Every line and
+ * the debt are allocated with `allocateExact`; each share's net is *derived*
+ * (its earnings − its deductions + its debt), so every share balances on its
+ * own and the shares sum back to the payslip to the Rial. An empty allocation
+ * is one unallocated share.
+ */
+export function allocatePayslip(slip: PostablePayslip, percents: readonly number[]): PostablePayslip[] {
+  if (percents.length === 0) return [slip];
+  const lineParts = slip.lines.map((l) => allocateExact(l.amount, percents));
+  const debtParts = allocateExact(slip.employeeDebt, percents);
+  return percents.map((_, i) => {
+    const lines = slip.lines.map((l, j) => ({ ...l, amount: lineParts[j][i] }));
+    let remaining = 0n;
+    for (const l of lines) {
+      if (l.kind === "earning") remaining += l.amount;
+      else if (l.kind === "deduction") remaining -= l.amount;
+    }
+    return { lines, employeeDebt: debtParts[i], netPay: remaining + debtParts[i] };
+  });
+}
+
 /** The run lifecycle — the only transitions the service performs. */
-export const RUN_TRANSITIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+const RUN_TRANSITIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   draft: ["calculated", "cancelled"],
   calculated: ["calculated", "reviewed", "cancelled"],
   reviewed: ["calculated", "approved", "cancelled"],

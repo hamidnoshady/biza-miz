@@ -171,3 +171,14 @@ export function payrollPeriodKeyForLabel(label: string): string | null {
   const period = parsePayrollPeriod(label);
   return period ? payrollPeriodKey(period) : null;
 }
+
+/**
+ * A run's accrual date when the caller states none: the last day of the month
+ * (so a run for a closed month lands in it), or today while the month is still
+ * running. `today` is the business's own (`businessToday`). Shared by the #835
+ * journal-level accrual and the #865 statutory engine, so the two can never
+ * date the same month differently.
+ */
+export function defaultPayrollAccrualDate(period: { endsOn: string }, today: string): string {
+  return period.endsOn < today ? period.endsOn : today;
+}

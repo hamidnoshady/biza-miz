@@ -44,6 +44,31 @@ export async function inTransaction<T>(work: (client: PoolClient) => Promise<T>)
 }
 
 /**
+ * A read-only transaction on one snapshot (REPEATABLE READ): every statement in
+ * `work` sees the database as of its first query, so a multi-query report —
+ * reconciling payslips against the ledger — cannot mix states with a post or a
+ * payment committed between its reads.
+ */
+export async function inSnapshot<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const result = await work(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // The original error is the one that explains what went wrong.
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Serialises every payroll mutation that reads state it is about to change — an
  * accrual (duplicate checks, the advance balances it recovers, the commission
  * it claims), a void, and an advance void — one at a time per business. A

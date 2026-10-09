@@ -19,12 +19,19 @@
  *   accrual and the payment go through `postExactJournalEntry()` (fiscal locks
  *   apply) under a row lock, keyed `(source_type, source_id)` by the run, so a
  *   retry finds the run already posted rather than posting twice.
+ * - **Dimensioned.** The accrual is one balanced journal entry per cost-allocation
+ *   bucket (branch × project — `journal_entries.location_id` / `project_id`, the
+ *   ledger's canonical dimensions), split exactly by `allocatePayslip`. Each entry
+ *   is keyed `(payroll_engine_accrual, run, posting_kind = bucket)`, so a retry
+ *   can never post a bucket twice.
+ * - **Signed corrections** leave an employee *debt* (Debit 1260) instead of a
+ *   negative net; it is recovered by later regular runs through
+ *   `outstandingAdvances`, the one owner of "what a member still owes".
  * - **Commission** included in a run is *reserved* at calculation
  *   (`commission_accruals.payroll_engine_run_id`) and released on cancel /
  *   recalculation; its posting reclassifies 2300 rather than expensing it again.
  */
 import type { PoolClient } from "pg";
-import { query } from "./db";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { normalizeOptionalIsoDate } from "./iso-date";
 import { isUuid } from "./uuid";
@@ -33,20 +40,31 @@ import { accountIdsByCode, postExactJournalEntry } from "./ledger-service";
 import { MAX_RIAL } from "./inventory-exact";
 import { parseRialInput } from "./payroll-amounts";
 import { resolvePayoutAccount } from "./payroll-accounts";
-import { asRial, clientRunner, inTransaction, lockPayroll, poolRunner } from "./payroll-db";
-import { PayrollError } from "./payroll-errors";
-import { resolvePayrollPeriodKey } from "./payroll-period";
-import { componentsFor, ensureCatalogue, itemsInForce, ruleSetFor, type CostAllocationShare } from "./payroll-engine-setup";
+import { asRial, clientRunner, inSnapshot, inTransaction, lockPayroll, poolRunner, type Runner } from "./payroll-db";
+import { normalizeIdempotencyKey, PayrollError } from "./payroll-errors";
+import { defaultPayrollAccrualDate, resolvePayrollPeriodKey } from "./payroll-period";
+import { outstandingAdvances } from "./payroll-advances-service";
+import {
+  assertAllocationReferences,
+  componentsFor,
+  ensureCatalogue,
+  itemsInForce,
+  ruleSetFor,
+  type CostAllocationShare,
+} from "./payroll-engine-setup";
 import {
   accrualPostingSides,
   allocateExact,
+  allocatePayslip,
   canTransition,
   computePayslip,
+  coveredDays,
   NO_PRIOR,
   PayrollCalcError,
+  prorate,
   type PayrollComponentDef,
-  type PayrollRuleSet,
   type PayslipLine,
+  type PostablePayslip,
   type PriorPeriodTotals,
 } from "./payroll-engine-calc";
 
@@ -69,6 +87,7 @@ export interface EngineRunTotals {
   incomeTax: string;
   totalDeductions: string;
   netPay: string;
+  employeeDebt: string;
   employerCost: string;
   commission: string;
 }
@@ -87,7 +106,7 @@ export interface EngineRun {
   ruleSetId: string | null;
   ruleSetVersion: number | null;
   totals: EngineRunTotals | null;
-  accrualEntryId: string | null;
+  accrualEntryIds: string[];
   paymentEntryId: string | null;
   paidDate: string | null;
   createdAt: string;
@@ -118,19 +137,21 @@ export interface Payslip {
   incomeTax: string;
   totalDeductions: string;
   netPay: string;
+  /** Owed back by the employee after a downward correction; recovered by later runs. */
+  employeeDebt: string;
   employerCost: string;
+  /** Monthly contract rate used, days employed (rule basis), and this run's own overtime/leave (deltas in a correction). */
+  baseSalary: string;
+  workedDays: number;
+  overtimeHours: number;
+  unpaidLeaveDays: number;
   costAllocation: Array<CostAllocationShare & { amount: string }>;
   paymentStatus: "unpaid" | "paid";
   paidAt: string | null;
 }
 
-const IDEMPOTENCY_KEY = /^[\x21-\x7e]{8,128}$/;
 const STANDING = ["approved", "posted", "paid", "closed"] as const;
 
-function calcError(err: unknown): never {
-  if (err instanceof PayrollCalcError) throw new PayrollError(err.message, 400, err.field ? { field: err.field } : undefined);
-  throw err;
-}
 
 // ---------------------------------------------------------------------------
 // Reads
@@ -149,7 +170,7 @@ interface RunRow extends Record<string, unknown> {
   rule_set_id: string | null;
   rule_set_version: number | null;
   totals: EngineRunTotals | null;
-  accrual_entry_id: string | null;
+  accrual_entry_ids: string[];
   payment_entry_id: string | null;
   paid_date: string | null;
   created_at: string;
@@ -160,7 +181,7 @@ interface RunRow extends Record<string, unknown> {
 
 const RUN_SELECT = `SELECT r.id, r.period_key, r.run_type, r.sequence, r.status, r.accrual_date::text AS accrual_date,
        r.include_commission, r.note, r.inputs, r.rule_set_id, rs.version AS rule_set_version, r.totals,
-       r.accrual_entry_id, r.payment_entry_id, r.paid_date::text AS paid_date, r.created_at::text AS created_at,
+       r.accrual_entry_ids::text[] AS accrual_entry_ids, r.payment_entry_id, r.paid_date::text AS paid_date, r.created_at::text AS created_at,
        r.approved_at::text AS approved_at, r.posted_at::text AS posted_at, r.closed_at::text AS closed_at
   FROM payroll_engine_runs r LEFT JOIN payroll_rule_sets rs ON rs.id = r.rule_set_id`;
 
@@ -183,7 +204,7 @@ const toRun = (r: RunRow): EngineRun => ({
   ruleSetId: r.rule_set_id,
   ruleSetVersion: r.rule_set_version,
   totals: r.totals,
-  accrualEntryId: r.accrual_entry_id,
+  accrualEntryIds: r.accrual_entry_ids ?? [],
   paymentEntryId: r.payment_entry_id,
   paidDate: r.paid_date,
   createdAt: r.created_at,
@@ -235,7 +256,12 @@ interface PayslipRow extends Record<string, unknown> {
   advance_recovery: string;
   total_deductions: string;
   net_pay: string;
+  employee_debt: string;
   employer_cost: string;
+  base_salary: string;
+  worked_days: string;
+  overtime_hours: string;
+  unpaid_leave_days: string;
   lines: Array<{ code: string; name: string; kind: string; amount: string }>;
   cost_allocation: Array<CostAllocationShare & { amount: string }>;
   payment_status: "unpaid" | "paid";
@@ -248,7 +274,9 @@ const PAYSLIP_SELECT = `SELECT p.id, p.run_id, r.period_key, r.run_type, r.seque
        p.employee_insurance::text AS employee_insurance, p.employer_insurance::text AS employer_insurance,
        p.unemployment_insurance::text AS unemployment_insurance, p.income_tax::text AS income_tax,
        p.commission::text AS commission, p.advance_recovery::text AS advance_recovery,
-       p.total_deductions::text AS total_deductions, p.net_pay::text AS net_pay, p.employer_cost::text AS employer_cost,
+       p.total_deductions::text AS total_deductions, p.net_pay::text AS net_pay, p.employee_debt::text AS employee_debt,
+       p.employer_cost::text AS employer_cost, p.base_salary::text AS base_salary, p.worked_days::text AS worked_days,
+       p.overtime_hours::text AS overtime_hours, p.unpaid_leave_days::text AS unpaid_leave_days,
        p.lines, p.cost_allocation, p.payment_status, p.paid_at::text AS paid_at
   FROM payroll_payslips p JOIN payroll_engine_runs r ON r.id = p.run_id`;
 
@@ -276,7 +304,12 @@ const toPayslip = (r: PayslipRow): Payslip => {
     incomeTax: r.income_tax,
     totalDeductions: r.total_deductions,
     netPay: r.net_pay,
+    employeeDebt: r.employee_debt,
     employerCost: r.employer_cost,
+    baseSalary: r.base_salary,
+    workedDays: Number(r.worked_days),
+    overtimeHours: Number(r.overtime_hours),
+    unpaidLeaveDays: Number(r.unpaid_leave_days),
     costAllocation: r.cost_allocation ?? [],
     paymentStatus: r.payment_status,
     paidAt: r.paid_at,
@@ -303,7 +336,7 @@ export async function getPayslip(businessId: string, payslipId: string): Promise
 // ---------------------------------------------------------------------------
 
 /** Validates the per-employee inputs map. Amounts stay integer text; nothing passes through `Number` except hours/days. */
-export function parseRunInputs(raw: unknown, supplemental: boolean): Record<string, EngineRunEmployeeInput> {
+function parseRunInputs(raw: unknown, supplemental: boolean): Record<string, EngineRunEmployeeInput> {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== "object" || Array.isArray(raw)) throw new PayrollError("invalid_inputs", 400, "inputs");
   const out: Record<string, EngineRunEmployeeInput> = {};
@@ -318,7 +351,7 @@ export function parseRunInputs(raw: unknown, supplemental: boolean): Record<stri
     for (const k of ["overtimeHours", "unpaidLeaveDays"] as const) {
       if (v[k] === undefined || v[k] === null) continue;
       const n = v[k];
-      if (typeof n !== "number" || !Number.isFinite(n) || n < 0 || n > 400 || Math.abs(n * 100 - Math.round(n * 100)) > 1e-9) {
+      if (typeof n !== "number" || !Number.isFinite(n) || n < (supplemental ? -400 : 0) || n > 400 || Math.abs(n * 100 - Math.round(n * 100)) > 1e-9) {
         throw new PayrollError(k === "overtimeHours" ? "invalid_overtime_hours" : "invalid_unpaid_leave_days", 400, userId);
       }
       entry[k] = n;
@@ -342,14 +375,6 @@ export function parseRunInputs(raw: unknown, supplemental: boolean): Record<stri
   return out;
 }
 
-function normalizeIdempotencyKey(value: unknown): string | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== "string") throw new PayrollError("idempotency_key_invalid");
-  const key = value.trim();
-  if (key === "") return null;
-  if (!IDEMPOTENCY_KEY.test(key)) throw new PayrollError("idempotency_key_invalid");
-  return key;
-}
 
 // ---------------------------------------------------------------------------
 // Create / edit / cancel
@@ -381,7 +406,7 @@ export async function createEngineRun(params: {
 
   const today = await businessToday(params.businessId);
   if (period.startsOn > today) throw new PayrollError("period_in_future");
-  const accrualDate = accrual.value ?? (period.endsOn < today ? period.endsOn : today);
+  const accrualDate = accrual.value ?? defaultPayrollAccrualDate(period, today);
   if (accrualDate < period.startsOn) throw new PayrollError("invalid_accrual_date");
 
   const outcome = await inTransaction(async (client) => {
@@ -493,58 +518,65 @@ interface EmployeeRow extends Record<string, unknown> {
   full_name: string;
   code: string | null;
   base_salary: string;
+  hire_date: string | null;
+  termination_date: string | null;
   insured: boolean;
   tax_exempt: boolean;
   cost_allocation: CostAllocationShare[];
 }
 
-/** What earlier standing runs of the same month recorded, per employee. */
-async function priorTotals(client: PoolClient, businessId: string, periodKey: string, excludeRunId: string): Promise<Map<string, PriorPeriodTotals>> {
-  const { rows } = await client.query<Record<string, string>>(
+/**
+ * What earlier standing runs of the same month recorded, per employee — read
+ * from the payslip snapshots, never recomputed from today's profile: the rate
+ * and days of the regular run, and the overtime / unpaid leave (hours, days and
+ * amounts) across every standing run, so a correction is priced like the
+ * original and can never reverse more than was paid or deducted.
+ */
+async function priorTotals(run: Runner, businessId: string, periodKey: string, excludeRunId: string): Promise<Map<string, PriorPeriodTotals>> {
+  const { rows } = await run<Record<string, string | null>>(
     `SELECT p.user_id, sum(p.insurable_raw)::text AS insurable_raw, sum(p.insurance_base)::text AS insurance_base,
             sum(p.employee_insurance)::text AS employee_insurance, sum(p.employer_insurance)::text AS employer_insurance,
             sum(p.unemployment_insurance)::text AS unemployment_insurance, sum(p.taxable_base)::text AS taxable_base,
-            sum(p.income_tax)::text AS income_tax
-       FROM payroll_payslips p JOIN payroll_engine_runs r ON r.id = p.run_id
+            sum(p.income_tax)::text AS income_tax,
+            COALESCE(max(p.base_salary) FILTER (WHERE r.run_type = 'regular'), 0)::text AS base_salary,
+            max(p.worked_days) FILTER (WHERE r.run_type = 'regular')::text AS worked_days,
+            sum(p.overtime_hours)::text AS overtime_hours, sum(p.unpaid_leave_days)::text AS unpaid_leave_days,
+            COALESCE(sum((SELECT sum((l->>'amount')::bigint) FROM jsonb_array_elements(p.lines) l WHERE l->>'systemKey' = 'overtime')), 0)::text AS overtime_amount,
+            COALESCE(-sum((SELECT sum((l->>'amount')::bigint) FROM jsonb_array_elements(p.lines) l WHERE l->>'systemKey' = 'unpaid_leave')), 0)::text AS unpaid_leave_amount
+       FROM payroll_payslips p JOIN payroll_engine_runs r ON r.id = p.run_id AND r.business_id = p.business_id
       WHERE r.business_id = $1 AND r.period_key = $2 AND r.id <> $3 AND r.status = ANY($4::text[]) AND p.user_id IS NOT NULL
       GROUP BY p.user_id`,
     [businessId, periodKey, excludeRunId, STANDING],
   );
   return new Map(
     rows.map((r) => [
-      r.user_id,
+      r.user_id as string,
       {
-        insurableRaw: BigInt(r.insurable_raw),
-        insuranceBase: BigInt(r.insurance_base),
-        employeeInsurance: BigInt(r.employee_insurance),
-        employerInsurance: BigInt(r.employer_insurance),
-        unemploymentInsurance: BigInt(r.unemployment_insurance),
-        taxableBase: BigInt(r.taxable_base),
-        incomeTax: BigInt(r.income_tax),
+        insurableRaw: BigInt(r.insurable_raw!),
+        insuranceBase: BigInt(r.insurance_base!),
+        employeeInsurance: BigInt(r.employee_insurance!),
+        employerInsurance: BigInt(r.employer_insurance!),
+        unemploymentInsurance: BigInt(r.unemployment_insurance!),
+        taxableBase: BigInt(r.taxable_base!),
+        incomeTax: BigInt(r.income_tax!),
+        baseSalary: BigInt(r.base_salary!),
+        workedDays: r.worked_days === null ? null : Number(r.worked_days),
+        overtimeHours: Number(r.overtime_hours),
+        overtimeAmount: BigInt(r.overtime_amount!),
+        unpaidLeaveDays: Number(r.unpaid_leave_days),
+        unpaidLeaveAmount: BigInt(r.unpaid_leave_amount!),
       },
     ]),
   );
-}
-
-/** Advances still owed, net of every recovery except this run's own (which is being recomputed). */
-async function advancesOwed(client: PoolClient, businessId: string, excludeRunId: string): Promise<Map<string, bigint>> {
-  const { rows } = await client.query<{ user_id: string; owed: string }>(
-    `SELECT a.user_id, GREATEST(a.total - COALESCE(l.rec, 0) - COALESCE(e.rec, 0), 0)::text AS owed
-       FROM (SELECT user_id, sum(amount) AS total FROM payroll_advances WHERE business_id = $1 AND status = 'active' GROUP BY user_id) a
-       LEFT JOIN (SELECT rl.user_id, sum(rl.advance_recovery) AS rec FROM payroll_run_lines rl JOIN payroll_runs r ON r.id = rl.run_id
-                   WHERE r.business_id = $1 AND r.status <> 'voided' GROUP BY rl.user_id) l ON l.user_id = a.user_id
-       LEFT JOIN (SELECT ps.user_id, sum(ps.advance_recovery) AS rec FROM payroll_payslips ps JOIN payroll_engine_runs er ON er.id = ps.run_id
-                   WHERE er.business_id = $1 AND er.status <> 'cancelled' AND er.id <> $2 GROUP BY ps.user_id) e ON e.user_id = a.user_id`,
-    [businessId, excludeRunId],
-  );
-  return new Map(rows.map((r) => [r.user_id, BigInt(r.owed)]));
 }
 
 /**
  * Computes every payslip of a draft / calculated / reviewed run against the
  * rule version in force on its accrual date, replacing any earlier draft
  * calculation. A regular run covers every active profile employed during the
- * month; a supplemental run covers only the employees named in its inputs.
+ * month — prorated over the days employed (hire / termination) and each
+ * recurring item over its own effective window; a supplemental run covers only
+ * the employees named in its inputs, with signed corrections.
  */
 export async function calculateEngineRun(params: { businessId: string; runId: string; actorId: string | null }): Promise<EngineRun> {
   await inTransaction(async (client) => {
@@ -559,6 +591,7 @@ export async function calculateEngineRun(params: { businessId: string; runId: st
     await ensureCatalogue(client, params.businessId);
     const ruleSet = await ruleSetFor(runner, params.businessId, run.accrual_date);
     if (!ruleSet) throw new PayrollError("no_rule_set", 409);
+    const monthDays = ruleSet.rules.monthDays;
     const catalogue: PayrollComponentDef[] = (await componentsFor(runner, params.businessId, run.accrual_date)).map((c) => ({
       code: c.code, name: c.name, kind: c.kind, systemKey: c.systemKey, taxable: c.taxable, insurable: c.insurable,
       debitAccountCode: c.debitAccountCode, creditAccountCode: c.creditAccountCode,
@@ -566,6 +599,7 @@ export async function calculateEngineRun(params: { businessId: string; runId: st
 
     const { rows: employees } = await client.query<EmployeeRow>(
       `SELECT u.id AS user_id, u.full_name, COALESCE(p.payroll_code, e.employee_code) AS code, p.base_salary::text AS base_salary,
+              p.hire_date::text AS hire_date, p.termination_date::text AS termination_date,
               COALESCE((p.insurance_profile->>'insured')::boolean, true) AS insured,
               COALESCE((p.tax_profile->>'exempt')::boolean, false) AS tax_exempt, p.cost_allocation
          FROM payroll_employee_profiles p
@@ -584,9 +618,20 @@ export async function calculateEngineRun(params: { businessId: string; runId: st
     const covered = supplemental ? employees.filter((e) => inputs[e.user_id]) : employees;
     if (covered.length === 0) throw new PayrollError("no_employees", 409);
 
+    // Allocations are re-checked here: a branch closed or project archived since
+    // the profile was saved must not receive a journal line.
+    for (const emp of covered) {
+      try {
+        await assertAllocationReferences(runner, params.businessId, emp.cost_allocation ?? []);
+      } catch (err) {
+        if (err instanceof PayrollError) throw new PayrollError(err.message, err.status, { ...err.details, userId: emp.user_id });
+        throw err;
+      }
+    }
+
     const items = supplemental ? new Map() : await itemsInForce(runner, params.businessId, period.startsOn, period.endsOn);
-    const prior = supplemental ? await priorTotals(client, params.businessId, run.period_key, run.id) : new Map<string, PriorPeriodTotals>();
-    const owed = await advancesOwed(client, params.businessId, run.id);
+    const prior = supplemental ? await priorTotals(runner, params.businessId, run.period_key, run.id) : new Map<string, PriorPeriodTotals>();
+    const owed = supplemental ? new Map<string, bigint>() : await outstandingAdvances(runner, params.businessId, { excludeEngineRunId: run.id });
 
     // Commission: release this run's earlier reservation, then reserve what is unsettled now.
     await releaseCommission(client, run.id);
@@ -607,29 +652,41 @@ export async function calculateEngineRun(params: { businessId: string; runId: st
     }
 
     await client.query(`DELETE FROM payroll_payslips WHERE run_id = $1`, [run.id]);
-    const totals = { gross: 0n, ei: 0n, eri: 0n, ui: 0n, tax: 0n, ded: 0n, net: 0n, cost: 0n, commission: 0n };
+    const totals = { gross: 0n, ei: 0n, eri: 0n, ui: 0n, tax: 0n, ded: 0n, net: 0n, debt: 0n, cost: 0n, commission: 0n };
     for (const emp of covered) {
       const input = inputs[emp.user_id] ?? {};
-      const recurring = (items.get(emp.user_id) ?? []) as Array<{ componentCode: string; amount: string }>;
+      const before = prior.get(emp.user_id) ?? NO_PRIOR;
+      const employment = { from: emp.hire_date, to: emp.termination_date };
+      const workedDays = supplemental ? before.workedDays : coveredDays(period.startsOn, period.endsOn, [employment], monthDays);
+      const recurring = (items.get(emp.user_id) ?? []) as Array<{ componentCode: string; amount: string; effectiveFrom: string; effectiveTo: string | null }>;
+      const baseSalary = supplemental ? before.baseSalary : BigInt(emp.base_salary);
       let slip;
       try {
         slip = computePayslip(
           {
-            baseSalary: supplemental ? 0n : BigInt(emp.base_salary),
+            baseSalary,
+            workedDays: supplemental ? null : workedDays,
             insured: emp.insured,
             taxExempt: emp.tax_exempt,
-            overtimeHours: supplemental ? 0 : input.overtimeHours ?? 0,
-            unpaidLeaveDays: supplemental ? 0 : input.unpaidLeaveDays ?? 0,
+            overtimeHours: input.overtimeHours ?? 0,
+            unpaidLeaveDays: input.unpaidLeaveDays ?? 0,
             items: [
-              ...recurring.map((i) => ({ code: i.componentCode, amount: BigInt(i.amount) })),
+              ...recurring.map((i) => ({
+                code: i.componentCode,
+                amount: prorate(
+                  BigInt(i.amount),
+                  coveredDays(period.startsOn, period.endsOn, [employment, { from: i.effectiveFrom, to: i.effectiveTo }], monthDays),
+                  monthDays,
+                ),
+              })),
               ...(input.items ?? []).map((i) => ({ code: i.code, amount: BigInt(i.amount) })),
             ],
             commission: commission.get(emp.user_id) ?? 0n,
-            advanceOwed: supplemental ? 0n : owed.get(emp.user_id) ?? 0n,
+            advanceOwed: owed.get(emp.user_id) ?? 0n,
           },
           ruleSet.rules,
           catalogue,
-          prior.get(emp.user_id) ?? NO_PRIOR,
+          before,
           { supplemental },
         );
       } catch (err) {
@@ -643,14 +700,16 @@ export async function calculateEngineRun(params: { businessId: string; runId: st
       await client.query(
         `INSERT INTO payroll_payslips (business_id, run_id, user_id, employee_name_snapshot, employee_code_snapshot, gross, insurable_raw,
             insurance_base, employee_insurance, employer_insurance, unemployment_insurance, taxable_base, income_tax, commission,
-            advance_recovery, total_deductions, net_pay, employer_cost, lines, cost_allocation)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+            advance_recovery, total_deductions, net_pay, employee_debt, employer_cost, base_salary, worked_days, overtime_hours,
+            unpaid_leave_days, lines, cost_allocation)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
         [
           params.businessId, run.id, emp.user_id, emp.full_name, emp.code, slip.gross.toString(), slip.insurableRaw.toString(),
           slip.insuranceBase.toString(), slip.employeeInsurance.toString(), slip.employerInsurance.toString(),
           slip.unemploymentInsurance.toString(), slip.taxableBase.toString(), slip.incomeTax.toString(),
           sum("commission").toString(), sum("advance_recovery").toString(), slip.totalDeductions.toString(),
-          slip.netPay.toString(), slip.employerCost.toString(),
+          slip.netPay.toString(), slip.employeeDebt.toString(), slip.employerCost.toString(), baseSalary.toString(),
+          workedDays ?? monthDays, input.overtimeHours ?? 0, input.unpaidLeaveDays ?? 0,
           JSON.stringify(slip.lines.map((l) => ({ ...l, amount: l.amount.toString() }))), JSON.stringify(allocation),
         ],
       );
@@ -661,10 +720,11 @@ export async function calculateEngineRun(params: { businessId: string; runId: st
       totals.tax += slip.incomeTax;
       totals.ded += slip.totalDeductions;
       totals.net += slip.netPay;
+      totals.debt += slip.employeeDebt;
       totals.cost += slip.employerCost;
       totals.commission += sum("commission");
     }
-    if (totals.cost > MAX_RIAL) throw new PayrollError("amount_out_of_range");
+    if (totals.cost > MAX_RIAL || totals.gross > MAX_RIAL || -totals.gross > MAX_RIAL) throw new PayrollError("amount_out_of_range");
     const runTotals: EngineRunTotals = {
       employees: covered.length,
       gross: totals.gross.toString(),
@@ -674,6 +734,7 @@ export async function calculateEngineRun(params: { businessId: string; runId: st
       incomeTax: totals.tax.toString(),
       totalDeductions: totals.ded.toString(),
       netPay: totals.net.toString(),
+      employeeDebt: totals.debt.toString(),
       employerCost: totals.cost.toString(),
       commission: totals.commission.toString(),
     };
@@ -683,7 +744,7 @@ export async function calculateEngineRun(params: { businessId: string; runId: st
       [run.id, ruleSet.id, JSON.stringify({ version: ruleSet.version, title: ruleSet.title, effectiveFrom: ruleSet.effectiveFrom, rules: ruleSet.rules }),
        JSON.stringify(catalogue), JSON.stringify(runTotals)],
     );
-  }).catch(calcError);
+  });
   return mustGetRun(params.businessId, params.runId);
 }
 
@@ -711,36 +772,93 @@ export async function approveEngineRun(params: { businessId: string; runId: stri
 }
 
 /** The accrual, from the frozen payslips. Idempotent: a posted run answers `already_posted`, and the source key is unique. */
+/** One accrual journal entry's slice: a branch × project bucket and the payslip shares charged to it. */
+interface AccrualBucket {
+  postingKind: string;
+  locationId: string | null;
+  projectId: string | null;
+  parts: PostablePayslip[];
+}
+
+/**
+ * Splits payslips into cost-allocation buckets. Each payslip is divided exactly
+ * by its own allocation snapshot (`allocatePayslip` — every line and the debt
+ * split to the Rial, net derived per share so each share balances); an
+ * unallocated payslip goes whole to the undimensioned bucket. Buckets are
+ * ordered by key so posting order — and so entry ids order — is deterministic.
+ */
+function accrualBuckets(
+  payslips: ReadonlyArray<PostablePayslip & { costAllocation: readonly CostAllocationShare[] }>,
+): AccrualBucket[] {
+  const buckets = new Map<string, AccrualBucket>();
+  const bucketFor = (locationId: string | null, projectId: string | null) => {
+    const postingKind = `alloc:${locationId ?? "-"}:${projectId ?? "-"}`;
+    let bucket = buckets.get(postingKind);
+    if (!bucket) buckets.set(postingKind, (bucket = { postingKind, locationId, projectId, parts: [] }));
+    return bucket;
+  };
+  for (const slip of payslips) {
+    const shares = slip.costAllocation;
+    const parts = allocatePayslip(slip, shares.map((s) => s.percent));
+    if (shares.length === 0) bucketFor(null, null).parts.push(parts[0]);
+    else shares.forEach((share, i) => bucketFor(share.locationId ?? null, share.projectId ?? null).parts.push(parts[i]));
+  }
+  return [...buckets.values()].sort((x, y) => x.postingKind.localeCompare(y.postingKind));
+}
+
+/**
+ * Posts the accrual: one balanced entry per cost-allocation bucket, carrying the
+ * bucket's branch (`location_id`) and project (`project_id`). Each entry is
+ * keyed `(payroll_engine_accrual, run id, posting_kind)` under the ledger's
+ * unique posting index, so no bucket can be posted twice even by a racing retry.
+ */
 export async function postEngineRun(params: { businessId: string; runId: string; actorId: string | null }): Promise<EngineRun> {
   await inTransaction(async (client) => {
     const run = await lockRun(client, params.businessId, params.runId);
     if (run.status === "posted" || run.status === "paid" || run.status === "closed") throw new PayrollError("already_posted", 409);
     assertTransition(run.status, "posted");
-    const { rows } = await client.query<{ lines: Array<PayslipLine & { amount: string }>; net_pay: string }>(
-      `SELECT lines, net_pay::text AS net_pay FROM payroll_payslips WHERE run_id = $1`,
-      [run.id],
+    const { rows } = await client.query<{
+      lines: Array<PayslipLine & { amount: string }>;
+      net_pay: string;
+      employee_debt: string;
+      cost_allocation: CostAllocationShare[];
+    }>(
+      `SELECT lines, net_pay::text AS net_pay, employee_debt::text AS employee_debt, cost_allocation
+         FROM payroll_payslips WHERE run_id = $1 AND business_id = $2 ORDER BY id`,
+      [run.id, params.businessId],
     );
-    const sides = accrualPostingSides(
-      rows.map((r) => ({ netPay: BigInt(r.net_pay), lines: r.lines.map((l) => ({ ...l, amount: BigInt(l.amount) })) })),
-      WELL_KNOWN_CODES.salariesPayable,
+    const buckets = accrualBuckets(
+      rows.map((r) => ({
+        netPay: BigInt(r.net_pay),
+        employeeDebt: BigInt(r.employee_debt),
+        lines: r.lines.map((l) => ({ ...l, amount: BigInt(l.amount) })),
+        costAllocation: r.cost_allocation ?? [],
+      })),
     );
-    let entryId: string | null = null;
-    if (sides.length > 0) {
+    const postingAccounts = { salariesPayable: WELL_KNOWN_CODES.salariesPayable, employeeDebt: WELL_KNOWN_CODES.staffAdvances };
+    const memo = `حقوق و دستمزد — ${periodLabel(run.period_key)}${run.run_type === "supplemental" ? ` (اصلاحی ${run.sequence})` : ""}`;
+    const entryIds: string[] = [];
+    for (const bucket of buckets) {
+      const sides = accrualPostingSides(bucket.parts, postingAccounts);
+      if (sides.length === 0) continue;
       const accounts = await accountIdsByCode(client, params.businessId, sides.map((s) => s.accountCode));
-      entryId = await postExactJournalEntry(client, {
-        businessId: params.businessId,
-        locationId: null,
-        entryDate: run.accrual_date,
-        memo: `حقوق و دستمزد — ${periodLabel(run.period_key)}${run.run_type === "supplemental" ? ` (اصلاحی ${run.sequence})` : ""}`,
-        sourceType: "payroll_engine_accrual",
-        sourceId: run.id,
-        createdBy: params.actorId,
-        lines: sides.map((s) => ({ accountId: accounts.get(s.accountCode)!, debit: asRial(s.debit), credit: asRial(s.credit) })),
-      });
+      const entryId = await postExactJournalEntry(client, {
+          businessId: params.businessId,
+          locationId: bucket.locationId,
+          projectId: bucket.projectId,
+          postingKind: bucket.postingKind,
+          entryDate: run.accrual_date,
+          memo,
+          sourceType: "payroll_engine_accrual",
+          sourceId: run.id,
+          createdBy: params.actorId,
+          lines: sides.map((s) => ({ accountId: accounts.get(s.accountCode)!, debit: asRial(s.debit), credit: asRial(s.credit) })),
+        });
+      if (entryId) entryIds.push(entryId);
     }
     await client.query(
-      `UPDATE payroll_engine_runs SET status = 'posted', accrual_entry_id = $2, posted_by = $3, posted_at = now() WHERE id = $1`,
-      [run.id, entryId, params.actorId],
+      `UPDATE payroll_engine_runs SET status = 'posted', accrual_entry_ids = $2::uuid[], posted_by = $3, posted_at = now() WHERE id = $1`,
+      [run.id, entryIds, params.actorId],
     );
   });
   return mustGetRun(params.businessId, params.runId);
@@ -812,28 +930,44 @@ export async function closeEngineRun(params: { businessId: string; runId: string
 // ---------------------------------------------------------------------------
 
 /** Payroll register — every payslip of a period's standing runs (or of one run). */
-export async function payrollRegister(businessId: string, filter: { periodKey?: string; runId?: string }) {
+/**
+ * The payroll register for a period and/or one run. Filters are strict: a
+ * malformed `runId` is `invalid_run_id` and a malformed period `invalid_period`
+ * — never silently dropped, which would widen the report to every run.
+ */
+export async function payrollRegister(businessId: string, filter: { periodKey?: string | null; runId?: string | null }) {
+  const runId = filter.runId === undefined || filter.runId === null || filter.runId === "" ? null : filter.runId;
+  const rawPeriod = filter.periodKey === undefined || filter.periodKey === null || filter.periodKey === "" ? null : filter.periodKey;
+  if (runId !== null && !isUuid(runId)) throw new PayrollError("invalid_run_id", 400, "runId");
+  let periodKey: string | null = null;
+  if (rawPeriod !== null) {
+    const resolved = resolvePayrollPeriodKey(rawPeriod);
+    if (!resolved.ok) throw new PayrollError("invalid_period", 400, "period");
+    periodKey = resolved.period.key;
+  }
+  if (runId === null && periodKey === null) throw new PayrollError("invalid_period", 400, "period");
   const { rows } = await poolRunner<PayslipRow>(
     `${PAYSLIP_SELECT} WHERE p.business_id = $1 AND ($2::text IS NULL OR r.period_key = $2) AND ($3::uuid IS NULL OR r.id = $3)
         AND (r.id = $3 OR r.status = ANY($4::text[]))
       ORDER BY p.employee_name_snapshot, r.sequence, p.id`,
-    [businessId, filter.periodKey ?? null, filter.runId && isUuid(filter.runId) ? filter.runId : null, STANDING],
+    [businessId, periodKey, runId, STANDING],
   );
   const payslips = rows.map(toPayslip);
   return { payslips, totals: sumPayslips(payslips) };
 }
 
 function sumPayslips(slips: Payslip[]) {
-  const keys = ["gross", "taxableBase", "insuranceBase", "employeeInsurance", "employerInsurance", "unemploymentInsurance", "incomeTax", "totalDeductions", "netPay", "employerCost"] as const;
+  const keys = ["gross", "taxableBase", "insuranceBase", "employeeInsurance", "employerInsurance", "unemploymentInsurance", "incomeTax", "totalDeductions", "netPay", "employeeDebt", "employerCost"] as const;
   const out = Object.fromEntries(keys.map((k) => [k, 0n])) as Record<(typeof keys)[number], bigint>;
   for (const s of slips) for (const k of keys) out[k] += BigInt(s[k]);
   return Object.fromEntries(keys.map((k) => [k, out[k].toString()])) as Record<(typeof keys)[number], string>;
 }
 
 /** Employee payroll card — one member's standing payslips over a Jalali year. */
-export async function employeePayrollCard(businessId: string, userId: string, jalaliYear: number) {
-  if (!isUuid(userId)) throw new PayrollError("staff_not_found", 404);
-  if (!Number.isInteger(jalaliYear) || jalaliYear < 1300 || jalaliYear > 1599) throw new PayrollError("invalid_period");
+export async function employeePayrollCard(businessId: string, userId: string, year: string | number) {
+  if (!isUuid(userId)) throw new PayrollError("invalid_user_id", 400, "userId");
+  const jalaliYear = typeof year === "number" ? year : /^\d{4}$/.test(year) ? Number(year) : NaN;
+  if (!Number.isInteger(jalaliYear) || jalaliYear < 1300 || jalaliYear > 1599) throw new PayrollError("invalid_period", 400, "year");
   const { rows } = await poolRunner<PayslipRow>(
     `${PAYSLIP_SELECT} WHERE p.business_id = $1 AND p.user_id = $2 AND r.period_key LIKE $3 AND r.status = ANY($4::text[])
       ORDER BY r.period_key, r.sequence`,
@@ -850,7 +984,8 @@ async function periodSummaries(businessId: string, periodKeys: string[] | null) 
             sum(p.insurance_base)::text AS insurance_base, sum(p.employee_insurance)::text AS employee_insurance,
             sum(p.employer_insurance)::text AS employer_insurance, sum(p.unemployment_insurance)::text AS unemployment_insurance,
             sum(p.taxable_base)::text AS taxable_base, sum(p.income_tax)::text AS income_tax,
-            sum(p.total_deductions)::text AS total_deductions, sum(p.net_pay)::text AS net_pay, sum(p.employer_cost)::text AS employer_cost
+            sum(p.total_deductions)::text AS total_deductions, sum(p.net_pay)::text AS net_pay,
+            sum(p.employee_debt)::text AS employee_debt, sum(p.employer_cost)::text AS employer_cost
        FROM payroll_payslips p JOIN payroll_engine_runs r ON r.id = p.run_id
       WHERE p.business_id = $1 AND r.status = ANY($2::text[]) AND ($3::text[] IS NULL OR r.period_key = ANY($3::text[]))
       GROUP BY r.period_key ORDER BY r.period_key DESC LIMIT 120`,
@@ -870,6 +1005,7 @@ async function periodSummaries(businessId: string, periodKeys: string[] | null) 
     incomeTax: r.income_tax,
     totalDeductions: r.total_deductions,
     netPay: r.net_pay,
+    employeeDebt: r.employee_debt,
     employerCost: r.employer_cost,
   }));
 }
@@ -924,7 +1060,12 @@ function groupByEmployee<K extends keyof Payslip>(payslips: Payslip[], keys: K[]
 
 /** Period comparison — standing-run totals for two months side by side, with the difference. */
 export async function periodComparison(businessId: string, periodA: string, periodB: string) {
-  for (const p of [periodA, periodB]) if (!resolvePayrollPeriodKey(p).ok) throw new PayrollError("invalid_period");
+  const keys = [periodA, periodB].map((raw, i) => {
+    const resolved = resolvePayrollPeriodKey(raw);
+    if (!resolved.ok) throw new PayrollError("invalid_period", 400, i === 0 ? "a" : "b");
+    return resolved.period.key;
+  });
+  [periodA, periodB] = keys;
   const rows = await periodSummaries(businessId, [periodA, periodB]);
   const a = rows.find((r) => r.periodKey === periodA) ?? null;
   const b = rows.find((r) => r.periodKey === periodB) ?? null;
@@ -936,54 +1077,60 @@ export async function periodComparison(businessId: string, periodA: string, peri
 export const payrollPeriodSummaries = (businessId: string) => periodSummaries(businessId, null);
 
 /**
- * Payroll liability reconciliation — what the engine's subledger says each
- * payroll liability account should hold from engine postings, against what the
- * GL actually holds from those same postings (`source_type` of the engine).
- * Every difference must be zero; a non-zero one names the account that drifted.
- * The account's *total* GL balance (which also carries #835 runs, commission
- * accruals and remittances) is reported beside it for context.
+ * Reconciles what the engine's payslips say each payroll account should hold
+ * against what the engine's journal entries actually put there (and shows the
+ * account's full balance beside it). All reads run on one REPEATABLE READ
+ * snapshot, so a run posted or paid mid-report cannot make it disagree with
+ * itself. `onSnapshotTaken` is a test seam: it runs after the first read, while
+ * the snapshot is held.
  */
-export async function payrollLiabilityReconciliation(businessId: string) {
-  const { rows: runs } = await query<{ id: string; status: string; net: string }>(
-    `SELECT r.id, r.status, COALESCE(sum(p.net_pay), 0)::text AS net FROM payroll_engine_runs r
-       LEFT JOIN payroll_payslips p ON p.run_id = r.id
-      WHERE r.business_id = $1 AND r.status IN ('posted', 'paid', 'closed') GROUP BY r.id, r.status`,
-    [businessId],
-  );
-  const { rows: slipRows } = await query<{ lines: Array<PayslipLine & { amount: string }>; net_pay: string; paid: boolean }>(
-    `SELECT p.lines, p.net_pay::text AS net_pay, (r.status IN ('paid', 'closed')) AS paid
-       FROM payroll_payslips p JOIN payroll_engine_runs r ON r.id = p.run_id
-      WHERE r.business_id = $1 AND r.status IN ('posted', 'paid', 'closed')`,
-    [businessId],
-  );
-  const expected = new Map<string, bigint>();
-  const sides = accrualPostingSides(
-    slipRows.map((r) => ({ netPay: BigInt(r.net_pay), lines: r.lines.map((l) => ({ ...l, amount: BigInt(l.amount) })) })),
-    WELL_KNOWN_CODES.salariesPayable,
-  );
-  for (const s of sides) expected.set(s.accountCode, s.credit - s.debit);
-  const paidNet = slipRows.filter((r) => r.paid).reduce((s, r) => s + BigInt(r.net_pay), 0n);
-  expected.set(WELL_KNOWN_CODES.salariesPayable, (expected.get(WELL_KNOWN_CODES.salariesPayable) ?? 0n) - paidNet);
+export async function payrollLiabilityReconciliation(businessId: string, options: { onSnapshotTaken?: () => Promise<void> } = {}) {
+  return inSnapshot(async (client) => {
+    const { rows: runs } = await client.query<{ id: string }>(
+      `SELECT r.id FROM payroll_engine_runs r WHERE r.business_id = $1 AND r.status IN ('posted', 'paid', 'closed')`,
+      [businessId],
+    );
+    await options.onSnapshotTaken?.();
+    const { rows: slipRows } = await client.query<{ lines: Array<PayslipLine & { amount: string }>; net_pay: string; employee_debt: string; paid: boolean }>(
+      `SELECT p.lines, p.net_pay::text AS net_pay, p.employee_debt::text AS employee_debt, (r.status IN ('paid', 'closed')) AS paid
+         FROM payroll_payslips p JOIN payroll_engine_runs r ON r.id = p.run_id AND r.business_id = p.business_id
+        WHERE r.business_id = $1 AND r.status IN ('posted', 'paid', 'closed')`,
+      [businessId],
+    );
+    const salariesPayable = WELL_KNOWN_CODES.salariesPayable;
+    const expected = new Map<string, bigint>();
+    const sides = accrualPostingSides(
+      slipRows.map((r) => ({
+        netPay: BigInt(r.net_pay),
+        employeeDebt: BigInt(r.employee_debt),
+        lines: r.lines.map((l) => ({ ...l, amount: BigInt(l.amount) })),
+      })),
+      { salariesPayable, employeeDebt: WELL_KNOWN_CODES.staffAdvances },
+    );
+    for (const s of sides) expected.set(s.accountCode, s.credit - s.debit);
+    const paidNet = slipRows.filter((r) => r.paid).reduce((s, r) => s + BigInt(r.net_pay), 0n);
+    expected.set(salariesPayable, (expected.get(salariesPayable) ?? 0n) - paidNet);
 
-  const liabilityCodes = [...new Set([WELL_KNOWN_CODES.salariesPayable, WELL_KNOWN_CODES.insurancePayable, WELL_KNOWN_CODES.payrollTaxPayable, "2490", "1260", ...expected.keys()])].filter(
-    (code) => !code.startsWith("5"),
-  );
-  const { rows: gl } = await query<{ code: string; engine: string; total: string }>(
-    `SELECT a.code,
-            COALESCE(sum(jl.credit - jl.debit) FILTER (WHERE je.source_type IN ('payroll_engine_accrual', 'payroll_engine_payment')), 0)::text AS engine,
-            COALESCE(sum(jl.credit - jl.debit), 0)::text AS total
-       FROM accounts a
-       LEFT JOIN journal_lines jl ON jl.account_id = a.id
-       LEFT JOIN journal_entries je ON je.id = jl.entry_id
-      WHERE a.business_id = $1 AND a.code = ANY($2::text[])
-      GROUP BY a.code`,
-    [businessId, liabilityCodes],
-  );
-  const accounts = liabilityCodes.map((code) => {
-    const row = gl.find((g) => g.code === code);
-    const exp = expected.get(code) ?? 0n;
-    const actual = BigInt(row?.engine ?? "0");
-    return { code, expected: exp.toString(), glFromEngine: actual.toString(), difference: (actual - exp).toString(), glTotal: row?.total ?? "0" };
+    const liabilityCodes = [
+      ...new Set([salariesPayable, WELL_KNOWN_CODES.insurancePayable, WELL_KNOWN_CODES.payrollTaxPayable, "2490", WELL_KNOWN_CODES.staffAdvances, ...expected.keys()]),
+    ].filter((code) => !code.startsWith("5"));
+    const { rows: gl } = await client.query<{ code: string; engine: string; total: string }>(
+      `SELECT a.code,
+              COALESCE(sum(jl.credit - jl.debit) FILTER (WHERE je.source_type IN ('payroll_engine_accrual', 'payroll_engine_payment')), 0)::text AS engine,
+              COALESCE(sum(jl.credit - jl.debit), 0)::text AS total
+         FROM accounts a
+         LEFT JOIN journal_lines jl ON jl.account_id = a.id
+         LEFT JOIN journal_entries je ON je.id = jl.entry_id
+        WHERE a.business_id = $1 AND a.code = ANY($2::text[])
+        GROUP BY a.code`,
+      [businessId, liabilityCodes],
+    );
+    const accounts = liabilityCodes.map((code) => {
+      const row = gl.find((g) => g.code === code);
+      const exp = expected.get(code) ?? 0n;
+      const actual = BigInt(row?.engine ?? "0");
+      return { code, expected: exp.toString(), glFromEngine: actual.toString(), difference: (actual - exp).toString(), glTotal: row?.total ?? "0" };
+    });
+    return { runs: runs.length, payslips: slipRows.length, accounts, reconciled: accounts.every((a) => a.difference === "0") };
   });
-  return { runs: runs.length, accounts, reconciled: accounts.every((a) => a.difference === "0") };
 }
