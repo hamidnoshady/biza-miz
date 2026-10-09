@@ -127,10 +127,12 @@ list ever disagrees with it:
 | `postgresql-tools-artifact.yml` | `pull_request` touching its own workflow and PostgreSQL-tools scripts |
 | `mobile-emulator-acceptance.yml` | `pull_request` touching the gateway/certificate files it accepts |
 | `publish.yml` | `push` to `main` and to `v*` tags |
+| `android-build.yml` | `pull_request` and `push` to `main` and `arena/**`, path-filtered to `android/**`, `config/android-*`, `config/native-bridge-contract.json`, `public/.well-known/assetlinks.json`, `src/lib/native/**`, `src/components/native/**` |
 
 `release-readiness`, `release-acceptance-aggregate`, `physical-printer-acceptance`,
-`mobile-real-device-acceptance`, `windows-11-release`, `windows-signed-candidate` and
-`windows-production-release` are manual only.
+`mobile-real-device-acceptance`, `windows-11-release`, `windows-signed-candidate`,
+`windows-production-release`, `android-signed-candidate` and `android-production-release` are
+manual only.
 
 `test.yml` runs the checklist above — type check, unit tests, integration tests, and
 production build — as four independent jobs in parallel (each GitHub-hosted job gets its
@@ -162,6 +164,10 @@ a Linux container image. Four things follow, and each one is load-bearing:
   `FROM node:24-alpine`; hosted `ubuntu-latest` runners provide Docker with the Linux
   backend and buildx out of the box, which `docker/build-push-action` needs. Don't move it
   back to a Windows runner — hosted Windows runners cannot run a Linux-containers daemon.
+- **The `android-*.yml` workflows run on `ubuntu-latest` in bash, not PowerShell.** Each job
+  installs platform 36 and build-tools 36.0.0 with the runner's `sdkmanager`. The release
+  workflows run only on `main`, in the `android-staging` and `android-production` environments,
+  and PR builds never reference a secret. See `docs/android-runtime.md`.
 
 What follows from that:
 

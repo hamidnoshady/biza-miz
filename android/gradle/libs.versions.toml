@@ -1,0 +1,15 @@
+[versions]
+agp = "8.13.2"
+kotlin = "2.2.21"
+androidx-browser = "1.10.0"
+junit = "4.13.2"
+org-json = "20240303"
+
+[libraries]
+androidx-browser = { group = "androidx.browser", name = "browser", version.ref = "androidx-browser" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+org-json = { group = "org.json", name = "json", version.ref = "org-json" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
