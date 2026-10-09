@@ -20,9 +20,16 @@ import type { AccountingSectionKey } from "./accounting-routes";
  * The app's own door.
  *
  * `ledger.view` rather than a role list: it is the key every Accounting route
- * enforces, and its audience is exactly the owner/manager/accountant the old
- * `ACCOUNTING_ROLES` named — plus `viewer`, the read-only auditor role, for
- * whom being able to read the books is the entire point.
+ * enforces, and the presets that hold it are owner (by rule), admin, manager
+ * and accountant — the same audience the old `ACCOUNTING_ROLES` list named.
+ *
+ * The gate is *only* the capability, and that is deliberate. The old comment
+ * here named a `viewer` role — which is not a member role at all, it is
+ * `workspace-shared.ts`'s project-role ladder — so the sentence described an
+ * audience the `Role` union cannot produce. Anything that reads like a role
+ * list beside this constant is stale by construction: a custom tenant role
+ * granted `ledger.view` opens the app, and one without it does not, whatever
+ * it is called.
  */
 export const ACCOUNTING_DOOR_PERMISSION: Permission = PERMISSIONS.ledgerView;
 
@@ -57,13 +64,14 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "cheques", label: "چک‌ها" },
   { key: "reconciliation", label: "تطبیق بانکی" },
   { key: "chart-of-accounts", label: "سرفصل حساب‌ها" },
-  // Wages are compensation data — owner + accountant only, the same line the
-  // in-page rail draws. A manager may open every other section. This used to
-  // borrow `ledger.post` because that preset happened to be the right
-  // audience; it now asks for the key that actually means "may see payroll",
-  // which is also what `/api/ledger/payroll/*` enforces. Borrowing a key for
-  // its preset rather than its meaning is how a menu and an API drift apart
-  // the next time either preset changes.
+  // Wages are compensation data, so this entry follows `payroll.view` — the
+  // same capability the in-page rail and `/api/ledger/payroll/*` enforce. By
+  // default that is the owner, the admin and the accountant; a manager may open
+  // every other section but not this one, unless the business grants them the
+  // key. This used to borrow `ledger.post` because that preset happened to be
+  // the right audience; it now asks for the key that actually means "may see
+  // payroll". Borrowing a key for its preset rather than its meaning is how a
+  // menu and an API drift apart the next time either preset changes.
   { key: "payroll", label: "حقوق و دستمزد", permission: PERMISSIONS.payrollView },
   { key: "vat", label: "گزارش مالیات" },
   { key: "fixed-assets", label: "دارایی‌های ثابت" },

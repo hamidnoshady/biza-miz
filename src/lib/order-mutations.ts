@@ -247,6 +247,15 @@ export async function createOrder(
   if (shapeError) return { ok: false, error: shapeError, status: 400 };
 
   const businessId = await businessIdForLocation(input.locationId);
+  if (input.type === "dine_in" && businessId) {
+    // Dine-in is a table-service capability just like the table/session APIs.
+    // Enforce it at the shared mutation boundary as well: a caller can post
+    // directly to /api/orders or replay an offline event without ever fetching
+    // /api/tables, so route-prefix gating alone cannot protect order creation.
+    if (!(await isFeatureEnabled(businessId, "reservations"))) {
+      return { ok: false, error: "feature_disabled", status: 403 };
+    }
+  }
   if (businessId) {
     // Override-aware monthly-order ceiling (entitlement-service): a business
     // exception (§25) raises or lowers the plan's own limit.

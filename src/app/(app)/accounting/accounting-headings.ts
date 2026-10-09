@@ -17,7 +17,10 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
     description:
       "میز کار حسابداری — نمای مالی کسب‌وکار، اشخاص و دسترسی به همهٔ بخش‌های کاری از منوی کناری.",
   },
-  "trial-balance": { description: "ماندهٔ بدهکار و بستانکار همهٔ حساب‌ها؛ جمع دو ستون باید برابر باشد." },
+  "trial-balance": {
+    title: "تراز آزمایشی",
+    description: "ماندهٔ افتتاحیه، گردش و ماندهٔ پایان دورهٔ انتخاب‌شده؛ توازن حساب‌ها و سلامت اسناد را جداگانه بررسی کنید.",
+  },
   entries: { description: "همهٔ اسناد ثبت‌شده به ترتیب تاریخ، با منبع هر سند و امکان برگشت." },
   manual: { description: "ثبت سند دستی دوطرفه، با پیش‌نویس و تأیید پیش از ورود به دفتر." },
   expenses: { description: "ثبت هزینه‌های جاری کسب‌وکار و حساب پرداخت آن‌ها." },
@@ -40,7 +43,10 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
   },
   payroll: { description: "دوره‌های حقوق، تعهد حقوق کارکنان و پرداخت آن." },
   vat: { description: "مالیات بر ارزش افزودهٔ فروش و خرید در هر دوره." },
-  "fixed-assets": { description: "دفتر اموال، استهلاک ماهانه و تطبیق آن با دفتر کل." },
+  "fixed-assets": {
+    description:
+      "دفتر اموال، استهلاک ماهانه، واگذاری و اسقاط دارایی‌ها، و تطبیق آن با دفتر کل.",
+  },
   "financial-reports": {
     title: "گزارش‌های مالی",
     description: "گزارش‌های حسابداری و راه رسیدن به گزارش‌های کسب‌وکار.",

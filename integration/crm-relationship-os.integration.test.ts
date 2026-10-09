@@ -189,10 +189,20 @@ describe("smart queues", () => {
     }
     // Due today is a different queue: an activity whose due date is today must
     // not appear in «عقب‌افتاده», or the two headings say the same thing.
-    const today = new Date();
+    // "Today" here is the BUSINESS zone's calendar day — the one the queues
+    // bucket by — so the instant is built in that zone too. A runner-local
+    // 23:00 is a different calendar day in the branch zone for part of every
+    // UTC day (Tehran is already tomorrow from 20:30Z), which made this suite
+    // fail whenever it ran inside that window.
+    const businessDay = await day.businessToday(biz.id);
+    const businessZone = await day.businessTimeZone(biz.id);
+    const dueTodayInstant = await db.query<{ ts: string }>(
+      "SELECT ($1::date + time '23:00') AT TIME ZONE $2 AS ts",
+      [businessDay, businessZone],
+    );
     await makeActivity(biz.id, {
       subject: "تماس امروز",
-      dueAt: new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 0, 0).toISOString(),
+      dueAt: dueTodayInstant.rows[0].ts,
     });
     // A completed one is not outstanding work at all.
     await makeActivity(biz.id, {
@@ -1035,7 +1045,11 @@ describe("queues as views", () => {
     // The shop's own today — the date the queue's SQL and the list's bounds are
     // both judged by. Building the timestamps from it (rather than from the
     // browser's noon) is what makes «امروز» one date in both places.
-    const today = await day.businessToday(own.businessId);
+    // The whole day, not just its date: the queue cards bucket `due_at` by the
+    // branch's own day and the list's bounds are that same day, so the test
+    // passes the same context the route does.
+    const shopDay = await day.businessDayContext(own.businessId);
+    const today = shopDay.businessDate;
     const dayOffset = (offset: number) =>
       new Date(Date.parse(`${today}T00:00:00Z`) + offset * 86_400_000).toISOString().slice(0, 10);
 
@@ -1151,7 +1165,12 @@ describe("queues as views", () => {
       expect(parsed.error).toBeNull();
       const rows = await crm.listActivities(
         own.businessId,
-        activityViewListOptions(parsed.filters, { viewerId, today }),
+        activityViewListOptions(parsed.filters, {
+          viewerId,
+          today,
+          timeZone: shopDay.timeZone,
+          startMinutes: shopDay.startMinutes,
+        }),
       );
       return rows;
     };

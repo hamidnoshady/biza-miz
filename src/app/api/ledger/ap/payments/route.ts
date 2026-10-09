@@ -6,6 +6,7 @@ import { ApError, MissingLedgerAccountError, payBill } from "@/lib/ap-service";
 import { listPayments } from "@/lib/installments-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
+import { PayablesInputError } from "@/lib/payables-input";
 
 /** The «پرداخت‌ها» ledger slice — every payment voucher, newest first. */
 export const GET = withTenantScope(async (request: NextRequest) => {
@@ -22,6 +23,9 @@ interface PaymentBody {
   amount?: number;
   paymentDate?: string;
   memo?: string;
+  clientRequestId?: string;
+  cashAccountId?: string | null;
+  bankReference?: string | null;
 }
 
 const METHODS = ["cash", "bank"] as const;
@@ -40,6 +44,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const supplierId = body.supplierId?.trim();
   if (!supplierId) return NextResponse.json({ error: "supplier_required" }, { status: 400 });
+  const clientRequestId = body.clientRequestId?.trim();
+  if (!clientRequestId || clientRequestId.length > 200) {
+    return NextResponse.json({ error: "idempotency_key_required" }, { status: 400 });
+  }
   if (!METHODS.includes(body.method as (typeof METHODS)[number])) {
     return NextResponse.json({ error: "invalid_method" }, { status: 400 });
   }
@@ -65,11 +73,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       amount,
       paymentDate,
       memo: body.memo,
+      clientRequestId,
       createdBy: session.sub,
+      cashAccountId: typeof body.cashAccountId === "string" ? body.cashAccountId : null,
+      bankReference: typeof body.bankReference === "string" ? body.bankReference : null,
     });
-    return NextResponse.json({ payment }, { status: 201 });
+    return NextResponse.json({ payment }, { status: payment.duplicate ? 200 : 201 });
   } catch (err) {
     if (err instanceof ApError) return NextResponse.json({ error: err.message }, { status: err.status });
+    if (err instanceof PayablesInputError) return NextResponse.json({ error: err.code }, { status: 400 });
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }

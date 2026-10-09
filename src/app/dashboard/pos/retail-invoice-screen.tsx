@@ -18,7 +18,7 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
  * computes a ledger amount; the totals shown are the ones the server will
  * confirm back.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, useDeferredValue } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useDeferredValue } from "react";
 import { PlusIcon, PrinterIcon, RefreshCwIcon, SplitIcon, Trash2Icon, XIcon } from "lucide-react";
 import { formatQuantity, toPersianDigits } from "@/lib/digits";
 import { useMoney } from "@/components/money/money-context";
@@ -30,7 +30,6 @@ import { computeWatchSalePrice } from "@/lib/watch-pricing";
 import {
   defaultGoldMakingChargePercent,
   defaultGoldProfitPercent,
-  defaultRetailVatPercent,
   hasCapability,
   labelFor,
 } from "@/lib/industry-profile";
@@ -44,8 +43,7 @@ import { MAX_RETAIL_TENDERS } from "@/lib/retail-tenders";
 import { radioMoveForKey, radioTargetIndex } from "@/lib/radio-keys";
 import { safeRandomId } from "@/lib/client-id";
 import { HoldToConfirmButton } from "../hold-to-confirm-button";
-import { kickDrawer, printReceipt } from "@/lib/printing/client";
-import type { ReceiptData } from "@/lib/receipt-template";
+import { kickDrawer, printSaleReceipt } from "@/lib/printing/client";
 import { api, ErrorBox, errorMessage, Field, inputClass } from "../ui";
 import { usePaymentMethods } from "../payment-ways";
 import { PageHeader, PageShell, TabBar, TabPanel, cardClass } from "../page-chrome";
@@ -169,13 +167,23 @@ function safeMoneyInput(parse: (value: string) => number, value: string): number
   }
 }
 
+/**
+ * The VAT percent a fresh line proposes: this business's own «تنظیمات مالیات»
+ * rate (`vat-policy.ts`), read once by the page — never a per-trade literal
+ * (audit F05). Every line form can still edit it before the line is added.
+ */
+const DefaultVatContext = createContext(0);
+
 export function RetailInvoiceScreen({
   industry,
   canVoidInvoice = false,
+  defaultVatPercent = 0,
 }: {
   industry: Industry;
   /** `PERMISSIONS.ordersAmendClosed` — threaded down to «مدیریت فاکتورها»'s void button. */
   canVoidInvoice?: boolean;
+  /** The business's default VAT percent from `tax.config` (0 when unset). */
+  defaultVatPercent?: number;
 }) {
   const money = useMoney();
   const [weightItems, setWeightItems] = useState<WeightItem[]>([]);
@@ -229,7 +237,9 @@ export function RetailInvoiceScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<{ orderNumber: number; total: number } | null>(null);
-  const [lastReceipt, setLastReceipt] = useState<ReceiptData | null>(null);
+  // The sale just issued — enough to name it for a reprint, and all a reprint
+  // needs: the document is loaded from the sale's own rows by the server.
+  const [lastOrderId, setLastOrderId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -419,52 +429,30 @@ export function RetailInvoiceScreen({
       setNote("");
       void load();
 
+      setLastOrderId(invoice.orderId);
+
       // The invoice is already committed at this point — everything below is
-      // best-effort presentation. A failure fetching the print document (or
-      // printing it) must never look like the sale itself failed; it only
-      // ever surfaces as a non-blocking toast, same as "printer not configured".
+      // best-effort presentation, and a print that fails must never look like
+      // the sale failed: it only ever surfaces as a non-blocking toast, same
+      // as "printer not configured".
       const openedDrawer = splitPayment
         ? tenderRows.some((row) => tenderRowWay(row)?.opensDrawer === true)
         : (selectedWay?.opensDrawer ?? false);
-      void (async () => {
-        // The same builder the reprint endpoint calls (`getRetailInvoicePrintData`)
-        // — so the first print can never drift from a later reprint of the same
-        // sale (see src/lib/retail-invoice/print-data.ts's header comment).
-        const printResult = await api<{ receipt?: ReceiptData; error?: string }>(
-          `/api/sales/invoices/${invoice.orderId}?view=print`,
-        );
-        if (!printResult.ok || !printResult.data.receipt) {
-          toast.warning("دریافت اطلاعات چاپ ناموفق بود؛ فاکتور با موفقیت ثبت شده است.", {
-            action: {
-              label: "چاپ دوباره",
-              onClick: () => {
-                void api<{ receipt?: ReceiptData }>(`/api/sales/invoices/${invoice.orderId}?view=print`).then(
-                  (retry) => {
-                    if (retry.ok && retry.data.receipt) {
-                      setLastReceipt(retry.data.receipt);
-                      void printReceipt(null, retry.data.receipt, { requestId: `invoice:${invoice.orderId}:retry` });
-                    }
-                  },
-                );
-              },
-            },
-          });
-          return;
-        }
-        const receipt = printResult.data.receipt;
-        setLastReceipt(receipt);
-        const receiptRequestId = `invoice:${invoice.orderId}`;
-        const result = await printReceipt(null, receipt, { requestId: receiptRequestId });
+      const receiptRequestId = `invoice:${invoice.orderId}`;
+      // One call, no fetch: the server loads this sale through
+      // `getRetailInvoicePrintData` — the same builder the reprint endpoint and
+      // every later reprint use — and renders it. The sale's own rows are the
+      // only source, so the first print cannot drift from a later reprint of
+      // the same sale (see src/lib/retail-invoice/print-data.ts's header).
+      const issue = (requestId: string) => printSaleReceipt(null, invoice.orderId, { requestId });
+      void issue(receiptRequestId).then((result) => {
         if (!result.ok && result.error !== "printer_not_configured") {
           toast.warning("چاپ رسید انجام نشد؛ فاکتور با موفقیت ثبت شده است.", {
-            action: {
-              label: "چاپ دوباره",
-              onClick: () => void printReceipt(null, receipt, { requestId: `${receiptRequestId}:retry` }),
-            },
+            action: { label: "چاپ دوباره", onClick: () => void issue(`${receiptRequestId}:retry`) },
           });
         }
         if (openedDrawer && result.supportsDrawer && result.printerId) void kickDrawer(result.printerId);
-      })();
+      });
     } else {
       // The server sends the sell services' own Persian refusals (no stock, no
       // cost basis, no gold rate recorded for today) as `message`; showing that
@@ -474,9 +462,10 @@ export function RetailInvoiceScreen({
   }
 
   function reprintLast() {
-    if (!lastReceipt) return;
-    const requestId = `reprint:${crypto.randomUUID()}`;
-    void printReceipt(null, lastReceipt, { requestId }).then((result) => {
+    if (!lastOrderId) return;
+    const requestId = `reprint:${lastOrderId}:${crypto.randomUUID()}`;
+    const issue = (id: string) => printSaleReceipt(null, lastOrderId, { requestId: id });
+    void issue(requestId).then((result) => {
       if (result.ok) {
         toast.success("رسید برای چاپ ارسال شد");
       } else if (result.error === "printer_not_configured") {
@@ -491,7 +480,7 @@ export function RetailInvoiceScreen({
         });
       } else {
         toast.warning("چاپ رسید انجام نشد.", {
-          action: { label: "چاپ دوباره", onClick: () => void printReceipt(null, lastReceipt, { requestId: `${requestId}:retry` }) },
+          action: { label: "چاپ دوباره", onClick: () => void issue(`${requestId}:retry`) },
         });
       }
     });
@@ -522,7 +511,7 @@ export function RetailInvoiceScreen({
           <span>
             فاکتور شمارهٔ {toPersianDigits(done.orderNumber)} به مبلغ {money.format(done.total)} ثبت شد.
           </span>
-          {lastReceipt ? (
+          {lastOrderId ? (
             <Button variant="outline" size="sm" onClick={reprintLast}>
               <PrinterIcon aria-hidden="true" className="size-4" />
               چاپ رسید
@@ -544,6 +533,7 @@ export function RetailInvoiceScreen({
       />
       <TabPanel idPrefix="retail-invoice" active={view}>
       {view === "issue" ? (
+      <DefaultVatContext.Provider value={defaultVatPercent}>
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem] xl:grid-cols-[minmax(0,1fr)_26rem]">
         <div className="min-w-0 space-y-4">
           {hasCapability(industry, "barcode") ? (
@@ -834,6 +824,7 @@ export function RetailInvoiceScreen({
           </div>
         </aside>
       </div>
+      </DefaultVatContext.Provider>
       ) : (
         <InvoiceManagementView canVoidInvoice={canVoidInvoice} />
       )}
@@ -883,6 +874,7 @@ function BarcodeScanField({
   units: SerialUnit[];
   onAdd: (line: CartLine) => void;
 }) {
+  const defaultVatPercent = useContext(DefaultVatContext);
   const [code, setCode] = useState("");
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState("");
@@ -926,7 +918,7 @@ function BarcodeScanField({
         return;
       }
       try {
-        const vatPercent = defaultRetailVatPercent(industry);
+        const vatPercent = defaultVatPercent;
         const breakdown =
           industry === "cosmetics"
             ? computeCosmeticSalePrice({ unitPrice: variant.unitPrice, quantity: "1", discount: 0, vatPercent })
@@ -967,7 +959,7 @@ function BarcodeScanField({
         // cashier still sees the breakdown in the cart before settling.
         const makingChargeValue = defaultGoldMakingChargePercent(industry);
         const profitPercent = defaultGoldProfitPercent(industry);
-        const vatPercent = defaultRetailVatPercent(industry);
+        const vatPercent = defaultVatPercent;
         const breakdown = computeGoldSalePrice({
           netWeight: item.netWeight,
           pricePerGram: rate.pricePerGram,
@@ -1078,7 +1070,8 @@ function GoldLineForm({
   const [makingChargeType, setMakingChargeType] = useState<MakingChargeType>("percent");
   const [makingChargeValue, setMakingChargeValue] = useState(() => String(defaultGoldMakingChargePercent(industry)));
   const [profitPercent, setProfitPercent] = useState(() => String(defaultGoldProfitPercent(industry)));
-  const [vatPercent, setVatPercent] = useState(() => String(defaultRetailVatPercent(industry)));
+  const defaultVatPercent = useContext(DefaultVatContext);
+  const [vatPercent, setVatPercent] = useState(() => String(defaultVatPercent));
   const [search, setSearch] = useState("");
 
   const inStock = useMemo(() => items.filter((i) => i.status === "in_stock"), [items]);
@@ -1270,7 +1263,8 @@ function WatchLineForm({
   const [serialId, setSerialId] = useState("");
   const [price, setPrice] = useState("");
   const [discount, setDiscount] = useState("");
-  const [vatPercent, setVatPercent] = useState(() => String(defaultRetailVatPercent(industry)));
+  const defaultVatPercent = useContext(DefaultVatContext);
+  const [vatPercent, setVatPercent] = useState(() => String(defaultVatPercent));
 
   const inStock = useMemo(() => units.filter((u) => u.status === "in_stock"), [units]);
   const unit = inStock.find((u) => u.id === serialId) ?? null;
@@ -1388,7 +1382,8 @@ function AccessoryLineForm({
   const [quantity, setQuantity] = useState("1");
   const [unitPrice, setUnitPrice] = useState("");
   const [discount, setDiscount] = useState("");
-  const [vatPercent, setVatPercent] = useState(() => String(defaultRetailVatPercent(industry)));
+  const defaultVatPercent = useContext(DefaultVatContext);
+  const [vatPercent, setVatPercent] = useState(() => String(defaultVatPercent));
 
   const sellable = useMemo(
     () => variants.filter((v) => v.kind !== "variant_parent" && Number(v.quantity) > 0),
@@ -1520,7 +1515,8 @@ function CosmeticsLineForm({
   const [quantity, setQuantity] = useState("1");
   const [unitPrice, setUnitPrice] = useState("");
   const [discount, setDiscount] = useState("");
-  const [vatPercent, setVatPercent] = useState(() => String(defaultRetailVatPercent(industry)));
+  const defaultVatPercent = useContext(DefaultVatContext);
+  const [vatPercent, setVatPercent] = useState(() => String(defaultVatPercent));
 
   const sellable = useMemo(
     () =>

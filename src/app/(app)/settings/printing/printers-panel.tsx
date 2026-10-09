@@ -15,23 +15,14 @@ import { ErrorBox, InfoBox, errorMessage } from "@/app/dashboard/ui";
 import { connectorHealth } from "@/lib/printing/client";
 import { AddPrinterDialog } from "./add-printer-flow";
 import { PrinterCard } from "./printer-card";
-import { usePrinterList, useSavedTemplates, type SavedTemplateRow } from "./use-printing";
+import { usePrinterList } from "./use-printing";
 
-export function PrintersPanel({
-  templates,
-  onChanged,
-}: {
-  /** Saved templates when the panel is embedded where they are already loaded (the printing section). */
-  templates?: SavedTemplateRow[];
-  onChanged?: () => Promise<void> | void;
-}) {
+export function PrintersPanel({ onChanged }: { onChanged?: () => Promise<void> | void } = {}) {
   const printerList = usePrinterList();
-  const savedTemplates = useSavedTemplates();
   const [adding, setAdding] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
-  const templateRows = templates ?? savedTemplates.templates;
   const changed = async () => {
     await printerList.reload();
     await onChanged?.();
@@ -58,14 +49,13 @@ export function PrintersPanel({
       {printerList.loading ? (
         <LoadingSkeleton rows={3} label="در حال خواندن چاپگرها" />
       ) : printerList.printers.length === 0 ? (
-        <EmptyState>هنوز چاپگری ثبت نشده است. بدون چاپگر هم می‌توانید با پنجرهٔ چاپ مرورگر کار کنید.</EmptyState>
+        <EmptyState>هنوز چاپگری ثبت نشده است. تا وقتی چاپگری اضافه نشود، کارت‌ها و رسیدها چاپ نمی‌شوند.</EmptyState>
       ) : (
         <div className="space-y-3">
           {printerList.printers.map((printer) => (
             <PrinterCard
               key={printer.id}
               printer={printer}
-              templates={templateRows}
               onChanged={async () => {
                 await changed();
                 setNotice("تنظیمات چاپگر ذخیره شد.");
@@ -80,7 +70,6 @@ export function PrintersPanel({
       <AddPrinterDialog
         open={adding}
         onOpenChange={setAdding}
-        templates={templateRows}
         onSaved={async () => {
           setAdding(false);
           await changed();

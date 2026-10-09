@@ -1,17 +1,17 @@
 "use client";
 
-import { EmptyState, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
+import { EmptyState, KpiCard, KpiRow, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
 
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
-import { formatJalali } from "@/lib/jalali";
+import { JALALI_MONTHS, todayJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
-import { SearchableSelect } from "@/components/ui/searchable-select";
+import { sumRialText } from "@/lib/money";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
-import { api, errorMessage, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
+import { FilterChip, FilterChipRow } from "@/app/dashboard/filters";
+import { api, inputClass, SecondaryButton } from "@/app/dashboard/ui";
 import type { Runner } from "./accounting-manager";
-import { cardClass } from "@/app/dashboard/page-chrome";
 import { roleLabel } from "@/lib/role-labels";
 import {
   Dialog,
@@ -22,214 +22,290 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { UnsavedChangesDialog, useUnsavedChangesGuard } from "@/components/navigation/unsaved-changes-guard";
+import { forgetDrafts, recallDrafts, rememberDrafts } from "@/lib/payroll-draft-memory";
+import {
+  dirtyTerms,
+  termDisplayText,
+  termsBody,
+  type AmountDraft,
+  type TermDrafts,
+} from "@/lib/payroll-amount-drafts";
+import { EMPTY_PAYROLL_SETTINGS, type PayrollSettings } from "@/lib/payroll-gross-to-net";
+import {
+  PAY_TERMS,
+  type PayTerm,
+  type PayrollAdvance,
+  type PayrollCommissionPreview,
+  type PayrollLiability,
+  type PayrollPaymentAccount,
+  type PayrollRunStatus,
+  type PayrollRunSummary,
+  type StaffWage,
+} from "@/lib/payroll-types";
+import { PayrollAccrualPanel, type AccrualRequest } from "./payroll-accrual-panel";
+import { PayrollAdvancesPanel } from "./payroll-advances-panel";
+import { payrollError } from "./payroll-error";
+import { PayrollRunItem, STATUS_TONES, type PayChoice } from "./payroll-run-item";
+import { PayrollSettingsPanel } from "./payroll-settings-panel";
+import { TermHistory } from "./payroll-term-history";
+import { TERM_LABELS } from "./payroll-term-labels";
 
-interface StaffWage {
-  id: string;
-  fullName: string;
-  role: string;
-  monthlyWage: number | null;
+/** Runs shown per page of the history; the server bounds it too. */
+const HISTORY_PAGE_SIZE = 20;
+
+type StatusFilter = "" | PayrollRunStatus;
+
+interface HistoryFilters {
+  status: StatusFilter;
+  /** ISO accrual-date bounds, "" = open. */
+  from: string;
+  to: string;
 }
 
-interface PayrollRunLine {
-  userId: string | null;
-  fullName: string | null;
-  amount: number;
+/** What the database knows that the saved terms cannot tell: commission, the 2300 tie-out, the accounts to pay from. */
+interface Overview {
+  commission: PayrollCommissionPreview;
+  liability: PayrollLiability;
+  paymentAccounts: PayrollPaymentAccount[];
 }
-
-type PayrollRunStatus = "accrued" | "paid" | "voided";
-
-interface PayrollRun {
-  id: string;
-  periodLabel: string;
-  status: PayrollRunStatus;
-  totalAmount: number;
-  accrualDate: string;
-  paidDate: string | null;
-  voidedDate: string | null;
-  createdByName: string | null;
-  lines: PayrollRunLine[];
-}
-
-// The team roles a staff member can hold, in the platform's own Persian —
-// one definition (src/lib/role-labels.ts), so this section and the team
-// screen can never disagree about what a role is called; an unknown role
-// falls back to its raw key rather than a blank.
 
 /**
- * The run statuses, as the shared `StatusBadge` tones rather than a private
- * palette. The badge is the primitive every other ledger surface uses for a
- * status pill (`installments`, `chart-of-accounts`), so payroll had no reason
- * to hand-roll amber/emerald classes of its own — and the hand-rolled copy is
- * what drifted from them.
+ * A key that names one *attempt* to accrue, kept across a retry of the same
+ * attempt (a dropped connection, a double click) so the server can recognise it
+ * and return the run it already made instead of a second one.
  */
-const STATUS_TONES: Record<PayrollRunStatus, { label: string; tone: "active" | "positive" | "neutral" }> = {
-  paid: { label: "پرداخت‌شده", tone: "positive" },
-  accrued: { label: "تعهدشده", tone: "active" },
-  voided: { label: "ابطال‌شده", tone: "neutral" },
-};
-
-/** The longest «دوره» heading the API accepts (PERIOD_LABEL_MAX in payroll-service.ts). */
-const PERIOD_LABEL_MAX = 120;
+function newAttemptKey(): string {
+  const webCrypto = globalThis.crypto;
+  if (webCrypto && typeof webCrypto.randomUUID === "function") return webCrypto.randomUUID();
+  return `attempt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+}
 
 /**
- * A date the server sent, as Shamsi — or a dash when it is absent/unparseable.
+ * Payroll — a Jalali month's gross-to-net, advances and commission, as ledger
+ * entries (audit F11 + issue #835).
  *
- * `formatJalali` throws a `RangeError` on an invalid date, and a throw inside
- * a client component's render takes the whole section down to an error
- * boundary. A payroll row whose date somehow arrived malformed should cost one
- * dash, not the screen.
+ * The rates are the business's own (the settings panel; empty means no
+ * deduction). Each member has four standing terms — wage, two allowances, a
+ * fixed deduction — a run adds the month's overtime, recovers salary advances
+ * and settles the commission nobody has paid, and posting goes through the
+ * ledger's normal path. It is not a payslip or filing tool.
+ *
+ * Who may use it is a capability question, not a role one: reading needs
+ * `payroll.view`, changing anything needs `payroll.manage` (`canManage`). The
+ * server enforces both; `canManage` only decides which controls are drawn.
+ *
+ * Every amount box is a draft that remembers the unit it was typed in
+ * (`payroll-amount-drafts.ts`), so a Rial↔Toman switch converts the amount
+ * instead of re-reading its digits; unsaved terms are guarded against in-app
+ * navigation (`unsaved-changes-guard.tsx`) and, for the one exit that cannot be
+ * guarded (browser Back), kept in memory for the member (`payroll-draft-memory.ts`).
  */
-function jalaliOrDash(value: string | null | undefined): string {
-  if (!value) return "—";
-  try {
-    return toPersianDigits(formatJalali(value));
-  } catch {
-    return "—";
-  }
-}
-
-/**
- * Journal-level payroll — staff cost accrual and payment, not a payroll
- * engine (no tax tables, insurance, or payslips). Restricted to owner and
- * accountant: wages are compensation data, more sensitive than the rest of
- * this phase's ledger surfaces, which managers can otherwise post to freely.
- */
-export function PayrollSection({ busy, run, refreshKey }: { busy: boolean; run: Runner; refreshKey: number }) {
+export function PayrollSection({
+  busy,
+  run,
+  refreshKey,
+  canManage = true,
+  ownerKey,
+}: {
+  busy: boolean;
+  run: Runner;
+  refreshKey: number;
+  /** May this member change payroll? `undefined` (unknown) draws the controls and lets the API decide. */
+  canManage?: boolean;
+  /** The signed-in member's id — the key unsaved drafts are remembered under. Absent: nothing is remembered. */
+  ownerKey?: string;
+}) {
   const money = useMoney();
+  const readOnly = !canManage;
+
   const [staff, setStaff] = useState<StaffWage[] | null>(null);
-  const [runs, setRuns] = useState<PayrollRun[] | null>(null);
-  const [wageInputs, setWageInputs] = useState<Record<string, string>>({});
-  const [savingWage, setSavingWage] = useState<string | null>(null);
-  /*
-   * The rows the user has typed into since the last load.
-   *
-   * Distinct from "has a value in wageInputs": every row has one of those.
-   * Only these are protected from being overwritten by a refresh. */
-  const [editedRows, setEditedRows] = useState<Set<string>>(() => new Set());
-  /*
-   * ...and the same set as a ref, because `load` reads it.
-   *
-   * If `load` closed over the state it would have to list it as a dependency,
-   * and then the first keystroke in any wage field would change the callback's
-   * identity and re-fire the effect below — refetching the whole section
-   * mid-typing. The ref keeps the reader stable; the state stays the thing
-   * that renders.
-   */
-  const editedRowsRef = useRef(editedRows);
-  useEffect(() => {
-    editedRowsRef.current = editedRows;
-  }, [editedRows]);
-  const [periodLabel, setPeriodLabel] = useState("");
+  const [settings, setSettings] = useState<PayrollSettings | null>(null);
+  const [advances, setAdvances] = useState<PayrollAdvance[] | null>(null);
+  /** `undefined` while loading, `null` when the read failed (so a failure is not an endless skeleton). */
+  const [overview, setOverview] = useState<Overview | null | undefined>(undefined);
+  const [runs, setRuns] = useState<PayrollRunSummary[] | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [filters, setFilters] = useState<HistoryFilters>({ status: "", from: "", to: "" });
+  /** Bumped after a term is saved, so the commission preview and the open histories re-read. */
+  const [termVersion, setTermVersion] = useState(0);
+
+  // --- pay-term drafts -----------------------------------------------------
+  const [initialDrafts] = useState<Record<string, TermDrafts>>(() => (ownerKey ? recallDrafts(ownerKey) : {}));
+  const [drafts, setDrafts] = useState<Record<string, TermDrafts>>(initialDrafts);
+  const [restoredCount] = useState(() => Object.keys(initialDrafts).length);
+  const [savingRow, setSavingRow] = useState<string | null>(null);
+
+  // --- accrual form --------------------------------------------------------
+  const today = useMemo(() => todayJalali(), []);
+  const [period, setPeriod] = useState({ year: today.jy, month: today.jm });
+  const periodKey = `${period.year}-${String(period.month).padStart(2, "0")}`;
   const [accrualDate, setAccrualDate] = useState("");
+  const [includeCommission, setIncludeCommission] = useState(true);
+  const [accruing, setAccruing] = useState(false);
+  const attemptKey = useRef<string | null>(null);
+
   const [localError, setLocalError] = useState("");
   const [localNotice, setLocalNotice] = useState("");
-  /*
-   * «پرداخت از» — the account the payout leaves.
-   *
-   * `POST /api/ledger/payroll/runs/:id/pay` has accepted `cash` or `bank` since
-   * this feature shipped, and the payment posts against whichever is chosen.
-   * The button hardcoded `cash` and said «پرداخت (از صندوق)», so a business
-   * paying wages by transfer had to either post it from the till or write the
-   * entry by hand.
-   */
-  const [payMethod, setPayMethod] = useState<Record<string, "cash" | "bank">>({});
-  /*
-   * Which run a per-row action is in flight for.
-   *
-   * `busy` is the whole workspace's flag, so it disables *every* button on the
-   * screen at once and says nothing about which one is working. A payment that
-   * takes a second looked like the page had frozen; now the row that was
-   * clicked says «در حال ثبت…» and only that row's buttons are locked.
-   */
+  /** Which run or advance a per-row action is in flight for — only that row's buttons lock, not the whole screen. */
   const [rowBusy, setRowBusy] = useState<string | null>(null);
   /** The run «ابطال» is asking about — a real dialog, not `window.confirm`. */
-  const [voidTarget, setVoidTarget] = useState<PayrollRun | null>(null);
-  const periodFieldId = useId();
-  const accrualFieldId = useId();
+  const [voidTarget, setVoidTarget] = useState<PayrollRunSummary | null>(null);
+  /** The run that already stands for the month somebody tried to accrue again. */
+  const [duplicate, setDuplicate] = useState<{ periodLabel: string; status: PayrollRunStatus } | null>(null);
 
-  const load = useCallback(() => {
-    api<{ staff: StaffWage[] }>("/api/ledger/payroll/staff").then(({ ok, data }) => {
-      if (ok) {
-        setStaff(data.staff);
-        /*
-         * Only the rows the user actually typed into keep their text; every
-         * other row is re-derived from the server.
-         *
-         * Re-seeding *every* input from the response discarded whatever had
-         * been typed into the other rows the moment one row was saved (or the
-         * section refreshed) — on a ten-person list, nine edits lost in
-         * silence. But keeping every input that merely *existed* is wrong in
-         * the other direction: the displayed number depends on the money unit,
-         * so after a ریال→تومان switch the untouched rows would still show
-         * rial figures relabelled as toman — off by a factor of ten, in the
-         * one field where that matters most. Tracking the edited ids
-         * explicitly is what separates "the user's unsaved work" from "a
-         * value we rendered", so each can be treated correctly.
-         */
-        setWageInputs((prev) => {
-          const next: Record<string, string> = {};
-          for (const s of data.staff) {
-            const serverValue = s.monthlyWage != null ? String(money.toInput(s.monthlyWage)) : "";
-            next[s.id] = editedRowsRef.current.has(s.id) ? (prev[s.id] ?? serverValue) : serverValue;
-          }
-          return next;
-        });
-        // Drop edit marks for staff who are no longer listed, so the set
-        // cannot grow across refreshes.
-        setEditedRows((prev) => {
-          const live = new Set(data.staff.map((s) => s.id));
-          const kept = [...prev].filter((id) => live.has(id));
-          return kept.length === prev.size ? prev : new Set(kept);
-        });
-      } else {
-        // An endless skeleton reads as "still loading"; name the failure.
-        setStaff([]);
-        setLocalError("بارگذاری فهرست کارکنان ناموفق بود.");
+  const fromFieldId = useId();
+  const toFieldId = useId();
+
+  // Latest values for the unmount cleanup and the stale-response checks, which
+  // must not re-run when these change.
+  const staffRef = useRef<StaffWage[] | null>(null);
+  const draftsRef = useRef(drafts);
+  const discarded = useRef(false);
+  const runsRequest = useRef(0);
+  useEffect(() => {
+    staffRef.current = staff;
+    draftsRef.current = drafts;
+  });
+
+  /** Which of a member's terms are edited away from what the server holds? Compared as Rial — see `isDraftDirty`. */
+  const dirtyOf = useCallback((s: StaffWage) => dirtyTerms(drafts[s.id], s), [drafts]);
+  const dirtyCount = useMemo(() => (staff ?? []).filter((s) => dirtyOf(s).length > 0).length, [staff, dirtyOf]);
+
+  const guard = useUnsavedChangesGuard(dirtyCount > 0, {
+    onDiscard: () => {
+      discarded.current = true;
+      setDrafts({});
+      if (ownerKey) forgetDrafts(ownerKey);
+    },
+  });
+
+  // Leaving by any path the guard cannot stop (browser Back) must not lose the
+  // work: keep what is genuinely unsaved, in memory, for this member.
+  useEffect(() => {
+    return () => {
+      if (!ownerKey || discarded.current) return;
+      const current = staffRef.current;
+      const unsaved: Record<string, TermDrafts> = {};
+      for (const [userId, memberDrafts] of Object.entries(draftsRef.current)) {
+        const member = current?.find((s) => s.id === userId);
+        if (!member) continue;
+        const kept: TermDrafts = {};
+        for (const term of dirtyTerms(memberDrafts, member)) kept[term] = memberDrafts[term];
+        if (Object.keys(kept).length > 0) unsaved[userId] = kept;
       }
-    });
-    api<{ runs: PayrollRun[] }>("/api/ledger/payroll/runs").then(({ ok, data }) => {
-      if (ok) setRuns(data.runs);
-      else {
-        setRuns([]);
-        setLocalError("بارگذاری تاریخچه حقوق ناموفق بود.");
+      rememberDrafts(ownerKey, unsaved);
+    };
+  }, [ownerKey]);
+
+  // --- loading -------------------------------------------------------------
+  const loadStaff = useCallback(async () => {
+    const { ok, data } = await api<{ staff: StaffWage[] }>("/api/ledger/payroll/staff");
+    if (!ok) {
+      // An endless skeleton reads as "still loading"; name the failure.
+      setStaff([]);
+      return setLocalError("بارگذاری فهرست کارکنان ناموفق بود.");
+    }
+    setStaff(data.staff);
+    // Drop drafts for people who are no longer listed, and terms that now equal
+    // what is saved (somebody else made the same change), so nothing stale lingers.
+    setDrafts((prev) => {
+      const next: Record<string, TermDrafts> = {};
+      for (const s of data.staff) {
+        const memberDrafts = prev[s.id];
+        if (!memberDrafts) continue;
+        const kept: TermDrafts = {};
+        for (const term of dirtyTerms(memberDrafts, s)) kept[term] = memberDrafts[term];
+        if (Object.keys(kept).length > 0) next[s.id] = kept;
       }
+      return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
     });
-  }, [money]);
+  }, []);
+
+  const loadSettings = useCallback(async () => {
+    const { ok, data } = await api<{ settings: PayrollSettings }>("/api/ledger/payroll/settings");
+    if (!ok) {
+      // Never guess a rate: a failed read computes no deduction in the preview,
+      // and says so, while the server keeps its own copy.
+      setSettings({ ...EMPTY_PAYROLL_SETTINGS, taxBrackets: [] });
+      return setLocalError("بارگذاری تنظیمات بیمه و مالیات ناموفق بود.");
+    }
+    setSettings(data.settings);
+  }, []);
+
+  const loadAdvances = useCallback(async () => {
+    const { ok, data } = await api<{ advances: PayrollAdvance[] }>("/api/ledger/payroll/advances");
+    if (!ok) {
+      setAdvances([]);
+      return setLocalError("بارگذاری مساعده‌ها ناموفق بود.");
+    }
+    setAdvances(data.advances);
+  }, []);
+
+  const loadOverview = useCallback(async (key: string, date: string, withCommission: boolean) => {
+    const query = new URLSearchParams({ periodKey: key, includeCommission: String(withCommission) });
+    if (date) query.set("accrualDate", date);
+    const { ok, data } = await api<Overview>(`/api/ledger/payroll/preview?${query}`);
+    if (!ok) {
+      setOverview(null);
+      return setLocalError("بارگذاری پیش‌نمایش تعهد حقوق ناموفق بود.");
+    }
+    setOverview(data);
+  }, []);
+
+  const loadRuns = useCallback(async (f: HistoryFilters, cursor: string | null) => {
+    const request = ++runsRequest.current;
+    setHistoryBusy(true);
+    const query = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
+    if (f.status) query.set("status", f.status);
+    if (f.from) query.set("from", f.from);
+    if (f.to) query.set("to", f.to);
+    if (cursor) query.set("cursor", cursor);
+    const { ok, data } = await api<{ runs: PayrollRunSummary[]; nextCursor: string | null }>(
+      `/api/ledger/payroll/runs?${query}`,
+    );
+    // A newer request (another filter, a refresh) superseded this one: drop it.
+    if (request !== runsRequest.current) return;
+    setHistoryBusy(false);
+    if (!ok) {
+      setRuns((prev) => prev ?? []);
+      return setLocalError("بارگذاری تاریخچه حقوق ناموفق بود.");
+    }
+    setRuns((prev) => (cursor && prev ? [...prev, ...data.runs] : data.runs));
+    setNextCursor(data.nextCursor);
+  }, []);
 
   useEffect(() => {
-    load();
-  }, [load, refreshKey]);
+    void loadStaff();
+  }, [loadStaff, refreshKey]);
 
-  // The staff who will actually be accrued: an active member with a positive
-  // wage set. This mirrors accruePayroll's own WHERE clause, so the preview and
-  // the total match exactly what a «ثبت تعهد» will post.
-  const payableStaff = useMemo(() => (staff ?? []).filter((s) => s.monthlyWage != null && s.monthlyWage > 0), [staff]);
-  const monthlyWageBill = useMemo(() => payableStaff.reduce((sum, s) => sum + (s.monthlyWage ?? 0), 0), [payableStaff]);
+  useEffect(() => {
+    void loadSettings();
+  }, [loadSettings, refreshKey]);
 
-  /**
-   * Has this row been edited away from what the server holds?
-   *
-   * Drives the per-row «ذخیره‌نشده» hint and keeps the save button meaningful:
-   * saving a row nobody touched posts a no-op request and reports success for
-   * a change that never happened.
-   */
-  const isWageDirty = useCallback(
-    (s: StaffWage) => {
-      const current = (wageInputs[s.id] ?? "").trim();
-      const saved = s.monthlyWage != null ? String(money.toInput(s.monthlyWage)) : "";
-      return current !== saved;
-    },
-    [money, wageInputs],
-  );
+  useEffect(() => {
+    void loadAdvances();
+  }, [loadAdvances, refreshKey]);
 
-  const dirtyCount = useMemo(() => (staff ?? []).filter(isWageDirty).length, [staff, isWageDirty]);
+  useEffect(() => {
+    void loadOverview(periodKey, accrualDate, includeCommission);
+  }, [loadOverview, periodKey, accrualDate, includeCommission, refreshKey, termVersion]);
+
+  useEffect(() => {
+    void loadRuns(filters, null);
+  }, [loadRuns, filters, refreshKey]);
+
+  // A new attempt is a new intent: any change to what would be accrued gets a fresh key.
+  useEffect(() => {
+    attemptKey.current = null;
+  }, [periodKey, accrualDate, includeCommission]);
 
   /*
    * A success notice is about something that has finished, so it should not
    * outlive it. Without this the banner sat there until the next action —
    * «حقوق ذخیره شد.» still on screen minutes later, describing a save the user
-   * had long since moved on from, and (worse) still there after a *failed*
-   * action that only set the error line, showing success and failure at once.
+   * had long since moved on from.
    */
   useEffect(() => {
     if (!localNotice) return;
@@ -237,121 +313,129 @@ export function PayrollSection({ busy, run, refreshKey }: { busy: boolean; run: 
     return () => window.clearTimeout(timer);
   }, [localNotice]);
 
-  /*
-   * Forget the «پرداخت از» choice for runs that are no longer listed.
-   *
-   * The map is keyed by run id and was only ever added to, so every run the
-   * user ever touched stayed in memory for the life of the section. Pruning it
-   * against the current list keeps it bounded, and means a run id reused after
-   * a refresh cannot inherit a stale choice.
-   */
-  useEffect(() => {
-    if (!runs) return;
-    setPayMethod((prev) => {
-      const live = new Set(runs.map((r) => r.id));
-      const kept = Object.keys(prev).filter((id) => live.has(id));
-      if (kept.length === Object.keys(prev).length) return prev;
-      return Object.fromEntries(kept.map((id) => [id, prev[id]]));
-    });
-  }, [runs]);
+  // --- pay terms -----------------------------------------------------------
+  function editTerm(userId: string, term: PayTerm, text: string) {
+    discarded.current = false; // typing again after a discard: protect this work too
+    // The draft remembers the unit it is typed in, so a later Rial↔Toman switch
+    // converts it instead of re-reading it.
+    const draft: AmountDraft = { text, unit: money.unit };
+    setDrafts((prev) => ({ ...prev, [userId]: { ...prev[userId], [term]: draft } }));
+  }
 
-  /*
-   * Unsaved wages must survive leaving the page as a *warning*, not silently.
-   * A wage typed and not saved is indistinguishable from a wage that was
-   * saved, and the section is one rail click away from being unmounted.
-   */
-  useEffect(() => {
-    if (dirtyCount === 0) return;
-    function onBeforeUnload(event: BeforeUnloadEvent) {
-      event.preventDefault();
-      event.returnValue = "";
-    }
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [dirtyCount]);
-
-  async function saveWage(userId: string) {
+  async function saveTerms(userId: string) {
+    const member = staff?.find((s) => s.id === userId);
+    const memberDrafts = drafts[userId];
+    if (!member || !memberDrafts) return;
     setLocalError("");
     setLocalNotice("");
-    const raw = wageInputs[userId] ?? "";
-    let rial: number | null = null;
-    if (raw.trim()) {
-      try {
-        rial = money.parse(raw);
-      } catch {
-        return setLocalError("مبلغ حقوق معتبر نیست.");
-      }
-      // The API stores Rial as a BIGINT and refuses a negative or fractional
-      // amount; catching it here names the field instead of bouncing off a
-      // generic server error.
-      if (!Number.isSafeInteger(rial) || rial < 0) {
-        return setLocalError("مبلغ حقوق معتبر نیست.");
-      }
+
+    // Only the terms that changed are sent, and each amount is read through the
+    // unit it was typed in, never the current one; a malformed amount or one a
+    // JSON number would round is refused here, naming the term.
+    const body = termsBody(memberDrafts, member);
+    if (!body.ok) {
+      const label = TERM_LABELS[body.term];
+      return setLocalError(body.reason === "too_large" ? `مبلغ «${label}» بیش از حد مجاز است.` : `«${label}» معتبر نیست.`);
     }
-    setSavingWage(userId);
-    const { ok, data } = await api("/api/ledger/payroll/staff/" + userId, {
+    if (body.terms.length === 0) return;
+
+    setSavingRow(userId);
+    // The digits are already in the body as written — no amount passes through `Number`.
+    const { ok, data } = await api<{ error?: string }>("/api/ledger/payroll/staff/" + userId, {
       method: "PATCH",
-      body: JSON.stringify({ monthlyWage: rial }),
+      body: body.json,
     });
-    setSavingWage(null);
-    if (!ok) return setLocalError(errorMessage((data as { error?: string }).error));
-    const saved = staff?.find((s) => s.id === userId);
-    setLocalNotice(saved ? `حقوق «${saved.fullName}» ذخیره شد.` : "حقوق ذخیره شد.");
-    // Drop this row's local edit so the reload can adopt the server's value.
-    setWageInputs((prev) => {
+    setSavingRow(null);
+    if (!ok) return setLocalError(payrollError(data.error));
+
+    setLocalNotice(`اطلاعات حقوقی «${member.fullName}» ذخیره شد.`);
+    // Drop this member's drafts so the reload can adopt the server's values.
+    setDrafts((prev) => {
       const next = { ...prev };
       delete next[userId];
       return next;
     });
-    setEditedRows((prev) => {
-      if (!prev.has(userId)) return prev;
-      const next = new Set(prev);
-      next.delete(userId);
-      return next;
+    setTermVersion((v) => v + 1);
+    void loadStaff();
+  }
+
+  async function saveSettings(next: PayrollSettings): Promise<string | null> {
+    setLocalError("");
+    setLocalNotice("");
+    const { ok, data } = await api<{ settings?: PayrollSettings; error?: string }>("/api/ledger/payroll/settings", {
+      method: "PUT",
+      body: JSON.stringify(next),
     });
-    load();
+    if (!ok || !data.settings) return payrollError(data.error);
+    setSettings(data.settings);
+    setTermVersion((v) => v + 1);
+    setLocalNotice("تنظیمات بیمه و مالیات حقوق ذخیره شد.");
+    return null;
   }
 
-  async function accrue(e: React.FormEvent) {
-    e.preventDefault();
+  // --- accrual -------------------------------------------------------------
+  async function accrue({ overtime }: AccrualRequest): Promise<boolean> {
     setLocalError("");
     setLocalNotice("");
-    const label = periodLabel.trim();
-    if (!label) return setLocalError("عنوان دوره الزامی است.");
-    if (label.length > PERIOD_LABEL_MAX) return setLocalError("عنوان دوره بیش از حد طولانی است.");
-    if (payableStaff.length === 0) return setLocalError("هیچ کارمندی حقوق تعیین‌شده ندارد.");
-    /*
-     * An accrual is a journal entry, and posting the same month twice is the
-     * mistake this screen makes easiest — the API has no uniqueness rule on a
-     * period label, so «مرداد ۱۴۰۴» can be booked as many times as it is
-     * clicked. Warn on an exact repeat of a run that still stands.
-     */
-    const clash = (runs ?? []).find((r) => r.status !== "voided" && r.periodLabel.trim() === label);
-    if (clash && !window.confirm(`برای دوره «${label}» قبلاً تعهدی ثبت شده است. تعهد دیگری ثبت شود؟`)) return;
 
-    const ok = await run(() =>
-      api("/api/ledger/payroll/runs", {
-        method: "POST",
-        body: JSON.stringify({ periodLabel: label, accrualDate: accrualDate || undefined }),
+    const label = `${JALALI_MONTHS[period.month - 1]} ${toPersianDigits(period.year)}`;
+    setAccruing(true);
+    const key = (attemptKey.current ??= newAttemptKey());
+    const { ok, data } = await api<{
+      error?: string;
+      run?: { periodLabel: string; status: PayrollRunStatus };
+      idempotentReplay?: boolean;
+    }>("/api/ledger/payroll/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        periodKey,
+        accrualDate: accrualDate || undefined,
+        includeCommission,
+        overtime,
+        idempotencyKey: key,
       }),
-    );
-    if (ok) {
-      setPeriodLabel("");
-      setAccrualDate("");
-      setLocalNotice(`تعهد حقوق دوره «${label}» ثبت شد.`);
+    });
+    setAccruing(false);
+
+    if (!ok) {
+      // The server — not this screen — is what stops a month being booked twice;
+      // this only explains it.
+      if (data.error === "period_already_accrued" && data.run) {
+        setDuplicate({ periodLabel: data.run.periodLabel, status: data.run.status });
+        return false;
+      }
+      setLocalError(payrollError(data.error));
+      return false;
     }
+
+    attemptKey.current = null;
+    setAccrualDate("");
+    setLocalNotice(
+      data.idempotentReplay
+        ? `تعهد «${label}» پیش‌تر ثبت شده بود؛ همان لیست نمایش داده شد.`
+        : `تعهد حقوق «${label}» ثبت شد.`,
+    );
+    setTermVersion((v) => v + 1);
+    void loadRuns(filters, null);
+    void loadStaff();
+    void loadAdvances();
+    return true;
   }
 
-  async function pay(runId: string) {
-    const method = payMethod[runId] ?? "cash";
+  // --- payment, void and advances ------------------------------------------
+  async function pay(target: PayrollRunSummary, choice: PayChoice) {
     setLocalError("");
     setLocalNotice("");
-    setRowBusy(runId);
+    setRowBusy(target.id);
+    const body: Record<string, unknown> = choice.paymentAccountId
+      ? { paymentAccountId: choice.paymentAccountId }
+      : { method: choice.method };
+    if (choice.paidDate) body.paidDate = choice.paidDate;
     const ok = await run(() =>
-      api("/api/ledger/payroll/runs/" + runId + "/pay", { method: "POST", body: JSON.stringify({ method }) }),
+      api("/api/ledger/payroll/runs/" + target.id + "/pay", { method: "POST", body: JSON.stringify(body) }),
     );
     setRowBusy(null);
-    if (ok) setLocalNotice("پرداخت حقوق ثبت شد.");
+    if (ok) setLocalNotice(`پرداخت حقوق «${target.periodLabel}» ثبت شد.`);
   }
 
   async function confirmVoid() {
@@ -363,14 +447,40 @@ export function PayrollSection({ busy, run, refreshKey }: { busy: boolean; run: 
     setRowBusy(target.id);
     const ok = await run(() => api("/api/ledger/payroll/runs/" + target.id + "/void", { method: "POST" }));
     setRowBusy(null);
-    if (ok) setLocalNotice(`تعهد دوره «${target.periodLabel}» ابطال شد.`);
+    if (ok) setLocalNotice(`تعهد «${target.periodLabel}» ابطال شد.`);
   }
 
-  if (!staff || !runs) {
-    return (
-      <SectionCardSkeleton rows={4} />
-    );
+  async function recordAdvance(body: string): Promise<boolean> {
+    setLocalError("");
+    setLocalNotice("");
+    const ok = await run(() => api("/api/ledger/payroll/advances", { method: "POST", body }));
+    if (ok) setLocalNotice("مساعده ثبت شد؛ در تعهد حقوق بعدی کسر می‌شود.");
+    return ok;
   }
+
+  async function voidAdvance(target: PayrollAdvance): Promise<boolean> {
+    setLocalError("");
+    setLocalNotice("");
+    setRowBusy(target.id);
+    const ok = await run(() => api("/api/ledger/payroll/advances/" + target.id + "/void", { method: "POST" }));
+    setRowBusy(null);
+    if (ok) setLocalNotice("مساعده ابطال شد.");
+    return ok;
+  }
+
+  // --- derived -------------------------------------------------------------
+  const payableStaff = useMemo(() => (staff ?? []).filter((s) => s.monthlyWage !== null && s.monthlyWage !== "0"), [staff]);
+  const monthlyWageBill = useMemo(() => sumRialText(payableStaff.map((s) => s.monthlyWage as string)), [payableStaff]);
+
+  const hasFilters = filters.status !== "" || filters.from !== "" || filters.to !== "";
+  const unsettledCommission = overview ? BigInt(overview.liability.unsettledCommission) : 0n;
+
+  if (!staff || !runs || !advances || !settings || overview === undefined) {
+    return <SectionCardSkeleton rows={4} />;
+  }
+
+  const liability = overview?.liability ?? null;
+  const paymentAccounts = overview?.paymentAccounts ?? [];
 
   return (
     <div className="space-y-5">
@@ -382,9 +492,7 @@ export function PayrollSection({ busy, run, refreshKey }: { busy: boolean; run: 
         */}
       <div aria-live="assertive" role="alert">
         {localError ? (
-          <p className="rounded-xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-            {localError}
-          </p>
+          <p className="rounded-xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive">{localError}</p>
         ) : null}
       </div>
       <div aria-live="polite" role="status">
@@ -395,171 +503,192 @@ export function PayrollSection({ busy, run, refreshKey }: { busy: boolean; run: 
         ) : null}
       </div>
 
+      {/* What this screen is — accurately, and what it is not. */}
+      <p className="text-xs leading-6 text-muted-foreground">
+        ثبت تعهد ماهانهٔ حقوق و دستمزد (ناخالص به خالص با نرخ‌های خود کسب‌وکار)، مساعده و پورسانت در سطح سند حسابداری. فیش حقوقی،
+        فهرست بیمه و اظهارنامهٔ مالیاتی در این بخش صادر نمی‌شود و پرداخت بیمه و مالیاتِ نگه‌داشته‌شده جداگانه انجام می‌شود. لیست
+        حقوق برای کل کسب‌وکار ثبت می‌شود و به شعبهٔ فعال بستگی ندارد.
+      </p>
+
+      {restoredCount > 0 && dirtyCount > 0 ? (
+        <p
+          role="status"
+          className="rounded-xl border border-amber-500/20 bg-amber-50/60 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200"
+        >
+          تغییرات ذخیره‌نشدهٔ پیشین شما بازیابی شد؛ آن‌ها را ذخیره کنید یا مقدار را به حالت قبل برگردانید.
+        </p>
+      ) : null}
+
+      {liability ? (
+        <section aria-labelledby="payroll-liability-heading" className="space-y-3">
+          <h2 id="payroll-liability-heading" className="text-sm font-semibold text-foreground">
+            وضعیت حساب حقوق پرداختنی (۲۳۰۰)
+          </h2>
+          <KpiRow>
+            <KpiCard label="مانده در دفتر کل" value={money.formatText(liability.ledgerBalance)} />
+            <KpiCard
+              label="در انتظار پرداخت"
+              value={money.formatText(liability.awaitingPayment)}
+              hint="لیست‌های تعهدشده (خالص حقوق و پورسانت)"
+            />
+            <KpiCard
+              label="پورسانتِ واردنشده در هیچ لیست"
+              value={money.formatText(liability.unsettledCommission)}
+              hint="با ثبت تعهد بعدی تسویه می‌شود"
+            />
+            <KpiCard
+              label="مغایرت"
+              value={money.formatText(liability.difference)}
+              hint={
+                liability.difference === "0"
+                  ? "مانده با لیست‌ها و پورسانت‌ها تطبیق دارد"
+                  : "سند دستی یا تسویهٔ خارج از حقوق روی این حساب ثبت شده است"
+              }
+            />
+          </KpiRow>
+        </section>
+      ) : null}
+
+      <PayrollSettingsPanel settings={settings} onSave={saveSettings} readOnly={readOnly} />
+
       <section aria-labelledby="payroll-wages-heading" className={cardClass}>
         <header className="border-b border-border/80 px-4 py-4 sm:px-5">
-          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">تنظیمات حقوق</p>
-          <h2 id="payroll-wages-heading" className="mt-1 text-base font-semibold text-foreground">حقوق ماهانه کارکنان</h2>
+          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">حکم حقوقی</p>
+          <h2 id="payroll-wages-heading" className="mt-1 text-base font-semibold text-foreground">حقوق و مزایای ماهانه کارکنان</h2>
           {/* The unit is the business's own choice (ریال/تومان), so it comes from
               the money context rather than being asserted in the copy. */}
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            مبلغ حقوق هر کارمند را به {money.unitLabel} وارد و ذخیره کنید.
+            {readOnly
+              ? "شما فقط مجاز به مشاهدهٔ حقوق و مزایا هستید."
+              : `مبالغ ماهانه را به ${money.unitLabel} وارد و برای هر نفر ذخیره کنید. اضافه‌کار هر ماه هنگام ثبت تعهد وارد می‌شود.`}
           </p>
         </header>
 
         <div className="p-4 sm:p-5">
-        {staff.length === 0 ? (
-          <EmptyState>عضو فعالی یافت نشد.</EmptyState>
-        ) : (
-          <>
-          <ul className="space-y-3">
-            {staff.map((s) => {
-              const dirty = isWageDirty(s);
-              return (
-              <li
-                key={s.id}
-                className="grid gap-3 rounded-xl border border-border/80 bg-muted/60 p-4 md:grid-cols-[minmax(10rem,1fr)_minmax(12rem,15rem)_auto] md:items-end"
-              >
-                <div className="min-w-0">
-                  <p className="text-xs font-medium text-muted-foreground">کارمند</p>
-                  {/* A long Persian name has to wrap rather than push the grid
-                      wider than the card on a narrow screen. */}
-                  <p className="mt-1 break-words font-semibold text-foreground">{s.fullName}</p>
-                  <p className="mt-0.5 text-xs text-muted-foreground">{roleLabel(s.role)}</p>
-                </div>
-                <label className="block text-sm font-medium">
-                  <span className="mb-1.5 block text-xs text-muted-foreground">حقوق ماهانه ({money.unitLabel})</span>
-                  <PersianNumberInput
-                    className={inputClass + " w-full"}
-                    dir="ltr"
-                    inputMode="numeric"
-                    // A wage is a whole amount: decimals and negatives are not
-                    // wages, and the API refuses both — so don't let them be typed.
-                    allowDecimal={false}
-                    allowNegative={false}
-                    value={wageInputs[s.id] ?? ""}
-                    onChange={(e) => {
-                      setWageInputs((prev) => ({ ...prev, [s.id]: e.target.value }));
-                      setEditedRows((prev) => (prev.has(s.id) ? prev : new Set(prev).add(s.id)));
-                    }}
-                    // The placeholder repeated the label it sits under; «۰» is
-                    // what every other money field in the ledger shows.
-                    placeholder="۰"
-                    aria-label={"حقوق ماهانه " + s.fullName}
-                    // Enter saves the row the caret is in, the way a one-field
-                    // form does — reaching for the mouse per row is the whole
-                    // friction of this list.
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        if (!busy && savingWage !== s.id && dirty) void saveWage(s.id);
-                      }
-                    }}
-                  />
-                </label>
-                <div className="flex min-w-32 items-center gap-2 md:justify-end">
-                  <SecondaryButton
-                    onClick={() => saveWage(s.id)}
-                    // Saving an untouched row posts a no-op and reports a save
-                    // that did not happen.
-                    disabled={busy || savingWage === s.id || !dirty}
-                  >
-                    {savingWage === s.id ? "در حال ذخیره…" : "ذخیره"}
-                  </SecondaryButton>
-                  {dirty ? (
-                    <span className="text-xs text-amber-700 dark:text-amber-300">ذخیره‌نشده</span>
-                  ) : null}
-                </div>
-              </li>
-              );
-            })}
-          </ul>
+          {staff.length === 0 ? (
+            <EmptyState>عضو فعالی یافت نشد.</EmptyState>
+          ) : (
+            <>
+              <ul className="space-y-3">
+                {staff.map((s) => {
+                  const dirty = dirtyOf(s).length > 0;
+                  return (
+                    <li key={s.id} className="space-y-3 rounded-xl border border-border/80 bg-muted/60 p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          {/* A long Persian name has to wrap rather than push the grid
+                              wider than the card on a narrow screen. */}
+                          <p className="break-words font-semibold text-foreground">{s.fullName}</p>
+                          <p className="mt-0.5 text-xs text-muted-foreground">{roleLabel(s.role)}</p>
+                        </div>
+                        {s.advanceOutstanding !== "0" ? (
+                          <StatusBadge tone="active">مساعده باز: {money.formatText(s.advanceOutstanding)}</StatusBadge>
+                        ) : null}
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        {PAY_TERMS.map((term) => (
+                          <label key={term} className="block text-sm font-medium">
+                            <span className="mb-1.5 block text-xs text-muted-foreground">
+                              {TERM_LABELS[term]} ({money.unitLabel})
+                            </span>
+                            <PersianNumberInput
+                              className={inputClass + " w-full"}
+                              dir="ltr"
+                              inputMode="numeric"
+                              // These are whole, non-negative amounts: decimals and
+                              // negatives are not pay, and the API refuses both — so
+                              // don't let them be typed.
+                              allowDecimal={false}
+                              allowNegative={false}
+                              disabled={readOnly}
+                              value={termDisplayText(term, drafts[s.id]?.[term], s, money.unit)}
+                              onChange={(e) => editTerm(s.id, term, e.target.value)}
+                              // «۰» is what every other money field in the ledger shows.
+                              placeholder="۰"
+                              aria-label={`${TERM_LABELS[term]} ${s.fullName}`}
+                              // Enter saves the row the caret is in, the way a one-field
+                              // form does — reaching for the mouse per row is the whole
+                              // friction of this list.
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  if (!busy && savingRow !== s.id && dirty && !readOnly) void saveTerms(s.id);
+                                }
+                              }}
+                            />
+                          </label>
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {readOnly ? null : (
+                          <SecondaryButton
+                            onClick={() => void saveTerms(s.id)}
+                            // Saving an untouched row posts a no-op and reports a save
+                            // that did not happen.
+                            disabled={busy || savingRow === s.id || !dirty}
+                          >
+                            {savingRow === s.id ? "در حال ذخیره…" : "ذخیره"}
+                          </SecondaryButton>
+                        )}
+                        {dirty ? <span className="text-xs text-amber-700 dark:text-amber-300">ذخیره‌نشده</span> : null}
+                      </div>
+                      <TermHistory staffId={s.id} version={termVersion} />
+                    </li>
+                  );
+                })}
+              </ul>
 
-          {/* The month's wage bill at a glance: how many people carry a wage, and
-              the sum a «ثبت تعهد» would post today. */}
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/20 bg-amber-50/60 px-4 py-3 dark:bg-amber-500/10">
-            <span className="text-sm text-muted-foreground">
-              {toPersianDigits(payableStaff.length)} نفر از {toPersianDigits(staff.length)} کارمند حقوق تعیین‌شده دارند
-            </span>
-            <span className="text-sm font-semibold tabular-nums text-foreground">
-              جمع حقوق ماهانه: {money.format(monthlyWageBill)}
-            </span>
-          </div>
-          {dirtyCount > 0 ? (
-            <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
-              {toPersianDigits(dirtyCount)} تغییر ذخیره‌نشده دارید؛ تا زمانی که «ذخیره» نزنید در تعهد حقوق اعمال نمی‌شود.
-            </p>
-          ) : null}
-          </>
-        )}
+              {/* The month's wage bill at a glance: how many people carry a wage, and
+                  the base-wage sum a «ثبت تعهد» would start from. */}
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/20 bg-amber-50/60 px-4 py-3 dark:bg-amber-500/10">
+                <span className="text-sm text-muted-foreground">
+                  {toPersianDigits(payableStaff.length)} نفر از {toPersianDigits(staff.length)} کارمند حقوق تعیین‌شده دارند
+                </span>
+                <span className="text-sm font-semibold tabular-nums text-foreground">
+                  جمع حقوق پایه ماهانه: {money.formatText(monthlyWageBill)}
+                </span>
+              </div>
+              {dirtyCount > 0 ? (
+                <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                  {toPersianDigits(dirtyCount)} تغییر ذخیره‌نشده دارید؛ تا زمانی که «ذخیره» نزنید در تعهد حقوق اعمال نمی‌شود.
+                </p>
+              ) : null}
+            </>
+          )}
         </div>
       </section>
 
-      <section aria-labelledby="payroll-accrual-heading" className={cardClass}>
-        <header className="border-b border-border/80 px-4 py-4 sm:px-5">
-          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">ثبت دوره</p>
-          <h2 id="payroll-accrual-heading" className="mt-1 text-base font-semibold text-foreground">تعهد حقوق و دستمزد جدید</h2>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">ثبت تعهد، همان گردش سندداری موجود را اجرا می‌کند.</p>
-        </header>
-        <form onSubmit={accrue} className="grid gap-4 p-4 sm:p-5 md:grid-cols-[minmax(14rem,1fr)_12rem_auto] md:items-end">
-          <div className="block text-sm font-medium">
-            <label htmlFor={periodFieldId} className="mb-1.5 block text-xs text-muted-foreground">دوره</label>
-            <input
-              id={periodFieldId}
-              className={inputClass}
-              value={periodLabel}
-              onChange={(e) => setPeriodLabel(e.target.value)}
-              placeholder="مثلاً مرداد ۱۴۰۴"
-              maxLength={PERIOD_LABEL_MAX}
-              required
-            />
-          </div>
-          <div className="block text-sm font-medium">
-            {/*
-              * The picker is a button + popover, not an <input>, so wrapping it
-              * in a <label> gave it no accessible name at all. A real <label>
-              * beside it plus the picker's own aria-label is what names it.
-              */}
-            <span className="mb-1.5 block text-xs text-muted-foreground" id={accrualFieldId}>
-              تاریخ تعهد <span className="font-normal">(اختیاری)</span>
-            </span>
-            <JalaliDatePicker
-              value={accrualDate}
-              onChange={setAccrualDate}
-              placeholder="امروز"
-              labelledBy={accrualFieldId}
-            />
-          </div>
-          <div className="min-w-40">
-            <PrimaryButton disabled={busy || !periodLabel.trim() || payableStaff.length === 0}>
-              {busy ? "در حال ثبت…" : "ثبت تعهد"}
-            </PrimaryButton>
-          </div>
-          {/* A preview of exactly what the accrual will post — the payable staff
-              and the total — so «ثبت تعهد» never surprises. */}
-          <div className="md:col-span-3">
-            {payableStaff.length === 0 ? (
-              <EmptyState>هیچ کارمندی حقوق تعیین‌شده ندارد؛ ابتدا در بخش بالا حقوق ماهانه را وارد کنید.</EmptyState>
-            ) : (
-              <div className="rounded-xl border border-border/80 bg-muted/60 p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    این تعهد ثبت خواهد شد ({toPersianDigits(payableStaff.length)} نفر)
-                  </span>
-                  <span className="text-sm font-semibold tabular-nums text-foreground">{money.format(monthlyWageBill)}</span>
-                </div>
-                <ul className="mt-2 grid gap-1.5 sm:grid-cols-2">
-                  {payableStaff.map((s) => (
-                    <li key={s.id} className="flex items-center justify-between gap-3 text-sm">
-                      <span className="min-w-0 truncate text-muted-foreground" title={s.fullName}>{s.fullName}</span>
-                      <span className="shrink-0 tabular-nums text-foreground">{money.format(s.monthlyWage ?? 0)}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-        </form>
-      </section>
+      <PayrollAdvancesPanel
+        staff={staff}
+        advances={advances}
+        paymentAccounts={paymentAccounts}
+        readOnly={readOnly}
+        busy={busy}
+        workingId={rowBusy}
+        onRecord={recordAdvance}
+        onVoid={voidAdvance}
+        onError={setLocalError}
+      />
+
+      {readOnly ? null : (
+        <PayrollAccrualPanel
+          staff={staff}
+          settings={settings}
+          commission={overview?.commission ?? null}
+          unsettledCommission={unsettledCommission}
+          today={today}
+          period={period}
+          onPeriodChange={(year, month) => setPeriod({ year, month })}
+          accrualDate={accrualDate}
+          onAccrualDateChange={setAccrualDate}
+          includeCommission={includeCommission}
+          onIncludeCommissionChange={setIncludeCommission}
+          busy={busy}
+          accruing={accruing}
+          onAccrue={accrue}
+          onError={setLocalError}
+        />
+      )}
 
       <section aria-labelledby="payroll-history-heading" className={cardClass}>
         <header className="border-b border-border/80 px-4 py-4 sm:px-5">
@@ -567,96 +696,57 @@ export function PayrollSection({ busy, run, refreshKey }: { busy: boolean; run: 
           <h2 id="payroll-history-heading" className="mt-1 text-base font-semibold text-foreground">تاریخچه حقوق و دستمزد</h2>
         </header>
 
-        <div className="p-4 sm:p-5">
-        {runs.length === 0 ? (
-          <EmptyState>هنوز تعهدی ثبت نشده است.</EmptyState>
-        ) : (
-          <ul className="space-y-3">
-            {runs.map((r) => {
-              const status = STATUS_TONES[r.status] ?? { label: r.status, tone: "neutral" as const };
-              const rowWorking = rowBusy === r.id;
-              return (
-              <li key={r.id} className="rounded-xl border border-border/80 bg-muted/60 p-4">
-                <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-3">
-                  <div className="min-w-0">
-                    <h3 className="break-words font-semibold text-foreground">{r.periodLabel}</h3>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      تاریخ تعهد: {jalaliOrDash(r.accrualDate)}
-                      {r.status === "paid" && r.paidDate ? ` — پرداخت: ${jalaliOrDash(r.paidDate)}` : ""}
-                      {r.status === "voided" && r.voidedDate ? ` — ابطال: ${jalaliOrDash(r.voidedDate)}` : ""}
-                    </p>
-                    {r.createdByName ? (
-                      <p className="mt-0.5 text-xs text-muted-foreground">ثبت توسط: {r.createdByName}</p>
-                    ) : null}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className={"font-bold tabular-nums " + (r.status === "voided" ? "text-muted-foreground line-through" : "text-foreground")}>
-                      {money.format(r.totalAmount)}
-                    </span>
-                    <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
-                  </div>
-                </div>
+        <div className="space-y-4 p-4 sm:p-5">
+          {/* Server-side filters: the list below is a page of the history, newest first. */}
+          <div className="flex flex-wrap items-end gap-3">
+            <FilterChipRow label="فیلتر وضعیت">
+              {([["", "همه"], ["accrued", STATUS_TONES.accrued.label], ["paid", STATUS_TONES.paid.label], ["voided", STATUS_TONES.voided.label]] as const).map(
+                ([value, label]) => (
+                  <FilterChip key={value || "all"} selected={filters.status === value} onClick={() => setFilters((f) => ({ ...f, status: value }))}>
+                    {label}
+                  </FilterChip>
+                ),
+              )}
+            </FilterChipRow>
+            <div className="block min-w-40 text-sm font-medium">
+              <span className="mb-1.5 block text-xs text-muted-foreground" id={fromFieldId}>از تاریخ تعهد</span>
+              <JalaliDatePicker value={filters.from} onChange={(from) => setFilters((f) => ({ ...f, from }))} placeholder="ابتدا" labelledBy={fromFieldId} />
+            </div>
+            <div className="block min-w-40 text-sm font-medium">
+              <span className="mb-1.5 block text-xs text-muted-foreground" id={toFieldId}>تا تاریخ تعهد</span>
+              <JalaliDatePicker value={filters.to} onChange={(to) => setFilters((f) => ({ ...f, to }))} placeholder="امروز" labelledBy={toFieldId} />
+            </div>
+            {hasFilters ? (
+              <SecondaryButton onClick={() => setFilters({ status: "", from: "", to: "" })}>پاک کردن فیلترها</SecondaryButton>
+            ) : null}
+          </div>
 
-                <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                  {r.lines.map((l, i) => (
-                    <div key={l.userId ?? `line-${i}`} className="flex items-center justify-between gap-3 rounded-lg bg-muted/60 px-3 py-2.5 text-sm">
-                      {/* A line whose user was deleted keeps its amount; name it
-                          rather than showing a bare dash. */}
-                      <span className="min-w-0 truncate text-muted-foreground" title={l.fullName ?? undefined}>
-                        {l.fullName ?? "عضو حذف‌شده"}
-                      </span>
-                      <span className="shrink-0 font-semibold tabular-nums text-foreground">{money.format(l.amount)}</span>
-                    </div>
-                  ))}
-                </div>
+          {runs.length === 0 ? (
+            <EmptyState>{hasFilters ? "تعهدی با این فیلترها یافت نشد." : "هنوز تعهدی ثبت نشده است."}</EmptyState>
+          ) : (
+            <ul className="space-y-3" aria-busy={historyBusy}>
+              {runs.map((r) => (
+                <PayrollRunItem
+                  key={r.id}
+                  run={r}
+                  canManage={!readOnly}
+                  busy={busy}
+                  working={rowBusy === r.id}
+                  paymentAccounts={paymentAccounts}
+                  onPay={pay}
+                  onVoid={setVoidTarget}
+                />
+              ))}
+            </ul>
+          )}
 
-                {r.status === "accrued" ? (
-                  <div className="mt-4 grid gap-3 border-t border-border pt-3 sm:grid-cols-[minmax(0,12rem)_minmax(0,14rem)_auto] sm:items-end">
-                    <label className="block text-sm font-medium">
-                      <span className="mb-1.5 block text-xs text-muted-foreground">پرداخت از</span>
-                      <SearchableSelect
-                        value={payMethod[r.id] ?? "cash"}
-                        onChange={(value) => setPayMethod((prev) => ({ ...prev, [r.id]: value as "cash" | "bank" }))}
-                        ariaLabel={`حساب پرداخت حقوق دوره ${r.periodLabel}`}
-                        options={[
-                          { value: "cash", label: "صندوق (نقدی)" },
-                          { value: "bank", label: "بانکی" },
-                        ]}
-                      />
-                    </label>
-                    <SecondaryButton onClick={() => pay(r.id)} disabled={busy || rowWorking}>
-                      {rowWorking ? "در حال ثبت…" : "ثبت پرداخت حقوق"}
-                    </SecondaryButton>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      onClick={() => setVoidTarget(r)}
-                      disabled={busy || rowWorking}
-                      aria-label={`ابطال تعهد دوره ${r.periodLabel}`}
-                    >
-                      ابطال تعهد
-                    </Button>
-                  </div>
-                ) : null}
-
-                {r.status === "paid" ? (
-                  <div className="mt-4 flex justify-end border-t border-border pt-3">
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      onClick={() => setVoidTarget(r)}
-                      disabled={busy || rowWorking}
-                      aria-label={`ابطال تعهد و پرداخت دوره ${r.periodLabel}`}
-                    >
-                      {rowWorking ? "در حال ابطال…" : "ابطال (برگشت تعهد و پرداخت)"}
-                    </Button>
-                  </div>
-                ) : null}
-              </li>
-              );
-            })}
-          </ul>
-        )}
+          {nextCursor ? (
+            <div className="flex justify-center">
+              <SecondaryButton onClick={() => void loadRuns(filters, nextCursor)} disabled={historyBusy}>
+                {historyBusy ? "در حال بارگذاری…" : "نمایش موارد قدیمی‌تر"}
+              </SecondaryButton>
+            </div>
+          ) : null}
         </div>
       </section>
 
@@ -664,7 +754,7 @@ export function PayrollSection({ busy, run, refreshKey }: { busy: boolean; run: 
         * «ابطال» asks in a real dialog rather than `window.confirm`: the native
         * one is unstyled, LTR, unreadable on a phone, and shows the raw string
         * with no emphasis on the amount being reversed. This one names the
-        * period, the amount and exactly which entries will be mirrored.
+        * month, the amount and exactly which entries will be mirrored.
         */}
       <Dialog open={voidTarget !== null} onOpenChange={(open) => !open && setVoidTarget(null)}>
         <DialogContent dir="rtl" className="sm:max-w-md">
@@ -673,11 +763,15 @@ export function PayrollSection({ busy, run, refreshKey }: { busy: boolean; run: 
             <DialogDescription className="leading-6">
               {voidTarget ? (
                 <>
-                  دوره «{voidTarget.periodLabel}» به مبلغ{" "}
-                  <span className="font-semibold text-foreground">{money.format(voidTarget.totalAmount)}</span>{" "}
+                  «{voidTarget.periodLabel}» با ناخالص{" "}
+                  <span className="font-semibold text-foreground">{money.formatText(voidTarget.totalAmount)}</span>{" "}
                   {voidTarget.status === "paid"
                     ? "ابطال می‌شود؛ هم سند تعهد و هم سند پرداخت با اسناد معکوس (به تاریخ امروز) برگشت می‌خورند."
                     : "ابطال می‌شود؛ سند تعهد با یک سند معکوس (به تاریخ امروز) برگشت می‌خورد."}{" "}
+                  مساعده‌ای که در این لیست کسر شده دوباره باز می‌شود.{" "}
+                  {voidTarget.commissionTotal !== "0"
+                    ? "پورسانتِ واردشده در این لیست دوباره تسویه‌نشده می‌شود و در لیست بعدی قرار می‌گیرد. "
+                    : ""}
                   این کار قابل بازگشت نیست.
                 </>
               ) : null}
@@ -693,6 +787,38 @@ export function PayrollSection({ busy, run, refreshKey }: { busy: boolean; run: 
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/*
+        * A month that already has a standing run is refused by the *server*; this
+        * dialog only explains it. It replaces the native `window.confirm` that used
+        * to ask «تعهد دیگری ثبت شود؟» — which let the accountant say yes, and which
+        * no stale tab, retry or direct API call ever saw.
+        */}
+      <Dialog open={duplicate !== null} onOpenChange={(open) => !open && setDuplicate(null)}>
+        <DialogContent dir="rtl" className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>برای این ماه قبلاً لیست حقوق ثبت شده است</DialogTitle>
+            <DialogDescription className="leading-6">
+              {duplicate ? (
+                <>
+                  برای «{duplicate.periodLabel}» یک لیست حقوق در وضعیت «{STATUS_TONES[duplicate.status]?.label ?? duplicate.status}» وجود
+                  دارد و ثبت دوبارهٔ آن ممکن نیست. اگر آن لیست اشتباه است، ابتدا آن را در تاریخچه ابطال کنید و سپس دوباره ثبت کنید.
+                </>
+              ) : null}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:justify-start">
+            <Button type="button" onClick={() => setDuplicate(null)} autoFocus>
+              متوجه شدم
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Leaving with unsaved terms: stay, or discard and go — never silently. */}
+      <UnsavedChangesDialog guard={guard}>
+        {toPersianDigits(dirtyCount)} تغییر در حقوق یا مزایا ذخیره نشده است. اگر این صفحه را ترک کنید، این تغییرات از بین می‌روند.
+      </UnsavedChangesDialog>
     </div>
   );
 }

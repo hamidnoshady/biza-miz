@@ -8,7 +8,7 @@ import {
 } from "@/app/dashboard/page-chrome";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useEffect, useRef, useState } from "react";
-import { toPersianDigits } from "@/lib/digits";
+import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
@@ -18,6 +18,9 @@ import { Button } from "@/components/ui/button";
 import { FilterChip } from "@/app/dashboard/filters";
 import { fmtJalali, OverlayDialog } from "./ledger-ui";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
+import { MAX_BANK_REFERENCE_LENGTH, voucherAccountChoices, type VoucherAccountChoice } from "@/lib/payables-input";
+import Link from "next/link";
+import { accountingSectionHref } from "./accounting-routes";
 
 /**
  * «دریافت و پرداخت» — the voucher ledger slice. The reference software keeps
@@ -35,6 +38,19 @@ interface Voucher {
   amount: number;
   memo: string | null;
   partyName: string;
+  /** Audit F11 — the bank's tracking number, when one was recorded. */
+  bankReference: string | null;
+  /** Audit F11 — the cash/bank account named on the voucher; null = the method's default account. */
+  cashAccount: { code: string; name: string } | null;
+  locationName?: string | null;
+  reversed?: boolean;
+  reversalDate?: string | null;
+  reversalEntryId?: string | null;
+}
+
+/** «بانکی · بانک ملت» — the method, plus the account when the voucher named one. */
+function methodText(r: Voucher): string {
+  return r.cashAccount ? `${METHOD_LABELS[r.method]} · ${r.cashAccount.name}` : METHOD_LABELS[r.method];
 }
 
 type Side = "receipts" | "payments";
@@ -51,7 +67,15 @@ const METHOD_LABELS: Record<Voucher["method"], string> = {
  */
 const VISIBLE_ROWS = 100;
 
-export function ReceiptsPaymentsSection() {
+export function ReceiptsPaymentsSection({
+  canManageReceivables = false,
+  canManagePayables = false,
+  canReversePayments = false,
+}: {
+  canManageReceivables?: boolean;
+  canManagePayables?: boolean;
+  canReversePayments?: boolean;
+}) {
   const money = useMoney();
   const [side, setSide] = useState<Side>("receipts");
   const [q, setQ] = useState("");
@@ -60,6 +84,7 @@ export function ReceiptsPaymentsSection() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [reversingId, setReversingId] = useState<string | null>(null);
   /*
    * Responses race each other — a fast «علی» search easily outruns the slow
    * unfiltered listing it was typed over, and without the token the *older*
@@ -111,15 +136,17 @@ export function ReceiptsPaymentsSection() {
    */
   function downloadCsv() {
     if (!rows || rows.length === 0) return;
-    const head = ["تاریخ", "شخص", "شرح", "روش", `مبلغ (${money.unitLabel})`];
+    const head = ["تاریخ", "شخص", "شرح", "روش", "شماره پیگیری", `مبلغ (${money.unitLabel})`];
     const body = rows.map((r) => [
       fmtJalali(r.date),
       r.partyName,
       r.memo ?? "",
-      METHOD_LABELS[r.method],
+      methodText(r),
+      r.bankReference ?? "",
       String(money.toInput(r.amount)),
     ]);
-    const csv = [head, ...body].map((line) => line.map((cell) => `"${cell.replaceAll('"', '""')}"`).join(",")).join("\n");
+    // CRLF rows, like every other export: Excel on Windows mis-reads a bare LF.
+    const csv = `${[head, ...body].map((line) => line.map((cell) => `"${cell.replaceAll('"', '""')}"`).join(",")).join("\r\n")}\r\n`;
     const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -132,6 +159,22 @@ export function ReceiptsPaymentsSection() {
     a.click();
     a.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+
+  const canCreate = side === "receipts" ? canManageReceivables : canManagePayables;
+
+  async function reversePayment(row: Voucher) {
+    if (!canReversePayments || row.reversed || reversingId) return;
+    if (!window.confirm(`برگشت پرداخت ${row.partyName} به مبلغ ${money.format(row.amount)} ثبت شود؟ این کار سند اصلاحی تازه‌ای می‌سازد و قابل حذف نیست.`)) return;
+    setReversingId(row.id);
+    setError("");
+    const { ok, data } = await api<{ error?: string }>(`/api/ledger/ap/payments/${row.id}/reverse`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    setReversingId(null);
+    if (ok) setRefreshKey((k) => k + 1);
+    else setError(errorMessage(data.error));
   }
 
   const needle = q.trim();
@@ -176,10 +219,12 @@ export function ReceiptsPaymentsSection() {
               <DownloadIcon aria-hidden="true" className="size-4" />
               دانلود
             </button>
-            <Button onClick={() => setCreating(true)} className="min-h-10">
-              <PlusIcon aria-hidden="true" className="size-4" />
-              {side === "receipts" ? "ثبت دریافت" : "ثبت پرداخت"}
-            </Button>
+            {canCreate ? (
+              <Button onClick={() => setCreating(true)} className="min-h-10">
+                <PlusIcon aria-hidden="true" className="size-4" />
+                {side === "receipts" ? "ثبت دریافت" : "ثبت پرداخت"}
+              </Button>
+            ) : null}
           </div>
         </div>
 
@@ -201,8 +246,8 @@ export function ReceiptsPaymentsSection() {
           <input
             type="search"
             className={`${inputClass} h-11 ms-auto w-40 sm:w-56`}
-            placeholder="جست‌وجوی شخص یا شرح…"
-            aria-label="جست‌وجوی شخص یا شرح"
+            placeholder="جست‌وجوی شخص، شرح یا شماره پیگیری…"
+            aria-label="جست‌وجوی شخص، شرح یا شماره پیگیری"
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
@@ -240,18 +285,29 @@ export function ReceiptsPaymentsSection() {
                   <Th>شخص</Th>
                   <Th>شرح</Th>
                   <Th>روش</Th>
+                  <Th>شماره پیگیری</Th>
                   <Th>تاریخ</Th>
                   <Th>مبلغ</Th>
+                  {side === "payments" && canReversePayments ? <Th>اقدام</Th> : null}
                 </DataTableHead>
                 <DataTableBody>
                   {rows.slice(0, VISIBLE_ROWS).map((r, index) => (
                     <DataTableRow key={r.id}>
                       <Td muted>{toPersianDigits(index + 1)}</Td>
-                      <Td className="max-w-48 truncate font-medium" title={r.partyName}>{r.partyName}</Td>
+                      <Td className="max-w-48 truncate font-medium" title={r.partyName}>
+                        {r.partyName}
+                        {side === "payments" && r.locationName ? <span className="mt-1 block text-xs font-normal text-muted-foreground">شعبهٔ {r.locationName}</span> : null}
+                      </Td>
                       <Td muted className="max-w-64 truncate" title={r.memo ?? undefined}>{r.memo ?? "—"}</Td>
-                      <Td muted>{METHOD_LABELS[r.method]}</Td>
+                      <Td muted className="max-w-48 truncate" title={methodText(r)}>{methodText(r)}</Td>
+                      <Td muted nowrap dir="ltr">{r.bankReference ? toPersianDigits(r.bankReference) : "—"}</Td>
                       <Td nowrap muted>{fmtJalali(r.date)}</Td>
-                      <Td nowrap className="font-semibold">{money.format(r.amount)}</Td>
+                      <Td nowrap className="font-semibold">
+                        {money.format(r.amount)}
+                        {side === "payments" && r.reversed ? <span className="mt-1 block text-xs font-medium text-muted-foreground">برگشت‌خورده{r.reversalDate ? ` · ${fmtJalali(r.reversalDate)}` : ""}</span> : null}
+                        {side === "payments" && r.reversalEntryId ? <Link className="mt-1 block text-xs font-semibold text-primary underline-offset-4 hover:underline" href={`${accountingSectionHref("entries")}?entryId=${encodeURIComponent(r.reversalEntryId)}`}>سند برگشت</Link> : null}
+                      </Td>
+                      {side === "payments" && canReversePayments ? <Td>{r.reversed ? <span className="text-xs text-muted-foreground">برگشت‌خورده</span> : <SecondaryButton disabled={!!reversingId} onClick={() => void reversePayment(r)}>{reversingId === r.id ? "در حال ثبت…" : "برگشت پرداخت"}</SecondaryButton>}</Td> : null}
                     </DataTableRow>
                   ))}
                 </DataTableBody>
@@ -263,13 +319,18 @@ export function ReceiptsPaymentsSection() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <h3 className="truncate text-sm font-bold" title={r.partyName}>{r.partyName}</h3>
+                        {side === "payments" && r.locationName ? <p className="mt-1 text-xs text-muted-foreground">شعبهٔ {r.locationName}</p> : null}
                         <p className="mt-1 text-xs text-muted-foreground">{r.memo ?? (side === "receipts" ? "دریافت وجه" : "پرداخت وجه")}</p>
                       </div>
                       <span className="whitespace-nowrap font-bold">{money.format(r.amount)}</span>
                     </div>
                     <p className="mt-2 border-t border-border pt-2 text-xs text-muted-foreground">
-                      {fmtJalali(r.date)} · {METHOD_LABELS[r.method]}
+                      {fmtJalali(r.date)} · {methodText(r)}
+                      {r.bankReference ? ` · پیگیری ${toPersianDigits(r.bankReference)}` : ""}
                     </p>
+                    {side === "payments" && r.reversed ? <p className="mt-2 text-xs font-medium text-muted-foreground">برگشت‌خورده{r.reversalDate ? ` · ${fmtJalali(r.reversalDate)}` : ""}</p> : null}
+                    {side === "payments" && r.reversalEntryId ? <Link className="mt-2 inline-block text-xs font-semibold text-primary underline-offset-4 hover:underline" href={`${accountingSectionHref("entries")}?entryId=${encodeURIComponent(r.reversalEntryId)}`}>مشاهدهٔ سند برگشت</Link> : null}
+                    {side === "payments" && canReversePayments && !r.reversed ? <SecondaryButton className="mt-3 w-full" disabled={!!reversingId} onClick={() => void reversePayment(r)}>{reversingId === r.id ? "در حال ثبت…" : "برگشت پرداخت"}</SecondaryButton> : null}
                   </article>
                 ))}
               </div>
@@ -296,6 +357,7 @@ interface PartyOption {
   id: string;
   name: string;
   phone: string | null;
+  locationName?: string | null;
 }
 
 function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => void; onCreated: () => void }) {
@@ -306,10 +368,15 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
   const [partyId, setPartyId] = useState("");
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState<"cash" | "bank">("cash");
+  /** Audit F11 — "" = the method's default account, as before. */
+  const [cashAccountId, setCashAccountId] = useState("");
+  const [bankReference, setBankReference] = useState("");
+  const [accountChoices, setAccountChoices] = useState<VoucherAccountChoice[]>([]);
   const [date, setDate] = useState("");
   const [memo, setMemo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const requestKeyRef = useRef<{ intent: string; key: string } | null>(null);
 
   /*
    * `?scope=directory`, not the open-balance list. A voucher is not always a
@@ -325,7 +392,7 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
       side === "receipts" ? "/api/ledger/ar/customers?scope=directory" : "/api/ledger/ap/suppliers?scope=directory";
     api<{
       customers?: { customerId: string; customerName: string; customerPhone: string | null }[];
-      suppliers?: { supplierId: string; supplierName: string; supplierPhone: string | null }[];
+      suppliers?: { supplierId: string; supplierName: string; supplierPhone: string | null; locationName?: string | null }[];
     }>(url).then(({ ok, data }) => {
       if (cancelled) return;
       // `api()` resolves even when the network drops (as «network_error»), so
@@ -337,7 +404,7 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
       setParties(
         side === "receipts"
           ? (data.customers ?? []).map((c) => ({ id: c.customerId, name: c.customerName, phone: c.customerPhone }))
-          : (data.suppliers ?? []).map((s) => ({ id: s.supplierId, name: s.supplierName, phone: s.supplierPhone })),
+          : (data.suppliers ?? []).map((s) => ({ id: s.supplierId, name: s.supplierName, phone: s.supplierPhone, locationName: s.locationName })),
       );
       setPartyState("ready");
     });
@@ -345,6 +412,32 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
       cancelled = true;
     };
   }, [side, directoryKey]);
+
+  /*
+   * The cash and bank accounts of the chart, classified by the same rule the
+   * cash-flow statement uses. A failed load leaves only «حساب پیش‌فرض», which
+   * is exactly what the form did before it could name an account.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    api<{ accounts?: { id: string; code: string; name: string; type: "asset" | "liability" | "equity" | "revenue" | "expense"; parent_code: string | null }[] }>(
+      "/api/ledger/accounts",
+    ).then(({ ok, data }) => {
+      if (!cancelled && ok) setAccountChoices(voucherAccountChoices(data.accounts ?? []));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const methodAccounts = accountChoices.filter((a) => a.method === method);
+
+  function chooseMethod(next: "cash" | "bank") {
+    setMethod(next);
+    // An account belongs to one method; a reference number only to a bank transfer.
+    setCashAccountId("");
+    if (next === "cash") setBankReference("");
+  }
 
   async function submit() {
     if (!partyId) {
@@ -365,10 +458,36 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
     setBusy(true);
     setError("");
     const url = side === "receipts" ? "/api/ledger/ar/receipts" : "/api/ledger/ap/payments";
-    const body =
-      side === "receipts"
-        ? { customerId: partyId, amount: rial, method, memo: memo.trim() || undefined, receiptDate: date || undefined }
-        : { supplierId: partyId, amount: rial, method, memo: memo.trim() || undefined, paymentDate: date || undefined };
+    const memoValue = memo.trim() || undefined;
+    const bankReferenceValue = bankReference.trim() || undefined;
+    const common = {
+      amount: rial,
+      method,
+      memo: memoValue,
+      cashAccountId: cashAccountId || undefined,
+      bankReference: bankReferenceValue,
+    };
+    let body: Record<string, string | number | undefined>;
+    if (side === "receipts") {
+      body = { ...common, customerId: partyId, receiptDate: date || undefined };
+    } else {
+      // One request key belongs to one intended A/P transfer and survives a
+      // retry after an ambiguous network result. Any material edit rotates it.
+      const intent = JSON.stringify({
+        supplierId: partyId,
+        amount: rial,
+        method,
+        paymentDate: date || null,
+        memo: memoValue ?? null,
+        cashAccountId: cashAccountId || null,
+        bankReference: bankReferenceValue ? toLatinDigits(bankReferenceValue).trim() : null,
+      });
+      if (requestKeyRef.current?.intent !== intent) {
+        const key = globalThis.crypto?.randomUUID?.() ?? `ap-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        requestKeyRef.current = { intent, key };
+      }
+      body = { ...common, supplierId: partyId, paymentDate: date || undefined, clientRequestId: requestKeyRef.current.key };
+    }
     const { ok, data } = await api<{ error?: string }>(url, { method: "POST", body: JSON.stringify(body) });
     setBusy(false);
     if (ok) onCreated();
@@ -418,8 +537,8 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
                     // Two customers can share a name; the phone number is how
                     // the accountant tells them apart before money moves
                     // against the wrong person's account.
-                    label: p.phone ? `${p.name} · ${toPersianDigits(p.phone)}` : p.name,
-                    searchString: `${p.name} ${p.phone ?? ""}`,
+                    label: [p.name, p.locationName ? `شعبهٔ ${p.locationName}` : null, p.phone ? toPersianDigits(p.phone) : null].filter(Boolean).join(" · "),
+                    searchString: `${p.name} ${p.locationName ?? ""} ${p.phone ?? ""}`,
                   })),
                 ]}
               />
@@ -442,10 +561,40 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
             <div className="mb-4">
               <p className="mb-1 text-sm font-medium text-foreground">روش</p>
               <div className="flex gap-2">
-                <FilterChip dense selected={method === "cash"} onClick={() => setMethod("cash")}>نقدی</FilterChip>
-                <FilterChip dense selected={method === "bank"} onClick={() => setMethod("bank")}>بانکی</FilterChip>
+                <FilterChip dense selected={method === "cash"} onClick={() => chooseMethod("cash")}>نقدی</FilterChip>
+                <FilterChip dense selected={method === "bank"} onClick={() => chooseMethod("bank")}>بانکی</FilterChip>
               </div>
             </div>
+            <Field
+              label={side === "receipts" ? (method === "cash" ? "صندوق دریافت‌کننده" : "حساب بانکی دریافت‌کننده") : method === "cash" ? "صندوق پرداخت‌کننده" : "حساب بانکی پرداخت‌کننده"}
+              hint="اختیاری"
+            >
+              <SearchableSelect
+                value={cashAccountId}
+                onChange={setCashAccountId}
+                ariaLabel="انتخاب حساب صندوق یا بانک"
+                options={[
+                  { value: "", label: method === "cash" ? "صندوق پیش‌فرض" : "حساب پیش‌فرض بانکی" },
+                  ...methodAccounts.map((a) => ({
+                    value: a.id,
+                    label: `${toPersianDigits(a.code)} ${a.name}`,
+                    searchString: `${a.code} ${a.name}`,
+                  })),
+                ]}
+              />
+            </Field>
+            {method === "bank" ? (
+              <Field label="شماره پیگیری بانک (اختیاری)">
+                <input
+                  className={inputClass}
+                  dir="ltr"
+                  maxLength={MAX_BANK_REFERENCE_LENGTH}
+                  value={bankReference}
+                  onChange={(e) => setBankReference(e.target.value)}
+                  aria-label="شماره پیگیری بانک"
+                />
+              </Field>
+            ) : null}
             <Field label="تاریخ (اختیاری)">
               <JalaliDatePicker value={date} onChange={setDate} className={inputClass} ariaLabel="تاریخ" />
             </Field>

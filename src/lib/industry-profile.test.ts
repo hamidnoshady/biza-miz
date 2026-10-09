@@ -3,7 +3,6 @@ import { ENABLED_INDUSTRIES, INDUSTRIES, INDUSTRY_LABELS, isIndustry, type Indus
 import {
   defaultGoldMakingChargePercent,
   defaultGoldProfitPercent,
-  defaultRetailVatPercent,
   hasModule,
   industryProfile,
   labelFor,
@@ -317,6 +316,13 @@ describe("Phase 35 module keys", () => {
 });
 
 describe("moduleForApiPath", () => {
+  it("directly gates online-platform settings by the F&B delivery module", () => {
+    const module = moduleForApiPath("/api/settings/online-platforms");
+    expect(module).toBe("delivery");
+    expect(module && hasModule("food_service", module)).toBe(true);
+    expect(module && hasModule("jewelry", module)).toBe(false);
+  });
+
   it("maps a route and everything under it", () => {
     expect(moduleForApiPath("/api/tables")).toBe("tables");
     expect(moduleForApiPath("/api/tables/abc/close")).toBe("tables");
@@ -354,6 +360,10 @@ describe("moduleForApiPath", () => {
     expect(moduleForApiPath("/api/ledger/entries")).toBe("ledger");
     expect(moduleForApiPath("/api/reports/sales")).toBe("reports");
     expect(moduleForApiPath("/api/settings/pricing")).toBe("menu");
+    expect(moduleForApiPath("/api/settings/online-platforms")).toBe("delivery");
+    expect(moduleForApiPath("/api/settings/online-platforms/snapfood")).toBe("delivery");
+    expect(hasModule("food_service", "delivery")).toBe(true);
+    expect(hasModule("jewelry", "delivery")).toBe(false);
     expect(moduleForApiPath("/api/settings/business")).toBe("settings");
     expect(moduleForApiPath("/api/dashboard/overview")).toBe("dashboard");
     expect(moduleForApiPath("/api/waiter/board")).toBe("waiter");
@@ -394,27 +404,25 @@ describe("moduleForPagePath", () => {
 });
 
 describe("retail POS pricing defaults — one place, not hardcoded in the screen", () => {
-  it("gives jewelry its configured اجرت/سود/مالیات defaults, not a literal in the POS component", () => {
+  it("gives jewelry its configured اجرت/سود defaults, not a literal in the POS component", () => {
     expect(defaultGoldMakingChargePercent("jewelry")).toBe(
       INDUSTRY_PROFILES.jewelry.retailDefaults?.goldMakingChargePercent,
     );
     expect(defaultGoldProfitPercent("jewelry")).toBe(INDUSTRY_PROFILES.jewelry.retailDefaults?.goldProfitPercent);
-    expect(defaultRetailVatPercent("jewelry")).toBe(INDUSTRY_PROFILES.jewelry.retailDefaults?.vatPercent);
   });
 
-  it("falls back to 9% VAT and 7%/7% gold defaults for an industry with no retailDefaults opinion", () => {
+  it("falls back to 7%/7% gold defaults for an industry with no retailDefaults opinion", () => {
     const noOpinion = Object.entries(INDUSTRY_PROFILES).find(([, p]) => !p.retailDefaults)?.[0] as
       | Industry
       | undefined;
     if (!noOpinion) return; // every industry has opted in — nothing to assert
-    expect(defaultRetailVatPercent(noOpinion)).toBe(9);
     expect(defaultGoldMakingChargePercent(noOpinion)).toBe(7);
     expect(defaultGoldProfitPercent(noOpinion)).toBe(7);
   });
 
-  it("reads a per-industry VAT default for every retail industry without throwing", () => {
+  it("assumes no VAT rate per trade — VAT is the business's own setting (audit F05)", () => {
     for (const industry of INDUSTRIES) {
-      expect(defaultRetailVatPercent(industry)).toBeGreaterThanOrEqual(0);
+      expect(INDUSTRY_PROFILES[industry].retailDefaults ?? {}).not.toHaveProperty("vatPercent");
     }
   });
 });

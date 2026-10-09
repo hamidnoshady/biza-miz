@@ -16,7 +16,7 @@
 import { getPool } from "./db";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
-import { FiscalPeriodError } from "./fiscal-periods-service";
+import { FiscalPeriodError, readUncoveredEntries } from "./fiscal-periods-service";
 import { FISCAL_PERIOD_COUNT, fiscalPeriodLockErrorCode } from "./fiscal-periods";
 import type { JournalLine } from "./ledger";
 import { isUuid } from "./uuid";
@@ -82,6 +82,16 @@ export async function closeFiscalYear(
     }
     if (periods.some((p) => p.status !== "soft_closed")) {
       throw new FiscalPeriodError("periods_not_ready", 409);
+    }
+
+    // Audit F08: an entry dated on or before this year's end that no period
+    // covers would keep its revenue/expense out of the closing entry, with no
+    // period to lock it afterwards. Refuse the close and say which dates —
+    // the entries themselves are never rejected, moved or re-dated here; the
+    // owner covers them by defining the fiscal year(s) they belong to.
+    const uncovered = await readUncoveredEntries(businessId, { upTo: year.ends_on, client });
+    if (uncovered.count > 0) {
+      throw new FiscalPeriodError("uncovered_entries_before_close", 409, { uncovered });
     }
 
     const { rows: totals } = await client.query<{

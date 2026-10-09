@@ -372,3 +372,22 @@ html[data-cloud-embed] [data-workspace-sidebar] {
 .dark .ai-chat-scroll::-webkit-scrollbar-thumb:hover {
   background: rgb(255 255 255 / 0.3);
 }
+
+/* ---------------------------------------------------------------------------
+ * Print sheets (issue #820): reports that own a paper presentation portal a
+ * dedicated sheet onto <body> under `#print-sheet-root`. On paper the app
+ * chrome disappears and only the sheet is laid out, so a printed trial balance
+ * is the report — not the sidebar, rail and filter panel around it. On screen
+ * this rule matches nothing (it lives inside @media print), and the sheet's own
+ * module keeps it `display: none` there.
+ * ------------------------------------------------------------------------- */
+@media print {
+  @page {
+    size: A4 landscape;
+    margin: 12mm;
+  }
+
+  body > *:not(#print-sheet-root) {
+    display: none !important;
+  }
+}

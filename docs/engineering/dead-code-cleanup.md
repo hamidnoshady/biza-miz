@@ -278,13 +278,21 @@ what may still be legitimately consumed. The difference this time is that most o
 what was removed was not unreachable — it was reachable and wrong, because it put
 a tenant-configurable surface on something the issue makes Superadmin-only.
 
+> **Current ownership correction (issue #757):** this addendum records what the #812 cleanup
+> removed; it is not an endorsement of LiteLLM features as replacements. LiteLLM owns provider
+> deployments/routing/fallbacks, not the app's prompts or MCP connector. The app no longer has a
+> local semantic-cache/pgvector stack, but optional managed-knowledge retrieval uses a separately
+> configured external endpoint; do not assume it is a LiteLLM-native feature. Current map:
+> [AI subsystem architecture](../ai-subsystem-architecture.md) and
+> [Phase 39](../phases/Phase-39-LiteLLM-Only-AI-Platform.md).
+
 ## Removed, with the evidence
 
 | What | Why it could go |
 | --- | --- |
-| `src/lib/ai-answer-cache.ts`, `ai_answer_cache` | A semantic answer cache the application owned. A second cache the app runs is a second source of truth about what a tenant was told, and it is the one nobody invalidates. The shared semantic cache is LiteLLM's. |
-| `src/lib/ai-rag.ts`, `ai-rag-indexer.ts`, `ai-embeddings.ts`, `ai_embeddings`, `api/ai/rag/reindex` | The application's own pgvector RAG stack. Embeddings and RAG infrastructure are the LiteLLM layer's; a tenant reindex control is a tenant operating infrastructure. |
-| `src/lib/ai-knowledge-service.ts`, `ai-knowledge-shared.ts`, `api/ai/knowledge`, `(app)/ai/knowledge/knowledge-manager.tsx` | The tenant knowledge manager. Knowledge is tenant-**isolated** and infrastructure-owned; there is no tenant surface for feeding it. |
+| `src/lib/ai-answer-cache.ts`, `ai_answer_cache` | The app-owned semantic answer cache was retired. This means no local app cache; it does not mean the app delegates its cache policy to LiteLLM. |
+| `src/lib/ai-rag.ts`, `ai-rag-indexer.ts`, `ai-embeddings.ts`, `ai_embeddings`, `api/ai/rag/reindex` | The application's pgvector/indexing stack was retired. The app may call an optional external managed-knowledge endpoint; LiteLLM's native RAG ownership is not assumed. |
+| `src/lib/ai-knowledge-service.ts`, `ai-knowledge-shared.ts`, `api/ai/knowledge`, `(app)/ai/knowledge/knowledge-manager.tsx` | The tenant knowledge manager was removed. The app's remaining managed-knowledge client sends a server-resolved tenant scope to the configured external endpoint; there is no tenant ingestion/reindex surface. |
 | `src/lib/ai-custom-agents.ts`, `ai-custom-agents-service.ts`, `api/ai/agents/**`, `components/ai/ai-agent-selector.tsx`, `(app)/ai/**` (agents, automations, usage), `ai_custom_agents`, `ai_projects.default_agent_id` | The tenant agent builder. Two things called "Agent", one of them switchable by a business, is how a control-plane boundary gets argued away. |
 | `src/lib/ai-reasoning.ts` (`AI_REASONING_MODES`, `AI_MODE_DIRECTIVES`, `AiReasoningMode`) | Superseded by the three runtime modes. A "thinking" mode alongside auto/instant is a fourth mode nobody configured. |
 | `src/lib/ai-prompts.ts` + its test (`PROMPT_FRAGMENTS`, `fragmentsForTurn`, `assembleFromFragments`) | The dead fragment engine — only its own test imported it. Two prompt builders is a prompt you cannot predict. |

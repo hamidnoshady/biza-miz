@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { businessToday } from "@/lib/business-day-service";
+import { businessDayContext } from "@/lib/business-day-service";
 import { createActivity, listActivities } from "@/lib/crm-service";
 import {
   ACTIVITY_ASSIGNEE_MAX,
@@ -41,7 +41,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
 
   const search = request.nextUrl.searchParams;
-  const today = await businessToday(session.businessId);
+  // The whole day, not just its date: the row badges, the «امروز»/«عقب‌افتاده»
+  // bounds and the queue cards all have to mean the same day, and a day is only
+  // an instant once the branch's zone and day start are known.
+  const day = await businessDayContext(session.businessId);
+  const today = day.businessDate;
   const rawLimit = Number(search.get("limit"));
 
   // The list's own vocabulary, parsed by the list's own module
@@ -63,7 +67,12 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   // reading of one document. What stays here is what is not translation:
   // permissions, `limit`, and the legacy `customerId`/`dealId`/`caseId`/
   // `assignedTo` parameters other screens pass.
-  const options = activityViewListOptions(filters, { viewerId: session.sub, today });
+  const options = activityViewListOptions(filters, {
+    viewerId: session.sub,
+    today,
+    timeZone: day.timeZone,
+    startMinutes: day.startMinutes,
+  });
   const activities = await listActivities(session.businessId, {
     ...options,
     customerId: search.get("customerId") ?? undefined,

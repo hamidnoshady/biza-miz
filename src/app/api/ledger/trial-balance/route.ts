@@ -1,16 +1,45 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import { isValidIsoDate } from "@/lib/iso-date";
 import { getTrialBalance } from "@/lib/ledger-reports-service";
 
 /**
- * Trial balance. The query lives in `ledger-reports-service.ts` — shared with
- * the accounting dashboard, which is how the two can no longer disagree about
- * which accounts count (see that module's `ARCHIVED_WITH_POSTINGS` note).
+ * Period-scoped trial balance. A caller must name either an inclusive custom
+ * period (`dateFrom` + `dateTo`) or a compact closing date (`asOf`); an
+ * accidental no-filter request must never mean "all time".
  */
-export const GET = withTenantScope(async () => {
+export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
   if (error) return error;
 
-  return NextResponse.json(await getTrialBalance(session.businessId));
+  const params = request.nextUrl.searchParams;
+  const dateFrom = params.get("dateFrom");
+  const dateTo = params.get("dateTo");
+  const asOf = params.get("asOf");
+  const hasPeriod = dateFrom !== null || dateTo !== null;
+
+  if (
+    (asOf !== null && (hasPeriod || !isValidIsoDate(asOf))) ||
+    (asOf === null &&
+      (dateFrom === null || dateTo === null || !isValidIsoDate(dateFrom) || !isValidIsoDate(dateTo)))
+  ) {
+    return NextResponse.json({ error: "invalid_report_scope" }, { status: 400 });
+  }
+  if (dateFrom !== null && dateTo !== null && dateFrom > dateTo) {
+    return NextResponse.json({ error: "invalid_date_range" }, { status: 400 });
+  }
+
+  try {
+    const report = await getTrialBalance(
+      session.businessId,
+      asOf !== null ? { asOf } : { dateFrom: dateFrom!, dateTo: dateTo! },
+    );
+    return NextResponse.json(report);
+  } catch (cause) {
+    if (cause instanceof Error && cause.message === "invalid_trial_balance_scope") {
+      return NextResponse.json({ error: "invalid_report_scope" }, { status: 400 });
+    }
+    throw cause;
+  }
 });

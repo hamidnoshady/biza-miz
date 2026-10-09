@@ -32,10 +32,11 @@
  * buckets, the overlays — is here, once.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
+import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
 import { useMoney } from "@/components/money/money-context";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import {
@@ -57,6 +58,7 @@ import { DataTable, DataTableBody, DataTableFoot, DataTableHead, DataTableRow, T
 import { FilterChip } from "@/app/dashboard/filters";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { LedgerLoadFailed, OverlayDialog } from "./ledger-ui";
+import { accountingSectionHref } from "./accounting-routes";
 
 /** One row of the balances list — the common shape both sides map their payloads into. */
 export interface SubledgerPartyRow {
@@ -71,6 +73,8 @@ export interface SubledgerPartyRow {
    * unattributed bucket).
    */
   partyId: string | null;
+  /** Branch alias/location label (A/P); absent for business-wide A/R parties. */
+  locationName?: string | null;
 }
 
 /** One row of the aging report, in the buckets the reference software uses. */
@@ -84,6 +88,7 @@ export interface SubledgerAgingRow {
   total: number;
   /** The «اشخاص» record behind the row, when the payload carries one (null on A/P, whose aging names the alias only). */
   partyId: string | null;
+  locationName?: string | null;
 }
 
 /** The aging totals row — the buckets' sums, with no per-party fields. */
@@ -109,6 +114,22 @@ export interface SubledgerStatementLine {
   debit: number;
   credit: number;
   balance: number;
+  journalEntryId?: string;
+  journalLineId?: string;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  purchaseId?: string | null;
+  itemPurchaseId?: string | null;
+  supplierReturnId?: string | null;
+  itemSupplierReturnId?: string | null;
+  paymentVoucherId?: string | null;
+  chequeId?: string | null;
+  installmentPlanId?: string | null;
+  locationId?: string | null;
+  locationName?: string | null;
+  supplierLocationId?: string | null;
+  supplierLocationName?: string | null;
+  attributionStatus?: "attributed" | "automatic_missing" | "conditional_missing" | "intentional_unknown" | "unclassified";
 }
 
 /** The aging buckets, in display order — the same five columns on both sides. */
@@ -121,10 +142,10 @@ const AGING_COLUMNS: { key: keyof SubledgerAgingTotals; label: string }[] = [
 ];
 
 /** A party who paid ahead (advance or overpayment) has a *negative* balance; mark it, or it reads as debt. */
-function CreditBadge() {
+function CreditBadge({ label }: { label: string }) {
   return (
     <span className="ms-2 inline-block rounded-full bg-muted px-2.5 py-1 align-middle text-xs font-medium text-muted-foreground">
-      بستانکار
+      {label}
     </span>
   );
 }
@@ -134,6 +155,7 @@ interface StatementTarget {
   id: string;
   name: string;
   partyId: string | null;
+  locationName?: string | null;
 }
 
 /** What one side of the subledger is called, where it reads from, and how it posts. */
@@ -153,6 +175,8 @@ export interface SubledgerSide {
   /** The header's link into the one people directory, filtered to this side. */
   directoryHref: string;
   directoryLinkLabel: string;
+  /** Explanation shown when the unknown/unattributed bucket is present. */
+  unknownExplanation?: string;
 
   // — data ———————————————————————————————————————————————————————————————
   /** The sentinel id of the unattributed bucket — it gets no actions and no links. */
@@ -165,8 +189,12 @@ export interface SubledgerSide {
   readAging: (data: unknown) => SubledgerAgingReport;
 
   // — presentation switches ————————————————————————————————————————————
-  /** Whether a negative balance wears «بستانکار» (A/R: an advance must not read as debt). */
-  marksCreditBalances: boolean;
+  /** Explicit meaning of a negative row (A/R customer credit or A/P supplier advance). */
+  negativeBalanceLabel: string | null;
+  /** A negative A/P balance is an advance, so the action/modal wording changes with it. */
+  negativeSettleActionLabel?: string;
+  negativeTitlePrefix?: string;
+  negativeBalanceMessage?: string;
 
   // — the settle dialog («دریافت وجه» / «ثبت پرداخت») ————————————————————
   settle: {
@@ -225,7 +253,7 @@ function AgingAsOfPicker({
   );
 }
 
-export function SubledgerSection({ side }: { side: SubledgerSide }) {
+export function SubledgerSection({ side, canSettle = false }: { side: SubledgerSide; canSettle?: boolean }) {
   const money = useMoney();
   const [parties, setParties] = useState<SubledgerPartyRow[] | null>(null);
   const [partiesFailed, setPartiesFailed] = useState(false);
@@ -296,6 +324,11 @@ export function SubledgerSection({ side }: { side: SubledgerSide }) {
             <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">{side.eyebrow}</p>
             <h2 className="mt-1 text-base font-semibold text-foreground">{side.title}</h2>
             <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">{side.description}</p>
+            {side.unknownExplanation && parties.some((p) => p.id === side.unknownKey) ? (
+              <p className="mt-3 max-w-3xl rounded-xl border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs leading-6 text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+                {side.unknownExplanation}
+              </p>
+            ) : null}
           </div>
           <div className="flex min-w-full flex-col items-stretch gap-2 sm:min-w-0 sm:items-end">
             {/* The one directory, filtered to the people this screen is about. */}
@@ -331,10 +364,15 @@ export function SubledgerSection({ side }: { side: SubledgerSide }) {
                     <DataTableBody>
                       {parties.map((p) => (
                         <DataTableRow key={p.id}>
-                          <Td><button type="button" onClick={() => setStatementTarget(p)} className="font-semibold text-foreground hover:text-amber-700 hover:underline dark:hover:text-amber-300">{p.name}</button></Td>
+                          <Td>
+                            <div className="min-w-0">
+                              <button type="button" onClick={() => setStatementTarget(p)} className="font-semibold text-foreground hover:text-amber-700 hover:underline dark:hover:text-amber-300">{p.name}</button>
+                              {p.locationName ? <p className="mt-1 text-xs text-muted-foreground">شعبهٔ {p.locationName}</p> : null}
+                            </div>
+                          </Td>
                           <Td muted>{p.phone ? toPersianDigits(p.phone) : "—"}</Td>
-                          <Td numeric nowrap className="font-bold">{money.format(p.balance)}{p.balance < 0 && side.marksCreditBalances ? <CreditBadge /> : null}</Td>
-                          <Td>{p.id !== side.unknownKey ? <button type="button" onClick={() => setSettleTarget(p)} className="inline-flex min-h-9 items-center justify-center rounded-lg px-3 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-500/20">{side.settle.actionLabel}</button> : null}</Td>
+                          <Td numeric nowrap className="font-bold">{money.format(p.balance)}{p.balance < 0 && side.negativeBalanceLabel ? <CreditBadge label={side.negativeBalanceLabel} /> : null}</Td>
+                          <Td>{p.id !== side.unknownKey && canSettle ? <button type="button" onClick={() => setSettleTarget(p)} className="inline-flex min-h-9 items-center justify-center rounded-lg px-3 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-500/20">{p.balance < 0 ? side.negativeSettleActionLabel ?? side.settle.actionLabel : side.settle.actionLabel}</button> : null}</Td>
                         </DataTableRow>
                       ))}
                     </DataTableBody>
@@ -343,11 +381,15 @@ export function SubledgerSection({ side }: { side: SubledgerSide }) {
                     {parties.map((p) => (
                       <article key={p.id} className="rounded-xl border border-border/80 bg-muted/60 p-4">
                         <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0"><button type="button" onClick={() => setStatementTarget(p)} className="truncate text-right font-bold text-foreground hover:text-amber-700 dark:hover:text-amber-300">{p.name}</button><p className="mt-1 text-xs text-muted-foreground">{p.phone ? toPersianDigits(p.phone) : "شماره‌ای ثبت نشده"}</p></div>
+                          <div className="min-w-0">
+                            <button type="button" onClick={() => setStatementTarget(p)} className="truncate text-right font-bold text-foreground hover:text-amber-700 dark:hover:text-amber-300">{p.name}</button>
+                            <p className="mt-1 text-xs text-muted-foreground">{p.phone ? toPersianDigits(p.phone) : "شماره‌ای ثبت نشده"}</p>
+                            {p.locationName ? <p className="mt-1 text-xs font-medium text-muted-foreground">شعبهٔ {p.locationName}</p> : null}
+                          </div>
                           <span className="whitespace-nowrap font-bold text-foreground">{money.format(p.balance)}</span>
                         </div>
-                        {p.balance < 0 && side.marksCreditBalances ? <div className="mt-2"><CreditBadge /></div> : null}
-                        {p.id !== side.unknownKey ? <button type="button" onClick={() => setSettleTarget(p)} className="mt-3 min-h-11 w-full rounded-lg bg-amber-100 px-4 text-sm font-semibold text-amber-950 transition-colors hover:bg-amber-200 dark:bg-amber-500/20 dark:text-amber-200 dark:hover:bg-amber-500/30">{side.settle.actionLabel}</button> : null}
+                        {p.balance < 0 && side.negativeBalanceLabel ? <div className="mt-2"><CreditBadge label={side.negativeBalanceLabel} /></div> : null}
+                        {p.id !== side.unknownKey && canSettle ? <button type="button" onClick={() => setSettleTarget(p)} className="mt-3 min-h-11 w-full rounded-lg bg-amber-100 px-4 text-sm font-semibold text-amber-950 transition-colors hover:bg-amber-200 dark:bg-amber-500/20 dark:text-amber-200 dark:hover:bg-amber-500/30">{p.balance < 0 ? side.negativeSettleActionLabel ?? side.settle.actionLabel : side.settle.actionLabel}</button> : null}
                       </article>
                     ))}
                   </div>
@@ -373,7 +415,11 @@ export function SubledgerSection({ side }: { side: SubledgerSide }) {
                     <DataTableBody>
                       {aging.rows.map((r) => (
                         <DataTableRow key={r.id}>
-                          <Td><button type="button" onClick={() => setStatementTarget(r)} className="font-medium text-foreground hover:text-amber-700 hover:underline dark:hover:text-amber-300">{r.name}</button></Td>
+                          <Td>
+                            <button type="button" onClick={() => setStatementTarget(r)} className="font-medium text-foreground hover:text-amber-700 hover:underline dark:hover:text-amber-300">{r.name}</button>
+                            {r.locationName ? <p className="mt-1 text-xs text-muted-foreground">شعبهٔ {r.locationName}</p> : null}
+                            {r.total < 0 && side.negativeBalanceLabel ? <div className="mt-1"><CreditBadge label={side.negativeBalanceLabel} /></div> : null}
+                          </Td>
                           {AGING_COLUMNS.map((col) => (
                             <Td key={col.key} numeric nowrap className={col.key === "total" ? "font-bold" : undefined}>{r[col.key] ? money.format(r[col.key]) : "—"}</Td>
                           ))}
@@ -390,7 +436,7 @@ export function SubledgerSection({ side }: { side: SubledgerSide }) {
                   <div className="space-y-3 lg:hidden">
                     {aging.rows.map((r) => (
                       <article key={r.id} className="rounded-xl border border-border/80 bg-muted/60 p-4">
-                        <div className="flex items-start justify-between gap-3"><button type="button" onClick={() => setStatementTarget(r)} className="min-w-0 truncate text-sm font-semibold text-foreground hover:text-amber-700 dark:hover:text-amber-300">{r.name}</button><span className="shrink-0 whitespace-nowrap font-bold text-foreground">{money.format(r.total)}</span></div>
+                        <div className="flex items-start justify-between gap-3"><div className="min-w-0"><button type="button" onClick={() => setStatementTarget(r)} className="truncate text-right text-sm font-semibold text-foreground hover:text-amber-700 dark:hover:text-amber-300">{r.name}</button>{r.locationName ? <p className="mt-1 text-xs text-muted-foreground">شعبهٔ {r.locationName}</p> : null}{r.total < 0 && side.negativeBalanceLabel ? <div className="mt-1"><CreditBadge label={side.negativeBalanceLabel} /></div> : null}</div><span className="shrink-0 whitespace-nowrap font-bold text-foreground">{money.format(r.total)}</span></div>
                         <dl className="mt-3 grid grid-cols-2 gap-2 border-t border-border pt-3 text-sm">
                           {AGING_COLUMNS.filter((col) => col.key !== "total").map((col) => <div key={col.key}><dt className="text-xs text-muted-foreground">{col.label}</dt><dd className="mt-1 font-semibold text-foreground">{r[col.key] ? money.format(r[col.key]) : "—"}</dd></div>)}
                         </dl>
@@ -411,6 +457,7 @@ export function SubledgerSection({ side }: { side: SubledgerSide }) {
           id={statementTarget.id}
           name={statementTarget.name}
           partyId={statementTarget.partyId}
+          locationName={statementTarget.locationName}
           onClose={() => setStatementTarget(null)}
         />
       ) : null}
@@ -436,6 +483,7 @@ export function SubledgerStatementPanel({
   id,
   name,
   partyId,
+  locationName,
   onClose,
 }: {
   side: SubledgerSide;
@@ -444,6 +492,7 @@ export function SubledgerStatementPanel({
   name: string;
   /** The «اشخاص» record behind the row, when the caller knows it — the directory link's key. */
   partyId: string | null;
+  locationName?: string | null;
   onClose: () => void;
 }) {
   const money = useMoney();
@@ -473,6 +522,15 @@ export function SubledgerStatementPanel({
 
   const directoryHref = side.statement.directoryHrefFor(id, partyId);
   const typeLabel = (type: string) => side.statement.typeLabels[type] ?? type;
+  const attributionLabel = (status: SubledgerStatementLine["attributionStatus"]) => {
+    switch (status) {
+      case "intentional_unknown": return "استثنای آگاهانه؛ بدون طرف معین";
+      case "automatic_missing": return "خطای تطبیق؛ منبع خودکار بدون تأمین‌کننده";
+      case "conditional_missing": return "نیازمند بررسی؛ انتساب مشروط پیدا نشد";
+      case "unclassified": return "منبع هنوز در قرارداد انتساب دسته‌بندی نشده";
+      default: return null;
+    }
+  };
 
   return (
     <OverlayDialog
@@ -484,6 +542,7 @@ export function SubledgerStatementPanel({
         <div className="min-w-0">
           <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">جزئیات حساب</p>
           <h3 id={side.statement.headingId} className="mt-1 break-words text-lg font-bold">صورتحساب {name}</h3>
+          {locationName ? <p className="mt-1 text-xs text-muted-foreground">شعبهٔ {locationName}</p> : null}
           {/*
             The party's file in the one directory, with its accounting code,
             tax and balance. Hidden for unattributed lines, which belong to no
@@ -517,11 +576,12 @@ export function SubledgerStatementPanel({
           <DataTable
             caption={side.statement.caption}
             className="hidden lg:block"
-            tableClassName="min-w-[700px]"
+            tableClassName="min-w-[920px]"
           >
             <DataTableHead>
               <Th>تاریخ</Th>
               <Th>نوع</Th>
+              <Th>منبع و سند</Th>
               <Th>شرح</Th>
               <Th numeric>بدهکار</Th>
               <Th numeric>بستانکار</Th>
@@ -532,6 +592,14 @@ export function SubledgerStatementPanel({
                 <DataTableRow key={i}>
                   <Td muted nowrap>{toPersianDigits(formatJalali(l.date))}</Td>
                   <Td muted>{typeLabel(l.type)}</Td>
+                  <Td>
+                    <div className="space-y-1 text-xs">
+                      <p className="font-medium text-foreground">{ledgerSourceLabel(l.sourceType ?? l.type)}</p>
+                      {l.locationName || l.supplierLocationName ? <p className="text-muted-foreground">شعبه: {l.locationName ?? l.supplierLocationName}</p> : null}
+                      {attributionLabel(l.attributionStatus) ? <p className="text-amber-700 dark:text-amber-300">{attributionLabel(l.attributionStatus)}</p> : null}
+                      {l.journalEntryId ? <Link className="inline-block font-semibold text-primary underline-offset-4 hover:underline" href={`${accountingSectionHref("entries")}?entryId=${encodeURIComponent(l.journalEntryId)}`}>مشاهدهٔ سند روزنامه</Link> : <span className="text-muted-foreground">شناسهٔ سند موجود نیست</span>}
+                    </div>
+                  </Td>
                   <Td>{l.description}</Td>
                   <Td numeric nowrap>{l.debit ? money.format(l.debit) : "—"}</Td>
                   <Td numeric nowrap>{l.credit ? money.format(l.credit) : "—"}</Td>
@@ -550,6 +618,11 @@ export function SubledgerStatementPanel({
                     <h4 className="mt-1 break-words font-semibold text-foreground">{l.description}</h4>
                   </div>
                   <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">{typeLabel(l.type)}</span>
+                </div>
+                <div className="mt-3 space-y-1 border-t border-border pt-3 text-xs text-muted-foreground">
+                  <p>{ledgerSourceLabel(l.sourceType ?? l.type)}{l.locationName || l.supplierLocationName ? ` — شعبه: ${l.locationName ?? l.supplierLocationName}` : ""}</p>
+                  {attributionLabel(l.attributionStatus) ? <p className="font-medium text-amber-700 dark:text-amber-300">{attributionLabel(l.attributionStatus)}</p> : null}
+                  {l.journalEntryId ? <Link className="inline-block font-semibold text-primary underline-offset-4 hover:underline" href={`${accountingSectionHref("entries")}?entryId=${encodeURIComponent(l.journalEntryId)}`}>مشاهدهٔ سند روزنامه</Link> : null}
                 </div>
                 <dl className="mt-3 grid grid-cols-3 gap-2 border-t border-border pt-3 text-sm">
                   <div className="min-w-0">
@@ -596,6 +669,7 @@ function SubledgerSettleDialog({
   const [memo, setMemo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const requestKeyRef = useRef<{ intent: string; key: string } | null>(null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -612,6 +686,16 @@ function SubledgerSettleDialog({
     }
     setBusy(true);
     setError("");
+    const memoValue = memo.trim() || undefined;
+    let clientRequestId: string | undefined;
+    if (side.settle.idField === "supplierId") {
+      const intent = JSON.stringify({ supplierId: party.id, amount: rial, method, paymentDate: settleDate || null, memo: memoValue ?? null });
+      if (requestKeyRef.current?.intent !== intent) {
+        const key = globalThis.crypto?.randomUUID?.() ?? `ap-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        requestKeyRef.current = { intent, key };
+      }
+      clientRequestId = requestKeyRef.current.key;
+    }
     /*
      * The dialog posts for itself and shows the failure *here*. Routing it
      * through the workspace-level `run` would put the ErrorBox behind this
@@ -628,7 +712,8 @@ function SubledgerSettleDialog({
           amount: rial,
           method,
           [side.settle.dateField]: settleDate || undefined,
-          memo: memo.trim() || undefined,
+          memo: memoValue,
+          ...(clientRequestId ? { clientRequestId } : {}),
         }),
       });
     } catch {
@@ -654,11 +739,13 @@ function SubledgerSettleDialog({
       <form onSubmit={submit}>
         <header className="mb-4 border-b border-border pb-4">
           <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">{side.settle.eyebrow}</p>
-          <h3 id={side.settle.headingId} className="mt-1 text-lg font-bold">{side.settle.titlePrefix}{party.name}</h3>
+          <h3 id={side.settle.headingId} className="mt-1 text-lg font-bold">{party.balance < 0 ? side.negativeTitlePrefix ?? side.settle.titlePrefix : side.settle.titlePrefix}{party.name}</h3>
+          {party.locationName ? <p className="mt-1 text-xs text-muted-foreground">شعبهٔ {party.locationName}</p> : null}
           {/* The number this settlement is measured against; the pre-filled
               amount already references it, so keep it on screen after the
               user edits the field. */}
-          <p className="mt-1 text-sm text-muted-foreground">مانده فعلی: <span className="font-semibold text-foreground">{money.format(party.balance)}</span></p>
+          <p className="mt-1 text-sm text-muted-foreground">مانده فعلی: <span className="font-semibold text-foreground">{money.format(party.balance)}</span>{party.balance < 0 && side.negativeBalanceLabel ? <CreditBadge label={side.negativeBalanceLabel} /> : null}</p>
+          {party.balance < 0 && side.negativeBalanceMessage ? <p className="mt-2 rounded-lg border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">{side.negativeBalanceMessage}</p> : null}
         </header>
         <ErrorBox>{error}</ErrorBox>
         <Field label={`مبلغ (${money.unitLabel})`}>

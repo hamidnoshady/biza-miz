@@ -12,8 +12,8 @@
  * lives in push-service.ts.
  */
 
-/** The typed confirmation phrase that arms direct-SQL writes (the same pattern
- *  as DESTRUCTIVE_CONFIRMATION_PHRASE in the platform reset panel). */
+/** The typed confirmation phrase that arms direct-SQL writes (the same typed-
+ *  phrase pattern as `businessDestructivePhrase` in the platform danger zone). */
 export const HOLOO_DIRECT_SQL_CONFIRMATION_PHRASE = "holoo-direct-sql";
 
 export type ArmDirectSqlResult = { ok: true } | { ok: false; error: "confirmation_mismatch" };

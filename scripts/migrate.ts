@@ -5,6 +5,21 @@
  * transaction, and records applied files in schema_migrations.
  *
  * Usage: npm run db:migrate
+ *
+ * Issue #757's secret-column cutover is a two-step release. While a database
+ * still holds an AI gateway credential and AI_GATEWAY_SECRET_CUTOVER_VERIFIED
+ * is not "true", 0209 is deferred automatically (and always when
+ * AI_GATEWAY_SECRET_CUTOVER_DEFER=true): the ciphertext-only app boots, every
+ * later migration still applies, and 0209 stays pending for production read
+ * verification. After every deployment passes, set
+ * AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true for the controlled migration run.
+ * The migration also checks the session GUC set here.
+ *
+ * The *policy* — which migration is gated, which columns matter, when a defer
+ * is required and why — lives in `src/lib/ai-gateway-secret-cutover-policy.ts`
+ * so this runner and the platform health reporter
+ * (`src/lib/migration-status-service.ts`) cannot describe the same gate in two
+ * different ways. Only the execution stays here.
  */
 import "dotenv/config";
 import { createHash } from "node:crypto";
@@ -12,9 +27,39 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "pg";
+import {
+  AI_GATEWAY_SECRET_COLUMN_PROBE_SQL,
+  AI_GATEWAY_SECRET_CUTOVER_DEFER_ENV,
+  AI_GATEWAY_SECRET_CUTOVER_VERIFIED_ENV,
+  isSecretCutoverMigration,
+  migrationDependsOnLegacySecretColumn,
+  mustDeferSecretCutover,
+  readCutoverFlags,
+  type AiGatewaySecretColumn,
+} from "../src/lib/ai-gateway-secret-cutover-policy";
 
 const MIGRATIONS_DIR = join(process.cwd(), "migrations");
 export const MIGRATION_ADVISORY_LOCK_ID = "7310318183545164275";
+
+/**
+ * Whether 0209 would refuse to run without the post-verification confirmation:
+ * true when either legacy table still holds a credential, in plaintext or
+ * ciphertext. Mirrors the migration's own `stored_secret_count` check, and
+ * reads only the columns that exist so it is safe on any schema the runner
+ * reaches 0209 with.
+ */
+async function aiGatewaySecretsStored(client: Client): Promise<boolean> {
+  const { rows: columns } = await client.query<AiGatewaySecretColumn>(
+    AI_GATEWAY_SECRET_COLUMN_PROBE_SQL,
+  );
+  const checks: string[] = [];
+  for (const { table_name: table, column_name: column } of columns) {
+    checks.push(`EXISTS (SELECT 1 FROM ${table} WHERE NULLIF(btrim(${column}), '') IS NOT NULL)`);
+  }
+  if (checks.length === 0) return false;
+  const { rows } = await client.query<{ stored: boolean }>(`SELECT (${checks.join(" OR ")}) AS stored`);
+  return rows[0]?.stored === true;
+}
 
 /**
  * One-time historical checksum corrections.
@@ -118,6 +163,18 @@ const CHECKSUM_REPAIRS: ReadonlyMap<string, readonly string[]> = new Map([
     // 0201 carried its additions forward (see the note above).
     ["9acc7080334deaa16af7b8a66883a89464b3ae7eb07de5d2094219d2f0d3c3c5"],
   ],
+  [
+    "0028_bank_reconciliation.sql",
+    // sha256 of the original revision, whose leading comment described
+    // reconciliation as covering only cash 1100 and bank-clearing 1120 on the
+    // reasoning that nothing posted to the plain bank account. Phase 30 made
+    // that false (a cheque clears *into* 1110) and issue #830's audit flagged
+    // the comment as one of the places the stale two-account story was still
+    // being told. Only comment lines changed — every statement in the file is
+    // byte-for-byte identical, and the schema was never account-specific — so
+    // adopting the checksum is schema-neutral, exactly like 0127 and 0140.
+    ["5c0d7299b7d79fb9995fdaf713eeb1fad423515981f924459d18704bb5bd448f"],
+  ],
 ]);
 
 export interface MigrationRunOptions {
@@ -130,6 +187,7 @@ export interface MigrationRunResult {
   applied: number;
   adoptedChecksums: number;
   repairedChecksums: string[];
+  deferredMigrations: string[];
 }
 
 interface MigrationFile {
@@ -153,16 +211,26 @@ function loadMigrations(directory: string): MigrationFile[] {
 }
 
 export async function runMigrations(options: MigrationRunOptions): Promise<MigrationRunResult> {
+  const { defer: deferSecretCutover, verified: secretCutoverVerified } = readCutoverFlags();
+  if (deferSecretCutover && secretCutoverVerified) {
+    throw new Error("ai_gateway_secret_cutover_flags_conflict");
+  }
+
   const client = new Client({ connectionString: options.databaseUrl });
   let lockAcquired = false;
   let adoptedChecksums = 0;
   let appliedCount = 0;
   const repairedChecksums: string[] = [];
+  const deferredMigrations: string[] = [];
 
   await client.connect();
   try {
     await client.query("SELECT pg_advisory_lock($1::bigint)", [MIGRATION_ADVISORY_LOCK_ID]);
     lockAcquired = true;
+    await client.query(
+      "SELECT set_config('app.ai_gateway_secret_cutover_verified', $1, false)",
+      [secretCutoverVerified ? "true" : "false"],
+    );
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -213,8 +281,37 @@ export async function runMigrations(options: MigrationRunOptions): Promise<Migra
       }
     }
 
-    for (const migration of migrations) {
+    for (let index = 0; index < migrations.length; index += 1) {
+      const migration = migrations[index];
       if (applied.has(migration.filename)) continue;
+      // Without the explicit confirmation, a database that still holds a
+      // credential defers 0209 instead of failing the boot: the migration
+      // would refuse anyway, and refusing on every container start is a
+      // restart loop that takes the whole platform down over one AI column.
+      // The guard's intent is unchanged — the columns are dropped only on a
+      // run that sets AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true.
+      if (
+        isSecretCutoverMigration(migration.filename) &&
+        mustDeferSecretCutover({
+          defer: deferSecretCutover,
+          verified: secretCutoverVerified,
+          secretsStored: await aiGatewaySecretsStored(client),
+        })
+      ) {
+        const dependent = migrations
+          .slice(index + 1)
+          .find((later) => !applied.has(later.filename) && migrationDependsOnLegacySecretColumn(later.sql));
+        if (dependent) {
+          throw new Error(`ai_gateway_secret_cutover_deferred_blocks_later_migration:${dependent.filename}`);
+        }
+        deferredMigrations.push(migration.filename);
+        if (!options.quiet) {
+          console.warn(
+            `Deferred ${migration.filename}; verify ciphertext-backed production reads on every deployment, then rerun migrations with ${AI_GATEWAY_SECRET_CUTOVER_VERIFIED_ENV}=true.`,
+          );
+        }
+        continue;
+      }
       if (!options.quiet) process.stdout.write(`Applying ${migration.filename} ... `);
       await client.query("BEGIN");
       try {
@@ -233,7 +330,7 @@ export async function runMigrations(options: MigrationRunOptions): Promise<Migra
       }
     }
 
-    return { applied: appliedCount, adoptedChecksums, repairedChecksums };
+    return { applied: appliedCount, adoptedChecksums, repairedChecksums, deferredMigrations };
   } finally {
     try {
       if (lockAcquired) {
@@ -262,7 +359,14 @@ export async function main() {
   if (result.adoptedChecksums > 0) {
     console.log(`Adopted checksum(s) for ${result.adoptedChecksums} existing migration(s).`);
   }
-  console.log(result.applied === 0 ? "Nothing to do — schema is up to date." : `Applied ${result.applied} migration(s).`);
+  if (result.deferredMigrations.length > 0) {
+    console.log(`Deferred migration(s): ${result.deferredMigrations.join(", ")}.`);
+  }
+  console.log(
+    result.applied === 0 && result.deferredMigrations.length === 0
+      ? "Nothing to do — schema is up to date."
+      : `Applied ${result.applied} migration(s).`,
+  );
 }
 
 const entryPoint = process.argv[1] ? resolve(process.argv[1]) : null;

@@ -15,10 +15,12 @@ import {
   resetBusiness,
   hardDeleteBusiness,
   BusinessNotFoundError,
+  BusinessDeleteBlockedError,
+  ProtectedInternalBusinessError,
   ResetBusinessNotPossibleError,
   type BusinessStatus,
 } from "@/lib/platform-service";
-import { DESTRUCTIVE_CONFIRMATION_PHRASE } from "@/lib/platform-admin";
+import { businessDestructivePhrase } from "@/lib/platform-admin";
 import {
   businessLifecycleTransition,
   isBusinessLifecycleStatus,
@@ -287,9 +289,32 @@ export const PATCH = withPlatformScope(async (request: NextRequest, ctx: Ctx) =>
 });
 
 /**
- * Factory-reset one business after typing the fixed confirmation phrase. The
- * shared owner identity and subscription plan survive, but all tenant data is
- * deleted and the owner returns to the first-run setup wizard.
+ * The audit `reason` for a failed destructive action. Deliberately a small
+ * vocabulary of stable tokens instead of `err.message`: raw database text
+ * (constraint names, deadlock detail, SQLSTATE…) is not operator-audit
+ * material and must stay in the server logs, not in the audit trail
+ * (issue #822).
+ */
+function safeDestructiveFailureReason(err: unknown, action: "reset" | "delete"): string {
+  if (err instanceof ResetBusinessNotPossibleError) return "reset_not_possible";
+  if (err instanceof ProtectedInternalBusinessError) return "protected_internal_business";
+  if (err instanceof BusinessNotFoundError) return "not_found";
+  if (err instanceof BusinessDeleteBlockedError) return "reference_blocked";
+  return `${action}_unexpected_error`;
+}
+
+/**
+ * Factory-reset one business after typing the target-specific confirmation
+ * phrase (`RESET {slug}`). The business row itself survives — id, status,
+ * creation date, subscription, wallet, invoices/payments and the platform-
+ * company mappings are all preserved (see `resetBusiness`); the tenant's
+ * operational data is cleared and the owner returns to the first-run setup
+ * wizard.
+ *
+ * Audit lifecycle (same standard as hard delete): `business.reset.requested`
+ * only after a valid permission + confirmation, `business.reset.completed`
+ * only after the transaction committed, `business.reset.failed` when it did
+ * not — with an audit-safe reason.
  */
 export const POST = withPlatformScope(async (request: NextRequest, ctx: Ctx) => {
   const { session, error } = await requirePlatformCapability("business.reset");
@@ -312,39 +337,83 @@ export const POST = withPlatformScope(async (request: NextRequest, ctx: Ctx) => 
   }
 
   const confirmation = typeof body.confirmation === "string" ? body.confirmation.trim() : "";
-  if (confirmation !== DESTRUCTIVE_CONFIRMATION_PHRASE) {
+  if (confirmation !== businessDestructivePhrase("reset", business.slug)) {
     return NextResponse.json({ error: "reset_confirmation_required" }, { status: 400 });
   }
+
+  const identity = {
+    name: business.name,
+    slug: business.slug,
+    plan: business.plan,
+    status: business.status,
+  };
+  await platformAudit({
+    adminId: session.padmin,
+    businessId: id,
+    action: "business.reset.requested",
+    entity: "business",
+    entityId: id,
+    payload: identity,
+  });
 
   try {
     await resetBusiness(id);
   } catch (err) {
     if (err instanceof ResetBusinessNotPossibleError) {
+      await platformAudit({
+        adminId: session.padmin,
+        businessId: id,
+        action: "business.reset.failed",
+        entity: "business",
+        entityId: id,
+        payload: { ...identity, reason: safeDestructiveFailureReason(err, "reset") },
+      });
       return NextResponse.json({ error: "reset_not_possible" }, { status: 409 });
+    }
+    if (err instanceof ProtectedInternalBusinessError) {
+      await platformAudit({
+        adminId: session.padmin,
+        businessId: id,
+        action: "business.reset.failed",
+        entity: "business",
+        entityId: id,
+        payload: { ...identity, reason: safeDestructiveFailureReason(err, "reset") },
+      });
+      return NextResponse.json({ error: "protected_internal_business" }, { status: 409 });
     }
     // resetBusiness is one transaction, so this response also guarantees that
     // no partial reset was committed. Keep the database detail in server logs.
     console.error("platform business reset failed", { businessId: id, err });
+    await platformAudit({
+      adminId: session.padmin,
+      businessId: id,
+      action: "business.reset.failed",
+      entity: "business",
+      entityId: id,
+      payload: { ...identity, reason: safeDestructiveFailureReason(err, "reset") },
+    });
     return NextResponse.json({ error: "reset_failed" }, { status: 500 });
   }
 
+  // The business row survived the reset (that is the point of the refactor),
+  // so the completion keeps its business_id — unlike hard delete's.
   await platformAudit({
     adminId: session.padmin,
     businessId: id,
-    action: "business.reset",
+    action: "business.reset.completed",
     entity: "business",
     entityId: id,
-    payload: { name: business.name, slug: business.slug, plan: business.plan },
+    payload: identity,
   });
   return NextResponse.json({ ok: true });
 });
 
 /**
  * Hard-delete a business — immediately, irreversibly, no archive step and no
- * grace window. Owner-only (`business.delete`) and gated on the same fixed
- * confirmation phrase as reset — with the grace window gone, that pairing
- * (owner capability + typed phrase) is the only safety net left. The audit
- * row survives the delete because `platform_audit_log.business_id` is
+ * grace window. Owner-only (`business.delete`) and gated on the target-
+ * specific typed phrase (`DELETE {slug}`) — with the grace window gone, that
+ * pairing (owner capability + typed phrase) is the only safety net left. The
+ * audit row survives the delete because `platform_audit_log.business_id` is
  * ON DELETE SET NULL, so the record that it happened outlives the thing it
  * happened to.
  */
@@ -369,18 +438,23 @@ export const DELETE = withPlatformScope(async (request: NextRequest, ctx: Ctx) =
   }
 
   const confirmation = typeof body.confirmation === "string" ? body.confirmation.trim() : "";
-  if (confirmation !== DESTRUCTIVE_CONFIRMATION_PHRASE) {
+  if (confirmation !== businessDestructivePhrase("delete", business.slug)) {
     return NextResponse.json({ error: "delete_confirmation_required" }, { status: 400 });
   }
 
   // The identity of the business has to be captured before the row disappears,
   // and the audit trail has to say what actually happened. A single
   // "business.delete" written up front claimed success even when the delete
-  // then threw, so the trail is now three explicit lifecycle events:
+  // then threw, so the trail is three explicit lifecycle events:
   //   requested -> completed | failed
   // `completed` is written only after the delete committed, so its presence is
   // evidence the business is really gone.
-  const identity = { name: business.name, slug: business.slug, plan: business.plan };
+  const identity = {
+    name: business.name,
+    slug: business.slug,
+    plan: business.plan,
+    status: business.status,
+  };
   await platformAudit({
     adminId: session.padmin,
     businessId: id,
@@ -390,11 +464,57 @@ export const DELETE = withPlatformScope(async (request: NextRequest, ctx: Ctx) =
     payload: identity,
   });
 
+  let result: Awaited<ReturnType<typeof hardDeleteBusiness>>;
   try {
-    await hardDeleteBusiness(id);
+    result = await hardDeleteBusiness(id);
   } catch (err) {
     if (err instanceof BusinessNotFoundError) {
+      // A race: the row was there when `requested` was audited and is gone
+      // by the time the service takes its lock (a concurrent delete won).
+      // The trail must not dangle a `requested` with no terminal event.
+      await platformAudit({
+        adminId: session.padmin,
+        businessId: id,
+        action: "business.delete.failed",
+        entity: "business",
+        entityId: id,
+        payload: { ...identity, reason: "not_found" },
+      });
       return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
+    if (err instanceof ProtectedInternalBusinessError) {
+      // Defense-in-depth only — the route refuses platform-internal tenants
+      // before auditing `requested` — but if the deeper service check ever
+      // fires, it maps to the same operator-facing 409, never a raw 500.
+      await platformAudit({
+        adminId: session.padmin,
+        businessId: id,
+        action: "business.delete.failed",
+        entity: "business",
+        entityId: id,
+        payload: { ...identity, reason: "protected_internal_business" },
+      });
+      return NextResponse.json({ error: "protected_internal_business" }, { status: 409 });
+    }
+    if (err instanceof BusinessDeleteBlockedError) {
+      // A live reference the service has no deliberate rule for — a specific
+      // operator-facing blocker (issue #822), never a raw FK error.
+      await platformAudit({
+        adminId: session.padmin,
+        businessId: id,
+        action: "business.delete.failed",
+        entity: "business",
+        entityId: id,
+        payload: {
+          ...identity,
+          reason: "reference_blocked",
+          reference: err.reference,
+        },
+      });
+      return NextResponse.json(
+        { error: "delete_blocked", reference: err.reference },
+        { status: 409 },
+      );
     }
     // hardDeleteBusiness is one transaction, so this response also guarantees
     // no partial delete was committed. Keep the database detail in server logs.
@@ -407,7 +527,7 @@ export const DELETE = withPlatformScope(async (request: NextRequest, ctx: Ctx) =
       entityId: id,
       payload: {
         ...identity,
-        reason: err instanceof Error ? err.message : "unknown_error",
+        reason: safeDestructiveFailureReason(err, "delete"),
       },
     });
     return NextResponse.json({ error: "delete_failed" }, { status: 500 });
@@ -424,7 +544,10 @@ export const DELETE = withPlatformScope(async (request: NextRequest, ctx: Ctx) =
     action: "business.delete.completed",
     entity: "business",
     entityId: id,
-    payload: identity,
+    payload: {
+      ...identity,
+      detachedCustomerTenantMappings: result.detachedCustomerTenantMappings,
+    },
   });
   return NextResponse.json({ ok: true });
 });

@@ -39,6 +39,7 @@ import {
   type PartyRole,
 } from "@/lib/parties";
 import { directoryFilterCategories } from "@/lib/party-directory";
+import { uniqueSupplierAliasByParty } from "@/lib/ap-supplier-aliases";
 import { toPersianDigits } from "@/lib/digits";
 import { formatPhoneDisplay } from "@/lib/phone";
 import { useMoney } from "@/components/money/money-context";
@@ -52,7 +53,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { EmptyState, LoadingSkeleton, SectionCard, StatusBadge, TabBar } from "../page-chrome";
+import { EmptyState, LoadingSkeleton, SectionCard, StatusBadge, TabBar, TabPanel } from "../page-chrome";
 import {
   PARTY_DIRECTORY_VIEWS,
   partyDirectoryView,
@@ -246,14 +247,14 @@ export function PartiesSection({
    */
   const [balances, setBalances] = useState<Record<string, number>>({});
   /**
-   * Party id → the branch's `suppliers.id` for that party.
-   *
-   * The A/P ledger is keyed on the branch alias rather than on the party (see
-   * the panel mount at the foot of this component), so opening a supplier's
-   * statement needs the translation. Absent means this branch has no supplier
-   * row for that party, and therefore no payables statement to show.
+   * Party id → its one unambiguous `suppliers.id`, only when exactly one alias
+   * exists in the business. A party with aliases in multiple branches is
+   * intentionally omitted: the payables subledger displays those branch rows
+   * separately, and this business-wide directory cannot choose one by guess.
    */
-  const [supplierAliases, setSupplierAliases] = useState<Record<string, string>>({});
+  const [supplierAliases, setSupplierAliases] = useState<
+    Record<string, { supplierId: string; locationName: string | null }>
+  >({});
   const money = useMoney();
 
   const columns = useMemo(
@@ -364,18 +365,21 @@ export function PartiesSection({
       return;
     }
     const controller = new AbortController();
-    void api<{ suppliers: { supplierId: string; supplierPartyId: string | null }[] }>(
+    void api<{
+      suppliers: {
+        supplierId: string;
+        supplierPartyId: string | null;
+        locationName: string | null;
+      }[];
+    }>(
       "/api/ledger/ap/suppliers?scope=directory",
       { signal: controller.signal },
     ).then(({ ok, aborted, data }) => {
       if (aborted || !ok) return;
-      setSupplierAliases(
-        Object.fromEntries(
-          (data.suppliers ?? [])
-            .filter((row) => row.supplierPartyId)
-            .map((row) => [row.supplierPartyId as string, row.supplierId]),
-        ),
-      );
+      // A business-wide party row cannot choose a branch alias by accident.
+      // Only a unique alias opens directly; multi-branch accounts stay separate
+      // on the payables subledger, where each row displays its branch.
+      setSupplierAliases(uniqueSupplierAliasByParty(data.suppliers ?? []));
     });
     return () => controller.abort();
   }, [canOpenStatement, listedRoles, refreshKey]);
@@ -516,9 +520,9 @@ export function PartiesSection({
     (party: PartyListRow): "ar" | "ap" | null => {
       if (!canOpenStatement || scope.key === "accounting") return null;
       const kind = partyStatementKind(partyRoles(party.roles, party.role));
-      // A supplier this branch has never bought from has no `suppliers` row,
-      // so the A/P ledger has nothing filed under them. Better no button than
-      // one that opens an empty statement and reads as lost history.
+      // No alias means either no supplier record or multiple branch aliases.
+      // A business-wide party row must not guess which branch's A/P statement
+      // to open; the payables subledger lists each branch alias explicitly.
       if (kind === "ap" && !supplierAliases[party.id]) return null;
       return kind;
     },
@@ -644,6 +648,7 @@ export function PartiesSection({
           </div>
         ) : null}
 
+        <DirectoryViewPanel tabbed={views.length > 1 && Boolean(onViewChange)} active={activeView.key}>
         {/*
           The toolbar stacks on a phone and lays out in a row from `sm` up. It
           is a grid rather than a wrapping flex row because the three controls
@@ -848,6 +853,7 @@ export function PartiesSection({
             ) : null}
           </>
         )}
+        </DirectoryViewPanel>
       </SectionCard>
 
       {form ? (
@@ -906,19 +912,37 @@ export function PartiesSection({
         the party id this list already holds. `apLines` selects `suppliers.id`
         — the *branch alias* — and carries the party as a separate `party_id`
         column, so passing a party id here returns an empty statement rather
-        than an error. `supplierAliases` maps one to the other; a supplier the
-        branch has never transacted with has no alias, and `statementKindFor`
-        withholds the button rather than opening an empty panel.
+        than an error. `supplierAliases` maps a unique alias to the party; if the
+        party has aliases in multiple branches, the directory withholds the
+        button rather than choosing one arbitrarily. The payables subledger
+        lists each branch's statement separately.
       */}
       {statement?.kind === "ap" ? (
         <ApStatementPanel
-          supplierId={supplierAliases[statement.id] ?? statement.id}
+          supplierId={supplierAliases[statement.id]?.supplierId ?? statement.id}
           supplierName={statement.name}
           supplierPartyId={statement.id}
+          supplierLocationName={supplierAliases[statement.id]?.locationName}
           onClose={() => setStatement(null)}
         />
       ) : null}
     </div>
+  );
+}
+
+/**
+ * The list under the directory's view tabs. Each tab names
+ * `party-directory-tabpanel` in `aria-controls`; without a panel carrying that
+ * id the attribute pointed at nothing (axe: aria-valid-attr-value, critical)
+ * and a screen reader could not move from a tab to the list it filters. A
+ * scope with a single view draws no tabs and so needs no panel.
+ */
+function DirectoryViewPanel({ tabbed, active, children }: { tabbed: boolean; active: string; children: ReactNode }) {
+  if (!tabbed) return <>{children}</>;
+  return (
+    <TabPanel idPrefix="party-directory" active={active}>
+      {children}
+    </TabPanel>
   );
 }
 
@@ -1021,9 +1045,12 @@ function PartyCell({
       // use. A rate stored as a *string* by an importer rendered «—» before —
       // the column claimed the party had no rate while the ledger was posting
       // one.
+      // `null` is «follows the business rate», not 0 and not a missing value.
       const tax = taxPercentageOf(party);
       return (
-        <span className="tabular-nums text-muted-foreground">{toPersianDigits(String(tax))}٪</span>
+        <span className="tabular-nums text-muted-foreground">
+          {tax === null ? "نرخ کسب‌وکار" : `${toPersianDigits(String(tax))}٪`}
+        </span>
       );
     }
     case "balance":

@@ -13,6 +13,7 @@ import {
   MAX_IMPERSONATION_MINUTES,
   DEFAULT_IMPERSONATION_MINUTES,
   PLATFORM_ADMIN_ROLES,
+  businessDestructivePhrase,
 } from "./platform-admin";
 
 describe("platformCan — role → capability presets", () => {
@@ -229,6 +230,31 @@ describe("clampImpersonationMinutes — short, bounded windows", () => {
     expect(clampImpersonationMinutes(1)).toBe(1);
     expect(clampImpersonationMinutes(MAX_IMPERSONATION_MINUTES)).toBe(
       MAX_IMPERSONATION_MINUTES,
+    );
+  });
+});
+
+describe("businessDestructivePhrase — action- and target-specific confirmation", () => {
+  it("names the action verb and the exact tenant slug", () => {
+    expect(businessDestructivePhrase("reset", "cafe-alpha")).toBe("RESET cafe-alpha");
+    expect(businessDestructivePhrase("delete", "cafe-alpha")).toBe("DELETE cafe-alpha");
+  });
+
+  it("never lets one action's phrase stand in for the other", () => {
+    expect(businessDestructivePhrase("reset", "cafe-alpha")).not.toBe(
+      businessDestructivePhrase("delete", "cafe-alpha"),
+    );
+  });
+
+  it("never lets one tenant's phrase stand in for another", () => {
+    expect(businessDestructivePhrase("reset", "cafe-alpha")).not.toBe(
+      businessDestructivePhrase("reset", "cafe-beta"),
+    );
+  });
+
+  it("is stable and deterministic for a given action and slug", () => {
+    expect(businessDestructivePhrase("delete", "doomed-123")).toBe(
+      businessDestructivePhrase("delete", "doomed-123"),
     );
   });
 });

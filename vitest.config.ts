@@ -30,5 +30,19 @@ export default defineConfig({
   test: {
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     setupFiles: ["./vitest.setup.ts"],
+    /*
+     * Vitest's 5s default is a *load* threshold here, not a correctness one.
+     * The slowest honest tests in this suite are the ones that type through
+     * `userEvent` (~2.5s) and the one that walks every client component's
+     * import graph off disk (~1.3s) — comfortable alone, and over the wall on
+     * a busy two-core CI runner. The same commit went green on one runner and
+     * red on another for exactly that reason, twice, which teaches a reader
+     * to re-run CI rather than to read it.
+     *
+     * A longer budget costs a passing run nothing: it only changes how long a
+     * genuinely hung test takes to be declared dead. `vitest.db.config.ts`
+     * already says 30s for the same reason.
+     */
+    testTimeout: 15_000,
   },
 });

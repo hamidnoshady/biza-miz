@@ -795,7 +795,12 @@ function urgencyFor(severity: NotificationSeverity): "low" | "normal" | "high" {
  * tell me". Only the push is suppressed, and that suppression is recorded as a
  * `quiet` delivery so "why didn't my phone buzz" has an answer.
  */
-async function deliverEvent(businessId: string, event: OutboxRow, config: PushConfig | null): Promise<number> {
+async function deliverEvent(
+  businessId: string,
+  event: OutboxRow,
+  config: PushConfig | null,
+  now: Date,
+): Promise<number> {
   if (!isNotificationEventKey(event.event_key) || !isNotificationSeverity(event.severity)) {
     // An event key this build does not know about — a row left by a newer
     // version during a rolling deploy. Dropping it is right; guessing is not.
@@ -820,7 +825,7 @@ async function deliverEvent(businessId: string, event: OutboxRow, config: PushCo
     },
     members,
     rules,
-    minutesOfDay: localMinutesOfDay(new Date(), timezone),
+    minutesOfDay: localMinutesOfDay(now, timezone),
   });
   if (recipients.length === 0) return 0;
 
@@ -892,6 +897,13 @@ export async function runBusinessNotificationDelivery(
   businessId: string,
   config: PushConfig | null,
   limit = 50,
+  /**
+   * The moment delivery runs for — the quiet-hours check reads the branch's
+   * local time from it. Tests pass a fixed clock: "quiet all day" cannot be
+   * expressed through the rule API (minutes are 0–1439 and the window is
+   * half-open), so a wall-clock run fails whenever it lands on 23:59 local.
+   */
+  now: Date = new Date(),
 ): Promise<number> {
   const { rows } = await query<OutboxRow>(
     `SELECT id, location_id, event_key, severity, title, body, url, amount_rial, dedupe_key
@@ -918,7 +930,7 @@ export async function runBusinessNotificationDelivery(
     if ((rowCount ?? 0) === 0) continue;
 
     try {
-      pushed += await deliverEvent(businessId, event, config);
+      pushed += await deliverEvent(businessId, event, config, now);
     } catch (error) {
       console.error(
         `notification ${event.event_key} delivery failed:`,

@@ -6,6 +6,7 @@ import { ArError, MissingLedgerAccountError, receivePayment } from "@/lib/ar-ser
 import { listReceipts } from "@/lib/installments-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
+import { PayablesInputError } from "@/lib/payables-input";
 
 /** The «دریافت‌ها» ledger slice — every receipt voucher, newest first. */
 export const GET = withTenantScope(async (request: NextRequest) => {
@@ -22,6 +23,10 @@ interface ReceiptBody {
   amount?: number;
   receiptDate?: string;
   memo?: string;
+  /** Audit F11 — the cash/bank account (an active cash or bank account of the chosen method); omitted = the method's default. */
+  cashAccountId?: string | null;
+  /** Audit F11 — the bank's tracking/reference number. */
+  bankReference?: string | null;
 }
 
 const METHODS = ["cash", "bank"] as const;
@@ -67,10 +72,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       receiptDate,
       memo: body.memo,
       createdBy: session.sub,
+      cashAccountId: typeof body.cashAccountId === "string" ? body.cashAccountId : null,
+      bankReference: typeof body.bankReference === "string" ? body.bankReference : null,
     });
     return NextResponse.json({ receipt }, { status: 201 });
   } catch (err) {
     if (err instanceof ArError) return NextResponse.json({ error: err.message }, { status: err.status });
+    if (err instanceof PayablesInputError) return NextResponse.json({ error: err.code }, { status: 400 });
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }

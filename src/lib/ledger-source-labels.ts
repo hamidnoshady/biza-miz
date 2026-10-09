@@ -70,12 +70,19 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   // Money in and out
   ar_receipt: "دریافت از مشتری",
   ap_payment: "پرداخت به تأمین‌کننده",
+  ap_payment_reversal: "برگشت پرداخت به تأمین‌کننده",
   installment_interest: "سود برنامهٔ اقساط",
   cheque: "چک",
   expense: "هزینه",
   payroll_accrual: "تعهد حقوق",
   payroll_payment: "پرداخت حقوق",
+  payroll_advance: "مساعده کارکنان",
+  payroll_accrual_void: "ابطال تعهد حقوق",
+  payroll_payment_void: "ابطال پرداخت حقوق",
+  payroll_advance_void: "ابطال مساعده",
   fixed_asset_depreciation: "استهلاک دارایی ثابت",
+  fixed_asset_disposal: "واگذاری دارایی ثابت",
+  fixed_asset_acquisition: "خرید دارایی ثابت",
 
   // Marketing and loyalty
   gift_card: "کارت هدیه",

@@ -5,6 +5,7 @@ import { CircleAlertIcon, InfoIcon } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { recordApiFailure } from "@/lib/error-report";
+import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
 
 /**
  * The dashboard's fetch wrapper.
@@ -96,6 +97,9 @@ export async function api<T = Record<string, unknown>>(
 
 /** Persian messages for the API's error codes. */
 const ERROR_MESSAGES: Record<string, string> = {
+    // The fixed-asset register's domain errors live in their own dictionary
+    // (fixed-assets-errors.ts) — spread here so every screen shares them.
+    ...FIXED_ASSET_ERROR_TRANSLATIONS,
     unauthorized: "وارد نشده‌اید.",
     forbidden: "دسترسی مجاز نیست.",
     bad_request: "درخواست نامعتبر بود.",
@@ -144,6 +148,10 @@ const ERROR_MESSAGES: Record<string, string> = {
     account_has_postings: "این حساب سند خورده و قابل حذف نیست؛ می‌توانید آن را غیرفعال کنید.",
     account_has_draft_postings: "این حساب در یک پیش‌نویس استفاده شده و قابل حذف نیست.",
     account_has_children: "ابتدا زیرمجموعه‌های این حساب را جابه‌جا یا حذف کنید.",
+    parent_has_active_children: "نمی‌توان حسابی را که زیرمجموعهٔ فعال دارد بایگانی کرد؛ ابتدا زیرمجموعه‌ها را بایگانی یا جابه‌جا کنید.",
+    ancestor_archived: "نمی‌توان این حساب را فعال کرد؛ یکی از حساب‌های والد در زنجیره هنوز بایگانی است.",
+    parent_type_mismatch: "نوع حساب زیرمجموعه باید با نوع شاخهٔ والد یکسان باشد.",
+    parent_archived: "نمی‌توان حساب را زیر یک حساب بایگانی‌شده ایجاد یا جابه‌جا کرد.",
     missing_file: "فایل را انتخاب کنید.",
     file_too_large: "حجم فایل بیش از حد مجاز است.",
     unsupported_format: "فرمت فایل پشتیبانی نمی‌شود. CSV یا XLSX استفاده کنید.",
@@ -513,12 +521,17 @@ const ERROR_MESSAGES: Record<string, string> = {
       "بازیافت پیش‌پرداخت از ماندهٔ پیش‌پرداخت قرارداد بیشتر است؛ پیش‌پرداخت پرداخت‌شده را بررسی کنید.",
     supplier_required: "انتخاب تأمین‌کننده الزامی است.",
     supplier_not_found: "تأمین‌کننده انتخاب‌شده معتبر نیست.",
+    supplier_location_mismatch: "تأمین‌کننده به شعبهٔ دیگری تعلق دارد؛ شعبهٔ درست را انتخاب کنید.",
+    supplier_record_missing: "برای این شخص در شعبهٔ انتخاب‌شده، پروندهٔ تأمین‌کننده وجود ندارد.",
+    installment_location_required: "این برنامهٔ پرداختنی به شعبه مشخصی وابسته نیست و چند پروندهٔ تأمین‌کننده دارد؛ ابتدا شعبهٔ آن را تعیین کنید.",
+    idempotency_key_required: "شناسهٔ یکتای درخواست پرداخت معتبر نیست؛ فرم را تازه‌سازی و دوباره تلاش کنید.",
+    idempotency_conflict: "شناسهٔ درخواست قبلاً با جزئیات دیگری استفاده شده است؛ برای این پرداخت درخواست تازه‌ای بسازید.",
+    payment_not_found: "پرداخت موردنظر پیدا نشد.",
+    payment_not_reversible: "این پرداخت سند قابل برگشت ندارد یا از این مسیر قابل برگشت نیست.",
     // Phase 22 — fixed assets & depreciation
-    fixed_asset_not_found: "دارایی ثابت پیدا نشد.",
-    fixed_asset_has_depreciation: "برای این دارایی استهلاک ثبت شده و قابل حذف نیست.",
-    period_already_depreciated: "استهلاک این دوره قبلاً برای این دارایی ثبت شده است.",
-    fully_depreciated: "این دارایی به‌طور کامل مستهلک شده است.",
     salvage_value_invalid: "ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.",
+    // Issue #833 — fixed-asset lifecycle
+    location_required: "انتخاب شعبه الزامی است.",
     // Phase 16 — bank & cash reconciliation
     invalid_account: "حساب انتخاب‌شده معتبر نیست.",
     statement_date_required: "تاریخ صورتحساب الزامی است.",
@@ -532,8 +545,13 @@ const ERROR_MESSAGES: Record<string, string> = {
     negative_statement_balance:
       "مانده صورتحساب صندوق یا کارت‌خوان نمی‌تواند منفی باشد؛ مانده پایانی را وارد کنید، نه گردش دوره.",
     journal_line_not_found: "سند انتخاب‌شده معتبر نیست.",
+    journal_line_required: "هیچ سندی انتخاب نشده است.",
     journal_line_already_reconciled: "این سند در یک تطبیق قفل‌شدهٔ دیگر ثبت شده و دوباره قابل تطبیق نیست.",
     balance_mismatch: "مانده محاسبه‌شده با مانده صورتحساب برابر نیست.",
+    // A future statement would lock the account against every real statement
+    // after it, so the server refuses it rather than warning about it.
+    statement_date_in_future:
+      "تاریخ صورتحساب نمی‌تواند در آینده باشد؛ تاریخ پایان صورتحسابی را وارد کنید که دریافت کرده‌اید.",
     // Phase 17 — plan limits / feature gating
     feature_disabled: "این امکان برای کسب‌وکار شما فعال نیست.",
     branch_limit_exceeded: "به سقف تعداد شعبه در پلن فعلی رسیده‌اید. برای افزودن شعبهٔ بیشتر، پلن را ارتقا دهید.",
@@ -675,7 +693,6 @@ const ERROR_MESSAGES: Record<string, string> = {
     invalid_domain_mode: "نوع تأمین دامنه معتبر نیست.",
     invalid_cdn_provider: "ارائه‌دهندهٔ CDN معتبر نیست.",
     invalid_cdn_status: "وضعیت CDN معتبر نیست.",
-    invalid_period: "مدت ثبت دامنه باید بین ۱ تا ۵ سال باشد.",
     invalid_operation: "نوع عملیات دامنه معتبر نیست.",
     // `invalid_status` is already mapped above (the floor-plan's table status)
     // and the CMS order select only ever submits one of its four options, so
@@ -733,15 +750,12 @@ const ERROR_MESSAGES: Record<string, string> = {
     run_voided: "این تعهد ابطال شده و قابل پرداخت نیست.",
     run_not_found: "تعهد حقوق پیدا نشد.",
     no_wages_set: "هیچ عضو فعالی حقوق تعیین‌شده ندارد.",
-    period_label_required: "عنوان دوره الزامی است.",
-    period_label_too_long: "عنوان دوره بیش از حد طولانی است.",
     invalid_accrual_date: "تاریخ تعهد معتبر نیست.",
     invalid_paid_date: "تاریخ پرداخت معتبر نیست.",
     // «حقوق ماهانه» is saved through ui.tsx's own errorMessage, so the wage
     // screen's 404 needs a message here too — without it a wage saved against
     // a member who was just deactivated reported «خطای غیرمنتظره».
     user_not_found: "عضو موردنظر پیدا نشد.",
-    supplier_record_missing: "این شخص در فهرست تأمین‌کنندگان ثبت نشده است؛ ابتدا او را به‌عنوان تأمین‌کننده ثبت کنید.",
     installment_amount_too_small: "مبلغ هر قسط بسیار کم است؛ تعداد اقساط را کاهش دهید.",
     item_required: "قسط را انتخاب کنید.",
 };
@@ -842,19 +856,29 @@ export function PrimaryButton({
   );
 }
 
+/**
+ * The default is `type="button"` — and it is a default rather than an
+ * afterthought because every `<button>` inside a `<form>` submits that form
+ * unless something says otherwise. A secondary control («افزودن ردیف»,
+ * «انصراف», a pager) that a person reaches for while filling a form must never
+ * be the thing that files it; `type` is exposed so a caller can still ask for
+ * `submit` explicitly instead of relying on the browser's default.
+ */
 export function SecondaryButton({
   children,
   onClick,
   disabled,
   className,
+  type = "button",
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   disabled?: boolean;
   className?: string;
+  type?: "submit" | "button";
 }) {
   return (
-    <Button type="button" variant="outline" onClick={onClick} disabled={disabled} className={`px-4 ${className ?? ""}`}>
+    <Button type={type} variant="outline" onClick={onClick} disabled={disabled} className={`px-4 ${className ?? ""}`}>
       {children}
     </Button>
   );

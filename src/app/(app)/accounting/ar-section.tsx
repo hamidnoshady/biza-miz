@@ -85,7 +85,7 @@ export const RECEIVABLES_SIDE: SubledgerSide = {
     };
   },
 
-  marksCreditBalances: true,
+  negativeBalanceLabel: "بستانکار / پیش‌پرداخت مشتری",
 
   settle: {
     actionLabel: "دریافت وجه",
@@ -117,6 +117,6 @@ export const RECEIVABLES_SIDE: SubledgerSide = {
   },
 };
 
-export function ArSection() {
-  return <SubledgerSection side={RECEIVABLES_SIDE} />;
+export function ArSection({ canSettle = false }: { canSettle?: boolean }) {
+  return <SubledgerSection side={RECEIVABLES_SIDE} canSettle={canSettle} />;
 }
