@@ -176,7 +176,7 @@ Notes on the run history:
 
 # Status — draft PR open
 
-Delivered as draft PR #NNN from `arena/10b8596c-biza-miz`. The PR refs #868 and does not close it: the deferred items below are part of the issue and remain open.
+Delivered as draft PR #898 from `arena/10b8596c-biza-miz`. The PR refs #868 and does not close it: the deferred items below are part of the issue and remain open.
 
 Delivered (§6):
 
