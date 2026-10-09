@@ -89,6 +89,8 @@ export interface PostingRuleSummary {
 /** The account a settlement method credits — the `SETTLEMENT_DEBIT_CODES` split. */
 const CASH = { code: WELL_KNOWN_CODES.cash, label: "صندوق" };
 const BANK_CLEARING = { code: WELL_KNOWN_CODES.bankClearing, label: "بانک (در راه)" };
+/** The business's own bank account — where a payroll bank payment leaves, unlike the card-clearing account above. */
+const BANK = { code: WELL_KNOWN_CODES.bank, label: "بانک" };
 const RECEIVABLE = { code: WELL_KNOWN_CODES.accountsReceivable, label: "حساب‌های دریافتنی" };
 const PAYABLE = { code: WELL_KNOWN_CODES.accountsPayable, label: "حساب‌های پرداختنی" };
 
@@ -242,7 +244,7 @@ export function postingRulesFor({
     key: "payroll",
     label: "حقوق و دستمزد",
     description:
-      "تعهد حقوق در زمان ثبت (ناخالص به خالص با نرخ‌های بیمه و مالیاتی که خود کسب‌وکار وارد کرده)، و پرداخت خالص آن در زمان تسویه — دو سند جداگانه.",
+      "تعهد حقوق در زمان ثبت (ناخالص به خالص با نرخ‌های بیمه و مالیاتی که خود کسب‌وکار وارد کرده)، و پرداخت خالص آن در زمان تسویه — دو سند جداگانه و برای کل کسب‌وکار (نه یک شعبه). پورسانت فروشندگان هنگام فروش به ۲۳۰۰ بستانکار می‌شود و با پرداخت لیست حقوق، همراه خالص حقوق، تسویه می‌شود.",
     lines: [
       { side: "debit", code: WELL_KNOWN_CODES.salariesExpense, label: "هزینهٔ حقوق و دستمزد", note: "ناخالص" },
       {
@@ -260,7 +262,7 @@ export function postingRulesFor({
         side: "debit",
         code: WELL_KNOWN_CODES.salariesPayable,
         label: "حقوق پرداختنی (هنگام پرداخت)",
-        note: `در مقابلِ ${CASH.code} یا ${BANK_CLEARING.code}.`,
+        note: `خالص حقوق به‌علاوهٔ پورسانت تسویه‌شده در همان لیست؛ در مقابل حساب پرداخت انتخاب‌شده — ${CASH.code} صندوق، ${BANK.code} بانک، تنخواه یا هر حساب نقد و بانک دیگر (نه ${BANK_CLEARING.code}).`,
       },
     ],
   };

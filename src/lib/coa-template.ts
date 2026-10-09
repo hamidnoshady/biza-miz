@@ -199,6 +199,14 @@ export const WELL_KNOWN_CODES = {
   // fixed-asset line it's parented under.
   accumulatedDepreciation: "1510",
   depreciationExpense: "5700",
+  // Issue #833 — the fixed-asset lifecycle's own accounts. fixedAssets is the
+  // 1500–1599 block's root («اثاثه و تجهیزات» in every industry template),
+  // the fallback an asset's cost is credited out of at disposal when the
+  // register hasn't recorded a more specific asset_account_id. The gain and
+  // loss accounts are what a sale above/below net book value realises into.
+  fixedAssets: "1500",
+  gainOnAssetSale: "4920",
+  lossOnAssetSale: "5750",
   // Phase 21 Wave 3 — jewelry (JEWELRY_COA_TEMPLATE below), not seeded for
   // an F&B business. goldSalesRevenue and makingChargeRevenue are kept as
   // two separate accounts (not folded into one "gold sales" line) because

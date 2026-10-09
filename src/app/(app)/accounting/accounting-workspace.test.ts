@@ -168,8 +168,9 @@ describe("the Accounting workspace menu", () => {
   });
 
   it("respects the per-section role gate", () => {
-    // Payroll is owner + accountant (compensation data); a manager's menu has
-    // the ledger group without it.
+    // Payroll needs `payroll.view` (compensation data): the owner, admin and
+    // accountant presets hold it, the manager's does not, so a manager's menu
+    // has the ledger group without it.
     const managerHrefs = accountingWorkspaceHrefs(groupsFor("manager"));
     expect(managerHrefs).not.toContain(accountingSectionHref("payroll"));
     expect(managerHrefs).toContain(accountingSectionHref("trial-balance"));
@@ -230,8 +231,9 @@ describe("the Accounting workspace menu", () => {
   });
 
   it("drops a sub-group the member's role empties, rather than showing an empty heading", () => {
-    // Payroll is owner + accountant; a manager keeps «دوره، مالیات و حقوق»
-    // (it still holds دوره‌های مالی و مالیات) but never an empty heading.
+    // Payroll needs `payroll.view`, which the manager preset lacks; a manager
+    // keeps «دوره، مالیات و حقوق» (it still holds دوره‌های مالی و مالیات) but
+    // never an empty heading.
     for (const role of ["owner", "manager", "accountant"] as const) {
       const ledger = groupsFor(role).find((group) => group.key === LEDGER_WORKSPACE_GROUP_KEY);
       for (const subGroup of ledger?.subGroups ?? []) {

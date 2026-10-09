@@ -290,10 +290,33 @@ export function clampImpersonationMinutes(requested: number | undefined): number
 }
 
 /**
- * The fixed phrase an operator must type to reset or hard-delete a business.
- * Both are immediate and irreversible with no other safety net (no archive
- * step, no grace window) — a single memorable phrase rather than the
- * business's own slug, which a Persian business name makes tedious to
- * retype exactly.
+ * The two destructive business actions that demand a typed confirmation.
+ * Kept as one vocabulary so the client and the server build the *same*
+ * phrase from the *same* helper — the old fixed `delete-me` constant was
+ * duplicated between the panel and the route (two copies of one magic
+ * literal) and could not tell a factory reset apart from a hard delete.
  */
-export const DESTRUCTIVE_CONFIRMATION_PHRASE = "delete-me";
+export type DestructiveBusinessAction = "reset" | "delete";
+
+const DESTRUCTIVE_PHRASE_VERBS: Record<DestructiveBusinessAction, string> = {
+  reset: "RESET",
+  delete: "DELETE",
+};
+
+/**
+ * The exact phrase an operator must type to confirm a destructive business
+ * action: `RESET {slug}` for a factory reset, `DELETE {slug}` for a hard
+ * delete. The phrase is action-specific *and* target-specific — it names the
+ * verb and the exact tenant it applies to, so a confirmation typed for one
+ * action or one business can never authorize another. The slug is the stable
+ * Latin identifier (the Persian display name would be tedious and ambiguous
+ * to retype exactly). The server compares against this function's output —
+ * never against a literal of its own — so the phrase can never drift
+ * between the dialog and the route (issue #822).
+ */
+export function businessDestructivePhrase(
+  action: DestructiveBusinessAction,
+  slug: string,
+): string {
+  return `${DESTRUCTIVE_PHRASE_VERBS[action]} ${slug}`;
+}

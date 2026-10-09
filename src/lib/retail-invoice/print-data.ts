@@ -12,9 +12,8 @@
  * Both the POST-issue first print and the GET .../[id] reprint endpoint call
  * this wrapper — neither hand-rolls its own `ReceiptData`.
  */
-import { query } from "../db";
-import { getSetting, SETTING_KEYS } from "../settings";
 import type { ReceiptBusinessInfo, ReceiptData, ReceiptLine } from "../receipt-template";
+import { loadPrintIdentity } from "../printing/identity";
 import { getRetailInvoiceDetail } from "./read-service";
 import type { RetailInvoiceDetail, RetailInvoiceDetailLine, RetailInvoicePrintDataMeta } from "./types";
 
@@ -119,24 +118,13 @@ export async function getRetailInvoicePrintData(
   const detail = await getRetailInvoiceDetail(businessId, locationId, orderId);
   if (!detail) return null;
 
-  const [{ rows: businessRows }, { rows: locationRows }, profile] = await Promise.all([
-    query<{ name: string }>("SELECT name FROM businesses WHERE id = $1", [businessId]),
-    // The invoice's own location — not the viewer's currently active branch,
-    // so a manager reprinting a sale from another branch still sees that
-    // branch's address/phone on the paper, not their own.
-    query<{ address: string | null; phone: string | null }>(
-      "SELECT address, phone FROM locations WHERE id = $1",
-      [detail.locationId],
-    ),
-    getSetting<{ receiptFooter?: string }>(businessId, SETTING_KEYS.businessProfile),
-  ]);
-
-  const business: ReceiptBusinessInfo = {
-    name: businessRows[0]?.name ?? "",
-    address: locationRows[0]?.address ?? null,
-    phone: locationRows[0]?.phone ?? null,
-    footerMessage: profile?.receiptFooter ?? null,
-  };
+  // The invoice's own location — not the viewer's currently active branch, so
+  // a manager reprinting a sale from another branch still sees that branch's
+  // address/phone on the paper, not their own. One loader for the identity,
+  // shared with the print pipeline (printing/identity.ts), so the receipt a
+  // `GET ...?view=print` returns and the receipt the print route renders can
+  // never disagree about whose letterhead this is.
+  const { business } = await loadPrintIdentity(businessId, detail.locationId);
 
   const legacy = detail.lines.some((l) => l.kind === "legacy");
   return { receipt: buildRetailInvoiceReceipt(detail, business), meta: { legacy } };

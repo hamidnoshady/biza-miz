@@ -157,9 +157,18 @@ function enqueue(overrides: Partial<Parameters<typeof producer.recordNotificatio
   );
 }
 
+/**
+ * Delivery always runs at a fixed clock moment — noon Tehran, 12:00 local.
+ * The alternative (the real wall clock) made the quiet-hours tests flaky in a
+ * way nothing could reproduce locally: "cover the whole day" is written as
+ * 0–1439 minutes, but the quiet window is half-open, so the minute 23:59 is
+ * NOT quiet. A run that happened to execute at exactly Tehran 23:59 (one
+ * minute per day) saw the push fire and failed — which is how this was found.
+ */
 function deliver() {
+  const noonTehran = new Date("2026-06-01T08:30:00.000Z"); // 12:00 Asia/Tehran
   return dbLib.withTenant(shop.businessId, async () =>
-    service.runBusinessNotificationDelivery(shop.businessId, await service.getPushConfig()),
+    service.runBusinessNotificationDelivery(shop.businessId, await service.getPushConfig(), 50, noonTehran),
   );
 }
 
@@ -335,7 +344,9 @@ describe("idempotency", () => {
 describe("quiet hours", () => {
   async function setQuietWindow(userId: string, eventKey: "shift.cash_variance" | "backup.failed") {
     // The branch is Asia/Tehran, and the window is written to cover the whole
-    // day so the test does not depend on when it happens to run.
+    // day. It still can't cover 23:59 (the window is half-open and rule
+    // minutes end at 1439), which is why deliver() runs at a fixed noon
+    // instead of whenever the test happens to execute.
     await dbLib.withTenant(shop.businessId, () =>
       service.saveNotificationRule(shop.businessId, userId, {
         eventKey,
