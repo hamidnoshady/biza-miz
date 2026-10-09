@@ -214,9 +214,28 @@ payload's runaway detector is **620 MiB**, raised from 600 MiB when the AEC
 document-control wave took the traced runtime to 600.6 MiB against 0.2 MiB of
 headroom. The detector's job is to catch a payload that accidentally ships
 `node_modules`, a build cache or source maps rather than to freeze the app's
-growth, and the component report now shows the dominant term: roughly 103 MiB of
-*unminified* `.next/server` chunks. Minifying the compile pass is the real size
-work available here and is tracked separately.
+growth.
+
+**Where the bytes are.** On Windows, commit `90cc02b` (run
+[37979722293](https://github.com/hamidnoshady/biza-miz/actions/runs/37979722293),
+measured by the size diagnostics): staged runtime 198.150 MiB, unpacked payload
+618.583 MiB, installer 161 MiB. The largest term is the per-route
+client-reference manifests (`*_client-reference-manifest.js`): 1,051 files,
+71.95 MiB. Each route carries a copy of the app's client-module map, so every
+new route handler adds about 67 KiB before its own code. The earlier note called
+about 103 MiB of `.next/server` "unminified chunks" the dominant term. That
+figure counted the manifests, route bundles and traces as chunks; the shared
+server chunks themselves are about 11 MiB. Next's `*.nft.json` build traces add
+8.3 MiB on a Linux build and are read only by `next build`. Shrinking the
+manifests is a framework-level change and is tracked separately. A Linux build
+also installs both glibc and musl libvips, about 36 MiB; Windows installs one
+set, 18.9 MiB, so Linux absolute sizes are not gate numbers.
+
+Each desktop build records these categories, with exact bytes, traced packages,
+the largest files and a manifest, as `desktop-size-diagnostics` in the workflow
+notices and in the `desktop-staged-runtime-size` and
+`business-suite-desktop-size-report` artifacts. They are written after the
+budget steps, even when a budget fails, so a failed run still shows its numbers.
 
 The uploaded installer artifact is 136,405,815 bytes as a GitHub artifact and
 has digest
