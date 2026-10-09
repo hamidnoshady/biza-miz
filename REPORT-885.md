@@ -197,7 +197,20 @@ What *is* done: the issue's "one explicit deployment-aware eligibility policy" n
 What is **not** done, and is the substance of the finding:
 
 - **WebAuthn never evaluates the phone policy.** Roster and PIN admit `owner, admin, manager, accountant` off cloud while WebAuthn verify accepts only the operational roles, and WebAuthn still does not consult the phone-OTP gate at all. Closing this is not mechanical: gating WebAuthn on the phone policy the way PIN is gated would lock out WebAuthn users at any business that never adopted phone OTP, the day the adoption window closes. That is a product decision about who may sign in by which method, and guessing at it would be worse than leaving it.
-- **A local privileged PIN session still omits platform identity, `tokenVersion` and MFA state**, so the MFA grace banner never appears on that path. Adding them is plausibly safe but changes what downstream checks fire for an existing session shape, and I did not want to do that unverified late in the change.
+- **A local privileged PIN session still omits platform identity, `tokenVersion` and MFA state**, so the MFA grace banner never appears on that path.
+
+  I looked hard at fixing this and deliberately did not, because the fix is not neutral. `pin-login` mints its session with `platformUserId: null` and never fetches `users.platform_user_id` at all. Four routes currently refuse a session in that shape, and populating the field would switch them on for a PIN-authenticated caller:
+
+  | Route | Today, for a PIN session | After populating `platformUserId` |
+  |---|---|---|
+  | `auth/businesses` | returns an empty list | enumerates the member's other tenants |
+  | `auth/mfa/self` | `GET` reports `not_required`; `POST` is `403 forbidden` | exposes real enrolment state **and** allows enrolling/removing factors |
+  | `auth/password/self` | `409 no_login` | allows a password change |
+  | `auth/switch-business` | `403 forbidden` | allows switching tenant |
+
+  `signSession` would then also auto-populate `tokenVersion` from `platform_users` and subject the session to `checkPlatformIdentity`'s `token_version`/`is_active` re-check — which is the assurance the issue actually wants, but it arrives bundled with a cross-tenant capability that a four-to-twelve-digit PIN was never meant to grant on its own.
+
+  So this is the same shape of decision as the WebAuthn one above, not a mechanical omission: it needs a deliberate answer to "what should a PIN-only session be allowed to do", ideally with a step-up for the sensitive routes rather than a blanket grant. Making that call unverified, late in the change, on a security boundary, was the wrong trade.
 
 So the drift risk the finding warns about is removed; the assurance gap it describes is not. This remains the largest open item in the issue.
 
