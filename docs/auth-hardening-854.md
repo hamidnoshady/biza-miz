@@ -222,10 +222,10 @@ labelled; the rationale is in its row above.
 
 | Step | Result |
 |---|---|
-| `NODE_OPTIONS=--max-old-space-size=4096 npx tsc --noEmit` | clean |
-| `npm test` | 630 files / 8030 tests passed |
-| `npm run lint` (`eslint . --max-warnings=0`) | clean |
-| `npm run test:design` | 38 passed |
-| `npm run test:db` | 184 of 188 files passed (2236 tests). The four failures are sandbox-environmental and none is in the auth/team/MFA path: `platform-system-backup` (`postgresql_tool_server_incompatible:16:18` — bundled pg tools are v16, this server is v18), `runtime-database-url` + `runtime-role-regrant` (`APP_DB_PASSWORD` unset), and `platform-company` (all 59 skipped: `role "pos" does not exist`). `integration/{tenant-isolation,team,auth-hardening-854,auth-account-security,phone-otp,iam-login-credentials}` all pass — tenant-isolation is what pins the `mfa_challenges` decision above |
+| `npx tsc --noEmit` | clean (pass-3 head `4e1dd30`, 2026-10-09) |
+| `npm test` | 706 files / 9270 tests passed (pass-3 head) |
+| `npm run lint` (`eslint . --max-warnings=0`) | clean (pass-3 head) |
+| `npm run test:design` | 38 passed (pass-3 head) |
+| `npm run test:db` | 199 files / 2743 tests passed, 1 skipped (pass-3 head `4e1dd30`, local Postgres 5432, 2026-10-09) — including the extended `auth-hardening-854-gaps` suite (23 cases) and every tenant-isolation/team/phone-otp file |
 | `npm run build` | production build completed with `NODE_OPTIONS=--max-old-space-size=3072` (same as CI) once the sandbox gained swap; every earlier attempt on the swap-less 4 GB box was OOM-killed |
 | `npm run test:visual` | run locally against the CI-mirrored recipe in `docs/design/visual-regression.md` (Chromium `141.0.7390.0` from `@sparticuz/chromium@141.0.0`, seeded DB, production server, `TZ=Asia/Tehran`). Before this pass it failed exactly as CI did, and **only** on `accounting-expenses` (3.67% of pixels, bounds 54,18 1342×831; CI measured 4.06% at 54,18 1370×830 on the same stale baseline) with the other 13 screens byte-comparable. The diff is the #832 expenses redesign — the screen gained the VAT checkbox, the receipt-upload file input, the status/receipt/number/actions columns and the «پرداختی از حساب‌ها» totals line, all on the existing primitives (teal primary, amber eyebrow, the same table skin) — for which no baseline was ever re-recorded, on main as well as here. Reviewed per policy and re-recorded once, committed with this explanation; the suite is now 14/14 |
