@@ -188,6 +188,15 @@ export const WELL_KNOWN_CODES = {
   // is stock sent out without a sale (other expense).
   otherIncome: "4900",
   otherExpense: "5900",
+  // Issue #863 — multicurrency. Realized = settling a foreign receivable/
+  // payable at a later rate than it was booked at; unrealized = the optional
+  // end-of-period revaluation of foreign-currency accounts. The posting
+  // service looks these up by code like every other well-known account, so
+  // they can never be archived out from under an FX posting.
+  fxRealizedGain: "4930",
+  fxUnrealizedGain: "4935",
+  fxRealizedLoss: "5870",
+  fxUnrealizedLoss: "5875",
   // Phase 22 Wave 4 — cost of using a third-party online-ordering platform
   // (e.g. a delivery marketplace's cut of the sale). Settled via the manual-
   // journal workflow, the same "new well-known account, not deep posting-path
@@ -512,6 +521,10 @@ const SHARED_REVENUE_ACCOUNTS: TemplateAccount[] = [
   // business recording a discount by hand has somewhere honest to put it.
   { code: "4350", name: "تخفیفات فروش", type: "revenue", parentCode: "4000", isContra: true },
   { code: "4920", name: "سود فروش دارایی ثابت", type: "revenue", parentCode: "4000" },
+  // Multicurrency (issue #863) — seeded with every chart, and backfilled onto
+  // every existing business by migration 0216.
+  { code: "4930", name: "سود تسعیر ارز (تحقق‌یافته)", type: "revenue", parentCode: "4000" },
+  { code: "4935", name: "سود تسعیر تسویه‌نشده ارز (تحقق‌نیافته)", type: "revenue", parentCode: "4000" },
 ];
 
 const SHARED_EXPENSE_ACCOUNTS: TemplateAccount[] = [
@@ -524,6 +537,9 @@ const SHARED_EXPENSE_ACCOUNTS: TemplateAccount[] = [
   { code: "5810", name: "کسری و اضافه صندوق", type: "expense", parentCode: "5000" },
   { code: "5850", name: "هزینه مالی (سود تسهیلات)", type: "expense", parentCode: "5000" },
   { code: "5860", name: "هزینه چک برگشتی و جرایم بانکی", type: "expense", parentCode: "5000" },
+  // Multicurrency (issue #863) — the FX loss side, sibling to the gains under 4000.
+  { code: "5870", name: "زیان تسعیر ارز (تحقق‌یافته)", type: "expense", parentCode: "5000" },
+  { code: "5875", name: "زیان تسعیر تسویه‌نشده ارز (تحقق‌نیافته)", type: "expense", parentCode: "5000" },
   { code: "5950", name: "هزینه مالیات بر درآمد", type: "expense", parentCode: "5000" },
 ];
 

@@ -33,6 +33,13 @@ export const JOURNAL_EXPORT_COLUMNS = [
   { key: "accountName", label: "نام حساب" },
   { key: "debit", label: "بدهکار (ریال)" },
   { key: "credit", label: "بستانکار (ریال)" },
+  // Multicurrency (issue #863): a foreign document's lines keep their original
+  // currency, foreign amounts and frozen rate beside the base amounts — the
+  // export is the audit artefact, so the snapshot travels with it.
+  { key: "currency", label: "ارز" },
+  { key: "foreignDebit", label: "بدهکار ارزی" },
+  { key: "foreignCredit", label: "بستانکار ارزی" },
+  { key: "exchangeRate", label: "نرخ تسعیر سند" },
   { key: "entryTotal", label: "جمع سند (ریال)" },
   { key: "location", label: "شعبه" },
   { key: "project", label: "پروژه" },
@@ -80,7 +87,17 @@ export function buildJournalExportTable(entries: readonly JournalEntryRecord[]):
     if (entry.lines.length === 0) {
       // A document with no lines is corrupt, not absent — it belongs in the
       // export so the person reconciling can see it.
-      rows.push({ ...shared, accountCode: "", accountName: "", debit: "", credit: "" });
+      rows.push({
+        ...shared,
+        accountCode: "",
+        accountName: "",
+        debit: "",
+        credit: "",
+        currency: entry.currencyCode ?? "",
+        foreignDebit: "",
+        foreignCredit: "",
+        exchangeRate: entry.exchangeRate ?? "",
+      });
       continue;
     }
     for (const line of entry.lines) {
@@ -90,6 +107,10 @@ export function buildJournalExportTable(entries: readonly JournalEntryRecord[]):
         accountName: line.accountName,
         debit: line.debit,
         credit: line.credit,
+        currency: entry.currencyCode ?? "",
+        foreignDebit: line.foreignDebit !== "0" ? line.foreignDebit : "",
+        foreignCredit: line.foreignCredit !== "0" ? line.foreignCredit : "",
+        exchangeRate: entry.exchangeRate ?? "",
       });
     }
   }
