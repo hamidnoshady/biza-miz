@@ -8,8 +8,7 @@ import { CameraScanTrigger } from "@/components/scanner/camera-barcode-scanner";
 import { toPersianDigits } from "@/lib/digits";
 import { barcodeEntryError, normalizeBarcode } from "@/lib/barcode";
 import { printLabel } from "@/lib/printing/client";
-import { type LabelData } from "@/lib/label-template";
-import { useBusinessInfo } from "../use-printers";
+import { useBusinessInfo } from "../use-business-info";
 import { SectionCard, StatusBadge } from "../page-chrome";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { api, Field, inputClass } from "../ui";
@@ -22,9 +21,10 @@ import type { InventoryItem } from "./inventory-manager";
  * The retail trades got this in Phase 27 Wave 4 (`/api/barcodes`, the label
  * panel on the merchandising screen). F&B's `inventory_items` never had it, so
  * the only "code" an ingredient carried was `sku`, a search hint no scanner
- * emits. The label itself reuses the existing ESC/POS raster path
- * (`printLabel` → `renderLabelHtml`) unchanged; an ingredient's label carries
- * the unit rather than a shelf price, because raw stock is not priced to sell.
+ * emits. The label itself goes through the one printing pipeline every other
+ * document uses (`printLabel` → the branch's label rule → the label template →
+ * ESC/POS raster); an ingredient's label carries the unit rather than a shelf
+ * price, because raw stock is not priced to sell.
  *
  * Each card owns its own notice/error line (rendered inside the card the
  * action lives in, with `role="status"`), so a message from «چاپ لیبل» never
@@ -195,38 +195,33 @@ export function BarcodesSection({
     loadBarcodes();
   }
 
-  /** Print one label; resolves to null on success or a Persian error message. */
-  async function printOne(code: string, item: { name: string; unit: string }): Promise<string | null> {
-    const label: LabelData = {
-      businessName: businessInfo.name || "انبار",
-      itemName: item.name,
-      code,
-      fields: [{ label: "واحد", value: item.unit }],
-    };
-    // No registered printer is not a dead end: printLabel falls back to the
-    // browser's own print dialog, the same no-hardware path documents use.
-    const res = await printLabel(null, label, { requestId: `label:${code}` });
+  /**
+   * Print one label; resolves to null on success or a Persian error message.
+   *
+   * The label is the server's document — it loads the item and its barcode in
+   * this branch and builds the bars and fields from those rows, so what the
+   * scanner reads back is what the catalogue says. This screen names the item
+   * and the code; it no longer assembles the label (see
+   * src/lib/printing/label-print-data.ts).
+   *
+   * No printer id: the label rule decides. If the branch has no label printer
+   * at all, the server refuses with `printer_not_configured` — the browser's
+   * print dialog is not a fallback anywhere in this product.
+   */
+  async function printOne(itemId: string, code: string): Promise<string | null> {
+    const res = await printLabel(null, { itemId, code }, { requestId: `label:${code}` });
     if (res.ok) return null;
     return res.error === "connector_not_installed" || res.error === "connector_outdated" ? "رابط چاپ روی این کامپیوتر در دسترس نیست؛ از تنظیمات چاپگرها نصب کنید." : "چاپ لیبل ناموفق بود.";
   }
 
-  async function printSelected(code: string, item: { name: string; unit: string }) {
+  async function printSelected(row: { inventoryItemId: string; code: string }) {
     setManageError("");
     setManageNotice("");
-    const error = await printOne(code, item);
+    const error = await printOne(row.inventoryItemId, row.code);
     if (error) setManageError(error);
     else setManageNotice("لیبل چاپ شد.");
   }
 
-  function mintedLabel(row: MintedCode): LabelData {
-    const unit = items.find((i) => i.id === row.inventoryItemId)?.unit ?? "";
-    return {
-      businessName: businessInfo.name || "انبار",
-      itemName: row.itemName,
-      code: row.code,
-      fields: unit ? [{ label: "واحد", value: unit }] : [],
-    };
-  }
 
   async function printMinted() {
     if (printingAll || minted.length === 0) return;
@@ -236,7 +231,11 @@ export function BarcodesSection({
 
     let printed = 0;
     for (const row of minted) {
-      const res = await printLabel(null, mintedLabel(row), { requestId: `label:${row.code}` });
+      const res = await printLabel(
+        null,
+        { itemId: row.inventoryItemId, code: row.code },
+        { requestId: `label:${row.code}` },
+      );
       if (!res.ok) {
         const reason =
           res.error === "connector_not_installed" || res.error === "connector_outdated" ? "رابط چاپ روی این کامپیوتر در دسترس نیست؛ از تنظیمات چاپگرها نصب کنید." : "چاپ لیبل ناموفق بود.";
@@ -428,7 +427,7 @@ export function BarcodesSection({
                   size="sm"
                   variant="outline"
                   disabled={anyBusy}
-                  onClick={() => void printSelected(b.code, { name: selected.name, unit: selected.unit })}
+                  onClick={() => void printSelected(b)}
                 >
                   چاپ لیبل
                 </Button>

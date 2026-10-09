@@ -14,6 +14,12 @@
  * verification. After every deployment passes, set
  * AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true for the controlled migration run.
  * The migration also checks the session GUC set here.
+ *
+ * The *policy* — which migration is gated, which columns matter, when a defer
+ * is required and why — lives in `src/lib/ai-gateway-secret-cutover-policy.ts`
+ * so this runner and the platform health reporter
+ * (`src/lib/migration-status-service.ts`) cannot describe the same gate in two
+ * different ways. Only the execution stays here.
  */
 import "dotenv/config";
 import { createHash } from "node:crypto";
@@ -21,14 +27,19 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "pg";
+import {
+  AI_GATEWAY_SECRET_COLUMN_PROBE_SQL,
+  AI_GATEWAY_SECRET_CUTOVER_DEFER_ENV,
+  AI_GATEWAY_SECRET_CUTOVER_VERIFIED_ENV,
+  isSecretCutoverMigration,
+  migrationDependsOnLegacySecretColumn,
+  mustDeferSecretCutover,
+  readCutoverFlags,
+  type AiGatewaySecretColumn,
+} from "../src/lib/ai-gateway-secret-cutover-policy";
 
 const MIGRATIONS_DIR = join(process.cwd(), "migrations");
 export const MIGRATION_ADVISORY_LOCK_ID = "7310318183545164275";
-const AI_GATEWAY_SECRET_CUTOVER_MIGRATION = "0209_ai_gateway_secret_cutover.sql";
-const AI_GATEWAY_SECRET_CUTOVER_DEFER_ENV = "AI_GATEWAY_SECRET_CUTOVER_DEFER";
-const AI_GATEWAY_SECRET_CUTOVER_VERIFIED_ENV = "AI_GATEWAY_SECRET_CUTOVER_VERIFIED";
-/** A later migration naming either legacy column depends on 0209's order, so it cannot jump a deferred 0209. */
-const AI_GATEWAY_LEGACY_SECRET_COLUMN = /\b(?:master_key|virtual_key)\b/;
 
 /**
  * Whether 0209 would refuse to run without the post-verification confirmation:
@@ -38,11 +49,8 @@ const AI_GATEWAY_LEGACY_SECRET_COLUMN = /\b(?:master_key|virtual_key)\b/;
  * reaches 0209 with.
  */
 async function aiGatewaySecretsStored(client: Client): Promise<boolean> {
-  const { rows: columns } = await client.query<{ table_name: string; column_name: string }>(
-    `SELECT table_name, column_name FROM information_schema.columns
-      WHERE table_schema = current_schema()
-        AND ((table_name = 'platform_ai_gateway' AND column_name IN ('master_key', 'master_key_ciphertext'))
-          OR (table_name = 'ai_business_gateway' AND column_name IN ('virtual_key', 'virtual_key_ciphertext')))`,
+  const { rows: columns } = await client.query<AiGatewaySecretColumn>(
+    AI_GATEWAY_SECRET_COLUMN_PROBE_SQL,
   );
   const checks: string[] = [];
   for (const { table_name: table, column_name: column } of columns) {
@@ -203,8 +211,7 @@ function loadMigrations(directory: string): MigrationFile[] {
 }
 
 export async function runMigrations(options: MigrationRunOptions): Promise<MigrationRunResult> {
-  const deferSecretCutover = process.env[AI_GATEWAY_SECRET_CUTOVER_DEFER_ENV] === "true";
-  const secretCutoverVerified = process.env[AI_GATEWAY_SECRET_CUTOVER_VERIFIED_ENV] === "true";
+  const { defer: deferSecretCutover, verified: secretCutoverVerified } = readCutoverFlags();
   if (deferSecretCutover && secretCutoverVerified) {
     throw new Error("ai_gateway_secret_cutover_flags_conflict");
   }
@@ -284,19 +291,23 @@ export async function runMigrations(options: MigrationRunOptions): Promise<Migra
       // The guard's intent is unchanged — the columns are dropped only on a
       // run that sets AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true.
       if (
-        migration.filename === AI_GATEWAY_SECRET_CUTOVER_MIGRATION &&
-        (deferSecretCutover || (!secretCutoverVerified && (await aiGatewaySecretsStored(client))))
+        isSecretCutoverMigration(migration.filename) &&
+        mustDeferSecretCutover({
+          defer: deferSecretCutover,
+          verified: secretCutoverVerified,
+          secretsStored: await aiGatewaySecretsStored(client),
+        })
       ) {
         const dependent = migrations
           .slice(index + 1)
-          .find((later) => !applied.has(later.filename) && AI_GATEWAY_LEGACY_SECRET_COLUMN.test(later.sql));
+          .find((later) => !applied.has(later.filename) && migrationDependsOnLegacySecretColumn(later.sql));
         if (dependent) {
           throw new Error(`ai_gateway_secret_cutover_deferred_blocks_later_migration:${dependent.filename}`);
         }
         deferredMigrations.push(migration.filename);
         if (!options.quiet) {
           console.warn(
-            `Deferred ${AI_GATEWAY_SECRET_CUTOVER_MIGRATION}; verify ciphertext-backed production reads on every deployment, then rerun migrations with ${AI_GATEWAY_SECRET_CUTOVER_VERIFIED_ENV}=true.`,
+            `Deferred ${migration.filename}; verify ciphertext-backed production reads on every deployment, then rerun migrations with ${AI_GATEWAY_SECRET_CUTOVER_VERIFIED_ENV}=true.`,
           );
         }
         continue;

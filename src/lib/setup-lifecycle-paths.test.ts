@@ -8,9 +8,11 @@
  *   - **Pairing** imports an already-configured business and stamps the marker
  *     itself (pairing-apply.ts), because the configuration the wizard would
  *     have collected is exactly what just arrived.
- *   - **Super-admin provisioning** (the platform console, and the platform's
- *     own company workspace) promises a business that is usable immediately,
- *     so it asks provisionBusiness for `completeSetup: true`.
+ *   - **Super-admin provisioning** keeps its ready-to-enter path for non-F&B
+ *     trades. A food_service tenant cannot be considered ready until the
+ *     persisted readiness contract (including costing and a sellable menu) is
+ *     met, so the console leaves that marker unset and sends its owner through
+ *     the ordinary wizard. The platform's own company remains explicitly ready.
  *   - **First-run bootstrap and public signup** are the wizard's front doors:
  *     they must NOT stamp it, or a brand-new owner would never see setup.
  *
@@ -28,10 +30,13 @@ function source(relativePath: string): string {
 }
 
 describe("setup completion semantics per creation path", () => {
-  it("stamps completion for console-provisioned businesses", () => {
+  it("leaves console-provisioned food_service businesses to the readiness-checked wizard", () => {
     const route = source("src/app/api/platform/businesses/route.ts");
-    expect(route).toContain("completeSetup: true");
+    expect(route).toContain("shouldCompleteSetupForPlatformProvision(input.industry)");
     expect(route).toContain("seedChartOfAccounts: true");
+
+    const provisioning = source("src/lib/business-provisioning.ts");
+    expect(provisioning).toContain('wizardStepsForIndustry(industry ?? "food_service").includes("menu")');
   });
 
   it("stamps completion for the platform's own company workspace", () => {

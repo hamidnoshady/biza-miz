@@ -2,10 +2,18 @@ import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { getPool, query } from "@/lib/db";
 import { PERMISSIONS } from "@/lib/permissions";
-import { connectionJsonFor, parsePrinterInput } from "@/lib/printing/printer-input";
+import { parsePrinterInput } from "@/lib/printing/printer-input";
+import { PRINTER_COLUMNS } from "@/lib/printing/printer-columns";
+import { connectionJsonOf } from "@/lib/printing/types";
 import { resolveActiveLocation } from "@/lib/setup-state";
 
-/** All hardware for the active branch, including inactive printers. */
+/**
+ * All hardware for the active branch, including inactive printers.
+ *
+ * The row is the single source of truth for behaviour: purpose, paper,
+ * drawer, cut, defaultness and activity are relational columns, and the
+ * `connection` jsonb holds the hardware target and nothing else.
+ */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.settingsManage);
   if (error) return error;
@@ -14,13 +22,10 @@ export const GET = withTenantScope(async () => {
 
   try {
     const { rows: printers } = await query(
-      `SELECT id, name, kind, connection, is_active
+      `SELECT ${PRINTER_COLUMNS}
          FROM printers
         WHERE location_id = $1
-        -- JSON containment is deliberately used instead of casting ->> to
-        -- boolean. A legacy/imported row with a malformed isDefault value must
-        -- not make the entire settings page return 500.
-        ORDER BY kind, COALESCE(connection @> '{"isDefault": true}'::jsonb, false) DESC, name`,
+        ORDER BY kind, is_default DESC, name`,
       [location.id],
     );
     return NextResponse.json({ printers });
@@ -49,19 +54,28 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     await client.query("BEGIN");
     if (input.isDefault) {
       await client.query(
-        `UPDATE printers
-            SET connection =
-              CASE WHEN jsonb_typeof(connection) = 'object' THEN connection ELSE '{}'::jsonb END
-              || '{"isDefault": false}'::jsonb
-          WHERE location_id = $1 AND kind = $2`,
+        `UPDATE printers SET is_default = false WHERE location_id = $1 AND kind = $2`,
         [location.id, input.kind],
       );
     }
     const { rows } = await client.query(
-      `INSERT INTO printers (location_id, name, kind, connection, is_active)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, name, kind, connection, is_active`,
-      [location.id, input.name, input.kind, JSON.stringify(connectionJsonFor(input)), input.isActive],
+      `INSERT INTO printers
+         (location_id, name, kind, connection, is_active, printer_class, supports_drawer, supports_cut, is_default, paper, paper_width_mm)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING ${PRINTER_COLUMNS}`,
+      [
+        location.id,
+        input.name,
+        input.kind,
+        JSON.stringify(connectionJsonOf(input.connection)),
+        input.isActive,
+        input.printerClass,
+        input.openDrawer,
+        input.supportsCut,
+        input.isDefault,
+        input.paper,
+        input.paperWidthMm,
+      ],
     );
     await client.query("COMMIT");
     return NextResponse.json({ printer: rows[0] }, { status: 201 });

@@ -252,13 +252,21 @@ prompt composition, memory and Deep Research details.
 `npm run db:encrypt-ai-secrets -- --dry-run`, then `npm run db:encrypt-ai-secrets`, then
 `npm run db:encrypt-ai-secrets -- --verify-only` with the app's current
 `INTEGRATIONS_ENCRYPTION_KEY` (or `JWT_SECRET`). While any credential is stored and the
-confirmation below is not set, the migration runner leaves 0209 pending on its own (later
-migrations still apply) and the container entrypoint backfills missing ciphertext without
-clearing plaintext, so production ciphertext-backed reads/probes can be verified on every
-instance first. Drain
+confirmation below is not set, the migration runner leaves 0209 pending on its own and the
+container entrypoint backfills missing ciphertext without clearing plaintext, so production
+ciphertext-backed reads/probes can be verified on every instance first. Later migrations still
+apply **except** one that names a legacy plaintext column — that case blocks the deferral
+outright, because such a migration could not run either. Drain
 pre-cutover instances, then run `AI_GATEWAY_SECRET_CUTOVER_VERIFIED=true npm run db:migrate`.
 Both the migration runner and SQL require that post-verification confirmation when credentials
-exist. Remove the temporary flags afterward. See [Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md)
+exist. Remove the temporary flags afterward; `AI_GATEWAY_SECRET_CUTOVER_VERIFIED` is a one-time
+operator confirmation and must never become a permanent deployment default.
+
+A **bare `npm run db:migrate` will defer 0209 again** while a credential is still stored — that is
+the safety net working, not a failure. `/platform/system` reports the deferral as a gated cleanup
+awaiting verification, with the exact next steps, rather than as a generic schema-mismatch
+warning; `/platform` shows the same classification on its health tile. See
+[Phase 39](docs/phases/Phase-39-LiteLLM-Only-AI-Platform.md)
 for the full sequence. The local repository cannot establish that production backfill or
 verification has occurred.
 

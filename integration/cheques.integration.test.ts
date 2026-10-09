@@ -266,11 +266,13 @@ describe("cheque attribution in the party subledgers", () => {
       supplierName: "تأمین‌کننده",
       supplierPartyId: null,
       supplierPhone: null,
+      locationId: biz.locationId,
+      locationName: "Main",
       balance: -3_000_000,
     });
     const statement = await ap.getSupplierStatement(biz.id, party.supplierId);
     expect(statement).toHaveLength(1);
-    expect(statement[0]).toMatchObject({ debit: 3_000_000, credit: 0, type: "other" });
+    expect(statement[0]).toMatchObject({ debit: 3_000_000, credit: 0, type: "cheque" });
     expect(statement[0].description).toContain(cheque.serialNumber);
   });
 
@@ -290,6 +292,8 @@ describe("cheque attribution in the party subledgers", () => {
       supplierName: "تأمین‌کننده",
       supplierPartyId: null,
       supplierPhone: null,
+      locationId: biz.locationId,
+      locationName: "Main",
       balance: -5_000_000,
     });
 

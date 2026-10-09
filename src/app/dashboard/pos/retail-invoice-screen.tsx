@@ -43,8 +43,7 @@ import { MAX_RETAIL_TENDERS } from "@/lib/retail-tenders";
 import { radioMoveForKey, radioTargetIndex } from "@/lib/radio-keys";
 import { safeRandomId } from "@/lib/client-id";
 import { HoldToConfirmButton } from "../hold-to-confirm-button";
-import { kickDrawer, printReceipt } from "@/lib/printing/client";
-import type { ReceiptData } from "@/lib/receipt-template";
+import { kickDrawer, printSaleReceipt } from "@/lib/printing/client";
 import { api, ErrorBox, errorMessage, Field, inputClass } from "../ui";
 import { usePaymentMethods } from "../payment-ways";
 import { PageHeader, PageShell, TabBar, TabPanel, cardClass } from "../page-chrome";
@@ -238,7 +237,9 @@ export function RetailInvoiceScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<{ orderNumber: number; total: number } | null>(null);
-  const [lastReceipt, setLastReceipt] = useState<ReceiptData | null>(null);
+  // The sale just issued — enough to name it for a reprint, and all a reprint
+  // needs: the document is loaded from the sale's own rows by the server.
+  const [lastOrderId, setLastOrderId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -428,52 +429,30 @@ export function RetailInvoiceScreen({
       setNote("");
       void load();
 
+      setLastOrderId(invoice.orderId);
+
       // The invoice is already committed at this point — everything below is
-      // best-effort presentation. A failure fetching the print document (or
-      // printing it) must never look like the sale itself failed; it only
-      // ever surfaces as a non-blocking toast, same as "printer not configured".
+      // best-effort presentation, and a print that fails must never look like
+      // the sale failed: it only ever surfaces as a non-blocking toast, same
+      // as "printer not configured".
       const openedDrawer = splitPayment
         ? tenderRows.some((row) => tenderRowWay(row)?.opensDrawer === true)
         : (selectedWay?.opensDrawer ?? false);
-      void (async () => {
-        // The same builder the reprint endpoint calls (`getRetailInvoicePrintData`)
-        // — so the first print can never drift from a later reprint of the same
-        // sale (see src/lib/retail-invoice/print-data.ts's header comment).
-        const printResult = await api<{ receipt?: ReceiptData; error?: string }>(
-          `/api/sales/invoices/${invoice.orderId}?view=print`,
-        );
-        if (!printResult.ok || !printResult.data.receipt) {
-          toast.warning("دریافت اطلاعات چاپ ناموفق بود؛ فاکتور با موفقیت ثبت شده است.", {
-            action: {
-              label: "چاپ دوباره",
-              onClick: () => {
-                void api<{ receipt?: ReceiptData }>(`/api/sales/invoices/${invoice.orderId}?view=print`).then(
-                  (retry) => {
-                    if (retry.ok && retry.data.receipt) {
-                      setLastReceipt(retry.data.receipt);
-                      void printReceipt(null, retry.data.receipt, { requestId: `invoice:${invoice.orderId}:retry` });
-                    }
-                  },
-                );
-              },
-            },
-          });
-          return;
-        }
-        const receipt = printResult.data.receipt;
-        setLastReceipt(receipt);
-        const receiptRequestId = `invoice:${invoice.orderId}`;
-        const result = await printReceipt(null, receipt, { requestId: receiptRequestId });
+      const receiptRequestId = `invoice:${invoice.orderId}`;
+      // One call, no fetch: the server loads this sale through
+      // `getRetailInvoicePrintData` — the same builder the reprint endpoint and
+      // every later reprint use — and renders it. The sale's own rows are the
+      // only source, so the first print cannot drift from a later reprint of
+      // the same sale (see src/lib/retail-invoice/print-data.ts's header).
+      const issue = (requestId: string) => printSaleReceipt(null, invoice.orderId, { requestId });
+      void issue(receiptRequestId).then((result) => {
         if (!result.ok && result.error !== "printer_not_configured") {
           toast.warning("چاپ رسید انجام نشد؛ فاکتور با موفقیت ثبت شده است.", {
-            action: {
-              label: "چاپ دوباره",
-              onClick: () => void printReceipt(null, receipt, { requestId: `${receiptRequestId}:retry` }),
-            },
+            action: { label: "چاپ دوباره", onClick: () => void issue(`${receiptRequestId}:retry`) },
           });
         }
         if (openedDrawer && result.supportsDrawer && result.printerId) void kickDrawer(result.printerId);
-      })();
+      });
     } else {
       // The server sends the sell services' own Persian refusals (no stock, no
       // cost basis, no gold rate recorded for today) as `message`; showing that
@@ -483,9 +462,10 @@ export function RetailInvoiceScreen({
   }
 
   function reprintLast() {
-    if (!lastReceipt) return;
-    const requestId = `reprint:${crypto.randomUUID()}`;
-    void printReceipt(null, lastReceipt, { requestId }).then((result) => {
+    if (!lastOrderId) return;
+    const requestId = `reprint:${lastOrderId}:${crypto.randomUUID()}`;
+    const issue = (id: string) => printSaleReceipt(null, lastOrderId, { requestId: id });
+    void issue(requestId).then((result) => {
       if (result.ok) {
         toast.success("رسید برای چاپ ارسال شد");
       } else if (result.error === "printer_not_configured") {
@@ -500,7 +480,7 @@ export function RetailInvoiceScreen({
         });
       } else {
         toast.warning("چاپ رسید انجام نشد.", {
-          action: { label: "چاپ دوباره", onClick: () => void printReceipt(null, lastReceipt, { requestId: `${requestId}:retry` }) },
+          action: { label: "چاپ دوباره", onClick: () => void issue(`${requestId}:retry`) },
         });
       }
     });
@@ -531,7 +511,7 @@ export function RetailInvoiceScreen({
           <span>
             فاکتور شمارهٔ {toPersianDigits(done.orderNumber)} به مبلغ {money.format(done.total)} ثبت شد.
           </span>
-          {lastReceipt ? (
+          {lastOrderId ? (
             <Button variant="outline" size="sm" onClick={reprintLast}>
               <PrinterIcon aria-hidden="true" className="size-4" />
               چاپ رسید

@@ -316,6 +316,13 @@ describe("Phase 35 module keys", () => {
 });
 
 describe("moduleForApiPath", () => {
+  it("directly gates online-platform settings by the F&B delivery module", () => {
+    const module = moduleForApiPath("/api/settings/online-platforms");
+    expect(module).toBe("delivery");
+    expect(module && hasModule("food_service", module)).toBe(true);
+    expect(module && hasModule("jewelry", module)).toBe(false);
+  });
+
   it("maps a route and everything under it", () => {
     expect(moduleForApiPath("/api/tables")).toBe("tables");
     expect(moduleForApiPath("/api/tables/abc/close")).toBe("tables");
@@ -353,6 +360,10 @@ describe("moduleForApiPath", () => {
     expect(moduleForApiPath("/api/ledger/entries")).toBe("ledger");
     expect(moduleForApiPath("/api/reports/sales")).toBe("reports");
     expect(moduleForApiPath("/api/settings/pricing")).toBe("menu");
+    expect(moduleForApiPath("/api/settings/online-platforms")).toBe("delivery");
+    expect(moduleForApiPath("/api/settings/online-platforms/snapfood")).toBe("delivery");
+    expect(hasModule("food_service", "delivery")).toBe(true);
+    expect(hasModule("jewelry", "delivery")).toBe(false);
     expect(moduleForApiPath("/api/settings/business")).toBe("settings");
     expect(moduleForApiPath("/api/dashboard/overview")).toBe("dashboard");
     expect(moduleForApiPath("/api/waiter/board")).toBe("waiter");

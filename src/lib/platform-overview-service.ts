@@ -10,9 +10,21 @@
  * The shape is deliberately actionable: counts paired with the section an
  * operator would click through to, plus a short alert list surfacing the few
  * things that are actually wrong.
+ *
+ * Migration status arrives as the canonical `MigrationStatus` from
+ * `getMigrationStatus()` (see `src/lib/migration-status-service.ts`) so this
+ * page, the system page and the migration runner all classify the same state
+ * the same way. The overview deliberately keeps the split rather than a single
+ * number: an ordinary pending migration and the deliberately gated
+ * `0209_ai_gateway_secret_cutover.sql` need different operator actions, and
+ * folding them into one count is what made the cutover look like a forgotten
+ * migration.
  */
 import { query, withoutTenantScope } from "./db";
 import { getPlatformBackupHealth } from "./platform-backup-service";
+import type { MigrationStatus } from "./migration-status-service";
+import { migrationHeadline, type MigrationHeadline } from "./migration-status-labels";
+import { toPersianDigits } from "./digits";
 
 export interface OverviewAlert {
   level: "error" | "warning" | "info";
@@ -38,7 +50,25 @@ export interface PlatformOverview {
     reason: string | null;
   };
   system: {
-    pendingMigrations: number;
+    /**
+     * Ordinary pending + gated/deferred migrations, or null when the inventory
+     * could not be read. Never zero as a stand-in for "unknown".
+     */
+    pendingMigrations: number | null;
+    /** Unapplied migrations an ordinary `npm run db:migrate` would apply. */
+    ordinaryPendingMigrations: number;
+    /** Unapplied migrations deliberately withheld pending operator verification. */
+    gatedMigrations: number;
+    /** False when the migration inventory or `schema_migrations` was unreadable. */
+    migrationStatusAvailable: boolean;
+    /** Stable reason code from the migration-status service, or null. */
+    migrationStatusReasonCode: string | null;
+    /**
+     * The canonical one-line classification (`migrationHeadline`), computed once
+     * here so the tile, the alert list and the system page all say the same
+     * thing about the same state.
+     */
+    migrationHeadline: MigrationHeadline | null;
     rlsEffective: boolean;
     poolWaiting: number;
   };
@@ -46,11 +76,11 @@ export interface PlatformOverview {
 }
 
 /**
- * Aggregate the overview. `pendingMigrations` is passed in because computing it
- * compares the filesystem to the DB, which belongs in the route (as the system
- * route already does), not in a pure DB service.
+ * Aggregate the overview. `migrations` is the canonical status computed once by
+ * the shared migration-status service and handed in by the route, so the
+ * overview and the system page cannot disagree.
  */
-export async function getPlatformOverview(pendingMigrations: number): Promise<PlatformOverview> {
+export async function getPlatformOverview(migrations: MigrationStatus): Promise<PlatformOverview> {
   const [counts, backupHealth, rls, pool] = await withoutTenantScope("platform", () =>
     Promise.all([
       query<{
@@ -112,11 +142,44 @@ export async function getPlatformOverview(pendingMigrations: number): Promise<Pl
         : "ok"
     : "unknown";
 
+  const ordinaryPending = migrations.available ? migrations.ordinaryPending.length : 0;
+  const gatedMigrations = migrations.available ? migrations.gated.length : 0;
+
   const alerts: OverviewAlert[] = [];
-  if (pendingMigrations > 0) {
+  if (!migrations.available) {
+    // An inventory we could not read is not a healthy deployment; say so rather
+    // than reporting zero pending and letting the badge read «سالم».
+    alerts.push({
+      level: "warning",
+      title: "وضعیت مهاجرت‌های پایگاه‌داده نامشخص است؛ فهرست مهاجرت‌ها خوانده نشد",
+      href: "/platform/system",
+    });
+  }
+  if (migrations.cutover.flagsConflict) {
     alerts.push({
       level: "error",
-      title: `${pendingMigrations} مهاجرت پایگاه‌داده اجرا نشده است`,
+      title: "تناقض در تنظیمات مهاجرت کلید هوش مصنوعی؛ اجرای مهاجرت متوقف شده",
+      href: "/platform/system",
+    });
+  }
+  if (migrations.cutover.blockedBy) {
+    alerts.push({
+      level: "error",
+      title: `مهاجرت بعدی وابسته به ستون قدیمی، اجرای مهاجرت کلید هوش مصنوعی را متوقف کرده: ${migrations.cutover.blockedBy}`,
+      href: "/platform/system",
+    });
+  }
+  if (ordinaryPending > 0) {
+    alerts.push({
+      level: "error",
+      title: `${toPersianDigits(ordinaryPending)} مهاجرت پایگاه‌داده اجرا نشده است`,
+      href: "/platform/system",
+    });
+  }
+  if (gatedMigrations > 0) {
+    alerts.push({
+      level: "warning",
+      title: "پاک‌سازی کلیدهای قدیمی هوش مصنوعی در انتظار تأیید خوانش رمزنگاری‌شده است",
       href: "/platform/system",
     });
   }
@@ -180,7 +243,12 @@ export async function getPlatformOverview(pendingMigrations: number): Promise<Pl
       reason: backupHealth?.alert.reason ?? null,
     },
     system: {
-      pendingMigrations,
+      pendingMigrations: migrations.pendingTotal,
+      ordinaryPendingMigrations: ordinaryPending,
+      gatedMigrations,
+      migrationStatusAvailable: migrations.available,
+      migrationStatusReasonCode: migrations.reasonCode,
+      migrationHeadline: migrationHeadline(migrations),
       rlsEffective,
       poolWaiting: 0,
     },
