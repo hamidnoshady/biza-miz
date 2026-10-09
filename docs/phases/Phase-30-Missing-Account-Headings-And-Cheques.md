@@ -161,6 +161,21 @@ happened to this cheque" unanswerable from the event log.
 > **attribution** — an ordinary registration must name a customer/supplier, and capturing an
 > unattributed cheque is an explicit, visibly exceptional choice; **replacement** —
 > `replaces_cheque_id` records which cheque replaced which, so the history drills through.
+>
+> Migration 0218 finished two of those. **Replacement is a sequence, not a
+> link**: a replacement may only be registered against a cheque whose returned
+> balance has already been restored (`restore`), in the same branch, for the
+> same party, dated no earlier than that restoration, and for no more than the
+> part of the original that is still unreplaced — splitting one returned
+> cheque into several is supported, replacing more than came back is not. The
+> original is locked while that arithmetic is read, so two concurrent
+> replacements cannot both see room. **Identity survives an upgrade**: legacy
+> duplicates are classified (`canonical_duplicate_of`) rather than tolerated,
+> and the unique index covers every unclassified row, so a tenant whose
+> history contains the same cheque three times still has new duplicates
+> refused. **A retry is the same request**: both tables store the canonical
+> fingerprint of the payload that wrote them, and the same key carrying a
+> different payload is `idempotency_key_conflict` instead of a silent success.
 
 ## Where the exit criteria are satisfied
 

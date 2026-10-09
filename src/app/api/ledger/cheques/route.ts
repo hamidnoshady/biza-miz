@@ -36,6 +36,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       locationId: search.get("locationId"),
       status: search.get("status"),
       bankName: search.get("bank"),
+      // A treasurer's commonest question is "what falls due between these two
+      // dates" — validated in the service, in storage (ISO) form; the screen
+      // picks them on the Jalali calendar.
+      dueFrom: search.get("dueFrom"),
+      dueTo: search.get("dueTo"),
       q: search.get("q"),
       sort: search.get("sort"),
       limit,

@@ -36,6 +36,7 @@
  * DB-touching, so per repo convention it has no direct unit test — the pure half
  * is `cheques.ts`, and this is covered by integration/cheques.integration.test.ts.
  */
+import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { WELL_KNOWN_CODES } from "./coa-template";
@@ -116,6 +117,8 @@ export interface Cheque {
   replacesChequeId: string | null;
   /** That cheque's serial, so the register can name it without a second call. */
   replacesSerialNumber: string | null;
+  /** Set on a returned cheque that has already been replaced, in whole or in part. */
+  replacedByAmount: number;
   createdAt: string;
 }
 
@@ -138,6 +141,7 @@ interface ChequeRow extends Record<string, unknown> {
   memo: string | null;
   replaces_cheque_id: string | null;
   replaces_serial_number?: string | null;
+  replaced_by_amount?: string | null;
   created_at: string;
 }
 
@@ -161,6 +165,7 @@ function toCheque(r: ChequeRow): Cheque {
     memo: r.memo,
     replacesChequeId: r.replaces_cheque_id,
     replacesSerialNumber: r.replaces_serial_number ?? null,
+    replacedByAmount: Number(r.replaced_by_amount ?? 0),
     createdAt: r.created_at,
   };
 }
@@ -181,6 +186,9 @@ export interface ChequeListFilters {
   /** A single status, or one of the accounting-aware groups below. */
   status?: string | null;
   bankName?: string | null;
+  /** Inclusive due-date window, ISO (storage/wire form; the UI picks Jalali). */
+  dueFrom?: string | null;
+  dueTo?: string | null;
   /** Free text over counterparty, bank, serial, صیاد id and memo. */
   q?: string | null;
   sort?: string | null;
@@ -196,13 +204,7 @@ export interface ChequeListPage {
    * Accounting-aware totals for the *filtered* set, by where the value sits
    * rather than by "is the row finished" — see `CHEQUE_STATUS_GROUPS`.
    */
-  summary: {
-    outstanding: { count: number; total: number };
-    returnedUnresolved: { count: number; total: number };
-    settled: { count: number; total: number };
-    overdue: { count: number; total: number };
-    dueSoon: { count: number; total: number };
-  };
+  summary: ChequeSummary;
   banks: string[];
 }
 
@@ -212,6 +214,42 @@ export interface ChequeListPage {
  * (it is not — endorsement already paid the supplier) and dropped a returned
  * cheque entirely (it very much is still money, sitting in 1244/2122).
  */
+/**
+ * The accounting-aware categories the register reports, each reconciling to a
+ * control account rather than to "is this row finished":
+ *
+ *   onHand            چک‌های نزد صندوق (1241)
+ *   inCollection      چک‌های در جریان وصول (1242)
+ *   contingent        endorsed — off our books, but back if it bounces
+ *   returnedUnresolved چک‌های برگشتی (1244) / چک‌های پرداختنی برگشتی (2122)
+ *   cleared           وصول‌شده/پاس‌شده و تسویه‌شده
+ *   cancelled         ابطال چک صادرشده (payable only)
+ *   resolved          برگشتی که به حساب طرف بازگشته است
+ *
+ * `outstanding` stays as the sum of the two live asset buckets plus issued
+ * payables, because that is the number the KPI strip leads with.
+ */
+export interface ChequeSummaryBucket {
+  count: number;
+  total: number;
+}
+
+export interface ChequeSummary {
+  outstanding: ChequeSummaryBucket;
+  onHand: ChequeSummaryBucket;
+  inCollection: ChequeSummaryBucket;
+  issued: ChequeSummaryBucket;
+  contingent: ChequeSummaryBucket;
+  returnedUnresolved: ChequeSummaryBucket;
+  resolved: ChequeSummaryBucket;
+  cleared: ChequeSummaryBucket;
+  cancelled: ChequeSummaryBucket;
+  /** Kept for the "settled" tab: cleared + cancelled + resolved. */
+  settled: ChequeSummaryBucket;
+  overdue: ChequeSummaryBucket;
+  dueSoon: ChequeSummaryBucket;
+}
+
 export const CHEQUE_STATUS_GROUPS: Record<string, ChequeStatus[]> = {
   outstanding: ["on_hand", "in_collection", "issued"],
   contingent: ["endorsed"],
@@ -219,12 +257,18 @@ export const CHEQUE_STATUS_GROUPS: Record<string, ChequeStatus[]> = {
   settled: ["cleared", "cancelled", "resolved"],
 };
 
+/**
+ * Every sort ends in `c.id`, and `c.id` is unique: an append page is only
+ * meaningful if two rows can never tie. Without it a tenant with fifty cheques
+ * due the same day gets a different order per request, and "load more" both
+ * repeats and skips rows.
+ */
 const SORTS: Record<string, string> = {
-  due_asc: "c.due_date ASC, c.created_at ASC",
-  due_desc: "c.due_date DESC, c.created_at DESC",
-  amount_desc: "c.amount DESC, c.created_at DESC",
-  amount_asc: "c.amount ASC, c.created_at DESC",
-  created_desc: "c.created_at DESC",
+  due_asc: "c.due_date ASC, c.created_at ASC, c.id ASC",
+  due_desc: "c.due_date DESC, c.created_at DESC, c.id DESC",
+  amount_desc: "c.amount DESC, c.created_at DESC, c.id DESC",
+  amount_asc: "c.amount ASC, c.created_at DESC, c.id DESC",
+  created_desc: "c.created_at DESC, c.id DESC",
 };
 
 const MAX_PAGE = 200;
@@ -270,6 +314,17 @@ export async function listCheques(
     params.push(canonicalBankName(bankName));
     where += ` AND c.bank_name_canonical = $${params.length}`;
   }
+  const dueFrom = optionalIsoDate(filters.dueFrom, "invalid_due_from");
+  const dueTo = optionalIsoDate(filters.dueTo, "invalid_due_to");
+  if (dueFrom && dueTo && dueTo < dueFrom) throw new ChequeError("invalid_due_range");
+  if (dueFrom) {
+    params.push(dueFrom);
+    where += ` AND c.due_date >= $${params.length}`;
+  }
+  if (dueTo) {
+    params.push(dueTo);
+    where += ` AND c.due_date <= $${params.length}`;
+  }
   const q = filters.q?.trim();
   if (q) {
     params.push(`%${q.toLowerCase()}%`);
@@ -290,10 +345,15 @@ export async function listCheques(
   const { rows } = await query<ChequeRow>(
     `SELECT ${CHEQUE_COLUMNS_PREFIXED},
             l.name AS location_name,
-            r.serial_number AS replaces_serial_number
+            r.serial_number AS replaces_serial_number,
+            COALESCE(rep.replaced_by_amount, 0)::text AS replaced_by_amount
        FROM cheques c
        LEFT JOIN locations l ON l.id = c.location_id
        LEFT JOIN cheques r ON r.id = c.replaces_cheque_id
+       LEFT JOIN LATERAL (
+         SELECT SUM(x.amount) AS replaced_by_amount FROM cheques x
+          WHERE x.business_id = c.business_id AND x.replaces_cheque_id = c.id
+       ) rep ON true
       WHERE ${where}
       ORDER BY (c.status = ANY(ARRAY['cleared', 'bounced', 'cancelled', 'resolved']::cheque_status[])), ${orderBy}
       LIMIT ${limit + 1} OFFSET ${offset}`,
@@ -321,9 +381,16 @@ export async function listCheques(
 
   const today = todayIso();
   const bucket = { count: 0, total: 0 };
-  const summary = {
+  const summary: ChequeSummary = {
     outstanding: { ...bucket },
+    onHand: { ...bucket },
+    inCollection: { ...bucket },
+    issued: { ...bucket },
+    contingent: { ...bucket },
     returnedUnresolved: { ...bucket },
+    resolved: { ...bucket },
+    cleared: { ...bucket },
+    cancelled: { ...bucket },
     settled: { ...bucket },
     overdue: { ...bucket },
     dueSoon: { ...bucket },
@@ -334,16 +401,27 @@ export async function listCheques(
     const count = Number(row.count);
     const value = Number(row.total);
     total += count;
-    const add = (key: keyof typeof summary) => {
+    const add = (key: keyof ChequeSummary) => {
       summary[key].count += count;
       summary[key].total += value;
     };
+    const PER_STATUS: Partial<Record<ChequeStatus, keyof ChequeSummary>> = {
+      on_hand: "onHand",
+      in_collection: "inCollection",
+      issued: "issued",
+      endorsed: "contingent",
+      bounced: "returnedUnresolved",
+      cleared: "cleared",
+      cancelled: "cancelled",
+      resolved: "resolved",
+    };
+    const own = PER_STATUS[row.status];
+    if (own) add(own);
     if (CHEQUE_STATUS_GROUPS.outstanding.includes(row.status)) {
       add("outstanding");
       if (row.due_date < today) add("overdue");
       else if (row.due_date <= soonLimit) add("dueSoon");
-    } else if (row.status === "bounced") add("returnedUnresolved");
-    else if (row.status !== "endorsed") add("settled");
+    } else if (row.status !== "bounced" && row.status !== "endorsed") add("settled");
   }
 
   return {
@@ -414,9 +492,20 @@ async function assertSupplier(client: PoolClient, businessId: string, supplierId
   // `isUuid`). The A/P balance list's «بدون تأمین‌کننده مشخص» bucket carries the
   // id `"unknown"`, and a picker built from that list could submit it.
   if (!isUuid(supplierId)) throw new ChequeError("supplier_not_found", 404);
+  // Active alias, and — when the alias is linked to a canonical party (the
+  // `suppliers.party_id` link migration 0137 introduced) — an active, unmerged
+  // party. Attributing a cheque to a deactivated alias or to a party that has
+  // since been merged away points the A/P subledger at a record no statement
+  // will ever show again, which is the attribution failure issue #826 is
+  // about. Cross-branch is deliberately allowed: an alias is location-scoped
+  // but A/P is answered per business, so a cheque written at one branch may
+  // legitimately pay a supplier registered at another.
   const { rows } = await client.query(
-    `SELECT 1 FROM suppliers s JOIN locations l ON l.id = s.location_id
-      WHERE s.id = $1 AND l.business_id = $2`,
+    `SELECT 1 FROM suppliers s
+       JOIN locations l ON l.id = s.location_id
+       LEFT JOIN parties pa ON pa.id = s.party_id
+      WHERE s.id = $1 AND l.business_id = $2 AND s.is_active
+        AND (s.party_id IS NULL OR (pa.business_id = $2 AND pa.is_active AND pa.merged_into_id IS NULL))`,
     [supplierId, businessId],
   );
   if (!rows[0]) throw new ChequeError("supplier_not_found", 404);
@@ -433,6 +522,20 @@ async function assertCustomer(client: PoolClient, businessId: string, customerId
 }
 
 /**
+ * The canonical fingerprint of a money-moving request.
+ *
+ * A retry is "the same request sent again", and only the payload can prove
+ * that. Every accounting-significant field goes in, in a fixed order, so the
+ * comparison cannot depend on key order or on a field the caller omitted; a
+ * cosmetic field (memo) stays out, because re-sending a retry with a corrected
+ * note is still the same posting. A key that comes back with a *different*
+ * payload is a client bug or a key collision, and is refused.
+ */
+function fingerprintOf(parts: (string | number | null)[]): string {
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+/**
  * The cheque a previous call with this key created, if there was one.
  *
  * Retry safety has to answer *before* the write and again *after* a unique
@@ -440,12 +543,118 @@ async function assertCustomer(client: PoolClient, businessId: string, customerId
  * the loser of that race should still be handed the winner's cheque rather
  * than an error.
  */
-async function findChequeByIdempotencyKey(businessId: string, key: string): Promise<Cheque | null> {
-  const { rows } = await query<ChequeRow>(
-    `SELECT ${CHEQUE_COLUMNS} FROM cheques WHERE business_id = $1 AND idempotency_key = $2`,
+async function findChequeByIdempotencyKey(
+  businessId: string,
+  key: string,
+  fingerprint: string,
+): Promise<Cheque | null> {
+  const { rows } = await query<ChequeRow & { idempotency_fingerprint: string | null }>(
+    `SELECT ${CHEQUE_COLUMNS}, idempotency_fingerprint FROM cheques
+      WHERE business_id = $1 AND idempotency_key = $2`,
     [businessId, key],
   );
-  return rows[0] ? toCheque(rows[0]) : null;
+  const row = rows[0];
+  if (!row) return null;
+  // Same key, different request: answering with the first cheque would hide a
+  // real client bug behind a success.
+  if (row.idempotency_fingerprint && row.idempotency_fingerprint !== fingerprint) {
+    throw new ChequeError("idempotency_key_conflict", 409);
+  }
+  return toCheque(row);
+}
+
+/**
+ * May this new cheque be registered as the replacement of that returned one?
+ *
+ * The accounting is the whole reason this is strict. A returned receivable's
+ * value sits in چک‌های برگشتی (1244) until a resolution moves it; `restore`
+ * moves it back to حساب‌های دریافتنی, and only *then* does registering a
+ * replacement — whose own entry debits چک‌های نزد صندوق and credits
+ * حساب‌های دریافتنی — net out. Replacing a cheque that is still `bounced`
+ * would credit an A/R that was never restored (driving the customer's balance
+ * negative) and leave 1244 stranded exactly as issue #828 describes. So the
+ * restoration is required first and enforced here, server-side, rather than
+ * being a sequence the UI is trusted to follow.
+ *
+ * Under the original's row lock, which is what makes the amount arithmetic
+ * below safe against two replacements registered at the same moment.
+ */
+async function assertReplaceable(
+  client: PoolClient,
+  params: {
+    businessId: string;
+    originalId: string;
+    direction: ChequeDirection;
+    locationId: string | null;
+    customerId: string | null;
+    supplierId: string | null;
+    amount: number;
+    issueDate: string;
+  },
+): Promise<void> {
+  // Two statements, deliberately. The lock has to be taken on its own first:
+  // in READ COMMITTED a subquery in the *same* statement is evaluated against
+  // that statement's snapshot, which was taken before the wait, so a
+  // concurrent replacement that committed while we were blocked would be
+  // invisible and both callers would see room for the full amount. Locking,
+  // then re-reading in a fresh statement, is what makes the arithmetic below
+  // true at the moment it is used.
+  const { rows: locked } = await client.query<{
+    status: ChequeStatus;
+    direction: ChequeDirection;
+    location_id: string | null;
+    customer_id: string | null;
+    supplier_id: string | null;
+    amount: string;
+  }>(
+    `SELECT status, direction, location_id, customer_id, supplier_id, amount::text AS amount
+       FROM cheques WHERE business_id = $1 AND id = $2 FOR UPDATE`,
+    [params.businessId, params.originalId],
+  );
+  const { rows: live } = await client.query<{ replaced: string; last_event_on: string | null }>(
+    `SELECT COALESCE((SELECT SUM(x.amount) FROM cheques x
+                       WHERE x.business_id = $1 AND x.replaces_cheque_id = $2), 0)::text AS replaced,
+            (SELECT max(e.occurred_on)::text FROM cheque_events e
+              WHERE e.business_id = $1 AND e.cheque_id = $2) AS last_event_on`,
+    [params.businessId, params.originalId],
+  );
+  const rows = locked[0] ? [{ ...locked[0], ...live[0] }] : [];
+
+  const original = rows[0];
+  if (!original) throw new ChequeError("replaced_cheque_not_found", 404);
+  if (original.direction !== params.direction) throw new ChequeError("replaced_cheque_not_found", 404);
+
+  // `bounced` means the returned balance is still sitting in 1244/2122.
+  if (original.status === "bounced") throw new ChequeError("replaced_cheque_not_restored", 409);
+  if (original.status !== "resolved") throw new ChequeError("replaced_cheque_not_returned", 409);
+
+  // One instrument, one branch — the replacement continues the original's
+  // books, so it cannot be captured into another branch's.
+  if ((original.location_id ?? null) !== (params.locationId ?? null)) {
+    throw new ChequeError("replaced_cheque_other_branch", 409);
+  }
+
+  // The debt that came back belongs to a party; the replacement settles that
+  // same party's balance or it settles the wrong account.
+  const originalParty = params.direction === "receivable" ? original.customer_id : original.supplier_id;
+  const newParty = params.direction === "receivable" ? params.customerId : params.supplierId;
+  if (originalParty && originalParty !== newParty) {
+    throw new ChequeError("replaced_cheque_other_party", 409);
+  }
+
+  // A replacement cannot predate the resolution it answers.
+  if (original.last_event_on && params.issueDate < original.last_event_on) {
+    throw new ChequeError("replacement_before_resolution");
+  }
+
+  // Splitting one returned cheque into several smaller ones is ordinary
+  // practice and is supported: what is refused is replacing more than came
+  // back. The sum is read under the lock above, so two concurrent
+  // replacements cannot each see room for the full amount.
+  const already = Number(original.replaced);
+  if (already + params.amount > Number(original.amount)) {
+    throw new ChequeError("replacement_exceeds_original", 409);
+  }
 }
 
 export interface RecordChequeParams {
@@ -528,9 +737,27 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
 
   const status = initialStatus(params.direction);
 
+  // Everything the posting depends on, so a replay is recognised and a
+  // different request wearing the same key is refused.
+  const fingerprint = fingerprintOf([
+    "record",
+    params.direction,
+    params.locationId,
+    canonicalBankName(bankName),
+    canonicalSerialNumber(serialNumber),
+    sayadId,
+    params.amount,
+    issueDate,
+    dueDate,
+    customerId,
+    supplierId,
+    replacesChequeId,
+    params.allowUnattributed ? 1 : 0,
+  ]);
+
   // A replay answers from the first call's row, before anything is posted.
   if (idempotencyKey) {
-    const replay = await findChequeByIdempotencyKey(params.businessId, idempotencyKey);
+    const replay = await findChequeByIdempotencyKey(params.businessId, idempotencyKey, fingerprint);
     if (replay) return replay;
   }
 
@@ -541,17 +768,16 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
     if (customerId) await assertCustomer(client, params.businessId, customerId);
     if (supplierId) await assertSupplier(client, params.businessId, supplierId);
     if (replacesChequeId) {
-      const { rows: replaced } = await client.query<{ status: ChequeStatus; direction: ChequeDirection }>(
-        "SELECT status, direction FROM cheques WHERE business_id = $1 AND id = $2",
-        [params.businessId, replacesChequeId],
-      );
-      if (!replaced[0]) throw new ChequeError("replaced_cheque_not_found", 404);
-      if (replaced[0].direction !== params.direction) throw new ChequeError("replaced_cheque_not_found", 404);
-      // Only a returned cheque is replaceable, resolved or not yet: replacing
-      // a live cheque would double-count the debt it already carries.
-      if (!["bounced", "resolved"].includes(replaced[0].status)) {
-        throw new ChequeError("replaced_cheque_not_returned", 409);
-      }
+      await assertReplaceable(client, {
+        businessId: params.businessId,
+        originalId: replacesChequeId,
+        direction: params.direction,
+        locationId: params.locationId,
+        customerId,
+        supplierId,
+        amount: params.amount,
+        issueDate,
+      });
     }
 
     // A receivable lands in چک‌های نزد صندوق against the customer's account; a
@@ -565,9 +791,10 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
     const { rows } = await client.query<ChequeRow>(
       `INSERT INTO cheques (business_id, location_id, direction, status, serial_number, sayad_id, bank_name,
                             account_number, amount, issue_date, due_date, counterparty_name, customer_id,
-                            supplier_id, memo, created_by, idempotency_key, replaces_cheque_id)
+                            supplier_id, memo, created_by, idempotency_key, idempotency_fingerprint,
+                            replaces_cheque_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, CURRENT_DATE), $11, $12, $13, $14, $15, $16,
-               $17, $18)
+               $17, $18, $19)
        RETURNING ${CHEQUE_COLUMNS}`,
       [
         params.businessId,
@@ -587,6 +814,7 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
         memo,
         params.createdBy,
         idempotencyKey,
+        idempotencyKey ? fingerprint : null,
         replacesChequeId,
       ],
     );
@@ -630,7 +858,7 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
     // Lost a race against the same key: the other request's cheque is the
     // answer to this one too.
     if (idempotencyKey && isUniqueViolation(err)) {
-      const replay = await findChequeByIdempotencyKey(params.businessId, idempotencyKey);
+      const replay = await findChequeByIdempotencyKey(params.businessId, idempotencyKey, fingerprint);
       if (replay) return replay;
     }
     throw err;
@@ -657,13 +885,14 @@ async function recordChequeEvent(
     endorsedToSupplierId?: string | null;
     memo: string | null;
     idempotencyKey?: string | null;
+    idempotencyFingerprint?: string | null;
     createdBy: string | null;
   },
 ): Promise<void> {
   await client.query(
     `INSERT INTO cheque_events (business_id, cheque_id, event, occurred_on, entry_id, endorsed_to_supplier_id,
-                                memo, created_by, idempotency_key)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+                                memo, created_by, idempotency_key, idempotency_fingerprint)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
     [
       params.businessId,
       params.chequeId,
@@ -674,6 +903,7 @@ async function recordChequeEvent(
       params.memo,
       params.createdBy,
       params.idempotencyKey ?? null,
+      params.idempotencyKey ? (params.idempotencyFingerprint ?? null) : null,
     ],
   );
 }
@@ -830,6 +1060,17 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
   if (!isUuid(params.chequeId)) throw new ChequeError("cheque_not_found", 404);
   if (!CHEQUE_ACTIONS.includes(params.action)) throw new ChequeError("invalid_action");
   const idempotencyKey = optionalText(params.idempotencyKey);
+  // Bound to the cheque, the step, the date and the fee: a retry of "bounce
+  // this cheque with a ۳۰٬۰۰۰ ریال charge" is that request again, and a
+  // different charge under the same key is not a retry.
+  const fingerprint = fingerprintOf([
+    "transition",
+    params.chequeId,
+    params.action,
+    optionalIsoDate(params.occurredOn, "invalid_occurred_on"),
+    params.feeAmount ?? null,
+    optionalText(params.endorsedToSupplierId, "supplier_not_found"),
+  ]);
 
   const client = await getPool().connect();
   try {
@@ -847,11 +1088,14 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
     // cheque as the first call left it instead of being refused by the
     // transition table (or, worse, posting again from a status that allows it).
     if (idempotencyKey) {
-      const { rows: replay } = await client.query<{ id: string }>(
-        "SELECT id FROM cheque_events WHERE business_id = $1 AND idempotency_key = $2",
+      const { rows: replay } = await client.query<{ id: string; idempotency_fingerprint: string | null }>(
+        "SELECT id, idempotency_fingerprint FROM cheque_events WHERE business_id = $1 AND idempotency_key = $2",
         [params.businessId, idempotencyKey],
       );
       if (replay[0]) {
+        if (replay[0].idempotency_fingerprint && replay[0].idempotency_fingerprint !== fingerprint) {
+          throw new ChequeError("idempotency_key_conflict", 409);
+        }
         await client.query("COMMIT");
         return toCheque(cheque);
       }
@@ -930,6 +1174,7 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
       endorsedToSupplierId: params.action === "endorse" ? endorsedToSupplierId : null,
       memo,
       idempotencyKey,
+      idempotencyFingerprint: fingerprint,
       createdBy: params.createdBy,
     });
 

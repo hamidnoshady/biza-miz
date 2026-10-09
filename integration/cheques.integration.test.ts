@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import * as chequesPure from "../src/lib/cheques";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -150,6 +151,17 @@ async function linesFor(chequeId: string): Promise<Record<string, number>[]> {
     [chequeId],
   );
   return rows.map((r) => ({ [r.code]: Number(r.debit) - Number(r.credit) }));
+}
+
+/** The business-wide balance of one account code, debit-positive. */
+async function balanceOf(code: string): Promise<number> {
+  const { rows } = await db.query<{ balance: string }>(
+    `SELECT COALESCE(SUM(jl.debit - jl.credit), 0)::text AS balance
+       FROM journal_lines jl JOIN accounts a ON a.id = jl.account_id
+      WHERE a.business_id = $1 AND a.code = $2`,
+    [biz.id, code],
+  );
+  return Number(rows[0].balance);
 }
 
 function receivable(overrides: Partial<Parameters<typeof cheques.recordCheque>[0]> = {}) {
@@ -501,17 +513,6 @@ describe("cheques we wrote", () => {
 });
 
 describe("returned cheques are resolved, not stranded (issue #828)", () => {
-  /** The business-wide balance of one account code, debit-positive. */
-  async function balanceOf(code: string): Promise<number> {
-    const { rows } = await db.query<{ balance: string }>(
-      `SELECT COALESCE(SUM(jl.debit - jl.credit), 0)::text AS balance
-         FROM journal_lines jl JOIN accounts a ON a.id = jl.account_id
-        WHERE a.business_id = $1 AND a.code = $2`,
-      [biz.id, code],
-    );
-    return Number(rows[0].balance);
-  }
-
   it("settles a returned receivable into the bank and empties ۱۲۴۴", async () => {
     const cheque = await receivable();
     await cheques.transitionCheque({
@@ -857,14 +858,152 @@ describe("canonical identity and retry safety (issue #828)", () => {
     });
   });
 
-  it("returns the first cheque when a registration is retried with the same key", async () => {
+  it("returns the first cheque when the very same registration is retried", async () => {
     const key = randomUUID();
-    const first = await receivable({ idempotencyKey: key, serialNumber: "AA-1" });
-    const retry = await receivable({ idempotencyKey: key, serialNumber: "AA-2" });
+    const payload = { idempotencyKey: key, serialNumber: "AA-1" };
+    const first = await receivable(payload);
+    const retry = await receivable(payload);
     expect(retry.id).toBe(first.id);
     expect(retry.serialNumber).toBe("AA-1");
     expect((await cheques.listCheques(biz.id, { direction: "receivable" })).total).toBe(1);
     expect(await linesFor(first.id)).toHaveLength(2);
+  });
+
+  // The earlier version of this test sent a *different* cheque under the same
+  // key and expected the first one back. That is the opposite of the contract:
+  // a key identifies one request, so the same key with another payload is a
+  // client bug, and answering it with an unrelated cheque hides it.
+  it("refuses the same key carrying a different registration", async () => {
+    const key = randomUUID();
+    await receivable({ idempotencyKey: key, serialNumber: "AA-1" });
+    await expect(receivable({ idempotencyKey: key, serialNumber: "AA-2" })).rejects.toThrow(
+      "idempotency_key_conflict",
+    );
+    for (const changed of [
+      { amount: 9_000_000 },
+      { dueDate: "2026-04-10" },
+      { customerId: null, allowUnattributed: true },
+    ]) {
+      await expect(
+        receivable({ idempotencyKey: key, serialNumber: "AA-1", ...changed }),
+      ).rejects.toThrow("idempotency_key_conflict");
+    }
+    // …and nothing was posted by any of the refusals.
+    expect((await cheques.listCheques(biz.id, { direction: "receivable" })).total).toBe(1);
+  });
+
+  it("treats the same instrument typed differently as the same payload", async () => {
+    const key = randomUUID();
+    const first = await receivable({ idempotencyKey: key, serialNumber: "123456", bankName: "ملت" });
+    // Identity is canonical, so the retry that re-types «۱۲۳-۴۵۶» at «بانک ملت»
+    // is the same request, not a conflict.
+    const retry = await receivable({
+      idempotencyKey: key,
+      serialNumber: "۱۲۳-۴۵۶",
+      bankName: "بانک ملت",
+    });
+    expect(retry.id).toBe(first.id);
+  });
+
+  it("refuses a transition replay whose fee changed, and replays an identical one", async () => {
+    const cheque = await receivable();
+    const key = randomUUID();
+    const step = {
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "bounce" as const,
+      occurredOn: "2026-03-11",
+      feeAmount: 30_000,
+      idempotencyKey: key,
+      createdBy: null,
+    };
+    await cheques.transitionCheque(step);
+    await expect(cheques.transitionCheque({ ...step, feeAmount: 90_000 })).rejects.toThrow(
+      "idempotency_key_conflict",
+    );
+    const replay = await cheques.transitionCheque(step);
+    expect(replay.status).toBe("bounced");
+    // One bounce: the value moved once, and the charge was posted once.
+    const events = await cheques.getChequeHistory(biz.id, cheque.id);
+    expect(events.filter((e) => e.event === "bounced")).toHaveLength(1);
+  });
+
+  it("serialises two concurrent retries of the same step into one posting", async () => {
+    const cheque = await receivable();
+    const key = randomUUID();
+    const step = {
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "deposit" as const,
+      occurredOn: "2026-02-01",
+      idempotencyKey: key,
+      createdBy: null,
+    };
+    const [a, b] = await Promise.all([
+      cheques.transitionCheque(step),
+      cheques.transitionCheque(step),
+    ]);
+    expect(a.status).toBe("in_collection");
+    expect(b.status).toBe("in_collection");
+    const events = await cheques.getChequeHistory(biz.id, cheque.id);
+    expect(events.filter((e) => e.event === "deposited")).toHaveLength(1);
+  });
+
+  it("lets two concurrent registrations of the same key produce exactly one cheque", async () => {
+    const key = randomUUID();
+    const payload = { idempotencyKey: key, serialNumber: "CC-1" };
+    const results = await Promise.all([receivable(payload), receivable(payload)]);
+    expect(results[0].id).toBe(results[1].id);
+    expect((await cheques.listCheques(biz.id, { direction: "receivable" })).total).toBe(1);
+  });
+
+  it("refuses two concurrent registrations of the same instrument", async () => {
+    const settled = await Promise.allSettled([
+      receivable({ serialNumber: "۱۲۳-۴۵۶", bankName: "بانک ملت" }),
+      receivable({ serialNumber: "123456", bankName: "ملت" }),
+    ]);
+    expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect((await cheques.listCheques(biz.id, { direction: "receivable" })).total).toBe(1);
+  });
+
+  it("keeps canonical identity inside one business", async () => {
+    await receivable({ serialNumber: "123456", bankName: "ملت" });
+    // The same instrument number at another business is another instrument.
+    const rival = await cheques.recordCheque({
+      businessId: other.id,
+      locationId: null,
+      direction: "receivable",
+      serialNumber: "۱۲۳-۴۵۶",
+      bankName: "بانک ملت",
+      amount: 1_000_000,
+      issueDate: "2026-01-10",
+      dueDate: "2026-03-10",
+      counterpartyName: "مشتری رقیب",
+      allowUnattributed: true,
+      createdBy: null,
+    });
+    expect(rival.id).toBeTruthy();
+  });
+
+  it("canonicalises in SQL exactly as it does in TypeScript", async () => {
+    const samples = [
+      "ملت",
+      "بانک ملت",
+      "بانك ملت",
+      " بانک   ملت ",
+      "Bank Mellat",
+      "بانک",
+      "صادرات/شعبه ۱",
+    ];
+    const { rows } = await db.query<{ bank: string; serial: string }>(
+      `SELECT public.cheque_canonical_bank(v) AS bank, public.cheque_canonical_text(v) AS serial
+         FROM unnest($1::text[]) AS v`,
+      [samples],
+    );
+    expect(rows.map((r) => r.bank)).toEqual(samples.map((v) => chequesPure.canonicalBankName(v)));
+    expect(rows.map((r) => r.serial)).toEqual(
+      samples.map((v) => chequesPure.canonicalSerialNumber(v)),
+    );
   });
 
   it("returns the cheque unchanged when a transition is retried with the same key", async () => {
@@ -986,6 +1125,112 @@ describe("replacement links (issue #828)", () => {
     expect(listed?.replacesSerialNumber).toBe(original.serialNumber);
   });
 
+  async function returnedAndRestored(overrides: Record<string, unknown> = {}) {
+    const original = await receivable(overrides);
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: original.id,
+      action: "bounce",
+      occurredOn: "2026-03-11",
+      createdBy: null,
+    });
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: original.id,
+      action: "restore",
+      occurredOn: "2026-03-12",
+      createdBy: null,
+    });
+    return original;
+  }
+
+  // The defect this pins: a replacement posts Dr 1241 / Cr 1200, which only
+  // nets out against a `restore` that put the returned value back into 1200.
+  // Registered against a still-bounced cheque it credits a receivable nobody
+  // restored — the customer goes negative and 1244 stays stranded.
+  it("refuses a replacement until the returned balance has been restored", async () => {
+    const original = await receivable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: original.id,
+      action: "bounce",
+      occurredOn: "2026-03-11",
+      createdBy: null,
+    });
+    await expect(
+      receivable({ replacesChequeId: original.id, issueDate: "2026-03-12", dueDate: "2026-05-10" }),
+    ).rejects.toThrow("replaced_cheque_not_restored");
+
+    // Nothing was written by the refusal: 1244 still carries the whole cheque.
+    expect(await balanceOf("1244")).toBe(5_000_000);
+    expect(await balanceOf("1200")).toBe(-5_000_000);
+  });
+
+  it("nets A/R back to zero once the restored cheque is replaced", async () => {
+    const original = await returnedAndRestored();
+    expect(await balanceOf("1244")).toBe(0);
+    expect(await balanceOf("1200")).toBe(0);
+
+    await receivable({
+      replacesChequeId: original.id,
+      issueDate: "2026-03-12",
+      dueDate: "2026-05-10",
+    });
+    // The replacement's own entry credits 1200 again and debits 1241: the
+    // customer owes nothing more than the new cheque.
+    expect(await balanceOf("1200")).toBe(-5_000_000);
+    expect(await balanceOf("1241")).toBe(5_000_000);
+    expect(await balanceOf("1244")).toBe(0);
+  });
+
+  it("supports splitting one returned cheque into several, and refuses more than came back", async () => {
+    const original = await returnedAndRestored();
+    const part = (amount: number) =>
+      receivable({
+        replacesChequeId: original.id,
+        amount,
+        issueDate: "2026-03-12",
+        dueDate: "2026-05-10",
+      });
+    await part(2_000_000);
+    await part(3_000_000);
+    await expect(part(1)).rejects.toThrow("replacement_exceeds_original");
+    expect(await balanceOf("1241")).toBe(5_000_000);
+  });
+
+  it("lets two concurrent replacements share the original exactly once", async () => {
+    const original = await returnedAndRestored();
+    const attempt = () =>
+      receivable({
+        replacesChequeId: original.id,
+        amount: 4_000_000,
+        issueDate: "2026-03-12",
+        dueDate: "2026-05-10",
+      });
+    const settled = await Promise.allSettled([attempt(), attempt()]);
+    // 4m + 4m > 5m: the row lock makes the second attempt see the first.
+    expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(await balanceOf("1241")).toBe(4_000_000);
+  });
+
+  it("refuses a replacement for another party, another branch, or an earlier date", async () => {
+    const original = await returnedAndRestored();
+    const otherCustomer = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name) VALUES ($1, 'مشتری دیگر') RETURNING id",
+      [biz.id],
+    );
+    const base = { replacesChequeId: original.id, issueDate: "2026-03-12", dueDate: "2026-05-10" };
+    await expect(receivable({ ...base, customerId: otherCustomer.rows[0].id })).rejects.toThrow(
+      "replaced_cheque_other_party",
+    );
+    await expect(receivable({ ...base, locationId: null })).rejects.toThrow(
+      "replaced_cheque_other_branch",
+    );
+    await expect(receivable({ ...base, issueDate: "2026-03-01" })).rejects.toThrow(
+      "replacement_before_resolution",
+    );
+  });
+
   it("refuses to replace a live cheque, another business's, or the other direction's", async () => {
     const live = await receivable();
     await expect(receivable({ replacesChequeId: live.id })).rejects.toThrow(
@@ -1104,5 +1349,212 @@ describe("guards", () => {
         createdBy: null,
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe("the whole register reconciles to its control accounts (issue #828)", () => {
+  it("walks a mixed book through every lifecycle and leaves each control account exactly right", async () => {
+    // Receivables: one cleared through the bank, one endorsed to a supplier,
+    // one bounced and settled, one bounced, restored and replaced, one left
+    // sitting on hand.
+    const cleared = await receivable({ amount: 1_000_000 });
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: cleared.id, action: "deposit", occurredOn: "2026-02-01", createdBy: null });
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: cleared.id, action: "clear", occurredOn: "2026-03-10", createdBy: null });
+
+    const endorsed = await receivable({ amount: 2_000_000 });
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: endorsed.id, action: "endorse", occurredOn: "2026-02-02", endorsedToSupplierId: party.supplierId, createdBy: null });
+
+    const settledBack = await receivable({ amount: 3_000_000 });
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: settledBack.id, action: "bounce", occurredOn: "2026-03-11", feeAmount: 150_000, createdBy: null });
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: settledBack.id, action: "settle", occurredOn: "2026-03-12", createdBy: null });
+
+    const replaced = await receivable({ amount: 4_000_000 });
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: replaced.id, action: "bounce", occurredOn: "2026-03-11", createdBy: null });
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: replaced.id, action: "restore", occurredOn: "2026-03-12", createdBy: null });
+    await receivable({ amount: 4_000_000, replacesChequeId: replaced.id, issueDate: "2026-03-13", dueDate: "2026-06-10" });
+
+    const onHand = await receivable({ amount: 500_000 });
+
+    // Payables: one presented, one cancelled, one bounced and restored.
+    const presented = await payable({ amount: 6_000_000 });
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: presented.id, action: "present", occurredOn: "2026-03-10", createdBy: null });
+    const cancelled = await payable({ amount: 7_000_000 });
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: cancelled.id, action: "cancel", occurredOn: "2026-03-10", createdBy: null });
+    const returnedPayable = await payable({ amount: 8_000_000 });
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: returnedPayable.id, action: "bounce", occurredOn: "2026-03-11", createdBy: null });
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: returnedPayable.id, action: "restore", occurredOn: "2026-03-12", createdBy: null });
+
+    expect({
+      "1110": await balanceOf("1110"),
+      "1200": await balanceOf("1200"),
+      "1241": await balanceOf("1241"),
+      "1242": await balanceOf("1242"),
+      "1244": await balanceOf("1244"),
+      "2100": await balanceOf("2100"),
+      "2121": await balanceOf("2121"),
+      "2122": await balanceOf("2122"),
+      "5860": await balanceOf("5860"),
+    }).toEqual({
+      // Bank: +1m cleared receivable, +3m settled returned cheque, −150k fee,
+      // −6m presented payable.
+      "1110": 1_000_000 + 3_000_000 - 150_000 - 6_000_000,
+      // A/R: credited by every receivable registered (5 cheques: 1+2+3+4+4+0.5
+      // including the replacement), debited by the one restore.
+      "1200": -(1_000_000 + 2_000_000 + 3_000_000 + 4_000_000 + 4_000_000 + 500_000) + 4_000_000,
+      // On hand: the replacement (4m) and the untouched cheque.
+      "1241": 4_000_000 + 500_000,
+      "1242": 0,
+      // Both returned receivables were resolved.
+      "1244": 0,
+      // A/P, debit-positive: issuing a payable cheque *settles* the supplier
+      // (Dr 2100 / Cr 2121) for all three, +21m; endorsing a receivable to a
+      // supplier settles them too, +2m; the cancellation and the restore give
+      // the liability back, −7m and −8m.
+      "2100": 21_000_000 + 2_000_000 - 7_000_000 - 8_000_000,
+      // Issued cheques outstanding: credited on issue, debited when
+      // presented/cancelled/bounced — nothing is left open.
+      "2121": -(6_000_000 + 7_000_000 + 8_000_000) + 6_000_000 + 7_000_000 + 8_000_000,
+      "2122": 0,
+      "5860": 150_000,
+    });
+
+    // The register's own categories have to tell the same story.
+    const page = await cheques.listCheques(biz.id, { direction: "receivable" });
+    expect(page.summary.onHand.total).toBe(4_500_000);
+    expect(page.summary.contingent.total).toBe(2_000_000);
+    expect(page.summary.returnedUnresolved.total).toBe(0);
+    expect(page.summary.resolved.total).toBe(4_000_000);
+    const payables = await cheques.listCheques(biz.id, { direction: "payable" });
+    expect(payables.summary.cancelled.total).toBe(7_000_000);
+    expect(payables.summary.cleared.total).toBe(6_000_000);
+    expect(payables.summary.resolved.total).toBe(8_000_000);
+
+    // …and every A/R and A/P line this produced is attributed to a party.
+    const unattributed = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN accounts a ON a.id = jl.account_id
+         LEFT JOIN cheques c ON c.id = je.source_id AND je.source_type = 'cheque'
+         LEFT JOIN cheque_events ev ON ev.entry_id = je.id
+        WHERE a.business_id = $1 AND a.code IN ('1200', '2100')
+          AND COALESCE(c.customer_id, c.supplier_id, ev.endorsed_to_supplier_id) IS NULL`,
+      [biz.id],
+    );
+    expect(unattributed.rows[0].count).toBe("0");
+
+    void onHand;
+  });
+});
+
+describe("paging a register bigger than one page (issue #828)", () => {
+  it("walks past the service's own page cap without losing or repeating a row", async () => {
+    // 210 cheques, all due the same day and all for the same amount: every
+    // ordering key except the row id ties, which is exactly the case that
+    // used to shuffle rows between pages.
+    const ids: string[] = [];
+    for (let i = 0; i < 210; i += 1) {
+      ids.push((await receivable({ serialNumber: `P-${String(i).padStart(4, "0")}`, amount: 1_000 })).id);
+    }
+
+    const seen: string[] = [];
+    for (let offset = 0; offset < 300; offset += 50) {
+      const page = await cheques.listCheques(biz.id, { direction: "receivable", limit: 50, offset });
+      seen.push(...page.cheques.map((c) => c.id));
+      expect(page.total).toBe(210);
+      if (!page.hasMore) break;
+    }
+    expect(seen).toHaveLength(210);
+    expect(new Set(seen).size).toBe(210);
+    expect([...seen].sort()).toEqual([...ids].sort());
+  });
+
+  it("caps an over-large page instead of answering with the whole book", async () => {
+    await receivable();
+    const page = await cheques.listCheques(biz.id, { direction: "receivable", limit: 5_000 });
+    expect(page.cheques.length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe("the due-date window (issue #828)", () => {
+  it("filters by an inclusive range and validates it", async () => {
+    await receivable({ serialNumber: "D-1", dueDate: "2026-03-10" });
+    await receivable({ serialNumber: "D-2", dueDate: "2026-04-10" });
+    await receivable({ serialNumber: "D-3", dueDate: "2026-05-10" });
+
+    const window = await cheques.listCheques(biz.id, {
+      direction: "receivable",
+      dueFrom: "2026-03-10",
+      dueTo: "2026-04-10",
+    });
+    expect(window.cheques.map((c) => c.serialNumber).sort()).toEqual(["D-1", "D-2"]);
+    expect(window.total).toBe(2);
+
+    await expect(
+      cheques.listCheques(biz.id, { direction: "receivable", dueFrom: "not-a-date" }),
+    ).rejects.toThrow("invalid_due_from");
+    await expect(
+      cheques.listCheques(biz.id, { dueFrom: "2026-05-01", dueTo: "2026-04-01" }),
+    ).rejects.toThrow("invalid_due_range");
+  });
+});
+
+describe("supplier attribution follows the party model (issues #826, #828)", () => {
+  it("refuses a deactivated supplier alias", async () => {
+    await db.query("UPDATE suppliers SET is_active = false WHERE id = $1", [party.supplierId]);
+    await expect(payable()).rejects.toThrow("supplier_not_found");
+  });
+
+  it("refuses an alias whose canonical party was merged away or deactivated", async () => {
+    const keeper = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, roles) VALUES ($1, 'طرف اصلی', ARRAY['supplier']) RETURNING id",
+      [biz.id],
+    );
+    const merged = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, roles, merged_into_id)
+       VALUES ($1, 'طرف ادغام‌شده', ARRAY['supplier'], $2) RETURNING id`,
+      [biz.id, keeper.rows[0].id],
+    );
+    await db.query("UPDATE suppliers SET party_id = $1 WHERE id = $2", [
+      merged.rows[0].id,
+      party.supplierId,
+    ]);
+    await expect(payable()).rejects.toThrow("supplier_not_found");
+
+    await db.query("UPDATE parties SET merged_into_id = NULL, is_active = false WHERE id = $1", [
+      merged.rows[0].id,
+    ]);
+    await expect(payable()).rejects.toThrow("supplier_not_found");
+
+    // Active and unmerged: the ordinary case still works.
+    await db.query("UPDATE parties SET is_active = true WHERE id = $1", [merged.rows[0].id]);
+    await expect(payable()).resolves.toMatchObject({ status: "issued" });
+  });
+
+  it("refuses endorsing to a supplier that is no longer active", async () => {
+    const cheque = await receivable();
+    await db.query("UPDATE suppliers SET is_active = false WHERE id = $1", [party.supplierId]);
+    await expect(
+      cheques.transitionCheque({
+        businessId: biz.id,
+        chequeId: cheque.id,
+        action: "endorse",
+        endorsedToSupplierId: party.supplierId,
+        createdBy: null,
+      }),
+    ).rejects.toThrow("supplier_not_found");
+  });
+});
+
+describe("legacy canonical duplicates are classified, not tolerated (issue #828)", () => {
+  it("refuses to let the application pre-classify a new cheque", async () => {
+    const cheque = await receivable();
+    await expect(
+      db.query("INSERT INTO cheques (business_id, location_id, direction, status, serial_number, bank_name, amount, issue_date, due_date, counterparty_name, canonical_duplicate_of) VALUES ($1,$2,'receivable','on_hand','X-1','ملت',1000,'2026-01-01','2026-02-01','مشتری',$3)", [
+        biz.id,
+        biz.locationId,
+        cheque.id,
+      ]),
+    ).rejects.toThrow(/legacy canonical duplicate/);
   });
 });

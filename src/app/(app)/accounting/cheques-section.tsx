@@ -27,6 +27,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   useDeferredValue,
   useCallback,
@@ -120,6 +121,7 @@ import {
   type ChequeStatus,
 } from "@/lib/cheques";
 import { api } from "@/app/dashboard/ui";
+import { JournalPeekDialog } from "./journal-peek-dialog";
 
 // ---------------------------------------------------------------------------
 // Types & constants
@@ -144,6 +146,8 @@ interface Cheque {
   memo: string | null;
   replacesChequeId?: string | null;
   replacesSerialNumber?: string | null;
+  /** How much of this returned cheque has already been replaced. */
+  replacedByAmount?: number;
   createdAt?: string;
 }
 
@@ -153,12 +157,24 @@ interface Counterparty {
 }
 
 /** The server's accounting-aware totals for the whole filtered register. */
+interface SummaryBucket {
+  count: number;
+  total: number;
+}
+
 interface ChequeSummary {
-  outstanding: { count: number; total: number };
-  returnedUnresolved: { count: number; total: number };
-  settled: { count: number; total: number };
-  overdue: { count: number; total: number };
-  dueSoon: { count: number; total: number };
+  outstanding: SummaryBucket;
+  onHand: SummaryBucket;
+  inCollection: SummaryBucket;
+  issued: SummaryBucket;
+  contingent: SummaryBucket;
+  returnedUnresolved: SummaryBucket;
+  resolved: SummaryBucket;
+  cleared: SummaryBucket;
+  cancelled: SummaryBucket;
+  settled: SummaryBucket;
+  overdue: SummaryBucket;
+  dueSoon: SummaryBucket;
 }
 
 interface ChequePage {
@@ -172,21 +188,6 @@ interface ChequePage {
 
 /** How many rows one «بیشتر» adds. */
 const PAGE_SIZE = 50;
-
-/** The slice of a journal document the cheque drill-down renders. */
-interface JournalEntryView {
-  id: string;
-  entryDate: string;
-  memo: string | null;
-  locationName: string | null;
-  lines: {
-    accountId: string;
-    accountCode: string;
-    accountName: string;
-    debit: string;
-    credit: string;
-  }[];
-}
 
 interface ChequeEvent {
   id: string;
@@ -323,6 +324,19 @@ function errorMessage(code: string | undefined): string {
     invalid_status: "وضعیت انتخاب‌شده معتبر نیست.",
     replaced_cheque_not_found: "چک برگشتی مرجع پیدا نشد.",
     replaced_cheque_not_returned: "فقط چک برگشتی را می‌توان با چک جدید جایگزین کرد.",
+    replaced_cheque_not_restored:
+      "ابتدا باید مانده چک برگشتی با «بازگشت به حساب طرف» تعیین‌تکلیف شود؛ سپس چک جایگزین ثبت می‌شود.",
+    replaced_cheque_other_branch: "چک جایگزین باید در همان شعبهٔ چک برگشتی ثبت شود.",
+    replaced_cheque_other_party: "چک جایگزین باید به همان طرف حساب چک برگشتی متصل باشد.",
+    replacement_before_resolution:
+      "تاریخ چک جایگزین نمی‌تواند پیش از تاریخ تعیین‌تکلیف چک برگشتی باشد.",
+    replacement_exceeds_original:
+      "مجموع چک‌های جایگزین نمی‌تواند از مبلغ چک برگشتی بیشتر شود.",
+    idempotency_key_conflict:
+      "این درخواست با همان شناسهٔ تکرار ولی اطلاعات متفاوت ارسال شده است؛ صفحه را تازه کنید.",
+    invalid_due_from: "تاریخ شروع بازهٔ سررسید معتبر نیست.",
+    invalid_due_to: "تاریخ پایان بازهٔ سررسید معتبر نیست.",
+    invalid_due_range: "پایان بازهٔ سررسید نمی‌تواند پیش از شروع آن باشد.",
     ledger_account_missing: "یکی از حساب‌های مورد نیاز در سرفصل یافت نشد.",
     fiscal_period_locked: "دوره مالی این تاریخ قفل است.",
     fiscal_period_soft_closed:
@@ -372,7 +386,11 @@ export function ChequesSection({
   const [bankFilter, setBankFilter] = useState<string>("all");
   const [branchFilter, setBranchFilter] = useState<string>("all");
   const [sortBy, setSortBy] = useState<string>("due_asc");
-  const [page, setPage] = useState(1);
+  const [dueFrom, setDueFrom] = useState("");
+  const [dueTo, setDueTo] = useState("");
+  /** Rows loaded so far: the first page plus every appended one. */
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState("");
   const [summary, setSummary] = useState<ChequeSummary | null>(null);
   const [total, setTotal] = useState(0);
   const [hasMore, setHasMore] = useState(false);
@@ -392,55 +410,103 @@ export function ChequesSection({
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
 
-  // Fetch. Searching, filtering, sorting and paging are the server's job (a
-  // large tenant's register is not a download), so every one of them is a
-  // query parameter and a new request. A direction switch can race the
-  // previous response; only the most recent request may paint the register,
-  // otherwise a payable response can appear under the receivable tab.
+  /*
+   * Fetch. Searching, filtering, sorting and paging are the server's job (a
+   * large tenant's register is not a download), so every one of them is a
+   * query parameter.
+   *
+   * Paging *appends*. The first version asked for `limit = 50 × page` with no
+   * offset, which the service caps at 200 — so «بیشتر» silently stopped
+   * working at the fourth page and the rows the reader already had were
+   * blanked on every press. Now each press asks for the next window by
+   * offset, over an ordering that ends in the row id (unique, so no row can
+   * be skipped or repeated across pages), and the rows already on screen stay
+   * on screen while it loads.
+   *
+   * `requestRef` is the staleness guard: every filter change and every append
+   * takes the next ticket, and a response that is not holding the current
+   * ticket is dropped — a slow payable answer can never paint under the
+   * receivable tab, and a slow page 2 can never land after a filter reset.
+   */
+  const requestRef = useRef(0);
+
+  const queryFor = useCallback(
+    (offset: number) => {
+      const params = new URLSearchParams({
+        direction,
+        sort: sortBy,
+        limit: String(PAGE_SIZE),
+        offset: String(offset),
+      });
+      if (deferredQuery.trim()) params.set("q", deferredQuery.trim());
+      if (statusFilter !== "all") params.set("status", statusFilter);
+      if (bankFilter !== "all") params.set("bank", bankFilter);
+      if (branchFilter !== "all") params.set("locationId", branchFilter);
+      if (dueFrom) params.set("dueFrom", dueFrom);
+      if (dueTo) params.set("dueTo", dueTo);
+      return params;
+    },
+    [direction, sortBy, deferredQuery, statusFilter, bankFilter, branchFilter, dueFrom, dueTo],
+  );
+
+  const applyPage = useCallback(
+    (data: ChequePage) => {
+      setSummary(data.summary ?? null);
+      setTotal(data.total ?? 0);
+      setHasMore(Boolean(data.hasMore));
+      setBanks((previous) =>
+        bankFilter !== "all" && !(data.banks ?? []).includes(bankFilter)
+          ? Array.from(new Set([...(data.banks ?? []), bankFilter]))
+          : (data.banks ?? previous),
+      );
+    },
+    [bankFilter],
+  );
+
+  // First page: filters changed, so the register restarts.
   useEffect(() => {
-    let current = true;
+    const ticket = ++requestRef.current;
     setCheques(null);
     setLoadError("");
-    const params = new URLSearchParams({
-      direction,
-      sort: sortBy,
-      limit: String(PAGE_SIZE * page),
-    });
-    if (deferredQuery.trim()) params.set("q", deferredQuery.trim());
-    if (statusFilter !== "all") params.set("status", statusFilter);
-    if (bankFilter !== "all") params.set("bank", bankFilter);
-    if (branchFilter !== "all") params.set("locationId", branchFilter);
-    void api<ChequePage>(`/api/ledger/cheques?${params}`).then(({ ok, data }) => {
-      if (!current) return;
+    setMoreError("");
+    void api<ChequePage>(`/api/ledger/cheques?${queryFor(0)}`).then(({ ok, data }) => {
+      if (requestRef.current !== ticket) return;
       if (ok && Array.isArray(data.cheques)) {
         setCheques(data.cheques);
-        setSummary(data.summary ?? null);
-        setTotal(data.total ?? data.cheques.length);
-        setHasMore(Boolean(data.hasMore));
-        // The bank list describes the filtered set the server just answered
-        // with, so it cannot offer a bank that returns nothing — except the
-        // one currently selected, which must stay selectable to be cleared.
-        setBanks((previous) =>
-          bankFilter !== "all" && !(data.banks ?? []).includes(bankFilter)
-            ? Array.from(new Set([...(data.banks ?? []), bankFilter]))
-            : (data.banks ?? previous),
-        );
+        applyPage(data);
       } else {
         // Do not turn a failed request into the false claim that there are no
         // cheques. Keeping this null selects an explicit retry state below.
         setLoadError("بارگذاری فهرست چک‌ها ناموفق بود. دوباره تلاش کنید.");
       }
     });
-    return () => {
-      current = false;
-    };
-  }, [direction, refreshKey, deferredQuery, statusFilter, bankFilter, branchFilter, sortBy, page]);
+  }, [queryFor, applyPage, refreshKey]);
 
-  // A filter change restarts paging: keeping page 4 of the previous filter
-  // would ask the server for rows the reader never scrolled to.
-  useEffect(() => {
-    setPage(1);
-  }, [direction, deferredQuery, statusFilter, bankFilter, branchFilter, sortBy]);
+  /** One more window, appended — the rows already read stay put. */
+  const loadMore = useCallback(() => {
+    if (loadingMore) return;
+    const offset = cheques?.length ?? 0;
+    const ticket = ++requestRef.current;
+    setLoadingMore(true);
+    setMoreError("");
+    void api<ChequePage>(`/api/ledger/cheques?${queryFor(offset)}`).then(({ ok, data }) => {
+      if (requestRef.current !== ticket) return;
+      setLoadingMore(false);
+      if (ok && Array.isArray(data.cheques)) {
+        // Belt and braces against a duplicate the server could only produce
+        // if a row were inserted mid-scroll: identity wins over position.
+        setCheques((previous) => {
+          const seen = new Set((previous ?? []).map((c) => c.id));
+          return [...(previous ?? []), ...data.cheques!.filter((c) => !seen.has(c.id))];
+        });
+        applyPage(data);
+      } else {
+        // The page that failed is retryable on its own: the reader does not
+        // lose the register because one request did.
+        setMoreError("بارگذاری ادامهٔ فهرست ناموفق بود.");
+      }
+    });
+  }, [cheques, loadingMore, queryFor, applyPage]);
 
   // Branch context only means something to a business that has branches.
   useEffect(() => {
@@ -462,6 +528,8 @@ export function ChequesSection({
     setStatusFilter("all");
     setBankFilter("all");
     setQuery("");
+    setDueFrom("");
+    setDueTo("");
   }, [direction]);
 
   /*
@@ -702,6 +770,35 @@ export function ChequesSection({
               />
             </div>
 
+            {/* Where the register's value actually sits. Each line names the
+                control account it reconciles to, so "the register says X"
+                and "the ledger says X" are the same claim. */}
+            {summary ? (
+              <ul className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {categoryBreakdown(direction, summary).map((row) => (
+                  <li
+                    key={row.key}
+                    className="flex items-center justify-between gap-2 rounded-lg border bg-background/60 px-3 py-2"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate text-xs font-medium">{row.label}</span>
+                      <span className="block text-[11px] text-muted-foreground" dir="rtl">
+                        {row.account}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-end">
+                      <span className="block text-xs font-semibold tabular-nums">
+                        {money.format(row.bucket.total)}
+                      </span>
+                      <span className="block text-[11px] text-muted-foreground">
+                        {toPersianDigits(row.bucket.count)} فقره
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
             {/* Due-date distribution — counts only live cheques, so a cleared
                 item does not masquerade as an upcoming one. */}
             <div className="mt-4 rounded-xl border bg-muted/30 p-3">
@@ -834,8 +931,38 @@ export function ChequesSection({
             </Select>
           </div>
 
+          {/* The treasurer's question: what falls due between these two dates.
+              Shamsi throughout — the wire carries ISO, the reader never sees
+              it — and validated again on the server. */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:w-2/3">
+            <div className="flex items-center gap-2">
+              <span id="cheque-due-from-label" className="shrink-0 text-xs text-muted-foreground">
+                سررسید از
+              </span>
+              <JalaliDatePicker
+                value={dueFrom}
+                onChange={setDueFrom}
+                labelledBy="cheque-due-from-label"
+                placeholder="بدون محدودیت"
+                className="flex-1"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span id="cheque-due-to-label" className="shrink-0 text-xs text-muted-foreground">
+                تا
+              </span>
+              <JalaliDatePicker
+                value={dueTo}
+                onChange={setDueTo}
+                labelledBy="cheque-due-to-label"
+                placeholder="بدون محدودیت"
+                className="flex-1"
+              />
+            </div>
+          </div>
+
           <div className="flex flex-wrap items-center gap-2">
-            {(query || statusFilter !== "all" || bankFilter !== "all" || branchFilter !== "all") && (
+            {(query || statusFilter !== "all" || bankFilter !== "all" || branchFilter !== "all" || dueFrom || dueTo) && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -844,6 +971,8 @@ export function ChequesSection({
                   setStatusFilter("all");
                   setBankFilter("all");
                   setBranchFilter("all");
+                  setDueFrom("");
+                  setDueTo("");
                 }}
                 className="h-7 gap-1.5 px-2.5 text-xs"
               >
@@ -859,8 +988,8 @@ export function ChequesSection({
             </span>
             <Separator orientation="vertical" className="mx-1 h-4" />
             <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-              <FilterIcon className="size-3.5" /> جستجو، وضعیت، بانک و شعبه روی
-              سرور اعمال می‌شود
+              <FilterIcon className="size-3.5" /> جستجو، وضعیت، بانک، شعبه و
+              بازهٔ سررسید روی سرور اعمال می‌شود
             </span>
           </div>
 
@@ -1219,14 +1348,24 @@ export function ChequesSection({
                     })}
                   </div>
 
-                  {hasMore ? (
-                    <div className="flex justify-center pt-4">
+                  {hasMore || moreError ? (
+                    <div className="flex flex-col items-center gap-2 pt-4">
+                      {moreError ? (
+                        <p className="text-xs text-destructive" role="alert">
+                          {moreError}
+                        </p>
+                      ) : null}
                       <Button
                         variant="outline"
-                        onClick={() => setPage((p) => p + 1)}
-                        disabled={cheques === null}
+                        onClick={loadMore}
+                        disabled={cheques === null || loadingMore}
+                        aria-busy={loadingMore}
                       >
-                        نمایش {toPersianDigits(PAGE_SIZE)} مورد بیشتر
+                        {loadingMore
+                          ? "در حال بارگذاری…"
+                          : moreError
+                            ? "تلاش دوباره"
+                            : `نمایش ${toPersianDigits(PAGE_SIZE)} مورد بیشتر`}
                       </Button>
                     </div>
                   ) : null}
@@ -1651,6 +1790,12 @@ function ChequeDetailDialog({
                 label="شعبه ثبت چک"
                 value={cheque.locationName ?? "کل کسب‌وکار"}
               />
+              {cheque.status === "resolved" && (cheque.replacedByAmount ?? 0) > 0 ? (
+                <DetailItem
+                  label="جایگزین‌شده تا کنون"
+                  value={`${money.format(cheque.replacedByAmount ?? 0)} از ${money.format(cheque.amount)}`}
+                />
+              ) : null}
               {cheque.replacesChequeId ? (
                 <DetailItem
                   label="جایگزین چک برگشتی"
@@ -1807,10 +1952,19 @@ function ChequeDetailDialog({
         </div>
 
         <DialogFooter className="flex-wrap gap-2 sm:justify-start">
-          {onReplace && ["bounced", "resolved"].includes(cheque.status) ? (
+          {onReplace && cheque.status === "resolved" && replaceableRemainder(cheque) > 0 ? (
             <Button onClick={onReplace} className="gap-1.5">
               <PlusIcon className="size-4" /> ثبت چک جایگزین
             </Button>
+          ) : null}
+          {cheque.status === "bounced" ? (
+            // Not an option yet, and saying why is the point: the balance is
+            // still in چک‌های برگشتی, and a replacement registered now would
+            // credit a receivable nobody restored.
+            <p className="basis-full text-xs leading-5 text-muted-foreground">
+              برای ثبت چک جایگزین، ابتدا «بازگشت به حساب طرف» را انجام دهید تا
+              مانده چک برگشتی به حساب طرف حساب برگردد.
+            </p>
           ) : null}
           <Button variant="outline" onClick={onClose}>
             بستن
@@ -1818,7 +1972,11 @@ function ChequeDetailDialog({
         </DialogFooter>
 
         {entryId ? (
-          <JournalEntryDialog entryId={entryId} onClose={() => setEntryId(null)} money={money} />
+          <JournalPeekDialog
+            entryId={entryId}
+            title="سند این مرحله از زندگی چک"
+            onClose={() => setEntryId(null)}
+          />
         ) : null}
       </DialogContent>
     </Dialog>
@@ -1826,98 +1984,42 @@ function ChequeDetailDialog({
 }
 
 /**
- * The journal document behind a cheque event, read through the journal's own
- * endpoint (`?entryId=`) rather than a cheque-specific copy of it — one book,
- * one reader, so what the drill-down shows is what «دفتر روزنامه» shows.
+ * The register's value by accounting category, each tied to the control
+ * account it must agree with. Payable cancellation is its own line because
+ * «ابطال» is not «وصول»: it gives the liability back to the supplier, and a
+ * treasurer reconciling 2121 needs to see it separately.
  */
-function JournalEntryDialog({
-  entryId,
-  onClose,
-  money,
-}: {
-  entryId: string;
-  onClose: () => void;
-  money: ReturnType<typeof useMoney>;
-}) {
-  const [entry, setEntry] = useState<JournalEntryView | null>(null);
-  const [error, setError] = useState("");
+/**
+ * How much of a returned cheque is still unreplaced. Splitting one returned
+ * cheque into several smaller replacements is ordinary practice, so the
+ * question is never "has it been replaced" but "is there anything left" —
+ * and the server refuses anything above this remainder anyway.
+ */
+function replaceableRemainder(cheque: Cheque): number {
+  return Math.max(0, cheque.amount - (cheque.replacedByAmount ?? 0));
+}
 
-  useEffect(() => {
-    let current = true;
-    setEntry(null);
-    setError("");
-    void api<{ entries?: JournalEntryView[] }>(
-      `/api/ledger/entries?entryId=${encodeURIComponent(entryId)}`,
-    ).then(({ ok, data }) => {
-      if (!current) return;
-      const found = ok ? data.entries?.[0] : undefined;
-      if (found) setEntry(found);
-      else setError("سند حسابداری این رویداد بارگذاری نشد.");
-    });
-    return () => {
-      current = false;
-    };
-  }, [entryId]);
-
-  return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-lg" dir="rtl">
-        <DialogHeader>
-          <DialogTitle>سند حسابداری</DialogTitle>
-          <DialogDescription>
-            {entry
-              ? `${toPersianDigits(formatJalali(entry.entryDate))}${entry.locationName ? ` · ${entry.locationName}` : ""}`
-              : "در حال بارگذاری…"}
-          </DialogDescription>
-        </DialogHeader>
-
-        {error ? (
-          <Alert variant="destructive" role="alert">
-            <AlertTriangleIcon className="size-4" />
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        ) : null}
-
-        {entry ? (
-          <div className="space-y-3">
-            {entry.memo ? (
-              <p className="text-sm text-muted-foreground">{entry.memo}</p>
-            ) : null}
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>حساب</TableHead>
-                  <TableHead>بدهکار</TableHead>
-                  <TableHead>بستانکار</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {entry.lines.map((line, index) => (
-                  <TableRow key={`${line.accountId}-${index}`}>
-                    <TableCell className="text-sm">
-                      {toPersianDigits(line.accountCode)} — {line.accountName}
-                    </TableCell>
-                    <TableCell className="tabular-nums">
-                      {Number(line.debit) ? money.format(Number(line.debit)) : "—"}
-                    </TableCell>
-                    <TableCell className="tabular-nums">
-                      {Number(line.credit) ? money.format(Number(line.credit)) : "—"}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        ) : null}
-
-        <DialogFooter className="sm:justify-start">
-          <Button variant="outline" onClick={onClose}>
-            بستن
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
+function categoryBreakdown(
+  direction: ChequeDirection,
+  summary: ChequeSummary,
+): { key: string; label: string; account: string; bucket: SummaryBucket }[] {
+  if (direction === "receivable") {
+    return [
+      { key: "onHand", label: "نزد صندوق", account: "۱۲۴۱ چک‌های دریافتنی نزد صندوق", bucket: summary.onHand },
+      { key: "inCollection", label: "در جریان وصول", account: "۱۲۴۲ چک‌های در جریان وصول", bucket: summary.inCollection },
+      { key: "contingent", label: "ظهرنویسی‌شده (تعهد احتمالی)", account: "خارج از دارایی‌ها — بازگشت در صورت برگشت چک", bucket: summary.contingent },
+      { key: "returned", label: "برگشتی تعیین‌تکلیف‌نشده", account: "۱۲۴۴ چک‌های برگشتی", bucket: summary.returnedUnresolved },
+      { key: "resolved", label: "بازگشته به حساب طرف", account: "۱۲۰۰ حساب‌های دریافتنی", bucket: summary.resolved },
+      { key: "cleared", label: "وصول‌شده", account: "۱۱۱۰ بانک", bucket: summary.cleared },
+    ];
+  }
+  return [
+    { key: "issued", label: "صادرشده در جریان", account: "۲۱۲۱ اسناد پرداختنی", bucket: summary.issued },
+    { key: "returned", label: "برگشتی تعیین‌تکلیف‌نشده", account: "۲۱۲۲ چک‌های پرداختنی برگشتی", bucket: summary.returnedUnresolved },
+    { key: "resolved", label: "بازگشته به حساب تأمین‌کننده", account: "۲۱۰۰ حساب‌های پرداختنی", bucket: summary.resolved },
+    { key: "cancelled", label: "ابطال‌شده", account: "۲۱۰۰ حساب‌های پرداختنی — بدهی بازگشته", bucket: summary.cancelled },
+    { key: "cleared", label: "پاس‌شده", account: "۱۱۱۰ بانک", bucket: summary.cleared },
+  ];
 }
 
 function DetailItem({
