@@ -282,8 +282,13 @@ async function readFoodCostVariance(
   locationId?: string,
   page?: number,
 ) {
-  const params: unknown[] = [];
-  const where = ["o.status = 'completed'", "oi.status != 'voided'"];
+  const params: unknown[] = [businessId];
+  const where = [
+    "o.status = 'completed'",
+    "oi.status != 'voided'",
+    "o.location_id = oi.location_id",
+    `l.business_id = $${params.length}`,
+  ];
   if (locationId) {
     params.push(locationId);
     where.push(`oi.location_id = $${params.length}`);
@@ -304,15 +309,17 @@ async function readFoodCostVariance(
     `WITH sales AS (SELECT oi.menu_item_id, COALESCE(mi.name, MAX(oi.name_snapshot)) AS menu_item_name,
             SUM(oi.quantity)::text AS units_sold, SUM(oi.unit_price * oi.quantity)::text AS revenue
        FROM order_items oi
-       JOIN orders o ON o.id = oi.order_id
-       LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
+       JOIN orders o ON o.id = oi.order_id AND o.location_id = oi.location_id
+       JOIN locations l ON l.id = oi.location_id
+       LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id AND mi.location_id = oi.location_id
       WHERE ${where.join(" AND ")}
       GROUP BY oi.menu_item_id, mi.name), theoretical AS (SELECT s.source_menu_item_id AS menu_item_id,
             ROUND(SUM(s.required_quantity * oi.quantity * ii.avg_cost))::text AS theoretical_cost
        FROM order_item_inventory_snapshots s
        JOIN order_items oi ON oi.id = s.order_item_id
-       JOIN orders o ON o.id = oi.order_id
-       JOIN inventory_items ii ON ii.id = s.inventory_item_id
+       JOIN orders o ON o.id = oi.order_id AND o.location_id = oi.location_id
+       JOIN locations l ON l.id = oi.location_id
+       JOIN inventory_items ii ON ii.id = s.inventory_item_id AND ii.location_id = oi.location_id
       WHERE ${where.join(" AND ")}
       GROUP BY s.source_menu_item_id)
      SELECT sales.*, coalesce(theoretical.theoretical_cost,'0') AS theoretical_cost

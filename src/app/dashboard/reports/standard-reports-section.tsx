@@ -44,6 +44,7 @@ import { rowsToChartData, type ChartType, type ReportRow } from "./report-ui";
 import {
   COMPARABLE_SHAPES,
   DOCUMENT_SHAPES,
+  canToggleBusinessWideScope,
   EXPORT_KIND_BY_SHAPE,
   SNAPSHOT_SHAPES,
   UNDATED_SHAPES,
@@ -87,11 +88,11 @@ interface SavedReportRow {
 type ReportPayload = Record<string, unknown>;
 
 /**
- * Headline figures of a document-shaped report (a statement, not a row dump)
- * as one readable sentence — what the assistant gets asked to explain when
- * there are no rows to summarize. The comparison payload wraps the current
- * period under `current`, so unwrap it first. Statement amounts are Rial by
- * contract, so the caller passes the business's money formatter in; unknown
+ * Headline figures of a document-shaped report (not a row dump) as one readable
+ * sentence — what the assistant gets asked to explain when there are no rows
+ * to summarize. The comparison payload wraps the current period under
+ * `current`, so unwrap it first. Report amounts are Rial by contract, so the
+ * caller passes the business's money formatter in; unknown
  * shapes contribute nothing rather than fabricated numbers.
  */
 function documentFacts(
@@ -155,27 +156,6 @@ function normalizeSearch(value: string): string {
   return normalizePosSearchText(value);
 }
 
-/**
- * The shapes that render as a whole document (a statement) rather than as a
- * series over a dimension. Locally named because it was `DOCUMENT_SHAPES` from
- * `standard-report-config`, and this section also needs the *unscoped* subset of
- * it for the «کل کسب‌وکار» control below — one definition, two readings.
- */
-const STATEMENT_SHAPES = DOCUMENT_SHAPES;
-
-/**
- * The statements that can also be read consolidated for the whole business.
- *
- * Reading a branch's books and reading the business's books are different
- * reports with different audiences — the second is the owner's view of every
- * branch at once — so the second is a separate, elevated act
- * (`reports.business_wide`), which is why the server refuses it without the
- * capability (issue #819). The screen follows the same rule: the control is
- * drawn only for a member who holds it, so nobody is offered a button whose
- * request can only answer 403.
- */
-const BUSINESS_WIDE_SHAPES = new Set<ReportShape>(["profit_and_loss", "balance_sheet", "cash_flow"]);
-
 export function StandardReportsSection({
   canExplain,
   canExport,
@@ -188,7 +168,7 @@ export function StandardReportsSection({
    * the export capability — a control whose request could only answer 403.
    */
   canExport: boolean;
-  /** `reports.business_wide`: may read the consolidated statements. */
+  /** `reports.business_wide`: may request reports in the consolidated allowlist. */
   canBusinessWide: boolean;
 }) {
   const money = useMoney();
@@ -223,12 +203,12 @@ export function StandardReportsSection({
    * figures in it never covered.
    */
   const [loadedRange, setLoadedRange] = useState({ dateFrom: "", dateTo: "" });
-  /** The scope that produced the visible statement, immutable until the next read succeeds. */
+  /** The scope that produced the visible structured report, immutable until the next read succeeds. */
   const [loadedScope, setLoadedScope] = useState<"branch" | "business-wide">("branch");
   /**
-   * «کل کسب‌وکار» instead of the active branch, for the statements that support
-   * it. Off by default: the branch the member is working in is the safe reading
-   * of an unqualified report, and the consolidated statement has to be asked for
+   * «کل کسب‌وکار» instead of the active branch, for allowlisted reports.
+   * Off by default: the branch the member is working in is the safe reading of
+   * an unqualified report, and business-wide scope has to be requested
    * explicitly (`scope: "business-wide"`) — see issue #819.
    */
   const [businessWide, setBusinessWide] = useState(false);
@@ -267,10 +247,10 @@ export function StandardReportsSection({
     };
   }, []);
 
-  const isDocument = selected ? STATEMENT_SHAPES.has(selected.shape) : false;
-  /** Only these statements can be read consolidated, and only by a member allowed to. */
+  const isDocument = selected ? DOCUMENT_SHAPES.has(selected.shape) : false;
+  /** Only allowlisted reports can be consolidated, and only for an authorized member. */
   const scopeToggleAvailable = Boolean(
-    selected && canBusinessWide && BUSINESS_WIDE_SHAPES.has(selected.shape),
+    selected && canToggleBusinessWideScope(selected.key, canBusinessWide),
   );
   const hasDateColumn = selected?.config
     ? Boolean(views.find((view) => view.key === selected.config!.view)?.hasDateColumn)
@@ -279,7 +259,7 @@ export function StandardReportsSection({
     ? (isDocument && !UNDATED_SHAPES.has(selected.shape)) || hasDateColumn
     : false;
   const canCompare = selected ? COMPARABLE_SHAPES.has(selected.shape) : false;
-  /** A point-in-time statement: only an as-of date means anything to it. */
+  /** A point-in-time report: only an as-of date means anything to it. */
   const isSnapshot = selected ? SNAPSHOT_SHAPES.has(selected.shape) : false;
   // Each snapshot names its cutoff the way an owner would: a balance sheet
   // has a «تاریخ ترازنامه», the warranty register a plain «تا تاریخ».
@@ -294,7 +274,7 @@ export function StandardReportsSection({
   }, [compare, comparisonReady]);
 
   // «کل کسب‌وکار» belongs to the report it was chosen for. Carrying it to the
-  // next report picked would silently answer a *different* statement with the
+  // next report picked would silently answer a *different* report with the
   // whole business's figures.
   useEffect(() => {
     setBusinessWide(false);
@@ -340,17 +320,15 @@ export function StandardReportsSection({
       setLoading(true);
       setLoadError("");
       const requestedRange = { dateFrom, dateTo };
-      const requestedScope =
-        canBusinessWide && BUSINESS_WIDE_SHAPES.has(selected.shape) && businessWide
-          ? "business-wide"
-          : "branch";
+      const canRequestBusinessWide = canToggleBusinessWideScope(selected.key, canBusinessWide);
+      const requestedScope = canRequestBusinessWide && businessWide ? "business-wide" : "branch";
       try {
-        if (STATEMENT_SHAPES.has(selected.shape)) {
+        if (DOCUMENT_SHAPES.has(selected.shape)) {
           const params = new URLSearchParams();
           // The consolidated read is opt-in and only for a member who holds the
           // capability; the server re-checks it and refuses the request without
           // it, so this is the client side of the same rule, not the rule.
-          if (canBusinessWide && BUSINESS_WIDE_SHAPES.has(selected.shape)) {
+          if (canRequestBusinessWide) {
             params.set("scope", requestedScope);
           }
           if (dateFrom) params.set("dateFrom", dateFrom);
@@ -360,7 +338,7 @@ export function StandardReportsSection({
             // A snapshot has no period length to mirror, so
             // `getBalanceSheetComparison` needs the earlier as-of date spelled
             // out and returns `previous: null` without it — the checkbox
-            // appeared to do nothing on the one statement where an owner most
+            // appeared to do nothing on the statement where an owner most
             // expects a side-by-side. The extra picker beside it collects the
             // date into `dateFrom`.
             if (SNAPSHOT_SHAPES.has(selected.shape) && dateFrom) {
@@ -489,7 +467,7 @@ export function StandardReportsSection({
     // everything else as a grouped Persian number. Feeding the assistant a bare
     // Rial integer for a Toman business invited it to quote a number ten times
     // what the owner is looking at.
-    // Document-shaped reports (the statements) have no rows — pull their
+    // Document-shaped reports have no rows — pull their
     // headline figures from the payload instead, so «توضیح این عدد» is never
     // sent to the assistant empty-handed over a screen full of numbers.
     const facts = rows
@@ -746,7 +724,7 @@ export function StandardReportsSection({
                   ) : null}
 
                   {/*
-                    Branch or consolidated (issue #819). A statement is read for
+                    Branch or consolidated (issue #819). A report is read for
                     one branch unless its reader asks for the whole business and
                     holds `reports.business_wide`; without that capability the
                     server refuses the consolidated read, so the control is not
@@ -763,7 +741,7 @@ export function StandardReportsSection({
                       </label>
                       <p className="mt-1.5 text-xs text-muted-foreground">
                         {businessWide
-                          ? "این صورت مالی همهٔ شعبه‌ها را یک‌جا جمع می‌زند."
+                          ? "این گزارش داده‌های همهٔ شعبه‌ها را یک‌جا جمع می‌زند."
                           : "فقط شعبهٔ فعال شما محاسبه می‌شود."}
                       </p>
                     </div>

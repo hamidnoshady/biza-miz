@@ -22,8 +22,8 @@
  * So a branch-scoped manager is refused the consolidated *report* (this file)
  * while an accountant holding `ledger.view` still reads the business ledger —
  * that is the intended line, not a gap. What the audit fixed is the reporting
- * side pretending to be accounting: the four statements were served
- * business-wide through `reports.view`.
+ * side pretending to be accounting: consolidated standard reports were served
+ * business-wide through `reports.view` without a separate scope grant.
  *
  * ## Why this file exists
  *
@@ -37,13 +37,13 @@
  * business. Every caller therefore had its own idea of when that absence was
  * acceptable:
  *
- *   - `/api/reports/standard/[key]` skipped the branch on purpose for the four
- *     ledger statements, through a local `LEDGER_WIDE_REPORTS` list.
+ *   - `/api/reports/standard/[key]` skipped the branch on purpose for its
+ *     consolidated standard reports, through a local `LEDGER_WIDE_REPORTS` list.
  *   - `/api/reports/export` resolved a branch for the chart and shift kinds and
  *     passed nothing for P&L, the balance sheet and the cash flow.
  *   - The AI's `run_report` tool passed no branch at all, for any report.
- *   - The API-key route (`/api/v1/reports/standard/[key]`) scoped the same four
- *     statements to the key's branch — so two front doors into one report
+ *   - The API-key route (`/api/v1/reports/standard/[key]`) scoped those same
+ *     reports to the key's branch — so two front doors into one report
  *     disagreed about whose numbers they were.
  *
  * A missing branch is not a statement about authorization; it is a missing
@@ -52,8 +52,8 @@
  *   - **branch** — the ordinary scope. Every report read is one branch's
  *     trading, and the branch is resolved from the member's own assignment
  *     (`resolveActiveLocation`), never from the request.
- *   - **business-wide** — every branch at once, including the consolidated
- *     statements. It exists as its own scope because the product genuinely has
+ *   - **business-wide** — every branch at once, for explicitly consolidated
+ *     standard reports. It exists as its own scope because the product genuinely has
  *     one (the branch-comparison screen), and it requires its own capability:
  *     `reports.business_wide`. It is never what you get by *forgetting* to ask
  *     for a branch.
@@ -162,19 +162,17 @@ export function decideReportScope(input: {
   return input.hasAccessibleBranch ? { ok: true, mode: "branch" } : { ok: false, reason: "no_accessible_branch" };
 }
 /**
- * Whether a report may be run business-wide at all.
+ * The narrow set of standard reports with a meaningful consolidated form:
+ * three business-ledger statements and food-cost variance, which aggregates
+ * item-level theoretical costs with business-wide COGS and waste totals.
  *
  * A business-wide *row dump* is the exact leak the audit found: every branch's
- * orders, one row each. The consolidated scope therefore covers only the
- * reports that are already whole-business documents by construction — the
- * ledger statements, whose numbers are read from the business's books rather
- * than from one branch's trading, and which a branch-scoped variant of is a
- * legitimate (if different) report rather than a contradiction.
- *
- * Reports whose rows *are* one branch's trading (a shop's daily sales, a
- * cashier's shifts, a trade report) stay branch-only even for a member holding
- * the capability: "all branches" for those means running the report once per
- * branch, which the branch-comparison screen already does deliberately.
+ * orders, one row each. Reports whose rows *are* one branch's trading (a shop's
+ * daily sales, a cashier's shifts, a trade report) stay branch-only even for a
+ * member holding the capability: "all branches" for those means running the
+ * report once per branch, which the branch-comparison screen already does
+ * deliberately. This list is not authorization; callers still require
+ * `reports.business_wide` when the scope is requested.
  */
 export const CONSOLIDATED_STANDARD_REPORTS: readonly string[] = [
   "profit_and_loss",

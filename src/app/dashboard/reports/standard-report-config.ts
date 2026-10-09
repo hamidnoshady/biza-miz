@@ -10,6 +10,8 @@
  * obviously broken one.
  */
 
+import { isConsolidatedStandardReport } from "@/lib/report-scope";
+
 /**
  * Mirrors `ReportShape` in src/lib/reports.ts — the server tells us which view
  * renders the payload.
@@ -35,6 +37,17 @@ export type ReportShape =
   | "near_expiry"
   | "low_stock"
   | "dead_stock";
+
+/**
+ * The standard-report screen may offer the business-wide toggle only when the
+ * server's canonical consolidated-report allowlist contains this report and
+ * the current user holds the elevated capability. This keeps the UI from
+ * advertising a scope the API would refuse, or hiding one the API explicitly
+ * supports.
+ */
+export function canToggleBusinessWideScope(reportKey: string, hasCapability: boolean): boolean {
+  return hasCapability && isConsolidatedStandardReport(reportKey);
+}
 
 /**
  * A standard report's chart config, as the API hands it over.
