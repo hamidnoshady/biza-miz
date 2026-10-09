@@ -195,6 +195,56 @@ this is the packaged-desktop pass of the same scenario.
       correctly uses the connector (unchanged by this audit) — this is a
       regression check, not a new feature check.
 
+### 5.1 The unified pipeline (issue #815) — real Windows + real hardware
+
+> These are the acceptance items for the printing unification itself. Each one
+> is covered by unit/API tests as far as logic goes; the items below need the
+> real machine.
+
+- [ ] **A saved custom template actually prints.** In «قالب‌ها», duplicate the
+      80mm receipt, change something visible (e.g. a custom text line), save it
+      as the default for «رسید فروش» (or select it in «قوانین چاپ»), then sell
+      something at the till: confirm the printed slip shows the CHANGE, not the
+      built-in layout. This is the regression the audit exists for — a saved
+      template used to be silently ignored.
+- [ ] **Rules screen routing.** In «قوانین چاپ», set a rule for «فاکتور» to the
+      A4 printer with the A5/other printer as fallback; confirm the «اکنون:»
+      line names the template revision and printer. Turn that printer off in
+      Windows and print again: confirm the job goes to the FALLBACK printer and
+      the history row says `جانشین` (fallback) with the replaced printer's name.
+- [ ] **Incompatible printers are not offered.** Confirm a page (A4) printer is
+      absent from the receipt rule's printer list, and that a receipt printer
+      is absent from the invoice rule's — and, with a hand-crafted PUT to
+      `/api/settings/print-rules`, that the API refuses with
+      `incompatible_printer`.
+- [ ] **Document and label purposes end to end.** Pair an A4 Windows queue as
+      «فاکتور (A4/A5)» and print an invoice from the retail invoice detail
+      modal («چاپ فاکتور») — confirm a real page comes out with the branch's
+      logo/legal identity. Then pair a label printer (or a thermal roll) as
+      «برچسب», choose it as the label rule, and print a shelf label from
+      «موجودی → بارکدها»: confirm the barcode scans with a real scanner.
+- [ ] **Receipt and invoice are separate actions.** From one sale, confirm
+      «چاپ رسید» produces a thermal receipt and «چاپ فاکتور» produces the A4
+      invoice — and that neither one changes the other's routing.
+- [ ] **Preview equals print.** In the designer, place the logo, the legal name
+      and a footer; print the same template to the real printer («چاپ نمونه»)
+      and compare: the paper should match the preview, including the logo, the
+      branch address/phone and the footer.
+- [ ] **Failures are recorded, not hidden.** With the printer switched off,
+      print a receipt: confirm the progress modal ends on the error sentence,
+      the POS still keeps the sale, and «فعالیت اخیر» shows the job as
+      «ناموفق» with a canonical code — never left showing «در حال ارسال».
+- [ ] **Template versioning is visible.** Print, then edit the same template
+      again and print once more: the two history rows must name different
+      template versions (`… · v1` vs `… · v2`).
+- [ ] **No arbitrary HTML reaches the server's Chromium.** Post
+      `{"job":{"type":"document","html":"<h1>x</h1>"}}` to
+      `/api/printing/print` with a valid session and confirm 400 — the endpoint
+      only accepts intent job types.
+- [ ] **Kitchen tickets carry the branch name.** Print a kitchen ticket from a
+      second branch (or after renaming the branch): confirm the ticket header
+      shows the branch that sent it.
+
 ## 6. Backup system
 
 - [ ] Configure a local backup destination on a non-default drive; trigger

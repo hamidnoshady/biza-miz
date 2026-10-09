@@ -5,8 +5,6 @@ import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { printLabel } from "@/lib/printing/client";
-import { labelFieldsForTrade, type LabelData } from "@/lib/label-template";
-import { useBusinessInfo } from "../use-printers";
 import { api, Field, inputClass } from "../ui";
 import {
   LoadingSkeleton,
@@ -620,7 +618,6 @@ function BarcodesPanel({
   const [manualCode, setManualCode] = useState("");
   const [barcodes, setBarcodes] = useState<BarcodeRow[]>([]);
   const [barcodesLoading, setBarcodesLoading] = useState(false);
-  const businessInfo = useBusinessInfo();
 
   const selected = items.find((i) => i.id === itemId);
 
@@ -686,32 +683,16 @@ function BarcodesPanel({
     );
   }
 
+  /**
+   * Print one product's label. The fields (price, shade, nearest expiry) are
+   * read server-side from the item's own stock, attributes and batches — the
+   * same rows this board shows — so the label cannot drift from the catalogue
+   * the way a label assembled here could (`labelFieldsForTrade` now runs in
+   * src/lib/printing/label-print-data.ts, not in the browser).
+   */
   function print(code: string) {
-    if (!selected) return;
-    const shade =
-      selected.attributes.find((a) => a.name === "سایه" || a.name === "رنگ")
-        ?.value ?? null;
-    const expiry =
-      selected.batches
-        .filter((b) => b.expiryDate)
-        .sort((a, b) => (a.expiryDate! < b.expiryDate! ? -1 : 1))[0]
-        ?.expiryDate ?? null;
-    const label: LabelData = {
-      businessName: businessInfo.name || "فروشگاه",
-      itemName: selected.name,
-      code,
-      fields: labelFieldsForTrade(
-        "cosmetics",
-        {
-          name: selected.name,
-          price: selected.unitPrice,
-          shade,
-          expiryDate: expiry,
-        },
-        money.unit,
-      ),
-    };
-    printLabel(null, label, { requestId: `label:${code}` }).then((res) => {
+    if (!itemId) return;
+    printLabel(null, { itemId, code }, { requestId: `label:${code}` }).then((res) => {
       if (res.ok) onDone("لیبل چاپ شد.");
       else
         setError(
