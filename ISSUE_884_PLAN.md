@@ -194,14 +194,13 @@ this slice and is listed under follow-up work.
    pipeline, instead of a rebuild.
 8. Instrumented tests once a feature needs an emulator.
 
-## Open questions for the owner
+## Owner decisions
 
-1. **The production and staging web hosts.** The App Link host, the origin in each environment,
-   and the assetlinks statements all depend on them. Until they are set, staging and production
-   builds refuse to compile.
-2. **Play account and signing mode.** Whether the app is already created in Play Console, and
-   whether Play App Signing is enrolled. Production fingerprints come from that key.
-3. **Whether the device registry is the next slice,** or whether the mobile shell comes first.
+Answered by the owner during the session. Recorded here so the decisions travel with the code.
+
+1. **Web hosts.** Production is `https://app.eshobe.com`, which is also the App Link host. Staging is `https://staging.eshobe.com`. Still owner setup: set the GitHub variables `ANDROID_WEB_ORIGIN_PRODUCTION=https://app.eshobe.com` and `ANDROID_WEB_ORIGIN_STAGING=https://staging.eshobe.com` on the matching environments. Until they are set, the staging and production builds refuse to compile.
+2. **Play account.** There is no Play Console app yet. Next: create the app with the application ID `com.bizamiz.app`, and confirm in Play Console that Play App Signing is enrolled. Once it is, the Digital Asset Links fingerprint is the app signing key's SHA-256 from Play Console, not the upload key's. That value then goes into `public/.well-known/assetlinks.json`. Uploads to Play stay off until a service account exists.
+3. **Next slice: the device registry.** It gets its own tenant-scoped table, not `devices`, with RLS in the same migration. Still open before it starts: who may see and revoke a device, how a device registers (a bridge command at first launch, or a web call), and what a revoked device can still do.
 
 ## Gates
 
