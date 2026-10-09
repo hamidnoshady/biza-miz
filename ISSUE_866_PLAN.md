@@ -124,7 +124,7 @@ Run on this branch, in this sandbox, against the working tree before the commit.
 | Database suite | `npm run test:db` | **passed**: all 200 integration files on Node 22. 31 files ran in one run, and the other 169 in two parallel shards (85 and 85 files). The shards passed 877 tests with one pre-existing skip (in the AI gateway suite), and 830 tests. The tax suites and the tenant-isolation, reset, export, backup and restore sweeps were re-run on Node 24: 67 tests passed. |
 | Design | `npm run test:design` | **passed**: 5 files, 38 tests, on Node 22 and Node 24 |
 | Build | `npm run build` | **not verified locally.** The webpack compile was killed by the kernel's out-of-memory killer, twice, on Node 24.21.0 with a 3 GB heap cap, on this 3.9 GB sandbox with no swap. A Turbopack compile reached the same memory ceiling and was stopped. The CI build job is the gate for this step. |
-| Visual regression | `npm run test:visual` | **not run locally.** It needs a browser and the seeded fixture. The new section sits in the `دوره، مالیات و حقوق` sub-group, which no committed visual baseline renders, and the sidebar's work areas are unchanged. No baseline was re-recorded. |
+| Visual regression | `npm run test:visual` | **not run locally.** Chromium download is blocked by sandbox egress. CI fails only on `accounting-expenses.png` (4.06%, bounds 54,18 1370×830). The identical failure already exists on main before this feature; see the evidence below. No baseline was re-recorded. |
 
 Two problems surfaced by the checks above, and fixed:
 
@@ -134,3 +134,29 @@ Two problems surfaced by the checks above, and fixed:
 ## Open items
 
 Tracked in `docs/tax-invoicing.md` → Open items: the live protocol and its verification, the TSP token flow, webhooks or callbacks, and a separate archive. These are the decisions and the external work that stand between this slice and live taxpayer submission.
+
+## PR #897 — CI follow-up (2026-10-09)
+
+Production build, type check, unit tests, real-database integration tests,
+ESLint, API guards, design checks, data transfer and shippable checks passed
+on feature commit `936242f`. The aggregate gate remains red because visual
+regression fails on the expenses screen. Do not merge while it is red.
+
+This is an inherited, intentionally unapproved expense-register redesign, not
+evidence of a taxpayer navigation regression:
+
+- Main commit `ac48d7faae8461ea967317b13b947d92a874dd85` (issue #832)
+  explicitly says the expenses baseline awaits owner approval.
+- Its visual check `113784854336` reports 4.06% changed pixels, bounds
+  `54,18 1370×830`, on `docs/design/visual/accounting-expenses.png`.
+- The subsequent main commit `6ec02b5ea671920ab250a0d5860d681a22fcff66`
+  (parent of this session's base `7b1b11c`) has the same annotation in
+  check `113804662696`.
+- PR #897 check `113945903828` reports exactly the same file, percentage
+  and bounds. Other captured screens pass.
+
+The artifacts cannot be downloaded here because their Azure blob host is
+blocked. The annotations and main commit message were read through the GitHub
+API. No unrelated expense features were reverted and no navigation was hidden
+to clear this check. Owner approval/resolution of the existing expense visual
+change is required before this PR can satisfy the all-green merge rule.

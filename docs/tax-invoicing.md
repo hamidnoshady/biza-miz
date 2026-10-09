@@ -296,5 +296,9 @@ or work that needs the authority's specification and sandbox.
    verify their signatures before it changes any record.
 4. **Archive.** The register exports to CSV. There is no separate archive store or
    retention policy.
-5. **Local toolchain.** The repo declares Node `>=24`. The checks in this slice were
-   run on Node 22 locally, so they should be re-run on Node 24 in CI.
+5. **Customer filter.** The API supports a customer filter; the screen currently
+   offers buyer/reference search but no dedicated customer selector.
+6. **Merge gate.** PR #897 is blocked by an inherited expenses visual regression
+   from issue #832 awaiting owner approval. Production build and the other CI
+   checks pass; the local build was OOM-killed. Node 24 type, unit, lint, design
+   and targeted database checks also passed locally. See `ISSUE_866_PLAN.md`.
