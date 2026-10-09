@@ -24,7 +24,7 @@ import { DataTable, DataTableBody, DataTableFoot, DataTableHead, DataTableRow, T
 import { ErrorBox, api, SecondaryButton } from "@/app/dashboard/ui";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
-import { toCsv } from "@/lib/data-transfer/codecs";
+import { toCsv } from "@/lib/data-transfer/csv";
 import { todayIsoDate } from "@/lib/jalali";
 import {
   UNASSIGNED_DIMENSION,
