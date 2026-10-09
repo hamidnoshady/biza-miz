@@ -267,6 +267,12 @@ export async function createAccount(params: {
   type: string;
   parentId?: string | null;
   isContra?: boolean;
+  /**
+   * Multicurrency (issue #863): the account's own currency for a
+   * foreign-currency financial account (a foreign bank). NULL/omitted = the
+   * business's base currency, which is every account until one is flagged.
+   */
+  currencyCode?: string | null;
 }): Promise<{ id: string }> {
   /* The convention is «Latin digits in storage, Persian digits in display»
      (digits.ts), and the add form's own placeholder invites «۶۱۰۰». Storing a
@@ -296,11 +302,15 @@ export async function createAccount(params: {
   ]);
   if (existing.length > 0) throw new AccountsError("code_in_use", 409);
 
+  const currencyCode =
+    typeof params.currencyCode === "string" && /^[A-Za-z]{3}$/.test(params.currencyCode)
+      ? params.currencyCode.toUpperCase()
+      : null;
   try {
     const { rows } = await query<{ id: string }>(
-      `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [params.businessId, params.parentId ?? null, code, name, params.type, level, params.isContra ?? false],
+      `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra, currency_code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [params.businessId, params.parentId ?? null, code, name, params.type, level, params.isContra ?? false, currencyCode],
     );
     return { id: rows[0].id };
   } catch (err) {

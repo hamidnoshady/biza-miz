@@ -97,6 +97,11 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   opening: "تراز افتتاحیه",
   closing: "بستن سال مالی",
 
+  // حسابداری چندارزی (issue #863) — the foreign-currency documents
+  multicurrency: "سند ارزی",
+  fx_settlement: "تسویه ارزی",
+  fx_revaluation: "تجدید ارزیابی ارز",
+
   // شرکت پلتفرم — the internal company's own accounting, posted from the
   // platform billing outbox (migration 0193). Subscription revenue and wallet
   // settlements of a customer's subscription invoice are the company's trades,

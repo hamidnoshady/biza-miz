@@ -153,7 +153,7 @@ const accountsAdapter: EntityAdapter = {
     const { rows } = await query<Record<string, unknown>>(
       `SELECT a.id, a.code, a.name, a.type::text AS type, a.level::text AS level,
               parent.code AS "parentCode", a.normal_balance AS "normalBalance",
-              a.is_active AS "isActive"
+              a.is_active AS "isActive", a.currency_code AS "currencyCode"
          FROM accounts a
          LEFT JOIN accounts parent ON parent.id = a.parent_id
         WHERE ${where.join(" AND ")}
@@ -216,6 +216,9 @@ const accountsAdapter: EntityAdapter = {
         name,
         type: String(values.type ?? "expense"),
         parentId,
+        // Preserved on import so a foreign-currency financial account keeps
+        // the currency its postings are denominated in (issue #863).
+        currencyCode: typeof values.currencyCode === "string" ? values.currencyCode : null,
       });
       if (values.isActive === false) {
         await setAccountActive(context.businessId, created.id, false);

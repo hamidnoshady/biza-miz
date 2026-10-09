@@ -44,6 +44,7 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   "business-day": keys("accounting.operations"),
   printing: keys("accounting.operations"),
   ledger: keys("accounting.ledger"),
+  currencies: keys("accounting.ledger"),
   parties: keys("accounting.parties"),
   staff: keys("accounting.parties"),
   team: keys("accounting.parties"),

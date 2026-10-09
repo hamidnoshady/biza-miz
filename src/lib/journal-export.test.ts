@@ -31,6 +31,12 @@ function entry(overrides: Partial<JournalEntryRecord> = {}): JournalEntryRecord 
     reversedBy: null,
     reversedByName: null,
     totalDebit: "9007199254740993",
+    currencyCode: null,
+    baseCurrencyCode: null,
+    exchangeRateId: null,
+    exchangeRate: null,
+    roundingVersion: null,
+    roundingDelta: null,
     lines: [
       {
         entryId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -39,6 +45,9 @@ function entry(overrides: Partial<JournalEntryRecord> = {}): JournalEntryRecord 
         accountName: "هزینهٔ اجاره",
         debit: "9007199254740993",
         credit: "0",
+        foreignDebit: "0",
+        foreignCredit: "0",
+        partyId: null,
       },
       {
         entryId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -47,6 +56,9 @@ function entry(overrides: Partial<JournalEntryRecord> = {}): JournalEntryRecord 
         accountName: "صندوق",
         debit: "0",
         credit: "9007199254740993",
+        foreignDebit: "0",
+        foreignCredit: "0",
+        partyId: null,
       },
     ],
     ...overrides,

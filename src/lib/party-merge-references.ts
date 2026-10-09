@@ -174,6 +174,31 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "رسید دریافت",
   },
   {
+    // Multicurrency (issue #863). The party attribution ON A LINE — the
+    // foreign open item itself. Amounts (debit/credit/foreign) are untouched:
+    // only who the ledger says the balance belongs to moves, exactly like the
+    // orders entry above. Parent-scoped: journal_lines is tenanted by its
+    // entry, and the generated UPDATE must hop through journal_entries.
+    table: "journal_lines",
+    column: "party_id",
+    scope: "parent",
+    parent: { table: "journal_entries", childColumn: "entry_id", parentColumn: "id" },
+    disposition: "move",
+    reason:
+      "A foreign receivable/payable leg IS the person's open balance — the settlement FIFO and the foreign party report resolve it live. Leaving it on the archived record hides real money from the survivor's file; moving it touches only the attribution, never the posted amounts.",
+  },
+  {
+    // Multicurrency (issue #863). The lot trail's denormalized copy of the
+    // same attribution; it must keep agreeing with the settlement document
+    // and the lot line it points at, so it follows the same merge.
+    table: "fx_settlement_applications",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The application repeats its settlement's party for the audit trail; after a merge it must still name the surviving party or the trail contradicts the settlement document and the lot line it belongs to.",
+  },
+  {
     table: "fixed_assets",
     column: "custodian_party_id",
     scope: "business",
