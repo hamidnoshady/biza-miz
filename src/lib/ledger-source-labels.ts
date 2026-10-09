@@ -80,6 +80,12 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   payroll_accrual_void: "ابطال تعهد حقوق",
   payroll_payment_void: "ابطال پرداخت حقوق",
   payroll_advance_void: "ابطال مساعده",
+  // Commission settlement: a payout and the reversal of one (Growth → commission runs).
+  commission_payout: "پرداخت پورسانت",
+  commission_payout_reversal: "ابطال پرداخت پورسانت",
+  // A run line carried over from an earlier run stores this code as its source.
+  // No journal entry carries it; it is named here like every other stored code.
+  carry_forward: "مانده پورسانت دورهٔ قبل",
   fixed_asset_depreciation: "استهلاک دارایی ثابت",
   fixed_asset_disposal: "واگذاری دارایی ثابت",
   fixed_asset_acquisition: "خرید دارایی ثابت",

@@ -117,11 +117,11 @@ export const GET = withTenantScope(async () => {
          count(*) FILTER (WHERE se.origin='remote' AND se.applied_at IS NULL)::text AS inbound,
          (SELECT count(*) FROM sync_domain_effects WHERE business_id=$1 AND status='deferred')::text AS deferred,
          (SELECT count(*) FROM sync_events se2 JOIN locations l2 ON l2.id=se2.location_id
-            WHERE l2.business_id=$1 AND se2.error='conflict')::text AS conflicts,
+            WHERE l2.business_id=$1 AND se2.scope='location' AND se2.error='conflict')::text AS conflicts,
          (SELECT count(*) FROM sync_event_dead_letters WHERE business_id=$1 AND status='open')::text AS dead_letters
        FROM sync_events se
        JOIN locations l ON l.id=se.location_id
-       WHERE l.business_id=$1
+       WHERE l.business_id=$1 AND se.scope='location'
          AND EXISTS (SELECT 1 FROM users u WHERE u.id=$3 AND u.business_id=$1 AND u.is_active)
          AND (se.origin='remote' AND se.applied_at IS NULL
               OR se.origin='local' AND se.id > $2)`,

@@ -234,6 +234,12 @@ const DRAFTS: Draft[] = [
   { key: P.giftCardsRedeem, group: "growth", label: "مصرف کارت هدیه", description: "کسر مبلغ از موجودی کارت هدیه.", risk: "medium", audit: true, implies: [P.giftCardsView] },
   { key: P.commissionView, group: "growth", label: "مشاهده پورسانت", description: "دیدن قواعد پورسانت و گزارش پورسانت فروشندگان. دادهٔ جبران خدمت است.", risk: "high", audit: true },
   { key: P.commissionManage, group: "growth", label: "مدیریت پورسانت", description: "تعریف و تغییر قواعد پورسانت فروشندگان.", risk: "high", audit: true, implies: [P.commissionView] },
+  // Issue #869: the settlement lifecycle, split so no one key both decides what
+  // is owed and pays it out. Every one of them reads the same data as view.
+  { key: P.commissionCalculate, group: "growth", label: "ساخت دورهٔ تسویه پورسانت", description: "ساخت دورهٔ تسویه و محاسبهٔ اقلام آن از پورسانت‌های ثبت‌شده. پول جابه‌جا نمی‌کند.", risk: "high", audit: true, implies: [P.commissionView] },
+  { key: P.commissionApprove, group: "growth", label: "تأیید تسویه پورسانت", description: "بازبینی و تأیید دورهٔ تسویه، و بازگرداندن آن به پیش‌نویس یا ابطال پیش از پرداخت. کسی که دوره را ساخته نمی‌تواند آن را تأیید کند.", risk: "high", audit: true, implies: [P.commissionView] },
+  { key: P.commissionPayout, group: "growth", label: "پرداخت پورسانت", description: "آزاد کردن دورهٔ تأییدشده برای پرداخت، ثبت پرداخت به فروشندگان و بستن دوره. پول از صندوق یا بانک خارج می‌شود.", risk: "critical", audit: true, implies: [P.commissionView] },
+  { key: P.commissionReverse, group: "growth", label: "ابطال پرداخت پورسانت", description: "برگرداندن یک پرداخت پورسانت با سند اصلاحی. دفتر را اصلاح می‌کند و تأثیر آن روی مانده هر فروشنده ثبت می‌شود.", risk: "critical", audit: true, implies: [P.commissionView] },
   { key: P.marketingConfigure, group: "growth", label: "تنظیمات رشد و بازاریابی", description: "پیکربندی سراسری برنامه رشد، جدا از اجرای یک کمپین.", risk: "high", audit: true, implies: [P.growthView] },
 
   // --- Website -------------------------------------------------------------

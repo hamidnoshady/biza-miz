@@ -791,6 +791,7 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
          FROM sync_events se
          JOIN locations l ON l.id = se.location_id
         WHERE l.business_id = $1
+          AND se.scope = 'location'
           AND se.pushed_at IS NULL
           AND se.applied_at IS NOT NULL
           AND se.error IS NULL
@@ -950,7 +951,8 @@ interface RemoteEvent {
   type: string;
   occurredAt: string;
   payload: Record<string, unknown>;
-  locationId: string;
+  /** null for a business-scope event (#869): it belongs to no location. */
+  locationId: string | null;
   actorUserId: string;
   actorRole: string;
   businessId?: string;
@@ -978,6 +980,21 @@ export function pullPositionAdvances(
   }
   // An older central server reports no txid and orders by id alone.
   return id > cursorId;
+}
+
+/**
+ * The location a pulled business-scope event (#869) is recorded under on this
+ * desktop. Such an event names no location, and a desktop only acknowledges it
+ * (siteSkipsPulledEvent), so any location of the business will do: the desktop's
+ * own when it has one, else the business's first.
+ */
+async function locationForBusinessEvent(businessId: string, configured: string | undefined): Promise<string | null> {
+  if (configured) return configured;
+  const { rows } = await query<{ id: string }>(
+    "SELECT id FROM locations WHERE business_id = $1 ORDER BY created_at, id LIMIT 1",
+    [businessId],
+  );
+  return rows[0]?.id ?? null;
 }
 
 /**
@@ -1093,8 +1110,10 @@ export async function runServerPull(businessId: string): Promise<PullResult> {
         occurredAt: e.occurredAt,
         payload: e.payload,
       };
+      const eventLocationId = e.locationId ?? (await locationForBusinessEvent(businessId, config.locationId));
+      if (!eventLocationId) return fail("business_event_without_location");
       const applied = await applySyncEvent(
-        e.locationId,
+        eventLocationId,
         { userId: e.actorUserId, role: e.actorRole as import("./auth").Role },
         input,
         "remote",

@@ -99,6 +99,23 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
   "/api/loyalty/reports": { GET: PERMISSIONS.loyaltyView },
   "/api/commission/rules": { GET: PERMISSIONS.commissionView, POST: PERMISSIONS.commissionManage, PATCH: PERMISSIONS.commissionManage },
   "/api/commission/report": { GET: PERMISSIONS.commissionView },
+  // Settlement runs (issue #869): each action is its own permission, so a
+  // person can build a run without being able to approve or pay it.
+  "/api/commission/runs": { GET: PERMISSIONS.commissionView, POST: PERMISSIONS.commissionCalculate },
+  "/api/commission/runs/[id]": { GET: PERMISSIONS.commissionView },
+  "/api/commission/runs/[id]/lines": { GET: PERMISSIONS.commissionView },
+  "/api/commission/runs/[id]/calculate": { POST: PERMISSIONS.commissionCalculate },
+  "/api/commission/runs/[id]/review": { POST: PERMISSIONS.commissionApprove },
+  "/api/commission/runs/[id]/approve": { POST: PERMISSIONS.commissionApprove },
+  "/api/commission/runs/[id]/reject": { POST: PERMISSIONS.commissionApprove },
+  "/api/commission/runs/[id]/void": { POST: [PERMISSIONS.commissionCalculate, PERMISSIONS.commissionApprove] },
+  "/api/commission/runs/[id]/release": { POST: PERMISSIONS.commissionPayout },
+  "/api/commission/runs/[id]/close": { POST: PERMISSIONS.commissionPayout },
+  "/api/commission/runs/[id]/payouts": { POST: PERMISSIONS.commissionPayout },
+  "/api/commission/payouts/[id]/reverse": { POST: PERMISSIONS.commissionReverse },
+  "/api/commission/payment-accounts": { GET: PERMISSIONS.commissionPayout },
+  "/api/commission/statement": { GET: PERMISSIONS.commissionView },
+  "/api/commission/liability": { GET: PERMISSIONS.commissionView },
   "/api/messaging": { GET: PERMISSIONS.campaignsView, POST: PERMISSIONS.campaignsManage },
   "/api/messaging/preview": { POST: PERMISSIONS.campaignsManage },
 };

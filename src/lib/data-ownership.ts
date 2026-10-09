@@ -247,6 +247,29 @@ export const DATA_OWNERSHIP_REGISTRY = {
     transport: "events",
     events: [event("accounting.manual_journal.reversed", 1)],
   }),
+  /*
+   * Commission settlement (#869). The cloud owns the books, and a commission run
+   * covers every branch, so the run, its lines and its payouts are cloud-only and
+   * never replicated. What does travel is the money's own record: each payout and
+   * each reversal is one business-scope event, written in the transaction that
+   * moves the money and identified by the payout's own id. A business-wide consumer
+   * receives it. A desktop acknowledges a pulled copy without applying it, because
+   * the money has already moved, and a replayed copy is refused.
+   */
+  commission_settlement: replicated({
+    domain: "commission_settlement",
+    authority: "cloud_authoritative",
+    direction: "cloud_to_site",
+    conflictPolicy: "immutable_idempotent",
+    tombstonePolicy: "not_applicable",
+    bootstrap: "optional",
+    continuousSync: "active",
+    identity: "payout and reversal UUIDs; each event's client_event_id is derived from them",
+    retry:
+      "transactional business-scope sync_events row; a retried or doubly delivered event lands once; a replayed copy is refused, a pulled copy acknowledged",
+    transport: "events",
+    events: [event("commission.payout.recorded", 1), event("commission.payout.reversed", 1)],
+  }),
   inventory_movements: replicated({
     domain: "inventory_movements",
     authority: "site_authoritative",

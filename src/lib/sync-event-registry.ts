@@ -2,8 +2,21 @@ import type { Permission } from "./permissions";
 
 export const SYNC_EVENT_REGISTRY_VERSION = 1 as const;
 
-type LocationRule = "event_location" | "business_transfer";
-type EffectClass = "order" | "payment" | "refund" | "journal_reversal" | "inventory" | "transfer" | "shift";
+/**
+ * `business`: the event belongs to no location (a business-wide money action such as a
+ * commission payout, #869). It is recorded with business scope and reaches only
+ * business-wide consumers, never a location-bound site.
+ */
+type LocationRule = "event_location" | "business_transfer" | "business";
+type EffectClass =
+  | "order"
+  | "payment"
+  | "refund"
+  | "journal_reversal"
+  | "inventory"
+  | "transfer"
+  | "shift"
+  | "commission_settlement";
 
 export interface SyncEventDefinition {
   type: string;
@@ -39,7 +52,14 @@ export interface SyncEventDefinition {
  * supplier the desktop does not have) and showed them as «در انتظار پیش‌نیاز».
  * A desktop acknowledges a pulled event of these classes without applying it.
  */
-const CLOUD_OWNED_EFFECT_CLASSES: ReadonlySet<EffectClass> = new Set(["inventory", "transfer", "journal_reversal"]);
+const CLOUD_OWNED_EFFECT_CLASSES: ReadonlySet<EffectClass> = new Set([
+  "inventory",
+  "transfer",
+  "journal_reversal",
+  // #869: a commission payout moves money the cloud already moved; a desktop has
+  // no run to apply it to.
+  "commission_settlement",
+]);
 
 /** Whether a desktop (runtime role `site`) acknowledges this pulled cloud event instead of applying it. */
 export function siteSkipsPulledEvent(definition: Pick<SyncEventDefinition, "effectClass">): boolean {
@@ -52,6 +72,9 @@ const REFUND_PERMISSION = "payments.refund" as const;
 const INVENTORY_PERMISSION = "inventory.adjust" as const;
 /** The permission `/api/shifts/start` already requires to clock in. */
 const SHIFT_PERMISSION = "orders.create" as const;
+/** #869: the keys that pay a commission run out and reverse a payout. */
+const COMMISSION_PAYOUT_PERMISSION = "commission.payout" as const;
+const COMMISSION_REVERSE_PERMISSION = "commission.reverse" as const;
 
 /**
  * Authoritative, machine-readable sync event catalogue.
@@ -112,6 +135,12 @@ export const SYNC_EVENT_REGISTRY = [
   // shift reports; the row travels whole and replays idempotently by id.
   { type: "shift.opened", schemaVersion: 1, handler: "shift.opened", permission: SHIFT_PERMISSION, effectClass: "shift", locationRule: "event_location", dependencyErrors: ["employee_not_found"], payloadFields: ["shiftId", "employeeId", "businessDate", "openingFloat", "closingFloat", "startedAt", "endedAt", "closedBy"] },
   { type: "shift.closed", schemaVersion: 1, handler: "shift.closed", permission: SHIFT_PERMISSION, effectClass: "shift", locationRule: "event_location", dependencyErrors: ["employee_not_found"], payloadFields: ["shiftId", "employeeId", "businessDate", "openingFloat", "closingFloat", "startedAt", "endedAt", "closedBy"] },
+  // #869: a commission run's payout and the reversal of one. Business-scope: a run
+  // covers every branch, so neither event names a location. The cloud writes each in
+  // the same transaction as its journal entry. No replay applies one again (see
+  // sync-domain-handlers.ts), and a desktop acknowledges a pulled copy.
+  { type: "commission.payout.recorded", schemaVersion: 1, handler: "commission.payout.recorded", permission: COMMISSION_PAYOUT_PERMISSION, effectClass: "commission_settlement", locationRule: "business", dependencyErrors: [], payloadFields: ["payoutId", "runId", "runNumber", "amount", "paidDate", "method", "entryId", "allocations"] },
+  { type: "commission.payout.reversed", schemaVersion: 1, handler: "commission.payout.reversed", permission: COMMISSION_REVERSE_PERMISSION, effectClass: "commission_settlement", locationRule: "business", dependencyErrors: [], payloadFields: ["reversalId", "reversedPayoutId", "runId", "runNumber", "amount", "entryId"] },
 ] as const satisfies readonly SyncEventDefinition[];
 
 export type SyncEventType = (typeof SYNC_EVENT_REGISTRY)[number]["type"];

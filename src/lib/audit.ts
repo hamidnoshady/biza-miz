@@ -16,6 +16,16 @@
  */
 
 const ACTION_LABELS: Record<string, string> = {
+  "commission.run.created": "ساخت دورهٔ تسویه پورسانت",
+  "commission.run.calculated": "محاسبهٔ دورهٔ تسویه پورسانت",
+  "commission.run.reviewed": "بازبینی دورهٔ تسویه پورسانت",
+  "commission.run.approved": "تأیید دورهٔ تسویه پورسانت",
+  "commission.run.rejected": "بازگشت دورهٔ تسویه به پیش‌نویس",
+  "commission.run.released": "آزادسازی دورهٔ تسویه برای پرداخت",
+  "commission.run.voided": "ابطال دورهٔ تسویه پورسانت",
+  "commission.run.closed": "بستن دورهٔ تسویه پورسانت",
+  "commission.payout.recorded": "پرداخت پورسانت",
+  "commission.payout.reversed": "ابطال پرداخت پورسانت",
   "employee.profile_updated": "ویرایش پروفایل کارمند",
   "employee.credential_issued": "صدور اعتبارنامه",
   "employee.credential_revoked": "ابطال اعتبارنامه",
@@ -68,6 +78,8 @@ const ENTITY_LABELS: Record<string, string> = {
   account: "حساب",
   settings: "تنظیمات",
   menu_item: "آیتم منو",
+  commission_run: "دورهٔ تسویه پورسانت",
+  commission_payout: "پرداخت پورسانت",
 };
 
 /** A Persian label for a raw `audit_log.action` value, falling back to the raw string when unrecognised. */

@@ -62,6 +62,7 @@ describe("built-in role presets", () => {
       "billing.manage", "billing.view",
       "campaigns.manage", "campaigns.view",
       "cms.configure", "cms.content_manage", "cms.publish", "cms.view",
+      "commission.calculate",
       "commission.manage", "commission.view",
       "crm.configure", "crm.consent_manage", "crm.delete", "crm.export", "crm.manage", "crm.merge", "crm.view",
       "data.export", "data.import",
@@ -99,7 +100,7 @@ describe("built-in role presets", () => {
     expect(effective("accountant")).toEqual([
       "accounts.edit",
       "ai.usage.view", "ai.use",
-      "commission.view",
+      "commission.approve", "commission.calculate", "commission.payout", "commission.reverse", "commission.view",
       "data.export", "data.import",
       "finance.assets_manage", "finance.cheques_manage", "finance.expenses_manage",
       "finance.installments_manage", "finance.payables_manage",
