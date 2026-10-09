@@ -18,6 +18,7 @@
 
 import { normaliseHeader, westernDigits } from "./codecs";
 import { isValidIsoDate, jalaliToIsoDate } from "../jalali";
+import { isWholeRial } from "../money";
 import type {
   ColumnMapping,
   EntityDefinition,
@@ -301,6 +302,13 @@ export function coerceValue(
       // multiplied here, once, rather than at each call site — the 10× price
       // error is the single most expensive import bug there is.
       const rial = options.moneyUnit === "rial" ? value : value * 10;
+      // `isWholeRial` absorbs the float artefact of ×10 (۱۵/۷ تومان is
+      // 1507.0000000000002, which is a whole Rial); a field that stores exact
+      // Rial asks for more than that and gets an error naming its column, never
+      // a rounded figure the operator never wrote.
+      if (field.validation?.integral && !isWholeRial(rial)) {
+        return error(`«${field.label}» باید عدد صحیح ریال باشد؛ مبلغ کسری در دفتر پذیرفته نمی‌شود.`);
+      }
       return { value: Math.round(rial), message: null };
     }
 

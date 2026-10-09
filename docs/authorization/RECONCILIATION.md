@@ -124,7 +124,7 @@ api), `integrations.manage` (36), `media.view` (3), `media.manage` (6),
 
 | Key | API consumers | Why it must survive |
 |---|---|---|
-| `finance.expenses_manage` | 1 | Operational finance ≠ accounting authority. Sixteen ledger write routes used `requireRole("owner","manager","accountant")` as a proxy for two different capabilities. Mapping them to `ledger.post` either removes work every manager does, or widens `ledger.post` past its name. |
+| `finance.expenses_manage` | 3 routes (record, reverse, receipt OCR) — plus the data-transfer import gate and the AI capability, since #832 | Operational finance ≠ accounting authority. Sixteen ledger write routes used `requireRole("owner","manager","accountant")` as a proxy for two different capabilities. Mapping them to `ledger.post` either removes work every manager does, or widens `ledger.post` past its name. #832 §4 also moved expense *import* off `ledger.post` onto this key, so one business act has one capability on every door. |
 | `finance.receivables_manage` | 1 | ″ |
 | `finance.payables_manage` | 1 | ″ |
 | `finance.cheques_manage` | 2 | ″ |
