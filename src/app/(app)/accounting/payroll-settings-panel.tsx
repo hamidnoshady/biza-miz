@@ -48,10 +48,13 @@ function percentText(value: number | null): string {
 export function PayrollSettingsPanel({
   settings,
   onSave,
+  readOnly = false,
 }: {
   settings: PayrollSettings;
   /** Persists the document; resolves to a Persian error, or null once saved. */
   onSave: (settings: PayrollSettings) => Promise<string | null>;
+  /** A member who may see the rates (`payroll.view`) but not change them (`payroll.manage`) gets no form. */
+  readOnly?: boolean;
 }) {
   const money = useMoney();
   const headingId = useId();
@@ -179,10 +182,12 @@ export function PayrollSettingsPanel({
               : "هنوز نرخی وارد نشده است؛ تا وقتی خالی است، هیچ کسری اعمال نمی‌شود و خالص پرداختی برابر ناخالص است."}
           </p>
         </div>
-        <SecondaryButton onClick={() => setOpen((v) => !v)}>{open ? "بستن" : "ویرایش نرخ‌ها"}</SecondaryButton>
+        {readOnly ? null : (
+          <SecondaryButton onClick={() => setOpen((v) => !v)}>{open ? "بستن" : "ویرایش نرخ‌ها"}</SecondaryButton>
+        )}
       </header>
 
-      {open ? (
+      {open && !readOnly ? (
         <form onSubmit={save} className="space-y-5 p-4 sm:p-5">
           <p className="text-xs leading-5 text-muted-foreground">
             هیچ نرخی از پیش فرض نشده است؛ نرخ‌های قانونی جاری را خودتان وارد کنید. هر فیلد خالی یعنی «اعمال نمی‌شود».
