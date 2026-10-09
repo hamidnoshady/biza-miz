@@ -931,6 +931,35 @@ Since Phase 35 the app can reach a person who is not looking at a screen, over *
   in `platform_push_config` is written once (`ON CONFLICT DO NOTHING` plus a re-read), and that
   table is in `EXEMPT_TABLES`.
 
+## Taxpayer invoicing (سامانه مودیان) — read before touching a tax invoice
+
+Issue #866 lives inside Accounting at `/accounting/tax-invoices`. Read
+`docs/tax-invoicing.md` first. The rules that are easy to break:
+
+- A tax record is append-only, and the database enforces it (migration
+  `0216_tax_invoicing.sql`): identity and payload columns cannot change, the
+  receipt is written once, status moves must be legal, and the event history
+  cannot be edited. Corrections are new linked records (an amendment or a
+  cancellation), and a rejected sale is corrected by a new revision. Never UPDATE
+  a payload to "fix" it.
+- The uid is generated once, before the first send, and every retry reuses it. The
+  authority deduplicates on it. Never resend a record that is `sending` or
+  `awaiting_inquiry` without inquiring it first.
+- A cancellation rebuilds from the stored snapshot, so the withdrawal matches what
+  was sent. An amendment builds from the sale as it now stands. Do not mix the two.
+- Taxpayer status never writes ledger rows. Reconciliation reads `orders` and the
+  records, and writes nothing.
+- The production adapter fails closed with `live_provider_unavailable`. Do not add a
+  live submission path until the authority's protocol is verified. The simulator is
+  for tests and the sandbox environment only.
+- Credentials are write-only and sealed with `encryptSecret`. Never log them, return
+  them, or put them in an audit payload.
+- A new table that references `tax_invoice_submissions`, or that blocks deletion of
+  a business, must be covered by `purgeTaxInvoiceRecords` in `platform-service.ts`.
+  Reset and hard delete both depend on it.
+- Client code may import only types from `tax-invoice-core.ts`, which imports
+  `node:crypto`.
+
 ## Repository layout
 
 - `src/app/api/**/route.ts` — route handlers. Every handler starts with a guard

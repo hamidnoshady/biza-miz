@@ -1180,6 +1180,28 @@ async function assertNoOperationalChildrenRemain(
  *    to make both reset and hard delete fail with a raw FK error once a
  *    tenant had any of them).
  */
+/**
+ * Issue #866 — the taxpayer records a reset or hard delete must remove. They
+ * are immutable by design (a submission is never deleted in normal operation),
+ * and they RESTRICT-reference the orders and branches they report, so they go
+ * first. The purge is transaction-local, the same as the factory-reset flag, and
+ * is the only path migration 0216 allows a deletion through. A correction points
+ * at the record it corrects, so records are removed leaves first.
+ */
+async function purgeTaxInvoiceRecords(client: PoolClient, businessId: string): Promise<void> {
+  await client.query("SELECT set_config('app.tax_submission_purge', 'on', true)");
+  await client.query("DELETE FROM tax_invoice_events WHERE business_id = $1", [businessId]);
+  for (;;) {
+    const removed = await client.query(
+      `DELETE FROM tax_invoice_submissions AS s
+        WHERE s.business_id = $1
+          AND NOT EXISTS (SELECT 1 FROM tax_invoice_submissions AS c WHERE c.parent_submission_id = s.id)`,
+      [businessId],
+    );
+    if (!removed.rowCount) break;
+  }
+}
+
 async function clearBusinessDeleteBlockers(client: PoolClient, businessId: string): Promise<void> {
   // The migration-only escape hatch is transaction-local. It lets the
   // explicitly confirmed factory reset pass accounting immutability guards,
@@ -1190,6 +1212,7 @@ async function clearBusinessDeleteBlockers(client: PoolClient, businessId: strin
   // branch set before collecting/deleting data so a concurrent tenant request
   // cannot add a row halfway through this reset.
   await client.query("SELECT id FROM locations WHERE business_id = $1 FOR UPDATE", [businessId]);
+  await purgeTaxInvoiceRecords(client, businessId);
 
   const statements = [
     // Dependent rows first: their foreign keys are deliberately restrictive

@@ -39,6 +39,10 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
   "chart-of-accounts": { description: "ساختار حساب‌ها: گروه، کل و معین." },
   payroll: { description: "دوره‌های حقوق، تعهد حقوق کارکنان و پرداخت آن." },
   vat: { description: "مالیات بر ارزش افزودهٔ فروش و خرید در هر دوره." },
+  "tax-invoices": {
+    title: "صورتحساب مؤدیان",
+    description: "ارسال صورتحساب‌های الکترونیکی به سامانه مودیان، پیگیری پذیرش آن‌ها و تطبیق با فروش.",
+  },
   "fixed-assets": {
     description:
       "دفتر اموال، استهلاک ماهانه، واگذاری و اسقاط دارایی‌ها، و تطبیق آن با دفتر کل.",

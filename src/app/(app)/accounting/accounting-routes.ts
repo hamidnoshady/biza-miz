@@ -48,6 +48,7 @@ export const ACCOUNTING_SECTION_KEYS = [
   "chart-of-accounts",
   "payroll",
   "vat",
+  "tax-invoices",
   "fixed-assets",
   // The accounting-only report index. The business reporting workspace owns
   // `/accounting/reports`; keeping the financial index explicit avoids two
