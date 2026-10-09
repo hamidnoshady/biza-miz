@@ -37,6 +37,10 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
   cheques: { description: "چک‌های دریافتی و پرداختی و وضعیت هر کدام." },
   reconciliation: { description: "تطبیق گردش بانک با دفاتر و پیدا کردن اقلام باز." },
   "chart-of-accounts": { description: "ساختار حساب‌ها: گروه، کل و معین." },
+  dimensions: {
+    description:
+      "مرکز هزینه، مرکز سود، واحد سازمانی و بعد تحلیلی: تعریف مقدارها و گزارش هزینه و سود به تفکیک هر بُعد.",
+  },
   payroll: { description: "دوره‌های حقوق، تعهد حقوق کارکنان و پرداخت آن." },
   vat: { description: "مالیات بر ارزش افزودهٔ فروش و خرید در هر دوره." },
   "fixed-assets": {

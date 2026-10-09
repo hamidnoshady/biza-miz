@@ -19,6 +19,16 @@ import {
   journalEntryTotalText,
   type JournalFilters,
 } from "./journal-filters";
+import { DIMENSION_KINDS, type DimensionKind } from "./accounting-dimensions";
+
+/** One attribution a line carries (issue #868), labelled so the journal can show it. */
+export interface JournalLineDimension {
+  kind: DimensionKind;
+  valueId: string;
+  code: string;
+  name: string;
+  isActive: boolean;
+}
 
 export interface JournalLineRecord {
   entryId: string;
@@ -28,6 +38,8 @@ export interface JournalLineRecord {
   /** Exact Rial, as a decimal string — `journal_lines.debit` is BIGINT. */
   debit: string;
   credit: string;
+  /** Empty for a line that carries no attribution — most lines. */
+  dimensions: JournalLineDimension[];
 }
 
 /**
@@ -104,6 +116,40 @@ interface LineRow extends Record<string, unknown> {
   account_name: string;
   debit: string;
   credit: string;
+  cc_id: string | null;
+  cc_code: string | null;
+  cc_name: string | null;
+  cc_active: boolean | null;
+  pc_id: string | null;
+  pc_code: string | null;
+  pc_name: string | null;
+  pc_active: boolean | null;
+  dp_id: string | null;
+  dp_code: string | null;
+  dp_name: string | null;
+  dp_active: boolean | null;
+  dt_id: string | null;
+  dt_code: string | null;
+  dt_name: string | null;
+  dt_active: boolean | null;
+}
+
+/** A line's labelled attributions, in the fixed kind order the screen shows them in. */
+function lineDimensionsOf(line: LineRow): JournalLineDimension[] {
+  const byKind: Record<DimensionKind, { id: string | null; code: string | null; name: string | null; active: boolean | null }> = {
+    cost_center: { id: line.cc_id, code: line.cc_code, name: line.cc_name, active: line.cc_active },
+    profit_center: { id: line.pc_id, code: line.pc_code, name: line.pc_name, active: line.pc_active },
+    department: { id: line.dp_id, code: line.dp_code, name: line.dp_name, active: line.dp_active },
+    detail: { id: line.dt_id, code: line.dt_code, name: line.dt_name, active: line.dt_active },
+  };
+  const out: JournalLineDimension[] = [];
+  for (const kind of DIMENSION_KINDS) {
+    const entry = byKind[kind];
+    if (entry.id) {
+      out.push({ kind, valueId: entry.id, code: entry.code ?? "", name: entry.name ?? "", isActive: entry.active ?? false });
+    }
+  }
+  return out;
 }
 
 /**
@@ -128,6 +174,11 @@ function journalScope(businessId: string, filters: JournalFilters): { sql: strin
     filters.amountMin,
     filters.amountMax,
     filters.entryId,
+    // Issue #868: one value per kind, matched on a single line (see JournalFilters.dimensions).
+    filters.dimensions?.cost_center ?? null,
+    filters.dimensions?.profit_center ?? null,
+    filters.dimensions?.department ?? null,
+    filters.dimensions?.detail ?? null,
   ];
   const sql = `FROM journal_entries je
          LEFT JOIN users u ON u.id = je.created_by
@@ -173,7 +224,18 @@ function journalScope(businessId: string, filters: JournalFilters): { sql: strin
           )
           AND ($12::bigint IS NULL OR totals.total_debit >= $12::bigint)
           AND ($13::bigint IS NULL OR totals.total_debit <= $13::bigint)
-          AND ($14::uuid IS NULL OR je.id = $14::uuid)`;
+          AND ($14::uuid IS NULL OR je.id = $14::uuid)
+          AND (
+            ($15::uuid IS NULL AND $16::uuid IS NULL AND $17::uuid IS NULL AND $18::uuid IS NULL)
+            OR EXISTS (
+              SELECT 1 FROM journal_lines jl
+               WHERE jl.entry_id = je.id
+                 AND ($15::uuid IS NULL OR jl.cost_center_id = $15::uuid)
+                 AND ($16::uuid IS NULL OR jl.profit_center_id = $16::uuid)
+                 AND ($17::uuid IS NULL OR jl.department_id = $17::uuid)
+                 AND ($18::uuid IS NULL OR jl.detail_dimension_id = $18::uuid)
+            )
+          )`;
   return { sql, args };
 }
 
@@ -202,8 +264,17 @@ async function attachLines(entries: EntryRow[]): Promise<JournalEntryRecord[]> {
   if (entries.length === 0) return [];
   const { rows: lines } = await query<LineRow>(
     `SELECT jl.entry_id, jl.account_id, a.code AS account_code, a.name AS account_name,
-            jl.debit::text AS debit, jl.credit::text AS credit
-       FROM journal_lines jl JOIN accounts a ON a.id = jl.account_id
+            jl.debit::text AS debit, jl.credit::text AS credit,
+            cc.id AS cc_id, cc.code AS cc_code, cc.name AS cc_name, cc.is_active AS cc_active,
+            pc.id AS pc_id, pc.code AS pc_code, pc.name AS pc_name, pc.is_active AS pc_active,
+            dp.id AS dp_id, dp.code AS dp_code, dp.name AS dp_name, dp.is_active AS dp_active,
+            dt.id AS dt_id, dt.code AS dt_code, dt.name AS dt_name, dt.is_active AS dt_active
+       FROM journal_lines jl
+       JOIN accounts a ON a.id = jl.account_id
+       LEFT JOIN accounting_dimension_values cc ON cc.id = jl.cost_center_id
+       LEFT JOIN accounting_dimension_values pc ON pc.id = jl.profit_center_id
+       LEFT JOIN accounting_dimension_values dp ON dp.id = jl.department_id
+       LEFT JOIN accounting_dimension_values dt ON dt.id = jl.detail_dimension_id
       WHERE jl.entry_id = ANY($1::uuid[]) ORDER BY jl.entry_id, jl.id`,
     [entries.map((e) => e.id)],
   );
@@ -217,6 +288,7 @@ async function attachLines(entries: EntryRow[]): Promise<JournalEntryRecord[]> {
       accountName: line.account_name,
       debit: line.debit,
       credit: line.credit,
+      dimensions: lineDimensionsOf(line),
     });
     byEntry.set(line.entry_id, list);
   }

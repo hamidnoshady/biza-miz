@@ -9,6 +9,8 @@ import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { DimensionFields, useDimensionCatalog } from "./dimension-fields";
+import { dimensionPayload, enabledDimensionKinds, type DimensionDraft } from "./dimension-catalog";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,9 +38,11 @@ interface DraftLineInput {
   accountId: string;
   side: "debit" | "credit";
   amount: string;
+  /** Issue #868 — the line's cost centre / profit centre / department / detail, one per kind. */
+  dimensions: DimensionDraft;
 }
 
-const EMPTY_LINE: DraftLineInput = { accountId: "", side: "debit", amount: "" };
+const EMPTY_LINE: DraftLineInput = { accountId: "", side: "debit", amount: "", dimensions: {} };
 
 /** A blank document: one debit row and one credit row, the shape of every entry. */
 function blankLines(): DraftLineInput[] {
@@ -209,6 +213,10 @@ export function ManualEntrySection({
    */
   const nextKey = useRef(0);
   const makeKey = () => `line-${nextKey.current++}`;
+  // Issue #868: the enabled dimension kinds and their values. Read once; a
+  // business that never enabled one gets an empty catalogue and no extra fields.
+  const dimensionCatalog = useDimensionCatalog();
+  const dimensionKinds = enabledDimensionKinds(dimensionCatalog.settings);
   const [lines, setLines] = useState<{ key: string; value: DraftLineInput }[]>(() =>
     blankLines().map((value) => ({ key: makeKey(), value })),
   );
@@ -343,10 +351,13 @@ export function ManualEntrySection({
   /** The payload exactly as `submit` will send it, so the check below judges the real thing. */
   const journalLines = payloadLines.map((l) => {
     const rial = amountOf(l) ?? 0;
+    const dimensions = dimensionPayload(l.dimensions);
     return {
       accountId: l.accountId,
       debit: l.side === "debit" ? rial : 0,
       credit: l.side === "credit" ? rial : 0,
+      // Sent only when the line names a value, so an unattributed line is the same document it always was.
+      ...(dimensions ? { dimensions } : {}),
     };
   });
 
@@ -646,6 +657,19 @@ export function ManualEntrySection({
                         <Trash2Icon aria-hidden="true" />
                       </Button>
                     </div>
+                    {dimensionKinds.length > 0 ? (
+                      <div className="mt-3">
+                        <DimensionFields
+                          idPrefix={`line-dimensions-${key}`}
+                          catalog={dimensionCatalog}
+                          locationId={activeLocation?.id ?? null}
+                          value={line.dimensions}
+                          onChange={(next) => updateLine(key, { dimensions: next })}
+                          rowLabel={rowNumber}
+                          kinds={dimensionKinds}
+                        />
+                      </div>
+                    ) : null}
                   </li>
                 );
               })}

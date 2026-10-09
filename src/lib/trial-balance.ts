@@ -18,11 +18,17 @@
  * be exactly zero or exactly not.
  */
 import type { AccountLevel, AccountType, NormalBalance } from "./coa-template";
+import type { DimensionFilter } from "./accounting-dimensions";
 
 export type { AccountLevel, AccountType, NormalBalance };
 
 /** What the report is asked for. Exactly one of the two shapes is valid. */
 export interface TrialBalanceFilters {
+  /**
+   * Issue #868: restrict every figure to the lines carrying this dimension value
+   * (or to the lines carrying none). Absent means the whole ledger.
+   */
+  dimension?: DimensionFilter | null;
   /** Detailed view: everything posted before this date is the opening balance. */
   dateFrom?: string;
   /** Inclusive closing date, for both the detailed and the compact view. */
@@ -75,6 +81,8 @@ export interface TrialBalanceTotals {
 }
 
 export interface TrialBalanceReport {
+  /** The dimension filter the figures were computed under, or null for the whole ledger. */
+  dimension?: DimensionFilter | null;
   businessName: string;
   mode: "detailed" | "closing";
   /** Null in the compact as-of view, which has no period start. */

@@ -20,6 +20,8 @@
  * testable directly (`manual-journal.test.ts`), unlike the DB-touching service.
  */
 
+import { parseLineDimensions, type LineDimensions } from "./accounting-dimensions";
+
 /** Caps on one manual document — see `manualDocumentProblem` for why each exists. */
 export const MANUAL_MEMO_MAX = 500;
 export const MANUAL_LINES_MAX = 200;
@@ -42,7 +44,8 @@ export type ManualPayloadProblem =
   | "invalid_account_id"
   | "invalid_amount"
   | "invalid_entry_date"
-  | "invalid_idempotency_key";
+  | "invalid_idempotency_key"
+  | "invalid_dimension";
 
 /** A draft-create request body, parsed and known to be well-formed. */
 export interface ManualDraftPayload {
@@ -63,6 +66,8 @@ export interface ManualJournalLine {
   accountId: string;
   debit: number;
   credit: number;
+  /** Optional accounting dimensions (issue #868). Checked by the posting guard, not by the balance rules here. */
+  dimensions?: LineDimensions | null;
 }
 
 /**
@@ -201,7 +206,15 @@ export function parseManualDraftPayload(body: unknown): ManualPayloadResult {
     const debit = line.debit === undefined ? 0 : line.debit;
     const credit = line.credit === undefined ? 0 : line.credit;
     if (!isRialAmount(debit) || !isRialAmount(credit)) return { ok: false, problem: "invalid_amount" };
-    lines.push({ accountId: line.accountId, debit, credit });
+    // A line's dimensions are optional, and strict when present: an unknown kind
+    // or a value that is not an id is refused, never dropped (issue #868).
+    const dimensions = parseLineDimensions(line.dimensions);
+    if (!dimensions.ok) return { ok: false, problem: "invalid_dimension" };
+    // Present only when there is something to carry: a line without attribution
+    // keeps exactly the shape it always had.
+    const row: ManualJournalLine = { accountId: line.accountId, debit, credit };
+    if (Object.keys(dimensions.value).length > 0) row.dimensions = dimensions.value;
+    lines.push(row);
   }
 
   // Only the *type* is judged here. Whether the string is a real calendar day

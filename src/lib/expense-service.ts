@@ -49,6 +49,12 @@ import {
 import { expenseCategoryAccounts, expensePaymentSourceIds } from "./expense-accounts";
 import { EXPENSE_ERROR_MESSAGES, expenseErrorStatus } from "./expense-errors";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry, type PostJournalEntryInput } from "./ledger-service";
+import { parseLineDimensions, type LineDimensions } from "./accounting-dimensions";
+import {
+  AccountingDimensionError,
+  dimensionColumnValues,
+  dimensionsFromColumns,
+} from "./accounting-dimensions-service";
 import { getMediaAsset } from "./media-service";
 import { isUuid } from "./uuid";
 import {
@@ -179,6 +185,8 @@ async function nextReference(client: PoolClient, businessId: string, businessDat
 
 export interface Expense {
   id: string;
+  /** Issue #868 — the attribution the expense's debit line carries. Empty when none was recorded. */
+  dimensions: LineDimensions;
   /** `EXP-<Jalali year>-<n>`; null only on rows recorded before migration 0211. */
   reference: string | null;
   expenseDate: string;
@@ -237,6 +245,10 @@ export interface Expense {
 
 interface ExpenseRow extends Record<string, unknown> {
   id: string;
+  cost_center_id: string | null;
+  profit_center_id: string | null;
+  department_id: string | null;
+  detail_dimension_id: string | null;
   reference: string | null;
   expense_date: string;
   account_id: string;
@@ -281,6 +293,7 @@ function toExpense(r: ExpenseRow): Expense {
   const vatAmount = Number(r.vat_amount ?? 0);
   return {
     id: r.id,
+    dimensions: dimensionsFromColumns(r),
     reference: r.reference,
     expenseDate: r.expense_date,
     accountId: r.account_id,
@@ -326,6 +339,7 @@ const SELECT_EXPENSE = `
          e.payment_account_id, p.code AS payment_account_code, p.name AS payment_account_name,
          e.location_id, l.name AS location_name,
          e.party_id, pt.name AS party_name,
+         e.cost_center_id, e.profit_center_id, e.department_id, e.detail_dimension_id,
          u.full_name AS created_by_name,
          rb.full_name AS reversed_by_name,
          rev.id AS reversal_expense_id, rev.reference AS reversal_reference,
@@ -520,6 +534,13 @@ export interface RecordExpenseParams {
   receiptAssetId?: string | null;
   /** The input-VAT part of `amount`, in Rial (issue #832 §11). Absent means none. */
   vatAmount?: number | string | null;
+  /**
+   * Issue #868 — the cost centre, profit centre, department or detail the expense
+   * belongs to. It is carried by the expense's debit line (the cost itself) and
+   * by nothing else: the VAT leg is recoverable and the payment leg is a balance
+   * sheet fact, so neither takes attribution.
+   */
+  dimensions?: LineDimensions | null;
 }
 
 /**
@@ -663,6 +684,13 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
 
   const expenseNet = params.amount - vatAmount;
 
+  // The service is one of four callers, so the attribution is parsed here as
+  // strictly as the route parses it (issue #868): a malformed value is refused,
+  // never written as a different one.
+  const dimensionParse = parseLineDimensions(params.dimensions);
+  if (!dimensionParse.ok) throw new AccountingDimensionError("invalid_dimension");
+  const expenseDimensions = dimensionParse.value;
+
   let expenseId = "";
   let reference = "";
   const client = await getPool().connect();
@@ -689,8 +717,9 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO expenses (business_id, location_id, account_id, payment_account_id, amount, vat_amount,
                              expense_date, vendor, party_id, memo, created_by, receipt_asset_id,
-                             receipt_file_name, reference, settlement, supplier_id, due_date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING id`,
+                             receipt_file_name, reference, settlement, supplier_id, due_date,
+                             cost_center_id, profit_center_id, department_id, detail_dimension_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) RETURNING id`,
       [
         businessId,
         locationId,
@@ -709,12 +738,16 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
         settlement.settlement,
         settlement.supplierId,
         settlement.dueDate,
+        dimensionColumnValues(expenseDimensions).cost_center_id,
+        dimensionColumnValues(expenseDimensions).profit_center_id,
+        dimensionColumnValues(expenseDimensions).department_id,
+        dimensionColumnValues(expenseDimensions).detail_dimension_id,
       ],
     );
     expenseId = rows[0].id;
 
     const lines: PostJournalEntryInput["lines"] = [
-      { accountId: params.accountId, debit: expenseNet, credit: 0 },
+      { accountId: params.accountId, debit: expenseNet, credit: 0, dimensions: expenseDimensions },
       { accountId: creditAccountId, debit: 0, credit: params.amount },
     ];
     if (vatAmount > 0 && vatAccountId) {
@@ -805,14 +838,16 @@ export async function reverseExpense(params: {
       paymentAccountId: original.payment_account_id,
       amount: Number(original.amount),
       vatAmount: Number(original.vat_amount ?? 0),
+      dimensions: dimensionsFromColumns(original),
     });
 
     const reference = await nextReference(client, params.businessId, reversalDate);
     const { rows: inserted } = await client.query<{ id: string }>(
       `INSERT INTO expenses (business_id, location_id, account_id, payment_account_id, amount, vat_amount,
                              expense_date, vendor, party_id, memo, created_by, reference, reverses_expense_id,
-                             settlement, supplier_id, due_date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id`,
+                             settlement, supplier_id, due_date,
+                             cost_center_id, profit_center_id, department_id, detail_dimension_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING id`,
       [
         params.businessId,
         original.location_id,
@@ -834,6 +869,10 @@ export async function reverseExpense(params: {
         original.settlement,
         original.supplier_id,
         original.due_date,
+        original.cost_center_id,
+        original.profit_center_id,
+        original.department_id,
+        original.detail_dimension_id,
       ],
     );
     reversalId = inserted[0].id;
@@ -847,6 +886,8 @@ export async function reverseExpense(params: {
       sourceId: reversalId,
       createdBy: params.actorId,
       lines: mirrored,
+      // Mirrors what the original recorded; see `PostJournalEntryInput.dimensionMirror` (issue #868).
+      dimensionMirror: true,
     });
 
     const { rows: marked } = await client.query<{ id: string }>(
@@ -884,11 +925,20 @@ export async function reverseExpense(params: {
 async function mirroredLines(
   client: PoolClient,
   entryId: string | null,
-  fallback: { accountId: string; paymentAccountId: string; amount: number; vatAmount: number },
+  fallback: { accountId: string; paymentAccountId: string; amount: number; vatAmount: number; dimensions: LineDimensions },
 ): Promise<PostJournalEntryInput["lines"]> {
   if (entryId) {
-    const { rows } = await client.query<{ account_id: string; debit: string; credit: string }>(
-      `SELECT account_id, debit::text AS debit, credit::text AS credit
+    const { rows } = await client.query<{
+      account_id: string;
+      debit: string;
+      credit: string;
+      cost_center_id: string | null;
+      profit_center_id: string | null;
+      department_id: string | null;
+      detail_dimension_id: string | null;
+    }>(
+      `SELECT account_id, debit::text AS debit, credit::text AS credit,
+              cost_center_id, profit_center_id, department_id, detail_dimension_id
          FROM journal_lines WHERE entry_id = $1 ORDER BY id`,
       [entryId],
     );
@@ -900,12 +950,13 @@ async function mirroredLines(
         // come back as strings only to keep the read exact.
         debit: Number(line.credit),
         credit: Number(line.debit),
+        dimensions: dimensionsFromColumns(line),
       }));
     }
   }
   const lines: PostJournalEntryInput["lines"] = [
     { accountId: fallback.paymentAccountId, debit: fallback.amount, credit: 0 },
-    { accountId: fallback.accountId, debit: 0, credit: fallback.amount - fallback.vatAmount },
+    { accountId: fallback.accountId, debit: 0, credit: fallback.amount - fallback.vatAmount, dimensions: fallback.dimensions },
   ];
   if (fallback.vatAmount > 0) {
     lines.splice(1, 0, { accountId: fallback.accountId, debit: 0, credit: fallback.vatAmount });

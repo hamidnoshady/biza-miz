@@ -10,6 +10,7 @@
  */
 
 import {
+  LayersIcon,
   BarChart3Icon,
   CalendarDaysIcon,
   CalculatorIcon,
@@ -39,6 +40,7 @@ export const ACCOUNTING_SECTION_ICONS: Record<AccountingSectionKey, LucideIcon> 
   cheques: ScrollTextIcon,
   reconciliation: CircleIcon,
   "chart-of-accounts": CalculatorIcon,
+  dimensions: LayersIcon,
   payroll: UsersIcon,
   vat: CircleIcon,
   "fixed-assets": CircleIcon,

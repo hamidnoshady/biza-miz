@@ -168,6 +168,7 @@ export const LEDGER_WORKSPACE_SECTION_KEYS: readonly AccountingSectionKey[] = [
   "entries",
   "manual",
   "chart-of-accounts",
+  "dimensions",
   "receivables",
   "payables",
   "receipts",
@@ -201,7 +202,11 @@ export const LEDGER_WORKSPACE_SUBGROUPS: readonly {
   label: string;
   keys: readonly AccountingSectionKey[];
 }[] = [
-  { key: "ledger-books", label: "دفتر و اسناد", keys: ["trial-balance", "entries", "manual", "chart-of-accounts"] },
+  {
+    key: "ledger-books",
+    label: "دفتر و اسناد",
+    keys: ["trial-balance", "entries", "manual", "chart-of-accounts", "dimensions"],
+  },
   {
     key: "ledger-receivables",
     label: "دریافتنی و پرداختنی",

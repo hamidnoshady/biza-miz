@@ -39,6 +39,7 @@ function entry(overrides: Partial<JournalEntryRecord> = {}): JournalEntryRecord 
         accountName: "هزینهٔ اجاره",
         debit: "9007199254740993",
         credit: "0",
+        dimensions: [],
       },
       {
         entryId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -47,6 +48,7 @@ function entry(overrides: Partial<JournalEntryRecord> = {}): JournalEntryRecord 
         accountName: "صندوق",
         debit: "0",
         credit: "9007199254740993",
+        dimensions: [],
       },
     ],
     ...overrides,
