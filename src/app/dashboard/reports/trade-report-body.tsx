@@ -21,6 +21,14 @@ import {
   type WarrantyReport,
   type WeightReconciliationReport,
 } from "./trade-report-views";
+import {
+  VehicleInventoryView,
+  VehicleReservationsView,
+  VehicleSalesView,
+  type VehicleInventoryReportPayload,
+  type VehicleReservationsReportPayload,
+  type VehicleSalesReportPayload,
+} from "./automotive-report-views";
 import { EmptyState } from "../page-chrome";
 import type { ReportShape } from "./standard-report-config";
 type ReportPayload = Record<string, unknown>;
@@ -47,6 +55,13 @@ export function TradeReportBody({ shape, payload }: { shape: ReportShape; payloa
       return <LowStockView report={payload as unknown as LowStockReport} />;
     case "dead_stock":
       return <DeadStockView report={payload as unknown as DeadStockReport} />;
+    // Issue #839 §14 — the dealership's own payloads.
+    case "vehicle_inventory":
+      return <VehicleInventoryView report={payload as unknown as VehicleInventoryReportPayload} />;
+    case "vehicle_sales":
+      return <VehicleSalesView report={payload as unknown as VehicleSalesReportPayload} />;
+    case "vehicle_reservations":
+      return <VehicleReservationsView report={payload as unknown as VehicleReservationsReportPayload} />;
     default:
       return <EmptyState>نمایش این گزارش پشتیبانی نمی‌شود.</EmptyState>;
   }

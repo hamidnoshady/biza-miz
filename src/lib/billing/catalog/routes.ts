@@ -81,6 +81,10 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   merchandising: keys("retail.trades"),
   jewelry: keys("retail.trades"),
   watch: keys("retail.trades"),
+  // Issue #839 — a dealership's counter and board are the same retail
+  // capability the other trades bill under: the routes exist for an automotive
+  // tenant, and nothing in them is a separately-charged platform feature.
+  automotive: keys("retail.trades"),
   accessories: keys("retail.trades"),
   cosmetics: keys("retail.trades"),
   integrations: keys("integrations.api"),

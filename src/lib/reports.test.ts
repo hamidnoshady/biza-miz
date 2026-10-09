@@ -369,13 +369,15 @@ describe("buildReportQuery", () => {
 });
 
 describe("STANDARD_REPORTS", () => {
-  it("has 32 pre-built reports with unique keys", () => {
+  it("has 35 pre-built reports with unique keys", () => {
     // 18 through Phase 35, plus Phase 36's four CRM reports (acquisition,
     // retention, lifetime value, consent coverage), plus Phase 43's ten
     // retail-trade reports, which moved into the library from the per-trade
-    // manager tabs they used to be the only door to.
-    expect(STANDARD_REPORTS).toHaveLength(32);
-    expect(new Set(STANDARD_REPORTS.map((r) => r.key)).size).toBe(32);
+    // manager tabs they used to be the only door to, plus issue #839's three
+    // automotive reports (stock and valuation, sales and profitability, and
+    // the holds with their deposits).
+    expect(STANDARD_REPORTS).toHaveLength(35);
+    expect(new Set(STANDARD_REPORTS.map((r) => r.key)).size).toBe(35);
   });
 
   it("every report declares a group the UI can shelve it under", () => {

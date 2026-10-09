@@ -67,6 +67,44 @@ export const PERMISSIONS = {
   purchasesManage: "purchases.manage",
 
   /**
+   * Automotive — «خودرو و نمایشگاه اتومبیل» (issue #839).
+   *
+   * Split by *blast radius*, like the CRM and Growth blocks, because the trade
+   * has three genuinely different jobs on one lot: a salesperson shows and
+   * prices cars, a cashier takes money for one, and only the office may touch
+   * what the dealership paid. The two boundaries the issue names explicitly are
+   * both here and both are *reads* of money rather than screens:
+   *
+   *   * `vehicles.cost_view` is the cost/margin read. A cashier or salesperson
+   *     without it sees the asking price and the car, never the basis — which is
+   *     why it is its own key rather than a side effect of `vehicles.view`;
+   *     `vehicles.view` deliberately grants no cost, price-history or margin.
+   *   * `vehicles.override_min_price` is the one act that can complete a sale
+   *     below the floor the owner set. It is separate from `vehicles.sell` so
+   *     "sell cars" and "sell cars at a loss the owner did not authorise" are
+   *     two decisions, and it is audited.
+   *
+   * `vehicles.cost_edit` and `vehicles.expense_record` are the two ways the
+   * effective cost changes — the number COGS freezes at sale — so both are
+   * high-risk and audited. Pricing is deliberately *not* a cost permission
+   * (issue §6): `vehicles.price_edit` writes the asking/minimum/wholesale
+   * figures and can never reach the acquisition cost.
+   */
+  vehiclesView: "vehicles.view",
+  vehiclesCreate: "vehicles.create",
+  vehiclesEdit: "vehicles.edit",
+  vehiclesCostView: "vehicles.cost_view",
+  vehiclesCostEdit: "vehicles.cost_edit",
+  vehiclesPriceEdit: "vehicles.price_edit",
+  vehiclesReserve: "vehicles.reserve",
+  vehiclesReservationCancel: "vehicles.reservation_cancel",
+  vehiclesSell: "vehicles.sell",
+  vehiclesOverrideMinPrice: "vehicles.override_min_price",
+  vehiclesTransfer: "vehicles.transfer",
+  vehiclesExpenseRecord: "vehicles.expense_record",
+  vehiclesArchive: "vehicles.archive",
+
+  /**
    * Parties — «اشخاص»: the one record behind a customer, a supplier and a
    * member of staff (migration 0137 renamed `customers` to `parties`, and this
    * permission is why the ledger can hand a supplier file to the same screen as a
@@ -348,6 +386,11 @@ const HIGH_RISK = new Set<Permission>([
   PERMISSIONS.storeCreditPayout,
   PERMISSIONS.giftCardsIssue,
   PERMISSIONS.commissionManage,
+  // Issue #839: changing what a car cost (the figure COGS freezes at), selling
+  // below the owner's floor, and hiding a vehicle from the lot.
+  PERMISSIONS.vehiclesCostEdit,
+  PERMISSIONS.vehiclesOverrideMinPrice,
+  PERMISSIONS.vehiclesArchive,
 ]);
 const REASON_REQUIRED = new Set<Permission>([
   PERMISSIONS.ordersAmendClosed,
@@ -410,6 +453,9 @@ const {
   tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
   menuView, menuEdit,
   inventoryView, inventoryAdjust, purchasesManage,
+  vehiclesView, vehiclesCreate, vehiclesEdit, vehiclesCostView, vehiclesCostEdit,
+  vehiclesPriceEdit, vehiclesReserve, vehiclesReservationCancel, vehiclesSell,
+  vehiclesOverrideMinPrice, vehiclesTransfer, vehiclesExpenseRecord, vehiclesArchive,
   partiesView, partiesManage,
   crmView, crmManage, crmMerge, crmConsentManage, crmExport, crmConfigure, crmDelete,
   workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove, workspaceDocumentsIssue,
@@ -447,6 +493,13 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     tablesManage, tablesEdit, reservationsView, reservationsManage, kitchenView, deliveryManage, deliveryConfigure,
     menuView, menuEdit,
     inventoryView, inventoryAdjust, purchasesManage,
+    // Issue #839 — the manager runs the lot: every vehicle capability,
+    // including the cost and margin reads and the audited override. A
+    // dealership that wants a narrower sales manager revokes the individual
+    // keys per member, which is what overrides are for.
+    vehiclesView, vehiclesCreate, vehiclesEdit, vehiclesCostView, vehiclesCostEdit,
+    vehiclesPriceEdit, vehiclesReserve, vehiclesReservationCancel, vehiclesSell,
+    vehiclesOverrideMinPrice, vehiclesTransfer, vehiclesExpenseRecord, vehiclesArchive,
     partiesView, partiesManage,
     // The manager reached every CRM screen before these permissions existed
     // (the routes gated on requireRole("owner","manager")), so the preset
@@ -495,6 +548,12 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     aiUse, aiUsageView,
     menuView,
     inventoryView,
+    // Issue #839 — the books read vehicle stock at cost. `vehicles.cost_view`
+    // is the vehicle valuation and COGS side; `vehicles.view` is what the car
+    // is. No selling, no reserving, no expense recording: a cost the office
+    // did not agree to is not the accountant's to enter, and margin is not a
+    // floor capability.
+    vehiclesView, vehiclesCostView,
     partiesView, partiesManage,
     ledgerView, ledgerPost, ledgerApprove, ledgerClosePeriod, accountsEdit, ledgerPropose,
     financeExpensesManage, financeReceivablesManage, financePayablesManage, financeChequesManage,
@@ -524,6 +583,11 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     tablesManage, reservationsView, reservationsManage,
     menuView, deliveryManage,
     inventoryView,
+    // Issue #839 — a cashier may take payment for a car the lot has already
+    // priced, and nothing else: no cost or margin read, no price edit, no
+    // reservation authority, no sale below the floor. `vehicles.sell` is the
+    // till act; `phone the office` is what a deal below the floor takes.
+    vehiclesView, vehiclesSell,
     partiesView, partiesManage,
     // Matches what the CRM nav already showed a cashier (directory, persons,
     // activities, cases) — logging that a customer called is floor work. No
@@ -601,6 +665,22 @@ const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permission[]>
   [PERMISSIONS.crmDelete]: [PERMISSIONS.crmView],
   [PERMISSIONS.inventoryAdjust]: [PERMISSIONS.inventoryView],
   [PERMISSIONS.purchasesManage]: [PERMISSIONS.inventoryView],
+  // Issue #839. Every vehicle act needs the vehicle list; the two money writes
+  // additionally need to be able to *see* cost, so a role cannot record or
+  // change a figure its holder is not allowed to read. `vehicles.cost_view`
+  // implies only `vehicles.view`: reading the margin is not writing it.
+  [PERMISSIONS.vehiclesCreate]: [PERMISSIONS.vehiclesView],
+  [PERMISSIONS.vehiclesEdit]: [PERMISSIONS.vehiclesView],
+  [PERMISSIONS.vehiclesCostView]: [PERMISSIONS.vehiclesView],
+  [PERMISSIONS.vehiclesCostEdit]: [PERMISSIONS.vehiclesView, PERMISSIONS.vehiclesCostView],
+  [PERMISSIONS.vehiclesPriceEdit]: [PERMISSIONS.vehiclesView],
+  [PERMISSIONS.vehiclesReserve]: [PERMISSIONS.vehiclesView],
+  [PERMISSIONS.vehiclesReservationCancel]: [PERMISSIONS.vehiclesView],
+  [PERMISSIONS.vehiclesSell]: [PERMISSIONS.vehiclesView],
+  [PERMISSIONS.vehiclesOverrideMinPrice]: [PERMISSIONS.vehiclesView],
+  [PERMISSIONS.vehiclesTransfer]: [PERMISSIONS.vehiclesView],
+  [PERMISSIONS.vehiclesExpenseRecord]: [PERMISSIONS.vehiclesView, PERMISSIONS.vehiclesCostView],
+  [PERMISSIONS.vehiclesArchive]: [PERMISSIONS.vehiclesView],
   [PERMISSIONS.menuEdit]: [PERMISSIONS.menuView],
   [PERMISSIONS.ledgerPost]: [PERMISSIONS.ledgerView],
   [PERMISSIONS.ledgerPropose]: [PERMISSIONS.ledgerView],

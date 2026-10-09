@@ -89,6 +89,9 @@ describe("built-in role presets", () => {
       "settings.manage",
       "store_credit.issue", "store_credit.payout",
       "tables.edit", "tables.manage",
+      "vehicles.archive", "vehicles.cost_edit", "vehicles.cost_view", "vehicles.create",
+      "vehicles.edit", "vehicles.expense_record", "vehicles.override_min_price", "vehicles.price_edit",
+      "vehicles.reservation_cancel", "vehicles.reserve", "vehicles.sell", "vehicles.transfer", "vehicles.view",
       "website.manage", "website.settings_manage", "website.view",
       "woocommerce.configure", "woocommerce.manage", "woocommerce.sync", "woocommerce.view",
       "workspace.admin", "workspace.approve", "workspace.contracts_manage", "workspace.documents_issue", "workspace.manage", "workspace.view",
@@ -111,6 +114,7 @@ describe("built-in role presets", () => {
       "parties.manage", "parties.view",
       "payroll.manage", "payroll.view",
       "reports.export", "reports.view",
+      "vehicles.cost_view", "vehicles.view",
       "workspace.view",
     ]);
   });
@@ -130,6 +134,7 @@ describe("built-in role presets", () => {
       "printing.execute",
       "reservations.manage", "reservations.view",
       "tables.manage",
+      "vehicles.sell", "vehicles.view",
       "workspace.manage", "workspace.view",
     ]);
   });

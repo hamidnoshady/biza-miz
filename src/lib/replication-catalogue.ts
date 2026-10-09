@@ -75,6 +75,15 @@ export const REPLICATION_DOMAIN_DEFINITIONS: readonly ReplicationDomainDefinitio
   // business has no till modules — the desktop shows the cloud pane.
   { key: "aec_field_capture", label: "AEC field capture (site logs, inspections, snags, RFI drafts)", authority: "cloud_only", bootstrap: "none", eventEffectClasses: [], conflictPolicy: "not applicable until a field-capture protocol exists", locationScope: "business", retryPolicy: "not_applicable", dependencyPolicy: "none", mediaTransfer: "metadata", deploymentProfiles: ["cloud"], notes: "§26's offline candidates. Nothing travels yet: each entry in aec-sync-classification.ts states the event, the server-side numbering and the freeze boundary a field-capture protocol must add first." },
   { key: "aec_commercial_registers", label: "AEC commercial registers (BOQ, variations, certificates, procurement, transmittals)", authority: "cloud_only", bootstrap: "none", eventEffectClasses: [], conflictPolicy: "explicit event with a decision — never last-write-wins", locationScope: "business", retryPolicy: "not_applicable", dependencyPolicy: "none", mediaTransfer: "none", deploymentProfiles: ["cloud"], notes: "§26 forbids putting these into generic master-data merge: they are status machines whose terminal states move money and feed Accounting, and their guards refuse exactly the states a field-by-field merge could produce." },
+  // Issue #839 §22 — the automotive trade’s vehicle stock. The same reasoning as
+  // §26’s registers one row up, and the same answer: the desktop is a till, an
+  // automotive business does have `pos` (so a paired laptop can sell retail goods),
+  // and everything that names a physical car — VIN identity, landed cost, price
+  // history, holds and transfers — stays with the cloud, the only side that can
+  // hold 0212’s per-business uniqueness on a serial. `automotive-sync-
+  // classification.ts` is the audit: every automotive table classified, with what
+  // each would need before it could travel.
+  { key: "automotive_vehicle_stock", label: "Automotive vehicle stock (VIN/chassis identity, landed cost, price history, holds and transfers)", authority: "cloud_only", bootstrap: "none", eventEffectClasses: [], conflictPolicy: "single authority over the unit — a VIN is never merged", locationScope: "business", retryPolicy: "not_applicable", dependencyPolicy: "none", mediaTransfer: "metadata", deploymentProfiles: ["cloud"], notes: "A car is the archetype of a serial: item_serials deliberately does not sync, and a second writer holding the same VINs could sell one car twice. Only the make/model catalogue (items) rides the retail_catalogue feed." },
 ] as const;
 
 export function replicationCatalogue(): ReplicationDomain[] {

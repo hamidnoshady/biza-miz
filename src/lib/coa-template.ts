@@ -336,6 +336,30 @@ export const WELL_KNOWN_CODES = {
   aecProjectDirectCost: "5191",
   aecSubcontractorExpense: "5192",
   aecEquipmentExpense: "5193",
+  // Issue #839 — automotive (خودرو و نمایشگاه اتومبیل). A car is finished goods
+  // bought and resold, so the trade needs the usual inventory/revenue/COGS
+  // triple and nothing exotic — but three of its codes are genuinely its own:
+  //
+  //   * 1375 is the *landed-cost clearing* account. Freight, customs, the
+  //     pre-delivery inspection and reconditioning are paid before or while a
+  //     vehicle is brought in, and the model's explicit decision (see
+  //     `automotive-vehicle-costs.ts` / the domain service) is: costs marked
+  //     `capitalized` debit the vehicle's own inventory; costs marked
+  //     `period_expense` debit 5195. 1375 exists so a transport/customs bill
+  //     that arrives before its vehicle can be parked somewhere honest rather
+  //     than guessed at.
+  //   * 5194/5195 split cost of sales from period reconditioning, which is the
+  //     "do not silently mix both models" decision §5 of the issue demands.
+  //   * 2465 is the trade-in obligation: what the dealership owes the customer
+  //     for the car it accepted, until it is cleared against the sale invoice
+  //     or paid out. Nothing posts to it in Wave 1-4; it is seeded so the
+  //     second-wave trade-in flow has the account its trade actually uses.
+  vehicleInventory: "1370",
+  vehicleLandedCostClearing: "1375",
+  vehicleSalesRevenue: "4590",
+  vehicleCogs: "5194",
+  vehicleReconditioningExpense: "5195",
+  vehicleTradeInPayable: "2465",
 } as const;
 
 /**
@@ -384,6 +408,19 @@ const COST_OF_SALES_CODES_BY_INDUSTRY: Record<Industry, readonly string[]> = {
     WELL_KNOWN_CODES.inventoryCountExpense,
     WELL_KNOWN_CODES.inventoryWriteDownExpense,
     WELL_KNOWN_CODES.periodicPurchases,
+  ],
+  // Issue #839 — a dealership's cost of sales is the vehicle it delivered at
+  // its frozen effective cost, plus the write-down of a unit that will not
+  // sell. Reconditioning that was *capitalized* never appears here (it is
+  // already inside the unit's cost); only reconditioning deliberately posted
+  // as a period expense does — and that one is deliberately NOT in this list,
+  // because it is overhead by the business's own decision, exactly as
+  // `appliedConversionCost` is for F&B.
+  automotive: [
+    WELL_KNOWN_CODES.vehicleCogs,
+    WELL_KNOWN_CODES.inventoryWriteDownExpense,
+    WELL_KNOWN_CODES.periodicPurchases,
+    WELL_KNOWN_CODES.retailCountShortageExpense,
   ],
   jewelry: [
     WELL_KNOWN_CODES.goldCogs,
@@ -1107,6 +1144,73 @@ export const ARCHITECTURE_CONSTRUCTION_COA_TEMPLATE: TemplateAccount[] = [
 
 export const ACCOUNT_TYPES: AccountType[] = ["asset", "liability", "equity", "revenue", "expense"];
 /**
+ * Issue #839 — automotive (خودرو و نمایشگاه اتومبیل) chart of accounts.
+ *
+ * The generic skeleton every retail chart reuses (cash, bank, AR, AP, VAT,
+ * prepayments, fixed assets, salaries, the shared cheque/deposit/equity
+ * headings) plus this trade's own five accounts: «موجودی خودرو» (1370), the
+ * landed-cost clearing heading (1375), «فروش خودرو» (4590), «بهای تمام‌شده
+ * خودروی فروخته‌شده» (5194) and «هزینه بازسازی و آماده‌سازی خودرو» (5195).
+ *
+ * 2430 «پیش‌دریافت از مشتری» is the *shared* customer-advance liability and is
+ * NOT restated here: a reservation deposit is that concept, not a second one,
+ * which is what §7 of the issue asks for ("reuse an existing customer
+ * advance/liability concept; do not invent duplicate accounting semantics").
+ */
+export const AUTOMOTIVE_COA_TEMPLATE: TemplateAccount[] = [
+  { code: "1000", name: "دارایی‌ها", type: "asset" },
+  { code: "1100", name: "صندوق", type: "asset", parentCode: "1000" },
+  { code: "1110", name: "بانک", type: "asset", parentCode: "1000" },
+  { code: "1120", name: "کارت‌خوان (در راه)", type: "asset", parentCode: "1000" },
+  { code: "1200", name: "حساب‌های دریافتنی", type: "asset", parentCode: "1000" },
+  { code: "1220", name: "مالیات بر ارزش افزوده خرید (قابل استرداد)", type: "asset", parentCode: "1000" },
+  { code: "1370", name: "موجودی خودرو", type: "asset", parentCode: "1000" },
+  { code: "1375", name: "هزینه‌های حمل و ترخیص خودرو (واسط)", type: "asset", parentCode: "1000" },
+  { code: "1360", name: "کالای در راه", type: "asset", parentCode: "1000" },
+  { code: "1400", name: "پیش‌پرداخت‌ها", type: "asset", parentCode: "1000" },
+  { code: "1500", name: "اثاثه و تجهیزات", type: "asset", parentCode: "1000" },
+
+  ...RETAIL_ASSET_ACCOUNTS,
+  ...SHARED_ASSET_ACCOUNTS,
+
+  { code: "2000", name: "بدهی‌ها", type: "liability" },
+  { code: "2100", name: "حساب‌های پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2200", name: "مالیات بر ارزش افزوده پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2300", name: "حقوق پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2410", name: "اعتبار فروشگاهی", type: "liability", parentCode: "2000" },
+  { code: "2420", name: "کارت هدیه", type: "liability", parentCode: "2000" },
+  { code: "2465", name: "تعهد بابت معاوضه خودرو", type: "liability", parentCode: "2000" },
+
+  ...SHARED_LIABILITY_ACCOUNTS,
+
+  { code: "3000", name: "حقوق صاحبان سرمایه", type: "equity" },
+  { code: "3100", name: "سرمایه", type: "equity", parentCode: "3000" },
+  { code: "3800", name: "سود (زیان) انباشته", type: "equity", parentCode: "3000" },
+  { code: "3900", name: "تراز افتتاحیه", type: "equity", parentCode: "3000" },
+
+  ...SHARED_EQUITY_ACCOUNTS,
+
+  { code: "4000", name: "درآمدها", type: "revenue" },
+  { code: "4590", name: "فروش خودرو", type: "revenue", parentCode: "4000" },
+  { code: "4900", name: "سایر درآمدها", type: "revenue", parentCode: "4000" },
+  { code: "4400", name: "برگشت از فروش", type: "revenue", parentCode: "4000", isContra: true },
+
+  ...RETAIL_REVENUE_ACCOUNTS,
+  ...SHARED_REVENUE_ACCOUNTS,
+
+  { code: "5000", name: "هزینه‌ها", type: "expense" },
+  { code: "5194", name: "بهای تمام‌شده خودروی فروخته‌شده", type: "expense", parentCode: "5000" },
+  { code: "5195", name: "هزینه بازسازی و آماده‌سازی خودرو", type: "expense", parentCode: "5000" },
+  { code: "5210", name: "پورسانت فروش", type: "expense", parentCode: "5000" },
+  { code: "5300", name: "اجاره", type: "expense", parentCode: "5000" },
+  { code: "5400", name: "آب، برق و گاز", type: "expense", parentCode: "5000" },
+  { code: "5600", name: "بازاریابی و تبلیغات", type: "expense", parentCode: "5000" },
+  { code: "5900", name: "سایر هزینه‌ها", type: "expense", parentCode: "5000" },
+  ...RETAIL_EXPENSE_ACCOUNTS,
+  ...SHARED_EXPENSE_ACCOUNTS,
+];
+
+/**
  * The seed chart of accounts an industry starts from. One place, because
  * three call sites need the same answer: `seedChartOfAccounts`
  * (business-provisioning.ts, the platform console's path),
@@ -1134,6 +1238,8 @@ export function coaTemplateForIndustry(industry: Industry): readonly TemplateAcc
       return TOOLS_FITTINGS_COA_TEMPLATE;
     case "haberdashery":
       return HABERDASHERY_COA_TEMPLATE;
+    case "automotive":
+      return AUTOMOTIVE_COA_TEMPLATE;
     case "food_service":
       return FNB_COA_TEMPLATE;
   }

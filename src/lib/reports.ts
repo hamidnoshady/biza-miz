@@ -762,7 +762,13 @@ export type ReportShape =
   | "brand_sales"
   | "near_expiry"
   | "low_stock"
-  | "dead_stock";
+  | "dead_stock"
+  // Issue #839 §14 — the dealership's three read-only reports, each with its
+  // own payload shape because a car is not a stocked row: stock/valuation,
+  // sales/profit, and the holds with the money they hold.
+  | "vehicle_inventory"
+  | "vehicle_sales"
+  | "vehicle_reservations";
 
 export interface StandardReportDef {
   key: string;
@@ -1355,6 +1361,39 @@ export const STANDARD_REPORTS: StandardReportDef[] = [
     group: "inventory",
     requires: { modules: ["stock"] },
     shape: "low_stock",
+    view: null,
+    defaultChart: null,
+  },
+  {
+    key: "vehicle_stock_valuation",
+    label: "موجودی و ارزش‌گذاری خودرو",
+    description:
+      "همهٔ خودروهای موجود با بهای خرید، هزینهٔ سرمایه‌ای‌شده، بهای تمام‌شدهٔ مؤثر، قیمت فروش، حاشیهٔ بالقوه و سن موجودی — به تفکیک شعبه، نو/کارکرده و راکد/کند.",
+    group: "inventory",
+    requires: { modules: ["automotive"] },
+    shape: "vehicle_inventory",
+    view: null,
+    defaultChart: null,
+  },
+  {
+    key: "vehicle_sales_profitability",
+    label: "فروش و سودآوری خودرو",
+    description:
+      "خودروهای فروخته‌شده در دوره با بهای تمام‌شدهٔ منجمد، سود ناخالص، درصد حاشیه، روز تا فروش، فروشنده و عملکرد برند/مدل — در کنار خودروهای خریداری‌شدهٔ همان دوره.",
+    group: "sales",
+    requires: { modules: ["automotive"] },
+    shape: "vehicle_sales",
+    view: null,
+    defaultChart: null,
+  },
+  {
+    key: "vehicle_reservations",
+    label: "رزروها و بیعانه‌های خودرو",
+    description:
+      "رزروهای هر شعبه با وضعیت، تاریخ انقضا و بیعانهٔ دریافتی؛ جمع بیعانه به‌عنوان تعهد (نه درآمد) و بیعانه‌های بازگشتی دوره.",
+    group: "sales",
+    requires: { modules: ["automotive"] },
+    shape: "vehicle_reservations",
     view: null,
     defaultChart: null,
   },

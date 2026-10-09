@@ -28,6 +28,10 @@ import {
   SkeletonRows,
 } from "../../ui";
 import { IndustryPicker } from "../../industry-picker";
+import { industrySwitchCautions } from "@/lib/industries";
+// `Business` is main's addition (#886's danger-zone work) and
+// `industrySwitchCautions` is this branch's (#839's industry-switch warning);
+// neither side's import replaces the other.
 import { useBusiness, type Business } from "./context";
 
 /**
@@ -151,21 +155,33 @@ export function IndustryPanel() {
   const carried = counts
     ? [
         { label: "آیتم منو", value: counts.menuItems },
-        { label: "کالای صنفی", value: counts.industryItems },
+        // "کالای صنفی" is the shared `items` catalogue. For an automotive
+        // business the cars live there too (one serialized unit per car), so
+        // the count is honest but the *meaning* differs — the cautions below
+        // are what say so (issue #839 §2).
+        { label: "کالای صنفی / خودرو", value: counts.industryItems },
         { label: "سفارش", value: counts.orders },
         { label: "سند حسابداری", value: counts.journalEntries },
       ].filter((c) => c.value > 0)
     : [];
+  const cautions = changed ? industrySwitchCautions(business.industry, industry) : [];
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
-    const warning =
+    // Both halves of the confirmation: what the business owns today (the
+    // server's real counts) and what the new trade means for it (the
+    // trade-specific cautions). A switch with cheap data but a real meaning
+    // change — a jeweller with two stock rows becoming a dealership — must
+    // still warn, which is why the cautions are not nested inside the counts.
+    const warning = [
       carried.length > 0
         ? "\n\nاین کسب‌وکار داده‌ای دارد که به نوع فعلی تعلق دارد:\n" +
           carried.map((c) => `• ${c.label}: ${formatPersianNumber(c.value)}`).join("\n") +
           "\n\nاین داده‌ها حذف نمی‌شوند، اما پس از تغییر نوع، دیگر از داشبورد در دسترس نخواهند بود. " +
           "سرفصل‌های حساب موجود هم دست‌نخورده می‌مانند و فقط حساب‌های نبودهٔ نوع جدید اضافه می‌شوند."
-        : "";
+        : "",
+      cautions.length > 0 ? "\n" + cautions.map((line) => `• ${line}`).join("\n") : "",
+    ].join("");
     if (
       !window.confirm(
         `نوع «${business!.name}» از «${INDUSTRY_LABELS[business!.industry]}» به «${INDUSTRY_LABELS[industry]}» تغییر کند؟` +
@@ -209,6 +225,15 @@ export function IndustryPanel() {
           نوع کسب‌وکار تعیین می‌کند چه سرفصل حساب‌هایی ساخته می‌شود، مالک چه مراحلی از راه‌اندازی را
           می‌بیند، و داشبورد کدام ماژول‌ها را نشان می‌دهد.
         </p>
+        {changed && carried.length === 0 && cautions.length > 0 ? (
+          <div className="mt-3 rounded-lg border border-amber-400/30 bg-amber-400/5 px-3 py-2.5 text-xs leading-6 text-amber-800/90 dark:text-amber-200/90">
+            <ul className="space-y-0.5">
+              {cautions.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {changed && carried.length > 0 ? (
           <div className="mt-3 rounded-lg border border-amber-400/30 bg-amber-400/5 px-3 py-2.5 text-xs leading-6 text-amber-800/90 dark:text-amber-200/90">
             <p className="font-medium">این کسب‌وکار داده‌ای دارد که به نوع فعلی تعلق دارد:</p>
@@ -222,6 +247,13 @@ export function IndustryPanel() {
             <p className="mt-1.5">
               چیزی حذف نمی‌شود؛ اما این داده‌ها پس از تغییر از داشبورد در دسترس نخواهند بود.
             </p>
+            {cautions.length > 0 ? (
+              <ul className="mt-1.5 space-y-0.5">
+                {cautions.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            ) : null}
           </div>
         ) : null}
         {editable ? (

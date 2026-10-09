@@ -36,6 +36,10 @@ const INVENTORY_CODE_BY_INDUSTRY: Record<Industry, string> = {
   wholesale: WELL_KNOWN_CODES.wholesaleInventory,
   tools_fittings: WELL_KNOWN_CODES.toolsInventory,
   haberdashery: WELL_KNOWN_CODES.haberdasheryInventory,
+  // Issue #839 — a vehicle is this trade's stock; the purchase receipt, the
+  // count and the transfer rules all relieve «موجودی خودرو» (1370) like any
+  // other trade's finished goods.
+  automotive: WELL_KNOWN_CODES.vehicleInventory,
 };
 
 /**

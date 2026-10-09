@@ -33,6 +33,7 @@ const RETAIL_INDUSTRIES: Industry[] = [
   "wholesale",
   "tools_fittings",
   "haberdashery",
+  "automotive",
 ];
 
 describe("INDUSTRY_PROFILES", () => {
@@ -79,6 +80,7 @@ describe("module sets", () => {
         module === "wholesale" ||
         module === "tools_fittings" ||
         module === "haberdashery" ||
+        module === "automotive" ||
         module === "stock"
       )
         continue;

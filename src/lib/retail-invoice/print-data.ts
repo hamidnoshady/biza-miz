@@ -54,6 +54,24 @@ function toLine(line: RetailInvoiceDetailLine): ReceiptLine {
           ? { batchNumber: line.batchNumbers.join("، "), expiryDate: line.expiryDate }
           : null,
       };
+    case "vehicle":
+      // Issue #839 §8 — the printable document names the exact car: its stock
+      // number and VIN, so a reprint months later states which vehicle this
+      // invoice sold and not merely which model.
+      return {
+        ...base,
+        serial: {
+          serialNumber: line.stockNumber,
+          warrantyMonths: 0,
+          warrantyEndDate: null,
+        },
+        vehicle: {
+          stockNumber: line.stockNumber,
+          vin: line.vin,
+          chassisNumber: line.chassisNumber,
+          plateNumber: line.plateNumber,
+        },
+      };
     case "accessory":
     case "stocked":
       return base;

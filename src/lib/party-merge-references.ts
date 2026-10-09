@@ -747,6 +747,53 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "سفارش‌های خرید و پیمان‌های جزئی (پیش‌نویس)",
   },
 
+  // -- Automotive (issue #839 Wave 6) ---------------------------------------
+  // A car's row is live stock: it is edited (state, price, costs) long after
+  // the purchase, so a reference on it that resolved to an archived party would
+  // be exactly the stale-pointer bug this registry exists to prevent. All four
+  // move — the merge asserts these two records were one person, so the
+  // deduplicated record is the correct counterparty for every one of them.
+  {
+    table: "automotive_vehicle_attributes",
+    column: "acquisition_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The party the car was bought from (a customer's trade-in, a private seller, a supplier). Money is still owed or settled through that relationship — a trade-in payable names them — so an acquisition left on the archived record would hide the obligation from the surviving file.",
+    preview: true,
+    previewLabel: "خرید خودرو",
+  },
+  {
+    table: "automotive_vehicle_attributes",
+    column: "provenance_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "Who the car came from, as documented on the unit. It sits on the same live row as the acquisition and is resolved by name on the vehicle screen (`LEFT JOIN parties`), so leaving it archived would print a name nobody can open — the merge says the two records were one person all along.",
+    preview: true,
+    previewLabel: "سابقهٔ خودرو",
+  },
+  {
+    table: "automotive_vehicle_attributes",
+    column: "sold_customer_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The buyer of a sold car. The sale's own order moves too (`orders.customer_id`), and the two must not disagree about who bought the vehicle: a warranty, a follow-up or a reversal after the merge has to reach the surviving record.",
+    preview: true,
+    previewLabel: "فروش خودرو",
+  },
+  {
+    table: "automotive_vehicle_costs",
+    column: "vendor_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The vendor paid for reconditioning, freight or a repair. The row is a live expense (void-not-edit) whose amount is part of the car's landed cost, and the vendor is a payable like any other — repointing it keeps one vendor record instead of two.",
+    preview: true,
+    previewLabel: "هزینهٔ خودرو",
+  },
+
   // -- Historical / audit: deliberately NOT moved ---------------------------
   {
     table: "crm_merges",

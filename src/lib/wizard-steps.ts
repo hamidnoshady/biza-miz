@@ -68,6 +68,19 @@ const SETUP_SHAPE: Record<Industry, SetupShape> = {
   // service company, and it is the one shape that is asked its operating
   // profile (the `aec_profile` step) — see AEC_ONLY_STEPS below.
   architecture_construction: "aec",
+  // Issue #839 — the automotive trade walks the retail shape: business →
+  // accounts → tax → users → hardware → backup → opening, with neither F&B's
+  // `costing`/`menu` pair (it has no `inventory_items` recipe store and no
+  // `menu_items`) nor AEC's operating-profile question (a dealership is not
+  // choosing between five professional profiles). Its catalogue pointer on the
+  // finish page is its own manager, «خودروها» — see catalogueHrefFor.
+  //
+  // The `opening` step is where a dealer's existing lot is registered without
+  // fake sales or purchases: the automotive opening-stock screen writes the
+  // same `items`/`item_serials`/vehicle rows the acquisition path writes, at
+  // their real acquisition values, and posting goes through the same equity
+  // account (3900 تراز افتتاحیه) every other trade's opening stock uses.
+  automotive: "retail",
 };
 
 /**
@@ -138,6 +151,11 @@ export function catalogueHrefFor(industry: Industry): string | null {
       return "/accounting/jewelry";
     case "watch":
       return "/accounting/watch";
+    // Issue #839 — a dealership's vehicles live in its own manager, not in the
+    // products workspace (the products workspace is the variant board's door
+    // for the five trade-goods industries, and a car is not a variant).
+    case "automotive":
+      return "/accounting/automotive";
     default:
       return null;
   }

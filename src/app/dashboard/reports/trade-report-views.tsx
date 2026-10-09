@@ -212,7 +212,7 @@ const EXPIRY_LABELS: Record<string, string> = {
 };
 
 /** A row of headline figures above a report's table. */
-function StatStrip({ stats }: { stats: { label: string; value: ReactNode; tone?: "default" | "negative" }[] }) {
+export function StatStrip({ stats }: { stats: { label: string; value: ReactNode; tone?: "default" | "negative" }[] }) {
   return (
     <dl className="grid gap-3 border-b border-border/80 px-4 py-4 sm:grid-cols-2 sm:px-5 lg:grid-cols-4">
       {stats.map((stat) => (
