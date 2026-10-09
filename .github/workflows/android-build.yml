@@ -72,9 +72,34 @@ jobs:
 
       # The NON-PRODUCTION label is part of the artifact name on purpose: this build points at
       # https://app.invalid and is signed with the throwaway debug key.
+      # The full Gradle output is kept in android/gradle-run.log. It is uploaded on failure, and the
+      # step after this one repeats the error lines as annotations, which the API can read.
       - name: Lint, unit tests and assemble the development debug APK
         working-directory: android
-        run: ./gradlew --no-daemon :app:lintDevelopmentDebug :app:testDevelopmentDebugUnitTest :app:assembleDevelopmentDebug
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon :app:lintDevelopmentDebug :app:testDevelopmentDebugUnitTest :app:assembleDevelopmentDebug 2>&1 | tee gradle-run.log
+
+      - name: Repeat the Gradle error lines as annotations when the build fails
+        if: failure()
+        working-directory: android
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import re
+
+          path = pathlib.Path("gradle-run.log")
+          if path.exists():
+              lines = path.read_text(errors="replace").splitlines()
+          else:
+              lines = ["Gradle wrote no log: the failure happened before the build started."]
+          pattern = re.compile(r"^e: |^w: .*error|What went wrong|^> |Could not |Caused by|Execution failed|BUILD FAILED|error:|Exception|FAILURE")
+          keep = [line for line in lines if pattern.search(line)]
+          body = "\n".join(keep[:80]) or "\n".join(lines[-60:])
+          body = body[:6000]
+          encoded = body.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print("::error title=Gradle failure::" + encoded)
+          PY
 
       - name: Upload the development debug APK (NON-PRODUCTION)
         uses: actions/upload-artifact@v7
@@ -90,6 +115,7 @@ jobs:
         with:
           name: android-debug-reports
           path: |
+            android/gradle-run.log
             android/app/build/reports/
             android/app/build/test-results/
           if-no-files-found: ignore

@@ -114,11 +114,13 @@ class TwaLauncherActivity : Activity() {
                 callback.attach(session)
                 TwaSessionHolder.hold(this, callback, session)
 
+                // build() returns a TrustedWebActivityIntent, which is not an Intent. Launch it through
+                // its own method, as the androidx.browser documentation recommends.
                 val trustedIntent = TrustedWebActivityIntentBuilder(Uri.parse(url))
                     .setToolbarColor(Color.parseColor("#0F172A"))
                     .build(session)
                 settled = true
-                startActivity(trustedIntent)
+                trustedIntent.launchTrustedWebActivity(this@TwaLauncherActivity)
                 finish()
             }
 
