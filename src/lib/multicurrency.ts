@@ -464,7 +464,16 @@ export function restateForeignBalance(input: {
   /** The account type's normal side: asset/expense = debit-normal. */
   debitNormal: boolean;
 }): RevaluationOutcome {
-  const newValue = convertToBaseMinor(input.foreignBalanceMinor, input.rate, input.precision);
+  // A foreign account CAN stand negative — an overdraft on an FX bank, a net
+  // short position. Restating follows the sign (restateSigned): negating the
+  // magnitude, converting, negating back. convertToBaseMinor refuses
+  // negatives by contract, so passing a negative balance through it would
+  // crash the whole revaluation instead of flipping to the other side of the
+  // 4935/5875 pair.
+  const newValue =
+    input.foreignBalanceMinor < 0n
+      ? -convertToBaseMinor(-input.foreignBalanceMinor, input.rate, input.precision)
+      : convertToBaseMinor(input.foreignBalanceMinor, input.rate, input.precision);
   const raw = newValue - input.bookBaseMinor;
   const signedByNormal = input.debitNormal ? raw : -raw;
   return {
@@ -496,7 +505,8 @@ export type MulticurrencyPayloadProblem =
   | "invalid_side"
   | "too_many_lines"
   | "invalid_idempotency_key"
-  | "invalid_location_id";
+  | "invalid_location_id"
+  | "invalid_project_id";
 
 /** Caps on one document — mirrors the manual journal's caps. */
 export const MULTICURRENCY_LINES_MAX = 200;
@@ -510,6 +520,8 @@ export interface MulticurrencyEntryPayload {
   entryDate: string | null;
   memo: string;
   locationId: string | null;
+  /** The project dimension, carried onto the entry like the manual journal carries it. */
+  projectId: string | null;
   lines: MulticurrencyLineInput[];
   idempotencyKey: string | null;
 }
@@ -537,6 +549,7 @@ export function parseMulticurrencyEntryPayload(body: unknown):
     return { ok: false, problem: "invalid_memo" };
   }
   if (b.locationId != null && !isUuid(b.locationId)) return { ok: false, problem: "invalid_location_id" };
+  if (b.projectId != null && !isUuid(b.projectId)) return { ok: false, problem: "invalid_project_id" };
   if (b.idempotencyKey != null && (typeof b.idempotencyKey !== "string" || b.idempotencyKey.length === 0 || b.idempotencyKey.length > MULTICURRENCY_IDEMPOTENCY_KEY_MAX)) {
     return { ok: false, problem: "invalid_idempotency_key" };
   }
@@ -586,6 +599,7 @@ export function parseMulticurrencyEntryPayload(body: unknown):
       entryDate: (b.entryDate as string | null) ?? null,
       memo: typeof b.memo === "string" ? b.memo : "",
       locationId: (b.locationId as string | null) ?? null,
+      projectId: (b.projectId as string | null) ?? null,
       lines,
       idempotencyKey: (b.idempotencyKey as string | null) ?? null,
     },

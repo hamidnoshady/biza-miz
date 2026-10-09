@@ -42,6 +42,7 @@ import { VatReportSection } from "./vat-report-section";
 import { FixedAssetsSection } from "./fixed-assets-section";
 import { GrowthAccountingView } from "@/components/growth/growth-accounting-view";
 import { AccountingReportsSection } from "./reports-section";
+import { MulticurrencySection } from "./multicurrency-section";
 import { AccountingSettingsSection } from "./settings-section";
 import styles from "./ledger-workspace.module.css";
 
@@ -427,6 +428,9 @@ export function AccountingManager({
             />
           ) : null}
           {section === "financial-reports" ? <AccountingReportsSection /> : null}
+          {section === "multicurrency" ? (
+            <MulticurrencySection accounts={accounts ?? []} busy={busy} run={run} />
+          ) : null}
           {section === "settings" ? <AccountingSettingsSection /> : null}
           {section === "growth" ? <GrowthAccountingView /> : null}
     </>

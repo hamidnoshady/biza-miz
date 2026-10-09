@@ -391,6 +391,23 @@ describe("realized & unrealized FX", () => {
     expect(outcome.loss).toBe(1_000_000n);
     expect(outcome.gain).toBe(0n);
   });
+
+  it("restates a NEGATIVE balance (an overdraft) through the signed path (issue #863)", () => {
+    // An FX bank standing at −$100, booked at −60,000,000, restated at 650,000:
+    // the hole deepens to −65,000,000 — a 5,000,000 LOSS for a debit-normal
+    // account, not a crash and not a gain.
+    const outcome = restateForeignBalance({
+      foreignBalanceMinor: -10_000n,
+      bookBaseMinor: -60_000_000n,
+      rate: "650000",
+      precision: 2,
+      debitNormal: true,
+    });
+    expect(outcome.newValue).toBe(-65_000_000n);
+    expect(outcome.difference).toBe(-5_000_000n);
+    expect(outcome.gain).toBe(0n);
+    expect(outcome.loss).toBe(5_000_000n);
+  });
 });
 
 describe("payload parsers", () => {

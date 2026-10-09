@@ -32,6 +32,7 @@
  *    rows, atomically.
  */
 import { query, getPool } from "./db";
+import { assertCurrencyAvailable, MulticurrencyError } from "./multicurrency-service";
 import { isUuid } from "./uuid";
 import { toLatinDigits } from "./digits";
 import {
@@ -306,6 +307,18 @@ export async function createAccount(params: {
     typeof params.currencyCode === "string" && /^[A-Za-z]{3}$/.test(params.currencyCode)
       ? params.currencyCode.toUpperCase()
       : null;
+  if (currencyCode) {
+    // An account that names a currency may only name one this business has
+    // enabled — and never the base currency (that is what NULL means). The
+    // catalogue check is server-side: the form offers the allowed list, but
+    // the API does not trust it (issue #863 §tenant-ownership).
+    try {
+      await assertCurrencyAvailable(params.businessId, currencyCode);
+    } catch (err) {
+      if (err instanceof MulticurrencyError) throw new AccountsError(err.message, err.status);
+      throw err;
+    }
+  }
   try {
     const { rows } = await query<{ id: string }>(
       `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra, currency_code)

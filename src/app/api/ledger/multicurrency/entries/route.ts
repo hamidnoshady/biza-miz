@@ -118,6 +118,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       lines: parsed.value.lines,
       createdBy: session.sub,
       idempotencyKey: parsed.value.idempotencyKey,
+      projectId: parsed.value.projectId,
     });
     return NextResponse.json(posted, { status: posted.duplicate ? 200 : 201 });
   } catch (err) {

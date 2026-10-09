@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requirePermission, withTenantScope } from "@/lib/auth";
-import { PERMISSIONS } from "@/lib/permissions";
+import { withTenantScope } from "@/lib/auth";
+import { requirePlatformAdmin } from "@/lib/platform-auth";
 import { MulticurrencyError, updateCurrency } from "@/lib/multicurrency-service";
 
 interface Ctx {
@@ -10,14 +10,17 @@ interface Ctx {
 /**
  * Edits a catalogue currency's display fields or active flag.
  *
- * Deliberately narrow: `precision` is refused once the currency has any
- * posting or rate (the service checks), because re-scaling a stored amount's
- * unit retroactively is exactly the kind of history rewrite multicurrency
- * exists to make impossible. Deactivating a currency never hides its history —
- * it only stops new documents and rates.
+ * PLATFORM-admin only, for the same reason creation is: these rows are shared
+ * by every tenant, and a tenant admin must not mutate other tenants' books.
+ *
+ * Deliberately narrow: `precision` is refused atomically once the currency has
+ * any posting or rate (the UPDATE's own WHERE re-checks usage, so a rate
+ * recorded between check and write cannot slip a re-scale through).
+ * Deactivating a currency never hides its history — it only stops new
+ * documents and rates.
  */
 export const PATCH = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
-  const { error } = await requirePermission(PERMISSIONS.settingsManage);
+  const { error } = await requirePlatformAdmin();
   if (error) return error;
 
   const { code } = await ctx.params;

@@ -38,6 +38,7 @@
  * `integration/multicurrency.integration.test.ts` covers these paths end to
  * end against a real Postgres.
  */
+import { createHash } from "node:crypto";
 import { query, withTenantTransaction } from "./db";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { isValidIsoDate } from "./iso-date";
@@ -161,15 +162,10 @@ export async function updateCurrency(
     throw new MulticurrencyError("invalid_currency_precision");
   }
   // Precision is part of every stored amount's meaning; a currency with
-  // postings cannot silently re-scale them.
-  if (patch.precision !== undefined) {
-    const { rows } = await query<{ used: boolean }>(
-      `SELECT (EXISTS(SELECT 1 FROM journal_entries WHERE currency_code = $1)
-            OR EXISTS(SELECT 1 FROM exchange_rates WHERE currency_code = $1)) AS used`,
-      [code],
-    );
-    if (rows[0]?.used) throw new MulticurrencyError("currency_precision_locked", 409);
-  }
+  // postings cannot silently re-scale them. The check is ATOMIC with the
+  // write — the usage EXISTS rides in the UPDATE's own WHERE, so a rate
+  // recorded between «check» and «write» can no longer slip a re-scale
+  // through (the check-then-write version could).
   const { rows } = await query<{
     code: string;
     name: string;
@@ -183,10 +179,17 @@ export async function updateCurrency(
        precision = COALESCE($4, precision),
        is_active = COALESCE($5, is_active)
      WHERE code = $1
+       AND ($4::smallint IS NULL OR NOT (
+              EXISTS(SELECT 1 FROM journal_entries WHERE currency_code = $1)
+           OR EXISTS(SELECT 1 FROM exchange_rates   WHERE currency_code = $1)))
      RETURNING code, name, symbol, precision, is_active`,
     [code, patch.name ?? null, patch.symbol ?? null, patch.precision ?? null, patch.isActive ?? null],
   );
-  if (!rows[0]) throw new MulticurrencyError("currency_not_found", 404);
+  if (!rows[0]) {
+    const { rows: found } = await query<{ code: string }>(`SELECT code FROM currencies WHERE code = $1`, [code]);
+    if (!found[0]) throw new MulticurrencyError("currency_not_found", 404);
+    throw new MulticurrencyError("currency_precision_locked", 409);
+  }
   return { ...rows[0], isActive: rows[0].is_active };
 }
 
@@ -265,6 +268,22 @@ export async function setBusinessCurrencies(
     if (!knownMap.get(base)!) throw new MulticurrencyError("base_currency_inactive", 409);
     for (const code of foreign) {
       if (!knownMap.has(code)) throw new MulticurrencyError("currency_not_found", 404);
+    }
+    // A base-currency SWITCH after foreign financial activity exists would
+    // silently change what every future «base» label means next to snapshots
+    // that froze the old base. One source of truth: while the book has any
+    // foreign-currency document, the base is locked — reverse or start a new
+    // book instead; posted history is never rewritten.
+    const { rows: current } = await query<{ base_currency_code: string | null }>(
+      `SELECT base_currency_code FROM businesses WHERE id = $1`,
+      [businessId],
+    );
+    if (current[0]?.base_currency_code && current[0].base_currency_code !== base) {
+      const { rows: activity } = await query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM journal_entries WHERE business_id = $1 AND currency_code IS NOT NULL`,
+        [businessId],
+      );
+      if (BigInt(activity[0].n) > 0n) throw new MulticurrencyError("base_currency_locked", 409);
     }
     await query(`UPDATE businesses SET base_currency_code = $2 WHERE id = $1`, [businessId, base]);
     await query(
@@ -522,7 +541,7 @@ export async function voidRate(input: {
 // Shared posting validation
 // ---------------------------------------------------------------------------
 
-async function assertCurrencyAvailable(
+export async function assertCurrencyAvailable(
   businessId: string,
   currencyCode: string,
 ): Promise<{ precision: number; baseCurrencyCode: string }> {
@@ -611,8 +630,47 @@ export interface PostMulticurrencyEntryParams {
   lines: MulticurrencyLineInput[];
   createdBy: string | null;
   idempotencyKey: string | null;
+  /**
+   * Overrides the payload hash the insert path would derive from the built
+   * document. Settlements set this to a hash of the REQUEST (amount, party,
+   * direction) so a replayed key with a different request is refused even
+   * before any lot arithmetic runs.
+   */
+  idempotencyPayloadHash?: string | null;
+  /**
+   * The project dimension, preserved through the FX posting path exactly as
+   * the manual-journal path preserves it. Validated to belong to the business
+   * before it is written; a document posted without one keeps NULL.
+   */
+  projectId?: string | null;
   sourceType?: FxSourceType;
   sourceId?: string | null;
+}
+
+/**
+ * The SHA-256 of a request's canonical payload — what makes an idempotency key
+ * mean ONE document rather than «whatever this client sent most recently». A
+ * retry must present the same payload; the same key with a different body is a
+ * bug on the caller's side and is refused instead of silently returning the
+ * first document.
+ */
+function payloadHash(parts: unknown): string {
+  // Service-level callers pass BigInt amounts (the API layer serialises to
+  // text first, but it must not matter which door a retry arrives through):
+  // JSON.stringify throws on BigInt, so the hash canonicalises it as decimal
+  // text. The same request always hashes the same way.
+  return createHash("sha256")
+    .update(JSON.stringify(parts, (_key, value) => (typeof value === "bigint" ? value.toString() : value)))
+    .digest("hex");
+}
+
+function revaluationHash(params: {
+  currencyCode?: string | null;
+  asOf: string;
+  rateId?: string | null;
+  idempotencyKey?: string | null;
+}): string {
+  return payloadHash({ currencyCode: params.currencyCode, asOf: params.asOf, rateId: params.rateId ?? null });
 }
 
 async function findEntryIdByIdempotencyKey(businessId: string, key: string): Promise<string | null> {
@@ -621,6 +679,30 @@ async function findEntryIdByIdempotencyKey(businessId: string, key: string): Pro
     [businessId, key],
   );
   return rows[0]?.id ?? null;
+}
+
+/**
+ * Resolve an idempotency key to the entry it already created, refusing a
+ * payload that does not match what that entry was originally posted with.
+ * `storedHash` may be null on rows posted before 0217 — those are answered
+ * as-is (their keys predate compatibility checking; history is not rewritten).
+ */
+async function resolveIdempotentEntry(
+  businessId: string,
+  key: string,
+  hash: string,
+): Promise<string | null> {
+  const { rows } = await query<{ id: string; idempotency_payload_hash: string | null }>(
+    `SELECT id, idempotency_payload_hash FROM journal_entries
+      WHERE business_id = $1 AND idempotency_key = $2`,
+    [businessId, key],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  if (row.idempotency_payload_hash !== null && row.idempotency_payload_hash !== hash) {
+    throw new MulticurrencyError("idempotency_payload_mismatch", 409);
+  }
+  return row.id;
 }
 
 async function summarizePostedEntry(entryId: string, duplicate: boolean): Promise<PostedMulticurrencyEntry> {
@@ -669,9 +751,44 @@ async function insertForeignDocument(params: PostMulticurrencyEntryParams): Prom
   if (params.entryDate != null && !isValidIsoDate(params.entryDate)) {
     throw new MulticurrencyError("invalid_entry_date");
   }
+  if (params.projectId != null && !isUuid(params.projectId)) {
+    throw new MulticurrencyError("invalid_project");
+  }
+  if (params.projectId) {
+    const { rows: project } = await query<{ id: string }>(
+      `SELECT id FROM projects WHERE id = $1 AND business_id = $2`,
+      [params.projectId, params.businessId],
+    );
+    if (!project[0]) throw new MulticurrencyError("project_not_found", 404);
+  }
+
+  // Party attribution is tenant-owned: an id from another business must be
+  // refused here, not left for the cross-tenant FK to quietly accept.
+  const partyIds = [
+    ...new Set(params.lines.map((l) => l.partyId).filter((p): p is string => typeof p === "string" && p !== "")),
+  ];
+  if (partyIds.length > 0) {
+    const { rows: parties } = await query<{ id: string }>(
+      `SELECT id FROM parties WHERE business_id = $1 AND id = ANY($2::uuid[])`,
+      [params.businessId, partyIds],
+    );
+    if (parties.length !== partyIds.length) throw new MulticurrencyError("party_not_found", 404);
+  }
+
+  const hash =
+    params.idempotencyKey != null
+      ? params.idempotencyPayloadHash ??
+        payloadHash({
+          currencyCode,
+          rateId: params.rateId,
+          entryDate: params.entryDate,
+          lines: params.lines,
+          projectId: params.projectId ?? null,
+        })
+      : null;
 
   if (params.idempotencyKey) {
-    const existing = await findEntryIdByIdempotencyKey(params.businessId, params.idempotencyKey);
+    const existing = await resolveIdempotentEntry(params.businessId, params.idempotencyKey, hash!);
     if (existing) return summarizePostedEntry(existing, true);
   }
 
@@ -688,30 +805,46 @@ async function insertForeignDocument(params: PostMulticurrencyEntryParams): Prom
     currencyCode,
   );
 
-  const { rows } = await query<{ id: string }>(
-    `INSERT INTO journal_entries
-       (business_id, location_id, entry_date, memo, source_type, source_id, created_by,
-        currency_code, base_currency_code, exchange_rate_id, exchange_rate, rounding_version, rounding_delta, idempotency_key)
-     VALUES ($1, $2, COALESCE($3, CURRENT_DATE), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-     RETURNING id`,
-    [
-      params.businessId,
-      params.locationId,
-      params.entryDate,
-      params.memo,
-      params.sourceType ?? "multicurrency",
-      params.sourceId ?? null,
-      params.createdBy,
-      currencyCode,
-      currency.baseCurrencyCode,
-      rate.id,
-      rate.rate,
-      ROUNDING_POLICY_VERSION,
-      doc.roundingDelta.toString(),
-      params.idempotencyKey,
-    ],
-  );
-  const entryId = rows[0].id;
+  let insertedId: string | null = null;
+  try {
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO journal_entries
+         (business_id, location_id, entry_date, memo, source_type, source_id, created_by, project_id,
+          currency_code, base_currency_code, exchange_rate_id, exchange_rate, rounding_version, rounding_delta, idempotency_key, idempotency_payload_hash)
+       VALUES ($1, $2, COALESCE($3, CURRENT_DATE), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       RETURNING id`,
+      [
+        params.businessId,
+        params.locationId,
+        params.entryDate,
+        params.memo,
+        params.sourceType ?? "multicurrency",
+        params.sourceId ?? null,
+        params.createdBy,
+        params.projectId ?? null,
+        currencyCode,
+        currency.baseCurrencyCode,
+        rate.id,
+        rate.rate,
+        ROUNDING_POLICY_VERSION,
+        doc.roundingDelta.toString(),
+        params.idempotencyKey,
+        hash,
+      ],
+    );
+    insertedId = rows[0].id;
+  } catch (error) {
+    // Two requests raced the same idempotency key past the pre-check; the
+    // partial unique index let exactly one of them win. The loser answers
+    // with the winner's persisted document — after checking it IS the same
+    // document (same rules as the pre-check above).
+    if ((error as { code?: string }).code === "23505" && params.idempotencyKey) {
+      const existing = await resolveIdempotentEntry(params.businessId, params.idempotencyKey, hash!);
+      if (existing) return summarizePostedEntry(existing, true);
+    }
+    throw error;
+  }
+  const entryId = insertedId;
   for (const line of doc.lines) {
     await query(
       `INSERT INTO journal_lines
@@ -778,13 +911,14 @@ export async function reverseFxEntry(params: {
       exchange_rate_id: string | null;
       exchange_rate: string | null;
       rounding_version: number | null;
+      project_id: string | null;
       reverses_entry_id: string | null;
       reversed_at: Date | null;
       location_id: string | null;
       memo: string | null;
     }>(
       `SELECT id, source_type, currency_code, base_currency_code, exchange_rate_id,
-              exchange_rate, rounding_version,
+              exchange_rate, rounding_version, project_id,
               reverses_entry_id, reversed_at, location_id, memo
          FROM journal_entries WHERE id = $1 AND business_id = $2 FOR UPDATE`,
       [params.entryId, params.businessId],
@@ -813,18 +947,36 @@ export async function reverseFxEntry(params: {
     );
     if (lineRows.length === 0) throw new MulticurrencyError("entry_has_no_lines", 409);
 
+    // A document whose open items are still being consumed by LIVE
+    // settlements must not be reversed: the lots would vanish from the open
+    // list while the settlements consuming them remain standing, and the
+    // released control balances would stop reconciling. Unwind in order —
+    // reverse the settlements first (which restores the applications), then
+    // the document. Reversing a SETTLEMENT itself is always fine: its own
+    // applications stop counting the moment its entry is reversed.
+    const { rows: consumed } = await query<{ n: string }>(
+      `SELECT count(*)::text AS n
+         FROM fx_settlement_applications app
+         JOIN journal_entries se ON se.id = app.settlement_entry_id
+        WHERE app.lot_entry_id = $1 AND se.reversed_at IS NULL
+          AND app.settlement_entry_id <> $1`,
+      [params.entryId],
+    );
+    if (BigInt(consumed[0].n) > 0n) throw new MulticurrencyError("entry_has_active_settlements", 409);
+
     const memo =
       (typeof params.memo === "string" && params.memo.trim()) ||
       `برگشت سند ارزی: ${original.memo ?? ""}`.trim();
     const { rows: inserted } = await query<{ id: string }>(
       `INSERT INTO journal_entries
-         (business_id, location_id, entry_date, memo, source_type, created_by,
+         (business_id, location_id, project_id, entry_date, memo, source_type, created_by,
           currency_code, base_currency_code, exchange_rate_id, exchange_rate, rounding_version, rounding_delta)
-       VALUES ($1, $2, COALESCE($3, CURRENT_DATE), $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING id`,
       [
         params.businessId,
         original.location_id,
+        original.project_id,
         params.entryDate,
         memo,
         original.source_type ?? "multicurrency",
@@ -886,15 +1038,51 @@ async function loadOpenLots(
   currencyCode: string,
   partyId: string,
   entryIdFilter: string[] | null,
+  options: { forUpdate?: boolean } = {},
 ): Promise<ForeignOpenLot[]> {
   const controlCode =
     direction === "receivable" ? WELL_KNOWN_CODES.accountsReceivable : WELL_KNOWN_CODES.accountsPayable;
+  if (options.forUpdate) {
+    // Lock FIRST, in its own statement. The lock and the read cannot be one
+    // query: a single statement evaluates its CTE (and every plain FROM row)
+    // from the statement-start snapshot, and READ COMMITTED only re-reads the
+    // rows the lock itself names — so a settlement that waited out a rival
+    // would still see the rival's applications as «not yet committed» and
+    // double-consume the lot. Two statements, two snapshots: the second one
+    // starts after the winner committed, and its `applied` sums see the
+    // applications the loser must respect. That re-read is what makes the
+    // contention answer deterministic.
+    // Its own compact parameter list: PostgreSQL must be able to type every
+    // parameter a statement names, and unused placeholders from the wider
+    // read below give it nothing to go on.
+    await query(
+      `SELECT jl.id
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN accounts a ON a.id = jl.account_id
+        WHERE je.business_id = $1
+          AND je.currency_code = $2
+          AND jl.party_id = $3
+          AND a.code = $4
+          AND ($5::uuid[] IS NULL OR je.id = ANY($5::uuid[]))
+          AND je.reversed_at IS NULL
+          AND je.reverses_entry_id IS NULL
+        ORDER BY je.entry_date, je.posted_at, jl.id
+        FOR UPDATE OF jl`,
+      [businessId, currencyCode, partyId, controlCode, entryIdFilter],
+    );
+  }
   const { rows } = await query<OpenLotRow>(
     `WITH applied AS (
-       SELECT lot_line_id, sum(foreign_applied)::bigint AS foreign_applied, sum(base_applied)::bigint AS base_applied
-         FROM fx_settlement_applications
-        WHERE business_id = $1 AND direction = $2 AND currency_code = $3
-        GROUP BY lot_line_id
+       SELECT app.lot_line_id, sum(app.foreign_applied)::bigint AS foreign_applied, sum(app.base_applied)::bigint AS base_applied
+         FROM fx_settlement_applications app
+         JOIN journal_entries se ON se.id = app.settlement_entry_id
+        WHERE app.business_id = $1 AND app.direction = $2 AND app.currency_code = $3
+          -- A settlement that was itself reversed no longer consumes anything:
+          -- its entry was undone, so its applications stop counting. The rows
+          -- stay (append-only history); they just stop participating.
+          AND se.reversed_at IS NULL
+        GROUP BY app.lot_line_id
      )
      SELECT jl.id::text AS line_id, je.id::text AS entry_id,
             (CASE WHEN $4 = 'receivable'
@@ -914,6 +1102,11 @@ async function loadOpenLots(
         AND jl.party_id = $5
         AND a.code = $6
         AND ($7::uuid[] IS NULL OR je.id = ANY($7::uuid[]))
+        -- A reversed document no longer represents money owed: its reversal
+        -- restored the balance, so its lot must vanish from the open items
+        -- rather than linger as double-available.
+        AND je.reversed_at IS NULL
+        AND je.reverses_entry_id IS NULL
       ORDER BY je.entry_date, je.posted_at, jl.id`,
     [businessId, direction, currencyCode, direction, partyId, controlCode, entryIdFilter],
   );
@@ -925,6 +1118,79 @@ async function loadOpenLots(
       baseRemaining: BigInt(r.base_remaining),
     }))
     .filter((l) => l.foreignRemaining > 0n);
+}
+
+/**
+ * The open foreign lots for one party — what the settlement screen offers for
+ * selection. Read-only (no row locks): the locking happens when a settlement
+ * actually consumes, and the numbers here can only shrink in the meantime.
+ * Reversed documents and reversed settlements never appear: the first no
+ * longer represent money owed, the second no longer consumes anything.
+ */
+export async function listOpenLots(params: {
+  businessId: string;
+  direction: SettlementDirection;
+  currencyCode: string;
+  partyId: string;
+}): Promise<
+  { lineId: string; entryId: string; entryDate: string; foreignRemaining: string; baseRemaining: string }[]
+> {
+  const currencyCode = params.currencyCode?.trim().toUpperCase();
+  if (!isValidCurrencyCode(currencyCode)) throw new MulticurrencyError("invalid_currency");
+  if (!UUID_RE.test(params.partyId)) throw new MulticurrencyError("party_not_found", 404);
+  const { rows } = await query<{
+    line_id: string;
+    entry_id: string;
+    entry_date: string;
+    foreign_remaining: string;
+    base_remaining: string;
+  }>(
+    `WITH applied AS (
+       SELECT app.lot_line_id, sum(app.foreign_applied)::bigint AS foreign_applied, sum(app.base_applied)::bigint AS base_applied
+         FROM fx_settlement_applications app
+         JOIN journal_entries se ON se.id = app.settlement_entry_id
+        WHERE app.business_id = $1 AND app.direction = $2 AND app.currency_code = $3
+          AND se.reversed_at IS NULL
+        GROUP BY app.lot_line_id
+     )
+     SELECT jl.id::text AS line_id, je.id::text AS entry_id, je.entry_date::text AS entry_date,
+            (CASE WHEN $4 = 'receivable'
+                  THEN jl.foreign_debit - jl.foreign_credit
+                  ELSE jl.foreign_credit - jl.foreign_debit END
+              - COALESCE(ap.foreign_applied, 0))::text AS foreign_remaining,
+            (CASE WHEN $4 = 'receivable'
+                  THEN jl.debit - jl.credit
+                  ELSE jl.credit - jl.debit END
+              - COALESCE(ap.base_applied, 0))::text AS base_remaining
+       FROM journal_lines jl
+       JOIN journal_entries je ON je.id = jl.entry_id
+       JOIN accounts a ON a.id = jl.account_id
+       LEFT JOIN applied ap ON ap.lot_line_id = jl.id
+      WHERE je.business_id = $1
+        AND je.currency_code = $3
+        AND je.reversed_at IS NULL
+        AND je.reverses_entry_id IS NULL
+        AND jl.party_id = $5
+        AND a.code = $6
+      ORDER BY je.entry_date, je.posted_at, jl.id`,
+    [
+      params.businessId,
+      params.direction,
+      currencyCode,
+      params.direction,
+      params.partyId,
+      params.direction === "receivable" ? WELL_KNOWN_CODES.accountsReceivable : WELL_KNOWN_CODES.accountsPayable,
+    ],
+  );
+  return rows
+    .map((r) => ({
+      lineId: r.line_id,
+      entryId: r.entry_id,
+      entryDate: r.entry_date,
+      foreignRemaining: r.foreign_remaining,
+      baseRemaining: r.base_remaining,
+    }))
+    .filter((l) => BigInt(l.foreignRemaining) > 0n);
 }
 
 export interface SettlementResult {
@@ -981,8 +1247,23 @@ export async function settleForeignDocument(params: SettleParams): Promise<Settl
   if (params.autoAmount !== null && params.items.length > 0) throw new MulticurrencyError("either_auto_or_items");
 
   return withTenantTransaction(params.businessId, async () => {
+    // Hash of the REQUEST, not of the document it builds: a replayed key with
+    // a different amount/party/direction is refused here rather than answered
+    // with whatever the first request settled.
+    const requestHash = params.idempotencyKey
+      ? payloadHash({
+          direction: params.direction,
+          partyId: params.partyId,
+          currencyCode,
+          rateId: params.rateId,
+          settlementAccountId: params.settlementAccountId,
+          autoAmount: params.autoAmount,
+          items: params.items,
+          entryDate: params.entryDate,
+        })
+      : null;
     if (params.idempotencyKey) {
-      const existing = await findEntryIdByIdempotencyKey(params.businessId, params.idempotencyKey);
+      const existing = await resolveIdempotentEntry(params.businessId, params.idempotencyKey, requestHash!);
       if (existing) return summarizeSettlement(existing, true);
     }
 
@@ -1000,12 +1281,22 @@ export async function settleForeignDocument(params: SettleParams): Promise<Settl
       if (!UUID_RE.test(item.entryId)) throw new MulticurrencyError("invalid_entry_reference");
       parseMinorAmountText(item.amount, "amount");
     }
+    // The same entry named twice would consume its lots twice: the pure
+    // consumer re-reads the unmutated lot list per item, so the amounts would
+    // stack past the remaining balance. One entry, one item — say so here.
+    if (new Set(params.items.map((i) => i.entryId)).size !== params.items.length) {
+      throw new MulticurrencyError("duplicate_entry_reference", 400);
+    }
     const lots = await loadOpenLots(
       params.businessId,
       params.direction,
       currencyCode,
       params.partyId,
       entryIdFilter,
+      // Row locks on the lot lines: two concurrent settlements of the same
+      // party serialise here, and the loser re-reads the applications the
+      // winner committed before computing what is left.
+      { forUpdate: true },
     );
 
     let applications: ForeignLotApplication[];
@@ -1098,8 +1389,18 @@ export async function settleForeignDocument(params: SettleParams): Promise<Settl
       lines,
       createdBy: params.actorId,
       idempotencyKey: params.idempotencyKey,
+      idempotencyPayloadHash: requestHash,
       sourceType: "fx_settlement",
     });
+
+    // A duplicate (the idempotency key already created this settlement —
+    // either the pre-check above or the insert race resolved here) must not
+    // write applications again: its entry already carries them, and a second
+    // copy would double-consume every lot it touched. Answer from what the
+    // FIRST request actually persisted.
+    if (posted.duplicate) {
+      return summarizeSettlement(posted.entryId, true);
+    }
 
     for (const application of applications) {
       await query(
@@ -1141,19 +1442,22 @@ export async function settleForeignDocument(params: SettleParams): Promise<Settl
 async function summarizeSettlement(entryId: string, duplicate: boolean): Promise<SettlementResult> {
   const { rows } = await query<{
     currency_code: string;
+    exchange_rate_id: string;
     exchange_rate: string;
     precision: number;
+    direction: string | null;
     foreign_applied: string;
     base_applied: string;
   }>(
-    `SELECT je.currency_code, je.exchange_rate, c.precision,
+    `SELECT je.currency_code, je.exchange_rate_id, je.exchange_rate, c.precision,
+            max(app.direction) AS direction,
             COALESCE(sum(app.foreign_applied), 0)::text AS foreign_applied,
             COALESCE(sum(app.base_applied), 0)::text AS base_applied
        FROM journal_entries je
        JOIN currencies c ON c.code = je.currency_code
        LEFT JOIN fx_settlement_applications app ON app.settlement_entry_id = je.id
       WHERE je.id = $1
-      GROUP BY je.currency_code, je.exchange_rate, c.precision`,
+      GROUP BY je.currency_code, je.exchange_rate_id, je.exchange_rate, c.precision`,
     [entryId],
   );
   const row = rows[0];
@@ -1161,16 +1465,22 @@ async function summarizeSettlement(entryId: string, duplicate: boolean): Promise
   const foreignApplied = BigInt(row.foreign_applied);
   const baseApplied = BigInt(row.base_applied);
   const settlementBase = convertToBaseMinor(foreignApplied, row.exchange_rate, row.precision);
+  // The obligation view, exactly as the live path signs it: a payable settled
+  // below its booked base is a GAIN, so a retry of that settlement must
+  // report the same sign the original response did — never a recomputed
+  // asset-view number.
+  const rawDifference = settlementBase - baseApplied;
+  const realizedDifference = row.direction === "payable" ? -rawDifference : rawDifference;
   return {
     entryId,
     duplicate,
     currencyCode: row.currency_code,
-    rateId: "",
+    rateId: row.exchange_rate_id ?? "",
     rate: row.exchange_rate,
     foreignSettled: foreignApplied.toString(),
     baseSettledAtBooking: baseApplied.toString(),
     baseSettledAtSettlementRate: settlementBase.toString(),
-    realizedDifference: (settlementBase - baseApplied).toString(),
+    realizedDifference: realizedDifference.toString(),
     applications: [],
   };
 }
@@ -1223,11 +1533,126 @@ interface RevaluationOutcomeRow {
  * base* (which already includes earlier revaluations) against the new rate,
  * runs compose without reversal entries.
  */
+/**
+ * Everything a revaluation needs to DECIDE — currency, the rate in force at
+ * the end of `asOf`, and the per-account restatement outcomes (both balances
+ * cut off at the asOf entries). The run posts from this; the preview shows
+ * it. The signed-balance cases ride through restateForeignBalance: a negative
+ * net position flips to the other side of the 4935/5875 pair, and a
+ * credit-normal (liability) account flips gain and loss.
+ */
+async function computeRevaluationOutcomes(
+  businessId: string,
+  currencyCode: string,
+  asOf: string,
+  rateId: string | null,
+): Promise<{
+  currency: { precision: number };
+  rate: { id: string; rate: string; currencyCode: string };
+  effective: RevaluationOutcomeRow[];
+}> {
+  const currency = await assertCurrencyAvailable(businessId, currencyCode);
+  // «As of» a date means the rate in force at the END of that day, against
+  // the balances as they stood by that day's entries — never today's rate
+  // against a historical cutoff, and never entries the cutoff has not
+  // reached yet.
+  const rate = await resolveRate(businessId, currencyCode, {
+    rateId,
+    at: new Date(`${asOf}T23:59:59.999Z`),
+  });
+
+  // Book base = the account's WHOLE balance (any posting that moved it);
+  // foreign balance = the currency's own lines. The restatement brings the
+  // book value to rate × foreign, absorbing anything else on the account.
+  // Both subqueries cut off at asOf.
+  const { rows: accounts } = await query<{
+    id: string;
+    type: string;
+    foreign_balance: string;
+    book_base: string;
+  }>(
+    `SELECT a.id, a.type::text AS type,
+            (SELECT COALESCE(sum(jl.foreign_debit) - sum(jl.foreign_credit), 0)
+               FROM journal_lines jl
+               JOIN journal_entries je ON je.id = jl.entry_id
+              WHERE jl.account_id = a.id AND je.currency_code = $2
+                AND je.entry_date <= $3::date)::text AS foreign_balance,
+            (SELECT COALESCE(sum(jl.debit) - sum(jl.credit), 0)
+               FROM journal_lines jl
+               JOIN journal_entries je ON je.id = jl.entry_id
+              WHERE jl.account_id = a.id AND je.entry_date <= $3::date)::text AS book_base
+       FROM accounts a
+      WHERE a.business_id = $1 AND a.currency_code = $2`,
+    [businessId, currencyCode, asOf],
+  );
+
+  const effective: RevaluationOutcomeRow[] = accounts
+    .map((a) => ({
+      accountId: a.id,
+      foreignBalance: BigInt(a.foreign_balance),
+      bookBase: BigInt(a.book_base),
+      outcome: restateForeignBalance({
+        foreignBalanceMinor: BigInt(a.foreign_balance),
+        bookBaseMinor: BigInt(a.book_base),
+        rate: rate.rate,
+        precision: currency.precision,
+        debitNormal: a.type === "asset" || a.type === "expense",
+      }),
+    }))
+    .filter((o) => o.outcome.difference !== 0n);
+  return { currency, rate, effective };
+}
+
+/** The preview: exactly what the run would post, without posting it. */
+export async function previewFxRevaluation(params: {
+  businessId: string;
+  currencyCode: string;
+  asOf: string;
+  rateId: string | null;
+}): Promise<{
+  currencyCode: string;
+  asOf: string;
+  rateId: string;
+  rate: string;
+  totalGain: string;
+  totalLoss: string;
+  lines: { accountId: string; foreignBalance: string; bookBaseBalance: string; newBaseValue: string; difference: string }[];
+}> {
+  if (!isValidCurrencyCode(params.currencyCode?.trim().toUpperCase() ?? "")) {
+    throw new MulticurrencyError("invalid_currency");
+  }
+  if (!isValidIsoDate(params.asOf)) throw new MulticurrencyError("invalid_as_of");
+  return withTenantTransaction(params.businessId, async () => {
+    const { rate, effective } = await computeRevaluationOutcomes(
+      params.businessId,
+      params.currencyCode.trim().toUpperCase(),
+      params.asOf,
+      params.rateId,
+    );
+    return {
+      currencyCode: params.currencyCode.trim().toUpperCase(),
+      asOf: params.asOf,
+      rateId: rate.id,
+      rate: rate.rate,
+      totalGain: effective.reduce((s, o) => s + o.outcome.gain, 0n).toString(),
+      totalLoss: effective.reduce((s, o) => s + o.outcome.loss, 0n).toString(),
+      lines: effective.map((o) => ({
+        accountId: o.accountId,
+        foreignBalance: o.foreignBalance.toString(),
+        bookBaseBalance: o.bookBase.toString(),
+        newBaseValue: o.outcome.newValue.toString(),
+        difference: o.outcome.difference.toString(),
+      })),
+    };
+  });
+}
+
 export async function runFxRevaluation(params: RevaluateParams): Promise<RevaluationResult> {
   const currencyCode = params.currencyCode?.trim().toUpperCase();
   if (!isValidCurrencyCode(currencyCode)) throw new MulticurrencyError("invalid_currency");
   if (!isValidIsoDate(params.asOf)) throw new MulticurrencyError("invalid_as_of");
-  return withTenantTransaction(params.businessId, async () => {
+  try {
+    return await withTenantTransaction(params.businessId, async () => {
     if (params.idempotencyKey) {
       const { rows: existing } = await query<{
         id: string;
@@ -1238,13 +1663,22 @@ export async function runFxRevaluation(params: RevaluateParams): Promise<Revalua
         as_of: Date;
         total_gain: string;
         total_loss: string;
+        idempotency_payload_hash: string | null;
       }>(
         `SELECT id, entry_id, currency_code, rate_id, rate, as_of,
-                total_gain::text AS total_gain, total_loss::text AS total_loss
+                total_gain::text AS total_gain, total_loss::text AS total_loss,
+                idempotency_payload_hash
            FROM fx_revaluations WHERE business_id = $1 AND idempotency_key = $2`,
         [params.businessId, params.idempotencyKey],
       );
       if (existing[0]) {
+        // Same contract as entries: the key replays ONE run. A different
+        // request under the same key is refused rather than answered with
+        // the first run's numbers.
+        const hash = revaluationHash(params);
+        if (existing[0].idempotency_payload_hash && existing[0].idempotency_payload_hash !== hash) {
+          throw new MulticurrencyError("idempotency_payload_mismatch", 409);
+        }
         return {
           revaluationId: existing[0].id,
           entryId: existing[0].entry_id,
@@ -1260,51 +1694,17 @@ export async function runFxRevaluation(params: RevaluateParams): Promise<Revalua
       }
     }
 
-    const currency = await assertCurrencyAvailable(params.businessId, currencyCode);
-    const rate = await resolveRate(params.businessId, currencyCode, { rateId: params.rateId });
-
-    // Book base = the account's WHOLE balance (any posting that moved it);
-    // foreign balance = the currency's own lines. The restatement brings the
-    // book value to rate × foreign, absorbing anything else on the account.
-    const { rows: accounts } = await query<{
-      id: string;
-      type: string;
-      foreign_balance: string;
-      book_base: string;
-    }>(
-      `SELECT a.id, a.type::text AS type,
-              (SELECT COALESCE(sum(jl.foreign_debit) - sum(jl.foreign_credit), 0)
-                 FROM journal_lines jl
-                 JOIN journal_entries je ON je.id = jl.entry_id
-                WHERE jl.account_id = a.id AND je.currency_code = $2)::text AS foreign_balance,
-              (SELECT COALESCE(sum(jl.debit) - sum(jl.credit), 0)
-                 FROM journal_lines jl
-                WHERE jl.account_id = a.id)::text AS book_base
-         FROM accounts a
-        WHERE a.business_id = $1 AND a.currency_code = $2`,
-      [params.businessId, currencyCode],
+    const { currency, rate, effective } = await computeRevaluationOutcomes(
+      params.businessId,
+      currencyCode,
+      params.asOf,
+      params.rateId,
     );
-
-    const outcomes: RevaluationOutcomeRow[] = accounts
-      .map((a) => ({
-        accountId: a.id,
-        foreignBalance: BigInt(a.foreign_balance),
-        bookBase: BigInt(a.book_base),
-        outcome: restateForeignBalance({
-          foreignBalanceMinor: BigInt(a.foreign_balance),
-          bookBaseMinor: BigInt(a.book_base),
-          rate: rate.rate,
-          precision: currency.precision,
-          debitNormal: a.type === "asset" || a.type === "expense",
-        }),
-      }))
-      .filter((o) => o.outcome.difference !== 0n);
-    const effective = outcomes;
 
     const { rows: runRows } = await query<{ id: string }>(
       `INSERT INTO fx_revaluations
-         (business_id, currency_code, as_of, rate_id, rate, rounding_version, total_gain, total_loss, idempotency_key, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         (business_id, currency_code, as_of, rate_id, rate, rounding_version, total_gain, total_loss, idempotency_key, idempotency_payload_hash, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id`,
       [
         params.businessId,
@@ -1316,6 +1716,7 @@ export async function runFxRevaluation(params: RevaluateParams): Promise<Revalua
         effective.reduce((s, o) => s + o.outcome.gain, 0n).toString(),
         effective.reduce((s, o) => s + o.outcome.loss, 0n).toString(),
         params.idempotencyKey,
+        params.idempotencyKey ? revaluationHash(params) : null,
         params.actorId,
       ],
     );
@@ -1400,6 +1801,56 @@ export async function runFxRevaluation(params: RevaluateParams): Promise<Revalua
       duplicate: false,
     };
   });
+  } catch (error) {
+    // Two concurrent runs raced the same idempotency key past the pre-check;
+    // the partial unique let exactly one insert. The loser answers with the
+    // winner's persisted run — on a fresh transaction, since the aborted one
+    // is no longer usable.
+    if ((error as { code?: string }).code === "23505" && params.idempotencyKey) {
+      return withTenantTransaction(params.businessId, async () => {
+        const { rows } = await query<{ id: string }>(
+          `SELECT id FROM fx_revaluations WHERE business_id = $1 AND idempotency_key = $2`,
+          [params.businessId, params.idempotencyKey],
+        );
+        if (!rows[0]) throw error;
+        return summarizeRevaluation(rows[0].id, true);
+      });
+    }
+    throw error;
+  }
+}
+
+/** The stored shape of a revaluation run — what a duplicate retry answers with. */
+async function summarizeRevaluation(revaluationId: string, duplicate: boolean): Promise<RevaluationResult> {
+  const { rows } = await query<{
+    id: string;
+    entry_id: string | null;
+    currency_code: string;
+    rate_id: string;
+    rate: string;
+    as_of: Date;
+    total_gain: string;
+    total_loss: string;
+  }>(
+    `SELECT id, entry_id, currency_code, rate_id, rate, as_of,
+            total_gain::text AS total_gain, total_loss::text AS total_loss
+       FROM fx_revaluations WHERE id = $1`,
+    [revaluationId],
+  );
+  const row = rows[0];
+  if (!row) throw new MulticurrencyError("entry_not_found", 404);
+  return {
+    revaluationId: row.id,
+    entryId: row.entry_id,
+    currencyCode: row.currency_code,
+    rateId: row.rate_id,
+    rate: row.rate,
+    asOf: row.as_of.toISOString().slice(0, 10),
+    totalGain: row.total_gain,
+    totalLoss: row.total_loss,
+    lines: await loadRevaluationLines(row.id),
+    duplicate,
+  };
 }
 
 async function loadRevaluationLines(revaluationId: string) {

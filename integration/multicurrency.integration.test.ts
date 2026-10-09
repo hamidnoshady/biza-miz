@@ -130,7 +130,6 @@ beforeEach(async () => {
   await db.query("DELETE FROM fx_revaluations");
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
-  await db.query("DELETE FROM businesses");
   await db.query("UPDATE currencies SET is_active = true");
 
   const bizRow = await db.query<{ id: string }>(
@@ -911,11 +910,11 @@ describe("settlement of foreign receivables — realized FX", () => {
 
 describe("unrealized revaluation", () => {
   it("restates a foreign bank and posts the difference through 4935", async () => {
-    const rateId = await seedRate("600000");
+    const rateId = await seedRate("600000", "2026-03-01T09:00:00.000Z");
     await svc.postMulticurrencyEntry({
       businessId: biz.id,
       locationId: null,
-      entryDate: null,
+      entryDate: "2026-03-15",
       memo: "واریز ارزی",
       currencyCode: "USD",
       rateId,
@@ -927,7 +926,7 @@ describe("unrealized revaluation", () => {
       idempotencyKey: null,
     });
 
-    await seedRate("620000");
+    await seedRate("620000", "2026-03-31T09:00:00.000Z");
     const run = await svc.runFxRevaluation({
       businessId: biz.id,
       currencyCode: "USD",
@@ -963,7 +962,7 @@ describe("unrealized revaluation", () => {
     expect(again.entryId).toBeNull();
 
     // A rate drop posts the increment as a loss.
-    await seedRate("610000");
+    await seedRate("610000", "2026-04-30T09:00:00.000Z");
     const downward = await svc.runFxRevaluation({
       businessId: biz.id,
       currencyCode: "USD",
@@ -984,11 +983,11 @@ describe("unrealized revaluation", () => {
 
   it("is idempotent by key", async () => {
     const key = `reval-${randomUUID()}`;
-    const rateId = await seedRate("600000");
+    const rateId = await seedRate("600000", "2026-03-01T09:00:00.000Z");
     await svc.postMulticurrencyEntry({
       businessId: biz.id,
       locationId: null,
-      entryDate: null,
+      entryDate: "2026-03-15",
       memo: "واریز",
       currencyCode: "USD",
       rateId,
@@ -999,7 +998,7 @@ describe("unrealized revaluation", () => {
       createdBy: user.id,
       idempotencyKey: null,
     });
-    await seedRate("610000");
+    await seedRate("610000", "2026-03-31T09:00:00.000Z");
     const first = await svc.runFxRevaluation({
       businessId: biz.id,
       currencyCode: "USD",
@@ -1189,5 +1188,539 @@ describe("the base ledger is untouched and visible", () => {
       [biz.id],
     );
     expect(rows[0].count).toBe("1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #863 hardening: open-lot awareness, contention determinism, guards,
+// asOf revaluation, audited party moves, direction-aware reporting.
+// ---------------------------------------------------------------------------
+
+describe("issue #863 — open lots, settlement guards and contention", () => {
+  async function createParty(name: string, role: "customer" | "supplier" = "customer"): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, role) VALUES ($1, $2, $3) RETURNING id`,
+      [biz.id, name, role],
+    );
+    return rows[0].id;
+  }
+
+  it("lists open lots reversal-aware: a reversed invoice stops being selectable", async () => {
+    const partyId = await createParty("شرکت گاما");
+    const rateId = await seedRate("600000");
+    const entryId = await postForeignInvoice({ rateId, partyId, foreignCents: 10000n });
+
+    const open = await svc.listOpenLots({ businessId: biz.id, direction: "receivable", currencyCode: "USD", partyId });
+    expect(open).toHaveLength(1);
+    expect(open[0].foreignRemaining).toBe("10000");
+    expect(open[0].baseRemaining).toBe("60000000");
+    expect(open[0].entryId).toBe(entryId);
+
+    await svc.reverseFxEntry({ businessId: biz.id, entryId, actorId: user.id });
+    const afterReversal = await svc.listOpenLots({
+      businessId: biz.id,
+      direction: "receivable",
+      currencyCode: "USD",
+      partyId,
+    });
+    expect(afterReversal).toHaveLength(0);
+  });
+
+  it("restores the lot when the SETTLEMENT is reversed, keeping history append-only", async () => {
+    const partyId = await createParty("شرکت دلتا");
+    await seedRate("600000");
+    await postForeignInvoice({ rateId: (await svc.listRates(biz.id, "USD", 1))[0].id, partyId, foreignCents: 10000n });
+    await seedRate("610000");
+    const settlement = await svc.settleForeignDocument({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      direction: "receivable",
+      partyId,
+      currencyCode: "USD",
+      rateId: null,
+      settlementAccountId: acct.bankFx,
+      autoAmount: "10000",
+      items: [],
+      entryDate: null,
+      memo: "دریافت",
+      actorId: user.id,
+      idempotencyKey: `stl-${randomUUID()}`,
+    });
+
+    // Nothing open while the settlement stands.
+    expect(
+      await svc.listOpenLots({ businessId: biz.id, direction: "receivable", currencyCode: "USD", partyId }),
+    ).toHaveLength(0);
+
+    // Reversing the settlement gives the money back: the lot reopens.
+    const { entryId: settlementReversal } = await svc.reverseFxEntry({
+      businessId: biz.id,
+      entryId: settlement.entryId,
+      actorId: user.id,
+    });
+    expect(settlementReversal).toBeTruthy();
+
+    const reopened = await svc.listOpenLots({
+      businessId: biz.id,
+      direction: "receivable",
+      currencyCode: "USD",
+      partyId,
+    });
+    expect(reopened).toHaveLength(1);
+    expect(reopened[0].foreignRemaining).toBe("10000");
+    expect(reopened[0].baseRemaining).toBe("60000000");
+
+    // History is append-only: the applications still exist, they simply stop counting.
+    const { rows: apps } = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM fx_settlement_applications WHERE business_id = $1`,
+      [biz.id],
+    );
+    expect(apps[0].count).toBe("1");
+  });
+
+  it("serializes concurrent settlements of one remaining lot: exactly one wins, the lot is never over-consumed", async () => {
+    const partyId = await createParty("شرکت اپسیلون");
+    await seedRate("600000");
+    await postForeignInvoice({ rateId: (await svc.listRates(biz.id, "USD", 1))[0].id, partyId, foreignCents: 10000n });
+    await seedRate("620000");
+
+    // Two requests race for the same $100. The row lock inside the settlement
+    // transaction makes the second see the first's applications: it must be
+    // refused, not double-settle.
+    const attempts = await Promise.allSettled(
+      [randomUUID(), randomUUID()].map((key) =>
+        svc.settleForeignDocument({
+          businessId: biz.id,
+          locationId: biz.locationId,
+          direction: "receivable",
+          partyId,
+          currencyCode: "USD",
+          rateId: null,
+          settlementAccountId: acct.bankFx,
+          autoAmount: "10000",
+          items: [],
+          entryDate: null,
+          memo: "دریافت هم‌زمان",
+          actorId: user.id,
+          idempotencyKey: key,
+        }),
+      ),
+    );
+
+    const fulfilled = attempts.filter((a) => a.status === "fulfilled");
+    const rejected = attempts.filter((a) => a.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String((rejected[0] as PromiseRejectedResult).reason)).toContain("insufficient_open_balance");
+
+    // The winner's booking is intact and exact, and the books reconcile.
+    const winner = (fulfilled[0] as PromiseFulfilledResult<{ baseSettledAtBooking: string; realizedDifference: string }>).value;
+    expect(winner.baseSettledAtBooking).toBe("60000000");
+    expect(winner.realizedDifference).toBe("2000000"); // 62M − 60M
+
+    const { rows: totals } = await db.query<{ foreign: string; base: string }>(
+      `SELECT sum(foreign_applied)::text AS foreign, sum(base_applied)::text AS base
+         FROM fx_settlement_applications WHERE business_id = $1`,
+      [biz.id],
+    );
+    expect(totals[0].foreign).toBe("10000"); // never 20000
+    expect(totals[0].base).toBe("60000000");
+  });
+
+  it("rejects a settled invoice's reversal with entry_has_active_settlements", async () => {
+    const partyId = await createParty("شرکت زتا");
+    await seedRate("600000");
+    // Invoice: Dr A/R / Cr revenue — the A/R lot carries the party.
+    const invoiceId = await postForeignInvoice({
+      rateId: (await svc.listRates(biz.id, "USD", 1))[0].id,
+      partyId,
+      foreignCents: 5000n,
+    });
+    await svc.settleForeignDocument({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      direction: "receivable",
+      partyId,
+      currencyCode: "USD",
+      rateId: null,
+      settlementAccountId: acct.bankFx,
+      autoAmount: "5000",
+      items: [],
+      entryDate: null,
+      memo: "دریافت",
+      actorId: user.id,
+      idempotencyKey: `stl-${randomUUID()}`,
+    });
+    await expect(
+      svc.reverseFxEntry({ businessId: biz.id, entryId: invoiceId, actorId: user.id }),
+    ).rejects.toThrow("entry_has_active_settlements");
+  });
+
+  it("keeps idempotent settlement replays stable and refuses a different payload under the same key", async () => {
+    const partyId = await createParty("شرکت اتا");
+    await seedRate("600000");
+    // $200 open: enough for the 8000c settlement, the 3000c shared-key one,
+    // and room for the refused 5000c replay attempt.
+    await postForeignInvoice({ rateId: (await svc.listRates(biz.id, "USD", 1))[0].id, partyId, foreignCents: 20000n });
+    await seedRate("605000");
+
+    const params = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      direction: "receivable" as const,
+      partyId,
+      currencyCode: "USD",
+      rateId: null,
+      settlementAccountId: acct.bankFx,
+      autoAmount: "8000",
+      items: [],
+      entryDate: null,
+      memo: "دریافت همگام",
+      actorId: user.id,
+    };
+
+    const first = await svc.settleForeignDocument({ ...params, idempotencyKey: `stl-stable-${randomUUID()}` });
+    expect(first.duplicate).toBe(false);
+
+    // Same key, DIFFERENT payload (amount differs): refused, never silently re-run.
+    const sharedKey = `stl-shared-${randomUUID()}`;
+    const original = await svc.settleForeignDocument({ ...params, autoAmount: "3000", idempotencyKey: sharedKey });
+    await expect(
+      svc.settleForeignDocument({ ...params, autoAmount: "5000", idempotencyKey: sharedKey }),
+    ).rejects.toThrow("idempotency_payload_mismatch");
+    expect(original.foreignSettled).toBe("3000");
+  });
+
+  it("rejects duplicate explicit items in one settlement with duplicate_entry_reference", async () => {
+    const partyId = await createParty("شرکت ثتا");
+    await seedRate("600000");
+    await postForeignInvoice({ rateId: (await svc.listRates(biz.id, "USD", 1))[0].id, partyId, foreignCents: 9000n });
+
+    const open = await svc.listOpenLots({ businessId: biz.id, direction: "receivable", currencyCode: "USD", partyId });
+    expect(open).toHaveLength(1);
+    await expect(
+      svc.settleForeignDocument({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        direction: "receivable",
+        partyId,
+        currencyCode: "USD",
+        rateId: null,
+        settlementAccountId: acct.bankFx,
+        autoAmount: null,
+        items: [
+          { entryId: open[0].entryId, amount: "4000" },
+          { entryId: open[0].entryId, amount: "4000" },
+        ],
+        entryDate: null,
+        memo: "اقلام تکراری",
+        actorId: user.id,
+        idempotencyKey: `stl-${randomUUID()}`,
+      }),
+    ).rejects.toThrow("duplicate_entry_reference");
+  });
+});
+
+describe("issue #863 — revaluation determinism", () => {
+  async function createParty(name: string): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, role) VALUES ($1, $2, 'customer') RETURNING id`,
+      [biz.id, name],
+    );
+    return rows[0].id;
+  }
+
+  it("previews exactly what the run posts, at the asOf rate over asOf balances", async () => {
+    // The revaluation restates the accounts that NAME the currency — the FX
+    // bank. Day 1: $100 deposited at 60,000. Day 2: $50 more at 70,000, and
+    // then a late-day correction to 720,000.
+    const day1 = "2026-03-01";
+    const day2 = "2026-03-02";
+    async function deposit(date: string, cents: bigint, memo: string) {
+      const latest = (await svc.listRates(biz.id, "USD", 1))[0].id;
+      await svc.postMulticurrencyEntry({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        entryDate: date,
+        memo,
+        currencyCode: "USD",
+        rateId: latest,
+        lines: [
+          { accountId: acct.bankFx, side: "debit", foreignMinor: cents },
+          { accountId: acct.fxRealizedGain, side: "credit", foreignMinor: cents },
+        ],
+        createdBy: user.id,
+        idempotencyKey: null,
+      });
+    }
+    await seedRate("600000", `${day1}T09:00:00.000Z`);
+    await deposit(day1, 10000n, "واریز روز اول");
+    await seedRate("700000", `${day2}T09:00:00.000Z`);
+    await deposit(day2, 5000n, "واریز روز دوم");
+    await seedRate("720000", `${day2}T21:00:00.000Z`);
+
+    const preview = await svc.previewFxRevaluation({ businessId: biz.id, currencyCode: "USD", asOf: day2, rateId: null });
+    expect(preview.rate).toBe("720000"); // end-of-day rate, not the first day-2 rate
+    expect(preview.lines).toHaveLength(1);
+    // Bank book: 60,000,000 + 35,000,000 = 95,000,000. New: $150 × 720,000 = 108,000,000.
+    const bankLine = preview.lines[0];
+    expect(bankLine.accountId).toBe(acct.bankFx);
+    expect(bankLine.foreignBalance).toBe("15000");
+    expect(bankLine.bookBaseBalance).toBe("95000000");
+    expect(bankLine.newBaseValue).toBe("108000000");
+    expect(bankLine.difference).toBe("13000000");
+
+    // Preview and run agree — one computation, two doors.
+    const run = await svc.runFxRevaluation({
+      businessId: biz.id,
+      currencyCode: "USD",
+      asOf: day2,
+      rateId: null,
+      actorId: user.id,
+      idempotencyKey: `reval-${randomUUID()}`,
+    });
+    expect(run.totalGain).toBe(preview.totalGain);
+    expect(run.totalLoss).toBe(preview.totalLoss);
+
+    // A preview for day 1 sees only day-1 entries at the day-1 end rate.
+    await seedRate("610000", `${day1}T20:00:00.000Z`);
+    const previewDay1 = await svc.previewFxRevaluation({ businessId: biz.id, currencyCode: "USD", asOf: day1, rateId: null });
+    expect(previewDay1.rate).toBe("610000");
+    expect(previewDay1.lines[0].foreignBalance).toBe("10000");
+    expect(previewDay1.lines[0].bookBaseBalance).toBe("60000000");
+    expect(previewDay1.lines[0].difference).toBe("1000000"); // 61M − 60M
+  });
+
+  it("answers a replayed revaluation key with the original run and refuses a different one", async () => {
+    await seedRate("600000");
+    await svc.postMulticurrencyEntry({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      entryDate: null,
+      memo: "واریز ارزی",
+      currencyCode: "USD",
+      rateId: (await svc.listRates(biz.id, "USD", 1))[0].id,
+      lines: [
+        { accountId: acct.bankFx, side: "debit", foreignMinor: 10000n },
+        { accountId: acct.fxRealizedGain, side: "credit", foreignMinor: 10000n },
+      ],
+      createdBy: user.id,
+      idempotencyKey: null,
+    });
+    await seedRate("620000");
+
+    const key = `reval-shared-${randomUUID()}`;
+    const first = await svc.runFxRevaluation({
+      businessId: biz.id,
+      currencyCode: "USD",
+      asOf: "2026-12-31",
+      rateId: null,
+      actorId: user.id,
+      idempotencyKey: key,
+    });
+    expect(first.duplicate).toBe(false);
+
+    const replay = await svc.runFxRevaluation({
+      businessId: biz.id,
+      currencyCode: "USD",
+      asOf: "2026-12-31",
+      rateId: null,
+      actorId: user.id,
+      idempotencyKey: key,
+    });
+    expect(replay.duplicate).toBe(true);
+    expect(replay.entryId).toBe(first.entryId);
+    expect(replay.totalGain).toBe(first.totalGain);
+    // The run restated the bank: $100 from 60M to 62M is a 2M unrealized gain.
+    expect(first.totalGain).toBe("2000000");
+    expect(first.entryId).not.toBeNull();
+
+    await expect(
+      svc.runFxRevaluation({
+        businessId: biz.id,
+        currencyCode: "EUR",
+        asOf: "2026-12-31",
+        rateId: null,
+        actorId: user.id,
+        idempotencyKey: key,
+      }),
+    ).rejects.toThrow("idempotency_payload_mismatch");
+  });
+
+  it("restates a negative (credit) foreign bank position through the signed path", async () => {
+    // The FX bank OVERDRAFT: the account's foreign balance goes negative.
+    // The restatement must follow the sign, not blind-debit 4935.
+    await seedRate("600000");
+    await svc.postMulticurrencyEntry({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      entryDate: null,
+      memo: "برداشت ارزی — مانده منفی",
+      currencyCode: "USD",
+      rateId: (await svc.listRates(biz.id, "USD", 1))[0].id,
+      lines: [
+        { accountId: acct.fxRealizedGain, side: "debit", foreignMinor: 4000n }, // stand-in expense leg
+        { accountId: acct.bankFx, side: "credit", foreignMinor: 4000n },
+      ],
+      createdBy: user.id,
+      idempotencyKey: null,
+    });
+    await seedRate("650000");
+
+    const preview = await svc.previewFxRevaluation({ businessId: biz.id, currencyCode: "USD", asOf: "2026-12-31", rateId: null });
+    const bankLine = preview.lines.find((l) => l.accountId === acct.bankFx);
+    expect(bankLine).toBeDefined();
+    expect(bankLine!.foreignBalance).toBe("-4000");
+    expect(bankLine!.bookBaseBalance).toBe("-24000000");
+    expect(bankLine!.newBaseValue).toBe("-26000000");
+    // A deeper overdraft at a stronger dollar is a LOSS (5875), not a gain.
+    expect(bankLine!.difference).toBe("-2000000");
+  });
+});
+
+describe("issue #863 — configuration guards", () => {
+  it("locks the base currency once foreign financial activity exists", async () => {
+    await seedRate("600000");
+    await postForeignInvoice({ rateId: (await svc.listRates(biz.id, "USD", 1))[0].id, foreignCents: 1000n });
+    await expect(
+      svc.setBusinessCurrencies(biz.id, { baseCurrencyCode: "EUR", transactionCurrencyCodes: ["USD"] }),
+    ).rejects.toThrow("base_currency_locked");
+    // Without activity, the switch is still possible.
+    const otherBizConfig = await svc.setBusinessCurrencies(otherBiz.id, {
+      baseCurrencyCode: "EUR",
+      transactionCurrencyCodes: ["USD"],
+    });
+    expect(otherBizConfig.baseCurrencyCode).toBe("EUR");
+  });
+
+  it("locks a currency's precision once it has been used, atomically", async () => {
+    await seedRate("600000");
+    await postForeignInvoice({ rateId: (await svc.listRates(biz.id, "USD", 1))[0].id, foreignCents: 1000n });
+    await expect(svc.updateCurrency("USD", { precision: 0 })).rejects.toThrow("currency_precision_locked");
+    // A currency with no usage can still change precision.
+    await svc.updateCurrency("AED", { precision: 1 });
+  });
+});
+
+describe("issue #863 — party-merge journal attribution is audited", () => {
+  async function createParty(name: string): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, role) VALUES ($1, $2, 'customer') RETURNING id`,
+      [biz.id, name],
+    );
+    return rows[0].id;
+  }
+
+  it("moves journal_lines.party_id only through a recorded attribution move", async () => {
+    const { mergeCustomers } = await import("../src/lib/crm-service");
+    const winner = await createParty("خریدار اصلی");
+    const loser = await createParty("پروندهٔ ادغام‌شده");
+    const rateId = await seedRate("600000");
+    // The loser holds a foreign receivable lot.
+    const invoiceId = await postForeignInvoice({ rateId, partyId: loser, foreignCents: 7000n });
+    void invoiceId;
+
+    const result = await mergeCustomers(biz.id, winner, loser, { mergedByUserId: user.id });
+    expect(result).not.toBeNull();
+
+    const { rows: moved } = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM journal_lines WHERE party_id = $1`,
+      [winner],
+    );
+    expect(moved[0].count).toBe("1");
+
+    const { rows: audit } = await db.query<{ actor: string | null }>(
+      `SELECT actor_id::text AS actor FROM ledger_party_attribution_moves WHERE new_party_id = $1 AND old_party_id = $2`,
+      [winner, loser],
+    );
+    expect(audit).toHaveLength(1);
+    expect(audit[0].actor).toBe(user.id);
+
+    // The moved lot is now the winner's, and the history of the move is queryable.
+    const open = await svc.listOpenLots({ businessId: biz.id, direction: "receivable", currencyCode: "USD", partyId: winner });
+    expect(open).toHaveLength(1);
+    expect(open[0].foreignRemaining).toBe("7000");
+  });
+});
+
+describe("issue #863 — direction-aware settlement reporting", () => {
+  it("reports a payable at what settling it actually cost, not what was booked", async () => {
+    // Booked 60,000,000 ($100 @ 600,000); settled for 55,000,000 ($100 @ 550,000);
+    // the 5,000,000 difference is a GAIN for the buyer. The «settled» column
+    // must read 55,000,000 — the cash that left — for BOTH directions.
+    const { rows: supplierRows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, role) VALUES ($1, 'تأمین‌کننده گزارش', 'supplier') RETURNING id`,
+      [biz.id],
+    );
+    await svc.postMulticurrencyEntry({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      entryDate: "2026-03-01",
+      memo: "خرید ارزی",
+      currencyCode: "USD",
+      rateId: await seedRate("600000", "2026-03-01T09:00:00.000Z"),
+      lines: [
+        { accountId: acct.ar, side: "debit", foreignMinor: 10000n }, // stand-in asset
+        { accountId: acct.ap, side: "credit", foreignMinor: 10000n, partyId: supplierRows[0].id },
+      ],
+      createdBy: user.id,
+      idempotencyKey: null,
+    });
+    await seedRate("550000", "2026-03-05T09:00:00.000Z");
+    await svc.settleForeignDocument({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      direction: "payable",
+      partyId: supplierRows[0].id,
+      currencyCode: "USD",
+      rateId: null,
+      settlementAccountId: acct.bankFx,
+      autoAmount: "10000",
+      items: [],
+      entryDate: "2026-03-05",
+      memo: "پرداخت",
+      actorId: user.id,
+      idempotencyKey: `stl-${randomUUID()}`,
+    });
+
+    const report = await reports.gainLossReport(biz.id, { dateFrom: "2026-03-01", dateTo: "2026-03-28" });
+    expect(report.realized).toHaveLength(1);
+    const row = report.realized[0];
+    expect(row.direction).toBe("payable");
+    expect(row.baseAtBooking).toBe("60000000");
+    expect(row.baseAtSettlement).toBe("55000000"); // the paid amount
+    expect(row.difference).toBe("5000000"); // gain, obligation view
+
+    // Reversed settlements never appear in the realized report.
+    const { rows: settlements } = await db.query<{ id: string }>(
+      `SELECT id::text AS id FROM journal_entries WHERE business_id = $1 AND source_type = 'fx_settlement' AND reverses_entry_id IS NULL AND reversed_at IS NULL`,
+      [biz.id],
+    );
+    for (const s of settlements) {
+      await svc.reverseFxEntry({ businessId: biz.id, entryId: s.id, actorId: user.id });
+    }
+    const after = await reports.gainLossReport(biz.id, { dateFrom: "2026-03-01", dateTo: "2026-03-28" });
+    expect(after.realized).toHaveLength(0);
+  });
+});
+
+describe("issue #863 — dimension carry", () => {
+  it("carries projectId from a foreign document into its reversal", async () => {
+    const { rows: projectRows } = await db.query<{ id: string }>(
+      `INSERT INTO ai_projects (business_id, name, created_by) VALUES ($1, 'پروژهٔ ارزی', $2) RETURNING id`,
+      [biz.id, user.id],
+    );
+    const projectId = projectRows[0].id;
+    const rateId = await seedRate("600000");
+    const invoiceId = await postForeignInvoice({ rateId, foreignCents: 2000n });
+    // Stamp the project on the invoice entry, as a posting with a project would have.
+    await db.query(`UPDATE journal_entries SET project_id = $2 WHERE id = $1`, [invoiceId, projectId]);
+
+    const { entryId: reversalId } = await svc.reverseFxEntry({ businessId: biz.id, entryId: invoiceId, actorId: user.id });
+    const { rows: projRows } = await db.query<{ project_id: string | null }>(
+      `SELECT project_id::text AS project_id FROM journal_entries WHERE id = $1`,
+      [reversalId],
+    );
+    expect(projRows[0].project_id).toBe(projectId);
   });
 });
