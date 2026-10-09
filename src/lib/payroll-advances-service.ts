@@ -38,20 +38,42 @@ import type { PayrollAdvance } from "./payroll-types";
 export const ADVANCE_NOTE_MAX = 200;
 
 /**
- * Per member: standing advances minus what standing runs recovered, never
- * below zero. Run on the caller's client so an accrual reads it under its own
- * lock.
+ * Per member: what they still owe the business through payroll, never below
+ * zero — the one source of truth for both payroll paths:
+ *
+ *   salary advances (active)
+ *   + payroll debts from downward #865 supplemental corrections (approved+ runs)
+ *   − recoveries by #835 runs that are not voided
+ *   − recoveries by #865 engine runs that are not cancelled
+ *
+ * `excludeEngineRunId` leaves one engine run's own recovery out, for that run's
+ * recalculation. Run on the caller's client so an accrual reads it under its
+ * own lock.
  */
-export async function outstandingAdvances(run: Runner, businessId: string): Promise<Map<string, bigint>> {
+export async function outstandingAdvances(
+  run: Runner,
+  businessId: string,
+  options: { excludeEngineRunId?: string | null } = {},
+): Promise<Map<string, bigint>> {
   const { rows } = await run<{ user_id: string; outstanding: string }>(
-    `SELECT a.user_id, GREATEST(a.total - COALESCE(rec.recovered, 0), 0)::text AS outstanding
-       FROM (SELECT user_id, sum(amount) AS total FROM payroll_advances
-              WHERE business_id = $1 AND status = 'active' GROUP BY user_id) a
-       LEFT JOIN (SELECT rl.user_id, sum(rl.advance_recovery) AS recovered
-                    FROM payroll_run_lines rl JOIN payroll_runs r ON r.id = rl.run_id
-                   WHERE r.business_id = $1 AND r.status <> 'voided' AND rl.user_id IS NOT NULL
-                   GROUP BY rl.user_id) rec ON rec.user_id = a.user_id`,
-    [businessId],
+    `WITH owed AS (
+        SELECT user_id, amount AS owed, 0::bigint AS recovered FROM payroll_advances
+         WHERE business_id = $1 AND status = 'active'
+        UNION ALL
+        SELECT ps.user_id, ps.employee_debt, 0 FROM payroll_payslips ps JOIN payroll_engine_runs er ON er.id = ps.run_id
+         WHERE er.business_id = $1 AND er.status IN ('approved', 'posted', 'paid', 'closed')
+           AND ps.employee_debt > 0 AND ps.user_id IS NOT NULL
+        UNION ALL
+        SELECT rl.user_id, 0, rl.advance_recovery FROM payroll_run_lines rl JOIN payroll_runs r ON r.id = rl.run_id
+         WHERE r.business_id = $1 AND r.status <> 'voided' AND rl.user_id IS NOT NULL AND rl.advance_recovery > 0
+        UNION ALL
+        SELECT ps.user_id, 0, ps.advance_recovery FROM payroll_payslips ps JOIN payroll_engine_runs er ON er.id = ps.run_id
+         WHERE er.business_id = $1 AND er.status <> 'cancelled' AND ps.user_id IS NOT NULL AND ps.advance_recovery > 0
+           AND er.id IS DISTINCT FROM $2::uuid
+     )
+     SELECT user_id, GREATEST(sum(owed) - sum(recovered), 0)::text AS outstanding
+       FROM owed GROUP BY user_id HAVING sum(owed) > 0`,
+    [businessId, options.excludeEngineRunId ?? null],
   );
   return new Map(rows.map((r) => [r.user_id, BigInt(r.outstanding)]));
 }

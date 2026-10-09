@@ -26,3 +26,20 @@ export class PayrollError extends Error {
     this.details = typeof details === "string" ? { field: details } : details;
   }
 }
+
+/** Keys a client may attach to a create request: printable ASCII, no spaces, 8–128 characters. */
+const IDEMPOTENCY_KEY = /^[\x21-\x7e]{8,128}$/;
+
+/**
+ * The idempotency key of a payroll create request — the #835 accrual and the
+ * #865 engine run share this one rule. Absent/blank = none; anything else that
+ * is not a printable 8–128 character key is refused.
+ */
+export function normalizeIdempotencyKey(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new PayrollError("idempotency_key_invalid");
+  const key = value.trim();
+  if (key === "") return null;
+  if (!IDEMPOTENCY_KEY.test(key)) throw new PayrollError("idempotency_key_invalid");
+  return key;
+}
