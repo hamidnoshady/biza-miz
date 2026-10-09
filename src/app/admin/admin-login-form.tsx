@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { EyeIcon, EyeOffIcon } from "lucide-react";
 import { cardClass } from "@/app/dashboard/page-chrome";
@@ -263,12 +263,10 @@ export default function AdminLoginForm() {
         </div>
 
         {/*
-          Issue #885 L10 — the recovery path. This deployment has no
-          transactional email transport wired for platform identities (the
-          message outbox is campaign-scoped and billing-metered), so the
-          honest answer is the one that actually works today: an owner or
-          admin issues a single-use reset link from the team screen. Saying
-          "we sent you an email" would be a promise nothing keeps.
+          Issue #885 L10 — the recovery path. The panel lets a locked-out
+          manager request a reset link directly; the admin-issued link from
+          the team screen stays available underneath it as the fallback for
+          installs with no SMTP configured.
         */}
         <div className="text-end">
           <button
@@ -280,7 +278,7 @@ export default function AdminLoginForm() {
             رمز عبور را فراموش کرده‌اید؟
           </button>
         </div>
-        {showRecovery ? <RecoveryHelp /> : null}
+        {showRecovery ? <RecoveryHelp defaultEmail={email} /> : null}
 
         {/*
           Issue #885 L12 — a live region, not an ordinary paragraph. A
@@ -441,20 +439,103 @@ function BusinessPicker({
 }
 
 /**
- * Issue #885 L10 — how a locked-out manager actually gets back in.
+ * Issue #885 L10 — forgotten-password initiation.
  *
- * Deliberately not a "we emailed you" flow: this deployment has no
- * transactional email transport wired for platform identities. The message
- * outbox in `message-outbox-service.ts` is campaign-scoped and reserves
- * billing credit per send, which is the wrong subsystem for a security
- * credential — so rather than pretend, this names the path that works today.
+ * Redemption already existed (an admin mints a link from the team screen);
+ * what was missing is the half a locked-out manager needs, which is a way to
+ * *ask* without first finding someone who can already get in.
+ *
+ * The request goes to `/api/auth/password-reset/request`, which sends through
+ * the deployment's own SMTP settings — the same platform-level transport the
+ * scheduled-export delivery uses. Two things follow from how that endpoint is
+ * built, and both are reflected in the copy below:
+ *
+ *   - It answers identically whether or not the address exists, so this panel
+ *     must never claim "sent". "If this address is registered…" is the honest
+ *     form of the same sentence.
+ *   - If SMTP is not configured on this install, nothing arrives. So the
+ *     admin-issued path is kept alongside as the fallback that always works,
+ *     rather than being replaced by a flow that silently goes nowhere.
  */
-function RecoveryHelp() {
+function RecoveryHelp({ defaultEmail }: { defaultEmail: string }) {
+  const [email, setEmail] = useState(defaultEmail);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { busy, send } = useLoginRequest();
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    const result = await send(() =>
+      fetch("/api/auth/password-reset/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      }),
+    );
+    if (result.stale) return;
+    if (result.networkError) {
+      setError(networkErrorMessage(result.networkError));
+      return;
+    }
+    if (result.status === 400) {
+      setError("نشانی ایمیل معتبر نیست.");
+      return;
+    }
+    if (!result.ok) {
+      setError("ارسال درخواست ممکن نشد. کمی دیگر دوباره تلاش کنید.");
+      return;
+    }
+    // Same message for every outcome the server can produce, on purpose.
+    setSent(true);
+  }
+
+  if (sent) {
+    return (
+      <div className="rounded-lg border border-border/80 bg-muted/40 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
+        اگر این نشانی در سامانه ثبت شده باشد، پیوند بازنشانی رمز عبور برایش
+        ارسال می‌شود. پوشهٔ اسپم را هم بررسی کنید. اگر تا چند دقیقه چیزی
+        نرسید، از مدیر یا مالک کسب‌وکار بخواهید پیوند را از صفحهٔ «تیم» صادر
+        کند.
+      </div>
+    );
+  }
+
   return (
-    <div className="rounded-lg border border-border/80 bg-muted/40 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
-      پیوند بازنشانی رمز عبور را مدیر یا مالک کسب‌وکار از صفحهٔ «تیم» برای شما
-      صادر می‌کند. اگر خودتان مالک هستید و دسترسی ندارید، از مدیر سامانه کمک
-      بگیرید. این پیوند یک‌بار مصرف است و ۲۴ ساعت اعتبار دارد.
-    </div>
+    <form
+      onSubmit={submit}
+      className="rounded-lg border border-border/80 bg-muted/40 px-3 py-2.5 text-xs leading-5 text-muted-foreground"
+    >
+      <label htmlFor="recovery-email" className="mb-1 block">
+        نشانی ایمیل حساب را وارد کنید تا پیوند بازنشانی ارسال شود.
+      </label>
+      <input
+        id="recovery-email"
+        type="email"
+        dir="ltr"
+        required
+        autoComplete="email"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        placeholder="name@example.com"
+        className="mb-2 w-full rounded-md border border-input bg-background px-2.5 py-1.5 text-xs text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
+      />
+      {error ? (
+        <p role="alert" className="mb-2 text-destructive">
+          {error}
+        </p>
+      ) : null}
+      <button
+        type="submit"
+        disabled={busy}
+        className="w-full rounded-md bg-primary py-1.5 font-semibold text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50"
+      >
+        {busy ? "در حال ارسال…" : "ارسال پیوند بازنشانی"}
+      </button>
+      <p className="mt-2">
+        اگر ایمیل دریافت نکردید، مدیر یا مالک کسب‌وکار می‌تواند همین پیوند را از
+        صفحهٔ «تیم» صادر کند. پیوند یک‌بار مصرف است و ۲۴ ساعت اعتبار دارد.
+      </p>
+    </form>
   );
 }

@@ -205,6 +205,13 @@ const PUBLIC_PATHS = [
   "/api/auth/owner-activation",
   "/reset-password",
   "/api/auth/password-reset",
+  // Issue #885 L10 — the initiation half. Already covered by the entry above
+  // through `isPublicPath`'s prefix match, and listed anyway: the two halves
+  // have different reasons for being public (redemption carries a
+  // single-use token in the body; initiation carries no credential at all),
+  // and folding one into the other's prefix would let a future edit to the
+  // redemption entry silently un-publish the request endpoint.
+  "/api/auth/password-reset/request",
   // Phase 9: the caller is another location's server, not a browser — the
   // route authenticates it with a per-location bearer token, not a session.
   "/api/rollup/ingest",
@@ -387,6 +394,12 @@ const BROWSER_LOGIN_MUTATION_PATHS = [
   "/api/auth/mfa/enrol",
   "/api/auth/webauthn/login",
   "/api/auth/directory",
+  // Issue #885 L10 — forgotten-password initiation. It is pre-session by
+  // definition (the caller cannot get in), takes an email address, and can
+  // cause an email to be sent, so it belongs with the other browser-driven
+  // sign-in mutations behind the Origin check rather than being callable
+  // cross-site.
+  "/api/auth/password-reset/request",
 ];
 
 /** Is this one of the browser-driven, pre-session sign-in mutations? */

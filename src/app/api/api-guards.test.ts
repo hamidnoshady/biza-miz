@@ -116,6 +116,14 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "auth/password-reset":
     "user-controlled password reset / recovery exchange (Issue #809) — the single-use hashed " +
     "token in the link is the credential before the account holder sets a new password",
+  // Issue #885 L10. Public because the caller is by definition someone who
+  // cannot sign in. It carries no credential, so the safety comes from what
+  // it does rather than what it checks: it never says whether an address
+  // exists (one 200 and one body for every outcome), it is rate-limited per
+  // address, and the link it mints goes only to the address on file.
+  "auth/password-reset/request":
+    "forgotten-password initiation — pre-session by definition; non-enumerating single-shape " +
+    "response, per-address rate limit, and delivery only to the address on file",
   "auth/company-handoff": "one-use platform-company staff handoff; token is the credential before the tenant cookie exists",
   "website/leads": "public form intake authenticated by a hashed, site-scoped bearer credential with durable rate limiting and idempotency",
   "auth/impersonate-handoff":

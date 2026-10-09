@@ -23,6 +23,19 @@
 - Listing and revocation UI: `TrustedDevicesCard` in `settings/profile/profile-section.tsx` and `security-center-settings.tsx`, showing device label, issue date and **expiry**, each individually revocable.
 - "Remember my login type" is kept as a separate, non-security concern — the `pos:loginDoor` `localStorage` flag cannot establish trust.
 
+### Forgotten-password initiation (L10)
+
+`src/lib/password-reset-request.ts` + `src/app/api/auth/password-reset/request/route.ts`.
+
+Redemption already existed — an admin could mint a link from the team screen and `consumePasswordResetToken` would accept it. What was missing is the half a locked-out manager actually needs: a way to *ask*, without first finding someone who can already get in.
+
+- Reuses `issuePasswordResetToken`, so a self-requested link and an admin-issued one are the same credential with the same 24-hour single-use semantics.
+- **Non-enumerating by construction.** The route returns one status and one body for all six outcomes the service can produce (`sent`, `unknown_email`, `inactive`, `rate_limited`, and two `not_configured` reasons). A rate limit is deliberately *not* surfaced as a 429 — that would be the most useful possible answer to an attacker, distinguishing an address that exists and has been used from one that does not.
+- **Rate-limited per address** at 3/hour and 8/day, decided by a pure, order-independent `passwordResetBudgetDecision` that ignores unparseable and future-dated stamps rather than counting them.
+- **Delivery is not awaited**, on purpose: waiting on SMTP would make response time a function of whether the address exists, and no identical body can hide that timing difference. Send errors are logged, never surfaced.
+- **Declines rather than half-works.** If SMTP is unconfigured, or there is no `PLATFORM_BASE_URL`/`POS_DOMAIN`/`ROOT_DOMAIN` to build a link from, nothing is minted — issuing a link that can never arrive would revoke the user's existing pending token and leave them worse off.
+- The client keeps the admin-issued path visible alongside the email form, so an install with no SMTP still has a working recovery route.
+
 ### Other new surfaces
 
 | Surface | Purpose |
@@ -32,6 +45,8 @@
 | `src/app/api/auth/login-capabilities/route.ts` | Public `GET` capability probe for the offline door. |
 | `src/app/api/auth/trusted-devices/route.ts` | `GET` list / `DELETE` revoke own devices, gated by `requireRecentAuth`. |
 | `otpSendBudgetDecision` in `phone-otp-policy.ts` | Order-independent send-budget decision, exported so both the route and tests share one implementation. |
+| `src/lib/password-reset-request.ts` | L10 forgotten-password initiation: non-enumerating request service, per-address rate limit, delivery over the platform's own SMTP settings. |
+| `src/app/api/auth/password-reset/request/route.ts` | Public `POST` for the above — one response shape for every outcome. |
 
 ---
 
@@ -85,7 +100,7 @@
 - **Accessible names and live regions (L12).** `mfa-step.tsx` had no label on either input — the heading above was an `<h2>`, not a `<label>`, so a screen reader announced "edit text" plus a placeholder that vanishes on typing. Both inputs now carry mode-aware `aria-label`s, the code input is `aria-describedby` the instruction, and all three error paragraphs are `role="alert" aria-live="assertive"`. Focus stays on the submit button when verification fails, so an error rendered elsewhere in the tree was simply never announced. A recovery-code field no longer advertises `one-time-code`, which invited password managers to autofill an SMS the member was not being asked for.
 - **Trusted-device listing** shows device label, issue date and expiry, each revocable.
 - **Copy corrections (L16)** where the product promised "full settings/reports" against a role-based reality.
-- **Forgotten-password link** on the manager form, pointing at a truthful `RecoveryHelp` panel (see §9).
+- **Forgotten-password request (L10)** on the manager form: a labelled email field that asks for a reset link, prefilled with the address already typed into the login form, with its own error live region. The admin-issued path stays visible underneath it as the fallback for installs with no SMTP, and the confirmation copy says "*if* this address is registered" rather than "sent", because the endpoint answers every outcome the same way by design.
 
 ---
 
@@ -126,6 +141,9 @@ The legacy PIN-only scan was reviewed but **not retired** — it is still the on
 | `src/components/auth/login-door-chooser.test.tsx` | 11 | new — `next` preservation, offline copy, capability degradation |
 | `src/lib/trusted-device.test.ts` | 11 | new — trust matrix, exact 7-day boundary, invalid date fails closed |
 | `src/components/auth/use-login-request.test.tsx` | 10 | new — busy release on reject/timeout/non-JSON, stale-response guard, cancel |
+| `src/lib/password-reset-request.test.ts` | 13 | new — budget boundaries, order independence, corrupt stamps, reset-email copy |
+| `src/app/api/auth/password-reset/request/route.test.ts` | 8 | new — all six outcomes answer identically, no 429, no outcome echo |
+| `integration/password-reset-request.integration.test.ts` | 7 | new — minting, single-live-link, cap at the exact boundary, against real PostgreSQL |
 | `integration/trusted-device.integration.test.ts` | 7 | new — against real PostgreSQL |
 | `src/app/api/api-guards.test.ts` | — | +2 registrations for the new routes |
 
@@ -143,17 +161,17 @@ All commands run in this sandbox on the work commit.
 |---|---|
 | `NODE_OPTIONS=--max-old-space-size=3072 npx tsc --noEmit` | **exit 0**, no output |
 | `npx eslint . --max-warnings=0` | **exit 0** |
-| `npx vitest run --maxWorkers=2` | **671 files / 8,469 tests passed**, exit 0 |
-| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (9 auth files) | **9 files / 64 tests passed**, exit 0, 71.1 s |
-| Same, plus the 3 files exercising `team-service.ts` / `password-reset.ts` | **3 files / 49 tests passed**, exit 0, 141.0 s |
+| `npx vitest run --maxWorkers=2` | **673 files / 8,491 tests passed**, exit 0 |
+| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (10 auth files) | **10 files / 71 tests passed**, exit 0, 74.3 s |
+| Plus the 3 files exercising `team-service.ts` / `password-reset.ts` | **3 files / 49 tests passed**, exit 0, 141.0 s |
 
-Auth integration breakdown: `phone-otp` 13, `trusted-device` 7, `auth-account-security` 5, `auth-lockout` 3, `login-lockout-enumeration` 4, `staff-login-tenant` 7, `iam-login-credentials` 2, `authorization` 21, `desktop-cloud-login` 2.
+Auth integration breakdown: `phone-otp` 13, `password-reset-request` 7, `trusted-device` 7, `auth-account-security` 5, `auth-lockout` 3, `login-lockout-enumeration` 4, `staff-login-tenant` 7, `iam-login-credentials` 2, `authorization` 21, `desktop-cloud-login` 2.
 
-Modified-code integration breakdown: `hybrid-credential-sync` 16, `team` 23, `plan-limits` 10. These three were selected by grepping `integration/` for every test that references `auth_login_attempts`, `mfa_challenges`, `password-reset`, `consumePasswordResetToken`, `team-service`, or `revokeTrustedDevices` — i.e. the full set of integration tests reaching code this change touched, not a convenience sample. Combined: **12 files / 113 tests**.
+Modified-code integration breakdown: `hybrid-credential-sync` 16, `team` 23, `plan-limits` 10. These three were selected by grepping `integration/` for every test that references `auth_login_attempts`, `mfa_challenges`, `password-reset`, `consumePasswordResetToken`, `team-service`, or `revokeTrustedDevices` — i.e. the full set of integration tests reaching code this change touched, not a convenience sample. Combined with the auth set: **13 files / 120 tests**.
 
 Database: PostgreSQL **18.4**, provisioned via `embedded-postgres` on 127.0.0.1:54339, migrations applied through `scripts/migrate.ts`.
 
-Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. This change therefore adds **5 unit test files and 83 tests** with no existing test removed or altered in expectation.
+Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. This change therefore adds **7 unit test files and 105 tests** with no existing test removed or altered in expectation.
 
 GitHub CI: **no runs or statuses exist** for this repository — the lookup returns empty. There is no CI to report against.
 
@@ -163,7 +181,9 @@ GitHub CI: **no runs or statuses exist** for this repository — the lookup retu
 
 **The production build does not complete in this sandbox.** `npm run build` is OOM-killed (exit 137) on a machine with 3.9 GB RAM and no swap. I verified this is environmental, not caused by this work: `git stash`-ing every change and building the untouched base commit `d14f0e3` is killed identically at the same point, with the same exit code. **The build is therefore unverified for both the base and this branch here.** It must be run on CI or a machine with more memory before merge.
 
-**L10 — forgotten-password email delivery is not implemented.** There is no transactional email transport for `platform_user` identities; `message-outbox-service.ts` is campaign-scoped and billing-metered, so routing a security email through it would be wrong. The manager form links to a truthful `RecoveryHelp` panel that explains the admin-mediated reset that does exist (`platform-service.ts` and `team-service.ts` return a `resetUrl` for an admin to relay). The non-enumerating, rate-limited *initiation* flow the issue asks for is **not** built, because without delivery it would be a flow that silently goes nowhere.
+**L10 depends on the deployment having SMTP configured.** The flow is implemented and tested, but it sends through the platform's `platform_message_config` singleton. On an install with no SMTP host, or with no `PLATFORM_BASE_URL`/`POS_DOMAIN`/`ROOT_DOMAIN` to build a link from, the service declines to mint a token and logs why — deliberately, because minting a link that can never be delivered would revoke the user's existing pending token and leave them worse off than before. The client keeps the admin-issued link visible alongside the email form for exactly that case. **An install with neither SMTP nor an admin who can reach the team screen still has no self-service recovery**, and nothing in this change creates one.
+
+*(Correction to an earlier draft of this report: it claimed no email transport existed for platform identities. That was wrong. `resolveMessageConfig()` reads `platform_message_config WHERE id = true` under `withoutTenantScope("platform")` — a deployment-wide singleton, not a tenant setting — and `data-transfer/schedule-service.ts` already sends non-campaign mail through the same `SmtpMessageProvider`. L10 is implemented.)*
 
 **L13 — the deployment-aware eligibility/assurance policy is not implemented.** Roster and PIN admit `owner, admin, manager, accountant` off cloud; WebAuthn verify accepts only the four operational roles; WebAuthn never evaluates the phone policy; and a local privileged PIN session omits platform identity, `tokenVersion` and MFA state, so the MFA grace banner never appears there. Unifying these is **not** a mechanical fix: gating WebAuthn on the phone policy the way PIN is gated would lock out WebAuthn users at any business that never adopted phone OTP, the day the adoption window closes. That is a product decision about who may sign in by which method, and guessing at it would be worse than leaving it. This is the largest unfixed item in the issue.
 
