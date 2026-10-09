@@ -80,6 +80,8 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   payroll_accrual_void: "ابطال تعهد حقوق",
   payroll_payment_void: "ابطال پرداخت حقوق",
   payroll_advance_void: "ابطال مساعده",
+  payroll_engine_accrual: "حقوق و دستمزد (موتور قانونی)",
+  payroll_engine_payment: "پرداخت حقوق (موتور قانونی)",
   fixed_asset_depreciation: "استهلاک دارایی ثابت",
   fixed_asset_disposal: "واگذاری دارایی ثابت",
   fixed_asset_acquisition: "خرید دارایی ثابت",

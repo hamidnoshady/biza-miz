@@ -44,13 +44,19 @@ export const ADVANCE_NOTE_MAX = 200;
  */
 export async function outstandingAdvances(run: Runner, businessId: string): Promise<Map<string, bigint>> {
   const { rows } = await run<{ user_id: string; outstanding: string }>(
-    `SELECT a.user_id, GREATEST(a.total - COALESCE(rec.recovered, 0), 0)::text AS outstanding
+    `SELECT a.user_id, GREATEST(a.total - COALESCE(rec.recovered, 0) - COALESCE(erec.recovered, 0), 0)::text AS outstanding
        FROM (SELECT user_id, sum(amount) AS total FROM payroll_advances
               WHERE business_id = $1 AND status = 'active' GROUP BY user_id) a
        LEFT JOIN (SELECT rl.user_id, sum(rl.advance_recovery) AS recovered
                     FROM payroll_run_lines rl JOIN payroll_runs r ON r.id = rl.run_id
                    WHERE r.business_id = $1 AND r.status <> 'voided' AND rl.user_id IS NOT NULL
-                   GROUP BY rl.user_id) rec ON rec.user_id = a.user_id`,
+                   GROUP BY rl.user_id) rec ON rec.user_id = a.user_id
+       -- Issue #865: the statutory engine recovers advances too; a recovery of
+       -- any engine run that is not cancelled is no longer owed.
+       LEFT JOIN (SELECT ps.user_id, sum(ps.advance_recovery) AS recovered
+                    FROM payroll_payslips ps JOIN payroll_engine_runs er ON er.id = ps.run_id
+                   WHERE er.business_id = $1 AND er.status <> 'cancelled' AND ps.user_id IS NOT NULL
+                   GROUP BY ps.user_id) erec ON erec.user_id = a.user_id`,
     [businessId],
   );
   return new Map(rows.map((r) => [r.user_id, BigInt(r.outstanding)]));

@@ -705,6 +705,7 @@ async function collectCommission(
        JOIN users cu ON cu.id = a.employee_id AND cu.business_id = a.business_id
        LEFT JOIN journal_entries je ON je.id = a.entry_id
       WHERE a.business_id = $1 AND a.payroll_run_id IS NULL
+        AND a.payroll_engine_run_id IS NULL -- issue #865: not reserved by the statutory engine
         AND COALESCE(je.entry_date, a.created_at::date) <= $2::date
       ORDER BY a.id
       ${options.lock ? "FOR UPDATE OF a" : ""}`,
@@ -960,6 +961,14 @@ export async function accruePayroll(params: {
 
       const standing = await findStandingRun(client, params.businessId, period.key);
       if (standing) throw periodTaken(standing);
+      // Issue #865: a month booked by the statutory payroll engine is not
+      // accrued a second time here (the engine refuses the converse).
+      const { rows: engineRuns } = await client.query<{ id: string }>(
+        `SELECT id FROM payroll_engine_runs
+          WHERE business_id = $1 AND period_key = $2 AND run_type = 'regular' AND status <> 'cancelled'`,
+        [params.businessId, period.key],
+      );
+      if (engineRuns[0]) throw new PayrollError("period_held_by_engine", 409, { runId: engineRuns[0].id });
 
       const lines = await buildAccrualLines(client, params.businessId, {
         accrualDate,
