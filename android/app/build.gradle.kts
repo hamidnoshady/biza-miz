@@ -122,8 +122,7 @@ dependencies {
 
 // Release tasks must not run with a guessed origin or without signing. The check runs once the
 // task graph is known, so it fails before any compilation starts.
-// The explicit Action type selects the typed overload. A bare lambda resolves to the deprecated Groovy Closure.
-gradle.taskGraph.whenReady(Action<TaskExecutionGraph> { graph ->
+fun requireReleaseConfiguration(graph: TaskExecutionGraph) {
     val flavorsBeingReleased = graph.allTasks
         .mapNotNull { task -> releaseTaskPattern.find(task.name)?.groupValues?.get(2)?.lowercase() }
         .distinct()
@@ -144,5 +143,13 @@ gradle.taskGraph.whenReady(Action<TaskExecutionGraph> { graph ->
         if (problems.isNotEmpty()) {
             throw GradleException("Cannot build $flavorName release:\n - " + problems.joinToString("\n - "))
         }
+    }
+}
+
+// A named function behind an explicit object expression. A lambda here resolves to the wrong
+// Gradle overload in the Kotlin DSL.
+gradle.taskGraph.whenReady(object : Action<TaskExecutionGraph> {
+    override fun execute(graph: TaskExecutionGraph) {
+        requireReleaseConfiguration(graph)
     }
 })
