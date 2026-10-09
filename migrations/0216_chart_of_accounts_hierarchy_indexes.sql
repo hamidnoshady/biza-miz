@@ -1,5 +1,6 @@
 -- ---------------------------------------------------------------------------
 -- Chart-of-accounts hierarchy: the two indexes the issue #824 hardening needs.
+-- (Numbered 0216: 0211-0215 were already taken on main when this landed.)
 -- ---------------------------------------------------------------------------
 -- 1. `accounts.parent_id` had no index. The column is a foreign key, and
 --    PostgreSQL deliberately does **not** index a referencing column, so every

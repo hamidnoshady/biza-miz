@@ -33,7 +33,12 @@ vi.mock("next/navigation", () => ({
 
 function renderChart() {
   return render(
-    <AccountingManager role="owner" section="chart-of-accounts" permissions={["ledger.view", "accounts.edit"]} />,
+    <AccountingManager
+      role="owner"
+      section="chart-of-accounts"
+      permissions={["ledger.view", "accounts.edit"]}
+      currentUserId="user-owner"
+    />,
   );
 }
 
@@ -73,7 +78,8 @@ describe("issue #824 §7: chart mounting is independent", () => {
     await waitFor(() => expect(screen.getAllByText("هزینه‌ها").length).toBeGreaterThan(0));
 
     // No picker-failure banner, and no retry prompt for a request never made.
-    expect(screen.queryByText(/فهرست حساب‌های فعال ناموفق/)).toBeNull();
+    // Matches the picker-failure copy on either side of the reconciliation.
+    expect(screen.queryByText(/ناموفق بود/)).toBeNull();
     expect(screen.queryByRole("button", { name: /تلاش دوباره/ })).toBeNull();
   });
 });
