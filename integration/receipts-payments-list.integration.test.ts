@@ -80,9 +80,9 @@ async function addCustomer(name: string): Promise<string> {
 
 async function addReceipt(customerId: string, amount: number, date: string, memo: string | null): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
-    `INSERT INTO ar_receipts (business_id, customer_id, receipt_date, method, amount, memo)
-     VALUES ($1, $2, $3, 'cash', $4, $5) RETURNING id`,
-    [biz.id, customerId, date, amount, memo],
+    `INSERT INTO ar_receipts (business_id, customer_id, receipt_date, method, amount, memo, idempotency_key)
+     VALUES ($1, $2, $3, 'cash', $4, $5, $6) RETURNING id`,
+    [biz.id, customerId, date, amount, memo, randomUUID()],
   );
   return rows[0].id;
 }
@@ -125,7 +125,7 @@ beforeEach(async () => {
   biz.locationId = locRow.rows[0].id;
 });
 
-describe("listReceipts", () => {
+describe("listReceiptsPage search", () => {
   it("lists every receipt newest-first, regardless of party", async () => {
     const a = await addCustomer("علی رضایی");
     const b = await addCustomer("سارا محمدی");
@@ -133,7 +133,7 @@ describe("listReceipts", () => {
     await addReceipt(b, 200, "2026-09-15", "تسویه");
     await addReceipt(a, 300, "2026-09-16", null);
 
-    const rows = await installments.listReceipts(biz.id);
+    const rows = (await installments.listReceiptsPage(biz.id, {})).rows;
     expect(rows.map((r) => r.amount)).toEqual([300, 200, 100]);
     expect(rows[1].partyName).toBe("سارا محمدی");
   });
@@ -144,9 +144,9 @@ describe("listReceipts", () => {
     await addReceipt(a, 100, "2026-09-10", "بابت فاکتور ۱۲");
     await addReceipt(b, 200, "2026-09-11", "پیش‌پرداخت");
 
-    expect((await installments.listReceipts(biz.id, "علی")).map((r) => r.amount)).toEqual([100]);
-    expect((await installments.listReceipts(biz.id, "پیش‌پرداخت")).map((r) => r.amount)).toEqual([200]);
-    expect(await installments.listReceipts(biz.id, "چیزی که نیست")).toEqual([]);
+    expect((await installments.listReceiptsPage(biz.id, { q: "علی" })).rows.map((r) => r.amount)).toEqual([100]);
+    expect((await installments.listReceiptsPage(biz.id, { q: "پیش‌پرداخت" })).rows.map((r) => r.amount)).toEqual([200]);
+    expect((await installments.listReceiptsPage(biz.id, { q: "چیزی که نیست" })).rows).toEqual([]);
   });
 
   it("folds Arabic ي/ك and both digit sets, like the app's pickers do", async () => {
@@ -156,10 +156,10 @@ describe("listReceipts", () => {
     await addReceipt(a, 200, "2026-09-11", null);
 
     // Both rows match on the name alone; the order stays newest-first.
-    expect((await installments.listReceipts(biz.id, "علي كر")).map((r) => r.amount)).toEqual([200, 100]);
+    expect((await installments.listReceiptsPage(biz.id, { q: "علي كر" })).rows.map((r) => r.amount)).toEqual([200, 100]);
     // The memo holds Persian digits; the Latin-digit needle must still find it.
-    expect((await installments.listReceipts(biz.id, "6037")).map((r) => r.amount)).toEqual([100]);
-    expect((await installments.listReceipts(biz.id, "۶۰۳۷")).map((r) => r.amount)).toEqual([100]);
+    expect((await installments.listReceiptsPage(biz.id, { q: "6037" })).rows.map((r) => r.amount)).toEqual([100]);
+    expect((await installments.listReceiptsPage(biz.id, { q: "۶۰۳۷" })).rows.map((r) => r.amount)).toEqual([100]);
   });
 
   it("treats LIKE wildcards as literals, not patterns", async () => {
@@ -169,26 +169,26 @@ describe("listReceipts", () => {
     await addReceipt(b, 200, "2026-09-10", "تخفیف 50%");
 
     // «%» must not become the match-everything wildcard — only the literal hit lists.
-    expect((await installments.listReceipts(biz.id, "%")).map((r) => r.amount)).toEqual([200]);
+    expect((await installments.listReceiptsPage(biz.id, { q: "%" })).rows.map((r) => r.amount)).toEqual([200]);
     // …even when the needle is typed with Persian digits (folded to Latin first).
-    expect((await installments.listReceipts(biz.id, "۵۰%")).map((r) => r.amount)).toEqual([200]);
+    expect((await installments.listReceiptsPage(biz.id, { q: "۵۰%" })).rows.map((r) => r.amount)).toEqual([200]);
     // «_» in the needle is a literal too — it would otherwise match «علی رضایی».
-    expect(await installments.listReceipts(biz.id, "ع_ی")).toEqual([]);
+    expect((await installments.listReceiptsPage(biz.id, { q: "ع_ی" })).rows).toEqual([]);
   });
 });
 
-describe("listPayments", () => {
+describe("listPaymentsPage search", () => {
   it("lists payments and resolves the supplier alias name", async () => {
     const s = await addSupplier("پخش مواد غذایی آسمان");
     await addPayment(s, 900, "2026-09-09", "قبوض شهریور");
     await addPayment(s, 400, "2026-09-16", null);
 
-    const rows = await installments.listPayments(biz.id);
+    const rows = (await installments.listPaymentsPage(biz.id, {})).rows;
     expect(rows.map((r) => r.amount)).toEqual([400, 900]);
     expect(rows[0].partyName).toBe("پخش مواد غذایی آسمان");
 
-    expect((await installments.listPayments(biz.id, "آسمان")).map((r) => r.amount)).toEqual([400, 900]);
-    expect((await installments.listPayments(biz.id, "قبوض")).map((r) => r.amount)).toEqual([900]);
+    expect((await installments.listPaymentsPage(biz.id, { q: "آسمان" })).rows.map((r) => r.amount)).toEqual([400, 900]);
+    expect((await installments.listPaymentsPage(biz.id, { q: "قبوض" })).rows.map((r) => r.amount)).toEqual([900]);
   });
 });
 
@@ -286,5 +286,53 @@ describe("listPaymentsPage (issue #829: cursor pagination + filters)", () => {
     const second = await installments.listPaymentsPage(biz.id, { limit: 3, cursor: first.nextCursor });
     expect(second.rows.map((r) => r.amount)).toEqual([100]);
     expect(second.hasMore).toBe(false);
+  });
+});
+
+describe("voucher CSV export queries (issue #829 completion)", () => {
+  it("exports the full filtered receipt set, not the visible page", async () => {
+    const a = await addCustomer("علی رضایی");
+    const b = await addCustomer("سارا محمدی");
+    await addReceipt(a, 100, "2026-09-10", null);
+    await addReceipt(b, 200, "2026-09-11", "پیش‌پرداخت");
+    await addReceipt(a, 300, "2026-09-12", null);
+
+    // No limit/cursor: the whole filtered set, newest first.
+    const all = await installments.listReceiptsForExport(biz.id, {});
+    expect(all.rows.map((r) => r.amount)).toEqual([300, 200, 100]);
+    expect(all.truncated).toBe(false);
+
+    const filtered = await installments.listReceiptsForExport(biz.id, { q: "پیش‌پرداخت", minAmount: 100 });
+    expect(filtered.rows.map((r) => r.amount)).toEqual([200]);
+    expect(filtered.truncated).toBe(false);
+  });
+
+  it("exports the full filtered payment set", async () => {
+    const s = await addSupplier("پخش آسمان");
+    await addPayment(s, 400, "2026-09-10", null);
+    await addPayment(s, 900, "2026-09-11", "قبوض");
+
+    const exported = await installments.listPaymentsForExport(biz.id, { q: "قبوض" });
+    expect(exported.rows.map((r) => r.amount)).toEqual([900]);
+    expect(exported.truncated).toBe(false);
+  });
+
+  it("signals truncation past the export cap instead of silently cutting rows", async () => {
+    const a = await addCustomer("علی رضایی");
+    for (let i = 1; i <= 3; i += 1) {
+      await addReceipt(a, i * 100, `2026-09-0${i}`, null);
+    }
+    // The cap mechanics the export relies on, at a provable size: cap+1 rows
+    // are read so `hasMore` is exact, and the page carries exactly the cap.
+    const capped = await installments.listReceiptsPage(biz.id, {}, { exportCap: 2 });
+    expect(capped.rows.map((r) => r.amount)).toEqual([300, 200]);
+    expect(capped.hasMore).toBe(true);
+    const roomy = await installments.listReceiptsPage(biz.id, {}, { exportCap: 5 });
+    expect(roomy.rows).toHaveLength(3);
+    expect(roomy.hasMore).toBe(false);
+    // The wire limit can never reach the export cap: it clamps to the page max.
+    const wire = await installments.listReceiptsPage(biz.id, { limit: 5000 });
+    expect(wire.rows).toHaveLength(3);
+    expect(wire.hasMore).toBe(false);
   });
 });

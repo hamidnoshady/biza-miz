@@ -21,7 +21,7 @@ vi.mock("@/lib/ap-service", async (importOriginal) => {
 });
 vi.mock("@/lib/installments-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/installments-service")>();
-  return { ...actual, listPaymentsPage: vi.fn() };
+  return { ...actual, listPaymentsPage: vi.fn(), listPaymentsForExport: vi.fn() };
 });
 
 const SESSION = { businessId: "biz-1", sub: "user-1" };
@@ -37,6 +37,7 @@ beforeEach(() => {
   vi.mocked(setupState.resolveActiveLocation).mockResolvedValue({ id: "loc-1" } as never);
   vi.mocked(apService.payBill).mockResolvedValue({ id: "payment-1", duplicate: false } as never);
   vi.mocked(installmentService.listPaymentsPage).mockResolvedValue({ rows: [], nextCursor: null, hasMore: false } as never);
+  vi.mocked(installmentService.listPaymentsForExport).mockResolvedValue({ rows: [], truncated: false } as never);
 });
 
 describe("POST /api/ledger/ap/payments", () => {
@@ -104,6 +105,44 @@ it("keeps GET read-only under ledger.view", async () => {
   expect(response.status).toBe(200);
   expect(auth.requirePermission).toHaveBeenCalledWith("ledger.view");
   expect(installmentService.listPaymentsPage).toHaveBeenCalledWith("biz-1", expect.objectContaining({ q: "acme" }));
+});
+
+it("exports the filtered set as CSV and names a truncation", async () => {
+  vi.mocked(installmentService.listPaymentsForExport).mockResolvedValue({
+    rows: [{
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      date: "2026-10-04",
+      method: "cash",
+      amount: 50_000,
+      memo: null,
+      supplierId: SUPPLIER_ID,
+      supplierPartyId: null,
+      partyName: "فروشگاه بهار",
+      voucherNumber: 1,
+      locationId: null,
+      locationName: null,
+      createdAt: "2026-10-04T08:00:00.000Z",
+      createdByName: null,
+      cashAccountId: null,
+      bankReference: null,
+      cashAccount: null,
+      entryId: null,
+      reversedAt: null,
+      reversalEntryId: null,
+      reversalDate: null,
+    }],
+    truncated: true,
+  } as never);
+  const request = { nextUrl: new URL("http://localhost/api/ledger/ap/payments?format=csv&status=active") } as unknown as NextRequest;
+  const response = await GET(request);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("Content-Type")).toBe("text/csv; charset=utf-8");
+  expect(response.headers.get("X-Voucher-Export-Truncated")).toBe("20000");
+  expect(installmentService.listPaymentsPage).not.toHaveBeenCalled();
+  expect(installmentService.listPaymentsForExport).toHaveBeenCalledWith("biz-1", expect.objectContaining({ status: "active" }));
+  const csv = await response.text();
+  expect(csv).toContain("تأمین‌کننده");
+  expect(csv).toContain(",50000,");
 });
 
 it("does not reach payment writes when the permission gate denies access", async () => {

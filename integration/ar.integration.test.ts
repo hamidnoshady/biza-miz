@@ -21,6 +21,8 @@ let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let arService: typeof import("../src/lib/ar-service");
 let customersService: typeof import("../src/lib/parties-service");
+let holooImport: typeof import("../src/lib/integrations/holoo/transaction-import-service");
+let mappingService: typeof import("../src/lib/integrations/mapping-service");
 
 const biz = { id: "", locationId: "" };
 const acct = { cash: "", bank: "", bankClearing: "", revenue: "", accountsReceivable: "" };
@@ -55,6 +57,8 @@ beforeAll(async () => {
   dbLib = await import("../src/lib/db");
   arService = await import("../src/lib/ar-service");
   customersService = await import("../src/lib/parties-service");
+  holooImport = await import("../src/lib/integrations/holoo/transaction-import-service");
+  mappingService = await import("../src/lib/integrations/mapping-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -166,6 +170,7 @@ describe("listCustomerBalances", () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Sara" });
     await postCreditOrder("2025-04-01", customer.id, 200_000);
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -185,6 +190,7 @@ describe("receivePayment", () => {
     await postCreditOrder("2025-04-01", customer.id, 500_000);
 
     const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -210,6 +216,7 @@ describe("receivePayment", () => {
     await postCreditOrder("2025-04-01", customer.id, 500_000);
 
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -230,6 +237,7 @@ describe("receivePayment", () => {
     await postCreditOrder("2025-04-01", customer.id, 500_000);
 
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -255,6 +263,7 @@ describe("receivePayment", () => {
     );
 
     const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -276,6 +285,7 @@ describe("receivePayment", () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await expect(
       arService.receivePayment({
+        idempotencyKey: randomUUID(),
         businessId: biz.id,
         locationId: biz.locationId,
         customerId: customer.id,
@@ -320,9 +330,112 @@ describe("receivePayment", () => {
     expect(Number(rows[0].count)).toBe(1);
   });
 
+  it("requires a client idempotency key: without one there is no submission to de-duplicate", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await expect(
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 10_000,
+        idempotencyKey: "",
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("idempotency_key_required");
+    await expect(
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 10_000,
+        idempotencyKey: "k".repeat(129),
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("idempotency_key_required");
+  });
+
+  it("serializes a concurrent burst on one key: exactly one voucher, the rest replays", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await postCreditOrder("2025-04-01", customer.id, 500_000);
+    const key = `ar-${randomUUID()}`;
+    const call = () =>
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 100_000,
+        receiptDate: "2026-10-04",
+        idempotencyKey: key,
+        createdBy: user.id,
+      });
+    // All five race inside the service's transactions; Promise.all rejects if
+    // any of them surfaces the old transaction-aborted failure.
+    const results = await Promise.all([call(), call(), call(), call(), call()]);
+    expect(new Set(results.map((r) => r.id)).size).toBe(1);
+    expect(results.filter((r) => r.duplicate)).toHaveLength(4);
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM ar_receipts WHERE business_id = $1`,
+      [biz.id],
+    );
+    expect(Number(rows[0].count)).toBe(1);
+  });
+
+  it("rejects a key reused with changed intent instead of replaying the original", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const base = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash" as const,
+      receiptDate: "2026-10-04",
+      idempotencyKey: `ar-${randomUUID()}`,
+      createdBy: user.id,
+    };
+    await arService.receivePayment({ ...base, amount: 100_000 });
+    await expect(arService.receivePayment({ ...base, amount: 200_000 })).rejects.toThrow("idempotency_conflict");
+    // The same intent still replays the original.
+    const replay = await arService.receivePayment({ ...base, amount: 100_000 });
+    expect(replay.duplicate).toBe(true);
+  });
+
+  it("Holoo receipt import survives the crash between posting and writing the mapping", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Holoo Buyer" });
+    const { rows: connRows } = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections (business_id, location_id, name, provider, base_url, link_mode, currency_unit, created_by)
+       VALUES ($1, $2, 'Holoo', 'holoo', NULL, 'rest_api', 'rial', $3) RETURNING id`,
+      [biz.id, biz.locationId, user.id],
+    );
+    const connectionId = connRows[0].id;
+    await mappingService.upsertMapping(biz.id, connectionId, "holoo_customer", "person-1", customer.id);
+    const tx: Parameters<typeof holooImport.applyTransactions>[2] = [
+      { remoteId: "doc-1", type: "receipt", occurredAt: "2026-10-04T10:00:00", personId: "person-1", amountRial: 250_000n },
+    ];
+    const first = await holooImport.applyTransactions(biz.id, connectionId, tx, user.id);
+    expect(first.imported).toBe(1);
+    const receiptId = await mappingService.localIdForRemote(biz.id, connectionId, "holoo_receipt", "doc-1");
+    expect(receiptId).toBeTruthy();
+    // The crash: the receipt posted but the mapping write never landed.
+    await db.query(
+      `DELETE FROM integration_mappings WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'holoo_receipt'`,
+      [biz.id, connectionId],
+    );
+    const second = await holooImport.applyTransactions(biz.id, connectionId, tx, user.id);
+    expect(second.imported).toBe(1);
+    expect(await mappingService.localIdForRemote(biz.id, connectionId, "holoo_receipt", "doc-1")).toBe(receiptId);
+    const { rows } = await db.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM ar_receipts WHERE business_id = $1`,
+      [biz.id],
+    );
+    expect(Number(rows[0].count)).toBe(1);
+  });
+
   it("assigns stable sequential voucher numbers per business", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     const first = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -331,6 +444,7 @@ describe("receivePayment", () => {
       createdBy: user.id,
     });
     const second = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -349,6 +463,7 @@ describe("receivePayment", () => {
     );
     await expect(
       arService.receivePayment({
+        idempotencyKey: randomUUID(),
         businessId: biz.id,
         locationId: biz.locationId,
         customerId: rows[0].id,
@@ -364,6 +479,7 @@ describe("receivePayment", () => {
     await db.query(`UPDATE parties SET is_active = false WHERE id = $1`, [customer.id]);
     await expect(
       arService.receivePayment({
+        idempotencyKey: randomUUID(),
         businessId: biz.id,
         locationId: biz.locationId,
         customerId: customer.id,
@@ -383,6 +499,7 @@ describe("receivePayment", () => {
 
     await expect(
       arService.receivePayment({
+        idempotencyKey: randomUUID(),
         businessId: biz.id,
         locationId: biz.locationId,
         customerId: otherCustomer.id,
@@ -397,6 +514,7 @@ describe("receivePayment", () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await expect(
       arService.receivePayment({
+        idempotencyKey: randomUUID(),
         businessId: biz.id,
         locationId: biz.locationId,
         customerId: customer.id,
@@ -413,6 +531,7 @@ describe("reverseReceipt", () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await postCreditOrder("2025-04-01", customer.id, 500_000);
     const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -441,6 +560,7 @@ describe("reverseReceipt", () => {
   it("refuses to reverse the same voucher twice", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -458,6 +578,7 @@ describe("reverseReceipt", () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await postCreditOrder("2025-04-01", customer.id, 500_000);
     const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -479,6 +600,7 @@ describe("getCustomerStatement", () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
     await postCreditOrder("2025-04-01", customer.id, 500_000);
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -523,6 +645,7 @@ describe("getArAging", () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Mina" });
     await postCreditOrder("2025-04-01", customer.id, 200_000);
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -541,6 +664,7 @@ describe("getArAging", () => {
   it("shows a customer whose only AR activity is an advance", async () => {
     const customer = await customersService.createCustomer(biz.id, { name: "Payam" });
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -561,6 +685,7 @@ describe("getArAging", () => {
     const creditor = await customersService.createCustomer(biz.id, { name: "Creditor" });
     await postCreditOrder("2025-01-01", debtor.id, 400_000);
     await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: creditor.id,

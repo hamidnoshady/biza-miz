@@ -573,12 +573,12 @@ describe("reverseApPayment", () => {
 
     expect(reversal).toMatchObject({ paymentId: payment.id, reversalDate: "2025-04-11" });
     expect((await apService.listSupplierBalances(biz.id))[0].balance).toBe(500_000);
-    const vouchers = await installmentsService.listPayments(biz.id);
+    const vouchers = (await installmentsService.listPaymentsPage(biz.id, {})).rows;
     expect(vouchers).toContainEqual(expect.objectContaining({
       id: payment.id,
       partyName: "Acme",
       locationName: "Main",
-      reversed: true,
+      reversedAt: expect.any(String),
       reversalEntryId: reversal.reversalEntryId,
       reversalDate: "2025-04-11",
     }));

@@ -3,11 +3,13 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { ApError, MissingLedgerAccountError, payBill } from "@/lib/ap-service";
-import { listPaymentsPage, VoucherListError } from "@/lib/installments-service";
+import { listPaymentsForExport, listPaymentsPage, VoucherListError } from "@/lib/installments-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
-import { buildCsv, sanitizeCsvText } from "@/lib/csv-safe";
-import { isVoucherMethod, PayablesInputError, VOUCHER_METHOD_LABELS, VOUCHER_METHODS } from "@/lib/payables-input";
+import { rowsToCsv } from "@/lib/report-export";
+import { buildPaymentsExportTable, voucherExportFilename } from "@/lib/voucher-export";
+import { VOUCHER_EXPORT_ROW_CAP } from "@/lib/voucher-shared";
+import { isVoucherMethod, PayablesInputError, VOUCHER_METHODS } from "@/lib/payables-input";
 
 /**
  * The «پرداخت‌ها» ledger slice — payment vouchers, newest first, keyset-
@@ -40,30 +42,22 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const limit = limitRaw === null || limitRaw === "" ? undefined : Number(limitRaw);
   const cursor = params.get("cursor") ?? undefined;
 
+  // CSV export honors the same filters but ignores the cursor: it is the full
+  // filtered set (bounded, not the visible page) through the shared codec, so
+  // the file matches the journal export's conventions.
   if (params.get("format") === "csv") {
     try {
-      const page = await listPaymentsPage(session.businessId, { ...filters, limit: 5000 });
-      const csv = buildCsv(
-        ["شماره سند", "تاریخ", "تأمین‌کننده", "روش", "شماره پیگیری", "مبلغ (ریال)", "شرح", "وضعیت"],
-        page.rows.map((r) => [
-          r.voucherNumber === null ? "" : String(r.voucherNumber),
-          r.date,
-          sanitizeCsvText(r.partyName),
-          sanitizeCsvText(
-            r.cashAccount ? `${VOUCHER_METHOD_LABELS[r.method]} · ${r.cashAccount.name}` : VOUCHER_METHOD_LABELS[r.method],
-          ),
-          sanitizeCsvText(r.bankReference ?? ""),
-          String(r.amount),
-          sanitizeCsvText(r.memo ?? ""),
-          r.reversedAt ? "باطل‌شده" : "فعال",
-        ]),
-      );
-      return new NextResponse(csv, {
+      const { rows, truncated } = await listPaymentsForExport(session.businessId, filters);
+      const response = new NextResponse(rowsToCsv(buildPaymentsExportTable(rows)), {
         headers: {
           "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": "attachment; filename=payments.csv",
+          "Content-Disposition": `attachment; filename="${voucherExportFilename("payments")}"`,
         },
       });
+      // A truncated export is a fact the operator has to know before they
+      // reconcile against it; the header is read by the screen, which says so.
+      if (truncated) response.headers.set("X-Voucher-Export-Truncated", String(VOUCHER_EXPORT_ROW_CAP));
+      return response;
     } catch (err) {
       if (err instanceof VoucherListError) return NextResponse.json({ error: err.message }, { status: err.status });
       throw err;

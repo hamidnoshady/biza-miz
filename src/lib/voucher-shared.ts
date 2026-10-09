@@ -39,6 +39,13 @@ export interface VoucherListFilters {
 export const VOUCHER_PAGE_SIZE = 50;
 /** Hard cap so a crafted `?limit=` cannot ask for the whole history at once. */
 export const VOUCHER_PAGE_SIZE_MAX = 100;
+/**
+ * Hard cap for the full filtered CSV export (mirrors the journal's
+ * `JOURNAL_EXPORT_ROW_CAP`). The export is one bounded query, not a cursor
+ * loop; past the cap the file carries the first rows and the response the
+ * `X-Voucher-Export-Truncated` header naming the cap.
+ */
+export const VOUCHER_EXPORT_ROW_CAP = 20_000;
 
 /**
  * Stable newest-first cursor over (voucher date, created_at, id).

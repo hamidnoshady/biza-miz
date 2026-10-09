@@ -10,6 +10,7 @@ import { isValidIsoDate } from "./iso-date";
 import {
   decodeVoucherCursor,
   encodeVoucherCursor,
+  VOUCHER_EXPORT_ROW_CAP,
   VOUCHER_PAGE_SIZE,
   VOUCHER_PAGE_SIZE_MAX,
   type VoucherCursor,
@@ -501,6 +502,19 @@ function installmentApPaymentFingerprint(input: {
     .digest("hex");
 }
 
+/** Stable fingerprint for the one receipt attached to a receivable installment item. */
+function installmentArReceiptFingerprint(input: {
+  customerId: string;
+  locationId: string | null;
+  method: VoucherMethod;
+  amount: number;
+  memo: string;
+}): string {
+  return createHash("sha256")
+    .update(JSON.stringify(["installment-ar-v1", input.customerId, input.locationId, input.method, input.amount, input.memo]))
+    .digest("hex");
+}
+
 /**
  * Settles one slice. Receivable slices post the exact ar_receipt pair
  * (Debit Cash/Bank / Credit A/R); payable slices the ap_payments mirror —
@@ -547,8 +561,8 @@ export async function payInstallmentItem(params: {
     if (!plan) throw new InstallmentError("plan_not_found", 404);
     if (!plan.party_id) throw new InstallmentError("plan_has_no_party");
 
-    const { rows: itemRows } = await client.query<{ id: string; amount: string; paid_at: string | null; seq: string; payment_id: string | null }>(
-      `SELECT id, amount::text AS amount, paid_at::text AS paid_at, seq::text AS seq, payment_id
+    const { rows: itemRows } = await client.query<{ id: string; amount: string; paid_at: string | null; seq: string; payment_id: string | null; receipt_id: string | null }>(
+      `SELECT id, amount::text AS amount, paid_at::text AS paid_at, seq::text AS seq, payment_id, receipt_id
          FROM installment_items WHERE id = $1 AND installment_id = $2 FOR UPDATE`,
       [params.itemId, params.planId],
     );
@@ -557,7 +571,38 @@ export async function payInstallmentItem(params: {
     const amount = Number(item.amount);
     const memo = params.memo?.trim() || `قسط ${item.seq} — ${plan.party_name ?? ""}`;
     const installmentRequestId = `installment-ap:${plan.id}:${item.id}`;
+    const installmentReceiptId = `installment-ar:${plan.id}:${item.id}`;
     if (item.paid_at) {
+      if (plan.direction === "receivable" && item.receipt_id) {
+        const { rows: existingReceiptRows } = await client.query<{
+          customer_id: string;
+          location_id: string | null;
+          method: VoucherMethod;
+          amount: string;
+          memo: string | null;
+          idempotency_key: string | null;
+          request_fingerprint: string | null;
+        }>(
+          `SELECT customer_id, location_id, method, amount::text AS amount, memo,
+                  idempotency_key, request_fingerprint
+             FROM ar_receipts
+            WHERE business_id = $1 AND id = $2`,
+          [params.businessId, item.receipt_id],
+        );
+        const receipt = existingReceiptRows[0];
+        if (receipt?.idempotency_key === installmentReceiptId) {
+          const fingerprint = installmentArReceiptFingerprint({
+            customerId: receipt.customer_id,
+            locationId: receipt.location_id,
+            method: params.method,
+            amount: Number(receipt.amount),
+            memo,
+          });
+          if (receipt.request_fingerprint !== fingerprint) throw new InstallmentError("idempotency_conflict", 409);
+          await client.query("COMMIT");
+          return;
+        }
+      }
       if (plan.direction === "payable" && item.payment_id) {
         const { rows: existingPaymentRows } = await client.query<{
           supplier_id: string;
@@ -663,11 +708,20 @@ export async function payInstallmentItem(params: {
          RETURNING last_ar_voucher_number::text AS voucher_number`,
         [params.businessId],
       );
+      const receiptFingerprint = installmentArReceiptFingerprint({
+        customerId: plan.party_id,
+        locationId: effectiveLocationId,
+        method: params.method,
+        amount,
+        memo,
+      });
       const { rows } = await client.query<{ id: string; receipt_date: string }>(
         `INSERT INTO ar_receipts
-           (business_id, location_id, customer_id, receipt_date, method, cash_account_id, voucher_number, amount, memo, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id, receipt_date::text AS receipt_date`,
-        [params.businessId, effectiveLocationId, plan.party_id, paymentDate, params.method, storedCashAccountId, voucherRows[0].voucher_number, amount, memo, params.createdBy],
+           (business_id, location_id, customer_id, receipt_date, method, cash_account_id, voucher_number, amount, memo, created_by,
+            idempotency_key, request_fingerprint)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id, receipt_date::text AS receipt_date`,
+        [params.businessId, effectiveLocationId, plan.party_id, paymentDate, params.method, storedCashAccountId, voucherRows[0].voucher_number, amount, memo, params.createdBy,
+          installmentReceiptId, receiptFingerprint],
       );
       await postJournalEntry(client, {
         businessId: params.businessId,
@@ -873,9 +927,12 @@ function validateListFilters(filters: VoucherListFilters): void {
 export async function listReceiptsPage(
   businessId: string,
   params: VoucherListParams = {},
+  opts: { exportCap?: number } = {},
 ): Promise<VoucherPage<ReceiptListRow>> {
   validateListFilters(params);
-  const limit = clampLimit(params.limit);
+  // `exportCap` is internal (the `*ForExport` functions below): the wire
+  // `limit` stays clamped to `VOUCHER_PAGE_SIZE_MAX` no matter what.
+  const limit = opts.exportCap ?? clampLimit(params.limit);
   const cursor = parseCursor(params.cursor);
   const pattern = searchPattern(params.q);
   const values: Array<string | number | null> = [businessId];
@@ -896,7 +953,18 @@ export async function listReceiptsPage(
   if (params.method) conditions.push(`r.method = ${push(params.method)}`);
   if (params.partyId) conditions.push(`r.customer_id = ${push(params.partyId)}::uuid`);
   if (params.locationId) conditions.push(`r.location_id = ${push(params.locationId)}::uuid`);
-  if (params.cashAccountId) conditions.push(`r.cash_account_id = ${push(params.cashAccountId)}::uuid`);
+  if (params.cashAccountId) {
+    // The money's account is the posting, not the nullable choice column:
+    // `cash_account_id` is NULL whenever the method's default took it (and
+    // for every legacy row), so matching the column alone hides those
+    // vouchers. The Dr cash line of the voucher's own original entry is the
+    // actual account; the column disjunct keeps entry-less legacy rows
+    // matchable when they name an account.
+    const account = push(params.cashAccountId);
+    conditions.push(`(r.cash_account_id = ${account}::uuid OR EXISTS (
+             SELECT 1 FROM journal_lines jl
+              WHERE jl.entry_id = je.id AND jl.account_id = ${account}::uuid AND jl.debit > 0))`);
+  }
   if (params.minAmount !== undefined) conditions.push(`r.amount >= ${push(params.minAmount)}`);
   if (params.maxAmount !== undefined) conditions.push(`r.amount <= ${push(params.maxAmount)}`);
   if (params.status === "active") conditions.push(`r.reversed_at IS NULL`);
@@ -1002,9 +1070,12 @@ function voucherAccountFields(r: { bank_reference: string | null; cash_account_c
 export async function listPaymentsPage(
   businessId: string,
   params: VoucherListParams = {},
+  opts: { exportCap?: number } = {},
 ): Promise<VoucherPage<PaymentListRow>> {
   validateListFilters(params);
-  const limit = clampLimit(params.limit);
+  // `exportCap` is internal (the `*ForExport` functions below): the wire
+  // `limit` stays clamped to `VOUCHER_PAGE_SIZE_MAX` no matter what.
+  const limit = opts.exportCap ?? clampLimit(params.limit);
   const cursor = parseCursor(params.cursor);
   const pattern = searchPattern(params.q);
   const values: Array<string | number | null> = [businessId];
@@ -1026,7 +1097,15 @@ export async function listPaymentsPage(
   if (params.method) conditions.push(`p.method = ${push(params.method)}`);
   if (params.partyId) conditions.push(`p.supplier_id = ${push(params.partyId)}::uuid`);
   if (params.locationId) conditions.push(`p.location_id = ${push(params.locationId)}::uuid`);
-  if (params.cashAccountId) conditions.push(`p.cash_account_id = ${push(params.cashAccountId)}::uuid`);
+  if (params.cashAccountId) {
+    // Same as receipts, on the Cr cash line of the payment's own original
+    // entry: NULL `cash_account_id` means the method's default posted, and
+    // legacy rows predate the column entirely.
+    const account = push(params.cashAccountId);
+    conditions.push(`(p.cash_account_id = ${account}::uuid OR EXISTS (
+             SELECT 1 FROM journal_lines jl
+              WHERE jl.entry_id = je.id AND jl.account_id = ${account}::uuid AND jl.credit > 0))`);
+  }
   if (params.minAmount !== undefined) conditions.push(`p.amount >= ${push(params.minAmount)}`);
   if (params.maxAmount !== undefined) conditions.push(`p.amount <= ${push(params.maxAmount)}`);
   if (params.status === "active") conditions.push(`p.reversed_at IS NULL`);
@@ -1121,41 +1200,26 @@ export async function listPaymentsPage(
 }
 
 /**
- * Backwards-compatible wrappers kept for the pre-pagination call sites and
- * tests: the first page's rows, oldest contract (id/date/method/amount/memo/
- * partyName) plus the named cash account and bank reference. New code uses
- * the `*Page` variants with filters + cursor.
+ * The complete filtered result for a CSV export — pagination deliberately
+ * ignored, bounded by `VOUCHER_EXPORT_ROW_CAP` (mirrors the journal's
+ * `listJournalEntriesForExport`). One bounded query, not a cursor loop; past
+ * the cap the route answers the first rows plus the truncation header.
  */
-export async function listReceipts(businessId: string, q?: string) {
-  const page = await listReceiptsPage(businessId, { q, limit: VOUCHER_PAGE_SIZE_MAX });
-  return page.rows.map((r) => ({
-    id: r.id,
-    date: r.date,
-    method: r.method,
-    amount: r.amount,
-    memo: r.memo,
-    partyName: r.partyName,
-    bankReference: r.bankReference,
-    cashAccount: r.cashAccount,
-  }));
+export async function listReceiptsForExport(
+  businessId: string,
+  filters: VoucherListFilters = {},
+): Promise<{ rows: ReceiptListRow[]; truncated: boolean }> {
+  const page = await listReceiptsPage(businessId, filters, { exportCap: VOUCHER_EXPORT_ROW_CAP });
+  return { rows: page.rows, truncated: page.hasMore };
 }
 
-export async function listPayments(businessId: string, q?: string) {
-  const page = await listPaymentsPage(businessId, { q, limit: VOUCHER_PAGE_SIZE_MAX });
-  return page.rows.map((r) => ({
-    id: r.id,
-    date: r.date,
-    method: r.method,
-    amount: r.amount,
-    memo: r.memo,
-    partyName: r.partyName,
-    locationName: r.locationName,
-    bankReference: r.bankReference,
-    cashAccount: r.cashAccount,
-    reversed: r.reversedAt !== null,
-    reversalEntryId: r.reversalEntryId,
-    reversalDate: r.reversalDate,
-  }));
+/** The payments mirror of `listReceiptsForExport`. */
+export async function listPaymentsForExport(
+  businessId: string,
+  filters: VoucherListFilters = {},
+): Promise<{ rows: PaymentListRow[]; truncated: boolean }> {
+  const page = await listPaymentsPage(businessId, filters, { exportCap: VOUCHER_EXPORT_ROW_CAP });
+  return { rows: page.rows, truncated: page.hasMore };
 }
 
 export { MissingLedgerAccountError };

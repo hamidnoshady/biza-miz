@@ -6,7 +6,7 @@ import {
   cardClass,
   overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -18,9 +18,12 @@ import { fmtJalali, OverlayDialog } from "./ledger-ui";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { VoucherFormFields, useIdempotencyKey } from "./settlement-form";
 import { voucherReference } from "@/lib/voucher-shared";
-import { VOUCHER_METHOD_LABELS, type VoucherMethod } from "@/lib/payables-input";
+import { VOUCHER_METHOD_LABELS, voucherAccountChoices, type VoucherAccountChoice, type VoucherMethod } from "@/lib/payables-input";
 import Link from "next/link";
-import { accountingSectionHref } from "./accounting-routes";
+import { accountingCustomerHref, accountingSectionHref, accountingSupplierHref } from "./accounting-routes";
+import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
+import { PersianNumberInput } from "@/components/ui/persian-number-input";
+import { amountToRialText, rialTextToAmountInput } from "./journal-view";
 
 /**
  * «دریافت و پرداخت» — the voucher ledger slice. The reference software keeps
@@ -95,6 +98,27 @@ export function ReceiptsPaymentsSection({
   const [q, setQ] = useState("");
   const [methodFilter, setMethodFilter] = useState<MethodFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // The «فیلترهای بیشتر» panel, same vocabulary the API speaks: ISO dates on
+  // the wire (Shamsi at the edge), ids for party/branch/account, Rial text
+  // for the amount bounds (the fields show the display unit).
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [partyId, setPartyId] = useState("");
+  const [locationId, setLocationId] = useState("");
+  const [cashAccountId, setCashAccountId] = useState("");
+  const [minAmount, setMinAmount] = useState("");
+  const [maxAmount, setMaxAmount] = useState("");
+  const [showMoreFilters, setShowMoreFilters] = useState(false);
+  // Filter option sources. The branch list comes from the journal's filter
+  // endpoint (the values this business's book actually contains) rather than
+  // the branch directory, whose capability a viewer may not hold.
+  const [parties, setParties] = useState<PartyOption[]>([]);
+  const [partyState, setPartyState] = useState<"loading" | "error" | "ready">("loading");
+  const [directoryKey, setDirectoryKey] = useState(0);
+  const [locations, setLocations] = useState<{ id: string; name: string }[]>([]);
+  const [accountChoices, setAccountChoices] = useState<VoucherAccountChoice[] | null>(null);
+  const [optionsFailed, setOptionsFailed] = useState(false);
+  const [optionsKey, setOptionsKey] = useState(0);
   const [rows, setRows] = useState<Voucher[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -105,6 +129,9 @@ export function ReceiptsPaymentsSection({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [reversingId, setReversingId] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  /** Non-error notices: today, that a CSV export was truncated at the cap. */
+  const [notice, setNotice] = useState("");
   /*
    * Responses race each other — a fast «علی» search easily outruns the slow
    * unfiltered listing it was typed over, and without the token the *older*
@@ -123,16 +150,88 @@ export function ReceiptsPaymentsSection({
 
   const canCreate = side === "receipts" ? canManageReceivables !== false : canManagePayables !== false;
 
-  function listUrl(cursor?: string | null): string {
+  /*
+   * One serializer for the filter state: the list and the CSV export honor
+   * the same filters, so they build the same query rather than each spelling
+   * the fields. Amount bounds are Rial text already (the fields convert on
+   * input); only well-formed bounds travel.
+   */
+  function filterParams(): URLSearchParams {
     const params = new URLSearchParams();
     if (q.trim()) params.set("q", q.trim());
     if (methodFilter !== "all") params.set("method", methodFilter);
     if (statusFilter !== "all") params.set("status", statusFilter);
+    if (dateFrom) params.set("dateFrom", dateFrom);
+    if (dateTo) params.set("dateTo", dateTo);
+    if (partyId) params.set("partyId", partyId);
+    if (locationId) params.set("locationId", locationId);
+    if (cashAccountId) params.set("cashAccountId", cashAccountId);
+    if (/^\d+$/.test(minAmount.trim())) params.set("minAmount", minAmount.trim());
+    if (/^\d+$/.test(maxAmount.trim())) params.set("maxAmount", maxAmount.trim());
+    return params;
+  }
+
+  function listUrl(cursor?: string | null): string {
+    const params = filterParams();
     if (cursor) params.set("cursor", cursor);
     const query = params.toString();
     const base = side === "receipts" ? "/api/ledger/ar/receipts" : "/api/ledger/ap/payments";
     return query ? `${base}?${query}` : base;
   }
+
+  // The counterparty options, from the same directory endpoints the voucher
+  // form picks from (`?scope=directory`, not the open-balance list).
+  useEffect(() => {
+    let cancelled = false;
+    setPartyState("loading");
+    const url =
+      side === "receipts" ? "/api/ledger/ar/customers?scope=directory" : "/api/ledger/ap/suppliers?scope=directory";
+    api<{
+      customers?: { customerId: string; customerName: string; customerPhone: string | null }[];
+      suppliers?: { supplierId: string; supplierName: string; supplierPhone: string | null; locationName?: string | null }[];
+    }>(url).then(({ ok, data }) => {
+      if (cancelled) return;
+      if (!ok) {
+        setPartyState("error");
+        return;
+      }
+      setParties(
+        side === "receipts"
+          ? (data.customers ?? []).map((c) => ({ id: c.customerId, name: c.customerName, phone: c.customerPhone }))
+          : (data.suppliers ?? []).map((s) => ({ id: s.supplierId, name: s.supplierName, phone: s.supplierPhone, locationName: s.locationName })),
+      );
+      setPartyState("ready");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [side, directoryKey]);
+
+  // Branch options from the journal's filter endpoint, account options from
+  // the chart through the shared eligibility rules. Both are side-independent
+  // and load once; a failure degrades to the pickers disabled, never a broken
+  // screen — the list itself does not depend on them.
+  useEffect(() => {
+    let cancelled = false;
+    setOptionsFailed(false);
+    Promise.all([
+      api<{ locations?: { id: string; name: string }[] }>("/api/ledger/entries/filters"),
+      api<{
+        accounts?: { id: string; code: string; name: string; type: "asset" | "liability" | "equity" | "revenue" | "expense"; parent_code: string | null }[];
+      }>("/api/ledger/accounts"),
+    ]).then(([branches, chart]) => {
+      if (cancelled) return;
+      if (!branches.ok || !chart.ok) {
+        setOptionsFailed(true);
+        return;
+      }
+      setLocations(branches.data.locations ?? []);
+      setAccountChoices(voucherAccountChoices(chart.data.accounts ?? []));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [optionsKey]);
 
   useEffect(() => {
     // Switching دریافتی/پرداختی swaps the whole dataset; what is on screen
@@ -146,6 +245,12 @@ export function ReceiptsPaymentsSection({
       setHasMore(false);
     }
     const seq = ++requestSeq.current;
+    // A fresh listing supersedes any in-flight «نمایش بیشتر»: its rows would
+    // append to the wrong dataset, so it is discarded — and the button must
+    // not stay wedged in «در حال بارگذاری» because of it. The export notice
+    // describes the previous query, so it goes too.
+    setLoadingMore(false);
+    setNotice("");
     const run = () => {
       setLoading(true);
       api<{ receipts?: Voucher[]; payments?: Voucher[]; nextCursor?: string | null; hasMore?: boolean; error?: string }>(
@@ -168,12 +273,14 @@ export function ReceiptsPaymentsSection({
           if (requestSeq.current === seq) setLoading(false);
         });
     };
-    const t = setTimeout(run, q ? 250 : 0);
+    // Typed inputs (search, amount bounds) debounce; discrete pickers (chips,
+    // selects, dates) list immediately.
+    const t = setTimeout(run, q || minAmount || maxAmount ? 250 : 0);
     return () => clearTimeout(t);
     // listUrl closes over the filter state; listing every dep keeps the lint
     // rule honest without re-running on an unstable function identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [side, q, methodFilter, statusFilter, refreshKey]);
+  }, [side, q, methodFilter, statusFilter, dateFrom, dateTo, partyId, locationId, cashAccountId, minAmount, maxAmount, refreshKey]);
 
   async function loadMore() {
     if (!nextCursor || loadingMore) return;
@@ -187,6 +294,8 @@ export function ReceiptsPaymentsSection({
         hasMore?: boolean;
         error?: string;
       }>(listUrl(nextCursor));
+      // Superseded by a newer listing: the rows belong to the old query and
+      // must not append to the new dataset.
       if (requestSeq.current !== seq) return;
       if (ok) {
         setRows((prev) => [...(prev ?? []), ...(data.receipts ?? data.payments ?? []).map(normalizeRow)]);
@@ -196,35 +305,129 @@ export function ReceiptsPaymentsSection({
         setError(errorMessage(data.error));
       }
     } finally {
-      if (requestSeq.current === seq) setLoadingMore(false);
+      // Unconditional: a superseded fetch leaves the button wedged in «در حال
+      // بارگذاری» forever if the reset is seq-guarded.
+      setLoadingMore(false);
     }
   }
 
   /*
    * The export is server-rendered: the visible page is a window into the
    * history, and exporting it would silently drop every voucher outside the
-   * window. The API honors the same filters and sanitizes formula-leading
+   * window. The API honors the same filters and neutralizes formula-leading
    * cells, so a memo starting with «=» cannot become a spreadsheet formula.
+   * A plain anchor download cannot read response headers, so the file travels
+   * through fetch: past the export cap the API says so in
+   * `X-Voucher-Export-Truncated`, and the screen must repeat that — a silently
+   * cut file reconciled as complete is worse than no file.
    */
-  function downloadCsv() {
-    const params = new URLSearchParams();
-    if (q.trim()) params.set("q", q.trim());
-    if (methodFilter !== "all") params.set("method", methodFilter);
-    if (statusFilter !== "all") params.set("status", statusFilter);
-    params.set("format", "csv");
-    const base = side === "receipts" ? "/api/ledger/ar/receipts" : "/api/ledger/ap/payments";
-    const a = document.createElement("a");
-    a.href = `${base}?${params.toString()}`;
-    a.download = side === "receipts" ? "receipts.csv" : "payments.csv";
-    document.body.append(a);
-    a.click();
-    a.remove();
+  async function downloadCsv() {
+    if (downloading) return;
+    setDownloading(true);
+    setNotice("");
+    setError("");
+    try {
+      const params = filterParams();
+      params.set("format", "csv");
+      const base = side === "receipts" ? "/api/ledger/ar/receipts" : "/api/ledger/ap/payments";
+      let response: Response;
+      try {
+        response = await fetch(`${base}?${params.toString()}`);
+      } catch {
+        setError(errorMessage("network_error"));
+        return;
+      }
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        setError(errorMessage(data.error ?? "network_error"));
+        return;
+      }
+      const truncated = response.headers.get("X-Voucher-Export-Truncated");
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = side === "receipts" ? "receipts.csv" : "payments.csv";
+      document.body.append(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+      if (truncated) {
+        setNotice(
+          `فایل فقط ${toPersianDigits(truncated)} سند نخست را دارد؛ برای دریافت بقیه، فیلترها را محدودتر کنید و دوباره خروجی بگیرید.`,
+        );
+      }
+    } finally {
+      setDownloading(false);
+    }
   }
 
   function refresh() {
     setSelectedId(null);
     setRefreshKey((k) => k + 1);
   }
+
+  /*
+   * A counterparty id belongs to one stream — a customer id sent as the
+   * supplier filter (or vice versa) would match nothing and confuse. The
+   * party filter resets on the switch; the rest (dates, amounts, account,
+   * branch) are stream-agnostic and survive it.
+   */
+  function switchSide(next: Side) {
+    if (next === side) return;
+    setPartyId("");
+    setSide(next);
+  }
+
+  function clearExtraFilters() {
+    setDateFrom("");
+    setDateTo("");
+    setPartyId("");
+    setLocationId("");
+    setCashAccountId("");
+    setMinAmount("");
+    setMaxAmount("");
+  }
+
+  const extraFilterCount = [dateFrom, dateTo, partyId, locationId, cashAccountId, minAmount.trim(), maxAmount.trim()].filter(
+    (v) => v !== "",
+  ).length;
+
+  const partyOptions = useMemo(
+    () => [
+      { value: "", label: partyState === "error" ? "در دسترس نیست" : "همه اشخاص" },
+      ...parties.map((party) => ({
+        value: party.id,
+        // Two counterparties can share a name; the branch/phone tells them
+        // apart before the filter silently narrows to the wrong person.
+        label: [party.name, party.locationName ? `شعبهٔ ${party.locationName}` : null, party.phone ? toPersianDigits(party.phone) : null]
+          .filter(Boolean)
+          .join(" · "),
+        searchString: `${party.name} ${party.locationName ?? ""} ${party.phone ?? ""}`,
+      })),
+    ],
+    [parties, partyState],
+  );
+
+  const accountOptions = useMemo(
+    () => [
+      { value: "", label: optionsFailed ? "در دسترس نیست" : "همه حساب‌ها" },
+      ...(accountChoices ?? []).map((a) => ({
+        value: a.id,
+        label: `${VOUCHER_METHOD_LABELS[a.method]} · ${toPersianDigits(a.code)} ${a.name}`,
+        searchString: `${a.code} ${a.name} ${VOUCHER_METHOD_LABELS[a.method]}`,
+      })),
+    ],
+    [accountChoices, optionsFailed],
+  );
+
+  const locationOptions = useMemo(
+    () => [
+      { value: "", label: optionsFailed ? "در دسترس نیست" : "همهٔ شعب" },
+      ...locations.map((loc) => ({ value: loc.id, label: loc.name })),
+    ],
+    [locations, optionsFailed],
+  );
 
 
   async function reversePayment(row: Voucher) {
@@ -251,6 +454,11 @@ export function ReceiptsPaymentsSection({
   return (
     <section className="space-y-4">
       <ErrorBox>{error}</ErrorBox>
+      {notice ? (
+        <p role="status" className="rounded-xl border border-dashed border-amber-400/70 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-500/50 dark:text-amber-200">
+          {notice}
+        </p>
+      ) : null}
 
       <div className={`${cardClass} p-4 sm:p-5`}>
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -282,12 +490,12 @@ export function ReceiptsPaymentsSection({
             </button>
             <button
               type="button"
-              onClick={downloadCsv}
-              disabled={!rows || rows.length === 0}
+              onClick={() => void downloadCsv()}
+              disabled={downloading || !rows || rows.length === 0}
               className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-border px-3 text-xs font-semibold text-muted-foreground transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
             >
               <DownloadIcon aria-hidden="true" className="size-4" />
-              دانلود
+              {downloading ? "در حال آماده‌سازی…" : "دانلود"}
             </button>
             {canCreate ? (
               <Button onClick={() => setCreating(true)} className="min-h-10">
@@ -300,13 +508,13 @@ export function ReceiptsPaymentsSection({
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <div className="flex gap-2" role="group" aria-label="نوع سند">
-            <FilterChip dense selected={side === "receipts"} onClick={() => setSide("receipts")}>
+            <FilterChip dense selected={side === "receipts"} onClick={() => switchSide("receipts")}>
               <span className="inline-flex items-center gap-1.5">
                 <ArrowDownLeftIcon aria-hidden="true" className="size-3.5" />
                 دریافتی
               </span>
             </FilterChip>
-            <FilterChip dense selected={side === "payments"} onClick={() => setSide("payments")}>
+            <FilterChip dense selected={side === "payments"} onClick={() => switchSide("payments")}>
               <span className="inline-flex items-center gap-1.5">
                 <ArrowUpRightIcon aria-hidden="true" className="size-3.5" />
                 پرداختی
@@ -336,6 +544,104 @@ export function ReceiptsPaymentsSection({
             <FilterChip dense selected={statusFilter === "reversed"} onClick={() => setStatusFilter("reversed")}>باطل‌شده</FilterChip>
           </div>
         </div>
+
+        {showMoreFilters ? (
+          <div className="mt-3 grid gap-3 rounded-xl border border-border/80 bg-muted/60 p-3 lg:grid-cols-4 lg:items-end">
+            <label className="block">
+              <span className="mb-1.5 block text-xs text-muted-foreground">{side === "receipts" ? "مشتری" : "تأمین‌کننده"}</span>
+              <SearchableSelect
+                value={partyId}
+                onChange={setPartyId}
+                ariaLabel={side === "receipts" ? "فیلتر مشتری" : "فیلتر تأمین‌کننده"}
+                loading={partyState === "loading"}
+                disabled={partyState === "error"}
+                options={partyOptions}
+              />
+              {partyState === "error" ? (
+                <span className="mt-1.5 flex items-center gap-2 text-xs">
+                  <span className="text-destructive">لیست اشخاص بارگذاری نشد.</span>
+                  <button
+                    type="button"
+                    onClick={() => setDirectoryKey((k) => k + 1)}
+                    className="rounded-lg px-2 py-1 font-semibold text-amber-700 transition-colors hover:bg-amber-50 dark:text-amber-300 dark:hover:bg-amber-500/10"
+                  >
+                    تلاش مجدد
+                  </button>
+                </span>
+              ) : null}
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs text-muted-foreground">حساب</span>
+              <SearchableSelect
+                value={cashAccountId}
+                onChange={setCashAccountId}
+                ariaLabel="فیلتر حساب"
+                loading={accountChoices === null && !optionsFailed}
+                disabled={optionsFailed}
+                options={accountOptions}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs text-muted-foreground">شعبه</span>
+              <SearchableSelect
+                value={locationId}
+                onChange={setLocationId}
+                ariaLabel="فیلتر شعبه"
+                disabled={optionsFailed}
+                options={locationOptions}
+              />
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="mb-1.5 block text-xs text-muted-foreground">از تاریخ</span>
+                <JalaliDatePicker value={dateFrom} onChange={setDateFrom} ariaLabel="از تاریخ" placeholder="از تاریخ" />
+              </label>
+              <label className="block">
+                <span className="mb-1.5 block text-xs text-muted-foreground">تا تاریخ</span>
+                <JalaliDatePicker value={dateTo} onChange={setDateTo} ariaLabel="تا تاریخ" placeholder="تا تاریخ" />
+              </label>
+            </div>
+            <label className="block">
+              <span className="mb-1.5 block text-xs text-muted-foreground">حداقل مبلغ</span>
+              <PersianNumberInput
+                className={inputClass}
+                inputMode="numeric"
+                value={rialTextToAmountInput(minAmount, money.unit)}
+                onChange={(event) => setMinAmount(amountToRialText(event.target.value, money.parseText))}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs text-muted-foreground">حداکثر مبلغ</span>
+              <PersianNumberInput
+                className={inputClass}
+                inputMode="numeric"
+                value={rialTextToAmountInput(maxAmount, money.unit)}
+                onChange={(event) => setMaxAmount(amountToRialText(event.target.value, money.parseText))}
+              />
+            </label>
+          </div>
+        ) : null}
+
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <SecondaryButton onClick={() => setShowMoreFilters((open) => !open)}>
+            {showMoreFilters ? "بستن فیلترهای بیشتر" : "فیلترهای بیشتر"}
+            {extraFilterCount > 0 ? ` (${toPersianDigits(extraFilterCount)})` : ""}
+          </SecondaryButton>
+          {extraFilterCount > 0 ? (
+            <SecondaryButton onClick={clearExtraFilters}>
+              پاک کردن فیلترها
+            </SecondaryButton>
+          ) : null}
+        </div>
+
+        {optionsFailed ? (
+          <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-border px-3 py-3">
+            <p className="text-xs leading-5 text-muted-foreground">
+              فهرست شعب و حساب‌ها بارگذاری نشد؛ این فیلترها موقتاً غیرفعال‌اند.
+            </p>
+            <SecondaryButton onClick={() => setOptionsKey((key) => key + 1)}>تلاش دوباره</SecondaryButton>
+          </div>
+        ) : null}
 
         <div className="mt-4" aria-busy={loading && rows !== null}>
           {!rows ? (
@@ -408,6 +714,17 @@ export function ReceiptsPaymentsSection({
                   <article
                     key={r.id}
                     onClick={() => setSelectedId(r.id)}
+                    // A clickable card that only a pointer can open is a dead
+                    // end for keyboard users; the dialog is the drill-down
+                    // path on mobile, so the card behaves like a button.
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setSelectedId(r.id);
+                      }
+                    }}
+                    tabIndex={0}
+                    role="button"
                     className="cursor-pointer rounded-xl border border-border/80 bg-muted p-4"
                   >
                     <div className="flex items-start justify-between gap-3">
@@ -687,7 +1004,9 @@ interface VoucherDetail {
   amount: number;
   memo: string | null;
   voucherNumber: number | null;
+  customerId?: string;
   customerName?: string;
+  supplierId?: string;
   supplierName?: string;
   locationName: string | null;
   createdByName: string | null;
@@ -763,6 +1082,12 @@ function VoucherDetailDialog({
 
   const date = detail?.receiptDate ?? detail?.paymentDate ?? "";
   const partyName = detail?.customerName ?? detail?.supplierName ?? "—";
+  const partyId = detail?.customerId ?? detail?.supplierId ?? null;
+  const partyHref = partyId
+    ? side === "receipts"
+      ? accountingCustomerHref(partyId)
+      : accountingSupplierHref(partyId)
+    : null;
 
   return (
     <OverlayDialog
@@ -795,7 +1120,15 @@ function VoucherDetailDialog({
             <dl className="space-y-2 text-sm">
               <div className="flex justify-between gap-3">
                 <dt className="text-muted-foreground">{side === "receipts" ? "دریافت از" : "پرداخت به"}</dt>
-                <dd className="font-semibold">{partyName}</dd>
+                <dd className="font-semibold">
+                  {partyHref ? (
+                    <Link className="text-primary underline-offset-4 hover:underline" href={partyHref}>
+                      {partyName}
+                    </Link>
+                  ) : (
+                    partyName
+                  )}
+                </dd>
               </div>
               <div className="flex justify-between gap-3">
                 <dt className="text-muted-foreground">مبلغ</dt>
@@ -805,6 +1138,27 @@ function VoucherDetailDialog({
                 <dt className="text-muted-foreground">روش</dt>
                 <dd>{methodText(detail)}</dd>
               </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted-foreground">حساب</dt>
+                <dd>
+                  {detail.cashAccount
+                    ? `${toPersianDigits(detail.cashAccount.code)} ${detail.cashAccount.name}`
+                    : "—"}
+                </dd>
+              </div>
+              {detail.entryId ? (
+                <div className="flex justify-between gap-3">
+                  <dt className="text-muted-foreground">سند حسابداری</dt>
+                  <dd>
+                    <Link
+                      className="font-semibold text-primary underline-offset-4 hover:underline"
+                      href={`${accountingSectionHref("entries")}?entryId=${encodeURIComponent(detail.entryId)}`}
+                    >
+                      مشاهده در دفتر روزنامه
+                    </Link>
+                  </dd>
+                </div>
+              ) : null}
               {detail.bankReference ? (
                 <div className="flex justify-between gap-3">
                   <dt className="text-muted-foreground">شماره پیگیری</dt>
@@ -845,6 +1199,19 @@ function VoucherDetailDialog({
                     <dt className="text-muted-foreground">باطل‌کننده</dt>
                     <dd>{detail.reversedByName ?? "—"}</dd>
                   </div>
+                  {detail.reversalEntryId ? (
+                    <div className="flex justify-between gap-3">
+                      <dt className="text-muted-foreground">سند برگشت</dt>
+                      <dd>
+                        <Link
+                          className="font-semibold text-primary underline-offset-4 hover:underline"
+                          href={`${accountingSectionHref("entries")}?entryId=${encodeURIComponent(detail.reversalEntryId)}`}
+                        >
+                          مشاهده در دفتر روزنامه
+                        </Link>
+                      </dd>
+                    </div>
+                  ) : null}
                 </>
               ) : null}
             </dl>

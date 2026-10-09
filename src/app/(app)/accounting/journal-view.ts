@@ -215,6 +215,22 @@ export function rialTextToAmountInput(rialText: string, unit: MoneyUnit): string
   return (unit === "rial" ? value : value / 10n).toString();
 }
 
+/**
+ * A typed amount in the business's display unit → exact Rial text, or «»
+ * when the field is cleared. Shared with the voucher register's amount
+ * bounds; the journal's min/max fields and the voucher's are the same
+ * control with the same contract.
+ */
+export function amountToRialText(value: string, parseText: (input: string) => string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    return parseText(trimmed);
+  } catch {
+    return "";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // DOM ids
 // ---------------------------------------------------------------------------

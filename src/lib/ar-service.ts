@@ -19,6 +19,7 @@
  * first-class source-level reversal that keeps A/R party attribution (same
  * source_type/source_id, `*_reversal` posting kind).
  */
+import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { businessToday } from "./business-day-service";
@@ -428,7 +429,7 @@ export interface ArReceipt {
   cashAccountId: string | null;
   /** The bank's tracking number, when one was recorded. */
   bankReference: string | null;
-  /** Client idempotency key, when the submission carried one. */
+  /** Client idempotency key. Required for every submission since migration 0216. */
   idempotencyKey: string | null;
   /** Stable per-business document number. */
   voucherNumber: number | null;
@@ -457,7 +458,7 @@ interface ReceiptDbRow {
   reversal_entry_id: string | null;
 }
 
-function toReceipt(row: ReceiptDbRow): ArReceipt {
+function toReceipt(row: ReceiptDbRow, duplicate: boolean): ArReceipt {
   return {
     id: row.id,
     customerId: row.customer_id,
@@ -471,6 +472,7 @@ function toReceipt(row: ReceiptDbRow): ArReceipt {
     voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
     reversedAt: row.reversed_at,
     reversalEntryId: row.reversal_entry_id,
+    duplicate,
   };
 }
 
@@ -478,16 +480,23 @@ const RECEIPT_RETURNING = `id, customer_id, receipt_date::text AS receipt_date, 
   cash_account_id, bank_reference, idempotency_key, voucher_number::text AS voucher_number,
   reversed_at::text AS reversed_at, reversal_entry_id::text AS reversal_entry_id`;
 
+/**
+ * The receipt the key already posted, locked for this transaction — or null
+ * when the key is new. The row lock serializes two simultaneous submissions
+ * of one key: the loser waits here (or on the insert's unique index below)
+ * and then answers the winner's row instead of posting twice.
+ */
 async function findReceiptByIdempotencyKey(
   client: PoolClient,
   businessId: string,
   idempotencyKey: string,
-): Promise<ArReceipt | null> {
-  const { rows } = await client.query<ReceiptDbRow>(
-    `SELECT ${RECEIPT_RETURNING} FROM ar_receipts WHERE business_id = $1 AND idempotency_key = $2`,
+): Promise<(ReceiptDbRow & { request_fingerprint: string | null }) | null> {
+  const { rows } = await client.query<ReceiptDbRow & { request_fingerprint: string | null }>(
+    `SELECT ${RECEIPT_RETURNING}, request_fingerprint
+       FROM ar_receipts WHERE business_id = $1 AND idempotency_key = $2 FOR UPDATE`,
     [businessId, idempotencyKey],
   );
-  return rows[0] ? toReceipt(rows[0]) : null;
+  return rows[0] ?? null;
 }
 
 /**
@@ -507,13 +516,49 @@ async function nextReceiptVoucherNumber(client: PoolClient, businessId: string):
   return Number(rows[0].last_ar_voucher_number);
 }
 
-function normalizeIdempotencyKey(value: unknown): string | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== "string") throw new ArError("invalid_idempotency_key");
+/**
+ * Every receipt submission carries a client-generated key (migration 0216
+ * made the column NOT NULL): a retry replays the original voucher instead of
+ * posting a second one. The error code is the same one the A/P side answers
+ * with, so clients handle one vocabulary for both registers.
+ */
+function normalizeIdempotencyKey(value: unknown): string {
+  if (typeof value !== "string") throw new ArError("idempotency_key_required");
   const trimmed = value.trim();
-  if (!trimmed) return null;
-  if (trimmed.length > 128) throw new ArError("invalid_idempotency_key");
+  if (!trimmed || trimmed.length > 128) throw new ArError("idempotency_key_required");
   return trimmed;
+}
+
+/**
+ * The canonical receipt-request tuple, mirroring A/P's
+ * `paymentRequestFingerprint` field for field. An ordered tuple keeps
+ * normalization/versioning explicit and avoids key order dependence. Date
+ * omission remains null so a retry after midnight still refers to the
+ * original intended receipt date. Voucher account and bank reference are
+ * also part of the operation: reusing a key with a changed destination must
+ * be rejected rather than silently accepted as a retry.
+ */
+function receiptRequestFingerprint(params: {
+  customerId: string;
+  locationId: string | null;
+  method: VoucherMethod;
+  amount: number;
+  receiptDate: string | null;
+  memo: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
+}): string {
+  const canonical = JSON.stringify([
+    params.customerId,
+    params.locationId,
+    params.method,
+    params.amount,
+    params.receiptDate,
+    params.memo,
+    params.cashAccountId,
+    params.bankReference,
+  ]);
+  return createHash("sha256").update(canonical).digest("hex");
 }
 
 /**
@@ -522,7 +567,9 @@ function normalizeIdempotencyKey(value: unknown): string | null {
  * both reference (source_type='ar_receipt', source_id=receipt.id).
  *
  * Idempotent per business on `idempotencyKey`: a retry with the same key
- * returns the original receipt instead of posting a second one.
+ * returns the original receipt instead of posting a second one. A key reused
+ * with changed intent is a 409 `idempotency_conflict`, never a silent second
+ * money movement — the same contract `payBill` keeps.
  */
 export async function receivePayment(params: {
   businessId: string;
@@ -533,8 +580,8 @@ export async function receivePayment(params: {
   receiptDate?: string | null;
   memo?: string | null;
   createdBy: string | null;
-  /** Client-generated key per logical voucher submission (retry-safe). */
-  idempotencyKey?: string | null;
+  /** Client-generated key per logical voucher submission (retry-safe). Required since migration 0216. */
+  idempotencyKey: string;
   /** Holoo imports create local receipts but must not push them back to Holoo. */
   skipHolooPush?: boolean;
   /** The cash/bank/clearing account the money went into; null = the method's default account. */
@@ -551,9 +598,24 @@ export async function receivePayment(params: {
   if (!isUuid(params.customerId)) throw new ArError("customer_not_found", 404);
   // Same story for a date off the wire: reject it here, in the error
   // vocabulary the API answers with, rather than as Postgres's parse error.
-  if (params.receiptDate != null && !isValidIsoDate(params.receiptDate)) throw new ArError("invalid_date");
+  const requestedReceiptDate = params.receiptDate?.trim() || null;
+  if (requestedReceiptDate && !isValidIsoDate(requestedReceiptDate)) throw new ArError("invalid_date");
   if (!isVoucherMethod(params.method)) throw new ArError("invalid_method");
   const idempotencyKey = normalizeIdempotencyKey(params.idempotencyKey);
+  const memo = params.memo?.trim() || null;
+  const requestedCashAccountId = params.cashAccountId?.trim() || null;
+  // Throws PayablesInputError («invalid_bank_reference»), which the route answers as a 400.
+  const bankReference = normalizeBankReference(params.bankReference);
+  const fingerprint = receiptRequestFingerprint({
+    customerId: params.customerId,
+    locationId: params.locationId,
+    method: params.method,
+    amount: params.amount,
+    receiptDate: requestedReceiptDate,
+    memo,
+    cashAccountId: requestedCashAccountId,
+    bankReference,
+  });
 
   /*
    * «امروز» here is the business's own date, not the database server's.
@@ -566,21 +628,20 @@ export async function receivePayment(params: {
    * discipline `installments-service` documents: today is `businessToday`,
    * never a UTC date slice.
    */
-  const receiptDate = params.receiptDate ?? (await businessToday(params.businessId));
-  // Throws PayablesInputError («invalid_bank_reference»), which the route answers as a 400.
-  const bankReference = normalizeBankReference(params.bankReference);
+  const receiptDate = requestedReceiptDate ?? (await businessToday(params.businessId));
 
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
 
-    // Fast path for a client retry after a timeout: the original row is the answer.
-    if (idempotencyKey) {
-      const existing = await findReceiptByIdempotencyKey(client, params.businessId, idempotencyKey);
-      if (existing) {
-        await client.query("ROLLBACK");
-        return { ...existing, duplicate: true };
-      }
+    // Fast retry path, including when the active branch/business date changed
+    // after the first request committed. A key reused with changed intent is a
+    // hard conflict, never a silent second money movement.
+    const existing = await findReceiptByIdempotencyKey(client, params.businessId, idempotencyKey);
+    if (existing) {
+      if (existing.request_fingerprint !== fingerprint) throw new ArError("idempotency_conflict", 409);
+      await client.query("COMMIT");
+      return toReceipt(existing, true);
     }
 
     // Canonical customer validation: a receipt needs a real, active,
@@ -605,46 +666,45 @@ export async function receivePayment(params: {
 
     const voucherNumber = await nextReceiptVoucherNumber(client, params.businessId);
 
-    let receipt: ReceiptDbRow;
-    try {
-      const { rows } = await client.query<ReceiptDbRow>(
-        `INSERT INTO ar_receipts (business_id, location_id, customer_id, receipt_date, method, amount, memo, created_by,
-                                 idempotency_key, cash_account_id, bank_reference, voucher_number)
-         VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10, $11, $12)
-         RETURNING ${RECEIPT_RETURNING}`,
-        [
-          params.businessId,
-          params.locationId,
-          params.customerId,
-          receiptDate,
-          params.method,
-          params.amount,
-          params.memo?.trim() || null,
-          params.createdBy,
-          idempotencyKey,
-          cash.chosen ? cash.accountId : null,
-          bankReference,
-          voucherNumber,
-        ],
-      );
-      receipt = rows[0];
-    } catch (err) {
-      // Two simultaneous submissions with the same key both passed the fast
-      // path above; the unique index admits exactly one. The loser answers
-      // the winner's row rather than a 500.
-      if (
-        idempotencyKey &&
-        (err as { code?: string; constraint?: string }).code === "23505" &&
-        (err as { constraint?: string }).constraint === "uq_ar_receipts_business_idempotency"
-      ) {
-        const existing = await findReceiptByIdempotencyKey(client, params.businessId, idempotencyKey);
-        if (existing) {
-          await client.query("ROLLBACK");
-          return { ...existing, duplicate: true };
-        }
+    const { rows } = await client.query<ReceiptDbRow>(
+      `INSERT INTO ar_receipts (business_id, location_id, customer_id, receipt_date, method, amount, memo, created_by,
+                               idempotency_key, request_fingerprint, cash_account_id, bank_reference, voucher_number)
+       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       ON CONFLICT (business_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+       RETURNING ${RECEIPT_RETURNING}`,
+      [
+        params.businessId,
+        params.locationId,
+        params.customerId,
+        receiptDate,
+        params.method,
+        params.amount,
+        memo,
+        params.createdBy,
+        idempotencyKey,
+        fingerprint,
+        cash.chosen ? cash.accountId : null,
+        bankReference,
+        voucherNumber,
+      ],
+    );
+
+    // A concurrent request may have inserted the same key after our first
+    // lookup. `DO NOTHING` absorbs the conflict without aborting this
+    // transaction — catching the 23505 instead would leave the transaction
+    // aborted and every further query failing with 25P02 — and the unique
+    // index's wait means this re-read sees the single committed voucher and
+    // applies the same fingerprint guard.
+    if (!rows[0]) {
+      const concurrent = await findReceiptByIdempotencyKey(client, params.businessId, idempotencyKey);
+      if (!concurrent || concurrent.request_fingerprint !== fingerprint) {
+        throw new ArError("idempotency_conflict", 409);
       }
-      throw err;
+      await client.query("COMMIT");
+      return toReceipt(concurrent, true);
     }
+
+    const receipt = rows[0];
 
     await postJournalEntry(client, {
       businessId: params.businessId,
@@ -666,7 +726,7 @@ export async function receivePayment(params: {
     }
 
     await client.query("COMMIT");
-    return toReceipt(receipt);
+    return toReceipt(receipt, false);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;

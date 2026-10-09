@@ -69,6 +69,7 @@ import {
   journalDetailId,
   journalReversalBadge,
   journalRowId,
+  amountToRialText,
   rialTextToAmountInput,
   type JournalEntryView,
   type JournalFilterState,
@@ -756,17 +757,6 @@ export function EntriesSection({
       ) : null}
     </div>
   );
-}
-
-/** A typed amount in the business's display unit → exact Rial text, or «» when the field is cleared. */
-function amountToRialText(value: string, parseText: (input: string) => string): string {
-  const trimmed = value.trim();
-  if (!trimmed) return "";
-  try {
-    return parseText(trimmed);
-  } catch {
-    return "";
-  }
 }
 
 /**

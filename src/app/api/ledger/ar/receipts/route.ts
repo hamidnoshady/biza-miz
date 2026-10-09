@@ -3,11 +3,13 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { ArError, MissingLedgerAccountError, receivePayment } from "@/lib/ar-service";
-import { listReceiptsPage, VoucherListError } from "@/lib/installments-service";
+import { listReceiptsForExport, listReceiptsPage, VoucherListError } from "@/lib/installments-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
-import { buildCsv, sanitizeCsvText } from "@/lib/csv-safe";
-import { isVoucherMethod, PayablesInputError, VOUCHER_METHOD_LABELS, VOUCHER_METHODS } from "@/lib/payables-input";
+import { rowsToCsv } from "@/lib/report-export";
+import { buildReceiptsExportTable, voucherExportFilename } from "@/lib/voucher-export";
+import { VOUCHER_EXPORT_ROW_CAP } from "@/lib/voucher-shared";
+import { isVoucherMethod, PayablesInputError, VOUCHER_METHODS } from "@/lib/payables-input";
 
 /**
  * The «دریافت‌ها» ledger slice — receipt vouchers, newest first, keyset-
@@ -44,31 +46,21 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const cursor = params.get("cursor") ?? undefined;
 
   // CSV export honors the same filters but ignores the cursor: it is the full
-  // filtered set (capped), not the visible page.
+  // filtered set (bounded, not the visible page) through the shared codec, so
+  // the file matches the journal export's conventions.
   if (params.get("format") === "csv") {
     try {
-      const page = await listReceiptsPage(session.businessId, { ...filters, limit: 5000 });
-      const csv = buildCsv(
-        ["شماره سند", "تاریخ", "مشتری", "روش", "شماره پیگیری", "مبلغ (ریال)", "شرح", "وضعیت"],
-        page.rows.map((r) => [
-          r.voucherNumber === null ? "" : String(r.voucherNumber),
-          r.date,
-          sanitizeCsvText(r.partyName),
-          sanitizeCsvText(
-            r.cashAccount ? `${VOUCHER_METHOD_LABELS[r.method]} · ${r.cashAccount.name}` : VOUCHER_METHOD_LABELS[r.method],
-          ),
-          sanitizeCsvText(r.bankReference ?? ""),
-          String(r.amount),
-          sanitizeCsvText(r.memo ?? ""),
-          r.reversedAt ? "باطل‌شده" : "فعال",
-        ]),
-      );
-      return new NextResponse(csv, {
+      const { rows, truncated } = await listReceiptsForExport(session.businessId, filters);
+      const response = new NextResponse(rowsToCsv(buildReceiptsExportTable(rows)), {
         headers: {
           "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": "attachment; filename=receipts.csv",
+          "Content-Disposition": `attachment; filename="${voucherExportFilename("receipts")}"`,
         },
       });
+      // A truncated export is a fact the operator has to know before they
+      // reconcile against it; the header is read by the screen, which says so.
+      if (truncated) response.headers.set("X-Voucher-Export-Truncated", String(VOUCHER_EXPORT_ROW_CAP));
+      return response;
     } catch (err) {
       if (err instanceof VoucherListError) return NextResponse.json({ error: err.message }, { status: err.status });
       throw err;
@@ -94,6 +86,7 @@ interface ReceiptBody {
   cashAccountId?: string | null;
   /** The bank's tracking/reference number. */
   bankReference?: string | null;
+  /** Client-generated key per logical submission. Required: a retry replays the original voucher. */
   idempotencyKey?: string;
 }
 
@@ -111,6 +104,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const customerId = body.customerId?.trim();
   if (!customerId) return NextResponse.json({ error: "customer_required" }, { status: 400 });
+  const idempotencyKey = body.idempotencyKey?.trim();
+  if (!idempotencyKey || idempotencyKey.length > 128) {
+    return NextResponse.json({ error: "idempotency_key_required" }, { status: 400 });
+  }
   if (!isVoucherMethod(body.method)) {
     return NextResponse.json({ error: "invalid_method", allowed: [...VOUCHER_METHODS] }, { status: 400 });
   }
@@ -137,7 +134,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       amount,
       receiptDate,
       memo: body.memo,
-      idempotencyKey: body.idempotencyKey,
+      idempotencyKey,
       createdBy: session.sub,
       cashAccountId: typeof body.cashAccountId === "string" ? body.cashAccountId : null,
       bankReference: typeof body.bankReference === "string" ? body.bankReference : null,
