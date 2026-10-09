@@ -183,19 +183,19 @@ All commands run in this sandbox on the work commit.
 | `NODE_OPTIONS=--max-old-space-size=3072 npx tsc --noEmit` | **exit 0**, no output |
 | `npx eslint . --max-warnings=0` | **exit 0** |
 | `npx vitest run --maxWorkers=2` | **675 files / 8,518 tests passed**, exit 0 |
-| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (**full suite, 196 files**) | **192 files passed / 4 failed · 2446 tests passed / 14 failed / 10 skipped**, 1805.5 s |
-| …re-run of the 4 failing files' domains after the RLS fix | `tenant-isolation` **20/20**, `tenant-export` + `ai-tenant-isolation` **11/11**, auth/IAM **11 files / 87 tests** — all exit 0 |
+| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (**full suite, 196 files**) | **193 files passed / 3 failed · 2447 tests passed / 13 failed / 10 skipped**, 1630.1 s |
 
-The full suite was run end to end rather than sampled. **All 14 failures are accounted for, and none is an unexplained break:**
+These are the figures for the committed tree, from one end-to-end run of all 196 files rather than a sample. **All 13 failures are accounted for, and none is an unexplained break:**
 
 | Failing file | Tests | Cause | Mine? |
 |---|---|---|---|
 | `platform-system-backup` | 7 (+9 skipped) | No `pg_dump` exists anywhere on this box (`find / -name pg_dump -type f` → empty); `src/lib/pg-tools.ts:195` requires client major 16, the embedded server is 18.4, so it raises `postgresql_tool_server_incompatible` before doing any work. `pg-tools.ts` is not in this diff. | No — environmental |
 | `runtime-database-url` | 4 | `APP_DB_PASSWORD is required` (`src/lib/create-app-role.ts:55`). This sandbox's cluster uses trust auth with no password. Not in this diff. | No — environmental |
 | `runtime-role-regrant` | 2 | Same missing-password precondition. Not in this diff. | No — environmental |
-| `tenant-isolation` | 1 | `mfa_challenges is exempt but carries a tenant column`. **Caused by this work** — migration 0215 gave the table `business_id` and `destination` while it was still listed as RLS-exempt. | **Yes — fixed** |
 
-The `tenant-isolation` failure was a genuine defect in my own change and is fixed by migration 0216 plus removing `mfa_challenges` from `EXEMPT_TABLES` (§5). The other three are sandbox limitations: they need a PostgreSQL 16 client binary and a password-authenticated runtime role, neither of which this environment provides, and none of the files they exercise appears in this diff.
+Both preconditions were re-checked on this box rather than assumed: the `pg_dump` search returns nothing, `env | grep APP_DB_PASSWORD` is empty, and `pg-tools.ts:195` is `if (postgresMajor !== 16) throw`.
+
+**One earlier failure was mine and is now fixed.** A run taken before the final commit failed `tenant-isolation` with `mfa_challenges is exempt but carries a tenant column`: migration 0215 had given that table `business_id` and `destination` while it was still listed as RLS-exempt. Migration 0216 adds the RLS policy and drops it from `EXEMPT_TABLES` (§5), and `tenant-isolation` passes in the run above — which is why the count is 193/3 here rather than the 192/4 of that earlier run.
 
 The 10 skipped tests are `platform-system-backup`'s own `describe.skip` blocks for its peer-download and peer-HTTP surfaces, which are conditional on a second server; they were skipped, not failed.
 
@@ -245,7 +245,7 @@ One note on how the paste fix was chosen. The obvious reading of the symptom is 
 
 **Hostless multi-match disclosure is retained deliberately.** When a phone number matches members at several businesses, the response names those businesses before any proof is offered. Closing it means changing a flow that legitimate users depend on, so it is reported here rather than silently "fixed".
 
-**The full 196-file integration suite was completed, and 3 files still fail here for environmental reasons.** All 196 files ran end to end (1805.5 s): 192 passed, 4 failed. One of those four was a real defect in this work and is fixed (§5). The remaining three — `platform-system-backup`, `runtime-database-url`, `runtime-role-regrant` — fail on sandbox preconditions this environment cannot supply, and none of the source files they exercise is in this diff:
+**The full 196-file integration suite was completed, and 3 files still fail here for environmental reasons.** All 196 files ran end to end against the committed tree (1630.1 s): 193 passed, 3 failed. An earlier run had a fourth failure that was a real defect in this work, now fixed (§5) and passing. The remaining three — `platform-system-backup`, `runtime-database-url`, `runtime-role-regrant` — fail on sandbox preconditions this environment cannot supply, and none of the source files they exercise is in this diff:
 
 - `platform-system-backup` needs a `pg_dump` binary at PostgreSQL major 16. There is no `pg_dump` anywhere on this box (`find / -name pg_dump -type f` returns nothing), and `src/lib/pg-tools.ts:195` refuses any other major, so it raises `postgresql_tool_server_incompatible` against the 18.4 server before doing any work.
 - `runtime-database-url` and `runtime-role-regrant` need `APP_DB_PASSWORD`, because `src/lib/create-app-role.ts:55` provisions a password-authenticated restricted role. This sandbox's cluster runs trust auth with no password.
