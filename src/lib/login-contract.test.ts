@@ -5,6 +5,7 @@ import {
   loginEmailOrNull,
   loginErrorMessage,
   normalizeOtpCode,
+  otpFromPastedText,
   normalizePinInput,
   safeLoginNextPath,
   uuidOrNull,
@@ -216,5 +217,63 @@ describe("loginErrorMessage", () => {
 
   it("falls back to something honest for a status it does not know", () => {
     expect(loginErrorMessage({ status: 418, code: "teapot" })).toContain("ورود ناموفق");
+  });
+});
+
+describe("otpFromPastedText", () => {
+  /**
+   * Issue #885 L16 — `maxLength={6}` makes the browser truncate a paste
+   * *before* onChange fires, so a whole SMS arrived as its first six
+   * characters and normalised to an empty field. The member pasted their code
+   * and the box stayed blank.
+   */
+  it("pulls the code out of a pasted SMS body", () => {
+    expect(otpFromPastedText("Your code is 123456. Do not share it.")).toBe("123456");
+    expect(otpFromPastedText("کد ورود شما: 123456")).toBe("123456");
+  });
+
+  it("accepts Persian and Arabic-Indic digits in the pasted text", () => {
+    // The same keyboards the L11 fix was about; a paste path that only
+    // understood ASCII would reintroduce the bug one gesture later.
+    expect(otpFromPastedText("کد یک‌بارمصرف: ۱۲۳۴۵۶")).toBe("123456");
+    expect(otpFromPastedText("رمز: ١٢٣٤٥٦")).toBe("123456");
+  });
+
+  it("accepts a bare code", () => {
+    expect(otpFromPastedText("123456")).toBe("123456");
+    expect(otpFromPastedText(" 123456 ")).toBe("123456");
+  });
+
+  it("takes the first run of exactly the right length, not the first digits", () => {
+    // An SMS often carries other numbers: an expiry, a short code, a reference.
+    expect(otpFromPastedText("Ref 42. Your code is 123456, valid 10 min.")).toBe("123456");
+    expect(otpFromPastedText("Code 7 then 123456")).toBe("123456");
+  });
+
+  it("refuses to guess from a longer digit run", () => {
+    // Lifting six digits out of a phone number or an order id would produce a
+    // plausible wrong code and cost the member a failed attempt. An empty
+    // result leaves the box untouched so they can retry.
+    expect(otpFromPastedText("09121234567")).toBe("");
+    expect(otpFromPastedText("ORDER-1234567890")).toBe("");
+    expect(otpFromPastedText("12345")).toBe("");
+  });
+
+  it("returns empty for text with no code in it", () => {
+    expect(otpFromPastedText("no digits here")).toBe("");
+    expect(otpFromPastedText("")).toBe("");
+    expect(otpFromPastedText(null)).toBe("");
+    expect(otpFromPastedText(undefined)).toBe("");
+    expect(otpFromPastedText(123456)).toBe("");
+  });
+
+  it("honours a different expected length", () => {
+    expect(otpFromPastedText("code 1234", 4)).toBe("1234");
+    // A six-digit run is not a four-digit code.
+    expect(otpFromPastedText("code 123456", 4)).toBe("");
+  });
+
+  it("never returns anything longer than the bound", () => {
+    expect(otpFromPastedText("1234567890", 6).length).toBeLessThanOrEqual(6);
   });
 });

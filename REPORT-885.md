@@ -103,6 +103,7 @@ Redemption already existed — an admin could mint a link from the team screen a
 - **Accessible names and live regions (L12).** `mfa-step.tsx` had no label on either input — the heading above was an `<h2>`, not a `<label>`, so a screen reader announced "edit text" plus a placeholder that vanishes on typing. Both inputs now carry mode-aware `aria-label`s, the code input is `aria-describedby` the instruction, and all three error paragraphs are `role="alert" aria-live="assertive"`. Focus stays on the submit button when verification fails, so an error rendered elsewhere in the tree was simply never announced. A recovery-code field no longer advertises `one-time-code`, which invited password managers to autofill an SMS the member was not being asked for.
 - **Trusted-device listing** shows device label, issue date and expiry, each revocable.
 - **Copy corrections (L16)** where the product promised "full settings/reports" against a role-based reality.
+- **Pasting an SMS into the OTP field now yields the code (L16).** `otpFromPastedText` pulls a digit run of exactly the expected length out of arbitrary pasted text, wired into an `onPaste` on the phone-OTP and MFA code inputs. The bug was not the normaliser: `maxLength={6}` makes the browser truncate a paste *before* `onChange` fires, so "Your code is 123456. Do not share it." arrived as `"Your c"` and normalised to an empty box. The member pasted their code and saw nothing, with no explanation. Recovery-code entry is deliberately excluded — its format is not six digits.
 - **Forgotten-password request (L10)** on the manager form: a labelled email field that asks for a reset link, prefilled with the address already typed into the login form, with its own error live region. The admin-issued path stays visible underneath it as the fallback for installs with no SMTP, and the confirmation copy says "*if* this address is registered" rather than "sent", because the endpoint answers every outcome the same way by design.
 
 ---
@@ -137,7 +138,7 @@ The legacy PIN-only scan was reviewed but **not retired** — it is still the on
 
 | File | Tests | Notes |
 |---|---:|---|
-| `src/lib/login-contract.test.ts` | 25 | new — next-path, digit and PIN normalisation, bounded strings, error mapping |
+| `src/lib/login-contract.test.ts` | 33 | new — next-path, digit and PIN normalisation, bounded strings, error mapping, SMS paste extraction |
 | `src/middleware.test.ts` | 28 | +5 — phone-OTP public, authenticated `phone/self` still gated, prefix siblings not public, `isBrowserLoginMutationPath` |
 | `src/lib/phone-otp-policy.test.ts` | 24 | +`otpSendBudgetDecision` block — order independence, unparseable stamps, never a negative wait |
 | `integration/phone-otp.integration.test.ts` | 13 | +5 — challenge mint/redeem harness, concurrent consumption, scope mismatch |
@@ -166,7 +167,7 @@ All commands run in this sandbox on the work commit.
 |---|---|
 | `NODE_OPTIONS=--max-old-space-size=3072 npx tsc --noEmit` | **exit 0**, no output |
 | `npx eslint . --max-warnings=0` | **exit 0** |
-| `npx vitest run --maxWorkers=2` | **674 files / 8,503 tests passed**, exit 0 |
+| `npx vitest run --maxWorkers=2` | **674 files / 8,511 tests passed**, exit 0 |
 | `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (11 auth/IAM files) | **11 files / 87 tests passed**, exit 0, 201.3 s |
 | Plus the 3 files exercising `team-service.ts` / `password-reset.ts` | **3 files / 49 tests passed**, exit 0, 141.0 s |
 
@@ -176,7 +177,7 @@ Modified-code integration breakdown: `hybrid-credential-sync` 16, `team` 23, `pl
 
 Database: PostgreSQL **18.4**, provisioned via `embedded-postgres` on 127.0.0.1:54339, migrations applied through `scripts/migrate.ts`.
 
-Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. This change therefore adds **8 unit test files and 117 tests** with no existing test removed or altered in expectation.
+Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. This change therefore adds **8 unit test files and 125 tests** (8,511 − 8,386) with no existing test removed or altered in expectation.
 
 GitHub CI: **no runs or statuses exist** for this repository — the lookup returns empty. There is no CI to report against.
 
@@ -214,7 +215,9 @@ What is **not** done, and is the substance of the finding:
 
 So the drift risk the finding warns about is removed; the assurance gap it describes is not. This remains the largest open item in the issue.
 
-**L16 is partially addressed.** Copy corrections, the password toggle and `autocomplete` purposes are in; broader input ergonomics were not taken up.
+**L16 is largely addressed.** Copy corrections, the password toggle, `autocomplete` purposes and SMS paste extraction are in. What remains is open-ended: the finding also asks for broader input ergonomics, which is a design sweep rather than a defect list, and I did not attempt to define its scope here.
+
+One note on how the paste fix was chosen. The obvious reading of the symptom is that `normalizeOtpCode` mishandles pasted text. It does not — it extracts `123456` from a full SMS body correctly. The actual cause is `maxLength={6}`: the browser truncates a paste to the field's maximum length *before* `onChange` fires, so the handler only ever saw `"Your c"`. Fixing the normaliser would have changed nothing. `otpFromPastedText` therefore runs in `onPaste`, where `clipboardData` still holds the untruncated text, and only accepts a digit run of exactly the expected length — lifting six digits out of a phone number or an order id would hand the member a plausible wrong code and cost them a failed attempt, which is worse than leaving the box empty for a retry.
 
 **Hostless multi-match disclosure is retained deliberately.** When a phone number matches members at several businesses, the response names those businesses before any proof is offered. Closing it means changing a flow that legitimate users depend on, so it is reported here rather than silently "fixed".
 

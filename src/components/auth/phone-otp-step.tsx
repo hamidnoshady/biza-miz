@@ -14,7 +14,7 @@
  */
 import { useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
-import { normalizeOtpCode } from "@/lib/login-contract";
+import { normalizeOtpCode, otpFromPastedText } from "@/lib/login-contract";
 import { MfaStep } from "./mfa-step";
 
 /** How to address a resend — mirrors the three modes of /api/auth/phone-otp/request. */
@@ -241,6 +241,19 @@ export function PhoneOtpStep({
         // normalisation runs on the server, so a client that skips this still
         // cannot smuggle anything through.
         onChange={(e) => setCode(normalizeOtpCode(e.target.value))}
+        /*
+          Issue #885 L16 — pasting a whole SMS used to leave the box empty.
+          `maxLength={6}` makes the browser truncate the paste *before*
+          onChange fires, so "Your code is 123456." arrived as "Your c" and
+          normalised to nothing. clipboardData still holds the untruncated
+          text, so extract the code here and suppress the default insertion.
+        */
+        onPaste={(e) => {
+          const pasted = otpFromPastedText(e.clipboardData.getData("text"));
+          if (!pasted) return; // not a code — let the normal path handle it
+          e.preventDefault();
+          setCode(pasted);
+        }}
         placeholder="------"
         aria-label="کد تأیید ۶ رقمی"
         className="w-full rounded-lg border border-input px-3 py-2 text-center text-lg tracking-[0.4em] focus:border-primary focus:outline-none"

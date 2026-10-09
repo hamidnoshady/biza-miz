@@ -127,6 +127,34 @@ export function normalizeOtpCode(raw: unknown, maxLength = 6): string {
   return toLatinDigits(raw).replace(/\D/g, "").slice(0, maxLength);
 }
 
+/**
+ * Pull a one-time code out of pasted text.
+ *
+ * Issue #885 L16 — pasting a whole SMS into the OTP field produced an empty
+ * field. The cause is not `normalizeOtpCode`, which handles that text fine; it
+ * is `maxLength={6}` on the input. The browser truncates a paste to the
+ * field's maximum length *before* `onChange` fires, so "Your code is 123456.
+ * Do not share it." arrives as `"Your c"` and normalises to nothing. The
+ * member pastes their code and the box stays blank, with no explanation.
+ *
+ * Callers handle this in an `onPaste`, where `clipboardData` still holds the
+ * untruncated text, and prevent the default insertion.
+ *
+ * Only a digit run of *exactly* the expected length is accepted, and only the
+ * first such run. Guessing from a longer run would happily lift six digits out
+ * of a phone number or an order id, which is worse than inserting nothing —
+ * the member sees an empty box and retries, rather than a plausible wrong
+ * code that costs them a failed attempt.
+ */
+export function otpFromPastedText(raw: unknown, maxLength = 6): string {
+  if (typeof raw !== "string") return "";
+  const normalized = toLatinDigits(raw);
+  for (const run of normalized.match(/\d+/g) ?? []) {
+    if (run.length === maxLength) return run;
+  }
+  return "";
+}
+
 /** Canonicalise a typed PIN: any keyboard's digits, ASCII out, bounded. */
 export function normalizePinInput(raw: unknown, maxLength: number): string {
   if (typeof raw !== "string") return "";

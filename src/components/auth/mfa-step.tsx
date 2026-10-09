@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
+import { otpFromPastedText } from "@/lib/login-contract";
 
 export type MfaMethod = "totp" | "sms_otp";
 
@@ -545,6 +546,20 @@ export function MfaStep({
         required
         value={code}
         onChange={(e) => setCode(e.target.value)}
+        /*
+          Issue #885 L16 — same truncation trap as the phone-OTP field:
+          `maxLength` clips a pasted SMS before onChange sees it, so a member
+          who pasted the whole message got an empty box. Recovery codes are
+          deliberately excluded: their format is not six digits, and guessing
+          from arbitrary text would be worse than doing nothing.
+        */
+        onPaste={(e) => {
+          if (recoveryMode) return;
+          const pasted = otpFromPastedText(e.clipboardData.getData("text"));
+          if (!pasted) return;
+          e.preventDefault();
+          setCode(pasted);
+        }}
         placeholder={recoveryMode ? "ABCDE-FGHJK" : "------"}
         // Issue #885 L12 — an accessible name, and a mode-aware one. The two
         // fields are visually near-identical but ask for different things, and
