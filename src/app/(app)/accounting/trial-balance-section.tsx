@@ -6,6 +6,10 @@ import { RefreshCwIcon, PrinterIcon } from "lucide-react";
 import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { FilterChip } from "@/app/dashboard/filters";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { useDimensionCatalog } from "./dimension-fields";
+import { dimensionFilterOptionsFor, enabledDimensionKinds, enabledKindLabel } from "./dimension-catalog";
+import { UNASSIGNED_DIMENSION, type DimensionKind } from "@/lib/accounting-dimensions";
 import {
   CardEyebrow,
   cardClass,
@@ -163,6 +167,20 @@ export function TrialBalanceSection({
   const [accountType, setAccountType] = useState<AccountType | "all">("all");
   const [accountStatus, setAccountStatus] = useState<TrialBalanceAccountStatus>("all");
   const [includeZeroBalances, setIncludeZeroBalances] = useState(false);
+  // Issue #868: the report can be read for one dimension value. Off until a kind
+  // and a value are both chosen, and then every figure is that subset.
+  const dimensionCatalog = useDimensionCatalog();
+  const [dimensionKind, setDimensionKind] = useState<DimensionKind | "">("");
+  const [dimensionValue, setDimensionValue] = useState("");
+  const dimensionActive = dimensionKind !== "" && dimensionValue !== "";
+  const dimensionScopeLabel = !dimensionActive
+    ? ""
+    : dimensionValue === UNASSIGNED_DIMENSION
+      ? `${enabledKindLabel(dimensionCatalog.settings, dimensionKind)}: بدون بُعد`
+      : (() => {
+          const chosen = dimensionCatalog.values.find((v) => v.id === dimensionValue);
+          return `${enabledKindLabel(dimensionCatalog.settings, dimensionKind)}: ${chosen ? `${toPersianDigits(chosen.code)} · ${chosen.name}` : "مقدار انتخاب‌شده"}`;
+        })();
   const [drillTarget, setDrillTarget] = useState<DrillDownTarget | null>(null);
   // The print sheet is portalled onto <body>; there is no body to portal onto
   // during the server render, and on screen the sheet stays display:none.
@@ -274,6 +292,10 @@ export function TrialBalanceSection({
       params.set("dateFrom", dateFrom);
       params.set("dateTo", dateTo);
     }
+    if (dimensionActive) {
+      params.set("dimension", dimensionKind);
+      params.set("value", dimensionValue);
+    }
     try {
       const result = await api<TrialBalanceReport & { error?: string }>(
         `/api/ledger/trial-balance?${params}`,
@@ -300,7 +322,7 @@ export function TrialBalanceSection({
     } finally {
       if (!signal.aborted) setLoading(false);
     }
-  }, [dateFrom, dateTo, presentation]);
+  }, [dateFrom, dateTo, presentation, dimensionActive, dimensionKind, dimensionValue]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -340,7 +362,9 @@ export function TrialBalanceSection({
   }
   const balanceStatus = !data || noEntriesThroughDate
     ? "بدون سند در این بازه"
-    : data.trialBalanceBalanced ? "مانده‌ها برابر" : "مانده‌ها نامتوازن";
+    : dimensionActive
+      ? "زیرمجموعهٔ بُعد"
+      : data.trialBalanceBalanced ? "مانده‌ها برابر" : "مانده‌ها نامتوازن";
   const healthStatus = !data || !hasLedgerEntries
     ? "سلامت دفتر: بدون سند"
     : data.integrity.ledgerHealthy ? "دفتر سالم"
@@ -461,9 +485,11 @@ export function TrialBalanceSection({
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             {data ? (
               <>
-                <StatusBadge tone={noEntriesThroughDate ? "neutral" : data.trialBalanceBalanced ? "positive" : "danger"} dot>
-                  {balanceStatus}
-                </StatusBadge>
+                {dimensionActive ? null : (
+                  <StatusBadge tone={noEntriesThroughDate ? "neutral" : data.trialBalanceBalanced ? "positive" : "danger"} dot>
+                    {balanceStatus}
+                  </StatusBadge>
+                )}
                 <StatusBadge tone={data.integrity.ledgerHealthy ? "positive" : "danger"}>
                   {healthStatus}
                 </StatusBadge>
@@ -608,6 +634,44 @@ export function TrialBalanceSection({
                 <option value="archived">فقط بایگانی‌شده</option>
               </select>
             </label>
+            {enabledDimensionKinds(dimensionCatalog.settings).length > 0 ? (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block min-w-0">
+                  <span className="mb-1.5 block text-xs text-muted-foreground">بُعد</span>
+                  <SearchableSelect
+                    value={dimensionKind}
+                    onChange={(next) => {
+                      setDimensionKind(next as DimensionKind | "");
+                      setDimensionValue(next ? UNASSIGNED_DIMENSION : "");
+                    }}
+                    ariaLabel="بُعد تراز آزمایشی"
+                    options={[
+                      { value: "", label: "همهٔ سندها" },
+                      ...enabledDimensionKinds(dimensionCatalog.settings).map((k) => ({
+                        value: k,
+                        label: enabledKindLabel(dimensionCatalog.settings, k),
+                      })),
+                    ]}
+                  />
+                </label>
+                {dimensionKind ? (
+                  <label className="block min-w-0">
+                    <span className="mb-1.5 block text-xs text-muted-foreground">
+                      {enabledKindLabel(dimensionCatalog.settings, dimensionKind)}
+                    </span>
+                    <SearchableSelect
+                      value={dimensionValue}
+                      onChange={setDimensionValue}
+                      ariaLabel={`${enabledKindLabel(dimensionCatalog.settings, dimensionKind)} تراز آزمایشی`}
+                      options={[
+                        { value: UNASSIGNED_DIMENSION, label: "بدون بُعد" },
+                        ...dimensionFilterOptionsFor(dimensionCatalog.values, dimensionKind),
+                      ]}
+                    />
+                  </label>
+                ) : null}
+              </div>
+            ) : null}
             <label className="flex min-h-10 items-center gap-2 text-sm text-foreground">
               <input
                 type="checkbox"
@@ -630,7 +694,7 @@ export function TrialBalanceSection({
               : ""}
           </p>
           <div className="flex flex-wrap items-center gap-2">
-            {canExport && data ? (
+            {canExport && data && !dimensionActive ? (
               <ExportButtons
                 request={{
                   kind: "trial_balance",
@@ -660,7 +724,12 @@ export function TrialBalanceSection({
             <SectionCardSkeleton rows={4} label="در حال بارگذاری تراز آزمایشی" />
           ) : (
             <>
-              {data.integrity.ledgerHealthy && data.trialBalanceBalanced ? null : (
+              {dimensionActive ? (
+                <p role="status" className="mb-4 rounded-xl border border-border bg-muted/60 px-3 py-2.5 text-sm leading-6 text-foreground">
+                  این تراز فقط سندهایی را نشان می‌دهد که {dimensionScopeLabel} دارند. مانده‌های یک زیرمجموعه لزوماً متوازن نیستند؛ توازن کل دفتر در تراز بدون بُعد بررسی می‌شود.
+                </p>
+              ) : null}
+              {(dimensionActive ? data.integrity.ledgerHealthy : data.integrity.ledgerHealthy && data.trialBalanceBalanced) ? null : (
                 <p role="status" aria-live="polite" className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm leading-6 text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
                   {noEntriesThroughDate
                     ? "تا تاریخ گزارش سندی وجود ندارد؛ دفتر خالی به‌عنوان تراز تأییدشده نمایش داده نمی‌شود."

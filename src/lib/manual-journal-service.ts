@@ -18,6 +18,8 @@
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { postExactJournalEntry, postJournalEntry } from "./ledger-service";
+import { assertDimensionsPostable, dimensionColumnValues, dimensionsFromColumns } from "./accounting-dimensions-service";
+import type { LineDimensions } from "./accounting-dimensions";
 import type { JournalLine } from "./ledger";
 import type { Role } from "./auth-edge";
 import { appendSyncOutboxEvent } from "./sync-outbox";
@@ -51,6 +53,8 @@ export interface DraftLineInput {
   accountId: string;
   debit: number;
   credit: number;
+  /** Optional accounting dimensions (issue #868). Checked when the draft is written AND again at approval. */
+  dimensions?: LineDimensions | null;
 }
 
 /**
@@ -154,6 +158,7 @@ async function assertAccountsPostable(
 export interface DraftLine extends DraftLineInput {
   accountCode: string;
   accountName: string;
+  dimensions: LineDimensions;
 }
 
 export interface JournalDraft {
@@ -199,7 +204,12 @@ interface DraftLineRow extends Record<string, unknown> {
   account_name: string;
   debit: string;
   credit: string;
+  cost_center_id: string | null;
+  profit_center_id: string | null;
+  department_id: string | null;
+  detail_dimension_id: string | null;
 }
+
 
 async function attachLines(
   businessId: string,
@@ -215,7 +225,8 @@ async function attachLines(
    * 0151 adds the ordinal this sorts on). journal_lines can order by its own
    * id because that one is an identity bigint.
    */
-  const lineSelect = `SELECT dl.draft_id, dl.account_id, a.code AS account_code, a.name AS account_name, dl.debit::text AS debit, dl.credit::text AS credit
+  const lineSelect = `SELECT dl.draft_id, dl.account_id, a.code AS account_code, a.name AS account_name, dl.debit::text AS debit, dl.credit::text AS credit,
+                  dl.cost_center_id, dl.profit_center_id, dl.department_id, dl.detail_dimension_id
            FROM journal_entry_draft_lines dl
            JOIN accounts a ON a.id = dl.account_id
            JOIN journal_entry_drafts d ON d.id = dl.draft_id
@@ -233,6 +244,7 @@ async function attachLines(
       accountName: l.account_name,
       debit: Number(l.debit),
       credit: Number(l.credit),
+      dimensions: dimensionsFromColumns(l),
     });
     linesByDraft.set(l.draft_id, list);
   }
@@ -405,12 +417,24 @@ export async function createDraft(params: {
       return { id: winner[0].id, duplicate: true };
     }
     const draftId = rows[0].id;
+    // Attribution is checked as the draft is written, so the drafter hears about
+    // a closed cost centre now, not when a reviewer finally opens the document.
+    // Approval checks it again: a value can be archived in between.
+    await assertDimensionsPostable(client, {
+      businessId: params.businessId,
+      locationId: params.locationId,
+      entryDate,
+      lines: nonZero,
+    });
     // `line_no` is the row's place in the document as it was typed; see
     // attachLines above for why the read cannot recover it from the key.
     for (const [index, l] of nonZero.entries()) {
+      const dims = dimensionColumnValues(l.dimensions);
       await client.query(
-        `INSERT INTO journal_entry_draft_lines (draft_id, account_id, debit, credit, line_no) VALUES ($1, $2, $3, $4, $5)`,
-        [draftId, l.accountId, l.debit, l.credit, index],
+        `INSERT INTO journal_entry_draft_lines
+           (draft_id, account_id, debit, credit, line_no, cost_center_id, profit_center_id, department_id, detail_dimension_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [draftId, l.accountId, l.debit, l.credit, index, dims.cost_center_id, dims.profit_center_id, dims.department_id, dims.detail_dimension_id],
       );
     }
     await client.query("COMMIT");
@@ -668,8 +692,19 @@ export async function reverseEntryInTransaction(
   if (original.reverses_entry_id) throw new ManualJournalError("cannot_reverse_a_reversal", 409);
   if (original.reversed_at) throw new ManualJournalError("already_reversed", 409);
 
-  const { rows: lineRows } = await client.query<{ account_id: string; debit: string; credit: string }>(
-    `SELECT account_id, debit::text AS debit, credit::text AS credit
+  const { rows: lineRows } = await client.query<
+    {
+      account_id: string;
+      debit: string;
+      credit: string;
+      cost_center_id: string | null;
+      profit_center_id: string | null;
+      department_id: string | null;
+      detail_dimension_id: string | null;
+    }
+  >(
+    `SELECT account_id, debit::text AS debit, credit::text AS credit,
+            cost_center_id, profit_center_id, department_id, detail_dimension_id
        FROM journal_lines WHERE entry_id = $1 ORDER BY id`,
     [params.entryId],
   );
@@ -689,7 +724,11 @@ export async function reverseEntryInTransaction(
       accountId: line.account_id,
       debit: line.credit as RialText,
       credit: line.debit as RialText,
+      // Mirrored, not re-decided: the reversal undoes what the original recorded,
+      // and must do so even if a value has since been archived (issue #868).
+      dimensions: dimensionsFromColumns(line),
     })),
+    dimensionMirror: true,
   });
   await client.query("UPDATE journal_entries SET reverses_entry_id = $2 WHERE id = $1", [entryId, params.entryId]);
   await client.query("UPDATE journal_entries SET reversed_at = now(), reversed_by = $2 WHERE id = $1", [params.entryId, params.actorId]);

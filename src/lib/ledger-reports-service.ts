@@ -11,6 +11,11 @@
 import { query } from "./db";
 import { classifyAccounts, isClearing } from "./account-classification";
 import { isValidIsoDate } from "./iso-date";
+import {
+  DIMENSION_COLUMN,
+  UNASSIGNED_DIMENSION,
+  isDimensionUuid,
+} from "./accounting-dimensions";
 import type { AccountLevel, AccountType, NormalBalance } from "./coa-template";
 import type {
   TrialBalanceFilters,
@@ -180,6 +185,20 @@ export async function getTrialBalance(
   businessId: string,
   filters: TrialBalanceFilters,
 ): Promise<TrialBalanceReport> {
+  const dimension = filters.dimension ?? null;
+  if (dimension && dimension.valueId !== UNASSIGNED_DIMENSION && !isDimensionUuid(dimension.valueId)) {
+    throw new Error("invalid_trial_balance_scope");
+  }
+  // A dimension filter restricts the LINES. The predicate sits on the line join,
+  // so an account with no matching line still appears (at zero), and every
+  // figure is the same subset as every other: nothing is summed twice.
+  const dimensionPredicate = !dimension
+    ? "TRUE"
+    : dimension.valueId === UNASSIGNED_DIMENSION
+      ? `jl.${DIMENSION_COLUMN[dimension.kind]} IS NULL`
+      : `jl.${DIMENSION_COLUMN[dimension.kind]} = $4::uuid`;
+  const dimensionArgs: unknown[] =
+    dimension && dimension.valueId !== UNASSIGNED_DIMENSION ? [dimension.valueId] : [];
   const closingOnly = Boolean(filters.asOf);
   const dateFrom = closingOnly ? null : filters.dateFrom;
   const dateTo = closingOnly ? filters.asOf : filters.dateTo;
@@ -216,14 +235,14 @@ export async function getTrialBalance(
               COALESCE(SUM(jl.credit) FILTER (WHERE je.id IS NOT NULL), 0)::text AS raw_closing_credit
          FROM accounts a
          LEFT JOIN accounts parent ON parent.id = a.parent_id AND parent.business_id = $1
-         LEFT JOIN journal_lines jl ON jl.account_id = a.id
+         LEFT JOIN journal_lines jl ON jl.account_id = a.id AND ${dimensionPredicate}
          LEFT JOIN journal_entries je
            ON je.id = jl.entry_id AND je.business_id = $1 AND je.entry_date <= $3::date
         WHERE a.business_id = $1
         GROUP BY a.id, parent.code
        HAVING a.is_active OR COUNT(je.id) > 0
         ORDER BY a.code`,
-      [businessId, dateFrom, dateTo],
+      [businessId, dateFrom, dateTo, ...dimensionArgs],
     ),
     ledgerIntegritySummary(businessId, dateTo),
     query<{ name: string }>("SELECT name FROM businesses WHERE id = $1", [businessId]),
@@ -302,6 +321,9 @@ export async function getTrialBalance(
     // require *lines* in scope, though — a journal header with no lines leaves
     // both columns at zero, and 0 = 0 over nothing is not a balanced report.
     trialBalanceBalanced: activityLineCount > 0 && closingTotalsMatch,
+    // Echoed so the screen can say which subset it is showing. Under a filter the
+    // flag above describes that subset only, and a subset need not balance.
+    dimension,
     activity: { entryCount: activityEntryCount, lineCount: activityLineCount },
     integrity: {
       ledgerHealthy: integrity.ledgerHealthy,

@@ -48,6 +48,7 @@ function entry(overrides: Partial<JournalEntryRecord> = {}): JournalEntryRecord 
         foreignDebit: "0",
         foreignCredit: "0",
         partyId: null,
+        dimensions: [],
       },
       {
         entryId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -59,6 +60,7 @@ function entry(overrides: Partial<JournalEntryRecord> = {}): JournalEntryRecord 
         foreignDebit: "0",
         foreignCredit: "0",
         partyId: null,
+        dimensions: [],
       },
     ],
     ...overrides,

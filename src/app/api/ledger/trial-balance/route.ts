@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { isValidIsoDate } from "@/lib/iso-date";
 import { getTrialBalance } from "@/lib/ledger-reports-service";
+import { parseDimensionFilter } from "@/lib/accounting-dimensions";
 
 /**
  * Period-scoped trial balance. A caller must name either an inclusive custom
@@ -29,11 +30,18 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (dateFrom !== null && dateTo !== null && dateFrom > dateTo) {
     return NextResponse.json({ error: "invalid_date_range" }, { status: 400 });
   }
+  // Issue #868: `?dimension=cost_center&value=<id|unassigned>` restricts the
+  // whole report to one value of one kind. Absent means the whole ledger.
+  const dimension = parseDimensionFilter(params.get("dimension"), params.get("value"));
+  if (!dimension.ok) return NextResponse.json({ error: "invalid_dimension" }, { status: 400 });
 
   try {
     const report = await getTrialBalance(
       session.businessId,
-      asOf !== null ? { asOf } : { dateFrom: dateFrom!, dateTo: dateTo! },
+      {
+        ...(asOf !== null ? { asOf } : { dateFrom: dateFrom!, dateTo: dateTo! }),
+        ...(dimension.filter ? { dimension: dimension.filter } : {}),
+      },
     );
     return NextResponse.json(report);
   } catch (cause) {

@@ -5,6 +5,8 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 import { ExpenseError, listExpenses, MissingLedgerAccountError, recordExpense } from "@/lib/expense-service";
 import { encodeExpenseCursor, parseExpenseAmount, parseExpenseListQuery } from "@/lib/expense-input";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
+import { parseLineDimensions } from "@/lib/accounting-dimensions";
+import { AccountingDimensionError } from "@/lib/accounting-dimensions-service";
 
 /**
  * The expense register: filterable by date range, category, payment account,
@@ -81,12 +83,19 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     settlement?: string;
     supplierId?: string;
     dueDate?: string;
+    dimensions?: unknown;
   };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+
+  // Issue #868: the expense's cost centre / profit centre / department / detail.
+  // Read strictly here and again in the service, so no caller can slip a value
+  // past the rule by going around this route.
+  const dimensions = parseLineDimensions(body.dimensions);
+  if (!dimensions.ok) return NextResponse.json({ error: "invalid_dimension" }, { status: 400 });
 
   /*
    * The branch a *new* expense belongs to defaults to the member's active one, as
@@ -123,10 +132,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       settlement: typeof body.settlement === "string" ? (body.settlement as "paid" | "credit") : null,
       supplierId: typeof body.supplierId === "string" ? body.supplierId : null,
       dueDate: typeof body.dueDate === "string" ? body.dueDate : null,
+      dimensions: dimensions.value,
     });
     return NextResponse.json({ expense }, { status: 201 });
   } catch (err) {
     if (err instanceof ExpenseError) return NextResponse.json({ error: err.message }, { status: err.status });
+    if (err instanceof AccountingDimensionError) {
+      return NextResponse.json({ error: err.message, details: err.details }, { status: err.status });
+    }
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }

@@ -18,6 +18,8 @@ import {
   type ChartType,
 } from "./reports";
 import { addDays } from "./rollup";
+import { dimensionLinePredicate } from "./accounting-dimension-reports";
+import type { DimensionFilter } from "./accounting-dimensions";
 import {
   costOfSalesCodesForIndustry,
   isNonCurrentCode,
@@ -881,6 +883,12 @@ export async function getAccountStatement(
   businessId: string,
   accountId: string,
   filters: DateRangeFilters = {},
+  /**
+   * Issue #868 — the cost-centre account card: the same account, restricted to
+   * the lines that carry one dimension value (or none). The opening balance is
+   * restricted the same way, so the card's arithmetic still closes.
+   */
+  dimension: DimensionFilter | null = null,
 ): Promise<AccountStatement | null> {
   const { rows: accountRows } = await query<{
     code: string;
@@ -897,12 +905,17 @@ export async function getAccountStatement(
 
   let openingBalance = 0;
   if (filters.dateFrom) {
+    const openingParams: unknown[] = [businessId, accountId, filters.dateFrom];
+    const openingDimension = dimensionLinePredicate(dimension, (value) => {
+      openingParams.push(value);
+      return `$${openingParams.length}`;
+    });
     const { rows } = await query<{ debit: string; credit: string }>(
       `SELECT COALESCE(SUM(jl.debit), 0)::text AS debit, COALESCE(SUM(jl.credit), 0)::text AS credit
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.entry_id
-        WHERE je.business_id = $1 AND jl.account_id = $2 AND je.entry_date < $3`,
-      [businessId, accountId, filters.dateFrom],
+        WHERE je.business_id = $1 AND jl.account_id = $2 AND je.entry_date < $3 AND ${openingDimension}`,
+      openingParams,
     );
     openingBalance = sign * (Number(rows[0].debit) - Number(rows[0].credit));
   }
@@ -917,6 +930,12 @@ export async function getAccountStatement(
     params.push(filters.dateTo);
     where.push(`je.entry_date <= $${params.length}`);
   }
+  where.push(
+    dimensionLinePredicate(dimension, (value) => {
+      params.push(value);
+      return `$${params.length}`;
+    }),
+  );
   const { rows } = await query<{
     entry_id: string;
     entry_date: string;
