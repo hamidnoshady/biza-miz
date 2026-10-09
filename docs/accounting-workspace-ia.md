@@ -93,6 +93,10 @@ so the sidebar has one spelling of a row instead of one per menu.
   (`isLedgerWorkspacePathname`) and stays dark on unrelated Accounting areas —
   sales, inventory, the directory, reports and the overview each have their own
   row. At the 4rem icon rail the label hides and the row keeps its tooltip.
+  A bottom-bar tab pinned to `/accounting/ledger` follows the same rule
+  (`isActive` in `dashboard-sidebar.tsx` layers it over the shared
+  `navHrefIsActive`), so the tab does not go dark while the member is inside a
+  ledger tool.
 - The tools' own direct URLs are unchanged and remain bookmarkable,
   pinnable to the mobile bottom bar and permission-gated exactly as before.
 
