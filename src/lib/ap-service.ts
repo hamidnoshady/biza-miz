@@ -1,50 +1,40 @@
 /**
- * Phase 16 — AP subledger, the DB-touching part. Mirrors ar-service.ts, with
- * two structural differences from AR:
+ * Accounts Payable subledger and supplier-payment workflows.
  *
- * - Accounts Payable is a liability: its normal balance is credit-debit
- *   (the opposite sign convention from AR's asset debit-credit), so "an open
- *   item" is a credit line here and "a payment" is a debit line — backwards
- *   from ar-service.ts everywhere the two would otherwise look identical.
- * - A supplier can come from the purchase that raised it (`purchases.
- *   supplier_id`, required for a `credit`-settled purchase since this phase
- *   — see the validation in the purchases receive route), transitively from
- *   the purchase a supplier_return's `purchase_id` points at, an A/P payment,
- *   a cheque issued to that supplier, or the supplier stored on a cheque
- *   endorsement. `suppliers` itself has no `business_id` column (only
- *   `location_id`), so payBill verifies the business match through `locations`
- *   explicitly rather than a plain equality check.
+ * The subledger is reconstructed from journal lines on the control account;
+ * no mutable/shadow balance is stored. Liability balances are credit minus
+ * debit — the opposite sign convention from A/R's debit-minus-credit — so "an
+ * open item" is a credit line here and "a payment" is a debit line. All reads
+ * share the canonical source attribution in ap-attribution.ts and keep the
+ * unattributed bucket visible so the total reconciles to GL 2100.
  *
- * Like the A/R mirror, every read is aggregated in SQL: the balance list is
- * one row per supplier, a statement reads only that supplier's lines, and the
- * aging report returns one row per supplier with the buckets already summed.
+ * Like its A/R mirror (ar-service.ts), the report reads happen where the rows
+ * are: the balance list is one grouped row per supplier alias with the search,
+ * the window and the pre-window count done in SQL, and the aging report
+ * returns one row per supplier with the buckets already summed. Nothing loads
+ * the business's A/P history into Node to draw a screen.
  *
- * DB-touching, so per repo convention it has no direct unit test; the pure
- * aging math (shared with AR) lives in aging.ts. Covered here by
- * integration/ap.integration.test.ts.
+ * The statement is the one read that walks lines (a statement is a list), and
+ * it asks for a single supplier's lines only. DB-touching, so per repo
+ * convention it has no direct unit test; covered by integration/ap
+ * .integration.test.ts.
  */
-import { getPool, query, type PoolClient } from "./db";
+import { createHash } from "node:crypto";
+import { getPool, query } from "./db";
 import { businessToday } from "./business-day-service";
 import { isUuid } from "./uuid";
-import { WELL_KNOWN_CODES } from "./coa-template";
 import { isValidIsoDate } from "./iso-date";
+import { WELL_KNOWN_CODES } from "./coa-template";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
 import { agingBucketCaseSql, UNKNOWN_SUPPLIER_KEY, type AgingSummary } from "./aging";
+import { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL, apAttributionStatus } from "./ap-attribution";
 import { foldForSearch, searchPattern } from "./sql-search";
 import { enqueueHolooReceiptForApPayment } from "./integrations/holoo/outbox-producer";
-import { normalizeBankReference } from "./payables-input";
+import { normalizeBankReference, PayablesInputError } from "./payables-input";
 import { resolveVoucherCashAccount } from "./voucher-cash-account";
 
-export { MissingLedgerAccountError };
-
-/**
- * Group key for AP lines that carry no supplier attribution — a manual journal
- * entry against A/P, or a credit purchase predating this feature. Defined in
- * the pure `aging` module (see the note there) so client components can import
- * it without pulling in `pg`; re-exported here because this is where callers
- * expect to find it.
- */
-export { UNKNOWN_SUPPLIER_KEY };
+export { MissingLedgerAccountError, UNKNOWN_SUPPLIER_KEY };
+export { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL };
 
 export class ApError extends Error {
   status: number;
@@ -54,9 +44,6 @@ export class ApError extends Error {
   }
 }
 
-/** How a supplier alias with no name yet is shown — one copy, for the same reason A/R keeps one. */
-const UNATTRIBUTED_SUPPLIER_NAME = "بدون تأمین‌کننده مشخص";
-
 async function apAccountId(businessId: string): Promise<string | null> {
   const { rows } = await query<{ id: string }>(
     `SELECT id FROM accounts WHERE business_id = $1 AND code = $2`,
@@ -65,90 +52,160 @@ async function apAccountId(businessId: string): Promise<string | null> {
   return rows[0]?.id ?? null;
 }
 
+/** How a supplier alias with no name yet is shown — one copy, for the same reason A/R keeps one. */
+const UNATTRIBUTED_SUPPLIER_NAME = "بدون تأمین‌کننده مشخص";
+
 /**
- * The canonical "which supplier does this A/P line belong to?" SQL — the A/P
- * twin of `AR_CUSTOMER_ATTRIBUTION_SQL`, and the same reason it is a fragment:
- * every A/P read (balances, statement, aging) must attribute a line the same
- * way, and an endorsed received cheque names its supplier only through its
- * endorsement event.
- *
- * `$1` is the business id. The caller supplies the account filter.
+ * The display identity a grouped supplier alias is read through: the party
+ * behind the branch alias, else the alias's own copy, else the bucket's name.
  */
-export const AP_SUPPLIER_ATTRIBUTION_SQL = `
-  FROM journal_lines jl
-  JOIN journal_entries je ON je.id = jl.entry_id
-  LEFT JOIN purchases p ON je.source_type = 'purchase' AND p.id = je.source_id
-  LEFT JOIN supplier_returns sr ON je.source_type = 'supplier_return' AND sr.id = je.source_id
-  LEFT JOIN purchases p2 ON sr.purchase_id = p2.id
-  LEFT JOIN ap_payments ap ON je.source_type = 'ap_payment' AND ap.id = je.source_id
-  -- An expense recorded «پرداخت بعدی» credits A/P for the supplier it names, so
-  -- it is that supplier's bill exactly like a purchase is (audit F11).
-  LEFT JOIN expenses ex ON je.source_type = 'expense' AND ex.id = je.source_id
-  LEFT JOIN cheques ch ON je.source_type = 'cheque' AND ch.id = je.source_id
-  -- An endorsed received cheque has no supplier_id on its original row: the
-  -- supplier is the one recorded by the endorsement event. Reuse it for a
-  -- later bounce too, so that debit and reversing credit stay in the same
-  -- supplier statement. (First endorsement wins, as the old walk did.)
-  LEFT JOIN LATERAL (
-    SELECT endorsed_to_supplier_id
-      FROM cheque_events
-     WHERE cheque_id = ch.id AND endorsed_to_supplier_id IS NOT NULL
-     ORDER BY created_at, id
-     LIMIT 1
-  ) endorsed ON ch.id IS NOT NULL`;
-
-/** The supplier-id expression that goes with {@link AP_SUPPLIER_ATTRIBUTION_SQL}. */
-export const AP_SUPPLIER_ID_SQL =
-  "COALESCE(p.supplier_id, p2.supplier_id, ap.supplier_id, ex.supplier_id, ch.supplier_id, endorsed.endorsed_to_supplier_id)";
-
-/** The expression the supplier's display identity is read through: the party behind the branch alias, else the alias's own copy. */
 const AP_SUPPLIER_NAME_SQL = `coalesce(pa.name, s.name, '${UNATTRIBUTED_SUPPLIER_NAME}')`;
 
 /**
- * The joins that give a grouped supplier id its display identity: the branch
- * alias, then the party behind it. Takes the id expression because the two
- * shapes that need it name it differently — `g.supplier_id` under the grouped
- * subquery, `p.supplier_id` under the aging CTE.
+ * The joins that give an already-grouped supplier id its display identity and
+ * branch label. Takes the id expression because the two shapes that need it
+ * name it differently — `g.supplier_id` under the grouped subquery,
+ * `p.supplier_id` under the aging CTE.
  */
-function apSupplierJoins(idExpression: string): string {
+function apSupplierIdentityJoins(idExpression: string): string {
   return `
   LEFT JOIN suppliers s ON s.id = ${idExpression}
-  LEFT JOIN parties pa ON pa.id = s.party_id`;
+  LEFT JOIN parties pa ON pa.id = s.party_id
+  LEFT JOIN locations supplier_location ON supplier_location.id = s.location_id`;
+}
+
+interface ApLineRow extends Record<string, unknown> {
+  supplier_id: string | null;
+  supplier_name: string | null;
+  supplier_phone: string | null;
+  party_id: string | null;
+  supplier_location_id: string | null;
+  supplier_location_name: string | null;
+  location_id: string | null;
+  location_name: string | null;
+  journal_entry_id: string;
+  journal_line_id: string;
+  entry_date: string;
+  source_type: string | null;
+  source_id: string | null;
+  note: string | null;
+  return_reason: string | null;
+  memo: string | null;
+  debit: string;
+  credit: string;
+  purchase_id: string | null;
+  item_purchase_id: string | null;
+  supplier_return_id: string | null;
+  item_supplier_return_id: string | null;
+  payment_id: string | null;
+  cheque_id: string | null;
+  installment_plan_id: string | null;
+}
+
+interface ApLineFilters {
+  businessId: string;
+  accountId: string;
+  supplierId?: string;
+  asOfDate?: string;
+}
+
+/**
+ * Line-level A/P activity for statement/aging calculations. Unlike the old
+ * whole-history helper, this pushes both supplier selection and the as-of date
+ * into PostgreSQL before any rows reach Node.
+ */
+async function queryApLines(filters: ApLineFilters): Promise<ApLineRow[]> {
+  const values: unknown[] = [filters.businessId, filters.accountId];
+  const predicates = ["je.business_id = $1", "jl.account_id = $2"];
+  if (filters.asOfDate) {
+    values.push(filters.asOfDate);
+    predicates.push(`je.entry_date <= $${values.length}::date`);
+  }
+  if (filters.supplierId !== undefined) {
+    values.push(filters.supplierId);
+    const supplierParameter = `$${values.length}::text`;
+    predicates.push(
+      `CASE WHEN ${supplierParameter} = '${UNKNOWN_SUPPLIER_KEY}'
+            THEN ${AP_SUPPLIER_ID_SQL} IS NULL
+            ELSE ${AP_SUPPLIER_ID_SQL}::text = ${supplierParameter}
+       END`,
+    );
+  }
+
+  const { rows } = await query<ApLineRow>(
+    `SELECT s.id AS supplier_id,
+            COALESCE(pa.name, s.name) AS supplier_name,
+            COALESCE(pa.phone, s.phone) AS supplier_phone,
+            s.party_id AS party_id,
+            supplier_location.id AS supplier_location_id,
+            supplier_location.name AS supplier_location_name,
+            je.location_id AS location_id,
+            entry_location.name AS location_name,
+            je.id AS journal_entry_id,
+            jl.id::text AS journal_line_id,
+            je.entry_date::text AS entry_date,
+            je.source_type,
+            je.source_id::text AS source_id,
+            COALESCE(p.note, p2.note, ip.note, ipr.note, exp.memo) AS note,
+            COALESCE(sr.reason, isr.reason) AS return_reason,
+            je.memo,
+            jl.debit::text AS debit,
+            jl.credit::text AS credit,
+            COALESCE(p.id, p2.id)::text AS purchase_id,
+            COALESCE(ip.id, ipr.id)::text AS item_purchase_id,
+            sr.id::text AS supplier_return_id,
+            isr.id::text AS item_supplier_return_id,
+            ap.id::text AS payment_id,
+            ch.id::text AS cheque_id,
+            ins.id::text AS installment_plan_id
+       ${AP_SUPPLIER_ATTRIBUTION_SQL}
+      WHERE ${predicates.join(" AND ")}
+      ORDER BY je.entry_date, je.posted_at, je.id, jl.id`,
+    values,
+  );
+  return rows;
 }
 
 export interface SupplierBalance {
-  supplierId: string; // UNKNOWN_SUPPLIER_KEY for unattributed lines
+  /** UNKNOWN_SUPPLIER_KEY for unattributed lines; otherwise the branch alias id. */
+  supplierId: string;
   supplierName: string;
   supplierPhone: string | null;
-  /**
-   * The party behind this branch alias (`suppliers.party_id`), or null for the
-   * unattributed bucket and a legacy alias no party was ever linked to. This is
-   * what a deep link into «اشخاص» needs: `supplierId` is the *alias* id, and
-   * the directory is keyed by the party record, not by the alias.
-   */
+  /** Party record behind this per-location supplier alias, when linked. */
   supplierPartyId: string | null;
+  /** Alias location is the branch that owns this payable under the strict branch-liability rule. */
+  locationId: string | null;
+  locationName: string | null;
+  /** Positive means the business owes the supplier; negative means an advance/debit balance. */
   balance: number;
 }
 
 /**
- * Every supplier *record* of this business, with whatever A/P balance it
- * carries — the picker's list, as opposed to {@link listSupplierBalances}'s
- * report. See `listCustomerDirectory` in ar-service.ts for the reasoning: a
- * cheque written to a supplier we owe nothing to yet is ordinary, and the
- * balances list also carries the `UNKNOWN_SUPPLIER_KEY` bucket, which is not a
- * supplier at all.
- *
- * The id is the branch alias's (`suppliers.id`) because that is what every A/P
- * write references; the name is the party's when there is one.
+ * Every supplier alias with its current balance. Kept separate from the report
+ * list because a new supplier or an advance-payment supplier can have no open
+ * bill yet. Branch names stay attached: the visible key is a branch alias, not
+ * a business-wide party balance.
  */
 export async function listSupplierDirectory(businessId: string): Promise<SupplierBalance[]> {
-  const { rows } = await query<{ id: string; name: string; phone: string | null; party_id: string | null }>(
-    `SELECT s.id, COALESCE(pa.name, s.name) AS name, COALESCE(pa.phone, s.phone) AS phone, s.party_id
+  const { rows } = await query<{
+    id: string;
+    name: string;
+    phone: string | null;
+    party_id: string | null;
+    location_id: string;
+    location_name: string;
+  }>(
+    `SELECT s.id,
+            COALESCE(pa.name, s.name) AS name,
+            COALESCE(pa.phone, s.phone) AS phone,
+            s.party_id,
+            l.id AS location_id,
+            l.name AS location_name
        FROM suppliers s
        JOIN locations l ON l.id = s.location_id
        LEFT JOIN parties pa ON pa.id = s.party_id
       WHERE l.business_id = $1 AND s.is_active
-      ORDER BY COALESCE(pa.name, s.name)`,
+      ORDER BY COALESCE(pa.name, s.name), l.name, s.id`,
     [businessId],
   );
   const balances = new Map((await listSupplierBalances(businessId)).map((s) => [s.supplierId, s.balance]));
@@ -157,14 +214,22 @@ export async function listSupplierDirectory(businessId: string): Promise<Supplie
     supplierName: r.name,
     supplierPhone: r.phone,
     supplierPartyId: r.party_id,
+    locationId: r.location_id,
+    locationName: r.location_name,
     balance: balances.get(r.id) ?? 0,
   }));
 }
 
 /**
  * The balance list, grouped in SQL and bounded by the caller's window — the
- * A/P twin of `customerBalanceRows`, with the liability sign (credit − debit)
- * and the supplier alias as the group key.
+ * A/P twin of `customerBalanceRows`, with the liability sign (credit − debit),
+ * the supplier alias as the group key, and the same three search fields
+ * (name, phone, accounting code) the A/R list searches.
+ *
+ * `$3` is the folded pattern or NULL; `$4`/`$5` are the window, both NULL for
+ * the whole list. `count(*) OVER ()` is evaluated after WHERE and before
+ * LIMIT, so a page and the number of matches it was cut from come back in one
+ * round trip.
  */
 async function supplierBalanceRows(
   businessId: string,
@@ -174,16 +239,20 @@ async function supplierBalanceRows(
   const pattern = searchPattern(options.q);
   const { rows } = await query<{
     supplier_id: string | null;
-    name: string;
-    phone: string | null;
+    supplier_name: string | null;
+    supplier_phone: string | null;
     party_id: string | null;
+    location_id: string | null;
+    location_name: string | null;
     balance: string;
     total: string;
   }>(
     `SELECT g.supplier_id,
-            ${AP_SUPPLIER_NAME_SQL} AS name,
-            coalesce(pa.phone, s.phone) AS phone,
-            s.party_id,
+            ${AP_SUPPLIER_NAME_SQL} AS supplier_name,
+            coalesce(pa.phone, s.phone) AS supplier_phone,
+            s.party_id AS party_id,
+            supplier_location.id AS location_id,
+            supplier_location.name AS location_name,
             g.balance::text AS balance,
             count(*) OVER () AS total
        FROM (
@@ -194,30 +263,34 @@ async function supplierBalanceRows(
           GROUP BY ${AP_SUPPLIER_ID_SQL}
          HAVING sum(jl.credit - jl.debit) <> 0
        ) g
-       ${apSupplierJoins("g.supplier_id")}
+       ${apSupplierIdentityJoins("g.supplier_id")}
       WHERE $3::text IS NULL
-         -- Name, phone and accounting code — the same three the A/R list
-         -- searches, so the two subledger search boxes behave alike.
          OR ${foldForSearch(AP_SUPPLIER_NAME_SQL)} ILIKE $3 ESCAPE '\\'
          OR ${foldForSearch("coalesce(pa.phone, s.phone, '')")} ILIKE $3 ESCAPE '\\'
          OR ${foldForSearch("coalesce(pa.accounting_code, '')")} ILIKE $3 ESCAPE '\\'
-      ORDER BY g.balance DESC, g.supplier_id NULLS LAST
+      ORDER BY g.balance DESC,
+               ${AP_SUPPLIER_NAME_SQL},
+               supplier_location.name NULLS FIRST,
+               g.supplier_id NULLS FIRST
       LIMIT $4::int OFFSET $5::int`,
     [businessId, accountId, pattern, options.limit, options.offset],
   );
+
   return {
-    suppliers: rows.map((r) => ({
-      supplierId: r.supplier_id ?? UNKNOWN_SUPPLIER_KEY,
-      supplierName: r.name,
-      supplierPhone: r.phone,
-      supplierPartyId: r.party_id,
-      balance: Number(r.balance),
+    suppliers: rows.map((row) => ({
+      supplierId: row.supplier_id ?? UNKNOWN_SUPPLIER_KEY,
+      supplierName: row.supplier_name ?? UNATTRIBUTED_SUPPLIER_NAME,
+      supplierPhone: row.supplier_phone,
+      supplierPartyId: row.party_id,
+      locationId: row.location_id,
+      locationName: row.location_name,
+      balance: Number(row.balance),
     })),
     total: rows[0] ? Number(rows[0].total) : 0,
   };
 }
 
-/** Every supplier with a nonzero AP balance, largest first — the unbounded read the callers outside the A/P screen need. */
+/** Supplier balances aggregated in PostgreSQL; no journal history is copied into application memory. */
 export async function listSupplierBalances(businessId: string): Promise<SupplierBalance[]> {
   const accountId = await apAccountId(businessId);
   if (!accountId) return [];
@@ -229,7 +302,8 @@ export async function listSupplierBalances(businessId: string): Promise<Supplier
  * What the whole A/P subledger adds up to — the mirror of
  * `ArReconciliationSummary`, with the liability signs: `payableTotal` is what
  * the business owes, `advanceTotal` the prepayments it has made, and
- * `controlBalance` the A/P control account read credit-positive.
+ * `controlBalance` the A/P control account read credit-positive (the way the
+ * trial balance reads accounts of this type).
  */
 export interface ApReconciliationSummary {
   payableTotal: number;
@@ -316,7 +390,7 @@ export interface SupplierBalancePage {
   summary: ApReconciliationSummary;
 }
 
-/** The A/P twin of `listCustomerBalancePage`. */
+/** The A/P twin of `listCustomerBalancePage`: the page in SQL, the totals in the same answer. */
 export async function listSupplierBalancePage(
   businessId: string,
   options: { q?: string | null; limit: number; offset: number },
@@ -334,107 +408,114 @@ export async function listSupplierBalancePage(
   return { suppliers, total, summary };
 }
 
-/** Where an A/P statement line came from — the mirror of the A/R shape (see `StatementSource`). */
-export interface ApStatementSource {
-  type: string | null;
-  id: string | null;
-  label: string | null;
-  /** The purchase behind the line, including the purchase a supplier return points back at. */
-  purchaseId: string | null;
-}
+export type ApStatementType =
+  | "bill"
+  | "payment"
+  | "payment_reversal"
+  | "return"
+  | "cheque"
+  | "interest"
+  | "adjustment"
+  | "other";
 
 export interface ApStatementLine {
-  entryId: string;
   date: string;
-  type: "bill" | "payment" | "return" | "other";
+  type: ApStatementType;
   description: string;
   debit: number;
   credit: number;
   balance: number;
-  source: ApStatementSource;
+  /** Stable ledger/source references; descriptions are never used to infer navigation. */
+  journalEntryId: string;
+  journalLineId: string;
+  sourceType: string | null;
+  sourceId: string | null;
+  purchaseId: string | null;
+  itemPurchaseId: string | null;
+  supplierReturnId: string | null;
+  itemSupplierReturnId: string | null;
+  paymentVoucherId: string | null;
+  chequeId: string | null;
+  installmentPlanId: string | null;
+  locationId: string | null;
+  locationName: string | null;
+  supplierLocationId: string | null;
+  supplierLocationName: string | null;
+  attributionStatus: ReturnType<typeof apAttributionStatus>;
 }
 
-interface ApStatementRow extends Record<string, unknown> {
-  entry_id: string;
-  entry_date: string;
-  source_type: string | null;
-  source_id: string | null;
-  purchase_id: string | null;
-  serial_number: string | null;
-  bank_name: string | null;
-  memo: string | null;
-  note: string | null;
-  debit: string;
-  credit: string;
-}
-
-/** The label a cheque line wears — the document's own words, never the memo's. */
-function apStatementSourceLabel(row: ApStatementRow): string | null {
-  if (row.source_type === "cheque" && row.serial_number) {
-    return row.bank_name ? `چک ${row.serial_number} — ${row.bank_name}` : `چک ${row.serial_number}`;
+function statementType(sourceType: string | null): ApStatementType {
+  switch (sourceType) {
+    case "purchase":
+    case "item_purchase":
+    case "expense":
+      return "bill";
+    case "ap_payment":
+      return "payment";
+    case "ap_payment_reversal":
+      return "payment_reversal";
+    case "supplier_return":
+    case "item_supplier_return":
+      return "return";
+    case "cheque":
+      return "cheque";
+    case "installment_interest":
+      return "interest";
+    case "manual":
+    case "manual_adjustment":
+    case "opening":
+    case "holoo_import":
+      return "adjustment";
+    default:
+      return "other";
   }
-  return null;
 }
 
-/**
- * One supplier's full activity against A/P, oldest first, with a running
- * balance. `supplierId` may be UNKNOWN_SUPPLIER_KEY.
- *
- * Attributed in SQL and filtered there — see `getCustomerStatement` for why
- * that matters on a long-lived book, and for why the filter is not a reason
- * to fork the attribution rule.
- */
+function statementDescription(line: ApLineRow, type: ApStatementType): string {
+  if (type === "bill") return line.note || (line.source_type === "item_purchase" ? "خرید کالای خرده‌فروشی" : "فاکتور خرید");
+  if (type === "payment") return line.memo || "پرداخت به تأمین‌کننده";
+  if (type === "payment_reversal") return line.memo || "برگشت پرداخت به تأمین‌کننده";
+  if (type === "return") return line.return_reason || line.memo || "برگشت به تأمین‌کننده";
+  if (type === "cheque") return line.memo || "رویداد چک";
+  if (type === "interest") return line.memo || "سود برنامهٔ اقساط";
+  return line.memo || (type === "adjustment" ? "تعدیل حساب پرداختنی" : "سند حسابداری");
+}
+
+/** One supplier's A/P statement; only that alias (or only the unknown bucket) is queried. */
 export async function getSupplierStatement(businessId: string, supplierId: string): Promise<ApStatementLine[]> {
   const accountId = await apAccountId(businessId);
   if (!accountId) return [];
-  const isUnknown = supplierId === UNKNOWN_SUPPLIER_KEY;
-  if (!isUnknown && !isUuid(supplierId)) return [];
-
-  const { rows } = await query<ApStatementRow>(
-    `SELECT je.id AS entry_id, je.entry_date::text AS entry_date, je.source_type, je.source_id,
-            purchase.id AS purchase_id,
-            ch.serial_number, ch.bank_name,
-            je.memo, coalesce(p.note, p2.note, ex.memo) AS note,
-            jl.debit::text AS debit, jl.credit::text AS credit
-     ${AP_SUPPLIER_ATTRIBUTION_SQL}
-     -- The purchase a line belongs to, including the one a return points back
-     -- at — the same bridge the attribution above uses, named for the reader.
-     LEFT JOIN purchases purchase ON purchase.id = coalesce(p.id, p2.id)
-      WHERE je.business_id = $1 AND jl.account_id = $2
-        AND ${isUnknown ? `${AP_SUPPLIER_ID_SQL} IS NULL` : `${AP_SUPPLIER_ID_SQL} = $3`}
-      ORDER BY je.entry_date, je.posted_at, jl.id`,
-    isUnknown ? [businessId, accountId] : [businessId, accountId, supplierId],
-  );
+  const lines = await queryApLines({ businessId, accountId, supplierId });
 
   let balance = 0;
-  return rows.map((l) => {
-    const debit = Number(l.debit);
-    const credit = Number(l.credit);
+  return lines.map((line) => {
+    const debit = Number(line.debit);
+    const credit = Number(line.credit);
     balance += credit - debit;
-    const type: ApStatementLine["type"] =
-      l.source_type === "purchase" || l.source_type === "expense" ? "bill" : l.source_type === "ap_payment" ? "payment" : l.source_type === "supplier_return" ? "return" : "other";
-    const description =
-      type === "bill"
-        ? (l.note ?? (l.source_type === "expense" ? "هزینه" : "فاکتور خرید"))
-        : type === "payment"
-          ? (l.memo ?? "پرداخت به تأمین‌کننده")
-          : type === "return"
-            ? "برگشت به تأمین‌کننده"
-            : (l.memo ?? "سند دستی");
+    const type = statementType(line.source_type);
     return {
-      entryId: l.entry_id,
-      date: l.entry_date,
+      date: line.entry_date,
       type,
-      description,
+      description: statementDescription(line, type),
       debit,
       credit,
       balance,
-      source: {
-        type: l.source_type,
-        id: l.source_id,
-        label: apStatementSourceLabel(l),
-        purchaseId: l.purchase_id,
-      },
+      journalEntryId: line.journal_entry_id,
+      journalLineId: line.journal_line_id,
+      sourceType: line.source_type,
+      sourceId: line.source_id,
+      purchaseId: line.purchase_id,
+      itemPurchaseId: line.item_purchase_id,
+      supplierReturnId: line.supplier_return_id,
+      itemSupplierReturnId: line.item_supplier_return_id,
+      paymentVoucherId: line.payment_id,
+      chequeId: line.cheque_id,
+      installmentPlanId: line.installment_plan_id,
+      locationId: line.location_id,
+      locationName: line.location_name,
+      supplierLocationId: line.supplier_location_id,
+      supplierLocationName: line.supplier_location_name,
+      attributionStatus: apAttributionStatus(line.source_type, line.supplier_id),
     };
   });
 }
@@ -442,6 +523,8 @@ export async function getSupplierStatement(businessId: string, supplierId: strin
 export interface AgingRow extends AgingSummary {
   supplierId: string;
   supplierName: string;
+  locationId: string | null;
+  locationName: string | null;
 }
 
 export interface AgingReport {
@@ -450,26 +533,36 @@ export interface AgingReport {
   totals: AgingSummary;
 }
 
-const EMPTY_AGING_SUMMARY: AgingSummary = { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 };
-
 /**
- * Standard 30/60/90-day AP aging, per supplier, as of `asOfDate` (defaults to
- * the *business's* today — see `getArAging` for why a UTC date slice put the
- * late shift's documents in the wrong bucket).
+ * Standard 30/60/90-day A/P aging, per supplier alias, as of `asOfDate`
+ * (defaults to the *business's* today — see `getArAging` for why a UTC date
+ * slice would put the late shift's documents in the wrong bucket).
  *
  * Aggregated in PostgreSQL like its A/R mirror: bills are the credits,
  * payments and returns the debits, and the database returns one row per
- * supplier with the buckets already summed.
+ * supplier with the buckets already summed and the as-of date already applied.
+ *
+ * The FIFO allocation is one pass of window functions rather than a join per
+ * party: the earlier null-tolerant join planned as a nested loop that compared
+ * every party against every line (2.7M comparisons at 300 suppliers × 9,000
+ * lines, with `Rows Removed by Join Filter` in the plan — see aging.ts's note).
+ * Carrying the party's payments as a window over the rows being scanned turns
+ * every join into a hash join: `EXPLAIN ANALYZE` on a seeded 138k-line ledger
+ * went from 441 ms to ~100 ms on the same data, all hash joins.
  */
 export async function getApAging(businessId: string, asOfDate?: string): Promise<AgingReport> {
   if (asOfDate !== undefined && !isValidIsoDate(asOfDate)) throw new ApError("invalid_date");
   const effectiveAsOf = asOfDate ?? (await businessToday(businessId));
   const accountId = await apAccountId(businessId);
-  if (!accountId) return { asOfDate: effectiveAsOf, rows: [], totals: { ...EMPTY_AGING_SUMMARY } };
+  if (!accountId) {
+    return { asOfDate: effectiveAsOf, rows: [], totals: { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 } };
+  }
 
   const { rows } = await query<{
     supplier_id: string | null;
-    name: string;
+    supplier_name: string;
+    location_id: string | null;
+    location_name: string | null;
     current: string;
     d31_60: string;
     d61_90: string;
@@ -488,8 +581,7 @@ export async function getApAging(businessId: string, asOfDate?: string): Promise
               jl.debit AS debit,
               jl.credit AS credit,
               -- The supplier's payments, carried as a window over the rows
-              -- being scanned rather than joined back on a per-party total —
-              -- see getArAging for the plan that made this necessary.
+              -- being scanned rather than joined back on a per-party total.
               sum(jl.debit) OVER (PARTITION BY coalesce(${AP_SUPPLIER_ID_SQL}::text, '')) AS paid
        ${AP_SUPPLIER_ATTRIBUTION_SQL}
         WHERE je.business_id = $1 AND jl.account_id = $2 AND je.entry_date <= $3::date
@@ -545,39 +637,46 @@ export async function getApAging(businessId: string, asOfDate?: string): Promise
          LEFT JOIN buckets b ON b.supplier_key = t.supplier_key
      )
      SELECT p.supplier_id,
-            ${AP_SUPPLIER_NAME_SQL} AS name,
+            ${AP_SUPPLIER_NAME_SQL} AS supplier_name,
+            supplier_location.id AS location_id,
+            supplier_location.name AS location_name,
             p.current::text AS current,
             p.d31_60::text AS d31_60,
             p.d61_90::text AS d61_90,
             p.over90::text AS over90,
             (p.current + p.d31_60 + p.d61_90 + p.over90)::text AS total
        FROM per_party p
-       ${apSupplierJoins("p.supplier_id")}
+       ${apSupplierIdentityJoins("p.supplier_id")}
       WHERE (p.current + p.d31_60 + p.d61_90 + p.over90) <> 0
-      ORDER BY (p.current + p.d31_60 + p.d61_90 + p.over90) DESC, ${AP_SUPPLIER_NAME_SQL} NULLS LAST`,
+      ORDER BY (p.current + p.d31_60 + p.d61_90 + p.over90) DESC,
+               ${AP_SUPPLIER_NAME_SQL},
+               supplier_location.name NULLS FIRST,
+               p.supplier_id NULLS FIRST`,
     [businessId, accountId, effectiveAsOf],
   );
 
-  const rowsOut: AgingRow[] = rows.map((r) => ({
-    supplierId: r.supplier_id ?? UNKNOWN_SUPPLIER_KEY,
-    supplierName: r.name,
-    current: Number(r.current),
-    d31_60: Number(r.d31_60),
-    d61_90: Number(r.d61_90),
-    over90: Number(r.over90),
-    total: Number(r.total),
+  const agingRows: AgingRow[] = rows.map((row) => ({
+    supplierId: row.supplier_id ?? UNKNOWN_SUPPLIER_KEY,
+    supplierName: row.supplier_name,
+    locationId: row.location_id,
+    locationName: row.location_name,
+    current: Number(row.current),
+    d31_60: Number(row.d31_60),
+    d61_90: Number(row.d61_90),
+    over90: Number(row.over90),
+    total: Number(row.total),
   }));
-  const totals = rowsOut.reduce<AgingSummary>(
-    (sum, r) => ({
-      current: sum.current + r.current,
-      d31_60: sum.d31_60 + r.d31_60,
-      d61_90: sum.d61_90 + r.d61_90,
-      over90: sum.over90 + r.over90,
-      total: sum.total + r.total,
+  const totals = agingRows.reduce<AgingSummary>(
+    (sum, row) => ({
+      current: sum.current + row.current,
+      d31_60: sum.d31_60 + row.d31_60,
+      d61_90: sum.d61_90 + row.d61_90,
+      over90: sum.over90 + row.over90,
+      total: sum.total + row.total,
     }),
-    { ...EMPTY_AGING_SUMMARY },
+    { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 },
   );
-  return { asOfDate: effectiveAsOf, rows: rowsOut, totals };
+  return { asOfDate: effectiveAsOf, rows: agingRows, totals };
 }
 
 export interface ApPayment {
@@ -589,13 +688,72 @@ export interface ApPayment {
   memo: string | null;
   cashAccountId: string | null;
   bankReference: string | null;
+  /** True only when this call reused the result for an earlier matching request id. */
+  duplicate: boolean;
+}
+
+function normalizedClientRequestId(value: unknown): string {
+  if (typeof value !== "string") throw new ApError("idempotency_key_required");
+  const key = value.trim();
+  if (!key || key.length > 200) throw new ApError("idempotency_key_required");
+  return key;
+}
+
+function paymentRequestFingerprint(params: {
+  supplierId: string;
+  locationId: string | null;
+  method: "cash" | "bank";
+  amount: number;
+  paymentDate: string | null;
+  memo: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
+}): string {
+  // An ordered tuple keeps normalization/versioning explicit and avoids key
+  // order dependence. Date omission remains null so a retry after midnight
+  // still refers to the original intended payment date. Voucher account and
+  // bank reference are also part of the operation: reusing a key with a changed
+  // destination must be rejected rather than silently accepted as a retry.
+  const canonical = JSON.stringify([
+    params.supplierId,
+    params.locationId,
+    params.method,
+    params.amount,
+    params.paymentDate,
+    params.memo,
+    params.cashAccountId,
+    params.bankReference,
+  ]);
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+function mapApPayment(row: {
+  id: string;
+  supplier_id: string;
+  payment_date: string;
+  method: "cash" | "bank";
+  amount: string;
+  memo: string | null;
+  cash_account_id: string | null;
+  bank_reference: string | null;
+}, duplicate: boolean): ApPayment {
+  return {
+    id: row.id,
+    supplierId: row.supplier_id,
+    paymentDate: row.payment_date,
+    method: row.method,
+    amount: Number(row.amount),
+    memo: row.memo,
+    cashAccountId: row.cash_account_id,
+    bankReference: row.bank_reference,
+    duplicate,
+  };
 }
 
 /**
- * Records the business paying down a supplier's AP balance: Debit Accounts
- * Payable, Credit Cash/Bank-Clearing, in the same transaction as the
- * ap_payments row both reference (source_type='ap_payment',
- * source_id=payment.id).
+ * Records a supplier payment atomically and idempotently. The supplier alias
+ * and the payment/journal location must be the same branch (strict branch
+ * liability semantics); the GL and supplier row are committed together.
  */
 export async function payBill(params: {
   businessId: string;
@@ -605,46 +763,83 @@ export async function payBill(params: {
   amount: number;
   paymentDate?: string | null;
   memo?: string | null;
+  clientRequestId: string;
   createdBy: string | null;
   /** Holoo imports create local payments but must not push them back to Holoo. */
   skipHolooPush?: boolean;
-  /** Audit F11 — the cash/bank account the money left from; null = the method's default account. */
+  /** The cash/bank account the payment left from; null uses the method default. */
   cashAccountId?: string | null;
-  /** Audit F11 — the bank's tracking/reference number. */
+  /** Bank tracking number; normalized and validated before posting. */
   bankReference?: string | null;
 }): Promise<ApPayment> {
-  if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
-    throw new ApError("invalid_amount");
-  }
-  // A non-uuid supplier id cannot match a row, and asking Postgres anyway
-  // raises a syntax error rather than returning none — see `isUuid`.
+  if (!Number.isSafeInteger(params.amount) || params.amount <= 0) throw new ApError("invalid_amount");
   if (!isUuid(params.supplierId)) throw new ApError("supplier_not_found", 404);
-  // The repo's one calendar-aware check: the regex it replaces accepted a
-  // well-shaped impossible date, which Postgres then refused with a 500.
-  if (params.paymentDate != null && !isValidIsoDate(params.paymentDate)) throw new ApError("invalid_date");
-
-  // The business's «امروز», not the DB server's UTC date — the same argument
-  // `receivePayment` in ar-service.ts makes for receipts.
-  const paymentDate = params.paymentDate ?? (await businessToday(params.businessId));
-  // Throws PayablesInputError («invalid_bank_reference»), which the route answers as a 400.
+  if (params.method !== "cash" && params.method !== "bank") throw new ApError("invalid_method");
+  const clientRequestId = normalizedClientRequestId(params.clientRequestId);
+  const requestedPaymentDate = params.paymentDate?.trim() || null;
+  if (requestedPaymentDate && !isValidIsoDate(requestedPaymentDate)) throw new ApError("invalid_date");
+  const memo = params.memo?.trim() || null;
+  const requestedCashAccountId = params.cashAccountId?.trim() || null;
+  // Throws PayablesInputError for a malformed/oversized bank reference. The
+  // normalized value makes Persian and ASCII digit forms the same operation.
   const bankReference = normalizeBankReference(params.bankReference);
+  const fingerprint = paymentRequestFingerprint({
+    supplierId: params.supplierId,
+    locationId: params.locationId,
+    method: params.method,
+    amount: params.amount,
+    paymentDate: requestedPaymentDate,
+    memo,
+    cashAccountId: requestedCashAccountId,
+    bankReference,
+  });
+  const paymentDate = requestedPaymentDate ?? (await businessToday(params.businessId));
 
-  const client: PoolClient = await getPool().connect();
+  const client = await getPool().connect();
   try {
     await client.query("BEGIN");
 
-    // suppliers has no business_id column — verify the match through its
-    // (mandatory) location instead.
-    const { rows: supplierRows } = await client.query<{ id: string }>(
-      `SELECT s.id FROM suppliers s JOIN locations l ON l.id = s.location_id
+    // Fast retry path, including when the active branch/business date changed
+    // after the first request committed. A key reused with changed intent is a
+    // hard conflict, never a silent second money movement.
+    const { rows: priorRows } = await client.query<{
+      id: string;
+      supplier_id: string;
+      payment_date: string;
+      method: "cash" | "bank";
+      amount: string;
+      memo: string | null;
+      request_fingerprint: string | null;
+      cash_account_id: string | null;
+      bank_reference: string | null;
+    }>(
+      `SELECT id, supplier_id, payment_date::text AS payment_date, method,
+              amount::text AS amount, memo, request_fingerprint, cash_account_id, bank_reference
+         FROM ap_payments
+        WHERE business_id = $1 AND client_request_id = $2
+        FOR UPDATE`,
+      [params.businessId, clientRequestId],
+    );
+    if (priorRows[0]) {
+      if (priorRows[0].request_fingerprint !== fingerprint) throw new ApError("idempotency_conflict", 409);
+      await client.query("COMMIT");
+      return mapApPayment(priorRows[0], true);
+    }
+
+    const { rows: supplierRows } = await client.query<{ id: string; location_id: string }>(
+      `SELECT s.id, s.location_id
+         FROM suppliers s
+         JOIN locations l ON l.id = s.location_id
         WHERE s.id = $1 AND l.business_id = $2`,
       [params.supplierId, params.businessId],
     );
-    if (!supplierRows[0]) throw new ApError("supplier_not_found", 404);
+    const supplier = supplierRows[0];
+    if (!supplier) throw new ApError("supplier_not_found", 404);
+    if (params.locationId !== supplier.location_id) throw new ApError("supplier_location_mismatch", 409);
 
     const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsPayable]);
     const apAccount = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
-    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId);
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, requestedCashAccountId);
     const cashAccount = cash.accountId;
 
     const { rows } = await client.query<{
@@ -657,9 +852,13 @@ export async function payBill(params: {
       cash_account_id: string | null;
       bank_reference: string | null;
     }>(
-      `INSERT INTO ap_payments (business_id, location_id, supplier_id, payment_date, method, amount, memo, created_by, cash_account_id, bank_reference)
-       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10)
-       RETURNING id, supplier_id, payment_date::text AS payment_date, method, amount::text AS amount, memo, cash_account_id, bank_reference`,
+      `INSERT INTO ap_payments
+         (business_id, location_id, supplier_id, payment_date, method, amount, memo,
+          client_request_id, request_fingerprint, created_by, cash_account_id, bank_reference)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       ON CONFLICT (business_id, client_request_id) WHERE client_request_id IS NOT NULL DO NOTHING
+       RETURNING id, supplier_id, payment_date::text AS payment_date,
+                 method, amount::text AS amount, memo, cash_account_id, bank_reference`,
       [
         params.businessId,
         params.locationId,
@@ -667,19 +866,50 @@ export async function payBill(params: {
         paymentDate,
         params.method,
         params.amount,
-        params.memo?.trim() || null,
+        memo,
+        clientRequestId,
+        fingerprint,
         params.createdBy,
         cash.chosen ? cash.accountId : null,
         bankReference,
       ],
     );
-    const payment = rows[0];
 
+    // A concurrent request may have inserted the same key after our first
+    // lookup. The unique index waits for its transaction, then this read sees
+    // the single committed voucher and applies the same fingerprint guard.
+    if (!rows[0]) {
+      const { rows: concurrentRows } = await client.query<{
+        id: string;
+        supplier_id: string;
+        payment_date: string;
+        method: "cash" | "bank";
+        amount: string;
+        memo: string | null;
+        request_fingerprint: string | null;
+        cash_account_id: string | null;
+        bank_reference: string | null;
+      }>(
+        `SELECT id, supplier_id, payment_date::text AS payment_date, method,
+                amount::text AS amount, memo, request_fingerprint, cash_account_id, bank_reference
+           FROM ap_payments
+          WHERE business_id = $1 AND client_request_id = $2
+          FOR UPDATE`,
+        [params.businessId, clientRequestId],
+      );
+      if (!concurrentRows[0] || concurrentRows[0].request_fingerprint !== fingerprint) {
+        throw new ApError("idempotency_conflict", 409);
+      }
+      await client.query("COMMIT");
+      return mapApPayment(concurrentRows[0], true);
+    }
+
+    const payment = rows[0];
     await postJournalEntry(client, {
       businessId: params.businessId,
       locationId: params.locationId,
       entryDate: payment.payment_date,
-      memo: params.memo?.trim() || "پرداخت به تأمین‌کننده",
+      memo: memo || "پرداخت به تأمین‌کننده",
       sourceType: "ap_payment",
       sourceId: payment.id,
       createdBy: params.createdBy,
@@ -690,21 +920,123 @@ export async function payBill(params: {
       ],
     });
 
-    if (!params.skipHolooPush) {
-      await enqueueHolooReceiptForApPayment(client, params.businessId, payment.id);
-    }
+    if (!params.skipHolooPush) await enqueueHolooReceiptForApPayment(client, params.businessId, payment.id);
 
     await client.query("COMMIT");
-    return {
-      id: payment.id,
-      supplierId: payment.supplier_id,
-      paymentDate: payment.payment_date,
-      method: payment.method,
-      amount: Number(payment.amount),
-      memo: payment.memo,
-      cashAccountId: payment.cash_account_id,
-      bankReference: payment.bank_reference,
-    };
+    return mapApPayment(payment, false);
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export interface ApPaymentReversal {
+  paymentId: string;
+  reversalEntryId: string;
+  reversalDate: string;
+}
+
+/**
+ * Append-only reversal for an A/P payment. The payment voucher is not edited or
+ * deleted. Its journal entry is marked reversed and a new entry posts every
+ * original debit/credit line on the opposite side, in the supplier's own
+ * branch and the date's fiscal period.
+ */
+export async function reverseApPayment(params: {
+  businessId: string;
+  locationId: string | null;
+  paymentId: string;
+  actorId: string | null;
+  reversalDate?: string | null;
+  memo?: string | null;
+}): Promise<ApPaymentReversal> {
+  if (!isUuid(params.paymentId)) throw new ApError("payment_not_found", 404);
+  const requestedDate = params.reversalDate?.trim() || null;
+  if (requestedDate && !isValidIsoDate(requestedDate)) throw new ApError("invalid_date");
+  const reversalDate = requestedDate ?? (await businessToday(params.businessId));
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<{
+      payment_id: string;
+      supplier_id: string;
+      source_type: string | null;
+      source_id: string | null;
+      entry_id: string;
+      entry_location_id: string | null;
+      supplier_location_id: string;
+      reversed_at: string | null;
+      reverses_entry_id: string | null;
+    }>(
+      `SELECT ap.id AS payment_id, ap.supplier_id, je.source_type, je.source_id,
+              je.id AS entry_id, je.location_id AS entry_location_id,
+              s.location_id AS supplier_location_id,
+              je.reversed_at::text AS reversed_at, je.reverses_entry_id
+         FROM ap_payments ap
+         JOIN suppliers s ON s.id = ap.supplier_id
+         JOIN locations sl ON sl.id = s.location_id AND sl.business_id = ap.business_id
+         JOIN journal_entries je
+           ON je.business_id = ap.business_id
+          AND je.source_type = 'ap_payment'
+          AND je.source_id = ap.id
+        WHERE ap.business_id = $1 AND ap.id = $2
+        ORDER BY je.posted_at, je.id
+        LIMIT 1
+        FOR UPDATE OF je`,
+      [params.businessId, params.paymentId],
+    );
+    const original = rows[0];
+    if (!original) throw new ApError("payment_not_found", 404);
+    if (original.source_type !== "ap_payment" || original.source_id !== original.payment_id || original.reverses_entry_id) {
+      throw new ApError("payment_not_reversible", 409);
+    }
+    if (original.reversed_at) throw new ApError("already_reversed", 409);
+
+    const originalLocationId = original.entry_location_id ?? original.supplier_location_id;
+    if (params.locationId !== originalLocationId) throw new ApError("supplier_location_mismatch", 409);
+
+    const { rows: accountRows } = await client.query<{ id: string }>(
+      `SELECT id FROM accounts WHERE business_id = $1 AND code = $2`,
+      [params.businessId, WELL_KNOWN_CODES.accountsPayable],
+    );
+    const apAccount = accountRows[0]?.id;
+    if (!apAccount) throw new MissingLedgerAccountError(WELL_KNOWN_CODES.accountsPayable);
+
+    const { rows: lines } = await client.query<{ account_id: string; debit: string; credit: string }>(
+      `SELECT jl.account_id, jl.debit::text AS debit, jl.credit::text AS credit
+         FROM journal_lines jl
+        WHERE jl.entry_id = $1
+        ORDER BY jl.id`,
+      [original.entry_id],
+    );
+    if (lines.length === 0 || !lines.some((line) => line.account_id === apAccount)) {
+      throw new ApError("payment_not_reversible", 409);
+    }
+
+    const reversalEntryId = await postJournalEntry(client, {
+      businessId: params.businessId,
+      locationId: originalLocationId,
+      entryDate: reversalDate,
+      memo: params.memo?.trim() || "برگشت پرداخت به تأمین‌کننده",
+      sourceType: "ap_payment_reversal",
+      sourceId: original.payment_id,
+      createdBy: params.actorId,
+      postingKind: "ap_payment_reversal",
+      lines: lines.map((line) => ({
+        accountId: line.account_id,
+        debit: Number(line.credit),
+        credit: Number(line.debit),
+      })),
+    });
+    if (!reversalEntryId) throw new ApError("payment_not_reversible", 409);
+
+    await client.query("UPDATE journal_entries SET reverses_entry_id = $2 WHERE id = $1", [reversalEntryId, original.entry_id]);
+    await client.query("UPDATE journal_entries SET reversed_at = now(), reversed_by = $2 WHERE id = $1", [original.entry_id, params.actorId]);
+    await client.query("COMMIT");
+    return { paymentId: original.payment_id, reversalEntryId, reversalDate };
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;

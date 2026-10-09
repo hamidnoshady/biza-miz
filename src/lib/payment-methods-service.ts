@@ -14,6 +14,7 @@
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import {
+  BUILTIN_PAYMENT_METHODS,
   builtinPaymentMethodsFor,
   isExactPaymentMethodOrder,
   paymentMethodCodeFor,
@@ -93,6 +94,51 @@ export async function seedPaymentMethods(
   }
 }
 
+const FOOD_SERVICE_ONLY_CODES = BUILTIN_PAYMENT_METHODS
+  .filter((method) => method.foodServiceOnly)
+  .map((method) => method.code);
+
+/**
+ * Reconcile the built-in ways that belong to one industry when the platform
+ * changes a business's trade. Generic and custom ways are never rewritten.
+ *
+ * SnapFood remains as an inactive row after leaving food_service so old
+ * payments keep their payment_method_id and the enum settlement they posted.
+ * Returning to food_service seeds any missing built-ins and re-enables the
+ * required F&B methods; ON CONFLICT DO NOTHING preserves names, ordering and
+ * other user configuration on rows that already exist.
+ */
+export async function reconcilePaymentMethodsForIndustry(
+  client: PoolClient,
+  businessId: string,
+  previousIndustry: string,
+  nextIndustry: string,
+): Promise<void> {
+  if (previousIndustry === nextIndustry) return;
+
+  if (nextIndustry === "food_service") {
+    await seedPaymentMethods(client, businessId, nextIndustry);
+    if (FOOD_SERVICE_ONLY_CODES.length > 0) {
+      await client.query(
+        `UPDATE payment_methods
+            SET is_active = true
+          WHERE business_id = $1 AND is_builtin AND code = ANY($2::text[])`,
+        [businessId, FOOD_SERVICE_ONLY_CODES],
+      );
+    }
+    return;
+  }
+
+  if (previousIndustry === "food_service" && FOOD_SERVICE_ONLY_CODES.length > 0) {
+    await client.query(
+      `UPDATE payment_methods
+          SET is_active = false
+        WHERE business_id = $1 AND is_builtin AND is_active AND code = ANY($2::text[])`,
+      [businessId, FOOD_SERVICE_ONLY_CODES],
+    );
+  }
+}
+
 export interface ListPaymentMethodsOptions {
   /** Checkout screens want only what they may offer; the settings tab wants everything. */
   includeInactive?: boolean;
@@ -102,18 +148,24 @@ export async function listPaymentMethods(
   businessId: string,
   options: ListPaymentMethodsOptions = {},
 ): Promise<PaymentMethodView[]> {
-  // One read covering every row (active or not) doubles as the "has this
-  // business been seeded yet" check, so the common case — already seeded —
-  // costs one round trip instead of the seed-check-then-list pair this used
-  // to run on every call.
-  let { rows } = await query<PaymentMethodRow>(`SELECT ${SELECT_COLUMNS} FROM payment_methods WHERE business_id = $1`, [
-    businessId,
-  ]);
+  // One read covering every method applicable to this industry's settings
+  // grid (active or not) doubles as the "has this business been seeded yet"
+  // check, so the common case — already seeded — costs one round trip instead
+  // of the seed-check-then-list pair this used to run on every call. Retained
+  // F&B-only rows are excluded from the view and direct-id lookups below.
+  const industryMethodFilter = `
+    AND (COALESCE((SELECT industry FROM businesses WHERE id = $1), 'food_service') = 'food_service'
+         OR code <> ALL($2::text[]))`;
+  let { rows } = await query<PaymentMethodRow>(
+    `SELECT ${SELECT_COLUMNS} FROM payment_methods WHERE business_id = $1${industryMethodFilter}`,
+    [businessId, FOOD_SERVICE_ONLY_CODES],
+  );
   if (rows.length === 0) {
     await seedForBusiness(businessId);
-    ({ rows } = await query<PaymentMethodRow>(`SELECT ${SELECT_COLUMNS} FROM payment_methods WHERE business_id = $1`, [
-      businessId,
-    ]));
+    ({ rows } = await query<PaymentMethodRow>(
+      `SELECT ${SELECT_COLUMNS} FROM payment_methods WHERE business_id = $1${industryMethodFilter}`,
+      [businessId, FOOD_SERVICE_ONLY_CODES],
+    ));
   }
   const views = options.includeInactive ? rows.map(toView) : rows.filter((r) => r.is_active).map(toView);
   return sortPaymentMethods(views);
@@ -133,8 +185,11 @@ export async function paymentMethodsByIds(
   const unique = [...new Set(ids)];
   if (unique.length === 0) return new Map();
   const { rows } = await query<PaymentMethodRow>(
-    `SELECT ${SELECT_COLUMNS} FROM payment_methods WHERE business_id = $1 AND id = ANY($2::uuid[])`,
-    [businessId, unique],
+    `SELECT ${SELECT_COLUMNS} FROM payment_methods
+      WHERE business_id = $1 AND id = ANY($2::uuid[])
+        AND (COALESCE((SELECT industry FROM businesses WHERE id = $1), 'food_service') = 'food_service'
+             OR code <> ALL($3::text[]))`,
+    [businessId, unique, FOOD_SERVICE_ONLY_CODES],
   );
   return new Map(rows.map((row) => [row.id, toView(row)]));
 }
@@ -142,8 +197,11 @@ export async function paymentMethodsByIds(
 /** The business's way with this code (`cash`, `card`, …), or null. */
 export async function paymentMethodByCode(businessId: string, code: string): Promise<PaymentMethodView | null> {
   const { rows } = await query<PaymentMethodRow>(
-    `SELECT ${SELECT_COLUMNS} FROM payment_methods WHERE business_id = $1 AND code = $2`,
-    [businessId, code],
+    `SELECT ${SELECT_COLUMNS} FROM payment_methods
+      WHERE business_id = $1 AND code = $2
+        AND (COALESCE((SELECT industry FROM businesses WHERE id = $1), 'food_service') = 'food_service'
+             OR code <> ALL($3::text[]))`,
+    [businessId, code, FOOD_SERVICE_ONLY_CODES],
   );
   return rows[0] ? toView(rows[0]) : null;
 }
@@ -153,7 +211,13 @@ export async function createPaymentMethod(
   input: ValidatedPaymentMethod,
 ): Promise<PaymentMethodView> {
   const existing = await listPaymentMethods(businessId, { includeInactive: true });
-  const code = paymentMethodCodeFor(input.name, existing.map((method) => method.code));
+  // Hidden industry-only rows still reserve their code. Otherwise a custom
+  // method added outside F&B could collide with the retained SnapFood row.
+  const allCodes = await query<{ code: string }>(
+    "SELECT code FROM payment_methods WHERE business_id = $1",
+    [businessId],
+  );
+  const code = paymentMethodCodeFor(input.name, allCodes.rows.map((method) => method.code));
   // Added ways land after everything already configured, so adding one never
   // reshuffles a grid the cashiers have learned.
   const sortOrder = existing.reduce((max, method) => Math.max(max, method.sortOrder), 0) + 10;
@@ -188,6 +252,8 @@ export async function updatePaymentMethod(
             opens_drawer = coalesce($6, opens_drawer),
             requires_reference = coalesce($7, requires_reference)
       WHERE business_id = $1 AND id = $2
+        AND (COALESCE((SELECT industry FROM businesses WHERE id = $1), 'food_service') = 'food_service'
+             OR code <> ALL($8::text[]))
       RETURNING ${SELECT_COLUMNS}`,
     [
       businessId,
@@ -197,6 +263,7 @@ export async function updatePaymentMethod(
       patch.isActive ?? null,
       patch.opensDrawer ?? null,
       patch.requiresReference ?? null,
+      FOOD_SERVICE_ONLY_CODES,
     ],
   );
   return rows[0] ? toView(rows[0]) : null;
@@ -239,8 +306,12 @@ export async function reorderPaymentMethods(businessId: string, orderedIds: read
   try {
     await client.query("BEGIN");
     const { rows } = await client.query<{ id: string }>(
-      "SELECT id FROM payment_methods WHERE business_id = $1 FOR UPDATE",
-      [businessId],
+      `SELECT id FROM payment_methods
+        WHERE business_id = $1
+          AND (COALESCE((SELECT industry FROM businesses WHERE id = $1), 'food_service') = 'food_service'
+               OR code <> ALL($2::text[]))
+        FOR UPDATE`,
+      [businessId, FOOD_SERVICE_ONLY_CODES],
     );
     if (!isExactPaymentMethodOrder(rows.map((row) => row.id), orderedIds)) {
       await client.query("ROLLBACK");

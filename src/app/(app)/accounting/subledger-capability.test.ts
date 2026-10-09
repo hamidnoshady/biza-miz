@@ -45,8 +45,13 @@ describe("the capability the settle action is drawn from", () => {
     expect(PERMISSIONS.financeReceivablesManage).toBe("finance.receivables_manage");
     expect(PERMISSIONS.financePayablesManage).toBe("finance.payables_manage");
     // The write half only; reading the list stays on ledger.view.
+    // The POST handler is gated on the manage permission and is the only thing
+    // that reaches the writing service (the A/P route validates an idempotency
+    // key in between, so the gate is asserted on the handler, not on a
+    // character distance to the call).
     expect(receiptsRoute).toMatch(/requirePermission\(PERMISSIONS\.financeReceivablesManage\)[\s\S]{0,1200}receivePayment/);
-    expect(paymentsRoute).toMatch(/requirePermission\(PERMISSIONS\.financePayablesManage\)[\s\S]{0,1200}payBill/);
+    expect(paymentsRoute).toMatch(/POST = withTenantScope\([\s\S]{0,400}requirePermission\(PERMISSIONS\.financePayablesManage\)/);
+    expect(paymentsRoute).toMatch(/payBill\(/);
     expect(receiptsRoute).toMatch(/GET = withTenantScope\([\s\S]{0,400}requirePermission\(PERMISSIONS\.ledgerView\)/);
   });
 

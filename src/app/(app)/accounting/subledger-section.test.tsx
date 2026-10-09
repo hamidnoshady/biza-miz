@@ -24,11 +24,12 @@
  *    record's own id (never parsed out of the Persian description), and the
  *    journal entry behind the line is fetched on demand.
  */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RECEIVABLES_SIDE } from "./ar-section";
-import { SubledgerSection } from "./subledger-section";
+import { PAYABLES_SIDE } from "./ap-section";
+import { SubledgerSection, SubledgerStatementPanel } from "./subledger-section";
 
 afterEach(cleanup);
 
@@ -337,5 +338,63 @@ describe("statement drill-down", () => {
 
     expect(await screen.findByText(RECEIVABLES_SIDE.statement.failed)).toBeTruthy();
     expect(screen.queryByText(RECEIVABLES_SIDE.statement.empty)).toBeNull();
+  });
+});
+
+
+describe("A/P contracts preserved by the shared screen", () => {
+  it.each([0, 1])("reads flat statement metadata and opens the journal in layout %i", async (layout) => {
+    fetchMock.mockImplementation(async (url: string) =>
+      url.startsWith("/api/ledger/entries/") ? respond(journalEntry()) : respond({
+        lines: [{
+          journalEntryId: ENTRY, journalLineId: "line-1",
+          date: "2025-04-01", type: "adjustment", description: "Adjustment",
+          debit: 0, credit: 500, balance: 500,
+          sourceType: "manual", locationName: "Central",
+          attributionStatus: "intentional_unknown",
+        }],
+      }),
+    );
+    render(<SubledgerStatementPanel side={PAYABLES_SIDE} id="unknown" name="Unknown"
+      partyId={null} onClose={() => {}} />);
+
+    expect(await screen.findAllByText("سند دستی")).toHaveLength(2);
+    expect(screen.getAllByText(/Central/)).toHaveLength(2);
+    expect(screen.getAllByText(PAYABLES_SIDE.statement.attributionNoteFor!("intentional_unknown")!)).toHaveLength(2);
+    // Neither layout fabricates a party or purchase URL from description text.
+    expect(screen.queryAllByRole("link")).toHaveLength(0);
+    await userEvent.click(screen.getAllByRole("button", { name: PAYABLES_SIDE.statement.entryLinkLabel })[layout]);
+    expect(await screen.findAllByText(/سند حسابداری/)).not.toHaveLength(0);
+    expect(fetchMock.mock.calls.some(([url]) => url === `/api/ledger/entries/${ENTRY}`)).toBe(true);
+  });
+
+  it("keeps the payment key on retry, but changes it for an edited payment", async () => {
+    const payments: { clientRequestId: string; memo?: string }[] = [];
+    fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        payments.push(JSON.parse(String(init.body)));
+        return respond({ error: "network_error" }, false, 500);
+      }
+      return respond({
+        suppliers: [{ supplierId: ALI, supplierName: "Supplier", supplierPhone: null,
+          supplierPartyId: SARA, locationName: "Central", balance: 800_000 }],
+        total: 1, summary: { ...summary(), payableTotal: 800_000 },
+      });
+    });
+    render(<SubledgerSection side={PAYABLES_SIDE} canSettle />);
+    await userEvent.click((await screen.findAllByRole("button", { name: PAYABLES_SIDE.settle.actionLabel }))[0]);
+    const dialog = within(screen.getByRole("dialog"));
+    const submit = dialog.getByRole("button", { name: PAYABLES_SIDE.settle.submitLabel });
+    await userEvent.click(submit);
+    await waitFor(() => expect(payments).toHaveLength(1));
+    await userEvent.click(submit);
+    await waitFor(() => expect(payments).toHaveLength(2));
+    expect(payments[0].clientRequestId).toBeTruthy();
+    expect(payments[1].clientRequestId).toBe(payments[0].clientRequestId);
+    await userEvent.type(dialog.getByLabelText("شرح (اختیاری)"), "Revised payment");
+    await userEvent.click(submit);
+    await waitFor(() => expect(payments).toHaveLength(3));
+    expect(payments[2].memo).toBe("Revised payment");
+    expect(payments[2].clientRequestId).not.toBe(payments[0].clientRequestId);
   });
 });

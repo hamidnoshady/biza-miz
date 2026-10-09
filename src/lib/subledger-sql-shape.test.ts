@@ -40,6 +40,12 @@ function read(name: string): string {
 
 const AR = read("./ar-service.ts");
 const AP = read("./ap-service.ts");
+/**
+ * A/P's canonical attribution fragment lives in its own module since the A/P
+ * hardening — imported *and* re-exported by ap-service, the same way
+ * `crm-app-boundaries.test.ts` requires A/R's to stay where it is.
+ */
+const AP_ATTRIBUTION = read("./ap-attribution.ts");
 
 describe("the aging report's SQL shape", () => {
   it("joins parties by key equality, never by a null-tolerant comparison", () => {
@@ -86,10 +92,14 @@ describe("the attribution rule", () => {
   it("exists once per service, inside the exported fragment, and is never re-stated inline", () => {
     // The amendment bridge is the piece a copy would silently drop.
     expect(AR.match(/LEFT JOIN cheques ch/g)).toHaveLength(1);
-    expect(AP.match(/LEFT JOIN cheques ch/g)).toHaveLength(1);
+    expect(AP_ATTRIBUTION.match(/LEFT JOIN cheques ch/g)).toHaveLength(1);
     expect(AR.match(/LEFT JOIN orders o/g)).toHaveLength(1);
     expect(AR).toMatch(/export const AR_CUSTOMER_ATTRIBUTION_SQL = `/);
-    expect(AP).toMatch(/export const AP_SUPPLIER_ATTRIBUTION_SQL = `/);
+    expect(AP_ATTRIBUTION).toMatch(/export const AP_SUPPLIER_ATTRIBUTION_SQL = `/);
+    // ap-service names the fragment rather than its joins: the joins appear in
+    // the service only inside the imported constant.
+    expect(AP).not.toMatch(/LEFT JOIN cheques ch/);
+    expect(AP).toMatch(/export \{ AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL \}/);
     // Every read model names the fragment rather than its joins.
     expect(AR.match(/\$\{AR_CUSTOMER_ATTRIBUTION_SQL\}/g)!.length).toBeGreaterThanOrEqual(3);
     expect(AP.match(/\$\{AP_SUPPLIER_ATTRIBUTION_SQL\}/g)!.length).toBeGreaterThanOrEqual(3);

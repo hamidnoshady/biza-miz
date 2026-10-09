@@ -9,6 +9,7 @@ import { rootDomain } from "@/lib/host";
 import { isIndustry } from "@/lib/industries";
 import {
   provisionBusiness,
+  shouldCompleteSetupForPlatformProvision,
   validateProvisionBody,
   ExistingOwnerConfirmationRequiredError,
   OwnerPhoneRequiredError,
@@ -74,10 +75,11 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
 });
 
 /**
- * Provision a working business end-to-end: identity, owner membership, first
- * branch, and — because this is the console, not the setup wizard — the default
- * chart of accounts, so the owner can log straight in and sell (exit criterion
- * 1). Owner-only (`business.provision`), and audited before we return.
+ * Provision a business end-to-end: identity, owner membership, first branch,
+ * and the default chart of accounts. Non-F&B trades retain the console's
+ * ready-to-enter path; food_service must complete its persisted menu/costing/
+ * tax setup in the wizard before its lifecycle is marked complete (issue #840).
+ * Owner-only (`business.provision`), and audited before we return.
  *
  * **No password is accepted here (issue #755 §14).** The console used to take
  * an operator-chosen owner password and print the owner's second factor and
@@ -121,11 +123,13 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     const provisioned = await provisionBusiness({
       ...input,
       seedChartOfAccounts: true,
-      // The console's contract is a business the owner can log straight into
-      // and sell from. Stamping the canonical completion marker here (issue
-      // #808 §4) is what makes that true for onboarding routing as well:
-      // without it the owner's first login lands in the first-run wizard.
-      completeSetup: true,
+      // Food-service readiness includes persisted preferences, costing, tax
+      // and a sellable menu. Bare provisioning does not create those, so an
+      // F&B tenant must enter the same wizard and Finish contract as an
+      // interactively-created one rather than inheriting a false completion
+      // stamp. Other industries retain the console's existing ready-to-enter
+      // contract (issue #840).
+      completeSetup: shouldCompleteSetupForPlatformProvision(input.industry),
       createdBy: session.padmin,
       confirmExistingOwner: body.confirmExistingOwner === true,
     });

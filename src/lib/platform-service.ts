@@ -17,8 +17,12 @@ import { getPool, query, withoutTenantScope, withTenant } from "./db";
 import { getPlatformBackupHealth } from "./platform-backup-service";
 import type { PoolClient } from "pg";
 import { disableFeatures, seedChartOfAccounts } from "./business-provisioning";
+import { reconcilePaymentMethodsForIndustry } from "./payment-methods-service";
+import { SETTING_KEYS } from "./settings";
+import { setupReadiness } from "./setup-readiness";
 import type { Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
+import { wizardStepsForIndustry } from "./wizard-steps";
 import { clampImpersonationMinutes, platformCan } from "./platform-admin";
 import type { PlatformAdminRole } from "./platform-auth-edge";
 import { platformAudit, revokeAllPlatformAdminSessions } from "./platform-auth";
@@ -561,9 +565,51 @@ export async function industryDataCounts(businessId: string): Promise<IndustryDa
   });
 }
 
+/** Read just the persisted fields used by the canonical Finish readiness contract. */
+async function setupReadinessForIndustryChange(
+  client: PoolClient,
+  businessId: string,
+  industry: Industry,
+) {
+  const { rows } = await client.query<{
+    has_business: boolean;
+    has_location: boolean;
+    has_prefs: boolean;
+    has_costing: boolean;
+    has_tax: boolean;
+    accounts: number;
+    sellable_menu_items: number;
+  }>(
+    `SELECT
+       EXISTS (SELECT 1 FROM businesses WHERE id = $1) AS has_business,
+       EXISTS (SELECT 1 FROM locations WHERE business_id = $1) AS has_location,
+       EXISTS (SELECT 1 FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2) AS has_prefs,
+       EXISTS (SELECT 1 FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $3) AS has_costing,
+       EXISTS (SELECT 1 FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $4) AS has_tax,
+       (SELECT count(*)::int FROM accounts WHERE business_id = $1) AS accounts,
+       (SELECT count(*)::int
+          FROM menu_items mi
+          JOIN locations l ON l.id = mi.location_id
+         WHERE l.business_id = $1 AND mi.is_active) AS sellable_menu_items`,
+    [businessId, SETTING_KEYS.businessPrefs, SETTING_KEYS.costing, SETTING_KEYS.tax],
+  );
+  const row = rows[0];
+  return setupReadiness({
+    industry,
+    hasBusiness: row?.has_business ?? false,
+    hasLocation: row?.has_location ?? false,
+    hasPrefs: row?.has_prefs ?? false,
+    hasCosting: row?.has_costing ?? false,
+    hasTax: row?.has_tax ?? false,
+    accounts: Number(row?.accounts ?? 0),
+    sellableMenuItems: Number(row?.sellable_menu_items ?? 0),
+  });
+}
+
 /**
- * Change which industry a business operates in, and top up its chart of
- * accounts so the new industry's posting rules have the accounts they need.
+ * Change which industry a business operates in, and reconcile its industry-
+ * shaped accounts, feature defaults, built-in payment methods, and setup
+ * lifecycle in the same transaction.
  *
  * Migration 0048 originally made `industry` immutable *by omission* — no update
  * route existed — because the chart of accounts is seeded from it at creation
@@ -576,10 +622,11 @@ export async function industryDataCounts(businessId: string): Promise<IndustryDa
  * `seedChartOfAccounts` skips every code the business already has — so existing
  * accounts, their names, and every journal entry posted against them survive
  * untouched. Data belonging to the old industry's model (`menu_items` for an
- * ex-F&B business, `items` for an ex-retail one) is likewise left alone: it
- * simply stops being reachable from the new industry's UI. Reconciling it is
- * the operator's call, which is why `industryDataCounts` exists to tell them
- * what they are leaving behind before they confirm.
+ * ex-F&B business, `items` for an ex-retail one) is likewise left alone. Custom
+ * payment methods and historical payments remain intact; SnapFood is retired
+ * by deactivation, not deletion. When switching into food_service, the canonical
+ * setup-readiness contract reopens a completed lifecycle only if F&B-required
+ * data is missing.
  */
 export async function changeBusinessIndustry(
   businessId: string,
@@ -621,6 +668,29 @@ export async function changeBusinessIndustry(
         );
       }
       await disableFeatures(client, businessId, industryProfile(industry).defaultDisabledFeatures);
+
+      // Phase 25 industry changes also reconcile built-in payment ways. The
+      // service preserves custom/user-configured rows and retires SnapFood by
+      // deactivating its row, never deleting the payment history that points to it.
+      await reconcilePaymentMethodsForIndustry(client, businessId, previous[0].industry, industry);
+
+      // A completed retail/service business may lack the F&B-only menu and
+      // costing prerequisites. Re-open its canonical setup marker when those
+      // requirements are introduced; the normal setup-state read then reconciles
+      // step markers from the same readiness contract the Finish API uses.
+      if (previous[0].industry !== industry && wizardStepsForIndustry(industry).includes("menu")) {
+        const readiness = await setupReadinessForIndustryChange(client, businessId, industry);
+        if (!readiness.ready) {
+          await client.query(
+            `UPDATE settings
+                SET value = jsonb_set(COALESCE(value, '{}'::jsonb), '{completedAt}', 'null'::jsonb, true),
+                    updated_at = now()
+              WHERE business_id = $1 AND location_id IS NULL AND key = $2
+                AND value ->> 'completedAt' IS NOT NULL`,
+            [businessId, SETTING_KEYS.wizardProgress],
+          );
+        }
+      }
 
       await client.query("COMMIT");
       return seeded;

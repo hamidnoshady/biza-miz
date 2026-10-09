@@ -28,6 +28,7 @@ interface SupplierBalance {
   supplierName: string;
   supplierPhone: string | null;
   supplierPartyId: string | null;
+  locationName: string | null;
   balance: number;
 }
 
@@ -39,12 +40,13 @@ interface AgingRow {
   d61_90: number;
   over90: number;
   total: number;
+  locationName: string | null;
 }
 
 interface AgingReport {
   asOfDate: string;
   rows: AgingRow[];
-  totals: Omit<AgingRow, "supplierId" | "supplierName">;
+  totals: Omit<AgingRow, "supplierId" | "supplierName" | "locationName">;
 }
 
 interface ReconciliationSummaryPayload {
@@ -66,7 +68,7 @@ interface BalancesPayload {
 export const PAYABLES_SIDE: SubledgerSide = {
   eyebrow: "تعهدات تأمین‌کنندگان",
   title: "حساب‌های پرداختنی",
-  description: "مانده حساب‌ها و نمای سنی بدهی تأمین‌کنندگان، بر پایه ثبت‌های فعلی.",
+  description: "مانده حساب‌ها و نمای سنی بدهی تأمین‌کنندگان، بر پایه ثبت‌های فعلی. ماندهٔ منفی یعنی پیش‌پرداخت یا بستانکاری شما نزد تأمین‌کننده، نه بدهی.",
   partyNoun: "تأمین‌کننده",
   balancesCaption: "مانده حساب‌های پرداختنی به تفکیک تأمین‌کننده",
   agingCaption: "نمای سنی بدهی به تأمین‌کنندگان",
@@ -77,6 +79,7 @@ export const PAYABLES_SIDE: SubledgerSide = {
   directoryHref: accountingSuppliersHref(),
   directoryLinkLabel: "تأمین‌کنندگان در حسابداری",
   searchLabel: "جست‌وجوی تأمین‌کننده",
+  unknownExplanation: "ماندهٔ «بدون تأمین‌کننده مشخص» یک استثنای تطبیق است، نه حساب یک تأمین‌کننده. ردیف‌ها در صورت‌حساب این بخش، همراه با منبع، وضعیت انتساب و پیوند دقیق به سند روزنامه بررسی می‌شوند.",
 
   unknownKey: UNKNOWN_SUPPLIER_KEY,
   listEndpoint: "/api/ledger/ap/suppliers",
@@ -87,10 +90,11 @@ export const PAYABLES_SIDE: SubledgerSide = {
     return {
       rows: rows.map((s) => ({
         id: s.supplierId,
-        name: s.supplierName,
+        name: s.supplierId === UNKNOWN_SUPPLIER_KEY ? "استثنای تطبیق — بدون تأمین‌کننده" : s.supplierName,
         phone: s.supplierPhone,
         balance: s.balance,
         partyId: s.supplierPartyId,
+        locationName: s.locationName,
       })),
       total: data.total ?? rows.length,
       summary: data.summary
@@ -111,7 +115,7 @@ export const PAYABLES_SIDE: SubledgerSide = {
       asOfDate: data.asOfDate,
       rows: (data.rows ?? []).map((r) => ({
         id: r.supplierId,
-        name: r.supplierName,
+        name: r.supplierId === UNKNOWN_SUPPLIER_KEY ? "استثنای تطبیق — بدون تأمین‌کننده" : r.supplierName,
         current: r.current,
         d31_60: r.d31_60,
         d61_90: r.d61_90,
@@ -120,12 +124,16 @@ export const PAYABLES_SIDE: SubledgerSide = {
         // The aging payload names the branch alias only; the directory link
         // stays hidden rather than pointing at a guessed party.
         partyId: null,
+        locationName: r.locationName,
       })),
       totals: data.totals,
     };
   },
 
-  marksCreditBalances: false,
+  negativeBalanceLabel: "پیش‌پرداخت / بستانکاری نزد تأمین‌کننده",
+  negativeSettleActionLabel: "افزودن پیش‌پرداخت",
+  negativeTitlePrefix: "پیش‌پرداخت به ",
+  negativeBalanceMessage: "ماندهٔ منفی یعنی پیش‌پرداخت یا بستانکاری شما نزد این تأمین‌کننده است، نه بدهی. پرداخت تازه، مبلغ پیش‌پرداخت را بیشتر می‌کند.",
 
   summary: {
     primaryLabel: "جمع بدهی به تأمین‌کنندگان",
@@ -155,7 +163,11 @@ export const PAYABLES_SIDE: SubledgerSide = {
     typeLabels: {
       bill: "فاکتور",
       payment: "پرداخت",
+      payment_reversal: "برگشت پرداخت",
       return: "برگشت",
+      cheque: "رویداد چک",
+      interest: "سود اقساط",
+      adjustment: "تعدیل / استثنای تطبیق",
       other: "سایر",
     },
     caption: "گردش حساب این تأمین‌کننده",
@@ -167,6 +179,26 @@ export const PAYABLES_SIDE: SubledgerSide = {
     sourceColumnLabel: "منبع",
     entryLinkLabel: "نمایش سند",
     entryFailed: "بارگذاری سند حسابداری این ردیف ناموفق بود.",
+    /*
+     * Only A/P has an attribution contract to explain: a line with no supplier
+     * is either a deliberate control-account adjustment or a source that was
+     * added without an attribution rule, and the two must not look alike in a
+     * report whose job is reconciling to GL 2100.
+     */
+    attributionNoteFor: (status) => {
+      switch (status) {
+        case "intentional_unknown":
+          return "استثنای آگاهانه؛ بدون طرف معین";
+        case "automatic_missing":
+          return "خطای تطبیق؛ منبع خودکار بدون تأمین‌کننده";
+        case "conditional_missing":
+          return "نیازمند بررسی؛ انتساب مشروط پیدا نشد";
+        case "unclassified":
+          return "منبع هنوز در قرارداد انتساب دسته‌بندی نشده";
+        default:
+          return null;
+      }
+    },
   },
 };
 

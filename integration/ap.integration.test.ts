@@ -23,8 +23,9 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let apService: typeof import("../src/lib/ap-service");
+let installmentsService: typeof import("../src/lib/installments-service");
 
-const biz = { id: "", locationId: "" };
+const biz = { id: "", locationId: "", branchLocationId: "" };
 const acct = { cash: "", bankClearing: "", inventory: "", accountsPayable: "" };
 const user = { id: "" };
 const supplier = { id: "" };
@@ -63,6 +64,7 @@ beforeAll(async () => {
   process.env.DATABASE_URL = urlFor(databaseName);
   dbLib = await import("../src/lib/db");
   apService = await import("../src/lib/ap-service");
+  installmentsService = await import("../src/lib/installments-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -83,6 +85,14 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.query("DELETE FROM cheque_events");
+  await db.query("DELETE FROM cheques");
+  await db.query("DELETE FROM installment_items");
+  await db.query("DELETE FROM installments");
+  await db.query("DELETE FROM item_supplier_return_items");
+  await db.query("DELETE FROM item_supplier_returns");
+  await db.query("DELETE FROM item_purchase_items");
+  await db.query("DELETE FROM item_purchases");
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM ap_payments");
@@ -101,7 +111,12 @@ beforeEach(async () => {
     "INSERT INTO locations (business_id, name) VALUES ($1, 'Main') RETURNING id",
     [biz.id],
   );
+  const branchRow = await db.query<{ id: string }>(
+    "INSERT INTO locations (business_id, name) VALUES ($1, 'Branch') RETURNING id",
+    [biz.id],
+  );
   biz.locationId = locRow.rows[0].id;
+  biz.branchLocationId = branchRow.rows[0].id;
 
   const userRow = await db.query<{ id: string }>(
     `INSERT INTO users (business_id, role, full_name, pin_hash) VALUES ($1, 'owner', 'Owner', 'x') RETURNING id`,
@@ -140,18 +155,23 @@ beforeEach(async () => {
 let purchaseCounter = 0;
 
 /** Mirrors what postExactPurchaseEntry posts for a credit-settled purchase: Debit Inventory / Credit Accounts Payable. */
-async function postCreditPurchase(entryDate: string, supplierId: string | null, amount: number): Promise<string> {
+async function postCreditPurchase(
+  entryDate: string,
+  supplierId: string | null,
+  amount: number,
+  locationId = biz.locationId,
+): Promise<string> {
   purchaseCounter += 1;
   const { rows: purchaseRows } = await db.query<{ id: string }>(
     `INSERT INTO purchases (location_id, supplier_id, status, total, settlement_method, note, received_at)
      VALUES ($1, $2, 'received', $3, 'credit', $4, $5) RETURNING id`,
-    [biz.locationId, supplierId, amount, `purchase #${purchaseCounter}`, entryDate],
+    [locationId, supplierId, amount, `purchase #${purchaseCounter}`, entryDate],
   );
   const purchaseId = purchaseRows[0].id;
   const { rows: entryRows } = await db.query<{ id: string }>(
-    `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, source_id)
-     VALUES ($1, $2, 'Purchase receipt', 'purchase', $3) RETURNING id`,
-    [biz.id, entryDate, purchaseId],
+    `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type, source_id)
+     VALUES ($1, $2, $3, 'Purchase receipt', 'purchase', $4) RETURNING id`,
+    [biz.id, locationId, entryDate, purchaseId],
   );
   await db.query(
     `INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, $3, 0), ($1, $4, 0, $3)`,
@@ -161,23 +181,83 @@ async function postCreditPurchase(entryDate: string, supplierId: string | null, 
 }
 
 /** Mirrors postExactOperationalInventoryEntry for a supplier return settled against the payable: Debit Accounts Payable / Credit Inventory. */
-async function postSupplierReturn(entryDate: string, purchaseId: string, amount: number): Promise<string> {
+async function postSupplierReturn(
+  entryDate: string,
+  purchaseId: string,
+  amount: number,
+  settlementMethod: "accounts_payable" | "cash" = "accounts_payable",
+): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
     `INSERT INTO supplier_returns (business_id, location_id, purchase_id, settlement_method, total_value_rial, reason, idempotency_key)
-     VALUES ($1, $2, $3, 'accounts_payable', $4, 'damaged', $5) RETURNING id`,
-    [biz.id, biz.locationId, purchaseId, amount, `return-${randomUUID()}`],
+     VALUES ($1, $2, $3, $4, $5, 'damaged', $6) RETURNING id`,
+    [biz.id, biz.locationId, purchaseId, settlementMethod, amount, `return-${randomUUID()}`],
   );
   const returnId = rows[0].id;
   const { rows: entryRows } = await db.query<{ id: string }>(
-    `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, source_id)
-     VALUES ($1, $2, 'Supplier return', 'supplier_return', $3) RETURNING id`,
-    [biz.id, entryDate, returnId],
+    `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type, source_id)
+     VALUES ($1, $2, $3, 'Supplier return', 'supplier_return', $4) RETURNING id`,
+    [biz.id, biz.locationId, entryDate, returnId],
   );
   await db.query(
     `INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, $3, 0), ($1, $4, 0, $3)`,
     [entryRows[0].id, acct.accountsPayable, amount, acct.inventory],
   );
   return returnId;
+}
+
+/** Posts one balanced A/P control-account line with its source document linked. */
+async function postApJournalLine(input: {
+  entryDate: string;
+  sourceType: string;
+  sourceId: string;
+  side: "debit" | "credit";
+  amount: number;
+  memo?: string;
+  locationId?: string;
+}): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type, source_id)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+    [biz.id, input.locationId ?? biz.locationId, input.entryDate, input.memo ?? input.sourceType, input.sourceType, input.sourceId],
+  );
+  if (input.side === "credit") {
+    await db.query(
+      `INSERT INTO journal_lines (entry_id, account_id, debit, credit)
+       VALUES ($1, $2, $3, 0), ($1, $4, 0, $3)`,
+      [rows[0].id, acct.inventory, input.amount, acct.accountsPayable],
+    );
+  } else {
+    await db.query(
+      `INSERT INTO journal_lines (entry_id, account_id, debit, credit)
+       VALUES ($1, $2, $3, 0), ($1, $4, 0, $3)`,
+      [rows[0].id, acct.accountsPayable, input.amount, acct.inventory],
+    );
+  }
+  return rows[0].id;
+}
+
+async function postRetailPurchase(supplierId: string, amount: number): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO item_purchases (business_id, location_id, supplier_id, status, total, received_at)
+     VALUES ($1, $2, $3, 'received', $4, '2025-04-01') RETURNING id`,
+    [biz.id, biz.locationId, supplierId, amount],
+  );
+  await postApJournalLine({ entryDate: "2025-04-01", sourceType: "item_purchase", sourceId: rows[0].id, side: "credit", amount });
+  return rows[0].id;
+}
+
+async function postRetailSupplierReturn(
+  purchaseId: string,
+  amount: number,
+  settlementMethod: "accounts_payable" | "cash",
+): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO item_supplier_returns (business_id, location_id, purchase_id, settlement_method, total_value_rial, reason, idempotency_key)
+     VALUES ($1, $2, $3, $4, $5, 'damaged', $6) RETURNING id`,
+    [biz.id, biz.locationId, purchaseId, settlementMethod, amount, `item-return-${randomUUID()}`],
+  );
+  await postApJournalLine({ entryDate: "2025-04-05", sourceType: "item_supplier_return", sourceId: rows[0].id, side: "debit", amount });
+  return rows[0].id;
 }
 
 describe("listSupplierBalances", () => {
@@ -191,6 +271,8 @@ describe("listSupplierBalances", () => {
         supplierName: "Acme",
         supplierPhone: "0912",
         supplierPartyId: party.id,
+        locationId: biz.locationId,
+        locationName: "Main",
         balance: 500_000,
       },
     ]);
@@ -211,6 +293,8 @@ describe("listSupplierBalances", () => {
       supplierName: "Acme",
       supplierPhone: "0912",
       supplierPartyId: party.id,
+      locationId: biz.locationId,
+      locationName: "Main",
       balance: 500_000,
     });
     expect(directory.find((s) => s.supplierId === settled.rows[0].id)?.balance).toBe(0);
@@ -241,6 +325,7 @@ describe("listSupplierBalances", () => {
       supplierId: supplier.id,
       method: "cash",
       amount: 200_000,
+      clientRequestId: randomUUID(),
       createdBy: user.id,
     });
 
@@ -260,6 +345,7 @@ describe("payBill", () => {
       method: "cash",
       amount: 200_000,
       memo: "test",
+      clientRequestId: randomUUID(),
       createdBy: user.id,
     });
     expect(payment.amount).toBe(200_000);
@@ -283,6 +369,7 @@ describe("payBill", () => {
       supplierId: supplier.id,
       method: "bank",
       amount: 100_000,
+      clientRequestId: randomUUID(),
       createdBy: user.id,
     });
 
@@ -314,6 +401,7 @@ describe("payBill", () => {
         supplierId: otherSupplier.rows[0].id,
         method: "cash",
         amount: 10_000,
+        clientRequestId: randomUUID(),
         createdBy: user.id,
       }),
     ).rejects.toThrow("supplier_not_found");
@@ -327,9 +415,210 @@ describe("payBill", () => {
         supplierId: supplier.id,
         method: "cash",
         amount: 0,
+        clientRequestId: randomUUID(),
         createdBy: user.id,
       }),
     ).rejects.toThrow("invalid_amount");
+  });
+});
+
+describe("A/P branch aliases and payment idempotency", () => {
+  it("keeps supplier aliases and balances branch-specific and rejects cross-branch payments", async () => {
+    const branchAlias = await db.query<{ id: string }>(
+      "INSERT INTO suppliers (location_id, name, party_id) VALUES ($1, 'Acme Branch', $2) RETURNING id",
+      [biz.branchLocationId, party.id],
+    );
+    await postCreditPurchase("2025-04-01", supplier.id, 100_000, biz.locationId);
+    await postCreditPurchase("2025-04-01", branchAlias.rows[0].id, 200_000, biz.branchLocationId);
+
+    const balances = await apService.listSupplierBalances(biz.id);
+    expect(balances.map((row) => [row.supplierId, row.locationId, row.locationName, row.balance])).toEqual([
+      [branchAlias.rows[0].id, biz.branchLocationId, "Branch", 200_000],
+      [supplier.id, biz.locationId, "Main", 100_000],
+    ]);
+
+    await expect(apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: branchAlias.rows[0].id,
+      method: "cash",
+      amount: 50_000,
+      clientRequestId: randomUUID(),
+      createdBy: user.id,
+    })).rejects.toThrow("supplier_location_mismatch");
+
+    await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.branchLocationId,
+      supplierId: branchAlias.rows[0].id,
+      method: "cash",
+      amount: 50_000,
+      clientRequestId: randomUUID(),
+      createdBy: user.id,
+    });
+    const after = await apService.listSupplierBalances(biz.id);
+    expect(after.find((row) => row.supplierId === branchAlias.rows[0].id)?.balance).toBe(150_000);
+    expect(after.find((row) => row.supplierId === supplier.id)?.balance).toBe(100_000);
+  });
+
+  it("reuses a matching request key and rejects key reuse with changed payment details", async () => {
+    const clientRequestId = `retry:${randomUUID()}`;
+    const intent = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "bank" as const,
+      amount: 40_000,
+      paymentDate: "2025-04-10",
+      memo: "batch payment",
+      clientRequestId,
+      createdBy: user.id,
+    };
+    const first = await apService.payBill(intent);
+    const retry = await apService.payBill(intent);
+    expect(first.duplicate).toBe(false);
+    expect(retry.duplicate).toBe(true);
+    expect(retry.id).toBe(first.id);
+
+    await expect(apService.payBill({ ...intent, amount: 41_000 })).rejects.toThrow("idempotency_conflict");
+    const count = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM ap_payments WHERE business_id = $1 AND client_request_id = $2",
+      [biz.id, clientRequestId],
+    );
+    expect(Number(count.rows[0].count)).toBe(1);
+  });
+
+  it("serializes concurrent retries into one voucher and one journal posting", async () => {
+    const clientRequestId = `concurrent:${randomUUID()}`;
+    const intent = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "cash" as const,
+      amount: 70_000,
+      paymentDate: "2025-04-10",
+      clientRequestId,
+      createdBy: user.id,
+    };
+    const results = await Promise.all([apService.payBill(intent), apService.payBill(intent)]);
+    expect(results.map((row) => row.id).sort()).toEqual([results[0].id, results[0].id]);
+    expect(results.filter((row) => row.duplicate)).toHaveLength(1);
+    const count = await db.query<{ payment_count: string; entry_count: string }>(
+      `SELECT (SELECT count(*) FROM ap_payments WHERE business_id = $1 AND client_request_id = $2)::text AS payment_count,
+              (SELECT count(*) FROM journal_entries WHERE business_id = $1 AND source_type = 'ap_payment'
+                AND source_id = (SELECT id FROM ap_payments WHERE business_id = $1 AND client_request_id = $2))::text AS entry_count`,
+      [biz.id, clientRequestId],
+    );
+    expect(count.rows[0]).toEqual({ payment_count: "1", entry_count: "1" });
+  });
+});
+
+describe("reverseApPayment", () => {
+  it("appends the opposite GL entry, restores supplier balance, and records exact statement links", async () => {
+    await postCreditPurchase("2025-04-01", supplier.id, 500_000);
+    const payment = await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "cash",
+      amount: 200_000,
+      paymentDate: "2025-04-10",
+      clientRequestId: randomUUID(),
+      createdBy: user.id,
+    });
+    const reversal = await apService.reverseApPayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      paymentId: payment.id,
+      actorId: user.id,
+      reversalDate: "2025-04-11",
+    });
+
+    expect(reversal).toMatchObject({ paymentId: payment.id, reversalDate: "2025-04-11" });
+    expect((await apService.listSupplierBalances(biz.id))[0].balance).toBe(500_000);
+    const vouchers = await installmentsService.listPayments(biz.id);
+    expect(vouchers).toContainEqual(expect.objectContaining({
+      id: payment.id,
+      partyName: "Acme",
+      locationName: "Main",
+      reversed: true,
+      reversalEntryId: reversal.reversalEntryId,
+      reversalDate: "2025-04-11",
+    }));
+    await expect(apService.reverseApPayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      paymentId: payment.id,
+      actorId: user.id,
+      reversalDate: "2025-04-12",
+    })).rejects.toThrow("already_reversed");
+
+    const lines = await apService.getSupplierStatement(biz.id, supplier.id);
+    expect(lines.map((line) => line.type)).toEqual(["bill", "payment", "payment_reversal"]);
+    expect(lines.map((line) => line.balance)).toEqual([500_000, 300_000, 500_000]);
+    expect(lines[2]).toMatchObject({
+      journalEntryId: reversal.reversalEntryId,
+      sourceType: "ap_payment_reversal",
+      sourceId: payment.id,
+      paymentVoucherId: payment.id,
+      attributionStatus: "attributed",
+      supplierLocationId: biz.locationId,
+      supplierLocationName: "Main",
+    });
+  });
+
+  it("does not allow a reversal from a different tenant or branch", async () => {
+    const payment = await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "cash",
+      amount: 10_000,
+      clientRequestId: randomUUID(),
+      createdBy: user.id,
+    });
+    await expect(apService.reverseApPayment({
+      businessId: biz.id,
+      locationId: biz.branchLocationId,
+      paymentId: payment.id,
+      actorId: user.id,
+    })).rejects.toThrow("supplier_location_mismatch");
+    await expect(apService.reverseApPayment({
+      businessId: randomUUID(),
+      locationId: biz.locationId,
+      paymentId: payment.id,
+      actorId: user.id,
+    })).rejects.toThrow("payment_not_found");
+  });
+
+  it("obeys fiscal-period locks for the reversal date", async () => {
+    const payment = await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "cash",
+      amount: 10_000,
+      paymentDate: "2025-03-10",
+      clientRequestId: randomUUID(),
+      createdBy: user.id,
+    });
+    const year = await db.query<{ id: string }>(
+      `INSERT INTO fiscal_years (business_id, label, starts_on, ends_on)
+       VALUES ($1, 'test-2025', '2025-01-01', '2026-01-01') RETURNING id`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO fiscal_periods (business_id, fiscal_year_id, label, starts_on, ends_on, status)
+       VALUES ($1, $2, 'locked-april', '2025-04-01', '2025-05-01', 'locked')`,
+      [biz.id, year.rows[0].id],
+    );
+    await expect(apService.reverseApPayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      paymentId: payment.id,
+      actorId: user.id,
+      reversalDate: "2025-04-15",
+    })).rejects.toThrow("fiscal_period_locked");
   });
 });
 
@@ -343,6 +632,7 @@ describe("getSupplierStatement", () => {
       method: "cash",
       amount: 200_000,
       paymentDate: "2025-04-10",
+      clientRequestId: randomUUID(),
       createdBy: user.id,
     });
 
@@ -350,6 +640,204 @@ describe("getSupplierStatement", () => {
     expect(lines.map((l) => l.type)).toEqual(["bill", "payment"]);
     expect(lines[0].balance).toBe(500_000);
     expect(lines[1].balance).toBe(300_000);
+  });
+});
+
+describe("payable installment branch behavior and retries", () => {
+  async function addSecondAlias() {
+    return db.query<{ id: string }>(
+      "INSERT INTO suppliers (location_id, name, party_id) VALUES ($1, 'Acme Branch', $2) RETURNING id",
+      [biz.branchLocationId, party.id],
+    );
+  }
+
+  function installmentInput(locationId: string | null) {
+    return {
+      businessId: biz.id,
+      locationId,
+      direction: "payable" as const,
+      source: "party" as const,
+      partyId: party.id,
+      principal: 100_000,
+      installmentCount: 1,
+      intervalMonths: 1,
+      firstDueDate: "2025-04-10",
+      createdBy: user.id,
+    };
+  }
+
+  it("rejects a null-location plan when the party has aliases in multiple branches", async () => {
+    await addSecondAlias();
+    await expect(installmentsService.createInstallmentPlan(installmentInput(null))).rejects.toThrow("installment_location_required");
+  });
+
+  it("uses the sole alias location for a legacy null-location plan when no branch is active", async () => {
+    const plan = await installmentsService.createInstallmentPlan(installmentInput(null));
+    const { rows: itemRows } = await db.query<{ id: string }>(
+      "SELECT id FROM installment_items WHERE installment_id = $1",
+      [plan.id],
+    );
+    await installmentsService.payInstallmentItem({
+      businessId: biz.id,
+      locationId: null,
+      planId: plan.id,
+      itemId: itemRows[0].id,
+      method: "cash",
+      createdBy: user.id,
+    });
+    const payment = await db.query<{ supplier_id: string; location_id: string }>(
+      "SELECT supplier_id, location_id FROM ap_payments WHERE client_request_id = $1",
+      [`installment-ap:${plan.id}:${itemRows[0].id}`],
+    );
+    expect(payment.rows[0]).toEqual({ supplier_id: supplier.id, location_id: biz.locationId });
+  });
+
+  it("binds a payable slice to its branch alias and makes retries idempotent", async () => {
+    const secondAlias = await addSecondAlias();
+    const plan = await installmentsService.createInstallmentPlan(installmentInput(biz.branchLocationId));
+    const { rows: itemRows } = await db.query<{ id: string }>(
+      "SELECT id FROM installment_items WHERE installment_id = $1",
+      [plan.id],
+    );
+    const itemId = itemRows[0].id;
+
+    await expect(installmentsService.payInstallmentItem({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      planId: plan.id,
+      itemId,
+      method: "cash",
+      createdBy: user.id,
+    })).rejects.toThrow("supplier_location_mismatch");
+
+    await Promise.all([1, 2].map(() => installmentsService.payInstallmentItem({
+      businessId: biz.id,
+      locationId: biz.branchLocationId,
+      planId: plan.id,
+      itemId,
+      method: "cash",
+      createdBy: user.id,
+    })));
+
+    const { rows: paymentRows } = await db.query<{
+      payment_id: string;
+      supplier_id: string;
+      location_id: string;
+      client_request_id: string;
+      request_fingerprint: string;
+    }>(
+      `SELECT p.id AS payment_id, p.supplier_id, p.location_id, p.client_request_id, p.request_fingerprint
+         FROM ap_payments p JOIN installment_items i ON i.payment_id = p.id
+        WHERE i.id = $1`,
+      [itemId],
+    );
+    expect(paymentRows).toHaveLength(1);
+    expect(paymentRows[0]).toMatchObject({
+      supplier_id: secondAlias.rows[0].id,
+      location_id: biz.branchLocationId,
+      client_request_id: `installment-ap:${plan.id}:${itemId}`,
+    });
+    expect(paymentRows[0].request_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    await expect(installmentsService.payInstallmentItem({
+      businessId: biz.id,
+      locationId: biz.branchLocationId,
+      planId: plan.id,
+      itemId,
+      method: "bank",
+      createdBy: user.id,
+    })).rejects.toThrow("idempotency_conflict");
+  });
+});
+
+describe("canonical A/P source attribution and reconciliation", () => {
+  it("attributes each automatic source, keeps intentional/conditional exceptions visible, and reconciles to GL 2100", async () => {
+    const purchaseId = await postCreditPurchase("2025-04-01", supplier.id, 100_000);
+    await postSupplierReturn("2025-04-02", purchaseId, 10_000, "accounts_payable");
+    await postSupplierReturn("2025-04-03", purchaseId, 5_000, "cash");
+
+    const retailPurchaseId = await postRetailPurchase(supplier.id, 200_000);
+    await postRetailSupplierReturn(retailPurchaseId, 20_000, "accounts_payable");
+    await postRetailSupplierReturn(retailPurchaseId, 7_000, "cash");
+
+    const payment = await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "cash",
+      amount: 30_000,
+      paymentDate: "2025-04-06",
+      clientRequestId: randomUUID(),
+      createdBy: user.id,
+    });
+    await apService.reverseApPayment({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      paymentId: payment.id,
+      actorId: user.id,
+      reversalDate: "2025-04-07",
+    });
+
+    const { rows: chequeRows } = await db.query<{ id: string }>(
+      `INSERT INTO cheques (business_id, location_id, direction, status, serial_number, bank_name, amount, issue_date, due_date, counterparty_name)
+       VALUES ($1, $2, 'receivable', 'bounced', $3, 'Test Bank', 50000, '2025-04-02', '2025-04-20', 'Customer')
+       RETURNING id`,
+      [biz.id, biz.locationId, `CH-${randomUUID().slice(0, 8)}`],
+    );
+    const chequeId = chequeRows[0].id;
+    await db.query(
+      `INSERT INTO cheque_events (business_id, cheque_id, event, occurred_on, endorsed_to_supplier_id)
+       VALUES ($1, $2, 'endorsed', '2025-04-04', $3), ($1, $2, 'bounced', '2025-04-08', NULL)`,
+      [biz.id, chequeId, supplier.id],
+    );
+    await postApJournalLine({ entryDate: "2025-04-04", sourceType: "cheque", sourceId: chequeId, side: "debit", amount: 50_000 });
+    await postApJournalLine({ entryDate: "2025-04-08", sourceType: "cheque", sourceId: chequeId, side: "credit", amount: 50_000 });
+
+    const { rows: planRows } = await db.query<{ id: string }>(
+      `INSERT INTO installments
+         (business_id, location_id, direction, source, party_id, principal, installment_count, interval_months, first_due_date)
+       VALUES ($1, $2, 'payable', 'party', $3, 100000, 1, 1, '2025-04-01') RETURNING id`,
+      [biz.id, biz.locationId, party.id],
+    );
+    await postApJournalLine({ entryDate: "2025-04-09", sourceType: "installment_interest", sourceId: planRows[0].id, side: "credit", amount: 80_000 });
+
+    const intentionalUnknownSources: [string, "debit" | "credit", number][] = [
+      ["manual", "credit", 9_000],
+      ["manual_adjustment", "debit", 2_000],
+      ["opening", "credit", 15_000],
+      ["holoo_import", "debit", 1_000],
+    ];
+    for (const [sourceType, side, amount] of intentionalUnknownSources) {
+      await postApJournalLine({ entryDate: "2025-04-10", sourceType, sourceId: randomUUID(), side, amount });
+    }
+
+    const supplierLines = await apService.getSupplierStatement(biz.id, supplier.id);
+    const unknownLines = await apService.getSupplierStatement(biz.id, "unknown");
+    const supplierSources = new Set(supplierLines.map((line) => line.sourceType));
+    for (const sourceType of [
+      "purchase", "supplier_return", "item_purchase", "item_supplier_return",
+      "ap_payment", "ap_payment_reversal", "cheque", "installment_interest",
+    ]) expect(supplierSources.has(sourceType)).toBe(true);
+
+    expect(supplierLines.every((line) => line.attributionStatus === "attributed")).toBe(true);
+    for (const sourceType of ["manual", "manual_adjustment", "opening", "holoo_import"]) {
+      expect(unknownLines.find((line) => line.sourceType === sourceType)?.attributionStatus).toBe("intentional_unknown");
+    }
+    expect(unknownLines.find((line) => line.sourceType === "supplier_return")?.attributionStatus).toBe("conditional_missing");
+    expect(unknownLines.find((line) => line.sourceType === "item_supplier_return")?.attributionStatus).toBe("conditional_missing");
+    expect(supplierLines.every((line) => line.journalEntryId && line.journalLineId && line.sourceId)).toBe(true);
+    expect(unknownLines.every((line) => line.journalEntryId && line.journalLineId && line.sourceId)).toBe(true);
+    expect(unknownLines.every((line) => line.locationName === "Main")).toBe(true);
+
+    const balances = await apService.listSupplierBalances(biz.id);
+    const supplierTotal = balances.filter((row) => row.supplierId !== "unknown").reduce((sum, row) => sum + row.balance, 0);
+    const unknownTotal = balances.find((row) => row.supplierId === "unknown")?.balance ?? 0;
+    const control = await db.query<{ balance: string }>(
+      "SELECT COALESCE(sum(jl.credit - jl.debit), 0)::text AS balance FROM journal_lines jl WHERE jl.account_id = $1",
+      [acct.accountsPayable],
+    );
+    expect(supplierTotal).toBe(350_000);
+    expect(unknownTotal).toBe(9_000);
+    expect(supplierTotal + unknownTotal).toBe(Number(control.rows[0].balance));
   });
 });
 
@@ -425,6 +913,7 @@ describe("date integrity", () => {
           amount: 10_000,
           paymentDate: impossible,
           createdBy: user.id,
+          clientRequestId: randomUUID(),
         }),
       ).rejects.toThrow("invalid_date");
       await expect(apService.getApAging(biz.id, impossible)).rejects.toThrow("invalid_date");
@@ -443,6 +932,7 @@ describe("date integrity", () => {
       amount: 40_000,
       paymentDate: "2024-02-29",
       createdBy: user.id,
+      clientRequestId: randomUUID(),
     });
     expect(payment.paymentDate).toBe("2024-02-29");
     const aging = await apService.getApAging(biz.id, "2024-02-29");

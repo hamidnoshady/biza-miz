@@ -330,7 +330,11 @@ export function AccountingManager({
           ) : null}
           {section === "receivables" ? <ArSection canSettle={canManageReceivables} /> : null}
           {section === "payables" ? <ApSection canSettle={canManagePayables} /> : null}
-          {section === "receipts" ? <ReceiptsPaymentsSection /> : null}
+          {section === "receipts" ? <ReceiptsPaymentsSection
+            canManageReceivables={canManageReceivables}
+            canManagePayables={canManagePayables}
+            canReversePayments={canApproveLedger}
+          /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}
           {section === "reconciliation" ? (

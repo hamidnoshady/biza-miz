@@ -124,7 +124,7 @@ export const RECEIVABLES_SIDE: SubledgerSide = {
     };
   },
 
-  marksCreditBalances: true,
+  negativeBalanceLabel: "بستانکار / پیش‌پرداخت مشتری",
 
   summary: {
     primaryLabel: "جمع مطالبات",
