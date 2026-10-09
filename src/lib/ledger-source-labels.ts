@@ -95,6 +95,8 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   manual: "سند دستی",
   manual_adjustment: "تعدیل دستی",
   opening: "تراز افتتاحیه",
+  opening_balance: "مانده افتتاحیه سال مالی",
+  opening_balance_reversal: "برگشت مانده افتتاحیه",
   closing: "بستن سال مالی",
 
   // شرکت پلتفرم — the internal company's own accounting, posted from the

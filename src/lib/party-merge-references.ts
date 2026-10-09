@@ -174,6 +174,16 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "رسید دریافت",
   },
   {
+    table: "opening_balance_lines",
+    column: "customer_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "An opening receivable is the customer's own open item carried into a fiscal year. It must resolve to the surviving party so the A/R directory and the customer's file agree. The journal lines it links to are untouched, so the trial balance is identical before and after.",
+    preview: true,
+    previewLabel: "مانده افتتاحیه",
+  },
+  {
     table: "fixed_assets",
     column: "custodian_party_id",
     scope: "business",

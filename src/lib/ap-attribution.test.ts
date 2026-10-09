@@ -16,6 +16,8 @@ describe("A/P source attribution contract", () => {
       "manual",
       "manual_adjustment",
       "opening",
+      "opening_balance",
+      "opening_balance_reversal",
       "holoo_import",
     ].sort();
     expect(Object.keys(AP_SOURCE_ATTRIBUTION_CONTRACT).sort()).toEqual(expectedSources);

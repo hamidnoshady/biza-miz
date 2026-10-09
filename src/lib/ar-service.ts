@@ -80,7 +80,8 @@ async function arLines(businessId: string, accountId: string): Promise<ArLineRow
        LEFT JOIN orders o ON o.id = CASE WHEN je.source_type = 'order' THEN je.source_id ELSE am.order_id END
        LEFT JOIN ar_receipts r ON je.source_type = 'ar_receipt' AND r.id = je.source_id
        LEFT JOIN cheques ch ON je.source_type = 'cheque' AND ch.id = je.source_id
-       LEFT JOIN parties c ON c.id = COALESCE(o.customer_id, r.customer_id, ch.customer_id)
+       LEFT JOIN opening_balance_lines obl ON obl.journal_line_id = jl.id OR obl.reversal_journal_line_id = jl.id
+       LEFT JOIN parties c ON c.id = ${AR_CUSTOMER_ID_SQL}
       WHERE je.business_id = $1 AND jl.account_id = $2
       ORDER BY je.entry_date, je.posted_at`,
     [businessId, accountId],
@@ -204,10 +205,14 @@ export const AR_CUSTOMER_ATTRIBUTION_SQL = `
   LEFT JOIN ar_receipts r
          ON je.source_type = 'ar_receipt' AND r.id = je.source_id
   LEFT JOIN cheques ch
-         ON je.source_type = 'cheque' AND ch.id = je.source_id`;
+         ON je.source_type = 'cheque' AND ch.id = je.source_id
+  -- A posted opening (or its reversal) keeps the customer it was entered for,
+  -- through the journal line it became (issue #867).
+  LEFT JOIN opening_balance_lines obl
+         ON obl.journal_line_id = jl.id OR obl.reversal_journal_line_id = jl.id`;
 
 /** The customer-id expression that goes with {@link AR_CUSTOMER_ATTRIBUTION_SQL}. */
-export const AR_CUSTOMER_ID_SQL = "COALESCE(o.customer_id, r.customer_id, ch.customer_id)";
+export const AR_CUSTOMER_ID_SQL = "COALESCE(o.customer_id, r.customer_id, ch.customer_id, obl.customer_id)";
 
 /**
  * A ready-made CTE body giving every customer's A/R balance in one pass.

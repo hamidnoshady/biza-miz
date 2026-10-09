@@ -20,6 +20,8 @@ export const AP_SOURCE_ATTRIBUTION_CONTRACT = {
   manual: { mode: "intentional_unknown", path: "manual journal has no counterparty dimension" },
   manual_adjustment: { mode: "intentional_unknown", path: "manual adjustment has no counterparty dimension" },
   opening: { mode: "intentional_unknown", path: "opening balance has no counterparty dimension" },
+  opening_balance: { mode: "conditional", path: "opening_balance_lines.supplier_id on an A/P line of a posted opening set" },
+  opening_balance_reversal: { mode: "conditional", path: "opening_balance_lines.supplier_id via reversal_journal_line_id of a reversed opening set" },
   holoo_import: { mode: "intentional_unknown", path: "imported general journal has no counterparty dimension" },
 } as const;
 
@@ -116,6 +118,11 @@ export const AP_SUPPLIER_ATTRIBUTION_SQL = `
      ORDER BY si.id
      LIMIT 1
   ) interest_supplier ON ins.id IS NOT NULL
+  -- A posted opening (or its reversal) carries the supplier it was entered
+  -- against. The link is the journal line itself, so a carried payable keeps
+  -- its party after the year rolls over (issue #867).
+  LEFT JOIN opening_balance_lines obl
+         ON obl.journal_line_id = jl.id OR obl.reversal_journal_line_id = jl.id
   LEFT JOIN suppliers s ON s.id = COALESCE(
     p.supplier_id,
     p2.supplier_id,
@@ -125,7 +132,8 @@ export const AP_SUPPLIER_ATTRIBUTION_SQL = `
     ap.supplier_id,
     ch.supplier_id,
     endorsed.endorsed_to_supplier_id,
-    interest_supplier.supplier_id
+    interest_supplier.supplier_id,
+    obl.supplier_id
   ) AND EXISTS (
     SELECT 1 FROM locations supplier_business_location
      WHERE supplier_business_location.id = s.location_id
@@ -147,5 +155,6 @@ export const AP_SUPPLIER_ID_SQL = `COALESCE(
   ap.supplier_id,
   ch.supplier_id,
   endorsed.endorsed_to_supplier_id,
-  interest_supplier.supplier_id
+  interest_supplier.supplier_id,
+  obl.supplier_id
 )`;
