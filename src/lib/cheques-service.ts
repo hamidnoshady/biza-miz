@@ -142,7 +142,8 @@ interface ChequeRow extends Record<string, unknown> {
   replaces_cheque_id: string | null;
   replaces_serial_number?: string | null;
   replaced_by_amount?: string | null;
-  created_at: string;
+  /** `timestamptz`: a `Date` from pg, a string once it has been through jsonb. */
+  created_at: string | Date;
 }
 
 function toCheque(r: ChequeRow): Cheque {
@@ -166,7 +167,13 @@ function toCheque(r: ChequeRow): Cheque {
     replacesChequeId: r.replaces_cheque_id,
     replacesSerialNumber: r.replaces_serial_number ?? null,
     replacedByAmount: Number(r.replaced_by_amount ?? 0),
-    createdAt: r.created_at,
+    // `timestamptz` arrives from pg as a `Date`, while this DTO has always
+    // declared a string and the wire has always carried one (JSON.stringify
+    // did the conversion silently). Doing it here makes the declared type
+    // true in memory too — which matters now that a result is stored as
+    // jsonb and replayed: a replay has to be *equal* to the original answer,
+    // not merely equivalent after serialisation.
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
   };
 }
 
@@ -209,12 +216,6 @@ export interface ChequeListPage {
 }
 
 /**
- * The groups the register reasons in. "Active" used to mean "not cleared,
- * bounced or cancelled", which called an endorsed cheque an outstanding asset
- * (it is not — endorsement already paid the supplier) and dropped a returned
- * cheque entirely (it very much is still money, sitting in 1244/2122).
- */
-/**
  * The accounting-aware categories the register reports, each reconciling to a
  * control account rather than to "is this row finished":
  *
@@ -228,6 +229,11 @@ export interface ChequeListPage {
  *
  * `outstanding` stays as the sum of the two live asset buckets plus issued
  * payables, because that is the number the KPI strip leads with.
+ *
+ * This replaced a plain "active" group that meant "not cleared, bounced or
+ * cancelled" — which called an endorsed cheque an outstanding asset (it is
+ * not; endorsement already paid the supplier) and dropped a returned cheque
+ * altogether, though it is very much still money, sitting in 1244/2122.
  */
 export interface ChequeSummaryBucket {
   count: number;
@@ -500,13 +506,23 @@ async function assertSupplier(client: PoolClient, businessId: string, supplierId
   // about. Cross-branch is deliberately allowed: an alias is location-scoped
   // but A/P is answered per business, so a cheque written at one branch may
   // legitimately pay a supplier registered at another.
+  //
+  // The linked party must also still *be* a supplier. Roles are editable
+  // (`parties.roles`, 0148) and every supplier-facing picker filters on them,
+  // so a party whose supplier role has been taken away is one no A/P screen
+  // will offer or group under again. Attributing a payable cheque — or an
+  // endorsement — to it would post into the subledger through a door the rest
+  // of the system has closed, which is the same class of silent
+  // mis-attribution as a merged party. `assertCustomer` has always required
+  // the customer role; this is its missing twin.
   const { rows } = await client.query(
     `SELECT 1 FROM suppliers s
        JOIN locations l ON l.id = s.location_id
        LEFT JOIN parties pa ON pa.id = s.party_id
       WHERE s.id = $1 AND l.business_id = $2 AND s.is_active
-        AND (s.party_id IS NULL OR (pa.business_id = $2 AND pa.is_active AND pa.merged_into_id IS NULL))`,
-    [supplierId, businessId],
+        AND (s.party_id IS NULL OR (pa.business_id = $2 AND pa.is_active AND pa.merged_into_id IS NULL
+                                    AND pa.roles @> ARRAY[$3]::text[]))`,
+    [supplierId, businessId, PARTY_ROLE_STORAGE.Supplier],
   );
   if (!rows[0]) throw new ChequeError("supplier_not_found", 404);
 }
@@ -527,12 +543,53 @@ async function assertCustomer(client: PoolClient, businessId: string, customerId
  * A retry is "the same request sent again", and only the payload can prove
  * that. Every accounting-significant field goes in, in a fixed order, so the
  * comparison cannot depend on key order or on a field the caller omitted; a
- * cosmetic field (memo) stays out, because re-sending a retry with a corrected
- * note is still the same posting. A key that comes back with a *different*
- * payload is a client bug or a key collision, and is refused.
+ * key that comes back with a *different* payload is a client bug or a key
+ * collision, and is refused rather than answered with an unrelated cheque.
+ *
+ * **A registration is fingerprinted on** (in this order): the literal
+ * `"record"`, direction, branch (`locationId`), canonical bank name,
+ * canonical serial number, صیاد id, amount, issue date, due date, customer
+ * id, supplier id, the cheque being replaced, and whether the unattributed
+ * exception was asked for.
+ *
+ * **A transition is fingerprinted on**: the literal `"transition"`, the
+ * cheque id, the action, the date it occurred on (as sent — an omitted date
+ * is `null`, not today, so "retry without a date" stays one request), the
+ * fee, and the supplier endorsed to.
+ *
+ * **Deliberately excluded**: `memo` and `createdBy`. Re-sending a retry with
+ * a corrected note, or from a second device the same person is signed in on,
+ * is still the same posting. The canonical forms — not the typed text — are
+ * what identity means here, so «۱۲۳-۴۵۶» retried as "123456" is recognised
+ * as the retry it is.
+ *
+ * `src/app/(app)/accounting/cheques-section.tsx` builds its client-side
+ * operation key from the same field lists, so the two sides of the contract
+ * agree about what "the same request" means; see `src/lib/operation-key.ts`.
  */
 function fingerprintOf(parts: (string | number | null)[]): string {
   return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+/**
+ * The answer a replay owes: what the first call *returned*, not what the row
+ * says now.
+ *
+ * A retry is the same request, so it deserves the same response. Reading the
+ * live row instead produced a different one as soon as the cheque moved on:
+ * register a cheque, lose the response, let it be deposited and bounce, retry
+ * the registration — and the retry replied `bounced`, an answer the first call
+ * could never have given. The result the call produced is therefore stored
+ * beside the key that produced it and replayed verbatim.
+ *
+ * `idempotency_result` is NULL only for rows written before migration 0219.
+ * Those keys keep the old behaviour — the current row is the best answer still
+ * available for them — and that is deliberate, not a gap left open: there is
+ * no record of what they first returned, and refusing them would break retries
+ * of work that genuinely committed.
+ */
+function replayResult(row: { idempotency_result: unknown }, fallback: Cheque): Cheque {
+  return (row.idempotency_result as Cheque | null) ?? fallback;
 }
 
 /**
@@ -548,8 +605,10 @@ async function findChequeByIdempotencyKey(
   key: string,
   fingerprint: string,
 ): Promise<Cheque | null> {
-  const { rows } = await query<ChequeRow & { idempotency_fingerprint: string | null }>(
-    `SELECT ${CHEQUE_COLUMNS}, idempotency_fingerprint FROM cheques
+  const { rows } = await query<
+    ChequeRow & { idempotency_fingerprint: string | null; idempotency_result: unknown }
+  >(
+    `SELECT ${CHEQUE_COLUMNS}, idempotency_fingerprint, idempotency_result FROM cheques
       WHERE business_id = $1 AND idempotency_key = $2`,
     [businessId, key],
   );
@@ -560,7 +619,7 @@ async function findChequeByIdempotencyKey(
   if (row.idempotency_fingerprint && row.idempotency_fingerprint !== fingerprint) {
     throw new ChequeError("idempotency_key_conflict", 409);
   }
-  return toCheque(row);
+  return replayResult(row, toCheque(row));
 }
 
 /**
@@ -851,8 +910,20 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
       createdBy: params.createdBy,
     });
 
+    const result = toCheque(cheque);
+    // The answer this key produced, kept so a retry can be given it again
+    // however far the cheque's life has moved on by then. Written inside the
+    // same transaction as the posting it describes: a stored result can never
+    // exist for a registration that did not commit.
+    if (idempotencyKey) {
+      await client.query(
+        "UPDATE cheques SET idempotency_result = $2::jsonb WHERE id = $1",
+        [cheque.id, JSON.stringify(result)],
+      );
+    }
+
     await client.query("COMMIT");
-    return toCheque(cheque);
+    return result;
   } catch (err) {
     await client.query("ROLLBACK");
     // Lost a race against the same key: the other request's cheque is the
@@ -886,13 +957,15 @@ async function recordChequeEvent(
     memo: string | null;
     idempotencyKey?: string | null;
     idempotencyFingerprint?: string | null;
+    /** The response this step returned, replayed verbatim on a retry. */
+    idempotencyResult?: Cheque | null;
     createdBy: string | null;
   },
 ): Promise<void> {
   await client.query(
     `INSERT INTO cheque_events (business_id, cheque_id, event, occurred_on, entry_id, endorsed_to_supplier_id,
-                                memo, created_by, idempotency_key, idempotency_fingerprint)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+                                memo, created_by, idempotency_key, idempotency_fingerprint, idempotency_result)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
     [
       params.businessId,
       params.chequeId,
@@ -904,6 +977,9 @@ async function recordChequeEvent(
       params.createdBy,
       params.idempotencyKey ?? null,
       params.idempotencyKey ? (params.idempotencyFingerprint ?? null) : null,
+      params.idempotencyKey && params.idempotencyResult
+        ? JSON.stringify(params.idempotencyResult)
+        : null,
     ],
   );
 }
@@ -1088,8 +1164,13 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
     // cheque as the first call left it instead of being refused by the
     // transition table (or, worse, posting again from a status that allows it).
     if (idempotencyKey) {
-      const { rows: replay } = await client.query<{ id: string; idempotency_fingerprint: string | null }>(
-        "SELECT id, idempotency_fingerprint FROM cheque_events WHERE business_id = $1 AND idempotency_key = $2",
+      const { rows: replay } = await client.query<{
+        id: string;
+        idempotency_fingerprint: string | null;
+        idempotency_result: unknown;
+      }>(
+        `SELECT id, idempotency_fingerprint, idempotency_result FROM cheque_events
+          WHERE business_id = $1 AND idempotency_key = $2`,
         [params.businessId, idempotencyKey],
       );
       if (replay[0]) {
@@ -1097,7 +1178,11 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
           throw new ChequeError("idempotency_key_conflict", 409);
         }
         await client.query("COMMIT");
-        return toCheque(cheque);
+        // The cheque as this step left it — a `deposit` replayed after the
+        // cheque has since cleared still answers `in_collection`, because
+        // that is what the call being retried returned. Pre-0219 events have
+        // no stored result and fall back to the live row.
+        return replayResult(replay[0], toCheque(cheque));
       }
     }
 
@@ -1162,6 +1247,7 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
        RETURNING ${CHEQUE_COLUMNS}`,
       [params.businessId, params.chequeId, target],
     );
+    const result = toCheque(updated[0]);
 
     await recordChequeEvent(client, {
       businessId: params.businessId,
@@ -1175,11 +1261,12 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
       memo,
       idempotencyKey,
       idempotencyFingerprint: fingerprint,
+      idempotencyResult: result,
       createdBy: params.createdBy,
     });
 
     await client.query("COMMIT");
-    return toCheque(updated[0]);
+    return result;
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;

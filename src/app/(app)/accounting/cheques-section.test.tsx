@@ -145,6 +145,77 @@ describe("the cheque register's paging", () => {
     expect(screen.getByText(toPersianDigits("S-000"))).toBeTruthy();
   });
 
+  it("does not strand «بیشتر» when the filters change while a page is in flight", async () => {
+    /*
+     * The stale-response bug, reproduced with a response the test holds open.
+     *
+     * Press «بیشتر», change a filter before the answer comes back, then let
+     * it arrive. The answer is correctly discarded — it belongs to the old
+     * filters — but it used to return *before* clearing the loading flag, and
+     * nothing else ever cleared it, so the button stayed disabled and the
+     * register was frozen on its first page until a full remount.
+     */
+    const pending: { url: string; release: (body: unknown) => void }[] = [];
+    registerCalls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (!url.startsWith("/api/ledger/cheques?")) {
+          return { ok: true, status: 200, json: async () => ({ locations: [] }) };
+        }
+        registerCalls.push(url);
+        const params = new URL(url, "http://t").searchParams;
+        const offset = Number(params.get("offset") ?? 0);
+        const filtered = params.get("q") === "ملت";
+        const body = {
+          cheques: Array.from({ length: 5 }, (_, i) =>
+            cheque(offset + i, { bankName: filtered ? "ملت" : "صادرات" }),
+          ),
+          total: 300,
+          hasMore: true,
+          banks: ["ملت"],
+          summary: summary(),
+        };
+        // Only the append is held open; first pages answer immediately so the
+        // test is about the stale append and nothing else.
+        if (offset === 0) return { ok: true, status: 200, json: async () => body };
+        return await new Promise((resolve) => {
+          pending.push({
+            url,
+            release: () => resolve({ ok: true, status: 200, json: async () => body }),
+          });
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText(toPersianDigits("S-000"));
+
+    await user.click(await screen.findByRole("button", { name: /مورد بیشتر/ }));
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    // The reader changes their mind mid-flight and searches instead.
+    await user.type(screen.getByLabelText("جستجوی چک‌ها"), "ملت");
+    await waitFor(() =>
+      expect(
+        registerCalls.filter((u) => new URL(u, "http://t").searchParams.get("q") === "ملت"),
+      ).not.toHaveLength(0),
+    );
+
+    // Now the obsolete page lands.
+    pending[0].release(null);
+
+    // The register belongs to the new filter, and paging still works.
+    const more = await screen.findByRole("button", { name: /مورد بیشتر/ });
+    await waitFor(() => expect(more.hasAttribute("disabled")).toBe(false));
+    await user.click(more);
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(new URL(pending[1].url, "http://t").searchParams.get("q")).toBe("ملت");
+    pending[1].release(null);
+    await screen.findByText(toPersianDigits("S-005"));
+  });
+
   it("offers a retry for the page that failed without discarding the register", async () => {
     let fail = true;
     registerCalls = [];
@@ -187,6 +258,120 @@ describe("the cheque register's paging", () => {
     await screen.findByText(toPersianDigits("S-005"));
   });
 });
+
+
+describe("the idempotency key a confirmation carries", () => {
+  /** Posts to the action route, with the key each attempt sent. */
+  let posts: { url: string; key: string | null; body: Record<string, unknown> }[];
+
+  function stubAction(respond: (attempt: number) => Promise<unknown>) {
+    posts = [];
+    registerCalls = [];
+    let attempt = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.startsWith("/api/ledger/cheques/")) {
+          attempt += 1;
+          const headers = new Headers(init?.headers);
+          posts.push({
+            url,
+            key: headers.get("Idempotency-Key"),
+            body: JSON.parse(String(init?.body ?? "{}")),
+          });
+          return await respond(attempt);
+        }
+        if (url.startsWith("/api/ledger/cheques?")) {
+          registerCalls.push(url);
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              cheques: [cheque(1, { status: "on_hand" })],
+              total: 1,
+              hasMore: false,
+              banks: ["ملت"],
+              summary: summary(),
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => ({ locations: [], customers: [], suppliers: [] }) };
+      }),
+    );
+  }
+
+  /** The ledger studio's runner: it reports a thrown fetch, it never retries. */
+  const run = async (fn: () => Promise<{ ok: boolean; data: { error?: string } }>) => {
+    try {
+      return (await fn()).ok;
+    } catch {
+      return false;
+    }
+  };
+
+  it("retries a lost response under the first key, so the step is replayed and not reposted", async () => {
+    /*
+     * The dangerous case: the request *did* commit and the response was lost
+     * on the way back. The user has no way to know, presses «واگذاری به
+     * بانک» again — and the second attempt must be recognisable to the
+     * server as the same operation. It used to mint a new key here, which
+     * would have deposited the cheque twice.
+     */
+    stubAction(async (attempt) => {
+      if (attempt === 1) throw new TypeError("Failed to fetch");
+      // The server replays the committed step.
+      return { ok: true, status: 200, json: async () => ({ cheque: cheque(1, { status: "in_collection" }) }) };
+    });
+
+    const user = userEvent.setup();
+    renderSection({ run });
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    const confirm = await screen.findByRole("button", { name: "واگذاری به بانک" });
+    await user.click(confirm);
+    await waitFor(() => expect(posts).toHaveLength(1));
+
+    // The user presses again — that press is the retry.
+    await user.click(await screen.findByRole("button", { name: "واگذاری به بانک" }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+
+    expect(posts[0].key).toBeTruthy();
+    expect(posts[1].key).toBe(posts[0].key);
+    expect(posts[1].body).toEqual(posts[0].body);
+  });
+
+  it("starts a new operation when the payload is edited after a failure", async () => {
+    stubAction(async (attempt) =>
+      attempt === 1
+        ? { ok: false, status: 400, json: async () => ({ error: "invalid_fee_amount" }) }
+        : { ok: true, status: 200, json: async () => ({ cheque: cheque(1, { status: "bounced" }) }) },
+    );
+
+    const user = userEvent.setup();
+    renderSection({ run });
+    await screen.findByText(toPersianDigits("S-001"));
+
+    await user.click(await screen.findByRole("button", { name: "برگشت خورد" }));
+    const fee = await screen.findByLabelText("مبلغ کارمزد چک برگشتی");
+    await user.type(fee, "30000");
+    await user.click(await screen.findByRole("button", { name: "برگشت خورد" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+
+    // Corrected fee: a different request, so a different key — otherwise the
+    // server would refuse it as a conflicting replay and the dialog would be
+    // stuck for ever.
+    await user.clear(fee);
+    await user.type(fee, "45000");
+    await user.click(await screen.findByRole("button", { name: "برگشت خورد" }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+
+    expect(posts[0].body.feeAmount).toBe(30000);
+    expect(posts[1].body.feeAmount).toBe(45000);
+    expect(posts[1].key).not.toBe(posts[0].key);
+  });
+});
+
 
 describe("the cheque register's permission gate", () => {
   beforeEach(() => {

@@ -120,6 +120,7 @@ import {
   type ChequeDirection,
   type ChequeStatus,
 } from "@/lib/cheques";
+import { OperationKeyHolder, operationSignature } from "@/lib/operation-key";
 import { api } from "@/app/dashboard/ui";
 import { JournalPeekDialog } from "./journal-peek-dialog";
 
@@ -388,8 +389,20 @@ export function ChequesSection({
   const [sortBy, setSortBy] = useState<string>("due_asc");
   const [dueFrom, setDueFrom] = useState("");
   const [dueTo, setDueTo] = useState("");
-  /** Rows loaded so far: the first page plus every appended one. */
-  const [loadingMore, setLoadingMore] = useState(false);
+  /*
+   * Which append is currently on screen as «در حال بارگذاری…».
+   *
+   * This was a plain boolean, and that was a bug with teeth: a response that
+   * arrived after the filters had moved on returned early — correctly, it is
+   * stale — *before* clearing the flag, and the first-page effect never reset
+   * it. So changing a filter while «بیشتر» was in flight left the button
+   * disabled for ever and the register stuck on its first page, with no error
+   * and nothing to retry. Holding the owning ticket instead of a boolean
+   * makes that unrepresentable: a request can only ever clear its own
+   * loading state, and starting a new register clears it outright.
+   */
+  const [loadingTicket, setLoadingTicket] = useState<number | null>(null);
+  const loadingMore = loadingTicket !== null;
   const [moreError, setMoreError] = useState("");
   const [summary, setSummary] = useState<ChequeSummary | null>(null);
   const [total, setTotal] = useState(0);
@@ -430,6 +443,12 @@ export function ChequesSection({
    */
   const requestRef = useRef(0);
 
+  /**
+   * Idempotency keys for the action dialogs, held across retries — see
+   * `src/lib/operation-key.ts` for the rule this implements.
+   */
+  const actionKeys = useRef(new OperationKeyHolder());
+
   const queryFor = useCallback(
     (offset: number) => {
       const params = new URLSearchParams({
@@ -469,6 +488,9 @@ export function ChequesSection({
     setCheques(null);
     setLoadError("");
     setMoreError("");
+    // A new register owns the loading state: whatever append was pending
+    // belongs to filters the reader has left behind.
+    setLoadingTicket(null);
     void api<ChequePage>(`/api/ledger/cheques?${queryFor(0)}`).then(({ ok, data }) => {
       if (requestRef.current !== ticket) return;
       if (ok && Array.isArray(data.cheques)) {
@@ -487,11 +509,16 @@ export function ChequesSection({
     if (loadingMore) return;
     const offset = cheques?.length ?? 0;
     const ticket = ++requestRef.current;
-    setLoadingMore(true);
+    setLoadingTicket(ticket);
     setMoreError("");
     void api<ChequePage>(`/api/ledger/cheques?${queryFor(offset)}`).then(({ ok, data }) => {
-      if (requestRef.current !== ticket) return;
-      setLoadingMore(false);
+      if (requestRef.current !== ticket) {
+        // Stale: drop the rows, and release the spinner only if it is still
+        // this request's. Whoever superseded it owns it now.
+        setLoadingTicket((owner) => (owner === ticket ? null : owner));
+        return;
+      }
+      setLoadingTicket(null);
       if (ok && Array.isArray(data.cheques)) {
         // Belt and braces against a duplicate the server could only produce
         // if a row were inserted mid-scroll: identity wins over position.
@@ -615,9 +642,31 @@ export function ChequesSection({
   ) {
     setLocalError("");
     setActionError("");
-    // One key per confirmed action, reused if `run` retries: a lost response
-    // must not be able to post the step twice.
-    const idempotencyKey = crypto.randomUUID();
+    /*
+     * One key per *operation*, not per press.
+     *
+     * `run()` reports a dropped connection and stops; it does not retry. The
+     * retry is therefore the user pressing «تأیید» again — and this used to
+     * mint a fresh key for that press, so a step whose response was lost on
+     * the way back could be posted a second time: two bounce fees, two
+     * endorsements, a cheque cleared twice in the history.
+     *
+     * The key is now derived from what is being asked for — this cheque, this
+     * action, this date and this fee, the same fields the server
+     * fingerprints. Press again after a failure and the request is recognised
+     * as the retry it is. Change the date or the fee first and it is a
+     * different operation, which gets its own key instead of being refused
+     * with `idempotency_key_conflict`.
+     */
+    const idempotencyKey = actionKeys.current.keyFor(
+      operationSignature([
+        cheque.id,
+        act,
+        body.occurredOn ?? null,
+        body.feeAmount ?? null,
+        body.endorsedToSupplierId ?? null,
+      ]),
+    );
     let response: { ok: boolean; data: { error?: string } } | undefined;
     const ok = await run(async () => {
       response = await api<{ error?: string }>(`/api/ledger/cheques/${cheque.id}/${act}`, {
@@ -633,6 +682,9 @@ export function ChequesSection({
       return response;
     });
     if (ok) {
+      // Committed: the next confirmation is a new operation, even an
+      // identical one (a cheque may legitimately be acted on twice).
+      actionKeys.current.settle();
       setAction(null);
       setDetail(null);
       setRefreshKey((k) => k + 1);
@@ -2109,9 +2161,20 @@ function CreateChequeDialog({
   // or A/P subledger's unattributed bucket, which no reconciliation can
   // explain. Ticking this is the user saying they mean it.
   const [unattributed, setUnattributed] = useState(false);
-  // One key per *attempt at a form*, so a retry after a lost response returns
-  // the first cheque instead of registering a second instrument.
-  const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
+  /*
+   * One key per *operation*, derived from the payload — see
+   * `src/lib/operation-key.ts`.
+   *
+   * A key held for the whole form was half right: a retry after a lost
+   * response did return the first cheque instead of registering a second
+   * instrument. But it was also held across *edits*, so the ordinary
+   * recovery — the server rejects the amount, the user fixes it and submits
+   * again — re-sent a different payload under the same key, which the server
+   * now correctly refuses with `idempotency_key_conflict`, leaving the form
+   * unusable until it was closed and reopened. Deriving the key from the
+   * payload keeps the retry safe and lets the correction through.
+   */
+  const createKeys = useRef(new OperationKeyHolder());
 
   const reportError = useCallback(
     (message: string) => {
@@ -2155,7 +2218,7 @@ function CreateChequeDialog({
       setMemo("");
       setFormError("");
       setUnattributed(false);
-      setIdempotencyKey(crypto.randomUUID());
+      createKeys.current.settle();
     }
   }, [open]);
 
@@ -2209,8 +2272,26 @@ function CreateChequeDialog({
         counterpartyId || undefined,
       allowUnattributed: !counterpartyId && unattributed ? true : undefined,
       replacesChequeId: replaces?.id,
-      idempotencyKey,
     };
+    // Every accounting-significant field of this registration, in the order
+    // the server fingerprints them. The memo is deliberately absent: fixing a
+    // typo in the note is still the same cheque.
+    body.idempotencyKey = createKeys.current.keyFor(
+      operationSignature([
+        dir,
+        serialNumber.trim(),
+        sayadId.trim(),
+        bankName.trim(),
+        accountNumber.trim(),
+        rial,
+        issueDate,
+        dueDate,
+        name,
+        counterpartyId,
+        replaces?.id ?? null,
+        !counterpartyId && unattributed,
+      ]),
+    );
     reportError("");
     let response: { ok: boolean; data: { error?: string } } | undefined;
     const ok = await run(async () => {
@@ -2220,8 +2301,10 @@ function CreateChequeDialog({
       });
       return response;
     });
-    if (ok) onCreated();
-    else reportError(errorMessage(response?.data.error));
+    if (ok) {
+      createKeys.current.settle();
+      onCreated();
+    } else reportError(errorMessage(response?.data.error));
   }
 
   return (

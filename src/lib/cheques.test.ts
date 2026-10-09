@@ -74,6 +74,17 @@ describe("canonical instrument identity", () => {
     }
   });
 
+  it("reads a group separator inside a serial as formatting, not identity", () => {
+    // A serial number is a label: nothing is ever computed from it, so a
+    // thousands separator inside one can only be how it was typed. Persian
+    // input produces «٬» (U+066C) most often, but «٫» (U+066B), the Arabic
+    // comma «،» (U+060C) and a Latin comma all turn up on the same paper.
+    const canonical = canonicalSerialNumber("123456");
+    for (const typed of ["۱۲۳٬۴۵۶", "۱۲۳٫۴۵۶", "۱۲۳،۴۵۶", "123,456", " 123٬456 "]) {
+      expect(canonicalSerialNumber(typed)).toBe(canonical);
+    }
+  });
+
   it("keeps genuinely different serials apart", () => {
     expect(canonicalSerialNumber("123456")).not.toBe(canonicalSerialNumber("123457"));
     expect(canonicalSerialNumber("A-123")).not.toBe(canonicalSerialNumber("B-123"));

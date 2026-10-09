@@ -994,6 +994,13 @@ describe("canonical identity and retry safety (issue #828)", () => {
       "Bank Mellat",
       "بانک",
       "صادرات/شعبه ۱",
+      // The group separators 0219 folds out: Arabic thousands (U+066C),
+      // Arabic decimal (U+066B), Arabic comma (U+060C) and the Latin comma.
+      "۱۲۳٬۴۵۶",
+      "۱۲۳٫۴۵۶",
+      "۱۲۳،۴۵۶",
+      "123,456",
+      "۱۲۳٬۴۵۶ ",
     ];
     const { rows } = await db.query<{ bank: string; serial: string }>(
       `SELECT public.cheque_canonical_bank(v) AS bank, public.cheque_canonical_text(v) AS serial
@@ -1080,6 +1087,190 @@ describe("canonical identity and retry safety (issue #828)", () => {
       await db.query("DROP TABLE IF EXISTS public.restore_shaped_like_cheques");
       await db.query("SELECT pg_catalog.set_config('search_path', 'public', false)");
     }
+  });
+});
+
+describe("a replay answers with the first call's result (issue #828)", () => {
+  it("replays the registration as it was, however far the cheque has moved since", async () => {
+    const key = randomUUID();
+    const serial = `R${randomUUID().slice(0, 8)}`;
+    const first = await receivable({ serialNumber: serial, idempotencyKey: key });
+    expect(first.status).toBe("on_hand");
+
+    // The cheque lives on: banked, then bounced.
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: first.id,
+      action: "deposit",
+      occurredOn: "2026-03-11",
+      createdBy: null,
+    });
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: first.id,
+      action: "bounce",
+      occurredOn: "2026-03-12",
+      createdBy: null,
+    });
+
+    // The lost response finally gets retried. It is the same request, so it
+    // deserves the same answer — not today's status.
+    const replay = await receivable({ serialNumber: serial, idempotencyKey: key });
+    expect(replay).toEqual(first);
+    expect(replay.status).toBe("on_hand");
+
+    // And nothing was written by the replay.
+    const { rows } = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM cheques WHERE business_id = $1 AND idempotency_key = $2",
+      [biz.id, key],
+    );
+    expect(rows[0].count).toBe("1");
+  });
+
+  it("replays a transition as that step left the cheque, not as later steps did", async () => {
+    const cheque = await receivable();
+    const key = randomUUID();
+    const deposited = await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "deposit",
+      occurredOn: "2026-03-10",
+      idempotencyKey: key,
+      createdBy: null,
+    });
+    expect(deposited.status).toBe("in_collection");
+
+    const cleared = await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "clear",
+      occurredOn: "2026-03-14",
+      createdBy: null,
+    });
+    expect(cleared.status).toBe("cleared");
+
+    const replay = await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "deposit",
+      occurredOn: "2026-03-10",
+      idempotencyKey: key,
+      createdBy: null,
+    });
+    expect(replay).toEqual(deposited);
+    expect(replay.status).toBe("in_collection");
+    // Two steps, two entries' worth of lines — the replay posted nothing.
+    expect(await cheques.getChequeHistory(biz.id, cheque.id)).toHaveLength(3);
+  });
+
+  it("stores the result beside the key, and only when there is a key", async () => {
+    const key = randomUUID();
+    const withKey = await receivable({ idempotencyKey: key });
+    const withoutKey = await receivable();
+    const { rows } = await db.query<{ id: string; idempotency_result: unknown }>(
+      "SELECT id, idempotency_result FROM cheques WHERE id = ANY($1::uuid[])",
+      [[withKey.id, withoutKey.id]],
+    );
+    const byId = new Map(rows.map((r) => [r.id, r.idempotency_result]));
+    expect(byId.get(withKey.id)).toMatchObject({ id: withKey.id, status: "on_hand" });
+    expect(byId.get(withoutKey.id)).toBeNull();
+  });
+
+  it("falls back to the live row for a key stored before the result column existed", async () => {
+    // A row written by the pre-0219 application: key and fingerprint, no
+    // stored result. Its retry cannot be refused — the posting really did
+    // commit — so it keeps the old read-the-row answer.
+    const key = randomUUID();
+    const serial = `L${randomUUID().slice(0, 8)}`;
+    const original = await receivable({ serialNumber: serial, idempotencyKey: key });
+    await db.query("UPDATE cheques SET idempotency_result = NULL WHERE id = $1", [original.id]);
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: original.id,
+      action: "deposit",
+      createdBy: null,
+    });
+
+    const replay = await receivable({ serialNumber: serial, idempotencyKey: key });
+    expect(replay.id).toBe(original.id);
+    expect(replay.status).toBe("in_collection");
+  });
+
+  it("keeps a stored result inside its own tenant", async () => {
+    const key = randomUUID();
+    const serial = `T${randomUUID().slice(0, 8)}`;
+    const mine = await receivable({ serialNumber: serial, idempotencyKey: key });
+
+    // The same key in another business is a different request entirely: it
+    // registers that business's own cheque and never sees ours.
+    const { rows: theirLocation } = await db.query<{ id: string }>(
+      "SELECT id FROM locations WHERE business_id = $1 LIMIT 1",
+      [other.id],
+    );
+    const theirs = await cheques.recordCheque({
+      businessId: other.id,
+      locationId: theirLocation[0].id,
+      direction: "receivable",
+      serialNumber: serial,
+      bankName: "ملت",
+      amount: 5_000_000,
+      issueDate: "2026-01-10",
+      dueDate: "2026-03-10",
+      counterpartyName: "مشتری دیگر",
+      allowUnattributed: true,
+      idempotencyKey: key,
+      createdBy: null,
+    });
+    expect(theirs.id).not.toBe(mine.id);
+    const { rows } = await db.query<{ business_id: string }>(
+      "SELECT business_id FROM cheques WHERE idempotency_key = $1",
+      [key],
+    );
+    expect(new Set(rows.map((r) => r.business_id))).toEqual(new Set([biz.id, other.id]));
+  });
+
+  it("answers two concurrent retries of one registration with one identical result", async () => {
+    const key = randomUUID();
+    const serial = `C${randomUUID().slice(0, 8)}`;
+    const [a, b] = await Promise.all([
+      receivable({ serialNumber: serial, idempotencyKey: key }),
+      receivable({ serialNumber: serial, idempotencyKey: key }),
+    ]);
+    expect(a).toEqual(b);
+    const { rows } = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM cheques WHERE business_id = $1 AND idempotency_key = $2",
+      [biz.id, key],
+    );
+    expect(rows[0].count).toBe("1");
+  });
+
+  it("still refuses the same key carrying a changed payload, before and after the result is stored", async () => {
+    const key = randomUUID();
+    const first = await receivable({ idempotencyKey: key, amount: 5_000_000 });
+    await expect(
+      receivable({ serialNumber: first.serialNumber, idempotencyKey: key, amount: 6_000_000 }),
+    ).rejects.toThrow("idempotency_key_conflict");
+
+    const cheque = await receivable();
+    const stepKey = randomUUID();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "deposit",
+      occurredOn: "2026-03-10",
+      idempotencyKey: stepKey,
+      createdBy: null,
+    });
+    await expect(
+      cheques.transitionCheque({
+        businessId: biz.id,
+        chequeId: cheque.id,
+        action: "deposit",
+        occurredOn: "2026-03-11",
+        idempotencyKey: stepKey,
+        createdBy: null,
+      }),
+    ).rejects.toThrow("idempotency_key_conflict");
   });
 });
 
@@ -1528,6 +1719,41 @@ describe("supplier attribution follows the party model (issues #826, #828)", () 
 
     // Active and unmerged: the ordinary case still works.
     await db.query("UPDATE parties SET is_active = true WHERE id = $1", [merged.rows[0].id]);
+    await expect(payable()).resolves.toMatchObject({ status: "issued" });
+  });
+
+  it("refuses an alias whose canonical party is no longer a supplier", async () => {
+    // Roles are editable, and every supplier picker and A/P grouping filters
+    // on them. A party that has had its supplier role taken away is one no
+    // payables screen will offer again, so attributing a cheque to it would
+    // post into the subledger through a door the rest of the system closed.
+    const stripped = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, roles) VALUES ($1, 'مشتری صرف', ARRAY['customer']) RETURNING id",
+      [biz.id],
+    );
+    await db.query("UPDATE suppliers SET party_id = $1 WHERE id = $2", [
+      stripped.rows[0].id,
+      party.supplierId,
+    ]);
+    await expect(payable()).rejects.toThrow("supplier_not_found");
+
+    // Endorsement is the same attribution and is refused the same way.
+    const cheque = await receivable();
+    await expect(
+      cheques.transitionCheque({
+        businessId: biz.id,
+        chequeId: cheque.id,
+        action: "endorse",
+        endorsedToSupplierId: party.supplierId,
+        createdBy: null,
+      }),
+    ).rejects.toThrow("supplier_not_found");
+
+    // Give the role back and the ordinary path works again — a party may
+    // hold several roles, so being a customer too is no obstacle.
+    await db.query("UPDATE parties SET roles = ARRAY['customer','supplier'] WHERE id = $1", [
+      stripped.rows[0].id,
+    ]);
     await expect(payable()).resolves.toMatchObject({ status: "issued" });
   });
 

@@ -127,6 +127,16 @@ export function normalizeSayadId(raw: string): string | null {
  * keyboard produces by accident («ي»، «ك») onto their canonical forms, then
  * drop every separator and zero-width mark. What is left is the form two
  * spellings of the same thing share.
+ *
+ * "Separator" includes the group separators Persian number formatting puts
+ * inside a long figure — «٬» (U+066C), «٫» (U+066B), «،» (U+060C) and the
+ * Latin comma. A serial number is a label, not a quantity: nothing can be
+ * computed from it, so a group separator inside one can only be presentation,
+ * and «۱۲۳٬۴۵۶» is the same cheque as «۱۲۳۴۵۶». This list is the twin of
+ * `public.cheque_canonical_text` in migration 0219; an integration test
+ * compares the two implementations character by character, because a drift
+ * between them would quietly stop the database index from enforcing the
+ * identity the application believes it is enforcing.
  */
 function foldForComparison(raw: string): string {
   return raw
@@ -136,7 +146,7 @@ function foldForComparison(raw: string): string {
     .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
     .replace(/\u064a/g, "\u06cc")
     .replace(/\u0643/g, "\u06a9")
-    .replace(/[\s\u200b-\u200f._/\\-]+/g, "");
+    .replace(/[\s\u200b-\u200f._/\\,\u060c\u066b\u066c-]+/g, "");
 }
 
 /**
