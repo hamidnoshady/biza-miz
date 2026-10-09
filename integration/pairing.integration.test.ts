@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { getPool, query, withTenant, withoutTenantScope } from "../src/lib/db";
 import { provisionBusiness } from "../src/lib/business-provisioning";
+import { createAccount } from "../src/lib/accounts-service";
 import {
   acknowledgePairingSession,
   issuePairingCode,
@@ -21,7 +22,7 @@ import {
   revokePairingCode,
 } from "../src/lib/pairing-service";
 import { applyPairingSnapshot, repairPairingSnapshot } from "../src/lib/pairing-apply";
-import { validateSnapshot } from "../src/lib/pairing-snapshot";
+import { validateSnapshot, type PairingSnapshot } from "../src/lib/pairing-snapshot";
 import { acknowledgePendingPairing } from "../src/lib/server-sync";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -472,4 +473,202 @@ describe("pairing code lifecycle", () => {
     );
     expect("code" in reissued).toBe(true);
   }, 120_000);
+});
+
+/**
+ * Issue #824 finding 2: restore the chart as a tree. A four-level chain must
+ * come back with the levels its parents imply; a fifth tier, a missing parent or
+ * a cycle must refuse the whole snapshot and leave nothing behind; an archived
+ * account must keep its flag; and two businesses that share codes must not see
+ * or disturb each other on the same device.
+ */
+describe("issue #824 finding 2: pairing restores the account chart as a tree", () => {
+  type Snapshot = PairingSnapshot;
+
+  function localClient(): Client {
+    return new Client({ connectionString: urlFor(localDb) });
+  }
+
+  /**
+   * Provision a business, shape its chart, and redeem a code for its snapshot.
+   * The caller points the pool at the server database first.
+   */
+  async function snapshotWithChart(
+    name: string,
+    shape: (businessId: string) => Promise<void>,
+  ): Promise<{ businessId: string; snapshot: Snapshot }> {
+    const created = await provisionBusiness({
+      businessName: name,
+      ownerName: "مالک",
+      email: `owner-${randomUUID()}@example.com`,
+      password: "correct-horse",
+      seedChartOfAccounts: false,
+    });
+    await shape(created.businessId);
+    const adminId = await createPlatformAdmin();
+    const issued = await withoutTenantScope("platform", () =>
+      issuePairingCode(created.businessId, adminId, created.locationId),
+    );
+    if (!("code" in issued)) throw new Error("expected a code");
+    const redeemed = await redeemPairingCode(issued.code, "127.0.0.1", "Windows Business Suite", `desktop-${randomUUID()}`);
+    if (!redeemed.ok) throw new Error(`redeem failed: ${redeemed.error}`);
+    const validation = validateSnapshot(JSON.parse(JSON.stringify(redeemed.snapshot)));
+    if (!validation.ok) throw new Error("snapshot did not validate");
+    return { businessId: created.businessId, snapshot: validation.snapshot };
+  }
+
+  /** Four tiers under one root, built through the editor, so levels are real. */
+  async function fourTierChart(businessId: string): Promise<void> {
+    await withTenant(businessId, async () => {
+      const root = await createAccount({ businessId, code: "9100", name: "دارایی تست", type: "asset" });
+      const kol = await createAccount({ businessId, code: "9110", name: "کل", type: "asset", parentId: root.id });
+      const moein = await createAccount({ businessId, code: "9111", name: "معین", type: "asset", parentId: kol.id });
+      await createAccount({ businessId, code: "9112", name: "تفصیلی", type: "asset", parentId: moein.id });
+    });
+  }
+
+  async function localAccounts(businessId: string): Promise<Array<{ code: string; level: string; is_active: boolean; parent_code: string | null }>> {
+    const c = localClient();
+    await c.connect();
+    try {
+      const { rows } = await c.query(
+        `SELECT a.code, a.level::text AS level, a.is_active, p.code AS parent_code
+           FROM accounts a LEFT JOIN accounts p ON p.id = a.parent_id
+          WHERE a.business_id = $1 ORDER BY a.code`,
+        [businessId],
+      );
+      return rows;
+    } finally {
+      await c.end();
+    }
+  }
+
+  async function localBusinessCount(businessId: string): Promise<number> {
+    const c = localClient();
+    await c.connect();
+    try {
+      const { rows } = await c.query<{ n: string }>(`SELECT count(*)::text AS n FROM businesses WHERE id = $1`, [businessId]);
+      return Number(rows[0].n);
+    } finally {
+      await c.end();
+    }
+  }
+
+  it("restores a four-tier chain with each level derived from its parent, and keeps an archived kol with its active children", async () => {
+    await useDatabase(serverDb);
+    const { businessId, snapshot } = await snapshotWithChart("چهار سطحی", async (id) => {
+      await fourTierChart(id);
+      // The legacy state the editor now forbids: an archived kol whose moein and
+      // tafsili are still active. The restore must mirror it, not flatten it.
+      await withTenant(id, () => query(`UPDATE accounts SET is_active = false WHERE code = '9110'`));
+    });
+
+    await useDatabase(localDb);
+    await applyPairingSnapshot(snapshot, "https://pos.example.com", {});
+
+    const restored = await localAccounts(businessId);
+    expect(restored.map((a) => [a.code, a.level, a.is_active, a.parent_code])).toEqual([
+      ["9100", "group", true, null],
+      ["9110", "kol", false, "9100"],
+      ["9111", "moein", true, "9110"],
+      ["9112", "tafsili", true, "9111"],
+    ]);
+  }, 120_000);
+
+  it("restores a snapshot written before archived accounts travelled: every account is active", async () => {
+    await useDatabase(serverDb);
+    const { businessId, snapshot } = await snapshotWithChart("قدیمی", fourTierChart);
+    const legacy = JSON.parse(JSON.stringify(snapshot)) as Snapshot;
+    for (const account of legacy.accounts) delete (account as { isActive?: boolean }).isActive;
+
+    await useDatabase(localDb);
+    await applyPairingSnapshot(legacy, "https://pos.example.com", {});
+    const restored = await localAccounts(businessId);
+    expect(restored).toHaveLength(4);
+    expect(restored.every((a) => a.is_active)).toBe(true);
+  }, 120_000);
+
+  it("refuses a fifth tier, a missing parent and a cycle, each with nothing written", async () => {
+    await useDatabase(serverDb);
+    const { businessId, snapshot } = await snapshotWithChart("نامعتبر", fourTierChart);
+    const tafsili = snapshot.accounts.find((a) => a.code === "9112")!;
+    const withExtra = (extra: Snapshot["accounts"][number]) => ({ ...snapshot, accounts: [...snapshot.accounts, extra] }) as Snapshot;
+    const base = { id: randomUUID(), name: "نامعتبر", type: "asset" };
+
+    await useDatabase(localDb);
+    const cases: Array<{ label: string; bad: Snapshot; reason: string }> = [
+      {
+        label: "fifth tier",
+        bad: withExtra({ ...base, parentCode: tafsili.code, code: "9113" }),
+        reason: "too_deep",
+      },
+      {
+        label: "missing parent",
+        bad: withExtra({ ...base, parentCode: "9999", code: "9120" }),
+        reason: "parent_missing",
+      },
+      {
+        label: "cycle",
+        bad: {
+          ...snapshot,
+          accounts: [
+            ...snapshot.accounts,
+            { ...base, parentCode: "9130", code: "9121" },
+            { ...base, id: randomUUID(), parentCode: "9121", code: "9130" },
+          ],
+        } as Snapshot,
+        reason: "parent_cycle",
+      },
+    ];
+    for (const { label, bad, reason } of cases) {
+      expect(validateSnapshot(JSON.parse(JSON.stringify(bad))).ok, label).toBe(false);
+      await expect(applyPairingSnapshot(bad, "https://pos.example.com", {}), label).rejects.toThrow(
+        `account_tree_${reason}`,
+      );
+      expect(await localBusinessCount(businessId), label).toBe(0);
+      expect(await localAccounts(businessId), label).toEqual([]);
+    }
+  }, 120_000);
+
+  it("keeps two businesses that share codes apart on one device", async () => {
+    await useDatabase(serverDb);
+    const first = await snapshotWithChart("شرکت اول", async (id) => {
+      await withTenant(id, async () => {
+        await createAccount({ businessId: id, code: "9500", name: "اول", type: "asset" });
+      });
+    });
+    await useDatabase(serverDb);
+    const second = await snapshotWithChart("شرکت دوم", async (id) => {
+      await withTenant(id, async () => {
+        await createAccount({ businessId: id, code: "9500", name: "دوم", type: "liability" });
+      });
+    });
+
+    await useDatabase(localDb);
+    await applyPairingSnapshot(first.snapshot, "https://pos.example.com", {});
+    await applyPairingSnapshot(second.snapshot, "https://pos.example.com", {});
+
+    expect(await localAccounts(first.businessId)).toEqual([
+      { code: "9500", level: "group", is_active: true, parent_code: null },
+    ]);
+    expect(await localAccounts(second.businessId)).toEqual([
+      { code: "9500", level: "group", is_active: true, parent_code: null },
+    ]);
+    // The same code resolves to each business's own row, by name. (Row-level
+    // isolation for a non-superuser runtime role is asserted separately, in
+    // chart-of-accounts.integration.test.ts; this pool owns the tables.)
+    const c = localClient();
+    await c.connect();
+    try {
+      const { rows } = await c.query<{ business_id: string; name: string; type: string }>(
+        `SELECT business_id, name, type::text AS type FROM accounts WHERE code = '9500' ORDER BY name`,
+      );
+      expect(rows).toEqual([
+        { business_id: first.businessId, name: "اول", type: "asset" },
+        { business_id: second.businessId, name: "دوم", type: "liability" },
+      ]);
+    } finally {
+      await c.end();
+    }
+  }, 180_000);
 });

@@ -3,13 +3,8 @@ import { getPool, query } from "@/lib/db";
 import { lockChartOfAccounts } from "@/lib/accounts-service";
 import { markStepDone } from "@/lib/settings";
 import { requireManager } from "@/lib/setup-state";
-import {
-  coaTemplateForIndustry,
-  nextAccountLevel,
-  validateAccounts,
-  type AccountLevel,
-  type TemplateAccount,
-} from "@/lib/coa-template";
+import { coaTemplateForIndustry, validateAccounts, type TemplateAccount } from "@/lib/coa-template";
+import { AccountTreeError, orderAccountTree } from "@/lib/account-hierarchy";
 import { withTenantScope } from "@/lib/auth";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 
@@ -58,6 +53,20 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (errors.length > 0) {
     return NextResponse.json({ error: "invalid_accounts", messages: errors }, { status: 400 });
   }
+  // Placement is decided before the transaction opens: the same parents-first
+  // ordering and level derivation the editor and the restore use. A list that
+  // cannot be placed is refused here, with nothing read or deleted.
+  let placed;
+  try {
+    placed = orderAccountTree(accounts.map((a) => ({ ...a, parentCode: a.parentCode ?? null })));
+  } catch (err) {
+    if (!(err instanceof AccountTreeError)) throw err;
+    const message =
+      err.reason === "too_deep"
+        ? "ساختار حساب‌ها از سطح «تفصیلی» عمیق‌تر است."
+        : "ساختار والد/فرزند حساب‌ها حلقه دارد.";
+    return NextResponse.json({ error: "invalid_accounts", messages: [message] }, { status: 400 });
+  }
 
   const client = await getPool().connect();
   try {
@@ -79,39 +88,24 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
     await client.query("DELETE FROM accounts WHERE business_id = $1", [session.businessId]);
 
-    // Insert parents before children: roots first, then rows whose parent exists.
+    // Parents first, as placed above; each row's level is the one derived from
+    // its parent, never a value the client sent.
     const idByCode = new Map<string, string>();
-    const levelByCode = new Map<string, AccountLevel>();
-    const pending = [...accounts];
-    while (pending.length > 0) {
-      const ready = pending.filter((a) => !a.parentCode || idByCode.has(a.parentCode));
-      if (ready.length === 0) {
-        // validateAccounts guarantees parents exist, so a cycle is the only way here
-        await client.query("ROLLBACK");
-        return NextResponse.json(
-          { error: "invalid_accounts", messages: ["ساختار والد/فرزند حساب‌ها حلقه دارد."] },
-          { status: 400 },
-        );
-      }
-      for (const a of ready) {
-        const parentLevel = a.parentCode ? (levelByCode.get(a.parentCode) ?? null) : null;
-        const level = nextAccountLevel(parentLevel);
-        if (!level) {
-          await client.query("ROLLBACK");
-          return NextResponse.json(
-            { error: "invalid_accounts", messages: ["ساختار حساب‌ها از سطح «تفصیلی» عمیق‌تر است."] },
-            { status: 400 },
-          );
-        }
-        const res = await client.query(
-          `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-          [session.businessId, a.parentCode ? idByCode.get(a.parentCode) : null, a.code, a.name, a.type, level, a.isContra],
-        );
-        idByCode.set(a.code, res.rows[0].id);
-        levelByCode.set(a.code, level);
-        pending.splice(pending.indexOf(a), 1);
-      }
+    for (const a of placed.ordered) {
+      const res = await client.query(
+        `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [
+          session.businessId,
+          a.parentCode ? idByCode.get(a.parentCode) : null,
+          a.code,
+          a.name,
+          a.type,
+          placed.levelByCode.get(a.code),
+          a.isContra,
+        ],
+      );
+      idByCode.set(a.code, res.rows[0].id);
     }
 
     // The step marker commits with the chart it describes (issue #808 §6), so

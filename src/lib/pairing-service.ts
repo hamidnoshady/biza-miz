@@ -650,11 +650,17 @@ export async function buildPairingSnapshot(
       code: string;
       name: string;
       type: string;
+      is_active: boolean;
     }>(
-      `SELECT a.id, p.code AS parent_code, a.code, a.name, a.type::text AS type
+      // The whole chart, archived rows included, each with its `is_active`.
+      // Exporting only active rows left an active child of an archived parent
+      // with a parentCode that no longer travelled, so the restore could only
+      // flatten it (issue #824 finding 2). Archived accounts keep their history
+      // on this side, so they belong in the snapshot too.
+      `SELECT a.id, p.code AS parent_code, a.code, a.name, a.type::text AS type, a.is_active
            FROM accounts a
            LEFT JOIN accounts p ON p.id = a.parent_id
-          WHERE a.business_id = $1 AND a.is_active
+          WHERE a.business_id = $1
           ORDER BY a.code`,
       [businessId],
     ),
@@ -847,6 +853,7 @@ export async function buildPairingSnapshot(
       code: a.code,
       name: a.name,
       type: a.type,
+      isActive: a.is_active,
     })),
     menu: {
       categories: catRes.rows.map((c) => ({

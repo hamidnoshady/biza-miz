@@ -28,6 +28,7 @@ import { coaTemplateForIndustry, nextAccountLevel, type AccountLevel, type Templ
 import { ENABLED_INDUSTRIES, INDUSTRIES, type Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
 import { lockChartOfAccounts } from "./accounts-service";
+import { AccountsError } from "./accounts-error";
 import { wizardStepsForIndustry } from "./wizard-steps";
 import { seedPaymentMethods } from "./payment-methods-service";
 import { isMobilePhone, phoneE164 } from "./phone";
@@ -755,10 +756,15 @@ export async function seedChartOfAccounts(
     const ready = pending.filter((a) => !a.parentCode || idByCode.has(a.parentCode));
     // The template is a fixed, cycle-free constant and every parentCode in it
     // is either already in the business or earlier in the same template, so
-    // `ready` can't be empty; it's never nested past four levels, so
-    // nextAccountLevel never returns null here.
+    // `ready` is never empty. If that ever stops being true, fail loudly
+    // instead of spinning: a silent empty pass here is an infinite loop inside
+    // the provisioning transaction.
+    if (ready.length === 0) throw new Error("coa_template_unresolved_parent");
     for (const a of ready) {
-      const level = nextAccountLevel(a.parentCode ? (levelByCode.get(a.parentCode) ?? null) : null)!;
+      // Derived from the parent, the same rule the editor and the restore use.
+      // Past تفصیلی there is no tier, so it is an error, never a clamp.
+      const level = nextAccountLevel(a.parentCode ? (levelByCode.get(a.parentCode) ?? null) : null);
+      if (!level) throw new AccountsError("parent_too_deep", 409);
       const { rows } = await client.query<{ id: string }>(
         `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,

@@ -2,8 +2,9 @@
  * The payload a desktop install receives when it redeems a pairing code, and
  * the validation it runs before touching its database.
  *
- * Pure — its only import is `industries.ts`, which is itself framework-free
- * (no db, no next) for exactly this reason — so it is unit-tested directly and
+ * Pure — its imports (`industries.ts`, and the account-tree rules in
+ * `account-hierarchy.ts`, which are framework-free too) carry no db or next
+ * dependency, so it is unit-tested directly and
  * can be used on both sides: the online server builds a value of this shape
  * (pairing-service.ts) and the local install validates one (pairing-apply.ts).
  *
@@ -17,6 +18,7 @@
  */
 
 import { isIndustry, type Industry } from "./industries";
+import { AccountTreeError, orderAccountTree } from "./account-hierarchy";
 
 export const PAIRING_SNAPSHOT_VERSION = 6;
 
@@ -67,6 +69,13 @@ export interface SnapshotAccount {
   code: string;
   name: string;
   type: string;
+  /**
+   * Whether the account is active on the issuing server. Optional for
+   * compatibility: snapshots issued before archived accounts travelled omit it,
+   * and every account in such a snapshot was active, so an absent value means
+   * `true`. Restore writes it verbatim.
+   */
+  isActive?: boolean;
 }
 
 export interface SnapshotMenuCategory {
@@ -373,6 +382,16 @@ export function validateSnapshot(raw: unknown): SnapshotValidation {
     if (typeof account.code !== "string" || !account.code) return fail;
     if (typeof account.name !== "string" || !account.name) return fail;
     if (typeof account.type !== "string" || !account.type) return fail;
+    if (account.isActive !== undefined && typeof account.isActive !== "boolean") return fail;
+  }
+  // The chart must be a tree a restore can place: unique codes, every parent
+  // present, no cycles, and no chain deeper than the four tiers. Checking it
+  // here refuses a bad snapshot before the local install opens a transaction.
+  try {
+    orderAccountTree(raw.accounts as SnapshotAccount[]);
+  } catch (err) {
+    if (err instanceof AccountTreeError) return fail;
+    throw err;
   }
 
   const menu = raw.menu;

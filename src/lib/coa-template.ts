@@ -1157,12 +1157,20 @@ export function validateAccounts(accounts: TemplateAccount[]): string[] {
     if (!a.name?.trim()) errors.push(`حساب با کد «${a.code}» نام ندارد.`);
     if (!ACCOUNT_TYPES.includes(a.type)) errors.push(`نوع حساب «${a.code}» نامعتبر است.`);
   }
+  // The type rule the editor enforces (issue #824 §2): a child's type must
+  // match its parent's. Checked here too, so a user-edited list is refused in
+  // the wizard, not only at the editor. Every industry template passes this
+  // (coa-template.test.ts and industry-coverage.test.ts validate each one).
+  const typeByCode = new Map(accounts.map((a) => [a.code, a.type]));
   for (const a of accounts) {
     if (a.parentCode && !codes.has(a.parentCode)) {
       errors.push(`حساب والد «${a.parentCode}» برای «${a.code}» وجود ندارد.`);
     }
     if (a.parentCode === a.code) {
       errors.push(`حساب «${a.code}» نمی‌تواند والد خودش باشد.`);
+    }
+    if (a.parentCode && codes.has(a.parentCode) && typeByCode.get(a.parentCode) !== a.type) {
+      errors.push(`نوع حساب «${a.code}» با نوع حساب والد «${a.parentCode}» یکسان نیست.`);
     }
   }
   return errors;

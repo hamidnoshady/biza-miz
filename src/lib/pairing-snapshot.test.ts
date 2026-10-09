@@ -263,6 +263,58 @@ describe("validateSnapshot", () => {
     expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
   });
 
+  describe("account tree (issue #824 finding 2)", () => {
+    const acct = (n: number, parentCode: string | null, code: string, extra: Record<string, unknown> = {}) => ({
+      id: `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
+      parentCode,
+      code,
+      name: `حساب ${code}`,
+      type: "asset",
+      ...extra,
+    });
+
+    it("accepts a four-level chain and an archived account, with isActive absent or boolean", () => {
+      const s = validSnapshot();
+      s.accounts = [
+        acct(1, null, "1000"),
+        acct(2, "1000", "1100"),
+        acct(3, "1100", "1110"),
+        acct(4, "1110", "1111", { isActive: false }),
+      ] as never;
+      expect(validateSnapshot(s).ok).toBe(true);
+    });
+
+    it("refuses a non-boolean isActive rather than guessing whether the account is live", () => {
+      const s = validSnapshot();
+      s.accounts = [acct(1, null, "1000", { isActive: "false" })] as never;
+      expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("refuses a child whose parent is not in the snapshot, instead of restoring it as a root", () => {
+      const s = validSnapshot();
+      s.accounts = [acct(1, null, "1000"), acct(2, "1999", "1100")] as never;
+      expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("refuses a cycle", () => {
+      const s = validSnapshot();
+      s.accounts = [acct(1, "1100", "1000"), acct(2, "1000", "1100")] as never;
+      expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+
+    it("refuses a fifth tier", () => {
+      const s = validSnapshot();
+      s.accounts = [
+        acct(1, null, "1"),
+        acct(2, "1", "11"),
+        acct(3, "11", "111"),
+        acct(4, "111", "1111"),
+        acct(5, "1111", "11111"),
+      ] as never;
+      expect(validateSnapshot(s)).toEqual({ ok: false, error: "snapshot_invalid" });
+    });
+  });
+
   it("accepts empty accounts, menu and settings — a business may be freshly provisioned", () => {
     const s = validSnapshot();
     s.accounts = [];

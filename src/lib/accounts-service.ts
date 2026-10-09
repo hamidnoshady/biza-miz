@@ -41,6 +41,8 @@
 import { query, getPool } from "./db";
 import { isUuid } from "./uuid";
 import { toLatinDigits } from "./digits";
+import { AccountsError } from "./accounts-error";
+import { attachmentLevel, loadAttachableParent, resolveAttachableParent } from "./account-hierarchy";
 import {
   ACCOUNT_TYPES,
   WELL_KNOWN_CODES,
@@ -52,13 +54,7 @@ import {
 } from "./coa-template";
 import type { PoolClient } from "pg";
 
-export class AccountsError extends Error {
-  status: number;
-  constructor(code: string, status = 400) {
-    super(code);
-    this.status = status;
-  }
-}
+export { AccountsError } from "./accounts-error";
 
 const WELL_KNOWN_CODE_SET = new Set<string>(Object.values(WELL_KNOWN_CODES));
 
@@ -486,25 +482,14 @@ export async function createAccount(params: {
   return inTransaction(async (client) => {
     await lockChartOfAccounts(client, params.businessId);
 
+    // The attachment rules (existence, archived parent, depth, type match) are
+    // the shared ones in account-hierarchy.ts; see that file for the order.
     let level: AccountLevel = "group";
-    let parentType: AccountType | null = null;
     let parentLabel: string | null = null;
     if (parentId) {
-      const parent = await findAccount(params.businessId, parentId, client);
-      if (!parent) throw new AccountsError("parent_not_found");
-      if (!parent.is_active) throw new AccountsError("parent_archived", 409);
-      const computed = nextAccountLevel(parent.level);
-      if (!computed) throw new AccountsError("parent_too_deep", 409);
-      level = computed;
-      parentType = parent.type;
-      parentLabel = parent.code;
-    }
-
-    // Parent/child type consistency (issue #824 §2): a child's accounting
-    // type must match its branch, because the chart groups accounts by type
-    // semantics and mixing them breaks every downstream report.
-    if (parentType && parentType !== (params.type as AccountType)) {
-      throw new AccountsError("parent_type_mismatch", 409);
+      const attached = await resolveAttachableParent(client, params.businessId, parentId, params.type as AccountType);
+      level = attached.level;
+      parentLabel = attached.parent.code;
     }
 
     const { rows: existing } = await client.query(
@@ -635,13 +620,9 @@ export async function updateAccount(params: {
       let afterParentLabel: string | null = null;
       if (parentId) {
         if (parentId === id) throw new AccountsError("parent_cycle");
-        const parent = await findAccount(businessId, parentId, client);
-        if (!parent) throw new AccountsError("parent_not_found");
-        if (!parent.is_active) throw new AccountsError("parent_archived", 409);
+        const parent = await loadAttachableParent(client, businessId, parentId);
         await assertNoCycle(client, businessId, id, parentId);
-        const computed = nextAccountLevel(parent.level);
-        if (!computed) throw new AccountsError("parent_too_deep", 409);
-        newLevel = computed;
+        newLevel = attachmentLevel(parent, account.type);
         destType = parent.type;
         afterParentLabel = parent.code;
       } else {
