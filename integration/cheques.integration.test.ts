@@ -12,7 +12,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import * as chequesPure from "../src/lib/cheques";
 
@@ -162,6 +162,15 @@ async function balanceOf(code: string): Promise<number> {
     [biz.id, code],
   );
   return Number(rows[0].balance);
+}
+
+/** How many cheques of this business carry that serial. */
+async function countOf(serialNumber: string): Promise<number> {
+  const { rows } = await db.query<{ count: string }>(
+    "SELECT count(*)::text AS count FROM cheques WHERE business_id = $1 AND serial_number = $2",
+    [biz.id, serialNumber],
+  );
+  return Number(rows[0].count);
 }
 
 function receivable(overrides: Partial<Parameters<typeof cheques.recordCheque>[0]> = {}) {
@@ -890,6 +899,110 @@ describe("canonical identity and retry safety (issue #828)", () => {
     }
     // …and nothing was posted by any of the refusals.
     expect((await cheques.listCheques(biz.id, { direction: "receivable" })).total).toBe(1);
+  });
+
+  /*
+   * The clock is not part of a request. `recordCheque` used to resolve an
+   * omitted issue date to "today" *before* fingerprinting it, which made the
+   * identity of a registration depend on when the retry arrived.
+   *
+   * Only `Date` is faked: the pool, its sockets and vitest's own timers keep
+   * running, so these are real writes against the real database.
+   */
+  describe("a retry whose issue date the server filled in", () => {
+    /** 2026-03-09 23:55 in Tehran — five minutes before the date rolls over. */
+    const BEFORE_MIDNIGHT = new Date("2026-03-09T20:25:00.000Z");
+    /** 2026-03-10 00:05 in Tehran — the same request, the next day. */
+    const AFTER_MIDNIGHT = new Date("2026-03-09T20:35:00.000Z");
+    /** Three weeks after the due date. */
+    const LONG_AFTER = new Date("2026-04-01T09:00:00.000Z");
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("replays the original registration when the retry crosses midnight", async () => {
+      vi.setSystemTime(BEFORE_MIDNIGHT);
+      const key = randomUUID();
+      const payload = { idempotencyKey: key, serialNumber: "MID-1", issueDate: null, dueDate: "2026-03-10" };
+      const first = await receivable(payload);
+      expect(first.issueDate).toBe("2026-03-09");
+
+      vi.setSystemTime(AFTER_MIDNIGHT);
+      const retry = await receivable(payload);
+      // The same answer, not a conflict and not a second instrument: what
+      // the client sent has not changed, only the wall clock.
+      expect(retry.id).toBe(first.id);
+      expect(retry.issueDate).toBe("2026-03-09");
+      expect(await countOf("MID-1")).toBe(1);
+      expect(await linesFor(first.id)).toHaveLength(2);
+    });
+
+    it("replays it even after the due date has passed", async () => {
+      vi.setSystemTime(BEFORE_MIDNIGHT);
+      const key = randomUUID();
+      const payload = { idempotencyKey: key, serialNumber: "MID-2", issueDate: null, dueDate: "2026-03-10" };
+      const first = await receivable(payload);
+
+      vi.setSystemTime(LONG_AFTER);
+      // The old order threw `due_date_before_issue` here — the retry of a
+      // cheque that is already on the books was refused as invalid, and the
+      // caller could never learn that it had committed.
+      const retry = await receivable(payload);
+      expect(retry.id).toBe(first.id);
+      expect(await countOf("MID-2")).toBe(1);
+    });
+
+    it("still refuses a genuinely new cheque dated after its due date", async () => {
+      vi.setSystemTime(LONG_AFTER);
+      // Full validation for a first write: moving the default resolution
+      // after the replay lookup must not weaken it.
+      await expect(
+        receivable({ idempotencyKey: randomUUID(), serialNumber: "MID-3", issueDate: null, dueDate: "2026-03-10" }),
+      ).rejects.toThrow("due_date_before_issue");
+      expect(await countOf("MID-3")).toBe(0);
+    });
+
+    it("keeps a key issued by the previous release replayable", async () => {
+      vi.setSystemTime(BEFORE_MIDNIGHT);
+      const key = randomUUID();
+      // What the old code stored: the fingerprint of the *resolved* date,
+      // which is what sending that date explicitly produces today.
+      const first = await receivable({
+        idempotencyKey: key,
+        serialNumber: "MID-4",
+        issueDate: "2026-03-09",
+        dueDate: "2026-03-10",
+      });
+
+      vi.setSystemTime(AFTER_MIDNIGHT);
+      const retry = await receivable({
+        idempotencyKey: key,
+        serialNumber: "MID-4",
+        issueDate: null,
+        dueDate: "2026-03-10",
+      });
+      expect(retry.id).toBe(first.id);
+      expect(await countOf("MID-4")).toBe(1);
+    });
+
+    it("still refuses the same key from another branch", async () => {
+      vi.setSystemTime(BEFORE_MIDNIGHT);
+      const key = randomUUID();
+      const payload = { idempotencyKey: key, serialNumber: "MID-5", issueDate: null, dueDate: "2026-03-10" };
+      await receivable(payload);
+      // The branch is request context the server reads from the session, and
+      // it is deliberately part of the identity: a retry sent after the
+      // operator switched branch is refused rather than silently posting the
+      // instrument into a different branch's books.
+      await expect(receivable({ ...payload, locationId: null })).rejects.toThrow(
+        "idempotency_key_conflict",
+      );
+      expect(await countOf("MID-5")).toBe(1);
+    });
   });
 
   it("treats the same instrument typed differently as the same payload", async () => {
@@ -1783,4 +1896,346 @@ describe("legacy canonical duplicates are classified, not tolerated (issue #828)
       ]),
     ).rejects.toThrow(/legacy canonical duplicate/);
   });
+});
+
+/*
+ * Concurrency, verified rather than hoped for.
+ *
+ * `Promise.all([a(), b()])` launches two requests at once; it does not make
+ * them collide. Node runs them on one thread, Postgres may finish the first
+ * before the second's first statement arrives, and the assertion "exactly one
+ * effect" then passes without the contended path ever having been taken — the
+ * test would keep passing if the row lock were removed.
+ *
+ * These cases force the collision instead: a separate connection opens a
+ * transaction and takes the very lock the service needs (the cheque row, or
+ * the unique index entry for the retry key / the canonical instrument), the
+ * contenders are started and *observed* waiting on a lock in
+ * `pg_stat_activity`, and only then is the barrier released. Every contender
+ * is therefore guaranteed to have reached the contended section.
+ */
+describe("concurrency under a forced lock barrier (issue #828)", () => {
+  let barrier: Client;
+
+  beforeEach(async () => {
+    barrier = new Client({ connectionString: urlFor(databaseName) });
+    await barrier.connect();
+  });
+
+  afterEach(async () => {
+    // Whatever the case did, never leave a transaction (or its locks) behind.
+    try {
+      await barrier.query("ROLLBACK");
+    } catch {
+      /* already closed */
+    }
+    await barrier.end();
+  });
+
+  /** The backend pid holding the barrier open, so it can be excluded below. */
+  async function barrierPid(): Promise<number> {
+    const { rows } = await barrier.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+    return rows[0].pid;
+  }
+
+  /**
+   * Resolves once `count` backends other than the barrier are waiting on a
+   * lock. Fails loudly instead of timing out silently: a contender that never
+   * blocks means the lock under test is not being taken, which is exactly the
+   * defect these cases exist to catch.
+   */
+  async function waitUntilBlocked(count: number, pid: number): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    let seen = -1;
+    while (Date.now() < deadline) {
+      const { rows } = await db.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> $1`,
+        [pid],
+      );
+      seen = Number(rows[0].count);
+      if (seen >= count) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`expected ${count} contenders to block on a lock, saw ${seen}`);
+  }
+
+  it("serialises two retries of one transition that are both inside the lock", async () => {
+    const cheque = await receivable();
+    const step = {
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "deposit" as const,
+      occurredOn: "2026-02-01",
+      idempotencyKey: randomUUID(),
+      createdBy: null,
+    };
+
+    const pid = await barrierPid();
+    await barrier.query("BEGIN");
+    // The row `transitionCheque` locks first.
+    await barrier.query("SELECT id FROM cheques WHERE business_id = $1 AND id = $2 FOR UPDATE", [
+      biz.id,
+      cheque.id,
+    ]);
+
+    const first = cheques.transitionCheque(step);
+    const second = cheques.transitionCheque(step);
+    // Both are now queued behind the barrier, so neither can have read the
+    // cheque's status yet: whatever happens next happens under contention.
+    await waitUntilBlocked(2, pid);
+
+    await barrier.query("COMMIT");
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(a.status).toBe("in_collection");
+    // The replay is the stored answer, not merely an equivalent one.
+    expect(b).toEqual(a);
+    const events = await cheques.getChequeHistory(biz.id, cheque.id);
+    expect(events.filter((e) => e.event === "deposited")).toHaveLength(1);
+    expect(await balanceOf("1241")).toBe(0);
+    expect(await balanceOf("1242")).toBe(5_000_000);
+  });
+
+  it("refuses a conflicting payload on the same key from inside the lock", async () => {
+    const cheque = await receivable();
+    const key = randomUUID();
+    const step = {
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "bounce" as const,
+      occurredOn: "2026-03-11",
+      idempotencyKey: key,
+      createdBy: null,
+    };
+
+    const pid = await barrierPid();
+    await barrier.query("BEGIN");
+    await barrier.query("SELECT id FROM cheques WHERE business_id = $1 AND id = $2 FOR UPDATE", [
+      biz.id,
+      cheque.id,
+    ]);
+
+    const honest = cheques.transitionCheque(step);
+    const divergent = cheques.transitionCheque({ ...step, feeAmount: 120_000 });
+    await waitUntilBlocked(2, pid);
+    await barrier.query("COMMIT");
+
+    const settled = await Promise.allSettled([honest, divergent]);
+    const fulfilled = settled.filter((r) => r.status === "fulfilled");
+    const rejected = settled.filter((r) => r.status === "rejected");
+    // Whichever of the two reaches the lock first, the other carries a
+    // different request under the same key and must be refused — never
+    // answered with the step it did not ask for.
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String((rejected[0] as PromiseRejectedResult).reason)).toContain(
+      "idempotency_key_conflict",
+    );
+    const events = await cheques.getChequeHistory(biz.id, cheque.id);
+    expect(events.filter((e) => e.event === "bounced")).toHaveLength(1);
+  });
+
+  it("lets exactly one of two contended registrations with one key commit", async () => {
+    const key = randomUUID();
+    const serial = `LOCK-${randomUUID().slice(0, 8)}`;
+    const payload = { idempotencyKey: key, serialNumber: serial };
+
+    const pid = await barrierPid();
+    await barrier.query("BEGIN");
+    // No row exists yet, so the contended resource is the unique index entry
+    // for the retry key. Claiming it in an uncommitted transaction makes
+    // every other inserter of that key wait on this tuple.
+    await barrier.query(
+      `INSERT INTO cheques (business_id, location_id, direction, status, serial_number, bank_name, amount,
+                            issue_date, due_date, counterparty_name, idempotency_key)
+       VALUES ($1, $2, 'receivable', 'on_hand', $3, 'ملت', 1, '2026-01-10', '2026-03-10', 'سد', $4)`,
+      [biz.id, biz.locationId, `BARRIER-${serial}`, key],
+    );
+
+    const first = receivable(payload);
+    const second = receivable(payload);
+    await waitUntilBlocked(2, pid);
+
+    // Releasing the barrier by rolling back: the claim on the key disappears
+    // and both contenders resume inside the race the index is there to decide.
+    await barrier.query("ROLLBACK");
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(a.id).toBe(b.id);
+    expect(a).toEqual(b);
+    expect(await countOf(serial)).toBe(1);
+    const { rows } = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM cheques WHERE business_id = $1 AND idempotency_key = $2",
+      [biz.id, key],
+    );
+    expect(rows[0].count).toBe("1");
+    // One registration, one journal entry, one `received` event.
+    expect(await linesFor(a.id)).toHaveLength(2);
+    const events = await cheques.getChequeHistory(biz.id, a.id);
+    expect(events).toHaveLength(1);
+  });
+
+  it("lets exactly one of two contended registrations of one instrument commit", async () => {
+    const serial = `IDENT-${randomUUID().slice(0, 6)}`;
+    const pid = await barrierPid();
+    await barrier.query("BEGIN");
+    // The canonical identity index is the contended resource this time: the
+    // same instrument typed two different ways is one instrument.
+    await barrier.query(
+      `INSERT INTO cheques (business_id, location_id, direction, status, serial_number, bank_name, amount,
+                            issue_date, due_date, counterparty_name)
+       VALUES ($1, $2, 'receivable', 'on_hand', $3, 'ملت', 1, '2026-01-10', '2026-03-10', 'سد')`,
+      [biz.id, biz.locationId, serial],
+    );
+
+    const typed = receivable({ serialNumber: serial, bankName: "ملت" });
+    const retyped = receivable({ serialNumber: `${serial}`.replace("IDENT", "IDENT"), bankName: "بانک ملت" });
+    await waitUntilBlocked(2, pid);
+    await barrier.query("ROLLBACK");
+
+    const settled = await Promise.allSettled([typed, retyped]);
+    expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(await countOf(serial)).toBe(1);
+  });
+
+  it("lets two contended replacements share the original's remainder exactly once", async () => {
+    const original = await returnedAndRestoredFor();
+    const attempt = () =>
+      receivable({
+        replacesChequeId: original.id,
+        amount: 4_000_000,
+        issueDate: "2026-03-12",
+        dueDate: "2026-05-10",
+      });
+
+    const pid = await barrierPid();
+    await barrier.query("BEGIN");
+    // `assertReplaceable` locks the original row before it measures what is
+    // left of it; holding that row puts both replacements inside the check.
+    await barrier.query("SELECT id FROM cheques WHERE business_id = $1 AND id = $2 FOR UPDATE", [
+      biz.id,
+      original.id,
+    ]);
+
+    const a = attempt();
+    const b = attempt();
+    await waitUntilBlocked(2, pid);
+    await barrier.query("COMMIT");
+
+    const settled = await Promise.allSettled([a, b]);
+    // 4m + 4m against a 5m original: the second must see the first's claim.
+    expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const refused = settled.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(refused.reason)).toContain("replacement_exceeds_original");
+    // And the books agree: one replacement cheque on hand, the remainder of
+    // the original still unreplaced.
+    expect(await balanceOf("1241")).toBe(4_000_000);
+    const { rows } = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM cheques WHERE business_id = $1 AND replaces_cheque_id = $2",
+      [biz.id, original.id],
+    );
+    expect(rows[0].count).toBe("1");
+  });
+
+  it("keeps a foreign tenant's identical key out of the contended decision", async () => {
+    const key = randomUUID();
+    const serial = `TEN-${randomUUID().slice(0, 6)}`;
+    const pid = await barrierPid();
+    await barrier.query("BEGIN");
+    await barrier.query(
+      `INSERT INTO cheques (business_id, location_id, direction, status, serial_number, bank_name, amount,
+                            issue_date, due_date, counterparty_name, idempotency_key)
+       VALUES ($1, $2, 'receivable', 'on_hand', $3, 'ملت', 1, '2026-01-10', '2026-03-10', 'سد', $4)`,
+      [biz.id, biz.locationId, `BARRIER-${serial}`, key],
+    );
+
+    const mine = receivable({ idempotencyKey: key, serialNumber: serial });
+    // The other business sends the very same key at the same moment. Keys are
+    // scoped per business, so this one must not queue behind our index entry
+    // and must not be answered with our cheque.
+    const theirs = cheques.recordCheque({
+      businessId: other.id,
+      locationId: null,
+      direction: "receivable",
+      serialNumber: serial,
+      bankName: "ملت",
+      amount: 1_000_000,
+      issueDate: "2026-01-10",
+      dueDate: "2026-03-10",
+      counterpartyName: "مشتری دیگر",
+      allowUnattributed: true,
+      idempotencyKey: key,
+      createdBy: null,
+    });
+    const theirCheque = await theirs;
+    await waitUntilBlocked(1, pid);
+
+    await barrier.query("ROLLBACK");
+    const myCheque = await mine;
+    expect(theirCheque.id).not.toBe(myCheque.id);
+    expect(await countOf(serial)).toBe(1);
+  });
+
+  it("refuses both contenders when the step falls in a locked period, and posts nothing", async () => {
+    const ownerRow = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, pin_hash) VALUES ($1, 'owner', 'Owner', 'x') RETURNING id`,
+      [biz.id],
+    );
+    const cheque = await receivable();
+    await fiscalService.createFiscalYear(biz.id, 1404);
+    const [year] = await fiscalService.listFiscalYears(biz.id);
+    const periods = await fiscalService.listPeriods(biz.id, year.id);
+    const period = periods.find((p) => p.startsOn <= "2025-05-01" && "2025-05-01" <= p.endsOn) ?? periods[0];
+    await fiscalService.setPeriodStatus(biz.id, period.id, "soft_closed", ownerRow.rows[0].id);
+    await fiscalService.setPeriodStatus(biz.id, period.id, "locked", ownerRow.rows[0].id);
+
+    const step = {
+      businessId: biz.id,
+      chequeId: cheque.id,
+      action: "deposit" as const,
+      occurredOn: period.startsOn,
+      idempotencyKey: randomUUID(),
+      createdBy: null,
+    };
+
+    const pid = await barrierPid();
+    await barrier.query("BEGIN");
+    await barrier.query("SELECT id FROM cheques WHERE business_id = $1 AND id = $2 FOR UPDATE", [
+      biz.id,
+      cheque.id,
+    ]);
+    const a = cheques.transitionCheque(step);
+    const b = cheques.transitionCheque(step);
+    await waitUntilBlocked(2, pid);
+    await barrier.query("COMMIT");
+
+    const settled = await Promise.allSettled([a, b]);
+    // A closed period is closed for both of them; winning the lock is not a
+    // way past it, and a refused step leaves no event and no entry behind.
+    expect(settled.filter((r) => r.status === "rejected")).toHaveLength(2);
+    expect(await cheques.getChequeHistory(biz.id, cheque.id)).toHaveLength(1);
+    expect((await cheques.listCheques(biz.id, { direction: "receivable" })).cheques[0].status).toBe(
+      "on_hand",
+    );
+  });
+
+  async function returnedAndRestoredFor() {
+    const original = await receivable();
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: original.id,
+      action: "bounce",
+      occurredOn: "2026-03-11",
+      createdBy: null,
+    });
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: original.id,
+      action: "restore",
+      occurredOn: "2026-03-12",
+      createdBy: null,
+    });
+    return original;
+  }
 });
