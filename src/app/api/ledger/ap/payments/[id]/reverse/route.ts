@@ -5,6 +5,7 @@ import { resolveActiveLocation } from "@/lib/setup-state";
 import { ApError, MissingLedgerAccountError, reverseApPayment } from "@/lib/ap-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
+import { optionalBodyText } from "@/lib/payables-input";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -26,9 +27,16 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
     // An empty body means reverse on the business-local date with the default memo.
   }
 
-  const reversalDate = body.reversalDate?.trim() || null;
+  const reversalDate = optionalBodyText(body.reversalDate);
+  if (reversalDate === undefined) {
+    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
   if (reversalDate && !isValidIsoDate(reversalDate)) {
     return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
+  const memo = optionalBodyText(body.memo);
+  if (memo === undefined) {
+    return NextResponse.json({ error: "invalid_memo" }, { status: 400 });
   }
   const location = await resolveActiveLocation(session);
 
@@ -39,7 +47,7 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
       paymentId: id,
       actorId: session.sub,
       reversalDate,
-      memo: body.memo,
+      memo,
     });
     return NextResponse.json({ reversal }, { status: 201 });
   } catch (err) {

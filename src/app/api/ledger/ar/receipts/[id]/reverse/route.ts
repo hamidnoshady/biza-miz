@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { ArError, MissingLedgerAccountError, reverseReceipt } from "@/lib/ar-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
+import { optionalBodyText } from "@/lib/payables-input";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -26,12 +27,17 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
     // no body is fine; memo is optional
   }
 
+  const memo = optionalBodyText(body.memo);
+  if (memo === undefined) {
+    return NextResponse.json({ error: "invalid_memo" }, { status: 400 });
+  }
+
   try {
     const result = await reverseReceipt({
       businessId: session.businessId,
       receiptId: id,
       actorId: session.sub,
-      memo: body.memo,
+      memo,
     });
     return NextResponse.json(result, { status: 201 });
   } catch (err) {

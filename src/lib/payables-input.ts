@@ -190,6 +190,17 @@ export function isVoucherMethod(value: unknown): value is VoucherMethod {
   return typeof value === "string" && (VOUCHER_METHODS as readonly string[]).includes(value);
 }
 
+/**
+ * Optional text off a JSON body: absent (or blank) is null — unset — while a
+ * wrong-typed value (a number, an object) is undefined, so the route answers
+ * its own field-specific 400 instead of `.trim()` throwing a TypeError 500.
+ */
+export function optionalBodyText(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return undefined;
+  return value.trim() || null;
+}
+
 export const VOUCHER_METHOD_LABELS: Record<VoucherMethod, string> = {
   cash: "نقدی",
   bank: "بانکی",

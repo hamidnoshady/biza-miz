@@ -40,12 +40,13 @@ export const VOUCHER_PAGE_SIZE = 50;
 /** Hard cap so a crafted `?limit=` cannot ask for the whole history at once. */
 export const VOUCHER_PAGE_SIZE_MAX = 100;
 /**
- * Hard cap for the full filtered CSV export (mirrors the journal's
- * `JOURNAL_EXPORT_ROW_CAP`). The export is one bounded query, not a cursor
- * loop; past the cap the file carries the first rows and the response the
- * `X-Voucher-Export-Truncated` header naming the cap.
+ * Rows per chunk of the full filtered CSV export. The export streams the
+ * whole filtered set through the list cursor in chunks of this size, so
+ * memory stays bounded no matter how long the history — complete, never
+ * capped. (The journal keeps its own `JOURNAL_EXPORT_ROW_CAP`; vouchers
+ * stream instead because the acceptance is every filtered row.)
  */
-export const VOUCHER_EXPORT_ROW_CAP = 20_000;
+export const VOUCHER_EXPORT_CHUNK_SIZE = 1000;
 
 /**
  * Stable newest-first cursor over (voucher date, created_at, id).

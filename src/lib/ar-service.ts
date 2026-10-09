@@ -35,7 +35,12 @@ import {
   enqueueHolooReversalForArReceipt,
 } from "./integrations/holoo/outbox-producer";
 import { isVoucherMethod, normalizeBankReference, type VoucherMethod } from "./payables-input";
-import { resolveVoucherCashAccount } from "./voucher-cash-account";
+import {
+  resolveVoucherCashAccount,
+  resolveVoucherPostedAccount,
+  VOUCHER_POSTED_ACCOUNT_SELECT,
+  voucherPostedAccountJoin,
+} from "./voucher-cash-account";
 
 export { MissingLedgerAccountError };
 
@@ -530,6 +535,19 @@ function normalizeIdempotencyKey(value: unknown): string {
 }
 
 /**
+ * Optional free text off the wire (memo, back-date, account choice): absent
+ * or blank means unset, but a wrong-typed value (a number, an object) is a
+ * 400 — never a TypeError from `.trim()`. The routes check first, and this
+ * is the fail-closed backstop for internal callers (AI apply, installment
+ * settlement) that bypass them.
+ */
+function normalizeOptionalText(value: unknown, code: "invalid_memo" | "invalid_date" | "invalid_cash_account"): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new ArError(code);
+  return value.trim() || null;
+}
+
+/**
  * The canonical receipt-request tuple, mirroring A/P's
  * `paymentRequestFingerprint` field for field. An ordered tuple keeps
  * normalization/versioning explicit and avoids key order dependence. Date
@@ -598,12 +616,12 @@ export async function receivePayment(params: {
   if (!isUuid(params.customerId)) throw new ArError("customer_not_found", 404);
   // Same story for a date off the wire: reject it here, in the error
   // vocabulary the API answers with, rather than as Postgres's parse error.
-  const requestedReceiptDate = params.receiptDate?.trim() || null;
+  const requestedReceiptDate = normalizeOptionalText(params.receiptDate, "invalid_date");
   if (requestedReceiptDate && !isValidIsoDate(requestedReceiptDate)) throw new ArError("invalid_date");
   if (!isVoucherMethod(params.method)) throw new ArError("invalid_method");
   const idempotencyKey = normalizeIdempotencyKey(params.idempotencyKey);
-  const memo = params.memo?.trim() || null;
-  const requestedCashAccountId = params.cashAccountId?.trim() || null;
+  const memo = normalizeOptionalText(params.memo, "invalid_memo");
+  const requestedCashAccountId = normalizeOptionalText(params.cashAccountId, "invalid_cash_account");
   // Throws PayablesInputError («invalid_bank_reference»), which the route answers as a 400.
   const bankReference = normalizeBankReference(params.bankReference);
   const fingerprint = receiptRequestFingerprint({
@@ -710,7 +728,7 @@ export async function receivePayment(params: {
       businessId: params.businessId,
       locationId: params.locationId,
       entryDate: receipt.receipt_date,
-      memo: params.memo?.trim() || "دریافت وجه از مشتری",
+      memo: memo || "دریافت وجه از مشتری",
       sourceType: "ar_receipt",
       sourceId: receipt.id,
       createdBy: params.createdBy,
@@ -768,6 +786,8 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
     bank_reference: string | null;
     cash_account_code: string | null;
     cash_account_name: string | null;
+    posted_account_code: string | null;
+    posted_account_name: string | null;
     idempotency_key: string | null;
     voucher_number: string | null;
     created_by_name: string | null;
@@ -784,8 +804,9 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
             r.receipt_date::text AS receipt_date, r.method, r.amount::text AS amount, r.memo,
             r.cash_account_id, r.bank_reference,
             ca.code AS cash_account_code, ca.name AS cash_account_name,
+            ${VOUCHER_POSTED_ACCOUNT_SELECT},
             r.idempotency_key, r.voucher_number::text AS voucher_number,
-            u.full_name AS created_by_name, r.created_at::text AS created_at,
+            u.full_name AS created_by_name, to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
             je.id::text AS entry_id,
             r.reversed_at::text AS reversed_at, ru.full_name AS reversed_by_name,
             r.reversal_entry_id::text AS reversal_entry_id,
@@ -799,6 +820,7 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
        LEFT JOIN journal_entries je
          ON je.business_id = r.business_id AND je.source_type = 'ar_receipt'
         AND je.source_id = r.id AND je.posting_kind = 'ar_receipt'
+       ${voucherPostedAccountJoin("receipt")}
        LEFT JOIN journal_entries rje ON rje.id = r.reversal_entry_id
       WHERE r.business_id = $1 AND r.id = $2`,
     [businessId, receiptId],
@@ -818,9 +840,10 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
     memo: row.memo,
     cashAccountId: row.cash_account_id,
     bankReference: row.bank_reference,
-    cashAccount: row.cash_account_code
-      ? { code: row.cash_account_code, name: row.cash_account_name ?? "" }
-      : null,
+    cashAccount: resolveVoucherPostedAccount(
+      row.cash_account_code ? { code: row.cash_account_code, name: row.cash_account_name ?? "" } : null,
+      row.posted_account_code ? { code: row.posted_account_code, name: row.posted_account_name ?? "" } : null,
+    ),
     idempotencyKey: row.idempotency_key,
     voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
     createdByName: row.created_by_name,
@@ -900,7 +923,7 @@ export async function reverseReceipt(params: {
       sourceType: "ar_receipt",
       sourceId: params.receiptId,
       postingKind: "ar_receipt_reversal",
-      memo: params.memo?.trim() || `برگشت دریافت${receipt.memo ? ` — ${receipt.memo}` : ""}`,
+      memo: normalizeOptionalText(params.memo, "invalid_memo") || `برگشت دریافت${receipt.memo ? ` — ${receipt.memo}` : ""}`,
       entryDate: reversalDate,
       createdBy: params.actorId,
     });

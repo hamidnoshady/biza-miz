@@ -26,7 +26,12 @@ import {
   enqueueHolooReversalForApPayment,
 } from "./integrations/holoo/outbox-producer";
 import { isVoucherMethod, normalizeBankReference, PayablesInputError, type VoucherMethod } from "./payables-input";
-import { resolveVoucherCashAccount } from "./voucher-cash-account";
+import {
+  resolveVoucherCashAccount,
+  resolveVoucherPostedAccount,
+  VOUCHER_POSTED_ACCOUNT_SELECT,
+  voucherPostedAccountJoin,
+} from "./voucher-cash-account";
 
 export { MissingLedgerAccountError, UNKNOWN_SUPPLIER_KEY };
 export { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL };
@@ -448,6 +453,19 @@ function normalizedClientRequestId(value: unknown): string {
   return key;
 }
 
+/**
+ * Optional free text off the wire (memo, back-date, account choice): absent
+ * or blank means unset, but a wrong-typed value (a number, an object) is a
+ * 400 — never a TypeError from `.trim()`. The routes check first, and this
+ * is the fail-closed backstop for internal callers (AI apply, installment
+ * settlement) that bypass them.
+ */
+function normalizeOptionalText(value: unknown, code: "invalid_memo" | "invalid_date" | "invalid_cash_account"): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new ApError(code);
+  return value.trim() || null;
+}
+
 function paymentRequestFingerprint(params: {
   supplierId: string;
   locationId: string | null;
@@ -547,10 +565,10 @@ export async function payBill(params: {
   if (!isUuid(params.supplierId)) throw new ApError("supplier_not_found", 404);
   if (!isVoucherMethod(params.method)) throw new ApError("invalid_method");
   const clientRequestId = normalizedClientRequestId(params.clientRequestId);
-  const requestedPaymentDate = params.paymentDate?.trim() || null;
+  const requestedPaymentDate = normalizeOptionalText(params.paymentDate, "invalid_date");
   if (requestedPaymentDate && !isValidIsoDate(requestedPaymentDate)) throw new ApError("invalid_date");
-  const memo = params.memo?.trim() || null;
-  const requestedCashAccountId = params.cashAccountId?.trim() || null;
+  const memo = normalizeOptionalText(params.memo, "invalid_memo");
+  const requestedCashAccountId = normalizeOptionalText(params.cashAccountId, "invalid_cash_account");
   // Throws PayablesInputError for a malformed/oversized bank reference. The
   // normalized value makes Persian and ASCII digit forms the same operation.
   const bankReference = normalizeBankReference(params.bankReference);
@@ -755,7 +773,7 @@ export async function reverseApPayment(params: {
   skipHolooPush?: boolean;
 }): Promise<ApPaymentReversal> {
   if (!isUuid(params.paymentId)) throw new ApError("payment_not_found", 404);
-  const requestedDate = params.reversalDate?.trim() || null;
+  const requestedDate = normalizeOptionalText(params.reversalDate, "invalid_date");
   if (requestedDate && !isValidIsoDate(requestedDate)) throw new ApError("invalid_date");
   const reversalDate = requestedDate ?? (await businessToday(params.businessId));
 
@@ -840,7 +858,7 @@ export async function reverseApPayment(params: {
       businessId: params.businessId,
       locationId: originalLocationId,
       entryDate: reversalDate,
-      memo: params.memo?.trim() || "برگشت پرداخت به تأمین‌کننده",
+      memo: normalizeOptionalText(params.memo, "invalid_memo") || "برگشت پرداخت به تأمین‌کننده",
       sourceType: "ap_payment_reversal",
       sourceId: original.payment_id,
       createdBy: params.actorId,
@@ -908,6 +926,8 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
     bank_reference: string | null;
     cash_account_code: string | null;
     cash_account_name: string | null;
+    posted_account_code: string | null;
+    posted_account_name: string | null;
     voucher_number: string | null;
     created_by_name: string | null;
     created_at: string;
@@ -925,8 +945,9 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
             p.payment_date::text AS payment_date, p.method, p.amount::text AS amount, p.memo,
             p.cash_account_id, p.bank_reference,
             ca.code AS cash_account_code, ca.name AS cash_account_name,
+            ${VOUCHER_POSTED_ACCOUNT_SELECT},
             p.voucher_number::text AS voucher_number,
-            u.full_name AS created_by_name, p.created_at::text AS created_at,
+            u.full_name AS created_by_name, to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
             je.id::text AS entry_id,
             p.reversed_at::text AS reversed_at, ru.full_name AS reversed_by_name,
             p.reversal_entry_id::text AS reversal_entry_id,
@@ -941,6 +962,7 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
        LEFT JOIN journal_entries je
          ON je.business_id = p.business_id AND je.source_type = 'ap_payment'
         AND je.source_id = p.id AND je.posting_kind = 'ap_payment'
+       ${voucherPostedAccountJoin("payment")}
        LEFT JOIN journal_entries rje ON rje.id = p.reversal_entry_id
       WHERE p.business_id = $1 AND p.id = $2`,
     [businessId, paymentId],
@@ -961,9 +983,10 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
     memo: row.memo,
     cashAccountId: row.cash_account_id,
     bankReference: row.bank_reference,
-    cashAccount: row.cash_account_code
-      ? { code: row.cash_account_code, name: row.cash_account_name ?? "" }
-      : null,
+    cashAccount: resolveVoucherPostedAccount(
+      row.cash_account_code ? { code: row.cash_account_code, name: row.cash_account_name ?? "" } : null,
+      row.posted_account_code ? { code: row.posted_account_code, name: row.posted_account_name ?? "" } : null,
+    ),
     duplicate: false,
     voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
     createdByName: row.created_by_name,

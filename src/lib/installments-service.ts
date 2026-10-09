@@ -10,14 +10,19 @@ import { isValidIsoDate } from "./iso-date";
 import {
   decodeVoucherCursor,
   encodeVoucherCursor,
-  VOUCHER_EXPORT_ROW_CAP,
+  VOUCHER_EXPORT_CHUNK_SIZE,
   VOUCHER_PAGE_SIZE,
   VOUCHER_PAGE_SIZE_MAX,
   type VoucherCursor,
   type VoucherListFilters,
 } from "./voucher-shared";
 import { isVoucherMethod, type VoucherMethod } from "./payables-input";
-import { resolveVoucherCashAccount } from "./voucher-cash-account";
+import {
+  resolveVoucherCashAccount,
+  resolveVoucherPostedAccount,
+  VOUCHER_POSTED_ACCOUNT_SELECT,
+  voucherPostedAccountJoin,
+} from "./voucher-cash-account";
 
 /**
  * Installment schedules (اقساط) — see migrations/0140_installments.sql for the
@@ -927,12 +932,13 @@ function validateListFilters(filters: VoucherListFilters): void {
 export async function listReceiptsPage(
   businessId: string,
   params: VoucherListParams = {},
-  opts: { exportCap?: number } = {},
+  opts: { internalPageSize?: number } = {},
 ): Promise<VoucherPage<ReceiptListRow>> {
   validateListFilters(params);
-  // `exportCap` is internal (the `*ForExport` functions below): the wire
-  // `limit` stays clamped to `VOUCHER_PAGE_SIZE_MAX` no matter what.
-  const limit = opts.exportCap ?? clampLimit(params.limit);
+  // `internalPageSize` is internal (the export iterators below page wider
+  // than any wire client may): the wire `limit` stays clamped to
+  // `VOUCHER_PAGE_SIZE_MAX` no matter what.
+  const limit = opts.internalPageSize ?? clampLimit(params.limit);
   const cursor = parseCursor(params.cursor);
   const pattern = searchPattern(params.q);
   const values: Array<string | number | null> = [businessId];
@@ -994,6 +1000,8 @@ export async function listReceiptsPage(
     bank_reference: string | null;
     cash_account_code: string | null;
     cash_account_name: string | null;
+    posted_account_code: string | null;
+    posted_account_name: string | null;
     entry_id: string | null;
     reversed_at: string | null;
     reversal_entry_id: string | null;
@@ -1005,6 +1013,7 @@ export async function listReceiptsPage(
             r.created_at::text AS created_at, u.full_name AS created_by_name,
             r.cash_account_id, r.bank_reference,
             ca.code AS cash_account_code, ca.name AS cash_account_name,
+            ${VOUCHER_POSTED_ACCOUNT_SELECT},
             je.id AS entry_id,
             r.reversed_at::text AS reversed_at, r.reversal_entry_id
        FROM ar_receipts r
@@ -1015,6 +1024,7 @@ export async function listReceiptsPage(
        LEFT JOIN journal_entries je
          ON je.business_id = r.business_id AND je.source_type = 'ar_receipt'
         AND je.source_id = r.id AND je.posting_kind = 'ar_receipt'
+       ${voucherPostedAccountJoin("receipt")}
       WHERE ${conditions.join(" AND ")}
       ORDER BY r.receipt_date DESC, r.created_at DESC, r.id DESC
       LIMIT ${fetch}`,
@@ -1051,15 +1061,23 @@ export async function listReceiptsPage(
 }
 
 /**
- * Audit F11 — the account a voucher named and the bank's reference. A voucher
- * recorded before 0212 (or without a choice) names no account: the method's
- * default account took it, and the screen says only the method.
+ * Audit F11 — the account a voucher shows and the bank's reference. A voucher
+ * recorded before 0212 (or without a choice) names no account; the method's
+ * default took it, and the journal — not today's default — says which
+ * account that was (`voucherPostedAccountJoin` evidence, shared with the
+ * detail drill-downs). The file and the screen inherit the same resolution
+ * because the export rows are these rows.
  */
-function voucherAccountFields(r: { bank_reference: string | null; cash_account_code: string | null; cash_account_name: string | null }) {
-  return {
-    bankReference: r.bank_reference,
-    cashAccount: r.cash_account_code ? { code: r.cash_account_code, name: r.cash_account_name ?? "" } : null,
-  };
+function voucherAccountFields(r: {
+  bank_reference: string | null;
+  cash_account_code: string | null;
+  cash_account_name: string | null;
+  posted_account_code: string | null;
+  posted_account_name: string | null;
+}) {
+  const named = r.cash_account_code ? { code: r.cash_account_code, name: r.cash_account_name ?? "" } : null;
+  const posted = r.posted_account_code ? { code: r.posted_account_code, name: r.posted_account_name ?? "" } : null;
+  return { bankReference: r.bank_reference, cashAccount: resolveVoucherPostedAccount(named, posted) };
 }
 
 /**
@@ -1070,12 +1088,13 @@ function voucherAccountFields(r: { bank_reference: string | null; cash_account_c
 export async function listPaymentsPage(
   businessId: string,
   params: VoucherListParams = {},
-  opts: { exportCap?: number } = {},
+  opts: { internalPageSize?: number } = {},
 ): Promise<VoucherPage<PaymentListRow>> {
   validateListFilters(params);
-  // `exportCap` is internal (the `*ForExport` functions below): the wire
-  // `limit` stays clamped to `VOUCHER_PAGE_SIZE_MAX` no matter what.
-  const limit = opts.exportCap ?? clampLimit(params.limit);
+  // `internalPageSize` is internal (the export iterators below page wider
+  // than any wire client may): the wire `limit` stays clamped to
+  // `VOUCHER_PAGE_SIZE_MAX` no matter what.
+  const limit = opts.internalPageSize ?? clampLimit(params.limit);
   const cursor = parseCursor(params.cursor);
   const pattern = searchPattern(params.q);
   const values: Array<string | number | null> = [businessId];
@@ -1137,6 +1156,8 @@ export async function listPaymentsPage(
     bank_reference: string | null;
     cash_account_code: string | null;
     cash_account_name: string | null;
+    posted_account_code: string | null;
+    posted_account_name: string | null;
     entry_id: string | null;
     reversed_at: string | null;
     reversal_entry_id: string | null;
@@ -1149,6 +1170,7 @@ export async function listPaymentsPage(
             p.created_at::text AS created_at, u.full_name AS created_by_name,
             p.cash_account_id, p.bank_reference,
             ca.code AS cash_account_code, ca.name AS cash_account_name,
+            ${VOUCHER_POSTED_ACCOUNT_SELECT},
             je.id AS entry_id,
             p.reversed_at::text AS reversed_at, p.reversal_entry_id,
             rje.entry_date::text AS reversal_date
@@ -1161,6 +1183,7 @@ export async function listPaymentsPage(
        LEFT JOIN journal_entries je
          ON je.business_id = p.business_id AND je.source_type = 'ap_payment'
         AND je.source_id = p.id AND je.posting_kind = 'ap_payment'
+       ${voucherPostedAccountJoin("payment")}
        LEFT JOIN journal_entries rje ON rje.id = p.reversal_entry_id
       WHERE ${conditions.join(" AND ")}
       ORDER BY p.payment_date DESC, p.created_at DESC, p.id DESC
@@ -1200,26 +1223,36 @@ export async function listPaymentsPage(
 }
 
 /**
- * The complete filtered result for a CSV export — pagination deliberately
- * ignored, bounded by `VOUCHER_EXPORT_ROW_CAP` (mirrors the journal's
- * `listJournalEntriesForExport`). One bounded query, not a cursor loop; past
- * the cap the route answers the first rows plus the truncation header.
+ * The complete filtered result for a CSV export, in bounded-memory chunks —
+ * pagination deliberately ignored, no row cap. Walks the same stable
+ * newest-first cursor the register pages with, so the file and the screen
+ * cannot disagree about the order; the route streams each chunk straight
+ * into the response instead of holding the history. Tenant-scoped by the
+ * caller's business id, like every other read here.
  */
-export async function listReceiptsForExport(
+export async function* iterateReceiptsForExport(
   businessId: string,
   filters: VoucherListFilters = {},
-): Promise<{ rows: ReceiptListRow[]; truncated: boolean }> {
-  const page = await listReceiptsPage(businessId, filters, { exportCap: VOUCHER_EXPORT_ROW_CAP });
-  return { rows: page.rows, truncated: page.hasMore };
+): AsyncGenerator<ReceiptListRow[], void, void> {
+  let cursor: string | null | undefined;
+  do {
+    const page = await listReceiptsPage(businessId, { ...filters, cursor }, { internalPageSize: VOUCHER_EXPORT_CHUNK_SIZE });
+    if (page.rows.length > 0) yield page.rows;
+    cursor = page.nextCursor;
+  } while (cursor);
 }
 
-/** The payments mirror of `listReceiptsForExport`. */
-export async function listPaymentsForExport(
+/** The payments mirror of `iterateReceiptsForExport`. */
+export async function* iteratePaymentsForExport(
   businessId: string,
   filters: VoucherListFilters = {},
-): Promise<{ rows: PaymentListRow[]; truncated: boolean }> {
-  const page = await listPaymentsPage(businessId, filters, { exportCap: VOUCHER_EXPORT_ROW_CAP });
-  return { rows: page.rows, truncated: page.hasMore };
+): AsyncGenerator<PaymentListRow[], void, void> {
+  let cursor: string | null | undefined;
+  do {
+    const page = await listPaymentsPage(businessId, { ...filters, cursor }, { internalPageSize: VOUCHER_EXPORT_CHUNK_SIZE });
+    if (page.rows.length > 0) yield page.rows;
+    cursor = page.nextCursor;
+  } while (cursor);
 }
 
 export { MissingLedgerAccountError };

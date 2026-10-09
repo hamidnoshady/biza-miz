@@ -706,3 +706,289 @@ describe("getArAging", () => {
     expect(aging.totals.total).toBe(Number(rows[0].balance));
   });
 });
+
+/**
+ * Forced contention on one idempotency key (#829 completion). The burst test
+ * above *hopes* the calls overlap; these tests *hold* them overlapped: a
+ * barrier transaction pins the business's voucher-counter row, both callers
+ * provably miss the initial lookup (zero rows mid-hold, both parked past the
+ * lookup on the counter lock), and only then is the barrier released — so
+ * the loser's `DO NOTHING` + re-read recovery path runs deterministically,
+ * not when the scheduler feels generous.
+ */
+describe("forced contention on one idempotency key (issue #829 completion)", () => {
+  /** How many backends on this database are lock-parked inside the counter upsert. */
+  async function counterLockWaiters(): Promise<number> {
+    const { rows } = await db.query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM pg_stat_activity
+        WHERE datname = $1 AND wait_event_type = 'Lock' AND query LIKE '%ar_ap_voucher_counters%'`,
+      [databaseName],
+    );
+    return Number(rows[0].n);
+  }
+
+  async function waitForCounterWaiters(count: number): Promise<void> {
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if ((await counterLockWaiters()) >= count) return;
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${count} counter-lock waiters`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  async function seedCounterRow(): Promise<void> {
+    await db.query(
+      `INSERT INTO ar_ap_voucher_counters (business_id, last_ar_voucher_number, last_ap_voucher_number)
+       VALUES ($1, 0, 0) ON CONFLICT (business_id) DO NOTHING`,
+      [biz.id],
+    );
+  }
+
+  it("both callers miss the first lookup, then recover to one voucher, one posting, no outbox rows", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await seedCounterRow();
+    const key = `barrier:${randomUUID()}`;
+    const call = () =>
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 100_000,
+        receiptDate: "2026-10-04",
+        idempotencyKey: key,
+        createdBy: user.id,
+      });
+
+    const holder = new Client({ connectionString: urlFor(databaseName) });
+    await holder.connect();
+    let released = false;
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`SELECT business_id FROM ar_ap_voucher_counters WHERE business_id = $1 FOR UPDATE`, [biz.id]);
+
+      const a = call();
+      const b = call();
+      // Both callers missed the initial lookup (there is nothing to find)
+      // and are parked *past* it, on the counter upsert — the parked query
+      // text proves the position. Nothing has been inserted mid-hold.
+      await waitForCounterWaiters(2);
+      const midHold = await db.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM ar_receipts WHERE business_id = $1`,
+        [biz.id],
+      );
+      expect(Number(midHold.rows[0].n)).toBe(0);
+
+      await holder.query("COMMIT");
+      released = true;
+      const [first, second] = await Promise.all([a, b]);
+      expect(first.id).toBe(second.id);
+      expect([first, second].filter((r) => r.duplicate)).toHaveLength(1);
+      expect([first, second].filter((r) => !r.duplicate)).toHaveLength(1);
+      const winner = first.duplicate ? second : first;
+
+      // One source row, one balanced journal effect.
+      const sources = await db.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM ar_receipts WHERE business_id = $1 AND idempotency_key = $2`,
+        [biz.id, key],
+      );
+      expect(Number(sources.rows[0].n)).toBe(1);
+      const entries = await db.query<{ id: string }>(
+        `SELECT id FROM journal_entries WHERE business_id = $1 AND source_type = 'ar_receipt' AND source_id = $2`,
+        [biz.id, winner.id],
+      );
+      expect(entries.rows).toHaveLength(1);
+      const lines = await db.query<{ code: string; debit: string; credit: string }>(
+        `SELECT a.code, l.debit::text AS debit, l.credit::text AS credit
+           FROM journal_lines l JOIN accounts a ON a.id = l.account_id
+          WHERE l.entry_id = $1 ORDER BY a.code`,
+        [entries.rows[0].id],
+      );
+      expect(lines.rows).toEqual([
+        { code: "1100", debit: "100000", credit: "0" },
+        { code: "1200", debit: "0", credit: "100000" },
+      ]);
+      // No Holoo connection is configured, and the loser's replay path
+      // returns before the enqueue — nothing reaches the outbox.
+      const outbox = await db.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM integration_outbox_events WHERE business_id = $1`,
+        [biz.id],
+      );
+      expect(Number(outbox.rows[0].n)).toBe(0);
+    } finally {
+      if (!released) await holder.query("ROLLBACK").catch(() => {});
+      await holder.end();
+    }
+  }, 60_000);
+
+  it("a concurrent caller with changed intent loses with 409 from the race path and posts nothing", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    await seedCounterRow();
+    const key = `barrier-conflict:${randomUUID()}`;
+    const call = (amount: number) =>
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount,
+        receiptDate: "2026-10-04",
+        idempotencyKey: key,
+        createdBy: user.id,
+      });
+
+    const holder = new Client({ connectionString: urlFor(databaseName) });
+    await holder.connect();
+    let released = false;
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`SELECT business_id FROM ar_ap_voucher_counters WHERE business_id = $1 FOR UPDATE`, [biz.id]);
+
+      const a = call(100_000);
+      const b = call(200_000);
+      // Keep vitest's unhandled-rejection detector quiet if an assertion
+      // below fails before the settlement: the outcomes are still observed.
+      a.catch(() => {});
+      b.catch(() => {});
+      // Both lookups missed before either could insert, so the loser cannot
+      // take the fast path — its 409 comes from the race-path re-read guard.
+      await waitForCounterWaiters(2);
+      await holder.query("COMMIT");
+      released = true;
+
+      const outcomes = await Promise.allSettled([a, b]);
+      const fulfilled = outcomes.filter((o) => o.status === "fulfilled");
+      const rejected = outcomes.filter((o) => o.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      if (fulfilled[0].status !== "fulfilled" || rejected[0].status !== "rejected") throw new Error("unreachable");
+      expect(fulfilled[0].value.duplicate).toBe(false);
+      expect(String(rejected[0].reason)).toContain("idempotency_conflict");
+
+      // Exactly the winner's transfer exists — one row, one posting, and the
+      // amount is whichever intent won the race.
+      const winnerAmount = fulfilled[0].value.amount;
+      expect([100_000, 200_000]).toContain(winnerAmount);
+      const sources = await db.query<{ n: string; amount: string }>(
+        `SELECT COUNT(*)::text AS n, MIN(amount)::text AS amount FROM ar_receipts WHERE business_id = $1 AND idempotency_key = $2`,
+        [biz.id, key],
+      );
+      expect(Number(sources.rows[0].n)).toBe(1);
+      expect(Number(sources.rows[0].amount)).toBe(winnerAmount);
+      const entries = await db.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM journal_entries WHERE business_id = $1 AND source_type = 'ar_receipt'`,
+        [biz.id],
+      );
+      expect(Number(entries.rows[0].n)).toBe(1);
+    } finally {
+      if (!released) await holder.query("ROLLBACK").catch(() => {});
+      await holder.end();
+    }
+  }, 60_000);
+
+  it("scopes keys to the business: the same key posts once per tenant and replays per tenant", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const otherBiz = await db.query<{ id: string }>("INSERT INTO businesses (name, slug) VALUES ('AR Other', $1) RETURNING id", [
+      `ar-other-${randomUUID().slice(0, 8)}`,
+    ]);
+    const otherBizId = otherBiz.rows[0].id;
+    const otherLoc = await db.query<{ id: string }>("INSERT INTO locations (business_id, name) VALUES ($1, 'Main') RETURNING id", [otherBizId]);
+    await db.query(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, '1100', 'Cash', 'asset'), ($1, '1110', 'Bank', 'asset'),
+              ($1, '1120', 'Card clearing', 'asset'),
+              ($1, '1200', 'Accounts Receivable', 'asset'), ($1, '4300', 'Sales', 'revenue')`,
+      [otherBizId],
+    );
+    const otherCustomer = await customersService.createCustomer(otherBizId, { name: "Sara" });
+
+    const key = `tenant:${randomUUID()}`;
+    const intentFor = (businessId: string, locationId: string, customerId: string) => ({
+      businessId,
+      locationId,
+      customerId,
+      method: "cash" as const,
+      amount: 50_000,
+      receiptDate: "2026-10-04",
+      idempotencyKey: key,
+      createdBy: null,
+    });
+    const first = await arService.receivePayment(intentFor(biz.id, biz.locationId, customer.id));
+    const second = await arService.receivePayment(intentFor(otherBizId, otherLoc.rows[0].id, otherCustomer.id));
+    expect(first.duplicate).toBe(false);
+    expect(second.duplicate).toBe(false);
+    expect(second.id).not.toBe(first.id);
+
+    // Each tenant's retry replays its own voucher, never the other's.
+    const replay = await arService.receivePayment(intentFor(biz.id, biz.locationId, customer.id));
+    expect(replay.duplicate).toBe(true);
+    expect(replay.id).toBe(first.id);
+    const counts = await db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM ar_receipts WHERE idempotency_key = $1`, [key]);
+    expect(Number(counts.rows[0].n)).toBe(2);
+  });
+
+  it("rolls everything back when the period lock refuses the posting date", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const year = await db.query<{ id: string }>(
+      `INSERT INTO fiscal_years (business_id, label, starts_on, ends_on)
+       VALUES ($1, 'test-2026', '2026-01-01', '2027-01-01') RETURNING id`,
+      [biz.id],
+    );
+    await db.query(
+      `INSERT INTO fiscal_periods (business_id, fiscal_year_id, label, starts_on, ends_on, status)
+       VALUES ($1, $2, 'locked-october', '2026-10-01', '2026-11-01', 'locked')`,
+      [biz.id, year.rows[0].id],
+    );
+    await expect(
+      arService.receivePayment({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        customerId: customer.id,
+        method: "cash",
+        amount: 100_000,
+        receiptDate: "2026-10-04",
+        idempotencyKey: `locked:${randomUUID()}`,
+        createdBy: user.id,
+      }),
+    ).rejects.toThrow("fiscal_period_locked");
+
+    // The source row, the journal effect and the consumed voucher number all
+    // rolled back together — a retry after reopening starts clean.
+    const leftovers = await db.query<{ receipts: string; entries: string; counters: string }>(
+      `SELECT (SELECT COUNT(*) FROM ar_receipts WHERE business_id = $1)::text AS receipts,
+              (SELECT COUNT(*) FROM journal_entries WHERE business_id = $1)::text AS entries,
+              (SELECT COUNT(*) FROM ar_ap_voucher_counters WHERE business_id = $1)::text AS counters`,
+      [biz.id],
+    );
+    expect(leftovers.rows[0]).toEqual({ receipts: "0", entries: "0", counters: "0" });
+  });
+});
+
+describe("wrong-typed fields fail closed (issue #829 completion)", () => {
+  it("rejects non-string memo/date/account with 400 codes and posts nothing", async () => {
+    const customer = await customersService.createCustomer(biz.id, { name: "Ali" });
+    const base = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "cash" as const,
+      amount: 10_000,
+      idempotencyKey: `types:${randomUUID()}`,
+      createdBy: user.id,
+    };
+    // The routes check first; these prove the service backstop answers the
+    // same controlled codes to internal callers instead of throwing TypeError.
+    await expect(arService.receivePayment({ ...base, memo: 123 as unknown as string })).rejects.toThrow("invalid_memo");
+    await expect(arService.receivePayment({ ...base, receiptDate: 20261004 as unknown as string })).rejects.toThrow("invalid_date");
+    await expect(arService.receivePayment({ ...base, cashAccountId: 123 as unknown as string })).rejects.toThrow("invalid_cash_account");
+    const { resolveVoucherCashAccount } = await import("../src/lib/voucher-cash-account");
+    const client = await dbLib.getPool().connect();
+    try {
+      await expect(resolveVoucherCashAccount(client, biz.id, "cash", 123 as unknown as string)).rejects.toThrow("invalid_cash_account");
+    } finally {
+      client.release();
+    }
+    const leftovers = await db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM ar_receipts WHERE business_id = $1`, [biz.id]);
+    expect(Number(leftovers.rows[0].n)).toBe(0);
+  });
+});

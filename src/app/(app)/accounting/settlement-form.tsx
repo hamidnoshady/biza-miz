@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FilterChip } from "@/app/dashboard/filters";
-import { api, Field, inputClass } from "@/app/dashboard/ui";
+import { api, errorMessage, Field, inputClass } from "@/app/dashboard/ui";
+import type { MoneyApi } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
@@ -41,14 +42,17 @@ import {
  * dialog (after success or cancel) gets a fresh key.
  */
 export function useIdempotencyKey(): string {
-  const [key] = useState(() => {
-    try {
-      return crypto.randomUUID();
-    } catch {
-      return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    }
-  });
+  const [key] = useState(() => newVoucherKey("voucher"));
   return key;
+}
+
+/** A fresh random key, prefixed so a support log shows which surface minted it. */
+export function newVoucherKey(prefix: string): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
 }
 
 export function VoucherMethodPicker({
@@ -194,6 +198,7 @@ export function VoucherFormFields({
   onMemoChange,
   methodLabel,
   dateLabel = "تاریخ (اختیاری)",
+  datePlaceholder,
 }: {
   amount: string;
   onAmountChange: (next: string) => void;
@@ -210,6 +215,7 @@ export function VoucherFormFields({
   onMemoChange: (next: string) => void;
   methodLabel?: string;
   dateLabel?: string;
+  datePlaceholder?: string;
 }) {
   const money = useMoney();
   return (
@@ -239,7 +245,7 @@ export function VoucherFormFields({
         </Field>
       ) : null}
       <Field label={dateLabel}>
-        <JalaliDatePicker value={date} onChange={onDateChange} className={inputClass} ariaLabel="تاریخ" />
+        <JalaliDatePicker value={date} onChange={onDateChange} className={inputClass} ariaLabel="تاریخ" placeholder={datePlaceholder} />
       </Field>
       <Field label="شرح (اختیاری)">
         <input className={inputClass} value={memo} onChange={(e) => onMemoChange(e.target.value)} />
@@ -247,3 +253,101 @@ export function VoucherFormFields({
     </>
   );
 }
+
+/**
+ * The shared voucher submission controller (#829 completion): one validation
+ * and one key discipline for the register dialog and both subledger settle
+ * dialogs. Each dialog keeps its own chrome — the register picks a party,
+ * the settle dialogs show a preselected party and its balance — but the
+ * rules below are the same act with the sides swapped, so they live once.
+ *
+ * Retry-key semantics, deliberately:
+ * - one key per dialog instance (`useIdempotencyKey`), retained across
+ *   retries of the same logical submission — regenerating per attempt would
+ *   mint a new voucher on every retry after an ambiguous failure;
+ * - a corrected field after a failure rotates the A/P intent key (a new
+ *   transfer), while an unchanged retry replays the same key (idempotent);
+ * - a reused key with a *different* fingerprint is rejected by the server
+ *   (409), never silently re-applied — the dialog shows the refusal;
+ * - closing the dialog (success or cancel) drops the keys: the next opening
+ *   is a new logical operation with fresh keys.
+ *
+ * The wire fields stay exactly what the routes already speak —
+ * `idempotencyKey` for A/R, `clientRequestId` for A/P — so the server-side
+ * callers (AI apply, installment settlement, Holoo import) are untouched:
+ * they mint their own stable keys and never render this form.
+ */
+
+/** The typed amount, or the Persian message the dialog shows. */
+export type ValidatedVoucherAmount = { ok: true; rial: number } | { ok: false; error: string };
+
+export function validateVoucherAmount(money: Pick<MoneyApi, "parse">, amount: string): ValidatedVoucherAmount {
+  let rial: number;
+  try {
+    rial = money.parse(amount);
+  } catch {
+    return { ok: false, error: errorMessage("invalid_amount") };
+  }
+  if (rial <= 0) return { ok: false, error: errorMessage("invalid_amount") };
+  return { ok: true, rial };
+}
+
+/**
+ * The retry keys for one dialog instance. A/R takes the stable dialog key;
+ * A/P derives its key from the intended transfer — the caller passes every
+ * submitted field that defines it, and any material edit rotates the key.
+ */
+export function useVoucherSubmission(side: "receipt" | "payment"): {
+  keyFor: (intent: Record<string, unknown>) => { idempotencyKey?: string; clientRequestId?: string };
+} {
+  const idempotencyKey = useIdempotencyKey();
+  const requestKeyRef = useRef<{ intent: string; key: string } | null>(null);
+  return useMemo(
+    () => ({
+      keyFor(intent: Record<string, unknown>) {
+        if (side === "receipt") return { idempotencyKey };
+        const fingerprint = JSON.stringify(intent);
+        if (requestKeyRef.current?.intent !== fingerprint) {
+          requestKeyRef.current = { intent: fingerprint, key: newVoucherKey("ap") };
+        }
+        return { clientRequestId: requestKeyRef.current.key };
+      },
+    }),
+    [side, idempotencyKey],
+  );
+}
+
+export interface VoucherBodyInput {
+  side: "receipt" | "payment";
+  partyId: string;
+  rial: number;
+  method: VoucherMethod;
+  /** "" = the method's default account. */
+  cashAccountId: string;
+  /** Absent for callers without a reference field (the settle dialogs). */
+  bankReference?: string;
+  /** "" = today. */
+  date: string;
+  memo: string;
+  idempotencyKey?: string;
+  clientRequestId?: string;
+}
+
+/**
+ * The POST body both voucher endpoints speak. Empty optionals are omitted
+ * (never sent as ""), so the server's «absent means default» reads hold.
+ */
+export function buildVoucherBody(input: VoucherBodyInput): Record<string, string | number | undefined> {
+  const common = {
+    amount: input.rial,
+    method: input.method,
+    memo: input.memo.trim() || undefined,
+    cashAccountId: input.cashAccountId || undefined,
+    bankReference: input.bankReference?.trim() || undefined,
+  };
+  if (input.side === "receipt") {
+    return { ...common, customerId: input.partyId, receiptDate: input.date || undefined, idempotencyKey: input.idempotencyKey };
+  }
+  return { ...common, supplierId: input.partyId, paymentDate: input.date || undefined, clientRequestId: input.clientRequestId };
+}
+

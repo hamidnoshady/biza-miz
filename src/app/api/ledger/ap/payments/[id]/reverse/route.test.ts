@@ -50,7 +50,7 @@ describe("POST /api/ledger/ap/payments/[id]/reverse", () => {
       paymentId: PAYMENT_ID,
       actorId: "approver-1",
       reversalDate: null,
-      memo: undefined,
+      memo: null,
     });
   });
 
@@ -58,6 +58,18 @@ describe("POST /api/ledger/ap/payments/[id]/reverse", () => {
     const response = await POST(requestWith({ reversalDate: "2025-02-30" }), CONTEXT);
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "invalid_date" });
+    expect(apService.reverseApPayment).not.toHaveBeenCalled();
+  });
+
+  it("answers wrong-typed reversal fields with 400s instead of throwing", async () => {
+    for (const [body, code] of [
+      [{ reversalDate: 20250410 }, "invalid_date"],
+      [{ memo: 123 }, "invalid_memo"],
+    ] as const) {
+      const response = await POST(requestWith(body), CONTEXT);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: code });
+    }
     expect(apService.reverseApPayment).not.toHaveBeenCalled();
   });
 

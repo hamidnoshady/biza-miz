@@ -57,7 +57,7 @@ const DETAIL = {
   customerName: "علی رضایی",
   locationName: "شعبهٔ مرکزی",
   createdByName: "حسابدار",
-  createdAt: "2026-10-01T09:30:00.000Z",
+  createdAt: "2026-10-01T20:45:00.000Z",
   entryId: ENTRY_ID,
   reversedAt: null,
   reversalEntryId: null,
@@ -80,7 +80,7 @@ const CHART = {
  * (branches + chart) while the list and directory stay healthy, so a test can
  * fail the panel alone; every call's URL is recorded on the mock.
  */
-function serve(options: { breakOptions?: boolean; truncated?: string | null } = {}) {
+function serve(options: { breakOptions?: boolean; csvStatus?: number } = {}) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     const json = (body: unknown, status = 200) =>
@@ -98,9 +98,10 @@ function serve(options: { breakOptions?: boolean; truncated?: string | null } = 
     }
     if (url.includes("/api/ledger/ar/receipts")) {
       if (url.includes("format=csv")) {
-        const headers: Record<string, string> = { "Content-Type": "text/csv" };
-        if (options.truncated) headers["X-Voucher-Export-Truncated"] = options.truncated;
-        return new Response("col\nrow\n", { status: 200, headers });
+        const status = options.csvStatus ?? 200;
+        return status === 200
+          ? new Response("col\nrow\n", { status, headers: { "Content-Type": "text/csv" } })
+          : new Response(JSON.stringify({ error: "server_error" }), { status, headers: { "Content-Type": "application/json" } });
       }
       return json({ receipts: [ROW], hasMore: false, nextCursor: null });
     }
@@ -140,6 +141,173 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+/**
+ * Overlapping requests, answered in a controlled order. `serve()` answers
+ * every fetch immediately, which can never reproduce a slow listing overlapped
+ * by a fast filter change; here the *list* responses stay pending until the
+ * test resolves them, while the ancillary endpoints (directory, branches,
+ * chart) answer at once. Each test names which answer wins and which rows
+ * must never appear.
+ */
+interface DeferredListCall {
+  url: string;
+  resolve: (body: unknown) => void;
+}
+
+function serveDeferred(): { listCalls: DeferredListCall[] } {
+  const listCalls: DeferredListCall[] = [];
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+    if (/\/api\/ledger\/a[pr]\/(receipts|payments)(\?|$)/.test(url) && !url.includes("format=csv")) {
+      return new Promise<Response>((resolve) => {
+        listCalls.push({ url, resolve: (body) => resolve(json(body)) });
+      });
+    }
+    if (url.includes("/api/ledger/ar/customers")) return Promise.resolve(json(DIRECTORY));
+    if (url.includes("/api/ledger/ap/suppliers")) return Promise.resolve(json(SUPPLIERS));
+    if (url.includes("/api/ledger/entries/filters")) return Promise.resolve(json(FILTER_OPTIONS));
+    if (url.includes("/api/ledger/accounts")) return Promise.resolve(json(CHART));
+    return Promise.resolve(json({}));
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return { listCalls };
+}
+
+let deferredRowSeq = 0;
+function deferredRow(partyName: string, method: "cash" | "bank" = "bank") {
+  deferredRowSeq += 1;
+  return {
+    id: `00000000-0000-4000-8000-${String(deferredRowSeq).padStart(12, "0")}`,
+    date: "2026-10-01",
+    method,
+    amount: 1000000,
+    memo: null,
+    partyName,
+    voucherNumber: deferredRowSeq,
+    reversedAt: null,
+    bankReference: null,
+    cashAccount: null,
+    locationName: null,
+  };
+}
+
+function listQuery(call: DeferredListCall): URLSearchParams {
+  return new URL(call.url, "http://localhost").searchParams;
+}
+
+describe("capability gating", () => {
+  it("hides every write and correction action from a ledger-only viewer", async () => {
+    // No capability props at all: the contract fails closed, so an unwired
+    // caller (or unreadable permissions) shows no action the API would 403.
+    serve();
+    render(
+      <MoneyProvider unit="rial">
+        <ReceiptsPaymentsSection />
+      </MoneyProvider>,
+    );
+    await screen.findAllByText("علی رضایی");
+    expect(screen.queryByRole("button", { name: "ثبت دریافت" })).toBeNull();
+
+    // The payments stream hides its register and row-reversal actions too.
+    fireEvent.click(screen.getByRole("button", { name: "پرداختی" }));
+    await screen.findByText("هنوز سندی برای پرداخت ثبت نشده است.");
+    expect(screen.queryByRole("button", { name: "ثبت پرداخت" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "برگشت پرداخت" })).toBeNull();
+  });
+});
+
+describe("overlapping list requests", () => {
+  it("refuses to page once the filters moved off the cursor's query", async () => {
+    const { listCalls } = serveDeferred();
+    renderRegister();
+    await waitFor(() => expect(listCalls).toHaveLength(1));
+    listCalls[0].resolve({ receipts: [deferredRow("حساب کهنه")], hasMore: true, nextCursor: "C1" });
+    await screen.findAllByText("حساب کهنه");
+
+    // The method chip lists immediately, but its answer is still in flight —
+    // the cursor on screen belongs to the unfiltered query.
+    fireEvent.click(screen.getByRole("button", { name: "نقدی" }));
+    await waitFor(() => expect(listCalls).toHaveLength(2));
+    expect(listQuery(listCalls[1]).get("method")).toBe("cash");
+    expect(listQuery(listCalls[1]).get("cursor")).toBeNull();
+
+    // Paging now would ask for the filtered query past the unfiltered
+    // cursor — another dataset's rows appended to this one. The click must
+    // not fire a request at all; the fresh listing resets the page instead.
+    fireEvent.click(screen.getByRole("button", { name: "نمایش بیشتر" }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(listCalls).toHaveLength(2);
+
+    listCalls[1].resolve({ receipts: [deferredRow("حساب تازه", "cash")], hasMore: false, nextCursor: null });
+    await screen.findAllByText("حساب تازه");
+    expect(screen.queryAllByText("حساب کهنه")).toHaveLength(0);
+  });
+
+  it("appends the next page while the query is unchanged", async () => {
+    const { listCalls } = serveDeferred();
+    renderRegister();
+    await waitFor(() => expect(listCalls).toHaveLength(1));
+    listCalls[0].resolve({ receipts: [deferredRow("صفحه یک")], hasMore: true, nextCursor: "C1" });
+    await screen.findAllByText("صفحه یک");
+
+    fireEvent.click(screen.getByRole("button", { name: "نمایش بیشتر" }));
+    await waitFor(() => expect(listCalls).toHaveLength(2));
+    expect(listQuery(listCalls[1]).get("cursor")).toBe("C1");
+    expect(screen.queryByRole("button", { name: "در حال بارگذاری…" })).not.toBeNull();
+
+    listCalls[1].resolve({ receipts: [deferredRow("صفحه دو")], hasMore: false, nextCursor: null });
+    await screen.findAllByText("صفحه دو");
+    expect(screen.queryAllByText("صفحه یک").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "نمایش بیشتر" })).toBeNull();
+  });
+
+  it("never lets a superseded listing overwrite the newer answer", async () => {
+    const { listCalls } = serveDeferred();
+    renderRegister();
+    await waitFor(() => expect(listCalls).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "نقدی" }));
+    await waitFor(() => expect(listCalls).toHaveLength(2));
+
+    // The newer answer lands first, then the stale one — the screen keeps
+    // the newer rows.
+    listCalls[1].resolve({ receipts: [deferredRow("ردیف تازه", "cash")], hasMore: false, nextCursor: null });
+    await screen.findAllByText("ردیف تازه");
+    listCalls[0].resolve({ receipts: [deferredRow("ردیف کهنه")], hasMore: false, nextCursor: null });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryAllByText("ردیف تازه").length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("ردیف کهنه")).toHaveLength(0);
+  });
+
+  it("drops a superseded «نمایش بیشتر» without appending and without wedging the button", async () => {
+    const { listCalls } = serveDeferred();
+    renderRegister();
+    await waitFor(() => expect(listCalls).toHaveLength(1));
+    listCalls[0].resolve({ receipts: [deferredRow("ردیف یک")], hasMore: true, nextCursor: "C1" });
+    await screen.findAllByText("ردیف یک");
+
+    fireEvent.click(screen.getByRole("button", { name: "نمایش بیشتر" }));
+    await waitFor(() => expect(listCalls).toHaveLength(2));
+    // A filter change supersedes the in-flight page…
+    fireEvent.click(screen.getByRole("button", { name: "نقدی" }));
+    await waitFor(() => expect(listCalls).toHaveLength(3));
+
+    listCalls[2].resolve({ receipts: [deferredRow("ردیف دو", "cash")], hasMore: true, nextCursor: "C2" });
+    await screen.findAllByText("ردیف دو");
+    expect(screen.queryAllByText("ردیف یک")).toHaveLength(0);
+
+    // …so when the stale page finally lands, its rows are discarded — and
+    // the button is back to «نمایش بیشتر», not wedged on «در حال بارگذاری…».
+    listCalls[1].resolve({ receipts: [deferredRow("ردیف بیگانه")], hasMore: false, nextCursor: null });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryAllByText("ردیف بیگانه")).toHaveLength(0);
+    expect(screen.queryAllByText("ردیف دو").length).toBeGreaterThan(0);
+    const more = screen.getByRole("button", { name: "نمایش بیشتر" });
+    expect(disabled(more)).toBe(false);
+  });
 });
 
 describe("the «فیلترهای بیشتر» panel", () => {
@@ -248,8 +416,8 @@ describe("the CSV export", () => {
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
   });
 
-  it("exports the filtered query, not the visible page, and warns when the server truncates", async () => {
-    const fetchMock = serve({ truncated: "5000" });
+  it("exports the filtered query, not the visible page", async () => {
+    const fetchMock = serve();
     renderRegister();
     await screen.findAllByText("علی رضایی");
 
@@ -264,21 +432,20 @@ describe("the CSV export", () => {
       expect(csv).toContain(`partyId=${CUSTOMER_ID}`);
     });
     expect(HTMLAnchorElement.prototype.click).toHaveBeenCalled();
-    // The truncation header reaches the screen: a silently cut file
-    // reconciled as complete is worse than no file.
-    expect((await screen.findByRole("status")).textContent).toContain("۵۰۰۰");
   });
 
-  it("stays silent when the export is complete", async () => {
-    serve();
+  it("shows a failed export as an error instead of downloading nothing", async () => {
+    serve({ csvStatus: 500 });
     renderRegister();
     await screen.findAllByText("علی رضایی");
 
     fireEvent.click(screen.getByRole("button", { name: "دانلود" }));
+    // A silently short file reconciled as complete is worse than no file —
+    // the failure lands in the error box and no download is triggered.
     await waitFor(() => {
-      expect(HTMLAnchorElement.prototype.click).toHaveBeenCalled();
+      expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
     });
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(document.querySelector('[role="alert"]')?.textContent ?? "").not.toBe("");
   });
 });
 
@@ -301,6 +468,19 @@ describe("the drill-down", () => {
     expect(entryLinks[0].getAttribute("href")).toContain("/accounting/entries");
     // …and the settlement account shows its code, not just its name.
     expect(screen.queryByText("۱۱۰۰ صندوق")).not.toBeNull();
+  });
+
+  it("shows the creation timestamp in business-local Shamsi, separate from the accounting date", async () => {
+    serve();
+    renderRegister();
+    const cells = await screen.findAllByText("علی رضایی");
+    const desktopRow = cells.map((cell) => cell.closest("tr")).find(Boolean);
+    fireEvent.click(desktopRow!);
+    await screen.findByText("جزئیات دریافت");
+    // The voucher is dated Mehr 9, but it was recorded at 00:15 Tehran time on
+    // Mehr 10 — the audit timestamp follows the creation instant, not the date.
+    expect(screen.queryByText("۱۴۰۵/۰۷/۱۰ ۰۰:۱۵")).not.toBeNull();
+    expect(screen.queryByText("زمان ثبت")).not.toBeNull();
   });
 
   it("opens from the mobile card with the keyboard", async () => {

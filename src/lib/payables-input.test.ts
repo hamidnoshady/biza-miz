@@ -14,6 +14,7 @@ import {
   voucherAccountChoices,
   voucherDefaultAccountCode,
   voucherMethodForRole,
+  optionalBodyText,
 } from "./payables-input";
 
 function codeOf(fn: () => unknown): string {
@@ -213,5 +214,18 @@ describe("supplierReturnVatReversal", () => {
   it("a full return reverses the whole VAT, and never more than is left", () => {
     expect(supplierReturnVatReversal({ ...base, returnedGoods: 1_000_000 })).toBe(100_000n);
     expect(supplierReturnVatReversal({ ...base, priorReturnedGoods: 1_000_000, priorReversedVat: 100_000, returnedGoods: 0 })).toBe(0n);
+  });
+});
+
+describe("optionalBodyText", () => {
+  it("trims text, folds blanks and absence to null, and flags wrong types", () => {
+    expect(optionalBodyText(" 1404-777 ")).toBe("1404-777");
+    expect(optionalBodyText("   ")).toBeNull();
+    expect(optionalBodyText(undefined)).toBeNull();
+    expect(optionalBodyText(null)).toBeNull();
+    expect(optionalBodyText(123)).toBeUndefined();
+    expect(optionalBodyText(true)).toBeUndefined();
+    expect(optionalBodyText({})).toBeUndefined();
+    expect(optionalBodyText(["x"])).toBeUndefined();
   });
 });

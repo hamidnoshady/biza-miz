@@ -590,7 +590,7 @@ describe("receipt/payment voucher account and bank reference", () => {
     expect((await installments.listReceiptsPage(biz.id, { q: "777" })).rows).toHaveLength(1);
   });
 
-  it("without a choice the method's default account takes it, exactly as before", async () => {
+  it("without a choice the method's default account takes it, and the read shows the posted account", async () => {
     const receipt = await arService.receivePayment({
       idempotencyKey: randomUUID(),
       businessId: biz.id,
@@ -606,7 +606,12 @@ describe("receipt/payment voucher account and bank reference", () => {
       { code: "1100", debit: 40_000, credit: 0 },
       { code: "1200", debit: 0, credit: 40_000 },
     ]);
-    expect((await installments.listReceiptsPage(biz.id, {})).rows[0].cashAccount).toBeNull();
+    // No choice stored — but the read resolves the posted account from the
+    // entry (#829 completion), so the register names 1100 instead of a dash.
+    expect((await installments.listReceiptsPage(biz.id, {})).rows[0].cashAccount).toEqual({
+      code: "1100",
+      name: "صندوق",
+    });
   });
 
   it("refuses an account that is not a cash/bank account of the method, or belongs to another business", async () => {
@@ -670,7 +675,11 @@ describe("receipt/payment voucher account and bank reference", () => {
       { code: "1110", debit: 90_000, credit: 0 },
       { code: "1200", debit: 0, credit: 90_000 },
     ]);
-    expect((await installments.listReceiptsPage(biz.id, {})).rows[0].cashAccount).toBeNull();
+    // The read resolves the posted account from the entry (#829 completion).
+    expect((await installments.listReceiptsPage(biz.id, {})).rows[0].cashAccount).toEqual({
+      code: "1110",
+      name: "بانک",
+    });
   });
 
   it("a clearing voucher posts to 1120 and only takes clearing accounts (issue #829)", async () => {

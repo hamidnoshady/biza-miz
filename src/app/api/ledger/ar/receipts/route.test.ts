@@ -5,6 +5,7 @@ import * as auth from "@/lib/auth";
 import * as setupState from "@/lib/setup-state";
 import * as arService from "@/lib/ar-service";
 import * as installmentService from "@/lib/installments-service";
+import * as settings from "@/lib/settings";
 import { GET, POST } from "./route";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -21,7 +22,11 @@ vi.mock("@/lib/ar-service", async (importOriginal) => {
 });
 vi.mock("@/lib/installments-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/installments-service")>();
-  return { ...actual, listReceiptsPage: vi.fn(), listReceiptsForExport: vi.fn() };
+  return { ...actual, listReceiptsPage: vi.fn(), iterateReceiptsForExport: vi.fn() };
+});
+vi.mock("@/lib/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/settings")>();
+  return { ...actual, getSetting: vi.fn() };
 });
 
 const SESSION = { businessId: "biz-1", sub: "user-1" };
@@ -65,7 +70,8 @@ beforeEach(() => {
   vi.mocked(setupState.resolveActiveLocation).mockResolvedValue({ id: "loc-1" } as never);
   vi.mocked(arService.receivePayment).mockResolvedValue({ id: "receipt-1", duplicate: false } as never);
   vi.mocked(installmentService.listReceiptsPage).mockResolvedValue({ rows: [], nextCursor: null, hasMore: false } as never);
-  vi.mocked(installmentService.listReceiptsForExport).mockResolvedValue({ rows: [], truncated: false } as never);
+  vi.mocked(installmentService.iterateReceiptsForExport).mockReturnValue((async function* () {})() as never);
+  vi.mocked(settings.getSetting).mockResolvedValue({ currencyDisplay: "rial" } as never);
 });
 
 describe("POST /api/ledger/ar/receipts", () => {
@@ -112,6 +118,27 @@ describe("POST /api/ledger/ar/receipts", () => {
     }));
   });
 
+  it("answers wrong-typed JSON fields with 400s instead of throwing", async () => {
+    const valid = { customerId: CUSTOMER_ID, method: "cash", amount: 100, idempotencyKey: "request-1" };
+    const cases: [Record<string, unknown>, string][] = [
+      [{ customerId: 123 }, "customer_required"],
+      [{ idempotencyKey: 456 }, "idempotency_key_required"],
+      [{ amount: true }, "invalid_amount"],
+      [{ amount: [100] }, "invalid_amount"],
+      [{ amount: { rial: 100 } }, "invalid_amount"],
+      [{ receiptDate: 20261004 }, "invalid_date"],
+      [{ memo: 123 }, "invalid_memo"],
+      [{ cashAccountId: 123 }, "invalid_cash_account"],
+      [{ bankReference: 123 }, "invalid_bank_reference"],
+    ];
+    for (const [override, code] of cases) {
+      const response = await POST(postRequest({ ...valid, ...override }));
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: code });
+    }
+    expect(arService.receivePayment).not.toHaveBeenCalled();
+  });
+
   it("returns 200 for a matching retried receipt", async () => {
     vi.mocked(arService.receivePayment).mockResolvedValue({ id: "receipt-1", duplicate: true } as never);
     const response = await POST(postRequest({
@@ -131,30 +158,54 @@ it("keeps GET read-only under ledger.view", async () => {
   expect(installmentService.listReceiptsPage).toHaveBeenCalledWith("biz-1", expect.objectContaining({ q: "acme" }));
 });
 
-it("exports the filtered set as CSV and names a truncation", async () => {
-  vi.mocked(installmentService.listReceiptsForExport).mockResolvedValue({
-    rows: [receiptRow()],
-    truncated: true,
-  } as never);
+it("streams the whole filtered set as CSV, in the business's display unit", async () => {
+  const second = receiptRow({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", voucherNumber: 2 });
+  vi.mocked(installmentService.iterateReceiptsForExport).mockReturnValue(
+    (async function* () {
+      yield [receiptRow()];
+      yield [second];
+    })() as never,
+  );
   const response = await GET(getRequest("http://localhost/api/ledger/ar/receipts?format=csv&status=active"));
   expect(response.status).toBe(200);
   expect(response.headers.get("Content-Type")).toBe("text/csv; charset=utf-8");
-  expect(response.headers.get("X-Voucher-Export-Truncated")).toBe("20000");
+  expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="receipts.csv"');
+  expect(response.headers.get("X-Voucher-Export-Truncated")).toBeNull();
   expect(installmentService.listReceiptsPage).not.toHaveBeenCalled();
-  expect(installmentService.listReceiptsForExport).toHaveBeenCalledWith("biz-1", expect.objectContaining({ status: "active" }));
+  expect(installmentService.iterateReceiptsForExport).toHaveBeenCalledWith("biz-1", expect.objectContaining({ status: "active" }));
   const csv = await response.text();
   expect(csv).toContain("مبلغ (ریال)");
   expect(csv).toContain(",100000,");
+  // Both chunks made the file — the export is complete, not a first page.
+  expect(csv).toContain("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  expect(csv).toContain("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
 });
 
-it("omits the truncation header when the export is complete", async () => {
-  vi.mocked(installmentService.listReceiptsForExport).mockResolvedValue({
-    rows: [receiptRow()],
-    truncated: false,
-  } as never);
+it("labels and converts the amount column for a Toman business", async () => {
+  vi.mocked(settings.getSetting).mockResolvedValue({ currencyDisplay: "toman" } as never);
+  vi.mocked(installmentService.iterateReceiptsForExport).mockReturnValue(
+    (async function* () {
+      yield [receiptRow({ amount: 1_234_560 })];
+    })() as never,
+  );
   const response = await GET(getRequest("http://localhost/api/ledger/ar/receipts?format=csv"));
   expect(response.status).toBe(200);
-  expect(response.headers.get("X-Voucher-Export-Truncated")).toBeNull();
+  const csv = await response.text();
+  expect(csv).toContain("مبلغ (تومان)");
+  expect(csv).toContain(",123456,");
+});
+
+it("answers 400 JSON for an invalid export filter instead of a broken stream", async () => {
+  const { VoucherListError } = await import("@/lib/installments-service");
+  vi.mocked(installmentService.iterateReceiptsForExport).mockReturnValue(
+    (async function* () {
+      throw new VoucherListError("invalid_status");
+      yield [];
+    })() as never,
+  );
+  const response = await GET(getRequest("http://localhost/api/ledger/ar/receipts?format=csv&status=bogus"));
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: "invalid_status" });
 });
 
 it("does not reach receipt writes when the permission gate denies access", async () => {

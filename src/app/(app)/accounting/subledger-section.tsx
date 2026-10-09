@@ -32,7 +32,7 @@
  * buckets, the overlays — is here, once.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
@@ -56,9 +56,8 @@ import {
 } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableBody, DataTableFoot, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { FilterChip } from "@/app/dashboard/filters";
-import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { LedgerLoadFailed, OverlayDialog } from "./ledger-ui";
-import { CashAccountPicker, VoucherMethodPicker, useIdempotencyKey } from "./settlement-form";
+import { buildVoucherBody, useVoucherSubmission, validateVoucherAmount, VoucherFormFields } from "./settlement-form";
 import type { VoucherMethod } from "@/lib/payables-input";
 import { accountingSectionHref } from "./accounting-routes";
 
@@ -678,61 +677,49 @@ function SubledgerSettleDialog({
   const [memo, setMemo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const idempotencyKey = useIdempotencyKey();
-  const requestKeyRef = useRef<{ intent: string; key: string } | null>(null);
+  const voucherSide = side.settle.idField === "supplierId" ? "payment" : "receipt";
+  const submission = useVoucherSubmission(voucherSide);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    let rial: number;
-    try {
-      rial = money.parse(amount);
-    } catch {
-      setError(errorMessage("invalid_amount"));
-      return;
-    }
-    if (rial <= 0) {
-      setError(errorMessage("invalid_amount"));
+    const parsed = validateVoucherAmount(money, amount);
+    if (!parsed.ok) {
+      setError(parsed.error);
       return;
     }
     setBusy(true);
     setError("");
-    const memoValue = memo.trim() || undefined;
-    let clientRequestId: string | undefined;
-    if (side.settle.idField === "supplierId") {
-      const intent = JSON.stringify({ supplierId: party.id, amount: rial, method, paymentDate: settleDate || null, memo: memoValue ?? null, cashAccountId: cashAccountId || null });
-      if (requestKeyRef.current?.intent !== intent) {
-        const key = globalThis.crypto?.randomUUID?.() ?? `ap-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        requestKeyRef.current = { intent, key };
-      }
-      clientRequestId = requestKeyRef.current.key;
-    }
+    const keys = submission.keyFor({
+      partyId: party.id,
+      amount: parsed.rial,
+      method,
+      date: settleDate || null,
+      memo: memo.trim() || null,
+      cashAccountId: cashAccountId || null,
+    });
     /*
      * The dialog posts for itself and shows the failure *here*. Routing it
      * through the workspace-level `run` would put the ErrorBox behind this
      * overlay's scrim — a refused settlement (a locked fiscal period, a
      * missing ledger account) would leave a busy-looking dialog and an error
-     * nobody could see.
+     * nobody could see. (`api()` resolves network failures as
+     * `network_error`, never rejects, so there is no try/catch to write.)
      */
-    let result: { ok: boolean; data: { error?: string } };
-    try {
-      result = await api(side.settle.endpoint, {
-        method: "POST",
-        body: JSON.stringify({
-          [side.settle.idField]: party.id,
-          amount: rial,
+    const result = await api<{ error?: string }>(side.settle.endpoint, {
+      method: "POST",
+      body: JSON.stringify(
+        buildVoucherBody({
+          side: voucherSide,
+          partyId: party.id,
+          rial: parsed.rial,
           method,
-          cashAccountId: cashAccountId || undefined,
-          ...(side.settle.idField === "supplierId" ? {} : { idempotencyKey }),
-          [side.settle.dateField]: settleDate || undefined,
-          memo: memoValue,
-          ...(clientRequestId ? { clientRequestId } : {}),
+          cashAccountId,
+          date: settleDate,
+          memo,
+          ...keys,
         }),
-      });
-    } catch {
-      setBusy(false);
-      setError("ارتباط با سرور برقرار نشد؛ دوباره تلاش کنید.");
-      return;
-    }
+      ),
+    });
     setBusy(false);
     if (!result.ok) {
       setError(errorMessage(result.data.error));
@@ -760,19 +747,24 @@ function SubledgerSettleDialog({
           {party.balance < 0 && side.negativeBalanceMessage ? <p className="mt-2 rounded-lg border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">{side.negativeBalanceMessage}</p> : null}
         </header>
         <ErrorBox>{error}</ErrorBox>
-        <Field label={`مبلغ (${money.unitLabel})`}>
-          <PersianNumberInput className={inputClass} dir="ltr" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="۰" />
-        </Field>
-        {/* Shared with the «دریافت و پرداخت» voucher form: same three methods,
-            same optional cash account, same idempotency key. */}
-        <VoucherMethodPicker value={method} onChange={chooseMethod} label={side.settle.methodLabel} />
-        <CashAccountPicker value={cashAccountId} onChange={setCashAccountId} method={method} />
-        <Field label={side.settle.dateLabel}>
-          <JalaliDatePicker value={settleDate} onChange={setSettleDate} placeholder="امروز" />
-        </Field>
-        <Field label="شرح (اختیاری)">
-          <input className={inputClass} value={memo} onChange={(e) => setMemo(e.target.value)} />
-        </Field>
+        {/* One form with the «دریافت و پرداخت» voucher dialog: same fields,
+            same validation, same retry keys — only the party is preselected
+            and the labels carry this side's words. */}
+        <VoucherFormFields
+          amount={amount}
+          onAmountChange={setAmount}
+          method={method}
+          onMethodChange={chooseMethod}
+          cashAccountId={cashAccountId}
+          onCashAccountChange={setCashAccountId}
+          date={settleDate}
+          onDateChange={setSettleDate}
+          memo={memo}
+          onMemoChange={setMemo}
+          methodLabel={side.settle.methodLabel}
+          dateLabel={side.settle.dateLabel}
+          datePlaceholder="امروز"
+        />
         <div className="mt-5 grid grid-cols-2 gap-3">
           <SecondaryButton onClick={onClose} disabled={busy}>
             انصراف

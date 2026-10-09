@@ -3,13 +3,12 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { ApError, MissingLedgerAccountError, payBill } from "@/lib/ap-service";
-import { listPaymentsForExport, listPaymentsPage, VoucherListError } from "@/lib/installments-service";
+import { iteratePaymentsForExport, listPaymentsPage, VoucherListError } from "@/lib/installments-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
-import { rowsToCsv } from "@/lib/report-export";
-import { buildPaymentsExportTable, voucherExportFilename } from "@/lib/voucher-export";
-import { VOUCHER_EXPORT_ROW_CAP } from "@/lib/voucher-shared";
-import { isVoucherMethod, PayablesInputError, VOUCHER_METHODS } from "@/lib/payables-input";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import { streamVoucherExportCsv, voucherExportFilename } from "@/lib/voucher-export";
+import { isVoucherMethod, optionalBodyText, PayablesInputError, VOUCHER_METHODS } from "@/lib/payables-input";
 
 /**
  * The «پرداخت‌ها» ledger slice — payment vouchers, newest first, keyset-
@@ -42,22 +41,34 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const limit = limitRaw === null || limitRaw === "" ? undefined : Number(limitRaw);
   const cursor = params.get("cursor") ?? undefined;
 
-  // CSV export honors the same filters but ignores the cursor: it is the full
-  // filtered set (bounded, not the visible page) through the shared codec, so
-  // the file matches the journal export's conventions.
+  // CSV export honors the same filters but ignores the cursor: it is the
+  // full filtered set (not the visible page), streamed chunk by chunk so a
+  // long history never sits whole in memory, through the shared codec. The
+  // first chunk is pulled eagerly so an invalid filter still answers 400
+  // JSON instead of a 200 whose body starts mid-error.
   if (params.get("format") === "csv") {
     try {
-      const { rows, truncated } = await listPaymentsForExport(session.businessId, filters);
-      const response = new NextResponse(rowsToCsv(buildPaymentsExportTable(rows)), {
-        headers: {
-          "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": `attachment; filename="${voucherExportFilename("payments")}"`,
+      const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(session.businessId, SETTING_KEYS.businessPrefs);
+      const unit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
+      const rest = iteratePaymentsForExport(session.businessId, filters);
+      const first = await rest.next();
+      return new NextResponse(
+        streamVoucherExportCsv({
+          businessId: session.businessId,
+          locationId: session.locationId ?? null,
+          userId: session.sub ?? null,
+          unit,
+          kind: "payments",
+          firstChunk: first.done ? [] : first.value,
+          rest,
+        }),
+        {
+          headers: {
+            "Content-Type": "text/csv; charset=utf-8",
+            "Content-Disposition": `attachment; filename="${voucherExportFilename("payments")}"`,
+          },
         },
-      });
-      // A truncated export is a fact the operator has to know before they
-      // reconcile against it; the header is read by the screen, which says so.
-      if (truncated) response.headers.set("X-Voucher-Export-Truncated", String(VOUCHER_EXPORT_ROW_CAP));
-      return response;
+      );
     } catch (err) {
       if (err instanceof VoucherListError) return NextResponse.json({ error: err.message }, { status: err.status });
       throw err;
@@ -98,24 +109,42 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
-  const supplierId = body.supplierId?.trim();
+  // Every body field is type-checked before it is touched: a wrong-typed
+  // value (a number id, a boolean amount) is a controlled 400, never a
+  // `.trim()` TypeError or a silently coerced meaning (`Number(true) === 1`).
+  const supplierId = optionalBodyText(body.supplierId) ?? "";
   if (!supplierId) return NextResponse.json({ error: "supplier_required" }, { status: 400 });
-  const clientRequestId = body.clientRequestId?.trim();
+  const clientRequestId = optionalBodyText(body.clientRequestId) ?? "";
   if (!clientRequestId || clientRequestId.length > 200) {
     return NextResponse.json({ error: "idempotency_key_required" }, { status: 400 });
   }
   if (!isVoucherMethod(body.method)) {
     return NextResponse.json({ error: "invalid_method", allowed: [...VOUCHER_METHODS] }, { status: 400 });
   }
-  const amount = Number(body.amount);
+  const amount = typeof body.amount === "number" || typeof body.amount === "string" ? Number(body.amount) : NaN;
   if (!Number.isSafeInteger(amount) || amount <= 0) {
     return NextResponse.json({ error: "invalid_amount" }, { status: 400 });
   }
   // Same guard as the receipts route: an unparseable or impossible date must
   // be a 400 here, not Postgres's datetime error surfacing as a 500.
-  const paymentDate = body.paymentDate?.trim() || null;
+  const paymentDate = optionalBodyText(body.paymentDate);
+  if (paymentDate === undefined) {
+    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
   if (paymentDate && !isValidIsoDate(paymentDate)) {
     return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
+  const memo = optionalBodyText(body.memo);
+  if (memo === undefined) {
+    return NextResponse.json({ error: "invalid_memo" }, { status: 400 });
+  }
+  const cashAccountId = optionalBodyText(body.cashAccountId);
+  if (cashAccountId === undefined) {
+    return NextResponse.json({ error: "invalid_cash_account" }, { status: 400 });
+  }
+  const bankReference = optionalBodyText(body.bankReference);
+  if (bankReference === undefined) {
+    return NextResponse.json({ error: "invalid_bank_reference" }, { status: 400 });
   }
 
   const location = await resolveActiveLocation(session);
@@ -128,11 +157,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       method: body.method,
       amount,
       paymentDate,
-      memo: body.memo,
+      memo,
       clientRequestId,
       createdBy: session.sub,
-      cashAccountId: typeof body.cashAccountId === "string" ? body.cashAccountId : null,
-      bankReference: typeof body.bankReference === "string" ? body.bankReference : null,
+      cashAccountId,
+      bankReference,
     });
     return NextResponse.json({ payment }, { status: payment.duplicate ? 200 : 201 });
   } catch (err) {

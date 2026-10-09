@@ -3,13 +3,12 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { ArError, MissingLedgerAccountError, receivePayment } from "@/lib/ar-service";
-import { listReceiptsForExport, listReceiptsPage, VoucherListError } from "@/lib/installments-service";
+import { iterateReceiptsForExport, listReceiptsPage, VoucherListError } from "@/lib/installments-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 import { isValidIsoDate } from "@/lib/iso-date";
-import { rowsToCsv } from "@/lib/report-export";
-import { buildReceiptsExportTable, voucherExportFilename } from "@/lib/voucher-export";
-import { VOUCHER_EXPORT_ROW_CAP } from "@/lib/voucher-shared";
-import { isVoucherMethod, PayablesInputError, VOUCHER_METHODS } from "@/lib/payables-input";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import { streamVoucherExportCsv, voucherExportFilename } from "@/lib/voucher-export";
+import { isVoucherMethod, optionalBodyText, PayablesInputError, VOUCHER_METHODS } from "@/lib/payables-input";
 
 /**
  * The «دریافت‌ها» ledger slice — receipt vouchers, newest first, keyset-
@@ -17,7 +16,7 @@ import { isVoucherMethod, PayablesInputError, VOUCHER_METHODS } from "@/lib/paya
  * history; callers now page with `limit` + `cursor` and filter with
  * `q/dateFrom/dateTo/method/partyId/locationId/cashAccountId/
  * minAmount/maxAmount/status`. `?format=csv` exports the filtered set
- * (formula-safe, capped) instead of a page.
+ * (formula-safe, streamed whole, in the business's display unit) instead of a page.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
@@ -45,22 +44,34 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const limit = limitRaw === null || limitRaw === "" ? undefined : Number(limitRaw);
   const cursor = params.get("cursor") ?? undefined;
 
-  // CSV export honors the same filters but ignores the cursor: it is the full
-  // filtered set (bounded, not the visible page) through the shared codec, so
-  // the file matches the journal export's conventions.
+  // CSV export honors the same filters but ignores the cursor: it is the
+  // full filtered set (not the visible page), streamed chunk by chunk so a
+  // long history never sits whole in memory, through the shared codec. The
+  // first chunk is pulled eagerly so an invalid filter still answers 400
+  // JSON instead of a 200 whose body starts mid-error.
   if (params.get("format") === "csv") {
     try {
-      const { rows, truncated } = await listReceiptsForExport(session.businessId, filters);
-      const response = new NextResponse(rowsToCsv(buildReceiptsExportTable(rows)), {
-        headers: {
-          "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": `attachment; filename="${voucherExportFilename("receipts")}"`,
+      const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(session.businessId, SETTING_KEYS.businessPrefs);
+      const unit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
+      const rest = iterateReceiptsForExport(session.businessId, filters);
+      const first = await rest.next();
+      return new NextResponse(
+        streamVoucherExportCsv({
+          businessId: session.businessId,
+          locationId: session.locationId ?? null,
+          userId: session.sub ?? null,
+          unit,
+          kind: "receipts",
+          firstChunk: first.done ? [] : first.value,
+          rest,
+        }),
+        {
+          headers: {
+            "Content-Type": "text/csv; charset=utf-8",
+            "Content-Disposition": `attachment; filename="${voucherExportFilename("receipts")}"`,
+          },
         },
-      });
-      // A truncated export is a fact the operator has to know before they
-      // reconcile against it; the header is read by the screen, which says so.
-      if (truncated) response.headers.set("X-Voucher-Export-Truncated", String(VOUCHER_EXPORT_ROW_CAP));
-      return response;
+      );
     } catch (err) {
       if (err instanceof VoucherListError) return NextResponse.json({ error: err.message }, { status: err.status });
       throw err;
@@ -102,25 +113,43 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
-  const customerId = body.customerId?.trim();
+  // Every body field is type-checked before it is touched: a wrong-typed
+  // value (a number id, a boolean amount) is a controlled 400, never a
+  // `.trim()` TypeError or a silently coerced meaning (`Number(true) === 1`).
+  const customerId = optionalBodyText(body.customerId) ?? "";
   if (!customerId) return NextResponse.json({ error: "customer_required" }, { status: 400 });
-  const idempotencyKey = body.idempotencyKey?.trim();
+  const idempotencyKey = optionalBodyText(body.idempotencyKey) ?? "";
   if (!idempotencyKey || idempotencyKey.length > 128) {
     return NextResponse.json({ error: "idempotency_key_required" }, { status: 400 });
   }
   if (!isVoucherMethod(body.method)) {
     return NextResponse.json({ error: "invalid_method", allowed: [...VOUCHER_METHODS] }, { status: 400 });
   }
-  const amount = Number(body.amount);
+  const amount = typeof body.amount === "number" || typeof body.amount === "string" ? Number(body.amount) : NaN;
   if (!Number.isSafeInteger(amount) || amount <= 0) {
     return NextResponse.json({ error: "invalid_amount" }, { status: 400 });
   }
   // `receiptDate` goes straight into a `date` column, so a malformed value is
   // a Postgres `22007` error — an unhandled 500 — rather than the 400 a bad
   // input is. (Date.parse wouldn't do: it normalises «2024-02-30» to March 1st.)
-  const receiptDate = body.receiptDate?.trim() || null;
+  const receiptDate = optionalBodyText(body.receiptDate);
+  if (receiptDate === undefined) {
+    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
   if (receiptDate && !isValidIsoDate(receiptDate)) {
     return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
+  const memo = optionalBodyText(body.memo);
+  if (memo === undefined) {
+    return NextResponse.json({ error: "invalid_memo" }, { status: 400 });
+  }
+  const cashAccountId = optionalBodyText(body.cashAccountId);
+  if (cashAccountId === undefined) {
+    return NextResponse.json({ error: "invalid_cash_account" }, { status: 400 });
+  }
+  const bankReference = optionalBodyText(body.bankReference);
+  if (bankReference === undefined) {
+    return NextResponse.json({ error: "invalid_bank_reference" }, { status: 400 });
   }
 
   const location = await resolveActiveLocation(session);
@@ -133,11 +162,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       method: body.method,
       amount,
       receiptDate,
-      memo: body.memo,
+      memo,
       idempotencyKey,
       createdBy: session.sub,
-      cashAccountId: typeof body.cashAccountId === "string" ? body.cashAccountId : null,
-      bankReference: typeof body.bankReference === "string" ? body.bankReference : null,
+      cashAccountId,
+      bankReference,
     });
     // An idempotent replay answers the original voucher with 200 so the client
     // can tell it did not create a second one; a fresh posting is 201.

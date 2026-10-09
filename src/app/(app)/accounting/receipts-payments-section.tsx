@@ -15,8 +15,9 @@ import { api, ErrorBox, errorMessage, Field, inputClass, PrimaryButton, Secondar
 import { Button } from "@/components/ui/button";
 import { FilterChip } from "@/app/dashboard/filters";
 import { fmtJalali, OverlayDialog } from "./ledger-ui";
+import { formatJalali } from "@/lib/jalali";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
-import { VoucherFormFields, useIdempotencyKey } from "./settlement-form";
+import { buildVoucherBody, useVoucherSubmission, validateVoucherAmount, VoucherFormFields } from "./settlement-form";
 import { voucherReference } from "@/lib/voucher-shared";
 import { VOUCHER_METHOD_LABELS, voucherAccountChoices, type VoucherAccountChoice, type VoucherMethod } from "@/lib/payables-input";
 import Link from "next/link";
@@ -75,18 +76,17 @@ const STATUS_LABELS: Record<Exclude<StatusFilter, "all">, string> = {
 };
 
 export function ReceiptsPaymentsSection({
-  canManageReceivables,
-  canManagePayables,
-  canReversePayments,
-  canReverseReceipts,
+  canManageReceivables = false,
+  canManagePayables = false,
+  canReversePayments = false,
+  canReverseReceipts = false,
 }: {
   /**
    * Whether this member may record receipts / payments
    * (finance.receivables_manage / finance.payables_manage) or approve a
-   * correction (ledger.approve). `undefined` when the page could not read
-   * the member's effective permissions; the ثبت buttons then draw and the
-   * API stays the gate, matching how the manual-entry queue treats the
-   * same gap. The correction buttons stay hidden until approval is known.
+   * correction (ledger.approve). The page always passes explicit booleans;
+   * the defaults deny, so an unwired caller fails closed and the API stays
+   * the gate in any case.
    */
   canManageReceivables?: boolean;
   canManagePayables?: boolean;
@@ -130,8 +130,6 @@ export function ReceiptsPaymentsSection({
   const [refreshKey, setRefreshKey] = useState(0);
   const [reversingId, setReversingId] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
-  /** Non-error notices: today, that a CSV export was truncated at the cap. */
-  const [notice, setNotice] = useState("");
   /*
    * Responses race each other — a fast «علی» search easily outruns the slow
    * unfiltered listing it was typed over, and without the token the *older*
@@ -139,6 +137,17 @@ export function ReceiptsPaymentsSection({
    * user asked for. Only the latest request may write state.
    */
   const requestSeq = useRef(0);
+  /*
+   * A keyset cursor belongs to the query that issued it. Paging appends to
+   * the rows on screen, so «نمایش بیشتر» may only fire while the filters
+   * still serialize to the cursor's own query: firing with a moved filter
+   * (a search typed inside the 250ms debounce, where the seq has not turned
+   * yet) would append another dataset's rows to this one. The ref mirrors
+   * the live filter state every render; the cursor's query is recorded on
+   * each listing/page answer and cleared when the stream switches.
+   */
+  const filterKeyRef = useRef("");
+  const cursorQueryRef = useRef<string | null>(null);
   /*
    * The register API projects stored row columns; `reversed` is derived, not
    * stored, so every fetch normalizes it before the rows reach state.
@@ -148,7 +157,7 @@ export function ReceiptsPaymentsSection({
   }
   const prevSide = useRef<Side>(side);
 
-  const canCreate = side === "receipts" ? canManageReceivables !== false : canManagePayables !== false;
+  const canCreate = side === "receipts" ? canManageReceivables : canManagePayables;
 
   /*
    * One serializer for the filter state: the list and the CSV export honor
@@ -178,6 +187,8 @@ export function ReceiptsPaymentsSection({
     const base = side === "receipts" ? "/api/ledger/ar/receipts" : "/api/ledger/ap/payments";
     return query ? `${base}?${query}` : base;
   }
+
+  filterKeyRef.current = filterParams().toString();
 
   // The counterparty options, from the same directory endpoints the voucher
   // form picks from (`?scope=directory`, not the open-balance list).
@@ -243,16 +254,16 @@ export function ReceiptsPaymentsSection({
       setRows(null);
       setNextCursor(null);
       setHasMore(false);
+      cursorQueryRef.current = null;
     }
     const seq = ++requestSeq.current;
     // A fresh listing supersedes any in-flight «نمایش بیشتر»: its rows would
     // append to the wrong dataset, so it is discarded — and the button must
-    // not stay wedged in «در حال بارگذاری» because of it. The export notice
-    // describes the previous query, so it goes too.
+    // not stay wedged in «در حال بارگذاری» because of it.
     setLoadingMore(false);
-    setNotice("");
     const run = () => {
       setLoading(true);
+      const requestedQuery = filterParams().toString();
       api<{ receipts?: Voucher[]; payments?: Voucher[]; nextCursor?: string | null; hasMore?: boolean; error?: string }>(
         listUrl(),
       )
@@ -262,6 +273,7 @@ export function ReceiptsPaymentsSection({
             setRows((data.receipts ?? data.payments ?? []).map(normalizeRow));
             setNextCursor(data.nextCursor ?? null);
             setHasMore(data.hasMore ?? false);
+            cursorQueryRef.current = requestedQuery;
             setError("");
           } else {
             // A network failure resolves here too — `api()` answers the
@@ -284,7 +296,14 @@ export function ReceiptsPaymentsSection({
 
   async function loadMore() {
     if (!nextCursor || loadingMore) return;
+    // The cursor was issued for another query than the filters now describe
+    // (a keystroke inside the debounce, a chip whose listing is still in
+    // flight): the fresh listing is already coming and will reset the page,
+    // so there is nothing truthful to append to.
+    if (filterKeyRef.current !== cursorQueryRef.current) return;
     const seq = requestSeq.current;
+    const queryKey = filterKeyRef.current;
+    const cursor = nextCursor;
     setLoadingMore(true);
     try {
       const { ok, data } = await api<{
@@ -293,7 +312,7 @@ export function ReceiptsPaymentsSection({
         nextCursor?: string | null;
         hasMore?: boolean;
         error?: string;
-      }>(listUrl(nextCursor));
+      }>(listUrl(cursor));
       // Superseded by a newer listing: the rows belong to the old query and
       // must not append to the new dataset.
       if (requestSeq.current !== seq) return;
@@ -301,6 +320,7 @@ export function ReceiptsPaymentsSection({
         setRows((prev) => [...(prev ?? []), ...(data.receipts ?? data.payments ?? []).map(normalizeRow)]);
         setNextCursor(data.nextCursor ?? null);
         setHasMore(data.hasMore ?? false);
+        cursorQueryRef.current = queryKey;
       } else {
         setError(errorMessage(data.error));
       }
@@ -316,15 +336,14 @@ export function ReceiptsPaymentsSection({
    * history, and exporting it would silently drop every voucher outside the
    * window. The API honors the same filters and neutralizes formula-leading
    * cells, so a memo starting with «=» cannot become a spreadsheet formula.
-   * A plain anchor download cannot read response headers, so the file travels
-   * through fetch: past the export cap the API says so in
-   * `X-Voucher-Export-Truncated`, and the screen must repeat that — a silently
-   * cut file reconciled as complete is worse than no file.
+   * A plain anchor download cannot surface a failure, so the file travels
+   * through fetch: the export streams the whole filtered set, and a failure
+   * anywhere along the way rejects here and shows as an error — a silently
+   * short file reconciled as complete is worse than no file.
    */
   async function downloadCsv() {
     if (downloading) return;
     setDownloading(true);
-    setNotice("");
     setError("");
     try {
       const params = filterParams();
@@ -342,7 +361,6 @@ export function ReceiptsPaymentsSection({
         setError(errorMessage(data.error ?? "network_error"));
         return;
       }
-      const truncated = response.headers.get("X-Voucher-Export-Truncated");
       const blob = await response.blob();
       const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -352,11 +370,6 @@ export function ReceiptsPaymentsSection({
       a.click();
       a.remove();
       URL.revokeObjectURL(objectUrl);
-      if (truncated) {
-        setNotice(
-          `فایل فقط ${toPersianDigits(truncated)} سند نخست را دارد؛ برای دریافت بقیه، فیلترها را محدودتر کنید و دوباره خروجی بگیرید.`,
-        );
-      }
     } finally {
       setDownloading(false);
     }
@@ -454,11 +467,6 @@ export function ReceiptsPaymentsSection({
   return (
     <section className="space-y-4">
       <ErrorBox>{error}</ErrorBox>
-      {notice ? (
-        <p role="status" className="rounded-xl border border-dashed border-amber-400/70 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-500/50 dark:text-amber-200">
-          {notice}
-        </p>
-      ) : null}
 
       <div className={`${cardClass} p-4 sm:p-5`}>
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -806,8 +814,8 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
   const [memo, setMemo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const idempotencyKey = useIdempotencyKey();
-  const requestKeyRef = useRef<{ intent: string; key: string } | null>(null);
+  const voucherSide = side === "receipts" ? "receipt" : "payment";
+  const submission = useVoucherSubmission(voucherSide);
 
   /*
    * `?scope=directory`, not the open-balance list. A voucher is not always a
@@ -857,50 +865,38 @@ function VoucherForm({ side, onClose, onCreated }: { side: Side; onClose: () => 
       setError("شخص را انتخاب کنید.");
       return;
     }
-    let rial: number;
-    try {
-      rial = money.parse(amount);
-    } catch {
-      setError(errorMessage("invalid_amount"));
-      return;
-    }
-    if (rial <= 0) {
-      setError(errorMessage("invalid_amount"));
+    const parsed = validateVoucherAmount(money, amount);
+    if (!parsed.ok) {
+      setError(parsed.error);
       return;
     }
     setBusy(true);
     setError("");
     const url = side === "receipts" ? "/api/ledger/ar/receipts" : "/api/ledger/ap/payments";
-    const memoValue = memo.trim() || undefined;
-    const bankReferenceValue = bankReference.trim() || undefined;
-    const common = {
-      amount: rial,
+    // One request key belongs to one intended A/P transfer and survives a
+    // retry after an ambiguous network result. Any material edit rotates it —
+    // the reference folds to Latin digits first, so retyping the same number
+    // in the other digit set is not a «material» edit.
+    const keys = submission.keyFor({
+      partyId,
+      amount: parsed.rial,
       method,
-      memo: memoValue,
-      cashAccountId: cashAccountId || undefined,
-      bankReference: bankReferenceValue,
-    };
-    let body: Record<string, string | number | undefined>;
-    if (side === "receipts") {
-      body = { ...common, customerId: partyId, receiptDate: date || undefined, idempotencyKey };
-    } else {
-      // One request key belongs to one intended A/P transfer and survives a
-      // retry after an ambiguous network result. Any material edit rotates it.
-      const intent = JSON.stringify({
-        supplierId: partyId,
-        amount: rial,
-        method,
-        paymentDate: date || null,
-        memo: memoValue ?? null,
-        cashAccountId: cashAccountId || null,
-        bankReference: bankReferenceValue ? toLatinDigits(bankReferenceValue).trim() : null,
-      });
-      if (requestKeyRef.current?.intent !== intent) {
-        const key = globalThis.crypto?.randomUUID?.() ?? `ap-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        requestKeyRef.current = { intent, key };
-      }
-      body = { ...common, supplierId: partyId, paymentDate: date || undefined, clientRequestId: requestKeyRef.current.key };
-    }
+      date: date || null,
+      memo: memo.trim() || null,
+      cashAccountId: cashAccountId || null,
+      bankReference: bankReference.trim() ? toLatinDigits(bankReference).trim() : null,
+    });
+    const body = buildVoucherBody({
+      side: voucherSide,
+      partyId,
+      rial: parsed.rial,
+      method,
+      cashAccountId,
+      bankReference,
+      date,
+      memo,
+      ...keys,
+    });
     const { ok, data } = await api<{ error?: string }>(url, { method: "POST", body: JSON.stringify(body) });
     setBusy(false);
     if (ok) onCreated();
@@ -1168,6 +1164,10 @@ function VoucherDetailDialog({
               <div className="flex justify-between gap-3">
                 <dt className="text-muted-foreground">تاریخ سند</dt>
                 <dd>{date ? fmtJalali(date) : "—"}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted-foreground">زمان ثبت</dt>
+                <dd>{detail.createdAt ? formatJalali(detail.createdAt, { withTime: true }) : "—"}</dd>
               </div>
               {detail.locationName ? (
                 <div className="flex justify-between gap-3">

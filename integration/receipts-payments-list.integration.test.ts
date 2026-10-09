@@ -20,6 +20,8 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let installments: typeof import("../src/lib/installments-service");
+let ar: typeof import("../src/lib/ar-service");
+let ap: typeof import("../src/lib/ap-service");
 
 const biz = { id: "", locationId: "" };
 
@@ -51,6 +53,8 @@ beforeAll(async () => {
   process.env.DATABASE_URL = urlFor(databaseName);
   dbLib = await import("../src/lib/db");
   installments = await import("../src/lib/installments-service");
+  ar = await import("../src/lib/ar-service");
+  ap = await import("../src/lib/ap-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -105,11 +109,14 @@ async function addPayment(supplierId: string, amount: number, date: string, memo
 }
 
 beforeEach(async () => {
+  await db.query("DELETE FROM journal_lines");
+  await db.query("DELETE FROM journal_entries");
   await db.query("DELETE FROM ar_receipts");
   await db.query("DELETE FROM ap_payments");
   await db.query("DELETE FROM suppliers");
   await db.query("DELETE FROM parties");
   await db.query("DELETE FROM locations");
+  await db.query("DELETE FROM accounts");
   await db.query("DELETE FROM businesses");
 
   const bizRow = await db.query<{ id: string }>(
@@ -289,6 +296,143 @@ describe("listPaymentsPage (issue #829: cursor pagination + filters)", () => {
   });
 });
 
+/**
+ * Seeds the cash/bank/clearing accounts plus the AR/AP offsets, and posts a
+ * legacy original entry the way the pre-#829 writers did: a «بانکی» receipt
+ * with no named account debited the 1120 clearing account, before the method
+ * gained its own 1110 bank default. The voucher rows carry NULL choices, so
+ * the only record of the money's path is this entry.
+ */
+async function addAccount(code: string, name: string): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO accounts (business_id, code, name, type) VALUES ($1, $2, $3, 'asset') RETURNING id`,
+    [biz.id, code, name],
+  );
+  return rows[0].id;
+}
+
+async function postLegacyEntry(
+  kind: "ar_receipt" | "ap_payment",
+  sourceId: string,
+  moneyAccountId: string,
+  offsetAccountId: string,
+  amount: number,
+): Promise<void> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO journal_entries (business_id, entry_date, source_type, source_id, posting_kind, memo)
+     VALUES ($1, '2026-09-10', $2, $3, $2, 'legacy') RETURNING id`,
+    [biz.id, kind, sourceId],
+  );
+  const entryId = rows[0].id;
+  const money = kind === "ar_receipt" ? [amount, 0] : [0, amount];
+  const offset = kind === "ar_receipt" ? [0, amount] : [amount, 0];
+  await db.query(
+    `INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, $3, $4), ($1, $5, $6, $7)`,
+    [entryId, moneyAccountId, ...money, offsetAccountId, ...offset],
+  );
+}
+
+describe("posted account resolution (issue #829 completion)", () => {
+  it("shows a default-choice receipt's actual posted account from the journal, not today's default", async () => {
+    const customer = await addCustomer("علی رضایی");
+    await addAccount("1100", "صندوق");
+    await addAccount("1110", "بانک");
+    const clearing = await addAccount("1120", "تنخواه");
+    const arAccount = await addAccount("1200", "دریافتنی");
+    const receiptId = await addReceipt(customer, 1000, "2026-09-10", null);
+    await postLegacyEntry("ar_receipt", receiptId, clearing, arAccount, 1000);
+
+    // The list, the drill-down and the export inherit one read-model: 1120
+    // from the entry, even though «بانکی» would resolve to 1110 today.
+    const listed = await installments.listReceiptsPage(biz.id, {});
+    expect(listed.rows).toHaveLength(1);
+    expect(listed.rows[0].cashAccount).toEqual({ code: "1120", name: "تنخواه" });
+    expect((await ar.getReceiptDetail(biz.id, receiptId))?.cashAccount).toEqual({
+      code: "1120",
+      name: "تنخواه",
+    });
+    const exported = await collectExport(installments.iterateReceiptsForExport(biz.id, {}));
+    expect(exported.rows).toHaveLength(1);
+    expect(exported.rows[0].cashAccount).toEqual({ code: "1120", name: "تنخواه" });
+  });
+
+  it("shows a default-choice payment's posted credit account", async () => {
+    const supplier = await addSupplier("پخش آسمان");
+    await addAccount("1110", "بانک");
+    const clearing = await addAccount("1120", "تنخواه");
+    const apAccount = await addAccount("2100", "پرداختنی");
+    const paymentId = await addPayment(supplier, 2000, "2026-09-10", null);
+    await postLegacyEntry("ap_payment", paymentId, clearing, apAccount, 2000);
+
+    const listed = await installments.listPaymentsPage(biz.id, {});
+    expect(listed.rows).toHaveLength(1);
+    expect(listed.rows[0].cashAccount).toEqual({ code: "1120", name: "تنخواه" });
+    expect((await ap.getPaymentDetail(biz.id, paymentId))?.cashAccount).toEqual({
+      code: "1120",
+      name: "تنخواه",
+    });
+  });
+
+  it("leaves entry-less legacy vouchers unresolved instead of guessing", async () => {
+    const customer = await addCustomer("علی رضایی");
+    const supplier = await addSupplier("پخش آسمان");
+    await addAccount("1100", "صندوق");
+    const receiptId = await addReceipt(customer, 1000, "2026-09-10", null);
+    const paymentId = await addPayment(supplier, 2000, "2026-09-10", null);
+
+    // No entry anywhere: the screen shows a dash, never today's default.
+    expect((await installments.listReceiptsPage(biz.id, {})).rows[0].cashAccount).toBeNull();
+    expect((await installments.listPaymentsPage(biz.id, {})).rows[0].cashAccount).toBeNull();
+    expect((await ar.getReceiptDetail(biz.id, receiptId))?.cashAccount).toBeNull();
+    expect((await ap.getPaymentDetail(biz.id, paymentId))?.cashAccount).toBeNull();
+  });
+
+  it("prefers the voucher's named account over the journal evidence", async () => {
+    // Production postings never disagree — posting debits/credits the
+    // resolved choice — so this pins the tiebreak order, not a live shape.
+    const customer = await addCustomer("علی رضایی");
+    const cash = await addAccount("1100", "صندوق");
+    const clearing = await addAccount("1120", "تنخواه");
+    const arAccount = await addAccount("1200", "دریافتنی");
+    const receiptId = await addReceipt(customer, 1000, "2026-09-10", null);
+    await db.query(`UPDATE ar_receipts SET cash_account_id = $2 WHERE id = $1`, [receiptId, cash]);
+    await postLegacyEntry("ar_receipt", receiptId, clearing, arAccount, 1000);
+
+    expect((await installments.listReceiptsPage(biz.id, {})).rows[0].cashAccount).toEqual({
+      code: "1100",
+      name: "صندوق",
+    });
+    expect((await ar.getReceiptDetail(biz.id, receiptId))?.cashAccount).toEqual({
+      code: "1100",
+      name: "صندوق",
+    });
+  });
+
+  it("returns the detail creation timestamp as unambiguous UTC ISO", async () => {
+    const customer = await addCustomer("علی رضایی");
+    const supplier = await addSupplier("پخش آسمان");
+    const receiptId = await addReceipt(customer, 1000, "2026-09-10", null);
+    const paymentId = await addPayment(supplier, 2000, "2026-09-10", null);
+
+    // `timestamptz::text` renders `+00`, which JS engines parse
+    // inconsistently; the audit timestamp must parse everywhere.
+    const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+    expect((await ar.getReceiptDetail(biz.id, receiptId))?.createdAt).toMatch(iso);
+    expect((await ap.getPaymentDetail(biz.id, paymentId))?.createdAt).toMatch(iso);
+  });
+});
+
+/** Drains an export iterator the way the route's stream does, chunk by chunk. */
+async function collectExport<T>(iterator: AsyncGenerator<T[], void, void>): Promise<{ chunks: number; rows: T[] }> {
+  const rows: T[] = [];
+  let chunks = 0;
+  for await (const chunk of iterator) {
+    chunks += 1;
+    rows.push(...chunk);
+  }
+  return { chunks, rows };
+}
+
 describe("voucher CSV export queries (issue #829 completion)", () => {
   it("exports the full filtered receipt set, not the visible page", async () => {
     const a = await addCustomer("علی رضایی");
@@ -298,13 +442,11 @@ describe("voucher CSV export queries (issue #829 completion)", () => {
     await addReceipt(a, 300, "2026-09-12", null);
 
     // No limit/cursor: the whole filtered set, newest first.
-    const all = await installments.listReceiptsForExport(biz.id, {});
+    const all = await collectExport(installments.iterateReceiptsForExport(biz.id, {}));
     expect(all.rows.map((r) => r.amount)).toEqual([300, 200, 100]);
-    expect(all.truncated).toBe(false);
 
-    const filtered = await installments.listReceiptsForExport(biz.id, { q: "پیش‌پرداخت", minAmount: 100 });
+    const filtered = await collectExport(installments.iterateReceiptsForExport(biz.id, { q: "پیش‌پرداخت", minAmount: 100 }));
     expect(filtered.rows.map((r) => r.amount)).toEqual([200]);
-    expect(filtered.truncated).toBe(false);
   });
 
   it("exports the full filtered payment set", async () => {
@@ -312,25 +454,83 @@ describe("voucher CSV export queries (issue #829 completion)", () => {
     await addPayment(s, 400, "2026-09-10", null);
     await addPayment(s, 900, "2026-09-11", "قبوض");
 
-    const exported = await installments.listPaymentsForExport(biz.id, { q: "قبوض" });
+    const exported = await collectExport(installments.iteratePaymentsForExport(biz.id, { q: "قبوض" }));
     expect(exported.rows.map((r) => r.amount)).toEqual([900]);
-    expect(exported.truncated).toBe(false);
   });
 
-  it("signals truncation past the export cap instead of silently cutting rows", async () => {
+  it("streams every receipt past the old row cap, in the register's exact order, tenant-scoped", async () => {
+    const a = await addCustomer("علی رضایی");
+    // 20,001 vouchers in one statement — past any row count the old capped
+    // export would have stopped at. Same transaction timestamp for all, so
+    // the (date, created_at, id) cursor is exercised on ties too.
+    await db.query(
+      `INSERT INTO ar_receipts (business_id, customer_id, receipt_date, method, amount, memo, idempotency_key)
+       SELECT $1, $2, '2026-01-01'::date + (g % 365), 'cash', 100 + g, NULL, 'bulk-receipt-' || g
+         FROM generate_series(1, 20001) AS g`,
+      [biz.id, a],
+    );
+    // Another tenant's rows must not leak into this business's file.
+    const otherBiz = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Other Co', $1) RETURNING id",
+      [`other-${randomUUID().slice(0, 8)}`],
+    );
+    const otherCustomer = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, role, is_active) VALUES ($1, 'Other', 'customer', true) RETURNING id",
+      [otherBiz.rows[0].id],
+    );
+    await db.query(
+      `INSERT INTO ar_receipts (business_id, customer_id, receipt_date, method, amount, idempotency_key)
+       VALUES ($1, $2, '2026-06-01', 'cash', 999, 'other-1')`,
+      [otherBiz.rows[0].id, otherCustomer.rows[0].id],
+    );
+
+    const { chunks, rows } = await collectExport(installments.iterateReceiptsForExport(biz.id, {}));
+    expect(chunks).toBeGreaterThan(1);
+    expect(rows).toHaveLength(20_001);
+    // The exact register order, id for id — no overlap or gap at any chunk
+    // boundary — and nothing from the other tenant.
+    const { rows: ordered } = await db.query<{ id: string }>(
+      `SELECT id FROM ar_receipts WHERE business_id = $1
+        ORDER BY receipt_date DESC, created_at DESC, id DESC`,
+      [biz.id],
+    );
+    expect(rows.map((r) => r.id)).toEqual(ordered.map((r) => r.id));
+  });
+
+  it("streams every payment across chunk boundaries", async () => {
+    const s = await addSupplier("پخش آسمان");
+    await db.query(
+      `INSERT INTO ap_payments (business_id, supplier_id, payment_date, method, amount, memo)
+       SELECT $1, $2, '2026-01-01'::date + (g % 365), 'bank', 100 + g, NULL
+         FROM generate_series(1, 2501) AS g`,
+      [biz.id, s],
+    );
+
+    const { chunks, rows } = await collectExport(installments.iteratePaymentsForExport(biz.id, {}));
+    expect(chunks).toBeGreaterThan(1);
+    expect(rows).toHaveLength(2_501);
+    const { rows: ordered } = await db.query<{ id: string }>(
+      `SELECT id FROM ap_payments WHERE business_id = $1
+        ORDER BY payment_date DESC, created_at DESC, id DESC`,
+      [biz.id],
+    );
+    expect(rows.map((r) => r.id)).toEqual(ordered.map((r) => r.id));
+  });
+
+  it("reads one row past the internal page so `hasMore` stays exact for the iterator", async () => {
     const a = await addCustomer("علی رضایی");
     for (let i = 1; i <= 3; i += 1) {
       await addReceipt(a, i * 100, `2026-09-0${i}`, null);
     }
-    // The cap mechanics the export relies on, at a provable size: cap+1 rows
-    // are read so `hasMore` is exact, and the page carries exactly the cap.
-    const capped = await installments.listReceiptsPage(biz.id, {}, { exportCap: 2 });
+    // The paging mechanics the export relies on, at a provable size: the
+    // internal page carries exactly its size and `hasMore` is exact.
+    const capped = await installments.listReceiptsPage(biz.id, {}, { internalPageSize: 2 });
     expect(capped.rows.map((r) => r.amount)).toEqual([300, 200]);
     expect(capped.hasMore).toBe(true);
-    const roomy = await installments.listReceiptsPage(biz.id, {}, { exportCap: 5 });
+    const roomy = await installments.listReceiptsPage(biz.id, {}, { internalPageSize: 5 });
     expect(roomy.rows).toHaveLength(3);
     expect(roomy.hasMore).toBe(false);
-    // The wire limit can never reach the export cap: it clamps to the page max.
+    // The wire limit stays clamped to the page max no matter what is asked.
     const wire = await installments.listReceiptsPage(biz.id, { limit: 5000 });
     expect(wire.rows).toHaveLength(3);
     expect(wire.hasMore).toBe(false);
