@@ -41,7 +41,6 @@ import { formatPersianNumber, toLatinDigits, toPersianDigits } from "@/lib/digit
 import { formatJalali } from "@/lib/jalali";
 import type { CmsConnectionSummary } from "@/lib/cms/connections";
 import type { CmsMedia, CmsOrder, CmsPage, CmsPost, CmsProduct, SiteDescriptor } from "@/lib/cms/types";
-import { lexicalToMarkdown } from "@/lib/website/providers/payload-content";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   EmptyState,
@@ -443,6 +442,7 @@ export function CmsPagesSection() {
   const [pages, setPages] = useState<CmsPage[] | null>(null);
   const [pagesError, setPagesError] = useState("");
   const [publishingPage, setPublishingPage] = useState("");
+  const [editingPage, setEditingPage] = useState<CmsPage | "new" | null>(null);
 
   const loadPages = useCallback(async () => {
     const { ok, data } = await api<{ pages?: CmsPage[]; error?: string }>("/api/cms/website/pages");
@@ -477,7 +477,16 @@ export function CmsPagesSection() {
   return (
     <div className="space-y-4 sm:space-y-5">
       <ErrorBox>{site.overviewError}</ErrorBox>
-      <SectionCard title="صفحه‌ها" description="برگه‌های ثابت سایت. ذخیره پیش‌نویس است؛ انتشار با دکمهٔ جداگانه.">
+      <SectionCard
+        title="صفحه‌ها"
+        description="برگه‌های ثابت سایت. ویرایش در همان صفحهٔ سایت‌ساز باز می‌شود؛ تغییرات پیش‌نویس‌اند تا منتشر شوند."
+        actions={
+          <SecondaryButton onClick={() => setEditingPage("new")}>
+            <PlusIcon className="size-4" />
+            صفحهٔ جدید
+          </SecondaryButton>
+        }
+      >
         <ErrorBox>{pagesError}</ErrorBox>
         {pages === null ? (
           <LoadingSkeleton rows={3} compact label="در حال بارگذاری صفحه‌ها" />
@@ -502,12 +511,34 @@ export function CmsPagesSection() {
                       {publishingPage === page.id ? "در حال انتشار…" : "انتشار"}
                     </Button>
                   ) : null}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={() => setEditingPage(page)}
+                    aria-label={`ویرایش ${page.title}`}
+                  >
+                    <PencilIcon className="size-4" />
+                  </Button>
                 </div>
               </li>
             ))}
           </ul>
         )}
       </SectionCard>
+
+      {editingPage ? (
+        <CmsEmbedDialog
+          collection="pages"
+          id={editingPage === "new" ? undefined : editingPage.id}
+          title={editingPage === "new" ? "صفحهٔ جدید" : "ویرایش صفحه"}
+          onClose={() => {
+            setEditingPage(null);
+            void loadPages();
+            site.loadOverview();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -594,10 +625,11 @@ export function CmsPostsSection() {
       </SectionCard>
 
       {editingPost ? (
-        <PostDialog
-          post={editingPost === "new" ? null : editingPost}
-          onClose={() => setEditingPost(null)}
-          onSaved={() => {
+        <CmsEmbedDialog
+          collection="posts"
+          id={editingPost === "new" ? undefined : editingPost.id}
+          title={editingPost === "new" ? "نوشتهٔ جدید" : "ویرایش نوشته"}
+          onClose={() => {
             setEditingPost(null);
             void loadPosts();
             site.loadOverview();
@@ -1859,113 +1891,103 @@ function PreviewCard({
 /* Posts, products and domain — create/edit/delete dialogs             */
 /* ------------------------------------------------------------------ */
 
-export function PostDialog({
-  post,
+/**
+ * The CMS's own admin page for one post or page (or its «new» form), in a modal.
+ *
+ * The page builder, media library, translations and drafts are the CMS's; this is the
+ * same screen an operator would open there, minus the sidebar, and without a second
+ * sign-in. The server swaps a one-time address for the frame (`POST /api/cms/website/embed`):
+ * the CMS credential never reaches the browser, and which CMS user the frame acts as —
+ * therefore whether it shows «انتشار» — is decided there from `cms.publish`, not here.
+ *
+ * Outside clicks do not close it: an editor's mouse leaving the frame must not discard a
+ * half-written page. «بستن» (or Esc from the dashboard side) does, and the caller refreshes.
+ */
+export function CmsEmbedDialog({
+  collection,
+  id,
+  title,
   onClose,
-  onSaved,
 }: {
-  post: CmsPost | null;
+  collection: "posts" | "pages";
+  id?: string;
+  title: string;
   onClose: () => void;
-  onSaved: () => void;
 }) {
-  const [title, setTitle] = useState(post?.title ?? "");
-  // New editor contract is Markdown. Existing CMS posts come back from the
-  // same Lexical shape, so translating them here preserves the supported rich
-  // formatting instead of flattening every heading/list on the next save.
-  const [content, setContent] = useState(lexicalToMarkdown(post?.content));
-  const [slug, setSlug] = useState(post?.slug ?? "");
-  const [excerpt, setExcerpt] = useState((post as (CmsPost & { excerpt?: string | null }) | null)?.excerpt ?? "");
-  const initialHero = post?.heroImage;
-  const [heroImageId, setHeroImageId] = useState(typeof initialHero === "string" ? initialHero : initialHero?.id ?? "");
-  const [heroImageUrl, setHeroImageUrl] = useState(typeof initialHero === "object" ? initialHero?.url ?? "" : "");
-  const [uploadingImage, setUploadingImage] = useState(false);
+  const [url, setUrl] = useState("");
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
-  const uploadHeroImage = async (file: File | null) => {
-    if (!file) return;
-    setUploadingImage(true); setError("");
-    const form = new FormData();
-    form.set("file", file);
-    const { ok, data } = await api<{ media?: { id: string; url: string | null }; error?: string }>("/api/cms/website/media", { method: "POST", body: form });
-    setUploadingImage(false);
-    if (!ok || !data.media) { setError(errorMessageOrRaw(data.error)); return; }
-    setHeroImageId(data.media.id);
-    setHeroImageUrl(data.media.url ?? "");
-  };
-
-  const save = async () => {
-    setBusy(true);
+  useEffect(() => {
+    let cancelled = false;
+    setUrl("");
     setError("");
-    const { ok, data } = await api<{ error?: string }>(
-      post ? `/api/cms/website/drafts/${post.id}` : "/api/cms/website/drafts",
-      { method: post ? "PATCH" : "POST", body: JSON.stringify({ title: title.trim(), body: content, slug: slug.trim() || undefined, excerpt: excerpt.trim() || undefined, featuredImageId: heroImageId || undefined }) },
-    );
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessageOrRaw(data.error));
-      return;
-    }
-    toast.success(post ? "نوشته ذخیره شد." : "نوشته ساخته شد.");
-    onSaved();
-  };
-
-  const remove = async () => {
-    if (!post || !window.confirm(`«${post.title}» حذف شود؟`)) return;
-    setBusy(true);
-    const { ok, data } = await api<{ error?: string }>(`/api/cms/website/posts/${post.id}`, { method: "DELETE" });
-    setBusy(false);
-    if (!ok) {
-      setError(errorMessageOrRaw(data.error));
-      return;
-    }
-    toast.success("نوشته حذف شد.");
-    onSaved();
-  };
+    setReady(false);
+    void (async () => {
+      const { ok, data } = await api<{ url?: string; error?: string }>("/api/cms/website/embed", {
+        method: "POST",
+        body: JSON.stringify({ collection, ...(id ? { id } : {}) }),
+      });
+      if (cancelled) return;
+      if (!ok || !data.url) {
+        setError(errorMessageOrRaw(data.error) || "باز کردن ویرایشگر سایت ممکن نشد.");
+        return;
+      }
+      setUrl(data.url);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [collection, id, attempt]);
 
   return (
     <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{post ? `ویرایش نوشته` : "نوشتهٔ جدید"}</DialogTitle>
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        onInteractOutside={(event) => event.preventDefault()}
+        className="h-[calc(100dvh-2rem)] max-w-[calc(100vw-1.5rem)] grid-rows-[auto_minmax(0,1fr)] gap-3 overflow-hidden p-3 sm:max-w-[min(72rem,calc(100vw-2rem))]"
+      >
+        <DialogHeader className="flex-row items-center justify-between gap-3">
+          <DialogTitle>{title}</DialogTitle>
+          <Button type="button" variant="outline" size="sm" onClick={onClose}>
+            بستن
+          </Button>
         </DialogHeader>
-        <ErrorBox>{error}</ErrorBox>
-
-        <Field label="عنوان">
-          <input className={inputClass} value={title} onChange={(e) => setTitle(e.target.value)} />
-        </Field>
-        <Field label="نشانک (slug)" hint="آدرس نوشته؛ فقط حروف، عدد و خط تیره. خالی = ساخت خودکار از عنوان.">
-          <input dir="ltr" className={inputClass} value={slug} onChange={(e) => setSlug(e.target.value)} />
-        </Field>
-        <Field label="خلاصه" hint="برای کارت‌ها و نتایج جست‌وجوی سایت.">
-          <textarea className={inputClass} rows={2} value={excerpt} onChange={(e) => setExcerpt(e.target.value)} />
-        </Field>
-        <Field label="تصویر شاخص" hint="JPG، PNG، WebP یا GIF تا ۵ مگابایت؛ اعتبارسنجی روی سرور انجام می‌شود.">
-          <div className="space-y-2"><input className={inputClass} type="file" accept="image/jpeg,image/png,image/webp,image/gif" disabled={uploadingImage || busy} onChange={(e) => void uploadHeroImage(e.target.files?.[0] ?? null)} />{uploadingImage ? <LoadingSkeleton aria-label="در حال بارگذاری تصویر" className="h-4 w-36" /> : null}{heroImageUrl ? <img src={heroImageUrl} alt="پیش‌نمایش تصویر شاخص" className="h-28 w-full rounded-lg object-cover" /> : heroImageId ? <p className="text-xs text-muted-foreground">تصویر شاخص وصل شده است.</p> : <p className="text-xs text-muted-foreground">تصویری انتخاب نشده است.</p>}</div>
-        </Field>
-        <Field label="متن Markdown" hint="پیش‌نویس و انتشار جدا هستند؛ ذخیره هرگز نوشته را عمومی نمی‌کند.">
-          <textarea className={`${inputClass} font-mono`} dir="auto" rows={10} value={content} onChange={(e) => setContent(e.target.value)} />
-        </Field>
-
-        <DialogFooter>
-          {post ? (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={remove}
-              disabled={busy}
-              className="me-auto text-destructive hover:bg-destructive/10 hover:text-destructive"
-            >
-              حذف
-            </Button>
-          ) : null}
-          <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
-            انصراف
-          </Button>
-          <Button type="button" onClick={save} disabled={busy}>
-            {busy ? "در حال ذخیره…" : "ذخیره"}
-          </Button>
-        </DialogFooter>
+        <div className="relative min-h-0 overflow-hidden rounded-lg border border-border bg-card">
+          {error ? (
+            <div className="space-y-3 p-4">
+              <ErrorBox>{error}</ErrorBox>
+              <Button type="button" variant="outline" size="sm" onClick={() => setAttempt((n) => n + 1)}>
+                تلاش دوباره
+              </Button>
+            </div>
+          ) : (
+            <>
+              {!ready ? (
+                <div className="absolute inset-0 p-4" role="status" aria-label="در حال باز کردن ویرایشگر">
+                  <Skeleton aria-hidden="true" className="h-full w-full rounded-lg" />
+                </div>
+              ) : null}
+              {url ? (
+                <iframe
+                  key={url}
+                  src={url}
+                  title={title}
+                  /* The CMS admin is a separate origin that the owner trusts but that must not
+                     steer the dashboard: no top navigation. Modals are allowed for Payload's
+                     own confirm prompts; popups escape the sandbox so «پیش‌نمایش» opens a
+                     normal tab. */
+                  sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-downloads"
+                  referrerPolicy="no-referrer"
+                  className={`h-full w-full bg-card transition-opacity motion-reduce:transition-none ${ready ? "opacity-100" : "opacity-0"}`}
+                  onLoad={() => setReady(true)}
+                />
+              ) : null}
+            </>
+          )}
+        </div>
       </DialogContent>
     </Dialog>
   );

@@ -70,7 +70,7 @@ import {
   updateCmsConnectionDomain,
   type CmsConnectionSummary,
 } from "./connections";
-import { publishOwnerContent } from "./owner-bridge";
+import { createOwnerEmbedSession, publishOwnerContent, type OwnerEmbedCollection } from "./owner-bridge";
 
 const DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 const SITE_TYPES = ["business", "portfolio", "store"] as const;
@@ -312,6 +312,14 @@ export async function publishCmsPage(businessId: string, id: string): Promise<We
   const result = await publishOwnerContent(businessId, "pages", id);
   if (!result.ok) return result;
   return { ok: true, data: { id } };
+}
+
+/** One-time URL for the dashboard's CMS edit modal (see `createOwnerEmbedSession`). */
+export async function createCmsEmbedSession(
+  businessId: string,
+  input: { collection: OwnerEmbedCollection; id?: string; canPublish: boolean },
+): Promise<WebsiteResult<{ url: string }>> {
+  return createOwnerEmbedSession(businessId, input);
 }
 
 export async function publishCmsProduct(businessId: string, id: string): Promise<WebsiteResult<{ id: string }>> {
