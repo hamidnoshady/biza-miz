@@ -87,7 +87,7 @@ function stubFetch(pageFor: (url: URL) => unknown) {
 
 function renderSection(props: Partial<Parameters<typeof ChequesSection>[0]> = {}) {
   return render(
-    <MoneyProvider>
+    <MoneyProvider unit="rial">
       <ChequesSection busy={false} run={async (fn) => (await fn()).ok} canManage {...props} />
     </MoneyProvider>,
   );
