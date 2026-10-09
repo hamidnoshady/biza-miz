@@ -107,6 +107,23 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "invalid_amount" }, { status: 400 });
   }
 
+  /*
+   * The branch a cheque is captured into is the operator's active one, and it
+   * is part of the request's identity — the service fingerprints it, because
+   * the same cheque booked at two branches is two different postings.
+   *
+   * The consequence is deliberate and worth stating: if someone switches
+   * branch between an attempt whose answer was lost and its retry, the retry
+   * is refused as `idempotency_key_conflict` rather than quietly posting the
+   * instrument into the branch they are standing in now. A refusal they can
+   * read is the safe end of that ambiguity; a silent second branch is not.
+   *
+   * Everything else in this payload comes from the client, so it is stable
+   * across a retry by construction. The only other value the server used to
+   * resolve for itself was an omitted issue date, which is now resolved
+   * *after* the replay lookup instead of being fingerprinted — see
+   * `recordCheque`.
+   */
   const location = await resolveActiveLocation(session);
 
   try {

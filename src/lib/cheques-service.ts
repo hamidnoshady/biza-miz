@@ -491,6 +491,69 @@ export async function getChequeHistory(businessId: string, chequeId: string): Pr
   }));
 }
 
+/** One cheque with the neighbours the detail view needs to navigate to. */
+export interface ChequeDetail {
+  cheque: Cheque;
+  /** The returned cheque this one replaces, when there is one. */
+  replaces: Cheque | null;
+  /** The cheques issued to replace this one, oldest first. */
+  replacements: Cheque[];
+}
+
+/**
+ * A single cheque, by id, enriched exactly like a register row.
+ *
+ * The register page is the only place that had a cheque in memory, so a
+ * detail view survived only as long as the page it came from: changing the
+ * filter or paging past it left a dialog describing a row the screen no
+ * longer held, and the links out of it had nothing to resolve. Reading the
+ * cheque by id — scoped to the business, 404 for anyone else's — makes the
+ * detail addressable on its own.
+ */
+export async function getChequeDetail(businessId: string, chequeId: string): Promise<ChequeDetail> {
+  if (!isUuid(chequeId)) throw new ChequeError("cheque_not_found", 404);
+  const cheque = await readCheque(businessId, "c.id = $2", [businessId, chequeId]);
+  if (!cheque) throw new ChequeError("cheque_not_found", 404);
+  const replaces = cheque.replacesChequeId
+    ? await readCheque(businessId, "c.id = $2", [businessId, cheque.replacesChequeId])
+    : null;
+  const replacements = await readCheques(businessId, "c.replaces_cheque_id = $2", [businessId, chequeId]);
+  return { cheque, replaces, replacements };
+}
+
+/** The register's enriched projection, for an arbitrary `WHERE` over `cheques c`. */
+async function readCheques(
+  businessId: string,
+  where: string,
+  params: unknown[],
+): Promise<Cheque[]> {
+  const { rows } = await query<ChequeRow>(
+    `SELECT ${CHEQUE_COLUMNS_PREFIXED},
+            l.name AS location_name,
+            r.serial_number AS replaces_serial_number,
+            COALESCE(rep.replaced_by_amount, 0)::text AS replaced_by_amount
+       FROM cheques c
+       LEFT JOIN locations l ON l.id = c.location_id
+       LEFT JOIN cheques r ON r.id = c.replaces_cheque_id
+       LEFT JOIN LATERAL (
+         SELECT SUM(x.amount) AS replaced_by_amount FROM cheques x
+          WHERE x.business_id = c.business_id AND x.replaces_cheque_id = c.id
+       ) rep ON true
+      -- Tenant scope is stated here as well as in RLS: a missing business_id
+      -- in a hand-written WHERE would otherwise be a cross-tenant read the
+      -- day this runs as an unscoped role.
+      WHERE c.business_id = $1 AND ${where}
+      ORDER BY c.created_at, c.id`,
+    params,
+  );
+  return rows.map(toCheque);
+}
+
+async function readCheque(businessId: string, where: string, params: unknown[]): Promise<Cheque | null> {
+  const rows = await readCheques(businessId, where, params);
+  return rows[0] ?? null;
+}
+
 /** A supplier belongs to this business through its (mandatory) location — `suppliers` has no business_id. */
 async function assertSupplier(client: PoolClient, businessId: string, supplierId: string): Promise<void> {
   // `suppliers.id` is a uuid: a non-uuid raises a Postgres syntax error rather
@@ -604,6 +667,14 @@ async function findChequeByIdempotencyKey(
   businessId: string,
   key: string,
   fingerprint: string,
+  options: {
+    /**
+     * A fingerprint this row would have had under an older rule, if any. Used
+     * to keep keys issued by a previous release replayable; returning `null`
+     * means "no older spelling applies to this request".
+     */
+    legacyFingerprintFor?: (row: ChequeRow) => string | null;
+  } = {},
 ): Promise<Cheque | null> {
   const { rows } = await query<
     ChequeRow & { idempotency_fingerprint: string | null; idempotency_result: unknown }
@@ -617,7 +688,10 @@ async function findChequeByIdempotencyKey(
   // Same key, different request: answering with the first cheque would hide a
   // real client bug behind a success.
   if (row.idempotency_fingerprint && row.idempotency_fingerprint !== fingerprint) {
-    throw new ChequeError("idempotency_key_conflict", 409);
+    const legacy = options.legacyFingerprintFor?.(row) ?? null;
+    if (legacy === null || row.idempotency_fingerprint !== legacy) {
+      throw new ChequeError("idempotency_key_conflict", 409);
+    }
   }
   return replayResult(row, toCheque(row));
 }
@@ -764,9 +838,21 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
   const serialNumber = requiredText(params.serialNumber, "serial_number_required");
   const bankName = requiredText(params.bankName, "bank_name_required");
   const counterpartyName = requiredText(params.counterpartyName, "counterparty_name_required");
-  const issueDate = optionalIsoDate(params.issueDate, "invalid_issue_date") ?? todayIso();
+  /*
+   * The date as *submitted* — `null` when the caller left it out.
+   *
+   * Resolving the default here is what the first version did, and it made a
+   * retry of an identical payload a different request: a registration sent at
+   * ۲۳:۵۹ and retried at ۰۰:۰۱ fingerprinted two different issue dates, so the
+   * replay was refused with `idempotency_key_conflict` — and the day after the
+   * due date, the retry did not even get that far, because the
+   * `due_date_before_issue` check (computed against *today*) threw before the
+   * committed original could be found and returned. What the client sent is
+   * stable; what the clock says is not, so only the former may take part in
+   * the request's identity.
+   */
+  const submittedIssueDate = optionalIsoDate(params.issueDate, "invalid_issue_date");
   const dueDate = requiredIsoDate(params.dueDate, "due_date_required", "invalid_due_date");
-  if (dueDate < issueDate) throw new ChequeError("due_date_before_issue");
 
   const sayadInput = optionalText(params.sayadId, "invalid_sayad_id");
   const sayadId = sayadInput ? normalizeSayadId(sayadInput) : null;
@@ -797,28 +883,50 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
   const status = initialStatus(params.direction);
 
   // Everything the posting depends on, so a replay is recognised and a
-  // different request wearing the same key is refused.
-  const fingerprint = fingerprintOf([
-    "record",
-    params.direction,
-    params.locationId,
-    canonicalBankName(bankName),
-    canonicalSerialNumber(serialNumber),
-    sayadId,
-    params.amount,
-    issueDate,
-    dueDate,
-    customerId,
-    supplierId,
-    replacesChequeId,
-    params.allowUnattributed ? 1 : 0,
-  ]);
+  // different request wearing the same key is refused. Only values the client
+  // sent go in — see `submittedIssueDate`.
+  const fingerprintFor = (issue: string | null) =>
+    fingerprintOf([
+      "record",
+      params.direction,
+      params.locationId,
+      canonicalBankName(bankName),
+      canonicalSerialNumber(serialNumber),
+      sayadId,
+      params.amount,
+      issue,
+      dueDate,
+      customerId,
+      supplierId,
+      replacesChequeId,
+      params.allowUnattributed ? 1 : 0,
+    ]);
+  const fingerprint = fingerprintFor(submittedIssueDate);
 
-  // A replay answers from the first call's row, before anything is posted.
+  /*
+   * A replay answers from the first call's row, before anything is posted and
+   * before any check that depends on the clock — a retry of a request that
+   * committed must get that request's answer however much later it arrives.
+   *
+   * Rows written before this changed stored a fingerprint computed from the
+   * *resolved* date. When the caller omitted the date, that is the row's own
+   * `issue_date`, so the stored value is recomputed with it and accepted:
+   * keys issued by the previous release keep working instead of turning into
+   * conflicts.
+   */
   if (idempotencyKey) {
-    const replay = await findChequeByIdempotencyKey(params.businessId, idempotencyKey, fingerprint);
+    const replay = await findChequeByIdempotencyKey(params.businessId, idempotencyKey, fingerprint, {
+      legacyFingerprintFor: (row) =>
+        submittedIssueDate === null ? fingerprintFor(row.issue_date) : null,
+    });
     if (replay) return replay;
   }
+
+  // Only now, with no committed original to answer with, does the clock come
+  // in: an omitted issue date means "today", and a new request gets every
+  // validation the first one got.
+  const issueDate = submittedIssueDate ?? todayIso();
+  if (dueDate < issueDate) throw new ChequeError("due_date_before_issue");
 
   const client = await getPool().connect();
   try {
@@ -929,7 +1037,10 @@ export async function recordCheque(params: RecordChequeParams): Promise<Cheque> 
     // Lost a race against the same key: the other request's cheque is the
     // answer to this one too.
     if (idempotencyKey && isUniqueViolation(err)) {
-      const replay = await findChequeByIdempotencyKey(params.businessId, idempotencyKey, fingerprint);
+      const replay = await findChequeByIdempotencyKey(params.businessId, idempotencyKey, fingerprint, {
+        legacyFingerprintFor: (row) =>
+          submittedIssueDate === null ? fingerprintFor(row.issue_date) : null,
+      });
       if (replay) return replay;
     }
     throw err;

@@ -31,7 +31,9 @@ import {
   useState,
   useDeferredValue,
   useCallback,
+  type ReactNode,
 } from "react";
+import Link from "next/link";
 import {
   SearchIcon,
   PlusIcon,
@@ -51,6 +53,8 @@ import {
   FileTextIcon,
   XIcon,
   ChevronDownIcon,
+  ExternalLinkIcon,
+  ArrowLeftIcon,
 } from "lucide-react";
 
 import {
@@ -116,13 +120,15 @@ import { formatJalali, todayIsoDate } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import {
   availableActions,
+  isTerminal,
   type ChequeAction,
   type ChequeDirection,
   type ChequeStatus,
 } from "@/lib/cheques";
-import { OperationKeyHolder, operationSignature } from "@/lib/operation-key";
+import { OperationKeyHolder, operationSignature, outcomeOf } from "@/lib/operation-key";
 import { api } from "@/app/dashboard/ui";
 import { JournalPeekDialog } from "./journal-peek-dialog";
+import { accountingCustomerHref, accountingSupplierHref } from "./accounting-routes";
 
 // ---------------------------------------------------------------------------
 // Types & constants
@@ -155,6 +161,16 @@ interface Cheque {
 interface Counterparty {
   id: string;
   name: string;
+  /**
+   * The canonical party behind this directory entry, when it has one.
+   *
+   * A supplier id is an alias id, not a party id, so it cannot address the
+   * party directory on its own; the A/P directory already resolves the link
+   * (`suppliers.party_id`) and returns it. Customers in this directory *are*
+   * parties, so the two coincide there. Null means the alias has never been
+   * linked — the name then stays plain text rather than linking to nothing.
+   */
+  partyId?: string | null;
 }
 
 /** The server's accounting-aware totals for the whole filtered register. */
@@ -414,6 +430,16 @@ export function ChequesSection({
   /** The returned cheque a «ثبت چک جایگزین» was started from, if any. */
   const [replacing, setReplacing] = useState<Cheque | null>(null);
   const [detail, setDetail] = useState<Cheque | null>(null);
+  /**
+   * Opens a cheque the register page may not hold — the returned original
+   * behind a replacement, or a replacement of a returned cheque. Both are
+   * routinely outside the current filter, so the row is read by id instead
+   * of being searched for in `items`.
+   */
+  const openChequeById = useCallback(async (id: string) => {
+    const { ok, data } = await api<{ cheque?: Cheque }>(`/api/ledger/cheques/${id}`);
+    if (ok && data.cheque) setDetail(data.cheque);
+  }, []);
   const [action, setAction] = useState<{
     cheque: Cheque;
     act: ChequeAction;
@@ -574,7 +600,7 @@ export function ChequesSection({
       api<{ customers?: { customerId: string; customerName: string }[] }>(
         "/api/ledger/ar/customers?scope=directory",
       ),
-      api<{ suppliers?: { supplierId: string; supplierName: string }[] }>(
+      api<{ suppliers?: { supplierId: string; supplierName: string; supplierPartyId?: string | null }[] }>(
         "/api/ledger/ap/suppliers?scope=directory",
       ),
     ]).then(([customerResult, supplierResult]) => {
@@ -584,6 +610,8 @@ export function ChequesSection({
           customerResult.data.customers.map((c) => ({
             id: c.customerId,
             name: c.customerName,
+            // The A/R directory is keyed by party id already.
+            partyId: c.customerId,
           })),
         );
       }
@@ -592,6 +620,7 @@ export function ChequesSection({
           supplierResult.data.suppliers.map((s) => ({
             id: s.supplierId,
             name: s.supplierName,
+            partyId: s.supplierPartyId ?? null,
           })),
         );
       }
@@ -658,16 +687,15 @@ export function ChequesSection({
      * different operation, which gets its own key instead of being refused
      * with `idempotency_key_conflict`.
      */
-    const idempotencyKey = actionKeys.current.keyFor(
-      operationSignature([
-        cheque.id,
-        act,
-        body.occurredOn ?? null,
-        body.feeAmount ?? null,
-        body.endorsedToSupplierId ?? null,
-      ]),
-    );
-    let response: { ok: boolean; data: { error?: string } } | undefined;
+    const signature = operationSignature([
+      cheque.id,
+      act,
+      body.occurredOn ?? null,
+      body.feeAmount ?? null,
+      body.endorsedToSupplierId ?? null,
+    ]);
+    const idempotencyKey = actionKeys.current.keyFor(signature);
+    let response: { ok: boolean; status: number; data: { error?: string } } | undefined;
     const ok = await run(async () => {
       response = await api<{ error?: string }>(`/api/ledger/cheques/${cheque.id}/${act}`, {
         method: "POST",
@@ -681,10 +709,11 @@ export function ChequesSection({
       });
       return response;
     });
+    // Committed or refused-in-words both settle this operation; anything else
+    // (a dropped connection, a 5xx, a proxy timeout) leaves the key in place
+    // so the next press is recognised as the retry it is.
+    actionKeys.current.resolve(signature, outcomeOf(response));
     if (ok) {
-      // Committed: the next confirmation is a new operation, even an
-      // identical one (a cheque may legitimately be acted on twice).
-      actionKeys.current.settle();
       setAction(null);
       setDetail(null);
       setRefreshKey((k) => k + 1);
@@ -1479,7 +1508,10 @@ export function ChequesSection({
           actions={actionsFor(detail)}
           onAction={(act) => openAction(detail, act)}
           onReplace={canManage ? () => openReplacement(detail) : undefined}
+          canManage={canManage}
+          customers={customers}
           suppliers={suppliers}
+          onOpenCheque={openChequeById}
           money={money}
           busy={busy}
         />
@@ -1736,18 +1768,30 @@ function ChequeDetailDialog({
   actions,
   onAction,
   onReplace,
+  canManage,
+  customers,
   suppliers,
+  onOpenCheque,
   money,
   busy,
 }: {
   cheque: Cheque;
   onClose: () => void;
-  /** Already gated by `finance.cheques_manage`; empty means read-only. */
+  /**
+   * The transitions this member may take now: legal for the cheque *and*
+   * permitted for them. Empty therefore has two very different causes, which
+   * is why `canManage` is passed separately — see the panel below.
+   */
   actions: ChequeAction[];
   onAction: (act: ChequeAction) => void;
   /** Offered on a returned cheque only, and only to a member who may write. */
   onReplace?: () => void;
+  /** Whether this member holds `finance.cheques_manage` at all. */
+  canManage: boolean;
+  customers: Counterparty[];
   suppliers: Counterparty[];
+  /** Opens another cheque's detail in place (the original, or a replacement). */
+  onOpenCheque: (id: string) => void;
   money: ReturnType<typeof useMoney>;
   busy: boolean;
 }) {
@@ -1776,11 +1820,59 @@ function ChequeDetailDialog({
     };
   }, [cheque.id, historyRefresh]);
 
+  /*
+   * The cheque this one replaces and the cheques issued to replace it, read
+   * by id rather than looked up in the register page: the page behind this
+   * dialog is one filtered, paginated slice, and the related cheque is very
+   * often not in it (a replacement is current, its returned original is
+   * settled — two different status filters). Reading them keeps the links
+   * working whatever the list is showing.
+   */
+  const [related, setRelated] = useState<{ replaces: Cheque | null; replacements: Cheque[] } | null>(
+    null,
+  );
+  useEffect(() => {
+    let current = true;
+    setRelated(null);
+    void api<{ replaces?: Cheque | null; replacements?: Cheque[] }>(
+      `/api/ledger/cheques/${cheque.id}`,
+    ).then(({ ok, data }) => {
+      if (!current || !ok) return;
+      setRelated({
+        replaces: data.replaces ?? null,
+        replacements: Array.isArray(data.replacements) ? data.replacements : [],
+      });
+    });
+    return () => {
+      current = false;
+    };
+  }, [cheque.id]);
+
   const endorsedSupplierId = events?.find((event) => event.event === "endorsed")?.endorsedToSupplierId;
   const linkedSupplierId = cheque.direction === "payable" ? cheque.supplierId : endorsedSupplierId;
-  const linkedSupplier = linkedSupplierId
-    ? (suppliers.find((supplier) => supplier.id === linkedSupplierId)?.name ?? "تأمین‌کننده")
-    : null;
+  const linkedSupplierRecord = linkedSupplierId
+    ? suppliers.find((supplier) => supplier.id === linkedSupplierId)
+    : undefined;
+  const linkedSupplier = linkedSupplierId ? (linkedSupplierRecord?.name ?? "تأمین‌کننده") : null;
+  /*
+   * Party links come from stored ids only. `customerId` *is* a party id; a
+   * supplier id is an alias, so its party comes from the A/P directory entry
+   * the picker is already built from. Nothing here is inferred from the memo
+   * or from matching names — a cheque whose counterparty was typed by hand
+   * has no party, and shows plain text, which is the truth.
+   */
+  const customerPartyId =
+    cheque.direction === "receivable" && cheque.customerId
+      ? (customers.find((c) => c.id === cheque.customerId)?.partyId ?? cheque.customerId)
+      : null;
+  const supplierPartyId = linkedSupplierRecord?.partyId ?? null;
+  const counterpartyHref = customerPartyId
+    ? accountingCustomerHref(customerPartyId)
+    : cheque.direction === "payable" && supplierPartyId
+      ? accountingSupplierHref(supplierPartyId)
+      : undefined;
+  const replacesCheque = related?.replaces ?? null;
+  const replacements = related?.replacements ?? [];
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -1813,7 +1905,11 @@ function ChequeDetailDialog({
               <CardTitle className="text-sm">مشخصات چک</CardTitle>
             </CardHeader>
             <CardContent className="grid gap-3 sm:grid-cols-2">
-              <DetailItem label="طرف حساب" value={cheque.counterpartyName} />
+              <DetailItem
+                label="طرف حساب"
+                value={cheque.counterpartyName}
+                href={counterpartyHref}
+              />
               <DetailItem label="بانک" value={cheque.bankName} />
               <DetailItem
                 label="شماره چک"
@@ -1842,21 +1938,52 @@ function ChequeDetailDialog({
                 label="شعبه ثبت چک"
                 value={cheque.locationName ?? "کل کسب‌وکار"}
               />
-              {cheque.status === "resolved" && (cheque.replacedByAmount ?? 0) > 0 ? (
+              {(cheque.replacedByAmount ?? 0) > 0 ? (
                 <DetailItem
                   label="جایگزین‌شده تا کنون"
                   value={`${money.format(cheque.replacedByAmount ?? 0)} از ${money.format(cheque.amount)}`}
+                  className={replacements.length > 0 ? "sm:col-span-2" : undefined}
                 />
+              ) : null}
+              {replacements.length > 0 ? (
+                <div className="sm:col-span-2">
+                  <p className="text-xs text-muted-foreground">چک‌های جایگزین</p>
+                  <ul className="mt-1 grid gap-1">
+                    {replacements.map((child) => (
+                      <li key={child.id}>
+                        <button
+                          type="button"
+                          onClick={() => onOpenCheque(child.id)}
+                          className="inline-flex items-center gap-1 rounded text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <span dir="ltr">{toPersianDigits(child.serialNumber)}</span>
+                          <span>· {money.format(child.amount)}</span>
+                          <span>· {STATUS_LABELS[child.status]}</span>
+                          <ArrowLeftIcon aria-hidden className="size-3.5 shrink-0" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               ) : null}
               {cheque.replacesChequeId ? (
                 <DetailItem
                   label="جایگزین چک برگشتی"
                   value={
-                    cheque.replacesSerialNumber
-                      ? toPersianDigits(cheque.replacesSerialNumber)
-                      : "ثبت‌شده"
+                    replacesCheque
+                      ? toPersianDigits(replacesCheque.serialNumber)
+                      : cheque.replacesSerialNumber
+                        ? toPersianDigits(cheque.replacesSerialNumber)
+                        : "ثبت‌شده"
                   }
                   dir="ltr"
+                  // The original is read by id, so the link survives the
+                  // register being filtered to a status it is not in.
+                  onClick={
+                    replacesCheque
+                      ? () => onOpenCheque(cheque.replacesChequeId as string)
+                      : undefined
+                  }
                 />
               ) : null}
               {cheque.accountNumber ? (
@@ -1870,6 +1997,7 @@ function ChequeDetailDialog({
                 <DetailItem
                   label={cheque.direction === "payable" ? "تأمین‌کننده" : "واگذارشده به"}
                   value={linkedSupplier}
+                  href={supplierPartyId ? accountingSupplierHref(supplierPartyId) : undefined}
                 />
               ) : null}
               {cheque.memo ? (
@@ -1892,8 +2020,19 @@ function ChequeDetailDialog({
             </CardHeader>
             <CardContent>
               {actions.length === 0 ? (
+                /*
+                 * Two unrelated reasons produce no buttons, and saying «در
+                 * وضعیت نهایی است» for both told a `ledger.view` reader that
+                 * a live on-hand cheque was finished — the opposite of the
+                 * truth. The legal state of the instrument and this member's
+                 * permission are reported separately.
+                 */
                 <p className="rounded-lg border border-dashed bg-muted/30 px-3 py-4 text-center text-xs text-muted-foreground">
-                  این چک در وضعیت نهایی است و اقدام دیگری ندارد.
+                  {isTerminal(cheque.direction, cheque.status)
+                    ? "این چک در وضعیت نهایی است و اقدام دیگری ندارد."
+                    : canManage
+                      ? "در این وضعیت اقدام دیگری برای این چک تعریف نشده است."
+                      : `این چک هنوز در جریان است، اما ثبت اقدام روی چک‌ها به دسترسی «مدیریت چک‌ها» نیاز دارد. وضعیت فعلی: ${STATUS_LABELS[cheque.status]}.`}
                 </p>
               ) : (
                 <div className="flex flex-wrap gap-2">
@@ -2079,18 +2218,40 @@ function DetailItem({
   value,
   dir,
   className,
+  href,
+  onClick,
 }: {
   label: string;
-  value: string;
+  value: ReactNode;
   dir?: "ltr" | "rtl";
   className?: string;
+  /** Navigates to the canonical screen for the thing this field names. */
+  href?: string;
+  /** In-screen navigation (another cheque), when there is no route to link to. */
+  onClick?: () => void;
 }) {
+  const linkClass =
+    "mt-1 inline-flex max-w-full items-center gap-1 break-words rounded text-start text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
   return (
     <div className={className}>
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="mt-1 break-words text-sm font-medium" dir={dir}>
-        {value}
-      </p>
+      {href ? (
+        // A real anchor, so it is keyboard reachable, middle-clickable and
+        // readable by a screen reader as the link it is.
+        <Link href={href} className={linkClass} dir={dir}>
+          {value}
+          <ExternalLinkIcon aria-hidden className="size-3.5 shrink-0" />
+        </Link>
+      ) : onClick ? (
+        <button type="button" onClick={onClick} className={linkClass} dir={dir}>
+          {value}
+          <ArrowLeftIcon aria-hidden className="size-3.5 shrink-0" />
+        </button>
+      ) : (
+        <p className="mt-1 break-words text-sm font-medium" dir={dir}>
+          {value}
+        </p>
+      )}
     </div>
   );
 }
@@ -2172,7 +2333,10 @@ function CreateChequeDialog({
    * again — re-sent a different payload under the same key, which the server
    * now correctly refuses with `idempotency_key_conflict`, leaving the form
    * unusable until it was closed and reopened. Deriving the key from the
-   * payload keeps the retry safe and lets the correction through.
+   * payload keeps the retry safe and lets the correction through — and the
+   * holder keeps every payload whose fate is still unknown, so editing away
+   * from one (or closing the form) cannot throw away the identity of a
+   * registration that may already have committed.
    */
   const createKeys = useRef(new OperationKeyHolder());
 
@@ -2218,7 +2382,10 @@ function CreateChequeDialog({
       setMemo("");
       setFormError("");
       setUnattributed(false);
-      createKeys.current.settle();
+      // Deliberately *not* clearing the operation keys: closing the dialog is
+      // not evidence that a submission failed. If the last attempt's fate is
+      // unknown, reopening the form and submitting the same cheque again must
+      // still be the retry of that attempt, not a second registration.
     }
   }, [open]);
 
@@ -2276,24 +2443,23 @@ function CreateChequeDialog({
     // Every accounting-significant field of this registration, in the order
     // the server fingerprints them. The memo is deliberately absent: fixing a
     // typo in the note is still the same cheque.
-    body.idempotencyKey = createKeys.current.keyFor(
-      operationSignature([
-        dir,
-        serialNumber.trim(),
-        sayadId.trim(),
-        bankName.trim(),
-        accountNumber.trim(),
-        rial,
-        issueDate,
-        dueDate,
-        name,
-        counterpartyId,
-        replaces?.id ?? null,
-        !counterpartyId && unattributed,
-      ]),
-    );
+    const signature = operationSignature([
+      dir,
+      serialNumber.trim(),
+      sayadId.trim(),
+      bankName.trim(),
+      accountNumber.trim(),
+      rial,
+      issueDate,
+      dueDate,
+      name,
+      counterpartyId,
+      replaces?.id ?? null,
+      !counterpartyId && unattributed,
+    ]);
+    body.idempotencyKey = createKeys.current.keyFor(signature);
     reportError("");
-    let response: { ok: boolean; data: { error?: string } } | undefined;
+    let response: { ok: boolean; status: number; data: { error?: string } } | undefined;
     const ok = await run(async () => {
       response = await api<{ error?: string }>("/api/ledger/cheques", {
         method: "POST",
@@ -2301,10 +2467,9 @@ function CreateChequeDialog({
       });
       return response;
     });
-    if (ok) {
-      createKeys.current.settle();
-      onCreated();
-    } else reportError(errorMessage(response?.data.error));
+    createKeys.current.resolve(signature, outcomeOf(response));
+    if (ok) onCreated();
+    else reportError(errorMessage(response?.data.error));
   }
 
   return (
