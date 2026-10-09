@@ -5,7 +5,8 @@ import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { useCallback, useEffect, useState, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FilterChip, FilterChipRow } from "@/app/dashboard/filters";
-import { api, ErrorBox, SecondaryButton } from "@/app/dashboard/ui";
+import { api, ErrorBox, errorMessageOrRaw, SecondaryButton } from "@/app/dashboard/ui";
+import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
 import { PERMISSIONS } from "@/lib/permissions";
 import { partyScopeFor } from "@/lib/parties-scopes";
 import {
@@ -161,6 +162,26 @@ export function AccountingManager({
    * API is going to refuse.
    */
   const canProposeLedger = permissions.includes(PERMISSIONS.ledgerPropose);
+
+  /**
+   * Whether this member may mutate the fixed-asset register — create,
+   * depreciate, reverse, dispose, transfer, archive, delete (issue #833).
+   *
+   * The page opens with `ledger.view`, but every mutation route checks
+   * `finance.assets_manage`; a ledger-only member used to see apparently
+   * live buttons and discover the 403 only after pressing one. `undefined`
+   * when effective permissions could not be read: the section is then
+   * READ-ONLY until the capability is affirmatively known — fail-closed,
+   * never "draw the controls and let the API say no" (the API stays the
+   * authority either way).
+   *
+   * `finance.assets_manage` is *the* authority for this register's
+   * controlled auto-postings too (depreciation, reversal, disposal): it is
+   * the operational finance capability the owner, manager and accountant
+   * presets all carry, and it is what the routes check — there is
+   * deliberately no second, separate posting permission here.
+   */
+  const canManageFixedAssets = permissions ? permissions.includes(PERMISSIONS.financeAssetsManage) : undefined;
 
   // Every section is a route now, so the rail navigates rather than switching
   // local state — a section a person lands on is a URL they can keep.
@@ -345,7 +366,14 @@ export function AccountingManager({
           ) : null}
           {section === "payroll" ? <PayrollSection busy={busy} run={run} refreshKey={refreshKey} /> : null}
           {section === "vat" ? <VatReportSection refreshKey={refreshKey} /> : null}
-          {section === "fixed-assets" ? <FixedAssetsSection busy={busy} refreshKey={refreshKey} /> : null}
+          {section === "fixed-assets" ? (
+            <FixedAssetsSection
+              busy={busy}
+              refreshKey={refreshKey}
+              canManage={canManageFixedAssets}
+              accounts={accounts ?? []}
+            />
+          ) : null}
           {section === "financial-reports" ? <AccountingReportsSection /> : null}
           {section === "settings" ? <AccountingSettingsSection /> : null}
           {section === "growth" ? <GrowthAccountingView /> : null}
@@ -490,7 +518,6 @@ function errorMessage(code: string | undefined): string {
     user_not_found: "عضو موردنظر پیدا نشد.",
     no_wages_set: "هیچ عضو فعالی حقوق تعیین‌شده ندارد.",
     // Audit F11 — a run is a Jalali month, computed gross-to-net.
-    invalid_period: "ماه حقوق معتبر نیست.",
     period_in_future: "این ماه هنوز شروع نشده است و حقوق آن قابل ثبت نیست.",
     period_already_accrued: "برای این ماه قبلاً تعهد حقوق ثبت شده است؛ برای ثبت دوباره ابتدا آن را ابطال کنید.",
     invalid_overtime: "مبلغ اضافه‌کار معتبر نیست.",
@@ -506,11 +533,14 @@ function errorMessage(code: string | undefined): string {
     already_paid: "این تعهد قبلاً پرداخت شده است.",
     already_voided: "این تعهد قبلاً ابطال شده است.",
     run_voided: "این تعهد ابطال شده و قابل پرداخت نیست.",
-    // Phase 22 — fixed assets & depreciation
-    fixed_asset_not_found: "دارایی ثابت پیدا نشد.",
-    fixed_asset_has_depreciation: "برای این دارایی استهلاک ثبت شده و قابل حذف نیست.",
-    period_already_depreciated: "استهلاک این دوره قبلاً ثبت شده است.",
-    fully_depreciated: "این دارایی به‌طور کامل مستهلک شده است.",
+    // Phase 22 — fixed assets & depreciation (lifecycle per issue #833)
+    location_not_found: "شعبه انتخاب‌شده معتبر نیست.",
+    reason_required: "ذکر دلیل الزامی است.",
+    reason_too_long: "دلیل واردشده بیش از حد طولانی است.",
   };
-  return map[code ?? ""] ?? "خطای غیرمنتظره. دوباره تلاش کنید.";
+  // The fixed-asset register's domain errors come from the one canonical
+  // dictionary (fixed-assets-errors.ts); everything else is this screen's
+  // own journal/account vocabulary or the shared dashboard fallback.
+  if (code && FIXED_ASSET_ERROR_TRANSLATIONS[code]) return FIXED_ASSET_ERROR_TRANSLATIONS[code];
+  return map[code ?? ""] ?? errorMessageOrRaw(code);
 }

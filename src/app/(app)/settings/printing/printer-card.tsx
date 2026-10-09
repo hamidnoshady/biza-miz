@@ -12,20 +12,20 @@ import { StatusBadge } from "@/app/dashboard/page-chrome";
 import { testPrint } from "@/lib/printing/client";
 import { printerErrorMessage } from "@/lib/printing/errors";
 import { describeConnection, legacyTransportLabel, normalizeStoredConnection } from "@/lib/printing/types";
-import { PAPERS } from "@/lib/print-template";
-import type { PrinterRow, SavedTemplateRow } from "./use-printing";
+import { DOC_TYPE_LABELS, PAPERS, type DocType } from "@/lib/print-template";
+import { documentTypeForPurpose } from "@/lib/printing/routing";
+import { PRINTER_PURPOSE_LABELS } from "@/lib/printing/types";
+import type { PrinterRow } from "./use-printing";
 import { AddPrinterDialog } from "./add-printer-flow";
 import { PrinterStatusBadge, usePrinterStatus } from "./printer-status";
 
 export function PrinterCard({
   printer,
-  templates,
   onChanged,
   onNotice,
   onError,
 }: {
   printer: PrinterRow;
-  templates: SavedTemplateRow[];
   onChanged: () => Promise<void> | void;
   onNotice: (message: string) => void;
   onError: (message: string) => void;
@@ -34,11 +34,11 @@ export function PrinterCard({
   const [editing, setEditing] = useState(false);
   const [testing, setTesting] = useState(false);
   const connection = normalizeStoredConnection(printer.connection);
-  const paper = connection.paper && PAPERS[connection.paper] ? PAPERS[connection.paper].label : connection.paperWidthMm === 58 ? "۵۸ میلی‌متر" : "۸۰ میلی‌متر";
+  const paper = printer.paper && PAPERS[printer.paper] ? PAPERS[printer.paper].label : printer.paper_width_mm === 58 ? "۵۸ میلی‌متر" : "۸۰ میلی‌متر";
 
   async function runTest() {
     setTesting(true);
-    const result = await testPrint(printer.id, printer.kind);
+    const result = await testPrint(printer.id, documentTypeForPurpose(printer.kind) as DocType);
     setTesting(false);
     if (!result.ok) {
       onError(printerErrorMessage(result.error));
@@ -53,12 +53,12 @@ export function PrinterCard({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="font-semibold text-foreground">{printer.name}</h3>
-            {connection.isDefault ? <StatusBadge tone="active">پیش‌فرض</StatusBadge> : null}
+            {printer.is_default ? <StatusBadge tone="active">پیش‌فرض</StatusBadge> : null}
             {!printer.is_active ? <StatusBadge tone="neutral">غیرفعال</StatusBadge> : null}
             <PrinterStatusBadge status={status} />
           </div>
           <p className="mt-1 truncate text-xs text-muted-foreground" dir="auto">
-            {printer.kind === "kitchen" ? "آشپزخانه" : "رسید"} • {connection.needsReconnect ? legacyTransportLabel(connection.legacyTransport) : target?.type === "windows" ? "ویندوز" : "شبکه"} •{" "}
+            {PRINTER_PURPOSE_LABELS[printer.kind] ?? DOC_TYPE_LABELS[documentTypeForPurpose(printer.kind)]} • {connection.needsReconnect ? legacyTransportLabel(connection.legacyTransport) : target?.type === "windows" ? "ویندوز" : "شبکه"} •{" "}
             {describeConnection(printer.connection)} • {paper}
           </p>
           {connection.needsReconnect ? (
@@ -88,7 +88,6 @@ export function PrinterCard({
       <AddPrinterDialog
         open={editing}
         onOpenChange={setEditing}
-        templates={templates}
         editing={printer}
         onSaved={async () => {
           setEditing(false);

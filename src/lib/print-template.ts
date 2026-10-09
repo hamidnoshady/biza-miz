@@ -17,6 +17,7 @@
  * templates it generalises, so the print agent, a route handler and the
  * browser can all import it.
  */
+import { ean13Modules } from "./barcode";
 import { toPersianDigits } from "./digits";
 import { formatJalali } from "./jalali";
 import { formatMoney, type MoneyUnit, type Rial } from "./money";
@@ -127,6 +128,7 @@ export type BlockType =
   | "text"
   | "qr"
   | "barcode"
+  | "labelFields"
   | "signature"
   | "divider"
   | "spacer";
@@ -145,10 +147,22 @@ export const BLOCK_LABELS: Record<BlockType, string> = {
   text: "متن دلخواه",
   qr: "کد QR",
   barcode: "بارکد / شمارهٔ سند",
+  labelFields: "مشخصات برچسب",
   signature: "محل امضا",
   divider: "خط جداکننده",
   spacer: "فاصلهٔ خالی",
 };
+
+/**
+ * Blocks the designer must not offer, with the reason it must not.
+ *
+ * `qr`: the renderer only draws a QR from a document-supplied payload
+ * (`withQrCode`), and nothing in the product produces one yet. The block type
+ * stays in the model — an existing template may carry it, and the renderer
+ * honours it the day a payload exists — but it is not a choice a person can
+ * make from a control that would print nothing.
+ */
+export const HIDDEN_BLOCK_TYPES: BlockType[] = ["qr"];
 
 /** Which columns the items table prints, in display order. */
 export type ItemColumn = "row" | "name" | "qty" | "unitPrice" | "discount" | "tax" | "total";
@@ -163,6 +177,15 @@ export const ITEM_COLUMN_LABELS: Record<ItemColumn, string> = {
   total: "مبلغ کل",
 };
 
+/**
+ * Block types the designer may add. `qr` is deliberately absent — see
+ * `HIDDEN_BLOCK_TYPES` below: no document supplies a QR payload yet, and
+ * offering a control the renderer would silently drop is the exact drift this
+ * model exists to prevent. The pipeline is ready for it: the server generates
+ * the QR image itself from the document's `qrPayload` (`withQrCode` in
+ * printing/render-service.ts), so re-enabling the control is a one-line change
+ * once a payload source is configured.
+ */
 export type Align = "start" | "center" | "end";
 export type TextSize = "xs" | "sm" | "md" | "lg" | "xl";
 
@@ -286,6 +309,8 @@ export interface PrintDocumentData {
   /** Pre-rendered QR image (data URL) — the browser/route makes it, the template only places it. */
   qrDataUrl?: string | null;
   barcodeValue?: string | null;
+  /** A label's trade fields («رنگ», «عیار», «سایز», …) — see the `labelFields` block. */
+  labelFields?: { label: string; value: string }[] | null;
   unit?: MoneyUnit;
 }
 
@@ -319,11 +344,25 @@ const THERMAL_RECEIPT_BLOCKS = (): TemplateBlock[] => [
 ];
 
 /**
- * The five templates every install starts with. Between them they cover the
+ * A label roll's blocks: the trade name, the item, the fields a shop reads at
+ * the counter, and the barcode. No totals, no payments, and no divider — a
+ * 57×40mm sticker has no room for them, which is exactly why the designer
+ * needs a preset rather than a receipt template squeezed onto a sticker.
+ */
+const LABEL_BLOCKS = (): TemplateBlock[] => [
+  block("businessName", "businessName", { align: "center", size: "xs" }),
+  block("title", "title", { align: "center", size: "md", bold: true }),
+  block("fields", "labelFields", { size: "sm" }),
+  block("barcode", "barcode", { align: "center" }),
+];
+
+/**
+ * The six templates every install starts with. Between them they cover the
  * paper a shop in this market actually owns: the two thermal roll widths, the
- * two office sheet sizes, and a kitchen roll. A shop can duplicate any of them
- * into a template of its own — that is what the designer's «ذخیره به‌عنوان
- * قالب جدید» does — but it can never break one, because these are code.
+ * two office sheet sizes, a kitchen roll and a label size. A shop can
+ * duplicate any of them into a template of its own — that is what the
+ * designer's «ذخیره به‌عنوان قالب جدید» does — but it can never break one,
+ * because these are code.
  */
 export const BUILT_IN_TEMPLATES: PrintTemplate[] = [
   {
@@ -390,12 +429,23 @@ export const BUILT_IN_TEMPLATES: PrintTemplate[] = [
     ],
   },
   {
+    key: "label57x40-label",
+    name: "برچسب ۵۷×۴۰ میلی‌متری",
+    docType: "label",
+    paper: "label57x40",
+    options: { ...DEFAULT_OPTIONS, marginMm: 2, fontScale: 1, lineHeight: 1.35, bodyWeight: 600, showUnit: false },
+    blocks: LABEL_BLOCKS(),
+  },
+  {
     key: "thermal80-kitchen",
     name: "سفارش آشپزخانه ۸۰ میلی‌متری",
     docType: "kitchen",
     paper: "thermal80",
     options: { ...DEFAULT_OPTIONS, fontScale: 1.25, lineHeight: 1.45, bodyWeight: 700, showUnit: false },
     blocks: [
+      // The branch's name, from the same resolver receipts use: a kitchen with
+      // two printers and one rail should be able to tell whose ticket it is.
+      block("businessName", "businessName", { align: "center", size: "xs" }),
       block("title", "title", { align: "center", size: "xl", bold: true }),
       block("meta", "meta", { align: "center", size: "sm" }),
       block("d1", "divider"),
@@ -550,9 +600,10 @@ export interface RenderOptions {
 
 /**
  * Render `template` filled with `data` into a complete, standalone HTML
- * document — the single output every print path shares. The print agent
- * screenshots it for thermal rolls; the browser hands the same string to
- * `window.print()` for A4/A5; the designer drops it into a preview iframe.
+ * document — the single output every print path shares. The server hands it
+ * to its Chromium rasteriser for thermal rolls and for A4/A5 page images
+ * alike, and the designer drops the very same string into a preview iframe.
+ * Nothing calls `window.print()` any more: there is no browser-dialog path.
  */
 export function renderPrintTemplate(
   template: PrintTemplate,
@@ -646,6 +697,12 @@ export function renderPrintTemplate(
   .signature { display: flex; justify-content: space-between; gap: 6mm; margin-top: 8mm; }
   .signature .slot { flex: 1; border-top: 1px solid #000; padding-top: 1.5mm; text-align: center; font-size: 0.8em; }
   .barcode { font-family: "Courier New", monospace; letter-spacing: 2px; direction: ltr; text-align: center; }
+  .barcode-bars { direction: ltr; }
+  .barcode-bars .bars { display: block; margin: 0 auto; }
+  .barcode-bars .code-text { font-family: "Courier New", monospace; font-size: 1.1em; letter-spacing: 3px; text-align: center; }
+  .label-fields .field { display: flex; justify-content: space-between; gap: 2mm; }
+  .label-fields .field-label { color: #333; }
+  .label-fields .field-value { font-weight: 600; }
   .preview-label { display: none; }
   @media screen { .page { box-shadow: 0 0 0 1px #ddd; } }
 </style>
@@ -663,6 +720,34 @@ interface BlockContext {
   money: (value: Rial, withUnit?: boolean) => string;
   dateLabel: string;
   opts: TemplateOptions;
+}
+
+/**
+ * The scannable bars of an EAN-13/UPC-A code as an inline SVG, or null for a
+ * code in another shape (which stays text-only). 2px per module at the label
+ * raster width leaves quiet zones a real scanner accepts; the bars print pure
+ * black on the same monochrome raster path as the rest of the document.
+ */
+function barcodeSvg(code: string): string | null {
+  const modules = ean13Modules(code);
+  if (!modules) return null;
+  const moduleWidth = 2;
+  const height = 62;
+  const rects: string[] = [];
+  let run = 0;
+  for (let i = 0; i <= modules.length; i++) {
+    if (i < modules.length && modules[i] === "1") {
+      run += 1;
+      continue;
+    }
+    if (run > 0) {
+      const x = (i - run) * moduleWidth;
+      rects.push(`<rect x="${x}" y="0" width="${run * moduleWidth}" height="${height}"/>`);
+      run = 0;
+    }
+  }
+  const width = modules.length * moduleWidth;
+  return `<svg class="bars" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" fill="black" shape-rendering="crispEdges">${rects.join("")}</svg>`;
 }
 
 function blockStyle(b: TemplateBlock, fallbackAlign: Align = "start"): string {
@@ -763,7 +848,21 @@ function renderBlock(b: TemplateBlock, ctx: BlockContext): string {
     case "barcode": {
       const value = data.barcodeValue || data.number;
       if (!value) return "";
-      return `<div class="blk barcode" style="font-size:${b.size ? SIZE_FACTORS[b.size] : 1}em">${escapeHtml(value)}</div>`;
+      const bars = barcodeSvg(value);
+      if (!bars) {
+        return `<div class="blk barcode" style="font-size:${b.size ? SIZE_FACTORS[b.size] : 1}em">${escapeHtml(value)}</div>`;
+      }
+      // A shelf label exists to be scanned: an EAN-13/UPC-A code prints as
+      // real bars with its digits beneath, on the same monochrome raster path
+      // as everything else. Codes in another shape keep the text block.
+      return `<div class="blk barcode-bars" style="${alignCss(b.align, "center") === "center" ? "text-align:center;" : ""}">${bars}<div class="code-text">${escapeHtml(value)}</div></div>`;
+    }
+    case "labelFields": {
+      if (!data.labelFields?.length) return "";
+      const rows = data.labelFields
+        .map((field) => `<div class="field"><span class="field-label">${escapeHtml(field.label)}</span><span class="field-value">${escapeHtml(field.value)}</span></div>`)
+        .join("");
+      return `<div class="blk label-fields" style="${style}">${rows}</div>`;
     }
     case "signature": {
       const [right, left] = (b.text || "مهر و امضای فروشنده|مهر و امضای خریدار").split("|");

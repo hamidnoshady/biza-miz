@@ -111,12 +111,12 @@ function journalEntry() {
   return {
     entry: {
       id: ENTRY,
-      entry_date: "2025-04-01",
+      entryDate: "2025-04-01",
       memo: "فروش نسیه",
-      source_type: "order",
-      posted_at: "2025-04-01T10:00:00.000Z",
-      created_by_name: "زهرا",
-      reverses_entry_id: null,
+      sourceType: "order",
+      postedAt: "2025-04-01T10:00:00.000Z",
+      createdByName: "زهرا",
+      reversesEntryId: null,
       lines: [
         { id: "1", accountCode: "1200", accountName: "حساب‌های دریافتنی", debit: 800_000, credit: 0 },
         { id: "2", accountCode: "4300", accountName: "فروش", debit: 0, credit: 800_000 },
@@ -323,6 +323,7 @@ describe("statement drill-down", () => {
 
     await userEvent.click(screen.getAllByRole("button", { name: RECEIVABLES_SIDE.statement.entryLinkLabel })[0]);
     expect(await screen.findAllByText(/سند حسابداری/)).not.toHaveLength(0);
+    expect(screen.getAllByText(/زهرا/).length).toBeGreaterThan(0);
     expect(await screen.findAllByText(/حساب‌های دریافتنی/)).not.toHaveLength(0);
     expect(await screen.findAllByText(/فروش/)).not.toHaveLength(0);
     expect(fetchMock.mock.calls.some(([url]) => url === `/api/ledger/entries/${ENTRY}`)).toBe(true);
@@ -365,6 +366,7 @@ describe("A/P contracts preserved by the shared screen", () => {
     expect(screen.queryAllByRole("link")).toHaveLength(0);
     await userEvent.click(screen.getAllByRole("button", { name: PAYABLES_SIDE.statement.entryLinkLabel })[layout]);
     expect(await screen.findAllByText(/سند حسابداری/)).not.toHaveLength(0);
+    expect(screen.getAllByText(/زهرا/).length).toBeGreaterThan(0);
     expect(fetchMock.mock.calls.some(([url]) => url === `/api/ledger/entries/${ENTRY}`)).toBe(true);
   });
 

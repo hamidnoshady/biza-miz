@@ -175,7 +175,7 @@ export interface SubledgerAgingReport {
  * description.
  */
 export interface SubledgerStatementSource {
-  /** The journal entry's own `source_type` ('order', 'ar_receipt', 'cheque', 'purchase', …), or null for a manual entry. */
+  /** The journal entry's own `sourceType` ('order', 'ar_receipt', 'cheque', 'purchase', …), or null for a manual entry. */
   type: string | null;
   /** The source row's id (the order, the receipt or the cheque). */
   id: string | null;
@@ -406,12 +406,12 @@ function BalanceSummary({ side, summary }: { side: SubledgerSide; summary: Suble
 
 interface LedgerEntryDetail {
   id: string;
-  entry_date: string;
+  entryDate: string;
   memo: string | null;
-  source_type: string | null;
-  posted_at: string;
-  created_by_name: string | null;
-  reverses_entry_id: string | null;
+  sourceType: string | null;
+  postedAt: string;
+  createdByName: string | null;
+  reversesEntryId: string | null;
   lines: { id: string; accountCode: string; accountName: string; debit: number; credit: number }[];
 }
 
@@ -451,8 +451,8 @@ function StatementEntryDetail({ entryId, failedMessage, onClose }: { entryId: st
     <div className="rounded-xl border border-border/80 bg-muted/60 p-3 text-sm">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <p className="font-semibold text-foreground">
-          سند حسابداری — {fmtJalali(entry.entry_date)}
-          {entry.reverses_entry_id ? <span className="ms-2 text-xs font-medium text-amber-700 dark:text-amber-300">سند برگشتی</span> : null}
+          سند حسابداری — {fmtJalali(entry.entryDate)}
+          {entry.reversesEntryId ? <span className="ms-2 text-xs font-medium text-amber-700 dark:text-amber-300">سند برگشتی</span> : null}
         </p>
         <button
           type="button"
@@ -464,7 +464,7 @@ function StatementEntryDetail({ entryId, failedMessage, onClose }: { entryId: st
       </div>
       <p className="mt-1 text-xs leading-6 text-muted-foreground">
         {entry.memo || "بدون شرح"}
-        {entry.created_by_name ? ` — ثبت: ${entry.created_by_name}` : ""}
+        {entry.createdByName ? ` — ثبت: ${entry.createdByName}` : ""}
       </p>
       <dl className="mt-2 grid gap-1.5">
         {entry.lines.map((line) => (

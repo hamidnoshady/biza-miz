@@ -456,9 +456,12 @@ describe("drill-down", () => {
     });
     expect(response.status).toBe(200);
     const payload = (await response.json()) as {
-      entry: { id: string; lines: { accountCode: string; debit: number; credit: number }[] };
+      entry: { id: string; entryDate: string; sourceType: string; sourceId: string; lines: { accountCode: string; debit: number; credit: number }[] };
     };
     expect(payload.entry.id).toBe(entryId);
+    expect(payload.entry.entryDate).toBe("2025-04-01");
+    expect(payload.entry.sourceType).toBe("order");
+    expect(payload.entry.sourceId).toBeTruthy();
     expect(payload.entry.lines.map((line) => line.accountCode)).toEqual(["1200", "4300"]);
     const debit = payload.entry.lines.reduce((sum, line) => sum + line.debit, 0);
     const credit = payload.entry.lines.reduce((sum, line) => sum + line.credit, 0);
