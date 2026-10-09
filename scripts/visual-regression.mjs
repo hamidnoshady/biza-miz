@@ -389,10 +389,27 @@ async function main() {
     await context.close();
     const baselinePath = join(BASELINE_DIR, `${screen.id}.png`);
 
-    if (UPDATE || !existsSync(baselinePath)) {
+    if (UPDATE) {
       writeFileSync(baselinePath, actual);
       recorded.push(screen.id);
       continue;
+    }
+
+    /*
+     * A screen listed here with no committed baseline used to be recorded
+     * silently and counted as a pass. On CI — where the recorded file is
+     * thrown away with the runner — that is a job reporting green for a
+     * screen it never compared: a gate that exists in the list and nowhere
+     * else. Adding a screen and committing its approved PNG are one change,
+     * and this makes that non-optional.
+     */
+    if (!existsSync(baselinePath)) {
+      throw new Error(
+        `${screen.id}: no baseline at docs/design/visual/${screen.id}.png. ` +
+          "Record it with `node scripts/visual-regression.mjs --update`, review the " +
+          "image, and commit it together with the SCREENS entry — a screen without " +
+          "a committed baseline is not covered.",
+      );
     }
 
     const { mismatch, reason, diff, bounds } = comparePng(actual, readFileSync(baselinePath));
