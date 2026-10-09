@@ -1,6 +1,8 @@
 import groovy.json.JsonSlurper
 import java.net.URI
+import org.gradle.api.Action
 import org.gradle.api.GradleException
+import org.gradle.api.execution.TaskExecutionGraph
 
 plugins {
     alias(libs.plugins.android.application)
@@ -120,7 +122,8 @@ dependencies {
 
 // Release tasks must not run with a guessed origin or without signing. The check runs once the
 // task graph is known, so it fails before any compilation starts.
-gradle.taskGraph.whenReady { graph ->
+// The explicit Action type selects the typed overload. A bare lambda resolves to the deprecated Groovy Closure.
+gradle.taskGraph.whenReady(Action<TaskExecutionGraph> { graph ->
     val flavorsBeingReleased = graph.allTasks
         .mapNotNull { task -> releaseTaskPattern.find(task.name)?.groupValues?.get(2)?.lowercase() }
         .distinct()
@@ -142,4 +145,4 @@ gradle.taskGraph.whenReady { graph ->
             throw GradleException("Cannot build $flavorName release:\n - " + problems.joinToString("\n - "))
         }
     }
-}
+})
