@@ -125,7 +125,12 @@ import {
   type ChequeDirection,
   type ChequeStatus,
 } from "@/lib/cheques";
-import { OperationKeyHolder, operationSignature, outcomeOf } from "@/lib/operation-key";
+import {
+  OperationKeyHolder,
+  OperationKeyLimitError,
+  operationSignature,
+  outcomeOf,
+} from "@/lib/operation-key";
 import { api } from "@/app/dashboard/ui";
 import { JournalPeekDialog } from "./journal-peek-dialog";
 import { accountingCustomerHref, accountingSupplierHref } from "./accounting-routes";
@@ -215,6 +220,15 @@ interface ChequeEvent {
   memo: string | null;
   createdAt: string;
 }
+
+/**
+ * Shown when the holder refuses to start one more operation (see
+ * `OperationKeyLimitError`). It says what is true — nothing was sent — and
+ * points at the only safe way forward, which is to finish the attempts whose
+ * fate is unknown rather than pile another posting on top of them.
+ */
+const TOO_MANY_UNRESOLVED =
+  "نتیجه چند درخواست قبلی هنوز مشخص نشده است، بنابراین درخواست تازه‌ای ارسال نشد. ارتباط خود را بررسی کنید و همان درخواست‌های قبلی را دوباره تأیید کنید.";
 
 const STATUS_LABELS: Record<ChequeStatus, string> = {
   on_hand: "نزد صندوق",
@@ -431,14 +445,66 @@ export function ChequesSection({
   const [replacing, setReplacing] = useState<Cheque | null>(null);
   const [detail, setDetail] = useState<Cheque | null>(null);
   /**
+   * What the *current* detail selection is waiting for, if anything.
+   *
+   * Reading a related cheque by id is a network request, and the first
+   * version of this ignored everything about that: no busy state (the link
+   * looked dead on a slow connection), no error (a failed read did nothing at
+   * all — indistinguishable from a broken link), and no ownership, so a slow
+   * answer could overwrite a newer selection or push a dialog back open after
+   * the reader had closed it.
+   */
+  const [detailNav, setDetailNav] = useState<
+    { status: "loading"; id: string } | { status: "error"; id: string; message: string } | null
+  >(null);
+  /**
+   * The ticket of the newest detail selection.
+   *
+   * Every selection — a row, a related cheque, or closing the view — takes
+   * the next ticket, and a response may only act if it still holds it. That
+   * is what makes an out-of-order answer harmless: it is not cancelled (the
+   * read is cheap and may already be in flight), it is simply no longer the
+   * answer to what the reader is looking at.
+   */
+  const detailTicket = useRef(0);
+
+  /** Shows a cheque the register already holds, and owns the selection. */
+  const showDetail = useCallback((cheque: Cheque) => {
+    detailTicket.current += 1;
+    setDetailNav(null);
+    setDetail(cheque);
+  }, []);
+
+  /** Closes the detail view and invalidates anything it was waiting for. */
+  const closeDetail = useCallback(() => {
+    detailTicket.current += 1;
+    setDetailNav(null);
+    setDetail(null);
+  }, []);
+
+  /**
    * Opens a cheque the register page may not hold — the returned original
    * behind a replacement, or a replacement of a returned cheque. Both are
    * routinely outside the current filter, so the row is read by id instead
    * of being searched for in `items`.
    */
   const openChequeById = useCallback(async (id: string) => {
-    const { ok, data } = await api<{ cheque?: Cheque }>(`/api/ledger/cheques/${id}`);
-    if (ok && data.cheque) setDetail(data.cheque);
+    detailTicket.current += 1;
+    const ticket = detailTicket.current;
+    setDetailNav({ status: "loading", id });
+    const { ok, data, aborted } = await api<{ cheque?: Cheque; error?: string }>(
+      `/api/ledger/cheques/${id}`,
+    );
+    // Superseded: the reader has since picked another cheque or closed the
+    // view. Neither reopening it nor replacing what they are reading now
+    // would be an answer to anything they asked for.
+    if (aborted || ticket !== detailTicket.current) return;
+    if (ok && data.cheque) {
+      setDetailNav(null);
+      setDetail(data.cheque);
+      return;
+    }
+    setDetailNav({ status: "error", id, message: errorMessage(data?.error) });
   }, []);
   const [action, setAction] = useState<{
     cheque: Cheque;
@@ -694,7 +760,18 @@ export function ChequesSection({
       body.feeAmount ?? null,
       body.endorsedToSupplierId ?? null,
     ]);
-    const idempotencyKey = actionKeys.current.keyFor(signature);
+    let idempotencyKey: string;
+    try {
+      idempotencyKey = actionKeys.current.keyFor(signature);
+    } catch (err) {
+      // Refusing to mint a 33rd key is a refusal to post, not a silent
+      // reuse of someone else's: nothing is sent and the reader is told.
+      if (err instanceof OperationKeyLimitError) {
+        setActionError(TOO_MANY_UNRESOLVED);
+        return;
+      }
+      throw err;
+    }
     let response: { ok: boolean; status: number; data: { error?: string } } | undefined;
     const ok = await run(async () => {
       response = await api<{ error?: string }>(`/api/ledger/cheques/${cheque.id}/${act}`, {
@@ -715,7 +792,7 @@ export function ChequesSection({
     actionKeys.current.resolve(signature, outcomeOf(response));
     if (ok) {
       setAction(null);
-      setDetail(null);
+      closeDetail();
       setRefreshKey((k) => k + 1);
     } else {
       setActionError(errorMessage(response?.data.error));
@@ -746,11 +823,11 @@ export function ChequesSection({
     (cheque: Cheque) => {
       if (!canManage) return;
       setLocalError("");
-      setDetail(null);
+      closeDetail();
       setReplacing(cheque);
       setCreateOpen(true);
     },
-    [canManage],
+    [canManage, closeDetail],
   );
 
   const openAction = useCallback((cheque: Cheque, act: ChequeAction) => {
@@ -759,9 +836,9 @@ export function ChequesSection({
     setActionError("");
     // Never stack a second modal on the detail modal — that traps focus between
     // two dialogs on keyboard and makes the close affordance ambiguous.
-    setDetail(null);
+    closeDetail();
     setAction({ cheque, act });
-  }, [canManage]);
+  }, [canManage, closeDetail]);
 
   return (
     <div className="space-y-4" dir="rtl">
@@ -1238,7 +1315,7 @@ export function ChequesSection({
                                     variant="ghost"
                                     size="sm"
                                     className="h-8 px-2.5"
-                                    onClick={() => setDetail(c)}
+                                    onClick={() => showDetail(c)}
                                   >
                                     <EyeIcon className="size-4" />
                                     جزئیات
@@ -1248,7 +1325,7 @@ export function ChequesSection({
                                     actions={actionsFor(c)}
                                     busy={busy}
                                     onAction={(act) => openAction(c, act)}
-                                    onDetail={() => setDetail(c)}
+                                    onDetail={() => showDetail(c)}
                                   />
                                 </div>
                               </TableCell>
@@ -1386,7 +1463,7 @@ export function ChequesSection({
                                 variant="outline"
                                 size="sm"
                                 className="flex-1"
-                                onClick={() => setDetail(c)}
+                                onClick={() => showDetail(c)}
                               >
                                 <EyeIcon className="size-4" /> جزئیات و تاریخچه
                               </Button>
@@ -1395,7 +1472,7 @@ export function ChequesSection({
                                 actions={actionsFor(c)}
                                 busy={busy}
                                 onAction={(act) => openAction(c, act)}
-                                onDetail={() => setDetail(c)}
+                                onDetail={() => showDetail(c)}
                               />
                             </div>
 
@@ -1504,7 +1581,7 @@ export function ChequesSection({
       {detail ? (
         <ChequeDetailDialog
           cheque={detail}
-          onClose={() => setDetail(null)}
+          onClose={closeDetail}
           actions={actionsFor(detail)}
           onAction={(act) => openAction(detail, act)}
           onReplace={canManage ? () => openReplacement(detail) : undefined}
@@ -1512,6 +1589,8 @@ export function ChequesSection({
           customers={customers}
           suppliers={suppliers}
           onOpenCheque={openChequeById}
+          navigation={detailNav}
+          onRetryNavigation={() => detailNav && openChequeById(detailNav.id)}
           money={money}
           busy={busy}
         />
@@ -1772,6 +1851,8 @@ function ChequeDetailDialog({
   customers,
   suppliers,
   onOpenCheque,
+  navigation,
+  onRetryNavigation,
   money,
   busy,
 }: {
@@ -1792,6 +1873,12 @@ function ChequeDetailDialog({
   suppliers: Counterparty[];
   /** Opens another cheque's detail in place (the original, or a replacement). */
   onOpenCheque: (id: string) => void;
+  /** Whether this view is waiting for — or failed to read — a related cheque. */
+  navigation:
+    | { status: "loading"; id: string }
+    | { status: "error"; id: string; message: string }
+    | null;
+  onRetryNavigation: () => void;
   money: ReturnType<typeof useMoney>;
   busy: boolean;
 }) {
@@ -1900,6 +1987,42 @@ function ChequeDetailDialog({
         </DialogHeader>
 
         <div className="grid gap-4">
+          {/*
+            Reading a related cheque is a request, and the reader is told so.
+            It is announced in place rather than by swapping the dialog out:
+            `role="status"` keeps focus where it is and lets a screen reader
+            hear the wait, and the failure below is an `alert` with the one
+            action that helps — try again — instead of a link that silently
+            did nothing.
+          */}
+          {navigation?.status === "loading" ? (
+            <p
+              role="status"
+              aria-live="polite"
+              className="flex items-center gap-2 rounded-lg border border-dashed bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+            >
+              <Clock3Icon aria-hidden className="size-4 animate-spin" />
+              در حال باز کردن چک مرتبط…
+            </p>
+          ) : null}
+          {navigation?.status === "error" ? (
+            <Alert variant="destructive" className="items-start">
+              <AlertTriangleIcon className="mt-0.5 size-4" />
+              <div className="min-w-0 flex-1">
+                <AlertTitle>چک مرتبط باز نشد</AlertTitle>
+                <AlertDescription className="leading-6">{navigation.message}</AlertDescription>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-2"
+                  onClick={onRetryNavigation}
+                  disabled={busy}
+                >
+                  تلاش دوباره
+                </Button>
+              </div>
+            </Alert>
+          ) : null}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm">مشخصات چک</CardTitle>
@@ -2457,7 +2580,15 @@ function CreateChequeDialog({
       replaces?.id ?? null,
       !counterpartyId && unattributed,
     ]);
-    body.idempotencyKey = createKeys.current.keyFor(signature);
+    try {
+      body.idempotencyKey = createKeys.current.keyFor(signature);
+    } catch (err) {
+      if (err instanceof OperationKeyLimitError) {
+        reportError(TOO_MANY_UNRESOLVED);
+        return;
+      }
+      throw err;
+    }
     reportError("");
     let response: { ok: boolean; status: number; data: { error?: string } } | undefined;
     const ok = await run(async () => {

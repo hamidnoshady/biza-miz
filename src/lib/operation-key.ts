@@ -37,6 +37,9 @@
  * | rejected | a response the server chose to send with a validation/permission error | retired — the server proved it wrote nothing, so a corrected resubmission is new work |
  * | unknown | the request threw, timed out, or came back 5xx/502/504 | **kept** — the next identical submission is a retry and carries the same key |
  *
+ * Nothing unresolved is ever dropped to make room for something newer: see
+ * `MAX_UNRESOLVED`.
+ *
  * A 5xx is deliberately *not* treated as a rejection: a proxy can return 502
  * after the origin committed, and the whole point of the key is that the
  * client does not have to guess. Nothing is lost by keeping it — a key whose
@@ -57,15 +60,43 @@
 export type OperationOutcome = "committed" | "rejected";
 
 /**
- * How many unresolved operations one holder remembers.
+ * How many unresolved operations one holder will carry.
  *
- * These are modal, one-at-a-time flows, so the realistic count is one or two;
- * the cap exists only so a pathological session cannot grow without bound. The
- * oldest unresolved entry is dropped first, and it is dropped from the *client*
- * only — the server still holds its key, so nothing becomes re-postable that
- * was not already.
+ * These are modal, one-at-a-time flows, so the realistic count is one or two.
+ * The cap exists only so that a pathological session cannot grow without
+ * bound — but *what happens at the cap* is the whole point.
+ *
+ * The first version dropped the oldest unresolved entry. That is precisely
+ * the thing this class exists to prevent, moved one level up: the oldest
+ * unresolved payload is the one whose lost response is least fresh in the
+ * user's mind and most likely to be retried, and dropping it means the retry
+ * silently becomes a second money-moving request. Capacity pressure is not
+ * evidence about what the server did.
+ *
+ * So the holder **blocks instead of forgetting**. A retry of something it
+ * already holds always works, at any size; only *starting an additional*
+ * operation is refused, with `OperationKeyLimitError`. Reaching this number
+ * means thirty-two consecutive postings whose outcome nobody knows, i.e. the
+ * server or the network is gone — and the safe thing to do then is to stop
+ * inventing new financial requests and tell the user, not to quietly make
+ * the oldest one re-postable.
  */
 const MAX_UNRESOLVED = 32;
+
+/**
+ * Thrown by `keyFor` when a *new* operation would exceed the cap.
+ *
+ * Callers should surface it to the user and post nothing. It is never thrown
+ * for a payload the holder already has a key for, so retrying is always
+ * possible — including retrying one's way back under the limit.
+ */
+export class OperationKeyLimitError extends Error {
+  readonly limit = MAX_UNRESOLVED;
+  constructor(readonly unresolved: number) {
+    super(`refusing to start a new operation: ${unresolved} unresolved (limit ${MAX_UNRESOLVED})`);
+    this.name = "OperationKeyLimitError";
+  }
+}
 
 /**
  * A stable string for a set of values.
@@ -112,17 +143,25 @@ export class OperationKeyHolder {
   /**
    * The key for this payload: the one an unresolved attempt already used, or a
    * new one.
+   *
+   * @throws OperationKeyLimitError when this would be an additional operation
+   * and the holder is already full. A retry never throws.
    */
   keyFor(signature: string): string {
     const existing = this.unresolved.get(signature);
     if (existing) return existing;
+    if (this.unresolved.size >= MAX_UNRESOLVED) {
+      throw new OperationKeyLimitError(this.unresolved.size);
+    }
     const key = this.mint();
     this.unresolved.set(signature, key);
-    if (this.unresolved.size > MAX_UNRESOLVED) {
-      const oldest = this.unresolved.keys().next();
-      if (!oldest.done) this.unresolved.delete(oldest.value);
-    }
     return key;
+  }
+
+  /** Whether an *additional* operation could be started right now. */
+  canStartNewOperation(signature?: string): boolean {
+    if (signature !== undefined && this.unresolved.has(signature)) return true;
+    return this.unresolved.size < MAX_UNRESOLVED;
   }
 
   /**
