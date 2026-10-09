@@ -135,6 +135,18 @@ describe("previewIsStale", () => {
     }
   });
 
+  it("treats an empty form filter object as the same query as a legacy config with no filters", () => {
+    const legacy: ReportConfig = {
+      view: "v_sales_by_day",
+      metric: "total",
+      aggregation: "sum",
+      dimension: "day",
+    };
+    const rebuilt = builderConfigFromState(builderStateFromConfig(legacy), []);
+    expect(rebuilt.filters).toEqual({ dateFrom: undefined, dateTo: undefined });
+    expect(previewIsStale(rebuilt, legacy)).toBe(false);
+  });
+
   it("stays fresh for a chart-only change, which cannot alter the numbers", () => {
     // The visualization is stored and exported with the report, but it asks
     // nothing new of the database — demanding another Preview to switch a bar

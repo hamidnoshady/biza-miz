@@ -13,6 +13,11 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   };
 });
 
+vi.mock("@/lib/industry-guard", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/industry-guard")>();
+  return { ...actual, getBusinessIndustry: vi.fn(async () => "food_service") };
+});
+
 vi.mock("@/lib/reports-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/reports-service")>();
   return {

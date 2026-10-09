@@ -3,11 +3,14 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
-import { getPrimaryLocation, resolveActiveLocation } from "@/lib/setup-state";
+import { getPrimaryLocation } from "@/lib/setup-state";
+import { isConsolidatedStandardReport, parseReportScope } from "@/lib/report-scope";
+import { authorizedReportScope, reportScopeDenialResponse } from "@/lib/report-scope-service";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { parseReportOrderFilters } from "@/lib/report-order-filters";
-import { reportConfigIsMoney, reportConfigLabels, validateReportConfig, type ReportConfig } from "@/lib/reports";
+import { reportConfigIsMoney, reportConfigLabels, validateReportConfigForIndustry, type ReportConfig } from "@/lib/reports";
+import { getBusinessIndustry } from "@/lib/industry-guard";
 import { shiftOrdersExportTable } from "@/lib/shift-orders-export";
 import { getShiftOrdersReport } from "@/lib/shift-orders-service";
 import type { ShiftOrder } from "@/lib/shift-orders";
@@ -35,6 +38,10 @@ import {
 
 type ExportFormat = "csv" | "excel" | "pdf";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 interface TrialBalanceExportOptions {
   presentation?: TrialBalancePresentation;
   search?: string;
@@ -42,6 +49,18 @@ interface TrialBalanceExportOptions {
   accountStatus?: TrialBalanceAccountStatus;
   includeZeroBalances?: boolean;
 }
+
+/**
+ * The consolidated standard report each export kind re-reads, where one exists.
+ * `shift_orders` and `business_overview` are deliberately absent: the shift file
+ * is one branch's trading, and the consolidated comparison is the whole point of
+ * its own kind (and its own capability).
+ */
+const EXPORT_KIND_STANDARD_KEY: Partial<Record<NonNullable<ExportBody["kind"]>, string>> = {
+  pnl: "profit_and_loss",
+  balance_sheet: "balance_sheet",
+  cash_flow: "cash_flow",
+};
 
 interface ExportBody {
   format?: ExportFormat;
@@ -59,6 +78,12 @@ interface ExportBody {
   dateTo?: string;
   asOf?: string;
   trialBalanceOptions?: TrialBalanceExportOptions;
+  /**
+   * Which rows the file covers. Absent = the caller's own branch. `"business-wide"`
+   * is honored only for the consolidated statement kinds *and* only with
+   * `reports.business_wide` (issue #819).
+   */
+  scope?: "branch" | "business-wide";
   /**
    * The shift screen's own query string (`/api/reports/shift-orders?...`).
    * Parsed here by `parseReportOrderFilters` — the same validator that route
@@ -101,12 +126,23 @@ function periodLabel(dateFrom?: string, dateTo?: string): string {
  * `reports.export` gates every *file* — that is the capability's meaning, and
  * it is checked here once rather than through a per-kind copy.
  *
- * The consolidated `business_overview` kind additionally requires
- * `reports.business_wide`, checked inside its branch below: it is the only kind
- * whose numbers span every branch, and without the second check the export
- * endpoint would be a way around the branch-comparison route's own gate. The
- * `chart` kind is branch-scoped with the same resolved location the query route
- * uses, so the file and the screen are the same report.
+ * Every kind is then run against an **authorized scope** from the one shared
+ * policy (`report-scope.ts`), exactly as its screen's route does — the file and
+ * the screen are the same report or the export is a way around the screen's
+ * gate. Concretely:
+ *
+ *  - `chart` and `shift_orders` are branch-only, scoped to the resolved active
+ *    branch.
+ *  - `pnl` / `balance_sheet` / `cash_flow` are branch-scoped by default and
+ *    accept an explicit `scope: "business-wide"`, which requires
+ *    `reports.business_wide`. They used to be business-wide for anyone holding
+ *    `reports.export` — a manager read the whole business's statements out of a
+ *    CSV while the same manager's screen showed one branch.
+ *  - `business_overview` is the consolidated comparison and requires
+ *    `reports.business_wide` outright.
+ *
+ * A member with no accessible branch is refused (`no_accessible_branch`) rather
+ * than exported every branch's rows.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.reportsExport);
@@ -114,18 +150,73 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const prefs = await getSetting<{ currencyDisplay?: "toman" | "rial" }>(session.businessId, SETTING_KEYS.businessPrefs);
   const unit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
 
-  let body: ExportBody;
+  let parsedBody: unknown;
   try {
-    body = await request.json();
+    parsedBody = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
+  if (!isRecord(parsedBody)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  const body = parsedBody as ExportBody;
 
   const format = body.format;
   if (format !== "csv" && format !== "excel" && format !== "pdf") {
     return NextResponse.json({ error: "invalid_format" }, { status: 400 });
   }
   const kind = body.kind ?? "chart";
+  const validKinds = new Set<NonNullable<ExportBody["kind"]>>([
+    "chart", "pnl", "balance_sheet", "cash_flow", "business_overview", "trial_balance", "shift_orders",
+  ]);
+  if (!validKinds.has(kind)) return NextResponse.json({ error: "invalid_kind" }, { status: 400 });
+  if (body.title !== undefined && typeof body.title !== "string") {
+    return NextResponse.json({ error: "invalid_title" }, { status: 400 });
+  }
+  if (
+    (body.dateFrom !== undefined && body.dateFrom !== "" && !isValidIsoDate(body.dateFrom)) ||
+    (body.dateTo !== undefined && body.dateTo !== "" && !isValidIsoDate(body.dateTo)) ||
+    (body.asOf !== undefined && body.asOf !== "" && !isValidIsoDate(body.asOf)) ||
+    (body.dateFrom && body.dateTo && body.dateFrom > body.dateTo)
+  ) {
+    return NextResponse.json({ error: "invalid_report_scope" }, { status: 400 });
+  }
+  if (body.query !== undefined && typeof body.query !== "string") {
+    return NextResponse.json({ error: "invalid_shift_filters" }, { status: 400 });
+  }
+  if (body.trialBalanceOptions !== undefined && !isRecord(body.trialBalanceOptions)) {
+    return NextResponse.json({ error: "invalid_trial_balance_filter" }, { status: 400 });
+  }
+
+  // A value that is not a scope this API serves is refused rather than treated
+  // as the default, so a typo cannot silently change what the file contains.
+  const requestedScope = parseReportScope(body.scope);
+  if (requestedScope === null) return NextResponse.json({ error: "invalid_scope" }, { status: 400 });
+  // Which consolidated standard report (if any) this kind re-reads. The
+  // definition of "consolidatable" lives in one place (`report-scope.ts`), so
+  // the export cannot drift from the screen's own rule about which reports have
+  // a business-wide form.
+  const standardKey = EXPORT_KIND_STANDARD_KEY[kind];
+  if (requestedScope === "business-wide" && !(standardKey && isConsolidatedStandardReport(standardKey))) {
+    return NextResponse.json(
+      { error: "scope_not_supported", message: "این خروجی فقط برای یک شعبه ساخته می‌شود." },
+      { status: 400 },
+    );
+  }
+
+  /**
+   * The scope for this request. Resolved lazily and once per file: the
+   * consolidated kinds are the only ones that may skip the branch, and asking
+   * for them is what triggers the capability check.
+   */
+  const resolveScope = async () => {
+    const resolved = await authorizedReportScope(session, {
+      requested: requestedScope,
+      authorizeBusinessWide: async () => {
+        const { error: wideError } = await requirePermission(PERMISSIONS.reportsBusinessWide);
+        return !wideError;
+      },
+    });
+    return resolved;
+  };
 
   if (kind === "trial_balance") {
     // Exporting this accounting report requires both the existing export grant
@@ -145,7 +236,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       return NextResponse.json({ error: "invalid_report_scope" }, { status: 400 });
     }
 
-    const requestedOptions = body.trialBalanceOptions ?? {};
+    const requestedOptions = (body.trialBalanceOptions ?? {}) as TrialBalanceExportOptions;
     const validTypes = new Set<AccountType>(["asset", "liability", "equity", "revenue", "expense"]);
     if (
       (requestedOptions.presentation !== undefined &&
@@ -295,17 +386,20 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   if (kind === "chart") {
     if (!body.config) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
-    const errors = validateReportConfig(body.config);
+    const industry = await getBusinessIndustry(session.businessId);
+    const errors = validateReportConfigForIndustry(body.config, industry);
     if (errors.length > 0) return NextResponse.json({ error: "invalid_config", details: errors }, { status: 400 });
 
     const { dimensionLabel, metricLabel, viewLabel } = reportConfigLabels(body.config);
     // Issue #819: the export must be the same report the screen showed, which
     // means the same branch. Phase 14's branch isolation is enforced by the
-    // application, so the resolved active location is passed exactly as the
-    // query route passes it — the file cannot aggregate a sibling branch the
-    // member may not report on. Never read a location from the body.
-    const location = await resolveActiveLocation(session);
-    const rows = await runCustomReportQuery(session.businessId, body.config, location?.id);
+    // application, so the scope is resolved exactly as the query route resolves
+    // it — the file cannot aggregate a sibling branch the member may not report
+    // on, and a member with no branch is refused rather than exported every
+    // branch. Never read a location from the body.
+    const resolved = await resolveScope();
+    if (!resolved.ok) return reportScopeDenialResponse(resolved.reason);
+    const rows = await runCustomReportQuery(session.businessId, body.config, resolved.scope);
     // A money metric is stored in integer Rial; the file speaks the business's
     // selected unit and says which one in the header, like the statements do.
     const table: ReportTable = customReportTable(
@@ -318,7 +412,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   if (kind === "pnl") {
-    const report = await getProfitAndLoss(session.businessId, { dateFrom: body.dateFrom, dateTo: body.dateTo });
+    const resolved = await resolveScope();
+    if (!resolved.ok) return reportScopeDenialResponse(resolved.reason);
+    const report = await getProfitAndLoss(
+      session.businessId,
+      { dateFrom: body.dateFrom, dateTo: body.dateTo },
+      resolved.scope,
+    );
     const title = body.title?.trim() || "صورت سود و زیان";
     if (format === "pdf") {
       const html = renderReportLedgerHtml({
@@ -348,7 +448,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   if (kind === "balance_sheet") {
-    const report = await getBalanceSheet(session.businessId, body.dateTo);
+    const resolved = await resolveScope();
+    if (!resolved.ok) return reportScopeDenialResponse(resolved.reason);
+    const report = await getBalanceSheet(
+      session.businessId,
+      body.dateTo,
+      resolved.scope,
+    );
     const title = body.title?.trim() || "ترازنامه";
     if (format === "pdf") {
       const html = renderReportLedgerHtml({
@@ -380,7 +486,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   if (kind === "cash_flow") {
-    const report = await getCashFlow(session.businessId, { dateFrom: body.dateFrom, dateTo: body.dateTo });
+    const resolved = await resolveScope();
+    if (!resolved.ok) return reportScopeDenialResponse(resolved.reason);
+    const report = await getCashFlow(
+      session.businessId,
+      { dateFrom: body.dateFrom, dateTo: body.dateTo },
+      resolved.scope,
+    );
     const title = body.title?.trim() || "صورت گردش وجوه نقد";
     const activities = (["operating", "investing", "financing"] as const).map((activity) => ({
       activity,
@@ -435,8 +547,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     // not just the 25 rows the screen is showing. The screen's filters are
     // re-parsed with the same validator its API uses, and the file is scoped
     // to the same resolved branch.
-    const location = await resolveActiveLocation(session);
-    if (!location) return NextResponse.json({ error: "no_location" }, { status: 400 });
+    const resolved = await resolveScope();
+    if (!resolved.ok) return reportScopeDenialResponse(resolved.reason);
+    // A shift file is one branch's trading by definition, so the scope policy
+    // always answers with a branch here (the consolidated scope is refused
+    // above for this kind).
+    const location = resolved.scope.location;
+    if (!location) return NextResponse.json({ error: "no_accessible_branch" }, { status: 403 });
 
     const parsed = parseReportOrderFilters(new URLSearchParams(body.query ?? ""));
     if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });

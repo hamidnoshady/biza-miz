@@ -125,13 +125,14 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   get_customer_timeline: "One customer's full file: purchase summary, loyalty points, lifecycle stage, contact-consent state, and their recent events (orders, payments, tickets, notes) newest first.",
   list_customer_segments: "Saved customer segments with their member counts and a plain-Persian description of each segment's rules.",
   preview_customer_segment: "Count and sample a segment definition without saving it. With purpose 'sms' or 'email' only customers who have granted that permission are counted; the unfiltered total is returned alongside so the gap can be reported.",
-  // Phase 38 — the website manager's reads.
-  list_website_posts: "The business's website posts (drafts and published) with id, title, status and dates. Get a post id here before editing it.",
-  list_website_products: "Products on the business's website with remote id, title, SKU, price in integer Rial and the site's stock figure.",
-  get_website_status: "Whether a website is connected, its domain, the last connection test, the price/stock push switches and the sync queue counts (pending / failed / dead).",
-  // Phase C — the messaging reads that feed the campaign-create action.
-  list_message_templates: "Saved message templates by id, channel (sms/email), name and body. Get a template id here before creating a campaign.",
-  list_message_campaigns: "The business's message campaigns (draft, sending, done) with id, name, channel, status and recipient / sent / delivered / failed counts.",
+  // Phase 38 — website content and connection metadata are business-wide, not
+  // filtered to the operator's current POS branch.
+  list_website_posts: "Posts on the website connected to the whole business (drafts and published) with id, title, status and dates. Get a post id here before editing it; this is not branch-filtered POS data.",
+  list_website_products: "Products on the website connected to the whole business with remote id, title, SKU, price in integer Rial and the site's stock figure; not branch-filtered POS stock.",
+  get_website_status: "Business-level website connection metadata: domain, last connection test, price/stock push switches and sync queue counts (pending / failed / dead); not a branch report.",
+  // Phase C — these templates and campaigns are business-wide, not branch-filtered.
+  list_message_templates: "Saved message templates shared by the whole business (all branches), by id, channel (sms/email), name and body. Get a template id here before creating a campaign.",
+  list_message_campaigns: "The whole business's message campaigns (all branches combined: draft, sending, done) with id, name, channel, status and recipient / sent / delivered / failed counts.",
   // Phase G — «میز کار من». These four answer over the workspace module, and
   // each one needs a caller identity: `callTool` passes the connection's
   // authorizing user, and where a connection has none the tool declines rather

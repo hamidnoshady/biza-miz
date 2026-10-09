@@ -13,7 +13,11 @@
  * re-checks the *scope*, because that is the boundary RLS says nothing about.
  */
 import { query } from "../db";
+import { memberAccessForUser } from "../member-access";
+import { resolveActiveLocationForUser } from "../setup-state";
 import { runSystemReadTool } from "../ai-system-read";
+import { SYSTEM_AI_READ_PERMISSIONS } from "../ai-capabilities";
+import { PERMISSIONS, type Permission } from "../permissions";
 import { getBusinessIndustry } from "../industry-guard";
 import { INDUSTRY_LABELS } from "../industries";
 import { industryProfile, labelFor } from "../industry-profile";
@@ -99,6 +103,46 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * MCP's `pos.read` grant is the connection's consent, not a substitute for
+ * the tenant's live report capabilities. In particular, an integration
+ * connection does not turn a manager into a business-wide report reader.
+ * Connections whose authorizer has since been deleted keep their existing
+ * branch-pinned read-only consent, but lose the owner-only consolidated key.
+ */
+interface McpReadAuthority {
+  actorUserId: string | undefined;
+  permissions: ReadonlySet<Permission>;
+  pinnedLocationAccessible: boolean;
+}
+
+async function mcpReadAuthority(auth: McpAuthentication): Promise<McpReadAuthority> {
+  if (auth.authorizedByUserId) {
+    const member = await memberAccessForUser(
+      auth.businessId,
+      auth.authorizedByUserId,
+      auth.locationId,
+    );
+    if (member) {
+      const pinnedLocation = member.isActive
+        ? await resolveActiveLocationForUser(auth.businessId, auth.authorizedByUserId, auth.locationId)
+        : null;
+      const canReadPinnedLocation = pinnedLocation?.id === auth.locationId;
+      return {
+        actorUserId: auth.authorizedByUserId,
+        permissions: member.isActive && canReadPinnedLocation ? member.permissions : new Set<Permission>(),
+        pinnedLocationAccessible: member.isActive && canReadPinnedLocation,
+      };
+    }
+  }
+
+  const permissions = new Set(SYSTEM_AI_READ_PERMISSIONS);
+  permissions.delete(PERMISSIONS.reportsBusinessWide);
+  // A deleted authorizer has no live membership to revalidate; retain the
+  // connection's established read-only consent, still pinned to its issued branch.
+  return { actorUserId: undefined, permissions, pinnedLocationAccessible: true };
+}
+
 async function callTool(
   auth: McpAuthentication,
   params: Record<string, unknown>,
@@ -123,12 +167,15 @@ async function callTool(
     // tool ignores the argument. A connection with no authorizing user (a
     // machine token) gets a decline from the tool itself, which is the right
     // answer: there is no "my tasks" without a "my".
+    const authority = await mcpReadAuthority(auth);
     const outcome = await runSystemReadTool(
       tool.binding.readToolName,
       args,
       auth.businessId,
       undefined,
-      auth.authorizedByUserId ?? undefined,
+      authority.actorUserId,
+      authority.permissions,
+      auth.locationId,
     );
     return { result: toolResult(outcome.data, !outcome.ok) };
   }
@@ -212,7 +259,11 @@ export async function dispatchMcpMessage(
 
     case "resources/read": {
       const uri = typeof params.uri === "string" ? params.uri : "";
-      const content = await readMcpResource(uri, auth.businessId);
+      const authority = await mcpReadAuthority(auth);
+      if (!authority.pinnedLocationAccessible) {
+        return jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, "این اتصال دیگر به شعبهٔ مورد تأیید دسترسی ندارد.");
+      }
+      const content = await readMcpResource(uri, auth.businessId, auth.locationId);
       return content
         ? jsonRpcResult(id, { contents: [content] })
         : jsonRpcError(id, JSON_RPC_ERRORS.invalidParams, `منبع «${uri}» وجود ندارد.`);

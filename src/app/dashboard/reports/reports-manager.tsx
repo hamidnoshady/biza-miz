@@ -62,7 +62,11 @@ export function ReportsManager({
       className="space-y-5 sm:space-y-6"
     >
       {tab === "standard" ? (
-        <StandardReportsSection canExplain={canExplain} canExport={capabilities.canExportReports} />
+        <StandardReportsSection
+          canExplain={canExplain}
+          canExport={capabilities.canExportReports}
+          canBusinessWide={capabilities.canViewBusinessWide}
+        />
       ) : null}
       {tab === "shift-orders" ? (
         <ShiftOrdersSection canExport={capabilities.canExportReports} />

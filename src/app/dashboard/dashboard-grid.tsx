@@ -24,6 +24,22 @@ interface WidgetRow {
   h: number;
   report_name: string;
   report_config: Record<string, unknown>;
+  /**
+   * Whether the pinned report still says something about this business
+   * (issue #819): a standard report its trade no longer offers, or a custom
+   * report on a view/metric the engine has retired. Absent on a layout the
+   * server could not annotate; treated as applicable then, so a missing field
+   * never replaces a working chart with a notice.
+   */
+  applicable?: boolean;
+  applicable_reason?: "standard_report_not_in_trade" | "unknown_view";
+}
+
+/** The sentence a tile shows instead of an all-zero chart. */
+function notApplicableReason(widget: WidgetRow): string {
+  return widget.applicable_reason === "unknown_view"
+    ? "ساختار این گزارش در نسخهٔ فعلی تغییر کرده است. برای حذف این ابزارک «ویرایش چیدمان» را بزنید."
+    : "این گزارش برای صنف فعلی کسب‌وکار ارائه نمی‌شود. برای حذف این ابزارک «ویرایش چیدمان» را بزنید.";
 }
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}/;
@@ -34,28 +50,43 @@ function formatDim(dim: string | null): string {
   return dim;
 }
 
-function useWidgetData(config: Record<string, unknown>) {
-  const [data, setData] = useState<ChartDatum[] | null>(null);
+function useWidgetData(config: Record<string, unknown>, enabled = true) {
+  const [state, setState] = useState<{ data: ChartDatum[] | null; error: string }>({
+    data: null,
+    error: "",
+  });
   const configKey = JSON.stringify(config);
   useEffect(() => {
     let cancelled = false;
-    api<{ rows?: { dim: string | null; value: string | number | null }[] }>("/api/reports/query", {
-      method: "POST",
-      body: configKey,
-    }).then(({ ok, data: res }) => {
+    if (!enabled) {
+      // A retained widget whose report no longer applies is a notice, not a
+      // hidden data read. Keeping the hook mounted is required by React, but it
+      // must not execute the stale config through the generic query endpoint.
+      setState({ data: null, error: "" });
+      return () => {
+        cancelled = true;
+      };
+    }
+    api<{ rows?: { dim: string | null; value: string | number | null }[]; message?: string }>(
+      "/api/reports/query",
+      { method: "POST", body: configKey },
+    ).then(({ ok, data: res }) => {
       if (cancelled) return;
       if (ok && res.rows) {
-        setData(res.rows.map((r) => ({ label: formatDim(r.dim), value: Number(r.value) || 0 })));
+        setState({ data: res.rows.map((r) => ({ label: formatDim(r.dim), value: Number(r.value) || 0 })), error: "" });
       } else {
-        setData([]);
+        // A refused read is not an empty result: the tile says why rather than
+        // drawing zero, which would read as "this branch sold nothing"
+        // (issue #819 — the query route now refuses a member with no branch).
+        setState({ data: [], error: res.message ?? "این ابزارک قابل خواندن نیست." });
       }
     });
     return () => {
       cancelled = true;
     };
 
-  }, [configKey]);
-  return data;
+  }, [configKey, enabled]);
+  return state;
 }
 
 function requestWidgetExplanation(widget: WidgetRow, data: ChartDatum[]) {
@@ -75,8 +106,22 @@ function requestWidgetExplanation(widget: WidgetRow, data: ChartDatum[]) {
 }
 
 function WidgetBody({ widget, canExplain }: { widget: WidgetRow; canExplain: boolean }) {
-  const data = useWidgetData(widget.report_config);
+  const { data, error } = useWidgetData(widget.report_config, widget.applicable !== false);
+  if (widget.applicable === false) {
+    return (
+      <p className="flex h-full items-center justify-center px-2 text-center text-xs leading-5 text-muted-foreground">
+        {notApplicableReason(widget)}
+      </p>
+    );
+  }
   if (data === null) return <LoadingSkeleton rows={2} compact />;
+  if (error) {
+    return (
+      <p role="alert" className="flex h-full items-center justify-center px-2 text-center text-xs leading-5 text-destructive">
+        {error}
+      </p>
+    );
+  }
 
   const chart =
     widget.chart_type === "number" ? (
@@ -122,6 +167,12 @@ export function DashboardGrid({ canEdit, canExplain }: { canEdit: boolean; canEx
   // overflows the screen horizontally on mobile before the effect corrects it.
   const { width, containerRef, mounted } = useContainerWidth({ measureBeforeMount: true });
   const [widgets, setWidgets] = useState<WidgetRow[] | null>(null);
+  /**
+   * The layout revision the rows above were read at (issue #819). Sent with
+   * every write so a save built from a stale screen is refused instead of
+   * deleting what another tab changed.
+   */
+  const [revision, setRevision] = useState<string>("");
   const [editMode, setEditMode] = useState(false);
   const [error, setError] = useState("");
 
@@ -133,8 +184,10 @@ export function DashboardGrid({ canEdit, canExplain }: { canEdit: boolean; canEx
   const canEditLayout = canEdit && !stacked;
 
   const load = useCallback(() => {
-    api<{ widgets: WidgetRow[] }>("/api/dashboard/widgets").then(({ ok, data }) => {
-      if (ok) setWidgets(data.widgets);
+    api<{ widgets: WidgetRow[]; revision?: string }>("/api/dashboard/widgets").then(({ ok, data }) => {
+      if (!ok) return;
+      setWidgets(data.widgets);
+      setRevision(data.revision ?? "");
     });
   }, []);
   useEffect(load, [load]);
@@ -157,11 +210,14 @@ export function DashboardGrid({ canEdit, canExplain }: { canEdit: boolean; canEx
   }, [widgets, stacked]);
 
   async function persist(next: WidgetRow[]) {
+    const previous = widgets;
     setWidgets(next);
-    const { ok, data } = await api<{ error?: string }>("/api/dashboard/widgets", {
+    setError("");
+    const { ok, data, status } = await api<{ error?: string; revision?: string }>("/api/dashboard/widgets", {
       method: "POST",
       body: JSON.stringify({
         scope: "personal",
+        ifRevision: revision,
         widgets: next.map((w) => ({
           savedReportId: w.saved_report_id,
           chartType: w.chart_type,
@@ -173,7 +229,19 @@ export function DashboardGrid({ canEdit, canExplain }: { canEdit: boolean; canEx
         })),
       }),
     });
-    if (!ok) setError(data.error ?? "خطای غیرمنتظره در ذخیرهٔ چیدمان.");
+    if (ok) {
+      if (data.revision) setRevision(data.revision);
+      return;
+    }
+    // The write did not land, so the screen must not keep showing it: 409 means
+    // another tab got there first, and anything else is a plain failure.
+    setWidgets(previous ?? null);
+    if (status === 409) {
+      setError("چیدمان داشبورد از جای دیگری تغییر کرده بود؛ نسخهٔ تازه بارگذاری شد. تغییر خود را دوباره اعمال کنید.");
+      load();
+      return;
+    }
+    setError(data.error ?? "خطای غیرمنتظره در ذخیرهٔ چیدمان.");
   }
 
   function onLayoutChange(next: Layout) {

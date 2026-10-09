@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { BUSINESS_WIDE_SCOPE } from "../src/lib/report-scope";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -127,7 +128,7 @@ describe("getCashFlow", () => {
     await postEntry("2025-04-05", "order", "in-period sale", acct.cash, acct.revenue, 300_000);
     await postEntry("2025-04-10", "manual", "cash withdrawal", acct.expense, acct.cash, 100_000);
 
-    const cf = await reportsService.getCashFlow(biz.id, { dateFrom: "2025-04-01", dateTo: "2025-04-30" });
+    const cf = await reportsService.getCashFlow(biz.id, { dateFrom: "2025-04-01", dateTo: "2025-04-30" }, BUSINESS_WIDE_SCOPE);
 
     expect(cf.openingCash).toBe(500_000);
     expect(cf.closingCash).toBe(700_000); // 500,000 + 300,000 - 100,000
@@ -143,12 +144,12 @@ describe("getCashFlow", () => {
   // happens when the settlement reaches the drawer/bank, as an operating inflow.
   it("discloses card clearing separately and counts the settlement as the cash inflow", async () => {
     await postEntry("2025-04-01", "order", "card sale", acct.bankClearing, acct.revenue, 150_000);
-    const beforeSettlement = await reportsService.getCashFlow(biz.id, { dateFrom: "2025-04-01", dateTo: "2025-04-30" });
+    const beforeSettlement = await reportsService.getCashFlow(biz.id, { dateFrom: "2025-04-01", dateTo: "2025-04-30" }, BUSINESS_WIDE_SCOPE);
     expect(beforeSettlement.closingCash).toBe(0);
     expect(beforeSettlement.clearingChange).toBe(150_000);
 
     await postEntry("2025-04-03", "manual", "PSP settlement", acct.cash, acct.bankClearing, 150_000);
-    const cf = await reportsService.getCashFlow(biz.id, { dateFrom: "2025-04-01", dateTo: "2025-04-30" });
+    const cf = await reportsService.getCashFlow(biz.id, { dateFrom: "2025-04-01", dateTo: "2025-04-30" }, BUSINESS_WIDE_SCOPE);
     expect(cf.closingCash).toBe(150_000);
     expect(cf.clearingChange).toBe(0);
     expect(cf.activities.operating).toBe(150_000);
@@ -167,7 +168,7 @@ describe("getCashFlow", () => {
     await postEntry("2025-05-04", "manual", "fund petty cash", id("1131"), acct.cash, 50_000);
     await postEntry("2025-05-05", "order", "cash sale", acct.cash, acct.revenue, 80_000);
 
-    const cf = await reportsService.getCashFlow(biz.id, { dateFrom: "2025-05-01", dateTo: "2025-05-31" });
+    const cf = await reportsService.getCashFlow(biz.id, { dateFrom: "2025-05-01", dateTo: "2025-05-31" }, BUSINESS_WIDE_SCOPE);
     expect(cf.activities).toEqual({ operating: 80_000, investing: -400_000, financing: 1_000_000 });
     // Funding petty cash is a transfer between two cash accounts — no flow.
     expect(cf.netChange).toBe(680_000);
@@ -182,7 +183,7 @@ describe("getProfitAndLoss", () => {
     await postEntry("2025-04-03", "manual", "payroll", acct.salaries, acct.cash, 200_000);
     await postEntry("2025-04-04", "manual", "rent", acct.expense, acct.cash, 100_000);
 
-    const pnl = await reportsService.getProfitAndLoss(biz.id, { dateFrom: "2025-04-01", dateTo: "2025-04-30" });
+    const pnl = await reportsService.getProfitAndLoss(biz.id, { dateFrom: "2025-04-01", dateTo: "2025-04-30" }, BUSINESS_WIDE_SCOPE);
 
     expect(pnl.totalRevenue).toBe(1_000_000);
     expect(pnl.costOfSales).toBe(300_000);
@@ -200,10 +201,11 @@ describe("getProfitAndLossComparison", () => {
     await postEntry("2025-03-10", "order", "march sale", acct.cash, acct.revenue, 400_000);
     await postEntry("2025-04-10", "order", "april sale", acct.cash, acct.revenue, 600_000);
 
-    const cmp = await reportsService.getProfitAndLossComparison(biz.id, {
-      dateFrom: "2025-04-01",
-      dateTo: "2025-04-30",
-    });
+    const cmp = await reportsService.getProfitAndLossComparison(
+      biz.id,
+      { dateFrom: "2025-04-01", dateTo: "2025-04-30" },
+      BUSINESS_WIDE_SCOPE,
+    );
 
     expect(cmp.current.totalRevenue).toBe(600_000);
     expect(cmp.previous).not.toBeNull();
@@ -211,7 +213,11 @@ describe("getProfitAndLossComparison", () => {
   });
 
   it("returns null previous for an open-ended range", async () => {
-    const cmp = await reportsService.getProfitAndLossComparison(biz.id, { dateTo: "2025-04-30" });
+    const cmp = await reportsService.getProfitAndLossComparison(
+      biz.id,
+      { dateTo: "2025-04-30" },
+      BUSINESS_WIDE_SCOPE,
+    );
     expect(cmp.previous).toBeNull();
   });
 });
@@ -328,10 +334,11 @@ describe("getProfitAndLoss for a business that is not a café", () => {
       [entry.rows[0].id, byCode["1100"], byCode["4500"], byCode["5110"], byCode["5300"]],
     );
 
-    const pnl = await reportsService.getProfitAndLoss(jeweller, {
-      dateFrom: "2025-04-01",
-      dateTo: "2025-04-30",
-    });
+    const pnl = await reportsService.getProfitAndLoss(
+      jeweller,
+      { dateFrom: "2025-04-01", dateTo: "2025-04-30" },
+      BUSINESS_WIDE_SCOPE,
+    );
     expect(pnl.totalRevenue).toBe(1_000_000);
     expect(pnl.costOfSales).toBe(600_000);
     expect(pnl.grossProfit).toBe(400_000);
@@ -363,7 +370,7 @@ describe("getBalanceSheet's جاری/غیرجاری split", () => {
       [entry.rows[0].id, acct.cash, byCode["1500"], byCode["2100"], byCode["2500"]],
     );
 
-    const sheet = await reportsService.getBalanceSheet(biz.id, "2025-04-30");
+    const sheet = await reportsService.getBalanceSheet(biz.id, "2025-04-30", BUSINESS_WIDE_SCOPE);
     expect(sheet.nonCurrentAssets).toBe(600_000);
     expect(sheet.currentAssets).toBe(400_000);
     expect(sheet.nonCurrentLiabilities).toBe(800_000);

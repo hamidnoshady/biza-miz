@@ -77,6 +77,10 @@ afterAll(async () => {
 beforeEach(async () => {
   await db.query("DELETE FROM commission_accruals");
   await db.query("DELETE FROM commission_rules");
+  // Closed-order trigger guards child writes, and a cascade may otherwise
+  // reach an order item after its parent has already disappeared.
+  await db.query("DELETE FROM order_items");
+  await db.query("DELETE FROM orders");
   await db.query("DELETE FROM domain_events");
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
@@ -130,6 +134,44 @@ async function withClient<T>(fn: (client: import("pg").PoolClient) => Promise<T>
 }
 
 describe("commission accrual", () => {
+  it("filters the leaderboard to the requested branch while retaining the central all-branch view", async () => {
+    const otherLocation = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Second') RETURNING id",
+      [biz.id],
+    );
+    const firstOrder = await db.query<{ id: string }>(
+      "INSERT INTO orders (location_id, order_number) VALUES ($1, 1) RETURNING id",
+      [biz.locationId],
+    );
+    const secondOrder = await db.query<{ id: string }>(
+      "INSERT INTO orders (location_id, order_number) VALUES ($1, 1) RETURNING id",
+      [otherLocation.rows[0].id],
+    );
+    const firstLine = await db.query<{ id: string }>(
+      `INSERT INTO order_items (location_id, order_id, name_snapshot, unit_price)
+       VALUES ($1, $2, 'Branch one', 10000) RETURNING id`,
+      [biz.locationId, firstOrder.rows[0].id],
+    );
+    const secondLine = await db.query<{ id: string }>(
+      `INSERT INTO order_items (location_id, order_id, name_snapshot, unit_price)
+       VALUES ($1, $2, 'Branch two', 20000) RETURNING id`,
+      [otherLocation.rows[0].id, secondOrder.rows[0].id],
+    );
+    await db.query(
+      `INSERT INTO commission_accruals (business_id, employee_id, source_type, source_id, amount, basis_amount)
+       VALUES ($1, $2, 'order_item', $3, 500, 10000), ($1, $2, 'order_item', $4, 900, 20000)`,
+      [biz.id, employee.id, firstLine.rows[0].id, secondLine.rows[0].id],
+    );
+
+    const branchReport = await commissionService.staffCommissionReport(biz.id, undefined, biz.locationId);
+    expect(branchReport).toHaveLength(1);
+    expect(branchReport[0]).toMatchObject({ amount: 500, basisAmount: 10000, lineCount: 1 });
+
+    const businessReport = await commissionService.staffCommissionReport(biz.id);
+    expect(businessReport).toHaveLength(1);
+    expect(businessReport[0]).toMatchObject({ amount: 1400, basisAmount: 30000, lineCount: 2 });
+  });
+
   it("accrues a percent of net and posts the payroll liability", async () => {
     await commissionService.upsertCommissionRule(biz.id, {
       employeeId: employee.id,

@@ -347,17 +347,40 @@ async function locationAccessContext(
 export async function resolveActiveLocation(
   session: SessionPayload,
 ): Promise<LocationRow | null> {
+  return resolveActiveLocationForUser(
+    session.businessId,
+    session.sub,
+    session.activeLocationId ?? session.locationId ?? null,
+  );
+}
+
+/**
+ * The same resolution for a caller that has a member id rather than a session.
+ *
+ * The AI's read tools receive `businessId` and the acting user and no session
+ * (issue #819); they must resolve the member's branch exactly as a route does
+ * rather than falling back to the business's primary branch — which is what
+ * `primaryLocationId` did, and meant a cashier asking the assistant about
+ * «فروش امروز» was answered with whichever branch the business created first.
+ *
+ * `requestedLocationId` is the session's active branch when there is one; it is
+ * honored only if the member can still reach it.
+ */
+export async function resolveActiveLocationForUser(
+  businessId: string,
+  userId: string,
+  requestedLocationId: string | null = null,
+): Promise<LocationRow | null> {
   const [locations, ctx] = await Promise.all([
-    businessLocations(session.businessId),
-    locationAccessContext(session.sub),
+    businessLocations(businessId),
+    locationAccessContext(userId),
   ]);
   if (locations.length === 0) return null;
 
   const ids = locations.map((l) => l.id);
-  const requested = session.activeLocationId ?? session.locationId ?? null;
   const targetId =
-    requested && canAccessLocation(ctx, ids, requested)
-      ? requested
+    requestedLocationId && canAccessLocation(ctx, ids, requestedLocationId)
+      ? requestedLocationId
       : defaultAccessibleLocationId(ctx, ids);
 
   return locations.find((l) => l.id === targetId) ?? null;

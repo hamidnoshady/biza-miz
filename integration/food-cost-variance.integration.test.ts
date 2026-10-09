@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { branchScope } from "../src/lib/report-scope";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -180,7 +181,11 @@ describe("getFoodCostVariance", () => {
     await postLedgerAmount(acct.cogs, 22_000, "2025-06-15");
     await postLedgerAmount(acct.waste, 3_000, "2025-06-15");
 
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
 
     expect(report.items).toHaveLength(1);
     const [item] = report.items;
@@ -210,7 +215,11 @@ describe("getFoodCostVariance", () => {
       snapshot: { inventoryItemId, requiredQuantity: 20 },
     });
 
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
     expect(report.items).toHaveLength(0);
     expect(report.theoreticalCost).toBe(0);
   });
@@ -227,7 +236,11 @@ describe("getFoodCostVariance", () => {
       snapshot: { inventoryItemId, requiredQuantity: 20 },
     });
 
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
     expect(report.items).toHaveLength(0);
   });
 
@@ -240,7 +253,11 @@ describe("getFoodCostVariance", () => {
       closedAt: "2025-06-15T10:00:00Z",
     });
 
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
     expect(report.items).toHaveLength(1);
     expect(report.items[0].theoreticalCost).toBe(0);
     expect(report.items[0].revenue).toBe(150_000);
@@ -268,12 +285,20 @@ describe("getFoodCostVariance", () => {
       snapshot: { inventoryItemId, requiredQuantity: 80 },
     });
 
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
     expect(report.items.map((i) => i.menuItemId)).toEqual([expensiveItem, cheapItem]);
   });
 
   it("returns zeroed totals with no data in range", async () => {
-    const report = await reportsService.getFoodCostVariance(biz.id, { dateFrom: "2025-06-01", dateTo: "2025-06-30" }, biz.locationId);
+    const report = await reportsService.getFoodCostVariance(
+      biz.id,
+      { dateFrom: "2025-06-01", dateTo: "2025-06-30" },
+      branchScope(biz.locationId),
+    );
     expect(report.items).toEqual([]);
     expect(report.theoreticalCost).toBe(0);
     expect(report.actualCogs).toBe(0);

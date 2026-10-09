@@ -25,6 +25,8 @@ import {
   builderConfigFromState,
   builderStateFromConfig,
   previewIsStale,
+  previewMetadata,
+  type PreviewMeta,
   type SortBy,
   type SortDir,
 } from "./report-builder-config";
@@ -58,6 +60,8 @@ interface SavedReportRow {
   /** The stored config; `ReportConfig` is the one shape both sides agree on. */
   config: ReportConfig;
   is_standard: boolean;
+  applicable?: boolean;
+  applicable_reason?: "standard_report_not_in_trade" | "unknown_view";
 }
 
 const AGG_LABELS: Record<Aggregation, string> = {
@@ -105,6 +109,13 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
    * changed but never previewed).
    */
   const [loadedConfig, setLoadedConfig] = useState<ReportConfig | null>(null);
+  /**
+   * How `rows` must be rendered, resolved from `loadedConfig` when the result
+   * landed — never from the draft (see `previewMetadata`). Switching the
+   * measure or the source moves the controls, not the meaning of the numbers
+   * already on screen.
+   */
+  const [loadedMeta, setLoadedMeta] = useState<PreviewMeta | null>(null);
   const [error, setError] = useState("");
   /** Success/confirmation feedback for the saved-report list, announced politely. */
   const [notice, setNotice] = useState("");
@@ -112,6 +123,20 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
   const [pendingId, setPendingId] = useState<string | null>(null);
   /** The entry awaiting delete confirmation — deleting cascades to dashboard widgets. */
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  /**
+   * Focus target for the delete confirmation (issue #819).
+   *
+   * Confirming swaps the row's whole action group, so the button the member just
+   * pressed is removed from the DOM and focus falls back to `<body>` — a
+   * keyboard user loses their place with no announcement. Focus moves to the
+   * confirm button when the question appears and back to the delete button when
+   * it is dismissed.
+   */
+  const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
+  const deleteButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  useEffect(() => {
+    if (confirmingDelete) confirmButtonRef.current?.focus();
+  }, [confirmingDelete]);
   const [listError, setListError] = useState("");
   const [busy, setBusy] = useState(false);
   // Monotonic request id + the in-flight request: a slow first preview must
@@ -120,6 +145,30 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
   const previewSeq = useRef(0);
   const inFlight = useRef<AbortController | null>(null);
   useEffect(() => () => inFlight.current?.abort(), []);
+
+  /**
+   * Drops any preview in flight and clears the result it would have produced
+   * (issue #819).
+   *
+   * The sequence guard inside `preview()` only fires when a *newer preview*
+   * supersedes an older one. A source change or a saved-report load clears the
+   * rows without starting a preview, so the guard had nothing to compare
+   * against and a slow response for the old source landed afterwards — writing
+   * its rows and its `loadedConfig` back onto a form that was now describing a
+   * different report, with an Export button that would happily build a file
+   * from them.
+   *
+   * Bumping the sequence is what makes the late response inert; aborting is
+   * what stops it doing the work at all. `busy` is cleared here because the
+   * `finally` in `preview()` skips it for a superseded request — otherwise the
+   * form would stay disabled forever.
+   */
+  function invalidatePreview() {
+    previewSeq.current += 1;
+    inFlight.current?.abort();
+    inFlight.current = null;
+    setBusy(false);
+  }
 
   async function loadSaved() {
     try {
@@ -193,7 +242,12 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
     // Equality filters are per-source keys; carrying them across sources makes
     // the next preview fail validation with a confusing message.
     setEquals({});
+    // Invalidate before clearing, or a response for the previous source lands
+    // on a form that no longer describes it.
+    invalidatePreview();
     setRows(null);
+    setLoadedConfig(null);
+    setLoadedMeta(null);
     setError("");
   }
 
@@ -233,6 +287,9 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
     // The exact object that goes on the wire is remembered with the rows, so
     // "what produced this result" is a fact rather than a reconstruction.
     const config = currentConfig();
+    // Resolved now, from the config that is about to run, so the rows and the
+    // way they are rendered are decided together.
+    const meta = previewMetadata(config, views);
     setBusy(true);
     setError("");
     try {
@@ -250,6 +307,7 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
       }
       setRows(data.rows ?? []);
       setLoadedConfig(config);
+      setLoadedMeta(meta);
     } catch (cause) {
       if (cause instanceof DOMException && cause.name === "AbortError") return;
       if (seq !== previewSeq.current) return;
@@ -314,8 +372,15 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
     setName(report.name);
     setDescription(report.description ?? "");
     setEditingId(report.id);
+    // Same reason as `selectView`: the form now describes a different report,
+    // so a preview still in flight for the previous one must not land.
+    invalidatePreview();
     setRows(null);
+    setLoadedConfig(null);
+    setLoadedMeta(null);
     setError("");
+    setNotice("");
+    setListError("");
   }
 
   /**
@@ -382,10 +447,16 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
     );
   }
 
-  // The engine marks money metrics (Rial amounts) in `/api/reports/views`; the
-  // preview must render them through the business's display unit, or a business
-  // showing «تومان» reads its own sales ten times too high (issue #819).
-  const formatValue = currentMetric?.money ? money.format : undefined;
+  /*
+   * Everything the preview renders with comes from `loadedMeta` — resolved from
+   * the config that produced the rows — and never from `currentView` /
+   * `currentMetric`, which describe the *next* report (issue #819). Reading them
+   * here meant changing the measure from money to count silently reformatted the
+   * rows already on screen through the money formatter.
+   */
+  const formatValue = loadedMeta?.money ? money.format : undefined;
+  const previewLabel = loadedMeta?.label ?? "";
+  const previewChartType = loadedMeta?.chartType ?? chartType;
 
   /**
    * True when the controls no longer describe the result on screen (issue
@@ -658,9 +729,9 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
               className="mt-6 space-y-5 border-t border-border pt-5"
             >
               <ChartPreview
-                chartType={chartType}
+                chartType={previewChartType}
                 data={rowsToChartData(rows)}
-                label={name || currentView?.label || ""}
+                label={name || previewLabel}
                 formatValue={formatValue}
               />
               <DataTable
@@ -681,7 +752,7 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
                   <ExportButtons
                     disabled={isDirty}
                     request={{
-                      title: name || currentView?.label || "گزارش",
+                      title: name || previewLabel || "گزارش",
                       kind: "chart",
                       config: loadedConfig ?? undefined,
                     }}
@@ -744,6 +815,11 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
                   <span className="mt-0.5 block text-xs text-muted-foreground">
                     نسخهٔ {toPersianDigits(report.version)}
                   </span>
+                  {report.applicable === false ? (
+                    <span className="mt-1 block text-xs leading-5 text-amber-700 dark:text-amber-300">
+                      این پیکربندی با صنف یا نسخهٔ فعلی گزارش‌ساز سازگار نیست؛ می‌توانید آن را ویرایش یا حذف کنید، اما تا اصلاح قابل اجرا یا سنجاق نیست.
+                    </span>
+                  ) : null}
                 </span>
                 {confirming ? (
                   <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -751,6 +827,7 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
                       این گزارش و ویجت‌های سنجاق‌شدهٔ آن حذف می‌شوند. مطمئنید؟
                     </span>
                     <Button
+                      ref={confirmButtonRef}
                       type="button"
                       variant="destructive"
                       size="lg"
@@ -764,7 +841,10 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
                       variant="ghost"
                       size="lg"
                       disabled={pending}
-                      onClick={() => setConfirmingDelete(null)}
+                      onClick={() => {
+                        setConfirmingDelete(null);
+                        deleteButtonRefs.current[report.id]?.focus();
+                      }}
                     >
                       انصراف
                     </Button>
@@ -786,6 +866,7 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
                       savedReportId={report.id}
                       chartType={report.config.visualization ?? "bar"}
                       title={report.name}
+                      disabled={report.applicable === false}
                     />
                     {capabilities.canManageSavedReports ? (
                       <>
@@ -793,16 +874,20 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
                           type="button"
                           variant="outline"
                           size="lg"
-                          disabled={pending}
+                          disabled={pending || report.applicable === false}
                           onClick={() => duplicate(report)}
                         >
                           {pending ? "در حال کپی…" : "کپی"}
                         </Button>
                         <Button
+                          ref={(node) => {
+                            deleteButtonRefs.current[report.id] = node;
+                          }}
                           type="button"
                           variant="destructive"
                           size="lg"
                           disabled={pending}
+                          aria-expanded={confirming}
                           onClick={() => {
                             setListError("");
                             setNotice("");

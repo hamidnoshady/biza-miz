@@ -5,61 +5,66 @@ import { CheckIcon, PinIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ChartType } from "./report-ui";
 
-interface ExistingWidget {
-  id: string;
-  saved_report_id: string;
-  chart_type: ChartType;
-  title: string | null;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-/** Adds a report to the caller's personal dashboard as a new widget, appended below whatever's already pinned. */
+/**
+ * Adds a report to the caller's personal dashboard as a new widget.
+ *
+ * ## Why this is one request and not three (issue #819)
+ *
+ * The button used to GET the whole layout, compute the next free row in the
+ * browser, and POST the array back with the new tile appended. Two failures
+ * followed from that shape and both were silent:
+ *
+ *  1. **A failed read was read as an empty layout.** The GET's
+ *     `response.json()` ignores `response.ok`, so a 403/500 body — `{error: …}`,
+ *     with no `widgets` — became `existing = []` through `?? []`. The POST then
+ *     replaced the member's entire dashboard with a single tile.
+ *  2. **Two pins at once lost one.** Both read the same layout, both wrote
+ *     "those plus mine", and the second write deleted the first.
+ *
+ * So the server owns the append (`{ append: … }`): it locks the layout, places
+ * the tile itself, and returns the new revision. The browser sends one request
+ * it cannot corrupt by having read something stale, and a failure leaves the
+ * existing layout exactly as it was.
+ */
 export function PinToDashboardButton({
   savedReportId,
   chartType,
   title,
+  disabled = false,
 }: {
   savedReportId: string;
   chartType: ChartType;
   title: string;
+  disabled?: boolean;
 }) {
   const [state, setState] = useState<"idle" | "busy" | "done" | "error">(
     "idle",
   );
+  const [error, setError] = useState("");
 
   async function pin() {
     setState("busy");
+    setError("");
     try {
-      const current = await fetch("/api/dashboard/widgets").then((response) =>
-        response.json(),
-      );
-      const existing: ExistingWidget[] = current.widgets ?? [];
-      const nextY = existing.reduce(
-        (maximum, widget) => Math.max(maximum, widget.y + widget.h),
-        0,
-      );
-      const widgets = [
-        ...existing.map((widget) => ({
-          savedReportId: widget.saved_report_id,
-          chartType: widget.chart_type,
-          title: widget.title,
-          x: widget.x,
-          y: widget.y,
-          w: widget.w,
-          h: widget.h,
-        })),
-        { savedReportId, chartType, title, x: 0, y: nextY, w: 4, h: 3 },
-      ];
       const response = await fetch("/api/dashboard/widgets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope: "personal", widgets }),
+        body: JSON.stringify({
+          scope: "personal",
+          append: { savedReportId, chartType, title, w: 4, h: 3 },
+        }),
       });
-      setState(response.ok ? "done" : "error");
+      if (!response.ok) {
+        // Every failure — refused, unknown report, network — keeps the layout
+        // untouched and says so. There is no fallback path that writes anyway.
+        const data = await response.json().catch(() => ({} as { error?: string }));
+        setError(data.error === "unknown_saved_report" ? "این گزارش دیگر در دسترس نیست." : "سنجاق کردن انجام نشد.");
+        setState("error");
+        return;
+      }
+      setState("done");
     } catch {
+      setError("سنجاق کردن انجام نشد. اتصال شبکه را بررسی کنید.");
       setState("error");
     }
   }
@@ -71,7 +76,7 @@ export function PinToDashboardButton({
         variant="outline"
         size="lg"
         onClick={pin}
-        disabled={state === "busy" || state === "done"}
+        disabled={disabled || state === "busy" || state === "done"}
       >
         {state === "done" ? <CheckIcon aria-hidden="true" /> : <PinIcon aria-hidden="true" />}
         {state === "done" ? "سنجاق شد" : state === "busy" ? "در حال سنجاق…" : "سنجاق به داشبورد"}
@@ -87,7 +92,7 @@ export function PinToDashboardButton({
       ) : null}
       {state === "error" ? (
         <span role="alert" className="text-xs text-destructive">
-          سنجاق کردن انجام نشد.
+          {error}
         </span>
       ) : null}
     </div>

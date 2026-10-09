@@ -52,6 +52,60 @@ export function builderStateFromConfig(config: ReportConfig): BuilderState {
 }
 
 /**
+ * What the preview renders with, resolved from the config that *produced* the
+ * rows rather than from the controls that are on screen now (issue #819).
+ *
+ * The builder used to read `currentMetric?.money` and `currentView?.label` —
+ * live draft state — while the rows underneath came from `loadedConfig`. Switch
+ * the measure from «جمع فروش» (Rial) to «تعداد سفارش» (a count) without
+ * previewing and the *old* loaded rows were reformatted through the money
+ * formatter: 1,250,000 Rial rendered as «۱۲۵٬۰۰۰ تومان» for a metric that is
+ * not money at all. Nothing on screen indicated the number or the label had
+ * changed meaning.
+ *
+ * So the metadata is resolved once, when the result lands, and stored beside
+ * the rows. Nothing about the preview is read from the draft.
+ */
+export interface PreviewMeta {
+  /** The loaded source's own label — what the tiles and the file are titled. */
+  label: string;
+  /** Whether the loaded metric is money, i.e. whether to format through the unit. */
+  money: boolean;
+  /** The loaded config's visualization, so switching the picker cannot re-draw old rows. */
+  chartType: ChartType;
+}
+
+/** The slice of the engine catalogue `previewMetadata` needs — `/api/reports/views`. */
+export interface PreviewCatalogueView {
+  key: string;
+  label: string;
+  metrics: { key: string; label: string; money: boolean }[];
+  dimensions: { key: string; label: string }[];
+}
+
+/**
+ * The rendering facts for a config, resolved against the engine's own catalogue.
+ *
+ * `null` config (nothing loaded yet) and an unknown view both answer `null`, so
+ * a caller renders nothing rather than guessing a formatter for rows it cannot
+ * describe. An unknown metric on a known view keeps the view's label but
+ * answers `money: false` — a count is the safe reading of "not an amount".
+ */
+export function previewMetadata(
+  config: ReportConfig | null,
+  catalogue: readonly PreviewCatalogueView[] | null,
+): PreviewMeta | null {
+  if (!config) return null;
+  const view = catalogue?.find((item) => item.key === config.view);
+  if (!view) return null;
+  return {
+    label: view.label,
+    money: view.metrics.find((metric) => metric.key === config.metric)?.money ?? false,
+    chartType: config.visualization ?? "bar",
+  };
+}
+
+/**
  * True when the form no longer describes the previewed result (issue #819).
  *
  * The builder used to keep whatever result was on screen while the controls
@@ -72,7 +126,19 @@ export function previewIsStale(draft: ReportConfig, loaded: ReportConfig | null)
  * `JSON.stringify` drops the `undefined` it is replaced with.
  */
 function queryShape(config: ReportConfig): string {
-  return JSON.stringify({ ...config, visualization: undefined });
+  const filters = config.filters;
+  const normalizedFilters = {
+    ...(filters?.dateFrom ? { dateFrom: filters.dateFrom } : {}),
+    ...(filters?.dateTo ? { dateTo: filters.dateTo } : {}),
+    ...(filters?.equals && Object.keys(filters.equals).length > 0 ? { equals: filters.equals } : {}),
+  };
+  return JSON.stringify({
+    ...config,
+    visualization: undefined,
+    // A legacy report may omit filters entirely while the controlled form
+    // rebuilds an empty object (`{}`); those are the same query, not an edit.
+    filters: Object.keys(normalizedFilters).length > 0 ? normalizedFilters : undefined,
+  });
 }
 
 /**

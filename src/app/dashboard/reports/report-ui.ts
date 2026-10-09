@@ -52,6 +52,8 @@ export interface ExportRequest {
     accountStatus?: "all" | "active" | "archived";
     includeZeroBalances?: boolean;
   };
+  /** The scope the screen actually loaded; used only by consolidated statement exports. */
+  scope?: "branch" | "business-wide";
   /** The shift screen's own query string; only read by the `shift_orders` kind. */
   query?: string;
 }

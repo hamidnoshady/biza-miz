@@ -17,6 +17,7 @@ import type { Industry } from "./industries";
 import { hasCapability, hasModule, type CapabilityKey, type ModuleKey } from "./industry-profile";
 import { PRODUCT_WORKSPACE_INDUSTRIES } from "./product-workspace";
 import { addDays } from "./rollup";
+import { reportScopeLocationId, type ReportScope } from "./report-scope";
 
 export type Aggregation = "sum" | "avg" | "count" | "count_distinct";
 export type DateGranularity = "day" | "week" | "month";
@@ -570,18 +571,39 @@ export interface ReportConfig {
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+function isValidIsoDate(value: string): boolean {
+  if (!ISO_DATE_RE.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  if (year < 1 || month < 1 || month > 12) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day >= 1 && day <= daysInMonth[month - 1];
+}
+
+export const MAX_REPORT_LIMIT = 1_000;
+
+const REPORT_AGGREGATIONS: readonly string[] = ["sum", "avg", "count", "count_distinct"];
+const REPORT_CHART_TYPES: readonly string[] = ["line", "bar", "pie", "number"];
+
+function isReportRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** Validates a report config against the view whitelist. Empty array = valid. Persian error strings. */
 export function validateReportConfig(config: ReportConfig): string[] {
+  if (!isReportRecord(config)) return ["پیکربندی گزارش نامعتبر است."];
   const errors: string[] = [];
-  const view = Object.hasOwn(REPORT_VIEWS, config.view) ? REPORT_VIEWS[config.view] : undefined;
-  if (!view) {
-    errors.push("منبع داده نامعتبر است.");
-    return errors;
+  if (typeof config.view !== "string" || !Object.hasOwn(REPORT_VIEWS, config.view)) {
+    return ["منبع داده نامعتبر است."];
   }
+  const view = REPORT_VIEWS[config.view];
+  if (!view) return ["منبع داده نامعتبر است."];
 
-  const metric = view.metrics.find((m) => m.key === config.metric);
+  const metric = typeof config.metric === "string" ? view.metrics.find((m) => m.key === config.metric) : undefined;
   if (!metric) {
     errors.push("معیار انتخاب‌شده برای این منبع داده معتبر نیست.");
+  } else if (!REPORT_AGGREGATIONS.includes(config.aggregation)) {
+    errors.push("نوع تجمیع برای این معیار پشتیبانی نمی‌شود.");
   } else if (!metric.aggregations.includes(config.aggregation)) {
     errors.push("نوع تجمیع برای این معیار پشتیبانی نمی‌شود.");
   } else if (config.aggregation !== "count" && metric.column === null) {
@@ -593,7 +615,9 @@ export function validateReportConfig(config: ReportConfig): string[] {
     errors.push("نوع تجمیع برای این معیار پشتیبانی نمی‌شود.");
   }
 
-  const dimension = view.dimensions.find((d) => d.key === config.dimension);
+  const dimension = typeof config.dimension === "string"
+    ? view.dimensions.find((d) => d.key === config.dimension)
+    : undefined;
   if (!dimension) {
     errors.push("بُعد انتخاب‌شده برای این منبع داده معتبر نیست.");
   }
@@ -601,31 +625,89 @@ export function validateReportConfig(config: ReportConfig): string[] {
     errors.push("این منبع داده بُعد زمانی ندارد.");
   }
 
-  if (config.filters?.dateFrom && !ISO_DATE_RE.test(config.filters.dateFrom)) {
-    errors.push("تاریخ شروع نامعتبر است.");
-  }
-  if (config.filters?.dateTo && !ISO_DATE_RE.test(config.filters.dateTo)) {
-    errors.push("تاریخ پایان نامعتبر است.");
-  }
-  if (config.filters?.dateFrom && config.filters?.dateTo && config.filters.dateFrom > config.filters.dateTo) {
-    errors.push("تاریخ شروع نمی‌تواند بعد از تاریخ پایان باشد.");
-  }
-  if ((config.filters?.dateFrom || config.filters?.dateTo) && !view.dateColumn) {
-    errors.push("این منبع داده قابل فیلتر بر اساس تاریخ نیست.");
-  }
+  const filters = config.filters as unknown;
+  if (filters !== undefined) {
+    if (!isReportRecord(filters)) {
+      errors.push("فیلترهای گزارش نامعتبر هستند.");
+    } else {
+      const dateFrom = filters.dateFrom;
+      const dateTo = filters.dateTo;
+      if (dateFrom !== undefined && (typeof dateFrom !== "string" || !isValidIsoDate(dateFrom))) {
+        errors.push("تاریخ شروع نامعتبر است.");
+      }
+      if (dateTo !== undefined && (typeof dateTo !== "string" || !isValidIsoDate(dateTo))) {
+        errors.push("تاریخ پایان نامعتبر است.");
+      }
+      if (typeof dateFrom === "string" && typeof dateTo === "string" && dateFrom && dateTo && dateFrom > dateTo) {
+        errors.push("تاریخ شروع نمی‌تواند بعد از تاریخ پایان باشد.");
+      }
+      if ((dateFrom || dateTo) && !view.dateColumn) {
+        errors.push("این منبع داده قابل فیلتر بر اساس تاریخ نیست.");
+      }
 
-  if (config.filters?.equals) {
-    for (const key of Object.keys(config.filters.equals)) {
-      if (!view.filters?.some((f) => f.key === key)) {
-        errors.push(`فیلتر «${key}» برای این منبع داده معتبر نیست.`);
+      const equals = filters.equals;
+      if (equals !== undefined) {
+        if (!isReportRecord(equals)) {
+          errors.push("فیلترهای انتخابی نامعتبر هستند.");
+        } else {
+          for (const [key, value] of Object.entries(equals)) {
+            if (!view.filters?.some((filter) => filter.key === key)) {
+              errors.push(`فیلتر «${key}» برای این منبع داده معتبر نیست.`);
+            }
+            if (typeof value !== "string") {
+              errors.push(`مقدار فیلتر «${key}» نامعتبر است.`);
+            }
+          }
+        }
       }
     }
   }
 
-  if (config.limit !== undefined && (!Number.isInteger(config.limit) || config.limit <= 0)) {
-    errors.push("محدودیت تعداد ردیف باید عدد صحیح مثبت باشد.");
+  const sort = config.sort as unknown;
+  if (sort !== undefined) {
+    if (
+      !isReportRecord(sort) ||
+      (sort.by !== "dimension" && sort.by !== "metric") ||
+      (sort.dir !== "asc" && sort.dir !== "desc")
+    ) {
+      errors.push("ترتیب گزارش نامعتبر است.");
+    }
   }
 
+  if (config.limit !== undefined && (!Number.isInteger(config.limit) || config.limit <= 0 || config.limit > MAX_REPORT_LIMIT)) {
+    errors.push(`محدودیت تعداد ردیف باید عدد صحیح بین ۱ و ${MAX_REPORT_LIMIT} باشد.`);
+  }
+  if (config.visualization !== undefined && !REPORT_CHART_TYPES.includes(config.visualization)) {
+    errors.push("نوع نمایش گزارش نامعتبر است.");
+  }
+
+  return errors;
+}
+
+/**
+ * Validates both the shape and the current trade's access to its source view.
+ *
+ * The plain schema validator is also used by framework-free SQL builders and
+ * can only answer whether a config is structurally valid. Request boundaries
+ * must use this stronger form: `REPORT_VIEWS` intentionally contains the union
+ * of every trade's sources, while the builder, saved-report list and standard
+ * report library are filtered to the current business's modules/capabilities.
+ * Without this check a direct `/api/reports/query` or a stale saved widget could
+ * query a different trade's view even though the UI never offered it.
+ */
+export function validateReportConfigForIndustry(
+  config: ReportConfig,
+  industry: Industry | null | undefined,
+): string[] {
+  const errors = validateReportConfig(config);
+  if (
+    isReportRecord(config) &&
+    typeof config.view === "string" &&
+    Object.hasOwn(REPORT_VIEWS, config.view) &&
+    !isReportViewAvailableForIndustry(config.view, industry)
+  ) {
+    errors.push("منبع داده برای صنف فعلی کسب‌وکار در دسترس نیست.");
+  }
   return errors;
 }
 
@@ -639,8 +721,20 @@ export function validateReportConfig(config: ReportConfig): string[] {
 export function buildReportQuery(
   config: ReportConfig,
   businessId: string,
-  locationId?: string,
+  /**
+   * The authorized scope. Required, and a value rather than an optional
+   * location, because this function used to add a branch predicate only
+   * `if (locationId)` — a shape in which "the caller forgot to resolve a
+   * branch" and "the caller means every branch" are the same input. Every
+   * route and service that reaches this engine now has to say which it is
+   * (issue #819).
+   */
+  scope: ReportScope,
 ): { sql: string; params: unknown[] } {
+  // `reportScopeLocationId` is also the runtime backstop for callers TypeScript
+  // cannot see (the platform request parser reads its scope off the wire): a
+  // scope that did not arrive throws instead of running over every branch.
+  const locationId = reportScopeLocationId(scope);
   const errors = validateReportConfig(config);
   if (errors.length > 0) {
     throw new Error(`invalid_report_config: ${errors.join(" | ")}`);
@@ -880,12 +974,20 @@ export function standardReportsFor(industry: Industry | null | undefined): Stand
  * not offered «چرخش میزها» as a ready-made report, it must not be offered the
  * view behind it as a place to build one from either.
  */
+export function isReportViewAvailableForIndustry(
+  viewKey: string,
+  industry: Industry | null | undefined,
+): boolean {
+  const view = Object.hasOwn(REPORT_VIEWS, viewKey) ? REPORT_VIEWS[viewKey] : undefined;
+  const resolved: Industry = industry ?? "food_service";
+  return Boolean(view && requirementMet(resolved, view.requires));
+}
+
 export function reportViewsFor(
   industry: Industry | null | undefined,
 ): { key: string; view: ReportViewDef }[] {
-  const resolved: Industry = industry ?? "food_service";
   return Object.entries(REPORT_VIEWS)
-    .filter(([, view]) => requirementMet(resolved, view.requires))
+    .filter(([key]) => isReportViewAvailableForIndustry(key, industry))
     .map(([key, view]) => ({ key, view }));
 }
 

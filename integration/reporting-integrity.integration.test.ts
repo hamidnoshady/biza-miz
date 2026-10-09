@@ -19,6 +19,7 @@
  * covered here too, against the service the builder actually calls.
  */
 import { randomUUID } from "node:crypto";
+import { branchScope, BUSINESS_WIDE_SCOPE } from "../src/lib/report-scope";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
@@ -62,6 +63,20 @@ async function seedEmployee(): Promise<string> {
   const id = rows[0].id;
   await db.query("INSERT INTO employees (id, business_id) VALUES ($1, $2)", [id, businessId]);
   return id;
+}
+
+/**
+ * A saved report the widget tables can reference. `config` is written through
+ * the service's own shape so the applicability check has something real to read.
+ */
+async function insertSavedReport(config: Record<string, unknown>, extra: { standardKey?: string } = {}): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO saved_reports (business_id, created_by, name, config, is_standard, standard_key)
+     VALUES ($1, $2, 'گزارش آزمایشی', $3::jsonb, $4, $5)
+     RETURNING id`,
+    [businessId, employeeId, JSON.stringify(config), Boolean(extra.standardKey), extra.standardKey ?? null],
+  );
+  return rows[0].id;
 }
 
 async function insertShift(locationId: string, startedAt: string, endedAt: string | null): Promise<string> {
@@ -149,6 +164,12 @@ beforeEach(async () => {
   await db.query("DELETE FROM orders");
   await db.query("DELETE FROM employee_shifts");
   await db.query("DELETE FROM saved_reports");
+  // These report fixtures include posted balances; remove dependent rows before
+  // the business-owned accounts they reference.
+  await db.query("DELETE FROM domain_events");
+  await db.query("DELETE FROM journal_lines");
+  await db.query("DELETE FROM journal_entries");
+  await db.query("DELETE FROM accounts");
   await db.query("DELETE FROM businesses");
 
   const biz = await db.query<{ id: string }>(
@@ -371,7 +392,7 @@ describe("branch isolation of report execution (issue #819)", () => {
 
     const rowsFor = (locationId: string) =>
       dbLib.withTenant(businessId, () =>
-        reportsService.runCustomReportQuery(businessId, DAY_CONFIG, locationId),
+        reportsService.runCustomReportQuery(businessId, DAY_CONFIG, branchScope(locationId)),
       );
 
     const main = await rowsFor(mainId);
@@ -379,13 +400,25 @@ describe("branch isolation of report execution (issue #819)", () => {
     expect(main.map((row) => Number(row.value))).toEqual([1_000_000]);
     expect(other.map((row) => Number(row.value))).toEqual([7_000_000]);
 
-    // Without a location the same query is the business-wide figure — the
-    // consolidated path, reachable only through an owner-level guard at the
-    // route layer, never by omitting a filter.
+    // The business-wide figure is a *separate scope*, not the absence of one:
+    // it has to be asked for by name and the route that serves it requires
+    // `reports.business_wide` (issue #819).
     const consolidated = await dbLib.withTenant(businessId, () =>
-      reportsService.runCustomReportQuery(businessId, DAY_CONFIG),
+      reportsService.runCustomReportQuery(businessId, DAY_CONFIG, BUSINESS_WIDE_SCOPE),
     );
     expect(consolidated.map((row) => Number(row.value))).toEqual([8_000_000]);
+
+    // And the omission that used to produce those same eight million now fails
+    // instead: a caller that never resolved a branch has no scope to pass.
+    await expect(
+      dbLib.withTenant(businessId, () =>
+        reportsService.runCustomReportQuery(
+          businessId,
+          DAY_CONFIG,
+          undefined as unknown as Parameters<typeof reportsService.runCustomReportQuery>[2],
+        ),
+      ),
+    ).rejects.toThrow(/missing_report_scope/);
   });
 
   it("scopes a standard report's raw rows to the named branch", async () => {
@@ -397,9 +430,261 @@ describe("branch isolation of report execution (issue #819)", () => {
     ]);
 
     const rows = await dbLib.withTenant(businessId, () =>
-      reportsService.runStandardReportRows("daily_sales_summary", businessId, {}, mainId),
+      reportsService.runStandardReportRows("daily_sales_summary", businessId, branchScope(mainId)),
     );
     expect(rows).toHaveLength(1);
     expect(Number(rows[0].total)).toBe(1_000_000);
+  });
+
+  it("keeps a branch balance sheet balanced while excluding a sibling branch", async () => {
+    const accounts = await db.query<{ id: string; code: string }>(
+      `INSERT INTO accounts (business_id, code, name, type)
+       VALUES ($1, '1100', 'نقد', 'asset'), ($1, '4300', 'فروش', 'revenue'),
+              ($1, '5900', 'هزینهٔ دیگر', 'expense')
+       RETURNING id, code`,
+      [businessId],
+    );
+    const cash = accounts.rows.find((row) => row.code === "1100")!.id;
+    const revenue = accounts.rows.find((row) => row.code === "4300")!.id;
+    const expense = accounts.rows.find((row) => row.code === "5900")!.id;
+    const post = async (locationId: string, entryDate: string, debit: string, credit: string, amount: number) => {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type)
+         VALUES ($1, $2, $3, 'آزمون تراز شعبه', 'manual') RETURNING id`,
+        [businessId, locationId, entryDate],
+      );
+      const id = rows[0].id;
+      await db.query(
+        `INSERT INTO journal_lines (entry_id, account_id, debit, credit)
+         VALUES ($1, $2, $4, 0), ($1, $3, 0, $4)`,
+        [id, debit, credit, amount],
+      );
+    };
+    // One sale and one operating expense in Main, a much larger sale in Other.
+    await post(mainId, "2026-08-10", cash, revenue, 1_000_000);
+    await post(mainId, "2026-08-11", expense, cash, 200_000);
+    await post(otherId, "2026-08-10", cash, revenue, 7_000_000);
+
+    const main = await dbLib.withTenant(businessId, () =>
+      reportsService.getBalanceSheet(businessId, "2026-08-31", branchScope(mainId)),
+    );
+    const other = await dbLib.withTenant(businessId, () =>
+      reportsService.getBalanceSheet(businessId, "2026-08-31", branchScope(otherId)),
+    );
+    const consolidated = await dbLib.withTenant(businessId, () =>
+      reportsService.getBalanceSheet(businessId, "2026-08-31", BUSINESS_WIDE_SCOPE),
+    );
+
+    expect(main.balanced).toBe(true);
+    expect(main.totalAssets).toBe(800_000);
+    expect(main.totalEquity).toBe(800_000);
+    expect(other.balanced).toBe(true);
+    expect(other.totalAssets).toBe(7_000_000);
+    expect(consolidated.balanced).toBe(true);
+    expect(consolidated.totalAssets).toBe(7_800_000);
+  });
+});
+
+describe("dashboard widget layouts — the write contract (issue #819)", () => {
+  // A config the engine actually accepts: views are keyed by their SQL view
+  // name, and the applicability check resolves the metric and dimension against
+  // that view's own lists.
+  const DAY_CONFIG = {
+    view: "v_sales_by_day",
+    metric: "total",
+    dimension: "day",
+    aggregation: "sum",
+    visualization: "bar",
+  };
+
+  it("keeps both tiles when two pins land at once on an empty dashboard", async () => {
+    const first = await insertSavedReport(DAY_CONFIG);
+    const second = await insertSavedReport({ ...DAY_CONFIG, metric: "order_count" });
+
+    // The browser used to do this as: GET the layout, append locally, POST the
+    // whole array back. Both reads saw an empty grid, so the second POST deleted
+    // the first tile. The append now happens server-side, inside a transaction
+    // that locks the scope — including the empty case, where there are no rows
+    // for FOR UPDATE to hold.
+    const [a, b] = await Promise.all([
+      reportsService.appendDashboardWidget(businessId, { userId: employeeId }, {
+        savedReportId: first,
+        chartType: "bar",
+        title: "فروش",
+        w: 4,
+        h: 3,
+      }),
+      reportsService.appendDashboardWidget(businessId, { userId: employeeId }, {
+        savedReportId: second,
+        chartType: "line",
+        title: "تعداد",
+        w: 4,
+        h: 3,
+      }),
+    ]);
+    if (!a.ok) throw new Error(`first append failed: ${JSON.stringify(a)}`);
+    if (!b.ok) throw new Error(`second append failed: ${JSON.stringify(b)}`);
+
+    const layout = await reportsService.getDashboardWidgets(businessId, employeeId, "manager");
+    expect(layout.widgets).toHaveLength(2);
+    expect(new Set(layout.widgets.map((w) => w.saved_report_id))).toEqual(new Set([first, second]));
+    // Both writes serialized, so the second tile was placed *below* the first
+    // rather than on top of it.
+    expect(new Set(layout.widgets.map((w) => w.y))).toEqual(new Set([0, 3]));
+
+    // And each write reported the layout it produced, which is what a client
+    // sends back on its next write.
+    expect(a.revision).not.toBe(b.revision);
+    expect([a.revision, b.revision]).toContain(layout.revision);
+  });
+
+  it("refuses a stale whole-layout write instead of deleting a newer one", async () => {
+    const report = await insertSavedReport(DAY_CONFIG);
+    const widget = { savedReportId: report, chartType: "bar" as const, title: null, x: 0, y: 0, w: 4, h: 3 };
+
+    await reportsService.saveDashboardWidgets(businessId, { userId: employeeId }, [widget]);
+    const read = await reportsService.getDashboardWidgets(businessId, employeeId, "manager");
+
+    // Tab A saves a drag using the revision it read.
+    const accepted = await reportsService.saveDashboardWidgets(
+      businessId,
+      { userId: employeeId },
+      [{ ...widget, x: 4, w: 8 }],
+      { ifRevision: read.revision },
+    );
+    expect(accepted).toEqual({ ok: true, revision: expect.any(String) });
+
+    // Tab B, still open on the older layout, drags something else. Its write
+    // must not delete tab A's — it is told its screen is out of date.
+    const refused = await reportsService.saveDashboardWidgets(
+      businessId,
+      { userId: employeeId },
+      [{ ...widget, w: 12 }],
+      { ifRevision: read.revision },
+    );
+    expect(refused).toEqual({ ok: false, reason: "layout_changed" });
+
+    const after = await reportsService.getDashboardWidgets(businessId, employeeId, "manager");
+    expect(after.revision).toBe(accepted.ok ? accepted.revision : "");
+    expect(after.widgets[0].w).toBe(8);
+  });
+
+  it("accepts the revision its own append returned", async () => {
+    const report = await insertSavedReport(DAY_CONFIG);
+    const appended = await reportsService.appendDashboardWidget(businessId, { role: "manager" }, {
+      savedReportId: report,
+      chartType: "bar",
+      title: null,
+      w: 4,
+      h: 3,
+    });
+    if (!appended.ok) throw new Error("valid saved report must append successfully");
+
+    // A role default is read by whoever inherits it; the revision has to be the
+    // same string for the scope that wrote and the scope that reads. This
+    // member has no personal layout of their own, so they inherit the role's.
+    const collegialMember = await seedEmployee();
+    const layout = await reportsService.getDashboardWidgets(businessId, collegialMember, "manager");
+    expect(layout.scope).toBe("role-default");
+    expect(layout.revision).toBe(appended.revision);
+
+    const replaced = await reportsService.saveDashboardWidgets(
+      businessId,
+      { role: "manager" },
+      [{ savedReportId: report, chartType: "pie", title: "دوباره", x: 0, y: 0, w: 6, h: 3 }],
+      { ifRevision: appended.revision },
+    );
+    expect(replaced.ok).toBe(true);
+  });
+
+  it("keeps a widget whose report the engine can no longer run, and says why", async () => {
+    // The scenario the retention rule in `ensureStandardSavedReports` creates:
+    // a report stayed in the database across an engine change, and a member's
+    // dashboard still points at it. It must be *visible and explained*, not
+    // dropped — silently deleting someone's layout is the other half of the bug.
+    const retired = await insertSavedReport({ ...DAY_CONFIG, view: "a_view_that_was_removed" });
+    const live = await insertSavedReport(DAY_CONFIG);
+    await db.query(
+      `INSERT INTO dashboard_widgets (business_id, user_id, saved_report_id, chart_type, title, x, y, w, h)
+       VALUES ($1, $2, $3, 'bar', NULL, 0, 0, 4, 3), ($1, $2, $4, 'bar', NULL, 0, 3, 4, 3)`,
+      [businessId, employeeId, retired, live],
+    );
+
+    const layout = await reportsService.getDashboardWidgets(businessId, employeeId, "manager");
+    expect(layout.widgets).toHaveLength(2);
+    const retiredRow = layout.widgets.find((w) => w.saved_report_id === retired);
+    expect(retiredRow?.applicable).toBe(false);
+    expect(retiredRow?.applicable_reason).toBe("unknown_view");
+    // The healthy widget is untouched and still applicable.
+    expect(layout.widgets.find((w) => w.saved_report_id === live)?.applicable).toBe(true);
+  });
+
+  it("retains old standard rows but excludes them from another trade's defaults and pin validation", async () => {
+    const stale = await insertSavedReport(DAY_CONFIG, { standardKey: "top_selling_items" });
+    await db.query("UPDATE businesses SET industry = 'jewelry' WHERE id = $1", [businessId]);
+
+    const ids = await dbLib.withTenant(businessId, () => reportsService.ensureStandardSavedReports(businessId));
+    expect(ids.has("top_selling_items")).toBe(false);
+    const validation = await dbLib.withTenant(businessId, () =>
+      reportsService.savedReportIdsInBusiness(businessId, [stale]),
+    );
+    expect(validation.owned.has(stale)).toBe(true);
+    expect(validation.applicable.has(stale)).toBe(false);
+
+    // The next Owner dashboard seed uses only the current trade's keys. The old
+    // row remains for any layout that already references it; it is not blindly
+    // deleted or newly pinned into a role default.
+    const layout = await dbLib.withTenant(businessId, () =>
+      reportsService.getDashboardWidgets(businessId, employeeId, "owner"),
+    );
+    expect(layout.widgets.some((widget) => widget.saved_report_id === stale)).toBe(false);
+    const retained = await db.query<{ id: string }>("SELECT id FROM saved_reports WHERE id = $1", [stale]);
+    expect(retained.rows).toEqual([{ id: stale }]);
+  });
+
+  it("refuses to append a report that became inapplicable before the locked write", async () => {
+    const stale = await insertSavedReport({ ...DAY_CONFIG, view: "a_view_that_was_removed" });
+    const appended = await reportsService.appendDashboardWidget(businessId, { userId: employeeId }, {
+      savedReportId: stale,
+      chartType: "bar",
+      title: null,
+      w: 4,
+      h: 3,
+    });
+    expect(appended).toEqual({ ok: false, reason: "saved_report_not_applicable" });
+  });
+
+  it("preserves an existing inapplicable widget only when the locked layout already contains it", async () => {
+    const stale = await insertSavedReport({ ...DAY_CONFIG, view: "a_view_that_was_removed" });
+    const widget = { savedReportId: stale, chartType: "bar" as const, title: null, x: 0, y: 0, w: 4, h: 3 };
+    const emptyRevision = reportsService.widgetLayoutRevision([]);
+    const rejected = await reportsService.saveDashboardWidgets(
+      businessId,
+      { userId: employeeId },
+      [widget],
+      { ifRevision: emptyRevision, preserveInapplicableSavedReportIds: [stale] },
+    );
+    expect(rejected).toEqual({ ok: false, reason: "saved_report_not_applicable" });
+
+    await db.query(
+      `INSERT INTO dashboard_widgets (business_id, user_id, saved_report_id, chart_type, title, x, y, w, h)
+       VALUES ($1, $2, $3, 'bar', NULL, 0, 0, 4, 3)`,
+      [businessId, employeeId, stale],
+    );
+    const read = await dbLib.withTenant(businessId, () =>
+      reportsService.getDashboardWidgets(businessId, employeeId, "manager"),
+    );
+    const preserved = await reportsService.saveDashboardWidgets(
+      businessId,
+      { userId: employeeId },
+      [widget],
+      { ifRevision: read.revision, preserveInapplicableSavedReportIds: [stale] },
+    );
+    expect(preserved.ok).toBe(true);
+    const after = await db.query<{ saved_report_id: string }>(
+      "SELECT saved_report_id FROM dashboard_widgets WHERE business_id = $1 AND user_id = $2",
+      [businessId, employeeId],
+    );
+    expect(after.rows.map((row) => row.saved_report_id)).toEqual([stale]);
   });
 });

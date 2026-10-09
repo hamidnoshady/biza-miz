@@ -155,9 +155,31 @@ function normalizeSearch(value: string): string {
   return normalizePosSearchText(value);
 }
 
+/**
+ * The shapes that render as a whole document (a statement) rather than as a
+ * series over a dimension. Locally named because it was `DOCUMENT_SHAPES` from
+ * `standard-report-config`, and this section also needs the *unscoped* subset of
+ * it for the «کل کسب‌وکار» control below — one definition, two readings.
+ */
+const STATEMENT_SHAPES = DOCUMENT_SHAPES;
+
+/**
+ * The statements that can also be read consolidated for the whole business.
+ *
+ * Reading a branch's books and reading the business's books are different
+ * reports with different audiences — the second is the owner's view of every
+ * branch at once — so the second is a separate, elevated act
+ * (`reports.business_wide`), which is why the server refuses it without the
+ * capability (issue #819). The screen follows the same rule: the control is
+ * drawn only for a member who holds it, so nobody is offered a button whose
+ * request can only answer 403.
+ */
+const BUSINESS_WIDE_SHAPES = new Set<ReportShape>(["profit_and_loss", "balance_sheet", "cash_flow"]);
+
 export function StandardReportsSection({
   canExplain,
   canExport,
+  canBusinessWide,
 }: {
   canExplain: boolean;
   /**
@@ -166,6 +188,8 @@ export function StandardReportsSection({
    * the export capability — a control whose request could only answer 403.
    */
   canExport: boolean;
+  /** `reports.business_wide`: may read the consolidated statements. */
+  canBusinessWide: boolean;
 }) {
   const money = useMoney();
   const searchId = useId();
@@ -199,6 +223,15 @@ export function StandardReportsSection({
    * figures in it never covered.
    */
   const [loadedRange, setLoadedRange] = useState({ dateFrom: "", dateTo: "" });
+  /** The scope that produced the visible statement, immutable until the next read succeeds. */
+  const [loadedScope, setLoadedScope] = useState<"branch" | "business-wide">("branch");
+  /**
+   * «کل کسب‌وکار» instead of the active branch, for the statements that support
+   * it. Off by default: the branch the member is working in is the safe reading
+   * of an unqualified report, and the consolidated statement has to be asked for
+   * explicitly (`scope: "business-wide"`) — see issue #819.
+   */
+  const [businessWide, setBusinessWide] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -234,7 +267,11 @@ export function StandardReportsSection({
     };
   }, []);
 
-  const isDocument = selected ? DOCUMENT_SHAPES.has(selected.shape) : false;
+  const isDocument = selected ? STATEMENT_SHAPES.has(selected.shape) : false;
+  /** Only these statements can be read consolidated, and only by a member allowed to. */
+  const scopeToggleAvailable = Boolean(
+    selected && canBusinessWide && BUSINESS_WIDE_SHAPES.has(selected.shape),
+  );
   const hasDateColumn = selected?.config
     ? Boolean(views.find((view) => view.key === selected.config!.view)?.hasDateColumn)
     : false;
@@ -255,6 +292,13 @@ export function StandardReportsSection({
   useEffect(() => {
     if (compare && !comparisonReady) setCompare(false);
   }, [compare, comparisonReady]);
+
+  // «کل کسب‌وکار» belongs to the report it was chosen for. Carrying it to the
+  // next report picked would silently answer a *different* statement with the
+  // whole business's figures.
+  useEffect(() => {
+    setBusinessWide(false);
+  }, [selected?.key]);
 
   /**
    * How this report's measure is written. Money metrics are Rial in the
@@ -296,9 +340,19 @@ export function StandardReportsSection({
       setLoading(true);
       setLoadError("");
       const requestedRange = { dateFrom, dateTo };
+      const requestedScope =
+        canBusinessWide && BUSINESS_WIDE_SHAPES.has(selected.shape) && businessWide
+          ? "business-wide"
+          : "branch";
       try {
-        if (DOCUMENT_SHAPES.has(selected.shape)) {
+        if (STATEMENT_SHAPES.has(selected.shape)) {
           const params = new URLSearchParams();
+          // The consolidated read is opt-in and only for a member who holds the
+          // capability; the server re-checks it and refuses the request without
+          // it, so this is the client side of the same rule, not the rule.
+          if (canBusinessWide && BUSINESS_WIDE_SHAPES.has(selected.shape)) {
+            params.set("scope", requestedScope);
+          }
           if (dateFrom) params.set("dateFrom", dateFrom);
           if (dateTo) params.set("dateTo", dateTo);
           if (compare && COMPARABLE_SHAPES.has(selected.shape)) {
@@ -329,6 +383,7 @@ export function StandardReportsSection({
           setDocument(data.report ?? data.comparison ?? null);
           setRows(null);
           setLoadedRange(requestedRange);
+          setLoadedScope(requestedScope);
           return;
         }
         const response = await fetch("/api/reports/query", {
@@ -358,7 +413,7 @@ export function StandardReportsSection({
         if (!signal.aborted) setLoading(false);
       }
     },
-    [selected, dateFrom, dateTo, compare],
+    [selected, dateFrom, dateTo, compare, businessWide, canBusinessWide],
   );
 
   useEffect(() => {
@@ -413,6 +468,8 @@ export function StandardReportsSection({
     setDocument(null);
     setLoadError("");
     setLoadedRange({ dateFrom: "", dateTo: "" });
+    setLoadedScope("branch");
+    setBusinessWide(false);
     // Below `lg` the library is a full-width column with the result *under* it,
     // so tapping a report on a phone changed a screenful of content the person
     // could not see and looked like it had done nothing at all. Take them to
@@ -688,6 +745,30 @@ export function StandardReportsSection({
                     </label>
                   ) : null}
 
+                  {/*
+                    Branch or consolidated (issue #819). A statement is read for
+                    one branch unless its reader asks for the whole business and
+                    holds `reports.business_wide`; without that capability the
+                    server refuses the consolidated read, so the control is not
+                    drawn for them at all.
+                  */}
+                  {scopeToggleAvailable ? (
+                    <div>
+                      <label className="flex min-h-11 w-fit cursor-pointer items-center gap-3 rounded-xl border border-border/80 bg-muted px-3 text-sm text-foreground">
+                        <Checkbox
+                          checked={businessWide}
+                          onCheckedChange={(value) => setBusinessWide(value === true)}
+                        />
+                        کل کسب‌وکار (همهٔ شعبه‌ها)
+                      </label>
+                      <p className="mt-1.5 text-xs text-muted-foreground">
+                        {businessWide
+                          ? "این صورت مالی همهٔ شعبه‌ها را یک‌جا جمع می‌زند."
+                          : "فقط شعبهٔ فعال شما محاسبه می‌شود."}
+                      </p>
+                    </div>
+                  ) : null}
+
                   {canCompare ? (
                     <div>
                       <label className="flex min-h-11 w-fit cursor-pointer items-center gap-3 rounded-xl border border-border/80 bg-muted px-3 text-sm text-foreground">
@@ -756,6 +837,7 @@ export function StandardReportsSection({
                             kind: EXPORT_KIND_BY_SHAPE[selected.shape],
                             dateFrom: loadedRange.dateFrom,
                             dateTo: loadedRange.dateTo,
+                            scope: loadedScope,
                           }
                         : {
                             title: selected.label,
