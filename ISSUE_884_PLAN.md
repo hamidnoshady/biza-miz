@@ -29,7 +29,7 @@ store promotion from a candidate.
 - Node 22 in the sandbox. The repo targets `>=24`. The web checks were run with the repo's own scripts.
 - No JDK, Gradle, or Android SDK can be installed in this sandbox. Maven, Google Maven, and the
   Gradle distribution host are blocked. So the Android project was not compiled or tested locally.
-  It was verified by the `android-build.yml` run on the pull request, which is green on `af78713`.
+  It was verified by `android-build.yml`, which is green on `f64c5fd` for both the pull request and the push.
 - The Gradle wrapper JAR and scripts were taken from the `gradle/gradle` repository at tag
   `v8.14.3` through the GitHub API. The distribution checksum is pinned in
   `android/gradle/wrapper/gradle-wrapper.properties`.
@@ -95,6 +95,7 @@ so the app needs one library rather than two.
 - [x] Existing workflows are unchanged, including `mobile-emulator-acceptance.yml` and `mobile-real-device-acceptance.yml`
 - [ ] Repository setup: the `android-staging` and `android-production` environments, their secrets and variables, and reviewers on the production environment — owner action
 - [x] First green `android-build.yml` run: pull-request run `37942083863` on `af78713` (web bridge tests, Gradle lint, JVM tests, debug APK artifact)
+- [x] Final `android-build.yml` run on `f64c5fd`: green on the pull request (`37944325144`) and on the push (`37944320292`)
 
 ## Phase 5 — documentation
 
@@ -204,26 +205,32 @@ this slice and is listed under follow-up work.
 
 ## Gates
 
-Local, on the final tree (sandbox: Node 22, 2 CPUs, 3.9 GB RAM):
+Local, on the final tree `f64c5fd` (sandbox: Node 22, 2 CPUs, 3.9 GB RAM). Every check below ran after a fresh `npm ci`:
 
-- `npx tsc --noEmit` with `NODE_OPTIONS=--max-old-space-size=3072` (the heap CI uses): exit 0. The first attempt ran out of the default heap, which is a sandbox limit and not a type error.
-- `npm test`: 706 files, 9,300 tests passed.
-- `npx vitest run src/lib/native src/components/native`: 9 files, 158 tests passed. That count includes 33 existing printing tests that the path filter matches.
+- `npm ci`: exit 0.
+- `npx tsc --noEmit` with `NODE_OPTIONS=--max-old-space-size=3072` (the heap CI uses): exit 0. An earlier attempt ran out of the default heap. That is a sandbox limit, not a type error.
+- `npm test`: 706 files, 9,303 tests passed.
+- `npx vitest run src/lib/native src/components/native`: 9 files, 161 tests passed. That count includes 33 tests in `src/lib/native-printing.test.ts`, an existing printing test file that the path filter also matches.
 - `npx eslint src/lib/native src/components/native src/app/layout.tsx --max-warnings=0`: clean. `npm run lint` (whole repo): exit 0.
-- `npm run db:migrate` (302 migrations applied) then `npm run test:db`: 197 files, 2,696 tests passed, 1 skipped.
-- `npm run build`: **not completed here**. The production build needs more memory than this sandbox has, and a memory watchdog stopped it before the build finished. The `production build` job in `test.yml` is the gate for this step. It passed on the pull-request run for `af78713`.
+- `npm run db:migrate` (302 migrations applied), then `npm run test:db` with `DATABASE_URL` set: 197 files, 2,696 tests passed, 1 skipped. `vitest` does not read `.env`, so `DATABASE_URL` must be set in the environment, as CI does. A first run without it failed two files at import (the other 195 passed). That was an invocation mistake, not a code change.
+- `npm run build`: **not completed here**. The production build needs more memory than this sandbox has, and a memory watchdog stopped it before the build finished. The `production build` job in `test.yml` is the gate for this step. It passed on both `test.yml` runs for `f64c5fd`.
 
 Android, on GitHub (the sandbox has no JDK, SDK, or Gradle host access):
 
 Not yet exercised: the two release workflows (`android-signed-candidate.yml`, `android-production-release.yml`). They are manual, main-only, and need the protected environments and their secrets, which are owner setup. A signed build and a Play upload have not run.
 
-- `android-build` on `af78713`, both pull-request and push: web native bridge tests passed. `android development debug` passed: Gradle lint, JVM unit tests and the debug APK all succeeded.
+- `android-build` on `f64c5fd`: green on the pull request (run `37944325144`) and on the push (run `37944320292`). Web native bridge tests, Gradle lint, JVM unit tests and the debug APK all passed.
 - Four CI runs failed before the green one, and each was a real defect. Three were the Gradle `whenReady` release guard: a bare lambda resolved to the deprecated Groovy `Closure` overload (two runs), and a lambda with an explicit `Action` type still did not infer (one run). An object expression fixed it. The fourth was a `toList()` call on `JSONArray` in a unit test, which only showed once the app code had compiled. Reading the androidx.browser source before CI reported it also found that `TrustedWebActivityIntentBuilder.build()` returns a `TrustedWebActivityIntent`, not an `Intent`. That was fixed in the same push as the diagnostics, and the app code compiled in the fourth run, so the fix is confirmed.
 
-`test.yml` on `af78713` (pull request):
+`test.yml` on `f64c5fd`, pull request run `37944325314` and push run `37944320331`:
 
-- passed: production build, unit tests, ESLint, type check, data transfer engine (real database), API guard and permission tests, design checks, media E2E tests.
-- **failed: visual regression.** It reports a 4.06% pixel diff on `docs/design/visual/accounting-expenses.png`. The same diff fails on `main` in runs `37919841516` and `37925908136`, so it predates this branch. Nothing under `docs/design` or the accounting UI changed here. The baseline is not re-recorded, per the repo rules. Because `required` depends on it, the PR will show red until `main` is fixed.
+- passed on both runs: production build, unit tests, integration tests (real database), data transfer engine (real database), ESLint, type check, API guard and permission tests, design checks, media E2E tests.
+- **failed on both runs: visual regression.** It reports a 4.06% pixel diff on `docs/design/visual/accounting-expenses.png`. The same diff fails on `main` in runs `37919841516` and `37925908136`, so it predates this branch. Nothing under `docs/design` or the accounting UI changed here. The baseline is not re-recorded, per the repo rules. Because `required` depends on it, the PR will show red until `main` is fixed.
+
+`verify-shippables` on `f64c5fd`:
+
+- Pull request run `37944325145`: passed.
+- Push run `37944320200`: the `desktop shell` job failed at the `npm ci` install step. This branch does not change `package.json`, the lockfile, `electron/`, or the workflow. The same job passed on the pull request run for this commit, and recent `main` push runs pass. No cause was found, and the job logs are not readable from the sandbox, so it is recorded as probably transient. GitHub refused a re-run and a manual dispatch from the sandbox. Re-run that job from the Actions tab to confirm.
 
 ## Files
 
