@@ -47,6 +47,7 @@ Redemption already existed — an admin could mint a link from the team screen a
 | `otpSendBudgetDecision` in `phone-otp-policy.ts` | Order-independent send-budget decision, exported so both the route and tests share one implementation. |
 | `src/lib/password-reset-request.ts` | L10 forgotten-password initiation: non-enumerating request service, per-address rate limit, delivery over the platform's own SMTP settings. |
 | `src/app/api/auth/password-reset/request/route.ts` | Public `POST` for the above — one response shape for every outcome. |
+| `src/lib/login-eligibility.ts` | L13 — the single deployment-aware login-eligibility policy: which role set each door applies, rendered as SQL. |
 
 ---
 
@@ -81,6 +82,8 @@ Redemption already existed — an admin could mint a link from the team screen a
 **Atomic quota (L03).** `reserveOtpSend` runs in `withTenantTransaction` under `pg_advisory_xact_lock(hashtext(identityKey))` and writes an `auth_login_attempts` row with outcome `'reserved'` *before* dispatch. `refundOtpSend` releases the reservation if the provider fails, so a failed send does not consume quota. The return type is a proper discriminated union (`OtpSendReservation`) rather than an intersection with optional fields, which previously forced a meaningless `challengeId: ""`.
 
 **A single next-path authority.** `login-helpers.useNextPath` and desktop `safeNextPath` were two implementations that disagreed — one rejected `//` but not `/\`. Both now delegate to `safeLoginNextPath`.
+
+**One login-eligibility policy (L13, partial).** The same role lists were written out literally in seven places across the login and credential paths, in two different spacing conventions, with no shared name — so "who can use a PIN" was answered by whichever file you happened to open. They are now one module, `login-eligibility.ts`, which owns only the *policy* (how a role set maps onto a deployment profile and onto each door); role *membership* stays in `@/lib/roles`, whose existing `roles.test.ts` guard fails the build if any module re-declares it. That guard caught my first attempt at this, which re-declared the lists — it is now satisfied. The two doors still differ on purpose, and the module records why: PIN and roster widen to the password roles off cloud, while WebAuthn stays narrow on every profile because a passkey is device-bound and the privileged doors are not.
 
 **PIN bounds imported, not duplicated.** `pin-pad.tsx` repeated the literals `4` and `12`; it now imports `PIN_MIN_LENGTH` / `PIN_MAX_LENGTH` from `pin-policy.ts`.
 
@@ -124,6 +127,7 @@ Redemption already existed — an admin could mint a link from the team screen a
 - `pin-pad.tsx`'s duplicated `4` / `12` literals are gone, imported from `pin-policy.ts`.
 - The duplicated `OtpSendResult` shape was split into a proper `OtpSendReservation` union, removing the placeholder `challengeId: ""` that the old intersection type forced callers to fabricate.
 - The `//`-but-not-`/\` inconsistency between the two next-path validators is gone with the second implementation.
+- Seven hand-copied role allowlists removed (`pin-login`, `webauthn/login/verify`, `employee-service`, `iam/login-credential-sync` ×3, `iam/login-credentials-service`, `iam/sync` ×2), plus an eighth in `iam/login-credentials.ts` that was spelled `new Set([...])` and so escaped the `roles.test.ts` guard, which only matches array literals. All now derive from `@/lib/roles`.
 
 The legacy PIN-only scan was reviewed but **not retired** — it is still the only door for staff without a linked platform identity, and removing it is a product decision rather than a cleanup.
 
@@ -141,6 +145,7 @@ The legacy PIN-only scan was reviewed but **not retired** — it is still the on
 | `src/components/auth/login-door-chooser.test.tsx` | 11 | new — `next` preservation, offline copy, capability degradation |
 | `src/lib/trusted-device.test.ts` | 11 | new — trust matrix, exact 7-day boundary, invalid date fails closed |
 | `src/components/auth/use-login-request.test.tsx` | 10 | new — busy release on reject/timeout/non-JSON, stale-response guard, cancel |
+| `src/lib/login-eligibility.test.ts` | 12 | new — SQL fragment shape, per-profile widening, and that WebAuthn stays narrow when the PIN door widens |
 | `src/lib/password-reset-request.test.ts` | 13 | new — budget boundaries, order independence, corrupt stamps, reset-email copy |
 | `src/app/api/auth/password-reset/request/route.test.ts` | 8 | new — all six outcomes answer identically, no 429, no outcome echo |
 | `integration/password-reset-request.integration.test.ts` | 7 | new — minting, single-live-link, cap at the exact boundary, against real PostgreSQL |
@@ -161,17 +166,17 @@ All commands run in this sandbox on the work commit.
 |---|---|
 | `NODE_OPTIONS=--max-old-space-size=3072 npx tsc --noEmit` | **exit 0**, no output |
 | `npx eslint . --max-warnings=0` | **exit 0** |
-| `npx vitest run --maxWorkers=2` | **673 files / 8,491 tests passed**, exit 0 |
-| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (10 auth files) | **10 files / 71 tests passed**, exit 0, 74.3 s |
+| `npx vitest run --maxWorkers=2` | **674 files / 8,503 tests passed**, exit 0 |
+| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` (11 auth/IAM files) | **11 files / 87 tests passed**, exit 0, 201.3 s |
 | Plus the 3 files exercising `team-service.ts` / `password-reset.ts` | **3 files / 49 tests passed**, exit 0, 141.0 s |
 
-Auth integration breakdown: `phone-otp` 13, `password-reset-request` 7, `trusted-device` 7, `auth-account-security` 5, `auth-lockout` 3, `login-lockout-enumeration` 4, `staff-login-tenant` 7, `iam-login-credentials` 2, `authorization` 21, `desktop-cloud-login` 2.
+Auth/IAM integration breakdown: `phone-otp` 13, `password-reset-request` 7, `trusted-device` 7, `auth-account-security` 5, `auth-lockout` 3, `login-lockout-enumeration` 4, `staff-login-tenant` 7, `iam-login-credentials` 2, `authorization` 21, `desktop-cloud-login` 2, `hybrid-credential-sync` 16.
 
 Modified-code integration breakdown: `hybrid-credential-sync` 16, `team` 23, `plan-limits` 10. These three were selected by grepping `integration/` for every test that references `auth_login_attempts`, `mfa_challenges`, `password-reset`, `consumePasswordResetToken`, `team-service`, or `revokeTrustedDevices` — i.e. the full set of integration tests reaching code this change touched, not a convenience sample. Combined with the auth set: **13 files / 120 tests**.
 
 Database: PostgreSQL **18.4**, provisioned via `embedded-postgres` on 127.0.0.1:54339, migrations applied through `scripts/migrate.ts`.
 
-Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. This change therefore adds **7 unit test files and 105 tests** with no existing test removed or altered in expectation.
+Baseline before any edits, same environment, measured by checking out base commit `d14f0e3` in a separate worktree: `npx tsc --noEmit` exit 0 and `npx vitest run` → **666 files / 8,386 tests passed**, exit 0. This change therefore adds **8 unit test files and 117 tests** with no existing test removed or altered in expectation.
 
 GitHub CI: **no runs or statuses exist** for this repository — the lookup returns empty. There is no CI to report against.
 
@@ -185,7 +190,16 @@ GitHub CI: **no runs or statuses exist** for this repository — the lookup retu
 
 *(Correction to an earlier draft of this report: it claimed no email transport existed for platform identities. That was wrong. `resolveMessageConfig()` reads `platform_message_config WHERE id = true` under `withoutTenantScope("platform")` — a deployment-wide singleton, not a tenant setting — and `data-transfer/schedule-service.ts` already sends non-campaign mail through the same `SmtpMessageProvider`. L10 is implemented.)*
 
-**L13 — the deployment-aware eligibility/assurance policy is not implemented.** Roster and PIN admit `owner, admin, manager, accountant` off cloud; WebAuthn verify accepts only the four operational roles; WebAuthn never evaluates the phone policy; and a local privileged PIN session omits platform identity, `tokenVersion` and MFA state, so the MFA grace banner never appears there. Unifying these is **not** a mechanical fix: gating WebAuthn on the phone policy the way PIN is gated would lock out WebAuthn users at any business that never adopted phone OTP, the day the adoption window closes. That is a product decision about who may sign in by which method, and guessing at it would be worse than leaving it. This is the largest unfixed item in the issue.
+**L13 is partially addressed — the policy is now explicit, but the underlying divergence is untouched.**
+
+What *is* done: the issue's "one explicit deployment-aware eligibility policy" now exists. `src/lib/login-eligibility.ts` is the single place that says which role set each door applies, and all eight hand-copied role lists are gone (§6). The doors' differing behaviour is now recorded as a decision with its reason attached, rather than being an accident of which file you opened.
+
+What is **not** done, and is the substance of the finding:
+
+- **WebAuthn never evaluates the phone policy.** Roster and PIN admit `owner, admin, manager, accountant` off cloud while WebAuthn verify accepts only the operational roles, and WebAuthn still does not consult the phone-OTP gate at all. Closing this is not mechanical: gating WebAuthn on the phone policy the way PIN is gated would lock out WebAuthn users at any business that never adopted phone OTP, the day the adoption window closes. That is a product decision about who may sign in by which method, and guessing at it would be worse than leaving it.
+- **A local privileged PIN session still omits platform identity, `tokenVersion` and MFA state**, so the MFA grace banner never appears on that path. Adding them is plausibly safe but changes what downstream checks fire for an existing session shape, and I did not want to do that unverified late in the change.
+
+So the drift risk the finding warns about is removed; the assurance gap it describes is not. This remains the largest open item in the issue.
 
 **L16 is partially addressed.** Copy corrections, the password toggle and `autocomplete` purposes are in; broader input ergonomics were not taken up.
 

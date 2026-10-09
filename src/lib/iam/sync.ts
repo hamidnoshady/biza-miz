@@ -1,3 +1,4 @@
+import { STAFF_PIN_ROLES_SQL } from "../login-eligibility";
 import { getPool, query } from "../db";
 import { getSetting, SETTING_KEYS } from "../settings";
 import type { ServerSyncConfig } from "../server-sync-config";
@@ -103,10 +104,10 @@ export async function applyIamEvents(businessId:string,siteDeviceId:string,lastS
           // blocks them through is_active.
           await client.query(`UPDATE employee_credentials SET status='revoked',revoked_at=now()
             WHERE business_id=$1 AND employee_id=$2 AND credential_type='pin' AND status='active'
-              AND EXISTS (SELECT 1 FROM users u WHERE u.id=$2 AND u.business_id=$1 AND u.role IN ('cashier','waiter','kitchen'))`,
+              AND EXISTS (SELECT 1 FROM users u WHERE u.id=$2 AND u.business_id=$1 AND u.role IN ${STAFF_PIN_ROLES_SQL})`,
             [businessId,event.entityId]);
           await client.query(`UPDATE users SET pin_hash=NULL
-            WHERE business_id=$1 AND id=$2 AND pin_hash IS NOT NULL AND role IN ('cashier','waiter','kitchen')`,
+            WHERE business_id=$1 AND id=$2 AND pin_hash IS NOT NULL AND role IN ${STAFF_PIN_ROLES_SQL}`,
             [businessId,event.entityId]);
         }else if(event.eventType==="membership.permissions_changed") await client.query(`UPDATE users SET permissions=$3,membership_revision=GREATEST(membership_revision,$4) WHERE business_id=$1 AND id=$2`,
           [businessId,event.entityId,JSON.stringify(event.payload.permissions??(event.payload.changes as {overrides?:unknown}|undefined)?.overrides??{}),revision]);

@@ -27,6 +27,7 @@
  * DB-touching, so per repo convention no direct unit test — covered by
  * integration/hybrid-credential-sync.integration.test.ts.
  */
+import { PASSWORD_ROLES_SQL, STAFF_PIN_ROLES_SQL } from "../login-eligibility";
 import { query, withTenant } from "../db";
 import { getSetting, SETTING_KEYS } from "../settings";
 import type { ServerSyncConfig } from "../server-sync-config";
@@ -150,7 +151,7 @@ export async function pinCredentialGap(businessId: string): Promise<PinCredentia
       WHERE u.business_id = $1
         AND u.is_active
         AND u.membership_status = 'active'
-        AND u.role IN ('cashier','waiter','kitchen')
+        AND u.role IN ${STAFF_PIN_ROLES_SQL}
       ORDER BY u.full_name`,
     [businessId],
   );
@@ -174,8 +175,8 @@ export async function membershipCounts(businessId: string): Promise<MembershipCo
   const { rows } = await query<{ expected: string; password_roles: string; linked: string }>(
     `SELECT
        count(*)::text AS expected,
-       count(*) FILTER (WHERE role IN ('owner','admin','manager','accountant'))::text AS password_roles,
-       count(*) FILTER (WHERE role IN ('owner','admin','manager','accountant') AND platform_user_id IS NOT NULL)::text AS linked
+       count(*) FILTER (WHERE role IN ${PASSWORD_ROLES_SQL})::text AS password_roles,
+       count(*) FILTER (WHERE role IN ${PASSWORD_ROLES_SQL} AND platform_user_id IS NOT NULL)::text AS linked
      FROM users
      WHERE business_id = $1 AND is_active AND membership_status = 'active'`,
     [businessId],

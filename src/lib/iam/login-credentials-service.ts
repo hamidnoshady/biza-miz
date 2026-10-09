@@ -3,6 +3,7 @@
  * paired site may read; site side applies it. Covered by
  * integration/iam-login-credentials.integration.test.ts.
  */
+import { STAFF_PIN_ROLES_SQL } from "../login-eligibility";
 import { getPool, query, withTenant, withoutTenantScope } from "../db";
 import { decryptTotpSecret, encryptTotpSecret } from "../mfa-service";
 import {
@@ -214,8 +215,11 @@ const ACTIVE_PIN = `LEFT JOIN LATERAL (
             ORDER BY created_at DESC LIMIT 1
          ) ec ON true`;
 
-/** Roles whose PIN the cloud owns; the site never writes one for them. */
-const STAFF_PIN_ROLES_SQL = `('cashier','waiter','kitchen')`;
+// Issue #885 L13 — this list used to be redeclared here. It is the same set of
+// roles as the login doors', so it is imported from `login-eligibility`
+// instead. Note that the *question* is different (whose PIN the cloud is
+// authoritative for, versus who may use a PIN door); only the role list is
+// shared, so a change to one must not silently change the other.
 
 /**
  * Cloud: the staff PIN roles the cloud knows about (issue #850).

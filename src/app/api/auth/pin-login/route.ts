@@ -21,6 +21,7 @@ import {
 import { memberPhoneState, pinWindowActive } from "@/lib/phone-otp-policy";
 import { readTrustedDeviceToken, verifyTrustedDevice } from "@/lib/trusted-device";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
+import { pinEligibleRolesSql } from "@/lib/login-eligibility";
 
 interface UserRow extends Record<string, unknown> {
   id: string;
@@ -98,7 +99,12 @@ export async function POST(request: NextRequest) {
 
   return withTenant(businessId, async () => {
     const deployment = await readDeploymentProfile(businessId);
-    const privilegedPinRoles = deployment.profile === "cloud" ? "" : ", 'owner', 'admin', 'manager', 'accountant'";
+    // Issue #885 L13 — the roles a PIN door accepts are one policy, not a
+    // literal repeated at each door. Cloud: staff only, because the
+    // privileged roles have a platform account and sign in with a password.
+    // Local/hybrid: both sets, since a standalone install has nothing else to
+    // offer an owner standing at the till.
+    const pinEligibleRoles = pinEligibleRolesSql(deployment.profile);
     // Phase 20 Wave 8 — a picker-narrowed request already names the employee,
     // so a lockout is checked before touching the PIN at all; a bare legacy
     // scan doesn't know who it is yet and gets the same check further below,
@@ -139,7 +145,7 @@ export async function POST(request: NextRequest) {
             ORDER BY created_at DESC LIMIT 1
          ) ec ON true
         WHERE u.is_active
-          AND u.role IN ('cashier', 'waiter', 'kitchen' ${privilegedPinRoles})
+          AND u.role IN ${pinEligibleRoles}
           AND coalesce(ec.secret_hash, u.pin_hash) IS NOT NULL
           ${filter}`,
       params,

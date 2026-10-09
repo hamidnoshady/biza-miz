@@ -13,6 +13,7 @@
  * wave. This module is the foundation Wave 2 (Login Experience Redesign)
  * will call into.
  */
+import { PASSWORD_ROLES_SQL, STAFF_PIN_ROLES_SQL } from "./login-eligibility";
 import bcrypt from "bcryptjs";
 import { BCRYPT_COST } from "@/lib/password-hashing";
 import type { PoolClient } from "pg";
@@ -1099,7 +1100,7 @@ export async function loginRoster(
        FROM users u
        LEFT JOIN employees e ON e.id = u.id
       WHERE u.is_active
-        AND (u.role IN ('cashier', 'waiter', 'kitchen') OR ($2::boolean AND u.role IN ('owner','admin','manager','accountant')))
+        AND (u.role IN ${STAFF_PIN_ROLES_SQL} OR ($2::boolean AND u.role IN ${PASSWORD_ROLES_SQL}))
         AND (u.pin_hash IS NOT NULL OR EXISTS (
           SELECT 1 FROM employee_credentials pin
            WHERE pin.employee_id = u.id AND pin.business_id = u.business_id

@@ -8,6 +8,7 @@
  * The TOTP secret is carried in plain base32 over TLS because each server
  * encrypts it at rest under its *own* key; the desktop re-encrypts on arrival.
  */
+import { PIN_ROLES } from "../roles";
 import { createHash } from "node:crypto";
 import { stable } from "./reconciliation";
 
@@ -158,7 +159,13 @@ export interface LocalPinState {
   pinHash: string | null;
 }
 
-const STAFF_PIN_ROLES: ReadonlySet<string> = new Set(["cashier", "waiter", "kitchen"]);
+/**
+ * Issue #885 L13 — derived from the canonical list in `@/lib/roles` rather
+ * than restated. This spelling escaped the `roles.test.ts` guard only because
+ * that guard matches array literals and not `new Set([...])`; the duplication
+ * was the same either way.
+ */
+const STAFF_PIN_ROLES: ReadonlySet<string> = new Set(PIN_ROLES);
 
 /**
  * Which members' site PIN to replace with the cloud's. Pure.

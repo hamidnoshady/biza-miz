@@ -1,3 +1,4 @@
+import { WEBAUTHN_LOGIN_ROLES_SQL } from "@/lib/login-eligibility";
 import { NextRequest, NextResponse } from "next/server";
 import type { AuthenticationResponseJSON } from "@simplewebauthn/server";
 import { query, withTenant } from "@/lib/db";
@@ -95,7 +96,7 @@ export async function POST(request: NextRequest) {
               b.subdomain::text AS business_subdomain, u.location_id, u.role, u.full_name
          FROM users u
          JOIN businesses b ON b.id = u.business_id
-        WHERE u.id = $1 AND u.is_active AND u.role IN ('cashier', 'waiter', 'kitchen')`,
+        WHERE u.id = $1 AND u.is_active AND u.role IN ${WEBAUTHN_LOGIN_ROLES_SQL}`,
       [body.employeeId],
     );
     const user = rows[0];
