@@ -15,6 +15,7 @@
 import { useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import { MfaStep } from "./mfa-step";
+import { BusinessPicker, useBusinessSelection } from "./business-picker";
 
 /** How to address a resend — mirrors the three modes of /api/auth/phone-otp/request. */
 export type PhoneOtpSendSpec =
@@ -30,6 +31,18 @@ interface RequestResponse {
   message?: string;
   retryAfterMs?: number;
 }
+
+/*
+ * Issue #854 (P1.18) — the multi-business answer to a *verified* code.
+ *
+ * The number matched members of more than one business, so nothing about those
+ * businesses was revealed until the code checked out. What comes back is the
+ * list plus a short-lived selection token; the member names a business and the
+ * server resolves the membership from the proven number, never from the id.
+ *
+ * The step itself lives in `business-picker.tsx` (P1.19) so the password door
+ * renders the same one.
+ */
 
 function phoneOtpErrorMessage(
   code: string | undefined,
@@ -89,6 +102,7 @@ export function PhoneOtpStep({
     method: "totp" | "sms_otp" | null;
     availableMethods: ("totp" | "sms_otp")[];
   } | null>(null);
+  const { selection, capture, clear } = useBusinessSelection();
 
   useEffect(() => {
     setToken(initialToken);
@@ -136,8 +150,14 @@ export function PhoneOtpStep({
     }
   }
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  /**
+   * POST /api/auth/phone-otp/verify with whatever the current step proves.
+   *
+   * One function for all three steps — the typed code, and the business choice
+   * that spends an already-proven code — because they differ only in the body
+   * and in which response shape comes back.
+   */
+  async function verify(body: Record<string, unknown>, bearer: string) {
     setBusy(true);
     setError(null);
     try {
@@ -145,17 +165,26 @@ export function PhoneOtpStep({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${bearer}`,
         },
-        body: JSON.stringify({ code, deviceToken }),
+        body: JSON.stringify(body),
       });
       const data = (await res.json().catch(() => ({}))) as RequestResponse & {
         mfaRequired?: boolean;
         mfaToken?: string;
         mfaMethod?: "totp" | "sms_otp" | null;
         availableMethods?: ("totp" | "sms_otp")[];
+        needsBusinessSelection?: boolean;
+        businesses?: { id: string; name: string }[];
+        selectionToken?: string;
       };
       if (res.ok) {
+        /*
+         * A code that proves a multi-business number answers with the list and a
+         * selection token and *no* session; the shared hook holds that pending
+         * choice so the picker below can finish it.
+         */
+        if (capture(data)) return;
         if (data.mfaRequired && data.mfaToken) {
           setMfaPending({
             token: data.mfaToken,
@@ -176,6 +205,16 @@ export function PhoneOtpStep({
     }
   }
 
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    await verify({ code, deviceToken }, token);
+  }
+
+  async function chooseBusiness(businessId: string) {
+    if (!selection?.token) return;
+    await verify({ businessId, deviceToken }, selection.token);
+  }
+
   if (mfaPending) {
     return (
       <MfaStep
@@ -187,6 +226,21 @@ export function PhoneOtpStep({
         onVerified={onVerified}
         onCancel={() => {
           setMfaPending(null);
+          onCancel();
+        }}
+      />
+    );
+  }
+
+  if (selection) {
+    return (
+      <BusinessPicker
+        selection={selection}
+        busy={busy}
+        error={error}
+        onChoose={(businessId) => void chooseBusiness(businessId)}
+        onCancel={() => {
+          clear();
           onCancel();
         }}
       />

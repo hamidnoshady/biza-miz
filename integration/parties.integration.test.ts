@@ -537,6 +537,29 @@ describe("removing a party", () => {
   it("says not_found rather than pretending", async () => {
     expect(await parties.removeParty(biz.id, randomUUID())).toBe("not_found");
   });
+
+  it("archives a membership-linked personnel file instead of hard-deleting it", async () => {
+    /**
+     * Issue #854 (P2.6): the personnel file of a member is linked through
+     * `employee_user_id`, and nothing downstream of the delete would have
+     * complained — the membership's foreign key is ON DELETE SET NULL on the
+     * *party's* column. So the history check itself must count the link, or a
+     * member's file disappears out from under a live membership.
+     */
+    const user = await db.query<{ id: string }>(
+      "INSERT INTO users (business_id, full_name, role, pin_hash) VALUES ($1, $2, 'waiter', $3) RETURNING id",
+      [biz.id, "پروندهٔ متصل به عضویت", "$2b$10$notarealhashnotarealhashnotarealhashno"],
+    );
+    const file = await parties.ensureEmployeeParty(biz.id, user.rows[0].id, {
+      displayName: "پروندهٔ متصل به عضویت",
+    });
+    expect(file?.id).toBeTruthy();
+
+    expect(await parties.removeParty(biz.id, file!.id)).toBe("archived");
+    const kept = await parties.getParty(biz.id, file!.id);
+    expect(kept).not.toBeNull();
+    expect(kept?.status).toBe(false);
+  });
 });
 
 describe("personnel", () => {

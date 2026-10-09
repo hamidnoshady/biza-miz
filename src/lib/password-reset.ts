@@ -10,22 +10,65 @@ const BCRYPT_COST = 12;
 
 export type PasswordSubjectRealm = "platform_user" | "platform_admin";
 
+export type PasswordStrengthError =
+  | "password_too_short"
+  | "password_too_long"
+  | "password_unchanged"
+  | "password_blank"
+  | "password_confirmation_mismatch"
+  | "missing_current_password"
+  | "missing_fields";
+
 export type PasswordStrengthResult =
   | { ok: true }
-  | {
-      ok: false;
-      error: "password_too_short" | "password_too_long" | "password_unchanged";
-    };
+  | { ok: false; error: PasswordStrengthError };
 
+/**
+ * The one password-change validator, server-side.
+ *
+ * Issue #854 (P2.15 / P2.16 / P2.17): the browser was doing work the server
+ * must not trust, and the two sides disagreed about the vocabulary.
+ *
+ *  - **`confirmPassword` is verified here.** The Profile form sent it and the
+ *    API ignored it, so a mismatch was a browser-only rule — which means any
+ *    non-browser client (a script, an old bundle, a crafted request) could set
+ *    a password the user did not mean to type. Credential invariants do not
+ *    live in the DOM.
+ *  - **Whitespace-only is rejected.** An eight-space password passed the length
+ *    check, and the UI even shipped a `password_blank` message the backend
+ *    could never emit. It can now.
+ *  - **One error vocabulary.** `PasswordStrengthError` is the union the routes
+ *    return and `src/lib/auth-error-messages.ts` translates, so
+ *    `missing_fields`/`password_blank`/`password_confirmation_mismatch` mean
+ *    the same thing wherever they surface.
+ *
+ * Note the deliberate asymmetry in the length rule: the *floor* counts the
+ * password's own characters, while the *blank* test uses `trim()`. A password
+ * of "  abcdefgh  " is accepted at its typed length (spaces are legitimate
+ * entropy and stripping them would silently change the credential), but a
+ * password that is *only* whitespace is not a password.
+ */
 export function validatePasswordStrength(
   newPassword: string,
   currentPassword?: string,
+  confirmPassword?: string,
 ): PasswordStrengthResult {
-  if (typeof newPassword !== "string" || newPassword.length < MIN_PASSWORD_LENGTH) {
+  if (typeof newPassword !== "string") {
+    return { ok: false, error: "password_too_short" };
+  }
+  if (newPassword.length === 0) return { ok: false, error: "password_too_short" };
+  if (newPassword.trim().length === 0) return { ok: false, error: "password_blank" };
+  if (newPassword.length < MIN_PASSWORD_LENGTH) {
     return { ok: false, error: "password_too_short" };
   }
   if (newPassword.length > MAX_PASSWORD_LENGTH) {
     return { ok: false, error: "password_too_long" };
+  }
+  // Only enforced when the caller sent one. `undefined` means "this surface has
+  // no confirmation field"; `""` means the user left it empty, which is a
+  // mismatch rather than an absent rule.
+  if (confirmPassword !== undefined && confirmPassword !== newPassword) {
+    return { ok: false, error: "password_confirmation_mismatch" };
   }
   if (currentPassword !== undefined && newPassword === currentPassword) {
     return { ok: false, error: "password_unchanged" };
@@ -159,10 +202,9 @@ export async function changeOwnPassword(params: {
       ok: false;
       error:
         | "invalid_current_password"
-        | "password_too_short"
-        | "password_too_long"
-        | "password_unchanged"
-        | "not_found";
+        | "not_found"
+        /** Everything the shared strength validator can refuse (#854 P2.15). */
+        | PasswordStrengthError;
     }
 > {
   const strength = validatePasswordStrength(params.newPassword, params.currentPassword);
@@ -363,9 +405,106 @@ export async function previewPasswordResetToken(
  * own password, `token_version` increments atomically, and all existing
  * sessions for that identity are revoked.
  */
+/** The row shape every reset lookup produces. */
+interface PasswordResetRow {
+  id: string;
+  subject_realm: PasswordSubjectRealm;
+  subject_id: string;
+  email: string;
+  expires_at: Date;
+  used_at: Date | null;
+  revoked_at: Date | null;
+}
+
+const RESET_ROW_SELECT = `SELECT id, subject_realm, subject_id, email::text AS email,
+        expires_at, used_at, revoked_at`;
+
+/**
+ * Apply a verified reset to its subject, inside the caller's transaction.
+ *
+ * One implementation, used by both the token path and the SMS-code path, so the
+ * two cannot drift on the parts that matter: `token_version` increments
+ * atomically with the password write, every session for the identity is
+ * revoked, and the reset row is burned. A second reset path that forgot the
+ * session revocation would be a silent "changed my password, attacker still
+ * logged in" bug.
+ */
+async function applyPasswordResetRow(
+  client: { query: (text: string, params?: unknown[]) => Promise<{ rows: unknown[] }> },
+  row: PasswordResetRow,
+  passwordHash: string,
+): Promise<{ subjectRealm: PasswordSubjectRealm; subjectId: string; email: string; tokenVersion: number }> {
+  let tokenVersion = 1;
+  if (row.subject_realm === "platform_user") {
+    const updated = (await client.query(
+      `UPDATE platform_users
+          SET password_hash = $2,
+              token_version = token_version + 1,
+              updated_at = now()
+        WHERE id = $1
+        RETURNING token_version`,
+      [row.subject_id, passwordHash],
+    )) as { rows: { token_version: number }[] };
+    tokenVersion = updated.rows[0]?.token_version ?? 2;
+
+    await client.query(
+      `UPDATE employee_sessions es
+          SET revoked_at = now()
+         FROM users u
+        WHERE es.employee_id = u.id
+          AND u.platform_user_id = $1
+          AND es.revoked_at IS NULL`,
+      [row.subject_id],
+    );
+    await client.query(
+      `UPDATE impersonation_grants ig
+          SET revoked_at = now()
+         FROM users u
+        WHERE ig.user_id = u.id
+          AND u.platform_user_id = $1
+          AND ig.ended_at IS NULL
+          AND ig.revoked_at IS NULL`,
+      [row.subject_id],
+    );
+  } else {
+    const updated = (await client.query(
+      `UPDATE platform_admins
+          SET password_hash = $2,
+              token_version = token_version + 1,
+              updated_at = now()
+        WHERE id = $1
+        RETURNING token_version`,
+      [row.subject_id, passwordHash],
+    )) as { rows: { token_version: number }[] };
+    tokenVersion = updated.rows[0]?.token_version ?? 2;
+
+    await client.query(
+      `UPDATE auth_admin_sessions
+          SET revoked_at = now()
+        WHERE admin_id = $1 AND revoked_at IS NULL`,
+      [row.subject_id],
+    );
+  }
+
+  await client.query(`UPDATE auth_password_resets SET used_at = now() WHERE id = $1`, [row.id]);
+
+  return {
+    subjectRealm: row.subject_realm,
+    subjectId: row.subject_id,
+    email: row.email,
+    tokenVersion,
+  };
+}
+
+/**
+ * Redeem a single-use password reset token: the account holder chooses their
+ * own password, `token_version` increments atomically, and all existing
+ * sessions for that identity are revoked.
+ */
 export async function consumePasswordResetToken(params: {
   token: string;
   newPassword: string;
+  confirmPassword?: string;
 }): Promise<
   | {
       ok: true;
@@ -381,16 +520,12 @@ export async function consumePasswordResetToken(params: {
         | "token_expired"
         | "token_used"
         | "token_revoked"
-        | "password_too_short"
-        | "password_too_long";
+        | PasswordStrengthError;
     }
 > {
-  const strength = validatePasswordStrength(params.newPassword);
+  const strength = validatePasswordStrength(params.newPassword, undefined, params.confirmPassword);
   if (!strength.ok) {
-    return {
-      ok: false,
-      error: strength.error === "password_unchanged" ? "password_too_short" : strength.error,
-    };
+    return { ok: false, error: strength.error };
   }
   if (!params.token || typeof params.token !== "string") {
     return { ok: false, error: "invalid_token" };
@@ -405,17 +540,8 @@ export async function consumePasswordResetToken(params: {
       await client.query("BEGIN");
       await client.query("SELECT set_config('app.rls_bypass', 'on', true)");
 
-      const { rows } = await client.query<{
-        id: string;
-        subject_realm: PasswordSubjectRealm;
-        subject_id: string;
-        email: string;
-        expires_at: Date;
-        used_at: Date | null;
-        revoked_at: Date | null;
-      }>(
-        `SELECT id, subject_realm, subject_id, email::text AS email,
-                expires_at, used_at, revoked_at
+      const { rows } = await client.query<PasswordResetRow>(
+        `${RESET_ROW_SELECT}
            FROM auth_password_resets
           WHERE token_hash = $1
           FOR UPDATE`,
@@ -424,80 +550,22 @@ export async function consumePasswordResetToken(params: {
       const row = rows[0];
       if (!row) {
         await client.query("ROLLBACK");
-        return { ok: false, error: "invalid_token" };
+        return { ok: false, error: "invalid_token" as const };
       }
       if (row.used_at) {
         await client.query("ROLLBACK");
-        return { ok: false, error: "token_used" };
+        return { ok: false, error: "token_used" as const };
       }
       if (row.revoked_at) {
         await client.query("ROLLBACK");
-        return { ok: false, error: "token_revoked" };
+        return { ok: false, error: "token_revoked" as const };
       }
       if (new Date(row.expires_at).getTime() <= Date.now()) {
         await client.query("ROLLBACK");
-        return { ok: false, error: "token_expired" };
+        return { ok: false, error: "token_expired" as const };
       }
 
-      let tokenVersion = 1;
-      if (row.subject_realm === "platform_user") {
-        const updated = await client.query<{ token_version: number }>(
-          `UPDATE platform_users
-              SET password_hash = $2,
-                  token_version = token_version + 1,
-                  updated_at = now()
-            WHERE id = $1
-            RETURNING token_version`,
-          [row.subject_id, passwordHash],
-        );
-        tokenVersion = updated.rows[0]?.token_version ?? 2;
-
-        await client.query(
-          `UPDATE employee_sessions es
-              SET revoked_at = now()
-             FROM users u
-            WHERE es.employee_id = u.id
-              AND u.platform_user_id = $1
-              AND es.revoked_at IS NULL`,
-          [row.subject_id],
-        );
-        await client.query(
-          `UPDATE impersonation_grants ig
-              SET revoked_at = now()
-             FROM users u
-            WHERE ig.user_id = u.id
-              AND u.platform_user_id = $1
-              AND ig.ended_at IS NULL
-              AND ig.revoked_at IS NULL`,
-          [row.subject_id],
-        );
-      } else {
-        const updated = await client.query<{ token_version: number }>(
-          `UPDATE platform_admins
-              SET password_hash = $2,
-                  token_version = token_version + 1,
-                  updated_at = now()
-            WHERE id = $1
-            RETURNING token_version`,
-          [row.subject_id, passwordHash],
-        );
-        tokenVersion = updated.rows[0]?.token_version ?? 2;
-
-        await client.query(
-          `UPDATE auth_admin_sessions
-              SET revoked_at = now()
-            WHERE admin_id = $1 AND revoked_at IS NULL`,
-          [row.subject_id],
-        );
-      }
-
-      await client.query(
-        `UPDATE auth_password_resets
-            SET used_at = now()
-          WHERE id = $1`,
-        [row.id],
-      );
-
+      const applied = await applyPasswordResetRow(client, row, passwordHash);
       await client.query("COMMIT");
 
       await clearAuthLockout(
@@ -505,13 +573,7 @@ export async function consumePasswordResetToken(params: {
         row.email,
       );
 
-      return {
-        ok: true,
-        subjectRealm: row.subject_realm,
-        subjectId: row.subject_id,
-        email: row.email,
-        tokenVersion,
-      };
+      return { ok: true, ...applied };
     } catch (err) {
       await client.query("ROLLBACK").catch(() => {});
       throw err;
@@ -519,4 +581,82 @@ export async function consumePasswordResetToken(params: {
       client.release();
     }
   });
+}
+
+/**
+ * Issue a reset whose credential is delivered **by SMS to the account holder**.
+ *
+ * Issue #854 (P0.3) is the reason this exists. `requestMemberPasswordReset`
+ * used to return the plaintext reset token, its URL and the target email to
+ * whichever tenant administrator triggered it — and that token is directly
+ * spendable to change the shared `platform_users` password. An administrator in
+ * Business A could therefore start recovery for a shared identity and then
+ * redeem their own token, taking over that person's account in Businesses B and
+ * C. The user-controlled boundary #809 introduced was real in intent and absent
+ * in practice.
+ *
+ * There is no mail transport in this system, so "deliver to the account holder"
+ * means the one channel only they hold: a **verified phone number**. The reset
+ * link is texted to it, and the tenant administrator receives back only a masked
+ * destination and an expiry — never the token. If the identity has no verified
+ * number anywhere, the recovery is refused (`no_verified_channel`) rather than
+ * falling back to handing the credential to the person requesting it, because
+ * that fallback *is* the vulnerability.
+ */
+export async function issueDeliveredPasswordReset(params: {
+  subjectRealm: PasswordSubjectRealm;
+  subjectId: string;
+  email: string;
+  membershipId?: string | null;
+  createdById?: string | null;
+  /** The verified number the link will be sent to. */
+  phoneE164: string;
+  /** Absolute origin to build the link from. */
+  origin: string;
+}): Promise<{ id: string; expiresAt: Date; maskedPhone: string }> {
+  const issued = await issuePasswordResetToken({
+    subjectRealm: params.subjectRealm,
+    subjectId: params.subjectId,
+    email: params.email,
+    membershipId: params.membershipId,
+    createdById: params.createdById,
+    // Short-lived: the credential travels over SMS, so the window it is
+    // spendable in is the window an intercepted message is worth anything.
+    ttlMs: 30 * 60 * 1000,
+  });
+
+  const maskedPhone =
+    params.phoneE164.length > 8
+      ? `+${params.phoneE164.slice(1, 4)}***${params.phoneE164.slice(-4)}`
+      : "***";
+
+  const link = `${params.origin.replace(/\/$/, "")}/reset-password?token=${encodeURIComponent(issued.token)}`;
+
+  await withoutTenantScope("identity", () =>
+    query(
+      `UPDATE auth_password_resets
+          SET delivery_channel = 'sms',
+              delivery_target_masked = $2,
+              delivered_at = now()
+        WHERE id = $1`,
+      [issued.id, maskedPhone],
+    ),
+  );
+
+  const { getSmsProvider } = await import("./sms-config");
+  const provider = await getSmsProvider();
+  try {
+    // Kavenegar's verify/lookup template takes one token, which is why the
+    // link (not a bare code) is what travels: the account holder taps it and
+    // lands on the reset form with the token already in hand.
+    await provider.sendOtp(params.phoneE164, link);
+  } catch (err) {
+    // A link that was never delivered must not stay live.
+    await withoutTenantScope("identity", () =>
+      query(`UPDATE auth_password_resets SET revoked_at = now() WHERE id = $1`, [issued.id]),
+    ).catch(() => {});
+    throw err;
+  }
+
+  return { id: issued.id, expiresAt: issued.expiresAt, maskedPhone };
 }

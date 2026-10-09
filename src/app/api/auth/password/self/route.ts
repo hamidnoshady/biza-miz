@@ -15,6 +15,8 @@ import {
   recordAuthSuccess,
 } from "@/lib/login-lockout-service";
 import { changeOwnPassword } from "@/lib/password-reset";
+import { AUTH_ERROR_CODES, authErrorMessage } from "@/lib/auth-contracts";
+import { describeCredentialSurface } from "@/lib/credential-authority";
 
 /**
  * Canonical tenant self-service password change (Issue #809 — Findings 3 & 5).
@@ -29,24 +31,74 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
 
   if (!session.platformUserId) {
-    return NextResponse.json({ error: "no_login" }, { status: 409 });
+    return NextResponse.json(
+      { error: "no_login", message: authErrorMessage("no_login") },
+      { status: 409 },
+    );
   }
 
-  if ((await readDeploymentProfile(session.businessId)).profile === "hybrid") {
-    return NextResponse.json({ error: "login_managed_by_cloud" }, { status: 409 });
+  /**
+   * Issue #854 (P1.14 / P1.15): the deployment's authority over the global
+   * password, asked through the shared table rather than an inline profile
+   * check — and answered with the shared code and message so the Profile screen
+   * can render the same reason the server gives.
+   */
+  const deployment = await readDeploymentProfile(session.businessId);
+  const surface = describeCredentialSurface(deployment.profile, "global_password");
+  if (!surface.editable) {
+    return NextResponse.json(
+      {
+        error: AUTH_ERROR_CODES.loginManagedByCloud,
+        message: surface.notice ?? authErrorMessage(AUTH_ERROR_CODES.loginManagedByCloud),
+      },
+      { status: 409 },
+    );
   }
 
-  let body: { currentPassword?: string; newPassword?: string };
+  let body: { currentPassword?: string; newPassword?: string; confirmPassword?: string };
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    return NextResponse.json({ error: AUTH_ERROR_CODES.badRequest }, { status: 400 });
   }
 
   const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
   const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
-  if (!currentPassword || !newPassword) {
-    return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+  const confirmPassword =
+    typeof body.confirmPassword === "string" ? body.confirmPassword : undefined;
+
+  /**
+   * Issue #854 (P2.15 / P2.17): the same vocabulary the UI translates, emitted
+   * from here rather than a bare `missing_fields` the client had no message
+   * for. `confirmPassword` is validated server-side because a confirmation the
+   * server does not check is a browser decoration, not an invariant.
+   */
+  if (!currentPassword) {
+    return NextResponse.json(
+      {
+        error: AUTH_ERROR_CODES.missingCurrentPassword,
+        message: authErrorMessage(AUTH_ERROR_CODES.missingCurrentPassword),
+      },
+      { status: 400 },
+    );
+  }
+  if (!newPassword) {
+    return NextResponse.json(
+      {
+        error: AUTH_ERROR_CODES.passwordBlank,
+        message: authErrorMessage(AUTH_ERROR_CODES.passwordBlank),
+      },
+      { status: 400 },
+    );
+  }
+  if (confirmPassword !== undefined && confirmPassword !== newPassword) {
+    return NextResponse.json(
+      {
+        error: AUTH_ERROR_CODES.passwordConfirmationMismatch,
+        message: authErrorMessage(AUTH_ERROR_CODES.passwordConfirmationMismatch),
+      },
+      { status: 400 },
+    );
   }
 
   const { rows } = await query<{ email: string | null }>(
@@ -76,9 +128,18 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!result.ok) {
     if (result.error === "invalid_current_password") {
       if (email) await recordAuthFailure("tenant_password", email);
-      return NextResponse.json({ error: "invalid_current_password" }, { status: 403 });
+      return NextResponse.json(
+        {
+          error: AUTH_ERROR_CODES.invalidCurrentPassword,
+          message: authErrorMessage(AUTH_ERROR_CODES.invalidCurrentPassword),
+        },
+        { status: 403 },
+      );
     }
-    return NextResponse.json({ error: result.error }, { status: 400 });
+    return NextResponse.json(
+      { error: result.error, message: authErrorMessage(result.error) },
+      { status: 400 },
+    );
   }
 
   if (email) {

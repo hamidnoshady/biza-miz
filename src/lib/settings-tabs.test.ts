@@ -50,6 +50,31 @@ describe("visibleSettingsTabs", () => {
     ]);
   });
 
+  it("lets team.view reach the roster read-only (issue #854 P2.1)", () => {
+    /**
+     * `team.view` is in the manager preset and, before this, led nowhere: the
+     * only entry to the roster demanded `team.manage`, so the permission existed
+     * without a screen. The tab is now reachable with either — the mutations
+     * behind it still demand `team.manage`/`team.permissions.manage`.
+     */
+    // `notifications` is ungated (every member configures their own), hence
+    // the company; the point is that `team` is present at all.
+    expect(visibleSettingsTabs([PERMISSIONS.teamView]).map((tab) => tab.key)).toEqual([
+      "team",
+      "notifications",
+    ]);
+  });
+
+  it("still keeps team-only tabs behind team.manage when only team.view is held", () => {
+    // The read-only viewer sees the roster and nothing else: shift history,
+    // the audit trail and the security center all expose other people's
+    // sessions and lockouts, which is an administrative read, not a roster one.
+    const keys = visibleSettingsTabs([PERMISSIONS.teamView]).map((tab) => tab.key);
+    expect(keys).not.toContain("security-center");
+    expect(keys).not.toContain("audit-log");
+    expect(keys).not.toContain("shifts");
+  });
+
   it("returns tabs that can cross the server/client boundary", () => {
     // /dashboard/settings is a server component handing these straight to
     // <SettingsManager>, a client one. React refuses to serialize a function

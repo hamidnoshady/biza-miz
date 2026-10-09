@@ -1,4 +1,5 @@
 import { getPool, query } from "../db";
+import { lockMembership } from "../membership-lock";
 import { getSetting, SETTING_KEYS } from "../settings";
 import type { ServerSyncConfig } from "../server-sync-config";
 import type { IamEvent, IamSnapshot } from "./model";
@@ -74,6 +75,10 @@ export async function applyIamEvents(businessId:string,siteDeviceId:string,lastS
       if(event.businessId!==businessId) throw new Error("event_tenant_mismatch");
       const revision=Number(event.payload.revision??0);
       if(event.entityType==="membership"){
+        // Issue #854: membership events change doors (creation, suspension,
+        // offboarding, role changes). Take the shared advisory lock before
+        // touching the rows, same protocol as the cloud-side writers.
+        await lockMembership(client, businessId, event.entityId);
         if(event.eventType==="membership.created") {
           const member=event.payload.membership as IamSnapshot["memberships"][number] | undefined;
           if(!member || member.businessId!==businessId) throw new Error("invalid_membership_created");

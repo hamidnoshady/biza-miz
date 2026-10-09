@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Button,
@@ -206,6 +206,7 @@ interface PlatformSelfMfa {
   graceDaysLeft: number | null;
   unusedRecoveryCodes: number;
   recentAuth?: boolean;
+  smsChallengeRequestedAt?: string | null;
 }
 
 interface PlatformEnrolResult {
@@ -236,12 +237,43 @@ function PlatformSelfMfaSection() {
   const [stepUpMfaCode, setStepUpMfaCode] = useState("");
   const [pendingAction, setPendingAction] = useState<Record<string, unknown> | null>(null);
 
+  // Issue #854 (P2.25) — live countdown of the server's 60-second resend
+  // cooldown, seeded from the challenge's actual request time so a reload
+  // mid-window still shows the honest remaining seconds instead of a fresh 60.
+  const RESEND_COOLDOWN_S = 60;
+  const [resendWait, setResendWait] = useState(0);
+  const cooldownRef = useRef<{ requestedAt: number } | null>(null);
+
+  function startResendCooldown(requestedAtIso?: string | null) {
+    const requestedAt = requestedAtIso ? Date.parse(requestedAtIso) : Date.now();
+    cooldownRef.current = { requestedAt };
+    setResendWait(
+      Math.max(0, Math.ceil((requestedAt + RESEND_COOLDOWN_S * 1000 - Date.now()) / 1000)),
+    );
+  }
+
+  useEffect(() => {
+    const tick = setInterval(() => {
+      const pending = cooldownRef.current;
+      if (!pending) return;
+      const remaining = Math.max(
+        0,
+        Math.ceil((pending.requestedAt + RESEND_COOLDOWN_S * 1000 - Date.now()) / 1000),
+      );
+      setResendWait(remaining);
+      if (remaining <= 0) cooldownRef.current = null;
+    }, 500);
+    return () => clearInterval(tick);
+  }, []);
+
   const load = useCallback(async () => {
     const { ok, data } = await api<PlatformSelfMfa & { error?: string }>(
       "/api/platform/mfa",
     );
-    if (ok) setStatus(data);
-    else setError(errorMessage(data.error));
+    if (ok) {
+      setStatus(data);
+      if (data.smsChallengeRequestedAt) startResendCooldown(data.smsChallengeRequestedAt);
+    } else setError(errorMessage(data.error));
   }, []);
 
   useEffect(() => {
@@ -281,6 +313,8 @@ function PlatformSelfMfaSection() {
     } else if (body.action === "confirm") {
       setPendingSetup(null);
       setConfirmCode("");
+      cooldownRef.current = null;
+      setResendWait(0);
       if (data.recoveryCodes?.length) {
         setShownCodes(data.recoveryCodes);
       }
@@ -645,9 +679,11 @@ function PlatformSelfMfaSection() {
                     onClick={() =>
                       void act({ action: "resend_challenge", method: "sms_otp" })
                     }
-                    disabled={busy}
+                    disabled={busy || resendWait > 0}
                   >
-                    ارسال مجدد کد
+                    {resendWait > 0
+                      ? `ارسال مجدد کد (${toPersianDigits(resendWait)})`
+                      : "ارسال مجدد کد"}
                   </Button>
                 </div>
               </form>

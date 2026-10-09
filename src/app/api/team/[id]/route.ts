@@ -41,6 +41,13 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
     permissions?: unknown;
     /** Phase 42 — set (or, with "", clear) the member's login phone. Stored unverified. */
     phone?: string;
+    /**
+     * Issue #854 (P2.4) — why this access change is being made. Required by the
+     * service whenever the write changes the role, the custom role or an
+     * override; the validation and the storage both live there, so this route
+     * only has to forward it honestly.
+     */
+    reason?: string;
   };
   try {
     body = await request.json();
@@ -159,6 +166,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
       defaultLocationId: body.defaultLocationId,
       locationScope: body.locationScope,
       overrides: body.permissions === undefined ? undefined : sanitizeOverrides(body.permissions),
+      reason: body.reason,
     });
     /*
      * Same best-effort party as on create, and here for the repair case: a member

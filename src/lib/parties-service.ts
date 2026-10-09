@@ -1383,7 +1383,18 @@ export async function removeParty(businessId: string, id: string): Promise<Remov
        EXISTS (SELECT 1 FROM ar_receipts WHERE business_id = $1 AND customer_id = $2) AS has_receipts,
        EXISTS (SELECT 1 FROM customer_points WHERE business_id = $1 AND customer_id = $2) AS has_points,
        EXISTS (SELECT 1 FROM suppliers WHERE party_id = $2) AS has_supplier_rows,
-       EXISTS (SELECT 1 FROM parties p WHERE p.merged_into_id = $2) AS has_merges`,
+       EXISTS (SELECT 1 FROM parties p WHERE p.merged_into_id = $2) AS has_merges,
+       /*
+        * Issue #854 (P2.6): a personnel party linked to a membership is not
+        * disposable, whatever its other history says. employee_user_id
+        * points at the member with ON DELETE SET NULL, so nothing downstream
+        * would have stopped the hard delete — the check has to.
+        */
+       EXISTS (
+         SELECT 1 FROM parties mp
+           JOIN users u ON u.id = mp.employee_user_id
+          WHERE mp.business_id = $1 AND mp.id = $2
+       ) AS has_membership`,
     [businessId, id],
   );
   // A party with points (or store credit, which is only ever created for a party
@@ -1394,7 +1405,8 @@ export async function removeParty(businessId: string, id: string): Promise<Remov
     refRows[0]?.has_receipts ||
     refRows[0]?.has_points ||
     refRows[0]?.has_supplier_rows ||
-    refRows[0]?.has_merges;
+    refRows[0]?.has_merges ||
+    refRows[0]?.has_membership;
 
   if (hasHistory) {
     await query(`UPDATE parties SET is_active = false, updated_at = now() WHERE business_id = $1 AND id = $2`, [

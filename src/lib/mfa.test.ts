@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   distinctSecondFactorMethods,
+  mayConfirmPendingEnrolmentAtLogin,
   enrolmentRequirement,
   graceDaysRemaining,
   isMfaEnrolmentConfirmed,
@@ -112,8 +113,17 @@ describe("mfaAppliesToRole", () => {
   });
 
   it("applies to manager only when the business opts in", () => {
-    expect(mfaAppliesToRole("manager", false)).toBe(false);
-    expect(mfaAppliesToRole("manager", true)).toBe(true);
+    expect(mfaAppliesToRole("manager", { requireForManagers: false })).toBe(false);
+    expect(mfaAppliesToRole("manager", { requireForManagers: true })).toBe(true);
+    /**
+     * Issue #854 (P1.1) — the accountant knob travels in the same object. It
+     * did not before: the signature took a single `extendToManager` boolean and
+     * every login door passed only the manager key, so `requireForAccountants`
+     * was stored, rendered and audited without ever changing an outcome.
+     */
+    expect(mfaAppliesToRole("accountant", { requireForAccountants: false })).toBe(false);
+    expect(mfaAppliesToRole("accountant", { requireForAccountants: true })).toBe(true);
+    expect(mfaAppliesToRole("accountant", { requireForManagers: true })).toBe(false);
   });
 });
 
@@ -225,5 +235,55 @@ describe("distinctSecondFactorMethods & shouldChallengeMfaOnLogin", () => {
         requirement: "required",
       }),
     ).toBe(true);
+  });
+});
+
+/**
+ * Issue #854 (P1.11) — one gate for the mid-enrolment login case.
+ *
+ * The rule has two halves, and both matter: an account with nothing confirmed
+ * must be able to finish enrolling while signing in, and an account that already
+ * has a confirmed factor must never let a half-finished row stand in as its
+ * second factor.
+ */
+describe("mayConfirmPendingEnrolmentAtLogin", () => {
+  const pendingTotp = {
+    id: "p1",
+    method: "totp" as const,
+    is_primary: true,
+    confirmed_at: null,
+  };
+  const liveTotp = {
+    id: "c1",
+    method: "totp" as const,
+    is_primary: true,
+    confirmed_at: "2026-04-01T00:00:00Z",
+  };
+  const liveSms = {
+    id: "c2",
+    method: "sms_otp" as const,
+    is_primary: false,
+    confirmed_at: "2026-04-01T00:00:00Z",
+  };
+
+  it("opens for an account that is mid-enrolment with nothing confirmed", () => {
+    expect(mayConfirmPendingEnrolmentAtLogin([pendingTotp], "totp")).toBe(true);
+  });
+
+  it("stays shut once any factor is confirmed, even one of another method", () => {
+    expect(mayConfirmPendingEnrolmentAtLogin([pendingTotp, liveSms], "totp")).toBe(false);
+    expect(mayConfirmPendingEnrolmentAtLogin([pendingTotp, liveTotp], "totp")).toBe(false);
+  });
+
+  it("stays shut when the pending row is for a different method than the code", () => {
+    expect(mayConfirmPendingEnrolmentAtLogin([pendingTotp], "sms_otp")).toBe(false);
+  });
+
+  it("stays shut when there is no method to confirm (recovery-code path)", () => {
+    expect(mayConfirmPendingEnrolmentAtLogin([pendingTotp], null)).toBe(false);
+  });
+
+  it("stays shut for an account with no enrolments at all", () => {
+    expect(mayConfirmPendingEnrolmentAtLogin([], "totp")).toBe(false);
   });
 });

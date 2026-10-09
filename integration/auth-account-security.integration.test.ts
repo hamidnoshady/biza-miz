@@ -2,8 +2,41 @@ import { createHash, randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { generate as generateTotp } from "otplib";
 import { Client } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+
+/**
+ * The SMS transport, replaced by something that records instead of ringing.
+ *
+ * Issue #854 (P0.3) changed what a tenant administrator gets back from
+ * `requestMemberPasswordReset`: the reset link is now *delivered to the account
+ * holder's verified phone* and the administrator receives only a masked
+ * destination. That makes the transport the only place the token exists in
+ * plaintext, so capturing it here is how these tests play the part of the
+ * person holding the phone — and the negative assertion (the caller's return
+ * value contains no `token`) only means something because the token *was*
+ * minted and sent.
+ */
+const sms = vi.hoisted(() => ({ sent: [] as { phone: string; code: string }[] }));
+
+vi.mock("@/lib/sms-config", () => ({
+  getPublicSmsConfig: async () => ({
+    configured: true,
+    hasStoredKey: true,
+    keyHint: "••••1234",
+    otpTemplate: "verify",
+    fromEnvironment: false,
+    updatedAt: null,
+  }),
+  getSmsProvider: async () => ({
+    sendOtp: async (phone: string, code: string) => {
+      sms.sent.push({ phone, code });
+    },
+  }),
+}));
+
+/** The number the shared manager proved they hold. */
+const SHARED_MANAGER_PHONE = "+989121110000";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -86,6 +119,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  sms.sent.length = 0;
   await db.query("DELETE FROM auth_password_resets");
   await db.query("DELETE FROM auth_admin_sessions");
   await db.query("DELETE FROM mfa_challenges");
@@ -128,9 +162,11 @@ async function seedTwoBusinessesWithSharedManager() {
     [bizA.rows[0].id, ownerAIdentity.rows[0].id],
   );
   const memberA = await db.query<{ id: string }>(
-    `INSERT INTO users (business_id, platform_user_id, role, full_name, email)
-     VALUES ($1, $2, 'manager', 'Shared Manager', 'shared.manager@example.com') RETURNING id`,
-    [bizA.rows[0].id, sharedPlatformUserId],
+    `INSERT INTO users (business_id, platform_user_id, role, full_name, email,
+                        phone_e164, phone_verified_at)
+     VALUES ($1, $2, 'manager', 'Shared Manager', 'shared.manager@example.com', $3, now())
+     RETURNING id`,
+    [bizA.rows[0].id, sharedPlatformUserId, SHARED_MANAGER_PHONE],
   );
 
   const bizB = await db.query<{ id: string }>(
@@ -179,7 +215,7 @@ describe("Issue #809 — P0 cross-tenant password overwrite protection & tenant 
     expect(await bcrypt.compare("HackedByBizA!999", rows[0].password_hash)).toBe(false);
   });
 
-  it("allows a tenant owner to issue a user-controlled reset token and revoke only that tenant's sessions", async () => {
+  it("delivers the reset link to the holder and revokes every business' sessions when it is redeemed", async () => {
     const seeded = await seedTwoBusinessesWithSharedManager();
 
     // Seed active employee_sessions in both Business A and Business B
@@ -216,25 +252,45 @@ describe("Issue #809 — P0 cross-tenant password overwrite protection & tenant 
     expect(checkA.rows[0].revoked_at).not.toBeNull();
     expect(checkB.rows[0].revoked_at).toBeNull();
 
-    // Issue user-controlled reset link from Business A
+    // Issue user-controlled reset link from Business A.
+    //
+    // Issue #854 (P0.3): the administrator who *triggers* recovery must not
+    // receive the credential that completes it. The return value is asserted to
+    // be free of anything spendable — a token, a URL, a code — and the link is
+    // read back from the SMS the account holder received instead.
     const issued = await dbLib.withTenant(seeded.bizAId, () =>
       team.requestMemberPasswordReset(
         seeded.bizAId,
         seeded.memberAId,
         seeded.ownerAId,
+        { origin: "https://app.example.com" },
       ),
     );
     expect(issued.email).toBe("shared.manager@example.com");
-    expect(issued.token).toHaveLength(43);
+    expect(issued.channel).toBe("sms");
+    expect(issued.deliveredTo).toBe("+989***0000");
+    expect(issued).not.toHaveProperty("token");
+    expect(issued).not.toHaveProperty("url");
+    expect(JSON.stringify(issued)).not.toContain("reset-password");
 
-    const preview = await passwordReset.previewPasswordResetToken(issued.token);
+    // The holder's phone is the only place the link exists.
+    expect(sms.sent).toHaveLength(1);
+    expect(sms.sent[0].phone).toBe(SHARED_MANAGER_PHONE);
+    const deliveredLink = sms.sent[0].code;
+    expect(deliveredLink).toContain("https://app.example.com/reset-password?token=");
+    const issuedToken = decodeURIComponent(
+      deliveredLink.slice(deliveredLink.indexOf("token=") + "token=".length),
+    );
+    expect(issuedToken).toHaveLength(43);
+
+    const preview = await passwordReset.previewPasswordResetToken(issuedToken);
     expect(preview).toMatchObject({
       subjectRealm: "platform_user",
       email: "shared.manager@example.com",
     });
 
     const consumed = await passwordReset.consumePasswordResetToken({
-      token: issued.token,
+      token: issuedToken,
       newPassword: "UserChosenNewPass!456",
     });
     expect(consumed).toMatchObject({
@@ -255,7 +311,7 @@ describe("Issue #809 — P0 cross-tenant password overwrite protection & tenant 
 
     // Token is single-use
     const replay = await passwordReset.consumePasswordResetToken({
-      token: issued.token,
+      token: issuedToken,
       newPassword: "AnotherPass!789",
     });
     expect(replay).toEqual({ ok: false, error: "token_used" });
@@ -336,6 +392,11 @@ describe("Issue #809 — P1 two-step MFA confirmation, deterministic primary sel
     expect(allBefore[0].is_primary).toBe(false);
     expect(mfaService.filterActiveMfaEnrolments(allBefore)).toEqual([]);
 
+    /**
+     * Issue #854 (P1.11): the default is now the strict one — a step-up must
+     * not finish somebody's half-done enrolment — so the one ceremony that
+     * *is* about confirming a pending factor asks for it explicitly.
+     */
     // Wrong code does not confirm the enrolment
     const badVerify = await mfaVerify.verifyAndConfirmMfaCode({
       subjectRealm: "platform_user",
@@ -343,6 +404,7 @@ describe("Issue #809 — P1 two-step MFA confirmation, deterministic primary sel
       method: "totp",
       code: "000000",
       useRecoveryCode: false,
+      confirmPendingEnrolment: true,
     });
     expect(badVerify.outcome).toBe("rejected");
     expect(
@@ -359,6 +421,7 @@ describe("Issue #809 — P1 two-step MFA confirmation, deterministic primary sel
       method: "totp",
       code: validCode,
       useRecoveryCode: false,
+      confirmPendingEnrolment: true,
     });
     expect(goodVerify.outcome).toBe("totp");
     expect(goodVerify.wasUnconfirmed).toBe(true);

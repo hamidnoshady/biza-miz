@@ -135,6 +135,7 @@ describe("membership creation always produces a usable login", () => {
         email: "manager@example.com",
         password: "manager-password",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -159,6 +160,7 @@ describe("membership creation always produces a usable login", () => {
         defaultLocationId: alpha.locationId,
         locationIds: [alpha.locationId],
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -184,6 +186,7 @@ describe("membership creation always produces a usable login", () => {
           pin: "2468",
           defaultLocationId: business.locationId,
           actorId: business.ownerId,
+          reason: "تست: دلیل تغییر دسترسی ثبت شد",
         }),
       );
     }
@@ -206,15 +209,27 @@ describe("cross-business invitation", () => {
         fullName: "Alpha Owner",
         locationIds: [beta.locationId],
         actorId: beta.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
     const preview = await team.previewInvitation(token);
     expect(preview.businessName).toBe("Beta");
-    // They already have a login, so acceptance needs no password.
     expect(preview.hasExistingLogin).toBe(true);
 
-    const result = await team.acceptInvitation(token, null);
+    /**
+     * Issue #854 (P0.4): the link identifies the intended account, it does not
+     * prove who is holding it. For an address that already has a login, the
+     * ceremony must therefore include that login's password — otherwise anyone
+     * who obtained the invitation (forwarded, leaked, intercepted) inherits the
+     * membership, and with it every business the identity can reach.
+     */
+    await expect(team.acceptInvitation(token, null)).rejects.toThrow("authentication_required");
+    await expect(team.acceptInvitation(token, "not-the-password")).rejects.toThrow(
+      "invalid_credentials",
+    );
+
+    const result = await team.acceptInvitation(token, "owner-password");
     expect(result.businessId).toBe(beta.businessId);
     expect(result.role).toBe("accountant");
 
@@ -241,12 +256,20 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Newcomer",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
     expect((await team.previewInvitation(token)).hasExistingLogin).toBe(false);
-    await expect(team.acceptInvitation(token, null)).rejects.toThrow("weak_password");
-    await expect(team.acceptInvitation(token, "short")).rejects.toThrow("weak_password");
+    /**
+     * A brand-new identity has nothing to authenticate against, so the password
+     * *is* the credential — and it goes through the one shared strength
+     * validator, whose vocabulary (`password_too_short`) is the same one every
+     * other password surface answers with (#854 P2.16).
+     */
+    await expect(team.acceptInvitation(token, null)).rejects.toThrow("password_too_short");
+    await expect(team.acceptInvitation(token, "short")).rejects.toThrow("password_too_short");
+    await expect(team.acceptInvitation(token, "        ")).rejects.toThrow("password_blank");
 
     await team.acceptInvitation(token, "a-good-password");
     const identity = await db.query("SELECT 1 FROM platform_users WHERE email = 'newcomer@example.com'");
@@ -261,6 +284,7 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Once",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -279,6 +303,7 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Revoked",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     await asBusiness(alpha.businessId, () =>
@@ -295,6 +320,7 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Stale",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     await db.query("UPDATE invitations SET expires_at = now() - interval '1 day'");
@@ -315,6 +341,7 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Twice",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     const second = await asBusiness(alpha.businessId, () =>
@@ -324,6 +351,7 @@ describe("cross-business invitation", () => {
         role: "manager",
         fullName: "Twice",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -340,6 +368,7 @@ describe("cross-business invitation", () => {
           role: "manager",
           fullName: "Alpha Owner",
           actorId: alpha.ownerId,
+          reason: "تست: دلیل تغییر دسترسی ثبت شد",
         }),
       ),
     ).rejects.toThrow("already_a_member");
@@ -358,6 +387,7 @@ describe("permission changes take effect immediately", () => {
         email: "perm@example.com",
         password: "manager-password",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -371,6 +401,7 @@ describe("permission changes take effect immediately", () => {
         userId,
         actorId: alpha.ownerId,
         overrides: { granted: [], revoked: [permissions.PERMISSIONS.menuEdit] },
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -387,6 +418,7 @@ describe("permission changes take effect immediately", () => {
         fullName: "Trusted Cashier",
         pin: "9182",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -396,6 +428,7 @@ describe("permission changes take effect immediately", () => {
         userId,
         actorId: alpha.ownerId,
         overrides: { granted: [permissions.PERMISSIONS.reportsView], revoked: [] },
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -447,6 +480,7 @@ describe("a business cannot lock itself out", () => {
         email: "second.owner@example.com",
         password: "second-password",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     expect(secondOwner).toBeTruthy();
@@ -457,6 +491,7 @@ describe("a business cannot lock itself out", () => {
         userId: alpha.ownerId,
         actorId: alpha.ownerId,
         role: "manager",
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -477,6 +512,7 @@ describe("removal preserves history", () => {
         pin: "5309",
         defaultLocationId: alpha.locationId,
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -521,6 +557,7 @@ describe("every membership mutation is auditable", () => {
         fullName: "Audited",
         pin: "7391",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     await asBusiness(alpha.businessId, () =>
@@ -562,6 +599,7 @@ describe("every membership mutation is auditable", () => {
         role: "manager",
         fullName: "Invited",
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
     await team.acceptInvitation(token, "a-good-password");
@@ -583,6 +621,7 @@ describe("team reads stay inside the business", () => {
         fullName: "Beta Cashier",
         pin: "1593",
         actorId: beta.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -603,11 +642,13 @@ describe("custom role assignment revisioning", () => {
     const { userId } = await asBusiness(alpha.businessId, () => team.createMembership({
       businessId: alpha.businessId, role: "cashier", fullName: "Revision Cashier",
       pin: "7531", actorId: alpha.ownerId,
+      reason: "تست: دلیل تغییر دسترسی ثبت شد",
     }));
     const before = await db.query<{ membership_revision: string }>("SELECT membership_revision FROM users WHERE id=$1", [userId]);
 
     await asBusiness(alpha.businessId, () => team.updateMembership({
       businessId: alpha.businessId, userId, actorId: alpha.ownerId, customRoleId: roles[0].id,
+      reason: "تست: دلیل تغییر دسترسی ثبت شد",
     }));
 
     const after = await db.query<{ custom_role_id: string; membership_revision: string }>("SELECT custom_role_id,membership_revision FROM users WHERE id=$1", [userId]);
@@ -653,6 +694,7 @@ describe("branch assignment", () => {
           pin: "1357",
           locationIds: [alpha.locationId, beta.locationId],
           actorId: alpha.ownerId,
+          reason: "تست: دلیل تغییر دسترسی ثبت شد",
         }),
       ),
     ).rejects.toMatchObject({ message: "unknown_location" });
@@ -677,6 +719,7 @@ describe("branch assignment", () => {
         locationIds: [second],
         defaultLocationId: alpha.locationId,
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -696,6 +739,7 @@ describe("branch assignment", () => {
         locationIds: [alpha.locationId],
         defaultLocationId: alpha.locationId,
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -734,6 +778,7 @@ describe("branch assignment", () => {
         locationIds: [alpha.locationId],
         defaultLocationId: alpha.locationId,
         actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
       }),
     );
 
@@ -750,5 +795,214 @@ describe("branch assignment", () => {
 
     // The refused update rolled back: the original assignment still stands.
     expect(await assignmentOf(userId)).toEqual({ defaultId: alpha.locationId, ids: [alpha.locationId] });
+  });
+});
+
+/**
+ * Issue #854 (P1.12) — a role transition may not strand the membership.
+ *
+ * The two models are not interchangeable: a password role signs in at the
+ * tenant login screen through the global identity, a PIN role signs in at the
+ * staff door. Moving a member across the line changes which door exists for
+ * them, and before this pass the role was written regardless — leaving an
+ * "active" member with no way in.
+ *
+ * The refusals name the missing credential, because the server deliberately
+ * does not invent one (a password or PIN the member never chose is a credential
+ * their administrator holds). Suspended memberships move freely: nobody signs in
+ * with a suspended membership, so the door is not needed until reactivation —
+ * which is checked, and is the third case below.
+ */
+describe("credential-aware role transitions (P1.12)", () => {
+  it("refuses to move a PIN member into a password role without a global identity", async () => {
+    await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Stranded",
+        pin: "7314",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM users WHERE business_id = $1 AND full_name = 'Stranded'",
+      [alpha.businessId],
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.updateMembership({
+          businessId: alpha.businessId,
+          userId: rows[0].id,
+          actorId: alpha.ownerId,
+          role: "manager",
+          reason: "تست: دلیل تغییر دسترسی ثبت شد",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "identity_required", status: 409 });
+
+    // Nothing half-applied: the member is still a cashier with their PIN.
+    const after = await db.query<{ role: string }>("SELECT role FROM users WHERE id = $1", [
+      rows[0].id,
+    ]);
+    expect(after.rows[0].role).toBe("cashier");
+  });
+
+  it("allows the same move once a global identity is linked", async () => {
+    await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "cashier",
+        fullName: "Promoted",
+        pin: "7315",
+        defaultLocationId: alpha.locationId,
+        actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+    const identity = await db.query<{ id: string }>(
+      `INSERT INTO platform_users (email, password_hash, full_name)
+       VALUES ('promoted@example.com', 'hash', 'Promoted') RETURNING id`,
+    );
+    await db.query(
+      "UPDATE users SET platform_user_id = $2 WHERE business_id = $1 AND full_name = 'Promoted'",
+      [alpha.businessId, identity.rows[0].id],
+    );
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM users WHERE business_id = $1 AND full_name = 'Promoted'",
+      [alpha.businessId],
+    );
+
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId: rows[0].id,
+        actorId: alpha.ownerId,
+        role: "manager",
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+
+    const after = await db.query<{ role: string }>("SELECT role FROM users WHERE id = $1", [
+      rows[0].id,
+    ]);
+    expect(after.rows[0].role).toBe("manager");
+  });
+
+  it("refuses to move a password member onto the staff door without a PIN", async () => {
+    await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "manager",
+        fullName: "Demoted",
+        email: "demoted@example.com",
+        password: "manager-password",
+        actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM users WHERE business_id = $1 AND full_name = 'Demoted'",
+      [alpha.businessId],
+    );
+
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.updateMembership({
+          businessId: alpha.businessId,
+          userId: rows[0].id,
+          actorId: alpha.ownerId,
+          role: "cashier",
+          reason: "تست: دلیل تغییر دسترسی ثبت شد",
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "pin_required", status: 409 });
+
+    // With a PIN set first — the same order the Team screen asks for — it lands.
+    await asBusiness(alpha.businessId, () =>
+      team.setPin(alpha.businessId, rows[0].id, "9182", alpha.ownerId),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId: rows[0].id,
+        actorId: alpha.ownerId,
+        role: "cashier",
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+    const after = await db.query<{ role: string }>("SELECT role FROM users WHERE id = $1", [
+      rows[0].id,
+    ]);
+    expect(after.rows[0].role).toBe("cashier");
+  });
+
+  it("lets a suspended member change model, then insists on the credential before reactivation", async () => {
+    await asBusiness(alpha.businessId, () =>
+      team.createMembership({
+        businessId: alpha.businessId,
+        role: "manager",
+        fullName: "Returning",
+        email: "returning@example.com",
+        password: "manager-password",
+        actorId: alpha.ownerId,
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+    const { rows } = await db.query<{ id: string }>(
+      "SELECT id FROM users WHERE business_id = $1 AND full_name = 'Returning'",
+      [alpha.businessId],
+    );
+
+    // Suspend, then move to the staff door while inactive: allowed, because a
+    // suspended membership has no door to lose.
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId: rows[0].id,
+        actorId: alpha.ownerId,
+        isActive: false,
+      }),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId: rows[0].id,
+        actorId: alpha.ownerId,
+        role: "waiter",
+        reason: "تست: دلیل تغییر دسترسی ثبت شد",
+      }),
+    );
+
+    // Reactivation is where the door is needed again — and there is no PIN yet.
+    await expect(
+      asBusiness(alpha.businessId, () =>
+        team.updateMembership({
+          businessId: alpha.businessId,
+          userId: rows[0].id,
+          actorId: alpha.ownerId,
+          isActive: true,
+        }),
+      ),
+    ).rejects.toMatchObject({ message: "pin_required", status: 409 });
+
+    await asBusiness(alpha.businessId, () =>
+      team.setPin(alpha.businessId, rows[0].id, "9183", alpha.ownerId),
+    );
+    await asBusiness(alpha.businessId, () =>
+      team.updateMembership({
+        businessId: alpha.businessId,
+        userId: rows[0].id,
+        actorId: alpha.ownerId,
+        isActive: true,
+      }),
+    );
+    const after = await db.query<{ is_active: boolean }>(
+      "SELECT is_active FROM users WHERE id = $1",
+      [rows[0].id],
+    );
+    expect(after.rows[0].is_active).toBe(true);
   });
 });

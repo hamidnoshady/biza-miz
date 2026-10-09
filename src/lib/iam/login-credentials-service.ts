@@ -4,6 +4,7 @@
  * integration/iam-login-credentials.integration.test.ts.
  */
 import { getPool, query, withTenant, withoutTenantScope } from "../db";
+import { lockMembership, lockMemberships } from "../membership-lock";
 import { decryptTotpSecret, encryptTotpSecret } from "../mfa-service";
 import {
   loginCredentialsFingerprint,
@@ -131,6 +132,10 @@ export async function applyLoginCredentials(
       const client = await getPool().connect();
       try {
         await client.query("BEGIN");
+        // Issue #854: this path rewrites the password door and the membership
+        // link, so it takes the same advisory lock the login-path invariant
+        // relies on — before reading any state it decides about.
+        await lockMembership(client, businessId, credential.membershipId);
         const email = credential.email.trim().toLowerCase();
         const existing = await client.query<{ id: string; password_hash: string }>(
           `SELECT id, password_hash FROM platform_users WHERE id = $1 OR email = $2
@@ -290,6 +295,11 @@ export async function applyReplicatedPins(
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    // Issue #854: PIN removal is exactly the "credential revoked" side of the
+    // login-path invariant. Hold the membership locks (sorted + deduped inside
+    // `lockMemberships`) so a concurrent role change or offboarding deciding
+    // on these doors waits for this replication, and vice versa.
+    await lockMemberships(client, businessId, ids);
     for (const membershipId of removals) {
       // Same effect a suspension/offboarding has: the credential stops being
       // active and the legacy compatibility copy goes with it. The member

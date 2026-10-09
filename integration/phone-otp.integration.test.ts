@@ -293,14 +293,14 @@ describe("stampPhoneVerified and the challenge verify", () => {
     const secret = await jwtSecret.getRealmSecret("platform");
     const hmac = createHmac("sha256", secret).update(code).digest("hex");
     await db.query(
-      `INSERT INTO mfa_challenges (subject_realm, subject_id, hashed_otp, expires_at)
-       VALUES ('employee_phone', $1, $2, now() + interval '5 minutes')`,
+      `INSERT INTO mfa_challenges (subject_realm, subject_id, purpose, hashed_otp, expires_at)
+       VALUES ('employee_phone', $1, 'login', $2, now() + interval '5 minutes')`,
       [staff.none, hmac],
     );
 
     await expect(
       dbLib.withTenant(biz.id, () =>
-        phoneOtp.verifyEmployeePhoneOtp({ userId: staff.none, code: "000000" }),
+        phoneOtp.verifyEmployeePhoneOtp({ userId: staff.none, code: "000000", purpose: "login" }),
       ),
     ).resolves.toBe(false);
     const { rows: afterWrong } = await db.query<{ attempts: number }>(
@@ -310,11 +310,38 @@ describe("stampPhoneVerified and the challenge verify", () => {
     expect(afterWrong[0].attempts).toBe(1);
 
     await expect(
-      dbLib.withTenant(biz.id, () => phoneOtp.verifyEmployeePhoneOtp({ userId: staff.none, code })),
+      dbLib.withTenant(biz.id, () =>
+        phoneOtp.verifyEmployeePhoneOtp({ userId: staff.none, code, purpose: "login" }),
+      ),
     ).resolves.toBe(true);
     // Consumed: a replay must find nothing live.
     await expect(
-      dbLib.withTenant(biz.id, () => phoneOtp.verifyEmployeePhoneOtp({ userId: staff.none, code })),
+      dbLib.withTenant(biz.id, () =>
+        phoneOtp.verifyEmployeePhoneOtp({ userId: staff.none, code, purpose: "login" }),
+      ),
     ).resolves.toBe(false);
+
+    // Issue #854 (invariant 4): a code issued for one purpose is not spendable
+    // for another, so a login code cannot be replayed as a phone-change proof.
+    await db.query(
+      `INSERT INTO mfa_challenges (subject_realm, subject_id, purpose, hashed_otp, expires_at)
+       VALUES ('employee_phone', $1, 'change_login_phone', $2, now() + interval '5 minutes')`,
+      [staff.none, hmac],
+    );
+    await expect(
+      dbLib.withTenant(biz.id, () =>
+        phoneOtp.verifyEmployeePhoneOtp({ userId: staff.none, code, purpose: "login" }),
+      ),
+    ).resolves.toBe(false);
+    // …and the challenge it really belongs to still works, once.
+    await expect(
+      dbLib.withTenant(biz.id, () =>
+        phoneOtp.verifyEmployeePhoneOtp({
+          userId: staff.none,
+          code,
+          purpose: "change_login_phone",
+        }),
+      ),
+    ).resolves.toBe(true);
   });
 });

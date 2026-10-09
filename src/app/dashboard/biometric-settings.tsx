@@ -8,6 +8,7 @@ import { browserSupportsWebAuthn, startRegistration } from "@simplewebauthn/brow
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import { readDeviceToken } from "@/lib/device-token";
+import { RECENT_AUTH_MESSAGE, StepUpPrompt } from "@/components/auth/step-up-prompt";
 import { overlayPanelClass } from "./page-chrome";
 import { SIDEBAR_FOOTER_BUTTON_CLASS } from "./sidebar-nav-styles";
 
@@ -49,11 +50,37 @@ export function BiometricSettingsButton() {
   );
 }
 
+/**
+ * The one refusal this panel can resolve on its own: `403 recent_auth_required`
+ * from a stale recent-auth window (issue #854 P1.8 made adding and removing a
+ * biometric credential a sensitive action). Any other failure is reported as
+ * the generic message the panel already had.
+ */
+async function isStaleRecentAuth(res: Response): Promise<boolean> {
+  if (res.status !== 403) return false;
+  try {
+    const body: { error?: string } = await res.json();
+    return body.error === "recent_auth_required";
+  } catch {
+    return false;
+  }
+}
+
 function BiometricPanel({ onClose }: { onClose: () => void }) {
   const [credentials, setCredentials] = useState<Credential[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [label, setLabel] = useState("");
+  /**
+   * The action waiting behind a step-up prompt. Held here rather than in the
+   * prompt so that `register`/`remove` stay the only code that talks to the
+   * WebAuthn routes — the prompt's job is to refresh the session, not to
+   * replay a half-finished ceremony.
+   */
+  const [stepUpFor, setStepUpFor] = useState<
+    { kind: "register" } | { kind: "remove"; id: string } | null
+  >(null);
 
   async function load() {
     try {
@@ -75,11 +102,16 @@ function BiometricPanel({ onClose }: { onClose: () => void }) {
     load();
   }, []);
 
-  async function register() {
+  async function register({ afterStepUp = false }: { afterStepUp?: boolean } = {}) {
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const optionsRes = await fetch("/api/auth/webauthn/register/options", { method: "POST" });
+      if (await isStaleRecentAuth(optionsRes)) {
+        setStepUpFor({ kind: "register" });
+        return;
+      }
       if (!optionsRes.ok) throw new Error("options_failed");
       const { options, challengeToken } = await optionsRes.json();
 
@@ -95,12 +127,22 @@ function BiometricPanel({ onClose }: { onClose: () => void }) {
           deviceToken: readDeviceToken(),
         }),
       });
+      if (await isStaleRecentAuth(verifyRes)) {
+        setStepUpFor({ kind: "register" });
+        return;
+      }
       if (!verifyRes.ok) throw new Error("verify_failed");
 
       setLabel("");
       await load();
     } catch {
-      setError("ثبت دستگاه بیومتریک ناموفق بود.");
+      // A browser can refuse to restart the platform ceremony without a fresh
+      // gesture; the identity proof itself is still good, so point at the button.
+      setError(
+        afterStepUp
+          ? "هویت شما تأیید شد؛ برای ثبت دستگاه دوباره روی «افزودن این دستگاه» بزنید."
+          : "ثبت دستگاه بیومتریک ناموفق بود.",
+      );
     } finally {
       setBusy(false);
     }
@@ -109,13 +151,18 @@ function BiometricPanel({ onClose }: { onClose: () => void }) {
   async function remove(id: string) {
     setBusy(true);
     setError(null);
+    setNotice(null);
     const res = await fetch(`/api/auth/webauthn/credentials/${id}`, { method: "DELETE" });
     setBusy(false);
     if (res.ok) {
       await load();
-    } else {
-      setError("حذف دستگاه ممکن نشد.");
+      return;
     }
+    if (await isStaleRecentAuth(res)) {
+      setStepUpFor({ kind: "remove", id });
+      return;
+    }
+    setError("حذف دستگاه ممکن نشد.");
   }
 
   return (
@@ -131,6 +178,30 @@ function BiometricPanel({ onClose }: { onClose: () => void }) {
         <p className="mb-3 text-xs text-muted-foreground">
           به‌جای پین، با اثر انگشت یا چهره این دستگاه وارد شوید. برای هر دستگاهی که استفاده می‌کنید جداگانه ثبت‌نام کنید.
         </p>
+
+        {stepUpFor ? (
+          <StepUpPrompt
+            open
+            title={
+              stepUpFor.kind === "register"
+                ? "تأیید هویت برای ثبت دستگاه"
+                : "تأیید هویت برای حذف دستگاه"
+            }
+            description={RECENT_AUTH_MESSAGE}
+            onCancel={() => setStepUpFor(null)}
+            onVerified={() => {
+              const action = stepUpFor;
+              setStepUpFor(null);
+              setNotice("هویت شما تأیید شد.");
+              if (action.kind === "register") void register({ afterStepUp: true });
+              else void remove(action.id);
+            }}
+          />
+        ) : null}
+
+        {notice && !stepUpFor ? (
+          <p className="mb-3 text-xs text-muted-foreground">{notice}</p>
+        ) : null}
 
         {credentials === null && <LoadingSkeleton rows={3} />}
         {credentials !== null && credentials.length === 0 && (
@@ -170,7 +241,7 @@ function BiometricPanel({ onClose }: { onClose: () => void }) {
           />
           <button
             type="button"
-            onClick={register}
+            onClick={() => void register()}
             disabled={busy}
             className="shrink-0 rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50"
           >
