@@ -449,6 +449,14 @@ function SelfPhoneCard() {
   const [phoneInput, setPhoneInput] = useState("");
   const [codeInput, setCodeInput] = useState("");
   const [maskedSentTo, setMaskedSentTo] = useState<string | null>(null);
+  /**
+   * Issue #885 L02 — the challenge the last `send` minted, echoed back on
+   * `verify` so verification is bound to the exact code that was sent.
+   */
+  const [otpChallenge, setOtpChallenge] = useState<{
+    challengeId: string;
+    destination: string;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -481,6 +489,8 @@ function SelfPhoneCard() {
       maskedPhone?: string;
       error?: string;
       message?: string;
+      challengeId?: string | null;
+      destination?: string | null;
     }>("/api/auth/phone/self", {
       method: "POST",
       body: JSON.stringify({
@@ -502,6 +512,14 @@ function SelfPhoneCard() {
       return;
     }
     setMaskedSentTo(data.maskedPhone ?? phoneInput.trim());
+    // Issue #885 L02 — hold on to the challenge this send minted. Verify now
+    // redeems that exact row instead of "the newest code for this member",
+    // so a resend cannot be satisfied by an earlier one.
+    setOtpChallenge(
+      data.challengeId && data.destination
+        ? { challengeId: data.challengeId, destination: data.destination }
+        : null,
+    );
     setCodeInput("");
   }
 
@@ -509,6 +527,11 @@ function SelfPhoneCard() {
     e.preventDefault();
     setBusy(true);
     setError(null);
+    if (!otpChallenge) {
+      setBusy(false);
+      setError("ابتدا کد تأیید را ارسال کنید.");
+      return;
+    }
     const { ok, status: httpStatus, data } = await api<{
       status?: string;
       error?: string;
@@ -517,6 +540,8 @@ function SelfPhoneCard() {
       body: JSON.stringify({
         action: "verify",
         code: codeInput.trim(),
+        challengeId: otpChallenge.challengeId,
+        destination: otpChallenge.destination,
         phone: editing ? phoneInput.trim() : undefined,
       }),
     });
@@ -533,6 +558,7 @@ function SelfPhoneCard() {
       return;
     }
     setMaskedSentTo(null);
+    setOtpChallenge(null);
     setEditing(false);
     setCodeInput("");
     setNotice("شمارهٔ موبایل ورود شما با موفقیت تأیید شد.");

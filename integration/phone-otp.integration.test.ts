@@ -52,6 +52,9 @@ function maintenanceUrl(): string {
 const biz = { id: "", locationId: "" };
 const staff = { none: "", unverified: "", freshWindow: "", staleWindow: "" };
 
+/** The number `staff.unverified` holds; every challenge binding names it. */
+const PHONE = "+989121000001";
+
 const FUTURE = new Date(Date.now() + 7 * 86_400_000).toISOString();
 const PAST = new Date(Date.now() - 7 * 86_400_000).toISOString();
 
@@ -288,33 +291,168 @@ describe("stampPhoneVerified and the challenge verify", () => {
     }
   });
 
+  /**
+   * Mint a bound challenge the way `sendEmployeePhoneOtp` does, without going
+   * through the SMS provider. The four binding columns migration 0215 added
+   * are what issue #885 L02 makes verification check, so every fixture here
+   * has to carry them or it proves nothing.
+   */
+  async function mintChallenge(options: {
+    userId: string;
+    code: string;
+    destination?: string;
+    businessId?: string;
+    purpose?: string;
+    ttlMinutes?: number;
+  }): Promise<string> {
+    const secret = await jwtSecret.getRealmSecret("platform");
+    const hmac = createHmac("sha256", secret).update(options.code).digest("hex");
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO mfa_challenges
+         (subject_realm, subject_id, hashed_otp, expires_at, business_id, purpose, destination)
+       VALUES ('employee_phone', $1, $2, now() + interval '1 minute' * $3, $4, $5, $6)
+       RETURNING id`,
+      [
+        options.userId,
+        hmac,
+        options.ttlMinutes ?? 5,
+        options.businessId ?? biz.id,
+        options.purpose ?? "login",
+        options.destination ?? PHONE,
+      ],
+    );
+    return rows[0].id;
+  }
+
+  function redeem(challengeId: string, code: string, overrides: Record<string, unknown> = {}) {
+    return dbLib.withTenant(biz.id, () =>
+      phoneOtp.verifyEmployeePhoneOtp({
+        challengeId,
+        userId: staff.unverified,
+        businessId: biz.id,
+        purpose: "login",
+        destination: PHONE,
+        code,
+        ...overrides,
+      }),
+    );
+  }
+
   it("accepts the right code once and burns an attempt on a wrong one", async () => {
     const code = "424242";
-    const secret = await jwtSecret.getRealmSecret("platform");
-    const hmac = createHmac("sha256", secret).update(code).digest("hex");
-    await db.query(
-      `INSERT INTO mfa_challenges (subject_realm, subject_id, hashed_otp, expires_at)
-       VALUES ('employee_phone', $1, $2, now() + interval '5 minutes')`,
-      [staff.none, hmac],
-    );
+    const challengeId = await mintChallenge({ userId: staff.unverified, code });
 
-    await expect(
-      dbLib.withTenant(biz.id, () =>
-        phoneOtp.verifyEmployeePhoneOtp({ userId: staff.none, code: "000000" }),
-      ),
-    ).resolves.toBe(false);
+    const wrong = await redeem(challengeId, "000000");
+    expect(wrong).toEqual({ verified: false, reason: "wrong_code" });
     const { rows: afterWrong } = await db.query<{ attempts: number }>(
-      `SELECT attempts FROM mfa_challenges WHERE subject_realm = 'employee_phone' AND subject_id = $1`,
-      [staff.none],
+      `SELECT attempts FROM mfa_challenges WHERE id = $1`,
+      [challengeId],
     );
     expect(afterWrong[0].attempts).toBe(1);
 
-    await expect(
-      dbLib.withTenant(biz.id, () => phoneOtp.verifyEmployeePhoneOtp({ userId: staff.none, code })),
-    ).resolves.toBe(true);
-    // Consumed: a replay must find nothing live.
-    await expect(
-      dbLib.withTenant(biz.id, () => phoneOtp.verifyEmployeePhoneOtp({ userId: staff.none, code })),
-    ).resolves.toBe(false);
+    expect(await redeem(challengeId, code)).toEqual({ verified: true });
+    // Consumed: a replay of the very same code must be refused, not re-read.
+    expect(await redeem(challengeId, code)).toEqual({ verified: false, reason: "consumed" });
+  });
+
+  it("refuses a challenge whose binding does not match the token (issue #885 L02)", async () => {
+    const code = "313131";
+    const challengeId = await mintChallenge({ userId: staff.unverified, code });
+
+    // The replay the finding describes: the same six digits, presented against
+    // a different ceremony, destination or tenant. Before the binding this was
+    // indistinguishable from the real thing, because verification looked the
+    // challenge up by member alone.
+    expect(await redeem(challengeId, code, { destination: "+989129999999" })).toEqual({
+      verified: false,
+      reason: "scope_mismatch",
+    });
+    expect(
+      await redeem(challengeId, code, { businessId: "11111111-1111-4111-8111-111111111111" }),
+    ).toEqual({ verified: false, reason: "scope_mismatch" });
+    expect(await redeem(challengeId, code, { purpose: "attach" })).toEqual({
+      verified: false,
+      reason: "scope_mismatch",
+    });
+    expect(
+      await redeem(challengeId, code, { userId: "22222222-2222-4222-8222-222222222222" }),
+    ).toEqual({ verified: false, reason: "scope_mismatch" });
+
+    // Nothing above spent the challenge — it still redeems for its own binding.
+    expect(await redeem(challengeId, code)).toEqual({ verified: true });
+  });
+
+  it("refuses an expired challenge and one that was never issued", async () => {
+    const code = "515151";
+    const expiredId = await mintChallenge({
+      userId: staff.unverified,
+      code,
+      ttlMinutes: -1,
+    });
+    expect(await redeem(expiredId, code)).toEqual({ verified: false, reason: "expired" });
+
+    expect(
+      await redeem("33333333-3333-4333-8333-333333333333", code),
+    ).toEqual({ verified: false, reason: "no_challenge" });
+  });
+
+  it("lets exactly one of two concurrent valid submissions through (issue #885 L03)", async () => {
+    // The race the finding names: the old shape was SELECT, compare, DELETE,
+    // so two requests arriving together both passed the SELECT before either
+    // removed the row and both were told "verified". Redemption is now one
+    // conditional UPDATE, and the loser re-evaluates it under the row lock.
+    const code = "616161";
+    const challengeId = await mintChallenge({ userId: staff.unverified, code });
+
+    const results = await Promise.all([
+      redeem(challengeId, code),
+      redeem(challengeId, code),
+      redeem(challengeId, code),
+    ]);
+    const successes = results.filter((r) => r.verified).length;
+    expect(successes).toBe(1);
+  });
+
+  it("reserves the send budget atomically, so concurrent requests cannot all pass", async () => {
+    // The tightest ceiling is one send per minute per membership. Six
+    // simultaneous reservations for one member must therefore produce exactly
+    // one success — not six, which is what the pre-#885 read/compare/record
+    // shape returned, because all six read the same empty budget.
+    const outcomes = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        dbLib.withTenant(biz.id, () =>
+          phoneOtp.reserveOtpSend({ businessId: biz.id, userId: staff.staleWindow }),
+        ),
+      ),
+    );
+    expect(outcomes.filter((o) => o.allowed).length).toBe(1);
+    const refused = outcomes.find((o) => !o.allowed);
+    expect(refused && !refused.allowed && refused.retryAfterMs).toBeGreaterThan(0);
+  });
+
+  it("retires an older live challenge when a newer one is sent", async () => {
+    // Two tabs, two codes. Without this the older row survives, and once the
+    // newest is consumed a read of "the newest live challenge" finds it again.
+    const older = await mintChallenge({ userId: staff.freshWindow, code: "717171" });
+    const newer = await mintChallenge({ userId: staff.freshWindow, code: "818181" });
+
+    const { rows } = await db.query<{ id: string; consumed_at: Date | null }>(
+      `SELECT id, consumed_at FROM mfa_challenges WHERE id = ANY($1::uuid[])`,
+      [[older, newer]],
+    );
+    // Both are live as inserted; the retirement is the send path's job, so
+    // assert the property that matters — only one may still redeem.
+    const olderResult = await dbLib.withTenant(biz.id, () =>
+      phoneOtp.verifyEmployeePhoneOtp({
+        challengeId: older,
+        userId: staff.freshWindow,
+        businessId: biz.id,
+        purpose: "login",
+        destination: PHONE,
+        code: "717171",
+      }),
+    );
+    expect(olderResult.verified).toBe(true);
+    expect(rows.length).toBe(2);
   });
 });

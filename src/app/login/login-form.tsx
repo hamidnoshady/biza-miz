@@ -28,6 +28,7 @@ import {
   useNextPath,
 } from "@/components/auth/login-helpers";
 import { roleLabel } from "@/lib/role-labels";
+import { withLoginNextParam } from "@/lib/login-contract";
 
 /**
  * The client half of the login page. Kept separate from the route so the
@@ -61,14 +62,33 @@ import { roleLabel } from "@/lib/role-labels";
  * remembered anymore) is never stuck.
  */
 export default function LoginForm() {
+  const router = useRouter();
+  // Where this visit was heading, so switching doors does not lose it
+  // (issue #885 L06).
+  const next = useNextPath("/dashboard");
   // `null` = "not decided yet" (still reading localStorage, first paint must
   // not flash the wrong screen); `false` = show the chooser now.
   const [remembered, setRemembered] = useState<boolean | null>(null);
   const [offlineNote, setOfflineNote] = useState(false);
 
   useEffect(() => {
-    setRemembered(readRememberedLoginDoor() === "staff");
-  }, []);
+    const door = readRememberedLoginDoor();
+    // Issue #885 L07 — both remembered doors are honoured.
+    //
+    // `login-door.ts` stores "admin" and "staff" symmetrically, but this was
+    // the only reader and it tested `=== "staff"`, so a browser that had
+    // chosen the manager door and asked to be remembered was shown the
+    // chooser again on every visit. The preference it had just written was
+    // dead on arrival.
+    //
+    // Still a UI shortcut and nothing more: `/admin` re-checks the credential
+    // server-side, and a stale or hand-edited value here costs one redirect.
+    if (door === "admin") {
+      router.replace(withLoginNextParam("/admin", next));
+      return;
+    }
+    setRemembered(door === "staff");
+  }, [next, router]);
 
   function chooseDoor(choice: DoorChoice) {
     // "admin" already navigated away inside the chooser; only "staff" and
@@ -103,7 +123,7 @@ export default function LoginForm() {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
         <div className="w-full max-w-3xl">
-          <LoginDoorChooser onChoose={chooseDoor} />
+          <LoginDoorChooser next={next} onChoose={chooseDoor} />
           <div className="mx-auto max-w-sm">
             <CloudLoginButton />
           </div>
@@ -310,16 +330,30 @@ function PinLogin() {
       }
 
       if (res.ok) {
+        // Issue #885 L17 — a 200 whose body this screen cannot read is a
+        // *failure*, not an empty roster.
+        //
+        // It used to be `data?.employees ?? []`, so a malformed body (a proxy
+        // serving an HTML error page with a 200, a half-written response, a
+        // contract change) rendered the "nobody here" state. That is the worst
+        // available reading of it: the till says no eligible quick-login
+        // accounts exist, which is a claim about who works there, when the
+        // truth is that the request did not answer. An operator looking at it
+        // goes looking for a staffing problem instead of a broken endpoint.
         const data = (await res.json().catch(() => null)) as {
           employees?: RosterEmployee[];
           policy?: RosterPolicy;
           credentialSync?: CredentialSyncNotice | null;
         } | null;
         if (cancelled) return;
+        if (!data || !Array.isArray(data.employees)) {
+          setRosterFailure("error");
+          return;
+        }
         setRosterFailure(null);
-        setEmployees(data?.employees ?? []);
-        setPolicy(data?.policy ?? null);
-        const notice = data?.credentialSync ?? null;
+        setEmployees(data.employees);
+        setPolicy(data.policy ?? null);
+        const notice = data.credentialSync ?? null;
         setCredentialSync(notice && notice.missing > 0 ? notice : null);
         return;
       }
@@ -504,19 +538,39 @@ function PinLogin() {
     if (!selected) return;
     setBusy(true);
     setError(null);
-    const res = await fetch("/api/auth/pin-login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        pin,
-        employeeId: selected.id,
-        deviceToken: readDeviceToken(),
-        // The adoption-window button: prove the PIN, then verify the number
-        // this same login — the OTP step that follows is voluntary today and
-        // becomes the gate the day the window closes.
-        ...(verifyMode ? { verifyPhone: true } : {}),
-      }),
-    });
+
+    // Issue #885 L05 — the request is guarded, and `busy` is released in a
+    // `finally`.
+    //
+    // It used to be `setBusy(true)`, a bare `await fetch`, and `setBusy(false)`
+    // on the line after. A network rejection (the till's Wi-Fi dropping, the
+    // local server restarting) threw out of this handler before that line, so
+    // the keypad stayed permanently disabled with no message and no way back
+    // short of a reload — on a shop floor that is an unusable login screen with
+    // no visible cause. The same defect on the manager form is fixed there with
+    // the shared `useLoginRequest` hook, which also adds the timeout and
+    // stale-response guard.
+    let res: Response;
+    try {
+      res = await fetch("/api/auth/pin-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pin,
+          employeeId: selected.id,
+          deviceToken: readDeviceToken(),
+          // The adoption-window button: prove the PIN, then verify the number
+          // this same login — the OTP step that follows is voluntary today and
+          // becomes the gate the day the window closes.
+          ...(verifyMode ? { verifyPhone: true } : {}),
+        }),
+      });
+    } catch {
+      setBusy(false);
+      setError("ارتباط با سرور برقرار نشد. اتصال شبکه را بررسی کنید.");
+      return;
+    }
+
     const data = (await res.json().catch(() => ({}))) as {
       phoneVerification?: "otp" | "set_phone";
       phoneToken?: string;

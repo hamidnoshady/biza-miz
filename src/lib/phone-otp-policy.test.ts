@@ -7,6 +7,7 @@ import {
   phoneOtpDaysRemaining,
   phoneOtpEnforcement,
   pinWindowActive,
+  otpSendBudgetDecision,
 } from "./phone-otp-policy";
 
 describe("normalizePhoneOtpPolicy", () => {
@@ -117,5 +118,80 @@ describe("employeeLoginMode", () => {
   it("honours the 7-day PIN shortcut once the phone is verified and the window open", () => {
     expect(employeeLoginMode({ enforcement: "enforced", phoneState: "verified", pinWindow: true }))
       .toBe("pin");
+  });
+});
+
+/**
+ * Issue #885 L03 — the send budget.
+ *
+ * The arithmetic was never the problem; *when* it was evaluated was. The
+ * caller read the budget, compared, and only recorded the send on the way
+ * back, so two simultaneous requests both read "under the limit" and both
+ * spent a message. `reserveOtpSend` now takes the check and the record inside
+ * one transaction behind an advisory lock (proved against a real database in
+ * `integration/phone-otp.integration.test.ts`); this pins the rule that
+ * decision applies.
+ */
+describe("otpSendBudgetDecision", () => {
+  const NOW = new Date("2026-10-09T12:00:00.000Z");
+  const ago = (ms: number) => new Date(NOW.getTime() - ms);
+  const MINUTE = 60_000;
+  const HOUR = 3_600_000;
+
+  it("allows a first send", () => {
+    expect(otpSendBudgetDecision([], NOW)).toEqual({ allowed: true });
+    expect(otpSendBudgetDecision([ago(2 * MINUTE)], NOW)).toEqual({ allowed: true });
+  });
+
+  it("refuses a second send inside the minute", () => {
+    const decision = otpSendBudgetDecision([ago(10_000)], NOW);
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) {
+      // The wait is until the oldest send ages out of the window, not a fixed
+      // cool-down — a fixed one would be wrong in both directions for a member
+      // who has been sending steadily.
+      expect(decision.retryAfterMs).toBe(MINUTE - 10_000);
+    }
+  });
+
+  it("refuses the sixth send inside the hour and names when it clears", () => {
+    const sends = [ago(1 * MINUTE), ago(10 * MINUTE), ago(20 * MINUTE), ago(30 * MINUTE), ago(40 * MINUTE)];
+    const decision = otpSendBudgetDecision(sends, NOW);
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) {
+      // The oldest of the five holds the window closed.
+      expect(decision.retryAfterMs).toBe(HOUR - 40 * MINUTE);
+    }
+  });
+
+  it("is order-independent, so a caller cannot get it wrong by sorting wrong", () => {
+    const sends = [ago(40 * MINUTE), ago(1 * MINUTE), ago(30 * MINUTE), ago(10 * MINUTE), ago(20 * MINUTE)];
+    expect(otpSendBudgetDecision(sends, NOW)).toEqual(
+      otpSendBudgetDecision([...sends].reverse(), NOW),
+    );
+  });
+
+  it("ignores timestamps outside every window, and unparseable ones", () => {
+    expect(otpSendBudgetDecision([ago(2 * HOUR), ago(3 * HOUR)], NOW)).toEqual({
+      allowed: true,
+    });
+    expect(otpSendBudgetDecision(["not a date", ago(2 * HOUR)], NOW)).toEqual({
+      allowed: true,
+    });
+  });
+
+  it("never returns a negative wait", () => {
+    // A send stamped in the future by clock skew must not produce a negative
+    // countdown, which the UI would render as "ready 0 seconds ago".
+    const decision = otpSendBudgetDecision([new Date(NOW.getTime() + 5_000)], NOW);
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) expect(decision.retryAfterMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("applies the tightest breached ceiling, not the first one it meets", () => {
+    // Four sends this hour, none inside the last minute: the hour ceiling is
+    // not breached yet, so the answer is still yes.
+    const sends = [ago(2 * MINUTE), ago(10 * MINUTE), ago(20 * MINUTE), ago(30 * MINUTE)];
+    expect(otpSendBudgetDecision(sends, NOW)).toEqual({ allowed: true });
   });
 });

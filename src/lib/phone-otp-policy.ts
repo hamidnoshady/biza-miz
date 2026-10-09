@@ -130,3 +130,77 @@ export function employeeLoginMode(options: {
   if (options.phoneState === "verified" && options.pinWindow) return "pin";
   return "otp";
 }
+
+// ---------------------------------------------------------------------------
+// The send budget — pure decision, DB-free
+// ---------------------------------------------------------------------------
+//
+// Split out of reserveOtpSend (phone-otp.ts) because the part that is
+// worth pinning down with a test is the arithmetic, not the SELECT: given the
+// recent send timestamps, is one more allowed, and if not, when is it?
+//
+// Issue #885 L03 is about *when* this decision is taken, not what it says —
+// the caller used to read the budget, compare, and only record the send on
+// the way back, so two simultaneous requests both read "under the limit" and
+// both spent a message. That is fixed by reserveOtpSend taking the check and
+// the record inside one transaction behind an advisory lock; this function is
+// the unchanged rule that decision now applies atomically.
+
+/** One ceiling: at most `max` sends inside any rolling `windowMs`. */
+export interface OtpSendLimit {
+  max: number;
+  windowMs: number;
+}
+
+/**
+ * The three ceilings, tightest first.
+ *
+ * One a minute is the "I lost the SMS" resend; five an hour is the shift that
+ * keeps losing it; twenty a day is the outer cap on what one membership can
+ * cost. Deliberately per-membership, not per-IP — the per-IP ceiling is the
+ * middleware's job (see the phone-OTP entries in AUTH_RATE_LIMITED_PATHS).
+ */
+export const PHONE_OTP_SEND_LIMITS: readonly OtpSendLimit[] = [
+  { max: 1, windowMs: 60_000 },
+  { max: 5, windowMs: 3_600_000 },
+  { max: 20, windowMs: 86_400_000 },
+];
+
+export type OtpSendBudgetDecision =
+  | { allowed: true }
+  | { allowed: false; retryAfterMs: number };
+
+/**
+ * Is one more send allowed right now?
+ *
+ * `sentAt` is the membership's recent send timestamps, in any order; they are
+ * sorted here so a caller cannot get the answer wrong by passing them
+ * ascending. The refusal names the soonest instant the tightest breached
+ * ceiling clears — which is when the oldest send inside that window ages out
+ * of it, not a fixed cool-down, because a fixed one would be wrong in both
+ * directions for a member who has been sending steadily.
+ */
+export function otpSendBudgetDecision(
+  sentAt: ReadonlyArray<Date | string | number>,
+  now: Date = new Date(),
+  limits: readonly OtpSendLimit[] = PHONE_OTP_SEND_LIMITS,
+): OtpSendBudgetDecision {
+  const reference = now.getTime();
+  const times = sentAt
+    .map((value) => new Date(value).getTime())
+    .filter((ms) => Number.isFinite(ms))
+    .sort((a, b) => b - a);
+
+  for (const limit of limits) {
+    const inside = times.filter((ms) => reference - ms < limit.windowMs);
+    if (inside.length < limit.max) continue;
+    // `inside` is still newest-first, so the last element is the oldest send
+    // holding this window closed.
+    const oldest = inside[inside.length - 1];
+    return {
+      allowed: false,
+      retryAfterMs: Math.max(0, limit.windowMs - (reference - oldest)),
+    };
+  }
+  return { allowed: true };
+}

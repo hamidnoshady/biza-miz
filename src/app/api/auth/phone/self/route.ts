@@ -12,6 +12,7 @@ import {
   verifyEmployeePhoneOtp,
 } from "@/lib/phone-otp";
 import { memberPhoneState } from "@/lib/phone-otp-policy";
+import { boundedString, normalizeOtpCode } from "@/lib/login-contract";
 import { KavenegarError } from "@/lib/sms-kavenegar";
 
 /**
@@ -64,7 +65,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const recentAuthError = requireRecentAuth(session);
   if (recentAuthError) return recentAuthError;
 
-  let body: { action?: string; phone?: string; code?: string };
+  let body: {
+    action?: string;
+    phone?: string;
+    code?: string;
+    /** Echoed from the `send` response — the challenge this verify redeems. */
+    challengeId?: string;
+    /** Echoed from the `send` response — the number that challenge went to. */
+    destination?: string;
+  };
   try {
     body = await request.json();
   } catch {
@@ -76,6 +85,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     [session.sub, session.businessId],
   );
   const current = rows[0]?.phone_e164 ?? null;
+
+  // Set by the send branch, returned to the client, echoed back on verify.
+  let challenge: { challengeId: string; destination: string } | null = null;
 
   // --- send ---------------------------------------------------------------
   if (body.action === "send") {
@@ -94,6 +106,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         businessId: session.businessId,
         userId: session.sub,
         phone: target,
+        // Its own purpose: a signed-in member changing their number is not the
+        // same ceremony as a login proving one, and a challenge minted by one
+        // must not be redeemable by the other.
+        purpose: "manage",
       });
       if (!sent.allowed) {
         return NextResponse.json(
@@ -101,6 +117,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
           { status: 429 },
         );
       }
+      // The client echoes both back on `verify`. Without them the verify half
+      // would have to fall back to "newest challenge for this member", which
+      // is the ambiguity issue #885 L02 removes.
+      challenge = { challengeId: sent.challengeId, destination: target };
     } catch (err) {
       console.error("Phone-OTP dispatch failed (self)", err);
       const message =
@@ -108,7 +128,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       return NextResponse.json({ error: "sms_dispatch_failed", message }, { status: 502 });
     }
 
-    return NextResponse.json({ status: "sent", maskedPhone: maskPhoneE164(target) });
+    return NextResponse.json({
+      status: "sent",
+      maskedPhone: maskPhoneE164(target),
+      challengeId: challenge?.challengeId ?? null,
+      destination: challenge?.destination ?? null,
+    });
   }
 
   // --- verify -------------------------------------------------------------
@@ -121,15 +146,37 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       );
     }
 
-    const code = String((body as { code?: string }).code ?? "").trim();
+    // Same canonicalisation as the login door: a code typed on a Persian
+    // keyboard arrives as Persian digits and must be converted, not deleted.
+    const code = normalizeOtpCode(body.code);
     if (!/^\d{6}$/.test(code)) {
       return NextResponse.json({ error: "invalid_code" }, { status: 401 });
     }
 
-    const ok = await verifyEmployeePhoneOtp({ userId: session.sub, code });
-    if (!ok) {
+    // Issue #885 L02 — redeem the exact challenge the `send` minted. Both
+    // halves of the binding come from the client's echo of that response and
+    // are re-checked against the row, so a stale or swapped pair simply does
+    // not match.
+    const challengeId = boundedString(body.challengeId, { max: 64 });
+    const destination = canonicalMemberPhone(body.destination);
+    if (!challengeId || !destination) {
+      return NextResponse.json({ error: "challenge_required" }, { status: 400 });
+    }
+
+    const verification = await verifyEmployeePhoneOtp({
+      challengeId,
+      userId: session.sub,
+      businessId: session.businessId,
+      purpose: "manage",
+      destination,
+      code,
+    });
+    if (!verification.verified) {
       await auditLoginFailure(session.businessId, session.sub, "invalid_phone_otp");
-      return NextResponse.json({ error: "invalid_code" }, { status: 401 });
+      return NextResponse.json(
+        { error: verification.reason === "expired" ? "code_expired" : "invalid_code" },
+        { status: 401 },
+      );
     }
 
     // The change candidate (if one was typed) is resent by the client on

@@ -328,7 +328,14 @@ export function MfaStep({
               : "برای این حساب هنوز روش دومرحله‌ای ثبت نشده و مهلت فعال‌سازی تمام شده است. یکی از دو روش زیر را انتخاب کنید."}
           </p>
         </div>
-        {error ? <p className={theme.error}>{error}</p> : null}
+        {/* Issue #885 L12 — announced, for the same reason as the code form's:
+            focus stays on the submit button, so an error elsewhere in the tree
+            was never read out. */}
+        {error ? (
+          <p role="alert" aria-live="assertive" className={theme.error}>
+            {error}
+          </p>
+        ) : null}
         <button
           type="button"
           disabled={busy}
@@ -389,7 +396,14 @@ export function MfaStep({
             کد یک‌بارمصرف هر بار به این شماره پیامک می‌شود.
           </p>
         </div>
-        {error ? <p className={theme.error}>{error}</p> : null}
+        {/* Issue #885 L12 — announced, for the same reason as the code form's:
+            focus stays on the submit button, so an error elsewhere in the tree
+            was never read out. */}
+        {error ? (
+          <p role="alert" aria-live="assertive" className={theme.error}>
+            {error}
+          </p>
+        ) : null}
         <input
           dir="ltr"
           inputMode="tel"
@@ -398,6 +412,11 @@ export function MfaStep({
           value={phone}
           onChange={(e) => setPhone(e.target.value)}
           placeholder="09121234567"
+          // Issue #885 L12 — the heading above is a <h2>, not a <label>, so a
+          // screen reader announced this field only as "edit text" with a
+          // placeholder that disappears on typing. The phone-OTP step already
+          // had a named input; this is the same treatment.
+          aria-label="شمارهٔ موبایل"
           className={theme.input}
         />
         <button type="submit" disabled={busy} className={theme.primaryButton}>
@@ -487,7 +506,10 @@ export function MfaStep({
         <h2 className={theme.heading}>
           {recoveryMode ? "کد بازیابی" : "کد تأیید دومرحله‌ای"}
         </h2>
-        <p className={theme.muted}>
+        {/* The id the code input's aria-describedby points at, so the
+            instruction is announced with the field rather than only once,
+            when the heading above it was read. */}
+        <p id="mfa-code-hint" className={theme.muted}>
           {recoveryMode
             ? "یکی از کدهای بازیابی که هنگام فعال‌سازی ذخیره کرده‌اید را وارد کنید. هر کد فقط یک بار کار می‌کند."
             : method === "sms_otp"
@@ -499,18 +521,36 @@ export function MfaStep({
       </div>
 
       {notice && !error ? <p className={theme.notice}>{notice}</p> : null}
-      {error ? <p className={theme.error}>{error}</p> : null}
+      {/*
+        Issue #885 L12 — a live region, not an ordinary paragraph. Focus stays
+        on the submit button when verification fails, so an error rendered
+        elsewhere in the tree was simply never announced: the user pressed
+        «تأیید» and heard nothing at all.
+      */}
+      {error ? (
+        <p role="alert" aria-live="assertive" className={theme.error}>
+          {error}
+        </p>
+      ) : null}
 
       <input
         dir="ltr"
         autoFocus
-        autoComplete="one-time-code"
+        // A recovery code is not a one-time SMS code, and saying so to a
+        // password manager matters: `one-time-code` invites autofill of an SMS
+        // the member is not being asked for.
+        autoComplete={recoveryMode ? "off" : "one-time-code"}
         inputMode={recoveryMode ? "text" : "numeric"}
         maxLength={recoveryMode ? 20 : 6}
         required
         value={code}
         onChange={(e) => setCode(e.target.value)}
         placeholder={recoveryMode ? "ABCDE-FGHJK" : "------"}
+        // Issue #885 L12 — an accessible name, and a mode-aware one. The two
+        // fields are visually near-identical but ask for different things, and
+        // a screen-reader user could not tell which was on screen.
+        aria-label={recoveryMode ? "کد بازیابی" : "کد تأیید ۶ رقمی"}
+        aria-describedby="mfa-code-hint"
         className={theme.input}
       />
 

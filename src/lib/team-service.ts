@@ -737,6 +737,20 @@ export async function removeMembership(
         WHERE employee_id = $1 AND business_id = $2 AND revoked_at IS NULL`,
       [userId, businessId],
     );
+    // Issue #885 — offboarding invalidates the seven-day device trust too.
+    //
+    // It has to happen here and not by chasing `platform_user_id`: the
+    // statement above sets that column to NULL, so a later
+    // `revokeTrustedDevicesForPlatformUser` would find nothing and a browser
+    // that still held a trust cookie could keep skipping OTP and MFA for a
+    // membership that no longer exists. Same transaction as the session
+    // revocation, for the same reason.
+    await client.query(
+      `UPDATE trusted_devices
+          SET revoked_at = now(), revoked_reason = 'member_offboarded'
+        WHERE business_id = $2 AND user_id = $1 AND revoked_at IS NULL`,
+      [userId, businessId],
+    );
     // Phase 20 Wave 5 — a removed member's shift (if left open) would
     // otherwise stay open forever now that nothing else about their access
     // is still live.

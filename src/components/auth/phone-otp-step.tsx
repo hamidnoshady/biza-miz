@@ -14,6 +14,7 @@
  */
 import { useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
+import { normalizeOtpCode } from "@/lib/login-contract";
 import { MfaStep } from "./mfa-step";
 
 /** How to address a resend — mirrors the three modes of /api/auth/phone-otp/request. */
@@ -21,6 +22,9 @@ export type PhoneOtpSendSpec =
   | { kind: "token"; token: string; phone?: string }
   | { kind: "employee"; employeeId: string; businessId?: string }
   | { kind: "phone"; phone: string; businessId?: string };
+
+/** How long the trusted-device choice is offered for, in days. Policy-fixed at seven. */
+const TRUST_DAYS = 7;
 
 interface RequestResponse {
   status?: string;
@@ -38,6 +42,8 @@ function phoneOtpErrorMessage(
 ): string {
   const map: Record<string, string> = {
     invalid_code: "کد واردشده درست نیست.",
+    code_expired: "مهلت این کد تمام شده است. کد تازه‌ای درخواست دهید.",
+    challenge_required: "مرحلهٔ تأیید به‌درستی آغاز نشده است. ارسال دوبارهٔ کد را بزنید.",
     phone_missing: "برای این حساب شمارهٔ موبایلی ثبت نشده است.",
     invalid_phone: "شمارهٔ موبایل معتبر نیست.",
     sms_dispatch_failed: "ارسال پیامک ممکن نشد. کمی بعد دوباره تلاش کنید.",
@@ -84,6 +90,16 @@ export function PhoneOtpStep({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * Issue #885 — «اعتماد به این دستگاه برای ۷ روز».
+   *
+   * Off by default and explicit. It is offered here rather than granted
+   * silently because the policy is that trust is the member's choice made
+   * *after* every required factor has succeeded; sending `trustDevice: true`
+   * on a verification that does not complete simply does nothing, because the
+   * server only registers trust on the path where all factors passed.
+   */
+  const [trustDevice, setTrustDevice] = useState(false);
   const [mfaPending, setMfaPending] = useState<{
     token: string;
     method: "totp" | "sms_otp" | null;
@@ -147,7 +163,7 @@ export function PhoneOtpStep({
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ code, deviceToken }),
+        body: JSON.stringify({ code, deviceToken, trustDevice }),
       });
       const data = (await res.json().catch(() => ({}))) as RequestResponse & {
         mfaRequired?: boolean;
@@ -219,11 +235,38 @@ export function PhoneOtpStep({
         maxLength={6}
         required
         value={code}
-        onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+        // Issue #885 L11 — canonicalise before filtering. `replace(/\D/g, "")`
+        // on its own *deletes* Persian and Arabic-Indic digits, so a member
+        // typing on a Persian keyboard watched their input disappear. The same
+        // normalisation runs on the server, so a client that skips this still
+        // cannot smuggle anything through.
+        onChange={(e) => setCode(normalizeOtpCode(e.target.value))}
         placeholder="------"
         aria-label="کد تأیید ۶ رقمی"
         className="w-full rounded-lg border border-input px-3 py-2 text-center text-lg tracking-[0.4em] focus:border-primary focus:outline-none"
       />
+
+      {/*
+        Issue #885 — the trust choice, offered at the verification step. It is
+        a convenience, not a credential: on a trusted device the PIN or
+        password is still required at every login, and only this routine OTP
+        is skipped. Kept visually separate from the code field so it cannot be
+        read as part of the ceremony.
+      */}
+      <label className="flex items-start gap-2 rounded-lg border border-border/80 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
+        <input
+          type="checkbox"
+          checked={trustDevice}
+          onChange={(e) => setTrustDevice(e.target.checked)}
+          className="mt-0.5 size-4 shrink-0 rounded border-input"
+        />
+        <span>
+          اعتماد به این دستگاه برای {toPersianDigits(TRUST_DAYS)} روز
+          <span className="block text-[11px] opacity-80">
+            در این مدت برای ورود دوباره کد پیامکی پرسیده نمی‌شود؛ رمز یا پین همچنان لازم است.
+          </span>
+        </span>
+      </label>
 
       <button
         type="submit"

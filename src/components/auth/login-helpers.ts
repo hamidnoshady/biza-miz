@@ -11,6 +11,7 @@
  */
 import { useSearchParams } from "next/navigation";
 import { toPersianDigits } from "@/lib/digits";
+import { safeLoginNextPath } from "@/lib/login-contract";
 
 /**
  * Where to go after signing in.
@@ -21,16 +22,19 @@ import { toPersianDigits } from "@/lib/digits";
  * that URL abandons an OAuth flow they have no way to restart from inside the
  * app.
  *
- * Only ever a same-site path. Without the second test a protocol-relative
- * `//evil.example` is a URL too, which is how a login page becomes an open
- * redirect — the same check `/api/host/redirect` makes on the value it forwards.
+ * Only ever a same-site path, and the rule now lives in one place.
+ *
+ * Issue #885: this used to test `startsWith("/")` and `!startsWith("//")`
+ * inline, while the desktop's `safeNextPath` tested the same two things *plus*
+ * the backslash form. Two near-identical validators is how one of them ends up
+ * missing a case, and `/\\evil.example` was exactly that case — browsers read
+ * `\\` as `/` in an authority, so it is the same open redirect as `//…`. Both
+ * now delegate to `safeLoginNextPath`, which also rejects control characters
+ * and percent-encoded variants of either.
  */
 export function useNextPath(fallback: string): string {
   const params = useSearchParams();
-  const requested = params.get("next");
-  return requested && requested.startsWith("/") && !requested.startsWith("//")
-    ? requested
-    : fallback;
+  return safeLoginNextPath(params.get("next"), fallback);
 }
 
 /**

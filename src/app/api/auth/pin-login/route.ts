@@ -19,6 +19,7 @@ import {
   signPhonePendingToken,
 } from "@/lib/phone-otp";
 import { memberPhoneState, pinWindowActive } from "@/lib/phone-otp-policy";
+import { readTrustedDeviceToken, verifyTrustedDevice } from "@/lib/trusted-device";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 
 interface UserRow extends Record<string, unknown> {
@@ -196,7 +197,39 @@ export async function POST(request: NextRequest) {
     const gateClosed =
       enforcement.state === "enforced" && !(phoneState === "verified" && windowActive);
 
-    if (wantsVerification || gateClosed) {
+    // -----------------------------------------------------------------------
+    // Issue #885 — the seven-day trusted-device exemption.
+    //
+    // This waives the *routine* re-verification, nothing else. The PIN above
+    // is still an approved primary credential and was still just proven; the
+    // membership, its business and its lockout were still re-read; and
+    // `authorize` still decides everything the session can do afterwards.
+    // What changes is that a device which completed a full verification and
+    // was explicitly trusted inside the last seven days is not asked to
+    // verify again.
+    //
+    // The lookup is scoped to this business *and* this member, so the
+    // membership-wide `otp_login_at` window it supplements cannot do what the
+    // policy forbids: one verified phone exempting every device that
+    // membership signs in from. A different device, a different account or a
+    // different tenant is a miss, and the gate below closes as usual.
+    //
+    // Only consulted when the gate would otherwise shut. On an install where
+    // the policy is not enforced there is no challenge to waive, and asking
+    // the table anyway would be a query per login for nothing.
+    const deviceTrust = gateClosed
+      ? await verifyTrustedDevice({
+          businessId: user.business_id,
+          userId: user.id,
+          token: readTrustedDeviceToken(request),
+        })
+      : null;
+    const trustExempt = deviceTrust?.trusted === true;
+
+    // A member who *asked* to verify their number still gets to, trusted
+    // device or not — that is the door's optional button, and honouring it is
+    // how a number gets onto file in the first place.
+    if (wantsVerification || (gateClosed && !trustExempt)) {
       // The PIN was proven — the member may set a number that is not on file
       // yet; every other path through the phone-OTP door may only be sent to
       // a number already stored.
@@ -205,6 +238,13 @@ export async function POST(request: NextRequest) {
         businessId: user.business_id,
         mayAttachPhone: true,
         phone: null,
+        // No challenge yet: this token authorises a *send*. The request route
+        // mints the challenge and re-signs a token that names it, so the
+        // binding required at verify time is established by the send that
+        // actually happened rather than promised up front here.
+        cid: null,
+        destination: null,
+        purpose: "attach",
       });
       return NextResponse.json({
         // `set_phone` — nothing on file: the client asks for the number

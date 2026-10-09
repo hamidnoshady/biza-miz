@@ -471,6 +471,25 @@ export async function consumePasswordResetToken(params: {
               AND ig.revoked_at IS NULL`,
           [row.subject_id],
         );
+
+        // Issue #885 — a password reset invalidates the seven-day device
+        // trust, in the same transaction as the credential change and the
+        // session revocations above.
+        //
+        // The reasoning is the same one that already revokes every session
+        // here: device trust is a convenience *earned by a verification that
+        // included this password*. Once the password is gone, nothing about
+        // the ceremony that earned the trust is still true, and leaving the
+        // entry live would let whoever holds the device cookie keep skipping
+        // OTP and MFA on a credential they never proved. Doing it inside the
+        // transaction matters — a reset that commits while trust survives is
+        // exactly the half-applied state the other revocations avoid.
+        await client.query(
+          `UPDATE trusted_devices
+              SET revoked_at = now(), revoked_reason = 'password_reset'
+            WHERE platform_user_id = $1 AND revoked_at IS NULL`,
+          [row.subject_id],
+        );
       } else {
         const updated = await client.query<{ token_version: number }>(
           `UPDATE platform_admins

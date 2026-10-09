@@ -7,6 +7,12 @@ import { verifyAndConfirmMfaCode } from "@/lib/mfa-verify";
 import { countRemainingRecoveryCodes } from "@/lib/mfa-recovery";
 import { query, withTenant, withoutTenantScope } from "@/lib/db";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
+import { boundedString } from "@/lib/login-contract";
+import {
+  issueTrustedDevice,
+  trustedDeviceCookieOptions,
+  TRUSTED_DEVICE_COOKIE,
+} from "@/lib/trusted-device";
 import { createSession } from "@/lib/employee-service";
 import {
   membershipBlockedReason,
@@ -31,7 +37,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  let body: { code?: string; useRecoveryCode?: boolean; method?: string };
+  let body: {
+    code?: string;
+    useRecoveryCode?: boolean;
+    method?: string;
+    /** Issue #885 — «اعتماد به این دستگاه برای ۷ روز». */
+    trustDevice?: unknown;
+    deviceToken?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -162,6 +175,36 @@ export async function POST(request: NextRequest) {
     });
 
     res.cookies.set(SESSION_COOKIE, sessionToken, sessionCookieOptions());
+
+    // Issue #885 — every required factor has now been satisfied on this
+    // request, which is the policy's precondition for granting the seven-day
+    // trust. This is the single place both doors converge: password + MFA and
+    // phone-OTP + MFA both land here, so neither needs its own copy of the
+    // rule.
+    //
+    // Recovery codes are excluded on purpose. They are the break-glass
+    // factor, minted for a member who has lost their authenticator, and a
+    // login that needed one is precisely the login that should not quietly
+    // buy seven days of skipped verification on a device nobody has
+    // re-established. Re-enrolling and signing in normally is the path that
+    // earns trust back.
+    if (body.trustDevice === true && !useRecoveryCode) {
+      const trust = await issueTrustedDevice({
+        businessId: chosen.businessId,
+        userId: chosen.userId,
+        platformUserId: user.id,
+        deviceToken: boundedString(body.deviceToken, { max: 256, required: false }),
+        deviceLabel: request.headers.get("user-agent")?.slice(0, 120) ?? null,
+        factorSummary: `${payload.primaryAuth ?? "password"}+${method ?? "mfa"}`,
+      }).catch((err) => {
+        console.error("Trusted-device registration failed", err);
+        return null;
+      });
+      if (trust) {
+        res.cookies.set(TRUSTED_DEVICE_COOKIE, trust.token, trustedDeviceCookieOptions());
+      }
+    }
+
     return res;
   });
 }

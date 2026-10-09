@@ -198,6 +198,7 @@ export function SecurityCenterSettings() {
   return (
     <div className="space-y-6">
       <PhoneLoginCard />
+      <TrustedDevicesCard />
 
       <SectionCard
         title="دسترسی پشتیبانی"
@@ -372,6 +373,16 @@ function PhoneLoginCard() {
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [codeSentTo, setCodeSentTo] = useState<string | null>(null);
+  /**
+   * Issue #885 L02 — the challenge the last `send` minted, echoed back on
+   * `verify`. Verification is bound to the exact code that was sent rather
+   * than to "the newest one for this member", so a stale pair simply fails
+   * instead of quietly matching something else.
+   */
+  const [challenge, setChallenge] = useState<{
+    challengeId: string;
+    destination: string;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -406,11 +417,20 @@ function PhoneLoginCard() {
     setError("");
     setNotice("");
     let ok: boolean;
-    let data: { status?: string; maskedPhone?: string; error?: string; message?: string; retryAfterMs?: number };
+    let data: {
+      status?: string;
+      maskedPhone?: string;
+      error?: string;
+      message?: string;
+      retryAfterMs?: number;
+      challengeId?: string | null;
+      destination?: string | null;
+    };
     try {
-      ({ ok, data } = await api<
-        { status?: string; maskedPhone?: string; error?: string; message?: string; retryAfterMs?: number }
-      >("/api/auth/phone/self", { method: "POST", body: JSON.stringify(body) }));
+      ({ ok, data } = await api<typeof data>("/api/auth/phone/self", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }));
     } catch {
       setBusy(false);
       setError(errorMessage(undefined));
@@ -425,6 +445,8 @@ function PhoneLoginCard() {
         sms_dispatch_failed: "ارسال پیامک ممکن نشد. کمی بعد دوباره تلاش کنید.",
         rate_limited: "درخواست‌های پیاپی مجاز نیست؛ کمی صبر کنید.",
         account_locked: "حساب شما موقتاً قفل شده است.",
+        code_expired: "مهلت این کد تمام شده است. کد تازه‌ای درخواست دهید.",
+        challenge_required: "ابتدا کد را ارسال کنید.",
       };
       setError(data.message ?? map[data.error ?? ""] ?? errorMessage(data.error));
       return null;
@@ -437,15 +459,28 @@ function PhoneLoginCard() {
     const data = await post({ action: "send", ...(phone.trim() ? { phone: phone.trim() } : {}) });
     if (data) {
       setCodeSentTo(data.maskedPhone ?? target);
+      // Issue #885 L02 — remember which challenge this send minted, so the
+      // verify below redeems that one and nothing else.
+      setChallenge(
+        data.challengeId && data.destination
+          ? { challengeId: data.challengeId, destination: data.destination }
+          : null,
+      );
       // Clear any half-typed digits from a previous try on resend.
       setCode("");
     }
   }
 
   async function verifyCode() {
+    if (!challenge) {
+      setError("ابتدا کد را ارسال کنید.");
+      return;
+    }
     const data = await post({
       action: "verify",
       code,
+      challengeId: challenge.challengeId,
+      destination: challenge.destination,
       ...(phone.trim() ? { phone: phone.trim() } : {}),
     });
     if (data) {
@@ -453,6 +488,7 @@ function PhoneLoginCard() {
       setPhone("");
       setCode("");
       setCodeSentTo(null);
+      setChallenge(null);
       await load();
     }
   }
@@ -627,6 +663,148 @@ function PhoneLoginCard() {
             </div>
           )}
         </div>
+      )}
+    </SectionCard>
+  );
+}
+
+/** What `/api/auth/trusted-devices` answers for the caller's own membership. */
+interface TrustedDevice {
+  id: string;
+  deviceLabel: string | null;
+  factorSummary: string | null;
+  trustedAt: string;
+  expiresAt: string;
+  lastSeenAt: string | null;
+  revokedAt: string | null;
+}
+
+/**
+ * Issue #885 — the seven-day trusted devices this member has earned.
+ *
+ * The policy is that skipping a routine OTP/MFA on a known device must stay
+ * visible and revocable: trust is a convenience granted by a verification, and
+ * the moment that device is lost, lent or sold the member needs a way to take
+ * it back without waiting seven days for it to lapse on its own.
+ *
+ * Listed per membership, from the session, so this card can only ever show or
+ * clear the caller's own devices. It is deliberately separate from the
+ * "remember login type" preference on the login screen: that one is a
+ * device-local UI shortcut stored in localStorage and worth nothing; this one
+ * is a server-side credential that waives a verification step.
+ */
+function TrustedDevicesCard() {
+  const [devices, setDevices] = useState<TrustedDevice[] | null>(null);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const { ok, data } = await api<{ devices: TrustedDevice[]; error?: string }>(
+        "/api/auth/trusted-devices",
+      );
+      if (ok) {
+        setDevices(data.devices);
+        setError("");
+      } else {
+        setError(errorMessage(data.error));
+      }
+    } catch {
+      setError(errorMessage(undefined));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function revoke(id: string) {
+    setBusyId(id);
+    setError("");
+    setNotice("");
+    try {
+      const { ok, data } = await api<{ error?: string }>("/api/auth/trusted-devices", {
+        method: "DELETE",
+        body: JSON.stringify({ id }),
+      });
+      if (!ok) {
+        setError(errorMessage(data.error));
+        return;
+      }
+      setNotice("اعتماد این دستگاه لغو شد؛ ورود بعدی از آن دوباره تأیید می‌خواهد.");
+      await load();
+    } catch {
+      setError(errorMessage(undefined));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const live = (devices ?? []).filter((d) => !d.revokedAt);
+  const past = (devices ?? []).filter((d) => d.revokedAt);
+
+  return (
+    <SectionCard
+      title={
+        <div>
+          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">امنیت و دسترسی</p>
+          <h2 className="mt-1 text-base sm:text-lg font-semibold text-foreground">
+            دستگاه‌های مورد اعتماد
+          </h2>
+        </div>
+      }
+      description="دستگاه‌هایی که پس از تأیید کامل، برای ۷ روز از پرسش دوبارهٔ کد پیامکی یا ورود دومرحله‌ای معاف شده‌اند. رمز عبور یا پین در هر ورود همچنان لازم است."
+      actions={<RefreshButton refreshing={busyId !== null} onClick={() => void load()} />}
+    >
+      {error ? <ErrorBox>{error}</ErrorBox> : null}
+      {notice && !error ? <InfoBox>{notice}</InfoBox> : null}
+
+      {devices === null ? (
+        <LoadingSkeleton rows={2} />
+      ) : live.length === 0 && past.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          هیچ دستگاهی را برای این حساب اعتماد نکرده‌اید. در ورود بعدی می‌توانید
+          «اعتماد به این دستگاه برای ۷ روز» را انتخاب کنید.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {[...live, ...past].map((device) => {
+            const revoked = Boolean(device.revokedAt);
+            const expired = new Date(device.expiresAt).getTime() <= Date.now();
+            const state = revoked
+              ? "لغو شده"
+              : expired
+                ? "منقضی شده"
+                : `تا ${formatTime(device.expiresAt)} معتبر است`;
+            return (
+              <li
+                key={device.id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/80 px-3 py-2.5"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-foreground">
+                    {device.deviceLabel || "دستگاه ناشناخته"}
+                  </p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {state}
+                    {device.lastSeenAt ? ` · آخرین استفاده ${formatTime(device.lastSeenAt)}` : ""}
+                  </p>
+                </div>
+                {!revoked ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busyId === device.id}
+                    onClick={() => void revoke(device.id)}
+                  >
+                    لغو اعتماد
+                  </Button>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
       )}
     </SectionCard>
   );
