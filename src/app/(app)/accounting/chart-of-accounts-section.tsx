@@ -3,7 +3,7 @@
 import { EmptyState, overlayPanelClass, SectionCard, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Button } from "@/components/ui/button";
@@ -67,6 +67,11 @@ const errorLabels: Record<string, string> = {
   account_has_children: "ابتدا زیرمجموعه‌های این حساب را جابه‌جا یا حذف کنید.",
   parent_too_deep: "حساب والد از سطح «تفصیلی» است و نمی‌تواند زیرمجموعه داشته باشد.",
   hierarchy_too_deep: "این جابه‌جایی باعث می‌شود ساختار حساب از سطح «تفصیلی» عمیق‌تر شود.",
+  parent_type_mismatch: "نوع حساب زیرمجموعه باید با نوع شاخهٔ والد یکسان باشد (دارایی زیر دارایی، هزینه زیر هزینه و…).",
+  parent_archived: "نمی‌توان حساب را زیر یک حساب بایگانی‌شده ایجاد یا جابه‌جا کرد.",
+  parent_has_active_children: "نمی‌توان حسابی را که زیرمجموعهٔ فعال دارد بایگانی کرد؛ ابتدا زیرمجموعه‌ها را بایگانی یا جابه‌جا کنید.",
+  ancestor_archived: "نمی‌توان این حساب را فعال کرد؛ یکی از حساب‌های والد در زنجیره هنوز بایگانی است. ابتدا حساب‌های بالاتر را فعال کنید.",
+  bad_request: "درخواست نامعتبر بود.",
   forbidden: "برای تغییر سرفصل حساب‌ها دسترسی «ویرایش سرفصل‌ها» لازم است.",
 };
 
@@ -83,6 +88,7 @@ interface AccountRow {
   parentCode: string | null;
   isActive: boolean;
   hasPostings: boolean;
+  hasDraftPostings: boolean;
   hasChildren: boolean;
   level: AccountLevel;
   normalBalance: NormalBalance;
@@ -194,11 +200,17 @@ export function ChartOfAccountsSection({
     if (!trimmedName) return setLocalError(errorLabels.name_required);
     if (accounts?.some((a) => a.code === normalizedCode)) return setLocalError(errorLabels.code_in_use);
 
+    // When a parent is selected the child's type is always inherited from it
+    // (issue #824 §2). The type picker is constrained client-side; the server
+    // enforces the same rule as the integrity boundary.
+    const resolvedParent = parentId ? accounts?.find((a) => a.id === parentId) : undefined;
+    const effectiveType: AccountType = resolvedParent ? resolvedParent.type : type;
+
     setSaving(true);
     try {
       const { ok, data } = await api<{ error?: string }>("/api/ledger/accounts", {
         method: "POST",
-        body: JSON.stringify({ code: normalizedCode, name: trimmedName, type, parentId: parentId || null, isContra }),
+        body: JSON.stringify({ code: normalizedCode, name: trimmedName, type: effectiveType, parentId: parentId || null, isContra }),
       });
       if (!ok) {
         setLocalError(accountError(data.error));
@@ -208,6 +220,7 @@ export function ChartOfAccountsSection({
       setName("");
       setParentId("");
       setIsContra(false);
+      setType("expense");
       setNotice(`حساب «${normalizedCode} — ${trimmedName}» اضافه شد.`);
       refresh();
     } catch {
@@ -258,11 +271,27 @@ export function ChartOfAccountsSection({
 
   const actionBusy = busy || saving || pendingId !== null;
 
-  // Only an account that can still take a child: a «تفصیلی» parent is refused
-  // server-side (`parent_too_deep`), so offering it is offering an error.
+  // Only an account that can still receive a new child: a «تفصیلی» parent is
+  // refused server-side (`parent_too_deep`) and an archived parent is refused
+  // too (`parent_archived`, issue #824 §3), so offering either one as a *new*
+  // parent in the add form would be offering an error. The edit panel may add
+  // the current (already-archived) parent separately so the existing value
+  // stays visible. The service enforces the same invariants as the hard
+  // boundary; this is just UX.
   const parentOptions = useMemo(
     () => (accounts ?? []).filter((a) => a.isActive && nextAccountLevel(a.level) !== null),
     [accounts],
+  );
+  // For editing, the current parent (if it has become archived since this
+  // account was placed under it) must remain visible so the picker shows the
+  // actual current value; otherwise a no-op save would look like the parent
+  // was cleared. Moving the account to it again is still refused server-side
+  // (`parent_archived`); moving away is allowed. A parent that isn't in
+  // `parentOptions` because it is archived is appended to the edit panel's
+  // option list with an "[بایگانی‌شده]" suffix rather than silently vanishing.
+  const currentParentForEdit = useMemo(
+    () => (editing?.parentId ? (accounts ?? []).find((a) => a.id === editing.parentId) ?? null : null),
+    [accounts, editing],
   );
 
   /**
@@ -357,11 +386,19 @@ export function ChartOfAccountsSection({
             <Field label="نام حساب">
               <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} placeholder="نام حساب" required />
             </Field>
-            <Field label="نوع حساب" hint={`ماهیت این حساب: ${NORMAL_BALANCE_LABELS[NORMAL_BALANCE_FOR_TYPE[type]]}`}>
+            <Field
+              label="نوع حساب"
+              hint={
+                parentId
+                  ? `از والد به ارث رسیده: ${TYPE_LABELS[parentOptions.find((a) => a.id === parentId)?.type ?? type]}`
+                  : `ماهیت این حساب: ${NORMAL_BALANCE_LABELS[NORMAL_BALANCE_FOR_TYPE[type]]}`
+              }
+            >
               <SearchableSelect
                 value={type}
                 onChange={(value) => setType(value as AccountType)}
                 ariaLabel="نوع حساب"
+                disabled={!!parentId}
                 options={(Object.keys(TYPE_LABELS) as AccountType[]).map((t) => ({ value: t, label: TYPE_LABELS[t] }))}
               />
             </Field>
@@ -373,19 +410,31 @@ export function ChartOfAccountsSection({
                       ACCOUNT_LEVEL_LABELS[
                         nextAccountLevel(parentOptions.find((a) => a.id === parentId)?.level ?? null) ?? "tafsili"
                       ]
-                    }`
+                    } — نوع حساب به‌طور خودکار از والد تعیین می‌شود.`
                   : "بدون والد، حساب در سطح «گروه» ساخته می‌شود."
               }
             >
               <SearchableSelect
                 value={parentId}
-                onChange={setParentId}
+                onChange={(value) => {
+                  setParentId(value);
+                  // When a parent is chosen, the child's type must match the
+                  // parent's branch (issue #824 §2) — so the picker locks to
+                  // that type automatically instead of letting the user pick a
+                  // mismatch that the server will reject. Clearing the parent
+                  // does not revert the type (no opinion either way), but it
+                  // does unlock the picker.
+                  if (value) {
+                    const parent = parentOptions.find((a) => a.id === value);
+                    if (parent) setType(parent.type);
+                  }
+                }}
                 ariaLabel="حساب والد"
                 options={[
                   { value: "", label: "بدون والد (سطح گروه)" },
                   ...parentOptions.map((a) => ({
                     value: a.id,
-                    label: `${a.code} — ${a.name} (${ACCOUNT_LEVEL_LABELS[a.level]})`,
+                    label: `${a.code} — ${a.name} (${ACCOUNT_LEVEL_LABELS[a.level]}، ${TYPE_LABELS[a.type]})`,
                   })),
                 ]}
               />
@@ -413,7 +462,6 @@ export function ChartOfAccountsSection({
       )}
 
       <SectionCard
-        title="سرفصل حساب‌ها"
         description={
           filtering
             ? `${formatPersianNumber(matchCount)} حساب از ${formatPersianNumber(accounts.length)} حساب با این فیلتر پیدا شد.`
@@ -530,6 +578,7 @@ export function ChartOfAccountsSection({
                           onHistory={() => setHistoryAccount({ id: a.id, code: a.code, name: a.name })}
                           onToggle={() => void toggleActive(a)}
                           onRemove={() => remove(a)}
+                          onBlockedRemove={setNotice}
                         />
                       </Td>
                     </DataTableRow>
@@ -586,6 +635,7 @@ export function ChartOfAccountsSection({
                         onHistory={() => setHistoryAccount({ id: a.id, code: a.code, name: a.name })}
                         onToggle={() => void toggleActive(a)}
                         onRemove={() => remove(a)}
+                        onBlockedRemove={setNotice}
                       />
                     </div>
                   </article>
@@ -610,12 +660,23 @@ export function ChartOfAccountsSection({
           account={editing}
           // A parent that is the account itself, or anything below it, is the
           // one move the server always rejects (`parent_cycle`) — and the list
-          // used to offer every one of them.
-          parentOptions={parentOptions.filter(
-            (candidate) =>
-              candidate.id !== editing.id && !collectDescendantIds(accounts, editing.id).has(candidate.id),
-          )}
+          // used to offer every one of them. If the current parent is archived
+          // (now filtered out of parentOptions) it is still included so the
+          // picker displays the existing value; moving to it is still blocked
+          // server-side if it's archived, but selecting no-op is fine.
+          parentOptions={(() => {
+            const cycleSafe = parentOptions.filter(
+              (candidate) =>
+                candidate.id !== editing.id &&
+                !collectDescendantIds(accounts ?? [], editing.id).has(candidate.id),
+            );
+            if (currentParentForEdit && !cycleSafe.some((c) => c.id === currentParentForEdit.id)) {
+              return [...cycleSafe, currentParentForEdit];
+            }
+            return cycleSafe;
+          })()}
           busy={busy}
+          canEdit={canEdit}
           onClose={() => setEditing(null)}
           onSaved={(message) => {
             setEditing(null);
@@ -653,11 +714,16 @@ export function ChartOfAccountsSection({
 /**
  * One account's actions.
  *
- * Read-only actions (گردش حساب، تاریخچه) are always offered; the writes are
- * drawn only for a member who holds `accounts.edit`. «حذف» additionally needs
- * an account with nothing posted to it and no children — the same rule the
- * service enforces — and a system account is never deletable or archivable, so
- * the button says why instead of disappearing.
+ * Read-only actions (گردش حساب) are always offered. تاریخچه (audit) is offered
+ * only to editors to match the `accounts.edit` gate on the history API. Write
+ * actions (ویرایش، بایگانی/فعال کردن، حذف) are drawn only for a member who
+ * holds `accounts.edit`. «حذف» additionally needs an account with no real
+ * postings, no draft postings, no children, and not a well-known system account
+ * — the same four guards the service enforces; when not deletable the control
+ * is shown as a disabled explanatory chip (with the reason inline and on hover)
+ * rather than hidden, so keyboard and touch users can discover why without
+ * having to guess through an error dialog. System/well-known accounts are
+ * never archivable.
  */
 function AccountActions({
   account,
@@ -670,6 +736,7 @@ function AccountActions({
   onHistory,
   onToggle,
   onRemove,
+  onBlockedRemove,
 }: {
   account: AccountRow;
   canEdit: boolean;
@@ -681,9 +748,28 @@ function AccountActions({
   onHistory: () => void;
   onToggle: () => void;
   onRemove: () => void;
+  /** Report *why* deletion is unavailable when the user tries anyway. */
+  onBlockedRemove: (reason: string) => void;
 }) {
+  // One id per row: `aria-describedby` needs a stable target for the inline
+  // reason text, and rows are rendered many times on one screen.
+  const blockedReasonId = useId();
   const isWellKnown = WELL_KNOWN_CODE_SET.has(account.code);
-  const deletable = !account.hasPostings && !account.hasChildren && !isWellKnown;
+  // Mirror the service's delete guards exactly (issue #824 §4): real postings,
+  // draft postings, children, and well-known codes each block deletion. The
+  // UI says why rather than letting the user discover it through a failed
+  // confirmation dialog.
+  const deletable =
+    !account.hasPostings && !account.hasDraftPostings && !account.hasChildren && !isWellKnown;
+  const deleteBlockedReason = isWellKnown
+    ? "حساب سیستمی قابل حذف نیست"
+    : account.hasPostings
+    ? "دارای سند ثبت‌شده"
+    : account.hasDraftPostings
+    ? "در پیش‌نویس استفاده شده"
+    : account.hasChildren
+    ? "دارای زیرمجموعه"
+    : null;
 
   return (
     <div className={`flex flex-wrap gap-2 ${stacked ? "" : "justify-start"}`}>
@@ -705,19 +791,56 @@ function AccountActions({
           {pending ? "در حال اعمال…" : account.isActive ? "بایگانی" : "فعال کردن"}
         </SecondaryButton>
       ) : null}
-      {canEdit && deletable ? (
-        <Button type="button" variant="destructive" onClick={onRemove} disabled={busy} className="px-4">
-          حذف
-        </Button>
+      {canEdit ? (
+        deletable ? (
+          <Button type="button" variant="destructive" onClick={onRemove} disabled={busy} className="px-4">
+            حذف
+          </Button>
+        ) : (
+          /*
+           * The account cannot be deleted, and the control says so where the
+           * user is looking rather than letting them discover it through a
+           * failed dialog (issue #824 §4 / review item 5).
+           *
+           * It stays a real <button> — `aria-disabled` rather than `disabled`
+           * — so it is reachable by Tab and announced with its reason through
+           * `aria-describedby`. A `disabled` control is skipped by the tab
+           * order, which is exactly how the reason used to become invisible to
+           * keyboard and screen-reader users. Activating it reports the reason
+           * in the panel's own notice area, so a tap gives feedback on touch
+           * devices too (where a title/tooltip never appears).
+           */
+          <button
+            type="button"
+            aria-disabled="true"
+            aria-describedby={blockedReasonId}
+            title={deleteBlockedReason ?? ""}
+            onClick={() => onBlockedRemove(deleteBlockedReason ?? "")}
+            className="inline-flex min-h-9 cursor-not-allowed items-center gap-1 rounded-xl border border-border/80 px-3 py-2 text-xs font-medium text-muted-foreground"
+          >
+            <span aria-hidden="true" className="select-none">⛔</span>
+            <span>حذف</span>
+          </button>
+        )
+      ) : null}
+      {canEdit && !deletable && deleteBlockedReason ? (
+        // Visible text, not only a tooltip: this is what a touch user reads,
+        // and it is the node `aria-describedby` points at.
+        <span
+          id={blockedReasonId}
+          className="inline-flex items-center text-[11px] text-muted-foreground"
+        >
+          {deleteBlockedReason}
+        </span>
       ) : null}
     </div>
   );
 }
 
 /**
- * Rename an account, move it under another, or both.
+ * Rename an account, move it under another, or flip its contra flag.
  *
- * One PATCH covers both edits (applied in a single transaction by
+ * One PATCH covers every requested change (applied in a single transaction by
  * `updateAccount`), and only the fields that actually changed are sent — the
  * route treats a present `parentId` as an instruction, so sending an unchanged
  * one would write an audit row saying it moved when it did not.
@@ -726,29 +849,36 @@ function AccountActions({
  * accounts up *by code* (`WELL_KNOWN_CODES`), and the account's type decides
  * which side of the statements it lands on. Neither is a rename — changing
  * either is a new account plus a reclassifying entry, which is a different
- * (and audited) operation.
+ * (and audited) operation. `isContra` *is* editable (issue #824 §6): a mistaken
+ * contra flag does not change postings, only how the balance is presented.
  */
 function EditAccountPanel({
   account,
   parentOptions,
   busy,
+  canEdit,
   onClose,
   onSaved,
 }: {
   account: AccountRow;
   parentOptions: AccountRow[];
   busy: boolean;
+  canEdit: boolean;
   onClose: () => void;
   onSaved: (message: string) => void;
 }) {
   const [name, setName] = useState(account.name);
   const [parentId, setParentId] = useState(account.parentId ?? "");
+  const [isContra, setIsContra] = useState(account.isContra);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
+  const isWellKnown = WELL_KNOWN_CODE_SET.has(account.code);
+
   const nameChanged = name.trim() !== account.name;
   const parentChanged = (parentId || null) !== (account.parentId ?? null);
-  const dirty = nameChanged || parentChanged;
+  const contraChanged = isContra !== account.isContra;
+  const dirty = nameChanged || parentChanged || contraChanged;
   const canSave = !!name.trim() && dirty;
 
   // Closing a form with edits in it silently discards them, so the way out
@@ -761,17 +891,19 @@ function EditAccountPanel({
     onClose();
   }
 
+  const selectedParent = parentOptions.find((a) => a.id === parentId);
   const nextLevel = parentId
-    ? nextAccountLevel(parentOptions.find((a) => a.id === parentId)?.level ?? null)
+    ? nextAccountLevel(selectedParent?.level ?? null)
     : "group";
 
   async function save() {
     if (!canSave) return;
     setSaving(true);
     setError("");
-    const body: { name?: string; parentId?: string | null } = {};
+    const body: { name?: string; parentId?: string | null; isContra?: boolean } = {};
     if (nameChanged) body.name = name.trim();
     if (parentChanged) body.parentId = parentId || null;
+    if (contraChanged) body.isContra = isContra;
     try {
       const { ok, data } = await api<{ error?: string }>(`/api/ledger/accounts/${account.id}`, {
         method: "PATCH",
@@ -801,13 +933,13 @@ function EditAccountPanel({
             <span dir="ltr">{account.code}</span> — {account.name}
           </h3>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            کد و نوع حساب قابل تغییر نیستند؛ سندهای خودکار حساب‌ها را با کد پیدا می‌کنند.
+            کد و نوع حساب قابل تغییر نیستند؛ سندهای خودکار حساب‌ها را با کد پیدا می‌کنند. نام، حساب والد و وضعیت کاهنده قابل ویرایش هستند.
           </p>
         </header>
 
         {error ? <ErrorBox>{error}</ErrorBox> : null}
 
-        <div className="space-y-1">
+        <div className="space-y-3">
           <Field label="نام حساب">
             <input
               className={inputClass}
@@ -815,6 +947,7 @@ function EditAccountPanel({
               onChange={(e) => setName(e.target.value)}
               placeholder="نام حساب"
               autoFocus
+              disabled={!canEdit}
             />
           </Field>
           <Field
@@ -829,24 +962,41 @@ function EditAccountPanel({
               value={parentId}
               onChange={setParentId}
               ariaLabel="حساب والد"
+              disabled={!canEdit}
               options={[
                 { value: "", label: "بدون والد (سطح گروه)" },
-                ...parentOptions.map((a) => ({ value: a.id, label: `${a.code} — ${a.name} (${ACCOUNT_LEVEL_LABELS[a.level]})` })),
+                ...parentOptions.map((a) => ({
+                  value: a.id,
+                  label: `${a.code} — ${a.name} (${ACCOUNT_LEVEL_LABELS[a.level]})${!a.isActive ? " [بایگانی‌شده]" : ""}`,
+                })),
               ]}
             />
             {account.hasChildren ? (
               <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">
-                زیرمجموعه‌های این حساب هم همراه آن جابه‌جا می‌شوند.
+                زیرمجموعه‌های این حساب هم همراه آن جابه‌جا می‌شوند. جابه‌جایی زیرشاخه‌ها را نیز از نظر نوع حساب اعتبارسنجی می‌کند.
               </span>
             ) : null}
           </Field>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              className="size-4 accent-primary"
+              checked={isContra}
+              onChange={(e) => setIsContra(e.target.checked)}
+              disabled={!canEdit || isWellKnown}
+            />
+            <span className="text-sm font-medium">
+              حساب کاهنده
+              {isWellKnown ? " (برای حساب‌های سیستمی تغییرپذیر نیست)" : ""}
+            </span>
+          </label>
         </div>
 
         <div className="mt-5 grid grid-cols-2 gap-3">
           <SecondaryButton onClick={requestClose} disabled={saving || busy}>
             انصراف
           </SecondaryButton>
-          <PrimaryButton type="button" onClick={() => void save()} disabled={saving || busy || !canSave}>
+          <PrimaryButton type="button" onClick={() => void save()} disabled={saving || busy || !canSave || !canEdit}>
             {saving ? "در حال ذخیره…" : "ذخیره تغییرات"}
           </PrimaryButton>
         </div>

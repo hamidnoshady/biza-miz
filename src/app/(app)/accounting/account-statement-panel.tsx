@@ -2,7 +2,7 @@
 
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
@@ -56,6 +56,10 @@ export function AccountStatementPanel({
   const [dateTo, setDateTo] = useState("");
   const [statement, setStatement] = useState<AccountStatement | null>(null);
   const [error, setError] = useState("");
+  // Monotonic request token: increments for every effect run so a late response
+  // from a superseded request cannot overwrite newer state even if AbortController
+  // somehow fails to cancel the body stream (review item 3).
+  const requestTokenRef = useRef(0);
 
   // Both pickers hand back ISO YYYY-MM-DD, so this comparison is chronological.
   const rangeInvalid = dateFrom !== "" && dateTo !== "" && dateFrom > dateTo;
@@ -72,12 +76,31 @@ export function AccountStatementPanel({
     if (dateFrom) params.set("dateFrom", dateFrom);
     if (dateTo) params.set("dateTo", dateTo);
     setError("");
-    void api<AccountStatement>(`/api/ledger/accounts/${accountId}/statement?${params}`)
-      .then(({ ok, data }) => {
-        if (ok) setStatement(data);
-        else setError("بارگذاری گردش این حساب ناموفق بود.");
-      })
-      .catch(() => setError("ارتباط با سرور برقرار نشد؛ دوباره تلاش کنید."));
+
+    // Stale-response guard (issue #824 §12 + review item 3):
+    //
+    //   * Monotonic request token guards against the A-then-B-then-A-out-of-order
+    //     race even if abort somehow fails; the signal is the primary guard.
+    //   * AbortController cancels the previous fetch when the effect re-runs or
+    //     the panel unmounts.
+    //   * The `api` helper now reports `aborted: true` if abort fires between
+    //     headers and body or during JSON parsing (it previously swallowed that
+    //     into {} and returned ok).
+    //   * We also check `signal.aborted` directly right before every state write,
+    //     so even a surprise path that forgot to propagate aborted cannot
+    //     install stale data.
+    const controller = new AbortController();
+    const token = ++requestTokenRef.current;
+    void api<AccountStatement>(`/api/ledger/accounts/${accountId}/statement?${params}`, {
+      signal: controller.signal,
+    }).then(({ ok, data, aborted }) => {
+      if (controller.signal.aborted || aborted || token !== requestTokenRef.current) return;
+      if (ok) setStatement(data);
+      else setError("بارگذاری گردش این حساب ناموفق بود.");
+    });
+    return () => {
+      controller.abort();
+    };
   }, [accountId, dateFrom, dateTo, rangeInvalid]);
 
   return (

@@ -163,17 +163,31 @@ export function AccountingManager({
     : [];
 
   const [loadFailed, setLoadFailed] = useState(false);
+  /**
+   * Sections that depend on the shared active-account list. Only manual entry
+   * and expense flows need the picker list; everything else — most importantly
+   * `/accounting/chart-of-accounts`, which mounts its own `?all=1` request —
+   * renders independently (issue #824 §7). A failed active-account fetch must
+   * not block the chart editor from loading (and retrying) its own data, and
+   * the chart screen must not pay the waterfall cost of a request it does not
+   * use.
+   */
+  const needsAccounts = section === "manual" || section === "expenses";
+
   const loadAccounts = useCallback(() => {
     setLoadFailed(false);
     api<{ accounts: AccountRow[] }>("/api/ledger/accounts").then(({ ok, data }) => {
       if (ok) setAccounts(data.accounts);
-      // Without this the whole workspace sat on a skeleton for ever whenever
-      // the chart of accounts failed to load — indistinguishable from a slow
-      // network, and with no way to retry.
       else setLoadFailed(true);
     });
   }, []);
-  useEffect(loadAccounts, [loadAccounts]);
+  useEffect(() => {
+    // Only fetch the active-account list when a section that actually needs it
+    // is mounted. The chart-of-accounts screen owns its own fetch and must not
+    // trigger or wait on this one.
+    if (!needsAccounts) return;
+    loadAccounts();
+  }, [loadAccounts, needsAccounts]);
 
   async function run(fn: () => Promise<{ ok: boolean; data: { error?: string } }>) {
     setBusy(true);
@@ -198,20 +212,24 @@ export function AccountingManager({
     }
   }
 
-  if (!accounts) {
-    if (loadFailed) {
-      return (
-        <div className="space-y-3">
-          <ErrorBox>بارگذاری سرفصل حساب‌ها ناموفق بود؛ بخش‌های حسابداری بدون آن باز نمی‌شوند.</ErrorBox>
-          <div className="max-w-xs">
-            <SecondaryButton onClick={loadAccounts}>تلاش دوباره</SecondaryButton>
+  // Only sections that actually need the shared active-account list wait on it.
+  // Other sections (chart-of-accounts, settings, dashboard, reports, directory,
+  // AR/AP, cheques, reconciliation, …) render immediately and own their own
+  // data requests.
+  if (needsAccounts) {
+    if (!accounts) {
+      if (loadFailed) {
+        return (
+          <div className="space-y-3">
+            <ErrorBox>بارگذاری فهرست حساب‌های فعال ناموفق بود؛ این بخش بدون آن باز نمی‌شود.</ErrorBox>
+            <div className="max-w-xs">
+              <SecondaryButton onClick={loadAccounts}>تلاش دوباره</SecondaryButton>
+            </div>
           </div>
-        </div>
-      );
+        );
+      }
+      return <SectionCardSkeleton rows={4} />;
     }
-    return (
-      <SectionCardSkeleton rows={4} />
-    );
   }
 
   const body = (
@@ -221,7 +239,7 @@ export function AccountingManager({
           {section === "entries" ? <EntriesSection refreshKey={refreshKey} busy={busy} run={run} /> : null}
           {section === "manual" ? (
             <ManualEntrySection
-              accounts={accounts}
+              accounts={accounts ?? []}
               busy={busy}
               run={run}
               refreshKey={refreshKey}
@@ -229,7 +247,7 @@ export function AccountingManager({
               currentUserId={currentUserId}
             />
           ) : null}
-          {section === "expenses" ? <ExpenseSection accounts={accounts} busy={busy} run={run} refreshKey={refreshKey} /> : null}
+          {section === "expenses" ? <ExpenseSection accounts={accounts ?? []} busy={busy} run={run} refreshKey={refreshKey} /> : null}
           {section === "fiscal-periods" ? <FiscalPeriodsSection /> : null}
           {section === "directory" ? (
             <PartiesSection
@@ -381,6 +399,10 @@ function errorMessage(code: string | undefined): string {
     account_has_postings: "این حساب سند خورده و قابل حذف نیست؛ می‌توانید آن را غیرفعال کنید.",
     account_has_draft_postings: "این حساب در یک پیش‌نویس استفاده شده و قابل حذف نیست.",
     account_has_children: "ابتدا زیرمجموعه‌های این حساب را جابه‌جا یا حذف کنید.",
+    parent_has_active_children: "نمی‌توان حسابی را که زیرمجموعهٔ فعال دارد بایگانی کرد؛ ابتدا زیرمجموعه‌ها را بایگانی یا جابه‌جا کنید.",
+    ancestor_archived: "نمی‌توان این حساب را فعال کرد؛ یکی از حساب‌های والد در زنجیره هنوز بایگانی است.",
+    parent_type_mismatch: "نوع حساب زیرمجموعه باید با نوع شاخهٔ والد یکسان باشد.",
+    parent_archived: "نمی‌توان حساب را زیر یک حساب بایگانی‌شده ایجاد یا جابه‌جا کرد.",
     // Fiscal years and periods (fiscal-periods-service.ts)
     invalid_year: "سال شمسی نامعتبر است.",
     fiscal_year_exists: "این سال مالی قبلاً تعریف شده است.",

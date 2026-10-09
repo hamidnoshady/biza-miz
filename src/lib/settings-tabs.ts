@@ -122,7 +122,7 @@ export const SETTINGS_TABS: SettingsTab[] = [
   {
     key: "accounts",
     label: "حسابداری",
-    description: "سرفصل‌ها، حساب‌های سیستمی، گردش حساب و تاریخچهٔ تغییرات",
+    description: "پیوند به صفحهٔ مدیریت سرفصل حساب‌ها در برنامهٔ حسابداری",
     requiredAnyPermission: [PERMISSIONS.accountsEdit],
   },
   {

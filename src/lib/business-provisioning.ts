@@ -27,6 +27,7 @@ import { SETTING_KEYS, markSetupComplete } from "./settings";
 import { coaTemplateForIndustry, nextAccountLevel, type AccountLevel, type TemplateAccount } from "./coa-template";
 import { ENABLED_INDUSTRIES, INDUSTRIES, type Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
+import { lockChartOfAccounts } from "./accounts-service";
 import { seedPaymentMethods } from "./payment-methods-service";
 import { isMobilePhone, phoneE164 } from "./phone";
 import { generateSecret, generateURI } from "otplib";
@@ -721,6 +722,13 @@ export async function seedChartOfAccounts(
   businessId: string,
   industry: Industry,
 ): Promise<string[]> {
+  // A hierarchy writer, so it takes the canonical chart-of-accounts lock
+  // (issue #824 review item 6). `changeBusinessIndustry` re-runs this against
+  // a business that is already live and being used, where a concurrent edit is
+  // entirely possible; in the provisioning case the lock is uncontended and
+  // costs one statement. There is deliberately no "we might be alone" branch —
+  // one rule for every writer is easier to keep true than a list of exceptions.
+  await lockChartOfAccounts(client, businessId);
   const { rows: existing } = await client.query<{ id: string; code: string; level: AccountLevel }>(
     "SELECT id, code, level FROM accounts WHERE business_id = $1",
     [businessId],

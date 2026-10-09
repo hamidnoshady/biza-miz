@@ -28,17 +28,36 @@ export async function api<T = Record<string, unknown>>(
   url: string,
   init?: RequestInit,
 ): Promise<{ ok: boolean; status: number; data: T; aborted: boolean }> {
+  // Helper to detect abort at any point: AbortController can fire between
+  // `await fetch(...)` resolving and our next `await res.json()`, or even
+  // mid-stream during JSON parsing, in which case the json() catch block would
+  // otherwise surface as a spurious ok:true/empty-body (issue #824 review
+  // item 3). Check the signal explicitly on every exit path.
+  const isAborted = () => init?.signal?.aborted === true;
   try {
     const res = await fetch(url, {
       headers: init?.body instanceof FormData ? undefined : { "Content-Type": "application/json" },
       ...init,
     });
+    // Abort can fire between headers arriving and body consumption.
+    if (isAborted()) {
+      return { ok: false, status: 0, data: {} as T, aborted: true };
+    }
     let data: T;
     try {
       data = (await res.json()) as T;
-    } catch {
+    } catch (jsonErr) {
+      // If the body stream was aborted mid-read, surface that rather than
+      // swallowing into {} — an AbortError during body consumption is a
+      // deliberate cancellation, not a malformed response.
+      if (isAborted() || (jsonErr instanceof DOMException && jsonErr.name === "AbortError")) {
+        return { ok: false, status: 0, data: {} as T, aborted: true };
+      }
       // A 204, an HTML error page from a proxy, or a body cut off mid-flight.
       data = {} as T;
+    }
+    if (isAborted()) {
+      return { ok: false, status: 0, data: {} as T, aborted: true };
     }
     // Section 12 (professional error handling) follow-up: a 5xx is the
     // server itself failing, not a validation rejection — worth capturing in
@@ -62,8 +81,7 @@ export async function api<T = Record<string, unknown>>(
     // `network_error` would put «ارتباط با سرور برقرار نشد» on screen every time
     // a newer search superseded an older one, which is the normal path, not a
     // failure. Callers that pass `init.signal` check `aborted` and return.
-    const aborted =
-      init?.signal?.aborted === true || (err instanceof DOMException && err.name === "AbortError");
+    const aborted = isAborted() || (err instanceof DOMException && err.name === "AbortError");
     if (!aborted) {
       recordApiFailure({ method: init?.method ?? "GET", url, status: 0, code: "network_error" });
     }

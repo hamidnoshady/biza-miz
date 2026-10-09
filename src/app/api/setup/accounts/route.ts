@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPool, query } from "@/lib/db";
+import { lockChartOfAccounts } from "@/lib/accounts-service";
 import { markStepDone } from "@/lib/settings";
 import { requireManager } from "@/lib/setup-state";
 import {
@@ -61,6 +62,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    // Same wholesale-replacement shape as the settings route, so the same
+    // canonical chart-of-accounts lock applies (issue #824 review item 6).
+    await lockChartOfAccounts(client, session.businessId);
 
     const { rows: used } = await client.query(
       `SELECT 1 FROM journal_lines jl

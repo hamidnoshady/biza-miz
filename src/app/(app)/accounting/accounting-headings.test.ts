@@ -12,6 +12,15 @@ describe("accountingSectionHeading", () => {
     expect(accountingSectionHeading("manual").title).toBe("ثبت سند دستی");
     expect(accountingSectionHeading("settings").title).toBe("تنظیمات حسابداری");
   });
+
+  it("gives the canonical chart of accounts its own page header (issue #824 §13)", () => {
+    const heading = accountingSectionHeading("chart-of-accounts");
+    expect(heading.title).toBe("سرفصل حساب‌ها");
+    // The header is owned by the route, so the section card inside it must not
+    // repeat the same title.
+    expect(heading.description.length).toBeGreaterThan(0);
+    expect(heading.description).toMatch(/حساب/);
+  });
 });
 
 describe("accountingAssistantContext", () => {

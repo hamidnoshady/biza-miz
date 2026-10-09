@@ -30,6 +30,13 @@
  *    rejected move) leaves the screen showing an error next to a change that
  *    actually happened. `updateAccount` applies all three, with their audit
  *    rows, atomically.
+ *  - **Hierarchy writes are serialized per business.** Any operation that
+ *    mutates hierarchy state (create with parent, reparent, delete, archive
+ *    when descendant invariants are involved) takes an advisory xact lock on
+ *    `chart-of-accounts:<businessId>` before reading or writing. Without
+ *    this, two concurrent opposite reparents could each pass assertNoCycle
+ *    and commit a real cycle (issue #824 §1). Validation always happens
+ *    after the lock is held.
  */
 import { query, getPool } from "./db";
 import { isUuid } from "./uuid";
@@ -86,13 +93,27 @@ export interface AccountRow {
   parentCode: string | null;
   isActive: boolean;
   hasPostings: boolean;
+  hasDraftPostings: boolean;
   hasChildren: boolean;
   level: AccountLevel;
   normalBalance: NormalBalance;
   isContra: boolean;
 }
 
-export async function listAccounts(businessId: string): Promise<AccountRow[]> {
+/**
+ * The management metadata for one account — real postings, draft postings,
+ * children. `listAccounts` exposes them all so the UI can decide eligibility
+ * with the same rules the service enforces server-side; nothing the UI does
+ * is the integrity boundary, but offering a button the backend is guaranteed
+ * to reject just produces a confusing error dialog.
+ */
+export async function listAccounts(businessId: string, options?: { all?: boolean }): Promise<AccountRow[]> {
+  // Preserve legacy semantics: `listAccounts()` (no options) returns every
+  // account regardless of active/archived state, matching the historical
+  // behaviour callers (e.g. Holoo export, the chart ?all=1 path) rely on.
+  // Passing `{ all: false }` explicitly filters to active accounts only for
+  // callers that want the narrow list.
+  const onlyActive = options?.all === false;
   const { rows } = await query<{
     id: string;
     code: string;
@@ -102,6 +123,7 @@ export async function listAccounts(businessId: string): Promise<AccountRow[]> {
     parent_code: string | null;
     is_active: boolean;
     has_postings: boolean;
+    has_draft_postings: boolean;
     has_children: boolean;
     level: AccountLevel;
     normal_balance: NormalBalance;
@@ -109,10 +131,12 @@ export async function listAccounts(businessId: string): Promise<AccountRow[]> {
   }>(
     `SELECT a.id, a.code, a.name, a.type, a.parent_id, p.code AS parent_code, a.is_active,
             EXISTS (SELECT 1 FROM journal_lines jl WHERE jl.account_id = a.id) AS has_postings,
+            EXISTS (SELECT 1 FROM journal_entry_draft_lines dl WHERE dl.account_id = a.id) AS has_draft_postings,
             EXISTS (SELECT 1 FROM accounts c WHERE c.parent_id = a.id) AS has_children,
             a.level, a.normal_balance, a.is_contra
        FROM accounts a LEFT JOIN accounts p ON p.id = a.parent_id
       WHERE a.business_id = $1
+        ${onlyActive ? "AND a.is_active" : ""}
       ORDER BY a.code`,
     [businessId],
   );
@@ -125,6 +149,7 @@ export async function listAccounts(businessId: string): Promise<AccountRow[]> {
     parentCode: r.parent_code,
     isActive: r.is_active,
     hasPostings: r.has_postings,
+    hasDraftPostings: r.has_draft_postings,
     hasChildren: r.has_children,
     level: r.level,
     normalBalance: r.normal_balance,
@@ -136,9 +161,11 @@ interface AccountLookup extends Record<string, unknown> {
   id: string;
   code: string;
   name: string;
+  type: AccountType;
   parent_id: string | null;
   level: AccountLevel;
   is_active: boolean;
+  is_contra: boolean;
 }
 
 /**
@@ -151,7 +178,7 @@ async function findAccount(
   client?: PoolClient,
 ): Promise<AccountLookup | null> {
   if (!isUuid(id)) return null;
-  const sql = `SELECT id, code, name, parent_id, level, is_active FROM accounts WHERE business_id = $1 AND id = $2`;
+  const sql = `SELECT id, code, name, type, parent_id, level, is_active, is_contra FROM accounts WHERE business_id = $1 AND id = $2`;
   const params = [businessId, id];
   const { rows } = client
     ? await client.query<AccountLookup>(sql, params)
@@ -170,12 +197,25 @@ async function findAccount(
  * Written on the *same* client as the change it describes, so the log and the
  * state it records commit or roll back together — an audited system whose
  * audit row can be the thing that fails is not audited.
+ *
+ * Creation (account.created), hard deletion (account.deleted) and contra
+ * changes (account.contra_changed) are logged as of issue #824, alongside the
+ * earlier rename/reparent/archive/reactivate actions. Deletion snapshots the
+ * identifying fields so the row remains understandable after the account row
+ * is gone.
  */
 async function recordAccountAudit(
   client: PoolClient,
   businessId: string,
   actorId: string | null,
-  action: "account.renamed" | "account.reparented" | "account.archived" | "account.reactivated",
+  action:
+    | "account.created"
+    | "account.renamed"
+    | "account.reparented"
+    | "account.archived"
+    | "account.reactivated"
+    | "account.contra_changed"
+    | "account.deleted",
   accountId: string,
   payload?: Record<string, unknown>,
 ): Promise<void> {
@@ -184,6 +224,34 @@ async function recordAccountAudit(
      VALUES ($1, $2, $3, 'account', $4, $5)`,
     [businessId, actorId, action, accountId, payload ? JSON.stringify(payload) : null],
   );
+}
+
+/**
+ * Take a transaction-scoped advisory lock that serialises every hierarchy
+ * mutation for one business. Issue #824 §1/§9: without a lock, two concurrent
+ * opposite reparents could each read the pre-mutation state, both pass
+ * assertNoCycle, update different rows and commit a real cycle — and many
+ * other hierarchy-sensitive operations (derive level from parent, cascade
+ * descendant levels, check archived-parent invariants) have analogous races.
+ *
+ * Using pg_advisory_xact_lock means the lock releases automatically on
+ * COMMIT/ROLLBACK, so there is no leaked-lock path. Hashtextextended spreads
+ * the keyspace over the 64-bit advisory namespace the same way other parts
+ * of the codebase that need per-tenant serialization do.
+ *
+ * Exported because this is the *one* boundary for chart-of-accounts
+ * hierarchy writes (review item 6). Any other code path that inserts or
+ * reparents accounts must take the same lock — the canonical editor, the
+ * Holoo account import, and the device-pairing restore all do. The two
+ * provisioning paths (`seedChartOfAccounts`) take it too, even though a
+ * business being created has no concurrent editor, so that the rule is
+ * "every writer locks" rather than "every writer locks except the ones we
+ * believed were alone".
+ */
+export async function lockChartOfAccounts(client: PoolClient, businessId: string): Promise<void> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+    `chart-of-accounts:${businessId}`,
+  ]);
 }
 
 /** Run `fn` inside one transaction, rolling back on any failure. */
@@ -207,6 +275,8 @@ async function inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise
  * (already-updated) parent's — the cascade a reparent needs whenever the
  * moved account's own level changes. Throws `hierarchy_too_deep` if any
  * descendant would need to sit below تفصیلی, the deepest standard tier.
+ *
+ * Must be called while the hierarchy lock is held (see `lockChartOfAccounts`).
  */
 async function cascadeDescendantLevels(
   client: PoolClient,
@@ -260,6 +330,127 @@ async function assertNoCycle(
   }
 }
 
+/**
+ * Fetch every descendant of `rootId` (root included), using UNION with an
+ * array-accumulated visited set so a pre-existing cycle in the data cannot
+ * cause the recursive CTE to loop infinitely. PG has no native CYCLE clause
+ * in older versions, so we guard manually.
+ *
+ * Returns {id, parent_id, is_active, type} so callers can use the result for
+ * type checks, active-status checks and cascade rules without re-querying.
+ */
+async function fetchDescendants(
+  client: PoolClient,
+  businessId: string,
+  rootId: string,
+): Promise<{ id: string; parent_id: string | null; is_active: boolean; type: AccountType }[]> {
+  // Walk in application code with a seen-set so corrupt historical cycles
+  // terminate deterministically (we must not loop, but we also must not
+  // mutate historical data to "fix" cycles — the tree UI already tolerates
+  // them; our job here is to not crash when validating).
+  const out: { id: string; parent_id: string | null; is_active: boolean; type: AccountType }[] = [];
+  const seen = new Set<string>([rootId]);
+  // Start with direct children of rootId (root itself is excluded from the
+  // "descendant" set — callers add it separately when needed).
+  let frontier: string[] = [];
+  const { rows: direct } = await client.query<{ id: string; parent_id: string | null; is_active: boolean; type: AccountType }>(
+    `SELECT id, parent_id, is_active, type FROM accounts WHERE business_id = $1 AND parent_id = $2`,
+    [businessId, rootId],
+  );
+  for (const r of direct) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    out.push(r);
+    frontier.push(r.id);
+  }
+  while (frontier.length > 0) {
+    const next: string[] = [];
+    for (const nodeId of frontier) {
+      const { rows } = await client.query<{ id: string; parent_id: string | null; is_active: boolean; type: AccountType }>(
+        `SELECT id, parent_id, is_active, type FROM accounts WHERE business_id = $1 AND parent_id = $2`,
+        [businessId, nodeId],
+      );
+      for (const r of rows) {
+        if (seen.has(r.id)) continue;
+        seen.add(r.id);
+        out.push(r);
+        next.push(r.id);
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+
+/**
+ * Fetch the type of every descendant of `rootId` (root included). Used to
+ * enforce the type-consistency rule: a subtree can only be reparented under
+ * a parent whose accounting type matches its own, because the chart groups
+ * accounts by asset/liability/equity/revenue/expense semantics.
+ */
+async function fetchSubtreeTypes(
+  client: PoolClient,
+  businessId: string,
+  rootId: string,
+): Promise<{ id: string; type: AccountType }[]> {
+  const root = await client.query<{ id: string; type: AccountType }>(
+    `SELECT id, type FROM accounts WHERE business_id = $1 AND id = $2`,
+    [businessId, rootId],
+  );
+  const rootRow = root.rows[0];
+  if (!rootRow) return [];
+  const descendants = await fetchDescendants(client, businessId, rootId);
+  return [{ id: rootRow.id, type: rootRow.type }, ...descendants.map((d) => ({ id: d.id, type: d.type }))];
+}
+
+/**
+ * Walk the ancestor chain of `accountId` upward and return the first ancestor
+ * that is archived, or null if every ancestor is active. Used on restore
+ * (issue #824 review item 1): restoring a child under an archived ancestor
+ * would resurrect "archived ancestor → active descendant", the mirror
+ * invariant of the archive-with-active-child guard.
+ */
+async function findArchivedAncestor(
+  client: PoolClient,
+  businessId: string,
+  accountId: string,
+  effectiveParentId: string | null,
+): Promise<{ id: string; code: string } | null> {
+  let current: string | null = effectiveParentId;
+  const seen = new Set<string>();
+  while (current) {
+    if (seen.has(current)) break; // cycle guard
+    seen.add(current);
+    const { rows } = await client.query<{ id: string; code: string; parent_id: string | null; is_active: boolean }>(
+      `SELECT id, code, parent_id, is_active FROM accounts WHERE business_id = $1 AND id = $2`,
+      [businessId, current],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    if (!row.is_active) return { id: row.id, code: row.code };
+    current = row.parent_id;
+  }
+  return null;
+}
+
+/**
+ * Does an active descendant exist under `rootId`? Used when archiving: we
+ * disallow archiving a parent while any active child/grandchild/... remains
+ * beneath it, regardless of whether an intermediate node in that chain is
+ * itself already archived (issue #824 review item 2 — the old recursive
+ * filter filtered on is_active in both terms, so it missed active
+ * grandchildren hidden under an archived intermediate). We traverse every
+ * descendant regardless of active state, then check each for is_active.
+ */
+async function hasActiveDescendant(
+  client: PoolClient,
+  businessId: string,
+  rootId: string,
+): Promise<boolean> {
+  const descendants = await fetchDescendants(client, businessId, rootId);
+  return descendants.some((d) => d.is_active);
+}
+
 export async function createAccount(params: {
   businessId: string;
   code: string;
@@ -267,6 +458,7 @@ export async function createAccount(params: {
   type: string;
   parentId?: string | null;
   isContra?: boolean;
+  actorId?: string | null;
 }): Promise<{ id: string }> {
   /* The convention is «Latin digits in storage, Persian digits in display»
      (digits.ts), and the add form's own placeholder invites «۶۱۰۰». Storing a
@@ -280,37 +472,69 @@ export async function createAccount(params: {
   if (!isValidAccountCode(code)) throw new AccountsError("invalid_code");
   if (!name) throw new AccountsError("name_required");
   if (!ACCOUNT_TYPES.includes(params.type as AccountType)) throw new AccountsError("invalid_type");
-
-  let level: AccountLevel = "group";
-  if (params.parentId) {
-    const parent = await findAccount(params.businessId, params.parentId);
-    if (!parent) throw new AccountsError("parent_not_found");
-    const computed = nextAccountLevel(parent.level);
-    if (!computed) throw new AccountsError("parent_too_deep", 409);
-    level = computed;
+  if (params.isContra !== undefined && typeof params.isContra !== "boolean") {
+    throw new AccountsError("bad_request");
   }
+  const isContra = params.isContra ?? false;
+  const actorId = params.actorId ?? null;
+  const parentId = params.parentId ?? null;
 
-  const { rows: existing } = await query(`SELECT 1 FROM accounts WHERE business_id = $1 AND code = $2`, [
-    params.businessId,
-    code,
-  ]);
-  if (existing.length > 0) throw new AccountsError("code_in_use", 409);
+  // Hierarchy creation takes the per-business lock so a concurrent reparent
+  // cannot move our chosen parent out from under us after we read it. The
+  // pre-flight duplicate-code check also runs under the lock; the UNIQUE
+  // constraint remains the final authority for code races.
+  return inTransaction(async (client) => {
+    await lockChartOfAccounts(client, params.businessId);
 
-  try {
-    const { rows } = await query<{ id: string }>(
-      `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [params.businessId, params.parentId ?? null, code, name, params.type, level, params.isContra ?? false],
+    let level: AccountLevel = "group";
+    let parentType: AccountType | null = null;
+    let parentLabel: string | null = null;
+    if (parentId) {
+      const parent = await findAccount(params.businessId, parentId, client);
+      if (!parent) throw new AccountsError("parent_not_found");
+      if (!parent.is_active) throw new AccountsError("parent_archived", 409);
+      const computed = nextAccountLevel(parent.level);
+      if (!computed) throw new AccountsError("parent_too_deep", 409);
+      level = computed;
+      parentType = parent.type;
+      parentLabel = parent.code;
+    }
+
+    // Parent/child type consistency (issue #824 §2): a child's accounting
+    // type must match its branch, because the chart groups accounts by type
+    // semantics and mixing them breaks every downstream report.
+    if (parentType && parentType !== (params.type as AccountType)) {
+      throw new AccountsError("parent_type_mismatch", 409);
+    }
+
+    const { rows: existing } = await client.query(
+      `SELECT 1 FROM accounts WHERE business_id = $1 AND code = $2`,
+      [params.businessId, code],
     );
-    return { id: rows[0].id };
-  } catch (err) {
-    // The SELECT above is a pre-flight, not a lock: two simultaneous creates
-    // of the same code race the table's UNIQUE(business_id, code), and before
-    // this the loser of that race got a raw 500 instead of the same 409 the
-    // pre-flight would have produced.
-    if (sqlState(err) === UNIQUE_VIOLATION) throw new AccountsError("code_in_use", 409);
-    throw err;
-  }
+    if (existing.length > 0) throw new AccountsError("code_in_use", 409);
+
+    try {
+      const { rows } = await client.query<{ id: string }>(
+        `INSERT INTO accounts (business_id, parent_id, code, name, type, level, is_contra)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [params.businessId, parentId, code, name, params.type, level, isContra],
+      );
+      const newId = rows[0].id;
+      await recordAccountAudit(client, params.businessId, actorId, "account.created", newId, {
+        code,
+        name,
+        type: params.type,
+        parentId,
+        parentLabel,
+        level,
+        isContra,
+      });
+      return { id: newId };
+    } catch (err) {
+      if (sqlState(err) === UNIQUE_VIOLATION) throw new AccountsError("code_in_use", 409);
+      throw err;
+    }
+  });
 }
 
 /** Renames an account. See `updateAccount` for the combined edit. */
@@ -344,18 +568,23 @@ export async function setAccountActive(
 }
 
 /**
- * One account edit — rename and/or reparent and/or archive — applied as a
- * single transaction, with its audit rows.
+ * One account edit — rename and/or reparent and/or archive/restoration and/or
+ * contra change — applied as a single transaction, with its audit rows.
  *
- * The route accepts all three in one PATCH ("rename while reparenting"), and
- * they used to run as three independent statements: a rename that succeeded
- * followed by a move the hierarchy rules rejected left the account renamed,
- * the caller holding an error, and the screen still showing the old name.
+ * The route accepts all in one PATCH ("rename while reparenting"), and they
+ * used to run as independent statements: a rename that succeeded followed by a
+ * move the hierarchy rules rejected left the account renamed, the caller
+ * holding an error, and the screen still showing the old name.
+ * `updateAccount` applies all requested changes, or none of them.
  *
  * `reparent` is explicit rather than inferred from `parentId !== undefined`,
  * because moving an account to the top level *is* `parentId: null` — the
  * route's own "a present parentId is an instruction" rule, made unambiguous
  * for callers that build the patch from a form.
+ *
+ * Hierarchy mutations (reparent, archive) take the per-business advisory lock
+ * via `lockChartOfAccounts` before any validation, so concurrent writes are
+ * serialised rather than racing.
  */
 export async function updateAccount(params: {
   businessId: string;
@@ -366,16 +595,25 @@ export async function updateAccount(params: {
   /** Apply `parentId` (which may be null, meaning "no parent"). */
   reparent?: boolean;
   isActive?: boolean;
+  isContra?: boolean;
 }): Promise<void> {
   const { businessId, id } = params;
   const actorId = params.actorId ?? null;
   const wantsReparent = params.reparent === true || (params.reparent === undefined && params.parentId !== undefined);
   const parentId = params.parentId ?? null;
+  const wantsHierarchyMutation = wantsReparent || params.isActive !== undefined;
 
   const trimmedName = params.name === undefined ? undefined : params.name.trim();
   if (trimmedName !== undefined && !trimmedName) throw new AccountsError("name_required");
 
   await inTransaction(async (client) => {
+    // Serialize any hierarchy-affecting mutation. Pure renames do not change
+    // hierarchy shape and are safe without the lock (they still commit/roll
+    // back atomically with their audit row).
+    if (wantsHierarchyMutation) {
+      await lockChartOfAccounts(client, businessId);
+    }
+
     const account = await findAccount(businessId, id, client);
     if (!account) throw new AccountsError("account_not_found", 404);
 
@@ -393,16 +631,44 @@ export async function updateAccount(params: {
 
     if (wantsReparent && parentId !== account.parent_id) {
       let newLevel: AccountLevel;
+      let destType: AccountType | null = null;
+      let afterParentLabel: string | null = null;
       if (parentId) {
         if (parentId === id) throw new AccountsError("parent_cycle");
         const parent = await findAccount(businessId, parentId, client);
         if (!parent) throw new AccountsError("parent_not_found");
+        if (!parent.is_active) throw new AccountsError("parent_archived", 409);
         await assertNoCycle(client, businessId, id, parentId);
         const computed = nextAccountLevel(parent.level);
         if (!computed) throw new AccountsError("parent_too_deep", 409);
         newLevel = computed;
+        destType = parent.type;
+        afterParentLabel = parent.code;
       } else {
         newLevel = "group";
+      }
+
+      // Enforce type consistency across the whole moved subtree (issue #824 §2).
+      // If any descendant has a different type from the destination branch the
+      // move is rejected atomically — no partial reparent.
+      if (destType) {
+        const subtree = await fetchSubtreeTypes(client, businessId, id);
+        for (const node of subtree) {
+          if (node.type !== destType) {
+            throw new AccountsError("parent_type_mismatch", 409);
+          }
+        }
+      }
+
+      // Look up before-parent label for the audit payload — recorded while the
+      // lock is held so it can't change under us.
+      let beforeParentLabel: string | null = null;
+      if (account.parent_id) {
+        const { rows } = await client.query<{ code: string }>(
+          `SELECT code FROM accounts WHERE business_id = $1 AND id = $2`,
+          [businessId, account.parent_id],
+        );
+        beforeParentLabel = rows[0]?.code ?? null;
       }
 
       await client.query(`UPDATE accounts SET parent_id = $1, level = $2 WHERE business_id = $3 AND id = $4`, [
@@ -415,13 +681,48 @@ export async function updateAccount(params: {
       await recordAccountAudit(client, businessId, actorId, "account.reparented", id, {
         beforeParentId: account.parent_id,
         afterParentId: parentId,
+        beforeParentLabel,
+        afterParentLabel,
       });
+    }
+
+    // Determine the effective post-mutation parent for restore validation: if
+    // the PATCH also reparents, the new parent is what matters; otherwise we
+    // use the existing parent_id.
+    let effectiveParentId: string | null = account.parent_id;
+    if (wantsReparent && parentId !== account.parent_id) {
+      // The reparent block above updates parent_id only if the move was
+      // accepted; we don't duplicate the change here — but we still need to
+      // compute the effective parent for the restore check below. Compute it
+      // from the same input the reparent block will apply.
+      effectiveParentId = parentId;
     }
 
     if (params.isActive !== undefined) {
       const isActive = params.isActive;
       if (!isActive && WELL_KNOWN_CODE_SET.has(account.code)) {
         throw new AccountsError("well_known_account", 409);
+      }
+      // Archiving: refuse if any active descendant still exists (issue #824
+      // §3 + review item 2 — traverses all descendants regardless of their
+      // own archive state, so an active grandchild below an archived
+      // intermediate is still detected).
+      if (!isActive && isActive !== account.is_active) {
+        if (await hasActiveDescendant(client, businessId, id)) {
+          throw new AccountsError("parent_has_active_children", 409);
+        }
+      }
+      // Restoring: refuse if the effective parent (after any concurrent
+      // reparent in the same PATCH) is archived, or if any ancestor in the
+      // post-mutation chain is archived (issue #824 review item 1). Without
+      // this, a child can be restored under an archived parent/grandparent,
+      // recreating an archived-ancestor → active-descendant state the UI
+      // cannot represent.
+      if (isActive && isActive !== account.is_active) {
+        const archivedAncestor = await findArchivedAncestor(client, businessId, id, effectiveParentId);
+        if (archivedAncestor) {
+          throw new AccountsError("ancestor_archived", 409);
+        }
       }
       // Archiving an already-archived account is not an event. Rename and
       // reparent have always skipped their no-ops (and the integration suite
@@ -442,16 +743,52 @@ export async function updateAccount(params: {
         );
       }
     }
+
+    if (params.isContra !== undefined) {
+      if (typeof params.isContra !== "boolean") throw new AccountsError("bad_request");
+      // Code and type are immutable; isContra is correctable from the canonical
+      // COA editor (issue #824 §6) because a mistaken contra flag does not
+      // change postings or reclassify the account — it only changes how the
+      // balance is presented on reports. System/well-known accounts keep the
+      // existing protection: changing their contra semantics would silently
+      // misstate figures the auto-posting engine relies on.
+      if (WELL_KNOWN_CODE_SET.has(account.code)) {
+        throw new AccountsError("well_known_account", 409);
+      }
+      if (params.isContra !== account.is_contra) {
+        await client.query(`UPDATE accounts SET is_contra = $1 WHERE business_id = $2 AND id = $3`, [
+          params.isContra,
+          businessId,
+          id,
+        ]);
+        await recordAccountAudit(client, businessId, actorId, "account.contra_changed", id, {
+          before: account.is_contra,
+          after: params.isContra,
+        });
+      }
+    }
   });
 }
 
-/** Hard delete — only for an account that was never actually posted to. Otherwise, archive it. */
-export async function deleteAccount(businessId: string, id: string): Promise<void> {
-  const account = await findAccount(businessId, id);
-  if (!account) throw new AccountsError("account_not_found", 404);
-  if (WELL_KNOWN_CODE_SET.has(account.code)) throw new AccountsError("well_known_account", 409);
-
+/**
+ * Hard delete — only for an account that was never actually posted to.
+ * Otherwise, archive it. Takes the per-business hierarchy lock because
+ * removing a node changes parent-child relationships for any future create/
+ * reparent that might race it; the audit row is written in the same
+ * transaction so it survives after the row is gone (issue #824 §5).
+ */
+export async function deleteAccount(
+  businessId: string,
+  id: string,
+  actorId: string | null = null,
+): Promise<void> {
   await inTransaction(async (client) => {
+    await lockChartOfAccounts(client, businessId);
+
+    const account = await findAccount(businessId, id, client);
+    if (!account) throw new AccountsError("account_not_found", 404);
+    if (WELL_KNOWN_CODE_SET.has(account.code)) throw new AccountsError("well_known_account", 409);
+
     const { rows: postings } = await client.query(`SELECT 1 FROM journal_lines WHERE account_id = $1 LIMIT 1`, [id]);
     if (postings.length > 0) throw new AccountsError("account_has_postings", 409);
 
@@ -467,12 +804,23 @@ export async function deleteAccount(businessId: string, id: string): Promise<voi
     );
     if (children.length > 0) throw new AccountsError("account_has_children", 409);
 
+    // Snapshot enough fields for the audit row to remain legible after the
+    // account itself no longer exists.
+    const snapshot = {
+      code: account.code,
+      name: account.name,
+      type: account.type,
+      level: account.level,
+      isContra: account.is_contra,
+    };
+
     try {
       const { rowCount } = await client.query(`DELETE FROM accounts WHERE business_id = $1 AND id = $2`, [
         businessId,
         id,
       ]);
       if (!rowCount) throw new AccountsError("account_not_found", 404);
+      await recordAccountAudit(client, businessId, actorId, "account.deleted", id, snapshot);
     } catch (err) {
       // Every table that points at an account does so `ON DELETE RESTRICT`
       // (journal lines, draft lines, expenses, reconciliations). Those FKs —

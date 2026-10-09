@@ -20,6 +20,8 @@ import type { PoolClient } from "pg";
 import { getPool, withoutTenantScope } from "./db";
 import type { PairingSnapshot } from "./pairing-snapshot";
 import { SETTING_KEYS } from "./settings";
+import { nextAccountLevel, type AccountLevel } from "./coa-template";
+import { lockChartOfAccounts } from "./accounts-service";
 
 /** Electron supplies this durable identity; the deterministic fallback keeps non-Electron development resumable. */
 export function localInstallationId(): string {
@@ -126,6 +128,11 @@ export async function applyPairingSnapshot(
 
       await insertTenantRoles(client, snapshot);
       const ownerIds = await insertUsers(client, snapshot);
+      // The canonical chart-of-accounts hierarchy lock (issue #824 review
+      // item 6). Pairing restores into a business that may already be live —
+      // it is a full snapshot replay, not only a first-run path — so it
+      // serialises against the editor exactly like any other writer.
+      await lockChartOfAccounts(client, snapshot.business.id);
       await insertAccounts(client, snapshot);
       await insertMenu(client, snapshot);
       await insertDiningTables(client, snapshot);
@@ -210,12 +217,27 @@ async function insertUsers(client: PoolClient, snapshot: PairingSnapshot): Promi
   return { ownerUserId, ownerName, ownerPlatformUserId: null };
 }
 
-/** Parents before children, resolving parent_id from a code→id map built as we go. */
+/**
+ * Parents before children, resolving parent_id from a code→id map built as we
+ * go — and *deriving each row's `level` from its parent*.
+ *
+ * The snapshot's account records predate the `level` column and carry no such
+ * field, so the old insert left every imported sub-account at the column
+ * default («گروه») regardless of its depth. That made the restored chart's
+ * tiers a lie: the editor offers a گروه more children than a معین, refuses
+ * children under a تفصیلی, and cascades levels on reparent — all of it
+ * computed from the stored level. Deriving it here costs a map and removes a
+ * whole class of "the restored device disagrees with the server" bugs.
+ *
+ * The caller holds the canonical chart-of-accounts lock (review item 6).
+ */
 async function insertAccounts(
   client: PoolClient,
   snapshot: PairingSnapshot,
 ): Promise<void> {
   const idByCode = new Map<string, string>();
+  /** The level each inserted account actually got, keyed by code. */
+  const levelByCode = new Map<string, AccountLevel>();
   const pending = [...snapshot.accounts];
   let guard = pending.length + 1;
   while (pending.length > 0 && guard > 0) {
@@ -233,9 +255,15 @@ async function insertAccounts(
       const values: string[] = [];
       const args: unknown[] = [];
       let offset = 1;
-      for (const account of chunk) {
+      // The level each row in this chunk gets, resolved before the statement
+      // so a single INSERT still carries it.
+      const chunkLevels = chunk.map((account) =>
+        nextAccountLevel(account.parentCode ? (levelByCode.get(account.parentCode) ?? null) : null) ??
+        "tafsili",
+      );
+      for (const [i, account] of chunk.entries()) {
         values.push(
-          `($${offset}, $${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::account_type)`,
+          `($${offset}, $${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::account_type, $${offset + 6}::account_level)`,
         );
         args.push(
           account.id,
@@ -246,17 +274,19 @@ async function insertAccounts(
           account.code,
           account.name,
           account.type,
+          chunkLevels[i],
         );
-        offset += 6;
+        offset += 7;
       }
       if (values.length > 0) {
         await client.query(
-          `INSERT INTO accounts (id, business_id, parent_id, code, name, type) VALUES ${values.join(", ")}`,
+          `INSERT INTO accounts (id, business_id, parent_id, code, name, type, level) VALUES ${values.join(", ")}`,
           args,
         );
       }
-      for (const account of chunk) {
+      for (const [i, account] of chunk.entries()) {
         idByCode.set(account.code, account.id);
+        levelByCode.set(account.code, chunkLevels[i]);
         pending.splice(pending.indexOf(account), 1);
       }
     }

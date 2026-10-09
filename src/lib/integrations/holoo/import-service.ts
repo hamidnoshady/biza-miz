@@ -22,6 +22,8 @@ import { getSetting, SETTING_KEYS } from "../../settings";
 import { planAccountImport, planGoods, planPersons, holooAccountType } from "./import-plan";
 import type { MappedAccount, MappedGoods, MappedOpeningInventory, MappedPerson } from "./mappers";
 import { createParty } from "../../parties-service";
+import { lockChartOfAccounts } from "../../accounts-service";
+import { nextAccountLevel, type AccountLevel } from "../../coa-template";
 
 async function resolveLocationId(businessId: string, connectionLocationId: string | null): Promise<string> {
   if (connectionLocationId) return connectionLocationId;
@@ -430,25 +432,83 @@ export async function applyBaseImport(
     await upsertMapping(businessId, connectionId, "holoo_account", account.remoteId, rows[0].id, importRunId, false);
   }
   // Create accounts with codes absent from the seed chart, parents first.
-  for (const account of accountsPlan.toCreate) {
-    let parentId = account.parentCode
-      ? await localIdForRemote(businessId, connectionId, "holoo_account", account.parentCode)
-      : null;
-    if (account.parentCode && !parentId) {
-      const { rows } = await query<{ id: string }>(
-        `SELECT id FROM accounts WHERE business_id = $1 AND code = $2 AND is_active`,
-        [businessId, account.parentCode],
-      );
-      parentId = rows[0]?.id ?? null;
+  //
+  // This is a hierarchy writer like any other (issue #824 review item 6), so
+  // it takes the canonical chart-of-accounts advisory lock for the business
+  // and runs in one transaction: the account rows, their derived `level`s and
+  // their Holoo mappings commit together or not at all.
+  //
+  // `level` is *derived from the parent*, not left to the column default. The
+  // old insert omitted the column entirely, so every imported sub-account
+  // landed as «گروه» and the tier rules the chart enforces (a گروه can take
+  // children, تفصیلی cannot) were computed from a lie.
+  if (accountsPlan.toCreate.length > 0) {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      await lockChartOfAccounts(client, businessId);
+      for (const account of accountsPlan.toCreate) {
+        let parentId: string | null = null;
+        let parentLevel: AccountLevel | null = null;
+        if (account.parentCode) {
+          const mapped = await localIdForRemote(
+            businessId,
+            connectionId,
+            "holoo_account",
+            account.parentCode,
+          );
+          if (mapped) {
+            const { rows } = await client.query<{ level: AccountLevel }>(
+              `SELECT level FROM accounts WHERE business_id = $1 AND id = $2`,
+              [businessId, mapped],
+            );
+            parentId = mapped;
+            parentLevel = rows[0]?.level ?? null;
+          } else {
+            const { rows } = await client.query<{ id: string; level: AccountLevel; is_active: boolean }>(
+              `SELECT id, level, is_active FROM accounts WHERE business_id = $1 AND code = $2`,
+              [businessId, account.parentCode],
+            );
+            if (!rows[0]) throw new Error("unresolved_account_parent");
+            // An archived parent must not silently adopt new children — the
+            // same invariant the editor enforces (`parent_archived`).
+            if (!rows[0].is_active) throw new Error("archived_account_parent");
+            parentId = rows[0].id;
+            parentLevel = rows[0].level;
+          }
+        }
+        const level = nextAccountLevel(parentLevel);
+        if (!level) throw new Error("account_parent_too_deep");
+        const { rows } = await client.query<{ id: string }>(
+          `INSERT INTO accounts (business_id, parent_id, code, name, type, level)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [
+            businessId,
+            parentId,
+            account.code,
+            account.name,
+            holooAccountType(account.code, account.nature),
+            level,
+          ],
+        );
+        await upsertMappingOnClient(
+          client,
+          businessId,
+          connectionId,
+          "holoo_account",
+          account.remoteId,
+          rows[0].id,
+          importRunId,
+        );
+        createdAccounts += 1;
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
     }
-    if (account.parentCode && !parentId) throw new Error("unresolved_account_parent");
-    const { rows } = await query<{ id: string }>(
-      `INSERT INTO accounts (business_id, parent_id, code, name, type)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [businessId, parentId, account.code, account.name, holooAccountType(account.code, account.nature)],
-    );
-    await upsertMapping(businessId, connectionId, "holoo_account", account.remoteId, rows[0].id, importRunId);
-    createdAccounts += 1;
   }
 
   const openingInventoryRows = input.openingInventory ?? [];
