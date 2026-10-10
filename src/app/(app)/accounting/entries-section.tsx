@@ -154,8 +154,8 @@ export function EntriesSection({
   const [optionsKey, setOptionsKey] = useState(0);
   // Issue #868: the dimension filters, and the labels a line's attribution shows with.
   const { catalog: dimensionCatalog, error: dimensionCatalogError, retry: retryDimensionCatalog } = useDimensionCatalog();
-  const dimSettings = dimensionCatalog?.settings ?? [];
-  const dimAllValues = dimensionCatalog?.allValues ?? [];
+  const dimSettings = useMemo(() => dimensionCatalog?.settings ?? [], [dimensionCatalog?.settings]);
+  const dimAllValues = useMemo(() => dimensionCatalog?.allValues ?? [], [dimensionCatalog?.allValues]);
   const lineKindLabel = useCallback(
     (kind: DimensionKind) => enabledKindLabel(dimSettings, kind),
     [dimSettings],
