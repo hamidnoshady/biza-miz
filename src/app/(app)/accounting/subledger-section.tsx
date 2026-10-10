@@ -446,24 +446,21 @@ function StatementEntryDetail({ entryId, failedMessage, onClose }: { entryId: st
     };
   }, [entryId, reloadKey]);
 
-  if (failed) return <LedgerLoadFailed message={failedMessage} onRetry={() => setReloadKey((k) => k + 1)} />;
-  if (!entry) return <LoadingSkeleton rows={2} />;
-
   return (
-    <div className="rounded-xl border border-border/80 bg-muted/60 p-3 text-sm">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <p className="font-semibold text-foreground">
-          سند حسابداری — {fmtJalali(entry.entryDate)}
-          {entry.reversesEntryId ? <span className="ms-2 text-xs font-medium text-amber-700 dark:text-amber-300">سند برگشتی</span> : null}
-        </p>
-        <button
-          type="button"
-          onClick={onClose}
-          className="rounded-lg border border-border px-2 py-1 text-xs font-medium text-muted-foreground"
-        >
-          بستن
-        </button>
-      </div>
+    <OverlayDialog
+      headingId="statement-entry-heading"
+      onClose={onClose}
+      className={`${overlayPanelClass} max-h-[88vh] w-full max-w-2xl overflow-y-auto p-4 sm:p-5`}
+    >
+      <header className="mb-3 flex items-start justify-between gap-2">
+        <h3 id="statement-entry-heading" className="font-semibold text-foreground">سند حسابداری</h3>
+        <SecondaryButton onClick={onClose}>بستن سند</SecondaryButton>
+      </header>
+      {failed ? <LedgerLoadFailed message={failedMessage} onRetry={() => setReloadKey((k) => k + 1)} /> : !entry ? <LoadingSkeleton rows={2} /> : <>
+      <p className="font-semibold text-foreground">
+        {fmtJalali(entry.entryDate)}
+        {entry.reversesEntryId ? <span className="ms-2 text-xs font-medium text-amber-700 dark:text-amber-300">سند برگشتی</span> : null}
+      </p>
       <p className="mt-1 text-xs leading-6 text-muted-foreground">
         {entry.memo || "بدون شرح"}
         {entry.createdByName ? ` — ثبت: ${entry.createdByName}` : ""}
@@ -480,7 +477,8 @@ function StatementEntryDetail({ entryId, failedMessage, onClose }: { entryId: st
           </div>
         ))}
       </dl>
-    </div>
+      </>}
+    </OverlayDialog>
   );
 }
 
@@ -844,9 +842,8 @@ export function SubledgerStatementPanel({
   const [lines, setLines] = useState<SubledgerStatementLine[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  // Which line's journal entry is open below the row (its index), and the id
-  // that entry is addressed by. Kept together so a re-render cannot show one
-  // row's document under another row.
+  // One entry overlay serves both responsive layouts. Keep the line and its
+  // stable journal ID together, without mounting/fetching two hidden details.
   const [openLine, setOpenLine] = useState<{ index: number; entryId: string } | null>(null);
 
   useEffect(() => {
@@ -889,7 +886,6 @@ export function SubledgerStatementPanel({
     const orderHref = side.statement.orderHrefFor?.(line.source) ?? null;
     return { entryId, label, location, note, orderHref };
   };
-  const columns = 7;
 
   return (
     <OverlayDialog
@@ -949,7 +945,7 @@ export function SubledgerStatementPanel({
             <DataTableBody>
               {lines.map((l, i) => {
                 const { entryId, label, location, note, orderHref } = sourceOf(l);
-                return [
+                return (
                   <DataTableRow key={`line-${i}`}>
                     <Td muted nowrap>{fmtJalali(l.date)}</Td>
                     <Td muted>{typeLabel(l.type)}</Td>
@@ -968,6 +964,7 @@ export function SubledgerStatementPanel({
                           {entryId ? (
                             <button
                               type="button"
+                              aria-haspopup="dialog"
                               aria-expanded={openLine?.index === i}
                               onClick={() => setOpenLine(openLine?.index === i ? null : { index: i, entryId })}
                               className="rounded-lg border border-border px-2 py-1 text-xs font-semibold text-muted-foreground transition-colors hover:bg-muted"
@@ -981,19 +978,8 @@ export function SubledgerStatementPanel({
                     <Td numeric nowrap>{l.debit ? money.format(l.debit) : "—"}</Td>
                     <Td numeric nowrap>{l.credit ? money.format(l.credit) : "—"}</Td>
                     <Td numeric nowrap className="font-semibold">{money.format(l.balance)}</Td>
-                  </DataTableRow>,
-                  openLine?.index === i ? (
-                    <DataTableRow key={`entry-${i}`}>
-                      <Td colSpan={columns} className="bg-muted/40">
-                        <StatementEntryDetail
-                          entryId={openLine.entryId}
-                          failedMessage={side.statement.entryFailed}
-                          onClose={() => setOpenLine(null)}
-                        />
-                      </Td>
-                    </DataTableRow>
-                  ) : null,
-                ];
+                  </DataTableRow>
+                );
               })}
             </DataTableBody>
           </DataTable>
@@ -1038,7 +1024,8 @@ export function SubledgerStatementPanel({
                         {entryId ? (
                           <button
                             type="button"
-                            aria-expanded={openLine?.index === i}
+                            aria-haspopup="dialog"
+                              aria-expanded={openLine?.index === i}
                             onClick={() => setOpenLine(openLine?.index === i ? null : { index: i, entryId })}
                             className="rounded-lg border border-border px-2 py-1 font-semibold text-muted-foreground"
                           >
@@ -1048,21 +1035,19 @@ export function SubledgerStatementPanel({
                       </div>
                     </div>
                   ) : null}
-                  {openLine?.index === i ? (
-                    <div className="mt-3">
-                      <StatementEntryDetail
-                        entryId={openLine.entryId}
-                        failedMessage={side.statement.entryFailed}
-                        onClose={() => setOpenLine(null)}
-                      />
-                    </div>
-                  ) : null}
+
                 </article>
               );
             })}
           </div>
         </>
       )}
+      {openLine ? <StatementEntryDetail
+        key={openLine.entryId}
+        entryId={openLine.entryId}
+        failedMessage={side.statement.entryFailed}
+        onClose={() => setOpenLine(null)}
+      /> : null}
     </OverlayDialog>
   );
 }

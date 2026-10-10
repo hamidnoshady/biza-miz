@@ -323,14 +323,21 @@ describe("statement drill-down", () => {
       .getAllByRole("link", { name: RECEIVABLES_SIDE.statement.directoryLabel })
       .map((link) => link.getAttribute("href"));
     expect(directoryHrefs).toContain(directoryHref);
-    expect(directoryHrefs).toContain(RECEIVABLES_SIDE.directoryHref);
+    // The background directory action is outside the active modal and hidden from AT.
+    expect(directoryHrefs).not.toContain(RECEIVABLES_SIDE.directoryHref);
 
     await userEvent.click(screen.getAllByRole("button", { name: RECEIVABLES_SIDE.statement.entryLinkLabel })[0]);
     expect(await screen.findAllByText(/سند حسابداری/)).not.toHaveLength(0);
     expect(screen.getAllByText(/زهرا/).length).toBeGreaterThan(0);
     expect(await screen.findAllByText(/حساب‌های دریافتنی/)).not.toHaveLength(0);
     expect(await screen.findAllByText(/فروش/)).not.toHaveLength(0);
-    expect(fetchMock.mock.calls.some(([url]) => url === `/api/ledger/entries/${ENTRY}`)).toBe(true);
+    expect(fetchMock.mock.calls.filter(([url]) => url === `/api/ledger/entries/${ENTRY}`)).toHaveLength(1);
+    const entryDialog = screen.getByRole("dialog", { name: "سند حسابداری" });
+    expect(entryDialog.contains(document.activeElement)).toBe(true);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "سند حسابداری" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: /صورتحساب Ali/ })).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getAllByRole("button", { name: RECEIVABLES_SIDE.statement.entryLinkLabel })[0]));
   });
 
   it("says the statement failed rather than showing it as an empty account", async () => {
@@ -371,7 +378,13 @@ describe("A/P contracts preserved by the shared screen", () => {
     await userEvent.click(screen.getAllByRole("button", { name: PAYABLES_SIDE.statement.entryLinkLabel })[layout]);
     expect(await screen.findAllByText(/سند حسابداری/)).not.toHaveLength(0);
     expect(screen.getAllByText(/زهرا/).length).toBeGreaterThan(0);
-    expect(fetchMock.mock.calls.some(([url]) => url === `/api/ledger/entries/${ENTRY}`)).toBe(true);
+    expect(fetchMock.mock.calls.filter(([url]) => url === `/api/ledger/entries/${ENTRY}`)).toHaveLength(1);
+    const entryDialog = screen.getByRole("dialog", { name: "سند حسابداری" });
+    expect(entryDialog.contains(document.activeElement)).toBe(true);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "سند حسابداری" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: /صورتحساب Unknown/ })).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getAllByRole("button", { name: PAYABLES_SIDE.statement.entryLinkLabel })[layout]));
   });
 
   it("keeps the payment key on retry, but changes it for an edited payment", async () => {

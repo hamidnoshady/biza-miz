@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { resolveActiveLocation } from "@/lib/setup-state";
-import { MissingLedgerAccountError, PayrollError, payPayroll } from "@/lib/payroll-service";
-import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
+import { payPayroll } from "@/lib/payroll-service";
+import { badRequest, payrollErrorResponse, readJsonObject } from "@/lib/payroll-http";
 
 interface Ctx {
   params: Promise<{ id: string }>;
@@ -11,52 +10,58 @@ interface Ctx {
 
 const METHODS = ["cash", "bank"] as const;
 
-/** Pays out an accrued payroll run: Debit salariesPayable / Credit the chosen Cash or Bank-Clearing account. */
+/**
+ * Pays out an accrued payroll run — wage and commission together: Debit
+ * salaries payable / Credit the payment account. Gated on `payroll.manage`.
+ *
+ * Body (all optional): `paymentAccountId` — one of the business's cash, bank or
+ * petty-cash accounts (`GET /api/ledger/payroll/preview` lists them); `method`
+ * (`cash` → صندوق, `bank` → بانک, the shorthand when no account is named);
+ * `paidDate` (ISO, default today, never before the accrual date).
+ *
+ * The payment is posted with the run's own location, not the caller's active
+ * branch — it cannot land on a different branch than the accrual.
+ */
 export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   const { session, error } = await requirePermission(PERMISSIONS.payrollManage);
   if (error) return error;
 
   const { id } = await ctx.params;
-  let body: { method?: unknown; paidDate?: unknown } = {};
-  try {
-    body = await request.json();
-  } catch {
-    // no body is fine; method defaults to cash
-  }
+  // An empty body is fine (cash, today); a body that is present and is not a
+  // JSON object is not — it used to be ignored, silently paying out of cash.
+  const body = await readJsonObject(request, { emptyIsObject: true });
+  if (!body) return badRequest();
+
   /*
    * An unrecognised method used to fall back to `cash` silently, so a typo or
    * a stale client posted the wage bill out of the till while the caller
-   * believed it went out of the bank — the two credit different accounts
-   * (۱۱۰۰ vs ۱۱۲۰) and the entry cannot be told apart afterwards. Absent still
-   * means cash (the documented default); a *wrong* value is now refused.
+   * believed it went out of the bank — the two credit different accounts and
+   * the entry cannot be told apart afterwards. Absent still means cash (the
+   * documented default); a *wrong* value is refused.
    */
   if (body.method !== undefined && !METHODS.includes(body.method as (typeof METHODS)[number])) {
-    return NextResponse.json({ error: "invalid_method" }, { status: 400 });
+    return badRequest("invalid_method");
   }
-  const method = (body.method as "cash" | "bank" | undefined) ?? "cash";
+  if (body.paymentAccountId !== undefined && body.paymentAccountId !== null && typeof body.paymentAccountId !== "string") {
+    return badRequest("invalid_payment_account");
+  }
   if (body.paidDate !== undefined && body.paidDate !== null && typeof body.paidDate !== "string") {
-    return NextResponse.json({ error: "invalid_paid_date" }, { status: 400 });
+    return badRequest("invalid_paid_date");
   }
-
-  const location = await resolveActiveLocation(session);
 
   try {
     const run = await payPayroll({
       businessId: session.businessId,
-      locationId: location?.id ?? null,
       runId: id,
-      method,
-      paidDate: body.paidDate as string | undefined,
+      method: (body.method as "cash" | "bank" | undefined) ?? "cash",
+      paymentAccountId: (body.paymentAccountId as string | null | undefined) ?? null,
+      paidDate: body.paidDate as string | null | undefined,
       actorId: session.sub,
     });
     return NextResponse.json({ run });
   } catch (err) {
-    if (err instanceof PayrollError) return NextResponse.json({ error: err.message }, { status: err.status });
-    if (err instanceof MissingLedgerAccountError) {
-      return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
-    }
-    const lockCode = fiscalPeriodLockErrorCode(err);
-    if (lockCode) return NextResponse.json({ error: lockCode }, { status: 409 });
+    const response = payrollErrorResponse(err);
+    if (response) return response;
     throw err;
   }
 });

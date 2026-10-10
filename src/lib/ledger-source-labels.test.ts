@@ -54,6 +54,14 @@ describe("ledger source-type labels", () => {
     ).toBe("");
   });
 
+  it("labels the source types a payroll void posts under (built from a template, so the literal scan cannot see them)", () => {
+    // payroll-service.ts mirrors a run's accrual and payment entries as
+    // `payroll_accrual_void` / `payroll_payment_void`; without these the journal
+    // fell back to the generic «سند سیستمی» for an undone salary.
+    expect(ledgerSourceLabel("payroll_accrual_void")).toBe("ابطال تعهد حقوق");
+    expect(ledgerSourceLabel("payroll_payment_void")).toBe("ابطال پرداخت حقوق");
+  });
+
   it("never returns a raw code", () => {
     expect(ledgerSourceLabel("ar_receipt")).toBe("دریافت از مشتری");
     expect(ledgerSourceLabel("a_rule_from_a_newer_deploy")).toBe("سند سیستمی");

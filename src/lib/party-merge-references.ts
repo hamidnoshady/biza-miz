@@ -208,6 +208,23 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     preview: true,
     previewLabel: "قرارداد اقساط",
   },
+  {
+    table: "expenses",
+    column: "party_id",
+    scope: "business",
+    // An expense survives its party being deleted outright — `ON DELETE SET
+    // NULL` plus the free-text `vendor` snapshot keep the posted fact intact
+    // (issue #832 §12). A merge is a different act: it does not destroy the
+    // record, it declares that two rows were always the same person. Leaving
+    // the link on the loser would strand it on an archived row, and the ledger
+    // question the column exists to answer — «به این شخص/شرکت چقدر پرداختیم» —
+    // would silently lose every expense the loser had.
+    disposition: "move",
+    reason:
+      "The supplier link on a paid expense is a live ledger reference, not an audit annotation; the audit trail is the journal entry and the `vendor` snapshot, which a merge does not touch.",
+    preview: true,
+    previewLabel: "هزینه",
+  },
 
   // -- Growth-owned programs ------------------------------------------------
   {

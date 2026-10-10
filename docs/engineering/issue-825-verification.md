@@ -1,5 +1,9 @@
 # Receivables audit (#825) — implementation and verification
 
+> Historical functional verification through `25424d5d`. The
+> [2026-10-10 visual/accessibility follow-up](issue-825-visual-accessibility.md)
+> supersedes the outstanding visual and modal-accessibility notes below.
+
 PR: #881, branch `arena/f1cf4030-biza-miz`. No merge or deployment is authorized.
 
 ## Review baseline

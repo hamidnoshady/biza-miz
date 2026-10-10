@@ -52,8 +52,15 @@ export const AUTOPILOT_CEILINGS: Record<AutopilotCategory, AutopilotCategorySett
 };
 
 /**
- * What a category starts at once an owner switches it on. Money is tightest:
- * `expense.categorize` is the one eligible action with no one-click undo.
+ * What a category starts at once an owner switches it on. Money is tightest.
+ *
+ * It used to say here that `expense.categorize` was the one eligible action
+ * with *no* one-click undo, and that is why the category was clamped so hard.
+ * Issue #832 §1 gave it an undo — a mirrored reversal, from the register and
+ * from autopilot's own revert path — so the caps are now what they always
+ * secondarily were: an automatic expense posting is money leaving the business,
+ * and a reversal, however clean, still leaves a correction in the ledger that
+ * somebody has to explain at period close. Same numbers, honest reason.
  */
 export const AUTOPILOT_DEFAULTS: Record<AutopilotCategory, AutopilotCategorySetting> = {
   inventory: { enabled: false, maxAmountRial: 10_000_000, maxPercent: null, maxItemsPerRun: 10, dailyActionLimit: 2 },

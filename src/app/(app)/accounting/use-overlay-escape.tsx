@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, type RefObject } from "react";
 
 /**
  * Close a hand-rolled overlay on Escape.
@@ -12,11 +12,10 @@ import { useEffect } from "react";
  * Escape is a keyboard trap for anyone not using a mouse, and it is the one
  * behaviour every reader already expects from `aria-modal="true"`.
  *
- * Deliberately only the key: focus trapping and scroll locking belong to a real
- * dialog primitive, and half-implementing them here would be worse than the
- * plain panel these already are.
+ * Deliberately only the key: OverlayDialog composes Radix FocusScope for
+ * focus containment/restoration rather than duplicating that behavior here.
  */
-export function useOverlayEscape(onClose: () => void, enabled = true): void {
+export function useOverlayEscape(onClose: () => void, enabled = true, panel?: RefObject<HTMLElement | null>): void {
   useEffect(() => {
     if (!enabled) return;
     function onKeyDown(event: KeyboardEvent) {
@@ -25,9 +24,18 @@ export function useOverlayEscape(onClose: () => void, enabled = true): void {
       // never stops propagation, so without this check the panel underneath
       // closed with it: one press, two layers gone.
       if (event.defaultPrevented) return;
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape") return;
+      if (panel) {
+        // A statement can open an entry above it. Older window listeners run
+        // first, so propagation alone cannot protect the parent. Busy top
+        // layers also consume Escape rather than dismissing anything below.
+        const layers = document.querySelectorAll("[data-ledger-dialog]");
+        if (layers[layers.length - 1] !== panel.current) return;
+        event.preventDefault();
+      }
+      onClose();
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [enabled, onClose]);
+  }, [enabled, onClose, panel]);
 }

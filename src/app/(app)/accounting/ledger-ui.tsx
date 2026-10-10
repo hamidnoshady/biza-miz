@@ -17,14 +17,16 @@
  *
  * They live together here because they are used together: a ledger overlay
  * almost always shows a Jalali date and can fail to load. `OverlayDialog`
- * composes `use-overlay-escape.tsx` (the hook the hand-rolled panels already
- * shared) rather than re-implementing it, and stays presentation-only — no
- * focus trapping, no scroll locking, exactly the plain panel these screens
- * already were. A panel that needs the full dialog behaviour uses the shadcn
- * `<Dialog>` the cheques register uses instead.
+ * keeps the ledger's panel styling while composing Radix FocusScope for
+ * initial focus, Tab containment and restoration. Portals avoid ancestor
+ * clipping; inactive content is hidden from assistive technology. Nested scopes
+ * pause their parent; Escape dismisses only the top ledger layer.
  */
 
-import { useCallback, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { FocusScope } from "@radix-ui/react-focus-scope";
+import { Portal } from "radix-ui";
+import { hideOthers } from "aria-hidden";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { SecondaryButton } from "@/app/dashboard/ui";
@@ -103,25 +105,39 @@ export function OverlayDialog({
   const requestClose = useCallback(() => {
     if (dismissible) onClose();
   }, [dismissible, onClose]);
-  useOverlayEscape(requestClose, dismissible);
+  const panelRef = useRef<HTMLElement>(null);
+  const [panel, setPanel] = useState<HTMLElement | null>(null);
+  const attachPanel = useCallback((node: HTMLElement | null) => {
+    panelRef.current = node;
+    setPanel(node);
+  }, []);
+  useEffect(() => panel ? hideOthers(panel) : undefined, [panel]);
+  useOverlayEscape(requestClose, true, panelRef);
 
   return (
-    <div
-      className={`fixed inset-0 z-50 flex items-end justify-center bg-black/40 ${
-        sheet ? "p-0 sm:items-center sm:p-4" : "p-3 sm:items-center sm:p-4"
-      }`}
-      onClick={requestClose}
-    >
-      <section
-        role={role}
-        aria-modal="true"
-        aria-labelledby={headingId}
-        aria-describedby={describedById}
-        className={className}
-        onClick={(e) => e.stopPropagation()}
+    <Portal.Root asChild>
+      <div
+        className={`fixed inset-0 z-50 flex items-end justify-center bg-black/40 ${
+          sheet ? "p-0 sm:items-center sm:p-4" : "p-3 sm:items-center sm:p-4"
+        }`}
+        onClick={requestClose}
       >
-        {children}
-      </section>
-    </div>
+        <FocusScope asChild trapped loop>
+          <section
+            ref={attachPanel}
+            data-ledger-dialog=""
+            tabIndex={-1}
+            role={role}
+            aria-modal="true"
+            aria-labelledby={headingId}
+            aria-describedby={describedById}
+            className={className}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {children}
+          </section>
+        </FocusScope>
+      </div>
+    </Portal.Root>
   );
 }

@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Keep the framework-only badge out of local visual review; no production effect.
+  devIndicators: false,
   // This repository has hundreds of App Router entries. Keep compilation
   // single-process and enable webpack's reduced-memory graph representation so
   // release builds also work on Local/Desktop builders with modest RAM.

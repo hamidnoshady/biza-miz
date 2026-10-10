@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_RIAL } from "./inventory-exact";
 import {
   applyBasisPoints,
   computeGrossToNet,
@@ -192,157 +193,195 @@ describe("computeGrossToNet", () => {
   it("with nothing configured, gross equals net and the employer pays gross", () => {
     const r = ok(
       computeGrossToNet(
-        { baseSalaryRial: 150_000_000, taxableAllowancesRial: 20_000_000, nonTaxableAllowancesRial: 10_000_000, overtimeRial: 5_000_000 },
+        { baseSalaryRial: 150_000_000n, taxableAllowancesRial: 20_000_000n, nonTaxableAllowancesRial: 10_000_000n, overtimeRial: 5_000_000n },
         EMPTY_PAYROLL_SETTINGS,
       ),
     );
-    expect(r.grossRial).toBe(185_000_000);
-    expect(r.netPayRial).toBe(185_000_000);
-    expect(r.employerCostRial).toBe(185_000_000);
-    expect(r.employeeInsuranceRial + r.employerInsuranceRial + r.incomeTaxRial).toBe(0);
+    expect(r.grossRial).toBe(185_000_000n);
+    expect(r.netPayRial).toBe(185_000_000n);
+    expect(r.employerCostRial).toBe(185_000_000n);
+    expect(r.employeeInsuranceRial + r.employerInsuranceRial + r.incomeTaxRial).toBe(0n);
   });
 
   it("computes the full breakdown to the Rial", () => {
     const r = ok(
       computeGrossToNet(
         {
-          baseSalaryRial: 200_000_000,
-          taxableAllowancesRial: 30_000_000,
-          nonTaxableAllowancesRial: 15_000_000,
-          overtimeRial: 10_000_000,
-          advanceOutstandingRial: 5_000_000,
-          otherDeductionsRial: 2_000_000,
+          baseSalaryRial: 200_000_000n,
+          taxableAllowancesRial: 30_000_000n,
+          nonTaxableAllowancesRial: 15_000_000n,
+          overtimeRial: 10_000_000n,
+          advanceOutstandingRial: 5_000_000n,
+          otherDeductionsRial: 2_000_000n,
         },
         SETTINGS,
       ),
     );
     // insurance base = 200 + 10 + 30 = 240M (non-taxable not insurable)
-    expect(r.grossRial).toBe(255_000_000);
-    expect(r.insuranceBaseRial).toBe(240_000_000);
-    expect(r.employeeInsuranceRial).toBe(16_800_000);
-    expect(r.employerInsuranceRial).toBe(48_000_000);
-    expect(r.unemploymentInsuranceRial).toBe(7_200_000);
+    expect(r.grossRial).toBe(255_000_000n);
+    expect(r.insuranceBaseRial).toBe(240_000_000n);
+    expect(r.employeeInsuranceRial).toBe(16_800_000n);
+    expect(r.employerInsuranceRial).toBe(48_000_000n);
+    expect(r.unemploymentInsuranceRial).toBe(7_200_000n);
     // taxable = 240M − 16.8M = 223.2M → 40M×10% + 83.2M×15% = 4M + 12.48M = 16.48M
-    expect(r.taxableIncomeRial).toBe(223_200_000);
-    expect(r.incomeTaxRial).toBe(16_480_000);
-    expect(r.otherDeductionsRial).toBe(2_000_000);
-    expect(r.advanceRecoveryRial).toBe(5_000_000);
-    expect(r.advanceCarriedRial).toBe(0);
-    expect(r.netPayRial).toBe(255_000_000 - 16_800_000 - 16_480_000 - 2_000_000 - 5_000_000);
-    expect(r.employerCostRial).toBe(255_000_000 + 48_000_000 + 7_200_000);
+    expect(r.taxableIncomeRial).toBe(223_200_000n);
+    expect(r.incomeTaxRial).toBe(16_480_000n);
+    expect(r.otherDeductionsRial).toBe(2_000_000n);
+    expect(r.advanceRecoveryRial).toBe(5_000_000n);
+    expect(r.advanceCarriedRial).toBe(0n);
+    expect(r.netPayRial).toBe(255_000_000n - 16_800_000n - 16_480_000n - 2_000_000n - 5_000_000n);
+    expect(r.employerCostRial).toBe(255_000_000n + 48_000_000n + 7_200_000n);
   });
 
   it("caps the insurance base at the ceiling", () => {
     const r = ok(
-      computeGrossToNet({ baseSalaryRial: 500_000_000 }, { ...SETTINGS, insuranceCeilingRial: 300_000_000 }),
+      computeGrossToNet({ baseSalaryRial: 500_000_000n }, { ...SETTINGS, insuranceCeilingRial: 300_000_000 }),
     );
-    expect(r.insuranceBaseRial).toBe(300_000_000);
-    expect(r.employeeInsuranceRial).toBe(21_000_000);
-    expect(r.employerInsuranceRial).toBe(60_000_000);
+    expect(r.insuranceBaseRial).toBe(300_000_000n);
+    expect(r.employeeInsuranceRial).toBe(21_000_000n);
+    expect(r.employerInsuranceRial).toBe(60_000_000n);
     // taxable income is not capped
-    expect(r.taxableIncomeRial).toBe(500_000_000 - 21_000_000);
+    expect(r.taxableIncomeRial).toBe(500_000_000n - 21_000_000n);
   });
 
   it("insures non-taxable allowances only when the business says so", () => {
-    const input = { baseSalaryRial: 100_000_000, nonTaxableAllowancesRial: 20_000_000 };
-    expect(ok(computeGrossToNet(input, SETTINGS)).insuranceBaseRial).toBe(100_000_000);
+    const input = { baseSalaryRial: 100_000_000n, nonTaxableAllowancesRial: 20_000_000n };
+    expect(ok(computeGrossToNet(input, SETTINGS)).insuranceBaseRial).toBe(100_000_000n);
     expect(ok(computeGrossToNet(input, { ...SETTINGS, nonTaxableAllowancesInsurable: true })).insuranceBaseRial).toBe(
-      120_000_000,
+      120_000_000n,
     );
   });
 
   it("keeps non-taxable allowances out of taxable income", () => {
-    const r = ok(computeGrossToNet({ baseSalaryRial: 100_000_000, nonTaxableAllowancesRial: 50_000_000 }, {
+    const r = ok(computeGrossToNet({ baseSalaryRial: 100_000_000n, nonTaxableAllowancesRial: 50_000_000n }, {
       ...SETTINGS,
       employeeInsurancePercent: null,
     }));
-    expect(r.taxableIncomeRial).toBe(100_000_000);
-    expect(r.incomeTaxRial).toBe(0);
+    expect(r.taxableIncomeRial).toBe(100_000_000n);
+    expect(r.incomeTaxRial).toBe(0n);
   });
 
   it("deducts the employee's insurance before tax only when the business says so", () => {
-    const withDeduction = ok(computeGrossToNet({ baseSalaryRial: 200_000_000 }, SETTINGS));
-    const without = ok(computeGrossToNet({ baseSalaryRial: 200_000_000 }, { ...SETTINGS, deductEmployeeInsuranceFromTaxable: false }));
-    expect(withDeduction.taxableIncomeRial).toBe(186_000_000);
-    expect(without.taxableIncomeRial).toBe(200_000_000);
-    expect(without.incomeTaxRial).toBeGreaterThan(withDeduction.incomeTaxRial);
+    const withDeduction = ok(computeGrossToNet({ baseSalaryRial: 200_000_000n }, SETTINGS));
+    const without = ok(computeGrossToNet({ baseSalaryRial: 200_000_000n }, { ...SETTINGS, deductEmployeeInsuranceFromTaxable: false }));
+    expect(withDeduction.taxableIncomeRial).toBe(186_000_000n);
+    expect(without.taxableIncomeRial).toBe(200_000_000n);
+    expect(without.incomeTaxRial > withDeduction.incomeTaxRial).toBe(true);
   });
 
   it("recovers an advance only up to the remaining pay and carries the rest", () => {
     const r = ok(
-      computeGrossToNet({ baseSalaryRial: 10_000_000, advanceOutstandingRial: 25_000_000 }, EMPTY_PAYROLL_SETTINGS),
+      computeGrossToNet({ baseSalaryRial: 10_000_000n, advanceOutstandingRial: 25_000_000n }, EMPTY_PAYROLL_SETTINGS),
     );
-    expect(r.advanceRecoveryRial).toBe(10_000_000);
-    expect(r.advanceCarriedRial).toBe(15_000_000);
-    expect(r.netPayRial).toBe(0);
+    expect(r.advanceRecoveryRial).toBe(10_000_000n);
+    expect(r.advanceCarriedRial).toBe(15_000_000n);
+    expect(r.netPayRial).toBe(0n);
   });
 
   it("refuses a month whose fixed deductions exceed gross", () => {
     expect(
-      computeGrossToNet({ baseSalaryRial: 10_000_000, otherDeductionsRial: 10_000_001 }, EMPTY_PAYROLL_SETTINGS),
+      computeGrossToNet({ baseSalaryRial: 10_000_000n, otherDeductionsRial: 10_000_001n }, EMPTY_PAYROLL_SETTINGS),
     ).toEqual({ ok: false, error: "deductions_exceed_gross" });
   });
 
-  it.each([-1, 1.5, Number.NaN])("refuses the amount %s", (value) => {
-    expect(computeGrossToNet({ baseSalaryRial: value }, EMPTY_PAYROLL_SETTINGS)).toEqual({
-      ok: false,
-      error: "invalid_amount",
-    });
-    expect(computeGrossToNet({ baseSalaryRial: 1, overtimeRial: value }, EMPTY_PAYROLL_SETTINGS)).toEqual({
-      ok: false,
-      error: "invalid_amount",
-    });
+  it("refuses a negative amount, and anything that is not a bigint (a Number would round)", () => {
+    const refused = { ok: false, error: "invalid_amount" };
+    expect(computeGrossToNet({ baseSalaryRial: -1n }, EMPTY_PAYROLL_SETTINGS)).toEqual(refused);
+    expect(computeGrossToNet({ baseSalaryRial: 1n, overtimeRial: -1n }, EMPTY_PAYROLL_SETTINGS)).toEqual(refused);
+    for (const value of [1.5, Number.NaN, 5, "5", null]) {
+      expect(computeGrossToNet({ baseSalaryRial: value as never }, EMPTY_PAYROLL_SETTINGS)).toEqual(refused);
+      expect(computeGrossToNet({ baseSalaryRial: 1n, overtimeRial: value as never }, EMPTY_PAYROLL_SETTINGS)).toEqual(refused);
+    }
   });
 
   it("rounds each insurance figure half-up", () => {
     // base 15 Rial × 7% = 1.05 → 1; × 20% = 3; × 3.5% = 0.525 → 1
     const r = ok(
-      computeGrossToNet({ baseSalaryRial: 15 }, { ...EMPTY_PAYROLL_SETTINGS, employeeInsurancePercent: 7, employerInsurancePercent: 20, unemploymentInsurancePercent: 3.5 }),
+      computeGrossToNet({ baseSalaryRial: 15n }, { ...EMPTY_PAYROLL_SETTINGS, employeeInsurancePercent: 7, employerInsurancePercent: 20, unemploymentInsurancePercent: 3.5 }),
     );
-    expect([r.employeeInsuranceRial, r.employerInsuranceRial, r.unemploymentInsuranceRial]).toEqual([1, 3, 1]);
+    expect([r.employeeInsuranceRial, r.employerInsuranceRial, r.unemploymentInsuranceRial]).toEqual([1n, 3n, 1n]);
   });
 
   it("satisfies gross = net + every employee-side deduction for any input", () => {
-    for (let base = 0; base < 3_000_000; base += 77_777) {
+    for (let base = 0n; base < 3_000_000n; base += 77_777n) {
       const r = ok(
         computeGrossToNet(
-          { baseSalaryRial: base, taxableAllowancesRial: 1_234, overtimeRial: 9_999, advanceOutstandingRial: 50_001 },
+          { baseSalaryRial: base, taxableAllowancesRial: 1_234n, overtimeRial: 9_999n, advanceOutstandingRial: 50_001n },
           { ...SETTINGS, taxExemptThresholdRial: 1_000_000, taxBrackets: [{ upToRial: 2_000_000, ratePercent: 10.5 }, { upToRial: null, ratePercent: 33.33 }] },
         ),
       );
       expect(r.netPayRial + r.employeeInsuranceRial + r.incomeTaxRial + r.otherDeductionsRial + r.advanceRecoveryRial).toBe(
         r.grossRial,
       );
-      expect(r.netPayRial).toBeGreaterThanOrEqual(0);
+      expect(r.netPayRial >= 0n).toBe(true);
     }
+  });
+
+  // Issue #835 §10: money is exact past 2^53. A `Number` here would round the
+  // wage, the insurance and the net by a few Rial and the journal would stop balancing.
+  describe("beyond Number's safe range (issue #835 §10)", () => {
+    const BIG = 9_007_199_254_740_993n; // 2^53 + 1 — not representable as a Number
+
+    it("keeps every figure exact when a wage is past 2^53", () => {
+      const r = ok(computeGrossToNet({ baseSalaryRial: BIG }, { ...EMPTY_PAYROLL_SETTINGS, employeeInsurancePercent: 7 }));
+      expect(r.grossRial).toBe(BIG);
+      // 7% of 2^53 + 1, rounded half-up: (BIG × 700 + 5000) / 10000
+      expect(r.employeeInsuranceRial).toBe((BIG * 700n + 5000n) / 10_000n);
+      expect(r.netPayRial + r.employeeInsuranceRial).toBe(BIG);
+      // The figure a Number would have produced is a different integer.
+      expect(BigInt(Number(BIG))).not.toBe(BIG);
+    });
+
+    it("refuses an employer cost the ledger columns cannot hold, instead of wrapping or aborting later", () => {
+      expect(computeGrossToNet({ baseSalaryRial: MAX_RIAL }, { ...EMPTY_PAYROLL_SETTINGS, employerInsurancePercent: 20 })).toEqual({
+        ok: false,
+        error: "amount_too_large",
+      });
+      // …while the largest cost that does fit is accepted.
+      expect(computeGrossToNet({ baseSalaryRial: MAX_RIAL }, EMPTY_PAYROLL_SETTINGS).ok).toBe(true);
+    });
   });
 });
 
 describe("payrollAccrualTotals", () => {
   it("sums lines into a balanced journal", () => {
     const lines = [
-      ok(computeGrossToNet({ baseSalaryRial: 200_000_000, advanceOutstandingRial: 3_000_000, otherDeductionsRial: 1_000_000 }, SETTINGS)),
-      ok(computeGrossToNet({ baseSalaryRial: 120_000_000, overtimeRial: 7_777_777 }, SETTINGS)),
+      ok(computeGrossToNet({ baseSalaryRial: 200_000_000n, advanceOutstandingRial: 3_000_000n, otherDeductionsRial: 1_000_000n }, SETTINGS)),
+      ok(computeGrossToNet({ baseSalaryRial: 120_000_000n, overtimeRial: 7_777_777n }, SETTINGS)),
     ];
     const t = payrollAccrualTotals(lines);
     const debits = t.grossRial + t.employerInsuranceExpenseRial;
     const credits =
       t.netPayableRial + t.insurancePayableRial + t.incomeTaxPayableRial + t.advanceRecoveryRial + t.otherDeductionsPayableRial;
     expect(debits).toBe(credits);
-    expect(t.advanceRecoveryRial).toBe(3_000_000);
-    expect(t.otherDeductionsPayableRial).toBe(1_000_000);
+    expect(t.advanceRecoveryRial).toBe(3_000_000n);
+    expect(t.otherDeductionsPayableRial).toBe(1_000_000n);
   });
 
   it("with nothing configured, is gross on both sides", () => {
-    const t = payrollAccrualTotals([ok(computeGrossToNet({ baseSalaryRial: 50_000_000 }, EMPTY_PAYROLL_SETTINGS))]);
+    const t = payrollAccrualTotals([ok(computeGrossToNet({ baseSalaryRial: 50_000_000n }, EMPTY_PAYROLL_SETTINGS))]);
     expect(t).toEqual({
-      grossRial: 50_000_000,
-      employerInsuranceExpenseRial: 0,
-      netPayableRial: 50_000_000,
-      insurancePayableRial: 0,
-      incomeTaxPayableRial: 0,
-      advanceRecoveryRial: 0,
-      otherDeductionsPayableRial: 0,
+      grossRial: 50_000_000n,
+      employerInsuranceExpenseRial: 0n,
+      netPayableRial: 50_000_000n,
+      insurancePayableRial: 0n,
+      incomeTaxPayableRial: 0n,
+      advanceRecoveryRial: 0n,
+      otherDeductionsPayableRial: 0n,
     });
+  });
+
+  it("stays balanced to the Rial when the total passes 2^53 (lines that are each exact)", () => {
+    const settings = { ...SETTINGS, taxExemptThresholdRial: null, taxBrackets: [] };
+    const lines = [9_007_199_254_740_993n, 9_007_199_254_740_995n, 4_503_599_627_370_497n].map((base) =>
+      ok(computeGrossToNet({ baseSalaryRial: base, advanceOutstandingRial: 1_000_000n }, settings)),
+    );
+    const t = payrollAccrualTotals(lines);
+    expect(t.grossRial).toBe(9_007_199_254_740_993n + 9_007_199_254_740_995n + 4_503_599_627_370_497n);
+    const debits = t.grossRial + t.employerInsuranceExpenseRial;
+    const credits =
+      t.netPayableRial + t.insurancePayableRial + t.incomeTaxPayableRial + t.advanceRecoveryRial + t.otherDeductionsPayableRial;
+    expect(debits).toBe(credits);
+    expect(BigInt(Number(t.grossRial))).not.toBe(t.grossRial);
   });
 });
