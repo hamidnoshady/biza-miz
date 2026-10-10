@@ -3,6 +3,7 @@ import {
   ACCOUNTING_SECTIONS,
   accountingSectionsFor,
   canViewAccountingSection,
+  LEDGER_WORKSPACE_LABEL,
 } from "./accounting-nav";
 import { roleBasePermissions } from "@/lib/permissions";
 import type { Role } from "@/lib/auth";
@@ -17,7 +18,6 @@ import {
   ledgerWorkspaceToolGroups,
   LEDGER_WORKSPACE_GROUP_KEY,
   LEDGER_WORKSPACE_ICON_KEY,
-  LEDGER_WORKSPACE_LABEL,
   LEDGER_WORKSPACE_SECTION_KEYS,
   LEDGER_WORKSPACE_SUBGROUPS,
   workspaceEntryIsActive,
@@ -313,10 +313,28 @@ describe("the ledger workspace's own section list", () => {
 });
 
 describe("the ledger tool divisions", () => {
-  it("gives every ledger tool exactly one division", () => {
+  it("gives every ledger tool exactly one division, and the tool set is exactly these fifteen", () => {
+    // The contract, written out: a tool added or dropped must change this list
+    // on purpose. The tool set is derived from the divisions, so this is the one
+    // place the membership is pinned — not a second copy of it.
+    const expected = [
+      "trial-balance", "entries", "manual", "chart-of-accounts",
+      "receivables", "payables", "installments", "cheques",
+      "receipts", "expenses", "reconciliation", "fixed-assets",
+      "fiscal-periods", "vat", "payroll",
+    ];
     const placed = LEDGER_WORKSPACE_SUBGROUPS.flatMap((subGroup) => subGroup.keys);
     expect(new Set(placed).size).toBe(placed.length);
-    expect([...placed].sort()).toEqual([...LEDGER_WORKSPACE_SECTION_KEYS].sort());
+    expect([...LEDGER_WORKSPACE_SECTION_KEYS].sort()).toEqual([...expected].sort());
+    expect([...placed].sort()).toEqual([...expected].sort());
+    // The order inside each division is what the page and the in-page rail
+    // show, so it is pinned too: the rail's siblings follow this order.
+    expect(LEDGER_WORKSPACE_SUBGROUPS.map((subGroup) => subGroup.keys)).toEqual([
+      ["trial-balance", "entries", "manual", "chart-of-accounts"],
+      ["receivables", "payables", "installments", "cheques"],
+      ["receipts", "expenses", "reconciliation", "fixed-assets"],
+      ["fiscal-periods", "vat", "payroll"],
+    ]);
   });
 
   it("names each division once", () => {

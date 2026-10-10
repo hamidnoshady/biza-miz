@@ -44,14 +44,19 @@ export interface AccountingSectionDef {
   permission?: Permission;
 }
 
+/**
+ * The one definition of the ledger workspace's name. The menu row, the
+ * workspace page heading and the tests all read it from here, so the label
+ * cannot drift between the place a member clicks and the place they land.
+ */
+export const LEDGER_WORKSPACE_LABEL = "فضای کار حسابداری";
+
 /** The app's sections, in menu order. The dashboard (the app's home) is first. */
 export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "dashboard", label: "داشبورد حسابداری" },
   // The ledger workspace's landing page. One ordinary menu link — the same
   // skin as «فروش و فاکتور» — whose page lists the permitted ledger tools.
-  // The label is exact: the menu row, the page heading and the workspace link
-  // all wear «فضای کار حسابداری» from this one definition.
-  { key: "ledger", label: "فضای کار حسابداری" },
+  { key: "ledger", label: LEDGER_WORKSPACE_LABEL },
   { key: "trial-balance", label: "تراز آزمایشی" },
   { key: "entries", label: "دفتر روزنامه" },
   { key: "manual", label: "ثبت سند دستی" },
@@ -85,54 +90,6 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   // Accounting's *own* settings — never the platform settings page. Last in
   // the menu, the way every app's settings entry is.
   { key: "settings", label: "تنظیمات حسابداری" },
-];
-
-/**
- * How the ledger's sections divide into work areas.
- *
- * The app's **sidebar** is not this list: Accounting is the business's primary
- * workspace now, so its menu is composed in `accounting-workspace.ts` — the
- * business's work areas plus one ordinary link, «فضای کار حسابداری», whose
- * landing page (`/accounting/ledger`) lists the permitted tools under the
- * divisions in `LEDGER_WORKSPACE_SUBGROUPS`. This grouping stays because it is
- * the one place that guarantees every section has a home.
- *
- * Twenty-three rows in one column is a list nobody reads; these are the
- * accountant's own divisions of the work. Every key appears in exactly one
- * group — asserted in `accounting-nav.test.ts`, so a section added to
- * `ACCOUNTING_SECTIONS` without a home here fails the build rather than
- * quietly vanishing from the menu.
- */
-export const ACCOUNTING_NAV_GROUPS: readonly {
-  label: string;
-  keys: readonly AccountingSectionKey[];
-}[] = [
-  {
-    label: "دفتر",
-    keys: [
-      "dashboard",
-      "ledger",
-      "trial-balance",
-      "entries",
-      "manual",
-      "chart-of-accounts",
-    ],
-  },
-  { label: "اشخاص", keys: ["directory"] },
-  {
-    label: "دریافتنی و پرداختنی",
-    keys: ["receivables", "payables", "installments", "cheques"],
-  },
-  {
-    label: "وجوه و هزینه",
-    keys: ["receipts", "expenses", "reconciliation", "fixed-assets"],
-  },
-  {
-    label: "دوره و گزارش",
-    keys: ["fiscal-periods", "vat", "payroll", "financial-reports", "growth"],
-  },
-  // The app's settings entry, last — the shape every app's menu ends with.
-  { label: "پیکربندی", keys: ["settings"] },
 ];
 
 /** The sections a member may open — the same list the sidebar and the rail draw. */

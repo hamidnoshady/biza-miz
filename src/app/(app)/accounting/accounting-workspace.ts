@@ -136,51 +136,17 @@ const REPORTS_SLOTS: readonly WorkspaceSlot[] = [
 ];
 
 /**
- * The ledger's own tools — everything the «فضای کار حسابداری» page links to.
+ * The ledger's own tools, divided the way the accountant works.
  *
- * Membership lives here; the *order* and the headings live in
- * `LEDGER_WORKSPACE_SUBGROUPS` below, which arranges exactly these keys.
- * Their routes, labels, icons and permissions are untouched: the sidebar
- * simply links to the workspace page instead of listing them all, and the
- * page lists them through the same permission helper the menu used.
+ * This is the one membership list: the «فضای کار حسابداری» page draws these
+ * divisions, the ledger tool set is derived from them below, and the menu's
+ * active matching reads that derived set. A tool therefore cannot be listed
+ * in one place and missing from another. Each tool sits in exactly one
+ * division — asserted in `accounting-workspace.test.ts`.
  *
- * Everything `ACCOUNTING_SECTIONS` holds except the workspace door itself and
- * the app-level areas: the app's home (a group of its own at the top), the
- * directory (the people group), reports, the cross-domain growth analysis,
- * and app settings. Those destinations have their own focused groups rather
- * than being buried among ledger tools.
- */
-export const LEDGER_WORKSPACE_SECTION_KEYS: readonly AccountingSectionKey[] = [
-  "trial-balance",
-  "entries",
-  "manual",
-  "chart-of-accounts",
-  "receivables",
-  "payables",
-  "receipts",
-  "installments",
-  "cheques",
-  "expenses",
-  "reconciliation",
-  "fixed-assets",
-  "fiscal-periods",
-  "vat",
-  "payroll",
-];
-
-/**
- * How the «فضای کار حسابداری» page divides its tools.
- *
- * The workspace is one ordinary menu link now, so the ledger's sixteen rows no
- * longer sit in the sidebar at all — they are listed on `/accounting/ledger`
- * under these headings. These are the accountant's own divisions — the same
- * ones the in-page rail already draws (`ACCOUNTING_NAV_GROUPS`), narrowed to
- * the keys `LEDGER_WORKSPACE_SECTION_KEYS` holds.
- *
- * The union of these keys is exactly `LEDGER_WORKSPACE_SECTION_KEYS`, asserted
- * in `accounting-workspace.test.ts`, so a ledger tool can never be added
- * without a home — and the sub-groups can never become a second, disagreeing
- * list.
+ * Their routes, labels, icons and permissions are owned by
+ * `ACCOUNTING_SECTIONS` and `accounting-routes.ts`; this file only arranges
+ * them. The sidebar links to the workspace page instead of listing them.
  */
 export const LEDGER_WORKSPACE_SUBGROUPS: readonly {
   key: string;
@@ -197,8 +163,10 @@ export const LEDGER_WORKSPACE_SUBGROUPS: readonly {
   { key: "ledger-periods", label: "دوره، مالیات و حقوق", keys: ["fiscal-periods", "vat", "payroll"] },
 ];
 
-/** The label «فضای کار حسابداری» wears wherever it is drawn — menu row and page alike. */
-export const LEDGER_WORKSPACE_LABEL = "فضای کار حسابداری";
+/** Every ledger tool, in division order — derived, never a second list. */
+export const LEDGER_WORKSPACE_SECTION_KEYS: readonly AccountingSectionKey[] =
+  LEDGER_WORKSPACE_SUBGROUPS.flatMap((subGroup) => subGroup.keys);
+
 export const LEDGER_WORKSPACE_GROUP_KEY = "ledger";
 /**
  * The glyph the workspace row wears — the same calculator the workspace rail

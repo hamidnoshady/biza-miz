@@ -14,8 +14,8 @@ import type { ReactNode } from "react";
 import { roleBasePermissions } from "@/lib/permissions";
 import type { Role } from "@/lib/auth";
 import { accountingSectionHref, type AccountingSectionKey } from "./accounting-routes";
+import { LEDGER_WORKSPACE_LABEL } from "./accounting-nav";
 import {
-  LEDGER_WORKSPACE_LABEL,
   LEDGER_WORKSPACE_SECTION_KEYS,
   LEDGER_WORKSPACE_SUBGROUPS,
 } from "./accounting-workspace";

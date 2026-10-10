@@ -175,14 +175,14 @@ table for all three roles (migration 0137).
 ## 5. Adding to the menu
 
 - **A new accounting section** — add the key to `ACCOUNTING_SECTION_KEYS`, a
-  label to `ACCOUNTING_SECTIONS`, a glyph to `ACCOUNTING_SECTION_ICONS`, a home
-  to `ACCOUNTING_NAV_GROUPS`, and (if it is a ledger tool) to
-  `LEDGER_WORKSPACE_SECTION_KEYS` and one division of
-  `LEDGER_WORKSPACE_SUBGROUPS` — the workspace page then lists it
-  automatically, filtered by the same permission helper. A non-tool section
-  gets a menu row through `accountingWorkspaceGroups()`.
-  `accounting-workspace.test.ts` fails if a section ends up with neither a menu
-  row nor a workspace-page tool.
+  label to `ACCOUNTING_SECTIONS`, a glyph to `ACCOUNTING_SECTION_ICONS`, and
+  (if it is a ledger tool) one division of `LEDGER_WORKSPACE_SUBGROUPS` — the
+  tool set `LEDGER_WORKSPACE_SECTION_KEYS` is derived from those divisions. The
+  workspace page then lists it automatically, filtered by the same permission
+  helper. A non-tool section gets a menu row through
+  `accountingWorkspaceGroups()`. `app-ownership.test.ts` fails if a section ends
+  up with neither a menu row nor a workspace-page tool, and
+  `accounting-workspace.test.ts` pins the fifteen tools.
 - **A business page the workspace should adopt** — add its href to
   `WORKSPACE_GROUP_SLOTS` in `accounting-workspace.ts`. Do **not** re-declare
   the page: the composer picks it out of the nav the shell already gated, so
