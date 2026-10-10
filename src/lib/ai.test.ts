@@ -536,6 +536,10 @@ describe("Phase C — party, campaign and receipt writes", () => {
     expect(receipt.alwaysConfirm).toBe(true);
     expect(receipt.autopilotCategory).toBeUndefined();
     expect(receipt.executor).toBeUndefined();
+    // The destination requires a client idempotency key the model must not
+    // invent; the apply endpoint injects a stable proposal-derived one.
+    expect(receipt.needsIdempotencyKey).toBe(true);
+    expect(receipt.payloadHint).not.toContain("idempotencyKey");
   });
 
   it("leaves all four gap actions out of every unattended path", () => {

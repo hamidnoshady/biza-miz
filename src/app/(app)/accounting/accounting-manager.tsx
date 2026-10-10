@@ -170,6 +170,18 @@ export function AccountingManager({
    * API is going to refuse.
    */
   const canProposeLedger = permissions.includes(PERMISSIONS.ledgerPropose);
+  /**
+   * Whether this member may record receipts / payments in «دریافت و پرداخت».
+   * The workspace used to draw ثبت for everyone who could view the ledger, so
+   * a viewer got a 403 from a control that looked live. Plain booleans like
+   * `canApproveLedger`/`canProposeLedger` — `permissions` is required, so
+   * there is no unread-member case to represent (the section still accepts
+   * `undefined` and treats it as allowed, keeping the API as the gate for any
+   * future optional caller).
+   */
+  const canManageReceivables = permissions.includes(PERMISSIONS.financeReceivablesManage);
+  const canManagePayables = permissions.includes(PERMISSIONS.financePayablesManage);
+  const canReverseVouchers = permissions.includes(PERMISSIONS.ledgerApprove);
 
   /**
    * Whether this member may *write* in the expense register (issue #832 §3).
@@ -393,12 +405,13 @@ export function AccountingManager({
               permissions={permissions}
             />
           ) : null}
-          {section === "receivables" ? <ArSection canSettle={!!permissions?.includes(PERMISSIONS.financeReceivablesManage)} /> : null}
-          {section === "payables" ? <ApSection canSettle={!!permissions?.includes(PERMISSIONS.financePayablesManage)} /> : null}
+          {section === "receivables" ? <ArSection canSettle={canManageReceivables} /> : null}
+          {section === "payables" ? <ApSection canSettle={canManagePayables} /> : null}
           {section === "receipts" ? <ReceiptsPaymentsSection
-            canManageReceivables={!!permissions?.includes(PERMISSIONS.financeReceivablesManage)}
-            canManagePayables={!!permissions?.includes(PERMISSIONS.financePayablesManage)}
-            canReversePayments={!!permissions?.includes(PERMISSIONS.ledgerApprove)}
+            canManageReceivables={canManageReceivables}
+            canManagePayables={canManagePayables}
+            canReversePayments={canReverseVouchers}
+            canReverseReceipts={canReverseVouchers}
           /> : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? <ChequesSection busy={busy} run={run} /> : null}

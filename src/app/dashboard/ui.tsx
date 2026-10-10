@@ -379,6 +379,9 @@ const ERROR_MESSAGES: Record<string, string> = {
     // Not a usable YYYY-MM-DD calendar date — what the ledger's aging and
     // voucher routes answer a malformed date parameter with.
     invalid_date: "تاریخ واردشده معتبر نیست.",
+    // A wrong-typed memo off the wire (a number, an object) — rejected as a
+    // 400, never trimmed into a TypeError 500.
+    invalid_memo: "شرح واردشده معتبر نیست.",
     // پروفایل کسب‌وکار و پروژه‌های AEC (issue #799، موج ۲)
     industry_mismatch: "این بخش فقط برای کسب‌وکارهای عمران، معماری و پیمانکاری است.",
     invalid_operating_profile: "پروفایل کسب‌وکار انتخابی معتبر نیست.",

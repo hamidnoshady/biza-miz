@@ -567,6 +567,7 @@ describe("supplier return of a purchase that carried input VAT", () => {
 describe("receipt/payment voucher account and bank reference", () => {
   it("debits the chosen bank account, stores the reference, and lists both", async () => {
     const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -583,14 +584,15 @@ describe("receipt/payment voucher account and bank reference", () => {
       { code: "1200", debit: 0, credit: 3_000_000 },
     ]);
 
-    const listed = await installments.listReceipts(biz.id);
+    const listed = (await installments.listReceiptsPage(biz.id, {})).rows;
     expect(listed[0]).toMatchObject({ bankReference: "1404-777", cashAccount: { code: "1119", name: "بانک ملت" } });
     // The reference is searchable.
-    expect(await installments.listReceipts(biz.id, "777")).toHaveLength(1);
+    expect((await installments.listReceiptsPage(biz.id, { q: "777" })).rows).toHaveLength(1);
   });
 
-  it("without a choice the method's default account takes it, exactly as before", async () => {
+  it("without a choice the method's default account takes it, and the read shows the posted account", async () => {
     const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
       businessId: biz.id,
       locationId: biz.locationId,
       customerId: customer.id,
@@ -604,7 +606,12 @@ describe("receipt/payment voucher account and bank reference", () => {
       { code: "1100", debit: 40_000, credit: 0 },
       { code: "1200", debit: 0, credit: 40_000 },
     ]);
-    expect((await installments.listReceipts(biz.id))[0].cashAccount).toBeNull();
+    // No choice stored — but the read resolves the posted account from the
+    // entry (#829 completion), so the register names 1100 instead of a dash.
+    expect((await installments.listReceiptsPage(biz.id, {})).rows[0].cashAccount).toEqual({
+      code: "1100",
+      name: "صندوق",
+    });
   });
 
   it("refuses an account that is not a cash/bank account of the method, or belongs to another business", async () => {
@@ -616,21 +623,21 @@ describe("receipt/payment voucher account and bank reference", () => {
       receiptDate: "2026-10-04",
       createdBy: user.id,
     };
-    await expect(arService.receivePayment({ ...base, method: "cash", cashAccountId: acct["1119"] })).rejects.toMatchObject({
+    await expect(arService.receivePayment({ idempotencyKey: randomUUID(), ...base, method: "cash", cashAccountId: acct["1119"] })).rejects.toMatchObject({
       code: "cash_account_method_mismatch",
     });
-    await expect(arService.receivePayment({ ...base, method: "bank", cashAccountId: acct["1220"] })).rejects.toMatchObject({
+    await expect(arService.receivePayment({ idempotencyKey: randomUUID(), ...base, method: "bank", cashAccountId: acct["1220"] })).rejects.toMatchObject({
       code: "invalid_cash_account",
     });
     const foreign = await db.query<{ id: string }>(
       "INSERT INTO accounts (business_id, code, name, type) VALUES ($1, '1110', 'Their bank', 'asset') RETURNING id",
       [biz.otherId],
     );
-    await expect(arService.receivePayment({ ...base, method: "bank", cashAccountId: foreign.rows[0].id })).rejects.toMatchObject({
+    await expect(arService.receivePayment({ idempotencyKey: randomUUID(), ...base, method: "bank", cashAccountId: foreign.rows[0].id })).rejects.toMatchObject({
       code: "invalid_cash_account",
     });
     await expect(
-      arService.receivePayment({ ...base, method: "bank", bankReference: "9".repeat(65) }),
+      arService.receivePayment({ idempotencyKey: randomUUID(), ...base, method: "bank", bankReference: "9".repeat(65) }),
     ).rejects.toMatchObject({ code: "invalid_bank_reference" });
     expect((await db.query("SELECT 1 FROM ar_receipts UNION ALL SELECT 1 FROM journal_entries")).rows).toHaveLength(0);
   });
@@ -648,7 +655,95 @@ describe("receipt/payment voucher account and bank reference", () => {
       cashAccountId: acct["1110"],
       bankReference: "REF-1",
     });
-    const listed = await installments.listPayments(biz.id);
+    const listed = (await installments.listPaymentsPage(biz.id, {})).rows;
     expect(listed[0]).toMatchObject({ bankReference: "REF-1", cashAccount: { code: "1110", name: "بانک" } });
+  });
+
+  it("a bank voucher without a choice posts to the bank account, 1110 (issue #829)", async () => {
+    const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "bank",
+      amount: 90_000,
+      receiptDate: "2026-10-04",
+      createdBy: user.id,
+    });
+    expect(receipt).toMatchObject({ cashAccountId: null, bankReference: null });
+    expect(await entryLines("ar_receipt", receipt.id)).toEqual([
+      { code: "1110", debit: 90_000, credit: 0 },
+      { code: "1200", debit: 0, credit: 90_000 },
+    ]);
+    // The read resolves the posted account from the entry (#829 completion).
+    expect((await installments.listReceiptsPage(biz.id, {})).rows[0].cashAccount).toEqual({
+      code: "1110",
+      name: "بانک",
+    });
+  });
+
+  it("a clearing voucher posts to 1120 and only takes clearing accounts (issue #829)", async () => {
+    const base = {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      amount: 70_000,
+      receiptDate: "2026-10-04",
+      createdBy: user.id,
+    };
+    const receipt = await arService.receivePayment({ idempotencyKey: randomUUID(), ...base, method: "clearing" });
+    expect(receipt).toMatchObject({ cashAccountId: null, bankReference: null });
+    expect(await entryLines("ar_receipt", receipt.id)).toEqual([
+      { code: "1120", debit: 70_000, credit: 0 },
+      { code: "1200", debit: 0, credit: 70_000 },
+    ]);
+
+    // The clearing account is a clearing-method account now, not a bank one.
+    const named = await arService.receivePayment({ idempotencyKey: randomUUID(), ...base, method: "clearing", cashAccountId: acct["1120"] });
+    expect(named.cashAccountId).toBe(acct["1120"]);
+    await expect(arService.receivePayment({ idempotencyKey: randomUUID(), ...base, method: "bank", cashAccountId: acct["1120"] })).rejects.toMatchObject({
+      code: "cash_account_method_mismatch",
+    });
+    await expect(arService.receivePayment({ idempotencyKey: randomUUID(), ...base, method: "clearing", cashAccountId: acct["1119"] })).rejects.toMatchObject({
+      code: "cash_account_method_mismatch",
+    });
+  });
+
+  it("the receipt account filter reads the actual posting, so default-account vouchers are found (issue #829)", async () => {
+    const receipt = await arService.receivePayment({
+      idempotencyKey: randomUUID(),
+      businessId: biz.id,
+      locationId: biz.locationId,
+      customerId: customer.id,
+      method: "bank",
+      amount: 90_000,
+      receiptDate: "2026-10-04",
+      createdBy: user.id,
+    });
+    expect(receipt.cashAccountId).toBeNull();
+    // The voucher named no account, but the money posted to 1110 — filtering
+    // by 1110 finds it, filtering by another bank account does not.
+    const found = await installments.listReceiptsPage(biz.id, { cashAccountId: acct["1110"] });
+    expect(found.rows.map((r) => r.id)).toContain(receipt.id);
+    const missed = await installments.listReceiptsPage(biz.id, { cashAccountId: acct["1119"] });
+    expect(missed.rows.map((r) => r.id)).not.toContain(receipt.id);
+  });
+
+  it("the payment account filter reads the credit cash line of the original entry (issue #829)", async () => {
+    const payment = await apService.payBill({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      supplierId: supplier.id,
+      method: "bank",
+      amount: 60_000,
+      paymentDate: "2026-10-05",
+      clientRequestId: `f11-acct:${randomUUID()}`,
+      createdBy: user.id,
+    });
+    expect(payment.cashAccountId).toBeNull();
+    const found = await installments.listPaymentsPage(biz.id, { cashAccountId: acct["1110"] });
+    expect(found.rows.map((r) => r.id)).toContain(payment.id);
+    const missed = await installments.listPaymentsPage(biz.id, { cashAccountId: acct["1119"] });
+    expect(missed.rows.map((r) => r.id)).not.toContain(payment.id);
   });
 });

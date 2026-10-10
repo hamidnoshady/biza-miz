@@ -6,6 +6,23 @@ import { isoDateToJalali, jalaliMonthLength, jalaliToIsoDate } from "./jalali";
 import { isUuid } from "./uuid";
 import { businessToday } from "./business-day-service";
 import { normalizePosSearchText } from "./pos-selection";
+import { isValidIsoDate } from "./iso-date";
+import {
+  decodeVoucherCursor,
+  encodeVoucherCursor,
+  VOUCHER_EXPORT_CHUNK_SIZE,
+  VOUCHER_PAGE_SIZE,
+  VOUCHER_PAGE_SIZE_MAX,
+  type VoucherCursor,
+  type VoucherListFilters,
+} from "./voucher-shared";
+import { isVoucherMethod, type VoucherMethod } from "./payables-input";
+import {
+  resolveVoucherCashAccount,
+  resolveVoucherPostedAccount,
+  VOUCHER_POSTED_ACCOUNT_SELECT,
+  voucherPostedAccountJoin,
+} from "./voucher-cash-account";
 
 /**
  * Installment schedules (اقساط) — see migrations/0140_installments.sql for the
@@ -47,7 +64,7 @@ export interface InstallmentItemRow {
   dueDate: string;
   amount: number;
   paidAt: string | null;
-  paidMethod: "cash" | "bank" | null;
+  paidMethod: VoucherMethod | null;
   paidMemo: string | null;
 }
 
@@ -458,7 +475,7 @@ export async function getInstallmentPlan(businessId: string, planId: string): Pr
     due_date: string;
     amount: string;
     paid_at: string | null;
-    paid_method: "cash" | "bank" | null;
+    paid_method: VoucherMethod | null;
     paid_memo: string | null;
   }>(
     `SELECT id, seq, due_date::text AS due_date, amount::text AS amount,
@@ -481,12 +498,25 @@ export async function getInstallmentPlan(businessId: string, planId: string): Pr
 function installmentApPaymentFingerprint(input: {
   supplierId: string;
   locationId: string;
-  method: "cash" | "bank";
+  method: VoucherMethod;
   amount: number;
   memo: string;
 }): string {
   return createHash("sha256")
     .update(JSON.stringify(["installment-ap-v1", input.supplierId, input.locationId, input.method, input.amount, input.memo]))
+    .digest("hex");
+}
+
+/** Stable fingerprint for the one receipt attached to a receivable installment item. */
+function installmentArReceiptFingerprint(input: {
+  customerId: string;
+  locationId: string | null;
+  method: VoucherMethod;
+  amount: number;
+  memo: string;
+}): string {
+  return createHash("sha256")
+    .update(JSON.stringify(["installment-ar-v1", input.customerId, input.locationId, input.method, input.amount, input.memo]))
     .digest("hex");
 }
 
@@ -501,9 +531,15 @@ export async function payInstallmentItem(params: {
   locationId: string | null;
   planId: string;
   itemId: string;
-  method: "cash" | "bank";
+  method: VoucherMethod;
   memo?: string | null;
   createdBy: string | null;
+  /**
+   * The cash/bank/clearing account the slice settles through; null = the
+   * method's default. Validated like a voucher's choice (business-owned,
+   * active, of the method's kind).
+   */
+  cashAccountId?: string | null;
 }): Promise<void> {
   // UUID route parameters are untrusted. Passing malformed values to a uuid
   // comparison produces a PostgreSQL parser error instead of a useful 404.
@@ -530,8 +566,8 @@ export async function payInstallmentItem(params: {
     if (!plan) throw new InstallmentError("plan_not_found", 404);
     if (!plan.party_id) throw new InstallmentError("plan_has_no_party");
 
-    const { rows: itemRows } = await client.query<{ id: string; amount: string; paid_at: string | null; seq: string; payment_id: string | null }>(
-      `SELECT id, amount::text AS amount, paid_at::text AS paid_at, seq::text AS seq, payment_id
+    const { rows: itemRows } = await client.query<{ id: string; amount: string; paid_at: string | null; seq: string; payment_id: string | null; receipt_id: string | null }>(
+      `SELECT id, amount::text AS amount, paid_at::text AS paid_at, seq::text AS seq, payment_id, receipt_id
          FROM installment_items WHERE id = $1 AND installment_id = $2 FOR UPDATE`,
       [params.itemId, params.planId],
     );
@@ -540,12 +576,43 @@ export async function payInstallmentItem(params: {
     const amount = Number(item.amount);
     const memo = params.memo?.trim() || `قسط ${item.seq} — ${plan.party_name ?? ""}`;
     const installmentRequestId = `installment-ap:${plan.id}:${item.id}`;
+    const installmentReceiptId = `installment-ar:${plan.id}:${item.id}`;
     if (item.paid_at) {
+      if (plan.direction === "receivable" && item.receipt_id) {
+        const { rows: existingReceiptRows } = await client.query<{
+          customer_id: string;
+          location_id: string | null;
+          method: VoucherMethod;
+          amount: string;
+          memo: string | null;
+          idempotency_key: string | null;
+          request_fingerprint: string | null;
+        }>(
+          `SELECT customer_id, location_id, method, amount::text AS amount, memo,
+                  idempotency_key, request_fingerprint
+             FROM ar_receipts
+            WHERE business_id = $1 AND id = $2`,
+          [params.businessId, item.receipt_id],
+        );
+        const receipt = existingReceiptRows[0];
+        if (receipt?.idempotency_key === installmentReceiptId) {
+          const fingerprint = installmentArReceiptFingerprint({
+            customerId: receipt.customer_id,
+            locationId: receipt.location_id,
+            method: params.method,
+            amount: Number(receipt.amount),
+            memo,
+          });
+          if (receipt.request_fingerprint !== fingerprint) throw new InstallmentError("idempotency_conflict", 409);
+          await client.query("COMMIT");
+          return;
+        }
+      }
       if (plan.direction === "payable" && item.payment_id) {
         const { rows: existingPaymentRows } = await client.query<{
           supplier_id: string;
           location_id: string;
-          method: "cash" | "bank";
+          method: VoucherMethod;
           amount: string;
           memo: string | null;
           client_request_id: string | null;
@@ -613,14 +680,21 @@ export async function payInstallmentItem(params: {
       }
     }
 
+    if (!isVoucherMethod(params.method)) throw new InstallmentError("invalid_method");
     const balanceAccountCode = plan.direction === "receivable"
       ? WELL_KNOWN_CODES.accountsReceivable
       : WELL_KNOWN_CODES.accountsPayable;
-    const cashAccountCode = params.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bankClearing;
+    // Issue #829: installment slices share the voucher method vocabulary.
+    // "bank" means money at the bank (1110); deferred/uncleared cheques use the
+    // explicit "clearing" method (1120). The old bank->clearing mapping is gone.
+    // Throws PayablesInputError for a foreign/inactive/wrong-kind account,
+    // which the route answers as a 400.
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId);
+    const cashAccount = cash.accountId;
+    const storedCashAccountId = cash.chosen ? cash.accountId : null;
     // Do not require the opposite subledger account: a receivable settlement
     // must not fail merely because this business has no active A/P account.
-    const accounts = await accountIdsByCode(client, params.businessId, [balanceAccountCode, cashAccountCode]);
-    const cashAccount = accounts.get(cashAccountCode)!;
+    const accounts = await accountIdsByCode(client, params.businessId, [balanceAccountCode]);
     const { rows: dateRows } = await client.query<{ business_date: string }>(
       `SELECT app_business_date(now(), COALESCE(l.timezone, 'Asia/Tehran'), l.business_day_start_minutes)::text AS business_date
          FROM (SELECT 1) one
@@ -631,10 +705,28 @@ export async function payInstallmentItem(params: {
 
     if (plan.direction === "receivable") {
       const arAccount = accounts.get(WELL_KNOWN_CODES.accountsReceivable)!;
+      const { rows: voucherRows } = await client.query<{ voucher_number: string }>(
+        `INSERT INTO ar_ap_voucher_counters (business_id, last_ar_voucher_number, last_ap_voucher_number)
+         VALUES ($1, 1, 0)
+         ON CONFLICT (business_id) DO UPDATE
+           SET last_ar_voucher_number = ar_ap_voucher_counters.last_ar_voucher_number + 1
+         RETURNING last_ar_voucher_number::text AS voucher_number`,
+        [params.businessId],
+      );
+      const receiptFingerprint = installmentArReceiptFingerprint({
+        customerId: plan.party_id,
+        locationId: effectiveLocationId,
+        method: params.method,
+        amount,
+        memo,
+      });
       const { rows } = await client.query<{ id: string; receipt_date: string }>(
-        `INSERT INTO ar_receipts (business_id, location_id, customer_id, receipt_date, method, amount, memo, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, receipt_date::text AS receipt_date`,
-        [params.businessId, effectiveLocationId, plan.party_id, paymentDate, params.method, amount, memo, params.createdBy],
+        `INSERT INTO ar_receipts
+           (business_id, location_id, customer_id, receipt_date, method, cash_account_id, voucher_number, amount, memo, created_by,
+            idempotency_key, request_fingerprint)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id, receipt_date::text AS receipt_date`,
+        [params.businessId, effectiveLocationId, plan.party_id, paymentDate, params.method, storedCashAccountId, voucherRows[0].voucher_number, amount, memo, params.createdBy,
+          installmentReceiptId, receiptFingerprint],
       );
       await postJournalEntry(client, {
         businessId: params.businessId,
@@ -657,6 +749,14 @@ export async function payInstallmentItem(params: {
     } else {
       // ap_payments points at the per-location supplier row, not the party.
       const apAccount = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
+      const { rows: voucherRows } = await client.query<{ voucher_number: string }>(
+        `INSERT INTO ar_ap_voucher_counters (business_id, last_ar_voucher_number, last_ap_voucher_number)
+         VALUES ($1, 0, 1)
+         ON CONFLICT (business_id) DO UPDATE
+           SET last_ap_voucher_number = ar_ap_voucher_counters.last_ap_voucher_number + 1
+         RETURNING last_ap_voucher_number::text AS voucher_number`,
+        [params.businessId],
+      );
       const requestFingerprint = installmentApPaymentFingerprint({
         supplierId: payableSupplierId!,
         locationId: effectiveLocationId!,
@@ -666,12 +766,12 @@ export async function payInstallmentItem(params: {
       });
       const { rows } = await client.query<{ id: string; payment_date: string }>(
         `INSERT INTO ap_payments
-           (business_id, location_id, supplier_id, payment_date, method, amount, memo,
-            client_request_id, request_fingerprint, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           (business_id, location_id, supplier_id, payment_date, method, cash_account_id, amount, memo,
+            client_request_id, request_fingerprint, voucher_number, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING id, payment_date::text AS payment_date`,
-        [params.businessId, effectiveLocationId, payableSupplierId, paymentDate, params.method, amount, memo,
-          installmentRequestId, requestFingerprint, params.createdBy],
+        [params.businessId, effectiveLocationId, payableSupplierId, paymentDate, params.method, storedCashAccountId, amount, memo,
+          installmentRequestId, requestFingerprint, voucherRows[0].voucher_number, params.createdBy],
       );
       await postJournalEntry(client, {
         businessId: params.businessId,
@@ -723,123 +823,437 @@ function searchPattern(q: string | undefined): string | null {
   return `%${needle.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
 }
 
-/** Audit F11 — an explicitly selected cash/bank account and optional bank reference. */
+export interface ReceiptListRow {
+  id: string;
+  date: string;
+  method: VoucherMethod;
+  amount: number;
+  memo: string | null;
+  partyId: string;
+  partyName: string;
+  voucherNumber: number | null;
+  locationId: string | null;
+  locationName: string | null;
+  createdAt: string;
+  createdByName: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
+  cashAccount: { code: string; name: string } | null;
+  entryId: string | null;
+  reversedAt: string | null;
+  reversalEntryId: string | null;
+}
+
+export interface PaymentListRow {
+  id: string;
+  date: string;
+  method: VoucherMethod;
+  amount: number;
+  memo: string | null;
+  supplierId: string;
+  supplierPartyId: string | null;
+  partyName: string;
+  voucherNumber: number | null;
+  locationId: string | null;
+  locationName: string | null;
+  createdAt: string;
+  createdByName: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
+  cashAccount: { code: string; name: string } | null;
+  entryId: string | null;
+  reversedAt: string | null;
+  reversalEntryId: string | null;
+  reversalDate: string | null;
+}
+
+export interface VoucherPage<T> {
+  rows: T[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+export interface VoucherListParams extends VoucherListFilters {
+  limit?: number;
+  cursor?: string | null;
+}
+
+class VoucherListError extends Error {
+  status: number;
+  constructor(code: string, status = 400) {
+    super(code);
+    this.status = status;
+  }
+}
+
+function clampLimit(limit: number | undefined): number {
+  if (limit === undefined || limit === null || Number.isNaN(limit)) return VOUCHER_PAGE_SIZE;
+  return Math.min(Math.max(1, Math.floor(limit)), VOUCHER_PAGE_SIZE_MAX);
+}
+
+function parseCursor(raw: string | null | undefined): VoucherCursor | null {
+  if (!raw) return null;
+  const cursor = decodeVoucherCursor(raw);
+  if (!cursor) throw new VoucherListError("invalid_cursor");
+  return cursor;
+}
+
+function validateListFilters(filters: VoucherListFilters): void {
+  if (filters.dateFrom && !isValidIsoDate(filters.dateFrom)) throw new VoucherListError("invalid_date_from");
+  if (filters.dateTo && !isValidIsoDate(filters.dateTo)) throw new VoucherListError("invalid_date_to");
+  if (filters.method && !isVoucherMethod(filters.method)) throw new VoucherListError("invalid_method");
+  if (filters.status && filters.status !== "all" && filters.status !== "active" && filters.status !== "reversed") {
+    throw new VoucherListError("invalid_status");
+  }
+  for (const key of ["partyId", "locationId", "cashAccountId"] as const) {
+    const value = filters[key];
+    if (value && !isUuid(value)) throw new VoucherListError(`invalid_${key}`);
+  }
+  if (filters.minAmount !== undefined && (!Number.isInteger(filters.minAmount) || filters.minAmount < 0)) {
+    throw new VoucherListError("invalid_min_amount");
+  }
+  if (filters.maxAmount !== undefined && (!Number.isInteger(filters.maxAmount) || filters.maxAmount < 0)) {
+    throw new VoucherListError("invalid_max_amount");
+  }
+}
+
+/**
+ * Lists receipt vouchers — the «دریافت‌ها» ledger slice — newest first with
+ * keyset pagination. Issue #829: the old version returned the business's
+ * entire receipt history in one query; the route now pages through this with
+ * a cursor so a large history never ships in one response.
+ */
+/**
+ * Lists receipt vouchers — the «دریافت‌ها» ledger slice — newest first with
+ * keyset pagination. Issue #829: the old version returned the business's
+ * entire receipt history in one query; the route now pages through this with
+ * a cursor so a large history never ships in one response.
+ */
+export async function listReceiptsPage(
+  businessId: string,
+  params: VoucherListParams = {},
+  opts: { internalPageSize?: number } = {},
+): Promise<VoucherPage<ReceiptListRow>> {
+  validateListFilters(params);
+  // `internalPageSize` is internal (the export iterators below page wider
+  // than any wire client may): the wire `limit` stays clamped to
+  // `VOUCHER_PAGE_SIZE_MAX` no matter what.
+  const limit = opts.internalPageSize ?? clampLimit(params.limit);
+  const cursor = parseCursor(params.cursor);
+  const pattern = searchPattern(params.q);
+  const values: Array<string | number | null> = [businessId];
+  const conditions: string[] = ["r.business_id = $1"];
+  const push = (value: string | number | null): string => {
+    values.push(value);
+    return `$${values.length}`;
+  };
+
+  if (pattern) {
+    const p = push(pattern);
+    conditions.push(`(${SEARCH_FOLD.replace("%s", "COALESCE(p.name, 'بدون مشتری مشخص')")} ILIKE ${p} ESCAPE '\\'
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.memo, '')")} ILIKE ${p} ESCAPE '\\'
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.bank_reference, '')")} ILIKE ${p} ESCAPE '\\')`);
+  }
+  if (params.dateFrom) conditions.push(`r.receipt_date >= ${push(params.dateFrom)}::date`);
+  if (params.dateTo) conditions.push(`r.receipt_date <= ${push(params.dateTo)}::date`);
+  if (params.method) conditions.push(`r.method = ${push(params.method)}`);
+  if (params.partyId) conditions.push(`r.customer_id = ${push(params.partyId)}::uuid`);
+  if (params.locationId) conditions.push(`r.location_id = ${push(params.locationId)}::uuid`);
+  if (params.cashAccountId) {
+    // The money's account is the posting, not the nullable choice column:
+    // `cash_account_id` is NULL whenever the method's default took it (and
+    // for every legacy row), so matching the column alone hides those
+    // vouchers. The Dr cash line of the voucher's own original entry is the
+    // actual account; the column disjunct keeps entry-less legacy rows
+    // matchable when they name an account.
+    const account = push(params.cashAccountId);
+    conditions.push(`(r.cash_account_id = ${account}::uuid OR EXISTS (
+             SELECT 1 FROM journal_lines jl
+              WHERE jl.entry_id = je.id AND jl.account_id = ${account}::uuid AND jl.debit > 0))`);
+  }
+  if (params.minAmount !== undefined) conditions.push(`r.amount >= ${push(params.minAmount)}`);
+  if (params.maxAmount !== undefined) conditions.push(`r.amount <= ${push(params.maxAmount)}`);
+  if (params.status === "active") conditions.push(`r.reversed_at IS NULL`);
+  if (params.status === "reversed") conditions.push(`r.reversed_at IS NOT NULL`);
+  if (cursor) {
+    const d = push(cursor.date);
+    const c = push(cursor.createdAt);
+    const i = push(cursor.id);
+    conditions.push(`(r.receipt_date, r.created_at, r.id) < (${d}::date, ${c}::timestamptz, ${i}::uuid)`);
+  }
+  const fetch = push(limit + 1);
+
+  const { rows } = await query<{
+    id: string;
+    receipt_date: string;
+    method: VoucherMethod;
+    amount: string;
+    memo: string | null;
+    customer_id: string;
+    party_name: string | null;
+    voucher_number: string | null;
+    location_id: string | null;
+    location_name: string | null;
+    created_at: string;
+    created_by_name: string | null;
+    cash_account_id: string | null;
+    bank_reference: string | null;
+    cash_account_code: string | null;
+    cash_account_name: string | null;
+    posted_account_code: string | null;
+    posted_account_name: string | null;
+    entry_id: string | null;
+    reversed_at: string | null;
+    reversal_entry_id: string | null;
+  }>(
+    `SELECT r.id, r.receipt_date::text AS receipt_date, r.method, r.amount::text AS amount, r.memo,
+            r.customer_id, p.name AS party_name,
+            r.voucher_number::text AS voucher_number,
+            r.location_id, l.name AS location_name,
+            r.created_at::text AS created_at, u.full_name AS created_by_name,
+            r.cash_account_id, r.bank_reference,
+            ca.code AS cash_account_code, ca.name AS cash_account_name,
+            ${VOUCHER_POSTED_ACCOUNT_SELECT},
+            je.id AS entry_id,
+            r.reversed_at::text AS reversed_at, r.reversal_entry_id
+       FROM ar_receipts r
+       LEFT JOIN parties p ON p.id = r.customer_id
+       LEFT JOIN locations l ON l.id = r.location_id
+       LEFT JOIN users u ON u.id = r.created_by
+       LEFT JOIN accounts ca ON ca.id = r.cash_account_id
+       LEFT JOIN journal_entries je
+         ON je.business_id = r.business_id AND je.source_type = 'ar_receipt'
+        AND je.source_id = r.id AND je.posting_kind = 'ar_receipt'
+       ${voucherPostedAccountJoin("receipt")}
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY r.receipt_date DESC, r.created_at DESC, r.id DESC
+      LIMIT ${fetch}`,
+    values,
+  );
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page[page.length - 1];
+  return {
+    rows: page.map((r) => ({
+      id: r.id,
+      date: r.receipt_date,
+      method: r.method,
+      amount: Number(r.amount),
+      memo: r.memo,
+      partyId: r.customer_id,
+      partyName: r.party_name ?? "بدون مشتری مشخص",
+      voucherNumber: r.voucher_number === null ? null : Number(r.voucher_number),
+      locationId: r.location_id,
+      locationName: r.location_name,
+      createdAt: r.created_at,
+      createdByName: r.created_by_name,
+      cashAccountId: r.cash_account_id,
+      ...voucherAccountFields(r),
+      entryId: r.entry_id,
+      reversedAt: r.reversed_at,
+      reversalEntryId: r.reversal_entry_id,
+    })),
+    nextCursor: hasMore && last
+      ? encodeVoucherCursor({ date: last.receipt_date, createdAt: last.created_at, id: last.id })
+      : null,
+    hasMore,
+  };
+}
+
+/**
+ * Audit F11 — the account a voucher shows and the bank's reference. A voucher
+ * recorded before 0212 (or without a choice) names no account; the method's
+ * default took it, and the journal — not today's default — says which
+ * account that was (`voucherPostedAccountJoin` evidence, shared with the
+ * detail drill-downs). The file and the screen inherit the same resolution
+ * because the export rows are these rows.
+ */
 function voucherAccountFields(r: {
   bank_reference: string | null;
   cash_account_code: string | null;
   cash_account_name: string | null;
+  posted_account_code: string | null;
+  posted_account_name: string | null;
 }) {
-  return {
-    bankReference: r.bank_reference,
-    cashAccount: r.cash_account_code ? { code: r.cash_account_code, name: r.cash_account_name ?? "" } : null,
+  const named = r.cash_account_code ? { code: r.cash_account_code, name: r.cash_account_name ?? "" } : null;
+  const posted = r.posted_account_code ? { code: r.posted_account_code, name: r.posted_account_name ?? "" } : null;
+  return { bankReference: r.bank_reference, cashAccount: resolveVoucherPostedAccount(named, posted) };
+}
+
+/**
+ * Lists payment vouchers — the «پرداخت‌ها» ledger slice — newest first with
+ * keyset pagination. Same cursor contract as receipts; A/P rows are keyed by
+ * the branch supplier alias, so the party filter matches the alias id.
+ */
+export async function listPaymentsPage(
+  businessId: string,
+  params: VoucherListParams = {},
+  opts: { internalPageSize?: number } = {},
+): Promise<VoucherPage<PaymentListRow>> {
+  validateListFilters(params);
+  // `internalPageSize` is internal (the export iterators below page wider
+  // than any wire client may): the wire `limit` stays clamped to
+  // `VOUCHER_PAGE_SIZE_MAX` no matter what.
+  const limit = opts.internalPageSize ?? clampLimit(params.limit);
+  const cursor = parseCursor(params.cursor);
+  const pattern = searchPattern(params.q);
+  const values: Array<string | number | null> = [businessId];
+  const conditions: string[] = ["p.business_id = $1"];
+  const push = (value: string | number | null): string => {
+    values.push(value);
+    return `$${values.length}`;
   };
-}
 
-/** Lists receipt vouchers — the «دریافت‌ها» ledger slice. */
-export async function listReceipts(businessId: string, q?: string) {
-  // The filter runs in SQL, not after the fact: filtering in JS meant every
-  // keystroke first shipped the business's *entire* receipt history to the
-  // server process. The unseen-party fallback name stays searchable exactly as
-  // it displays.
-  const pattern = searchPattern(q);
-  const { rows } = await query<{
-    id: string;
-    receipt_date: string;
-    method: "cash" | "bank";
-    amount: string;
-    memo: string | null;
-    party_name: string | null;
-    bank_reference: string | null;
-    cash_account_code: string | null;
-    cash_account_name: string | null;
-  }>(
-    `SELECT r.id, r.receipt_date::text AS receipt_date, r.method, r.amount::text AS amount, r.memo, p.name AS party_name,
-            r.bank_reference, ca.code AS cash_account_code, ca.name AS cash_account_name
-       FROM ar_receipts r LEFT JOIN parties p ON p.id = r.customer_id
-       LEFT JOIN accounts ca ON ca.id = r.cash_account_id
-      WHERE r.business_id = $1
-        AND ($2::text IS NULL
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.name, 'بدون مشتری مشخص')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.memo, '')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(r.bank_reference, '')")} ILIKE $2 ESCAPE '\\')
-      ORDER BY r.receipt_date DESC, r.created_at DESC, r.id DESC`,
-    [businessId, pattern],
-  );
-  return rows.map((r) => ({
-    id: r.id,
-    date: r.receipt_date,
-    method: r.method,
-    amount: Number(r.amount),
-    memo: r.memo,
-    partyName: r.party_name ?? "بدون مشتری مشخص",
-    ...voucherAccountFields(r),
-  }));
-}
+  if (pattern) {
+    const p = push(pattern);
+    conditions.push(`(${SEARCH_FOLD.replace("%s", "COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص')")} ILIKE ${p} ESCAPE '\\'
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.memo, '')")} ILIKE ${p} ESCAPE '\\'
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(l.name, '')")} ILIKE ${p} ESCAPE '\\'
+             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.bank_reference, '')")} ILIKE ${p} ESCAPE '\\')`);
+  }
+  if (params.dateFrom) conditions.push(`p.payment_date >= ${push(params.dateFrom)}::date`);
+  if (params.dateTo) conditions.push(`p.payment_date <= ${push(params.dateTo)}::date`);
+  if (params.method) conditions.push(`p.method = ${push(params.method)}`);
+  if (params.partyId) conditions.push(`p.supplier_id = ${push(params.partyId)}::uuid`);
+  if (params.locationId) conditions.push(`p.location_id = ${push(params.locationId)}::uuid`);
+  if (params.cashAccountId) {
+    // Same as receipts, on the Cr cash line of the payment's own original
+    // entry: NULL `cash_account_id` means the method's default posted, and
+    // legacy rows predate the column entirely.
+    const account = push(params.cashAccountId);
+    conditions.push(`(p.cash_account_id = ${account}::uuid OR EXISTS (
+             SELECT 1 FROM journal_lines jl
+              WHERE jl.entry_id = je.id AND jl.account_id = ${account}::uuid AND jl.credit > 0))`);
+  }
+  if (params.minAmount !== undefined) conditions.push(`p.amount >= ${push(params.minAmount)}`);
+  if (params.maxAmount !== undefined) conditions.push(`p.amount <= ${push(params.maxAmount)}`);
+  if (params.status === "active") conditions.push(`p.reversed_at IS NULL`);
+  if (params.status === "reversed") conditions.push(`p.reversed_at IS NOT NULL`);
+  if (cursor) {
+    const d = push(cursor.date);
+    const c = push(cursor.createdAt);
+    const i = push(cursor.id);
+    conditions.push(`(p.payment_date, p.created_at, p.id) < (${d}::date, ${c}::timestamptz, ${i}::uuid)`);
+  }
+  const fetch = push(limit + 1);
 
-/** Lists payment vouchers — the «پرداخت‌ها» ledger slice, including reversal state and branch. */
-export async function listPayments(businessId: string, q?: string) {
-  // The supplier's branch alias remains the visible key. The lateral entry
-  // lookup and reverses_entry_id expose correction state without mutating the
-  // immutable voucher row.
-  const pattern = searchPattern(q);
   const { rows } = await query<{
     id: string;
     payment_date: string;
-    method: "cash" | "bank";
+    method: VoucherMethod;
     amount: string;
     memo: string | null;
+    supplier_id: string;
+    supplier_party_id: string | null;
     party_name: string | null;
+    voucher_number: string | null;
+    location_id: string | null;
     location_name: string | null;
-    reversed_at: string | null;
-    reversal_entry_id: string | null;
+    created_at: string;
+    created_by_name: string | null;
+    cash_account_id: string | null;
     reversal_date: string | null;
     bank_reference: string | null;
     cash_account_code: string | null;
     cash_account_name: string | null;
+    posted_account_code: string | null;
+    posted_account_name: string | null;
+    entry_id: string | null;
+    reversed_at: string | null;
+    reversal_entry_id: string | null;
   }>(
     `SELECT p.id, p.payment_date::text AS payment_date, p.method, p.amount::text AS amount, p.memo,
+            p.supplier_id, s.party_id AS supplier_party_id,
             COALESCE(pa.name, s.name) AS party_name,
-            l.name AS location_name,
-            p.bank_reference, ca.code AS cash_account_code, ca.name AS cash_account_name,
-            original.reversed_at::text AS reversed_at,
-            reversal.id AS reversal_entry_id,
-            reversal.entry_date::text AS reversal_date
+            p.voucher_number::text AS voucher_number,
+            p.location_id, l.name AS location_name,
+            p.created_at::text AS created_at, u.full_name AS created_by_name,
+            p.cash_account_id, p.bank_reference,
+            ca.code AS cash_account_code, ca.name AS cash_account_name,
+            ${VOUCHER_POSTED_ACCOUNT_SELECT},
+            je.id AS entry_id,
+            p.reversed_at::text AS reversed_at, p.reversal_entry_id,
+            rje.entry_date::text AS reversal_date
        FROM ap_payments p
        LEFT JOIN suppliers s ON s.id = p.supplier_id
        LEFT JOIN locations l ON l.id = p.location_id
        LEFT JOIN parties pa ON pa.id = s.party_id
+       LEFT JOIN users u ON u.id = p.created_by
        LEFT JOIN accounts ca ON ca.id = p.cash_account_id
-       LEFT JOIN LATERAL (
-         SELECT je.id, je.reversed_at
-           FROM journal_entries je
-          WHERE je.business_id = p.business_id
-            AND je.source_type = 'ap_payment' AND je.source_id = p.id
-          ORDER BY je.posted_at, je.id
-          LIMIT 1
-       ) original ON true
-       LEFT JOIN journal_entries reversal ON reversal.reverses_entry_id = original.id
-      WHERE p.business_id = $1
-        AND ($2::text IS NULL
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.memo, '')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(l.name, '')")} ILIKE $2 ESCAPE '\\'
-             OR ${SEARCH_FOLD.replace("%s", "COALESCE(p.bank_reference, '')")} ILIKE $2 ESCAPE '\\')
-      ORDER BY p.payment_date DESC, p.created_at DESC, p.id DESC`,
-    [businessId, pattern],
+       LEFT JOIN journal_entries je
+         ON je.business_id = p.business_id AND je.source_type = 'ap_payment'
+        AND je.source_id = p.id AND je.posting_kind = 'ap_payment'
+       ${voucherPostedAccountJoin("payment")}
+       LEFT JOIN journal_entries rje ON rje.id = p.reversal_entry_id
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY p.payment_date DESC, p.created_at DESC, p.id DESC
+      LIMIT ${fetch}`,
+    values,
   );
-  return rows.map((r) => ({
-    id: r.id,
-    date: r.payment_date,
-    method: r.method,
-    amount: Number(r.amount),
-    memo: r.memo,
-    partyName: r.party_name ?? "بدون تأمین‌کننده مشخص",
-    locationName: r.location_name,
-    ...voucherAccountFields(r),
-    reversed: r.reversed_at !== null || r.reversal_entry_id !== null,
-    reversalEntryId: r.reversal_entry_id,
-    reversalDate: r.reversal_date,
-  }));
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page[page.length - 1];
+  return {
+    rows: page.map((r) => ({
+      id: r.id,
+      date: r.payment_date,
+      method: r.method,
+      amount: Number(r.amount),
+      memo: r.memo,
+      supplierId: r.supplier_id,
+      supplierPartyId: r.supplier_party_id,
+      partyName: r.party_name ?? "بدون تأمین‌کننده مشخص",
+      voucherNumber: r.voucher_number === null ? null : Number(r.voucher_number),
+      locationId: r.location_id,
+      locationName: r.location_name,
+      createdAt: r.created_at,
+      createdByName: r.created_by_name,
+      cashAccountId: r.cash_account_id,
+      ...voucherAccountFields(r),
+      entryId: r.entry_id,
+      reversedAt: r.reversed_at,
+      reversalEntryId: r.reversal_entry_id,
+      reversalDate: r.reversal_date,
+    })),
+    nextCursor: hasMore && last
+      ? encodeVoucherCursor({ date: last.payment_date, createdAt: last.created_at, id: last.id })
+      : null,
+    hasMore,
+  };
+}
+
+/**
+ * The complete filtered result for a CSV export, in bounded-memory chunks —
+ * pagination deliberately ignored, no row cap. Walks the same stable
+ * newest-first cursor the register pages with, so the file and the screen
+ * cannot disagree about the order; the route streams each chunk straight
+ * into the response instead of holding the history. Tenant-scoped by the
+ * caller's business id, like every other read here.
+ */
+export async function* iterateReceiptsForExport(
+  businessId: string,
+  filters: VoucherListFilters = {},
+): AsyncGenerator<ReceiptListRow[], void, void> {
+  let cursor: string | null | undefined;
+  do {
+    const page = await listReceiptsPage(businessId, { ...filters, cursor }, { internalPageSize: VOUCHER_EXPORT_CHUNK_SIZE });
+    if (page.rows.length > 0) yield page.rows;
+    cursor = page.nextCursor;
+  } while (cursor);
+}
+
+/** The payments mirror of `iterateReceiptsForExport`. */
+export async function* iteratePaymentsForExport(
+  businessId: string,
+  filters: VoucherListFilters = {},
+): AsyncGenerator<PaymentListRow[], void, void> {
+  let cursor: string | null | undefined;
+  do {
+    const page = await listPaymentsPage(businessId, { ...filters, cursor }, { internalPageSize: VOUCHER_EXPORT_CHUNK_SIZE });
+    if (page.rows.length > 0) yield page.rows;
+    cursor = page.nextCursor;
+  } while (cursor);
 }
 
 export { MissingLedgerAccountError };
+export { VoucherListError };

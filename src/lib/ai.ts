@@ -248,6 +248,13 @@ export interface ActionMeta {
    */
   alwaysConfirm?: true;
   /**
+   * The destination requires a client idempotency key the model must not
+   * invent: the apply endpoint injects a stable `ai-proposal:{auditId}` key,
+   * so a transport retry replays the original mutation instead of doubling it
+   * — and the key traces the ledger row back to the proposal that made it.
+   */
+  needsIdempotencyKey?: true;
+  /**
    * Phase F pt.2 — the action only makes sense inside a PROJECT: its endpoint
    * is addressed by an ambient project id the model never sees. It is kept out
    * of the default `propose_action` enum (like `coworkerOnly` keeps waste out)
@@ -599,8 +606,9 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     method: "POST",
     label: "ثبت دریافت از مشتری",
     payloadHint:
-      '{ customerId: string /* از find_customers */, method: "cash"|"bank", amount: number /* ریال صحیح، مثبت */, receiptDate?: string /* ISO؛ پیش‌فرض امروزِ کسب‌وکار */, memo?: string } — پول جابه‌جا می‌کند و همیشه به تأیید انسان نیاز دارد',
+      '{ customerId: string /* از find_customers */, method: "cash"|"bank"|"clearing", amount: number /* ریال صحیح، مثبت */, receiptDate?: string /* ISO؛ پیش‌فرض امروزِ کسب‌وکار */, memo?: string } — پول جابه‌جا می‌کند و همیشه به تأیید انسان نیاز دارد. کلید idempotency را نفرست؛ خودکار افزوده می‌شود',
     alwaysConfirm: true,
+    needsIdempotencyKey: true,
   },
   "project.memory.add": {
     type: "project.memory.add",

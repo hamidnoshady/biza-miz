@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { InstallmentError, MissingLedgerAccountError, payInstallmentItem } from "@/lib/installments-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
+import { isVoucherMethod, PayablesInputError, VOUCHER_METHODS } from "@/lib/payables-input";
 
 /** Settles one slice of a plan — posts the subledger pair atomically. */
 export const POST = withTenantScope(async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -11,15 +12,15 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   if (error) return error;
   const { id: planId } = await context.params;
 
-  let body: { itemId?: string; method?: string; memo?: string };
+  let body: { itemId?: string; method?: string; memo?: string; cashAccountId?: string | null };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
   if (!body.itemId) return NextResponse.json({ error: "item_required" }, { status: 400 });
-  if (body.method !== "cash" && body.method !== "bank") {
-    return NextResponse.json({ error: "invalid_method" }, { status: 400 });
+  if (!isVoucherMethod(body.method)) {
+    return NextResponse.json({ error: "invalid_method", allowed: [...VOUCHER_METHODS] }, { status: 400 });
   }
 
   const location = await resolveActiveLocation(session);
@@ -33,12 +34,14 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       method: body.method,
       memo: body.memo,
       createdBy: session.sub,
+      cashAccountId: typeof body.cashAccountId === "string" ? body.cashAccountId : null,
     });
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof InstallmentError) {
       return NextResponse.json({ error: err.message }, { status: err.status });
     }
+    if (err instanceof PayablesInputError) return NextResponse.json({ error: err.code }, { status: 400 });
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }

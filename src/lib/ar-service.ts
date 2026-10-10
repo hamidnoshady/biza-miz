@@ -12,19 +12,35 @@
  * DB-touching, so per repo convention it has no direct unit test; the pure
  * aging math (shared with the AP subledger) lives in aging.ts and is what
  * aging.test.ts covers. Covered here by integration/ar.integration.test.ts.
+ *
+ * Issue #829 hardening: idempotent creation (per-business idempotency key),
+ * the cash/bank/clearing account the money moved through (cash → 1100,
+ * bank → 1110, clearing → 1120), canonical customer validation, and
+ * first-class source-level reversal that keeps A/R party attribution (same
+ * source_type/source_id, `*_reversal` posting kind).
  */
+import { createHash } from "node:crypto";
+import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { businessToday } from "./business-day-service";
 import { isUuid } from "./uuid";
 import { PARTY_ROLE_STORAGE } from "./parties";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { isValidIsoDate } from "./iso-date";
-import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
+import { accountIdsByCode, MissingLedgerAccountError, postExactMirrorEntry, postJournalEntry } from "./ledger-service";
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_CUSTOMER_KEY, type AgingSummary } from "./aging";
 import { toPersianDigits } from "./digits";
-import { enqueueHolooReceiptForArReceipt } from "./integrations/holoo/outbox-producer";
-import { normalizeBankReference } from "./payables-input";
-import { resolveVoucherCashAccount } from "./voucher-cash-account";
+import {
+  enqueueHolooReceiptForArReceipt,
+  enqueueHolooReversalForArReceipt,
+} from "./integrations/holoo/outbox-producer";
+import { isVoucherMethod, normalizeBankReference, type VoucherMethod } from "./payables-input";
+import {
+  resolveVoucherCashAccount,
+  resolveVoucherPostedAccount,
+  VOUCHER_POSTED_ACCOUNT_SELECT,
+  voucherPostedAccountJoin,
+} from "./voucher-cash-account";
 
 export { MissingLedgerAccountError };
 
@@ -38,15 +54,6 @@ export class ArError extends Error {
     this.status = status;
   }
 }
-
-/**
- * An actual calendar date in ISO form. The regex alone passes «2025-13-45»,
- * which `Date.parse` then reads as NaN — and every age bucket computed from a
- * NaN «today» falls through to «بیش از ۹۰ روز» without failing the request.
- * The rule is `iso-date.ts`'s `isValidIsoDate`, shared with A/P aging, bank
- * reconciliation, the manual journal and «دفتر روزنامه».
- */
-const isIsoDateOnly = isValidIsoDate;
 
 async function arAccountId(businessId: string): Promise<string | null> {
   const { rows } = await query<{ id: string }>(
@@ -62,6 +69,8 @@ interface ArLineRow extends Record<string, unknown> {
   customer_phone: string | null;
   entry_date: string;
   source_type: string | null;
+  /** Set on reversal entries: what distinguishes a برگشت from the receipt it undoes. */
+  reverses_entry_id: string | null;
   order_number: string | number | null;
   memo: string | null;
   debit: string;
@@ -72,7 +81,8 @@ interface ArLineRow extends Record<string, unknown> {
 async function arLines(businessId: string, accountId: string): Promise<ArLineRow[]> {
   const { rows } = await query<ArLineRow>(
     `SELECT c.id AS customer_id, c.name AS customer_name, c.phone AS customer_phone,
-            je.entry_date::text AS entry_date, je.source_type, o.order_number, je.memo,
+            je.entry_date::text AS entry_date, je.source_type, je.reverses_entry_id::text AS reverses_entry_id,
+            o.order_number, je.memo,
             jl.debit, jl.credit
        FROM journal_lines jl
        JOIN journal_entries je ON je.id = jl.entry_id
@@ -297,7 +307,7 @@ export async function getCustomerArBalance(businessId: string, customerId: strin
 
 export interface ArStatementLine {
   date: string;
-  type: "invoice" | "receipt" | "other";
+  type: "invoice" | "receipt" | "reversal" | "other";
   description: string;
   debit: number;
   credit: number;
@@ -318,12 +328,16 @@ export async function getCustomerStatement(businessId: string, customerId: strin
     balance += debit - credit;
     // A closed-order amendment posts against the order it corrects, so its
     // reversal and re-posting belong on the customer's statement as that
-    // order's own activity rather than as an unexplained "other".
-    const type =
+    // order's own activity rather than as an unexplained "other". A receipt
+    // reversal keeps the receipt's source identity (that is what preserves
+    // attribution) and is told apart by its reverses_entry_id.
+    const type: ArStatementLine["type"] =
       l.source_type === "order" || l.source_type === "order_amendment"
         ? "invoice"
         : l.source_type === "ar_receipt"
-          ? "receipt"
+          ? l.reverses_entry_id
+            ? "reversal"
+            : "receipt"
           : "other";
     const description =
       type === "invoice" && l.order_number != null
@@ -331,7 +345,7 @@ export async function getCustomerStatement(businessId: string, customerId: strin
           // statement reads as a data glitch next to every Persian-digit
           // amount and date around it.
           `سفارش #${toPersianDigits(String(l.order_number))}`
-        : (l.memo ?? (type === "receipt" ? "دریافت وجه" : "سند دستی"));
+        : (l.memo ?? (type === "receipt" ? "دریافت وجه" : type === "reversal" ? "برگشت دریافت" : "سند دستی"));
     return { date: l.entry_date, type, description, debit, credit, balance };
   });
 }
@@ -359,7 +373,7 @@ export interface AgingReport {
  * question the branch's own calendar does.
  */
 export async function getArAging(businessId: string, asOfDate?: string): Promise<AgingReport> {
-  if (asOfDate !== undefined && !isIsoDateOnly(asOfDate)) throw new ArError("invalid_date");
+  if (asOfDate !== undefined && !isValidIsoDate(asOfDate)) throw new ArError("invalid_date");
   const effectiveAsOf = asOfDate ?? (await businessToday(businessId));
   const accountId = await arAccountId(businessId);
   if (!accountId) return { asOfDate: effectiveAsOf, rows: [], totals: { current: 0, d31_60: 0, d61_90: 0, over90: 0, total: 0 } };
@@ -410,32 +424,187 @@ export interface ArReceipt {
   id: string;
   customerId: string;
   receiptDate: string;
-  method: "cash" | "bank";
+  method: VoucherMethod;
   amount: number;
   memo: string | null;
+  /**
+   * The cash/bank/clearing account named on the voucher (migration 0212);
+   * null = the method's default account took it.
+   */
   cashAccountId: string | null;
+  /** The bank's tracking number, when one was recorded. */
   bankReference: string | null;
+  /** Client idempotency key. Required for every submission since migration 0216. */
+  idempotencyKey: string | null;
+  /** Stable per-business document number. */
+  voucherNumber: number | null;
+  reversedAt: string | null;
+  reversalEntryId: string | null;
+  /**
+   * True when this call was a retry that returned the original row instead of
+   * posting again. Not a column — set by `receivePayment` only — so the route
+   * can answer 200 (replay) vs 201 (created).
+   */
+  duplicate?: boolean;
+}
+
+interface ReceiptDbRow {
+  id: string;
+  customer_id: string;
+  receipt_date: string;
+  method: VoucherMethod;
+  amount: string;
+  memo: string | null;
+  cash_account_id: string | null;
+  bank_reference: string | null;
+  idempotency_key: string | null;
+  voucher_number: string | null;
+  reversed_at: string | null;
+  reversal_entry_id: string | null;
+}
+
+function toReceipt(row: ReceiptDbRow, duplicate: boolean): ArReceipt {
+  return {
+    id: row.id,
+    customerId: row.customer_id,
+    receiptDate: row.receipt_date,
+    method: row.method,
+    amount: Number(row.amount),
+    memo: row.memo,
+    cashAccountId: row.cash_account_id,
+    bankReference: row.bank_reference,
+    idempotencyKey: row.idempotency_key,
+    voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
+    reversedAt: row.reversed_at,
+    reversalEntryId: row.reversal_entry_id,
+    duplicate,
+  };
+}
+
+const RECEIPT_RETURNING = `id, customer_id, receipt_date::text AS receipt_date, method, amount::text AS amount, memo,
+  cash_account_id, bank_reference, idempotency_key, voucher_number::text AS voucher_number,
+  reversed_at::text AS reversed_at, reversal_entry_id::text AS reversal_entry_id`;
+
+/**
+ * The receipt the key already posted, locked for this transaction — or null
+ * when the key is new. The row lock serializes two simultaneous submissions
+ * of one key: the loser waits here (or on the insert's unique index below)
+ * and then answers the winner's row instead of posting twice.
+ */
+async function findReceiptByIdempotencyKey(
+  client: PoolClient,
+  businessId: string,
+  idempotencyKey: string,
+): Promise<(ReceiptDbRow & { request_fingerprint: string | null }) | null> {
+  const { rows } = await client.query<ReceiptDbRow & { request_fingerprint: string | null }>(
+    `SELECT ${RECEIPT_RETURNING}, request_fingerprint
+       FROM ar_receipts WHERE business_id = $1 AND idempotency_key = $2 FOR UPDATE`,
+    [businessId, idempotencyKey],
+  );
+  return rows[0] ?? null;
 }
 
 /**
- * Records a customer paying down their AR balance: Debit Cash/Bank-Clearing,
+ * Next per-business receipt document number, concurrency-safe.
+ * A single upsert increments the business's counter under its row lock, so two
+ * simultaneous submissions cannot take the same number.
+ */
+async function nextReceiptVoucherNumber(client: PoolClient, businessId: string): Promise<number> {
+  const { rows } = await client.query<{ last_ar_voucher_number: string }>(
+    `INSERT INTO ar_ap_voucher_counters (business_id, last_ar_voucher_number, last_ap_voucher_number)
+     VALUES ($1, 1, 0)
+     ON CONFLICT (business_id) DO UPDATE
+       SET last_ar_voucher_number = ar_ap_voucher_counters.last_ar_voucher_number + 1
+     RETURNING last_ar_voucher_number::text AS last_ar_voucher_number`,
+    [businessId],
+  );
+  return Number(rows[0].last_ar_voucher_number);
+}
+
+/**
+ * Every receipt submission carries a client-generated key (migration 0216
+ * made the column NOT NULL): a retry replays the original voucher instead of
+ * posting a second one. The error code is the same one the A/P side answers
+ * with, so clients handle one vocabulary for both registers.
+ */
+function normalizeIdempotencyKey(value: unknown): string {
+  if (typeof value !== "string") throw new ArError("idempotency_key_required");
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 128) throw new ArError("idempotency_key_required");
+  return trimmed;
+}
+
+/**
+ * Optional free text off the wire (memo, back-date, account choice): absent
+ * or blank means unset, but a wrong-typed value (a number, an object) is a
+ * 400 — never a TypeError from `.trim()`. The routes check first, and this
+ * is the fail-closed backstop for internal callers (AI apply, installment
+ * settlement) that bypass them.
+ */
+function normalizeOptionalText(value: unknown, code: "invalid_memo" | "invalid_date" | "invalid_cash_account"): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new ArError(code);
+  return value.trim() || null;
+}
+
+/**
+ * The canonical receipt-request tuple, mirroring A/P's
+ * `paymentRequestFingerprint` field for field. An ordered tuple keeps
+ * normalization/versioning explicit and avoids key order dependence. Date
+ * omission remains null so a retry after midnight still refers to the
+ * original intended receipt date. Voucher account and bank reference are
+ * also part of the operation: reusing a key with a changed destination must
+ * be rejected rather than silently accepted as a retry.
+ */
+function receiptRequestFingerprint(params: {
+  customerId: string;
+  locationId: string | null;
+  method: VoucherMethod;
+  amount: number;
+  receiptDate: string | null;
+  memo: string | null;
+  cashAccountId: string | null;
+  bankReference: string | null;
+}): string {
+  const canonical = JSON.stringify([
+    params.customerId,
+    params.locationId,
+    params.method,
+    params.amount,
+    params.receiptDate,
+    params.memo,
+    params.cashAccountId,
+    params.bankReference,
+  ]);
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+/**
+ * Records a customer paying down their AR balance: Debit cash/bank/clearing,
  * Credit Accounts Receivable, in the same transaction as the ar_receipts row
  * both reference (source_type='ar_receipt', source_id=receipt.id).
+ *
+ * Idempotent per business on `idempotencyKey`: a retry with the same key
+ * returns the original receipt instead of posting a second one. A key reused
+ * with changed intent is a 409 `idempotency_conflict`, never a silent second
+ * money movement — the same contract `payBill` keeps.
  */
 export async function receivePayment(params: {
   businessId: string;
   locationId: string | null;
   customerId: string;
-  method: "cash" | "bank";
+  method: VoucherMethod;
   amount: number;
   receiptDate?: string | null;
   memo?: string | null;
   createdBy: string | null;
+  /** Client-generated key per logical voucher submission (retry-safe). Required since migration 0216. */
+  idempotencyKey: string;
   /** Holoo imports create local receipts but must not push them back to Holoo. */
   skipHolooPush?: boolean;
-  /** Audit F11 — the cash/bank account the money went into; null = the method's default account. */
+  /** The cash/bank/clearing account the money went into; null = the method's default account. */
   cashAccountId?: string | null;
-  /** Audit F11 — the bank's tracking/reference number. */
+  /** The bank's tracking/reference number. */
   bankReference?: string | null;
 }): Promise<ArReceipt> {
   if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
@@ -447,7 +616,24 @@ export async function receivePayment(params: {
   if (!isUuid(params.customerId)) throw new ArError("customer_not_found", 404);
   // Same story for a date off the wire: reject it here, in the error
   // vocabulary the API answers with, rather than as Postgres's parse error.
-  if (params.receiptDate != null && !isIsoDateOnly(params.receiptDate)) throw new ArError("invalid_date");
+  const requestedReceiptDate = normalizeOptionalText(params.receiptDate, "invalid_date");
+  if (requestedReceiptDate && !isValidIsoDate(requestedReceiptDate)) throw new ArError("invalid_date");
+  if (!isVoucherMethod(params.method)) throw new ArError("invalid_method");
+  const idempotencyKey = normalizeIdempotencyKey(params.idempotencyKey);
+  const memo = normalizeOptionalText(params.memo, "invalid_memo");
+  const requestedCashAccountId = normalizeOptionalText(params.cashAccountId, "invalid_cash_account");
+  // Throws PayablesInputError («invalid_bank_reference»), which the route answers as a 400.
+  const bankReference = normalizeBankReference(params.bankReference);
+  const fingerprint = receiptRequestFingerprint({
+    customerId: params.customerId,
+    locationId: params.locationId,
+    method: params.method,
+    amount: params.amount,
+    receiptDate: requestedReceiptDate,
+    memo,
+    cashAccountId: requestedCashAccountId,
+    bankReference,
+  });
 
   /*
    * «امروز» here is the business's own date, not the database server's.
@@ -460,38 +646,50 @@ export async function receivePayment(params: {
    * discipline `installments-service` documents: today is `businessToday`,
    * never a UTC date slice.
    */
-  const receiptDate = params.receiptDate ?? (await businessToday(params.businessId));
-  // Throws PayablesInputError («invalid_bank_reference»), which the route answers as a 400.
-  const bankReference = normalizeBankReference(params.bankReference);
+  const receiptDate = requestedReceiptDate ?? (await businessToday(params.businessId));
 
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
 
+    // Fast retry path, including when the active branch/business date changed
+    // after the first request committed. A key reused with changed intent is a
+    // hard conflict, never a silent second money movement.
+    const existing = await findReceiptByIdempotencyKey(client, params.businessId, idempotencyKey);
+    if (existing) {
+      if (existing.request_fingerprint !== fingerprint) throw new ArError("idempotency_conflict", 409);
+      await client.query("COMMIT");
+      return toReceipt(existing, true);
+    }
+
+    // Canonical customer validation: a receipt needs a real, active,
+    // non-merged customer — not a supplier-only or employee-only party that
+    // happens to live in the same business. Multi-role parties qualify when
+    // Customer is one of the roles. The picker already filters this way; the
+    // service is authoritative so a crafted request cannot bypass it.
     const { rows: customerRows } = await client.query<{ id: string }>(
-      `SELECT id FROM parties WHERE id = $1 AND business_id = $2`,
-      [params.customerId, params.businessId],
+      `SELECT id FROM parties
+        WHERE id = $1 AND business_id = $2
+          AND roles @> ARRAY[$3]::text[] AND is_active AND merged_into_id IS NULL`,
+      [params.customerId, params.businessId, PARTY_ROLE_STORAGE.Customer],
     );
     if (!customerRows[0]) throw new ArError("customer_not_found", 404);
 
     const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsReceivable]);
     const arAccount = accounts.get(WELL_KNOWN_CODES.accountsReceivable)!;
+    // Throws PayablesInputError (invalid_cash_account /
+    // cash_account_method_mismatch), which the route answers as a 400.
     const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId);
-    const cashAccount = cash.accountId;
+    const cashAccountId = cash.accountId;
 
-    const { rows } = await client.query<{
-      id: string;
-      customer_id: string;
-      receipt_date: string;
-      method: "cash" | "bank";
-      amount: string;
-      memo: string | null;
-      cash_account_id: string | null;
-      bank_reference: string | null;
-    }>(
-      `INSERT INTO ar_receipts (business_id, location_id, customer_id, receipt_date, method, amount, memo, created_by, cash_account_id, bank_reference)
-       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10)
-       RETURNING id, customer_id, receipt_date::text AS receipt_date, method, amount::text AS amount, memo, cash_account_id, bank_reference`,
+    const voucherNumber = await nextReceiptVoucherNumber(client, params.businessId);
+
+    const { rows } = await client.query<ReceiptDbRow>(
+      `INSERT INTO ar_receipts (business_id, location_id, customer_id, receipt_date, method, amount, memo, created_by,
+                               idempotency_key, request_fingerprint, cash_account_id, bank_reference, voucher_number)
+       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       ON CONFLICT (business_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+       RETURNING ${RECEIPT_RETURNING}`,
       [
         params.businessId,
         params.locationId,
@@ -499,25 +697,44 @@ export async function receivePayment(params: {
         receiptDate,
         params.method,
         params.amount,
-        params.memo?.trim() || null,
+        memo,
         params.createdBy,
+        idempotencyKey,
+        fingerprint,
         cash.chosen ? cash.accountId : null,
         bankReference,
+        voucherNumber,
       ],
     );
+
+    // A concurrent request may have inserted the same key after our first
+    // lookup. `DO NOTHING` absorbs the conflict without aborting this
+    // transaction — catching the 23505 instead would leave the transaction
+    // aborted and every further query failing with 25P02 — and the unique
+    // index's wait means this re-read sees the single committed voucher and
+    // applies the same fingerprint guard.
+    if (!rows[0]) {
+      const concurrent = await findReceiptByIdempotencyKey(client, params.businessId, idempotencyKey);
+      if (!concurrent || concurrent.request_fingerprint !== fingerprint) {
+        throw new ArError("idempotency_conflict", 409);
+      }
+      await client.query("COMMIT");
+      return toReceipt(concurrent, true);
+    }
+
     const receipt = rows[0];
 
     await postJournalEntry(client, {
       businessId: params.businessId,
       locationId: params.locationId,
       entryDate: receipt.receipt_date,
-      memo: params.memo?.trim() || "دریافت وجه از مشتری",
+      memo: memo || "دریافت وجه از مشتری",
       sourceType: "ar_receipt",
       sourceId: receipt.id,
       createdBy: params.createdBy,
       postingKind: "ar_receipt",
       lines: [
-        { accountId: cashAccount, debit: params.amount, credit: 0 },
+        { accountId: cashAccountId, debit: params.amount, credit: 0 },
         { accountId: arAccount, debit: 0, credit: params.amount },
       ],
     });
@@ -527,20 +744,209 @@ export async function receivePayment(params: {
     }
 
     await client.query("COMMIT");
-    return {
-      id: receipt.id,
-      customerId: receipt.customer_id,
-      receiptDate: receipt.receipt_date,
-      method: receipt.method,
-      amount: Number(receipt.amount),
-      memo: receipt.memo,
-      cashAccountId: receipt.cash_account_id,
-      bankReference: receipt.bank_reference,
-    };
+    return toReceipt(receipt, false);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
   }
+}
+
+export interface ArReceiptDetail extends ArReceipt {
+  customerName: string;
+  customerPhone: string | null;
+  locationId: string | null;
+  locationName: string | null;
+  createdByName: string | null;
+  createdAt: string;
+  /** The named cash/bank/clearing account; null = the method's default took it. */
+  cashAccount: { code: string; name: string } | null;
+  /** The live journal entry this voucher posted (null for legacy rows predating the posting). */
+  entryId: string | null;
+  reversalDate: string | null;
+  reversedByName: string | null;
+}
+
+/** One receipt voucher with the audit metadata the register drill-down shows. */
+export async function getReceiptDetail(businessId: string, receiptId: string): Promise<ArReceiptDetail | null> {
+  if (!isUuid(receiptId)) return null;
+  const { rows } = await query<{
+    id: string;
+    customer_id: string;
+    customer_name: string;
+    customer_phone: string | null;
+    location_id: string | null;
+    location_name: string | null;
+    receipt_date: string;
+    method: VoucherMethod;
+    amount: string;
+    memo: string | null;
+    cash_account_id: string | null;
+    bank_reference: string | null;
+    cash_account_code: string | null;
+    cash_account_name: string | null;
+    posted_account_code: string | null;
+    posted_account_name: string | null;
+    idempotency_key: string | null;
+    voucher_number: string | null;
+    created_by_name: string | null;
+    created_at: string;
+    entry_id: string | null;
+    reversed_at: string | null;
+    reversed_by_name: string | null;
+    reversal_entry_id: string | null;
+    reversal_date: string | null;
+  }>(
+    `SELECT r.id, r.customer_id,
+            COALESCE(p.name, 'بدون مشتری مشخص') AS customer_name, p.phone AS customer_phone,
+            r.location_id, l.name AS location_name,
+            r.receipt_date::text AS receipt_date, r.method, r.amount::text AS amount, r.memo,
+            r.cash_account_id, r.bank_reference,
+            ca.code AS cash_account_code, ca.name AS cash_account_name,
+            ${VOUCHER_POSTED_ACCOUNT_SELECT},
+            r.idempotency_key, r.voucher_number::text AS voucher_number,
+            u.full_name AS created_by_name, to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
+            je.id::text AS entry_id,
+            r.reversed_at::text AS reversed_at, ru.full_name AS reversed_by_name,
+            r.reversal_entry_id::text AS reversal_entry_id,
+            rje.entry_date::text AS reversal_date
+       FROM ar_receipts r
+       LEFT JOIN parties p ON p.id = r.customer_id
+       LEFT JOIN locations l ON l.id = r.location_id
+       LEFT JOIN accounts ca ON ca.id = r.cash_account_id
+       LEFT JOIN users u ON u.id = r.created_by
+       LEFT JOIN users ru ON ru.id = r.reversed_by
+       LEFT JOIN journal_entries je
+         ON je.business_id = r.business_id AND je.source_type = 'ar_receipt'
+        AND je.source_id = r.id AND je.posting_kind = 'ar_receipt'
+       ${voucherPostedAccountJoin("receipt")}
+       LEFT JOIN journal_entries rje ON rje.id = r.reversal_entry_id
+      WHERE r.business_id = $1 AND r.id = $2`,
+    [businessId, receiptId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    customerId: row.customer_id,
+    customerName: row.customer_name,
+    customerPhone: row.customer_phone,
+    locationId: row.location_id,
+    locationName: row.location_name,
+    receiptDate: row.receipt_date,
+    method: row.method,
+    amount: Number(row.amount),
+    memo: row.memo,
+    cashAccountId: row.cash_account_id,
+    bankReference: row.bank_reference,
+    cashAccount: resolveVoucherPostedAccount(
+      row.cash_account_code ? { code: row.cash_account_code, name: row.cash_account_name ?? "" } : null,
+      row.posted_account_code ? { code: row.posted_account_code, name: row.posted_account_name ?? "" } : null,
+    ),
+    idempotencyKey: row.idempotency_key,
+    voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
+    createdByName: row.created_by_name,
+    createdAt: row.created_at,
+    entryId: row.entry_id,
+    reversedAt: row.reversed_at,
+    reversedByName: row.reversed_by_name,
+    reversalEntryId: row.reversal_entry_id,
+    reversalDate: row.reversal_date,
+  };
+}
+
+/**
+ * Reverses a posted receipt — the only supported correction flow.
+ *
+ * Never edits or deletes: it posts the exact mirror of the original live
+ * journal entry (same `source_type`/`source_id`, `ar_receipt_reversal` posting
+ * kind) so the reversal stays attributed to the same customer in every A/R
+ * statement, balance and aging report, and marks the source row reversed.
+ * Dated on the reversal date (default: the business's today), never backdated
+ * into a locked period — the fiscal-period trigger refuses a locked date the
+ * same way it refuses a fresh posting.
+ */
+export async function reverseReceipt(params: {
+  businessId: string;
+  receiptId: string;
+  actorId: string | null;
+  /** ISO date; defaults to the business's today. */
+  reversalDate?: string | null;
+  memo?: string | null;
+  /** Holoo imports must not push reversals they did not originate. */
+  skipHolooPush?: boolean;
+}): Promise<ArReceiptDetail> {
+  if (!isUuid(params.receiptId)) throw new ArError("receipt_not_found", 404);
+  if (params.reversalDate != null && !isValidIsoDate(params.reversalDate)) throw new ArError("invalid_date");
+  const reversalDate = params.reversalDate ?? (await businessToday(params.businessId));
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+
+    const { rows: receiptRows } = await client.query<{
+      id: string;
+      location_id: string | null;
+      memo: string | null;
+      reversed_at: string | null;
+    }>(
+      `SELECT id, location_id, memo, reversed_at::text AS reversed_at
+         FROM ar_receipts WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+      [params.receiptId, params.businessId],
+    );
+    const receipt = receiptRows[0];
+    if (!receipt) throw new ArError("receipt_not_found", 404);
+    if (receipt.reversed_at) throw new ArError("already_reversed", 409);
+
+    // An installment slice settled through this receipt still shows paid; an
+    // unwatched reversal would leave the plan and the ledger disagreeing.
+    const { rows: linked } = await client.query<{ id: string }>(
+      `SELECT id FROM installment_items WHERE receipt_id = $1 LIMIT 1`,
+      [params.receiptId],
+    );
+    if (linked[0]) throw new ArError("receipt_linked_to_installment", 409);
+
+    const { rows: entryRows } = await client.query<{ id: string }>(
+      `SELECT id FROM journal_entries
+        WHERE business_id = $1 AND source_type = 'ar_receipt' AND source_id = $2
+          AND posting_kind = 'ar_receipt' AND reversed_at IS NULL AND reverses_entry_id IS NULL`,
+      [params.businessId, params.receiptId],
+    );
+    const original = entryRows[0];
+    if (!original) throw new ArError("receipt_has_no_entry", 409);
+
+    const reversalEntryId = await postExactMirrorEntry(client, {
+      businessId: params.businessId,
+      locationId: receipt.location_id,
+      originalEntryId: original.id,
+      sourceType: "ar_receipt",
+      sourceId: params.receiptId,
+      postingKind: "ar_receipt_reversal",
+      memo: normalizeOptionalText(params.memo, "invalid_memo") || `برگشت دریافت${receipt.memo ? ` — ${receipt.memo}` : ""}`,
+      entryDate: reversalDate,
+      createdBy: params.actorId,
+    });
+    if (!reversalEntryId) throw new ArError("receipt_has_no_entry", 409);
+
+    await client.query(
+      `UPDATE ar_receipts SET reversed_at = now(), reversed_by = $2, reversal_entry_id = $3 WHERE id = $1`,
+      [params.receiptId, params.actorId, reversalEntryId],
+    );
+
+    if (!params.skipHolooPush) {
+      await enqueueHolooReversalForArReceipt(client, params.businessId, params.receiptId, reversalEntryId);
+    }
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  const detail = await getReceiptDetail(params.businessId, params.receiptId);
+  if (!detail) throw new ArError("receipt_not_found", 404);
+  return detail;
 }

@@ -5,19 +5,33 @@
  * no mutable/shadow balance is stored. Liability balances are credit minus
  * debit. All reads share the canonical source attribution in ap-attribution.ts
  * and keep the unattributed bucket visible so the total reconciles to GL 2100.
+ *
+ * Issue #829 layers the voucher-register hardening on top: the money
+ * moves through an explicit cash/bank/clearing account, every voucher takes
+ * a per-business sequential number, and reversals additionally mark the
+ * source row so the register reads correction state without a journal join.
  */
-import { createHash } from "node:crypto";
 import { getPool, query } from "./db";
 import { businessToday } from "./business-day-service";
 import { isUuid } from "./uuid";
 import { isValidIsoDate } from "./iso-date";
+import { createHash } from "node:crypto";
+import type { PoolClient } from "pg";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
 import { ageOpenItems, summarizeAging, unappliedCredit, UNKNOWN_SUPPLIER_KEY, type AgingSummary } from "./aging";
 import { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL, apAttributionStatus } from "./ap-attribution";
-import { enqueueHolooReceiptForApPayment } from "./integrations/holoo/outbox-producer";
-import { normalizeBankReference, PayablesInputError } from "./payables-input";
-import { resolveVoucherCashAccount } from "./voucher-cash-account";
+import {
+  enqueueHolooReceiptForApPayment,
+  enqueueHolooReversalForApPayment,
+} from "./integrations/holoo/outbox-producer";
+import { isVoucherMethod, normalizeBankReference, PayablesInputError, type VoucherMethod } from "./payables-input";
+import {
+  resolveVoucherCashAccount,
+  resolveVoucherPostedAccount,
+  VOUCHER_POSTED_ACCOUNT_SELECT,
+  voucherPostedAccountJoin,
+} from "./voucher-cash-account";
 
 export { MissingLedgerAccountError, UNKNOWN_SUPPLIER_KEY };
 export { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL };
@@ -410,13 +424,26 @@ export interface ApPayment {
   id: string;
   supplierId: string;
   paymentDate: string;
-  method: "cash" | "bank";
+  method: VoucherMethod;
   amount: number;
   memo: string | null;
+  /**
+   * The cash/bank/clearing account named on the voucher (migration 0212);
+   * null = the method's default account took it.
+   */
   cashAccountId: string | null;
+  /** The bank's tracking number, when one was recorded. */
   bankReference: string | null;
   /** True only when this call reused the result for an earlier matching request id. */
   duplicate: boolean;
+  /**
+   * The per-business sequential voucher number (migration 0215); null for
+   * vouchers posted before numbering existed (e.g. installment slices).
+   */
+  voucherNumber: number | null;
+  /** Set once the voucher's entry is reversed; null while it stands. */
+  reversedAt: string | null;
+  reversalEntryId: string | null;
 }
 
 function normalizedClientRequestId(value: unknown): string {
@@ -426,10 +453,23 @@ function normalizedClientRequestId(value: unknown): string {
   return key;
 }
 
+/**
+ * Optional free text off the wire (memo, back-date, account choice): absent
+ * or blank means unset, but a wrong-typed value (a number, an object) is a
+ * 400 — never a TypeError from `.trim()`. The routes check first, and this
+ * is the fail-closed backstop for internal callers (AI apply, installment
+ * settlement) that bypass them.
+ */
+function normalizeOptionalText(value: unknown, code: "invalid_memo" | "invalid_date" | "invalid_cash_account"): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new ApError(code);
+  return value.trim() || null;
+}
+
 function paymentRequestFingerprint(params: {
   supplierId: string;
   locationId: string | null;
-  method: "cash" | "bank";
+  method: VoucherMethod;
   amount: number;
   paymentDate: string | null;
   memo: string | null;
@@ -458,11 +498,14 @@ function mapApPayment(row: {
   id: string;
   supplier_id: string;
   payment_date: string;
-  method: "cash" | "bank";
+  method: VoucherMethod;
   amount: string;
   memo: string | null;
   cash_account_id: string | null;
   bank_reference: string | null;
+  voucher_number: string | null;
+  reversed_at: string | null;
+  reversal_entry_id: string | null;
 }, duplicate: boolean): ApPayment {
   return {
     id: row.id,
@@ -474,19 +517,38 @@ function mapApPayment(row: {
     cashAccountId: row.cash_account_id,
     bankReference: row.bank_reference,
     duplicate,
+    voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
+    reversedAt: row.reversed_at,
+    reversalEntryId: row.reversal_entry_id,
   };
+}
+
+async function nextPaymentVoucherNumber(client: PoolClient, businessId: string): Promise<number> {
+  const { rows } = await client.query<{ last_ap_voucher_number: string }>(
+    `INSERT INTO ar_ap_voucher_counters (business_id, last_ar_voucher_number, last_ap_voucher_number)
+     VALUES ($1, 0, 1)
+     ON CONFLICT (business_id) DO UPDATE
+       SET last_ap_voucher_number = ar_ap_voucher_counters.last_ap_voucher_number + 1
+     RETURNING last_ap_voucher_number::text AS last_ap_voucher_number`,
+    [businessId],
+  );
+  return Number(rows[0].last_ap_voucher_number);
 }
 
 /**
  * Records a supplier payment atomically and idempotently. The supplier alias
  * and the payment/journal location must be the same branch (strict branch
  * liability semantics); the GL and supplier row are committed together.
+ *
+ * The money moves through an explicit cash/bank/clearing account (#829 adds
+ * clearing to the method set); every voucher takes the next per-business AP
+ * voucher number.
  */
 export async function payBill(params: {
   businessId: string;
   locationId: string | null;
   supplierId: string;
-  method: "cash" | "bank";
+  method: VoucherMethod;
   amount: number;
   paymentDate?: string | null;
   memo?: string | null;
@@ -494,19 +556,19 @@ export async function payBill(params: {
   createdBy: string | null;
   /** Holoo imports create local payments but must not push them back to Holoo. */
   skipHolooPush?: boolean;
-  /** The cash/bank account the payment left from; null uses the method default. */
+  /** The cash/bank/clearing account the money left from; null uses the method default. */
   cashAccountId?: string | null;
   /** Bank tracking number; normalized and validated before posting. */
   bankReference?: string | null;
 }): Promise<ApPayment> {
   if (!Number.isSafeInteger(params.amount) || params.amount <= 0) throw new ApError("invalid_amount");
   if (!isUuid(params.supplierId)) throw new ApError("supplier_not_found", 404);
-  if (params.method !== "cash" && params.method !== "bank") throw new ApError("invalid_method");
+  if (!isVoucherMethod(params.method)) throw new ApError("invalid_method");
   const clientRequestId = normalizedClientRequestId(params.clientRequestId);
-  const requestedPaymentDate = params.paymentDate?.trim() || null;
+  const requestedPaymentDate = normalizeOptionalText(params.paymentDate, "invalid_date");
   if (requestedPaymentDate && !isValidIsoDate(requestedPaymentDate)) throw new ApError("invalid_date");
-  const memo = params.memo?.trim() || null;
-  const requestedCashAccountId = params.cashAccountId?.trim() || null;
+  const memo = normalizeOptionalText(params.memo, "invalid_memo");
+  const requestedCashAccountId = normalizeOptionalText(params.cashAccountId, "invalid_cash_account");
   // Throws PayablesInputError for a malformed/oversized bank reference. The
   // normalized value makes Persian and ASCII digit forms the same operation.
   const bankReference = normalizeBankReference(params.bankReference);
@@ -533,15 +595,20 @@ export async function payBill(params: {
       id: string;
       supplier_id: string;
       payment_date: string;
-      method: "cash" | "bank";
+      method: VoucherMethod;
       amount: string;
       memo: string | null;
       request_fingerprint: string | null;
       cash_account_id: string | null;
       bank_reference: string | null;
+      voucher_number: string | null;
+      reversed_at: string | null;
+      reversal_entry_id: string | null;
     }>(
       `SELECT id, supplier_id, payment_date::text AS payment_date, method,
-              amount::text AS amount, memo, request_fingerprint, cash_account_id, bank_reference
+              amount::text AS amount, memo, request_fingerprint, cash_account_id, bank_reference,
+              voucher_number::text AS voucher_number, reversed_at::text AS reversed_at,
+              reversal_entry_id::text AS reversal_entry_id
          FROM ap_payments
         WHERE business_id = $1 AND client_request_id = $2
         FOR UPDATE`,
@@ -553,11 +620,17 @@ export async function payBill(params: {
       return mapApPayment(priorRows[0], true);
     }
 
+    // suppliers has no business_id column — the match is verified through its
+    // (mandatory) location. The alias must also be active, and when it is
+    // linked to a party that party must still be live and non-merged, so a
+    // crafted request cannot pay a supplier the directory already retired.
     const { rows: supplierRows } = await client.query<{ id: string; location_id: string }>(
       `SELECT s.id, s.location_id
          FROM suppliers s
          JOIN locations l ON l.id = s.location_id
-        WHERE s.id = $1 AND l.business_id = $2`,
+         LEFT JOIN parties pa ON pa.id = s.party_id
+        WHERE s.id = $1 AND l.business_id = $2 AND s.is_active
+          AND (s.party_id IS NULL OR (pa.is_active AND pa.merged_into_id IS NULL))`,
       [params.supplierId, params.businessId],
     );
     const supplier = supplierRows[0];
@@ -567,25 +640,35 @@ export async function payBill(params: {
     const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsPayable]);
     const apAccount = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
     const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, requestedCashAccountId);
-    const cashAccount = cash.accountId;
+    // Throws PayablesInputError (invalid_cash_account /
+    // cash_account_method_mismatch), which the route answers as a 400.
+    const cashAccountId = cash.accountId;
+
+    const voucherNumber = await nextPaymentVoucherNumber(client, params.businessId);
 
     const { rows } = await client.query<{
       id: string;
       supplier_id: string;
       payment_date: string;
-      method: "cash" | "bank";
+      method: VoucherMethod;
       amount: string;
       memo: string | null;
       cash_account_id: string | null;
       bank_reference: string | null;
+      voucher_number: string | null;
+      reversed_at: string | null;
+      reversal_entry_id: string | null;
     }>(
       `INSERT INTO ap_payments
          (business_id, location_id, supplier_id, payment_date, method, amount, memo,
-          client_request_id, request_fingerprint, created_by, cash_account_id, bank_reference)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          client_request_id, request_fingerprint, created_by, cash_account_id, bank_reference,
+          voucher_number)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT (business_id, client_request_id) WHERE client_request_id IS NOT NULL DO NOTHING
        RETURNING id, supplier_id, payment_date::text AS payment_date,
-                 method, amount::text AS amount, memo, cash_account_id, bank_reference`,
+                 method, amount::text AS amount, memo, cash_account_id, bank_reference,
+                 voucher_number::text AS voucher_number, reversed_at::text AS reversed_at,
+                 reversal_entry_id::text AS reversal_entry_id`,
       [
         params.businessId,
         params.locationId,
@@ -599,6 +682,7 @@ export async function payBill(params: {
         params.createdBy,
         cash.chosen ? cash.accountId : null,
         bankReference,
+        voucherNumber,
       ],
     );
 
@@ -610,15 +694,20 @@ export async function payBill(params: {
         id: string;
         supplier_id: string;
         payment_date: string;
-        method: "cash" | "bank";
+        method: VoucherMethod;
         amount: string;
         memo: string | null;
         request_fingerprint: string | null;
         cash_account_id: string | null;
         bank_reference: string | null;
+        voucher_number: string | null;
+        reversed_at: string | null;
+        reversal_entry_id: string | null;
       }>(
         `SELECT id, supplier_id, payment_date::text AS payment_date, method,
-                amount::text AS amount, memo, request_fingerprint, cash_account_id, bank_reference
+                amount::text AS amount, memo, request_fingerprint, cash_account_id, bank_reference,
+                voucher_number::text AS voucher_number, reversed_at::text AS reversed_at,
+                reversal_entry_id::text AS reversal_entry_id
            FROM ap_payments
           WHERE business_id = $1 AND client_request_id = $2
           FOR UPDATE`,
@@ -643,7 +732,7 @@ export async function payBill(params: {
       postingKind: "ap_payment",
       lines: [
         { accountId: apAccount, debit: params.amount, credit: 0 },
-        { accountId: cashAccount, debit: 0, credit: params.amount },
+        { accountId: cashAccountId, debit: 0, credit: params.amount },
       ],
     });
 
@@ -669,7 +758,9 @@ export interface ApPaymentReversal {
  * Append-only reversal for an A/P payment. The payment voucher is not edited or
  * deleted. Its journal entry is marked reversed and a new entry posts every
  * original debit/credit line on the opposite side, in the supplier's own
- * branch and the date's fiscal period.
+ * branch and the date's fiscal period. The source row is additionally marked
+ * (reversed_at/by/entry) so the register reads correction state without a
+ * journal join; an installment-linked voucher is refused, not unpicked.
  */
 export async function reverseApPayment(params: {
   businessId: string;
@@ -678,15 +769,27 @@ export async function reverseApPayment(params: {
   actorId: string | null;
   reversalDate?: string | null;
   memo?: string | null;
+  /** Holoo imports must not push their own corrections back to Holoo. */
+  skipHolooPush?: boolean;
 }): Promise<ApPaymentReversal> {
   if (!isUuid(params.paymentId)) throw new ApError("payment_not_found", 404);
-  const requestedDate = params.reversalDate?.trim() || null;
+  const requestedDate = normalizeOptionalText(params.reversalDate, "invalid_date");
   if (requestedDate && !isValidIsoDate(requestedDate)) throw new ApError("invalid_date");
   const reversalDate = requestedDate ?? (await businessToday(params.businessId));
 
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    // Lock the voucher row itself: a row already marked reversed is refused
+    // here, and the mark below is what the register and drill-down read.
+    const { rows: paymentRows } = await client.query<{ id: string; reversed_at: string | null }>(
+      `SELECT id, reversed_at::text AS reversed_at FROM ap_payments
+        WHERE business_id = $1 AND id = $2 FOR UPDATE`,
+      [params.businessId, params.paymentId],
+    );
+    if (!paymentRows[0]) throw new ApError("payment_not_found", 404);
+    if (paymentRows[0].reversed_at) throw new ApError("already_reversed", 409);
+
     const { rows } = await client.query<{
       payment_id: string;
       supplier_id: string;
@@ -743,11 +846,19 @@ export async function reverseApPayment(params: {
       throw new ApError("payment_not_reversible", 409);
     }
 
+    // An installment slice's payment is part of the plan's posted history;
+    // reversing it here would strand the slice as paid with no money moved.
+    const { rows: linked } = await client.query<{ id: string }>(
+      `SELECT id FROM installment_items WHERE payment_id = $1 LIMIT 1`,
+      [params.paymentId],
+    );
+    if (linked[0]) throw new ApError("payment_linked_to_installment", 409);
+
     const reversalEntryId = await postJournalEntry(client, {
       businessId: params.businessId,
       locationId: originalLocationId,
       entryDate: reversalDate,
-      memo: params.memo?.trim() || "برگشت پرداخت به تأمین‌کننده",
+      memo: normalizeOptionalText(params.memo, "invalid_memo") || "برگشت پرداخت به تأمین‌کننده",
       sourceType: "ap_payment_reversal",
       sourceId: original.payment_id,
       createdBy: params.actorId,
@@ -762,6 +873,15 @@ export async function reverseApPayment(params: {
 
     await client.query("UPDATE journal_entries SET reverses_entry_id = $2 WHERE id = $1", [reversalEntryId, original.entry_id]);
     await client.query("UPDATE journal_entries SET reversed_at = now(), reversed_by = $2 WHERE id = $1", [original.entry_id, params.actorId]);
+    await client.query(
+      `UPDATE ap_payments SET reversed_at = now(), reversed_by = $2, reversal_entry_id = $3 WHERE id = $1`,
+      [params.paymentId, params.actorId, reversalEntryId],
+    );
+
+    if (!params.skipHolooPush) {
+      await enqueueHolooReversalForApPayment(client, params.businessId, params.paymentId, reversalEntryId);
+    }
+
     await client.query("COMMIT");
     return { paymentId: original.payment_id, reversalEntryId, reversalDate };
   } catch (err) {
@@ -770,4 +890,111 @@ export async function reverseApPayment(params: {
   } finally {
     client.release();
   }
+}
+
+export interface ApPaymentDetail extends ApPayment {
+  supplierName: string;
+  supplierPhone: string | null;
+  supplierPartyId: string | null;
+  locationId: string | null;
+  locationName: string | null;
+  createdByName: string | null;
+  createdAt: string;
+  /** The named cash/bank/clearing account; null = the method's default took it. */
+  cashAccount: { code: string; name: string } | null;
+  entryId: string | null;
+  reversalDate: string | null;
+  reversedByName: string | null;
+}
+
+/** One payment voucher with the audit metadata the register drill-down shows. */
+export async function getPaymentDetail(businessId: string, paymentId: string): Promise<ApPaymentDetail | null> {
+  if (!isUuid(paymentId)) return null;
+  const { rows } = await query<{
+    id: string;
+    supplier_id: string;
+    supplier_name: string;
+    supplier_phone: string | null;
+    supplier_party_id: string | null;
+    location_id: string | null;
+    location_name: string | null;
+    payment_date: string;
+    method: VoucherMethod;
+    amount: string;
+    memo: string | null;
+    cash_account_id: string | null;
+    bank_reference: string | null;
+    cash_account_code: string | null;
+    cash_account_name: string | null;
+    posted_account_code: string | null;
+    posted_account_name: string | null;
+    voucher_number: string | null;
+    created_by_name: string | null;
+    created_at: string;
+    entry_id: string | null;
+    reversed_at: string | null;
+    reversed_by_name: string | null;
+    reversal_entry_id: string | null;
+    reversal_date: string | null;
+  }>(
+    `SELECT p.id, p.supplier_id,
+            COALESCE(pa.name, s.name, 'بدون تأمین‌کننده مشخص') AS supplier_name,
+            COALESCE(pa.phone, s.phone) AS supplier_phone,
+            s.party_id AS supplier_party_id,
+            p.location_id, l.name AS location_name,
+            p.payment_date::text AS payment_date, p.method, p.amount::text AS amount, p.memo,
+            p.cash_account_id, p.bank_reference,
+            ca.code AS cash_account_code, ca.name AS cash_account_name,
+            ${VOUCHER_POSTED_ACCOUNT_SELECT},
+            p.voucher_number::text AS voucher_number,
+            u.full_name AS created_by_name, to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
+            je.id::text AS entry_id,
+            p.reversed_at::text AS reversed_at, ru.full_name AS reversed_by_name,
+            p.reversal_entry_id::text AS reversal_entry_id,
+            rje.entry_date::text AS reversal_date
+       FROM ap_payments p
+       LEFT JOIN suppliers s ON s.id = p.supplier_id
+       LEFT JOIN parties pa ON pa.id = s.party_id
+       LEFT JOIN locations l ON l.id = p.location_id
+       LEFT JOIN accounts ca ON ca.id = p.cash_account_id
+       LEFT JOIN users u ON u.id = p.created_by
+       LEFT JOIN users ru ON ru.id = p.reversed_by
+       LEFT JOIN journal_entries je
+         ON je.business_id = p.business_id AND je.source_type = 'ap_payment'
+        AND je.source_id = p.id AND je.posting_kind = 'ap_payment'
+       ${voucherPostedAccountJoin("payment")}
+       LEFT JOIN journal_entries rje ON rje.id = p.reversal_entry_id
+      WHERE p.business_id = $1 AND p.id = $2`,
+    [businessId, paymentId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    supplierId: row.supplier_id,
+    supplierName: row.supplier_name,
+    supplierPhone: row.supplier_phone,
+    supplierPartyId: row.supplier_party_id,
+    locationId: row.location_id,
+    locationName: row.location_name,
+    paymentDate: row.payment_date,
+    method: row.method,
+    amount: Number(row.amount),
+    memo: row.memo,
+    cashAccountId: row.cash_account_id,
+    bankReference: row.bank_reference,
+    cashAccount: resolveVoucherPostedAccount(
+      row.cash_account_code ? { code: row.cash_account_code, name: row.cash_account_name ?? "" } : null,
+      row.posted_account_code ? { code: row.posted_account_code, name: row.posted_account_name ?? "" } : null,
+    ),
+    duplicate: false,
+    voucherNumber: row.voucher_number != null ? Number(row.voucher_number) : null,
+    createdByName: row.created_by_name,
+    createdAt: row.created_at,
+    entryId: row.entry_id,
+    reversedAt: row.reversed_at,
+    reversedByName: row.reversed_by_name,
+    reversalEntryId: row.reversal_entry_id,
+    reversalDate: row.reversal_date,
+  };
 }

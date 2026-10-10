@@ -31,6 +31,7 @@ import type { InstallmentPlanRow } from "@/lib/installments-service";
 import { fmtJalali, OverlayDialog } from "./ledger-ui";
 import { FilterChip } from "@/app/dashboard/filters";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
+import { VOUCHER_METHOD_LABELS, type VoucherMethod } from "@/lib/payables-input";
 
 /**
  * «کارت اقساط» — the installment schedule card. Functions follow the trade's
@@ -604,7 +605,7 @@ function InstallmentDetailPanel({ planId, onClose, onChanged }: { planId: string
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [payingId, setPayingId] = useState<string | null>(null);
-  const [method, setMethod] = useState<"cash" | "bank">("cash");
+  const [method, setMethod] = useState<VoucherMethod>("cash");
   const [memo, setMemo] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -736,7 +737,7 @@ function InstallmentDetailPanel({ planId, onClose, onChanged }: { planId: string
                       <Td>
                         {item.paidAt ? (
                           <span className="text-xs text-muted-foreground">
-                            {item.paidMethod === "cash" ? "نقدی" : item.paidMethod === "bank" ? "بانکی" : "ثبت‌شده"}
+                            {item.paidMethod ? VOUCHER_METHOD_LABELS[item.paidMethod] : "ثبت‌شده"}
                           </span>
                         ) : payingId === item.id ? null : (
                           <button type="button" onClick={() => { setPayingId(item.id); setError(""); }} className="rounded-lg px-3 py-1.5 text-xs font-semibold text-amber-700 dark:text-amber-300 transition-colors hover:bg-amber-100 dark:hover:bg-amber-500/20">
@@ -755,6 +756,7 @@ function InstallmentDetailPanel({ planId, onClose, onChanged }: { planId: string
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <FilterChip dense selected={method === "cash"} onClick={() => setMethod("cash")}>نقدی</FilterChip>
                     <FilterChip dense selected={method === "bank"} onClick={() => setMethod("bank")}>بانکی</FilterChip>
+                    <FilterChip dense selected={method === "clearing"} onClick={() => setMethod("clearing")}>در جریان وصول</FilterChip>
                     <input className={`${inputClass} h-11 min-w-40 flex-1`} placeholder="شرح (اختیاری)" value={memo} onChange={(e) => setMemo(e.target.value)} />
                   </div>
                   <p className="mt-2 text-xs text-amber-800 dark:text-amber-300">با ثبت پرداخت، سند دریافت/پرداخت این قسط هم در حسابداری ثبت می‌شود.</p>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addDaysIso,
+  isVoucherMethod,
   normalizeBankReference,
   parseExpenseSettlement,
   parseSupplierInvoice,
@@ -9,8 +10,11 @@ import {
   resolvePaymentDueDate,
   supplierReturnVatReversal,
   vatAmountForRate,
+  VOUCHER_METHOD_LABELS,
   voucherAccountChoices,
+  voucherDefaultAccountCode,
   voucherMethodForRole,
+  optionalBodyText,
 } from "./payables-input";
 
 function codeOf(fn: () => unknown): string {
@@ -129,14 +133,33 @@ describe("purchasePayableRial / due dates", () => {
 });
 
 describe("voucher accounts", () => {
-  it("maps cash/petty cash to «نقدی» and bank/card clearing to «بانکی», nothing else", () => {
+  it("maps cash/petty cash to «نقدی», bank to «بانکی» and card clearing to «در جریان وصول», nothing else", () => {
     expect(voucherMethodForRole("cash")).toBe("cash");
     expect(voucherMethodForRole("petty_cash")).toBe("cash");
     expect(voucherMethodForRole("bank")).toBe("bank");
-    expect(voucherMethodForRole("payment_clearing")).toBe("bank");
+    expect(voucherMethodForRole("payment_clearing")).toBe("clearing");
     expect(voucherMethodForRole("trade_receivable")).toBeNull();
     expect(voucherMethodForRole("vat_receivable")).toBeNull();
     expect(voucherMethodForRole(null)).toBeNull();
+  });
+
+  it("accepts exactly the cash/bank/clearing methods", () => {
+    expect(isVoucherMethod("cash")).toBe(true);
+    expect(isVoucherMethod("bank")).toBe(true);
+    expect(isVoucherMethod("clearing")).toBe(true);
+    expect(isVoucherMethod("cheque")).toBe(false);
+    expect(isVoucherMethod("")).toBe(false);
+    expect(isVoucherMethod(undefined)).toBe(false);
+  });
+
+  it("labels the three methods for the register and the pickers", () => {
+    expect(VOUCHER_METHOD_LABELS).toEqual({ cash: "نقدی", bank: "بانکی", clearing: "در جریان وصول" });
+  });
+
+  it("defaults bank to 1110 and clearing to 1120 (issue #829: bank is no longer clearing)", () => {
+    expect(voucherDefaultAccountCode("cash")).toBe("1100");
+    expect(voucherDefaultAccountCode("bank")).toBe("1110");
+    expect(voucherDefaultAccountCode("clearing")).toBe("1120");
   });
 
   it("lists a custom bank sub-account under its parent's method, and never a receivable or VAT account", () => {
@@ -147,11 +170,13 @@ describe("voucher accounts", () => {
       { id: "a4", code: "1200", name: "دریافتنی", type: "asset", parent_code: null },
       { id: "a5", code: "1220", name: "مالیات خرید", type: "asset", parent_code: null },
       { id: "a6", code: "5200", name: "اجاره", type: "expense", parent_code: null },
+      { id: "a7", code: "1120", name: "کارت‌خوان (در راه)", type: "asset", parent_code: null },
     ]);
     expect(choices.map((c) => [c.id, c.method])).toEqual([
       ["a1", "cash"],
       ["a2", "bank"],
       ["a3", "bank"],
+      ["a7", "clearing"],
     ]);
   });
 
@@ -189,5 +214,18 @@ describe("supplierReturnVatReversal", () => {
   it("a full return reverses the whole VAT, and never more than is left", () => {
     expect(supplierReturnVatReversal({ ...base, returnedGoods: 1_000_000 })).toBe(100_000n);
     expect(supplierReturnVatReversal({ ...base, priorReturnedGoods: 1_000_000, priorReversedVat: 100_000, returnedGoods: 0 })).toBe(0n);
+  });
+});
+
+describe("optionalBodyText", () => {
+  it("trims text, folds blanks and absence to null, and flags wrong types", () => {
+    expect(optionalBodyText(" 1404-777 ")).toBe("1404-777");
+    expect(optionalBodyText("   ")).toBeNull();
+    expect(optionalBodyText(undefined)).toBeNull();
+    expect(optionalBodyText(null)).toBeNull();
+    expect(optionalBodyText(123)).toBeUndefined();
+    expect(optionalBodyText(true)).toBeUndefined();
+    expect(optionalBodyText({})).toBeUndefined();
+    expect(optionalBodyText(["x"])).toBeUndefined();
   });
 });
