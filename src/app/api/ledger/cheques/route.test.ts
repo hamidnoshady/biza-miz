@@ -101,7 +101,7 @@ describe("GET /api/ledger/cheques — the read door", () => {
   it("passes the register's filters through, including the due-date window", async () => {
     await GET(
       getRequest(
-        "?direction=payable&status=returned_unresolved&bank=%D9%85%D9%84%D8%AA&q=123&sort=amount_desc&limit=25&offset=50&dueFrom=2026-01-01&dueTo=2026-02-01&locationId=loc-9",
+        "?direction=payable&status=returned_unresolved&bank=%D9%85%D9%84%D8%AA&q=123&sort=amount_desc&limit=25&cursor=abc123&dueFrom=2026-01-01&dueTo=2026-02-01&locationId=loc-9",
       ),
     );
     expect(vi.mocked(chequeService.listCheques).mock.calls[0][1]).toMatchObject({
@@ -111,7 +111,7 @@ describe("GET /api/ledger/cheques — the read door", () => {
       q: "123",
       sort: "amount_desc",
       limit: 25,
-      offset: 50,
+      cursor: "abc123",
       dueFrom: "2026-01-01",
       dueTo: "2026-02-01",
       locationId: "loc-9",
@@ -119,7 +119,9 @@ describe("GET /api/ledger/cheques — the read door", () => {
   });
 
   it("refuses an unusable page window before the service sees it", async () => {
-    for (const qs of ["?limit=0", "?limit=abc", "?offset=-1"]) {
+    // `offset` is retired: a stale client is refused by name, not answered
+    // with page one again.
+    for (const qs of ["?limit=0", "?limit=abc", "?offset=0", "?offset=50"]) {
       const response = await GET(getRequest(qs));
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({ error: "bad_request" });

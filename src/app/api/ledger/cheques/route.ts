@@ -19,9 +19,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "invalid_direction" }, { status: 400 });
   }
 
+  // Offset paging is retired (see `ChequeListFilters.cursor`). Refuse it by
+  // name rather than answering page one again, which is what a stale client
+  // would otherwise loop on.
+  if (search.has("offset")) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
   const limit = Number(search.get("limit") ?? 50);
-  const offset = Number(search.get("offset") ?? 0);
-  if (!Number.isFinite(limit) || !Number.isFinite(offset) || limit < 1 || offset < 0) {
+  if (!Number.isFinite(limit) || limit < 1) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
@@ -43,8 +48,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       dueTo: search.get("dueTo"),
       q: search.get("q"),
       sort: search.get("sort"),
+      cursor: search.get("cursor"),
       limit,
-      offset,
     });
     return NextResponse.json(page);
   } catch (err) {

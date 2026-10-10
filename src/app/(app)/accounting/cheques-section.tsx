@@ -203,6 +203,8 @@ interface ChequePage {
   cheques?: Cheque[];
   total?: number;
   hasMore?: boolean;
+  /** The keyset cursor for the next window; `null` on the last one. */
+  nextCursor?: string | null;
   summary?: ChequeSummary;
   banks?: string[];
   error?: string;
@@ -437,6 +439,7 @@ export function ChequesSection({
   const [summary, setSummary] = useState<ChequeSummary | null>(null);
   const [total, setTotal] = useState(0);
   const [hasMore, setHasMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [banks, setBanks] = useState<string[]>([]);
   const [branches, setBranches] = useState<Counterparty[]>([]);
 
@@ -523,10 +526,11 @@ export function ChequesSection({
    * Paging *appends*. The first version asked for `limit = 50 × page` with no
    * offset, which the service caps at 200 — so «بیشتر» silently stopped
    * working at the fourth page and the rows the reader already had were
-   * blanked on every press. Now each press asks for the next window by
-   * offset, over an ordering that ends in the row id (unique, so no row can
-   * be skipped or repeated across pages), and the rows already on screen stay
-   * on screen while it loads.
+   * blanked on every press. Each press now asks for the window after the
+   * server's `nextCursor` — the exact sort key of the last row read — rather
+   * than an offset the client counts. An offset slides under the reader when
+   * a row above it changes status; a cursor does not. The rows already on
+   * screen stay on screen while the next window loads.
    *
    * `requestRef` is the staleness guard: every filter change and every append
    * takes the next ticket, and a response that is not holding the current
@@ -542,13 +546,13 @@ export function ChequesSection({
   const actionKeys = useRef(new OperationKeyHolder());
 
   const queryFor = useCallback(
-    (offset: number) => {
+    (cursor: string | null) => {
       const params = new URLSearchParams({
         direction,
         sort: sortBy,
         limit: String(PAGE_SIZE),
-        offset: String(offset),
       });
+      if (cursor) params.set("cursor", cursor);
       if (deferredQuery.trim()) params.set("q", deferredQuery.trim());
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (bankFilter !== "all") params.set("bank", bankFilter);
@@ -565,6 +569,7 @@ export function ChequesSection({
       setSummary(data.summary ?? null);
       setTotal(data.total ?? 0);
       setHasMore(Boolean(data.hasMore));
+      setNextCursor(data.nextCursor ?? null);
       setBanks((previous) =>
         bankFilter !== "all" && !(data.banks ?? []).includes(bankFilter)
           ? Array.from(new Set([...(data.banks ?? []), bankFilter]))
@@ -578,12 +583,13 @@ export function ChequesSection({
   useEffect(() => {
     const ticket = ++requestRef.current;
     setCheques(null);
+    setNextCursor(null);
     setLoadError("");
     setMoreError("");
     // A new register owns the loading state: whatever append was pending
     // belongs to filters the reader has left behind.
     setLoadingTicket(null);
-    void api<ChequePage>(`/api/ledger/cheques?${queryFor(0)}`).then(({ ok, data }) => {
+    void api<ChequePage>(`/api/ledger/cheques?${queryFor(null)}`).then(({ ok, data }) => {
       if (requestRef.current !== ticket) return;
       if (ok && Array.isArray(data.cheques)) {
         setCheques(data.cheques);
@@ -598,12 +604,11 @@ export function ChequesSection({
 
   /** One more window, appended — the rows already read stay put. */
   const loadMore = useCallback(() => {
-    if (loadingMore) return;
-    const offset = cheques?.length ?? 0;
+    if (loadingMore || !nextCursor) return;
     const ticket = ++requestRef.current;
     setLoadingTicket(ticket);
     setMoreError("");
-    void api<ChequePage>(`/api/ledger/cheques?${queryFor(offset)}`).then(({ ok, data }) => {
+    void api<ChequePage>(`/api/ledger/cheques?${queryFor(nextCursor)}`).then(({ ok, data }) => {
       if (requestRef.current !== ticket) {
         // Stale: drop the rows, and release the spinner only if it is still
         // this request's. Whoever superseded it owns it now.
@@ -625,7 +630,7 @@ export function ChequesSection({
         setMoreError("بارگذاری ادامهٔ فهرست ناموفق بود.");
       }
     });
-  }, [cheques, loadingMore, queryFor, applyPage]);
+  }, [nextCursor, loadingMore, queryFor, applyPage]);
 
   // Branch context only means something to a business that has branches.
   useEffect(() => {

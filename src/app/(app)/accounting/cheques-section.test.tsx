@@ -98,17 +98,21 @@ beforeEach(() => {
 });
 
 describe("the cheque register's paging", () => {
-  it("asks for the next window by offset and appends it, keeping what is already read", async () => {
-    // Five rows per answer keeps the DOM small; what is under test is the
-    // *shape* of each request (a fixed limit and a moving offset) and the
-    // accumulation, not how many rows a real page holds.
+  it("asks for the server's next cursor and appends the window, keeping what is already read", async () => {
+    // Five rows per answer keeps the DOM small. What is under test is that the
+    // register follows the cursor the server issued — opaque to the client,
+    // never a count of the rows already on screen — and accumulates the rows.
     const WINDOW = 5;
+    const TOTAL = 20;
     stubFetch((url) => {
-      const offset = Number(url.searchParams.get("offset") ?? 0);
+      const cursor = url.searchParams.get("cursor");
+      const start = cursor ? Number(cursor.slice("after-".length)) : 0;
+      const end = Math.min(start + WINDOW, TOTAL);
       return {
-        cheques: Array.from({ length: WINDOW }, (_, i) => cheque(offset + i)),
-        total: 210,
-        hasMore: offset + WINDOW < 210,
+        cheques: Array.from({ length: end - start }, (_, i) => cheque(start + i)),
+        total: TOTAL,
+        hasMore: end < TOTAL,
+        nextCursor: end < TOTAL ? `after-${end}` : null,
         banks: ["ملت"],
         summary: summary(),
       };
@@ -119,30 +123,29 @@ describe("the cheque register's paging", () => {
 
     await screen.findByText(toPersianDigits("S-000"));
     expect(new URL(registerCalls[0], "http://t").searchParams.get("limit")).toBe("50");
-    expect(new URL(registerCalls[0], "http://t").searchParams.get("offset")).toBe("0");
+    expect(new URL(registerCalls[0], "http://t").searchParams.has("cursor")).toBe(false);
 
     await user.click(await screen.findByRole("button", { name: /مورد بیشتر/ }));
     await screen.findByText(toPersianDigits("S-005"));
 
-    // The second request is the *next* window, not a bigger first one…
+    // The second request carries the cursor the first answer issued…
     const second = new URL(registerCalls[1], "http://t");
-    expect(second.searchParams.get("offset")).toBe("5");
+    expect(second.searchParams.get("cursor")).toBe("after-5");
     expect(second.searchParams.get("limit")).toBe("50");
+    expect(second.searchParams.has("offset")).toBe(false);
     // …and the rows already on screen are still there.
     expect(screen.getByText(toPersianDigits("S-000"))).toBeTruthy();
 
-    // Keep going: the window keeps moving instead of the limit growing, which
-    // is what used to stall against the service's 200-row cap.
-    for (let press = 0; press < 3; press += 1) {
+    for (let press = 0; press < 2; press += 1) {
       await user.click(await screen.findByRole("button", { name: /مورد بیشتر/ }));
     }
-    const offsets = registerCalls.map((u) => new URL(u, "http://t").searchParams.get("offset"));
-    expect(offsets).toEqual(["0", "5", "10", "15", "20"]);
-    expect(
-      registerCalls.every((u) => new URL(u, "http://t").searchParams.get("limit") === "50"),
-    ).toBe(true);
-    await screen.findByText(toPersianDigits("S-020"));
+    // The last window (after-15) answers without a cursor, so «بیشتر» goes
+    // away instead of asking again.
+    await screen.findByText(toPersianDigits("S-019"));
+    const cursors = registerCalls.map((u) => new URL(u, "http://t").searchParams.get("cursor"));
+    expect(cursors).toEqual([null, "after-5", "after-10", "after-15"]);
     expect(screen.getByText(toPersianDigits("S-000"))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /مورد بیشتر/ })).toBeNull();
   });
 
   it("does not strand «بیشتر» when the filters change while a page is in flight", async () => {
@@ -165,7 +168,8 @@ describe("the cheque register's paging", () => {
         }
         registerCalls.push(url);
         const params = new URL(url, "http://t").searchParams;
-        const offset = Number(params.get("offset") ?? 0);
+        const cursor = params.get("cursor");
+        const offset = cursor ? Number(cursor.slice("after-".length)) : 0;
         const filtered = params.get("q") === "ملت";
         const body = {
           cheques: Array.from({ length: 5 }, (_, i) =>
@@ -173,6 +177,7 @@ describe("the cheque register's paging", () => {
           ),
           total: 300,
           hasMore: true,
+          nextCursor: `after-${offset + 5}`,
           banks: ["ملت"],
           summary: summary(),
         };
@@ -226,7 +231,8 @@ describe("the cheque register's paging", () => {
           return { ok: true, status: 200, json: async () => ({ locations: [] }) };
         }
         registerCalls.push(url);
-        const offset = Number(new URL(url, "http://t").searchParams.get("offset") ?? 0);
+        const cursor = new URL(url, "http://t").searchParams.get("cursor");
+        const offset = cursor ? Number(cursor.slice("after-".length)) : 0;
         if (offset > 0 && fail) {
           fail = false;
           return { ok: false, status: 500, json: async () => ({ error: "boom" }) };
@@ -238,6 +244,7 @@ describe("the cheque register's paging", () => {
             cheques: Array.from({ length: 5 }, (_, i) => cheque(offset + i)),
             total: 120,
             hasMore: true,
+            nextCursor: `after-${offset + 5}`,
             banks: [],
             summary: summary(),
           }),

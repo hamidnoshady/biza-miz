@@ -144,6 +144,8 @@ interface ChequeRow extends Record<string, unknown> {
   replaced_by_amount?: string | null;
   /** `timestamptz`: a `Date` from pg, a string once it has been through jsonb. */
   created_at: string | Date;
+  /** The last row's sort key, as canonical text — only ever read for `nextCursor`. */
+  cursor_keys?: string[];
 }
 
 function toCheque(r: ChequeRow): Cheque {
@@ -200,13 +202,21 @@ export interface ChequeListFilters {
   q?: string | null;
   sort?: string | null;
   limit?: number;
-  offset?: number;
+  /**
+   * Keyset cursor: the `nextCursor` of the page before. Offset paging is gone
+   * on purpose — a row that changes status between two requests moves within
+   * the ordering, and an offset window then skips or repeats a row nobody
+   * touched. A cursor names the last row read, by its exact sort key.
+   */
+  cursor?: string | null;
 }
 
 export interface ChequeListPage {
   cheques: Cheque[];
   total: number;
   hasMore: boolean;
+  /** Pass back as `cursor` for the next window; `null` when this is the last. */
+  nextCursor: string | null;
   /**
    * Accounting-aware totals for the *filtered* set, by where the value sits
    * rather than by "is the row finished" — see `CHEQUE_STATUS_GROUPS`.
@@ -264,18 +274,116 @@ export const CHEQUE_STATUS_GROUPS: Record<string, ChequeStatus[]> = {
 };
 
 /**
- * Every sort ends in `c.id`, and `c.id` is unique: an append page is only
- * meaningful if two rows can never tie. Without it a tenant with fifty cheques
- * due the same day gets a different order per request, and "load more" both
- * repeats and skips rows.
+ * One column of an ordering: the SQL that orders by it, its direction, and its
+ * storage type (for typed cursor comparisons).
  */
-const SORTS: Record<string, string> = {
-  due_asc: "c.due_date ASC, c.created_at ASC, c.id ASC",
-  due_desc: "c.due_date DESC, c.created_at DESC, c.id DESC",
-  amount_desc: "c.amount DESC, c.created_at DESC, c.id DESC",
-  amount_asc: "c.amount ASC, c.created_at DESC, c.id DESC",
-  created_desc: "c.created_at DESC, c.id DESC",
+interface SortColumn {
+  expr: string;
+  dir: "ASC" | "DESC";
+  type: "boolean" | "date" | "bigint" | "timestamptz" | "uuid";
+}
+
+const column = (expr: string, dir: SortColumn["dir"], type: SortColumn["type"]): SortColumn => ({
+  expr,
+  dir,
+  type,
+});
+
+/** Open items first, closed ones after: the register's long-standing grouping. */
+const STATUS_GROUP_COLUMN = column(
+  "(c.status = ANY(ARRAY['cleared', 'bounced', 'cancelled', 'resolved']::cheque_status[]))",
+  "ASC",
+  "boolean",
+);
+
+/**
+ * Every sort ends in `c.id`, and `c.id` is unique: a window is only meaningful
+ * if two rows can never tie, so the cursor always names exactly one row.
+ */
+const SORTS: Record<string, SortColumn[]> = {
+  due_asc: [column("c.due_date", "ASC", "date"), column("c.created_at", "ASC", "timestamptz"), column("c.id", "ASC", "uuid")],
+  due_desc: [column("c.due_date", "DESC", "date"), column("c.created_at", "DESC", "timestamptz"), column("c.id", "DESC", "uuid")],
+  amount_desc: [column("c.amount", "DESC", "bigint"), column("c.created_at", "DESC", "timestamptz"), column("c.id", "DESC", "uuid")],
+  amount_asc: [column("c.amount", "ASC", "bigint"), column("c.created_at", "DESC", "timestamptz"), column("c.id", "DESC", "uuid")],
+  created_desc: [column("c.created_at", "DESC", "timestamptz"), column("c.id", "DESC", "uuid")],
 };
+const DEFAULT_SORT = "due_asc";
+
+/** The full ordering for a sort: the status group, then the sort's own columns. */
+function orderingFor(sort: string): SortColumn[] {
+  return [STATUS_GROUP_COLUMN, ...SORTS[sort]];
+}
+
+/**
+ * The canonical text of one key, independent of the session's DateStyle or
+ * time zone, so a cursor written on one request compares exactly on the next.
+ * Timestamps keep their microseconds: a millisecond round-trip through JS
+ * would silently move a row across the boundary it was read at.
+ */
+function keyTextOf(col: SortColumn): string {
+  if (col.type === "date") return `to_char(${col.expr}, 'YYYY-MM-DD')`;
+  if (col.type === "timestamptz") return `to_char(${col.expr} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+  return `(${col.expr})::text`;
+}
+
+const KEY_PATTERN: Record<SortColumn["type"], RegExp> = {
+  boolean: /^(true|false)$/,
+  date: /^\d{4}-\d{2}-\d{2}$/,
+  bigint: /^\d{1,19}$/,
+  timestamptz: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/,
+  uuid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+};
+
+function encodeCursor(sort: string, keys: string[]): string {
+  return Buffer.from(JSON.stringify({ s: sort, k: keys }), "utf8").toString("base64url");
+}
+
+/**
+ * Reads a cursor back, or refuses it. A cursor is only ever produced by this
+ * service, so one that does not parse, names another sort, or carries a key of
+ * the wrong shape is a client bug and is answered as one.
+ */
+function decodeCursor(raw: string, sort: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+  } catch {
+    throw new ChequeError("invalid_cursor");
+  }
+  const { s, k } = (parsed ?? {}) as { s?: unknown; k?: unknown };
+  const columns = orderingFor(sort);
+  if (s !== sort || !Array.isArray(k) || k.length !== columns.length) {
+    throw new ChequeError("invalid_cursor");
+  }
+  columns.forEach((col, i) => {
+    const value = k[i];
+    if (typeof value !== "string" || !KEY_PATTERN[col.type].test(value)) {
+      throw new ChequeError("invalid_cursor");
+    }
+  });
+  return k as string[];
+}
+
+/**
+ * "Strictly after the cursor row" in the given ordering, written as the OR of
+ * one branch per column: equal on every earlier column, and past this one in
+ * its direction. Unique `c.id` at the end means exactly one row is never
+ * returned twice and no row that did not move is ever skipped.
+ */
+function keysetAfter(ordering: SortColumn[], values: string[], params: unknown[]): string {
+  const branches = ordering.map((col, i) => {
+    const conjunct: string[] = [];
+    for (let j = 0; j < i; j += 1) {
+      params.push(values[j]);
+      conjunct.push(`${ordering[j].expr} = $${params.length}::${ordering[j].type}`);
+    }
+    params.push(values[i]);
+    const op = col.dir === "ASC" ? ">" : "<";
+    conjunct.push(`${col.expr} ${op} $${params.length}::${col.type}`);
+    return `(${conjunct.join(" AND ")})`;
+  });
+  return `(${branches.join(" OR ")})`;
+}
 
 const MAX_PAGE = 200;
 
@@ -345,14 +453,23 @@ export async function listCheques(
   }
 
   const limit = Math.min(Math.max(Math.trunc(filters.limit ?? 50), 1), MAX_PAGE);
-  const offset = Math.max(Math.trunc(filters.offset ?? 0), 0);
-  const orderBy = SORTS[filters.sort ?? "due_asc"] ?? SORTS.due_asc;
+  const sort = filters.sort && Object.hasOwn(SORTS, filters.sort) ? filters.sort : DEFAULT_SORT;
+  const ordering = orderingFor(sort);
+
+  // The cursor's values go to the page query only; the summary and the bank
+  // list describe the whole filtered set and must not see the window.
+  const pageParams = [...params];
+  let afterCursor = "";
+  if (filters.cursor) {
+    afterCursor = ` AND ${keysetAfter(ordering, decodeCursor(filters.cursor, sort), pageParams)}`;
+  }
 
   const { rows } = await query<ChequeRow>(
     `SELECT ${CHEQUE_COLUMNS_PREFIXED},
             l.name AS location_name,
             r.serial_number AS replaces_serial_number,
-            COALESCE(rep.replaced_by_amount, 0)::text AS replaced_by_amount
+            COALESCE(rep.replaced_by_amount, 0)::text AS replaced_by_amount,
+            ARRAY[${ordering.map(keyTextOf).join(", ")}]::text[] AS cursor_keys
        FROM cheques c
        LEFT JOIN locations l ON l.id = c.location_id
        LEFT JOIN cheques r ON r.id = c.replaces_cheque_id
@@ -360,12 +477,15 @@ export async function listCheques(
          SELECT SUM(x.amount) AS replaced_by_amount FROM cheques x
           WHERE x.business_id = c.business_id AND x.replaces_cheque_id = c.id
        ) rep ON true
-      WHERE ${where}
-      ORDER BY (c.status = ANY(ARRAY['cleared', 'bounced', 'cancelled', 'resolved']::cheque_status[])), ${orderBy}
-      LIMIT ${limit + 1} OFFSET ${offset}`,
-    params,
+      WHERE ${where}${afterCursor}
+      ORDER BY ${ordering.map((col) => `${col.expr} ${col.dir}`).join(", ")}
+      LIMIT ${limit + 1}`,
+    pageParams,
   );
   const hasMore = rows.length > limit;
+  const pageRows = rows.slice(0, limit);
+  const last = pageRows[pageRows.length - 1];
+  const nextCursor = hasMore && last ? encodeCursor(sort, last.cursor_keys ?? []) : null;
 
   // The totals describe the whole filtered set, not the page — a KPI that
   // only counted the first fifty rows would be worse than none.
@@ -431,9 +551,10 @@ export async function listCheques(
   }
 
   return {
-    cheques: rows.slice(0, limit).map(toCheque),
+    cheques: pageRows.map(toCheque),
     total,
     hasMore,
+    nextCursor,
     summary,
     banks: bankRows.map((row) => row.bank_name),
   };

@@ -811,11 +811,91 @@ describe("the register the server filters, pages and totals (issue #828)", () =>
     // The summary describes the filter, not the page.
     expect(first.summary.outstanding).toEqual({ count: 3, total: 3_000_000 });
 
-    const second = await cheques.listCheques(biz.id, { direction: "receivable", limit: 2, offset: 2 });
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const second = await cheques.listCheques(biz.id, { direction: "receivable", limit: 2, cursor: first.nextCursor });
     expect(second.cheques).toHaveLength(1);
     expect(second.hasMore).toBe(false);
     const ids = [...first.cheques, ...second.cheques].map((c) => c.id);
     expect(new Set(ids).size).toBe(3);
+  });
+
+  it("does not skip an unchanged row when a row above the reader changes status between pages", async () => {
+    // The register is read while it is being worked: a bounce on a row the
+    // reader has already passed moves that row to the closed group, which the
+    // ordering puts last. An offset window then slides one row up under the
+    // reader, and the first row of the next page is lost (reproduced against
+    // the offset API before the cursor change). Keyset paging must keep every
+    // row that did not itself move.
+    const rows = [];
+    for (let i = 1; i <= 5; i += 1) {
+      rows.push(await receivable({ serialNumber: `M-${i}`, dueDate: `2026-04-0${i}`, amount: 1_000_000 }));
+    }
+    const first = await cheques.listCheques(biz.id, { direction: "receivable", limit: 2 });
+    expect(first.cheques.map((c) => c.serialNumber)).toEqual(["M-1", "M-2"]);
+
+    await cheques.transitionCheque({
+      businessId: biz.id,
+      chequeId: rows[0].id,
+      action: "bounce",
+      occurredOn: "2026-03-11",
+      createdBy: null,
+    });
+
+    const seen: string[] = first.cheques.map((c) => c.serialNumber);
+    let cursor = first.nextCursor;
+    while (cursor) {
+      const page = await cheques.listCheques(biz.id, { direction: "receivable", limit: 2, cursor });
+      seen.push(...page.cheques.map((c) => c.serialNumber));
+      cursor = page.nextCursor;
+    }
+    // Every row that did not move is read exactly once. The bounced row was
+    // read before it moved, so it legitimately comes round again behind the
+    // reader; the register de-duplicates by identity, so it is shown once.
+    for (const serial of ["M-2", "M-3", "M-4", "M-5"]) {
+      expect(seen.filter((x) => x === serial)).toHaveLength(1);
+    }
+    expect([...new Set(seen)].sort()).toEqual(["M-1", "M-2", "M-3", "M-4", "M-5"]);
+  });
+
+  it("keeps the rows behind the reader out of the next window when a new cheque is taken above it", async () => {
+    for (let i = 1; i <= 4; i += 1) {
+      await receivable({ serialNumber: `N-${i}`, dueDate: `2026-05-0${i}`, amount: 1_000_000 });
+    }
+    const first = await cheques.listCheques(biz.id, { direction: "receivable", limit: 2 });
+    expect(first.cheques.map((c) => c.serialNumber)).toEqual(["N-1", "N-2"]);
+
+    // A cheque due before everything already read lands above the reader.
+    await receivable({ serialNumber: "N-0", dueDate: "2026-04-01", amount: 1_000_000 });
+
+    const second = await cheques.listCheques(biz.id, {
+      direction: "receivable",
+      limit: 2,
+      cursor: first.nextCursor,
+    });
+    expect(second.cheques.map((c) => c.serialNumber)).toEqual(["N-3", "N-4"]);
+    expect(second.nextCursor).toBeNull();
+    expect(second.hasMore).toBe(false);
+  });
+
+  it("refuses a cursor it did not issue for this sort, and one that is not a cursor", async () => {
+    await receivable({ serialNumber: "C-1" });
+    await receivable({ serialNumber: "C-2", dueDate: "2026-04-02" });
+    const first = await cheques.listCheques(biz.id, { direction: "receivable", limit: 1, sort: "due_asc" });
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    await expect(
+      cheques.listCheques(biz.id, {
+        direction: "receivable",
+        limit: 1,
+        sort: "amount_desc",
+        cursor: first.nextCursor,
+      }),
+    ).rejects.toThrow("invalid_cursor");
+    for (const bogus of ["not-a-cursor", Buffer.from("{}").toString("base64url")]) {
+      await expect(
+        cheques.listCheques(biz.id, { direction: "receivable", limit: 1, cursor: bogus }),
+      ).rejects.toThrow("invalid_cursor");
+    }
   });
 
   it("counts a bounce as returned-unresolved and an endorsement as neither outstanding nor settled", async () => {
@@ -1762,11 +1842,18 @@ describe("paging a register bigger than one page (issue #828)", () => {
     }
 
     const seen: string[] = [];
-    for (let offset = 0; offset < 300; offset += 50) {
-      const page = await cheques.listCheques(biz.id, { direction: "receivable", limit: 50, offset });
+    let cursor: string | null | undefined;
+    for (let pages = 0; pages < 10; pages += 1) {
+      const page: Awaited<ReturnType<typeof cheques.listCheques>> = await cheques.listCheques(biz.id, {
+        direction: "receivable",
+        limit: 50,
+        cursor,
+      });
       seen.push(...page.cheques.map((c) => c.id));
       expect(page.total).toBe(210);
-      if (!page.hasMore) break;
+      expect(page.hasMore).toBe(page.nextCursor !== null);
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
     }
     expect(seen).toHaveLength(210);
     expect(new Set(seen).size).toBe(210);
