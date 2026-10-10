@@ -19,8 +19,22 @@ import { rialText, type RialText } from "../../inventory-exact";
 import { upsertMappingOnClient } from "../mapping-service";
 import { planJournalImport, type HolooVoucher, type NormalizedVoucher } from "./journal-plan";
 import { writeIntegrationAudit } from "../audit";
+import {
+  DIMENSION_KINDS,
+  type DimensionKind,
+  type LineDimensions,
+} from "../../accounting-dimensions";
+import { findDimensionValueByCode } from "../../accounting-dimensions-service";
 
 export const HOLOO_IMPORT_SOURCE_TYPE = "holoo_import";
+
+/** Which code field on a NormalizedLine corresponds to each dimension kind. */
+const DIMENSION_CODE_FIELD: Record<DimensionKind, "costCenterCode" | "profitCenterCode" | "departmentCode" | "detailCode"> = {
+  cost_center: "costCenterCode",
+  profit_center: "profitCenterCode",
+  department: "departmentCode",
+  detail: "detailCode",
+};
 
 async function accountIdForCode(
   businessId: string,
@@ -38,6 +52,8 @@ export interface JournalImportSummary {
   alreadyMapped: number;
   unbalanced: { remoteId: string; difference: string }[];
   unmappedAccounts: { remoteId: string; accountCode: string }[];
+  /** Rows refused because a dimension code named on a line was unknown or archived. */
+  unmappedDimensions: { remoteId: string; kind: DimensionKind; code: string; reason: "unknown" | "inactive" }[];
   skippedEmpty: string[];
 }
 
@@ -46,6 +62,7 @@ export interface JournalImportPreview {
   alreadyMapped: number;
   unbalanced: { remoteId: string; difference: string }[];
   unmappedAccounts: { remoteId: string; accountCode: string }[];
+  unmappedDimensions: JournalImportSummary["unmappedDimensions"];
   skippedEmpty: string[];
 }
 
@@ -79,10 +96,11 @@ async function resolveVoucherLines(
   connectionId: string,
   voucher: NormalizedVoucher,
   unmappedAccounts: JournalImportPreview["unmappedAccounts"],
+  unmappedDimensions: JournalImportPreview["unmappedDimensions"],
   provisionalAccountCodes: ReadonlySet<string> = new Set(),
   allowProvisional = false,
-): Promise<{ accountId: string; debit: RialText; credit: RialText }[]> {
-  const lines: { accountId: string; debit: RialText; credit: RialText }[] = [];
+): Promise<{ accountId: string; debit: RialText; credit: RialText; dimensions?: LineDimensions }[]> {
+  const lines: { accountId: string; debit: RialText; credit: RialText; dimensions?: LineDimensions }[] = [];
   let hasUnmapped = false;
   for (const line of voucher.lines) {
     if (line.debit === 0n && line.credit === 0n) continue;
@@ -93,10 +111,38 @@ async function resolveVoucherLines(
       hasUnmapped = true;
       continue;
     }
+    // Resolve optional dimension codes for the line (issue #868). A blank cell
+    // leaves the kind unattributed; an unknown or archived code refuses the
+    // row exactly the way the expense importer refuses it, so the mistake is
+    // always surfaced on the sheet.
+    const dimensions: LineDimensions = {};
+    let lineHasBadDimension = false;
+    for (const kind of DIMENSION_KINDS) {
+      const codeKey = DIMENSION_CODE_FIELD[kind];
+      const code = line[codeKey];
+      if (!code) continue;
+      const match = await findDimensionValueByCode(businessId, kind, code, client);
+      if (!match) {
+        unmappedDimensions.push({ remoteId: voucher.remoteId, kind, code, reason: "unknown" });
+        lineHasBadDimension = true;
+        continue;
+      }
+      if (!match.isActive) {
+        unmappedDimensions.push({ remoteId: voucher.remoteId, kind, code, reason: "inactive" });
+        lineHasBadDimension = true;
+        continue;
+      }
+      dimensions[kind] = match.id;
+    }
+    if (lineHasBadDimension) {
+      hasUnmapped = true;
+      continue;
+    }
     lines.push({
       accountId,
       debit: rialText(line.debit.toString()),
       credit: rialText(line.credit.toString()),
+      dimensions: Object.keys(dimensions).length ? dimensions : undefined,
     });
   }
   return hasUnmapped ? [] : lines;
@@ -139,6 +185,7 @@ export async function previewJournalVouchers(
         difference: voucher.difference.toString(),
       })),
       unmappedAccounts: [],
+      unmappedDimensions: [],
       skippedEmpty: [],
     };
     for (const voucher of balanced) {
@@ -152,6 +199,7 @@ export async function previewJournalVouchers(
         connectionId,
         voucher,
         result.unmappedAccounts,
+        result.unmappedDimensions,
         new Set(provisionalAccountCodes),
         true,
       );
@@ -194,6 +242,7 @@ export async function importJournalVouchers(
       difference: voucher.difference.toString(),
     })),
     unmappedAccounts: [],
+    unmappedDimensions: [],
     skippedEmpty: [],
   };
   const client = await getPool().connect();
@@ -212,9 +261,19 @@ export async function importJournalVouchers(
           continue;
         }
 
-        const lines = await resolveVoucherLines(client, businessId, connectionId, voucher, result.unmappedAccounts);
+        const lines = await resolveVoucherLines(
+          client,
+          businessId,
+          connectionId,
+          voucher,
+          result.unmappedAccounts,
+          result.unmappedDimensions,
+        );
         if (lines.length === 0) {
-          if (!result.unmappedAccounts.some((row) => row.remoteId === voucher.remoteId)) {
+          if (
+            !result.unmappedAccounts.some((row) => row.remoteId === voucher.remoteId)
+            && !result.unmappedDimensions.some((row) => row.remoteId === voucher.remoteId)
+          ) {
             result.skippedEmpty.push(voucher.remoteId);
           }
           await client.query("ROLLBACK");
@@ -258,7 +317,8 @@ export async function importJournalVouchers(
         imported: result.imported,
         alreadyMapped: result.alreadyMapped,
         unbalanced: result.unbalanced.length,
-        unmapped: result.unmappedAccounts.length,
+        unmappedAccounts: result.unmappedAccounts.length,
+        unmappedDimensions: result.unmappedDimensions.length,
       },
     });
     return result;

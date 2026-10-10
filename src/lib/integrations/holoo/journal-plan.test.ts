@@ -7,12 +7,35 @@ describe("normalizeLine", () => {
       accountCode: "1100",
       debit: 70n,
       credit: 0n,
+      costCenterCode: "",
+      profitCenterCode: "",
+      departmentCode: "",
+      detailCode: "",
     });
     expect(normalizeLine({ accountCode: "2100", debitRial: 30n, creditRial: 100n })).toEqual({
       accountCode: "2100",
       debit: 0n,
       credit: 70n,
+      costCenterCode: "",
+      profitCenterCode: "",
+      departmentCode: "",
+      detailCode: "",
     });
+  });
+
+  it("trims optional dimension codes and carries them through", () => {
+    const line = normalizeLine({
+      accountCode: "1100",
+      debitRial: 100n,
+      costCenterCode: " CC-01 ",
+      profitCenterCode: null,
+      departmentCode: undefined,
+      detailCode: " D-7 ",
+    });
+    expect(line.costCenterCode).toBe("CC-01");
+    expect(line.profitCenterCode).toBe("");
+    expect(line.departmentCode).toBe("");
+    expect(line.detailCode).toBe("D-7");
   });
 });
 
