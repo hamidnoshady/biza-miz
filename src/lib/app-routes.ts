@@ -91,6 +91,40 @@ export function workspaceSectionHref(section: WorkspaceSection): string {
   return `${WORKSPACE_MODULE_HOME}/${section}`;
 }
 
+/**
+ * Whether a nav href is the current location.
+ *
+ * A bare href (no `?`) is a section's home and is active on its whole path
+ * prefix, the way the flat nav always behaved — so a group's parent link stays
+ * lit on every one of its query-string tabs. A `?tab=` href is a *named* sub-
+ * section: it matches only that tab (other query params, like a `party=` deep
+ * link, are ignored so the «مشتریان» entry stays lit on one customer's file).
+ *
+ * Route semantics only: callers that give one row extra owned paths (the
+ * ledger workspace row owning its tools' flat routes) layer that on top of
+ * this matcher rather than teaching the generic rule about any one app.
+ */
+export function navHrefIsActive(
+  pathname: string,
+  href: string,
+  search?: { get(name: string): string | null } | null,
+): boolean {
+  // Platform and Workspace homes are exact destinations; a prefix match would
+  // make Home active throughout another workspace.
+  if (href === DASHBOARD_HOME || href === WORKSPACE_MODULE_HOME) return pathname === href;
+  if (href === workspaceSectionHref("overview")) {
+    return pathname === WORKSPACE_MODULE_HOME || pathname === href;
+  }
+  const q = href.indexOf("?");
+  if (q >= 0) {
+    const hrefPath = href.slice(0, q);
+    if (pathname !== hrefPath) return false;
+    const hrefTab = new URLSearchParams(href.slice(q + 1)).get("tab");
+    return (search?.get("tab") ?? null) === hrefTab;
+  }
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
 /** One project's page, inside the workspace's projects section. */
 export function workspaceProjectHref(projectId: string): string {
   return `${WORKSPACE_MODULE_HOME}/projects/${projectId}`;

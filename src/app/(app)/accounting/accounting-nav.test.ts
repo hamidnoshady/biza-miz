@@ -80,6 +80,9 @@ describe("accountingSectionsFor", () => {
     expect(keys).toContain("trial-balance");
     expect(keys).toContain("directory");
     expect(keys).toContain("dashboard");
+    // The workspace door itself is ledger-gated, not payroll-gated: a manager
+    // opens «فضای کار حسابداری» and every tool it lists except payroll.
+    expect(keys).toContain("ledger");
   });
 
   it("keeps operational staff out of ledger sections", () => {

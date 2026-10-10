@@ -1,41 +1,28 @@
 "use client";
 
 /**
- * One group of entries in the dashboard's navigation column — plain or
- * collapsible — written once for every menu that draws one.
+ * One group of entries in the dashboard's navigation column, written once for
+ * every menu that draws one.
  *
- * Why it exists: «فضای کار حسابداری» was the one group in the Accounting menu
- * with a disclosure, and its disclosure was a bespoke 40px-tall, 11px-bold
- * heading with a chevron — a control that shared nothing with the 48px
- * `rounded-xl` amber rows underneath it. So the longest, most important group
- * in the menu read as a stray toggle rather than as part of the menu, and it
- * was the only group with no internal headings while every other group had
- * one. Both halves of that were the same bug: the group was hand-rolled, in
- * two places (`dashboard-sidebar.tsx` and `accounting-app-nav.tsx`) that had
- * already drifted apart by a `duration-200`.
- *
- * The rules it keeps (docs/design-system.md §Rail navigation, §Radius scale,
- * §Colour roles):
- *  - a collapsible group header uses the **same metadata label** as every
- *    other group (`NAV_GROUP_LABEL_CLASS`), with a chevron and a touch-sized
- *    hit target — not a second, always-bold nav row that reads as a stray
- *    section link between the real group headings;
- *  - a closed group whose current page is inside it stays marked as selected,
- *    so «you are here» survives collapsing;
- *  - group labels are the metadata style `text-[11px] font-semibold
- *    tracking-wide`, never a second spelling of it;
- *  - sub-group headings divide a long group the way every other group is
- *    divided by its own heading;
- *  - RTL throughout: logical insets only (`ms`/`ps`/`border-s`/`text-start`)
- *    and a chevron that points toward the inline start when closed;
- *  - at the 4rem icon rail the words hide and the rows stay reachable — a
- *    closed group must never leave the rail empty, because there is no
- *    chevron there to reopen it with.
+ * Why it exists: the Accounting menu's groups were each hand-rolled, in two
+ * places (`dashboard-sidebar.tsx` and `accounting-app-nav.tsx`) that had
+ * already drifted apart by a `duration-200`. The shared component keeps the
+ * rules the menus agree on (docs/design-system.md §Rail navigation, §Radius
+ * scale, §Colour roles):
+ *  - a group heading is the **metadata label** (`NAV_GROUP_LABEL_CLASS`), and
+ *    a group with no label is one ordinary link standing alone in the column —
+ *    the «فضای کار حسابداری» workspace door, which wears its words on the row
+ *    the way «فروش و فاکتور» does, never on a heading above it and never on a
+ *    disclosure;
+ *  - every row is a real `SidebarMenuButton`/`Link` wearing the shared skins
+ *    (`APP_NAV_BUTTON_CLASS`, `NAV_LABEL_CLASS`) with the row's own tooltip,
+ *    hover/focus/selected states and `aria-current`;
+ *  - RTL throughout: logical insets only (`ms`/`ps`/`border-s`/`text-start`);
+ *  - at the 4rem icon rail the words hide and the rows stay reachable.
  */
 
 import Link from "next/link";
-import { ChevronDownIcon, CircleIcon, type LucideIcon } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { CircleIcon } from "lucide-react";
 import {
   SidebarMenu,
   SidebarMenuButton,
@@ -54,36 +41,25 @@ export const NAV_GROUP_LABEL_CLASS =
   "px-3 pb-1 pt-2 text-[11px] font-semibold tracking-wide text-muted-foreground group-data-[state=collapsed]/sidebar:hidden";
 
 /**
- * The disclosure control for a long group — same words and weight as
- * `NAV_GROUP_LABEL_CLASS`, plus chevron and selection when closed over the
- * current page.
- */
-export const NAV_COLLAPSIBLE_GROUP_TOGGLE_CLASS =
-  "flex min-h-12 w-full items-center gap-2 rounded-xl px-3 pb-1 pt-2 text-[11px] font-semibold tracking-wide text-muted-foreground transition-colors hover:bg-amber-50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:hover:bg-amber-500/15 dark:hover:text-amber-300 dark:focus-visible:ring-amber-400/45 group-data-[state=collapsed]/sidebar:hidden";
-
-/**
  * The hairline that replaces a heading at the 4rem rail, where words are
  * hidden and two groups would otherwise read as one column of glyphs.
  */
 export const NAV_GROUP_RULE_CLASS =
   "mx-2 hidden border-t border-border/70 group-data-[state=collapsed]/sidebar:block";
 
-/**
- * The same metadata type one indent in, over a sub-group's rows — written out
- * rather than merged with the class above, because `ps-`/`px-` merging depends
- * on the merge strategy and a heading that silently lost its inset is exactly
- * the kind of drift this file exists to stop.
- */
-export const NAV_SUBGROUP_LABEL_CLASS =
-  "ms-4 ps-4 pb-1 pt-2 text-[11px] font-semibold tracking-wide text-muted-foreground group-data-[state=collapsed]/sidebar:hidden";
-
 /** Whether an entry is the page currently open — each menu's own rule. */
 export type EntryActiveTest = (entry: WorkspaceNavEntry) => boolean;
 
 function EntryIcon({ entry }: { entry: WorkspaceNavEntry }) {
-  const Icon = entry.section
-    ? ACCOUNTING_SECTION_ICONS[entry.section]
-    : (NAV_ICONS[entry.iconKey ?? entry.href] ?? NAV_ICONS[entry.href.split("?")[0]] ?? CircleIcon);
+  // An explicit `iconKey` wins — it is the one place a row names the *mapping*
+  // (the «حسابداری» calculator, `LEDGER_WORKSPACE_ICON_KEY`) rather than its
+  // section's glyph. An entry has never carried both a business icon and a
+  // section before, so this changes nothing for the existing rows.
+  const Icon = entry.iconKey
+    ? (NAV_ICONS[entry.iconKey] ?? CircleIcon)
+    : entry.section
+      ? ACCOUNTING_SECTION_ICONS[entry.section]
+      : (NAV_ICONS[entry.href.split("?")[0]] ?? CircleIcon);
   return <Icon aria-hidden="true" className="size-5 shrink-0" />;
 }
 
@@ -91,22 +67,14 @@ export function NavEntries({
   entries,
   isActive,
   onNavigate,
-  indented,
 }: {
   entries: readonly WorkspaceNavEntry[];
   isActive: EntryActiveTest;
+  /** Closes the mobile drawer after a tap, the way the flat nav does. */
   onNavigate: () => void;
-  /** Inside a disclosure group: a start-side rule ties the children to their heading. */
-  indented?: boolean;
 }) {
   return (
-    <SidebarMenu
-      className={cn(
-        "space-y-1.5",
-        indented &&
-          "ms-4 border-s border-border/70 ps-2 group-data-[state=collapsed]/sidebar:ms-0 group-data-[state=collapsed]/sidebar:border-s-0 group-data-[state=collapsed]/sidebar:ps-0",
-      )}
-    >
+    <SidebarMenu className="space-y-1.5">
       {entries.map((entry) => {
         const active = isActive(entry);
         return (
@@ -124,7 +92,14 @@ export function NavEntries({
   );
 }
 
-/** A group that is simply open: a heading over its rows. */
+/**
+ * A block of the menu: an optional heading over its rows.
+ *
+ * Without a label the block is one ordinary link in the column — the same
+ * visual treatment as a row inside any other group, and no group furniture
+ * around it beyond the collapsed-rail hairline that keeps the icon column's
+ * boundaries legible.
+ */
 export function NavGroup({
   group,
   isActive,
@@ -137,98 +112,8 @@ export function NavGroup({
   return (
     <div className="space-y-1.5">
       <div aria-hidden="true" className={NAV_GROUP_RULE_CLASS} />
-      <p className={NAV_GROUP_LABEL_CLASS}>{group.label}</p>
+      {group.label ? <p className={NAV_GROUP_LABEL_CLASS}>{group.label}</p> : null}
       <NavEntries entries={group.entries} isActive={isActive} onNavigate={onNavigate} />
-    </div>
-  );
-}
-
-/**
- * A group that discloses — the long one.
- *
- * Its header is the same group label every other block wears, with a chevron —
- * not a full nav row that sits between «اشخاص» and «گزارش و تحلیل» looking like
- * a duplicate menu entry. When it is closed over the page you are on it keeps
- * the selected skin so «you are here» survives collapsing.
- */
-export function NavCollapsibleGroup({
-  group,
-  idPrefix,
-  isActive,
-  onNavigate,
-  open,
-  onToggle,
-}: {
-  group: WorkspaceNavGroup;
-  /** Prefixes the panel id so two menus on one page cannot collide. */
-  idPrefix: string;
-  isActive: EntryActiveTest;
-  onNavigate: () => void;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  const panelId = `${idPrefix}-${group.key}`;
-  const holdsCurrentPage = group.entries.some((entry) => isActive(entry));
-  const subGroups = group.subGroups?.length
-    ? group.subGroups
-    : [{ key: group.key, label: "", entries: group.entries }];
-
-  return (
-    <div className="space-y-1.5">
-      <div aria-hidden="true" className={NAV_GROUP_RULE_CLASS} />
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        aria-controls={panelId}
-        className={cn(
-          NAV_COLLAPSIBLE_GROUP_TOGGLE_CLASS,
-          holdsCurrentPage &&
-            !open &&
-            "bg-amber-100 font-semibold text-amber-700 dark:bg-amber-500/20 dark:text-amber-200",
-        )}
-      >
-        <span className="min-w-0 flex-1 truncate text-start">{group.label}</span>
-        <ChevronDownIcon
-          aria-hidden="true"
-          // Closed, the chevron points toward the inline start — which in
-          // this RTL product is the left, hence the extra flip under `rtl:`.
-          className={cn(
-            "ms-auto size-4 shrink-0 text-muted-foreground transition-transform duration-200 ease-out",
-            open ? "" : "-rotate-90 rtl:rotate-90",
-          )}
-        />
-      </button>
-
-      {/*
-        At the 4rem rail there is no chevron to reopen a closed group with, so
-        a closed group would leave the rail simply empty. The disclosure is an
-        expanded-rail affordance; collapsed, the rows are always listed.
-      */}
-      <div
-        id={panelId}
-        className={cn("space-y-1.5", open ? "" : "hidden group-data-[state=collapsed]/sidebar:block")}
-      >
-        {group.description ? (
-          <p className="px-3 text-[11px] leading-5 text-muted-foreground group-data-[state=collapsed]/sidebar:hidden">
-            {group.description}
-          </p>
-        ) : null}
-        {subGroups.map((subGroup, index) => (
-          <div key={subGroup.key} className="space-y-1.5">
-            {subGroup.label ? (
-              <>
-                {/* The group's own rule already sits above the first one; a
-                    second hairline there would draw a double line at 4rem,
-                    where the header and the headings are hidden. */}
-                {index > 0 ? <div aria-hidden="true" className={NAV_GROUP_RULE_CLASS} /> : null}
-                <p className={NAV_SUBGROUP_LABEL_CLASS}>{subGroup.label}</p>
-              </>
-            ) : null}
-            <NavEntries entries={subGroup.entries} isActive={isActive} onNavigate={onNavigate} indented />
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

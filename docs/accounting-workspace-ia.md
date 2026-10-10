@@ -8,12 +8,16 @@ canon remains unchanged.
 
 Accounting is the business's primary work menu, not a narrow ledger tool. It
 brings together the daily business work (sales, inventory, products, operations
-and business reporting) and the ledger as a named group in one app shell. The
-previous flat `/dashboard/*` operational URLs made a person leave Accounting to
-complete routine work and created competing navigation structures.
+and business reporting) and the ledger as **one ordinary menu link** —
+«فضای کار حسابداری» — that opens the ledger workspace page at
+`/accounting/ledger`, where the permitted tools are listed. The previous flat
+`/dashboard/*` operational URLs made a person leave Accounting to complete
+routine work and created competing navigation structures; the previous sidebar
+disclosure (a chevron over sixteen ledger rows) made the menu read as a drawer
+bolted onto the workspace. Both are gone.
 
 `/accounting` is one shell with one menu. The menu composes, rather than copies,
-the shell's already-gated business entries with Accounting's own ledger entries.
+the shell's already-gated business entries with Accounting's own workspace link.
 `workspace-shell.tsx` remains the source of module, role, feature and permission
 gating; `accounting-workspace.ts` adopts eligible entries by their canonical
 href. A business without a module simply has no corresponding menu entry.
@@ -50,52 +54,57 @@ The rest of the workspace has these responsibilities:
 | خرید و انبار | inventory, products and industry-specific trade entries |
 | عملیات | the industry’s canonical operations screens, such as floor, kitchen, reservations and delivery |
 | اشخاص | the one directory (`/accounting/directory`) and its `?view=` links |
-| **فضای کار حسابداری** | trial balance, journal, manual entry, chart of accounts, receivables, payables, receipts/payments, instalments, cheques, expenses, bank reconciliation, fixed assets, periods, tax, payroll and accounting settings |
+| **فضای کار حسابداری** | ONE ordinary link to the workspace page `/accounting/ledger`, which lists the permitted ledger tools (trial balance, journal, manual entry, chart of accounts, receivables, payables, receipts/payments, instalments, cheques, expenses, bank reconciliation, fixed assets, periods, tax, payroll) under four named divisions |
 | گزارش و تحلیل | financial reports (`/accounting/financial-reports`), business reports (`/accounting/reports`), growth/marketing |
 | پیکربندی | business settings, technical connections, credit and billing |
 
 `/accounting/financial-reports` is the ledger report index. `/accounting/reports`
 is the business reporting workspace; they are intentionally different routes.
 
-### How the group is drawn
+### How the workspace link is drawn
 
-
-Every group in this menu — plain or collapsible — is rendered by the shared
+Every group in this menu is rendered by the shared
 [`src/app/dashboard/sidebar-nav-group.tsx`](../src/app/dashboard/sidebar-nav-group.tsx),
-so the sidebar has one spelling of a group instead of one per menu.
+so the sidebar has one spelling of a row instead of one per menu.
 
-- The ledger group's **disclosure header matches every other group heading** —
-  `text-[11px] font-semibold tracking-wide text-muted-foreground`, a chevron,
-  and a touch-sized hit target (`NAV_COLLAPSIBLE_GROUP_TOGGLE_CLASS` in
-  `sidebar-nav-group.tsx`). It is not a second, always-bold nav row with its
-  own icon sitting between «اشخاص» and «گزارش و تحلیل». Closed **over the page
-  you are on**, the header keeps the amber selected skin so «you are here»
-  survives collapsing.
-- The group has **named sub-groups**, the way every other group has a heading:
+- «فضای کار حسابداری» is **one ordinary menu link** — the same
+  `SidebarMenuButton`/`Link` row as «فروش و فاکتور» (`APP_NAV_BUTTON_CLASS`,
+  `NAV_LABEL_CLASS`, a 20px glyph from the calculator mapping
+  `LEDGER_WORKSPACE_ICON_KEY`, hover/focus/selected states, `aria-current` and
+  the collapsed-rail tooltip). It has **no disclosure, no chevron, no `aria-expanded`
+  and no nested panel** — the words live on the row, not on a heading above it.
+  Clicking it opens `/accounting/ledger` immediately.
+- The workspace page (`/accounting/ledger`, the `ledger` section) lists the
+  permitted tools under the accountant's own divisions:
 
-  | sub-group | sections |
+  | division | sections |
   | --- | --- |
   | دفتر و اسناد | تراز آزمایشی، دفتر روزنامه، ثبت سند دستی، سرفصل حساب‌ها |
   | دریافتنی و پرداختنی | دریافتنی، پرداختنی، اقساط، چک‌ها |
   | وجوه و هزینه | دریافت و پرداخت، هزینه‌ها، تطبیق بانکی، دارایی ثابت |
   | دوره، مالیات و حقوق | دوره‌های مالی، مالیات، حقوق و دستمزد |
-  | پیکربندی حسابداری | تنظیمات حسابداری |
 
   They are an *arrangement* of `LEDGER_WORKSPACE_SECTION_KEYS`, never a second
-  list: the group's flat `entries` are built from the sub-groups, and a test
-  asserts the two sets are identical, so a section cannot end up in one and not
-  the other.
-- At the 4rem icon rail the headings and the chevron hide and the rows stay
-  listed — a closed group must never leave the rail empty, because collapsed
-  there is no chevron to reopen it with.
+  list: `ledgerWorkspaceToolGroups()` builds the page from
+  `LEDGER_WORKSPACE_SUBGROUPS` and the same `accountingSectionsFor` permission
+  helper the section routes enforce, and a test asserts the tool sets are
+  identical, so a section cannot end up in one and not the other.
+- The row **lights on its landing page and on every tool route it owns**
+  (`isLedgerWorkspacePathname`) and stays dark on unrelated Accounting areas —
+  sales, inventory, the directory, reports and the overview each have their own
+  row. At the 4rem icon rail the label hides and the row keeps its tooltip.
+  A bottom-bar tab pinned to `/accounting/ledger` follows the same rule
+  (`isActive` in `dashboard-sidebar.tsx` layers it over the shared
+  `navHrefIsActive`), so the tab does not go dark while the member is inside a
+  ledger tool.
+- The tools' own direct URLs are unchanged and remain bookmarkable,
+  pinnable to the mobile bottom bar and permission-gated exactly as before.
 
-Its **in-page rail** — the `SectionNav` that used to list every section in the
-app, i.e. a second copy of the whole menu inside the page — is now scoped to
-exactly that group. `/accounting/settings` now appears in this rail as the
-single «تنظیمات حسابداری» destination; the route and page were moved into the
-group rather than copied. On a page outside the group (`/accounting/overview`,
-`/accounting/directory`, `/accounting/reports`) there is no rail at all: those
-are top-level areas of the workspace and render as plain pages.
+In-page, a ledger tool screen draws the compact contextual chip row of its own
+division («دفتر و اسناد»، «وجوه و هزینه»…) after its content on a phone and
+above it from `sm` up (`accounting-manager.tsx`); the workspace page, the
+overview, the directory and the reports pages render as plain pages. That chip
+row is navigation between sibling tools, not a second copy of the menu.
 
 ### Where the business entries come from
 
@@ -166,10 +175,14 @@ table for all three roles (migration 0137).
 ## 5. Adding to the menu
 
 - **A new accounting section** — add the key to `ACCOUNTING_SECTION_KEYS`, a
-  label to `ACCOUNTING_SECTIONS`, a glyph to `ACCOUNTING_SECTION_ICONS`, a home
-  to `ACCOUNTING_NAV_GROUPS`, and (if it is a ledger tool) to
-  `LEDGER_WORKSPACE_SECTION_KEYS`. `accounting-workspace.test.ts` fails if it
-  ends up in no menu group.
+  label to `ACCOUNTING_SECTIONS`, a glyph to `ACCOUNTING_SECTION_ICONS`, and
+  (if it is a ledger tool) one division of `LEDGER_WORKSPACE_SUBGROUPS` — the
+  tool set `LEDGER_WORKSPACE_SECTION_KEYS` is derived from those divisions. The
+  workspace page then lists it automatically, filtered by the same permission
+  helper. A non-tool section gets a menu row through
+  `accountingWorkspaceGroups()`. `app-ownership.test.ts` fails if a section ends
+  up with neither a menu row nor a workspace-page tool, and
+  `accounting-workspace.test.ts` pins the fifteen tools.
 - **A business page the workspace should adopt** — add its href to
   `WORKSPACE_GROUP_SLOTS` in `accounting-workspace.ts`. Do **not** re-declare
   the page: the composer picks it out of the nav the shell already gated, so
@@ -245,9 +258,12 @@ balance and one file.
 
 ## 5. Adding or moving a route
 
-- **New ledger section:** add its key, label, icon and menu group through the
-  Accounting route constants. `accounting-workspace.test.ts` must still prove
-  every section has an intended menu home.
+- **New ledger section:** add its key, label, icon and division through the
+  Accounting route constants (`LEDGER_WORKSPACE_SECTION_KEYS` +
+  `LEDGER_WORKSPACE_SUBGROUPS`). It then appears on the
+  «فضای کار حسابداری» page (`/accounting/ledger`) at its canonical URL; the
+  sidebar does not list it. `accounting-workspace.test.ts` must still prove
+  every section has an intended home.
 - **Business page adopted by Accounting:** add its **canonical** href to
   `WORKSPACE_GROUP_SLOTS`. Do not duplicate its gating; the composer receives
   the shell’s already-filtered nav.

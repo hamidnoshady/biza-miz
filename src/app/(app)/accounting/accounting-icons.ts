@@ -26,6 +26,11 @@ import type { AccountingSectionKey } from "./accounting-routes";
 
 export const ACCOUNTING_SECTION_ICONS: Record<AccountingSectionKey, LucideIcon> = {
   dashboard: LayoutDashboardIcon,
+  // The workspace row wears the app's own calculator — the same glyph the
+  // workspace rail and the bottom nav carry for «حسابداری» (the exact mapping
+  // is `LEDGER_WORKSPACE_ICON_KEY` in `accounting-workspace.ts`; this entry
+  // keeps the section-keyed map total for every other surface that reads it).
+  ledger: CalculatorIcon,
   "trial-balance": CalculatorIcon,
   entries: ClipboardListIcon,
   manual: ClipboardListIcon,

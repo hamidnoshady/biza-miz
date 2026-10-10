@@ -11,9 +11,12 @@ import { describe, expect, it } from "vitest";
  * Node with no jsdom and no `@testing-library`, so a client component cannot be
  * mounted here. Grepping is not as good as rendering, but it holds the exact
  * lines that broke before: a physical `left`/`right` inset that mirrors wrongly
- * in Persian, a chevron that points the wrong way, a group heading that is a
- * `<div>` with no expanded state, a dialog whose only exit discards a filled
- * form without asking.
+ * in Persian, a chevron that points the wrong way, a ledger disclosure bolted
+ * onto the menu («فضای کار حسابداری» is ONE ordinary link now — these tests
+ * keep it that way), a dialog whose only exit discards a filled form without
+ * asking. (The rendered-menu half — one workspace link, no disclosure button,
+ * tooltip at the icon rail, `onNavigate` closing the drawer — is mounted in
+ * `accounting-app-nav.test.tsx`.)
  */
 
 const NAV_SOURCE = readFileSync(
@@ -22,8 +25,8 @@ const NAV_SOURCE = readFileSync(
 );
 /**
  * The groups themselves are drawn by the shared component now, so the rules
- * about indentation, chevrons and disclosure state are checked there — the
- * menu file only composes it.
+ * about rows, tooltips and selection state are checked there — the menu file
+ * only composes it.
  */
 const GROUP_SOURCE = readFileSync(
   fileURLToPath(new URL("../../dashboard/sidebar-nav-group.tsx", import.meta.url)),
@@ -58,6 +61,14 @@ function physicalClassesIn(source: string): string[] {
   return [...(source.match(PHYSICAL_CLASSES) ?? []), ...(source.match(PHYSICAL_BARE) ?? [])];
 }
 
+/** Code only — comments may *name* the removed disclosure; code may not use it. */
+function withoutComments(source: string): string[] {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"));
+}
+
 describe("the Accounting menu is written for RTL", () => {
   it("uses logical insets, never physical left/right ones", () => {
     // `ms`/`me`/`ps`/`pe`/`border-s`/`text-start` flip with the document
@@ -68,16 +79,24 @@ describe("the Accounting menu is written for RTL", () => {
     expect(physicalClassesIn(BACK_SOURCE)).toEqual([]);
   });
 
-  it("ties a group's children to their heading with a start-side rule", () => {
-    expect(GROUP_SOURCE).toMatch(/border-s\b/);
-    expect(GROUP_SOURCE).toMatch(/\bms-4\b/);
+  it("draws «فضای کار حسابداری» as one ordinary link — no disclosure, no chevron, no panel", () => {
+    // The regression: the ledger was a collapsible group — a bespoke 11px/600
+    // disclosure header with a chevron over a nested panel, and the only item
+    // in the menu that expanded at all. It is one ordinary row now, so none of
+    // that machinery may come back — not in the menu, not in the shared drawer.
+    expect(withoutComments(NAV_SOURCE).join("\n")).not.toMatch(/NavCollapsibleGroup|useOpenNavGroups|onToggle|aria-expanded|aria-controls|Chevron/i);
+    expect(withoutComments(GROUP_SOURCE).join("\n")).not.toMatch(/NavCollapsibleGroup|aria-expanded|aria-controls|onToggle|Chevron/i);
+    // The row is drawn through the same `SidebarMenuButton`/`Link` pair as
+    // «فروش و فاکتور», wearing the shared skins — never a custom heading
+    // typography (the old 11px/600 toggle) or a button-with-panel.
+    expect(GROUP_SOURCE).toMatch(/<SidebarMenuButton asChild/);
+    expect(GROUP_SOURCE).toMatch(/APP_NAV_BUTTON_CLASS/);
+    expect(GROUP_SOURCE).toMatch(/NAV_LABEL_CLASS/);
+    expect(withoutComments(GROUP_SOURCE).join("\n")).not.toMatch(/<button[\s\S]{0,200}aria-expanded/);
   });
 
-  it("flips the disclosure chevron for RTL", () => {
-    // Closed, the chevron must point toward the inline start — which is the
-    // left here, so the LTR rotation needs an `rtl:` counterpart.
-    expect(GROUP_SOURCE).toMatch(/-rotate-90 rtl:rotate-90/);
-    // The «بازگشت» arrow too: an arrow drawn for LTR points the wrong way.
+  it("flips the «بازگشت» arrow for RTL", () => {
+    // An arrow drawn for LTR points the wrong way in Persian.
     expect(BACK_SOURCE).toMatch(/rtl:rotate-180/);
   });
 
@@ -86,43 +105,31 @@ describe("the Accounting menu is written for RTL", () => {
     // Both the label span and the collapsed-rail tooltip carry the words.
     expect(GROUP_SOURCE).toMatch(/tooltip=\{entry\.label\}/);
     expect(GROUP_SOURCE).toMatch(/\{entry\.label\}/);
-    // The collapsible group's header carries its name in words too.
+    // A group with a heading carries its name in words; the workspace door
+    // group carries none because its row *is* the name.
     expect(GROUP_SOURCE).toMatch(/\{group\.label\}/);
   });
 
-  it("makes each group a real disclosure a screen reader can follow", () => {
-    expect(GROUP_SOURCE).toMatch(/aria-expanded=\{open\}/);
-    expect(GROUP_SOURCE).toMatch(/aria-controls=\{panelId\}/);
-    // And the menu names itself, so a screen reader announces which nav it is.
+  it("names the menu for a screen reader", () => {
     expect(NAV_SOURCE).toMatch(/aria-label="منوی حسابداری"/);
   });
 
   it("marks the current page for assistive tech, not only in colour", () => {
     expect(GROUP_SOURCE).toMatch(/aria-current=\{active \? "page" : undefined\}/);
-  });
-
-  it("draws the group toggle as a group heading with a chevron, not a nav row", () => {
-    // The bug: a 48px nav row with an icon and always-bold label — it read as a
-    // stray section between «اشخاص» and «گزارش و تحلیل» instead of another
-    // group heading. It is the same metadata type as `NavGroup` now, with a
-    // chevron and a touch-sized hit target.
-    expect(GROUP_SOURCE).toMatch(/NAV_COLLAPSIBLE_GROUP_TOGGLE_CLASS/);
-    expect(GROUP_SOURCE).not.toMatch(/<SidebarMenuButton[\s\S]{0,200}onClick=\{onToggle\}/);
+    // …and the selected skin is the shared one (`data-[active=true]` through
+    // `APP_NAV_BUTTON_CLASS`), the same «you are here» as «فروش و فاکتور».
+    expect(GROUP_SOURCE).toMatch(/isActive=\{active\}/);
   });
 
   it("keeps the group heading in the shared metadata type, not a new spelling", () => {
     expect(GROUP_SOURCE).toMatch(/text-\[11px\] font-semibold tracking-wide text-muted-foreground/);
   });
 
-  it("keeps «you are here» on a group that is closed over the current page", () => {
-    expect(GROUP_SOURCE).toMatch(/holdsCurrentPage &&[\s\S]{0,80}!open/);
-  });
-
   it("hides labels, not entries, when the rail collapses to icons", () => {
     expect(GROUP_SOURCE).toMatch(/group-data-\[state=collapsed\]\/sidebar:hidden/);
-    // A closed group must still list its rows at 4rem: there is no chevron
-    // there to reopen it with, so hiding them would empty the rail.
-    expect(GROUP_SOURCE).toMatch(/hidden group-data-\[state=collapsed\]\/sidebar:block/);
+    // At 4rem the rows stay listed (with their tooltips) and only the hairline
+    // separates groups — an icon rail must never hide a destination.
+    expect(GROUP_SOURCE).toMatch(/hidden[^"]*group-data-\[state=collapsed\]\/sidebar:block/);
   });
 });
 
