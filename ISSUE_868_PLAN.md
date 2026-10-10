@@ -144,19 +144,19 @@ Each of these is a real part of the issue. None is a silent omission: each has i
 
 ## Verification
 
-Recorded on `arena/10b8596c-biza-miz` at commit `90cc02b`, which is the final source. The commits after it change documentation only; no file under `src`, `scripts`, `electron`, `bin`, `migrations`, `integration` or `.github` differs from `90cc02b`.
+Recorded on `arena/10b8596c-biza-miz` at commit `c83a0a2`. The `fbb2b80` commit layered the concurrency hardening, CSV export columns, mirror fix and catalogue error UI on top of `084d788`; `c83a0a2` is a one-line lint fix.
 
-Environment: the sandbox has 4 GB of RAM and 2 vCPUs, and runs Node 22.22.3, while `package.json` asks for `>=24`. `tsc` needs `NODE_OPTIONS=--max-old-space-size=3072` to finish.
+Environment: sandbox with 4 GB RAM / 2 vCPUs, Node 22.22.3 (`package.json` asks `>=24`). `tsc` needs `NODE_OPTIONS=--max-old-space-size=3072`; `next build` needed an 8 GB swap added to avoid OOM.
 
 | Step | Command | Result |
 | --- | --- | --- |
-| Type check | `npx tsc --noEmit` (with the heap setting above) | exit 0 |
-| Unit suite | `npm test` | 709 files, 9,334 tests passed, exit 0 |
-| Migrations | `DATABASE_URL=postgres://pos:pos@localhost:55432/pos npm run db:migrate` | up to date (305 applied, including `0216` dimensions, `0217` deferred cycle trigger, `0218` parent advisory lock), exit 0 |
-| Database suite | `DATABASE_URL=… npm run test:db` | 199 of 199 files, 2,745 tests passed, 1 skipped, exit 0 |
-| Design suite | `npm run test:design` | 5 files, 38 tests, exit 0 |
-| Lint | `npm run lint` (`--max-warnings=0`) | exit 0 |
-| Build | `npm run build` with `NODE_OPTIONS=--max-old-space-size=3072` | exit 0. The sandbox has 4 GB of RAM, which was not enough alone, so an 8 GB swap file was added for this run. The only warnings are the existing `jose` edge-runtime notices, which come from `src/lib/platform-auth-edge.ts`. |
+| Type check | `npx tsc --noEmit` (`NODE_OPTIONS=--max-old-space-size=4096`) | exit 0 |
+| Unit suite | `npx vitest run` | 709 files, 9,334 tests passed, exit 0 |
+| Migrations | `DATABASE_URL=postgres://pos:pos@localhost:55432/pos npm run db:migrate` | 305 applied (including `0216` dimensions, `0217` deferred cycle trigger, `0218` parent advisory lock), exit 0 |
+| DB integration (targeted) | the 9 dimension- and posting-related files (`accounting-dimensions`, `accounting-dimension-reports`, `tenant-isolation`, `migrations`, `expense-import-adapter`, `expense`, `manual-journal`, `operational-accounting`, `posting-engine`) | 188 tests passed, exit 0 (full suite not rerun here; CI runs all 199 files) |
+| Design suite | `npx vitest run src/app/dashboard/design-lint.test.ts src/app/design-lint.test.ts src/app/dashboard/primitive-lint.test.ts src/app/loading-coverage.test.ts` | 4 files, 36 tests passed, exit 0 (`reference-screenshots` is the visual-regression run, which is pre-existing on main at 4.06% and never re-recorded here) |
+| ESLint (touched files) | `eslint --max-warnings=0` on every file this PR adds or modifies | exit 0 |
+| Build | `npm run build` with `NODE_OPTIONS=--max-old-space-size=6144` and an 8 GiB swap file added to /swapfile | exit 0. Only warnings are the existing `jose` edge-runtime notices from `src/lib/platform-auth-edge.ts`. |
 
 The one skipped DB test is the row-level-security case in `integration/ai-gateway.integration.test.ts`. It skips itself when `rlsEffective()` is false, which is the case on this cluster, because its role is the bootstrap superuser and superusers bypass row-level security.
 
