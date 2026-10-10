@@ -28,11 +28,12 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (kindParam && !isDimensionKind(kindParam)) {
     return NextResponse.json({ error: "unknown_dimension_kind" }, { status: 400 });
   }
+  const includeArchived = ["1", "true", "yes"].includes((params.get("includeArchived") ?? "").toLowerCase());
   const [settings, values] = await Promise.all([
     listDimensionSettings(session.businessId),
     listDimensionValues(session.businessId, {
       kind: kindParam ? (kindParam as DimensionKind) : undefined,
-      includeArchived: params.get("includeArchived") === "1",
+      includeArchived,
     }),
   ]);
   return NextResponse.json({ settings, values });

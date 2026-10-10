@@ -26,7 +26,7 @@ import { FilterChip } from "@/app/dashboard/filters";
 import { EXPENSE_SETTLEMENT_LABELS, type ExpenseSettlement } from "@/lib/payables-input";
 import { ExpenseDetailPanel } from "./expense-detail-panel";
 import type { AccountRow, Runner } from "./accounting-manager";
-import { DimensionFields, useDimensionCatalog } from "./dimension-fields";
+import { DimensionFields, useDimensionCatalog, DimensionCatalogError } from "./dimension-fields";
 import { dimensionPayload, type DimensionDraft } from "./dimension-catalog";
 
 interface LocationOption {
@@ -161,7 +161,7 @@ export function ExpenseSection({
   const [locationId, setLocationId] = useState("");
   // Issue #868: the expense's own attribution (cost centre, department …). It
   // lands on the debit line of the expense, and nowhere else.
-  const dimensionCatalog = useDimensionCatalog();
+  const { catalog: dimensionCatalog, error: dimensionCatalogError, retry: retryDimensionCatalog } = useDimensionCatalog();
   const [dimensionDraft, setDimensionDraft] = useState<DimensionDraft>({});
   const [partyId, setPartyId] = useState("");
   const [vatOn, setVatOn] = useState(false);
@@ -775,13 +775,17 @@ export function ExpenseSection({
                   </div>
                 ) : null}
 
-                <DimensionFields
-                  idPrefix="expense-dimensions"
-                  catalog={dimensionCatalog}
-                  locationId={locationId || null}
-                  value={dimensionDraft}
-                  onChange={setDimensionDraft}
-                />
+                {dimensionCatalogError ? (
+                  <DimensionCatalogError error={dimensionCatalogError} onRetry={retryDimensionCatalog} />
+                ) : (
+                  <DimensionFields
+                    idPrefix="expense-dimensions"
+                    catalog={dimensionCatalog}
+                    locationId={locationId || null}
+                    value={dimensionDraft}
+                    onChange={setDimensionDraft}
+                  />
+                )}
 
                 <PartyField
                   value={partyId}

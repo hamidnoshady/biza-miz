@@ -756,10 +756,24 @@ export async function postExactMirrorEntry(
     inventoryEventId?: string | null;
   },
 ): Promise<string | null> {
-  const { rows: lines } = await client.query<{ account_id: string; debit: string; credit: string }>(
-    "SELECT account_id, debit::text, credit::text FROM journal_lines WHERE entry_id=$1 ORDER BY id",
+  const { rows: lines } = await client.query<{
+    account_id: string;
+    debit: string;
+    credit: string;
+    cost_center_id: string | null;
+    profit_center_id: string | null;
+    department_id: string | null;
+    detail_dimension_id: string | null;
+  }>(
+    `SELECT account_id, debit::text, credit::text,
+            cost_center_id, profit_center_id, department_id, detail_dimension_id
+       FROM journal_lines WHERE entry_id=$1 ORDER BY id`,
     [params.originalEntryId],
   );
+  // A reversal mirrors exactly what the original recorded — including its
+  // dimension attribution (issue #868). It must succeed even if a value has
+  // since been archived or a kind switched off, so we set dimensionMirror=true
+  // and let the database structural guards handle tenancy/kind.
   const entryId = await postExactJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
@@ -770,10 +784,17 @@ export async function postExactMirrorEntry(
     createdBy: params.createdBy,
     postingKind: params.postingKind,
     inventoryEventId: params.inventoryEventId ?? null,
+    dimensionMirror: true,
     lines: lines.map((line) => ({
       accountId: line.account_id,
       debit: line.credit as RialText,
       credit: line.debit as RialText,
+      dimensions: {
+        cost_center: line.cost_center_id ?? undefined,
+        profit_center: line.profit_center_id ?? undefined,
+        department: line.department_id ?? undefined,
+        detail: line.detail_dimension_id ?? undefined,
+      },
     })),
   });
   if (entryId) {

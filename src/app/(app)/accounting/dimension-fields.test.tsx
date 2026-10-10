@@ -42,20 +42,23 @@ function value(overrides: Partial<DimensionValueRecord> & Pick<DimensionValueRec
   };
 }
 
-const catalog = {
-  loaded: true,
-  settings: [setting("cost_center", true), setting("profit_center", false), setting("department", false), setting("detail", false)],
-  values: [
+function makeCatalog(valuesOverride?: DimensionValueRecord[]) {
+  const values = valuesOverride ?? [
     value({ id: HQ, kind: "cost_center", code: "CC-HQ", name: "Head office" }),
     value({ id: ONLINE, kind: "profit_center", code: "PC-ONLINE", name: "Online" }),
     value({ id: "33333333-3333-4333-8333-333333333333", kind: "cost_center", code: "CC-NORTH", name: "North", locationId: OTHER_BRANCH }),
-  ],
-};
+  ];
+  return {
+    settings: [setting("cost_center", true), setting("profit_center", false), setting("department", false), setting("detail", false)],
+    postableValues: values.filter((v) => v.isActive),
+    allValues: values,
+  };
+}
 
 describe("DimensionFields", () => {
   it("draws a picker only for the kinds the business has switched on", () => {
     render(
-      <DimensionFields idPrefix="t" catalog={catalog} locationId={BRANCH} value={{}} onChange={vi.fn()} />,
+      <DimensionFields idPrefix="t" catalog={makeCatalog()} locationId={BRANCH} value={{}} onChange={vi.fn()} />,
     );
     expect(screen.getByRole("button", { name: "مرکز هزینه" })).not.toBeNull();
     // Profit centre is switched off in this business, so it is not offered at all.
@@ -66,7 +69,7 @@ describe("DimensionFields", () => {
     const { container } = render(
       <DimensionFields
         idPrefix="t"
-        catalog={{ ...catalog, settings: [setting("cost_center", false)] }}
+        catalog={{ settings: [setting("cost_center", false)], postableValues: [], allValues: [] }}
         locationId={BRANCH}
         value={{}}
         onChange={vi.fn()}
@@ -75,8 +78,8 @@ describe("DimensionFields", () => {
     expect(container.querySelector("#t")).toBeNull();
   });
 
-  it("shows the placeholder while the catalogue loads, reserving the shape of the fields", () => {
-    render(<DimensionFields idPrefix="t" catalog={{ ...catalog, loaded: false }} locationId={BRANCH} value={{}} onChange={vi.fn()} />);
+  it("shows the placeholder while the catalogue loads (catalog=null)", () => {
+    render(<DimensionFields idPrefix="t" catalog={null} locationId={BRANCH} value={{}} onChange={vi.fn()} />);
     expect(screen.queryByRole("button", { name: "مرکز هزینه" })).toBeNull();
     expect(screen.getByLabelText("در حال بارگذاری ابعاد حسابداری")).not.toBeNull();
   });
@@ -88,7 +91,7 @@ describe("DimensionFields", () => {
 
   it("offers an empty choice that means none, and reports a pick as the API's shape", async () => {
     const onChange = vi.fn();
-    render(<DimensionFields idPrefix="t" catalog={catalog} locationId={BRANCH} value={{}} onChange={onChange} />);
+    render(<DimensionFields idPrefix="t" catalog={makeCatalog()} locationId={BRANCH} value={{}} onChange={onChange} />);
     const trigger = screen.getByRole("button", { name: "مرکز هزینه" });
     expect(trigger.textContent).toContain("بدون مرکز هزینه");
     trigger.click();

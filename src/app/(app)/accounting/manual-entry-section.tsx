@@ -9,7 +9,7 @@ import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { DimensionFields, useDimensionCatalog } from "./dimension-fields";
+import { DimensionFields, useDimensionCatalog, DimensionCatalogError } from "./dimension-fields";
 import { dimensionPayload, enabledDimensionKinds, type DimensionDraft } from "./dimension-catalog";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { Button } from "@/components/ui/button";
@@ -215,8 +215,9 @@ export function ManualEntrySection({
   const makeKey = () => `line-${nextKey.current++}`;
   // Issue #868: the enabled dimension kinds and their values. Read once; a
   // business that never enabled one gets an empty catalogue and no extra fields.
-  const dimensionCatalog = useDimensionCatalog();
-  const dimensionKinds = enabledDimensionKinds(dimensionCatalog.settings);
+  const { catalog: dimensionCatalog, error: dimensionCatalogError, retry: retryDimensionCatalog } = useDimensionCatalog();
+  const dimSettings = dimensionCatalog?.settings ?? [];
+  const dimensionKinds = enabledDimensionKinds(dimSettings);
   const [lines, setLines] = useState<{ key: string; value: DraftLineInput }[]>(() =>
     blankLines().map((value) => ({ key: makeKey(), value })),
   );
@@ -657,7 +658,11 @@ export function ManualEntrySection({
                         <Trash2Icon aria-hidden="true" />
                       </Button>
                     </div>
-                    {dimensionKinds.length > 0 ? (
+                    {dimensionCatalogError ? (
+                      <div className="mt-3">
+                        <DimensionCatalogError error={dimensionCatalogError} onRetry={retryDimensionCatalog} />
+                      </div>
+                    ) : dimensionKinds.length > 0 ? (
                       <div className="mt-3">
                         <DimensionFields
                           idPrefix={`line-dimensions-${key}`}
