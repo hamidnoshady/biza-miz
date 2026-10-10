@@ -18,7 +18,7 @@
 import { ACCOUNTING_WORKSPACE_HREFS } from "@/lib/app-routes";
 import type { ReportCapabilities } from "@/lib/report-permissions";
 
-export const REPORTS_TAB_KEYS = ["standard", "shift-orders", "builder", "growth", "branches"] as const;
+export const REPORTS_TAB_KEYS = ["standard", "dashboard", "shift-orders", "builder", "growth", "branches"] as const;
 export type ReportsTabKey = (typeof REPORTS_TAB_KEYS)[number];
 
 export interface ReportsTabDef {
@@ -35,6 +35,7 @@ export interface ReportsTabDef {
 
 export const REPORTS_TABS: readonly ReportsTabDef[] = [
   { key: "standard", label: "گزارش‌های آماده", capability: "canViewReports" },
+  { key: "dashboard", label: "گزارش‌های سنجاق‌شده", capability: "canViewReports" },
   { key: "shift-orders", label: "سفارش‌های شیفت", capability: "canViewReports" },
   { key: "builder", label: "گزارش‌ساز", capability: "canBuildReports" },
   { key: "growth", label: "رشد و بازاریابی", capability: "canViewReports" },

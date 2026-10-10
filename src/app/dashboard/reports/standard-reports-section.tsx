@@ -160,6 +160,7 @@ export function StandardReportsSection({
   canExplain,
   canExport,
   canBusinessWide,
+  canManageSavedReports,
 }: {
   canExplain: boolean;
   /**
@@ -170,6 +171,8 @@ export function StandardReportsSection({
   canExport: boolean;
   /** `reports.business_wide`: may request reports in the consolidated allowlist. */
   canBusinessWide: boolean;
+  /** `reports.manage`: may append to a personal dashboard layout. */
+  canManageSavedReports: boolean;
 }) {
   const money = useMoney();
   const searchId = useId();
@@ -846,7 +849,7 @@ export function StandardReportsSection({
                     <SparklesIcon className="size-4" aria-hidden="true" /> توضیح این عدد
                   </Button>
                 ) : null}
-                {selected.chartType && savedIds.has(selected.key) ? (
+                {canManageSavedReports && selected.chartType && savedIds.has(selected.key) ? (
                   <PinToDashboardButton
                     savedReportId={savedIds.get(selected.key)!}
                     chartType={chartType}

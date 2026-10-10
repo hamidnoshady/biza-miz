@@ -5,182 +5,240 @@ import { PERMISSIONS } from "@/lib/permissions";
 import {
   appendDashboardWidget,
   getDashboardWidgets,
+  getRoleDashboardWidgets,
   saveDashboardWidgets,
   savedReportIdsInBusiness,
+  type DashboardLayoutName,
+  type DashboardWidgetPrecondition,
   type WidgetInput,
 } from "@/lib/reports-service";
-
-/**
- * The canonical role list (issue #819).
- *
- * This used to be a local `const ROLES = ["owner", "manager", "cashier",
- * "waiter", "kitchen"]` — a copy of the role vocabulary made before `admin`
- * and `accountant` existed, so those two could never have a role default
- * seeded or replaced through this route. `ALL_ROLES` from `roles.ts` is the one
- * definition of which roles exist; duplicating it here is how the reports
- * subsystem drifted from the role model in the first place.
- */
-
-/**
- * The caller's dashboard widget layout: their personal one if they have one,
- * else their role's default. Every member who may read reports can view.
- *
- * The response carries the layout's `revision`. A client echoes it back on the
- * write it makes next, which is what stops two tabs — or a pin and a drag-save
- * — from silently discarding each other's change (issue #819). Each widget also
- * carries `applicable`, so the grid can explain a pin whose report the
- * business's trade no longer offers instead of drawing it as an empty chart.
- */
-export const GET = withTenantScope(async () => {
-  const { session, error } = await requirePermission(PERMISSIONS.reportsView);
-  if (error) return error;
-
-  const result = await getDashboardWidgets(session.businessId, session.sub, session.role);
-  return NextResponse.json(result);
-});
 
 interface WidgetBody {
   scope?: "personal" | "role";
   role?: Role;
-  widgets?: WidgetInput[];
-  /**
-   * Append one widget instead of replacing the layout — the pin button's own
-   * operation, done server-side (issue #819). See `appendDashboardWidget`.
-   */
-  append?: Omit<WidgetInput, "x" | "y">;
-  /** The revision the client read; the write is refused when it no longer matches. */
-  ifRevision?: string;
+  widgets?: unknown;
+  append?: unknown;
+  /** Whole-layout replacement requires both the visible source and write-target revisions. */
+  precondition?: unknown;
 }
 
-/** Shared validation: the ids arrive from the client, so they are facts to check, not to trust. */
-function normalizeWidget(raw: WidgetInput): WidgetInput {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonnegativeInteger(value: unknown, fallback: number): number {
+  const number = value === undefined ? fallback : Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : Number.NaN;
+}
+
+function normalizeWidget(raw: unknown): WidgetInput | null {
+  if (!isRecord(raw)) return null;
+  const savedReportId = typeof raw.savedReportId === "string" ? raw.savedReportId.trim() : "";
+  const chartType = raw.chartType;
+  const title = raw.title === undefined || raw.title === null ? null : raw.title;
+  if (typeof title !== "string" && title !== null) return null;
+  if (typeof title === "string" && title.length > 200) return null;
+
   return {
-    savedReportId: String(raw.savedReportId ?? ""),
-    chartType: raw.chartType,
-    title: raw.title ?? null,
-    x: Number(raw.x) || 0,
-    y: Number(raw.y) || 0,
-    w: Number(raw.w) || 4,
-    h: Number(raw.h) || 3,
+    savedReportId,
+    chartType: chartType as WidgetInput["chartType"],
+    title,
+    x: nonnegativeInteger(raw.x, 0),
+    y: nonnegativeInteger(raw.y, 0),
+    w: nonnegativeInteger(raw.w, 4),
+    h: nonnegativeInteger(raw.h, 3),
   };
 }
 
 function isWellFormed(widget: WidgetInput): boolean {
-  return Boolean(widget.savedReportId) && ["line", "bar", "pie", "number"].includes(widget.chartType);
+  return Boolean(widget.savedReportId) &&
+    ["line", "bar", "pie", "number"].includes(widget.chartType) &&
+    widget.x >= 0 && widget.y >= 0 &&
+    widget.w >= 2 && widget.w <= 12 && widget.x + widget.w <= 12 &&
+    widget.h >= 2 && widget.h <= 20;
+}
+
+function parsePrecondition(
+  raw: unknown,
+  targetScope: DashboardLayoutName,
+): { ok: true; value: DashboardWidgetPrecondition } | { ok: false; status: number; error: string } {
+  if (!isRecord(raw) || !isRecord(raw.source) || !isRecord(raw.target)) {
+    return { ok: false, status: 428, error: "precondition_required" };
+  }
+  if (
+    !Object.hasOwn(raw.source, "revision") ||
+    !Object.hasOwn(raw.target, "revision") ||
+    !Object.hasOwn(raw.source, "scope") ||
+    !Object.hasOwn(raw.target, "scope")
+  ) {
+    return { ok: false, status: 428, error: "precondition_required" };
+  }
+
+  const sourceScope = raw.source.scope;
+  const targetScopeValue = raw.target.scope;
+  const sourceRevision = raw.source.revision;
+  const targetRevision = raw.target.revision;
+  const validScope = (value: unknown): value is DashboardLayoutName =>
+    value === "personal" || value === "role-default";
+
+  if (
+    !validScope(sourceScope) ||
+    !validScope(targetScopeValue) ||
+    typeof sourceRevision !== "string" || sourceRevision.length === 0 ||
+    (targetRevision !== null && typeof targetRevision !== "string") ||
+    targetScopeValue !== targetScope
+  ) {
+    return { ok: false, status: 400, error: "invalid_precondition" };
+  }
+  if (
+    (targetScope === "role-default" &&
+      (sourceScope !== "role-default" || targetRevision === null || sourceRevision !== targetRevision)) ||
+    (targetScope === "personal" && sourceScope === "personal" &&
+      (targetRevision === null || sourceRevision !== targetRevision)) ||
+    (targetScope === "personal" && sourceScope === "role-default" && targetRevision !== null)
+  ) {
+    return { ok: false, status: 400, error: "invalid_precondition" };
+  }
+
+  return {
+    ok: true,
+    value: {
+      source: { scope: sourceScope, revision: sourceRevision },
+      target: { scope: targetScopeValue, revision: targetRevision as string | null },
+    },
+  };
 }
 
 /**
- * Writes a widget layout — the caller's own, a role's default, or a single
- * appended pin.
- *
- * ## Authorization (issue #819)
- *
- * The two layouts are two different acts and are now two different
- * capabilities:
- *
- *  - **personal** — the caller's own dashboard. `reports.view`: it is their own
- *    arrangement of reports they may already read.
- *  - **role default** — the layout *every member of that role* is seeded with
- *    when they have no personal one. It used to be writable by anyone holding
- *    `reports.view`, while the route's own documentation said role defaults
- *    were Owner/Manager only: any report viewer could POST
- *    `{scope:"role", role:"manager", widgets:[…]}` and replace a whole role's
- *    dashboard. It now requires `reports.dashboard_defaults.manage`.
- *
- * Every referenced report is verified to belong to this business before the
- * layout is stored: the ids arrive from the client, and an id from another
- * tenant (or a deleted one) would otherwise be written into `dashboard_widgets`
- * and surface as a widget the member cannot open.
- *
- * ## Concurrency
- *
- * A whole-layout replace is conditional on `ifRevision` — the value the client
- * read from `GET` — and is refused with 409 `layout_changed` when another write
- * landed in between, rather than deleting it. An append does not need one: it
- * is itself the atomic operation, so two simultaneous pins both survive.
+ * The caller's layout is personal when explicitly recorded; otherwise GET
+ * serves their role default. A role-default read is available only to a member
+ * who holds the dedicated management capability.
+ */
+export const GET = withTenantScope(async (request: NextRequest) => {
+  const { session, error } = await requirePermission(PERMISSIONS.reportsView);
+  if (error) return error;
+
+  const requestedScope = request.nextUrl.searchParams.get("scope");
+  const requestedRole = request.nextUrl.searchParams.get("role");
+  if (requestedScope === null || requestedScope === "personal") {
+    if (requestedRole !== null) return NextResponse.json({ error: "invalid_scope" }, { status: 400 });
+    return NextResponse.json(await getDashboardWidgets(session.businessId, session.sub, session.role));
+  }
+  if (requestedScope !== "role-default" || !requestedRole || !ALL_ROLES.includes(requestedRole as Role)) {
+    return NextResponse.json({ error: "invalid_scope" }, { status: 400 });
+  }
+
+  const elevated = await requirePermission(PERMISSIONS.reportsDashboardDefaultsManage);
+  if (elevated.error) return elevated.error;
+  return NextResponse.json(await getRoleDashboardWidgets(session.businessId, requestedRole as Role));
+});
+
+/**
+ * Writes one atomic append or a revision-checked whole-layout replacement.
+ * Personal first edits copy the current role default into a distinct personal
+ * layout. Role defaults require the dedicated management permission.
  */
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.reportsView);
   if (error) return error;
 
-  let body: WidgetBody;
+  let rawBody: unknown;
   try {
-    body = await request.json();
+    rawBody = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  if (!isRecord(rawBody)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  const body = rawBody as WidgetBody;
+  if (body.scope !== undefined && body.scope !== "personal" && body.scope !== "role") {
+    return NextResponse.json({ error: "invalid_scope" }, { status: 400 });
   }
 
   const roleDefault = body.scope === "role";
   if (roleDefault) {
     const elevated = await requirePermission(PERMISSIONS.reportsDashboardDefaultsManage);
     if (elevated.error) return elevated.error;
+    if (!body.role || !ALL_ROLES.includes(body.role)) {
+      return NextResponse.json({ error: "invalid_role" }, { status: 400 });
+    }
+  } else {
+    if (body.role !== undefined) return NextResponse.json({ error: "invalid_role" }, { status: 400 });
+    const personalWrite = await requirePermission(PERMISSIONS.reportsManage);
+    if (personalWrite.error) return personalWrite.error;
   }
 
-  const target: { userId: string } | { role: Role } = roleDefault
+  const target = roleDefault
     ? { role: body.role as Role }
-    : { userId: session.sub };
-  if (roleDefault && (!body.role || !ALL_ROLES.includes(body.role))) {
-    return NextResponse.json({ error: "invalid_role" }, { status: 400 });
-  }
+    : { userId: session.sub, role: session.role };
+  const targetScope: DashboardLayoutName = roleDefault ? "role-default" : "personal";
 
-  // --- append one pin -----------------------------------------------------
-  if (body.append) {
-    // Only the fields a pin actually decides: which report, how to draw it, and
-    // its size. The row is the server's to compute from the layout it locks, so
-    // a geometry field sent by the client is ignored rather than stored — the
-    // browser cannot know the current layout, and both tabs would compute the
-    // same row anyway.
-    const widget: Omit<WidgetInput, "x" | "y"> = {
-      savedReportId: String(body.append.savedReportId ?? ""),
-      chartType: body.append.chartType,
-      title: body.append.title ?? null,
-      w: Number(body.append.w) || 4,
-      h: Number(body.append.h) || 3,
-    };
-    if (!widget.savedReportId || !["line", "bar", "pie", "number"].includes(widget.chartType)) {
+  // Append is the pin-button operation. It has no caller revision because the
+  // server serializes it and computes placement from the locked current layout.
+  if (body.append !== undefined) {
+    if (Object.hasOwn(body, "widgets")) {
+      return NextResponse.json({ error: "ambiguous_layout_write" }, { status: 400 });
+    }
+    if (!isRecord(body.append)) return NextResponse.json({ error: "invalid_widget" }, { status: 400 });
+    const raw = body.append;
+    const savedReportId = typeof raw.savedReportId === "string" ? raw.savedReportId.trim() : "";
+    const title = raw.title === undefined || raw.title === null ? null : raw.title;
+    const w = nonnegativeInteger(raw.w, 4);
+    const h = nonnegativeInteger(raw.h, 3);
+    const chartType = raw.chartType as WidgetInput["chartType"];
+    if (
+      !savedReportId || typeof title !== "string" && title !== null ||
+      typeof title === "string" && title.length > 200 ||
+      !["line", "bar", "pie", "number"].includes(chartType) ||
+      w < 2 || w > 12 || h < 2 || h > 20
+    ) {
       return NextResponse.json({ error: "invalid_widget" }, { status: 400 });
     }
-    const checked = await savedReportIdsInBusiness(session.businessId, [widget.savedReportId]);
-    if (!checked.owned.has(widget.savedReportId)) {
+
+    const widget = { savedReportId, chartType, title, w, h };
+    const checked = await savedReportIdsInBusiness(session.businessId, [savedReportId]);
+    if (!checked.owned.has(savedReportId)) {
       return NextResponse.json({ error: "unknown_saved_report" }, { status: 400 });
     }
-    if (!checked.applicable.has(widget.savedReportId)) {
+    if (!checked.applicable.has(savedReportId)) {
       return NextResponse.json({ error: "saved_report_not_applicable" }, { status: 400 });
     }
+
     const appended = await appendDashboardWidget(session.businessId, target, widget);
-    if (!appended.ok) {
-      return NextResponse.json({ error: appended.reason }, { status: 400 });
-    }
+    if (!appended.ok) return NextResponse.json({ error: appended.reason }, { status: 400 });
     return NextResponse.json({ ok: true, revision: appended.revision, widget: appended.widget });
   }
 
-  // --- replace the whole layout -------------------------------------------
-  const widgets = (body.widgets ?? []).map(normalizeWidget);
-  for (const widget of widgets) {
-    if (!isWellFormed(widget)) {
-      return NextResponse.json({ error: "invalid_widget" }, { status: 400 });
-    }
+  if (!Array.isArray(body.widgets)) {
+    return NextResponse.json({ error: "invalid_widgets" }, { status: 400 });
+  }
+  const parsedPrecondition = parsePrecondition(body.precondition, targetScope);
+  if (!parsedPrecondition.ok) {
+    return NextResponse.json({ error: parsedPrecondition.error }, { status: parsedPrecondition.status });
   }
 
-  const ids = widgets.map((w) => w.savedReportId);
+  const widgets = body.widgets.map(normalizeWidget);
+  if (widgets.some((widget) => widget === null || !isWellFormed(widget))) {
+    return NextResponse.json({ error: "invalid_widget" }, { status: 400 });
+  }
+  const normalized = widgets as WidgetInput[];
+  const ids = normalized.map((widget) => widget.savedReportId);
   const checked = await savedReportIdsInBusiness(session.businessId, ids);
   if (ids.some((id) => !checked.owned.has(id))) {
     return NextResponse.json({ error: "unknown_saved_report" }, { status: 400 });
   }
-  // Old tiles are deliberately retained and annotated on GET rather than
-  // deleted when a business changes trade or a view is retired. A whole-layout
-  // save may keep one that is already in this layout, so moving/removing a
-  // neighbouring tile never destroys user state; it may not introduce a new
-  // inapplicable pin.
+  // A stale tile may be kept only if it is present in the exact source/target
+  // snapshot being replaced; the transaction verifies that condition again.
   const inapplicableIds = [...new Set(ids.filter((id) => !checked.applicable.has(id)))];
-
-  const written = await saveDashboardWidgets(session.businessId, target, widgets, {
-    ifRevision: typeof body.ifRevision === "string" ? body.ifRevision : undefined,
-    preserveInapplicableSavedReportIds: inapplicableIds,
-  });
+  const written = await saveDashboardWidgets(
+    session.businessId,
+    target,
+    normalized,
+    parsedPrecondition.value,
+    { preserveInapplicableSavedReportIds: inapplicableIds },
+  );
   if (!written.ok) {
     const status = written.reason === "layout_changed" ? 409 : 400;
     return NextResponse.json({ error: written.reason }, { status });
   }
-  return NextResponse.json({ ok: true, revision: written.revision });
+  return NextResponse.json({ ok: true, revision: written.revision, precondition: written.precondition });
 });

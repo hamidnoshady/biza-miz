@@ -13,6 +13,7 @@
  * transactional tables" true by construction, not by convention.
  */
 import { WELL_KNOWN_CODES } from "./coa-template";
+import { LIFECYCLE_STAGES } from "./crm-scoring";
 import type { Industry } from "./industries";
 import { hasCapability, hasModule, type CapabilityKey, type ModuleKey } from "./industry-profile";
 import { PRODUCT_WORKSPACE_INDUSTRIES } from "./product-workspace";
@@ -60,10 +61,27 @@ export interface DimensionDef {
   columns?: string[];
 }
 
+export interface ReportFilterOption {
+  value: string;
+  label: string;
+}
+
+/** Presentation/control metadata for a whitelist filter. Values never enter SQL as identifiers. */
+export type ReportFilterControl =
+  | { kind: "text" }
+  | { kind: "enum"; options: readonly ReportFilterOption[] }
+  | {
+      kind: "entity";
+      source: "menu-category" | "modifier-group" | "supplier" | "account";
+      accountType?: "asset" | "liability" | "equity" | "revenue" | "expense";
+    };
+
 export interface FilterDef {
   key: string;
   label: string;
   column: string;
+  /** Kept beside the SQL whitelist so the builder cannot drift from a filter's source. */
+  control: ReportFilterControl;
 }
 
 /**
@@ -126,6 +144,54 @@ export interface ReportViewDef {
  * this whole object is a fixed compile-time constant, that's equivalent to
  * a hard-coded allowlist, not user input.
  */
+const ACCOUNT_TYPE_FILTER_OPTIONS: readonly ReportFilterOption[] = [
+  { value: "asset", label: "دارایی" },
+  { value: "liability", label: "بدهی" },
+  { value: "equity", label: "حقوق مالکانه" },
+  { value: "revenue", label: "درآمد" },
+  { value: "expense", label: "هزینه" },
+];
+
+const PURCHASE_STATUS_FILTER_OPTIONS: readonly ReportFilterOption[] = [
+  { value: "draft", label: "پیش‌نویس" },
+  { value: "ordered", label: "سفارش‌شده" },
+  { value: "received", label: "دریافت‌شده" },
+  { value: "cancelled", label: "لغوشده" },
+];
+
+const DELIVERY_STATUS_FILTER_OPTIONS: readonly ReportFilterOption[] = [
+  { value: "pending", label: "در انتظار" },
+  { value: "assigned", label: "واگذارشده به پیک" },
+  { value: "out_for_delivery", label: "در مسیر" },
+  { value: "delivered", label: "تحویل‌شده" },
+  { value: "failed", label: "ناموفق" },
+];
+
+const INVENTORY_HISTORY_CLASSIFICATION_OPTIONS: readonly ReportFilterOption[] = [
+  { value: "exact", label: "دقیق" },
+  { value: "source_backed", label: "مستند به منبع" },
+  { value: "unavailable", label: "در دسترس نیست" },
+];
+
+const INVENTORY_HISTORY_SOURCE_OPTIONS: readonly ReportFilterOption[] = [
+  { value: "order", label: "سفارش" },
+  { value: "purchase", label: "خرید" },
+  { value: "opening", label: "موجودی افتتاحیه" },
+  { value: "negative_settlement", label: "تسویهٔ موجودی منفی" },
+];
+
+const LIFECYCLE_FILTER_OPTIONS: readonly ReportFilterOption[] = [
+  ...Object.values(LIFECYCLE_STAGES).map(({ key, label }) => ({ value: key, label })),
+  { value: "unscored", label: "بدون امتیاز" },
+];
+
+const CONSENT_FILTER_OPTIONS: readonly ReportFilterOption[] = [
+  { value: "هر دو کانال", label: "هر دو کانال" },
+  { value: "فقط پیامک", label: "فقط پیامک" },
+  { value: "فقط ایمیل", label: "فقط ایمیل" },
+  { value: "بدون اجازه", label: "بدون اجازه" },
+];
+
 export const REPORT_VIEWS: Record<string, ReportViewDef> = {
   v_sales_by_day: {
     label: "فروش روزانه",
@@ -160,7 +226,7 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       { key: "revenue", label: "درآمد", column: "revenue", money: true, aggregations: ["sum", "avg"] },
       { key: "rows", label: "تعداد ردیف", column: null, aggregations: ["count"] },
     ],
-    filters: [{ key: "category", label: "دسته", column: "category_id" }],
+    filters: [{ key: "category", label: "دسته", column: "category_id", control: { kind: "entity", source: "menu-category" } }],
   },
   // Add-on grain. v_menu_item_performance.revenue already includes these
   // deltas inside each item's revenue; this view breaks them out so add-on
@@ -182,7 +248,7 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       { key: "revenue", label: "درآمد افزودنی", column: "revenue", money: true, aggregations: ["sum", "avg"] },
       { key: "rows", label: "تعداد ردیف", column: null, aggregations: ["count"] },
     ],
-    filters: [{ key: "group", label: "گروه افزودنی", column: "modifier_group_id" }],
+    filters: [{ key: "group", label: "گروه افزودنی", column: "modifier_group_id", control: { kind: "entity", source: "modifier-group" } }],
   },
   v_inventory_valuation: {
     requires: { modules: ["inventory"] },
@@ -221,8 +287,8 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       { key: "rows", label: "تعداد گروه‌ها", column: null, aggregations: ["count"] },
     ],
     filters: [
-      { key: "classification", label: "وضعیت پوشش", column: "classification" },
-      { key: "source_type", label: "نوع منبع", column: "source_type" },
+      { key: "classification", label: "وضعیت پوشش", column: "classification", control: { kind: "enum", options: INVENTORY_HISTORY_CLASSIFICATION_OPTIONS } },
+      { key: "source_type", label: "نوع منبع", column: "source_type", control: { kind: "enum", options: INVENTORY_HISTORY_SOURCE_OPTIONS } },
     ],
   },
   v_ledger_by_account: {
@@ -241,8 +307,8 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       { key: "rows", label: "تعداد سطر", column: null, aggregations: ["count"] },
     ],
     filters: [
-      { key: "account_code", label: "کد حساب", column: "account_code" },
-      { key: "account_type", label: "نوع حساب", column: "account_type" },
+      { key: "account_code", label: "کد حساب", column: "account_code", control: { kind: "entity", source: "account" } },
+      { key: "account_type", label: "نوع حساب", column: "account_type", control: { kind: "enum", options: ACCOUNT_TYPE_FILTER_OPTIONS } },
     ],
   },
   v_shift_reconciliation: {
@@ -344,7 +410,7 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       { key: "fee", label: "هزینهٔ ارسال", column: "fee", money: true, aggregations: ["sum", "avg"] },
       { key: "rows", label: "تعداد ارسال", column: null, aggregations: ["count"] },
     ],
-    filters: [{ key: "status", label: "وضعیت", column: "delivery_status" }],
+    filters: [{ key: "status", label: "وضعیت", column: "delivery_status", control: { kind: "enum", options: DELIVERY_STATUS_FILTER_OPTIONS } }],
   },
   v_courier_performance: {
     requires: { modules: ["delivery"] },
@@ -430,8 +496,8 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       { key: "rows", label: "تعداد ردیف", column: null, aggregations: ["count"] },
     ],
     filters: [
-      { key: "status", label: "وضعیت", column: "status" },
-      { key: "supplier", label: "تأمین‌کننده", column: "supplier_id" },
+      { key: "status", label: "وضعیت", column: "status", control: { kind: "enum", options: PURCHASE_STATUS_FILTER_OPTIONS } },
+      { key: "supplier", label: "تأمین‌کننده", column: "supplier_id", control: { kind: "entity", source: "supplier" } },
     ],
   },
   // Expense grain (migration 0063): one row per expense. The expense account
@@ -452,8 +518,8 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       { key: "rows", label: "تعداد هزینه", column: null, aggregations: ["count"] },
     ],
     filters: [
-      { key: "account_code", label: "کد حساب هزینه", column: "account_code" },
-      { key: "vendor", label: "طرف حساب", column: "vendor" },
+      { key: "account_code", label: "کد حساب هزینه", column: "account_code", control: { kind: "entity", source: "account", accountType: "expense" } },
+      { key: "vendor", label: "طرف حساب", column: "vendor", control: { kind: "text" } },
     ],
   },
   // Phase 36 — the CRM's three views (migration 0119). All three count only
@@ -483,7 +549,7 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       },
       { key: "rows", label: "تعداد ردیف", column: null, aggregations: ["count"] },
     ],
-    filters: [{ key: "lifecycle_stage", label: "مرحلهٔ چرخهٔ عمر", column: "lifecycle_stage" }],
+    filters: [{ key: "lifecycle_stage", label: "مرحلهٔ چرخهٔ عمر", column: "lifecycle_stage", control: { kind: "enum", options: LIFECYCLE_FILTER_OPTIONS } }],
   },
   // Customer grain (one row per customer, dated by *last* purchase): what the
   // relationship has been worth, and how long since it last showed a sign of
@@ -515,7 +581,7 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       },
       { key: "customers", label: "تعداد مشتری", column: null, aggregations: ["count"] },
     ],
-    filters: [{ key: "lifecycle_stage", label: "مرحلهٔ چرخهٔ عمر", column: "lifecycle_stage" }],
+    filters: [{ key: "lifecycle_stage", label: "مرحلهٔ چرخهٔ عمر", column: "lifecycle_stage", control: { kind: "enum", options: LIFECYCLE_FILTER_OPTIONS } }],
   },
   // Customer grain, one row per customer: permission and reachability side by
   // side, because they are different numbers and only reporting the first one
@@ -535,7 +601,7 @@ export const REPORT_VIEWS: Record<string, ReportViewDef> = {
       { key: "email_reachable", label: "ایمیل قابل ارسال", column: "email_reachable", aggregations: ["sum"] },
       { key: "rows", label: "تعداد ردیف", column: null, aggregations: ["count"] },
     ],
-    filters: [{ key: "consent_state", label: "وضعیت رضایت", column: "consent_state" }],
+    filters: [{ key: "consent_state", label: "وضعیت رضایت", column: "consent_state", control: { kind: "enum", options: CONSENT_FILTER_OPTIONS } }],
   },
 };
 

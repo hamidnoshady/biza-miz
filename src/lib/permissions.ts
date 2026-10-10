@@ -238,9 +238,11 @@ export const PERMISSIONS = {
    *                  sees their own branch's reports with `reports.view`, and
    *                  reading every branch at once stays with ownership.
    *   reports.dashboard_defaults.manage
-   *                  replace a *role's* default dashboard layout, which every
-   *                  member of that role inherits. Owner/manager by preset, the
-   *                  same product policy the widgets route always documented.
+   *                  replace a *role's* default dashboard layout, which a
+   *                  member inherits until they make a personal override.
+   *                  Owner, Admin and Manager receive it by default; it is
+   *                  separate from both personal-layout (`reports.manage`) and
+   *                  business-wide reporting authority.
    */
   reportsView: "reports.view",
   reportsManage: "reports.manage",
@@ -558,8 +560,8 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     payrollView, payrollManage,
     // Issue #819: the accountant could already download the statements; running
     // and saving a report is the read/manage half of the same work. Not the
-    // role-default dashboard key (that is an owner/manager product decision)
-    // and not `reports.business_wide`.
+    // role-default dashboard key (Owner, Admin and Manager receive that
+    // separate capability by default) and not `reports.business_wide`.
     reportsView, reportsManage, reportsExport,
     // Same reasoning as the manager's: the accountant already downloaded the
     // financial statements through reports.export, and importing a chart of

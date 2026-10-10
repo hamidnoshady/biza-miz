@@ -20,7 +20,7 @@ import {
   type ReportRow,
 } from "./report-ui";
 import type { ReportCapabilities } from "@/lib/report-permissions";
-import type { ReportConfig } from "@/lib/reports";
+import type { ReportConfig, ReportFilterControl, ReportFilterOption } from "@/lib/reports";
 import {
   builderConfigFromState,
   builderStateFromConfig,
@@ -44,8 +44,8 @@ interface ViewMeta {
   hasDateColumn: boolean;
   dimensions: { key: string; label: string }[];
   metrics: { key: string; label: string; money: boolean; aggregations: Aggregation[] }[];
-  /** Equality filters this source accepts, straight from the engine whitelist. */
-  filters: { key: string; label: string }[];
+  /** Filter presentation metadata remains paired with the engine whitelist. */
+  filters: { key: string; label: string; control: ReportFilterControl }[];
 }
 
 export type { SortBy, SortDir } from "./report-builder-config";
@@ -93,6 +93,12 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
   const [dateTo, setDateTo] = useState("");
   // Engine-supported equality filters (view.filters), keyed by filter key.
   const [equals, setEquals] = useState<Record<string, string>>({});
+  const [filterOptions, setFilterOptions] = useState<Record<string, ReportFilterOption[]>>({});
+  const [filterOptionsLoading, setFilterOptionsLoading] = useState(false);
+  const [filterOptionsError, setFilterOptionsError] = useState("");
+  const [filterOptionsReload, setFilterOptionsReload] = useState(0);
+  const filterOptionsSequence = useRef(0);
+  const filterOptionsController = useRef<AbortController | null>(null);
   const [sortBy, setSortBy] = useState<"" | SortBy>("");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [limit, setLimit] = useState("");
@@ -207,6 +213,61 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
     () => views?.find((item) => item.key === view) ?? null,
     [views, view],
   );
+
+  function invalidateFilterOptions() {
+    filterOptionsSequence.current += 1;
+    filterOptionsController.current?.abort();
+    filterOptionsController.current = null;
+    setFilterOptions({});
+    setFilterOptionsLoading(false);
+    setFilterOptionsError("");
+  }
+
+  useEffect(() => {
+    filterOptionsController.current?.abort();
+    const sequence = ++filterOptionsSequence.current;
+    const source = currentView;
+    const needsDynamicOptions = source?.filters.some((filter) => filter.control.kind === "entity") ?? false;
+    setFilterOptions({});
+    setFilterOptionsError("");
+
+    if (!source || !needsDynamicOptions) {
+      setFilterOptionsLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    filterOptionsController.current = controller;
+    setFilterOptionsLoading(true);
+    void (async () => {
+      try {
+        const response = await fetch(`/api/reports/filter-options?view=${encodeURIComponent(source.key)}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("filter_options_failed");
+        const payload: unknown = await response.json();
+        if (
+          typeof payload !== "object" || payload === null ||
+          !("options" in payload) || typeof payload.options !== "object" || payload.options === null
+        ) {
+          throw new Error("filter_options_invalid");
+        }
+        if (sequence !== filterOptionsSequence.current || controller.signal.aborted) return;
+        setFilterOptions(payload.options as Record<string, ReportFilterOption[]>);
+      } catch {
+        if (controller.signal.aborted || sequence !== filterOptionsSequence.current) return;
+        setFilterOptionsError("بارگذاری گزینه‌های فیلتر ناموفق بود. دوباره تلاش کنید.");
+      } finally {
+        if (sequence === filterOptionsSequence.current) setFilterOptionsLoading(false);
+      }
+    })();
+
+    return () => {
+      controller.abort();
+      if (filterOptionsController.current === controller) filterOptionsController.current = null;
+    };
+  }, [currentView, filterOptionsReload]);
+
   const currentMetric = useMemo(
     () => currentView?.metrics.find((item) => item.key === metric) ?? null,
     [currentView, metric],
@@ -239,8 +300,8 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
       setDateFrom("");
       setDateTo("");
     }
-    // Equality filters are per-source keys; carrying them across sources makes
-    // the next preview fail validation with a confusing message.
+    // Equality filters and dynamic option lists belong to one source only.
+    invalidateFilterOptions();
     setEquals({});
     // Invalidate before clearing, or a response for the previous source lands
     // on a form that no longer describes it.
@@ -358,6 +419,7 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
    */
   function loadIntoBuilder(report: SavedReportRow) {
     const state = builderStateFromConfig(report.config);
+    invalidateFilterOptions();
     setView(state.view);
     setMetric(state.metric);
     setAggregation(state.aggregation);
@@ -573,22 +635,69 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
                 فیلترهای پشتیبانی‌شدهٔ همین منبع داده. مقدار خالی یعنی فیلتر اعمال نشود.
               </p>
               <div className="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                {currentView?.filters.map((filter) => (
-                  <label key={filter.key} className="block">
-                    <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
-                      {filter.label}
-                    </span>
-                    <input
-                      className={inputClass}
-                      value={equals[filter.key] ?? ""}
-                      placeholder={filter.label}
-                      onChange={(event) =>
-                        setEquals((current) => ({ ...current, [filter.key]: event.target.value }))
-                      }
-                    />
-                  </label>
-                ))}
+                {currentView?.filters.map((filter) => {
+                  const selectedValue = equals[filter.key] ?? "";
+                  const declaredOptions = filter.control.kind === "enum"
+                    ? [...filter.control.options]
+                    : filter.control.kind === "entity"
+                      ? filterOptions[filter.key] ?? []
+                      : [];
+                  const options = [
+                    { value: "", label: "بدون فیلتر" },
+                    ...declaredOptions,
+                    ...(selectedValue && !declaredOptions.some((option) => option.value === selectedValue)
+                      ? [{
+                          value: selectedValue,
+                          label: filter.control.kind === "entity"
+                            ? "مقدار پیشین (در این شعبه در دسترس نیست)"
+                            : `مقدار پیشین: ${selectedValue}`,
+                        }]
+                      : []),
+                  ];
+
+                  return (
+                    <div key={filter.key} className="block">
+                      <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                        {filter.label}
+                      </span>
+                      {filter.control.kind === "text" ? (
+                        <input
+                          className={inputClass}
+                          value={selectedValue}
+                          placeholder={filter.label}
+                          aria-label={filter.label}
+                          onChange={(event) =>
+                            setEquals((current) => ({ ...current, [filter.key]: event.target.value }))
+                          }
+                        />
+                      ) : (
+                        <SearchableSelect
+                          className={inputClass}
+                          ariaLabel={filter.label}
+                          value={selectedValue}
+                          onChange={(value) =>
+                            setEquals((current) => ({ ...current, [filter.key]: value }))
+                          }
+                          options={options}
+                          loading={filter.control.kind === "entity" && filterOptionsLoading}
+                          emptyText={filter.control.kind === "entity" ? "گزینه‌ای در این شعبه نیست." : "گزینه‌ای یافت نشد."}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
               </div>
+              {filterOptionsLoading ? (
+                <LoadingSkeleton rows={1} compact label="در حال بارگذاری گزینه‌های فیلتر" className="mt-2" />
+              ) : null}
+              {filterOptionsError ? (
+                <div role="alert" className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+                  <span>{filterOptionsError}</span>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setFilterOptionsReload((value) => value + 1)}>
+                    تلاش دوباره
+                  </Button>
+                </div>
+              ) : null}
             </fieldset>
           ) : null}
 
@@ -862,12 +971,14 @@ export function ReportBuilderSection({ capabilities }: { capabilities: ReportCap
                         ویرایش / تغییر نام
                       </Button>
                     ) : null}
-                    <PinToDashboardButton
-                      savedReportId={report.id}
-                      chartType={report.config.visualization ?? "bar"}
-                      title={report.name}
-                      disabled={report.applicable === false}
-                    />
+                    {capabilities.canManageSavedReports ? (
+                      <PinToDashboardButton
+                        savedReportId={report.id}
+                        chartType={report.config.visualization ?? "bar"}
+                        title={report.name}
+                        disabled={report.applicable === false}
+                      />
+                    ) : null}
                     {capabilities.canManageSavedReports ? (
                       <>
                         <Button

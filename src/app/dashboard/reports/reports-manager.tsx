@@ -7,6 +7,7 @@ import { BranchOverviewSection } from "./branch-overview-section";
 import { ReportBuilderSection } from "./report-builder-section";
 import { ShiftOrdersSection } from "./shift-orders-section";
 import { StandardReportsSection } from "./standard-reports-section";
+import { DashboardGrid } from "../dashboard-grid";
 import { GrowthAccountingView } from "@/components/growth/growth-accounting-view";
 import type { ReportCapabilities } from "@/lib/report-permissions";
 import { reportsTabsForCapabilities, resolveReportsTab, type ReportsTabKey } from "./reports-nav";
@@ -66,6 +67,14 @@ export function ReportsManager({
           canExplain={canExplain}
           canExport={capabilities.canExportReports}
           canBusinessWide={capabilities.canViewBusinessWide}
+          canManageSavedReports={capabilities.canManageSavedReports}
+        />
+      ) : null}
+      {tab === "dashboard" ? (
+        <DashboardGrid
+          canEdit={capabilities.canManageSavedReports}
+          canExplain={canExplain}
+          canManageRoleDefaults={capabilities.canManageRoleWidgets}
         />
       ) : null}
       {tab === "shift-orders" ? (

@@ -1,9 +1,11 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { CheckIcon, PinIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ChartType } from "./report-ui";
+import { reportsTabHref } from "./reports-nav";
 
 /**
  * Adds a report to the caller's personal dashboard as a new widget.
@@ -87,7 +89,9 @@ export function PinToDashboardButton({
       */}
       {state === "done" ? (
         <span role="status" className="text-xs text-muted-foreground">
-          در «گزارش‌های سنجاق‌شده» داشبورد اضافه شد.
+          گزارش در <Link className="font-medium text-primary underline-offset-4 hover:underline" href={reportsTabHref("dashboard")}>
+            «گزارش‌های سنجاق‌شده»
+          </Link> اضافه شد.
         </span>
       ) : null}
       {state === "error" ? (

@@ -49,7 +49,11 @@ const VIEWS = [
     key: "sales",
     label: "فروش",
     hasDateColumn: true,
-    filters: [],
+    filters: [
+      { key: "category", label: "دسته", control: { kind: "entity", source: "menu-category" } },
+      { key: "status", label: "وضعیت", control: { kind: "enum", options: [{ value: "open", label: "باز" }, { value: "closed", label: "بسته" }] } },
+      { key: "vendor", label: "طرف حساب", control: { kind: "text" } },
+    ],
     metrics: [
       { key: "total", label: "جمع فروش", money: true, aggregations: ["sum"] },
       { key: "orders", label: "تعداد سفارش", money: false, aggregations: ["count"] },
@@ -110,6 +114,7 @@ interface QueryCall {
  */
 function stubFetch(overrides: {
   onQuery?: (body: Record<string, unknown>, call: QueryCall) => Promise<Response> | Response;
+  onFilterOptions?: (view: string, signal?: AbortSignal) => Promise<Response> | Response;
   saved?: unknown[];
   views?: unknown[];
 }): QueryCall[] {
@@ -120,6 +125,15 @@ function stubFetch(overrides: {
       const href = String(url);
       if (href.startsWith("/api/reports/views")) {
         return { ok: true, status: 200, json: async () => ({ views: overrides.views ?? VIEWS }) } as Response;
+      }
+      if (href.startsWith("/api/reports/filter-options")) {
+        const source = new URL(href, "http://localhost").searchParams.get("view") ?? "";
+        if (overrides.onFilterOptions) return overrides.onFilterOptions(source, init?.signal ?? undefined);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ options: { category: [{ value: "cat-1", label: "نوشیدنی" }] } }),
+        } as Response;
       }
       if (href.startsWith("/api/reports/saved")) {
         return { ok: true, status: 200, json: async () => ({ reports: overrides.saved ?? [] }) } as Response;
@@ -183,6 +197,67 @@ describe("preview rendering uses the loaded result's own metadata", () => {
     expect(screen.queryByText("۱,۲۵۰,۰۰۰")).toBeNull();
     // And the form is honest that the result no longer matches the controls.
     expect(screen.getByText(/تنظیمات تغییر کرده‌اند/)).toBeTruthy();
+  });
+});
+
+describe("source-aware filter controls", () => {
+  it("renders entity, enum, and text filters from canonical metadata and round-trips selections", async () => {
+    const calls = stubFetch({});
+    render(<ReportBuilderSection capabilities={CAPABILITIES} />);
+
+    const category = await screen.findByRole("button", { name: "دسته" });
+    fireEvent.click(category);
+    fireEvent.click(await screen.findByRole("option", { name: "نوشیدنی" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "وضعیت" }));
+    fireEvent.click(screen.getByRole("option", { name: "باز" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "طرف حساب" }), { target: { value: "تأمین‌کنندهٔ یک" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "پیش‌نمایش" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toMatchObject({
+      filters: {
+        equals: {
+          category: "cat-1",
+          status: "open",
+          vendor: "تأمین‌کنندهٔ یک",
+        },
+      },
+    });
+  });
+
+  it("aborts and ignores a late entity-options response after switching report source", async () => {
+    let resolveOld: (response: Response) => void = () => {};
+    const held = new Promise<Response>((resolve) => {
+      resolveOld = resolve;
+    });
+    let oldRequestStarted = false;
+    let oldRequestAborted = false;
+    stubFetch({
+      onFilterOptions: (source, signal) => {
+        if (source === "sales") {
+          oldRequestStarted = true;
+          signal?.addEventListener("abort", () => { oldRequestAborted = true; });
+          return held;
+        }
+        return { ok: true, status: 200, json: async () => ({ options: {} }) } as Response;
+      },
+    });
+
+    render(<ReportBuilderSection capabilities={CAPABILITIES} />);
+    await waitFor(() => expect(oldRequestStarted).toBe(true));
+    pick("trigger", "فروش");
+    pick("option", "کارکنان");
+    await waitFor(() => expect(oldRequestAborted).toBe(true));
+
+    resolveOld({
+      ok: true,
+      status: 200,
+      json: async () => ({ options: { category: [{ value: "old-cat", label: "دستهٔ قدیمی" }] } }),
+    } as Response);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.queryByRole("button", { name: "دسته" })).toBeNull();
+    expect(screen.queryByText("دستهٔ قدیمی")).toBeNull();
   });
 });
 

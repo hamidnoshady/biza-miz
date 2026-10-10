@@ -34,6 +34,7 @@ let db: Client;
 
 /** Loaded after DATABASE_URL points at the scratch database. */
 let reportsService: typeof import("../src/lib/reports-service");
+let reportFilterOptionsService: typeof import("../src/lib/report-filter-options-service");
 let dbLib: typeof import("../src/lib/db");
 
 let businessId = "";
@@ -137,6 +138,7 @@ beforeAll(async () => {
 
   process.env.DATABASE_URL = urlFor(databaseName);
   reportsService = await import("../src/lib/reports-service");
+  reportFilterOptionsService = await import("../src/lib/report-filter-options-service");
   dbLib = await import("../src/lib/db");
 
   db = new Client({ connectionString: urlFor(databaseName) });
@@ -485,10 +487,41 @@ describe("branch isolation of report execution (issue #819)", () => {
   });
 });
 
-describe("dashboard widget layouts — the write contract (issue #819)", () => {
-  // A config the engine actually accepts: views are keyed by their SQL view
-  // name, and the applicability check resolves the metric and dimension against
-  // that view's own lists.
+describe("report filter option scope (issue #819)", () => {
+  it("returns only the authorized branch's entities and refuses cross-business location ids", async () => {
+    await db.query(
+      `INSERT INTO menu_categories (location_id, name)
+       VALUES ($1, 'Main beverages'), ($2, 'Other branch meals')`,
+      [mainId, otherId],
+    );
+    const otherBusiness = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Other Filter Business', $1) RETURNING id",
+      [`filter-${randomUUID().slice(0, 8)}`],
+    );
+    const foreignLocation = await db.query<{ id: string }>(
+      "INSERT INTO locations (business_id, name) VALUES ($1, 'Foreign') RETURNING id",
+      [otherBusiness.rows[0].id],
+    );
+    await db.query("INSERT INTO menu_categories (location_id, name) VALUES ($1, 'Foreign category')", [foreignLocation.rows[0].id]);
+
+    const mainOptions = await dbLib.withTenant(businessId, () =>
+      reportFilterOptionsService.reportFilterOptions(businessId, mainId, "v_menu_item_performance"),
+    );
+    expect(mainOptions.category).toEqual([{ value: expect.any(String), label: "Main beverages" }]);
+
+    const otherBranchOptions = await dbLib.withTenant(businessId, () =>
+      reportFilterOptionsService.reportFilterOptions(businessId, otherId, "v_menu_item_performance"),
+    );
+    expect(otherBranchOptions.category).toEqual([{ value: expect.any(String), label: "Other branch meals" }]);
+
+    const foreignOptions = await dbLib.withTenant(businessId, () =>
+      reportFilterOptionsService.reportFilterOptions(businessId, foreignLocation.rows[0].id, "v_menu_item_performance"),
+    );
+    expect(foreignOptions.category).toEqual([]);
+  });
+});
+
+describe("dashboard widget layouts — revision, inheritance and isolation (issue #819)", () => {
   const DAY_CONFIG = {
     view: "v_sales_by_day",
     metric: "total",
@@ -496,112 +529,292 @@ describe("dashboard widget layouts — the write contract (issue #819)", () => {
     aggregation: "sum",
     visualization: "bar",
   };
+  const managerTarget = { role: "manager" as const };
+  const personalTarget = (userId: string) => ({ userId, role: "manager" as const });
 
-  it("keeps both tiles when two pins land at once on an empty dashboard", async () => {
-    const first = await insertSavedReport(DAY_CONFIG);
-    const second = await insertSavedReport({ ...DAY_CONFIG, metric: "order_count" });
-
-    // The browser used to do this as: GET the layout, append locally, POST the
-    // whole array back. Both reads saw an empty grid, so the second POST deleted
-    // the first tile. The append now happens server-side, inside a transaction
-    // that locks the scope — including the empty case, where there are no rows
-    // for FOR UPDATE to hold.
-    const [a, b] = await Promise.all([
-      reportsService.appendDashboardWidget(businessId, { userId: employeeId }, {
-        savedReportId: first,
-        chartType: "bar",
-        title: "فروش",
-        w: 4,
-        h: 3,
-      }),
-      reportsService.appendDashboardWidget(businessId, { userId: employeeId }, {
-        savedReportId: second,
-        chartType: "line",
-        title: "تعداد",
-        w: 4,
-        h: 3,
-      }),
-    ]);
-    if (!a.ok) throw new Error(`first append failed: ${JSON.stringify(a)}`);
-    if (!b.ok) throw new Error(`second append failed: ${JSON.stringify(b)}`);
-
-    const layout = await reportsService.getDashboardWidgets(businessId, employeeId, "manager");
-    expect(layout.widgets).toHaveLength(2);
-    expect(new Set(layout.widgets.map((w) => w.saved_report_id))).toEqual(new Set([first, second]));
-    // Both writes serialized, so the second tile was placed *below* the first
-    // rather than on top of it.
-    expect(new Set(layout.widgets.map((w) => w.y))).toEqual(new Set([0, 3]));
-
-    // And each write reported the layout it produced, which is what a client
-    // sends back on its next write.
-    expect(a.revision).not.toBe(b.revision);
-    expect([a.revision, b.revision]).toContain(layout.revision);
-  });
-
-  it("refuses a stale whole-layout write instead of deleting a newer one", async () => {
-    const report = await insertSavedReport(DAY_CONFIG);
-    const widget = { savedReportId: report, chartType: "bar" as const, title: null, x: 0, y: 0, w: 4, h: 3 };
-
-    await reportsService.saveDashboardWidgets(businessId, { userId: employeeId }, [widget]);
-    const read = await reportsService.getDashboardWidgets(businessId, employeeId, "manager");
-
-    // Tab A saves a drag using the revision it read.
-    const accepted = await reportsService.saveDashboardWidgets(
-      businessId,
-      { userId: employeeId },
-      [{ ...widget, x: 4, w: 8 }],
-      { ifRevision: read.revision },
-    );
-    expect(accepted).toEqual({ ok: true, revision: expect.any(String) });
-
-    // Tab B, still open on the older layout, drags something else. Its write
-    // must not delete tab A's — it is told its screen is out of date.
-    const refused = await reportsService.saveDashboardWidgets(
-      businessId,
-      { userId: employeeId },
-      [{ ...widget, w: 12 }],
-      { ifRevision: read.revision },
-    );
-    expect(refused).toEqual({ ok: false, reason: "layout_changed" });
-
-    const after = await reportsService.getDashboardWidgets(businessId, employeeId, "manager");
-    expect(after.revision).toBe(accepted.ok ? accepted.revision : "");
-    expect(after.widgets[0].w).toBe(8);
-  });
-
-  it("accepts the revision its own append returned", async () => {
-    const report = await insertSavedReport(DAY_CONFIG);
-    const appended = await reportsService.appendDashboardWidget(businessId, { role: "manager" }, {
-      savedReportId: report,
+  const readPersonal = (userId: string) => dbLib.withTenant(businessId, () =>
+    reportsService.getDashboardWidgets(businessId, userId, "manager"),
+  );
+  const readRole = () => dbLib.withTenant(businessId, () =>
+    reportsService.getRoleDashboardWidgets(businessId, "manager"),
+  );
+  const append = (target: { role: "manager" } | { userId: string; role: "manager" }, savedReportId: string, title: string) =>
+    dbLib.withTenant(businessId, () => reportsService.appendDashboardWidget(businessId, target, {
+      savedReportId,
       chartType: "bar",
-      title: null,
+      title,
       w: 4,
       h: 3,
-    });
-    if (!appended.ok) throw new Error("valid saved report must append successfully");
+    }));
 
-    // A role default is read by whoever inherits it; the revision has to be the
-    // same string for the scope that wrote and the scope that reads. This
-    // member has no personal layout of their own, so they inherit the role's.
-    const collegialMember = await seedEmployee();
-    const layout = await reportsService.getDashboardWidgets(businessId, collegialMember, "manager");
-    expect(layout.scope).toBe("role-default");
-    expect(layout.revision).toBe(appended.revision);
+  async function waitForAdvisoryLockWaiters(expected: number): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const { rows } = await db.query<{ waiters: number }>(
+        `SELECT count(*)::int AS waiters
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND pid <> pg_backend_pid()
+            AND state = 'active'
+            AND wait_event_type = 'Lock'
+            AND query LIKE '%pg_advisory_xact_lock%'`,
+      );
+      if (rows[0].waiters >= expected) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`timed out waiting for ${expected} advisory-lock contenders`);
+  }
 
-    const replaced = await reportsService.saveDashboardWidgets(
-      businessId,
-      { role: "manager" },
-      [{ savedReportId: report, chartType: "pie", title: "دوباره", x: 0, y: 0, w: 6, h: 3 }],
-      { ifRevision: appended.revision },
+  async function holdWidgetScopeLock(key: string): Promise<{ release: () => Promise<void>; client: Client }> {
+    const client = new Client({ connectionString: urlFor(databaseName) });
+    await client.connect();
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [key]);
+    return {
+      client,
+      release: async () => {
+        await client.query("COMMIT");
+        await client.end();
+      },
+    };
+  }
+
+  it("atomically transitions an inherited layout, preserves the role default, and treats empty as an override", async () => {
+    const roleReport = await insertSavedReport(DAY_CONFIG);
+    const laterRoleReport = await insertSavedReport({ ...DAY_CONFIG, metric: "order_count" });
+    const seededDefault = await append(managerTarget, roleReport, "پیش‌فرض نقش");
+    if (!seededDefault.ok) throw new Error(`role append failed: ${JSON.stringify(seededDefault)}`);
+    const roleBefore = await readRole();
+
+    const memberId = await seedEmployee();
+    const legacyPersonalState = await db.query(
+      "SELECT 1 FROM dashboard_widget_layout_state WHERE business_id = $1 AND user_id = $2",
+      [businessId, memberId],
     );
-    expect(replaced.ok).toBe(true);
+    expect(legacyPersonalState.rowCount).toBe(0);
+    const inherited = await readPersonal(memberId);
+    expect(inherited.scope).toBe("role-default");
+    expect(inherited.widgets.map((widget) => widget.saved_report_id)).toEqual([roleReport]);
+    expect(inherited.precondition).toEqual({
+      source: { scope: "role-default", revision: roleBefore.precondition.source.revision },
+      target: { scope: "personal", revision: null },
+    });
+
+    const firstEdit = await dbLib.withTenant(businessId, () => reportsService.saveDashboardWidgets(
+      businessId,
+      personalTarget(memberId),
+      [{
+        savedReportId: roleReport,
+        chartType: "line",
+        title: "ویرایش شخصی",
+        x: 2,
+        y: 0,
+        w: 4,
+        h: 3,
+      }],
+      inherited.precondition,
+    ));
+    expect(firstEdit.ok).toBe(true);
+    if (!firstEdit.ok) throw new Error(`first personal edit failed: ${firstEdit.reason}`);
+    expect(firstEdit.precondition).toEqual({
+      source: { scope: "personal", revision: firstEdit.revision },
+      target: { scope: "personal", revision: firstEdit.revision },
+    });
+
+    const roleAfterFirstEdit = await readRole();
+    expect(roleAfterFirstEdit.precondition).toEqual(roleBefore.precondition);
+    expect(roleAfterFirstEdit.widgets.map((widget) => widget.saved_report_id)).toEqual([roleReport]);
+    const personalAfterFirstEdit = await readPersonal(memberId);
+    expect(personalAfterFirstEdit.scope).toBe("personal");
+    expect(personalAfterFirstEdit.widgets[0]).toMatchObject({ x: 2, chart_type: "line" });
+
+    // A later edit uses the fresh personal revision, not the inherited role
+    // revision, and may intentionally create an empty personal override.
+    const laterEdit = await dbLib.withTenant(businessId, () => reportsService.saveDashboardWidgets(
+      businessId,
+      personalTarget(memberId),
+      [],
+      personalAfterFirstEdit.precondition,
+    ));
+    expect(laterEdit.ok).toBe(true);
+    if (!laterEdit.ok) throw new Error(`later personal edit failed: ${laterEdit.reason}`);
+    const personalEmpty = await readPersonal(memberId);
+    expect(personalEmpty.scope).toBe("personal");
+    expect(personalEmpty.widgets).toEqual([]);
+    expect(personalEmpty.precondition.source.revision).toBe(laterEdit.revision);
+
+    // Changing the role default later must not repopulate that explicit empty
+    // personal layout.
+    const roleAppend = await append(managerTarget, laterRoleReport, "افزوده به پیش‌فرض");
+    expect(roleAppend.ok).toBe(true);
+    const roleAfterAppend = await readRole();
+    expect(roleAfterAppend.widgets).toHaveLength(2);
+    const stillEmpty = await readPersonal(memberId);
+    expect(stillEmpty.scope).toBe("personal");
+    expect(stillEmpty.widgets).toEqual([]);
   });
 
-  it("keeps a widget whose report the engine can no longer run, and says why", async () => {
-    // The scenario the retention rule in `ensureStandardSavedReports` creates:
-    // a report stayed in the database across an engine change, and a member's
-    // dashboard still points at it. It must be *visible and explained*, not
-    // dropped — silently deleting someone's layout is the other half of the bug.
+  it("allows exactly one of two contending inherited first edits under a deterministic lock barrier", async () => {
+    const report = await insertSavedReport(DAY_CONFIG);
+    const roleAppend = await append(managerTarget, report, "پیش‌فرض");
+    if (!roleAppend.ok) throw new Error("valid role report must append");
+    const roleBefore = await readRole();
+    const memberId = await seedEmployee();
+    const inherited = await readPersonal(memberId);
+    expect(inherited.precondition.target.revision).toBeNull();
+
+    const barrier = await holdWidgetScopeLock(`${businessId}:user:${memberId}`);
+    let released = false;
+    try {
+      const attempt = (x: number) => dbLib.withTenant(businessId, () => reportsService.saveDashboardWidgets(
+        businessId,
+        personalTarget(memberId),
+        [{ savedReportId: report, chartType: "bar", title: `ویرایش ${x}`, x, y: 0, w: 4, h: 3 }],
+        inherited.precondition,
+      ));
+      const first = attempt(0);
+      const second = attempt(4);
+      // The holder makes the contention deterministic: both writes have
+      // reached an actual PostgreSQL advisory-lock wait before release.
+      await waitForAdvisoryLockWaiters(2);
+      await barrier.release();
+      released = true;
+      const results = await Promise.all([first, second]);
+      expect(results.filter((result) => result.ok)).toHaveLength(1);
+      expect(results.filter((result) => !result.ok)).toEqual([{ ok: false, reason: "layout_changed" }]);
+      const personal = await readPersonal(memberId);
+      expect(personal.scope).toBe("personal");
+      expect([0, 4]).toContain(personal.widgets[0].x);
+      const roleAfter = await readRole();
+      expect(roleAfter.precondition).toEqual(roleBefore.precondition);
+      expect(roleAfter.widgets.map((widget) => widget.saved_report_id)).toEqual([report]);
+    } finally {
+      if (!released) {
+        await barrier.client.query("ROLLBACK").catch(() => {});
+        await barrier.client.end().catch(() => {});
+      }
+    }
+  });
+
+  it("serializes concurrent append pins to an empty layout without losing either widget", async () => {
+    const first = await insertSavedReport(DAY_CONFIG);
+    const second = await insertSavedReport({ ...DAY_CONFIG, metric: "order_count" });
+    const memberId = await seedEmployee();
+    // Ensure the role source exists, while leaving this user's personal target absent.
+    const inherited = await readPersonal(memberId);
+    expect(inherited.scope).toBe("role-default");
+
+    const barrier = await holdWidgetScopeLock(`${businessId}:user:${memberId}`);
+    let released = false;
+    try {
+      const one = append(personalTarget(memberId), first, "فروش");
+      const two = append(personalTarget(memberId), second, "تعداد");
+      await waitForAdvisoryLockWaiters(2);
+      await barrier.release();
+      released = true;
+      const [a, b] = await Promise.all([one, two]);
+      expect(a.ok).toBe(true);
+      expect(b.ok).toBe(true);
+      if (!a.ok || !b.ok) throw new Error("both valid concurrent pins must append");
+
+      const layout = await readPersonal(memberId);
+      expect(layout.scope).toBe("personal");
+      expect(layout.widgets).toHaveLength(2);
+      expect(new Set(layout.widgets.map((widget) => widget.saved_report_id))).toEqual(new Set([first, second]));
+      expect(new Set(layout.widgets.map((widget) => widget.y))).toEqual(new Set([0, 3]));
+      expect(a.revision).not.toBe(b.revision);
+      expect([a.revision, b.revision]).toContain(layout.precondition.target.revision);
+    } finally {
+      if (!released) {
+        await barrier.client.query("ROLLBACK").catch(() => {});
+        await barrier.client.end().catch(() => {});
+      }
+    }
+  });
+
+  it("rejects a stale personal source revision rather than deleting a newer layout", async () => {
+    const first = await insertSavedReport(DAY_CONFIG);
+    const second = await insertSavedReport({ ...DAY_CONFIG, metric: "order_count" });
+    const a = await append(personalTarget(employeeId), first, "نخست");
+    const b = await append(personalTarget(employeeId), second, "دوم");
+    expect(a.ok && b.ok).toBe(true);
+    const read = await readPersonal(employeeId);
+    expect(read.scope).toBe("personal");
+
+    const accepted = await dbLib.withTenant(businessId, () => reportsService.saveDashboardWidgets(
+      businessId,
+      personalTarget(employeeId),
+      read.widgets.map((widget, index) => ({
+        savedReportId: widget.saved_report_id,
+        chartType: widget.chart_type,
+        title: widget.title,
+        x: index === 0 ? 2 : 0,
+        y: widget.y,
+        w: widget.w,
+        h: widget.h,
+      })),
+      read.precondition,
+    ));
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) throw new Error("first revision-checked replacement must succeed");
+
+    const stale = await dbLib.withTenant(businessId, () => reportsService.saveDashboardWidgets(
+      businessId,
+      personalTarget(employeeId),
+      [],
+      read.precondition,
+    ));
+    expect(stale).toEqual({ ok: false, reason: "layout_changed" });
+    const after = await readPersonal(employeeId);
+    expect(after.precondition.target.revision).toBe(accepted.revision);
+    expect(after.widgets[0].x).toBe(2);
+  });
+
+  it("requires source and target revisions to replace a role default", async () => {
+    const report = await insertSavedReport(DAY_CONFIG);
+    const appended = await append(managerTarget, report, "پیش‌فرض مدیر");
+    if (!appended.ok) throw new Error("valid role report must append");
+    const read = await readRole();
+    const replacement = await dbLib.withTenant(businessId, () => reportsService.saveDashboardWidgets(
+      businessId,
+      managerTarget,
+      [{ savedReportId: report, chartType: "pie", title: "نمودار تازه", x: 0, y: 0, w: 6, h: 3 }],
+      read.precondition,
+    ));
+    expect(replacement.ok).toBe(true);
+    const stale = await dbLib.withTenant(businessId, () => reportsService.saveDashboardWidgets(
+      businessId,
+      managerTarget,
+      [],
+      read.precondition,
+    ));
+    expect(stale).toEqual({ ok: false, reason: "layout_changed" });
+  });
+
+  it("adopts non-empty pre-revision personal rows instead of mistaking them for inheritance", async () => {
+    const personalReport = await insertSavedReport(DAY_CONFIG);
+    const roleReport = await insertSavedReport({ ...DAY_CONFIG, metric: "order_count" });
+    const roleAppend = await append(managerTarget, roleReport, "پیش‌فرض نقش");
+    expect(roleAppend.ok).toBe(true);
+    const legacyMember = await seedEmployee();
+    await db.query(
+      `INSERT INTO dashboard_widgets (business_id, user_id, saved_report_id, chart_type, title, x, y, w, h)
+       VALUES ($1, $2, $3, 'bar', 'چیدمان قدیمی', 0, 0, 4, 3)`,
+      [businessId, legacyMember, personalReport],
+    );
+
+    const layout = await readPersonal(legacyMember);
+    expect(layout.scope).toBe("personal");
+    expect(layout.widgets.map((widget) => widget.saved_report_id)).toEqual([personalReport]);
+    expect(layout.precondition.source.scope).toBe("personal");
+    const state = await db.query<{ revision: string }>(
+      "SELECT revision::text AS revision FROM dashboard_widget_layout_state WHERE business_id = $1 AND user_id = $2",
+      [businessId, legacyMember],
+    );
+    expect(state.rows).toHaveLength(1);
+  });
+
+  it("keeps a widget whose report is now obsolete, with a reason, and only preserves it when it was in the source", async () => {
     const retired = await insertSavedReport({ ...DAY_CONFIG, view: "a_view_that_was_removed" });
     const live = await insertSavedReport(DAY_CONFIG);
     await db.query(
@@ -610,81 +823,75 @@ describe("dashboard widget layouts — the write contract (issue #819)", () => {
       [businessId, employeeId, retired, live],
     );
 
-    const layout = await reportsService.getDashboardWidgets(businessId, employeeId, "manager");
-    expect(layout.widgets).toHaveLength(2);
-    const retiredRow = layout.widgets.find((w) => w.saved_report_id === retired);
-    expect(retiredRow?.applicable).toBe(false);
-    expect(retiredRow?.applicable_reason).toBe("unknown_view");
-    // The healthy widget is untouched and still applicable.
-    expect(layout.widgets.find((w) => w.saved_report_id === live)?.applicable).toBe(true);
+    const read = await readPersonal(employeeId);
+    expect(read.widgets).toHaveLength(2);
+    const retiredRow = read.widgets.find((widget) => widget.saved_report_id === retired);
+    expect(retiredRow).toMatchObject({ applicable: false, applicable_reason: "unknown_view" });
+    expect(read.widgets.find((widget) => widget.saved_report_id === live)?.applicable).toBe(true);
+
+    const staleNew = await insertSavedReport({ ...DAY_CONFIG, view: "another_retired_view" });
+    const rejected = await dbLib.withTenant(businessId, () => reportsService.saveDashboardWidgets(
+      businessId,
+      personalTarget(employeeId),
+      [{ savedReportId: staleNew, chartType: "bar", title: null, x: 0, y: 0, w: 4, h: 3 }],
+      read.precondition,
+      { preserveInapplicableSavedReportIds: [staleNew] },
+    ));
+    expect(rejected).toEqual({ ok: false, reason: "saved_report_not_applicable" });
+
+    const preserved = await dbLib.withTenant(businessId, () => reportsService.saveDashboardWidgets(
+      businessId,
+      personalTarget(employeeId),
+      [{ savedReportId: retired, chartType: "bar", title: null, x: 0, y: 0, w: 4, h: 3 }],
+      read.precondition,
+      { preserveInapplicableSavedReportIds: [retired] },
+    ));
+    expect(preserved.ok).toBe(true);
   });
 
-  it("retains old standard rows but excludes them from another trade's defaults and pin validation", async () => {
+  it("keeps old standard reports but excludes them from another trade's defaults and pin validation", async () => {
     const stale = await insertSavedReport(DAY_CONFIG, { standardKey: "top_selling_items" });
     await db.query("UPDATE businesses SET industry = 'jewelry' WHERE id = $1", [businessId]);
 
     const ids = await dbLib.withTenant(businessId, () => reportsService.ensureStandardSavedReports(businessId));
     expect(ids.has("top_selling_items")).toBe(false);
-    const validation = await dbLib.withTenant(businessId, () =>
-      reportsService.savedReportIdsInBusiness(businessId, [stale]),
-    );
+    const validation = await dbLib.withTenant(businessId, () => reportsService.savedReportIdsInBusiness(businessId, [stale]));
     expect(validation.owned.has(stale)).toBe(true);
     expect(validation.applicable.has(stale)).toBe(false);
 
-    // The next Owner dashboard seed uses only the current trade's keys. The old
-    // row remains for any layout that already references it; it is not blindly
-    // deleted or newly pinned into a role default.
-    const layout = await dbLib.withTenant(businessId, () =>
-      reportsService.getDashboardWidgets(businessId, employeeId, "owner"),
-    );
+    const layout = await dbLib.withTenant(businessId, () => reportsService.getDashboardWidgets(businessId, employeeId, "owner"));
     expect(layout.widgets.some((widget) => widget.saved_report_id === stale)).toBe(false);
     const retained = await db.query<{ id: string }>("SELECT id FROM saved_reports WHERE id = $1", [stale]);
     expect(retained.rows).toEqual([{ id: stale }]);
   });
 
-  it("refuses to append a report that became inapplicable before the locked write", async () => {
-    const stale = await insertSavedReport({ ...DAY_CONFIG, view: "a_view_that_was_removed" });
-    const appended = await reportsService.appendDashboardWidget(businessId, { userId: employeeId }, {
-      savedReportId: stale,
-      chartType: "bar",
-      title: null,
-      w: 4,
-      h: 3,
-    });
-    expect(appended).toEqual({ ok: false, reason: "saved_report_not_applicable" });
-  });
-
-  it("preserves an existing inapplicable widget only when the locked layout already contains it", async () => {
-    const stale = await insertSavedReport({ ...DAY_CONFIG, view: "a_view_that_was_removed" });
-    const widget = { savedReportId: stale, chartType: "bar" as const, title: null, x: 0, y: 0, w: 4, h: 3 };
-    const emptyRevision = reportsService.widgetLayoutRevision([]);
-    const rejected = await reportsService.saveDashboardWidgets(
-      businessId,
-      { userId: employeeId },
-      [widget],
-      { ifRevision: emptyRevision, preserveInapplicableSavedReportIds: [stale] },
+  it("rejects cross-business widget/layout references at the database boundary", async () => {
+    const otherBusiness = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Other Cafe', $1) RETURNING id",
+      [`other-${randomUUID().slice(0, 8)}`],
     );
-    expect(rejected).toEqual({ ok: false, reason: "saved_report_not_applicable" });
+    const otherBusinessId = otherBusiness.rows[0].id;
+    const otherUser = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, role, full_name, email, pin_hash)
+       VALUES ($1, 'manager', 'کاربر دیگر', $2, 'x') RETURNING id`,
+      [otherBusinessId, `other-${randomUUID().slice(0, 8)}@example.com`],
+    );
+    const otherReport = await db.query<{ id: string }>(
+      `INSERT INTO saved_reports (business_id, name, config, is_standard)
+       VALUES ($1, 'گزارش دیگر', $2::jsonb, false) RETURNING id`,
+      [otherBusinessId, JSON.stringify(DAY_CONFIG)],
+    );
 
-    await db.query(
+    await expect(db.query(
       `INSERT INTO dashboard_widgets (business_id, user_id, saved_report_id, chart_type, title, x, y, w, h)
        VALUES ($1, $2, $3, 'bar', NULL, 0, 0, 4, 3)`,
-      [businessId, employeeId, stale],
-    );
-    const read = await dbLib.withTenant(businessId, () =>
-      reportsService.getDashboardWidgets(businessId, employeeId, "manager"),
-    );
-    const preserved = await reportsService.saveDashboardWidgets(
-      businessId,
-      { userId: employeeId },
-      [widget],
-      { ifRevision: read.revision, preserveInapplicableSavedReportIds: [stale] },
-    );
-    expect(preserved.ok).toBe(true);
-    const after = await db.query<{ saved_report_id: string }>(
-      "SELECT saved_report_id FROM dashboard_widgets WHERE business_id = $1 AND user_id = $2",
-      [businessId, employeeId],
-    );
-    expect(after.rows.map((row) => row.saved_report_id)).toEqual([stale]);
+      [businessId, employeeId, otherReport.rows[0].id],
+    )).rejects.toMatchObject({ code: "23503" });
+
+    await expect(db.query(
+      `INSERT INTO dashboard_widget_layout_state (business_id, user_id, role)
+       VALUES ($1, $2, NULL)`,
+      [businessId, otherUser.rows[0].id],
+    )).rejects.toMatchObject({ code: "23503" });
   });
 });
