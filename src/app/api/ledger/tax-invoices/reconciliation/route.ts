@@ -20,6 +20,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       from: filters.from,
       to: filters.to,
       locationId: filters.locationId,
+      customerId: filters.customerId,
     });
     return NextResponse.json(result);
   } catch (err) {

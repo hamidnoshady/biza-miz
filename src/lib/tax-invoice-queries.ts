@@ -120,6 +120,8 @@ export interface TaxRegisterRow {
   acceptedAt: string | null;
   preparedAt: string;
   parentSubmissionId: string | null;
+  archivedAt?: string | null;
+  retentionHoldAt?: string | null;
 }
 
 export interface TaxRegisterPage {
@@ -161,8 +163,9 @@ export async function listTaxRegister(
               s.payload_snapshot->'buyer'->>'name' AS buyer_name,
               s.payload_snapshot->'source'->>'closedAt' AS closed_at,
               s.total_rial::bigint AS total_rial, s.vat_rial::bigint AS vat_rial,
-              s.attempts, s.last_error_code, s.next_attempt_at, s.submitted_at, s.accepted_at,
-              s.prepared_at, s.parent_submission_id
+              s.attempts, s.last_error_code, s.next_attempt_at, s.submitted_at, s.accepted_at, s.retention_hold_at,
+              s.prepared_at, s.parent_submission_id,
+              (SELECT a.archived_at FROM tax_invoice_archives a WHERE a.submission_id = s.id) AS archived_at
          FROM tax_invoice_submissions s
         WHERE ${page.sql()}
         ORDER BY s.prepared_at DESC, s.id DESC
@@ -203,8 +206,10 @@ export async function listTaxRegister(
       nextAttemptAt: row.next_attempt_at ? (row.next_attempt_at as Date).toISOString() : null,
       submittedAt: row.submitted_at ? (row.submitted_at as Date).toISOString() : null,
       acceptedAt: row.accepted_at ? (row.accepted_at as Date).toISOString() : null,
+      retentionHoldAt: row.retention_hold_at ? (row.retention_hold_at as Date).toISOString() : null,
       preparedAt: (row.prepared_at as Date).toISOString(),
       parentSubmissionId: (row.parent_submission_id as string | null) ?? null,
+      archivedAt: row.archived_at ? (row.archived_at as Date).toISOString() : null,
     }));
     const last = pageRows[pageRows.length - 1];
     return {
@@ -256,7 +261,8 @@ export async function getTaxRecordDetail(businessId: string, id: string): Promis
               s.payload_snapshot->'source'->>'orderNumber' AS order_number,
               s.payload_snapshot->'source'->>'locationName' AS location_name,
               s.payload_snapshot->'buyer'->>'name' AS buyer_name,
-              s.payload_snapshot->'source'->>'closedAt' AS closed_at
+              s.payload_snapshot->'source'->>'closedAt' AS closed_at,
+              (SELECT a.archived_at FROM tax_invoice_archives a WHERE a.submission_id = s.id) AS archived_at
          FROM tax_invoice_submissions s WHERE s.id = $1`,
       [id],
     );
@@ -298,9 +304,11 @@ export async function getTaxRecordDetail(businessId: string, id: string): Promis
       nextAttemptAt: row.next_attempt_at ? (row.next_attempt_at as Date).toISOString() : null,
       submittedAt: row.submitted_at ? (row.submitted_at as Date).toISOString() : null,
       acceptedAt: row.accepted_at ? (row.accepted_at as Date).toISOString() : null,
+      retentionHoldAt: row.retention_hold_at ? (row.retention_hold_at as Date).toISOString() : null,
       preparedAt: (row.prepared_at as Date).toISOString(),
       queuedAt: row.queued_at ? (row.queued_at as Date).toISOString() : null,
       parentSubmissionId: (row.parent_submission_id as string | null) ?? null,
+      archivedAt: row.archived_at ? (row.archived_at as Date).toISOString() : null,
       idempotencyKey: row.idempotency_key as string,
       payloadVersion: row.payload_version as string,
       payloadHash: row.payload_hash as string,
@@ -405,7 +413,7 @@ export interface ReconciliationPage {
  */
 export async function getTaxReconciliation(
   businessId: string,
-  filters: { from: string; to: string; locationId?: string },
+  filters: { from: string; to: string; locationId?: string; customerId?: string },
 ): Promise<ReconciliationPage> {
   return withTenant(businessId, async () => {
     const timeZone = await getBusinessTimeZone(businessId);
@@ -415,6 +423,7 @@ export async function getTaxReconciliation(
     w.add(`${when} >= (${w.p(requireDay(filters.from))}::date)::timestamp AT TIME ZONE ${w.p(timeZone)}`);
     w.add(`${when} < ((${w.p(requireDay(filters.to))}::date) + 1)::timestamp AT TIME ZONE ${w.p(timeZone)}`);
     if (filters.locationId) w.add(`o.location_id = ${w.p(filters.locationId)}::uuid`);
+    if (filters.customerId) w.add(`o.customer_id = ${w.p(filters.customerId)}::uuid`);
     const cap = 5001;
     const sourceRows = await query<Record<string, unknown>>(
       `SELECT o.id, o.order_number, o.location_id, l.name AS location_name, ${when} AS closed_at, o.status,
@@ -601,4 +610,20 @@ export async function buildTaxRegisterExport(
     ],
     rows,
   };
+}
+
+/** Customer choices include stored buyer identities, even after a party was removed. */
+export async function listTaxCustomers(businessId: string): Promise<{ id: string; name: string }[]> {
+  return withTenant(businessId, async () => {
+    const { rows } = await query<{ id: string; name: string }>(`
+      SELECT id, MAX(name) AS name FROM (
+        SELECT p.id::text AS id, p.name FROM parties p
+         WHERE p.business_id = $1 AND 'customer' = ANY(p.roles)
+        UNION ALL
+        SELECT payload_snapshot->'buyer'->>'partyId', payload_snapshot->'buyer'->>'name'
+          FROM tax_invoice_submissions WHERE business_id = $1
+      ) customers WHERE id IS NOT NULL AND name IS NOT NULL
+      GROUP BY id ORDER BY name, id`, [businessId]);
+    return rows;
+  });
 }

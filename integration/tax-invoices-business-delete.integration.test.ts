@@ -178,7 +178,21 @@ async function prepareAndAccept(t: Tenant, orderId: string): Promise<string> {
  * that references it, a rejected sale, and the history of each. The amendment is a
  * child of the sale, so the purge has to delete leaves first.
  */
-async function taxedHistory(t: Tenant): Promise<History> {
+async function taxedHistory(t: Tenant, accepted = true): Promise<History> {
+  if (!accepted) {
+    sandboxWith();
+    const order = await sale(t, 100000, 1);
+    const [prepared] = await service.prepareSales(t.actor, [order]);
+    if (!prepared.submissionId) throw new Error("prepare failed");
+    await service.queueAndSend(t.actor, [prepared.submissionId]);
+    const { archiveTaxInvoices, saveTaxArchivePolicy } = await import("../src/lib/tax-invoice-archive");
+    // Rejected by a verified inquiry, so this submitted record is archive-eligible.
+    simulator.adapter = { provider: "sandbox", submit: async () => ({ receiptId: "unused" }), inquire: async () => ({ state: "rejected", issues: [{ code: "invalid", message: "invalid" }] }) };
+    await service.inquireSubmissions(t.businessId, { ids: [prepared.submissionId], force: true });
+    await saveTaxArchivePolicy(t.actor, 1);
+    await archiveTaxInvoices(t.businessId, new Date(Date.now() + 2 * 86400000));
+    return { acceptedSale: prepared.submissionId, amendment: prepared.submissionId, rejectedSale: prepared.submissionId };
+  }
   // The rejection is the first submit, so the script's first failure lands on this sale.
   sandboxWith({ submitFailures: [{ kind: "rejected", issues: [{ code: "ITEM_CODE_UNKNOWN", message: "شناسه کالا ثبت نشده است." }] }] });
   const rejectedOrder = await sale(t, 100000, 1);
@@ -199,6 +213,7 @@ async function taxedHistory(t: Tenant): Promise<History> {
 }
 
 const TAX_TABLES = [
+  "tax_invoice_archives",
   "tax_invoice_submissions",
   "tax_invoice_events",
   "tax_invoice_profiles",
@@ -232,12 +247,13 @@ describe("taxpayer records through business reset and hard delete", () => {
 
     const target = await seedBusiness("Reset Co");
     await enableTax(target);
-    await taxedHistory(target);
-    expect((await taxRowCounts(target.businessId)).tax_invoice_submissions).toBe(3);
+    await taxedHistory(target, false);
+    expect((await taxRowCounts(target.businessId)).tax_invoice_submissions).toBe(1);
 
     await platform.resetBusiness(target.businessId);
 
     expect(await taxRowCounts(target.businessId)).toEqual({
+      tax_invoice_archives: 0,
       tax_invoice_submissions: 0,
       tax_invoice_events: 0,
       tax_invoice_profiles: 0,
@@ -265,8 +281,8 @@ describe("taxpayer records through business reset and hard delete", () => {
 
     const doomed = await seedBusiness("Doomed Co");
     await enableTax(doomed);
-    await taxedHistory(doomed);
-    expect((await taxRowCounts(doomed.businessId)).tax_invoice_submissions).toBe(3);
+    await taxedHistory(doomed, false);
+    expect((await taxRowCounts(doomed.businessId)).tax_invoice_submissions).toBe(1);
 
     await platform.hardDeleteBusiness(doomed.businessId);
 
@@ -276,4 +292,42 @@ describe("taxpayer records through business reset and hard delete", () => {
     expect(await statusOf(controlHistory.acceptedSale)).toBe("accepted");
     expect((await taxRowCounts(control.businessId)).tax_invoice_submissions).toBe(3);
   });
+});
+
+
+it("refuses reset and hard delete of accepted invoices atomically, preserving records and archives", async () => {
+  const target = await seedBusiness("Retained Co"); await enableTax(target);
+  const history = await taxedHistory(target);
+  const archive = await import("../src/lib/tax-invoice-archive");
+  await archive.saveTaxArchivePolicy(target.actor, 1);
+  await archive.archiveTaxInvoices(target.businessId, new Date(Date.now() + 2 * 86400000));
+  const before = await taxRowCounts(target.businessId);
+  expect(before.tax_invoice_archives).toBeGreaterThan(0);
+  await expect(platform.resetBusiness(target.businessId)).rejects.toMatchObject({ reference: "tax_accepted_retained" });
+  expect(await taxRowCounts(target.businessId)).toEqual(before);
+  await expect(platform.hardDeleteBusiness(target.businessId)).rejects.toMatchObject({ reference: "tax_accepted_retained" });
+  expect(await taxRowCounts(target.businessId)).toEqual(before);
+  expect(await statusOf(history.acceptedSale)).toBe("accepted");
+});
+
+it("refuses destruction while a provider delivery is unresolved", async () => {
+  const target = await seedBusiness("Pending Co"); await enableTax(target); sandboxWith();
+  const order = await sale(target, 100000, 1);
+  const [record] = await service.prepareSales(target.actor, [order]);
+  await service.queueAndSend(target.actor, [record.submissionId!]);
+  await expect(platform.resetBusiness(target.businessId)).rejects.toMatchObject({ reference: "tax_inflight_retained" });
+  await expect(platform.hardDeleteBusiness(target.businessId)).rejects.toMatchObject({ reference: "tax_inflight_retained" });
+  expect(await statusOf(record.submissionId!)).toBe("submitted");
+});
+
+it("refuses reset and hard delete for a retained provider dispute without calling it accepted", async () => {
+  const target = await seedBusiness("Disputed Co"); await enableTax(target);
+  sandboxWith({ submitFailures: [{ kind: "rejected", issues: [{ code: "bad", message: "refused" }] }] });
+  const order = await sale(target, 100000, 1);
+  const [record] = await service.prepareSales(target.actor, [order]);
+  await service.queueAndSend(target.actor, [record.submissionId!]);
+  await owner.query("UPDATE tax_invoice_submissions SET retention_hold_at = now() WHERE id = $1", [record.submissionId]);
+  await expect(platform.resetBusiness(target.businessId)).rejects.toMatchObject({ reference: "tax_retention_hold" });
+  await expect(platform.hardDeleteBusiness(target.businessId)).rejects.toMatchObject({ reference: "tax_retention_hold" });
+  expect(await statusOf(record.submissionId!)).toBe("rejected");
 });

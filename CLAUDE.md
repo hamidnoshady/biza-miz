@@ -949,9 +949,21 @@ Issue #866 lives inside Accounting at `/accounting/tax-invoices`. Read
   was sent. An amendment builds from the sale as it now stands. Do not mix the two.
 - Taxpayer status never writes ledger rows. Reconciliation reads `orders` and the
   records, and writes nothing.
-- The production adapter fails closed with `live_provider_unavailable`. Do not add a
-  live submission path until the authority's protocol is verified. The simulator is
-  for tests and the sandbox environment only.
+- The production adapter fails closed with `live_provider_unavailable`. The gated
+  transport has no installed codec; an environment flag alone cannot enable it.
+  Verify current taxid/schema, normalization, signing, encryption and response
+  trust against official vectors/sandbox before installing a codec. Simulator
+  fixtures are not proof of authority compatibility.
+- Never exhaust unknown delivery into a retryable error. Use inquiry indefinitely.
+  Completion writes require the opaque claim token; callbacks invalidate it. Stale
+  responses keep audit evidence rather than overwriting a newer outcome.
+- Signed callbacks use the documented platform/TSP tenant-bound HMAC, not an
+  assumed official Moodian callback protocol. Never bypass tenant scope for ingress.
+- Accepted (including cancelled) records/events/archives are NEVER deleted, even
+  with the purge flag. Pending delivery and immutable disputed-evidence holds also
+  block reset/delete. Archive age is not legal expiry. Retention holds cannot be
+  cleared through normal application writes. Keep source-order hold/claim locking
+  and business-root lifecycle/destruction locking consistent.
 - Credentials are write-only and sealed with `encryptSecret`. Never log them, return
   them, or put them in an audit payload.
 - A new table that references `tax_invoice_submissions`, or that blocks deletion of

@@ -62,7 +62,7 @@ function stubReads() {
       });
     }
     if (path.startsWith("/api/ledger/tax-invoices?")) {
-      return json({ rows: [], nextCursor: null, counts: { unsent: 0, sent: 0, error: 0, total: 0 } });
+      return json({ customers: [{ id: "11111111-1111-4111-8111-111111111111", name: "مشتری خاص" }], rows: [], nextCursor: null, counts: { unsent: 0, sent: 0, error: 0, total: 0 } });
     }
     throw new Error(`unexpected fetch ${path}`);
   });
@@ -117,12 +117,13 @@ function stubAll() {
         units: [],
       });
     }
+    if (path === "/api/ledger/tax-invoices/archive") return json({ archiveAfterDays: 365, retention: "indefinite", archivedCount: 0 });
     if (path.startsWith("/api/ledger/tax-invoices/item-codes")) return json({ products: [] });
     if (path.startsWith("/api/ledger/tax-invoices/reconciliation?")) return json(EMPTY_RECONCILIATION);
     if (path.startsWith("/api/ledger/tax-invoices/provider-errors?")) return json({ rows: [] });
     if (path.startsWith("/api/ledger/tax-invoices/queue")) return json({ rows: [] });
     if (path.startsWith("/api/ledger/tax-invoices?")) {
-      return json({ rows: [], nextCursor: null, counts: { unsent: 0, sent: 0, error: 0, total: 0 } });
+      return json({ customers: [{ id: "11111111-1111-4111-8111-111111111111", name: "مشتری خاص" }], rows: [], nextCursor: null, counts: { unsent: 0, sent: 0, error: 0, total: 0 } });
     }
     throw new Error(`unexpected fetch ${path}`);
   });
@@ -182,4 +183,18 @@ describe("the taxpayer-invoicing screen", () => {
     expect(await screen.findByText(/کامل در بازه/)).toBeTruthy();
     expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/ledger/tax-invoices/reconciliation?"))).toBe(true);
   });
+});
+
+
+it("sends the dedicated customer filter to the register and reconciliation", async () => {
+  const { waitFor } = await import("@testing-library/react");
+  const fetchMock = stubAll();
+  render(<TaxInvoicesSection refreshKey={0} capabilities={ADMINISTRATOR} />);
+  await screen.findByRole("option", { name: "مشتری خاص" });
+  fireEvent.change(screen.getByRole("combobox", { name: "مشتری" }), { target: { value: "11111111-1111-4111-8111-111111111111" } });
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/ledger/tax-invoices?") && String(url).includes("customerId=11111111"))).toBe(true));
+  fireEvent.click(screen.getByRole("tab", { name: "گزارش‌ها" }));
+  await screen.findByRole("option", { name: "مشتری خاص" });
+  fireEvent.change(screen.getByRole("combobox", { name: "مشتری" }), { target: { value: "11111111-1111-4111-8111-111111111111" } });
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/ledger/tax-invoices/reconciliation?") && String(url).includes("customerId=11111111"))).toBe(true));
 });

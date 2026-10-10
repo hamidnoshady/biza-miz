@@ -11,6 +11,7 @@
  * Dates are Shamsi and money is the business's unit, as everywhere in Accounting.
  */
 import Link from "next/link";
+import { TaxCustomerFilter } from "./tax-customer-filter";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { EmptyState, LoadingSkeleton, PageHeader, SectionCard, StatusBadge, TabBar } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
@@ -43,6 +44,9 @@ type Tab = "register" | "unprepared" | "reports" | "settings";
 type ViewChoice = "all" | TaxView;
 
 const EVENT_LABELS: Record<string, string> = {
+  archived: "بایگانی شد",
+  provider_callback: "پیام شرکت معتمد",
+  callback_received_in_flight: "پیام در حین ارسال",
   prepared: "آماده‌سازی",
   queued: "ورود به صف",
   send_started: "شروع ارسال",
@@ -68,7 +72,7 @@ function errorText(data: { error?: string; message?: string } | undefined): stri
   return data?.message ?? errorMessageOrRaw(data?.error);
 }
 
-function registerQuery(view: ViewChoice, status: string, kind: string, from: string, to: string, locationId: string, q: string, cursor?: string | null): string {
+function registerQuery(view: ViewChoice, status: string, kind: string, from: string, to: string, locationId: string, q: string, customerId: string, cursor?: string | null): string {
   const params = new URLSearchParams();
   if (view !== "all") params.set("view", view);
   if (status) params.set("status", status);
@@ -77,6 +81,7 @@ function registerQuery(view: ViewChoice, status: string, kind: string, from: str
   if (to) params.set("to", to);
   if (locationId) params.set("locationId", locationId);
   if (q.trim()) params.set("q", q.trim());
+  if (customerId) params.set("customerId", customerId);
   if (cursor) params.set("cursor", cursor);
   return params.toString();
 }
@@ -167,6 +172,7 @@ function RegisterPanel({
   const [cursor, setCursor] = useState<string | null>(null);
   const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [customerId, setCustomerId] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -176,7 +182,7 @@ function RegisterPanel({
     async (nextCursor: string | null) => {
       setLoading(true);
       setLoadError("");
-      const res = await api<TaxRegisterPage>(`/api/ledger/tax-invoices?${registerQuery(view, status, kind, from, to, locationId, q, nextCursor)}`);
+      const res = await api<TaxRegisterPage>(`/api/ledger/tax-invoices?${registerQuery(view, status, kind, from, to, locationId, q, customerId, nextCursor)}`);
       setLoading(false);
       if (!res.ok) {
         setLoadError(errorText(res.data as { error?: string; message?: string }));
@@ -186,7 +192,7 @@ function RegisterPanel({
       setCursor(res.data.nextCursor);
       setRows((prev) => (nextCursor ? [...prev, ...res.data.rows] : res.data.rows));
     },
-    [view, status, kind, from, to, locationId, q],
+    [view, status, kind, from, to, locationId, q, customerId],
   );
 
   useEffect(() => {
@@ -224,7 +230,7 @@ function RegisterPanel({
   const inquireSelected = () => runBatch("/api/ledger/tax-invoices/inquiry", [...selected], "استعلام");
   const inquireAllPending = () => runBatch("/api/ledger/tax-invoices/inquiry", null, "استعلام معلق‌ها");
 
-  const exportUrl = `/api/ledger/tax-invoices/export?${registerQuery(view, status, kind, from, to, locationId, q)}`;
+  const exportUrl = `/api/ledger/tax-invoices/export?${registerQuery(view, status, kind, from, to, locationId, q, customerId)}`;
   const viewCounts = page?.counts;
 
   return (
@@ -285,6 +291,7 @@ function RegisterPanel({
                 ))}
               </select>
             </label>
+            <TaxCustomerFilter value={customerId} onChange={setCustomerId} />
             <label className="block">
               <span className="mb-1 block text-xs text-muted-foreground">جستجو</span>
               <input className={inputClass} value={q} onChange={(e) => setQ(e.target.value)} placeholder="شماره ارجاع، شماره فروش یا خریدار" />
@@ -493,6 +500,7 @@ function RecordDetail({
     >
       <div className="space-y-5">
         {message ? <InfoBox>{message}</InfoBox> : null}
+        {record.retentionHoldAt ? <ErrorBox>شواهد متناقض یا نامشخص ارائه‌دهنده ثبت شده است. نگهداری دائمی و توقف ارسال برای این فروش اعمال شده؛ بررسی انسانی با ارائه‌دهنده لازم است.</ErrorBox> : null}
         {record.lastErrorMessage ? <ErrorBox>{record.lastErrorMessage}</ErrorBox> : null}
         {record.providerErrors.length > 0 ? (
           <ul className="list-disc space-y-1 ps-5 text-sm text-destructive">
@@ -527,6 +535,11 @@ function RecordDetail({
           <Meta label="هش محتوای ارسالی" value={record.payloadHash} ltr />
           <Meta label="نسخهٔ قالب" value={record.payloadVersion} ltr />
         </dl>
+
+        {record.archivedAt && capabilities.exportRegister ? (
+          <SecondaryButton onClick={() => { window.location.href = `/api/ledger/tax-invoices/archive?submissionId=${id}`; }}>دریافت بایگانی JSON</SecondaryButton>
+        ) : null}
+        {record.archivedAt ? <InfoBox>بایگانی دائمی: {formatJalali(record.archivedAt, { withTime: true })}</InfoBox> : null}
 
         {allowed.length > 0 ? (
           <div className="space-y-3">

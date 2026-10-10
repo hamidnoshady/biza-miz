@@ -351,13 +351,17 @@ describe("decideAfterSendFailure", () => {
     expect(decision.errorCode).toBe("timeout");
   });
 
-  it("stops both transport failures after the attempt limit, with a reason an operator can act on", () => {
-    for (const kind of ["not_delivered", "unknown_delivery"] as const) {
-      const decision = decideAfterSendFailure({ kind, code: "timeout", message: "x" }, 7, NOW);
-      expect(decision.status, kind).toBe("error");
-      expect(decision.errorCode, kind).toBe("retries_exhausted");
-      expect(decision.nextAttemptAt, kind).toBeNull();
-    }
+  it("stops only proven non-delivery after the attempt limit", () => {
+    const decision = decideAfterSendFailure({ kind: "not_delivered", code: "timeout", message: "x" }, 7, NOW);
+    expect(decision.status).toBe("error");
+    expect(decision.errorCode).toBe("retries_exhausted");
+    expect(decision.nextAttemptAt).toBeNull();
+  });
+
+  it.each([0, 6, 7, 49])("never makes ambiguous delivery retryable after %i previous attempts", (attempts) => {
+    const decision = decideAfterSendFailure({ kind: "unknown_delivery", code: "timeout", message: "x" }, attempts, NOW);
+    expect(decision.status).toBe("awaiting_inquiry");
+    expect(decision.nextAttemptAt!.getTime()).toBeGreaterThan(NOW.getTime());
   });
 
   it("records a refusal as rejected with the authority's own issues", () => {

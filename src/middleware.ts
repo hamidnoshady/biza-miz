@@ -70,6 +70,8 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/integrations",
   "/api/integrations/wordpress",
   "/api/integrations/woocommerce/webhook",
+  // Tax provider/TSP callbacks verify a tenant-bound HMAC in their handler.
+  "/api/integrations/tax-invoices/webhook",
   "/api/mcp",
   "/api/connections/mcp",
   "/api/well-known/oauth-",
@@ -241,6 +243,8 @@ const PUBLIC_PATHS = [
   // signature, not a tenant session — the handler authenticates the delivery
   // against the connection's webhook secret before resolving its business.
   "/api/integrations/woocommerce/webhook",
+  // Tax provider/TSP callbacks verify a tenant-bound HMAC in their handler.
+  "/api/integrations/tax-invoices/webhook",
   // The other way a store connects: the WordPress plugin authenticates every
   // call with a bearer link token plus an HMAC envelope over timestamp, nonce
   // and body (src/lib/integrations/plugin-link.ts), never a tenant session.

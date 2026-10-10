@@ -41,7 +41,7 @@ describe("readJsonBody", () => {
 describe("registerFiltersFromSearch", () => {
   it("reads every filter the register understands", () => {
     const filters = registerFiltersFromSearch(
-      new URLSearchParams(`view=sent&status=accepted&kind=sale&from=2026-10-01&to=2026-10-09&locationId=${LOCATION}&q=%20۱۰۴۲%20`),
+      new URLSearchParams(`view=sent&status=accepted&kind=sale&from=2026-10-01&to=2026-10-09&locationId=${LOCATION}&customerId=${LOCATION}&q=%20۱۰۴۲%20`),
     );
     expect(filters).toMatchObject({
       view: "sent",
@@ -50,6 +50,7 @@ describe("registerFiltersFromSearch", () => {
       from: "2026-10-01",
       to: "2026-10-09",
       locationId: LOCATION,
+      customerId: LOCATION,
       q: "۱۰۴۲",
     });
   });
@@ -65,6 +66,7 @@ describe("registerFiltersFromSearch", () => {
     refuse("kind=refund");
     refuse("from=2026/10/01");
     refuse("locationId=not-a-uuid");
+    refuse("customerId=not-a-uuid");
     refuse(`q=${"x".repeat(101)}`);
   });
 });

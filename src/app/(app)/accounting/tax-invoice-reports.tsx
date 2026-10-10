@@ -7,6 +7,7 @@
  * computes a tax total. The tie-out is the check that matters: a sale is
  * accepted only when a live record for it stands with the same totals.
  */
+import { TaxCustomerFilter } from "./tax-customer-filter";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { KpiCard, KpiRow, LoadingSkeleton, SectionCard, StatusBadge, TabBar } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
@@ -113,6 +114,7 @@ function ReconciliationPanel({
 }) {
   const [range, setRange] = useState(defaultRange);
   const [locationId, setLocationId] = useState("");
+  const [customerId, setCustomerId] = useState("");
   const [stateFilter, setStateFilter] = useState<ReconState | "all">("all");
   const [data, setData] = useState<ReconciliationPage | null>(null);
   const [error, setError] = useState("");
@@ -128,6 +130,7 @@ function ReconciliationPanel({
     setError("");
     const params = new URLSearchParams({ from: range.from, to: range.to });
     if (locationId) params.set("locationId", locationId);
+    if (customerId) params.set("customerId", customerId);
     const res = await api<ReconciliationPage>(`/api/ledger/tax-invoices/reconciliation?${params.toString()}`);
     setLoading(false);
     if (!res.ok) {
@@ -136,7 +139,7 @@ function ReconciliationPanel({
       return;
     }
     setData(res.data);
-  }, [range.from, range.to, locationId]);
+  }, [range.from, range.to, locationId, customerId]);
 
   useEffect(() => {
     void load();
@@ -147,6 +150,7 @@ function ReconciliationPanel({
 
   const exportParams = new URLSearchParams({ from: range.from, to: range.to });
   if (locationId) exportParams.set("locationId", locationId);
+  if (customerId) exportParams.set("customerId", customerId);
   const exportHref = `/api/ledger/tax-invoices/export?${exportParams.toString()}`;
 
   return (
@@ -180,6 +184,7 @@ function ReconciliationPanel({
               ))}
             </select>
           </label>
+          <TaxCustomerFilter value={customerId} onChange={setCustomerId} />
         </div>
 
         {error ? <ErrorBox>{error}</ErrorBox> : null}

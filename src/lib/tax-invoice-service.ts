@@ -53,6 +53,15 @@ export class TaxServiceError extends Error {
   }
 }
 
+/** Serialize destructive reset/delete against every lifecycle mutation. */
+async function withTaxTransaction<T>(businessId: string, fn: () => Promise<T>): Promise<T> {
+  return withTenantTransaction(businessId, async () => {
+    const root = await query("SELECT id FROM businesses WHERE id = $1 FOR KEY SHARE", [businessId]);
+    if (!root.rowCount) throw new TaxServiceError("not_found", 404, "کسب‌وکار یافت نشد.");
+    return fn();
+  });
+}
+
 export interface TaxActor {
   businessId: string;
   userId: string | null;
@@ -190,7 +199,7 @@ export interface TaxProfileInput {
   credentials?: TaxCredentials | null;
 }
 
-const CREDENTIAL_FIELDS = ["secret", "certificatePem"] as const;
+const CREDENTIAL_FIELDS = ["secret", "certificatePem", "webhookSecret", "tspUsername"] as const;
 
 function normalizeCredentials(input: TaxCredentials): TaxCredentials {
   const out: TaxCredentials = {};
@@ -200,6 +209,7 @@ function normalizeCredentials(input: TaxCredentials): TaxCredentials {
     if (typeof value !== "string" || value.length > 16_000) {
       throw new TaxServiceError("invalid_credentials", 400, "مقدار گواهی یا کلید نامعتبر است.");
     }
+    if (field === "webhookSecret" && value.length < 32) throw new TaxServiceError("invalid_webhook_secret", 400, "کلید وب‌هوک باید حداقل ۳۲ نویسه باشد.");
     out[field] = value;
   }
   return out;
@@ -235,7 +245,7 @@ export async function saveTaxProfile(actor: TaxActor, input: TaxProfileInput): P
     throw new TaxServiceError("invalid_taxpayer_name", 400, "نام مؤدی بیش از حد طولانی است.");
   }
   let credentialsChanged = false;
-  await withTenantTransaction(actor.businessId, async () => {
+  await withTaxTransaction(actor.businessId, async () => {
     // A credentials object is a partial write: a field it leaves out keeps the
     // stored value, so entering a new key does not discard the certificate.
     // null clears both; undefined leaves them alone.
@@ -329,7 +339,7 @@ export async function saveTaxUnits(actor: TaxActor, units: readonly TaxUnitInput
     return { locationId: unit.locationId, memoryId, unitCode };
   });
 
-  await withTenantTransaction(actor.businessId, async () => {
+  await withTaxTransaction(actor.businessId, async () => {
     for (const unit of cleaned) {
       const location = await query(`SELECT id FROM locations WHERE id = $1 AND business_id = $2`, [unit.locationId, actor.businessId]);
       if (location.rowCount === 0) throw new TaxServiceError("location_not_found", 404, "شعبه پیدا نشد.");
@@ -417,7 +427,7 @@ export async function saveTaxItemCodes(actor: TaxActor, codes: readonly TaxItemC
     }
   }
 
-  await withTenantTransaction(actor.businessId, async () => {
+  await withTaxTransaction(actor.businessId, async () => {
     for (const entry of codes) {
       const table = entry.productKind === "menu_item" ? "menu_items" : "items";
       // The product must exist in this tenant. RLS hides another tenant's rows, so
@@ -467,6 +477,7 @@ export interface TaxRecordRow {
   attempts: number;
   next_attempt_at: Date | null;
   leased_until: Date | null;
+  claim_token: string | null;
   last_error_code: string | null;
   last_error_message: string | null;
   provider_errors: ProviderIssue[];
@@ -476,7 +487,7 @@ export interface TaxRecordRow {
 const RECORD_COLUMNS = `id, location_id, order_id, kind, revision, parent_submission_id, idempotency_key,
   reference_number, uid, receipt_id, environment, provider, payload_snapshot, payload_hash,
   total_rial::bigint AS total_rial, vat_rial::bigint AS vat_rial, status, attempts, next_attempt_at, leased_until,
-  last_error_code, last_error_message, provider_errors, correlation_id`;
+  last_error_code, last_error_message, provider_errors, correlation_id, claim_token`;
 
 function mapRecord(row: Record<string, unknown>): TaxRecordRow {
   return {
@@ -704,6 +715,13 @@ interface CreateInput {
   correlationId: string;
 }
 
+/** A signed contradictory acceptance is retained; never mint another invoice for it. */
+async function assertNoAcceptanceConflict(orderId: string): Promise<void> {
+  const conflict = await query(`SELECT 1 FROM tax_invoice_submissions WHERE order_id = $1
+    AND retention_hold_at IS NOT NULL LIMIT 1`, [orderId]);
+  if (conflict.rowCount) throw new TaxServiceError("tax_retention_hold", 409, "پذیرش متناقض ثبت شده است؛ پیش از ارسال جدید با ارائه‌دهنده بررسی کنید.");
+}
+
 /**
  * Create one prepared record for an order. Runs inside the caller's tenant
  * transaction and takes the order's row lock first, so two prepares of the same
@@ -712,6 +730,7 @@ interface CreateInput {
 async function createRecord(actor: TaxActor, input: CreateInput): Promise<CreateOutcome> {
   const lock = await query<{ id: string }>(`SELECT id FROM orders WHERE id = $1 FOR UPDATE`, [input.orderId]);
   if (lock.rowCount === 0) throw new TaxServiceError("order_not_found", 404, "فروش پیدا نشد.");
+  await assertNoAcceptanceConflict(input.orderId);
 
   if (input.kind === "sale") {
     const live = await query<Record<string, unknown>>(
@@ -877,7 +896,7 @@ export async function prepareSales(actor: TaxActor, orderIds: readonly string[])
   for (const orderId of unique) {
     const correlationId = randomUUID();
     try {
-      const outcome = await withTenantTransaction(actor.businessId, () =>
+      const outcome = await withTaxTransaction(actor.businessId, () =>
         createRecord(actor, { orderId, kind: "sale", parent: null, reason: null, correlationId }),
       );
       if (outcome.outcome === "blocked") {
@@ -910,7 +929,7 @@ export async function queueAndSend(actor: TaxActor, ids: readonly string[]): Pro
   if (ids.length > MAX_BATCH) throw new TaxServiceError("batch_too_large", 400, `حداکثر ${MAX_BATCH} صورتحساب در هر بار.`);
   const unique = [...new Set(ids.map((id) => requireUuid(id)))];
   const skipped = new Map<string, string>();
-  await withTenantTransaction(actor.businessId, async () => {
+  await withTaxTransaction(actor.businessId, async () => {
     for (const id of unique) {
       const record = await loadRecord(id, true);
       if (!record) {
@@ -953,31 +972,35 @@ interface ClaimedRecord extends TaxRecordRow {
  * claim is `FOR UPDATE SKIP LOCKED`, so two workers never hold the same record.
  */
 async function claimForSend(businessId: string, ids: readonly string[] | null, now: Date, limit: number): Promise<ClaimedRecord[]> {
-  return withTenantTransaction(businessId, async () => {
+  return withTaxTransaction(businessId, async () => {
     const { rows } = await query<Record<string, unknown>>(
-      `UPDATE tax_invoice_submissions
-          SET status = 'sending', leased_until = $2::timestamptz + make_interval(secs => $3::int), updated_at = now()
-        WHERE id IN (
-          SELECT id FROM tax_invoice_submissions
-           WHERE business_id = $1 AND status = 'queued'
-             AND (next_attempt_at IS NULL OR next_attempt_at <= $2::timestamptz)
-             AND ($4::uuid[] IS NULL OR id = ANY($4::uuid[]))
-           ORDER BY next_attempt_at NULLS FIRST, prepared_at, id
-           LIMIT $5
-           FOR UPDATE SKIP LOCKED)
-      RETURNING ${RECORD_COLUMNS}, attempts`,
-      [businessId, now, Math.round(SEND_LEASE_MS / 1000), ids ? [...ids] : null, limit],
+      `SELECT ${RECORD_COLUMNS}, attempts FROM tax_invoice_submissions
+        WHERE business_id = $1 AND status = 'queued' AND retention_hold_at IS NULL
+          AND (next_attempt_at IS NULL OR next_attempt_at <= $2::timestamptz)
+          AND ($3::uuid[] IS NULL OR id = ANY($3::uuid[]))
+        ORDER BY next_attempt_at NULLS FIRST, prepared_at, id LIMIT $4 FOR UPDATE SKIP LOCKED`,
+      [businessId, now, ids ? [...ids] : null, limit],
     );
+    const claimed: ClaimedRecord[] = [];
     for (const row of rows) {
+      // Lock order: business -> submission -> source order. Never wait for an
+      // order in the claim path. Hold writers take NO KEY UPDATE on that order;
+      // recheck in a fresh statement after locking (READ COMMITTED snapshot).
+      const source = await query(`SELECT id FROM orders WHERE id = $1 FOR SHARE SKIP LOCKED`, [row.order_id]);
+      if (!source.rowCount) continue;
+      const held = await query(`SELECT 1 FROM tax_invoice_submissions WHERE order_id = $1 AND retention_hold_at IS NOT NULL LIMIT 1`, [row.order_id]);
+      if (held.rowCount) continue;
+      const token = randomUUID();
+      await query(`UPDATE tax_invoice_submissions SET status = 'sending', claim_token = $2,
+        leased_until = $3::timestamptz + make_interval(secs => $4::int), updated_at = now() WHERE id = $1`,
+      [row.id, token, now, Math.round(SEND_LEASE_MS / 1000)]);
       await recordEvent(businessId, row.id as string, {
-        type: "send_started",
-        from: "queued",
-        to: "sending",
-        correlationId: row.correlation_id as string,
+        type: "send_started", from: "queued", to: "sending", correlationId: row.correlation_id as string,
         detail: { attempt: Number(row.attempts) + 1 },
       });
+      claimed.push({ ...mapRecord(row), status: "sending", claim_token: token, attempts: Number(row.attempts) });
     }
-    return rows.map((row) => ({ ...mapRecord(row), attempts: Number(row.attempts) }));
+    return claimed;
   });
 }
 
@@ -986,10 +1009,10 @@ async function claimForSend(businessId: string, ids: readonly string[] | null, n
  * packet may or may not have arrived, so it goes to inquiry, never to a resend.
  */
 async function recoverExpiredSendLeases(businessId: string, now: Date): Promise<number> {
-  return withTenantTransaction(businessId, async () => {
+  return withTaxTransaction(businessId, async () => {
     const { rows } = await query<{ id: string; correlation_id: string }>(
       `UPDATE tax_invoice_submissions
-          SET status = 'awaiting_inquiry', leased_until = NULL, next_attempt_at = $1::timestamptz,
+          SET status = 'awaiting_inquiry', claim_token = NULL, leased_until = NULL, next_attempt_at = $1::timestamptz,
               last_error_code = 'lease_expired',
               last_error_message = 'ارسال قطع شد؛ پیش از هر ارسال مجدد، وضعیت از سامانه استعلام می‌شود.',
               updated_at = now()
@@ -1018,16 +1041,17 @@ async function sendOne(businessId: string, record: ClaimedRecord, credentials: T
       reference: record.reference_number,
       environment: record.environment,
       payload: record.payload_snapshot,
+      retry: record.attempts > 0,
       credentials,
     });
-    await withTenantTransaction(businessId, async () => {
+    const applied = await withTaxTransaction(businessId, async () => {
       const updated = await query(
         `UPDATE tax_invoice_submissions
             SET status = 'submitted', receipt_id = $2, attempts = attempts + 1, submitted_at = now(),
-                leased_until = NULL, next_attempt_at = $3::timestamptz,
+                leased_until = NULL, claim_token = NULL, next_attempt_at = $3::timestamptz,
                 last_error_code = NULL, last_error_message = NULL, provider_errors = '[]'::jsonb, updated_at = now()
-          WHERE id = $1 AND status = 'sending'`,
-        [record.id, receiptId, new Date(now.getTime() + FIRST_INQUIRY_MS)],
+          WHERE id = $1 AND status = 'sending' AND claim_token = $4::uuid`,
+        [record.id, receiptId, new Date(now.getTime() + FIRST_INQUIRY_MS), record.claim_token],
       );
       if (updated.rowCount === 1) {
         await recordEvent(businessId, record.id, {
@@ -1037,9 +1061,20 @@ async function sendOne(businessId: string, record: ClaimedRecord, credentials: T
           correlationId: record.correlation_id,
           detail: { receiptId },
         });
+        return true;
       }
+      const current = await loadRecord(record.id, true);
+      if (current) {
+        if (!["accepted", "cancelled"].includes(current.status)) {
+          await query("SELECT id FROM orders WHERE id = $1 FOR NO KEY UPDATE", [current.order_id]);
+          await query(`UPDATE tax_invoice_submissions SET retention_hold_at = COALESCE(retention_hold_at, $2) WHERE id = $1`, [record.id, now]);
+        }
+        await recordEvent(businessId, record.id, { type: "send_stale_success", correlationId: record.correlation_id,
+          detail: { receiptId, claimToken: record.claim_token } });
+      }
+      return false;
     });
-    taxLog("record.submitted", { correlationId: record.correlation_id, submissionId: record.id, provider: adapter.provider });
+    taxLog(applied ? "record.submitted" : "record.send_stale_success", { correlationId: record.correlation_id, submissionId: record.id, provider: adapter.provider });
   } catch (error) {
     const failure: SendFailure =
       error instanceof TaxProviderFailure
@@ -1050,12 +1085,12 @@ async function sendOne(businessId: string, record: ClaimedRecord, credentials: T
             message: "ارسال با خطای ناشناخته پاسخ داد؛ پیش از ارسال مجدد استعلام می‌شود.",
           };
     const decision = decideAfterSendFailure(failure, record.attempts, now);
-    await withTenantTransaction(businessId, async () => {
+    const applied = await withTaxTransaction(businessId, async () => {
       const updated = await query(
         `UPDATE tax_invoice_submissions
-            SET status = $2, attempts = $3, next_attempt_at = $4::timestamptz, leased_until = NULL,
+            SET status = $2, attempts = $3, next_attempt_at = $4::timestamptz, leased_until = NULL, claim_token = NULL,
                 last_error_code = $5, last_error_message = $6, provider_errors = $7::jsonb, updated_at = now()
-          WHERE id = $1 AND status = 'sending'`,
+          WHERE id = $1 AND status = 'sending' AND claim_token = $8::uuid`,
         [
           record.id,
           decision.status,
@@ -1064,6 +1099,7 @@ async function sendOne(businessId: string, record: ClaimedRecord, credentials: T
           decision.errorCode,
           decision.errorMessage,
           JSON.stringify(decision.providerErrors),
+          record.claim_token,
         ],
       );
       if (updated.rowCount === 1) {
@@ -1074,9 +1110,20 @@ async function sendOne(businessId: string, record: ClaimedRecord, credentials: T
           correlationId: record.correlation_id,
           detail: { failure: failure.kind, code: decision.errorCode, attempts: decision.attempts },
         });
+        return true;
       }
+      const current = await loadRecord(record.id, true);
+      if (current) {
+        if (failure.kind === "unknown_delivery" && !["accepted", "cancelled"].includes(current.status)) {
+          await query("SELECT id FROM orders WHERE id = $1 FOR NO KEY UPDATE", [current.order_id]);
+          await query(`UPDATE tax_invoice_submissions SET retention_hold_at = COALESCE(retention_hold_at, $2) WHERE id = $1`, [record.id, now]);
+        }
+        await recordEvent(businessId, record.id, { type: "send_stale_failure", correlationId: record.correlation_id,
+          detail: { failure: failure.kind, code: decision.errorCode, claimToken: record.claim_token } });
+      }
+      return false;
     });
-    taxLog("record.send_failed", {
+    taxLog(applied ? "record.send_failed" : "record.send_stale_failure", {
       correlationId: record.correlation_id,
       submissionId: record.id,
       failure: failure.kind,
@@ -1135,6 +1182,8 @@ type InquiryClaim = {
   kind: TaxKind;
   parent_submission_id: string | null;
   correlation_id: string;
+  payload_snapshot: TaxPayloadV1;
+  claim_token: string;
 };
 
 /**
@@ -1143,9 +1192,9 @@ type InquiryClaim = {
  * record the schedule has not yet reached.
  */
 async function claimForInquiry(businessId: string, ids: readonly string[] | null, now: Date, limit: number, force: boolean): Promise<InquiryClaim[]> {
-  return withTenantTransaction(businessId, async () => {
+  return withTaxTransaction(businessId, async () => {
     const { rows } = await query<InquiryClaim>(
-      `SELECT id, status, uid, reference_number, receipt_id, environment, attempts, kind, parent_submission_id, correlation_id
+      `SELECT id, status, uid, reference_number, receipt_id, environment, attempts, kind, parent_submission_id, correlation_id, payload_snapshot
          FROM tax_invoice_submissions
         WHERE business_id = $1 AND status IN ('submitted', 'awaiting_inquiry')
           AND (leased_until IS NULL OR leased_until < $2::timestamptz)
@@ -1156,14 +1205,15 @@ async function claimForInquiry(businessId: string, ids: readonly string[] | null
         FOR UPDATE SKIP LOCKED`,
       [businessId, now, force, ids ? [...ids] : null, limit],
     );
+    const claimToken = randomUUID();
     if (rows.length > 0) {
       await query(
-        `UPDATE tax_invoice_submissions SET leased_until = $2::timestamptz + make_interval(secs => $3::int)
+        `UPDATE tax_invoice_submissions SET claim_token = $4::uuid, leased_until = $2::timestamptz + make_interval(secs => $3::int)
           WHERE id = ANY($1::uuid[])`,
-        [rows.map((row) => row.id), now, Math.round(INQUIRY_LEASE_MS / 1000)],
+        [rows.map((row) => row.id), now, Math.round(INQUIRY_LEASE_MS / 1000), claimToken],
       );
     }
-    return rows;
+    return rows.map((row) => ({ ...row, claim_token: claimToken }));
   });
 }
 
@@ -1176,6 +1226,8 @@ async function inquireOne(businessId: string, claim: InquiryClaim, credentials: 
       reference: claim.reference_number,
       receiptId: claim.receipt_id,
       environment: claim.environment,
+      memoryId: claim.payload_snapshot.seller.memoryId,
+      submissionMode: claim.payload_snapshot.seller.submissionMode,
       credentials,
     });
   } catch (error) {
@@ -1183,7 +1235,7 @@ async function inquireOne(businessId: string, claim: InquiryClaim, credentials: 
   }
 
   const decision = decideAfterInquiry(claim.status, outcome, claim.attempts, now);
-  await withTenantTransaction(businessId, async () => {
+  const applied = await withTaxTransaction(businessId, async () => {
     const updated = await query<{ id: string }>(
       `UPDATE tax_invoice_submissions
           SET status = $2::text,
@@ -1191,13 +1243,14 @@ async function inquireOne(businessId: string, claim: InquiryClaim, credentials: 
               inquiry_result = $4::jsonb,
               last_inquired_at = $5::timestamptz,
               next_attempt_at = $6::timestamptz,
-              leased_until = NULL,
+              leased_until = NULL, claim_token = NULL,
               last_error_code = $7::text,
               last_error_message = $8::text,
               provider_errors = $9::jsonb,
-              accepted_at = CASE WHEN $2::text = 'accepted' THEN now() ELSE accepted_at END,
+              accepted_at = CASE WHEN $2::text = 'accepted' THEN COALESCE(accepted_at, now()) ELSE accepted_at END,
               updated_at = now()
-        WHERE id = $1 AND status = $10::text
+        WHERE id = $1 AND status = $10::text AND claim_token = $11::uuid
+          AND receipt_id IS NOT DISTINCT FROM $12::text
       RETURNING id`,
       [
         claim.id,
@@ -1210,11 +1263,24 @@ async function inquireOne(businessId: string, claim: InquiryClaim, credentials: 
         decision.errorMessage,
         JSON.stringify(decision.providerErrors),
         claim.status,
+        claim.claim_token,
+        claim.receipt_id,
       ],
     );
     if (updated.rowCount === 0) {
-      // A concurrent move already changed this record. Its own history says what happened.
-      return;
+      // Fencing forbids an old worker overwriting current status. Still preserve
+      // verified acceptance evidence, which must not disappear on tenant purge.
+      const current = await loadRecord(claim.id, true);
+      if (current) {
+        const acceptance = outcome.state === "accepted" && (!current.receipt_id || current.receipt_id === outcome.receiptId);
+        if (acceptance && !["accepted", "cancelled"].includes(current.status)) {
+          await query("SELECT id FROM orders WHERE id = $1 FOR NO KEY UPDATE", [current.order_id]);
+          await query(`UPDATE tax_invoice_submissions SET retention_hold_at = COALESCE(retention_hold_at, $2) WHERE id = $1`, [claim.id, now]);
+        }
+        await recordEvent(businessId, claim.id, { type: "inquiry_stale", correlationId: claim.correlation_id,
+          detail: { state: outcome.state, acceptanceRetained: acceptance } });
+      }
+      return false;
     }
     await recordEvent(businessId, claim.id, {
       type: "inquired",
@@ -1249,7 +1315,12 @@ async function inquireOne(businessId: string, claim: InquiryClaim, credentials: 
         detail: { note: "the authority holds no packet under this uid; a resend reuses it" },
       });
     }
+    return true;
   });
+  if (!applied) {
+    taxLog("record.inquiry_stale", { correlationId: claim.correlation_id, submissionId: claim.id, state: outcome.state });
+    return;
+  }
   taxLog("record.inquired", { correlationId: claim.correlation_id, submissionId: claim.id, state: outcome.state, to: decision.to });
 }
 
@@ -1278,10 +1349,11 @@ export async function inquireSubmissions(
 /** `error` → `queued`: an operator asked for another attempt. The same uid is reused. */
 export async function retrySubmission(actor: TaxActor, id: string): Promise<TaxStatus | null> {
   requireUuid(id);
-  const moved = await withTenantTransaction(actor.businessId, async () => {
+  const moved = await withTaxTransaction(actor.businessId, async () => {
     const record = await loadRecord(id, true);
     if (!record) throw new TaxServiceError("not_found", 404, "صورتحساب پیدا نشد.");
     if (record.status !== "error") throw new TaxServiceError("not_retryable", 409, "فقط خطا را می‌توان دوباره ارسال کرد.");
+    await assertNoAcceptanceConflict(record.order_id);
     await query(
       `UPDATE tax_invoice_submissions
           SET status = 'queued', next_attempt_at = NULL, last_error_code = NULL, last_error_message = NULL, updated_at = now()
@@ -1313,7 +1385,7 @@ function requireReason(reason: string): string {
 export async function amendSubmission(actor: TaxActor, id: string, reason: string): Promise<PrepareResult> {
   requireUuid(id);
   const text = requireReason(reason);
-  return withTenantTransaction(actor.businessId, async () => {
+  return withTaxTransaction(actor.businessId, async () => {
     const parent = await loadRecord(id, true);
     if (!parent) throw new TaxServiceError("not_found", 404, "صورتحساب پیدا نشد.");
     if (parent.status !== "accepted") throw new TaxServiceError("not_accepted", 409, "فقط صورتحساب پذیرفته‌شده را می‌توان اصلاح کرد.");
@@ -1328,7 +1400,7 @@ export async function amendSubmission(actor: TaxActor, id: string, reason: strin
 export async function cancelSubmission(actor: TaxActor, id: string, reason: string): Promise<PrepareResult> {
   requireUuid(id);
   const text = requireReason(reason);
-  return withTenantTransaction(actor.businessId, async () => {
+  return withTaxTransaction(actor.businessId, async () => {
     const parent = await loadRecord(id, true);
     if (!parent) throw new TaxServiceError("not_found", 404, "صورتحساب پیدا نشد.");
     if (parent.status !== "accepted") throw new TaxServiceError("not_accepted", 409, "فقط صورتحساب پذیرفته‌شده را می‌توان ابطال کرد.");
@@ -1342,7 +1414,7 @@ export async function cancelSubmission(actor: TaxActor, id: string, reason: stri
 /** `rejected` → a new prepared revision of the same kind, built from the current source. */
 export async function resubmitSubmission(actor: TaxActor, id: string): Promise<PrepareResult> {
   requireUuid(id);
-  return withTenantTransaction(actor.businessId, async () => {
+  return withTaxTransaction(actor.businessId, async () => {
     const rejected = await loadRecord(id, true);
     if (!rejected) throw new TaxServiceError("not_found", 404, "صورتحساب پیدا نشد.");
     if (rejected.status !== "rejected") throw new TaxServiceError("not_rejected", 409, "فقط صورتحساب ردشده را می‌توان دوباره صادر کرد.");
@@ -1390,7 +1462,11 @@ export async function runTaxInvoiceTick(now = new Date()): Promise<{ businesses:
       `SELECT DISTINCT business_id FROM tax_invoice_submissions
         WHERE (status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= $1))
            OR (status = 'sending' AND leased_until < $1)
-           OR (status IN ('submitted', 'awaiting_inquiry') AND (next_attempt_at IS NULL OR next_attempt_at <= $1))`,
+           OR (status IN ('submitted', 'awaiting_inquiry') AND (next_attempt_at IS NULL OR next_attempt_at <= $1))
+           OR (status IN ('accepted', 'rejected', 'cancelled')
+               AND COALESCE(accepted_at, submitted_at) <= $1::timestamptz -
+                 (SELECT archive_after_days FROM tax_invoice_profiles p WHERE p.business_id = tax_invoice_submissions.business_id) * interval '1 day'
+               AND NOT EXISTS (SELECT 1 FROM tax_invoice_archives a WHERE a.submission_id = tax_invoice_submissions.id))`,
       [now],
     ),
   );
@@ -1403,6 +1479,8 @@ export async function runTaxInvoiceTick(now = new Date()): Promise<{ businesses:
       submitted += sent.submitted;
       const checked = await inquireSubmissions(businessId, { force: false, now });
       inquired += checked.inquired;
+      const { archiveTaxInvoices } = await import("./tax-invoice-archive");
+      await archiveTaxInvoices(businessId, now);
     } catch (error) {
       taxLog("tick.business_failed", { businessId, error: error instanceof Error ? error.message : String(error) });
     }

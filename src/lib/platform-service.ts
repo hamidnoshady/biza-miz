@@ -1181,15 +1181,25 @@ async function assertNoOperationalChildrenRemain(
  *    tenant had any of them).
  */
 /**
- * Issue #866 — the taxpayer records a reset or hard delete must remove. They
+ * Issue #866 — purge only non-accepted, non-in-flight taxpayer records. They
  * are immutable by design (a submission is never deleted in normal operation),
- * and they RESTRICT-reference the orders and branches they report, so they go
+ * Accepted and unresolved provider history blocks destructive operations.
+ * Other records RESTRICT-reference orders and branches they report, so they go
  * first. The purge is transaction-local, the same as the factory-reset flag, and
  * is the only path migration 0216 allows a deletion through. A correction points
  * at the record it corrects, so records are removed leaves first.
  */
 async function purgeTaxInvoiceRecords(client: PoolClient, businessId: string): Promise<void> {
+  const retained = await client.query(`SELECT 1 FROM tax_invoice_submissions
+    WHERE business_id = $1 AND (accepted_at IS NOT NULL OR status = 'accepted') LIMIT 1`, [businessId]);
+  if (retained.rowCount) throw new BusinessDeleteBlockedError("tax_accepted_retained");
+  const held = await client.query(`SELECT 1 FROM tax_invoice_submissions WHERE business_id = $1 AND retention_hold_at IS NOT NULL LIMIT 1`, [businessId]);
+  if (held.rowCount) throw new BusinessDeleteBlockedError("tax_retention_hold");
+  const pending = await client.query(`SELECT 1 FROM tax_invoice_submissions WHERE business_id = $1
+    AND status IN ('sending', 'submitted', 'awaiting_inquiry') LIMIT 1`, [businessId]);
+  if (pending.rowCount) throw new BusinessDeleteBlockedError("tax_inflight_retained");
   await client.query("SELECT set_config('app.tax_submission_purge', 'on', true)");
+  await client.query("DELETE FROM tax_invoice_archives WHERE business_id = $1", [businessId]);
   await client.query("DELETE FROM tax_invoice_events WHERE business_id = $1", [businessId]);
   for (;;) {
     const removed = await client.query(

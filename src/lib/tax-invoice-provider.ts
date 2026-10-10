@@ -14,13 +14,14 @@
  *     one. It is for development and tests, and every record it touches says so
  *     («آزمایشی»). It never talks to the network.
  *
- *   - `liveProvider` is the production adapter, and it is not built yet. The
+ *   - `liveProvider` fails closed by default. The opt-in transport requires a reviewed codec. The
  *     Moodian protocol signs each request and encrypts the packet with keys issued
  *     to the taxpayer's own certificate. Until that is implemented and checked
  *     against the authority's sandbox, a production record fails permanently with
  *     `live_provider_unavailable` rather than sending something half-correct.
  */
 import { randomUUID } from "node:crypto";
+import { MoodianTaxProvider, type MoodianCodec } from "./tax-invoice-moodian";
 import type { TaxEnvironment } from "./tax-invoice";
 import type { InquiryOutcome, ProviderIssue, SendFailure, TaxPayloadV1 } from "./tax-invoice-core";
 
@@ -30,6 +31,10 @@ export interface TaxCredentials {
   secret?: string;
   /** A certificate chain the authority can verify the signature against. */
   certificatePem?: string;
+  /** Platform/TSP callback contract only; never reused as a signing private key. */
+  webhookSecret?: string;
+  /** GET_TOKEN username for a trusted service provider, not the taxpayer id. */
+  tspUsername?: string;
 }
 
 export interface TaxSubmitRequest {
@@ -39,6 +44,7 @@ export interface TaxSubmitRequest {
   /** The stored snapshot, sent exactly as it was prepared. Never rebuilt. */
   payload: TaxPayloadV1;
   credentials: TaxCredentials | null;
+  retry?: boolean;
 }
 
 export interface TaxInquiryRequest {
@@ -47,6 +53,9 @@ export interface TaxInquiryRequest {
   receiptId: string | null;
   environment: TaxEnvironment;
   credentials: TaxCredentials | null;
+  /** From the stored submission snapshot, never current settings. */
+  memoryId?: string;
+  submissionMode?: "direct" | "tsp";
 }
 
 /** Thrown by an adapter with the classified failure; the service applies the policy. */
@@ -189,7 +198,15 @@ export function sandboxProvider(): SandboxTaxProvider {
   return sandboxSingleton;
 }
 
-const liveProviderSingleton = new UnavailableTaxProvider();
+let liveProviderSingleton: TaxProviderAdapter = new UnavailableTaxProvider();
+
+/** Server bootstrap only. An env flag alone cannot activate an unverified signer. */
+export function installVerifiedMoodianCodec(codec: MoodianCodec): void {
+  if (process.env.TAX_MOODIAN_TRANSPORT_ENABLED !== "true" || !codec.verificationReference.trim()) {
+    throw new Error("moodian_transport_not_approved");
+  }
+  liveProviderSingleton = new MoodianTaxProvider({ enabled: true, codec });
+}
 
 /** The adapter a profile's environment selects. Production never falls back to the simulator. */
 export function providerFor(environment: TaxEnvironment): TaxProviderAdapter {

@@ -4,8 +4,8 @@ Issue #866. This is the reference for the taxpayer submission workspace inside
 Accounting (`/accounting/tax-invoices`). It describes what is built, how a record
 moves, what guarantees the database enforces, and what is not live yet.
 
-> **Status: live transmission is not active.** The production adapter is a stub
-> that fails every record permanently with `live_provider_unavailable`. The
+> **Status: live transmission is not active.** The default production adapter
+> fails every record permanently with `live_provider_unavailable`. The
 > sandbox simulator is the only adapter that submits. The live protocol (signing,
 > certificates, pattern versions, and the exact header and body fields) has not
 > been verified against the authority's official specification and sandbox. Do not
@@ -18,7 +18,7 @@ A tax record reports **one completed sale** (an `orders` row with status
 `completed`) to the taxpayer system. It is a first-class, append-only submission:
 
 - It keeps the **snapshot that was sent** (`payload_snapshot`) with its hash
-  (`payload_hash`) and payload version. The snapshot is what the authority received.
+  (`payload_hash`) and payload version. It is the immutable internal payload supplied to the adapter (not yet an official authority-wire schema).
   It is never rebuilt from current products or customers.
 - It keeps the **reference number** (`{prefix-}{unit}-{orderNumber}-{S|A|C}{revision}`,
   e.g. `BIZ-K1-1042-S1`), the **uid** (the sender's «شناسه یکتای ارسال», a UUID
@@ -65,7 +65,7 @@ revision, and the refused record stays as it was.
   (5 s, doubling, capped at 5 min). After 8 attempts it becomes `error`
   (`retries_exhausted`).
 - **unknown delivery** (a timeout after the packet may have left): `awaiting_inquiry`.
-  The record is **never resent blind**. It is inquired by uid first.
+  The record is **never resent blind**, even beyond eight attempts. It is inquired by uid first.
 - **rejected** (the authority refused the content): terminal. A new revision is
   created to correct it. The refused record is kept as it was.
 - **error** (permanent failure, or retries exhausted): an operator's retry moves it
@@ -106,8 +106,7 @@ and an accepted amendment offers only amend. A withdrawn invoice cannot be amend
   `processing` stays `submitted` and is asked again later.
 - **Observability.** Structured logs (`component: "tax-invoice"`) with the record's
   correlation id, and the event history per record.
-- **Webhooks and callbacks.** Not implemented. The worker inquires by uid. There is
-  no inbound endpoint, so no signature verification exists yet.
+- **Webhooks and callbacks.** Tenant-bound signed TSP callbacks are implemented (contract below). No official Moodian callback protocol is assumed. Inquiry remains the default.
 
 ## Database guarantees
 
@@ -120,7 +119,8 @@ level security and a `tenant_isolation` policy:
 | `tax_invoice_units` | one per branch: memory id and unit code |
 | `tax_item_codes` | a 13-digit «شناسه کالا/خدمت» per product |
 | `tax_invoice_submissions` | the records above |
-| `tax_invoice_events` | the append-only history |
+| `tax_invoice_events` | the append-only history, callback identity and body hash |
+| `tax_invoice_archives` | immutable canonical JSON checkpoint, SHA256, tenant RLS (migration 0217) |
 
 The database enforces what the service also checks:
 
@@ -130,10 +130,10 @@ The database enforces what the service also checks:
 - A **receipt is recorded once**.
 - **Status moves must be legal** (`tax_status_transition_allowed`).
 - A submission is **never deleted**, except by the purge, which is gated on the
-  transaction-local flag `app.tax_submission_purge` (see
+  transaction-local flag `app.tax_submission_purge`; accepted and unresolved in-flight records are never purgeable (see
   [Business reset and hard delete](#business-reset-and-hard-delete)).
 - **Events are append-only**: `UPDATE` always fails, and `DELETE` fails unless the
-  purge flag is set.
+  purge flag is set; accepted history remains undeletable even with that flag.
 
 These are tested against a real database, as the application role, in
 `integration/tax-invoices.integration.test.ts`.
@@ -151,7 +151,7 @@ These are tested against a real database, as the application role, in
 | Export the register | `tax.export` | | ✓ | ✓ | ✓ |
 | Manage taxpayer settings, units, item codes, credentials | `tax.manage_settings` | | | ✓ | ✓ |
 
-Every API route checks its capability with `requirePermission`. The UI shows only
+Every browser API route checks its capability with `requirePermission`. The session-less callback authenticates only with its tenant-bound HMAC. The UI shows only
 the actions the member's capabilities grant, and the API checks the same grant
 again. Cashier, waiter and kitchen roles hold none of these.
 
@@ -166,7 +166,7 @@ again. Cashier, waiter and kitchen roles hold none of these.
   are sealed with `encryptSecret` under the platform integration key
   (`INTEGRATIONS_ENCRYPTION_KEY`, or a key derived from `JWT_SECRET`). A credentials
   object is a partial write: named fields replace, empty strings are ignored, and
-  `null` clears both. The audit row `tax_invoice.settings_updated` records that
+  `null` clears all fields. `webhookSecret` (at least 32 characters) and `tspUsername` share the same sealed, partial-write store. The audit row `tax_invoice.settings_updated` records that
   credentials changed, never their values.
 - **Units** (per branch): memory id (up to 64 characters) and unit code. The
   reference uses the unit code when present, and otherwise the first eight hex
@@ -213,7 +213,7 @@ Reports on the **Reports** tab:
 
 - **Register**: sent, accepted and rejected records, with status filters, the
   date range, branch, and a free-text search over the reference, the sale number and the buyer.
-  Keyset pagination. The API also accepts a customer filter; the screen does not offer it yet.
+  Keyset pagination. A dedicated customer selector filters the register, its CSV export and reconciliation. Register filtering uses the stored buyer ID; reconciliation filters the source sale customer ID.
 - **Queue**: records that are queued, sending, submitted or awaiting inquiry.
   Inquire all, or the selected ones; send the first 50 queued records.
 - **Unprepared sales**: completed sales with no record yet. Batch preparation.
@@ -229,20 +229,113 @@ records of the same sale, and a link to the source sale
 
 ## Business reset and hard delete
 
-Both paths delete a business's operational data. The tax records must go first:
+Accepted records (including accepted amendments and accepted-then-cancelled sales)
+are retained indefinitely. Migrations 0217–0220 add acceptance-anchor, archive, in-flight deletion,
+opaque worker-claim fencing and disputed-evidence retention guards. Acceptance timestamps
+cannot be cleared to evade retention. Reset/delete fail atomically with
+`tax_accepted_retained`; unresolved sends fail with `tax_inflight_retained`;
+disputed evidence fails with `tax_retention_hold`.
+The business and source documents remain intact. There is no administrative override
+or finite deletion deadline in this implementation.
 
-- They are immutable, so the generic sweep cannot delete them.
-- Their `order_id` references are `RESTRICT`, so the sales cannot go while they exist.
-- Their events are append-only.
+The destructive service locks the business root FOR UPDATE; lifecycle writes take
+FOR KEY SHARE before touching invoice rows. In-flight network operations already
+have a protected pending record. This prevents reset from erasing an acceptance
+that is committing concurrently. A pending inquiry's opaque token is invalidated
+by a callback, so a slow response cannot overwrite that callback. Fenced responses
+still append audit evidence. A late signed acceptance of a terminal rejected record,
+or a late ambiguous/successful send, puts a separate immutable `retention_hold_at`
+on the record rather than falsely changing its status or `accepted_at`. Holds block
+new preparations and claims for that source order; order-level locks serialize new
+claims with hold writers. A claim committed before the hold can already be in flight;
+its response is retained for investigation, not silently discarded. There is no
+automatic conflict resolver/hold-clear endpoint. Operators must reconcile provider
+truth before a reviewed future resolution workflow can release a hold. Migration
+0220 also conservatively holds legacy exhausted ambiguous deliveries in error/queue.
+The record drawer displays an explicit Persian warning for a held record.
 
-`purgeTaxInvoiceRecords` in `platform-service.ts` runs first in
-`clearBusinessDeleteBlockers`, which both `resetBusiness` and `hardDeleteBusiness`
-call. It sets `app.tax_submission_purge` for the transaction, deletes the events,
-then deletes the submissions leaves first (children before parents), and only then
-does the generic sweep run.
+Other records (draft/queued, definitively rejected or not-delivered errors) can be
+purged by the existing explicit destructive operation: archives, events, then
+submissions leaves-first, under the transaction-local purge flag. Normal archival
+never deletes anything. Tests cover both permitted purge and retention refusal.
 
-Tested in `integration/tax-invoices-business-delete.integration.test.ts`. With the
-purge disabled, both paths fail, so the test covers the purge itself.
+## Archive policy and download
+
+Settings → **بایگانی و نگهداری صورتحساب‌ها** configures the archive-after threshold
+(default 365 days, range 1–36500). This is an operational threshold, **not a legal
+retention period**. The worker and the explicit archive action append a checkpoint
+for old terminal submitted/accepted records, in batches of 100. The checkpoint
+contains the exact immutable payload, record metadata and event history as of that
+checkpoint, canonically hashed as `tax-archive/v1`. Later lifecycle events remain in
+the live append-only history; an old checkpoint is never rewritten.
+
+`GET /api/ledger/tax-invoices/archive` reads the policy (`tax.view`). PUT updates
+it and POST archives due records (`tax.manage_settings`). Once archived, the record
+drawer offers JSON download (`tax.export`):
+`GET /api/ledger/tax-invoices/archive?submissionId=<uuid>`. The hash is verified
+before download; the original payload hash is verified before archival. Credentials
+are not included. Tenant exports/backups discover the new RLS table via the catalog.
+
+## Signed TSP callback contract (platform v1, not an official authority contract)
+
+`POST /api/integrations/tax-invoices/webhook/<businessId>` is session-less. The URL
+selects a **tenant-scoped** credential read; it grants no mutation rights. No new RLS
+bypass is used. Set `profile.credentials.webhookSecret` through the settings API/UI.
+Use a random secret of at least 32 characters, separate from the signing key.
+
+Headers: `X-Tax-Timestamp` = 13-digit Unix milliseconds; `X-Tax-Signature` = lowercase
+hex HMAC-SHA256 over `timestamp + "\n" + businessId + "\n" + exact UTF-8 body`.
+Clock skew must be within five minutes. The stream is bounded at 64 KiB even without
+Content-Length. Signatures are compared in constant time **before JSON is trusted**.
+
+```json
+{"eventId":"provider-delivery-123","provider":"moodian","uid":"00000000-0000-4000-8000-000000000001","status":"accepted","receiptId":"authority-receipt"}
+```
+
+Statuses: `accepted` / `processing` require a receipt; `rejected` requires nonempty
+`issues: [{"code":"...","message":"...","field":"optional"}]`. UID and provider
+must match a row in that tenant. Receipt conflicts are refused. Same event ID and
+same raw body return `{duplicate:true}`; changed content under the same ID is 409.
+Serialize event identities and lock records; one event row is stored transactionally
+with a legal lifecycle move. Terminal/out-of-order callbacks append an ignored event,
+never regress state or create a new submission. Conflicting terminal events include
+an anomaly marker and full bounded outcome for investigation. A contradictory late
+acceptance retains the evidence under an indefinite hold, without rewriting terminal
+status. Retries after the five-minute window must use
+a fresh header timestamp/signature but the same body/event ID.
+
+## Gated public-documentation transport
+
+`MoodianTaxProvider` implements signed POST flow plumbing: self-tsp/tsp GET_TOKEN,
+Bearer authorization, async/normal-enqueue, and INQUIRY_BY_UID with stored fiscal ID.
+It reuses UID and retry flags, restricts the endpoint to `tp.tax.gov.ir`, forbids
+redirects, bounds response bytes and time, verifies responses via a codec, and never
+interprets a missing/malformed inquiry row as permission to resend. A failure after
+invoice POST is **unknown delivery**, including HTTP errors and invalid signatures.
+Tokens are per call, not cached across tenants.
+
+Public reference (2023 reproduction; not proof of 2026 compatibility):
+https://rahrokh.com/technical-instructions-on-how-to-connect-to-modian-system-2/
+Tables 2–11 and the GET_TOKEN/inquiry sections document these paths, envelopes,
+Bearer token and uid/fiscalId pairing. Its normalization/signing section describes
+flatten/sort/# escaping, RSA2048-SHA256, XOR + AES/GCM and RSA-OAEP key wrapping, but
+its examples have inconsistencies (including IV length) and no verified test vectors.
+
+**Unverified/not shipped:** cryptographic codec, official taxid/check digit and
+invoice-pattern mapping, normalization edge cases/array ordering, current certificates
+and trust roots/key rotation, encryption wire layout, response signatures, current
+provider error schema and official sandbox acceptance. Internal reference numbers
+are NOT official 22-character taxids. The internal payload is not claimed to be an
+authority invoice schema. No real invoice or credential was sent during development.
+
+Application production remains fail-closed. Enabling requires BOTH
+`TAX_MOODIAN_TRANSPORT_ENABLED=true` and an explicit server bootstrap call to
+`installVerifiedMoodianCodec(codec)` with reviewed mapping/signing/encryption and
+response verification plus its `verificationReference`. No such bootstrap/codec is
+installed here; an environment flag alone does nothing. Tests exercise HTTP with a
+fake codec/fetch only and do **not** certify protocol compliance. Simulator stays the
+default environment. A verified codec must derive only from the stored snapshot and
+persist any additional authority taxid/wire-mapping version before live rollout.
 
 ## Code map
 
@@ -254,7 +347,7 @@ purge disabled, both paths fail, so the test covers the purge itself.
 | `src/lib/tax-invoice-service.ts` | write path, worker tick, settings, units, item codes, prepare, send, inquiry, retry, amend, cancel, resubmit |
 | `src/lib/tax-invoice-queries.ts` | read side: register, detail, unprepared, reconciliation, provider errors, queue, export |
 | `src/lib/tax-invoice-http.ts` | error mapping, JSON body reader, filter parsing |
-| `src/app/api/ledger/tax-invoices/` | 16 route handlers, each checking its capability |
+| `src/app/api/ledger/tax-invoices/` | 17 browser route handlers, each checking its capability |
 | `src/app/(app)/accounting/tax-invoices-section.tsx` | the register, queue and unprepared views |
 | `src/app/(app)/accounting/tax-invoice-settings.tsx` | taxpayer profile, units, item codes |
 | `src/app/(app)/accounting/tax-invoice-reports.tsx` | reconciliation, provider errors, export |
@@ -281,24 +374,11 @@ Client code imports only types from `tax-invoice-core.ts`, because that module i
 
 ## Open items
 
-These are deliberate gaps in this slice. Each one is either a decision still needed
-or work that needs the authority's specification and sandbox.
-
-1. **Live protocol.** Verify the signing, certificate, pattern version, header and
-   body fields (including the authority's identifiers for the packet and its
-   timestamps) against the official specification and the authority's sandbox. Then
-   implement the production adapter behind `providerFor`. Until then, production
-   records fail closed.
-2. **TSP mode.** The setting exists. The token flow, and the TSP-specific request
-   fields, are not implemented.
-3. **Webhooks and callbacks.** Not implemented. Inquiry by uid is the only way a
-   record learns its outcome. If the authority pushes callbacks, the endpoint must
-   verify their signatures before it changes any record.
-4. **Archive.** The register exports to CSV. There is no separate archive store or
-   retention policy.
-5. **Customer filter.** The API supports a customer filter; the screen currently
-   offers buyer/reference search but no dedicated customer selector.
-6. **Merge gate.** PR #897 is blocked by an inherited expenses visual regression
-   from issue #832 awaiting owner approval. Production build and the other CI
-   checks pass; the local build was OOM-killed. Node 24 type, unit, lint, design
-   and targeted database checks also passed locally. See `ISSUE_866_PLAN.md`.
+1. Obtain current official protocol/SDK/test vectors and sandbox access; review and
+   implement the gated codec, persist official taxid and mapped-wire version, then
+   validate actual direct and TSP acceptance/inquiry before considering live use.
+2. Confirm indefinite retention and the resulting reset/delete refusal with the
+   product/legal owner. No accepted record is deleted while that decision is open.
+3. PR #897 must remain unmerged for the user. The expenses visual diff is inherited
+   (4.06%, identical bounds on two main runs); no baseline or expenses edits are made.
+   Latest verification and CI state are in `ISSUE_866_PLAN.md`.

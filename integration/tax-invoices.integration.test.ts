@@ -10,7 +10,7 @@
  * The worker tick and business reset / hard delete have their own files. The
  * tick serves every business in the database, and reset runs under the owner.
  */
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createAppRole } from "../scripts/create-app-role";
@@ -200,17 +200,17 @@ const SALE_CLOSED = "2026-10-01T10:00:00Z";
  * A closed sale, written the way the POS writes one: an order opened, its served
  * lines added while it is open, then closed. VAT is 9% of the subtotal.
  */
-async function sale(t: Tenant, lines: SaleLine[], options: { status?: "completed" | "voided" } = {}): Promise<Sale> {
+async function sale(t: Tenant, lines: SaleLine[], options: { status?: "completed" | "voided"; customerId?: string } = {}): Promise<Sale> {
   const subtotal = lines.reduce((sum, line) => sum + line.price * line.quantity, 0);
   const vat = (subtotal * 9) / 100;
   if (!Number.isInteger(vat)) throw new Error("fixture subtotals must make whole-rial VAT");
   const total = subtotal + vat;
   orderSeq += 1;
   const order = await owner.query<{ id: string }>(
-    `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, opened_at, opened_by)
-     VALUES ($1, $2, 'takeaway', 'open', $3, 0, 0, $4, $5, $6::timestamptz, $7)
+    `INSERT INTO orders (location_id, order_number, type, status, subtotal, discount, service_charge, tax, total, opened_at, opened_by, customer_id)
+     VALUES ($1, $2, 'takeaway', 'open', $3, 0, 0, $4, $5, $6::timestamptz, $7, $8)
      RETURNING id`,
-    [t.locationId, orderSeq, subtotal, vat, total, SALE_OPENED, t.userId],
+    [t.locationId, orderSeq, subtotal, vat, total, SALE_OPENED, t.userId, options.customerId ?? null],
   );
   const orderId = order.rows[0].id;
   for (const line of lines) {
@@ -921,4 +921,248 @@ describe("reconciliation against the sales ledger", () => {
     expect(page.rows.find((row) => row.orderId === s.orderId)).toMatchObject({ state: "mismatch", recordStatus: "accepted" });
     expect((await stored(id)).status).toBe("accepted");
   });
+});
+
+
+describe("follow-up customer filters, callbacks and indefinite archive", () => {
+  it("filters stored buyer identities and reconciliation sources under the app role", async () => {
+    const t = await seedTenant("Filter Co"); await enableTax(t); sandboxWith();
+    const menu = await product(t, "کوکو", 60000, "1111111111111");
+    const customer = await owner.query<{ id: string }>(`INSERT INTO parties (business_id, name, role) VALUES ($1, 'مشتری ویژه', 'customer') RETURNING id`, [t.businessId]);
+    const customerId = customer.rows[0].id;
+    const first = await sale(t, [{ productId: menu, name: "کوکو", price: 60000, quantity: 1 }], { customerId });
+    const other = await sale(t, [{ productId: menu, name: "کوکو", price: 60000, quantity: 2 }]);
+    await prepare(t, first.orderId); await prepare(t, other.orderId);
+    expect((await queries.listTaxRegister(t.businessId, { customerId })).rows.map((row) => row.orderId)).toEqual([first.orderId]);
+    const recon = await queries.getTaxReconciliation(t.businessId, { from: "2026-10-01", to: "2026-10-01", customerId });
+    expect(recon.rows.map((row) => row.orderId)).toEqual([first.orderId]);
+    expect(recon.totals.sourceTotalRial).toBe(first.total);
+    expect(await queries.listTaxCustomers(t.businessId)).toContainEqual({ id: customerId, name: "مشتری ویژه" });
+    expect((await queries.listTaxRegister(t.businessId, { customerId: randomUUID() })).rows).toEqual([]);
+  });
+
+  it("authenticates callbacks, deduplicates concurrent replay and keeps terminal state unchanged", async () => {
+    const { applyTaxCallback } = await import("../src/lib/tax-invoice-callback");
+    const t = await seedTenant("Callback Co"); await enableTax(t); sandboxWith();
+    const secret = "callback-secret-for-tests-at-least-32-chars";
+    await service.saveTaxProfile(t.actor, { credentials: { webhookSecret: secret } });
+    const menu = await product(t, "کوکو", 60000, "1111111111111");
+    const saleRow = await sale(t, [{ productId: menu, name: "کوکو", price: 60000, quantity: 1 }]);
+    const { id } = await prepare(t, saleRow.orderId); await service.queueAndSend(t.actor, [id]);
+    const record = await stored(id);
+    const now = new Date(); const timestamp = String(now.getTime());
+    const raw = JSON.stringify({ eventId: "delivery-1", provider: "sandbox", uid: record.uid, status: "accepted", receiptId: record.receipt_id });
+    const headersFor = (body: string, tenant = t.businessId) => new Headers({ "x-tax-timestamp": timestamp, "x-tax-signature": createHmac("sha256", secret).update(`${timestamp}\n${tenant}\n${body}`).digest("hex") });
+    await expect(applyTaxCallback(t.businessId, raw, new Headers(), now)).rejects.toMatchObject({ code: "invalid_signature" });
+    await expect(applyTaxCallback(t.businessId, raw + " ", headersFor(raw), now)).rejects.toMatchObject({ code: "invalid_signature" });
+    const results = await Promise.all([applyTaxCallback(t.businessId, raw, headersFor(raw), now), applyTaxCallback(t.businessId, raw, headersFor(raw), now)]);
+    expect(results.filter((result) => result.duplicate)).toHaveLength(1);
+    expect((await stored(id)).status).toBe("accepted");
+    const events = await owner.query(`SELECT * FROM tax_invoice_events WHERE submission_id = $1 AND callback_event_id = 'delivery-1'`, [id]);
+    expect(events.rowCount).toBe(1);
+    const altered = raw.replace("accepted", "processing");
+    await expect(applyTaxCallback(t.businessId, altered, headersFor(altered), now)).rejects.toMatchObject({ code: "callback_conflict" });
+    const late = JSON.stringify({ eventId: "delivery-2", provider: "sandbox", uid: record.uid, status: "rejected", issues: [{ code: "late", message: "late" }] });
+    expect(await applyTaxCallback(t.businessId, late, headersFor(late), now)).toMatchObject({ ignored: true });
+    expect((await stored(id)).status).toBe("accepted");
+    const foreign = await seedTenant("Foreign callback"); await enableTax(foreign);
+    await service.saveTaxProfile(foreign.actor, { credentials: { webhookSecret: secret } });
+    await expect(applyTaxCallback(foreign.businessId, raw, headersFor(raw), now)).rejects.toMatchObject({ code: "invalid_signature" });
+    await expect(applyTaxCallback(foreign.businessId, raw, headersFor(raw, foreign.businessId), now)).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("archives submitted payloads reproducibly and never deletes accepted history even with purge", async () => {
+    const archive = await import("../src/lib/tax-invoice-archive");
+    const { hashPayload } = await import("../src/lib/tax-invoice-core");
+    const t = await seedTenant("Archive Co"); await enableTax(t); sandboxWith();
+    const menu = await product(t, "کوکو", 60000, "1111111111111");
+    const s = await sale(t, [{ productId: menu, name: "کوکو", price: 60000, quantity: 1 }]);
+    const { id } = await prepare(t, s.orderId); await service.queueAndSend(t.actor, [id]);
+    await service.inquireSubmissions(t.businessId, { ids: [id], force: true });
+    await archive.saveTaxArchivePolicy(t.actor, 1);
+    const future = new Date(Date.now() + 86400000 * 2);
+    expect(await archive.archiveTaxInvoices(t.businessId, future)).toBe(1);
+    expect(await archive.archiveTaxInvoices(t.businessId, future)).toBe(0);
+    const saved = await archive.readTaxArchive(t.businessId, id) as { snapshot: { record: StoredRecord }; sha256: string };
+    expect(saved.sha256).toBe(hashPayload(saved.snapshot));
+    expect(verifyPayloadHash(saved.snapshot.record.payload_snapshot, saved.snapshot.record.payload_hash)).toBe(true);
+    const foreign = await seedTenant("Foreign archive");
+    expect(await archive.readTaxArchive(foreign.businessId, id)).toBeNull();
+    await expect(dbLib.withTenantTransaction(foreign.businessId, () => dbLib.query(
+      `INSERT INTO tax_invoice_archives (business_id, submission_id, snapshot, sha256) VALUES ($1, $2, '{}'::jsonb, $3)`,
+      [foreign.businessId, id, "0".repeat(64)],
+    ))).rejects.toThrow(/tax_archive_tenant_mismatch/);
+    await expect(dbLib.withTenantTransaction(t.businessId, () => dbLib.query(
+      `UPDATE tax_invoice_archives SET snapshot = '{}'::jsonb WHERE submission_id = $1`, [id],
+    ))).rejects.toThrow(/append-only/);
+    await expect(dbLib.withTenantTransaction(t.businessId, async () => {
+      await dbLib.query("SELECT set_config('app.tax_submission_purge', 'on', true)");
+      await dbLib.query("DELETE FROM tax_invoice_events WHERE submission_id = $1", [id]);
+    })).rejects.toThrow(/tax_accepted_retained/);
+    await expect(dbLib.withTenantTransaction(t.businessId, async () => {
+      await dbLib.query("SELECT set_config('app.tax_submission_purge', 'on', true)");
+      await dbLib.query("DELETE FROM tax_invoice_archives WHERE submission_id = $1", [id]);
+    })).rejects.toThrow(/tax_accepted_retained/);
+    await expect(dbLib.withTenantTransaction(t.businessId, async () => {
+      await dbLib.query("SELECT set_config('app.tax_submission_purge', 'on', true)");
+      await dbLib.query("DELETE FROM tax_invoice_submissions WHERE id = $1", [id]);
+    })).rejects.toThrow(/tax_accepted_retained/);
+    await expect(dbLib.withTenantTransaction(t.businessId, () => dbLib.query("UPDATE tax_invoice_submissions SET accepted_at = NULL WHERE id = $1", [id]))).rejects.toThrow(/tax_accepted_retained/);
+    expect((await stored(id)).status).toBe("accepted");
+  });
+});
+
+
+it("fences a slow inquiry when a processing callback keeps the same status", async () => {
+  const { applyTaxCallback } = await import("../src/lib/tax-invoice-callback");
+  const t = await seedTenant("Fenced Co"); await enableTax(t); sandboxWith();
+  const secret = "fencing-callback-test-secret-at-least-32";
+  await service.saveTaxProfile(t.actor, { credentials: { webhookSecret: secret } });
+  const menu = await product(t, "کوکو", 60000, "1111111111111");
+  const s = await sale(t, [{ productId: menu, name: "کوکو", price: 60000, quantity: 1 }]);
+  const { id } = await prepare(t, s.orderId); await service.queueAndSend(t.actor, [id]);
+  const original = await stored(id);
+  let entered!: () => void; const called = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+  simulator.adapter = { provider: "sandbox", submit: async () => { throw new Error("unexpected send"); }, inquire: async () => {
+    entered(); await gate; return { state: "rejected", issues: [{ code: "old", message: "stale response" }] };
+  } };
+  const pending = service.inquireSubmissions(t.businessId, { ids: [id], force: true });
+  await called;
+  try {
+    const timestamp = String(Date.now());
+    const body = JSON.stringify({ eventId: "fence-1", provider: "sandbox", uid: original.uid, status: "processing", receiptId: original.receipt_id });
+    await applyTaxCallback(t.businessId, body, new Headers({ "x-tax-timestamp": timestamp, "x-tax-signature": createHmac("sha256", secret).update(`${timestamp}\n${t.businessId}\n${body}`).digest("hex") }));
+  } finally { release(); }
+  await pending;
+  expect((await stored(id)).status).toBe("submitted");
+  const events = await owner.query(`SELECT event_type FROM tax_invoice_events WHERE submission_id = $1 AND event_type = 'inquired'`, [id]);
+  expect(events.rowCount).toBe(0);
+});
+
+it("retains contradictory terminal acceptance and blocks another revision", async () => {
+  const { applyTaxCallback } = await import("../src/lib/tax-invoice-callback");
+  const t = await seedTenant("Contradictory Co"); await enableTax(t);
+  sandboxWith({ submitFailures: [{ kind: "rejected", issues: [{ code: "bad", message: "refused" }] }] });
+  const secret = "contradictory-callback-secret-at-least-32";
+  await service.saveTaxProfile(t.actor, { credentials: { webhookSecret: secret } });
+  const menu = await product(t, "کوکو", 60000, "1111111111111");
+  const s = await sale(t, [{ productId: menu, name: "کوکو", price: 60000, quantity: 1 }]);
+  const { id } = await prepare(t, s.orderId); await service.queueAndSend(t.actor, [id]);
+  const record = await stored(id);
+  expect(record.status).toBe("rejected");
+  const timestamp = String(Date.now());
+  const body = JSON.stringify({ eventId: "late-acceptance", provider: "sandbox", uid: record.uid, status: "accepted", receiptId: "late-receipt" });
+  await applyTaxCallback(t.businessId, body, new Headers({ "x-tax-timestamp": timestamp, "x-tax-signature": createHmac("sha256", secret).update(`${timestamp}\n${t.businessId}\n${body}`).digest("hex") }));
+  const after = await stored(id);
+  expect(after.status).toBe("rejected");
+  expect(after.accepted_at).toBeNull();
+  const hold = await owner.query("SELECT retention_hold_at FROM tax_invoice_submissions WHERE id = $1", [id]);
+  expect(hold.rows[0].retention_hold_at).not.toBeNull();
+  await expect(service.resubmitSubmission(t.actor, id)).rejects.toMatchObject({ code: "tax_retention_hold" });
+  await expect(dbLib.withTenantTransaction(t.businessId, async () => {
+    await dbLib.query("SELECT set_config('app.tax_submission_purge', 'on', true)");
+    await dbLib.query("DELETE FROM tax_invoice_events WHERE submission_id = $1", [id]);
+  })).rejects.toThrow(/tax_retention_hold/);
+});
+
+it("keeps ambiguous delivery in inquiry beyond the attempt limit, never operator retry", async () => {
+  const t = await seedTenant("Exhausted Co"); await enableTax(t);
+  sandboxWith({ submitFailures: [{ kind: "unknown_delivery", code: "timeout", message: "ambiguous" }] });
+  const menu = await product(t, "کوکو", 60000, "1111111111111");
+  const s = await sale(t, [{ productId: menu, name: "کوکو", price: 60000, quantity: 1 }]);
+  const { id } = await prepare(t, s.orderId);
+  await owner.query("UPDATE tax_invoice_submissions SET attempts = 7 WHERE id = $1", [id]);
+  await service.queueAndSend(t.actor, [id]);
+  expect((await stored(id)).status).toBe("awaiting_inquiry");
+  await expect(service.retrySubmission(t.actor, id)).rejects.toMatchObject({ code: "not_retryable" });
+});
+
+it("retains a slow send receipt after a callback wins, without overwriting its status", async () => {
+  const { applyTaxCallback } = await import("../src/lib/tax-invoice-callback");
+  const t = await seedTenant("Slow Send Co"); await enableTax(t);
+  const secret = "slow-send-callback-secret-at-least-32";
+  await service.saveTaxProfile(t.actor, { credentials: { webhookSecret: secret } });
+  const menu = await product(t, "کوکو", 60000, "1111111111111");
+  const s = await sale(t, [{ productId: menu, name: "کوکو", price: 60000, quantity: 1 }]);
+  const { id } = await prepare(t, s.orderId); const record = await stored(id);
+  let entered!: () => void; const called = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+  simulator.adapter = { provider: "sandbox", submit: async () => { entered(); await gate; return { receiptId: "slow-receipt" }; },
+    inquire: async () => ({ state: "processing", receiptId: "slow-receipt" }) };
+  const pending = service.queueAndSend(t.actor, [id]);
+  await called;
+  try {
+    const timestamp = String(Date.now());
+    const body = JSON.stringify({ eventId: "send-race", provider: "sandbox", uid: record.uid, status: "rejected", issues: [{ code: "conflict", message: "refused" }] });
+    await applyTaxCallback(t.businessId, body, new Headers({ "x-tax-timestamp": timestamp, "x-tax-signature": createHmac("sha256", secret).update(`${timestamp}\n${t.businessId}\n${body}`).digest("hex") }));
+  } finally { release(); }
+  await pending;
+  expect((await stored(id)).status).toBe("rejected");
+  const events = await owner.query("SELECT detail FROM tax_invoice_events WHERE submission_id = $1 AND event_type = 'send_stale_success'", [id]);
+  expect(events.rows).toEqual([{ detail: { receiptId: "slow-receipt", claimToken: expect.any(String) } }]);
+  await expect(service.resubmitSubmission(t.actor, id)).rejects.toMatchObject({ code: "tax_retention_hold" });
+  await expect(dbLib.withTenantTransaction(t.businessId, () => dbLib.query("UPDATE tax_invoice_submissions SET retention_hold_at = NULL WHERE id = $1", [id]))).rejects.toThrow(/tax_retention_hold/);
+});
+
+it("does not claim a new revision while a provider dispute holds the source order lock", async () => {
+  const t = await seedTenant("Claim Barrier Co"); await enableTax(t);
+  sandboxWith({ submitFailures: [{ kind: "rejected", issues: [{ code: "bad", message: "refused" }] }] });
+  const menu = await product(t, "کوکو", 60000, "1111111111111");
+  const s = await sale(t, [{ productId: menu, name: "کوکو", price: 60000, quantity: 1 }]);
+  const { id } = await prepare(t, s.orderId); await service.queueAndSend(t.actor, [id]);
+  const next = await service.resubmitSubmission(t.actor, id);
+  // Deterministic second connection: exactly the lock order used by hold writers.
+  await owner.query("BEGIN");
+  try {
+    await owner.query("SELECT id FROM tax_invoice_submissions WHERE id = $1 FOR UPDATE", [id]);
+    await owner.query("SELECT id FROM orders WHERE id = $1 FOR NO KEY UPDATE", [s.orderId]);
+    await owner.query("UPDATE tax_invoice_submissions SET retention_hold_at = now() WHERE id = $1", [id]);
+    await service.queueAndSend(t.actor, [next.submissionId!]);
+    expect((await stored(next.submissionId!)).status).toBe("queued");
+    await owner.query("COMMIT");
+  } catch (error) { await owner.query("ROLLBACK"); throw error; }
+  await service.drainSubmissions(t.businessId, { ids: [next.submissionId!] });
+  expect((await stored(next.submissionId!)).status).toBe("queued");
+});
+
+it("round-trips an accepted archive and events through tenant logical backup without another tenant", async () => {
+  const { exportTenantData, tenantDataToSql } = await import("../src/lib/tenant-export");
+  const { restoreTenantExport } = await import("../scripts/restore-tenant");
+  const archive = await import("../src/lib/tax-invoice-archive");
+  const { hashPayload } = await import("../src/lib/tax-invoice-core");
+  const t = await seedTenant("Tax Export Co"); await enableTax(t); sandboxWith();
+  const menu = await product(t, "کوکو", 60000, "1111111111111");
+  const s = await sale(t, [{ productId: menu, name: "کوکو", price: 60000, quantity: 1 }]);
+  const { id } = await prepare(t, s.orderId); await service.queueAndSend(t.actor, [id]);
+  await service.inquireSubmissions(t.businessId, { ids: [id], force: true });
+  await archive.saveTaxArchivePolicy(t.actor, 1);
+  await archive.archiveTaxInvoices(t.businessId, new Date(Date.now() + 2 * 86400000));
+  const data = await exportTenantData(t.businessId);
+  const records = data.find((table) => table.name === "tax_invoice_submissions")!.rows;
+  expect(records.map((row) => row.id)).toEqual([id]);
+  const archives = data.find((table) => table.name === "tax_invoice_archives")!.rows;
+  expect(archives).toHaveLength(1);
+  const foreign = await seedTenant("Not in export");
+  expect(JSON.stringify(data)).not.toContain(foreign.businessId);
+  const targetName = `pos_tax_restore_${randomUUID().replaceAll("-", "")}`;
+  const maintenance = new Client({ connectionString: maintenanceUrl() }); await maintenance.connect();
+  let target: Client | undefined;
+  try {
+    await maintenance.query(`CREATE DATABASE "${targetName}"`);
+    await runMigrations({ databaseUrl: urlFor(targetName), quiet: true });
+    target = new Client({ connectionString: urlFor(targetName) }); await target.connect();
+    const sql = tenantDataToSql(data);
+    expect((await restoreTenantExport(target, sql, { apply: false })).committed).toBe(false);
+    expect((await target.query("SELECT id FROM businesses")).rows).toEqual([]);
+    expect((await restoreTenantExport(target, sql, { apply: true })).committed).toBe(true);
+    expect((await target.query("SELECT id, status FROM tax_invoice_submissions")).rows).toEqual([{ id, status: "accepted" }]);
+    const restored = (await target.query("SELECT snapshot, sha256 FROM tax_invoice_archives")).rows[0];
+    expect(restored.sha256).toBe(hashPayload(restored.snapshot));
+    expect((await target.query("SELECT count(*)::int AS n FROM tax_invoice_events")).rows[0].n).toBe(data.find((table) => table.name === "tax_invoice_events")!.rows.length);
+    expect((await target.query("SELECT id FROM businesses")).rows).toEqual([{ id: t.businessId }]);
+  } finally {
+    await target?.end();
+    await maintenance.query(`DROP DATABASE IF EXISTS "${targetName}" WITH (FORCE)`); await maintenance.end();
+  }
 });

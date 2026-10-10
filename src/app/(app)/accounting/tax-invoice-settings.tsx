@@ -9,6 +9,7 @@
  * the form shows that one exists, and a blank field keeps it. Clearing it is an
  * explicit action.
  */
+import { TaxArchiveSettings } from "./tax-archive-settings";
 import { useCallback, useEffect, useState } from "react";
 import { LoadingSkeleton, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
@@ -43,6 +44,8 @@ export function TaxInvoiceSettings({ onSaved }: { onSaved: () => void }) {
   const [taxpayerName, setTaxpayerName] = useState("");
   const [referencePrefix, setReferencePrefix] = useState("");
   const [secret, setSecret] = useState("");
+  const [webhookSecret, setWebhookSecret] = useState("");
+  const [tspUsername, setTspUsername] = useState("");
   const [certificatePem, setCertificatePem] = useState("");
   const [units, setUnits] = useState<Record<string, { memoryId: string; unitCode: string }>>({});
   const [codes, setCodes] = useState<Record<string, string>>({});
@@ -81,8 +84,8 @@ export function TaxInvoiceSettings({ onSaved }: { onSaved: () => void }) {
     setError("");
     setNotice("");
     // A blank field keeps what is stored; a null clears both keys.
-    const typed = secret !== "" || certificatePem !== "";
-    const credentials = clearCredentials ? null : typed ? { ...(secret ? { secret } : {}), ...(certificatePem ? { certificatePem } : {}) } : undefined;
+    const typed = secret !== "" || certificatePem !== "" || webhookSecret !== "" || tspUsername !== "";
+    const credentials = clearCredentials ? null : typed ? { ...(secret ? { secret } : {}), ...(certificatePem ? { certificatePem } : {}), ...(webhookSecret ? { webhookSecret } : {}), ...(tspUsername ? { tspUsername } : {}) } : undefined;
     const res = await api<TaxSettingsView>("/api/ledger/tax-invoices/settings", {
       method: "PUT",
       body: JSON.stringify({
@@ -104,6 +107,8 @@ export function TaxInvoiceSettings({ onSaved }: { onSaved: () => void }) {
     }
     setSecret("");
     setCertificatePem("");
+    setWebhookSecret("");
+    setTspUsername("");
     setNotice(clearCredentials ? "کلیدهای ارسال پاک شدند." : "تنظیمات مؤدی ذخیره شد.");
     setSettings(res.data);
     onSaved();
@@ -225,6 +230,17 @@ export function TaxInvoiceSettings({ onSaved }: { onSaved: () => void }) {
             </label>
           </div>
 
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-xs text-muted-foreground">کلید وب‌هوک شرکت معتمد (حداقل ۳۲ نویسه، فقط نوشتن)</span>
+              <input className={inputClass} type="password" autoComplete="off" value={webhookSecret} onChange={(e) => setWebhookSecret(e.target.value)} />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-xs text-muted-foreground">شناسه شرکت معتمد برای توکن (فقط نوشتن)</span>
+              <input className={inputClass} autoComplete="off" value={tspUsername} onChange={(e) => setTspUsername(e.target.value)} />
+            </label>
+          </div>
+
           <div className="flex flex-wrap gap-2">
             <PrimaryButton disabled={busy} type="button" onClick={() => void saveProfile(false)}>
               ذخیرهٔ مؤدی
@@ -237,6 +253,8 @@ export function TaxInvoiceSettings({ onSaved }: { onSaved: () => void }) {
           </div>
         </div>
       </SectionCard>
+
+      <TaxArchiveSettings />
 
       <SectionCard
         title="حافظهٔ مالیاتی شعبه‌ها"

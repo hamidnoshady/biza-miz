@@ -490,16 +490,8 @@ export function decideAfterSendFailure(
       };
     }
     case "unknown_delivery":
-      if (isDeadAfterAttempts(attempts)) {
-        return {
-          status: "error",
-          attempts,
-          nextAttemptAt: null,
-          errorCode: "retries_exhausted",
-          errorMessage: failure.message,
-          providerErrors: [],
-        };
-      }
+      // An attempt budget is not proof of non-delivery. Never expose this as
+      // retryable error, even after the normal transport retry limit.
       return {
         status: "awaiting_inquiry",
         attempts,

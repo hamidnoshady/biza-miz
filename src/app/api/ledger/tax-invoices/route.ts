@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { listTaxRegister } from "@/lib/tax-invoice-queries";
+import { listTaxRegister, listTaxCustomers } from "@/lib/tax-invoice-queries";
 import { registerFiltersFromSearch, taxErrorResponse } from "@/lib/tax-invoice-http";
 
 /**
@@ -18,7 +18,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       limit,
       cursor: params.get("cursor"),
     });
-    return NextResponse.json(page);
+    return NextResponse.json({ ...page, customers: await listTaxCustomers(session.businessId) });
   } catch (err) {
     return taxErrorResponse(err);
   }
