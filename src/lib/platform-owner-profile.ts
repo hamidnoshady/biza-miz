@@ -26,6 +26,7 @@
  * identity to show and edit. PIN-only staff are people, but not this profile.
  */
 import { getPool, withoutTenantScope } from "./db";
+import { lockMembership } from "./membership-lock";
 import { formatPersianNumber } from "./digits";
 import { normalizePhone } from "./phone";
 
@@ -317,6 +318,10 @@ export async function updateBusinessOwnerProfile(
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    // Issue #854: suspension/reactivation changes the door, so it joins the
+    // shared advisory-lock protocol before the rows are read (advisory lock
+    // first, row lock second — the order every other path uses).
+    await lockMembership(client, businessId, update.membershipId);
 
     const locked = await client.query<{ id: string; platform_user_id: string | null; is_active: boolean }>(
       `SELECT id, platform_user_id, is_active FROM users

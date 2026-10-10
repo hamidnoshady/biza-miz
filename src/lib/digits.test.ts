@@ -5,6 +5,7 @@ import {
   formatQuantity,
   groupDigits,
   normalizeNumericText,
+  normalizeSecurityDigits,
   toLatinDigits,
   toPersianDigits,
 } from "./digits";
@@ -68,5 +69,24 @@ describe("digits", () => {
     expect(formatQuantity(0)).toBe("۰");
     expect(formatQuantity("12.3456")).toBe("۱۲٫۳۴۶"); // rounds beyond maxDecimals
     expect(formatQuantity("12.3456", 4)).toBe("۱۲٫۳۴۵۶");
+  });
+
+  it("normalizes security-code entry (issue #854 pass 4): converts, never strips", () => {
+    // A Persian keyboard must type a valid OTP/PIN: localized digits are
+    // converted to ASCII, not silently dropped by a /\D/g strip.
+    expect(normalizeSecurityDigits("۱۲۳۴۵۶")).toBe("123456");
+    expect(normalizeSecurityDigits("١٢٣٤٥٦")).toBe("123456");
+    expect(normalizeSecurityDigits("۱2٣4")).toBe("1234");
+    // Non-digits are dropped; the value stays digits-only for the server.
+    expect(normalizeSecurityDigits("12a34-b")).toBe("1234");
+    expect(normalizeSecurityDigits("  42  ")).toBe("42");
+    expect(normalizeSecurityDigits("")).toBe("");
+  });
+
+  it("enforces the maximum length a code field accepts", () => {
+    expect(normalizeSecurityDigits("1234567890", 6)).toBe("123456");
+    expect(normalizeSecurityDigits("۱۲۳۴۵۶۷۸۹۰", 6)).toBe("123456");
+    expect(normalizeSecurityDigits("12", 6)).toBe("12");
+    expect(normalizeSecurityDigits("۹۸۷۶۵۴۳۲۱۰۹۸", 12)).toBe("987654321098");
   });
 });

@@ -20,6 +20,12 @@ import {
 } from "@/lib/phone-otp";
 import { memberPhoneState, pinWindowActive } from "@/lib/phone-otp-policy";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
+import {
+  filterActiveMfaEnrolments,
+  getAccountMfaEnrolments,
+} from "@/lib/mfa-service";
+import { getMfaPolicy } from "@/lib/mfa-policy";
+import { isPrivilegedMfaRole, mfaAppliesToRole } from "@/lib/mfa";
 
 interface UserRow extends Record<string, unknown> {
   id: string;
@@ -30,6 +36,8 @@ interface UserRow extends Record<string, unknown> {
   role: Role;
   full_name: string;
   pin_hash: string | null;
+  platform_user_id: string | null;
+  token_version: number | null;
   phone_e164: string | null;
   phone_verified_at: Date | null;
   otp_login_at: Date | null;
@@ -128,9 +136,11 @@ export async function POST(request: NextRequest) {
       `SELECT u.id, u.business_id, b.slug::text AS business_slug,
               b.subdomain::text AS business_subdomain, u.location_id,
               u.role, u.full_name, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash,
+              u.platform_user_id, p.token_version,
               u.phone_e164, u.phone_verified_at, u.otp_login_at
          FROM users u
          JOIN businesses b ON b.id = u.business_id
+         LEFT JOIN platform_users p ON p.id = u.platform_user_id
          LEFT JOIN LATERAL (
            SELECT secret_hash FROM employee_credentials
             WHERE employee_id = u.id AND business_id = u.business_id
@@ -218,6 +228,50 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    // -----------------------------------------------------------------------
+    // Issue #854 (P0.6) — a privileged role must not skip MFA through the PIN
+    // door.
+    //
+    // The fast staff door admits `cashier`/`waiter`/`kitchen` — and, on a
+    // Local/Hybrid install, `owner`/`admin`/`manager`/`accountant`. A privileged
+    // role let through here *without* the password path's second-factor policy
+    // is the bypass the finding describes: pick your own name on the till and
+    // walk in as the owner. The policy is asked through the same predicate the
+    // password and phone-OTP doors use, so "MFA applies consistently across
+    // every login path" is enforced rather than asserted.
+    //
+    // The preferred fix from the issue is the strict one: a role that requires
+    // a second factor does not get to use the PIN door at all. It is refused
+    // with `mfa_required` and the client sends the member to the account door.
+    // (A PIN factor is device-local and cannot stand in for a global factor,
+    // and allowing "PIN then TOTP" would reintroduce the same ordering problem
+    // the phone-OTP path had.) A privileged role that does **not** require a
+    // factor — an accountant on a business that has not opted in — keeps the
+    // quick door, which is what the deployment profile was asking for.
+    // -----------------------------------------------------------------------
+    if (isPrivilegedMfaRole(user.role)) {
+      const mfaPolicy = await getMfaPolicy(user.business_id);
+      const requiresMfa = mfaAppliesToRole(user.role, mfaPolicy);
+      const enrolments = user.platform_user_id
+        ? filterActiveMfaEnrolments(
+            await getAccountMfaEnrolments("platform_user", user.platform_user_id),
+          )
+        : [];
+
+      if (requiresMfa || enrolments.length > 0) {
+        await auditLoginFailure(user.business_id, user.id, "privileged_pin_mfa_required");
+        return NextResponse.json(
+          {
+            error: "mfa_required",
+            message:
+              "برای این نقش ورود دومرحله‌ای لازم است؛ از درِ ورود حساب کاربری استفاده کنید.",
+            role: user.role,
+          },
+          { status: 403 },
+        );
+      }
+    }
+
     await ensureEmployeeProfile(user.id, user.business_id);
     const deviceLabel = request.headers.get("user-agent")?.slice(0, 120) ?? null;
     const deviceId = await resolveDeviceId(body.deviceToken, user.business_id);
@@ -225,6 +279,8 @@ export async function POST(request: NextRequest) {
       locationId: user.location_id,
       deviceLabel,
       deviceId,
+      loginMethod: "pin",
+      userAgent: request.headers.get("user-agent"),
     });
 
     const token = await signSession({
@@ -235,8 +291,21 @@ export async function POST(request: NextRequest) {
       businessSubdomain: user.business_subdomain,
       locationId: user.location_id,
       fullName: user.full_name,
-      platformUserId: null,
+      /**
+       * Issue #854 (P0.6): the member's real global identity, not `null`.
+       *
+       * The old session hard-coded `platformUserId: null` even for a member who
+       * plainly had one, which meant the session did not participate in global
+       * identity revocation — a password change or "sign out everywhere" on the
+       * cloud could not reach a PIN session minted here, because nothing tied
+       * the two together. Carrying the id (and the identity's `tokenVersion`,
+       * which `auth.ts` re-checks live) puts the PIN door inside the same
+       * revocation boundary as every other door.
+       */
+      platformUserId: user.platform_user_id,
+      tokenVersion: user.token_version ?? undefined,
       employeeSessionId: employeeSession.id,
+      recentAuthAt: Math.floor(Date.now() / 1000),
     });
 
     const res = NextResponse.json({

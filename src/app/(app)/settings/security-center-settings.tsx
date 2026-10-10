@@ -29,7 +29,6 @@ import { RefreshCwIcon } from "lucide-react";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import { credentialKindFromId, credentialKindLabel } from "@/lib/audit";
-import { formatPhoneDisplay } from "@/lib/phone";
 import { roleLabel } from "@/lib/role-labels";
 import { ErrorBox, InfoBox, api, errorMessage } from "@/app/dashboard/ui";
 import { LoadingSkeleton, SectionCard } from "@/app/dashboard/page-chrome";
@@ -350,10 +349,7 @@ export function SecurityCenterSettings() {
  * the list of members whose number is still missing or unproven, exactly the
  * list to work through before the date arrives.
  */
-interface PhoneSelfState {
-  phone: string | null;
-  phoneState: "none" | "unverified" | "verified";
-  otpWindowOpen: boolean;
+interface PhonePolicyState {
   policy: { state: "off" | "grace" | "pending_sms" | "enforced"; daysLeft: number | null };
 }
 
@@ -366,22 +362,26 @@ interface TeamPhoneMember {
   phoneVerified: boolean;
 }
 
+/**
+ * Issue #854 (pass 4, gap 1) — the Security Center keeps the *organizational*
+ * view of the phone door (adoption posture + who still lacks a proven number)
+ * but no longer carries the member's *personal* set-and-verify form: that is
+ * Profile's job (`SelfPhoneCard`), and a second copy here both drifted (it
+ * stripped Persian digits with `/\D/g` and had no shared cooldown/expiry) and
+ * gave personal-security mutation two homes. The personal half is now a single
+ * link to `/settings/profile`.
+ */
 function PhoneLoginCard() {
-  const [state, setState] = useState<PhoneSelfState | null>(null);
+  const [state, setState] = useState<PhonePolicyState | null>(null);
   const [members, setMembers] = useState<TeamPhoneMember[] | null>(null);
-  const [phone, setPhone] = useState("");
-  const [code, setCode] = useState("");
-  const [codeSentTo, setCodeSentTo] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
 
   const load = useCallback(async () => {
     const [selfResult, teamResult] = await Promise.allSettled([
-      api<PhoneSelfState & { error?: string }>("/api/auth/phone/self"),
+      api<PhonePolicyState & { error?: string }>("/api/auth/phone/self"),
       // The security center is team.manage-gated like every tab it shares,
       // so the member list is readable from here; a 403 would mean the tab
-      // was reached without it, in which case the self half still matters.
+      // was reached without it, in which case the posture half still matters.
       api<{ members?: TeamPhoneMember[]; error?: string }>("/api/team"),
     ]);
     if (selfResult.status === "fulfilled" && selfResult.value.ok) {
@@ -401,64 +401,7 @@ function PhoneLoginCard() {
     void load();
   }, [load]);
 
-  async function post(body: Record<string, unknown>) {
-    setBusy(true);
-    setError("");
-    setNotice("");
-    let ok: boolean;
-    let data: { status?: string; maskedPhone?: string; error?: string; message?: string; retryAfterMs?: number };
-    try {
-      ({ ok, data } = await api<
-        { status?: string; maskedPhone?: string; error?: string; message?: string; retryAfterMs?: number }
-      >("/api/auth/phone/self", { method: "POST", body: JSON.stringify(body) }));
-    } catch {
-      setBusy(false);
-      setError(errorMessage(undefined));
-      return null;
-    }
-    setBusy(false);
-    if (!ok) {
-      const map: Record<string, string> = {
-        invalid_phone: "شمارهٔ موبایل معتبر نیست.",
-        phone_missing: "شماره‌ای برای ارسال کد ثبت نشده است.",
-        invalid_code: "کد واردشده درست نیست.",
-        sms_dispatch_failed: "ارسال پیامک ممکن نشد. کمی بعد دوباره تلاش کنید.",
-        rate_limited: "درخواست‌های پیاپی مجاز نیست؛ کمی صبر کنید.",
-        account_locked: "حساب شما موقتاً قفل شده است.",
-      };
-      setError(data.message ?? map[data.error ?? ""] ?? errorMessage(data.error));
-      return null;
-    }
-    return data;
-  }
-
-  async function sendCode() {
-    const target = phone.trim() || state?.phone || "";
-    const data = await post({ action: "send", ...(phone.trim() ? { phone: phone.trim() } : {}) });
-    if (data) {
-      setCodeSentTo(data.maskedPhone ?? target);
-      // Clear any half-typed digits from a previous try on resend.
-      setCode("");
-    }
-  }
-
-  async function verifyCode() {
-    const data = await post({
-      action: "verify",
-      code,
-      ...(phone.trim() ? { phone: phone.trim() } : {}),
-    });
-    if (data) {
-      setNotice("شمارهٔ موبایل تأیید شد. از این پس می‌توانید با همین شماره وارد شوید.");
-      setPhone("");
-      setCode("");
-      setCodeSentTo(null);
-      await load();
-    }
-  }
-
   const unverified = (members ?? []).filter((m) => m.isActive && !(m.phone && m.phoneVerified));
-  const typedPhone = phone.trim();
 
   return (
     <SectionCard
@@ -471,7 +414,6 @@ function PhoneLoginCard() {
       description="هر عضو با شمارهٔ موبایل خود و یک کد پیامکی وارد می‌شود؛ رمز عددی تا ۷ روز بعد از هر تأیید کار می‌کند."
     >
       <ErrorBox>{error}</ErrorBox>
-      <InfoBox>{notice}</InfoBox>
 
       {state === null ? (
         error ? (
@@ -483,95 +425,15 @@ function PhoneLoginCard() {
         )
       ) : (
         <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="font-medium">شمارهٔ شما:</span>
-            {state.phone ? (
-              <>
-                <span dir="ltr">{toPersianDigits(formatPhoneDisplay(state.phone))}</span>
-                {state.phoneState === "verified" ? (
-                  <span className="rounded-full bg-emerald-600/10 px-2.5 py-0.5 text-xs text-emerald-700 dark:text-emerald-300">
-                    تأییدشده
-                  </span>
-                ) : (
-                  <span className="rounded-full bg-amber-600/10 px-2.5 py-0.5 text-xs text-amber-700 dark:text-amber-300">
-                    تأییدنشده
-                  </span>
-                )}
-              </>
-            ) : (
-              <span className="text-muted-foreground">ثبت نشده</span>
-            )}
+          {/* Issue #854 (gap 1): personal number management lives on Profile only. */}
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/80 bg-muted/30 px-3 py-2 text-sm">
+            <p className="text-muted-foreground">
+              شمارهٔ موبایل ورود و تأیید آن در صفحهٔ حساب کاربری هر عضو مدیریت می‌شود.
+            </p>
+            <Button asChild variant="outline" size="xs" className="shrink-0">
+              <Link href="/settings/profile">مدیریت شمارهٔ ورود من</Link>
+            </Button>
           </div>
-
-          {!codeSentTo ? (
-            <div className="flex flex-wrap items-end gap-2">
-              <div className="min-w-52 grow sm:grow-0">
-                <label className="mb-1 block text-sm text-muted-foreground" htmlFor="phone-self">
-                  {state.phone ? "تغییر شماره (اختیاری)" : "شمارهٔ موبایل"}
-                </label>
-                <input
-                  id="phone-self"
-                  dir="ltr"
-                  inputMode="tel"
-                  autoComplete="tel"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  placeholder="09121234567"
-                  className="w-full rounded-lg border border-input px-3 py-2 text-start focus:border-primary focus:outline-none"
-                />
-              </div>
-              <Button
-                type="button"
-                disabled={busy || (!typedPhone && !(state.phone && state.phoneState !== "verified"))}
-                onClick={() => void sendCode()}
-              >
-                {/* The button's only job is sending a code — the verify step is
-                    the next screen, so name it after what actually happens. */}
-                {typedPhone ? "ارسال کد به شمارهٔ جدید" : "ارسال کد تأیید"}
-              </Button>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <p className="text-sm text-muted-foreground">
-                کد پیامک‌شده به <span dir="ltr">{toPersianDigits(codeSentTo)}</span> را وارد کنید.
-              </p>
-              <div className="flex flex-wrap items-end gap-2">
-                <div className="min-w-36 grow sm:grow-0">
-                  <label className="mb-1 block text-sm text-muted-foreground" htmlFor="phone-self-code">
-                    کد ۶ رقمی
-                  </label>
-                  <input
-                    id="phone-self-code"
-                    dir="ltr"
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    maxLength={6}
-                    value={code}
-                    onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-                    placeholder="------"
-                    className="w-full rounded-lg border border-input px-3 py-2 text-center tracking-[0.3em] focus:border-primary focus:outline-none"
-                  />
-                </div>
-                <Button type="button" disabled={busy || code.length !== 6} onClick={() => void verifyCode()}>
-                  تأیید کد
-                </Button>
-                <Button type="button" variant="outline" disabled={busy} onClick={() => void sendCode()}>
-                  ارسال دوبارهٔ کد
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() => {
-                    setCodeSentTo(null);
-                    setCode("");
-                  }}
-                >
-                  تغییر شماره
-                </Button>
-              </div>
-            </div>
-          )}
 
           {state.policy.state === "grace" && (
             <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-sm">
@@ -622,7 +484,7 @@ function PhoneLoginCard() {
                 </ul>
               )}
               <p className="mt-2 text-xs text-muted-foreground">
-                شمارهٔ اعضا را از «تیم» ثبت کنید؛ هر عضو شماره‌اش را با یک کد پیامکی تأیید می‌کند.
+                شمارهٔ اعضا را از «تیم» ثبت کنید؛ هر عضو شماره‌اش را با یک کد پیامکی در «حساب کاربری» تأیید می‌کند.
               </p>
             </div>
           )}

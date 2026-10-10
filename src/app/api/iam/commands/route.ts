@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { lockMemberships } from "@/lib/membership-lock";
 import { getPool, query, withTenant } from "@/lib/db";
 import { authenticateIamSite } from "@/lib/iam/site-auth";
 import { appendIamEvent } from "@/lib/iam/service";
@@ -23,6 +24,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
+  // Validated UUIDs (see the guard above), captured as `string` so the
+  // closure below can rely on them without re-checking.
+  const membershipId = body.membershipId;
+  const actorUserId = body.actorUserId;
+
   return withTenant(site.businessId, async () => {
     const client = await getPool().connect();
     let inserted = false;
@@ -45,6 +51,13 @@ export async function POST(request: NextRequest) {
           body.expectedRevision, JSON.stringify(body.changes ?? {}), body.actorUserId],
       );
       inserted = true;
+
+      // Issue #854: same advisory-lock protocol as every other door-changing
+      // path — taken before the membership rows are read, in sorted order, so
+      // this transaction and a concurrent role change / PIN write cannot
+      // interleave their reads and writes (and the lock order, advisory first
+      // then `FOR UPDATE`, is the same everywhere, so no cycle is possible).
+      await lockMemberships(client, site.businessId, [actorUserId, membershipId]);
 
       const members = await client.query<MemberRow>(
         `SELECT u.id,u.role,u.custom_role_id,u.permissions,u.membership_revision,u.is_active,u.membership_status,u.location_scope,u.location_id,

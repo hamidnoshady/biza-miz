@@ -48,6 +48,13 @@ export const IAM_EVENT_TYPES = [
   "membership.created", "membership.profile_updated", "membership.system_role_changed",
   "membership.custom_role_changed", "membership.permissions_changed", "membership.location_policy_changed",
   "membership.locations_changed", "membership.suspended", "membership.reactivated", "membership.offboarded",
+  /**
+   * Issue #854 (pass 4) — the explicit rehire ceremony: an offboarded
+   * membership regains its identity linkage, credentials, role, permissions
+   * and branch policy in one locked write. Carries the full membership
+   * snapshot like `membership.created`, so a replica applies it the same way.
+   */
+  "membership.rehired",
   "credential.created", "credential.rotated", "credential.revoked",
   "tenant_role.created", "tenant_role.updated", "tenant_role.permissions_changed", "tenant_role.archived",
 ] as const;

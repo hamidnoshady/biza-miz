@@ -5,6 +5,25 @@ import { ALL_PERMISSIONS, effectivePermissions, parseOverrides, type Permission 
 import type { Role } from "../auth-edge";
 import type { LocationScope } from "../location-access";
 import { appendIamEvent } from "./service";
+import { validateAccessChangeReason } from "../membership-authority";
+
+/**
+ * Issue #854 (P2.4) — a custom role *is* access: it is a named bundle of
+ * capabilities that will be handed to members. Creating one, changing what it
+ * contains, or retiring it are the mutations the reason requirement exists for.
+ *
+ * The field was already threaded through both service functions and written as
+ * `reason ?? null` in every event and audit row: structurally present,
+ * functionally absent, because nothing ever required the caller to send it and
+ * every caller that existed sent nothing. Optional-but-unused is the same as
+ * missing, so the rule now lives here, where the row is written, rather than in
+ * the route that happened to remember the field this week.
+ */
+function requireAccessChangeReason(reason: unknown): string {
+  const validated = validateAccessChangeReason(reason);
+  if (!validated.ok) throw new TenantRoleError(validated.error);
+  return validated.reason;
+}
 
 export class TenantRoleError extends Error { constructor(public code:string,public status=400){super(code);} }
 export interface TenantRoleView {id:string;name:string;description:string;permissions:string[];defaultLocationScope:LocationScope;isActive:boolean;revision:number;memberCount:number;createdAt:string;updatedAt:string}
@@ -34,24 +53,35 @@ export async function listTenantRoles(businessId:string):Promise<TenantRoleView[
 }
 export async function createTenantRole(input:{businessId:string;actorId:string;name:string;description?:string;permissions:unknown;defaultLocationScope?:LocationScope;reason?:string}){
   const eventOrigin=await origin(input.businessId),name=input.name.trim(),permissions=validPermissions(input.permissions);if(!name||name.length>80)throw new TenantRoleError("invalid_name");
+  // Issue #854 (P2.4): a role that grants capabilities is created for a reason.
+  const reason=requireAccessChangeReason(input.reason);
   const client=await getPool().connect();try{await client.query("BEGIN");await assertDelegable(client,input.businessId,input.actorId,permissions);
     const {rows}=await client.query<{id:string;description:string;default_location_scope:LocationScope;is_active:boolean}>(`INSERT INTO tenant_roles(business_id,name,description,permissions,default_location_scope,created_by,updated_by)
       VALUES($1,$2,$3,$4,$5,$6,$6) RETURNING id,description,default_location_scope,is_active`,[input.businessId,name,input.description?.trim()??"",JSON.stringify(permissions),input.defaultLocationScope??"selected",input.actorId]);
-    await appendIamEvent(client,{businessId:input.businessId,type:"tenant_role.created",entityId:rows[0].id,payload:{revision:1,role:{id:rows[0].id,name,description:rows[0].description,permissions,defaultLocationScope:rows[0].default_location_scope,isActive:rows[0].is_active,revision:1},reason:input.reason??null},actorUserId:input.actorId,origin:eventOrigin});
-    await client.query(`INSERT INTO audit_log(business_id,user_id,action,entity,entity_id,payload) VALUES($1,$2,'team.custom_role_created','tenant_role',$3,$4)`,[input.businessId,input.actorId,rows[0].id,JSON.stringify({name,permissions,reason:input.reason??null})]);
+    await appendIamEvent(client,{businessId:input.businessId,type:"tenant_role.created",entityId:rows[0].id,payload:{revision:1,role:{id:rows[0].id,name,description:rows[0].description,permissions,defaultLocationScope:rows[0].default_location_scope,isActive:rows[0].is_active,revision:1},reason},actorUserId:input.actorId,origin:eventOrigin});
+    await client.query(`INSERT INTO audit_log(business_id,user_id,action,entity,entity_id,payload) VALUES($1,$2,'team.custom_role_created','tenant_role',$3,$4)`,[input.businessId,input.actorId,rows[0].id,JSON.stringify({name,permissions,reason,actorId:input.actorId})]);
     await client.query("COMMIT");return rows[0].id;}catch(e){await client.query("ROLLBACK").catch(()=>{});if((e as {code?:string}).code==="23505")throw new TenantRoleError("role_name_taken",409);throw e;}finally{client.release();}
 }
-export async function updateTenantRole(input:{businessId:string;actorId:string;roleId:string;expectedRevision:number;name?:string;description?:string;permissions?:unknown;isActive?:boolean;reason?:string}){
+export async function updateTenantRole(input:{businessId:string;actorId:string;roleId:string;expectedRevision:number;name?:string;description?:string;permissions?:unknown;isActive?:boolean;defaultLocationScope?:LocationScope;reason?:string}){
   const eventOrigin=await origin(input.businessId),permissions=input.permissions===undefined?undefined:validPermissions(input.permissions);
+  /**
+   * Issue #854 (P2.4) — the same rule the membership update uses: a reason is
+   * required when the write changes *what the role grants* (or retires it), not
+   * when it only corrects a description. Requiring prose for a typo fix is how
+   * people learn to type filler.
+   */
+  const reason = permissions !== undefined || input.isActive === false || input.defaultLocationScope !== undefined
+    ? requireAccessChangeReason(input.reason)
+    : null;
   const client=await getPool().connect();try{await client.query("BEGIN");if(permissions)await assertDelegable(client,input.businessId,input.actorId,permissions);
     if(input.isActive===false){const assigned=await client.query(`SELECT 1 FROM users WHERE business_id=$1 AND custom_role_id=$2 AND membership_status<>'offboarded' LIMIT 1`,[input.businessId,input.roleId]);if(assigned.rowCount)throw new TenantRoleError("role_in_use",409);}
     const {rows}=await client.query<{role_revision:string;name:string;description:string;permissions:string[];default_location_scope:LocationScope;is_active:boolean}>(`UPDATE tenant_roles SET name=COALESCE($4,name),description=COALESCE($5,description),permissions=COALESCE($6,permissions),
-      is_active=COALESCE($7,is_active),role_revision=role_revision+1,updated_by=$3,updated_at=now() WHERE business_id=$1 AND id=$2 AND role_revision=$8
+      is_active=COALESCE($7,is_active),default_location_scope=COALESCE($9,default_location_scope),role_revision=role_revision+1,updated_by=$3,updated_at=now() WHERE business_id=$1 AND id=$2 AND role_revision=$8
       RETURNING role_revision,name,description,ARRAY(SELECT jsonb_array_elements_text(permissions)) permissions,default_location_scope,is_active`,
-      [input.businessId,input.roleId,input.actorId,input.name?.trim()||null,input.description?.trim()??null,permissions?JSON.stringify(permissions):null,input.isActive??null,input.expectedRevision]);
+      [input.businessId,input.roleId,input.actorId,input.name?.trim()||null,input.description?.trim()??null,permissions?JSON.stringify(permissions):null,input.isActive??null,input.expectedRevision,input.defaultLocationScope??null]);
     if(!rows[0])throw new TenantRoleError("revision_conflict",409);const revision=Number(rows[0].role_revision),type=input.isActive===false?"tenant_role.archived":permissions?"tenant_role.permissions_changed":"tenant_role.updated";
-    await appendIamEvent(client,{businessId:input.businessId,type,entityId:input.roleId,payload:{revision,role:{id:input.roleId,name:rows[0].name,description:rows[0].description,permissions:rows[0].permissions,defaultLocationScope:rows[0].default_location_scope,isActive:rows[0].is_active,revision},reason:input.reason??null},actorUserId:input.actorId,origin:eventOrigin});
-    await client.query(`INSERT INTO audit_log(business_id,user_id,action,entity,entity_id,payload) VALUES($1,$2,$3,'tenant_role',$4,$5)`,[input.businessId,input.actorId,input.isActive===false?'team.custom_role_archived':'team.custom_role_updated',input.roleId,JSON.stringify({revision,reason:input.reason??null})]);
+    await appendIamEvent(client,{businessId:input.businessId,type,entityId:input.roleId,payload:{revision,role:{id:input.roleId,name:rows[0].name,description:rows[0].description,permissions:rows[0].permissions,defaultLocationScope:rows[0].default_location_scope,isActive:rows[0].is_active,revision},reason},actorUserId:input.actorId,origin:eventOrigin});
+    await client.query(`INSERT INTO audit_log(business_id,user_id,action,entity,entity_id,payload) VALUES($1,$2,$3,'tenant_role',$4,$5)`,[input.businessId,input.actorId,input.isActive===false?'team.custom_role_archived':'team.custom_role_updated',input.roleId,JSON.stringify({revision,reason,actorId:input.actorId})]);
     await client.query("COMMIT");return revision;
   }catch(e){await client.query("ROLLBACK").catch(()=>{});throw e;}finally{client.release();}
 }

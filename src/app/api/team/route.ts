@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAnyPermission, requirePermission, withTenantScope } from "@/lib/auth";
-import { query } from "@/lib/db";
 import { PERMISSIONS } from "@/lib/permissions";
 import { isLocationScope } from "@/lib/location-access";
 import { toLatinDigits } from "@/lib/digits";
@@ -12,6 +11,13 @@ import {
   isPinTaken,
   listMembers,
 } from "@/lib/team-service";
+import {
+  grantRefusalMessage,
+  loadCustomRole,
+  membershipGrantRefusal,
+  projectGrantedPermissions,
+  resolveMembershipAuthority,
+} from "@/lib/membership-authority";
 import { listBranches } from "@/lib/branch-service";
 import { canonicalMemberPhone } from "@/lib/phone-otp";
 import { ASSIGNABLE_ROLES } from "@/lib/roles";
@@ -77,6 +83,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     /** 'all' | 'selected' | 'home' — the explicit branch policy (migration 0170). */
     locationScope?: string;
     permissions?: unknown;
+    /** Issue #854 (P0.1) — custom-role assignment is part of the grant. */
+    customRoleId?: string | null;
+    /** Issue #854 (P2.4) — why this membership is being created with this access. */
+    reason?: string;
   };
   try {
     body = await request.json();
@@ -89,22 +99,64 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "invalid_role" }, { status: 400 });
   }
 
-  // `team.manage` can be delegated, but ownership cannot. Without this guard a
-  // delegated manager could promote themselves (or a new account) to owner.
-  if (role === "owner") {
-    const { rows } = await query<{ role: Role }>(
-      "SELECT role FROM users WHERE id = $1 AND business_id = $2 AND is_active = true",
-      [session.sub, session.businessId],
+  /**
+   * Issue #854 (P0.1) — the anti-escalation rule, applied to *creation*.
+   *
+   * `team.manage` can be delegated, and the old guard here only refused
+   * creating another `owner`. Everything else — a role more powerful than the
+   * actor's, permission overrides the actor does not hold, a custom role whose
+   * capabilities out-rank the actor — was accepted. A delegated team manager
+   * who could not *edit* a colleague into `payments.refund` could simply create
+   * one that had it. The decision now goes through the same shared function
+   * that guards member editing and invitations, so the three doors cannot
+   * disagree about what the actor is allowed to hand out.
+   */
+  const actor = await resolveMembershipAuthority(session.businessId, session.sub);
+  if (!actor) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
+  const overrides = sanitizeOverrides(body.permissions);
+  const customRole = body.customRoleId ? await loadCustomRole(session.businessId, body.customRoleId) : null;
+  if (body.customRoleId && !customRole) {
+    return NextResponse.json({ error: "custom_role_not_found" }, { status: 400 });
+  }
+
+  const refusal = membershipGrantRefusal({
+    actor,
+    nextRole: role,
+    nextPermissions: projectGrantedPermissions({
+      role,
+      overrides,
+      customRolePermissions: customRole?.permissions ?? null,
+    }),
+    customRole,
+    isSelf: false,
+    isCreation: true,
+    roleChanges: true,
+    changesAccess: true,
+  });
+  if (refusal) {
+    return NextResponse.json(
+      { error: refusal, message: grantRefusalMessage(refusal) },
+      { status: 403 },
     );
-    if (rows[0]?.role !== "owner") {
-      return NextResponse.json({ error: "owner_only" }, { status: 403 });
-    }
   }
 
   // Refused rather than ignored: silently dropping an unrecognised scope would
   // create the member on a policy the caller did not ask for.
   if (body.locationScope !== undefined && !isLocationScope(body.locationScope)) {
     return NextResponse.json({ error: "invalid_location_scope" }, { status: 400 });
+  }
+  /**
+   * Issue #854 (P2.10): the branch-scope invariants, enforced on create as well
+   * as on update. `selected` with nothing selected and `home` with no branch
+   * both produce a membership whose access resolves to nothing — an "active"
+   * member who cannot open a single screen.
+   */
+  if (body.locationScope === "selected" && (body.locationIds?.length ?? 0) === 0) {
+    return NextResponse.json({ error: "selected_locations_required" }, { status: 400 });
+  }
+  if (body.locationScope === "home" && !body.defaultLocationId) {
+    return NextResponse.json({ error: "home_location_required" }, { status: 400 });
   }
 
   let pin: string | null = null;
@@ -142,8 +194,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       locationIds: body.locationIds ?? [],
       defaultLocationId: body.defaultLocationId ?? null,
       locationScope: isLocationScope(body.locationScope) ? body.locationScope : undefined,
-      overrides: sanitizeOverrides(body.permissions),
+      overrides,
+      customRoleId: body.customRoleId ?? null,
       actorId: session.sub,
+      reason: body.reason,
     });
     // Every staff account is also a party of role `Employee` in the shared table —
     // the same record the payroll row and the personnel phone number come from, so
@@ -159,6 +213,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       await ensureEmployeeParty(session.businessId, userId, {
         displayName: body.fullName?.trim() || null,
         email: body.email ?? null,
+        // Issue #854 (pass 4, gap 5) — the file is seeded with the canonical
+        // login phone too, so the personnel tab never starts out disagreeing
+        // with the membership about it.
+        phone: phone ?? undefined,
       });
     } catch {
       /* no party row yet — see the comment above */

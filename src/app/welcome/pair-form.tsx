@@ -7,6 +7,7 @@ import {
   classifyConnectionCode,
   normalizeServerAddress,
 } from "@/lib/connection-code";
+import { toLatinDigits } from "@/lib/digits";
 
 /** Every failure this flow can produce, in the owner's language. */
 const ERROR_MESSAGES: Record<string, string> = {
@@ -170,8 +171,8 @@ export function PairForm({ onBack }: { onBack: () => void }) {
       ) : null}
       {error ? <div className="mt-4 rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{error}</div> : null}
       <form className="mt-5 space-y-4" onSubmit={async(e)=>{e.preventDefault();if(!/^\d{4,12}$/.test(offlinePin)){setError("رمز عددی باید ۴ تا ۱۲ رقم باشد.");return;}if(offlinePin!==confirmPin){setError("تکرار رمز با رمز اصلی یکسان نیست.");return;}setBusy(true);const response=await fetch(`/api/team/${pairedOwnerId}/credentials`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({pin:offlinePin})});if(response.ok){router.replace("/dashboard");return;}const result=await response.json().catch(()=>({}));setError(ERROR_MESSAGES[result.error]??"ثبت رمز آفلاین ناموفق بود.");setBusy(false);}}>
-        <label className="block"><span className="mb-1 block text-sm font-medium">رمز عددی جدید</span><input autoFocus required dir="ltr" inputMode="numeric" maxLength={12} className="w-full rounded-lg border border-input px-3 py-2 text-center text-xl tracking-[.3em]" value={offlinePin} onChange={e=>setOfflinePin(e.target.value.replace(/\D/g,""))}/></label>
-        <label className="block"><span className="mb-1 block text-sm font-medium">تکرار رمز</span><input required dir="ltr" inputMode="numeric" maxLength={12} className="w-full rounded-lg border border-input px-3 py-2 text-center text-xl tracking-[.3em]" value={confirmPin} onChange={e=>setConfirmPin(e.target.value.replace(/\D/g,""))}/></label>
+        <label className="block"><span className="mb-1 block text-sm font-medium">رمز عددی جدید</span><input autoFocus required dir="ltr" inputMode="numeric" maxLength={12} className="w-full rounded-lg border border-input px-3 py-2 text-center text-xl tracking-[.3em]" value={offlinePin} onChange={e=>setOfflinePin(toLatinDigits(e.target.value).replace(/\D/g,""))}/></label>
+        <label className="block"><span className="mb-1 block text-sm font-medium">تکرار رمز</span><input required dir="ltr" inputMode="numeric" maxLength={12} className="w-full rounded-lg border border-input px-3 py-2 text-center text-xl tracking-[.3em]" value={confirmPin} onChange={e=>setConfirmPin(toLatinDigits(e.target.value).replace(/\D/g,""))}/></label>
         <button disabled={busy} className="min-h-11 w-full rounded-lg bg-primary px-4 font-medium text-primary-foreground disabled:opacity-50">{busy?"در حال ثبت…":"ثبت رمز و ورود"}</button>
       </form>
     </div>

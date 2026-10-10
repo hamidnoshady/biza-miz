@@ -1,4 +1,5 @@
 import { getPool, query } from "../db";
+import { lockMembership } from "../membership-lock";
 import { getSetting, SETTING_KEYS } from "../settings";
 import type { ServerSyncConfig } from "../server-sync-config";
 import type { IamEvent, IamSnapshot } from "./model";
@@ -74,12 +75,33 @@ export async function applyIamEvents(businessId:string,siteDeviceId:string,lastS
       if(event.businessId!==businessId) throw new Error("event_tenant_mismatch");
       const revision=Number(event.payload.revision??0);
       if(event.entityType==="membership"){
+        // Issue #854: membership events change doors (creation, suspension,
+        // offboarding, role changes). Take the shared advisory lock before
+        // touching the rows, same protocol as the cloud-side writers.
+        await lockMembership(client, businessId, event.entityId);
         if(event.eventType==="membership.created") {
           const member=event.payload.membership as IamSnapshot["memberships"][number] | undefined;
           if(!member || member.businessId!==businessId) throw new Error("invalid_membership_created");
           await client.query(`INSERT INTO users(id,business_id,role,custom_role_id,full_name,email,is_active,membership_status,permissions,location_scope,location_id,membership_revision)
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO NOTHING`,[member.id,businessId,member.role,member.customRoleId,
             member.fullName,member.email,member.isActive,member.status,JSON.stringify(member.overrides),member.locationScope,member.defaultLocationId,member.revision]);
+          if(member.locationIds.length) await client.query(`INSERT INTO user_locations(user_id,location_id) SELECT $1,unnest($2::uuid[]) ON CONFLICT DO NOTHING`,[member.id,member.locationIds]);
+        } else if(event.eventType==="membership.rehired") {
+          // Issue #854 (pass 4) — a rehire reaches the replica as the full
+          // membership snapshot: the row already exists here (offboarded), so
+          // this upserts it back to life exactly like a snapshot apply would,
+          // branch assignments included. The PIN half arrives through the
+          // credential sync that follows the cloud's restored credential row.
+          const member=event.payload.membership as IamSnapshot["memberships"][number] | undefined;
+          if(!member || member.businessId!==businessId) throw new Error("invalid_membership_rehired");
+          await client.query(`INSERT INTO users(id,business_id,role,custom_role_id,full_name,email,is_active,membership_status,permissions,location_scope,location_id,membership_revision)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO UPDATE SET role=EXCLUDED.role,custom_role_id=EXCLUDED.custom_role_id,
+            full_name=EXCLUDED.full_name,email=EXCLUDED.email,is_active=EXCLUDED.is_active,membership_status=EXCLUDED.membership_status,
+            permissions=EXCLUDED.permissions,location_scope=EXCLUDED.location_scope,location_id=EXCLUDED.location_id,
+            membership_revision=GREATEST(users.membership_revision,EXCLUDED.membership_revision),updated_at=now() WHERE users.business_id=$2`,
+            [member.id,businessId,member.role,member.customRoleId,member.fullName,member.email,member.isActive,member.status,
+              JSON.stringify(member.overrides),member.locationScope,member.defaultLocationId,member.revision]);
+          await client.query(`DELETE FROM user_locations WHERE user_id=$1`,[member.id]);
           if(member.locationIds.length) await client.query(`INSERT INTO user_locations(user_id,location_id) SELECT $1,unnest($2::uuid[]) ON CONFLICT DO NOTHING`,[member.id,member.locationIds]);
         } else if(event.eventType==="membership.suspended"||event.eventType==="membership.offboarded"){
           const status=event.eventType==="membership.suspended"?"suspended":"offboarded";

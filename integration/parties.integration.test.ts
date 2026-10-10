@@ -537,6 +537,29 @@ describe("removing a party", () => {
   it("says not_found rather than pretending", async () => {
     expect(await parties.removeParty(biz.id, randomUUID())).toBe("not_found");
   });
+
+  it("archives a membership-linked personnel file instead of hard-deleting it", async () => {
+    /**
+     * Issue #854 (P2.6): the personnel file of a member is linked through
+     * `employee_user_id`, and nothing downstream of the delete would have
+     * complained — the membership's foreign key is ON DELETE SET NULL on the
+     * *party's* column. So the history check itself must count the link, or a
+     * member's file disappears out from under a live membership.
+     */
+    const user = await db.query<{ id: string }>(
+      "INSERT INTO users (business_id, full_name, role, pin_hash) VALUES ($1, $2, 'waiter', $3) RETURNING id",
+      [biz.id, "پروندهٔ متصل به عضویت", "$2b$10$notarealhashnotarealhashnotarealhashno"],
+    );
+    const file = await parties.ensureEmployeeParty(biz.id, user.rows[0].id, {
+      displayName: "پروندهٔ متصل به عضویت",
+    });
+    expect(file?.id).toBeTruthy();
+
+    expect(await parties.removeParty(biz.id, file!.id)).toBe("archived");
+    const kept = await parties.getParty(biz.id, file!.id);
+    expect(kept).not.toBeNull();
+    expect(kept?.status).toBe(false);
+  });
 });
 
 describe("personnel", () => {
@@ -549,8 +572,10 @@ describe("personnel", () => {
     );
     const userId = user.rows[0].id;
 
-    const first = await parties.ensureEmployeeParty(biz.id, userId, { displayName: "علی رضایی" });
-    const again = await parties.ensureEmployeeParty(biz.id, userId, { displayName: "علی رضایی" });
+    // Issue #854 (pass 4, gap 5): the file is named after the membership —
+    // the member owns the identity fields, the repair path only follows.
+    const first = await parties.ensureEmployeeParty(biz.id, userId, { displayName: "کارمند تست" });
+    const again = await parties.ensureEmployeeParty(biz.id, userId, { displayName: "کارمند تست" });
     expect(first?.id).toBe(again?.id);
     expect(first?.role).toBe("Employee");
     expect(first?.employeeUserId).toBe(userId);
@@ -574,6 +599,10 @@ describe("personnel", () => {
     const userId = user.rows[0].id;
 
     const created = await parties.ensureEmployeeParty(biz.id, userId, { displayName: "آشپز قدیم" });
+    // Issue #854 (pass 4, gap 5): the team screen renames the membership
+    // first (`updateMembership`), and only then does the file follow — the
+    // membership is the canonical owner of the name, so that is the order.
+    await db.query("UPDATE users SET full_name = 'آشپز جدید' WHERE id = $1", [userId]);
     const renamed = await parties.ensureEmployeeParty(biz.id, userId, { displayName: "آشپز جدید" });
 
     expect(renamed?.id).toBe(created?.id);
@@ -739,5 +768,124 @@ describe("one person, several roles (migration 0148)", () => {
     await expect(
       parties.createParty(biz.id, { displayName: "نامعتبر", roles: ["Wizard"] }),
     ).rejects.toMatchObject({ code: "invalid_role" });
+  });
+});
+
+describe("canonical identity ownership for linked personnel files (issue #854 pass 4)", () => {
+  /**
+   * The membership (and the global identity behind it) owns the login
+   * identity fields — name, email, phone — and the personnel party owns the
+   * HR-only columns. A linked party edit that would grow an identity
+   * disagreeing with the membership is refused; the membership → party
+   * direction (`ensureEmployeeParty`) is the only way those fields travel.
+   */
+
+  async function seedMember(fields: { name: string; email?: string | null; phone?: string | null }) {
+    const user = await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, full_name, email, phone_e164, role, pin_hash)
+       VALUES ($1, $2, $3, $4, 'waiter', $5) RETURNING id`,
+      [
+        biz.id,
+        fields.name,
+        fields.email ?? null,
+        fields.phone ?? null,
+        "$2b$10$notarealhashnotarealhashnotarealhashno",
+      ],
+    );
+    return user.rows[0].id;
+  }
+
+  it("refuses a linked edit that conflicts with the membership's login identity", async () => {
+    const userId = await seedMember({
+      name: "کارمند هویت",
+      email: `identity-${randomUUID().slice(0, 8)}@example.ir`,
+      phone: "+989120001111",
+    });
+    const file = await parties.ensureEmployeeParty(biz.id, userId, {
+      displayName: "کارمند هویت",
+    });
+    expect(file?.id).toBeTruthy();
+
+    await expect(
+      parties.updateParty(biz.id, file!.id, { email: "conflict@example.ir" }),
+    ).rejects.toMatchObject({ code: "identity_email_managed_by_membership", field: "email" });
+
+    await expect(
+      parties.updateParty(biz.id, file!.id, { phone: "09120002222" }),
+    ).rejects.toMatchObject({ code: "identity_phone_managed_by_membership", field: "phone" });
+
+    await expect(
+      parties.updateParty(biz.id, file!.id, { displayName: "اسم دیگر" }),
+    ).rejects.toMatchObject({ code: "identity_name_managed_by_membership", field: "displayName" });
+
+    // Setting a phone when the membership has none is still a conflicting
+    // copy — the login phone is the membership's to set.
+    const noPhone = await seedMember({ name: "بی‌شماره" });
+    const noPhoneFile = await parties.ensureEmployeeParty(biz.id, noPhone, { displayName: "بی‌شماره" });
+    await expect(
+      parties.updateParty(biz.id, noPhoneFile!.id, { phone: "09120003333" }),
+    ).rejects.toMatchObject({ code: "identity_phone_managed_by_membership", field: "phone" });
+
+    // Nothing half-applied behind a refusal.
+    const unchanged = await parties.getParty(biz.id, file!.id);
+    expect(unchanged?.displayName).toBe("کارمند هویت");
+  });
+
+  it("allows an edit that brings the file in line with the membership (the repair direction)", async () => {
+    const email = `repair-${randomUUID().slice(0, 8)}@example.ir`;
+    const userId = await seedMember({ name: "کارمند تعمیر", email, phone: "+989120004444" });
+    const file = await parties.ensureEmployeeParty(biz.id, userId, { displayName: "کارمند تعمیر" });
+
+    // Drift that predates the rule (e.g. a pre-0137 copy the member outgrew):
+    await db.query("UPDATE parties SET email = 'stale@example.ir' WHERE id = $1", [file!.id]);
+
+    // Writing the membership's own values back is the repair, and passes.
+    const repaired = await parties.updateParty(biz.id, file!.id, {
+      email,
+      phone: "09120004444",
+      displayName: "کارمند تعمیر",
+    });
+    expect(repaired?.email).toBe(email);
+    expect(repaired?.displayName).toBe("کارمند تعمیر");
+  });
+
+  it("never locks an unrelated edit behind pre-existing identity drift", async () => {
+    const userId = await seedMember({ name: "کارمند یادداشت", email: `notes-${randomUUID().slice(0, 8)}@example.ir` });
+    const file = await parties.ensureEmployeeParty(biz.id, userId, { displayName: "کارمند یادداشت" });
+    await db.query("UPDATE parties SET email = 'drifted@example.ir' WHERE id = $1", [file!.id]);
+
+    const noted = await parties.updateParty(biz.id, file!.id, { notes: "یادداشت منابع انسانی" });
+    expect(noted?.notes).toBe("یادداشت منابع انسانی");
+    // The drifted column is untouched, neither silently fixed nor enforced.
+    expect(noted?.email).toBe("drifted@example.ir");
+  });
+
+  it("applies the same rule when a creation links itself to a membership", async () => {
+    const userId = await seedMember({ name: "کارمند ساخت", email: `create-${randomUUID().slice(0, 8)}@example.ir` });
+
+    await expect(
+      parties.createParty(biz.id, {
+        role: "Employee",
+        personType: "Real",
+        displayName: "کارمند ساخت",
+        email: "somebody-else@example.ir",
+        employeeUserId: userId,
+      }),
+    ).rejects.toMatchObject({ code: "identity_email_managed_by_membership", field: "email" });
+  });
+
+  it("leaves unlinked parties free to own their own identity fields", async () => {
+    const customer = await parties.createParty(biz.id, {
+      displayName: "مشتری آزاد",
+      roles: ["Customer"],
+    });
+    const updated = await parties.updateParty(biz.id, customer.id, {
+      email: `free-${randomUUID().slice(0, 8)}@example.ir`,
+      phone: "09120005555",
+      displayName: "مشتری آزاد (ویرایش)",
+    });
+    expect(updated?.displayName).toBe("مشتری آزاد (ویرایش)");
+    expect(updated?.email).toContain("@example.ir");
+    expect(updated?.phone).toBeTruthy();
   });
 });
