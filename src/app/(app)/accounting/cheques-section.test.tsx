@@ -1067,6 +1067,74 @@ describe("the cheque register's states, direction and accessibility", () => {
   });
 });
 
+describe("the cheque register's keyboard and names", () => {
+  const page = {
+    cheques: [cheque(1), cheque(2)],
+    total: 2,
+    hasMore: false,
+    banks: [],
+    summary: summary(),
+  };
+
+  it("gives every row its own name, so a screen reader can tell the rows apart", async () => {
+    stubFetch(() => page);
+    renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+
+    expect(
+      screen.getByRole("button", {
+        name: `جزئیات چک ${toPersianDigits("S-001")}`,
+      }),
+    ).toBeTruthy();
+    // The action trigger is drawn once in the table and once in the card.
+    expect(
+      screen.getAllByRole("button", {
+        name: `اقدام برای چک ${toPersianDigits("S-001")}`,
+      }),
+    ).toHaveLength(2);
+    // The desktop row and the mobile card are different controls with different names.
+    expect(
+      screen.getByRole("button", {
+        name: `جزئیات و تاریخچهٔ چک ${toPersianDigits("S-001")}`,
+      }),
+    ).toBeTruthy();
+  });
+
+  it("names every filter control, so none of them is an unlabelled combobox", async () => {
+    stubFetch(() => page);
+    renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+
+    const comboboxes = screen.getAllByRole("combobox");
+    // Status, bank, sort and the branch filter (shown with branches) — at least three.
+    expect(comboboxes.length).toBeGreaterThanOrEqual(3);
+    for (const box of comboboxes) {
+      expect(
+        box.getAttribute("aria-label") || box.getAttribute("aria-labelledby"),
+      ).toBeTruthy();
+    }
+    expect(screen.getByLabelText("جستجوی چک‌ها")).toBeTruthy();
+  });
+
+  it("keeps Tab inside the detail dialog while it is open", async () => {
+    stubFetch(() => page);
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findAllByText(toPersianDigits("S-001"));
+    await user.click(
+      screen.getByRole("button", {
+        name: `جزئیات چک ${toPersianDigits("S-001")}`,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+
+    for (let i = 0; i < 40; i += 1) {
+      await user.tab();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    }
+  });
+});
+
 describe("the cheque register's accounting categories", () => {
   it("names each category and the control account it reconciles to", async () => {
     stubFetch(() => ({

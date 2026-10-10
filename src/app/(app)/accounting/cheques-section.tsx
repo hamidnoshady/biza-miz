@@ -1321,6 +1321,9 @@ export function ChequesSection({
                                     size="sm"
                                     className="h-8 px-2.5"
                                     onClick={() => showDetail(c)}
+                                    // Every row carries the same visible «جزئیات»;
+                                    // the serial is what tells them apart aloud.
+                                    aria-label={`جزئیات چک ${toPersianDigits(c.serialNumber)}`}
                                   >
                                     <EyeIcon className="size-4" />
                                     جزئیات
@@ -1469,6 +1472,7 @@ export function ChequesSection({
                                 size="sm"
                                 className="flex-1"
                                 onClick={() => showDetail(c)}
+                                aria-label={`جزئیات و تاریخچهٔ چک ${toPersianDigits(c.serialNumber)}`}
                               >
                                 <EyeIcon className="size-4" /> جزئیات و تاریخچه
                               </Button>
@@ -1729,6 +1733,27 @@ function ChequesSkeleton() {
   );
 }
 
+/**
+ * Radix hands focus back only to a `Trigger`, and these register dialogs open
+ * from plain buttons, so focus fell to the page's body on every close. The
+ * control that held focus when the dialog opened is remembered and given focus
+ * back when it closes — unless it has been removed in the meantime.
+ */
+function useReturnFocusOnClose() {
+  const opener = useRef<HTMLElement | null>(null);
+  const onOpenAutoFocus = useCallback(() => {
+    const active = document.activeElement;
+    opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+  }, []);
+  const onCloseAutoFocus = useCallback((event: Event) => {
+    event.preventDefault();
+    const target = opener.current;
+    opener.current = null;
+    if (target?.isConnected) target.focus();
+  }, []);
+  return { onOpenAutoFocus, onCloseAutoFocus };
+}
+
 function ChequeLoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <Alert variant="destructive" className="items-start">
@@ -1807,6 +1832,7 @@ function ChequeRowActions({
           size="sm"
           className="h-8 gap-1"
           disabled={busy}
+          aria-label={`اقدام برای چک ${toPersianDigits(cheque.serialNumber)}`}
         >
           اقدام
           <ChevronDownIcon className="size-3.5 opacity-60" />
@@ -1908,6 +1934,7 @@ function ChequeDetailDialog({
   // «سند حسابداری ثبت شد» and leaves the reader to find it by hand is not an
   // audit screen.
   const [entryId, setEntryId] = useState<string | null>(null);
+  const focusReturn = useReturnFocusOnClose();
 
   useEffect(() => {
     let current = true;
@@ -1985,6 +2012,14 @@ function ChequeDetailDialog({
       <DialogContent
         className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"
         dir="rtl"
+        {...focusReturn}
+        // The journal entry opened from this history is a layer above the
+        // panel: Escape closes that layer alone, and the panel stays open.
+        onEscapeKeyDown={(event) => {
+          if (entryId === null) return;
+          event.preventDefault();
+          setEntryId(null);
+        }}
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -2447,6 +2482,7 @@ function CreateChequeDialog({
   ) => Promise<boolean>;
   onError: (m: string) => void;
 }) {
+  const focusReturn = useReturnFocusOnClose();
   const money = useMoney();
   const [dir, setDir] = useState<ChequeDirection>(direction);
   const counterparties = dir === "receivable" ? customers : suppliers;
@@ -2629,6 +2665,7 @@ function CreateChequeDialog({
       <DialogContent
         className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"
         dir="rtl"
+        {...focusReturn}
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -2914,6 +2951,7 @@ function ChequeActionDialog({
   onConfirm: (body: Record<string, unknown>) => void;
   onError: (m: string) => void;
 }) {
+  const focusReturn = useReturnFocusOnClose();
   const money = useMoney();
   const [occurredOn, setOccurredOn] = useState(todayIsoDate());
   const [memo, setMemo] = useState("");
@@ -2930,7 +2968,7 @@ function ChequeActionDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-md" dir="rtl">
+      <DialogContent className="sm:max-w-md" dir="rtl" {...focusReturn}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {isDestructive ? (

@@ -458,6 +458,10 @@ jobs:
         # superuser-ish seeding connection, not the unprivileged runtime role
         # the server above uses.
         run: npm run test:e2e:media
+      - name: Cheque register E2E (paging under moving data, keyboard, phone frame)
+        # Registers its own 220 receivables through the API, on this job's
+        # fresh database, so it never touches the visual-regression fixture.
+        run: npm run test:e2e:cheques
       - name: Server log (on failure)
         if: failure()
         run: cat server.log || true

@@ -130,10 +130,23 @@ const SCREENS = [
    * per state the register draws differently — in collection, endorsed to a
    * supplier, returned, returned-and-replaced, cleared, and an issued payable.
    * Light and dark both, because the status pills and the returned-cheque
-   * callout are the parts a token mistake would hide.
+   * callout are the parts a token mistake would hide. `anchor` frames the
+   * register table itself: the returned, restored and replacement rows are
+   * the relationships the screen exists to show, and a frame above the table
+   * photographs none of them.
    */
-  { id: "accounting-cheques", path: "/accounting/cheques", theme: "light" },
-  { id: "accounting-cheques-dark", path: "/accounting/cheques", theme: "dark" },
+  {
+    id: "accounting-cheques",
+    path: "/accounting/cheques",
+    theme: "light",
+    anchor: "table",
+  },
+  {
+    id: "accounting-cheques-dark",
+    path: "/accounting/cheques",
+    theme: "dark",
+    anchor: "table",
+  },
   // — CRM —
   { id: "crm-overview", path: "/crm/overview", theme: "light" },
   { id: "crm-deals", path: "/crm/deals", theme: "light" },
