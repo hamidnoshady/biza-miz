@@ -40,6 +40,7 @@ The following operational workspaces have exactly one public destination. Use
 | Kitchen | `/accounting/kitchen` |
 | Reservations | `/accounting/reservations` |
 | Delivery | `/accounting/delivery` |
+| Taxpayer invoices (سامانه مودیان) | `/accounting/tax-invoices` |
 
 The rest of the workspace has these responsibilities:
 

@@ -381,6 +381,11 @@ export const POST = withPlatformScope(async (request: NextRequest, ctx: Ctx) => 
       });
       return NextResponse.json({ error: "protected_internal_business" }, { status: 409 });
     }
+    if (err instanceof BusinessDeleteBlockedError && ["tax_accepted_retained", "tax_inflight_retained", "tax_retention_hold"].includes(err.reference)) {
+      await platformAudit({ adminId: session.padmin, businessId: id, action: "business.reset.failed", entity: "business", entityId: id, payload: { ...identity, reason: err.reference } });
+      return NextResponse.json({ error: err.reference, message: "صورتحساب‌های پذیرفته‌شده، در انتظار پاسخ یا دارای شواهد متناقض باید نگهداری شوند؛ بازنشانی مجاز نیست." }, { status: 409 });
+    }
+
     // resetBusiness is one transaction, so this response also guarantees that
     // no partial reset was committed. Keep the database detail in server logs.
     console.error("platform business reset failed", { businessId: id, err });

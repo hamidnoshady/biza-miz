@@ -51,6 +51,7 @@ export type PermissionGroup =
   | "accounting"
   | "finance"
   | "payroll"
+ | "tax"
   | "reports"
   | "growth"
   | "website"
@@ -98,6 +99,7 @@ const GROUP_LABELS: Record<PermissionGroup, string> = {
   accounting: "حسابداری",
   finance: "عملیات مالی",
   payroll: "حقوق و دستمزد",
+  tax: "صورتحساب مؤدیان",
   reports: "گزارش‌ها",
   growth: "رشد و بازاریابی",
   website: "مدیریت وب‌سایت",
@@ -113,7 +115,7 @@ export function permissionGroupLabel(group: PermissionGroup): string {
 
 export const PERMISSION_GROUP_ORDER: readonly PermissionGroup[] = [
   "ai", "orders", "payments", "floor", "menu", "inventory", "parties", "crm",
-  "workspace", "accounting", "finance", "payroll", "reports", "growth", "website", "data",
+  "workspace", "accounting", "finance", "payroll", "tax", "reports", "growth", "website", "data",
   "team", "settings", "security",
 ];
 
@@ -213,6 +215,14 @@ const DRAFTS: Draft[] = [
   // the ledger is not. The default presets give both keys to the owner, the
   // admin and the accountant and neither to the manager; a business can still
   // grant or revoke either one per member.
+  { key: P.taxView, group: "tax", label: "مشاهده صورتحساب‌های مؤدیان", description: "دیدن ثبت‌های ارسال به سامانه مودیان، وضعیت آن‌ها و گزارش‌های تطبیق.", risk: "low", audit: false, implies: [P.ledgerView] },
+  { key: P.taxPrepare, group: "tax", label: "آماده‌سازی صورتحساب", description: "ساخت پیش‌نویس صورتحساب از فروش‌های تکمیل‌شده. تا ارسال، چیزی به سازمان نمی‌رود.", risk: "medium", audit: true, implies: [P.taxView] },
+  { key: P.taxSend, group: "tax", label: "ارسال به سامانه مودیان", description: "ارسال صورتحساب آماده به سازمان امور مالیاتی. این کار پس از پذیرش، قانونی و ماندگار است.", risk: "high", audit: true, implies: [P.taxView] },
+  { key: P.taxInquiry, group: "tax", label: "استعلام از سامانه مودیان", description: "پرسیدن وضعیت صورتحساب‌های ارسالی. فقط خواندن از سامانه است.", risk: "low", audit: false, implies: [P.taxView] },
+  { key: P.taxAmend, group: "tax", label: "اصلاح صورتحساب پذیرفته‌شده", description: "صدور صورتحساب اصلاحی برای فروشی که سازمان پذیرفته است.", risk: "high", audit: true, implies: [P.taxView] },
+  { key: P.taxCancel, group: "tax", label: "ابطال صورتحساب پذیرفته‌شده", description: "ابطال صدور اصلی در سامانه مودیان. تنها راه پس‌گرفتن یک صورتحساب پذیرفته‌شده است.", risk: "critical", audit: true, implies: [P.taxView] },
+  { key: P.taxManageSettings, group: "tax", label: "مدیریت مؤدی و گواهی‌ها", description: "شناسه مؤدی، حافظه مالیاتی، شناسه کالا و کلیدهای ارسال. کلیدها پس از ذخیره دیده نمی‌شوند.", risk: "critical", audit: true, implies: [P.taxView] },
+  { key: P.taxExport, group: "tax", label: "خروجی صورتحساب‌های مؤدیان", description: "دریافت فهرست ثبت‌ها. خریدار و مبالغ از سیستم خارج می‌شوند.", risk: "high", audit: true, implies: [P.taxView] },
   { key: P.payrollView, group: "payroll", label: "مشاهده حقوق و دستمزد", description: "دیدن احکام حقوقی، لیست‌های حقوق و مبالغ پرداختی پرسنل.", risk: "high", audit: true },
   { key: P.payrollManage, group: "payroll", label: "اجرای حقوق و دستمزد", description: "تعریف حکم حقوقی، صدور لیست حقوق و پرداخت یا ابطال آن.", risk: "critical", audit: true, implies: [P.payrollView] },
 
