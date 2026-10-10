@@ -541,6 +541,41 @@ export async function voidRate(input: {
 // Shared posting validation
 // ---------------------------------------------------------------------------
 
+/**
+ * Like `assertCurrencyAvailable`, but for writers that legitimately bring
+ * their own currency: the import side of the chart of accounts. An exported
+ * foreign-currency bank re-imported into a fresh business would otherwise be
+ * rejected (`currency_not_allowed`) with no path to enable the currency — the
+ * import would silently downgrade the account to a base-currency one or fail
+ * the row. This activates the named currency for THAT business only
+ * (idempotent upsert; the global catalogue is never touched), keeping the
+ * same guards: unknown currency and «the base is not a transaction currency»
+ * still fail, because those mean the row itself is wrong.
+ */
+export async function ensureCurrencyEnabled(
+  businessId: string,
+  currencyCode: string,
+): Promise<void> {
+  const { rows } = await query<{ code: string; is_active: boolean; base_currency_code: string | null }>(
+    `SELECT c.code, c.is_active, b.base_currency_code
+       FROM currencies c CROSS JOIN businesses b
+      WHERE b.id = $1 AND c.code = $2`,
+    [businessId, currencyCode],
+  );
+  const row = rows[0];
+  if (!row) throw new MulticurrencyError("currency_not_found", 404);
+  if (!row.is_active) throw new MulticurrencyError("currency_inactive", 409);
+  if (row.base_currency_code === currencyCode) {
+    throw new MulticurrencyError("base_currency_not_a_transaction_currency", 409);
+  }
+  await query(
+    `INSERT INTO business_currencies (business_id, currency_code, is_active)
+     VALUES ($1, $2, true)
+     ON CONFLICT (business_id, currency_code) DO UPDATE SET is_active = true`,
+    [businessId, currencyCode],
+  );
+}
+
 export async function assertCurrencyAvailable(
   businessId: string,
   currencyCode: string,
@@ -673,14 +708,6 @@ function revaluationHash(params: {
   return payloadHash({ currencyCode: params.currencyCode, asOf: params.asOf, rateId: params.rateId ?? null });
 }
 
-async function findEntryIdByIdempotencyKey(businessId: string, key: string): Promise<string | null> {
-  const { rows } = await query<{ id: string }>(
-    `SELECT id FROM journal_entries WHERE business_id = $1 AND idempotency_key = $2`,
-    [businessId, key],
-  );
-  return rows[0]?.id ?? null;
-}
-
 /**
  * Resolve an idempotency key to the entry it already created, refusing a
  * payload that does not match what that entry was originally posted with.
@@ -754,9 +781,13 @@ async function insertForeignDocument(params: PostMulticurrencyEntryParams): Prom
   if (params.projectId != null && !isUuid(params.projectId)) {
     throw new MulticurrencyError("invalid_project");
   }
+  // The dimension lives in `ai_projects` — journal_entries.project_id's FK
+  // target. An earlier draft validated against `projects`, a relation that
+  // does not exist: every posting carrying a project crashed with a raw
+  // `relation "projects" does not exist` instead of a typed problem.
   if (params.projectId) {
     const { rows: project } = await query<{ id: string }>(
-      `SELECT id FROM projects WHERE id = $1 AND business_id = $2`,
+      `SELECT id FROM ai_projects WHERE id = $1 AND business_id = $2`,
       [params.projectId, params.businessId],
     );
     if (!project[0]) throw new MulticurrencyError("project_not_found", 404);
@@ -1022,6 +1053,7 @@ export async function reverseFxEntry(params: {
 interface OpenLotRow extends Record<string, unknown> {
   line_id: string;
   entry_id: string;
+  entry_date: string;
   foreign_remaining: string;
   base_remaining: string;
 }
@@ -1084,7 +1116,7 @@ async function loadOpenLots(
           AND se.reversed_at IS NULL
         GROUP BY app.lot_line_id
      )
-     SELECT jl.id::text AS line_id, je.id::text AS entry_id,
+     SELECT jl.id::text AS line_id, je.id::text AS entry_id, je.entry_date::text AS entry_date,
             (CASE WHEN $4 = 'receivable'
                   THEN jl.foreign_debit - jl.foreign_credit
                   ELSE jl.foreign_credit - jl.foreign_debit END
@@ -1114,6 +1146,7 @@ async function loadOpenLots(
     .map((r) => ({
       lineId: r.line_id,
       entryId: r.entry_id,
+      entryDate: r.entry_date,
       foreignRemaining: BigInt(r.foreign_remaining),
       baseRemaining: BigInt(r.base_remaining),
     }))
@@ -1138,59 +1171,19 @@ export async function listOpenLots(params: {
   const currencyCode = params.currencyCode?.trim().toUpperCase();
   if (!isValidCurrencyCode(currencyCode)) throw new MulticurrencyError("invalid_currency");
   if (!UUID_RE.test(params.partyId)) throw new MulticurrencyError("party_not_found", 404);
-  const { rows } = await query<{
-    line_id: string;
-    entry_id: string;
-    entry_date: string;
-    foreign_remaining: string;
-    base_remaining: string;
-  }>(
-    `WITH applied AS (
-       SELECT app.lot_line_id, sum(app.foreign_applied)::bigint AS foreign_applied, sum(app.base_applied)::bigint AS base_applied
-         FROM fx_settlement_applications app
-         JOIN journal_entries se ON se.id = app.settlement_entry_id
-        WHERE app.business_id = $1 AND app.direction = $2 AND app.currency_code = $3
-          AND se.reversed_at IS NULL
-        GROUP BY app.lot_line_id
-     )
-     SELECT jl.id::text AS line_id, je.id::text AS entry_id, je.entry_date::text AS entry_date,
-            (CASE WHEN $4 = 'receivable'
-                  THEN jl.foreign_debit - jl.foreign_credit
-                  ELSE jl.foreign_credit - jl.foreign_debit END
-              - COALESCE(ap.foreign_applied, 0))::text AS foreign_remaining,
-            (CASE WHEN $4 = 'receivable'
-                  THEN jl.debit - jl.credit
-                  ELSE jl.credit - jl.debit END
-              - COALESCE(ap.base_applied, 0))::text AS base_remaining
-       FROM journal_lines jl
-       JOIN journal_entries je ON je.id = jl.entry_id
-       JOIN accounts a ON a.id = jl.account_id
-       LEFT JOIN applied ap ON ap.lot_line_id = jl.id
-      WHERE je.business_id = $1
-        AND je.currency_code = $3
-        AND je.reversed_at IS NULL
-        AND je.reverses_entry_id IS NULL
-        AND jl.party_id = $5
-        AND a.code = $6
-      ORDER BY je.entry_date, je.posted_at, jl.id`,
-    [
-      params.businessId,
-      params.direction,
-      currencyCode,
-      params.direction,
-      params.partyId,
-      params.direction === "receivable" ? WELL_KNOWN_CODES.accountsReceivable : WELL_KNOWN_CODES.accountsPayable,
-    ],
-  );
-  return rows
-    .map((r) => ({
-      lineId: r.line_id,
-      entryId: r.entry_id,
-      entryDate: r.entry_date,
-      foreignRemaining: r.foreign_remaining,
-      baseRemaining: r.base_remaining,
-    }))
-    .filter((l) => BigInt(l.foreignRemaining) > 0n);
+  // The SETTLEMENT path's own query, unlocked: one definition of «what is
+  // open» for the reader and the writer alike — the screen can never offer a
+  // lot the settlement would refuse, or refuse one it would accept. (The
+  // writer re-runs this under FOR UPDATE inside its transaction; the reader
+  // needs no locks, since consumption can only shrink what is open.)
+  const lots = await loadOpenLots(params.businessId, params.direction, currencyCode, params.partyId, null, {});
+  return lots.map((l) => ({
+    lineId: l.lineId,
+    entryId: l.entryId,
+    entryDate: l.entryDate,
+    foreignRemaining: l.foreignRemaining.toString(),
+    baseRemaining: l.baseRemaining.toString(),
+  }));
 }
 
 export interface SettlementResult {
@@ -1221,6 +1214,8 @@ export interface SettleParams {
   items: { entryId: string; amount: string }[];
   entryDate: string | null;
   memo: string;
+  /** Optional project dimension stamped on the settlement document itself. */
+  projectId?: string | null;
   actorId: string | null;
   idempotencyKey: string | null;
 }
@@ -1260,6 +1255,7 @@ export async function settleForeignDocument(params: SettleParams): Promise<Settl
           autoAmount: params.autoAmount,
           items: params.items,
           entryDate: params.entryDate,
+          projectId: params.projectId ?? null,
         })
       : null;
     if (params.idempotencyKey) {
@@ -1387,6 +1383,7 @@ export async function settleForeignDocument(params: SettleParams): Promise<Settl
       currencyCode,
       rateId: rate.id,
       lines,
+      projectId: params.projectId ?? null,
       createdBy: params.actorId,
       idempotencyKey: params.idempotencyKey,
       idempotencyPayloadHash: requestHash,

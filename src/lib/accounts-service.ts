@@ -91,6 +91,14 @@ export interface AccountRow {
   level: AccountLevel;
   normalBalance: NormalBalance;
   isContra: boolean;
+  /**
+   * Multicurrency (issue #863): the account's own currency when it is a
+   * foreign-currency financial account (a foreign bank). NULL = the business
+   * base currency, which is every account until one is flagged. Surfaced so
+   * the chart shows which accounts hold foreign value instead of leaving the
+   * flag visible only at creation time.
+   */
+  currencyCode: string | null;
 }
 
 export async function listAccounts(businessId: string): Promise<AccountRow[]> {
@@ -107,11 +115,12 @@ export async function listAccounts(businessId: string): Promise<AccountRow[]> {
     level: AccountLevel;
     normal_balance: NormalBalance;
     is_contra: boolean;
+    currency_code: string | null;
   }>(
     `SELECT a.id, a.code, a.name, a.type, a.parent_id, p.code AS parent_code, a.is_active,
             EXISTS (SELECT 1 FROM journal_lines jl WHERE jl.account_id = a.id) AS has_postings,
             EXISTS (SELECT 1 FROM accounts c WHERE c.parent_id = a.id) AS has_children,
-            a.level, a.normal_balance, a.is_contra
+            a.level, a.normal_balance, a.is_contra, a.currency_code
        FROM accounts a LEFT JOIN accounts p ON p.id = a.parent_id
       WHERE a.business_id = $1
       ORDER BY a.code`,
@@ -130,6 +139,7 @@ export async function listAccounts(businessId: string): Promise<AccountRow[]> {
     level: r.level,
     normalBalance: r.normal_balance,
     isContra: r.is_contra,
+    currencyCode: r.currency_code,
   }));
 }
 

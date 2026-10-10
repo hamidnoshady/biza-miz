@@ -367,6 +367,8 @@ export interface ForeignOpenLot {
   lineId: string;
   /** The entry that posted the lot (the invoice document). */
   entryId: string;
+  /** The posting date of the lot's document — FIFO reads oldest first. */
+  entryDate: string;
   /** Remaining foreign amount in minor units. */
   foreignRemaining: bigint;
   /** Booked base value of the *remaining* slice, in base minor units. */
@@ -658,6 +660,8 @@ export interface SettlementPayload {
   items: { entryId: string; amount: string }[];
   entryDate: string | null;
   memo: string;
+  /** Optional project dimension for the settlement document itself. */
+  projectId: string | null;
   idempotencyKey: string | null;
 }
 
@@ -698,6 +702,7 @@ export function parseSettlementPayload(body: unknown):
   if (b.memo != null && (typeof b.memo !== "string" || b.memo.length > MULTICURRENCY_MEMO_MAX)) {
     return { ok: false, problem: "invalid_memo" };
   }
+  if (b.projectId != null && !isUuid(b.projectId)) return { ok: false, problem: "invalid_project_id" };
   if (
     b.idempotencyKey != null &&
     (typeof b.idempotencyKey !== "string" || b.idempotencyKey.length === 0 || b.idempotencyKey.length > MULTICURRENCY_IDEMPOTENCY_KEY_MAX)
@@ -716,6 +721,7 @@ export function parseSettlementPayload(body: unknown):
       items,
       entryDate: (b.entryDate as string | null) ?? null,
       memo: typeof b.memo === "string" ? b.memo : "",
+      projectId: (b.projectId as string | null) ?? null,
       idempotencyKey: (b.idempotencyKey as string | null) ?? null,
     },
   };

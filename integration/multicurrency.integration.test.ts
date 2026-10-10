@@ -36,6 +36,7 @@ let svc: typeof import("../src/lib/multicurrency-service");
 let reports: typeof import("../src/lib/multicurrency-reports-service");
 let journalService: typeof import("../src/lib/journal-service");
 let ledgerService: typeof import("../src/lib/ledger-service");
+let accountsSvc: typeof import("../src/lib/accounts-service");
 
 const biz = { id: "", locationId: "" };
 const otherBiz = { id: "" };
@@ -98,6 +99,7 @@ beforeAll(async () => {
   process.env.DATABASE_URL = urlFor(databaseName);
   dbLib = await import("../src/lib/db");
   svc = await import("../src/lib/multicurrency-service");
+  accountsSvc = await import("../src/lib/accounts-service");
   reports = await import("../src/lib/multicurrency-reports-service");
   journalService = await import("../src/lib/journal-service");
   ledgerService = await import("../src/lib/ledger-service");
@@ -1602,6 +1604,46 @@ describe("issue #863 — configuration guards", () => {
   });
 });
 
+describe("issue #863 — import-side currency enablement (ensureCurrencyEnabled)", () => {
+  it("enables a disabled currency for the business, idempotently", async () => {
+    // Start from USD disabled for this business.
+    await svc.setBusinessCurrencies(biz.id, { baseCurrencyCode: "IRR", transactionCurrencyCodes: [] });
+    let config = await svc.getBusinessCurrencyConfig(biz.id);
+    expect(config.transactionCurrencies.find((c) => c.code === "USD")?.allowed).toBe(false);
+
+    await svc.ensureCurrencyEnabled(biz.id, "USD");
+    await svc.ensureCurrencyEnabled(biz.id, "USD"); // second run is a no-op
+    config = await svc.getBusinessCurrencyConfig(biz.id);
+    expect(config.transactionCurrencies.find((c) => c.code === "USD")?.allowed).toBe(true);
+
+    // The enablement is tenant-local: the other business's config is untouched.
+    const other = await svc.getBusinessCurrencyConfig(otherBiz.id);
+    expect(other.transactionCurrencies.find((c) => c.code === "USD")?.allowed ?? false).toBe(false);
+  });
+
+  it("still refuses an unknown currency and the base currency", async () => {
+    await expect(svc.ensureCurrencyEnabled(biz.id, "ZZZ")).rejects.toThrow("currency_not_found");
+    await expect(svc.ensureCurrencyEnabled(biz.id, "IRR")).rejects.toThrow(
+      "base_currency_not_a_transaction_currency",
+    );
+  });
+
+  it("lets an imported foreign-currency account round-trip (import path parity)", async () => {
+    // The exact sequence the accounts adapter performs: enable, then create.
+    await svc.setBusinessCurrencies(biz.id, { baseCurrencyCode: "IRR", transactionCurrencyCodes: [] });
+    await svc.ensureCurrencyEnabled(biz.id, "USD");
+    const created = await accountsSvc.createAccount({
+      businessId: biz.id,
+      code: "1099",
+      name: "بانک ارزی وارداتی",
+      type: "asset",
+      currencyCode: "USD",
+    });
+    const rows = await dbLib.query("SELECT currency_code FROM accounts WHERE id = $1", [created.id]);
+    expect(rows.rows[0].currency_code).toBe("USD");
+  });
+});
+
 describe("issue #863 — party-merge journal attribution is audited", () => {
   async function createParty(name: string): Promise<string> {
     const { rows } = await db.query<{ id: string }>(
@@ -1705,22 +1747,155 @@ describe("issue #863 — direction-aware settlement reporting", () => {
 });
 
 describe("issue #863 — dimension carry", () => {
-  it("carries projectId from a foreign document into its reversal", async () => {
+  async function createParty(name: string): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO parties (business_id, name, role) VALUES ($1, $2, 'customer') RETURNING id`,
+      [biz.id, name],
+    );
+    return rows[0].id;
+  }
+
+  it("validates, posts, reverses and settles with a project — through the service, not raw SQL", async () => {
     const { rows: projectRows } = await db.query<{ id: string }>(
       `INSERT INTO ai_projects (business_id, name, created_by) VALUES ($1, 'پروژهٔ ارزی', $2) RETURNING id`,
       [biz.id, user.id],
     );
     const projectId = projectRows[0].id;
     const rateId = await seedRate("600000");
-    const invoiceId = await postForeignInvoice({ rateId, foreignCents: 2000n });
-    // Stamp the project on the invoice entry, as a posting with a project would have.
-    await db.query(`UPDATE journal_entries SET project_id = $2 WHERE id = $1`, [invoiceId, projectId]);
 
-    const { entryId: reversalId } = await svc.reverseFxEntry({ businessId: biz.id, entryId: invoiceId, actorId: user.id });
-    const { rows: projRows } = await db.query<{ project_id: string | null }>(
+    // Posting WITH a project goes through the service (this is the path that
+    // once validated against a non-existent `projects` table and crashed).
+    const posted = await svc.postMulticurrencyEntry({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      entryDate: null,
+      memo: "فروش ارزی پروژه‌ای",
+      currencyCode: "USD",
+      rateId,
+      projectId,
+      lines: [
+        { accountId: acct.ar, side: "debit", foreignMinor: 3000n },
+        { accountId: acct.fxRealizedGain, side: "credit", foreignMinor: 3000n },
+      ],
+      createdBy: user.id,
+      idempotencyKey: null,
+    });
+    const { rows: postedProj } = await db.query<{ project_id: string | null }>(
+      `SELECT project_id::text AS project_id FROM journal_entries WHERE id = $1`,
+      [posted.entryId],
+    );
+    expect(postedProj[0].project_id).toBe(projectId);
+
+    // A nonexistent or other-tenant project is refused with a typed problem.
+    await expect(
+      svc.postMulticurrencyEntry({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        entryDate: null,
+        memo: "پروژهٔ ناموجود",
+        currencyCode: "USD",
+        rateId,
+        projectId: "00000000-0000-4000-8000-000000000000",
+        lines: [
+          { accountId: acct.ar, side: "debit", foreignMinor: 100n },
+          { accountId: acct.fxRealizedGain, side: "credit", foreignMinor: 100n },
+        ],
+        createdBy: user.id,
+        idempotencyKey: null,
+      }),
+    ).rejects.toThrow("project_not_found");
+
+    // Reversal inherits the project.
+    const { entryId: reversalId } = await svc.reverseFxEntry({ businessId: biz.id, entryId: posted.entryId, actorId: user.id });
+    const { rows: reversalProj } = await db.query<{ project_id: string | null }>(
       `SELECT project_id::text AS project_id FROM journal_entries WHERE id = $1`,
       [reversalId],
     );
-    expect(projRows[0].project_id).toBe(projectId);
+    expect(reversalProj[0].project_id).toBe(projectId);
+  });
+
+  it("stamps the settlement document (and its reversal) with the requested project", async () => {
+    const { rows: projectRows } = await db.query<{ id: string }>(
+      `INSERT INTO ai_projects (business_id, name, created_by) VALUES ($1, 'پروژهٔ تسویه', $2) RETURNING id`,
+      [biz.id, user.id],
+    );
+    const projectId = projectRows[0].id;
+    const partyId = await createParty("مشتری پروژهٔ تسویه");
+    const rateId = await seedRate("600000");
+    await svc.postMulticurrencyEntry({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      entryDate: null,
+      memo: "فاکتور پروژه‌ای",
+      currencyCode: "USD",
+      rateId,
+      projectId,
+      lines: [
+        { accountId: acct.ar, side: "debit", foreignMinor: 4000n, partyId },
+        { accountId: acct.fxRealizedGain, side: "credit", foreignMinor: 4000n },
+      ],
+      createdBy: user.id,
+      idempotencyKey: null,
+    });
+    await seedRate("610000");
+
+    const settlement = await svc.settleForeignDocument({
+      businessId: biz.id,
+      locationId: biz.locationId,
+      direction: "receivable",
+      partyId,
+      currencyCode: "USD",
+      rateId: null,
+      settlementAccountId: acct.bankFx,
+      autoAmount: "4000",
+      items: [],
+      entryDate: null,
+      memo: "تسویه پروژه‌ای",
+      projectId,
+      actorId: user.id,
+      idempotencyKey: `stl-proj-${randomUUID()}`,
+    });
+    const { rows: settlementProj } = await db.query<{ project_id: string | null }>(
+      `SELECT project_id::text AS project_id FROM journal_entries WHERE id = $1`,
+      [settlement.entryId],
+    );
+    expect(settlementProj[0].project_id).toBe(projectId);
+
+    // The settlement's reversal keeps the same dimension.
+    const { entryId: reversalId } = await svc.reverseFxEntry({
+      businessId: biz.id,
+      entryId: settlement.entryId,
+      actorId: user.id,
+    });
+    const { rows: reversalProj } = await db.query<{ project_id: string | null }>(
+      `SELECT project_id::text AS project_id FROM journal_entries WHERE id = $1`,
+      [reversalId],
+    );
+    expect(reversalProj[0].project_id).toBe(projectId);
+
+    // A project from ANOTHER business is refused on the settlement path too.
+    const { rows: otherProject } = await db.query<{ id: string }>(
+      `INSERT INTO ai_projects (business_id, name, created_by) VALUES ($1, 'پروژهٔ دیگر', $2) RETURNING id`,
+      [otherBiz.id, user.id],
+    );
+    await postForeignInvoice({ rateId, partyId, foreignCents: 1000n });
+    await expect(
+      svc.settleForeignDocument({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        direction: "receivable",
+        partyId,
+        currencyCode: "USD",
+        rateId: null,
+        settlementAccountId: acct.bankFx,
+        autoAmount: "1000",
+        items: [],
+        entryDate: null,
+        memo: "تسویه با پروژهٔ بیگانه",
+        projectId: otherProject[0].id,
+        actorId: user.id,
+        idempotencyKey: `stl-proj-${randomUUID()}`,
+      }),
+    ).rejects.toThrow("project_not_found");
   });
 });

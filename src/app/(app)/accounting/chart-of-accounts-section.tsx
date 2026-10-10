@@ -87,6 +87,7 @@ interface AccountRow {
   level: AccountLevel;
   normalBalance: NormalBalance;
   isContra: boolean;
+  currencyCode: string | null;
 }
 
 /** The indentation one tree level costs, in both layouts. */
@@ -556,6 +557,7 @@ export function ChartOfAccountsSection({
                           <span className="min-w-0 break-words">{a.name}</span>
                           {WELL_KNOWN_CODE_SET.has(a.code) ? <StatusBadge tone="active">سیستمی</StatusBadge> : null}
                           {a.isContra ? <StatusBadge tone="neutral">کاهنده</StatusBadge> : null}
+                          {a.currencyCode ? <StatusBadge tone="positive">{a.currencyCode}</StatusBadge> : null}
                         </span>
                       </Td>
                       <Td muted>{TYPE_LABELS[a.type]}</Td>
@@ -606,6 +608,7 @@ export function ChartOfAccountsSection({
                         <div className="mt-1.5 flex flex-wrap gap-1.5">
                           {WELL_KNOWN_CODE_SET.has(a.code) ? <StatusBadge tone="active">سیستمی</StatusBadge> : null}
                           {a.isContra ? <StatusBadge tone="neutral">کاهنده</StatusBadge> : null}
+                          {a.currencyCode ? <StatusBadge tone="positive">{a.currencyCode}</StatusBadge> : null}
                         </div>
                       </div>
                       <StatusBadge tone={a.isActive ? "positive" : "neutral"}>
